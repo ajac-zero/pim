@@ -22,9 +22,11 @@ import { type PimServices, text } from "./services";
  * (docs/cua-native-mcp.md). An agent starts one with `shell`, which asks the
  * person as any command does.
  *
- * Pim offers these tools only where its own code gives an authority, and
- * none does yet: the harness publishes no run identity a call can be checked
- * against (docs/cua-native-identity.md, docs/pi-durable-run-identity.md).
+ * Pim offers these tools only where `Pim.nativeDesktop()` turns them on,
+ * which no deployment or preview does: nothing starts the Cua computer that
+ * would take their calls (docs/cua-native-mcp.md, "Not wired yet"). The
+ * authority is Pim's own, over the run IDs its harness mints
+ * (docs/cua-native-identity.md, docs/pi-durable-run-identity.md).
  */
 
 export const DESKTOP_EXTENSION = "pim.desktop";

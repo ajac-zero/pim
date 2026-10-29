@@ -1,5 +1,8 @@
 import * as fs from "node:fs/promises";
 import type { Message } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { type ConversationId, LiveDoc } from "@earendil-works/pi-durable";
+import { NativeBindingsDoc } from "../src/cua-native-identity";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +15,7 @@ import type { Approval } from "../src/store";
 import { exports } from "cloudflare:workers";
 import { api, apiUrl, connectTestComputer, fakeChrome, lastUserText, OWNER, opens, post, setup, toolUse, waits } from "./helpers";
 import { requestLabel } from "./waits";
-import { desktopRuns, faux, type Pim } from "./worker";
+import { desktopSpaces, faux, type Pim } from "./worker";
 
 /**
  * The Cua bridge's link (src/cua.ts), on its own and in a space whose
@@ -1079,15 +1082,16 @@ describe("a space whose operator chose its Cua VM", () => {
 
 	/**
 	 * The desktop's native apps (src/extensions/desktop.ts), composed end to
-	 * end: the agent's tool call, its binding, its approval, the control
-	 * state's admission, `Computer.native`, the bridge, pim-computer's real
-	 * `Link` with the host's real native-app dispatcher
-	 * (computer/cua-host/native-mcp.ts), and a stand-in for spacesd's `/mcp`
-	 * written here. The run authority is the tests' stand-in (`desktopRuns` in
-	 * ./worker.ts), because Pim has none: nothing here shows what a real
-	 * harness run, spacesd, desktop or app would do.
+	 * end: the agent's tool call, its binding and the run authority in one
+	 * harness commit (Pim's real `harnessAuthority`, over the run IDs of its
+	 * local pi-durable patch), its approval, the control state's admission,
+	 * `Computer.native`, the bridge, pim-computer's real `Link` with the host's
+	 * real native-app dispatcher (computer/cua-host/native-mcp.ts), and a
+	 * stand-in for spacesd's `/mcp` written here. Only the tests turn the
+	 * tools on (`desktopSpaces` in ./worker.ts). Nothing here shows what a real
+	 * spacesd, desktop or app would do.
 	 */
-	describe("its desktop's apps, with the tests' stand-in for the run authority Pim lacks", () => {
+	describe("its desktop's apps, with Pim's run authority", () => {
 		type Pinned = Record<string, { required: readonly string[]; properties: Record<string, unknown> }>;
 		type NativeMcp = {
 			createNativeDispatcher(options: { origin: string; token: string; owner: string; fetch: (url: string, init: RequestInit) => Promise<Response>; limits?: Record<string, number> }): {
@@ -1170,11 +1174,35 @@ describe("a space whose operator chose its Cua VM", () => {
 				.sort();
 		/** What a call hears when the control state, or `#desktopSend`, refused it before anything left the space. */
 		const NOT_SENT = /computer's control state refused it, so no native-app call was bound or sent/;
+		const RUN = /^\d+$/;
 		let desk: Awaited<ReturnType<typeof space>>;
 		let deskFixture: Fixture;
 		let upstream: ReturnType<typeof spacesd>;
-		const bindings = async () => JSON.parse((await desk.within((instance) => instance.store.meta("native_bindings"))) ?? "{\"records\":[]}").records as { id: string; status: string; identity: { runAnchor: string } }[];
+		let root: string;
+		const bindings = async () =>
+			JSON.parse(
+				(await desk.within(async (instance) => (await instance.harness.pi()).commit(async (tx) => (await tx.doc(NativeBindingsDoc)).text, BACKGROUND_CONTEXT))) ?? '{"records":[]}',
+			).records as { id: string; status: string; identity: { runAnchor: string; conversationId: string } }[];
 		const natives = async () => (await desk.stateOf()).requests.filter((request) => request.runId !== undefined);
+
+		/** One turn in which the agent calls each of `calls` in order, in one run; resolves with what each call returned. */
+		function turn(calls: [string, Record<string, unknown>][]) {
+			const results: string[] = [];
+			const turning = waits().start("turn: several", () => {
+				faux.setResponses([
+					...calls.map(([name, args], index) => (context: { messages: readonly Message[] }) => {
+						if (index > 0) results.push(lastToolResult(context.messages));
+						return toolUse(name, args as never);
+					}),
+					(context: { messages: readonly Message[] }) => {
+						results.push(lastToolResult(context.messages));
+						return toolUse("send_to_user", { message: "Ok." });
+					},
+				]);
+				return desk.post(`/sessions/${root}/messages`, { content: "Several", wait: true });
+			});
+			return { turn: turning, results };
+		}
 
 		beforeAll(() =>
 			setup(async () => {
@@ -1187,8 +1215,9 @@ describe("a space whose operator chose its Cua VM", () => {
 						instance.store.setMeta(PROVIDER_KEY, choice(owner));
 						(instance as unknown as { env: Record<string, unknown> }).env.CUA_BRIDGES = bridges({ [owner]: bridgeOf(owner) });
 					},
-					(owner) => desktopRuns.set(owner, { run: "run-1" }),
+					(owner) => desktopSpaces.add(owner),
 				);
+				root = (await desk.api("/")).body.rootSession;
 				const dispatcher = createNativeDispatcher({ origin: SPACESD, token: SPACESD_TOKEN, owner: desk.owner, fetch: upstream.fetch, limits: { callMs: 2_000 } });
 				deskFixture = await fixtureFor(desk.owner, (request) => dispatcher.dispatch(request));
 				await desk.within((instance) => instance.control.enable());
@@ -1197,28 +1226,23 @@ describe("a space whose operator chose its Cua VM", () => {
 		);
 
 		afterEach(() => {
-			// Each test leaves the stand-in as it found it.
-			desktopRuns.set(desk.owner, { run: "run-1" });
 			upstream.answer = () => ({ content: [{ type: "text", text: "done" }] });
 		});
 
-		it("is offered only with a run authority, on the operator's Cua computer: not without one, nor on a Sprite, and never falls back", async () => {
+		it("is offered only where turned on, on the operator's Cua computer: not in a real space, nor on a Sprite, and never falls back", async () => {
 			expect(await desk.within(desktopTools)).toEqual(DESKTOP_TOOLS);
 			// No tool starts an app: launch_app runs any program, so apps are started with shell, under its approval.
 			expect(await desk.within((instance) => desktopTools(instance).some((name) => /launch/.test(name)))).toBe(false);
-			expect(await desk.within((instance) => instance.computer.native("launch_app", { name: "xterm" }).catch((error: Error) => error.message))).toMatch(
-				/A native-app call is made only within a request/,
-			);
 
-			// The space without an authority, which is every real space: nothing offered, Computer.native off.
+			// A space that isn't turned on, which is every real one: nothing offered, Computer.native off.
 			expect(await cua.within(desktopTools)).toEqual([]);
 			expect(await cua.within((instance) => instance.computer.native("list_apps", {}).catch((error: Error) => error.message))).toMatch(/Native-app calls are off/);
 
-			// A Sprite beside an authority: nothing offered, and no native-app call goes to it.
+			// A Sprite, turned on: nothing offered, and no native-app call goes to it.
 			const sprite = await space(
 				"cuadesksprite",
 				(instance) => instance.computer.started("pim-o-desk-sprite", Date.now()),
-				(owner) => desktopRuns.set(owner, { run: "run-s" }),
+				(owner) => desktopSpaces.add(owner),
 			);
 			expect(await sprite.within(desktopTools)).toEqual([]);
 			expect(await sprite.within((instance) => instance.computer.native("list_apps", {}).catch((error: Error) => error.message))).toMatch(
@@ -1233,28 +1257,40 @@ describe("a space whose operator chose its Cua VM", () => {
 			expect(reading.result()).toMatch(NOT_SENT);
 			expect((await bindings()).map((binding) => binding.status)).toEqual(["closed"]);
 			expect([upstream.executed, deskFixture.calls.mock.calls.length, elsewhere]).toEqual([[], 0, []]);
-			expect(await natives()).toEqual([expect.objectContaining({ runId: "run-1", status: "rejected" })]);
+			expect(await natives()).toEqual([expect.objectContaining({ runId: expect.stringMatching(RUN), status: "rejected" })]);
 		});
 
 		it("reads the desktop at once and acts on it only once approved, each call once, in its run's own driver session, beside shell, files and the browser", async () => {
 			const before = (await natives()).length;
-			// Reading: one request of the call's own, sent at once.
-			const listing = desk.uses("desktop_list_apps", {});
-			await listing.turn;
-			expect(listing.result()).toBe("done");
-			expect(upstream.executed).toEqual([{ name: "list_apps", arguments: {}, agentSession: expect.stringMatching(/^pim-[0-9a-f]{40}$/) }]);
-			const session = upstream.executed[0]!.agentSession;
+			// One turn, one run: a read, then an action, both in the run's driver session.
+			const both = turn([
+				["desktop_list_apps", {}],
+				["desktop_click", { pid: 4242, element_token: "s0a1b2c3d:7" }],
+			]);
+			const approval = await desk.pending();
+			expect(approval).toMatchObject({ action: "desktop_click", summary: "Click on element s0a1b2c3d:7 in the window of process 4242", args: { tool: "click", arguments: { pid: 4242, element_token: "s0a1b2c3d:7" } } });
+			// Nothing of the click reached spacesd before the approval.
+			expect(upstream.executed.map((call) => call.name)).toEqual(["list_apps"]);
+			await desk.decide(approval.id);
+			await both.turn;
+			expect(both.results).toEqual(["done", expect.stringContaining("done")]);
+			expect(upstream.executed).toEqual([
+				{ name: "list_apps", arguments: {}, agentSession: expect.stringMatching(/^pim-[0-9a-f]{40}$/) },
+				{ name: "click", arguments: { pid: 4242, element_token: "s0a1b2c3d:7" }, agentSession: upstream.executed[0]!.agentSession },
+			]);
+			expect((await desk.decide(approval.id)).status).toBe(409);
+			expect(upstream.executed).toHaveLength(2);
 
+			// The next turn is another run, with its own run ID and driver session; screenshots reach the model.
 			upstream.answer = () => ({ content: [{ type: "text", text: "button OK s0a1b2c3d:7" }, { type: "image", mimeType: "image/png", data: png(64, 48) }] });
 			const looking = desk.uses("desktop_window_state", { pid: 4242, include_screenshot: true });
 			await looking.turn;
 			expect([looking.result(), looking.images()]).toEqual(["button OK s0a1b2c3d:7", 1]);
-			upstream.answer = () => ({ content: [{ type: "text", text: "done" }] });
+			expect(upstream.executed[2]!.agentSession).not.toBe(upstream.executed[0]!.agentSession);
 
-			// Starting an app is a shell command, asked like any other.
+			// Starting an app is a shell command, asked like any other; files and the structured browser go as in any space on this computer.
 			expect(await desk.run("setsid xterm >/dev/null 2>&1 &")).toContain("ran setsid xterm");
 			expect(deskFixture.ran).toEqual(["setsid xterm >/dev/null 2>&1 &"]);
-			// Files and the structured browser go the same way as in any space on this computer.
 			const writing = desk.uses("file_write", { path: "/workspace/notes.txt", content: "From the desktop's agent" });
 			await writing.turn;
 			expect(await desk.within(() => fs.readFile(`${deskFixture.root}/notes.txt`, "utf8"))).toBe("From the desktop's agent");
@@ -1262,50 +1298,43 @@ describe("a space whose operator chose its Cua VM", () => {
 			await opening.turn;
 			expect(opening.result()).toMatch(/\[\d+ /);
 
-			// Acting: nothing reaches spacesd until the person approves, then exactly once, with the frozen arguments.
-			const clicking = desk.uses("desktop_click", { pid: 4242, element_token: "s0a1b2c3d:7" });
-			const approval = await desk.pending();
-			expect(approval).toMatchObject({ action: "desktop_click", summary: "Click on element s0a1b2c3d:7 in the window of process 4242", args: { tool: "click", arguments: { pid: 4242, element_token: "s0a1b2c3d:7" } } });
-			expect(upstream.executed).toHaveLength(2);
-			await desk.decide(approval.id);
-			await clicking.turn;
-			expect(clicking.result()).toContain("done");
-			expect(upstream.executed.slice(2)).toEqual([{ name: "click", arguments: { pid: 4242, element_token: "s0a1b2c3d:7" }, agentSession: session }]);
-			expect((await desk.decide(approval.id)).status).toBe(409);
-			expect(upstream.executed).toHaveLength(3);
-
 			const requests = (await natives()).slice(before);
-			expect(requests.map(({ requestId, runId, status }) => [requestId.split(":")[0], runId, status])).toEqual([
-				["call", "run-1", "completed"],
-				["call", "run-1", "completed"],
-				["approval", "run-1", "completed"],
+			expect(requests.map(({ requestId, status }) => [requestId.split(":")[0], status])).toEqual([
+				["call", "completed"],
+				["approval", "completed"],
+				["call", "completed"],
 			]);
-			expect(requests[2]!.requestId).toBe(`approval:${approval.id}`);
-			expect((await bindings()).slice(-3).map((binding) => binding.status)).toEqual(["closed", "closed", "closed"]);
+			// The run ID is the one the harness minted for the turn: the same for the turn's two calls, another for the next turn.
+			expect(requests[0]!.runId).toMatch(RUN);
+			expect(requests[1]!.runId).toBe(requests[0]!.runId);
+			expect(requests[2]!.runId).not.toBe(requests[0]!.runId);
+			expect(requests[1]!.requestId).toBe(`approval:${approval.id}`);
+			expect((await bindings()).slice(-3).map((binding) => [binding.status, binding.identity.runAnchor])).toEqual([
+				["closed", requests[0]!.runId],
+				["closed", requests[0]!.runId],
+				["closed", requests[2]!.runId],
+			]);
 			expect(elsewhere).toEqual([]);
 		});
 
-		it("sends nothing the authority won't vouch for, whose agent isn't the chat's, that the person denied, or whose lease was taken back", async () => {
+		it("sends nothing whose run can't be shown at dispatch, that the person denied, or whose lease was taken back", async () => {
 			const sent = upstream.executed.length;
 			const admitted = (await natives()).length;
 
-			// The authority refuses: nothing is bound, filed or sent.
-			desktopRuns.set(desk.owner, { run: "run-1", refuse: "stopped" });
-			const refusedRead = desk.uses("desktop_list_windows", {});
-			await refusedRead.turn;
-			expect(refusedRead.result()).toMatch(/couldn't be established \(stopped\), so no native-app call was bound or sent/);
-			const refusedClick = desk.uses("desktop_click", { pid: 4242, x: 1, y: 2 });
-			await refusedClick.turn;
-			expect(refusedClick.result()).toMatch(/couldn't be established \(stopped\)/);
-			expect((await desk.api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals).toEqual([]);
-
-			// It vouches for another agent than the one the chat talks as: refused before the control state admits anything.
-			desktopRuns.set(desk.owner, { run: "run-1", agentId: "agent-someone-else" });
-			const otherAgent = desk.uses("desktop_list_apps", {});
-			await otherAgent.turn;
-			expect(otherAgent.result()).toMatch(NOT_SENT);
-			expect((await bindings()).at(-1)!.status).toBe("closed");
-			desktopRuns.set(desk.owner, { run: "run-1" });
+			// The run's ID is gone by the time the approval is decided, as for a run from before run IDs: refused at the claim.
+			const legacy = desk.uses("desktop_click", { pid: 4242, x: 1, y: 2 });
+			const unproven = await desk.pending();
+			const conversation = (await bindings()).find((binding) => binding.id === (unproven.args as { binding: string }).binding)!.identity.conversationId;
+			await desk.within(async (instance) =>
+				(await instance.harness.pi()).commit(async (tx) => {
+					const live = await tx.doc(LiveDoc, Number(conversation) as ConversationId);
+					delete (live.run as { id?: unknown }).id;
+				}, BACKGROUND_CONTEXT),
+			);
+			await desk.decide(unproven.id);
+			await legacy.turn;
+			expect(legacy.result()).toMatch(/couldn't be established \(legacy\), so no native-app call was bound or sent/);
+			expect((await bindings()).find((binding) => binding.id === (unproven.args as { binding: string }).binding)?.status).toBe("closed");
 
 			// The person denies: the binding is closed, and nothing is sent.
 			const typing = desk.uses("desktop_type_text", { pid: 4242, text: "rm -rf ~" });
@@ -1314,6 +1343,15 @@ describe("a space whose operator chose its Cua VM", () => {
 			await typing.turn;
 			expect(typing.result()).toContain("Do not perform this action");
 			expect((await bindings()).find((binding) => binding.id === (denied.args as { binding: string }).binding)?.status).toBe("closed");
+
+			// The chat is stopped while its approval waits: the approval is denied, and its binding closed.
+			const stopping = desk.uses("desktop_hotkey", { pid: 4242, keys: ["ctrl", "q"] });
+			const stopped = await desk.pending();
+			await desk.post(`/sessions/${root}/abort`);
+			await stopping.turn.catch(() => undefined);
+			await vi.waitFor(async () => expect((await desk.api<Approval>(`/approvals/${stopped.id}`)).body.status).toBe("denied"), { timeout: 10_000 });
+			expect((await desk.decide(stopped.id)).status).toBe(409);
+			expect((await bindings()).find((binding) => binding.id === (stopped.args as { binding: string }).binding)?.status).toBe("closed");
 
 			// The lease the approval was filed under is taken back before it's decided: refused, nothing sent.
 			const pressing = desk.uses("desktop_press_key", { pid: 4242, key: "Return" });
@@ -1333,41 +1371,39 @@ describe("a space whose operator chose its Cua VM", () => {
 			expect(elsewhere).toEqual([]);
 		});
 
-		it("leaves a call whose end is unknown unknown, sends nothing more of its run after reconciliation too, and replays nothing", async () => {
+		it("leaves a call whose end is unknown unknown, sends nothing more of its run, and replays nothing", async () => {
 			upstream.answer = () => new Response("spacesd fell over", { status: 500 });
-			const clicking = desk.uses("desktop_click", { pid: 4242, x: 5, y: 6 });
+			// In one run: an action whose end is unknown, then a read the run may no longer make.
+			const both = turn([
+				["desktop_click", { pid: 4242, x: 5, y: 6 }],
+				["desktop_list_apps", {}],
+			]);
 			const approval = await desk.pending();
-			await desk.decide(approval.id);
-			await clicking.turn;
-			expect(clicking.result()).toMatch(/may have run on the desktop, and nothing says whether it did \(http_status\)/);
 			const sent = upstream.executed.length;
+			await desk.decide(approval.id);
+			await both.turn;
+			expect(both.results[0]).toMatch(/may have run on the desktop, and nothing says whether it did \(http_status\)/);
+			expect(both.results[1]).toMatch(/A call of this run may have run without an answer saying so, so no native-app call was bound or sent/);
+			expect(upstream.executed.length).toBe(sent + 1);
 			const unknown = (await natives()).at(-1)!;
-			expect(unknown).toMatchObject({ requestId: `approval:${approval.id}`, runId: "run-1", status: "unknown" });
+			expect(unknown).toMatchObject({ requestId: `approval:${approval.id}`, runId: expect.stringMatching(RUN), status: "unknown" });
 			expect((await bindings()).find((binding) => binding.id === (approval.args as { binding: string }).binding)?.status).toBe("unknown");
 			upstream.answer = () => ({ content: [{ type: "text", text: "done" }] });
 
 			// Nothing replays it: deciding again is refused, and the computer takes no agent's request, shell included.
 			expect((await desk.decide(approval.id)).status).toBe(409);
 			expect(await desk.run("echo after")).toMatch(/nothing was sent/);
-			const again = desk.uses("desktop_list_apps", {});
-			await again.turn;
-			expect(again.result()).toMatch(/may have run without an answer saying so/);
+			expect(upstream.executed.length).toBe(sent + 1);
 
-			// Settled by the operator, other runs go on; this run never does.
+			// Settled by the operator, the next run goes on, under its own run ID.
 			await desk.within((instance) =>
 				instance.control.apply({ type: "reconcile_request", requestId: unknown.requestId, resolution: "not_executed", evidence: "the stand-in says so" }),
 			);
-			const stillLatched = desk.uses("desktop_list_apps", {});
-			await stillLatched.turn;
-			expect(stillLatched.result()).toMatch(/may have run without an answer saying so/);
-			expect(upstream.executed.length).toBe(sent);
-
-			desktopRuns.set(desk.owner, { run: "run-2" });
 			const nextRun = desk.uses("desktop_list_apps", {});
 			await nextRun.turn;
 			expect(nextRun.result()).toBe("done");
-			expect(upstream.executed.slice(sent)).toEqual([{ name: "list_apps", arguments: {}, agentSession: expect.not.stringMatching(upstream.executed[0]!.agentSession) }]);
-			expect((await natives()).at(-1)).toMatchObject({ runId: "run-2", status: "completed" });
+			expect((await natives()).at(-1)).toMatchObject({ status: "completed" });
+			expect((await natives()).at(-1)!.runId).not.toBe(unknown.runId);
 			expect(elsewhere).toEqual([]);
 		});
 	});

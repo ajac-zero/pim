@@ -1,4 +1,5 @@
 import { dispatchEffect, NATIVE_IDENTITY, type NativeOutcome, type NativeRequest, readNativeOutcome, readNativeRequest } from "../computer/native-outcome";
+import { type ConversationId, defineDoc, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import type { ControlLease } from "./computer-control";
 import { ControlRefused } from "./computer-control-runtime";
 
@@ -12,11 +13,11 @@ import { ControlRefused } from "./computer-control-runtime";
  *
  * The identity comes from an authority the caller gives (`NativeIdentityAuthority`),
  * never from a model or a client, and the binder makes up no part of it: no
- * run ID from a call, conversation, task or usage ID. Pim has no authority
- * yet, because the harness doesn't promise a run identity a tool call can be
- * checked against (see "The harness's run" in the doc), so nothing makes a
- * binder outside tests: the desktop's tools (./extensions/desktop.ts) make
- * one only where `Pim.nativeIdentityAuthority()` gives an authority.
+ * run ID from a call, conversation, task or usage ID. Pim's authority is
+ * `harnessAuthority`, which reads the run ID the harness minted when the run
+ * started (Pim's local pi-durable patch, docs/pi-durable-run-identity.md).
+ * The desktop's tools (./extensions/desktop.ts) make a binder only where
+ * `Pim.nativeDesktop()` turns them on, which nothing but the tests does.
  *
  * Every refusal is before anything is sent. A binding is dispatched at most
  * once, after the authority confirms the identity again, the lease is still
@@ -30,11 +31,13 @@ import { ControlRefused } from "./computer-control-runtime";
  * longer bound keeps its identity, as a tombstone, so the same tool task or
  * call is never bound again. Past the bounds, every new binding is refused.
  *
- * Writes are one synchronous read-modify-write of the whole document, as in
- * ./computer-control-runtime.ts, so nothing interleaves between deciding and
- * recording. A write that fails latches the binder for as long as the process
- * lives; a restart reads what was stored, and a dispatch it can't tell the
- * end of comes back unknown.
+ * Each operation runs in one transaction its caller gives (`BinderScope`,
+ * `Transact`): in Pim, one harness commit, holding the binder's document
+ * (`NativeBindingsDoc`) and the authority's read of the call's tool task and
+ * run, so an abort, a reset or a chat's deletion commits wholly before or
+ * wholly after a claim. A write that fails latches the binder for as long as
+ * the process lives; a restart reads what was stored, and a claim it can't
+ * tell the end of comes back unknown.
  */
 
 export const NATIVE_BINDINGS_VERSION = 1;
@@ -146,95 +149,73 @@ const UNVERIFIED = "unverified";
 
 const refuse = (reason: BindingRefusal, detail: string): Refused => ({ ok: false, reason, message: `${detail}, so no native-app call was bound or sent.` });
 
+/**
+ * What one operation of the binder reads and writes, valid for one transaction only: the stored document and the
+ * authority, both read in it. In Pim, that is one harness commit (`Tx`), so the authority's check of the tool task
+ * and its run and the binder's write are one atomic step on the harness's commit line (docs/cua-native-identity.md).
+ */
+export type BinderScope = { readonly storage: NativeBindingStorage; readonly authority: NativeIdentityAuthority };
+/** Runs `work` in one transaction, with that transaction's scope, and resolves once it has committed. */
+export type Transact = <T>(work: (scope: BinderScope) => Promise<T> | T) => Promise<T>;
+export type ClaimResult = { readonly ok: true; readonly binding: NativeBinding } | Refused;
+
 export class NativeIdentityBinder {
 	readonly #owner: string;
-	readonly #storage: NativeBindingStorage;
-	readonly #authority: NativeIdentityAuthority;
 	readonly #lease: () => ControlLease | null;
 	readonly #newId: () => string;
-	#doc: Document;
-	/** Why the stored document can't be used, or why a write failed; never cleared in this process. */
-	#blocked: string | null = null;
+	/** Bindings this process claimed and hasn't settled: being sent. Any other claimed binding is from a process that ended, and is unknown. */
+	readonly #inFlight = new Set<string>();
+	/** Why a write failed; never cleared in this process. */
+	#latched: string | null = null;
 
-	/**
-	 * Loads the stored document. A binding recorded as dispatched without a
-	 * settlement is restored as unknown (the process died before or after
-	 * sending it) and written back so. A document that can't be read is left as
-	 * it is, and everything is refused.
-	 */
-	constructor(
-		owner: string,
-		storage: NativeBindingStorage,
-		options: { authority: NativeIdentityAuthority; lease: () => ControlLease | null; newId?: () => string },
-	) {
+	/** A binder for space `owner`. It keeps no document: each operation reads the one its scope gives, and writes it back there. */
+	constructor(owner: string, options: { lease: () => ControlLease | null; newId?: () => string }) {
 		if (!NATIVE_IDENTITY.test(owner)) throw new TypeError("A native-call binder needs its space's own name as its owner.");
 		this.#owner = owner;
-		this.#storage = storage;
-		this.#authority = options.authority;
 		this.#lease = options.lease;
 		this.#newId = options.newId ?? (() => crypto.randomUUID());
-		this.#doc = { version: NATIVE_BINDINGS_VERSION, owner, records: [] };
-		let raw: string | undefined;
-		try {
-			raw = storage.read();
-		} catch {
-			this.#blocked = "the stored native bindings can't be read";
-			return;
-		}
-		if (raw === undefined) return;
-		const loaded = this.#parse(raw);
-		if (typeof loaded === "string") {
-			this.#blocked = loaded;
-			return;
-		}
-		this.#doc = loaded;
-		if (loaded.records.some((record) => record.status === "claimed")) {
-			const records = loaded.records.map((record): BindingRecord => (record.status === "claimed" ? { ...record, status: "unknown" } : record));
-			// Remembered as unknown even if this write fails, which then blocks the binder.
-			this.#write({ ...loaded, records });
-		}
 	}
 
-	/** Why everything is refused, or null. */
-	get blocked(): string | null {
-		return this.#blocked;
+	/** Why everything is refused in `scope`, or null: a write that failed in this process, or a stored document that can't be used. */
+	blocked(scope: BinderScope): string | null {
+		const loaded = this.#load(scope);
+		return typeof loaded === "string" ? loaded : null;
 	}
 
 	/**
-	 * Binds a native-app call before its approval is filed. The tool and
-	 * arguments are copied (`readNativeRequest`) before anything is awaited, so
-	 * the caller changing its objects while the authority answers changes
-	 * nothing bound; then the authority vouches for the claim, and the binding
-	 * is stored before it is returned. A tool task bound before, such as one
-	 * woken from its approval or rerun after a restart, gets its original
-	 * binding back, lease included, if it is exactly the same call and its run
-	 * is still sure; if the call differs, or a call of its run is unknown, the
-	 * binding is closed. A tool task or call bound before and spent is never
-	 * bound again.
+	 * Binds a native-app call before its approval is filed, in one transaction.
+	 * The tool and arguments are copied (`readNativeRequest`) before anything is
+	 * awaited, so the caller changing its objects while the authority answers
+	 * changes nothing bound; then the authority vouches for the claim, and the
+	 * binding is stored. A tool task bound before, such as one woken from its
+	 * approval or rerun after a restart, gets its original binding back, lease
+	 * included, if it is exactly the same call and its run is still sure; if
+	 * the call differs, or a call of its run is unknown, the binding is closed.
+	 * A tool task or call bound before and spent is never bound again.
 	 */
-	async bind(claim: NativeIdentityClaim, tool: unknown, args: unknown): Promise<BindResult> {
-		if (this.#blocked) return refuse("blocked", this.#blocked);
+	async bind(scope: BinderScope, claim: NativeIdentityClaim, tool: unknown, args: unknown): Promise<BindResult> {
+		if (this.#latched) return refuse("blocked", this.#latched);
 		const read = readClaim(claim);
 		if (!read) return refuse("invalid_request", "The call's claim isn't a conversation, tool task and call ID");
 		const copy = readNativeRequest({ owner: this.#owner, agentId: UNVERIFIED, runId: UNVERIFIED, callId: read.callId, tool, arguments: args });
 		if (!copy) return refuse("invalid_request", "The call names no curated tool, or its arguments aren't a plain JSON object of a bounded size");
-		const verified = await this.#verify(read);
+		const verified = await this.#verify(scope, read);
 		if (!verified.ok) return verified;
 		const { identity } = verified;
-		// Everything from here to the write is checked against the document as it is now, with nothing awaited.
-		if (this.#blocked) return refuse("blocked", this.#blocked);
-		const { records } = this.#doc;
+		const doc = this.#load(scope);
+		if (typeof doc === "string") return refuse("blocked", doc);
+		const { records } = doc;
 		const earlier = records.find((record) => record.identity.toolTaskId === identity.toolTaskId);
 		if (earlier) {
 			if (earlier.status !== "bound") return this.#spent(earlier);
-			if (!sameCall(earlier, identity, copy)) return this.#close(earlier, refuse("changed", "The call isn't the one its tool task was bound as"));
-			if (this.#runUnknown(identity.runAnchor)) return this.#close(earlier, runUncertain());
+			if (!sameCall(earlier, identity, copy)) return this.#close(scope, doc, earlier, refuse("changed", "The call isn't the one its tool task was bound as"));
+			if (runUnknown(doc, identity.runAnchor)) return this.#close(scope, doc, earlier, runUncertain());
 			return { ok: true, binding: bindingOf(earlier), replayed: true };
 		}
 		if (records.some((record) => record.identity.runAnchor === identity.runAnchor && record.identity.callId === identity.callId)) {
 			return refuse("ambiguous_call", "Another call of this run has the same call ID");
 		}
-		if (this.#runUnknown(identity.runAnchor)) return runUncertain();
+		if (runUnknown(doc, identity.runAnchor)) return runUncertain();
 		const lease = this.#currentLease();
 		if (!lease) return refuse("not_agent_owned", "The person has control of the computer");
 		let id: unknown;
@@ -247,98 +228,143 @@ export class NativeIdentityBinder {
 			return refuse("invalid_request", "No unique binding ID could be made");
 		}
 		const record: BoundRecord = { id, identity, tool: copy.tool, arguments: copy.arguments, lease, status: "bound" };
-		const next = { ...this.#doc, records: [...records, record] };
+		const next = { ...doc, records: [...records, record] };
 		if (!fits(next)) return refuse("full", "The binder remembers as many bindings as it may");
-		if (!this.#write(next)) return refuse("blocked", "The binding couldn't be stored");
+		if (!this.#write(scope, next)) return refuse("blocked", "The binding couldn't be stored");
 		return { ok: true, binding: bindingOf(record), replayed: false };
 	}
 
 	/**
-	 * Sends a bound call once, when it is asked to; nothing here retries. The
-	 * authority vouches for it again, the lease must still be the one it was
-	 * bound under, and no call of its run may be unknown (which closes it) or
-	 * being sent (which refuses it, still bound). These are checked again after
-	 * the authority answers, with nothing awaited between the last check and
-	 * storing it as dispatched, which comes before `send` is called with the
-	 * binding. It is settled from what `send` gives: a known outcome closes it;
-	 * an `unknown` outcome, an unreadable one, or a `send` that throws leaves it
-	 * unknown, which latches its run. A `ControlRefused` from the dispatch
-	 * authority sent nothing, and closes it.
+	 * Claims a bound call for sending, in one transaction: the authority vouches
+	 * for it again, the lease must still be the one it was bound under, and no
+	 * call of its run may be unknown (which closes it) or being sent (which
+	 * refuses it, still bound). It is then stored as claimed, and from that
+	 * commit on it is taken as possibly sent: whatever commits after can't make
+	 * it unsent. The caller sends it once and settles it (`settle`).
 	 */
-	async dispatch(bindingId: string, send: (binding: NativeBinding) => Promise<NativeOutcome>): Promise<DispatchResult> {
-		if (this.#blocked) return refuse("blocked", this.#blocked);
-		const before = this.#find(bindingId);
-		if (!before) return refuse("unknown_binding", "No such binding is remembered");
-		if (before.status !== "bound") return this.#spent(before);
-		const held = this.#runHeld(before);
-		if (held) return held;
-		const { conversationId, toolTaskId, callId } = before.identity;
-		const verified = await this.#verify({ conversationId, toolTaskId, callId });
-		// Everything from here to the claim is checked against the document as it is now, with nothing awaited.
-		if (this.#blocked) return refuse("blocked", this.#blocked);
-		const record = this.#find(bindingId);
+	async claim(scope: BinderScope, bindingId: string): Promise<ClaimResult> {
+		if (this.#latched) return refuse("blocked", this.#latched);
+		const before = this.#load(scope);
+		if (typeof before === "string") return refuse("blocked", before);
+		const found = before.records.find((record) => record.id === bindingId);
+		if (!found) return refuse("unknown_binding", "No such binding is remembered");
+		if (found.status !== "bound") return this.#spent(found);
+		const { conversationId, toolTaskId, callId } = found.identity;
+		const verified = await this.#verify(scope, { conversationId, toolTaskId, callId });
+		const doc = this.#load(scope);
+		if (typeof doc === "string") return refuse("blocked", doc);
+		const record = doc.records.find((each) => each.id === bindingId);
 		if (!record) return refuse("unknown_binding", "No such binding is remembered");
 		if (record.status !== "bound") return this.#spent(record);
 		// An authority that failed says nothing of the call, which stays bound for a later dispatch to check afresh; any other refusal closes it.
-		if (!verified.ok) return verified.reason === "authority_failed" ? verified : this.#close(record, verified);
-		if (!sameIdentity(record.identity, verified.identity)) return this.#close(record, refuse("changed", "The call isn't the one it was bound as"));
-		const heldNow = this.#runHeld(record);
-		if (heldNow) return heldNow;
+		if (!verified.ok) return verified.reason === "authority_failed" ? verified : this.#close(scope, doc, record, verified);
+		if (!sameIdentity(record.identity, verified.identity)) return this.#close(scope, doc, record, refuse("changed", "The call isn't the one it was bound as"));
+		if (runUnknown(doc, record.identity.runAnchor)) return this.#close(scope, doc, record, runUncertain());
+		if (doc.records.some((other) => other.identity.runAnchor === record.identity.runAnchor && other.status === "claimed")) {
+			return refuse("run_busy", "Another call of this run is being sent");
+		}
 		const lease = this.#currentLease();
 		if (!lease || lease.epoch !== record.lease.epoch || lease.leaseId !== record.lease.leaseId) {
-			return this.#close(record, refuse("stale_lease", "The lease the call was bound under isn't the current one"));
+			return this.#close(scope, doc, record, refuse("stale_lease", "The lease the call was bound under isn't the current one"));
 		}
-		const binding = bindingOf(record);
-		if (!this.#setStatus(record.id, "claimed")) return refuse("blocked", "The dispatch couldn't be stored");
-
-		let outcome: NativeOutcome | null;
-		try {
-			outcome = readNativeOutcome(await send(binding));
-		} catch (error) {
-			if (error instanceof ControlRefused) {
-				this.#setStatus(record.id, "closed");
-				return refuse("control_refused", "The computer's control state refused it");
-			}
-			outcome = null;
-		}
-		if (!outcome) {
-			this.#setStatus(record.id, "unknown");
-			return refuse("uncertain", "The call may have run, and nothing says whether it did");
-		}
-		this.#setStatus(record.id, dispatchEffect(outcome).uncertain ? "unknown" : "closed");
-		return { ok: true, outcome };
-	}
-
-	/** Closes a binding not yet dispatched, such as one whose approval was denied or whose chat stopped. Nothing it says can be sent after. */
-	release(bindingId: string): boolean {
-		const record = this.#find(bindingId);
-		if (this.#blocked || !record || record.status !== "bound") return false;
-		return this.#setStatus(record.id, "closed");
-	}
-
-	/** The status of a binding, or null when it isn't remembered. */
-	status(bindingId: string): NativeBindingStatus | null {
-		return this.#find(bindingId)?.status ?? null;
-	}
-
-	/** Whether a call of run `runAnchor` is unknown, whichever agent, task or call it was: the run then sends nothing more. */
-	#runUnknown(runAnchor: string): boolean {
-		return this.#doc.records.some((record) => record.identity.runAnchor === runAnchor && record.status === "unknown");
+		if (!this.#setStatus(scope, doc, record.id, "claimed")) return refuse("blocked", "The dispatch couldn't be stored");
+		this.#inFlight.add(record.id);
+		return { ok: true, binding: bindingOf(record) };
 	}
 
 	/**
-	 * Why a bound call can't be sent now because of its run: a call of the run
-	 * is unknown, which closes it for good, or another is being sent, which
-	 * leaves it bound. One call of a run is out at a time, as the host's run
-	 * allows (`busy` in docs/cua-native-mcp.md).
+	 * Settles a claimed call from what sending it gave: a known outcome closes
+	 * it; an `unknown` outcome, an unreadable one, or a send that threw leaves
+	 * it unknown for good, which latches its run. A `ControlRefused` thrown by
+	 * the dispatch authority sent nothing, and closes it. If this isn't stored,
+	 * the binding stays claimed, which a later operation reads as unknown.
 	 */
-	#runHeld(record: BoundRecord): Refused | null {
-		const { runAnchor } = record.identity;
-		if (this.#runUnknown(runAnchor)) return this.#close(record, runUncertain());
-		if (this.#doc.records.some((other) => other.identity.runAnchor === runAnchor && other.status === "claimed")) {
-			return refuse("run_busy", "Another call of this run is being sent");
+	settle(scope: BinderScope, bindingId: string, sent: { readonly outcome: unknown } | { readonly thrown: unknown }): DispatchResult {
+		this.#inFlight.delete(bindingId);
+		let outcome: NativeOutcome | null = null;
+		let refused = false;
+		if ("thrown" in sent) refused = sent.thrown instanceof ControlRefused;
+		else outcome = readNativeOutcome(sent.outcome);
+		const status = refused ? "closed" : !outcome || dispatchEffect(outcome).uncertain ? "unknown" : "closed";
+		const doc = this.#load(scope);
+		if (typeof doc !== "string" && doc.records.some((record) => record.id === bindingId && (record.status === "claimed" || record.status === "unknown"))) {
+			this.#setStatus(scope, doc, bindingId, status);
 		}
-		return null;
+		if (refused) return refuse("control_refused", "The computer's control state refused it");
+		if (!outcome) return refuse("uncertain", "The call may have run, and nothing says whether it did");
+		return { ok: true, outcome };
+	}
+
+	/**
+	 * Sends a bound call once, when asked to; nothing here retries. It is
+	 * claimed in one transaction (`claim`), sent with `send` outside any, and
+	 * settled in another (`settle`).
+	 */
+	async dispatch(transact: Transact, bindingId: string, send: (binding: NativeBinding) => Promise<NativeOutcome>): Promise<DispatchResult> {
+		let claimed: ClaimResult;
+		try {
+			claimed = await transact((scope) => this.claim(scope, bindingId));
+		} catch {
+			// The claim wasn't committed, so nothing may be sent; the binding is as it was stored.
+			this.#inFlight.delete(bindingId);
+			return refuse("blocked", "The dispatch couldn't be stored");
+		}
+		if (!claimed.ok) return claimed;
+		let sent: { outcome: unknown } | { thrown: unknown };
+		try {
+			sent = { outcome: await send(claimed.binding) };
+		} catch (thrown) {
+			sent = { thrown };
+		}
+		try {
+			return await transact((scope) => this.settle(scope, bindingId, sent));
+		} catch {
+			// Not stored: it stays claimed, which every later operation reads as unknown.
+			this.#inFlight.delete(bindingId);
+			return refuse("uncertain", "The call may have run, and its end couldn't be stored");
+		}
+	}
+
+	/** Closes a binding not yet dispatched, such as one whose approval was denied or whose chat stopped. Nothing it says can be sent after. */
+	release(scope: BinderScope, bindingId: string): boolean {
+		if (this.#latched) return false;
+		const doc = this.#load(scope);
+		if (typeof doc === "string") return false;
+		const record = doc.records.find((each) => each.id === bindingId);
+		if (!record || record.status !== "bound") return false;
+		return this.#setStatus(scope, doc, record.id, "closed");
+	}
+
+	/** The status of a binding, or null when it isn't remembered or the document can't be read. */
+	status(scope: BinderScope, bindingId: string): NativeBindingStatus | null {
+		const doc = this.#load(scope);
+		return typeof doc === "string" ? null : (doc.records.find((record) => record.id === bindingId)?.status ?? null);
+	}
+
+	/**
+	 * The stored document, or why it can't be used. A binding stored as
+	 * claimed that this process isn't sending was claimed by a process that
+	 * ended before or after sending it: it is unknown, and written back so.
+	 */
+	#load(scope: BinderScope): Document | string {
+		if (this.#latched) return this.#latched;
+		let raw: string | undefined;
+		try {
+			raw = scope.storage.read();
+		} catch {
+			return "the stored native bindings can't be read";
+		}
+		if (raw === undefined) return { version: NATIVE_BINDINGS_VERSION, owner: this.#owner, records: [] };
+		const loaded = this.#parse(raw);
+		if (typeof loaded === "string") return loaded;
+		if (!loaded.records.some((record) => record.status === "claimed" && !this.#inFlight.has(record.id))) return loaded;
+		const records = loaded.records.map((record): BindingRecord =>
+			record.status === "claimed" && !this.#inFlight.has(record.id) ? { ...record, status: "unknown" } : record,
+		);
+		const restored = { ...loaded, records };
+		// Taken as unknown even if this write fails, which then latches the binder.
+		this.#write(scope, restored);
+		return this.#latched ?? restored;
 	}
 
 	/** The agent's lease now, or null when the person has control or it can't be read. */
@@ -350,14 +376,10 @@ export class NativeIdentityBinder {
 		}
 	}
 
-	#find(id: string): BindingRecord | undefined {
-		return this.#doc.records.find((record) => record.id === id);
-	}
-
-	async #verify(claim: NativeIdentityClaim): Promise<{ ok: true; identity: NativeIdentity } | Refused> {
+	async #verify(scope: BinderScope, claim: NativeIdentityClaim): Promise<{ ok: true; identity: NativeIdentity } | Refused> {
 		let answer: unknown;
 		try {
-			answer = await this.#authority.verify(Object.freeze({ ...claim }));
+			answer = await scope.authority.verify(Object.freeze({ ...claim }));
 		} catch {
 			return refuse("authority_failed", "Who makes the call couldn't be established");
 		}
@@ -371,40 +393,34 @@ export class NativeIdentityBinder {
 		return { ok: true, identity };
 	}
 
-	#spent(record: SpentRecord): Refused {
+	#spent(record: BindingRecord): Refused {
 		if (record.status === "claimed") return refuse("dispatched", "The call was dispatched already");
 		if (record.status === "unknown") return refuse("uncertain", "The call was dispatched, and may have run without an answer saying so");
 		return refuse("closed", "The binding was closed");
 	}
 
 	/** Closes a bound call that can never be sent, and refuses with why. */
-	#close(record: BoundRecord, refused: Refused): Refused {
-		this.#setStatus(record.id, "closed");
+	#close(scope: BinderScope, doc: Document, record: BoundRecord, refused: Refused): Refused {
+		this.#setStatus(scope, doc, record.id, "closed");
 		return refused;
 	}
 
 	/** Moves a binding on from `bound`, keeping it as a tombstone without its arguments. */
-	#setStatus(id: string, status: SpentRecord["status"]): boolean {
-		const records = this.#doc.records.map((record): BindingRecord => (record.id === id ? { ...record, status, arguments: null } : record));
-		return this.#write({ ...this.#doc, records });
+	#setStatus(scope: BinderScope, doc: Document, id: string, status: SpentRecord["status"]): boolean {
+		const records = doc.records.map((record): BindingRecord => (record.id === id ? { ...record, status, arguments: null } : record));
+		return this.#write(scope, { ...doc, records });
 	}
 
-	#write(doc: Document): boolean {
-		// Nothing more is written once blocked: a restart reads what was stored, and takes a dispatch it can't see the end of as unknown.
-		if (this.#blocked) {
-			this.#doc = doc;
-			return false;
-		}
+	#write(scope: BinderScope, doc: Document): boolean {
+		// Nothing more is written once latched: a restart reads what was stored, and takes a dispatch it can't see the end of as unknown.
+		if (this.#latched) return false;
 		try {
-			this.#storage.write(JSON.stringify(doc));
+			scope.storage.write(JSON.stringify(doc));
 		} catch {
 			// It may or may not have been stored, so nothing more is bound or sent until a restart reads what was.
-			this.#blocked = "the native bindings could not be stored";
-			// What was decided is remembered, so a dispatch in flight is still taken as unknown, not sent again.
-			this.#doc = doc;
+			this.#latched = "the native bindings could not be stored";
 			return false;
 		}
-		this.#doc = doc;
 		return true;
 	}
 
@@ -440,6 +456,11 @@ export class NativeIdentityBinder {
 }
 
 const runUncertain = () => refuse("run_uncertain", "A call of this run may have run without an answer saying so");
+
+/** Whether a call of run `runAnchor` is unknown, whichever agent, task or call it was: the run then sends nothing more. */
+function runUnknown(doc: Document, runAnchor: string): boolean {
+	return doc.records.some((record) => record.identity.runAnchor === runAnchor && record.status === "unknown");
+}
 
 /** Whether `doc` is within the bounds. Nothing is let go to make it so. */
 function fits(doc: Document): boolean {
@@ -537,4 +558,68 @@ function readRecord(value: unknown, owner: string): BindingRecord | null {
 	if (!request) return null;
 	const base = { id: fields.id, identity, tool: request.tool, lease };
 	return bound ? { ...base, status: "bound", arguments: request.arguments } : { ...base, status: fields.status as SpentRecord["status"], arguments: null };
+}
+
+/**
+ * Where a space's harness keeps its binder's document: a Pim-defined document
+ * on the harness's own commit line, so the authority's read of a call's tool
+ * task and run and the binder's write are one transaction (`BinderScope`).
+ * It holds the document's JSON as text, which the binder checks whole.
+ */
+export const NativeBindingsDoc = defineDoc<{ text?: string }>({ kind: "pim.native-bindings", version: 1, scope: "session", initial: () => ({}) });
+
+/** The binder's scope in one harness transaction: its document there, and the authority reading that same transaction. */
+export async function harnessScope(tx: Tx, authority: (tx: Tx) => NativeIdentityAuthority): Promise<BinderScope> {
+	const draft = await tx.doc(NativeBindingsDoc);
+	return {
+		storage: {
+			read: () => draft.text,
+			write: (value) => {
+				draft.text = value;
+			},
+		},
+		authority: authority(tx),
+	};
+}
+
+const LIVE_TASK = new Set(["pending", "running", "waiting"]);
+
+/**
+ * The run authority over Pim's harness, reading `tx`, the transaction the
+ * binder writes in: the call's `pi.tool` task must exist, be live and not
+ * marked for abort, be the claim's conversation and call, and carry the run
+ * ID its generation stamped on it when it was made; the conversation's run
+ * must be going now under that same ID (`Tx.run`, in Pim's local pi-durable
+ * patch, docs/pi-durable-run-identity.md). The agent is the one Pim records
+ * for the conversation (`agentOf`), and a chat Pim has marked deleted is
+ * refused, as its run is about to be aborted. The run anchor is the run ID
+ * the harness minted, as a string; nothing of it is derived from the call,
+ * task or chat. A call or run from before run IDs is refused as `legacy`.
+ */
+export function harnessAuthority(
+	tx: Tx,
+	options: { owner: string; agentOf: (conversationId: string) => string; deleted: (conversationId: string) => boolean },
+): NativeIdentityAuthority {
+	const refused = (reason: AuthorityRefusal): AuthorityAnswer => ({ status: "refused", reason });
+	return {
+		async verify(claim) {
+			const conversationId = Number(claim.conversationId);
+			const toolTaskId = Number(claim.toolTaskId);
+			if (!Number.isSafeInteger(conversationId) || !Number.isSafeInteger(toolTaskId) || String(toolTaskId) !== claim.toolTaskId || String(conversationId) !== claim.conversationId) {
+				return refused("missing");
+			}
+			const task = await tx.task(toolTaskId as TaskId);
+			if (!task) return refused("missing");
+			const input = task.input as { callId?: unknown; runId?: unknown } | null;
+			if (task.kind !== "pi.tool" || task.conversationId !== conversationId || input?.callId !== claim.callId) return refused("ambiguous");
+			if (!LIVE_TASK.has(task.state.status) || task.abortRequested) return refused("stopped");
+			if (typeof input.runId !== "number") return refused("legacy");
+			const run = await tx.run(conversationId as ConversationId);
+			if (!run) return refused("stopped");
+			if (run.id === null) return refused("legacy");
+			if (run.id !== input.runId) return refused("not_run_owned");
+			if (options.deleted(claim.conversationId)) return refused("stopped");
+			return { status: "verified", identity: { owner: options.owner, agentId: options.agentOf(claim.conversationId), ...claim, runAnchor: String(run.id) } };
+		},
+	};
 }

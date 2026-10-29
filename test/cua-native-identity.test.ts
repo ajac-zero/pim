@@ -8,6 +8,7 @@ import {
 	MAX_NATIVE_BINDINGS,
 	MAX_NATIVE_BINDINGS_CHARS,
 	type NativeBinding,
+	type NativeBindingStorage,
 	NativeIdentityBinder,
 	type NativeIdentityAuthority,
 	type NativeIdentityClaim,
@@ -108,13 +109,33 @@ class StandInHarness implements NativeIdentityAuthority {
 	}
 }
 
+/**
+ * The binder over `storage`, each operation one transaction of its own over
+ * that storage with `authority`, as Pim runs each in one harness commit
+ * (test/cua-native-authority.test.ts runs it over the real harness).
+ */
+function over(binder: NativeIdentityBinder, storage: NativeBindingStorage, authority: NativeIdentityAuthority) {
+	const scope = { storage, authority };
+	return {
+		bind: (claim: NativeIdentityClaim, tool: unknown, args: unknown) => binder.bind(scope, claim, tool, args),
+		dispatch: (id: string, send: (binding: NativeBinding) => Promise<NativeOutcome>) =>
+			binder.dispatch((work) => Promise.resolve().then(() => work(scope)), id, send),
+		release: (id: string) => binder.release(scope, id),
+		status: (id: string) => binder.status(scope, id),
+		get blocked() {
+			return binder.blocked(scope);
+		},
+	};
+}
+type Binder = ReturnType<typeof over>;
+
 /** A binder over fresh storage, with conversation c1 of agent-a running from input s1, whose generation g1 called tool task t1. */
 function setup() {
 	const { disk, storage } = memory();
 	const harness = new StandInHarness();
 	const control = { lease: lease1 as ControlLease | null };
 	let ids = 0;
-	const make = (owner = SPACE) => new NativeIdentityBinder(owner, storage, { authority: harness, lease: () => control.lease, newId: () => `b${++ids}` });
+	const make = (owner = SPACE) => over(new NativeIdentityBinder(owner, { lease: () => control.lease, newId: () => `b${++ids}` }), storage, harness);
 	harness.agents.set("c1", "agent-a");
 	harness.start("c1", "g1", "s1");
 	harness.call("c1", "t1", "call-1");
@@ -145,7 +166,7 @@ function sender(answer: () => Promise<unknown> = async () => known) {
  * failed, the cleanup's when only it did, and both, the assertions' first,
  * in one `AggregateError` whose message names each when both did.
  */
-function deadDispatch(binder: NativeIdentityBinder, disk: ReturnType<typeof memory>["disk"]) {
+function deadDispatch(binder: Binder, disk: ReturnType<typeof memory>["disk"]) {
 	const sent = gate();
 	const reply = gate<NativeOutcome>();
 	const late = binder.dispatch("b1", async () => {
@@ -185,7 +206,7 @@ function deadDispatch(binder: NativeIdentityBinder, disk: ReturnType<typeof memo
 
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-const bindingId = async (binder: NativeIdentityBinder, ...args: Parameters<NativeIdentityBinder["bind"]>) => {
+const bindingId = async (binder: Binder, ...args: Parameters<Binder["bind"]>) => {
 	const bound = await binder.bind(...args);
 	if (!bound.ok) throw new Error(`not bound: ${bound.reason}`);
 	return bound.binding.id;

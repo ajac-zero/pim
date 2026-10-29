@@ -156,7 +156,7 @@ import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import type { ControlEvent } from "./computer-control";
 import { ControlCoordinator, ControlRefused, currentTrace } from "./computer-control-runtime";
-import { type NativeBinding, type NativeIdentityAuthority, NativeIdentityBinder } from "./cua-native-identity";
+import { harnessAuthority, harnessScope, type NativeBinding, NativeIdentityBinder, type Transact } from "./cua-native-identity";
 import { DESKTOP_ACTIONS, DESKTOP_EXTENSION, describeOutcome, desktopActions, desktopExtension } from "./extensions/desktop";
 import type { NativeOutcome } from "../computer/native-outcome";
 import { asPersonRead, COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus } from "./computer";
@@ -199,8 +199,6 @@ const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifa
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE]);
 /** Where the space keeps its computer's control state, if it opted in (see ./computer-control-runtime.ts). */
 const CONTROL_KEY = "computer_control";
-/** Where the space keeps its native-app calls' bindings, once it has a run authority (see ./cua-native-identity.ts). */
-const DESKTOP_BINDINGS_KEY = "native_bindings";
 /** What someone trying to take the browser over hears in a space under control state, where nobody can. */
 const TAKE_OVER_UNAVAILABLE =
 	"Taking over the browser isn't available in this space: Pim can't make sure its agents have stopped using it, so nothing you do is sent to it.";
@@ -509,8 +507,8 @@ export class Pim extends DurableAgent<Env> {
 		inUse: () => this.browser.watched(),
 		selected: () => selection(this.store.meta(PROVIDER_KEY), this.name),
 		binding: () => this.#computerBinding(),
-		// Only with a run authority, which Pim's own code doesn't give (`nativeIdentityAuthority`).
-		nativeApps: () => this.nativeIdentityAuthority() !== null,
+		// Off unless the desktop's tools are (`nativeDesktop`), which they are nowhere but in tests.
+		nativeApps: () => this.nativeDesktop(),
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
@@ -543,37 +541,49 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * What vouches for a native-app call's run (./cua-native-identity.ts): none.
-	 * The harness publishes no run identity a tool call can be checked against
-	 * (docs/pi-durable-run-identity.md), and none may be made up from a call,
-	 * task or conversation, so the desktop's tools are offered nowhere and
-	 * `Computer.native` stays off. Only tests give one, a stand-in.
+	 * Whether this space's agents get the desktop's tools on the operator's Cua
+	 * computer: no deployment's or preview's, because nothing starts the Cua
+	 * computer that would take their calls (docs/cua-native-mcp.md, "Not wired
+	 * yet") and nothing has been qualified against a real one. Only tests say
+	 * yes. The run authority itself is real (`harnessAuthority`).
 	 */
-	protected nativeIdentityAuthority(): NativeIdentityAuthority | null {
-		return null;
+	protected nativeDesktop(): boolean {
+		return false;
 	}
 
 	#desktopBinder: NativeIdentityBinder | undefined;
 	/**
-	 * The space's native-call binder, while it has a run authority and its
+	 * The space's native-call binder, while its desktop's tools are on and its
 	 * computer is the operator's Cua VM; otherwise null, and nothing native is
 	 * offered, bound or sent. A paired computer or a Sprite never gets one.
 	 */
 	#desktop(): NativeIdentityBinder | null {
-		const authority = this.nativeIdentityAuthority();
-		if (!authority || this.computer.selected() !== "cua") return null;
-		return (this.#desktopBinder ??= new NativeIdentityBinder(
-			this.name,
-			{ read: () => this.store.meta(DESKTOP_BINDINGS_KEY), write: (value) => this.store.setMeta(DESKTOP_BINDINGS_KEY, value) },
-			{
-				authority,
-				lease: () => {
-					const state = this.control.state;
-					return state?.owner === "agent" ? state.lease : null;
-				},
+		if (!this.nativeDesktop() || this.computer.selected() !== "cua") return null;
+		return (this.#desktopBinder ??= new NativeIdentityBinder(this.name, {
+			lease: () => {
+				const state = this.control.state;
+				return state?.owner === "agent" ? state.lease : null;
 			},
-		));
+		}));
 	}
+
+	/**
+	 * Runs one operation of the binder in one harness commit: the binder's
+	 * document is the harness's (`NativeBindingsDoc`), and the authority reads
+	 * the call's tool task and run in that same commit, so an abort, a reset or
+	 * a chat's deletion commits wholly before it or wholly after.
+	 */
+	readonly #transact: Transact = async (work) =>
+		(await this.harness.pi()).commit(async (tx) => {
+			const scope = await harnessScope(tx, (read) =>
+				harnessAuthority(read, {
+					owner: this.name,
+					agentOf: (conversation) => this.#roleOf(conversation).agent.id,
+					deleted: (conversation) => this.store.deletedSessions().has(conversation),
+				}),
+			);
+			return work(scope);
+		}, BACKGROUND_CONTEXT);
 
 	/**
 	 * Sends a bound native-app call as one request the control state admits:
@@ -605,7 +615,7 @@ export class Pim extends DurableAgent<Env> {
 		const desktop = this.#desktop();
 		if (!desktop || !request.approval) return "The desktop's apps aren't available to agents in this space now, so nothing was sent.";
 		const approval = request.approval;
-		const sent = await desktop.dispatch(bindingId, (binding) => this.#desktopSend(binding, request.session, `approval:${approval}`, approval));
+		const sent = await desktop.dispatch(this.#transact, bindingId, (binding) => this.#desktopSend(binding, request.session, `approval:${approval}`, approval));
 		if (!sent.ok) return sent.message;
 		const said = describeOutcome(sent.outcome);
 		return said.images.length > 0 ? `${said.text}\n(${said.images.length} image(s) left out.)` : said.text;
@@ -620,9 +630,16 @@ export class Pim extends DurableAgent<Env> {
 		}
 		this.registry.install(
 			desktopExtension(services, {
-				bind: (claim, tool, args) => desktop.bind(claim, tool, args),
+				bind: (claim, tool, args) =>
+					this.#transact((scope) => desktop.bind(scope, claim, tool, args)).catch(() => ({
+						ok: false as const,
+						reason: "blocked" as const,
+						message: "The binding couldn't be stored, so no native-app call was bound or sent.",
+					})),
 				read: (binding) =>
-					desktop.dispatch(binding.id, (bound) => this.#desktopSend(bound, bound.identity.conversationId, `call:${bound.identity.conversationId}:${bound.identity.callId}`)),
+					desktop.dispatch(this.#transact, binding.id, (bound) =>
+						this.#desktopSend(bound, bound.identity.conversationId, `call:${bound.identity.conversationId}:${bound.identity.callId}`),
+					),
 			}),
 		);
 	}
@@ -2172,7 +2189,12 @@ export class Pim extends DurableAgent<Env> {
 			throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
 		}
 		// A desktop action denied, timed out or stopped is never sent: its binding is closed.
-		if (decision === "deny" && DESKTOP_ACTIONS.has(approval.action)) this.#desktop()?.release(String((approval.args as { binding?: unknown }).binding));
+		if (decision === "deny" && DESKTOP_ACTIONS.has(approval.action)) {
+			const desktop = this.#desktop();
+			const binding = String((approval.args as { binding?: unknown }).binding);
+			// A release that isn't stored leaves the binding bound, never sent: dispatching it needs an approval, and this one is denied.
+			if (desktop) await this.#transact((scope) => desktop.release(scope, binding)).catch((error) => console.warn("releasing a native binding", error));
+		}
 		if (decision === "approve") {
 			const action = this.actions.find((candidate) => candidate.name === approval.action);
 			let result: string;

@@ -11,7 +11,6 @@ import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
 import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
-import type { AuthorityRefusal, NativeIdentityAuthority } from "../src/cua-native-identity";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -231,14 +230,8 @@ export const google = definePimExtension({ id: "test.google", name: "Test Google
 	googleApp({ id: "unset", name: "Unset", description: "Never configured.", client: { id: "TEST_UNSET_CLIENT_ID", secret: "TEST_UNSET_CLIENT_SECRET" }, scopes: [GOOGLE_SCOPES.driveFile], tools: [] }),
 ] });
 
-/**
- * A stand-in for the run authority Pim lacks (src/cua-native-identity.ts),
- * for the spaces a test names here by owner: it vouches for every call with
- * the run the test sets, and the agent the space records for the chat (or
- * `agentId`), or refuses as the test says. It is not the harness: it checks
- * nothing of the tool task or the run, and proves nothing about one.
- */
-export const desktopRuns = new Map<string, { run: string; refuse?: AuthorityRefusal; agentId?: string }>();
+/** The spaces, by owner, whose agents get the desktop's tools in tests (`nativeDesktop`); no deployment's or preview's do. */
+export const desktopSpaces = new Set<string>();
 
 export class Pim extends RealPim {
 	/** The deployment's extensions, and the tests' own. */
@@ -288,18 +281,9 @@ export class Pim extends RealPim {
 		return utility.getModel();
 	}
 
-	/** The stand-in run authority, only in a space a test named in `desktopRuns`. */
-	protected override nativeIdentityAuthority(): NativeIdentityAuthority | null {
-		if (!desktopRuns.has(this.name)) return null;
-		return {
-			verify: async (claim) => {
-				const runs = desktopRuns.get(this.name);
-				if (!runs) return { status: "refused", reason: "unsupported" };
-				if (runs.refuse) return { status: "refused", reason: runs.refuse };
-				const agentId = runs.agentId ?? this.agents.ofSession(claim.conversationId).id;
-				return { status: "verified", identity: { owner: this.name, agentId, ...claim, runAnchor: runs.run } };
-			},
-		};
+	/** The desktop's tools, with Pim's real run authority, only in a space a test named in `desktopSpaces`. */
+	protected override nativeDesktop(): boolean {
+		return desktopSpaces.has(this.name);
 	}
 
 	/** The deployment's default image model, on the stand-in for Workers AI. */

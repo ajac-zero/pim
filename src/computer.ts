@@ -211,7 +211,7 @@ export class Computer {
 	readonly #selected: () => Selection | null;
 	/** What the space reaches its computer by now, which a link must have been made under; throws when that can't be read. */
 	readonly #binding: () => string;
-	/** Whether native-app calls may be sent (`native`): only when the one who makes the computer says so, which Pim does only where its code gives a run authority, and none does yet. */
+	/** Whether native-app calls may be sent (`native`): only when the one who makes the computer says so, which Pim does only where its desktop's tools are on (`Pim.nativeDesktop`), and they are nowhere but in tests. */
 	readonly #nativeApps: () => boolean;
 	/** pim-computer on the computer Pim started, while the space holds on to it. */
 	#link: ComputerLink | null = null;

@@ -6,6 +6,7 @@ import {
 	type ConversationId,
 	createRegistry,
 	defineExtension,
+	defineTask,
 	defineTool,
 	Harness,
 	LiveDoc,
@@ -15,7 +16,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OWNER, post, toolUse, waits } from "./helpers";
 import { faux, type Pim } from "./worker";
 
@@ -85,6 +86,25 @@ function refusable(storage: Storage = new MemoryStorage()) {
 	return { storage: proxy as Storage, refuseNext: () => void (refuse = true) };
 }
 
+/** A background task that holds until it is signalled, and then ends aborted. */
+const Linger = defineTask<Record<string, never>, { phase: "hold" }, null>({
+	name: "test.linger",
+	version: 1,
+	initial: () => ({ phase: "hold" }),
+	phases: {
+		hold: async (_task, runtime) => {
+			await new Promise<void>((resolve) => {
+				if (runtime.signal.aborted) resolve();
+				else runtime.signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+			runtime.signal.throwIfAborted();
+		},
+	},
+	abort: async (_task, runtime, ctx) => {
+		await runtime.commit(async () => ({ status: "terminal", outcome: { status: "aborted" } }), ctx);
+	},
+});
+
 /** A harness with `wait`, which suspends its call, and `spawn`, which starts a child conversation its task owns and suspends. */
 async function open(storage: Storage) {
 	const wait = defineTool({
@@ -113,7 +133,7 @@ async function open(storage: Storage) {
 	const models = createModels();
 	models.setProvider(model.provider);
 	const registry = createRegistry();
-	registry.install(defineExtension({ name: "effects", tools: [wait, spawn] }));
+	registry.install(defineExtension({ name: "effects", tools: [wait, spawn], tasks: [Linger] }));
 	const harness = await Harness.open(storage, { models, registry }, context);
 	const root = await harness.root(context, { agent: { model: MODEL } });
 	return { harness, root };
@@ -189,6 +209,44 @@ describe("Conversation.abortWithEffect (pi-durable)", () => {
 		await harness.close(context);
 	});
 
+	it("keeps abort()'s traversal, default and with background, and reports what each marked", async () => {
+		// The same scenario through abort() and through abortWithEffect(): the observable outcome must be the same.
+		const observe = async (mode: "abort" | "abortWithEffect") => {
+			const { harness, root } = await open(new MemoryStorage());
+			model.setResponses([call("wait")]);
+			await root.submit({ type: "input", content: "start" }, context);
+			await waitFor(async () => (await liveTasks(harness)).some((task) => task.kind === "pi.tool" && task.state.status === "waiting"), "call suspended");
+			const linger = await harness.commit((tx) => tx.createTask(Linger, {}, { ownership: { kind: "conversation" }, conversationId: root.id, background: true }), context);
+			await waitFor(async () => (await liveTasks(harness)).some((task) => task.id === linger && task.state.status === "running"), "background task running");
+			const run = (await harness.commit((tx) => tx.run(root.id), context))!.id;
+			const stop = async (options?: { background: boolean }) => {
+				if (mode === "abort") {
+					await bounded(root.abort(context, options), 5_000, "abort");
+					return undefined;
+				}
+				const { effect, idle } = await root.abortWithEffect(context, options);
+				await bounded(idle, 5_000, "idle");
+				return effect;
+			};
+			const ordinary = await stop();
+			const afterOrdinary = (await liveTasks(harness)).map((task) => ({ kind: task.kind, background: task.background === true, abortRequested: task.abortRequested === true }));
+			const background = await stop({ background: true });
+			const lingerAfter = (await harness.getTask(linger, context))?.state.status;
+			await harness.close(context);
+			return { run, ordinary, background, afterOrdinary, lingerAfter };
+		};
+		const plain = await observe("abort");
+		const reported = await observe("abortWithEffect");
+		// The default abort leaves the background task running and unmarked, and ends the run; with background, it ends too.
+		expect(plain.afterOrdinary).toEqual([{ kind: "test.linger", background: true, abortRequested: false }]);
+		expect(plain.lingerAfter).toBe("terminal");
+		expect(reported.afterOrdinary).toEqual(plain.afterOrdinary);
+		expect(reported.lingerAfter).toBe(plain.lingerAfter);
+		// What each commit reports: the run's two tasks without the background one; then the background one, with no run left.
+		expect(reported.ordinary).toEqual({ marked: [{ conversationId: expect.any(Number), runId: reported.run, newlyMarked: 2 }], withdrawn: [] });
+		expect(reported.background).toEqual({ marked: [{ conversationId: expect.any(Number), runId: null, newlyMarked: 1 }], withdrawn: [] });
+	});
+
 	it("reports a run from before run IDs as null, and a refused commit as no effect at all", async () => {
 		const refusing = refusable();
 		const { harness, root } = await open(refusing.storage);
@@ -232,6 +290,55 @@ async function newChat(): Promise<{ session: string; conversation: ConversationI
 
 /** The handle of a Stop, kept here rather than passed back across `runInDurableObject`. */
 let idleOf: Promise<void> | undefined;
+/** A Stop started and awaited across `runInDurableObject` calls. */
+let stopping: Promise<unknown> | undefined;
+
+/**
+ * Test-only: holds the adapter's Stop after its withdraw decision and before its marking commit. When the harness's
+ * `abortSubmission` answers `already_placed`, the next `conversation()` lookup, which the adapter makes at once before
+ * the conversation's abort, waits for `gate`. Nothing else of the harness changes.
+ */
+function holdBeforeMark(gate: Promise<void>, reached: () => void) {
+	return within(async (pim) => {
+		const pi = await pim.harness.pi();
+		const abortSubmission = pi.abortSubmission.bind(pi);
+		const conversationOf = pi.conversation.bind(pi);
+		let armed = false;
+		vi.spyOn(pi, "abortSubmission").mockImplementation(async (...args) => {
+			const result = await abortSubmission(...args);
+			if (result === "already_placed") armed = true;
+			return result;
+		});
+		vi.spyOn(pi, "conversation").mockImplementation(async (...args) => {
+			if (armed) {
+				armed = false;
+				reached();
+				await gate;
+			}
+			return conversationOf(...args);
+		});
+	});
+}
+
+function reachedPoint(what: string) {
+	let reached = () => undefined as void;
+	const at = new Promise<void>((resolve) => {
+		reached = resolve;
+	});
+	return { reached: () => reached(), at: () => bounded(at, 5_000, what) };
+}
+
+async function readRun(conversation: ConversationId, operations: readonly string[] = []) {
+	return within(async (pim) =>
+		(await pim.harness.pi()).commit(async (tx: Tx) => {
+			const run = await tx.run(conversation);
+			const statuses: Record<string, string | null> = {};
+			for (const operation of operations) statuses[operation] = (await tx.submissionByRequest(conversation, operation))?.status ?? null;
+			const task = run ? await tx.task(run.taskId) : undefined;
+			return { runId: run?.id ?? null, abortRequested: task?.abortRequested === true, statuses };
+		}, context),
+	);
+}
 
 describe("PiSession.abortWithEffect (agents adapter)", () => {
 	it("reports the operation's own commit and the conversation abort's, keeps abort()'s boolean, and resolves before idle", async () => {
@@ -321,5 +428,95 @@ describe("PiSession.abortWithEffect (agents adapter)", () => {
 		// abort() itself is unchanged: the same booleans as before the patch for missing and settled operations.
 		expect(await within((pim) => pim.harness.session(session).abort("op-missing"))).toBe(false);
 		expect(await within((pim) => pim.harness.session(session).abort("op-F"))).toBe(false);
+	});
+
+	it("reports the run actually marked when the run is replaced, or ends, between the withdraw decision and the mark", async () => {
+		const { session, conversation } = await newChat();
+		const responses = [1, 2, 3, 4, 5].map((n) => heldResponse(`race: response ${n}`, () => toolUse("send_to_user", { message: `answer ${n}` })));
+		faux.setResponses(responses.map((response) => response.respond));
+		const [r1, r2, r3, r4, r5] = responses as [ReturnType<typeof heldResponse>, ...ReturnType<typeof heldResponse>[]];
+		const submit = (operationId: string, whenBusy?: "followUp") =>
+			within(async (pim) => {
+				await pim.harness.session(session).submit(`Input ${operationId}.`, { operationId, ...(whenBusy ? { whenBusy } : {}) });
+			});
+
+		// Replaced: op-X's run ends after the withdraw decision, op-Y starts the next run, and the mark lands on that run.
+		await submit("op-X");
+		await r1.called();
+		const first = await readRun(conversation);
+		await submit("op-Y", "followUp");
+		await submit("op-Z", "followUp");
+		const holdA = waits().gate("race: before the mark (replaced)");
+		const pointA = reachedPoint("race: withdraw decided (replaced)");
+		await holdBeforeMark(holdA.opened, pointA.reached);
+		await within(async (pim) => {
+			stopping = pim.harness.session(session).abortWithEffect("op-X").then((handle) => ((idleOf = handle.idle), handle.effect));
+		});
+		await pointA.at();
+		r1.open();
+		await r2!.called();
+		const second = await readRun(conversation, ["op-X", "op-Y", "op-Z"]);
+		expect(second.runId).not.toBe(first.runId);
+		expect(second.statuses).toEqual({ "op-X": "done", "op-Y": "placed", "op-Z": "queued" });
+		holdA.open();
+		const replaced = await within(() => bounded(stopping!, 5_000, "the held Stop"));
+		expect(replaced).toEqual({
+			aborted: true,
+			operation: { operationId: "op-X", outcome: "placed" },
+			conversation: {
+				marked: [{ conversationId: conversation, runId: second.runId, newlyMarked: expect.any(Number) }],
+				withdrawn: [{ conversationId: conversation, submissionId: expect.any(Number), requestId: "op-Z" }],
+			},
+		});
+		r2!.open();
+		await within(() => bounded(idleOf!, 5_000, "idle (replaced)"));
+		await within(async () => vi.restoreAllMocks());
+
+		// No run: op-W's run ends after the withdraw decision and nothing follows; the abort then marks nothing.
+		await submit("op-W");
+		await r3!.called();
+		const holdB = waits().gate("race: before the mark (ended)");
+		const pointB = reachedPoint("race: withdraw decided (ended)");
+		await holdBeforeMark(holdB.opened, pointB.reached);
+		await within(async (pim) => {
+			stopping = pim.harness.session(session).abortWithEffect("op-W").then((handle) => ((idleOf = handle.idle), handle.effect));
+		});
+		await pointB.at();
+		r3!.open();
+		await expect.poll(async () => (await readRun(conversation)).runId, { timeout: 5_000 }).toBeNull();
+		holdB.open();
+		expect(await within(() => bounded(stopping!, 5_000, "the held Stop"))).toEqual({
+			aborted: true,
+			operation: { operationId: "op-W", outcome: "placed" },
+			conversation: { marked: [], withdrawn: [] },
+		});
+		await within(() => bounded(idleOf!, 5_000, "idle (ended)"));
+		await within(async () => vi.restoreAllMocks());
+
+		// The old boolean in the same race: abort(op-P) still returns true, marks the replacing run, and withdraws op-R.
+		await submit("op-P");
+		await r4!.called();
+		await submit("op-Q", "followUp");
+		await submit("op-R", "followUp");
+		const holdC = waits().gate("race: before the mark (boolean)");
+		const pointC = reachedPoint("race: withdraw decided (boolean)");
+		await holdBeforeMark(holdC.opened, pointC.reached);
+		await within(async (pim) => {
+			stopping = pim.harness.session(session).abort("op-P");
+		});
+		await pointC.at();
+		r4!.open();
+		await r5!.called();
+		const fifth = await readRun(conversation);
+		holdC.open();
+		await expect
+			.poll(async () => {
+				const now = await readRun(conversation, ["op-R"]);
+				return now.runId === fifth.runId && now.abortRequested && now.statuses["op-R"] === "unanswered";
+			}, { timeout: 5_000 })
+			.toBe(true);
+		r5!.open();
+		expect(await within(() => bounded(stopping!, 5_000, "abort(op-P)"))).toBe(true);
+		await within(async () => vi.restoreAllMocks());
 	});
 });

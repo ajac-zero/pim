@@ -164,7 +164,8 @@ Until an interface like this is accepted and implemented, blocker 2 stays failed
   - a resolve before idle, and an `idle` rejected by the caller's signal;
   - a repeat that newly marks nothing;
   - a legacy run reported as `null`;
-  - a refused marking commit that rejects with nothing marked, alike for `abort()`.
+  - a refused marking commit that rejects with nothing marked, alike for `abort()`;
+  - the traversal compared between `abort()` and `abortWithEffect()`, by default and with `background: true`. The default leaves a background task running and unmarked; with the option, it is marked and awaited until terminal.
 - **The agents adapter in Pim's Durable Object:**
   - a queued input withdrawn alone;
   - a placed input aborting its run and withdrawing unrelated queued inputs;
@@ -172,17 +173,18 @@ Until an interface like this is accepted and implemented, blocker 2 stays failed
   - settled, missing, empty and other-chat operations;
   - the plain Stop;
   - an input queued then placed into a new run, reported as that run;
-  - `abort()`'s booleans.
+  - `abort()`'s booleans;
+  - the Stop held, through a test-only hook on the harness's `abortSubmission` and `conversation()`, after its `already_placed` decision and before its marking commit. If the run is replaced meanwhile, the next run is reported as marked, and the remaining queued input withdrawn. If the run ends with nothing after it, `marked` is empty. Old `abort(op)` in the same race still returns `true`, marks the replacing run and withdraws the queued input.
 
 **Mutations, each caught:**
 - counting every reached task as newly marked;
 - no handler on `idle`, which the run reports as an unhandled rejection;
 - no withdrawn list;
 - the adapter awaiting `idle` before it resolves;
-- no run read.
+- no run read;
+- the adapter reporting the run read before its withdraw decision;
+- the traversal ignoring `background: true`;
+- `idle` not waiting for reached background tasks.
 
-**Not exercised:**
-- a run replaced between `abortSubmission`'s commit and the conversation abort's (no deterministic interleaving);
-- `background: true` traversal;
-- a crash between the marking commit and a caller's own record.
+**Not exercised:** a crash between the marking commit and a caller's own record.
 

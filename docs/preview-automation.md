@@ -51,6 +51,24 @@ The script writes the runner's input to a new file that only its owner can read 
 
 The credential goes only in the `Authorization` header of a POST. It never goes in a URL, a body, a log, chat or the browser. A credential grants one evaluation's one owner and nothing else: no admin, bootstrap or enrollment power. To make a new grant, make a new credential.
 
+## Operator readiness before the one exchange
+
+**A successful secret write is not readiness.** In the installed `wrangler@4.148.0` (`wrangler-dist/cli.js`), `wrangler secret put` sends one secret to the Worker's `/secrets` endpoint. When the latest version isn't the deployed one, Cloudflare refuses the write (errors 10214 and 10215), and Wrangler explains that the limit exists "to prevent accidental deployment": a write to the deployed version makes and deploys a new version. So setting `PREVIEW_AUTOMATION` and `PREVIEW_AUTOMATION_GRANT` with two writes makes two versions, and the first of them serves with only one of the two. `wrangler secret bulk` sends both in one request to `/secrets-bulk`; whether that always makes exactly one version isn't visible in Wrangler's source, so the gate below checks the version either way. "Success! Uploaded secret" says the write was accepted, not which version serves a given request.
+
+The operator makes the one permitted exchange only after every step below passes, in order, immediately before it. Any step that doesn't pass means stop: no exchange.
+
+1. **Write the grant first and the flag last**, or both in one `wrangler secret bulk -c wrangler.cua-eval.jsonc`. Never turn the flag on while an earlier grant may still be set.
+2. **One version serves everything.** `pnpm wrangler deployments status -c wrangler.cua-eval.jsonc` shows exactly one version, at 100%, of the `pim-cua-eval` Worker (never `pim`). A split, or another Worker's name, is a stop.
+3. **That version holds both.** `pnpm wrangler versions view <that version ID> -c wrangler.cua-eval.jsonc` lists both `PREVIEW_AUTOMATION` and `PREVIEW_AUTOMATION_GRANT` under Secrets, and was created no earlier than the last write. It prints names only: no value is readable, so this can't show that the flag is `on` or that the grant is the one printed for this credential.
+4. **The Worker serving a read sees both.** A signed-out `GET https://<origin>/auth/session`, with no cookie and no credential, answers `"agentPreview": {"enabled": true, "expiresAt": null}`. The Worker adds that only when the request it served saw `PREVIEW_AUTOMATION=on` and a grant well formed for this mode, runtime and address, and not past its `notAfter` (`describe` in `preview/automation.ts`). Without it, stop.
+5. **The one exchange.** `201` goes on. Any `401` is the end of the attempt: no retry and no second exchange. The operator turns the flag off, then removes the grant (each its own approved step), and records the outcome as unclassified.
+
+**What the gate can't prove.** Steps 2 and 3 are the control plane's record of what is deployed. Wrangler has no command that reports whether every Cloudflare location serves that version yet, and nothing here claims it does. Step 4 is evidence about the one request that made it: a grant for another credential, owner or evaluation that is well formed reads the same, and the exchange may be served by another version than the read was. So the gate makes a refused exchange less likely; it can't rule one out, and the procedure fails closed instead: a refusal stops the attempt.
+
+**What a refusal says.** The exchange's two `401` bodies are fixed and unchanged. `Sign in to Pim` means the route wasn't on for that request: the flag or grant wasn't seen, or the grant wasn't valid for this Worker then. `That automation credential isn't valid for this preview.` means the route was on and refused the credential, the identity in the body, or the Directory's check. Neither says which, or which version served it, so a refusal stays unclassified.
+
+**Local coverage, not propagation.** `test/preview-automation.test.ts` ("refuses the exchange with the same fixed 401s while a request sees only part of the flag and grant…") serves each request from one environment snapshot: neither, the grant only, the flag only, the flag off, another runtime's grant, another credential's grant, and both. It checks the readiness read and the exchange's fixed `401` for each, a read that passes on one snapshot followed by an exchange served by another, no session recorded and no credential logged by any refusal, and then one exchange that signs in when both are seen. That is deterministic and local. It qualifies nothing about how Cloudflare propagates a version.
+
 ## The interface
 
 All routes are at the preview's own origin. A write must carry `Origin: <origin>` exactly; a read may carry that or none.
@@ -175,6 +193,7 @@ Signing in, reading the metadata, ending and revoking write only the Directory's
 `test/preview-automation.test.ts` runs in workerd against the real preview Worker and a deployment's Worker (`src/index.ts`), with a fresh evaluation Directory per test. The owner is set up by the claim and a passkey made in the real ceremony by the tests' software authenticator. It starts no service, browser or socket, reaches nothing outside the isolate, and moves time only with `Date.now`. It covers:
 
 - a good exchange: the cookie's attributes and lifetime, the metadata, `/auth/session`, reads, and the read-only boundary (writes, sockets, the refused reads, `/auth` management, the admin API, another origin). The credential and cookie are never logged, and the Directory holds only the cookie's digest;
+- the operator readiness gate's local model: requests served by snapshots holding part of the flag and grant, the readiness read for each, and the exchange's fixed `401`s (see above);
 - refusals with no cookie and no session recorded: another origin, evaluation, deployment, owner or credential; the credential anywhere but its header; a grant for an owner other than the claimed one; and automation off, with no flag, another flag value, no grant, another origin or runtime, a past or too-distant deadline, a malformed digest or an extra field, and in the local preview;
 - a deployment's entry point with every preview variable copied and a live session, which offers none of it, while the owner's passkey still works there;
 - ending one session; revoking the grant (at once, in the same isolate, and after the Directory restarts); changing or turning off the grant; a suspended owner; and expiry at 30 minutes;
@@ -194,4 +213,5 @@ Removing any one of the revocation recheck, the deadline cap or the refusal of o
 - Nothing here has run against the live evaluation, a real browser, a real runner, Cloudflare's runtime or its rate limits. Setting the variables in the live evaluation is a separate step that needs its own approval.
 - The list of refused reads is a list of known reads with side effects, not a proof that every other `GET` in the space has none.
 - On Cloudflare, removing or changing a variable takes effect when the new version serves. Revoking through the route takes effect on the next request.
+- Whether every Cloudflare location serves the deployed version before the exchange is neither observable with Wrangler nor tested here; the readiness gate fails closed rather than claim it.
 - The runner and the banner (docs/agent-preview.md) have run against this Worker only with fake Playwright objects, in workerd: no real browser, Playwright install, page render or network.

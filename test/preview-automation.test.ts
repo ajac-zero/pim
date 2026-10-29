@@ -372,6 +372,81 @@ describe("automation sign-in for the preview's evaluation", () => {
 		expect(JSON.stringify(logged)).not.toContain(pim.secret);
 	});
 
+	it("refuses the exchange with the same fixed 401s while a request sees only part of the flag and grant, and the readiness read can't prove what the next request will see", async () => {
+		// What docs/preview-automation.md's operator readiness gate models, locally: each request is served by one Worker version,
+		// whose environment is a snapshot. Separate secret writes make one version per write, so a request may see the flag
+		// without the grant, the grant without the flag, a grant for another credential, or both. No Cloudflare edge, version or
+		// propagation is involved here; only the Worker's answer to each snapshot is.
+		const pim = await evaluation({ grant: false });
+		await pim.grant();
+		const matching = String(settings.PREVIEW_AUTOMATION_GRANT);
+		await pim.grant({}, credential());
+		const otherCredential = String(settings.PREVIEW_AUTOMATION_GRANT);
+		await pim.grant({ deployment: "cua-eval@cloudflare" });
+		const otherRuntime = String(settings.PREVIEW_AUTOMATION_GRANT);
+		const snapshots: Record<string, { flag?: string; grant?: string }> = {
+			"neither": {},
+			"the grant only": { grant: matching },
+			"the flag only": { flag: "on" },
+			"the flag off and the grant": { flag: "off", grant: matching },
+			"the flag and another runtime's grant": { flag: "on", grant: otherRuntime },
+			"the flag and another credential's grant": { flag: "on", grant: otherCredential },
+			"both": { flag: "on", grant: matching },
+		};
+		const servedBy = (name: string) => {
+			const { flag, grant } = snapshots[name]!;
+			if (flag === undefined) delete settings.PREVIEW_AUTOMATION;
+			else settings.PREVIEW_AUTOMATION = flag;
+			if (grant === undefined) delete settings.PREVIEW_AUTOMATION_GRANT;
+			else settings.PREVIEW_AUTOMATION_GRANT = grant;
+		};
+		/** The readiness read: a signed-out `/auth/session`, with no cookie and no credential. */
+		const ready = async () => ((await (await pim.ask("/auth/session")).json()) as { agentPreview?: unknown }).agentPreview ?? null;
+		const off = [401, "Sign in to Pim"];
+		const invalid = [401, "That automation credential isn't valid for this preview."];
+
+		// Each partial snapshot: the readiness read shows nothing, and the exchange gets the fixed 401 with no cookie and no session.
+		for (const name of ["neither", "the grant only", "the flag only", "the flag off and the grant", "the flag and another runtime's grant"]) {
+			servedBy(name);
+			expect([name, await ready()]).toEqual([name, null]);
+			const answer = await pim.exchange();
+			expect([name, ...(await errorOf(answer)), answer.headers.getSetCookie()]).toEqual([name, ...off, []]);
+		}
+		// A well-formed grant for another credential reads as ready, so the readiness read can't tell it from the matching one;
+		// the exchange is refused with the other fixed 401.
+		servedBy("the flag and another credential's grant");
+		expect(await ready()).toEqual({ enabled: true, expiresAt: null });
+		const stale = await pim.exchange();
+		expect([...(await errorOf(stale)), stale.headers.getSetCookie()]).toEqual([...invalid, []]);
+		// The readiness read passes on one snapshot and the next request is served by another: still the fixed 401. A passing
+		// read is evidence about the request that made it, not about the next one.
+		for (const next of ["the flag only", "the grant only"]) {
+			servedBy("both");
+			expect(await ready()).toEqual({ enabled: true, expiresAt: null });
+			servedBy(next);
+			const answer = await pim.exchange();
+			expect([next, ...(await errorOf(answer)), answer.headers.getSetCookie()]).toEqual([next, ...off, []]);
+		}
+		// None of the refusals recorded a session, and none logged the credential.
+		expect(await pim.rows()).toEqual([]);
+		expect(JSON.stringify(logged)).not.toContain(pim.secret);
+
+		// Both, in the snapshot that serves the read and the exchange: one exchange signs in, and the session reads.
+		servedBy("both");
+		expect(await ready()).toEqual({ enabled: true, expiresAt: null });
+		const answer = await pim.exchange();
+		expect(answer.status).toBe(201);
+		const cookie = pim.cookieOf(answer)!;
+		expect((await pim.ask("/api/settings", { cookie })).status).toBe(200);
+		expect(await pim.rows()).toHaveLength(1);
+		// Served next by a partial snapshot, the same session is refused, and is signed in again once both are seen.
+		servedBy("the grant only");
+		expect((await pim.ask("/api/settings", { cookie })).status).toBe(401);
+		servedBy("both");
+		expect((await pim.ask("/api/settings", { cookie })).status).toBe(200);
+		expect(sent).toEqual([]);
+	});
+
 	it("isn't mounted by a deployment's entry point, even with every preview variable copied into it", async () => {
 		const pim = await evaluation();
 		const cookie = await pim.signIn();

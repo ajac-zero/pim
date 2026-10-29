@@ -199,10 +199,13 @@ function DropdownMenuSub({
 function DropdownMenuSubTrigger({
   className,
   inset,
+  chevron = true,
   children,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.SubTrigger> & {
   inset?: boolean
+  /** Whether it ends in an arrow; one whose submenu opens to the left has none. */
+  chevron?: boolean
 }) {
   return (
     <DropdownMenuPrimitive.SubTrigger
@@ -215,7 +218,7 @@ function DropdownMenuSubTrigger({
       {...props}
     >
       {children}
-      <ChevronRightIcon className="ml-auto size-4" />
+      {chevron && <ChevronRightIcon className="ml-auto size-4" />}
     </DropdownMenuPrimitive.SubTrigger>
   )
 }

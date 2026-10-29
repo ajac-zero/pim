@@ -8,7 +8,7 @@ import {
   useAgentModel,
 } from "~/components/chat/model-menu";
 import { useI18n } from "~/components/i18n";
-import { X } from "~/components/icons";
+import { Lock, X } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -205,35 +205,28 @@ function Person({
   const { t } = useI18n();
   const { settings, current, pinned, choose } = useAgentModel(person.id);
   return (
-    <div className="flex items-center">
+    <div className="flex items-center gap-2 px-1">
       <DropdownMenuSub>
+        {/* The model is the button: its list opens to the left, where there is room, so it has no arrow. */}
         <DropdownMenuSubTrigger
-          className="min-w-0 flex-1 gap-2"
+          chevron={false}
+          className="size-8 shrink-0 justify-center p-0"
           aria-label={t("chooseModel", { model: current?.name ?? "" })}
         >
-          {agent && (
-            <AgentIcon
-              agent={agent}
-              tile
-              className="size-5 shrink-0 rounded-md"
-            />
-          )}
-          <span className="min-w-0 flex-1 truncate">{person.name}</span>
-          {person.host && (
-            <span className="text-muted-foreground text-xs">
-              {t("roomHost")}
-            </span>
-          )}
           {settings && current && (
             <ModelMark
               settings={settings}
               model={current}
-              className="size-4 shrink-0 text-muted-foreground"
+              className="size-4 text-muted-foreground"
             />
           )}
         </DropdownMenuSubTrigger>
+        {/* Radix can't be told a side, so the right edge is made too crowded to open on: the list opens left of the menu and doesn't cover the rest of the row. */}
         {settings && current && (
-          <DropdownMenuSubContent className="w-72 max-w-[calc(100vw-2rem)]">
+          <DropdownMenuSubContent
+            collisionPadding={{ right: 1000 }}
+            className="w-72 max-w-[calc(100vw-2rem)]"
+          >
             <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
               {t("modelForAgent", { name: person.name })}
             </DropdownMenuLabel>
@@ -246,7 +239,21 @@ function Person({
           </DropdownMenuSubContent>
         )}
       </DropdownMenuSub>
-      {!person.host && (
+      {agent && (
+        <AgentIcon agent={agent} tile className="size-5 shrink-0 rounded-md" />
+      )}
+      <span className="min-w-0 flex-1 truncate text-sm">{person.name}</span>
+      {/* Both end in a box of the same size, so the models line up. */}
+      {person.host ? (
+        <span
+          className="mr-1 p-1 text-muted-foreground"
+          role="img"
+          aria-label={t("roomHost")}
+          title={t("roomHost")}
+        >
+          <Lock className="size-3.5" />
+        </span>
+      ) : (
         <button
           type="button"
           className="mr-1 rounded-full p-1 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"

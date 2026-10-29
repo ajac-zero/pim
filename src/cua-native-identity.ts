@@ -335,6 +335,17 @@ export class NativeIdentityBinder {
 		return this.#setStatus(scope, doc, record.id, "closed");
 	}
 
+	/**
+	 * The runs with a call whose end is unknown, each once, or why the
+	 * document can't be used. A call claimed by a process that ended is
+	 * unknown from this read on (`#load`); one this process is sending isn't.
+	 */
+	unknownRuns(scope: BinderScope): string[] | string {
+		const doc = this.#load(scope);
+		if (typeof doc === "string") return doc;
+		return [...new Set(doc.records.filter((record) => record.status === "unknown").map((record) => record.identity.runAnchor))];
+	}
+
 	/** The status of a binding, or null when it isn't remembered or the document can't be read. */
 	status(scope: BinderScope, bindingId: string): NativeBindingStatus | null {
 		const doc = this.#load(scope);

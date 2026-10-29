@@ -1495,9 +1495,10 @@ describe("a space whose operator chose its Cua VM", () => {
 				const harness = await instance.harness.pi();
 				const proto = await harness.commit((tx) => Object.getPrototypeOf(tx) as { task: (id: number) => Promise<unknown> }, BACKGROUND_CONTEXT);
 				const read = proto.task;
-				const sessions = Object.getPrototypeOf(instance.harness.session(stopped)) as { abort: (operationId?: string) => Promise<boolean> };
-				const abort = sessions.abort;
-				spies.push(vi.spyOn(sessions, "abort").mockImplementation(async function (this: unknown, operationId?: string) {
+				// Pim stops a chat where the desktop's tools are on through the companion that reports its marking commit; "stopped" is that commit.
+				const sessions = Object.getPrototypeOf(instance.harness.session(stopped)) as { abortWithEffect: (operationId?: string) => Promise<unknown> };
+				const abort = sessions.abortWithEffect;
+				spies.push(vi.spyOn(sessions, "abortWithEffect").mockImplementation(async function (this: unknown, operationId?: string) {
 					order.push("stop asked");
 					try {
 						return await abort.call(this, operationId);
@@ -1619,10 +1620,10 @@ describe("a space whose operator chose its Cua VM", () => {
 			await desk.within(async (instance) => {
 				const proto = await (await instance.harness.pi()).commit((tx) => Object.getPrototypeOf(tx) as { task: (id: number) => Promise<unknown> }, BACKGROUND_CONTEXT);
 				const read = proto.task;
-				const sessions = Object.getPrototypeOf(instance.harness.session(raced)) as { abort: (operationId?: string) => Promise<boolean> };
-				const abort = sessions.abort;
+				const sessions = Object.getPrototypeOf(instance.harness.session(raced)) as { abortWithEffect: (operationId?: string) => Promise<unknown> };
+				const abort = sessions.abortWithEffect;
 				spies.push(
-					vi.spyOn(sessions, "abort").mockImplementation(async function (this: unknown, operationId?: string) {
+					vi.spyOn(sessions, "abortWithEffect").mockImplementation(async function (this: unknown, operationId?: string) {
 						order.push("stop asked");
 						try {
 							return await abort.call(this, operationId);

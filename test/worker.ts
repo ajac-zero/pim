@@ -4,6 +4,7 @@ import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
 import { InMemorySpanExporter, type SpanExporter } from "@opentelemetry/sdk-trace";
 import type { PiModel } from "agents/harness/pi";
 import { Pim as RealPim } from "../src/pim";
+import type { NativeFenceTransport } from "../src/cua-native-fences";
 import type { Mail, Mailer } from "../src/email";
 import { deploymentSettings } from "../src/deployment";
 import { type ImageModel, workersAiImageModel } from "../src/extensions/image-generation";
@@ -233,6 +234,9 @@ export const google = definePimExtension({ id: "test.google", name: "Test Google
 /** The spaces, by owner, whose agents get the desktop's tools in tests (`nativeDesktop`); no deployment's or preview's do. */
 export const desktopSpaces = new Set<string>();
 
+/** A test's scripted stand-in for the broker's fence channel, by owner (`nativeFenceTransport`); no broker exists, and no deployment's or preview's space has one. */
+export const fenceTransports = new Map<string, NativeFenceTransport>();
+
 export class Pim extends RealPim {
 	/** The deployment's extensions, and the tests' own. */
 	protected override pimConfig(): PimConfig {
@@ -287,6 +291,11 @@ export class Pim extends RealPim {
 	 */
 	protected override nativeDesktop(): boolean {
 		return desktopSpaces.has(this.name) || super.nativeDesktop();
+	}
+
+	/** A test's scripted fence channel for this space, if it gave one. */
+	protected override nativeFenceTransport(): NativeFenceTransport | null {
+		return fenceTransports.get(this.name) ?? super.nativeFenceTransport();
 	}
 
 	/** The deployment's default image model, on the stand-in for Workers AI. */

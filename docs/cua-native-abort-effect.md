@@ -1,6 +1,6 @@
 # A Stop that reports its effect
 
-**Status: implemented in Pim's local patches, for review.** Nothing in Pim calls the companions: there is no route integration and no production change, and native calls stay off. See "Implementation and evidence" at the end. The interface below is the one accepted at c4fefa5. The fence draft stays frozen at d1ee74d. This answers blocker 2 in `docs/cua-native-fence-prerequisites.md` (6e6e939): an operation's Stop can't be classified exactly today. The fix proposed is not to classify better beforehand, but to have the commits that actually mark and withdraw report what they did.
+**Status: implemented in Pim's local patches, for review.** Pim calls `PiSession.abortWithEffect` only where the desktop's tools are on, which is nowhere but tests (`docs/cua-native-fence-obligations.md`); everywhere else its Stops call `abort()` as before, and native calls stay off. See "Implementation and evidence" at the end. The interface below is the one accepted at c4fefa5. The fence draft stays frozen at d1ee74d. This answers blocker 2 in `docs/cua-native-fence-prerequisites.md` (6e6e939): an operation's Stop can't be classified exactly today. The fix proposed is not to classify better beforehand, but to have the commits that actually mark and withdraw report what they did.
 
 Pinned sources: `@earendil-works/pi-durable` 1.1.0 with Pim's patch (paths under `dist/harness/`), and `agents` (`dist/harness/pi/index.js`).
 

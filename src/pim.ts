@@ -157,9 +157,10 @@ import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import type { ControlEvent } from "./computer-control";
 import { ControlCoordinator, ControlRefused, currentTrace } from "./computer-control-runtime";
-import { harnessAuthority, harnessScope, type NativeBinding, NativeIdentityBinder, type Transact } from "./cua-native-identity";
+import { NativeFences, type NativeFenceTransport } from "./cua-native-fences";
+import { type DispatchResult, harnessAuthority, harnessScope, type NativeBinding, NativeIdentityBinder, type Transact } from "./cua-native-identity";
 import { DESKTOP_ACTIONS, DESKTOP_EXTENSION, describeOutcome, desktopActions, desktopExtension } from "./extensions/desktop";
-import type { NativeOutcome } from "../computer/native-outcome";
+import { dispatchEffect, type NativeOutcome } from "../computer/native-outcome";
 import { asPersonRead, COMPUTER_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerLink, type ComputerStatus, type NativeGate } from "./computer";
 import { bridgeFor, Cua, type CuaBridge, PROVIDER_KEY, selection } from "./cua";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
@@ -552,6 +553,38 @@ export class Pim extends DurableAgent<Env> {
 		return false;
 	}
 
+	/**
+	 * How the space asks the broker that sends its native-app calls to fence a
+	 * run: none, anywhere, since there is no broker yet
+	 * (docs/cua-native-fence-obligations.md). Only tests give a scripted one.
+	 * Without one, every fence the space requires stays unconfirmed.
+	 */
+	protected nativeFenceTransport(): NativeFenceTransport | null {
+		return null;
+	}
+
+	/** The fences of runs whose native-app calls were admitted (./cua-native-fences.ts). Its table is made only where the desktop's tools are on. */
+	readonly nativeFences = new NativeFences({ sql: this.ctx.storage.sql, sync: () => this.ctx.storage.sync(), transport: () => this.nativeFenceTransport() });
+
+	/**
+	 * Stops a chat's work as `PiSession.abort(operationId)` does, with its
+	 * answer and its wait for the chat to settle. Where the desktop's tools
+	 * may be on, it stops through the companion that reports what its commit
+	 * marked (`abortWithEffect`, docs/cua-native-abort-effect.md), and
+	 * requires the fence of each run it marked that had native-app calls
+	 * admitted, durably, before it waits for the chat to settle. A Stop whose
+	 * marking commit fails throws as `abort` does, having required nothing.
+	 */
+	async #stop(session: string, operationId?: string): Promise<boolean> {
+		const pi = this.harness.session(session);
+		if (!this.nativeDesktop()) return pi.abort(operationId);
+		const { effect, idle } = await pi.abortWithEffect(operationId);
+		const runs = (effect.conversation?.marked ?? []).flatMap((marked) => (marked.runId === null ? [] : [String(marked.runId)]));
+		if (runs.length > 0) await this.nativeFences.require(runs, "stop");
+		await idle;
+		return effect.aborted;
+	}
+
 	#desktopBinder: NativeIdentityBinder | undefined;
 	/**
 	 * The space's native-call binder, while its desktop's tools are on and its
@@ -613,6 +646,13 @@ export class Pim extends DurableAgent<Env> {
 			throw new ControlRefused("identity", "the call's chat or agent isn't the one it was bound for");
 		}
 		if (this.store.deletedSessions().has(session)) throw new ControlRefused("stopped", "the call's chat was deleted");
+		// Its run's fence record is stored before the control state admits the call and before its send is authorized, so nothing is sent without one;
+		// and nothing is admitted in a process that hasn't rebuilt the fences the durable binder records require.
+		const desktop = this.#desktop();
+		const unfenced = desktop
+			? ((await this.nativeFences.reconcile(() => this.#transact((scope) => desktop.unknownRuns(scope)))) ?? (await this.nativeFences.admit(runAnchor)))
+			: "the desktop's tools are off";
+		if (unfenced) throw new ControlRefused("fence", unfenced);
 		const gate: NativeGate = async (transmit) =>
 			(await this.harness.pi()).commit(async (tx) => {
 				const answer = await this.#authority(tx).verify({ conversationId, toolTaskId, callId });
@@ -637,12 +677,27 @@ export class Pim extends DurableAgent<Env> {
 		);
 	}
 
+	/**
+	 * Dispatches a bound call once (`NativeIdentityBinder.dispatch`). A call
+	 * sent that may have run without an answer saying so has its run's fence
+	 * required at once, as the restart that finds it unknown would.
+	 */
+	async #desktopDispatch(desktop: NativeIdentityBinder, bindingId: string, send: (binding: NativeBinding) => Promise<NativeOutcome>): Promise<DispatchResult> {
+		let run: string | undefined;
+		const sent = await desktop.dispatch(this.#transact, bindingId, (binding) => {
+			run = binding.identity.runAnchor;
+			return send(binding);
+		});
+		if (run !== undefined && (sent.ok ? dispatchEffect(sent.outcome).uncertain : sent.reason === "uncertain")) await this.nativeFences.require([run], "unknown");
+		return sent;
+	}
+
 	/** Runs an approved desktop action: its binding, once, as the approval's request, under the lease it was filed under. */
 	async #desktopDecide(bindingId: string, request: { readonly session: string; readonly approval?: string }): Promise<string> {
 		const desktop = this.#desktop();
 		if (!desktop || !request.approval) return "The desktop's apps aren't available to agents in this space now, so nothing was sent.";
 		const approval = request.approval;
-		const sent = await desktop.dispatch(this.#transact, bindingId, (binding) => this.#desktopSend(binding, request.session, `approval:${approval}`, approval));
+		const sent = await this.#desktopDispatch(desktop, bindingId, (binding) => this.#desktopSend(binding, request.session, `approval:${approval}`, approval));
 		if (!sent.ok) return sent.message;
 		const said = describeOutcome(sent.outcome);
 		return said.images.length > 0 ? `${said.text}\n(${said.images.length} image(s) left out.)` : said.text;
@@ -664,7 +719,7 @@ export class Pim extends DurableAgent<Env> {
 						message: "The binding couldn't be stored, so no native-app call was bound or sent.",
 					})),
 				read: (binding) =>
-					desktop.dispatch(this.#transact, binding.id, (bound) =>
+					this.#desktopDispatch(desktop, binding.id, (bound) =>
 						this.#desktopSend(bound, bound.identity.conversationId, `call:${bound.identity.conversationId}:${bound.identity.callId}`),
 					),
 			}),
@@ -3311,7 +3366,7 @@ export class Pim extends DurableAgent<Env> {
 			if (approval.session !== seat.conversation || !this.store.decideApproval(approval.id, "denied", reason, "user")) continue;
 			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(this.store.approval(approval.id)!) });
 		}
-		await this.harness.session(seat.conversation).abort();
+		await this.#stop(seat.conversation);
 		for (const task of this.#tasks.byRequester(seat.conversation)) await this.#cancelTask(task, reason);
 		const name = this.agents.get(seat.agent)?.name ?? "An agent";
 		for (const other of this.#rooms.seats(seat.room)) await this.#write(other.conversation, `${ROOM_NOTICE} ${name} left the chat.`, `left:${seat.conversation}:${other.agent}`);
@@ -3351,7 +3406,7 @@ export class Pim extends DurableAgent<Env> {
 			if (approval.session !== task.conversation || !this.store.decideApproval(approval.id, "denied", reason, "user")) continue;
 			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(this.store.approval(approval.id)!) });
 		}
-		await this.harness.session(task.conversation).abort();
+		await this.#stop(task.conversation);
 		this.#tasksChanged(task.root);
 		await this.#deliver(task.batch);
 	}
@@ -4044,7 +4099,7 @@ export class Pim extends DurableAgent<Env> {
 		if (status === "active") this.store.deleteMeta(STATUS_KEY);
 		else this.store.setMeta(STATUS_KEY, status);
 		if (status === "suspended") {
-			for (const session of await this.harness.sessions.list()) await this.harness.session(session.id).abort();
+			for (const session of await this.harness.sessions.list()) await this.#stop(session.id);
 			for (const connection of this.getConnections()) connection.close(4003, "Suspended");
 		}
 	}
@@ -4619,10 +4674,10 @@ export class Pim extends DurableAgent<Env> {
 				if (visit) this.visits.setSession(visit.ownerId, null);
 				// Nothing keeps working in a chat the user can no longer see, nor in the tasks it handed out, nor do the other agents in it.
 				for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) {
-					await this.harness.session(seat.conversation).abort();
+					await this.#stop(seat.conversation);
 					for (const task of this.#tasks.byRequester(seat.conversation)) await this.#cancelTask(task, "Its chat was deleted.");
 				}
-				await this.harness.session(id).abort();
+				await this.#stop(id);
 				for (const task of this.#tasks.byRequester(id)) await this.#cancelTask(task, "Its chat was deleted.");
 				const services = this.services();
 				// A task that starts new chats goes on without the chat that scheduled it.
@@ -4724,9 +4779,9 @@ export class Pim extends DurableAgent<Env> {
 				// Stopping a group chat stops every agent at work in it.
 				let others = false;
 				if (operationId === undefined) {
-					for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) others = (await this.harness.session(seat.conversation).abort()) || others;
+					for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) others = (await this.#stop(seat.conversation)) || others;
 				}
-				return { aborted: (await this.harness.session(id).abort(operationId)) || others };
+				return { aborted: (await this.#stop(id, operationId)) || others };
 			},
 		],
 		[
@@ -6475,7 +6530,7 @@ export class Pim extends DurableAgent<Env> {
 				return { ...receipt, session: this.store.publicId(session) };
 			}
 			case "abort":
-				return await handle.abort(message.operationId);
+				return await this.#stop(session, message.operationId);
 			case "reset":
 				await handle.reset(message.handoff);
 				return null;

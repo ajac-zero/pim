@@ -15,6 +15,7 @@ import { testBindings } from "./vitest.bindings";
 export const NATIVE_PREREQUISITE_FILES = [
 	"test/native-prerequisites.test.ts",
 	"test/abort-effect.test.ts",
+	"test/native-fences.test.ts",
 	"test/pi-durable-run-identity.test.ts",
 	"test/cua-native-authority.test.ts",
 	"test/approvals.test.ts",

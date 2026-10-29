@@ -7,6 +7,7 @@ import { evaluatorAdmission, LaunchEvaluatorLedger } from "../preview/launch-eva
 import previewWorker from "../preview/worker";
 import { applyObservationEvent, initialObservationState, type ObservationState } from "../src/cua-observation";
 import { OBSERVATION_KEY } from "../src/cua-observation-runtime";
+import { MANAGE_MS } from "../src/cua-viewer";
 import productionWorker from "../src/index";
 import { Authenticator } from "./webauthn";
 import { PreviewPim } from "./worker";
@@ -1370,6 +1371,45 @@ describe("the launch evaluator", () => {
 			expect(await pim.oldRecord()).toBe(pim.before);
 		}
 	});
+
+	it("carries the space's own uncertainty across the real RPC: a flush that failed before the host, or a launch it couldn't record after, is space_launch_uncertain with no ID, and leaves a second record", async () => {
+		// The space's storage, failing at one point: its flush of the fresh intent, or its write of the host's acknowledged launch.
+		for (const [fault, hostAsked] of [
+			["flush", 0],
+			["record", 1],
+		] as const) {
+			logged.length = 0;
+			const pim = await evaluator({ old: "unconfirmed", existingUnconfirmed: OLD });
+			await runInDurableObject(pim.space, (instance: PreviewPim, state) => {
+				if (fault === "flush") vi.spyOn(state.storage, "sync").mockRejectedValue(new Error("flush failed"));
+				const setMeta = instance.store.setMeta.bind(instance.store);
+				vi.spyOn(instance.store, "setMeta").mockImplementation((key, value) => {
+					if (fault === "record" && key === OBSERVATION_KEY && value.includes('"status":"open"')) throw new Error("write failed");
+					setMeta(key, value);
+				});
+			});
+			const answer = await pim.launch();
+			expect([fault, answer.status, await answer.json()]).toEqual([fault, 502, { error: UNCERTAIN, run: { phase: "launch_uncertain", classification: "space_launch_uncertain" } }]);
+			expect(pim.lines()).toEqual([{ event: "preview.launch-evaluator", action: "launch", outcome: "launch_uncertain", classification: "space_launch_uncertain" }]);
+			// The space's answer named no record, so the run names none, though the space stored one: before the host was asked, or after it launched.
+			expect(await pim.runs()).toEqual([expect.objectContaining({ phase: "launch_uncertain", observation_id: null, alongside_id: null })]);
+			expect([fault, pim.asked.map(({ action }) => action)]).toEqual([fault, Array(hostAsked).fill("launch")]);
+			await evictDurableObject(pim.space).catch(() => undefined);
+			const [original, second, ...more] = await pim.records();
+			expect([fault, original?.observationId, second?.status, second?.hostLaunchId, more]).toEqual([fault, OLD, "pending_open", null, []]);
+			expect(await pim.oldRecord()).toBe(pim.before);
+			// Restarted, the space holds the second record unconfirmed beside the original, and nothing starts a third or is asked.
+			const listing = (await (await pim.ask("/api/observations", { cookie: pim.passkey })).json()) as { observations: { id: string; status: string; evidence: string | null }[] };
+			expect(listing.observations).toEqual([
+				expect.objectContaining({ id: second!.observationId, status: "unconfirmed", evidence: "restored while pending_open: the host may hold a launch for it" }),
+				expect.objectContaining({ id: OLD, status: "unconfirmed" }),
+			]);
+			expect((await pim.ask("/api/observations", { cookie: pim.passkey, method: "POST" })).status).toBe(409);
+			expect((await pim.launch()).status).toBe(409);
+			expect(pim.asked).toHaveLength(hostAsked);
+			expect(sent).toEqual([]);
+		}
+	});
 });
 
 /**
@@ -1685,5 +1725,263 @@ describe("the automation session's observation summary", () => {
 			[ID.pending, "unconfirmed", recovered("pending_open")],
 			[ID.revoking, "unconfirmed", recovered("revoking")],
 		]);
+	});
+});
+
+/**
+ * The owner's own Watch, `POST /api/observations` from their passkey session,
+ * through the evaluation's real Worker: the gateway's session check and
+ * observation mount, the owner's Durable Object and its desk, the space's own
+ * storage and `storage.sync()`, and the real viewer client with its
+ * production bounds, against a bridge host written in `fetch`. It is the
+ * route the launch evaluator doesn't take: no Directory run and no RPC.
+ * Every host here is a local stand-in, so nothing here says why a live
+ * launch went as it did.
+ */
+describe("the owner's Watch through the evaluation's Worker", () => {
+	const BRIDGE = "https://bridge.owner-watch.test";
+	const BRIDGE_TOKEN = "owner-watch-bridge-token-0123456789abcd";
+	const LAUNCH_ID = "OwnerWatchLaunch000001";
+	const TICKET = "owner-watch-ticket-".padEnd(43, "w");
+	const VIEWER = `${BRIDGE}/${LAUNCH_ID}/viewer/#ticket=${TICKET}&clipboard=0`;
+	const LOST = "The computer's answer was lost; the observation may be open.";
+	const NOT_SETTLED = "Another observation is open or not settled yet. Stop it, or check it again.";
+	const BLOCKED = "Watching isn't available: a change to the ledger couldn't be stored.";
+	const RESTORED = "restored while pending_open: the host may hold a launch for it";
+
+	type Launch = { key: string; owner: string; notAfter: number };
+	type View = { id: string; status: string; notAfter: number; evidence: string | null };
+	const launched = (body: Launch, changes: Record<string, unknown> = {}) =>
+		Response.json({ outcome: "launched", key: body.key, launchId: LAUNCH_ID, generation: "gen-1", notAfter: body.notAfter, viewerPath: `/${LAUNCH_ID}/viewer/#ticket=${TICKET}&clipboard=0`, replayed: false, ...changes });
+
+	/**
+	 * An evaluation whose owner's space the fixture seeded, with an empty
+	 * ledger, and a bridge host whose launch answers as `host.launch` says.
+	 * `steps` records, in order, each write of the ledger (by its newest
+	 * record's status), each flush, and each request the host received, once
+	 * `instrument` has put the space's storage under watch, with a fault if given.
+	 */
+	async function watcher() {
+		const pim = await evaluation({ grant: false });
+		settings.PREVIEW_CUA_FIXTURE = "seed";
+		settings.PREVIEW_CUA_FIXTURE_OWNER = pim.owner;
+		settings.CUA_BRIDGES = JSON.stringify({ [pim.owner]: { url: `${BRIDGE}/${pim.owner}`, token: BRIDGE_TOKEN } });
+		const space = previews.getByName(pim.owner);
+		await evictDurableObject(space).catch(() => undefined);
+		const steps: string[] = [];
+		const host: { launch: (body: Launch) => Response | Promise<Response> } = { launch: (body) => launched(body) };
+		const asked: { action: string; body: Launch; authorization: string | null; space: string | null }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			const prefix = `${BRIDGE}/${pim.owner}/observations/`;
+			if (!request.url.startsWith(prefix)) {
+				sent.push(request.url);
+				throw new Error("This test reaches only its bridge's management");
+			}
+			const action = request.url.slice(prefix.length);
+			const body = JSON.parse(await request.text()) as Launch;
+			asked.push({ action, body, authorization: request.headers.get("authorization"), space: request.headers.get("x-pim-space") });
+			steps.push(`host ${action}`);
+			if (action !== "launch") throw new Error(`The test's bridge was asked for ${action}`);
+			return await host.launch(body);
+		});
+		/** The spies `instrument` put on one instance's storage, taken off when it restarts. */
+		const instrumented: { mockRestore(): void }[] = [];
+		const instrument = (fault: { write?: string; flush?: () => Promise<void> } = {}) =>
+			runInDurableObject(space, (instance: PreviewPim, state) => {
+				const sync = state.storage.sync.bind(state.storage);
+				const flushes = vi.spyOn(state.storage, "sync").mockImplementation(async () => {
+					try {
+						await (fault.flush ?? sync)();
+					} catch (error) {
+						steps.push("flush failed");
+						throw error;
+					}
+					steps.push("flushed");
+				});
+				const setMeta = instance.store.setMeta.bind(instance.store);
+				const writes = vi.spyOn(instance.store, "setMeta").mockImplementation((key, value) => {
+					if (key !== OBSERVATION_KEY) return setMeta(key, value);
+					const status = (JSON.parse(value) as ObservationState).records.at(-1)?.status;
+					if (status === fault.write) {
+						steps.push(`write ${status} failed`);
+						throw new Error("write failed");
+					}
+					setMeta(key, value);
+					steps.push(`write ${status}`);
+				});
+				instrumented.push(flushes, writes);
+			});
+		const ledger = async () => (JSON.parse((await runInDurableObject(space, (instance: PreviewPim) => instance.store.meta(OBSERVATION_KEY)))!) as ObservationState).records;
+		/** The space ended and started again, its ledger as stored; with `empty`, the ledger emptied first, as a fresh fixture leaves it. */
+		const restart = async (empty = false) => {
+			for (const spy of instrumented.splice(0)) spy.mockRestore();
+			if (empty) await runInDurableObject(space, (instance: PreviewPim) => instance.store.setMeta(OBSERVATION_KEY, JSON.stringify(initialObservationState(pim.owner))));
+			await evictDurableObject(space).catch(() => undefined);
+			steps.length = 0;
+			asked.length = 0;
+		};
+		const watch = () => pim.ask("/api/observations", { cookie: pim.passkey, method: "POST" });
+		const listing = async () => (await (await pim.ask("/api/observations", { cookie: pim.passkey })).json()) as { blocked: string | null; observations: View[] };
+		const read = async (answer: Response) => [answer.status, await answer.json()] as const;
+		return { ...pim, space, steps, host, asked, instrument, ledger, restart, watch, listing, read };
+	}
+
+	it("stores the intent and makes it durable before asking the host once, then answers the host's viewer through the Worker", async () => {
+		const w = await watcher();
+		await w.instrument();
+		const answer = await w.watch();
+		expect(answer.status).toBe(200);
+		expect([answer.headers.get("cache-control"), answer.headers.get("referrer-policy")]).toEqual(["no-store", "no-referrer"]);
+		const body = (await answer.json()) as { observation: View; viewer: string };
+		const { id, notAfter } = body.observation;
+		expect(body).toEqual({ observation: { id, status: "open", notAfter, evidence: null }, viewer: VIEWER });
+		expect(w.steps).toEqual(["write pending_open", "flushed", "host launch", "write open"]);
+		expect(w.asked).toEqual([{ action: "launch", body: { key: id, owner: w.owner, notAfter }, authorization: `Bearer ${BRIDGE_TOKEN}`, space: w.owner }]);
+		expect(await w.ledger()).toEqual([expect.objectContaining({ observationId: id, status: "open", hostLaunchId: LAUNCH_ID, hostGeneration: "gen-1" })]);
+		// The launch's credential is in this answer only: not stored or logged, and the bridge's token is in neither either.
+		for (const kept of [JSON.stringify(await w.ledger()), JSON.stringify(logged)]) for (const secret of [TICKET, BRIDGE_TOKEN]) expect(kept).not.toContain(secret);
+		expect(sent).toEqual([]);
+	});
+
+	it("asks the host nothing when the intent can't be stored or made durable; a failed flush leaves a record a restart holds unconfirmed", async () => {
+		// The intent's write fails: nothing is stored or asked, and this instance stays blocked until the space restarts.
+		const w = await watcher();
+		await w.instrument({ write: "pending_open" });
+		expect(await errorOf(await w.watch())).toEqual([503, "The observation couldn't be recorded (storage), so nothing was asked of the computer."]);
+		expect(await errorOf(await w.watch())).toEqual([503, BLOCKED]);
+		expect(w.steps).toEqual(["write pending_open failed"]);
+		expect([w.asked, await w.ledger()]).toEqual([[], []]);
+		await w.restart();
+		expect((await w.read(await w.watch()))[0]).toBe(200);
+		expect(w.asked).toHaveLength(1);
+
+		// The flush fails after the intent was written: nothing is asked. Whether a real failed flush kept the write, nothing here can
+		// say; kept, a restart restores it as unconfirmed, like a lost answer, and nothing new starts past it.
+		await w.restart(true);
+		await w.instrument({ flush: () => Promise.reject(new Error("flush failed")) });
+		expect(await errorOf(await w.watch())).toEqual([503, "The observation couldn't be made durable, so nothing was asked of the computer."]);
+		expect(w.steps).toEqual(["write pending_open", "flush failed"]);
+		expect(w.asked).toEqual([]);
+		const [intent] = await w.ledger();
+		expect(intent).toMatchObject({ status: "pending_open", hostLaunchId: null });
+		await w.restart();
+		expect((await w.listing()).observations).toEqual([{ id: intent!.observationId, status: "unconfirmed", notAfter: intent!.notAfter, evidence: RESTORED }]);
+		expect(await errorOf(await w.watch())).toEqual([409, NOT_SETTLED]);
+		expect(w.asked).toEqual([]);
+		expect(sent).toEqual([]);
+	});
+
+	it("holds a lost, unavailable, redirected, unreadable or unconfirmed launch answer unconfirmed, answers 502 through the Worker, and never asks again", async () => {
+		const w = await watcher();
+		const cases: [string, (body: Launch) => Response, string, string][] = [
+			["unreachable", () => {
+				throw new TypeError("connection refused");
+			}, LOST, "the host's answer to launch was lost (unreachable)"],
+			["a proxy's 502", () => new Response("<html>Bad gateway</html>", { status: 502, headers: { "content-type": "text/html" } }), LOST, "the host's answer to launch was lost (status)"],
+			["a proxy's 520", () => new Response(null, { status: 520 }), LOST, "the host's answer to launch was lost (status)"],
+			["503", () => new Response(null, { status: 503, headers: { "retry-after": "5" } }), LOST, "the host's answer to launch was lost (unavailable)"],
+			["a redirect", () => new Response(null, { status: 302, headers: { location: "https://elsewhere.test/" } }), LOST, "the host's answer to launch was lost (redirect)"],
+			["HTML", (body) => new Response(JSON.stringify({ outcome: "launched", key: body.key }), { headers: { "content-type": "text/html" } }), LOST, "the host's answer to launch was lost (malformed)"],
+			["cut-off JSON", () => new Response('{"outcome":"launched"', { headers: { "content-type": "application/json" } }), LOST, "the host's answer to launch was lost (malformed)"],
+			["an extra field", (body) => launched(body, { extra: true }), LOST, "the host's answer to launch was lost (malformed)"],
+			["another host version's viewer path", (body) => launched(body, { viewerPath: `/${LAUNCH_ID}/viewer/#ticket=${TICKET}` }), LOST, "the host's answer to launch was lost (malformed)"],
+			["another key", (body) => launched(body, { key: `${body.key}x` }), "The computer answered for another observation.", "the host answered for another key"],
+			["unconfirmed", (body) => Response.json({ outcome: "unconfirmed", key: body.key, reason: "timeout" }), "The computer can't say whether watching started.", "the host answered unconfirmed (timeout)"],
+		];
+		for (const [shape, answer, error, evidence] of cases) {
+			await w.restart(true);
+			w.host.launch = answer;
+			const [status, body] = await w.read(await w.watch());
+			const { id, notAfter } = (body as { observation: View }).observation;
+			expect([shape, status, body]).toEqual([shape, 502, { error, observation: { id, status: "unconfirmed", notAfter, evidence } }]);
+			expect([shape, w.asked.length]).toEqual([shape, 1]);
+			// The outcome stays unknown: no fresh Watch, no replay of the key, no status read or End without a launch to name.
+			expect(await w.read(await w.watch())).toEqual([409, { error: NOT_SETTLED, observation: { id, status: "unconfirmed", notAfter, evidence } }]);
+			expect(await w.read(await w.ask(`/api/observations/${id}`, { cookie: w.passkey }))).toEqual([200, { observation: { id, status: "unconfirmed", notAfter, evidence } }]);
+			expect(await errorOf(await w.ask(`/api/observations/${id}/end`, { cookie: w.passkey, method: "POST" }))).toEqual([409, "The computer never named a launch for this observation, so there is nothing to ask it to end."]);
+			await w.restart();
+			expect(await errorOf(await w.watch())).toEqual([409, NOT_SETTLED]);
+			expect([shape, w.asked]).toEqual([shape, []]);
+		}
+		expect(sent).toEqual([]);
+	});
+
+	it("keeps the host's launch it couldn't record as open out of every answer, blocks, and holds the record unconfirmed after a restart", async () => {
+		const w = await watcher();
+		await w.instrument({ write: "open" });
+		const answer = await w.watch();
+		const text = await answer.text();
+		const { id, notAfter } = (JSON.parse(text) as { observation: View }).observation;
+		expect([answer.status, JSON.parse(text)]).toEqual([503, { error: "The observation couldn't be recorded as open.", observation: { id, status: "pending_open", notAfter, evidence: null } }]);
+		expect(text).not.toContain(TICKET);
+		expect(w.steps).toEqual(["write pending_open", "flushed", "host launch", "write open failed"]);
+		expect(await w.listing()).toMatchObject({ blocked: "a change to the ledger couldn't be stored", observations: [{ id, status: "pending_open" }] });
+		expect(await errorOf(await w.watch())).toEqual([503, BLOCKED]);
+		// The host holds a launch the ledger never named: after a restart the record is unconfirmed, with nothing to end, and nothing starts past it.
+		await w.restart();
+		expect((await w.listing()).observations).toEqual([{ id, status: "unconfirmed", notAfter, evidence: RESTORED }]);
+		expect(await errorOf(await w.watch())).toEqual([409, NOT_SETTLED]);
+		expect(w.asked).toEqual([]);
+		expect(JSON.stringify([await w.ledger(), logged])).not.toContain(TICKET);
+	});
+
+	it("gives up on the host after the client's own bound, never asks again, and lets a late answer go; a deadline before the host asks nothing, and one during it hands out no viewer", async () => {
+		const w = await watcher();
+		// The client's production bound, MANAGE_MS, shortened for this test only where it is set.
+		const timeout = globalThis.setTimeout;
+		const bounds: number[] = [];
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) => {
+			if (ms === MANAGE_MS) bounds.push(ms);
+			return Reflect.apply(timeout, globalThis, [handler, ms === MANAGE_MS ? 50 : ms, ...rest]);
+		}) as typeof setTimeout);
+		let answerLate!: () => void;
+		const late = new Promise<void>((resolve) => (answerLate = resolve));
+		w.host.launch = async (body) => {
+			await late;
+			return launched(body);
+		};
+		const [status, body] = await w.read(await w.watch());
+		const { id, notAfter } = (body as { observation: View }).observation;
+		expect([status, body]).toEqual([502, { error: LOST, observation: { id, status: "unconfirmed", notAfter, evidence: "the host's answer to launch was lost (timeout)" } }]);
+		expect(bounds).toEqual([MANAGE_MS]);
+		answerLate();
+		await new Promise((resolve) => timeout(resolve, 50));
+		expect(await w.ledger()).toEqual([expect.objectContaining({ observationId: id, status: "unconfirmed", hostLaunchId: null })]);
+		expect(await errorOf(await w.watch())).toEqual([409, NOT_SETTLED]);
+		expect(w.asked).toHaveLength(1);
+
+		// The observation's deadline comes while its intent is made durable: the host is never asked, so the record says nothing opened, and the next Watch starts.
+		await w.restart(true);
+		w.host.launch = (launch) => launched(launch);
+		// The desk reads the clock it was made with, so the test's clock is in place before the space makes it.
+		const start = Date.now();
+		at(start);
+		await w.instrument({ flush: async () => void at(start + 10 * MINUTE + 1) });
+		const [expired, refused] = await w.read(await w.watch());
+		expect([expired, refused]).toEqual([
+			409,
+			{
+				error: "The observation's time ran out before the computer was asked, so nothing was asked of it.",
+				observation: expect.objectContaining({ status: "not_opened", evidence: "its deadline came while it was being recorded; the host was never asked" }),
+			},
+		]);
+		expect(w.asked).toEqual([]);
+		expect((await w.read(await w.watch()))[0]).toBe(200);
+		expect(w.asked).toHaveLength(1);
+
+		// The deadline comes while the host answers: its launch is recorded, so it can be ended, but no one gets its viewer.
+		await w.restart(true);
+		w.host.launch = (launch) => {
+			at(launch.notAfter);
+			return launched(launch);
+		};
+		const answered = await w.watch();
+		const text = await answered.text();
+		expect([answered.status, JSON.parse(text).error]).toEqual([409, "The observation's time ran out, or it changed, while the computer answered. Check it again."]);
+		expect(text).not.toContain(TICKET);
+		expect(await w.ledger()).toEqual([expect.objectContaining({ status: "open", hostLaunchId: LAUNCH_ID, hostGeneration: "gen-1" })]);
+		expect(w.asked).toHaveLength(1);
+		expect(sent).toEqual([]);
 	});
 });

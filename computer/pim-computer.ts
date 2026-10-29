@@ -15,7 +15,13 @@
  * (./pim-host.ts), its desktop is streamed to the person through this
  * connection too (`spacesdScreen`).
  *
- * Runs on Node.js 22.18 or later, with nothing to install:
+ * Runs on Node.js 22.18 or later. The Pim's install script, which Settings
+ * shows with the token, gets Node.js where it's missing and runs `install`,
+ * which keeps this running as the user's own service (`Service`):
+ *
+ *   curl -fsSL https://pim.example.com/install.sh | sh -s -- computer pimc_…
+ *
+ * Or run it in the foreground:
  *
  *   PIM_URL=https://pim.example.com PIM_COMPUTER_TOKEN=pimc_… node pim-computer.ts
  *
@@ -872,7 +878,323 @@ export function spacesdScreen(base: string, tokenFile: string): ScreenHost {
 	};
 }
 
+/**
+ * A program of Pim's kept running as the user's own service, which starts it
+ * at login (or boot, where systemd lets the user linger) and again whenever
+ * it stops: a systemd user service, a launchd agent on macOS, or else a loop
+ * in the background, which nothing starts again after the machine restarts.
+ * The service runs `run`, a script in the program's folder that gets the
+ * Pim's newest copy of the program and starts it. pim-host.ts, which the
+ * Pim serves beside this, keeps itself running with these too.
+ */
+export type Service = {
+	readonly name: string;
+	readonly description: string;
+	/** Its folder, where `run`, `log` (where systemd doesn't keep it) and `loop.pid` are. */
+	readonly dir: string;
+	/** Started with the desktop's session, as on the computers a Pim's host keeps, rather than at login or boot. */
+	readonly desktop?: boolean;
+};
+
+type ServiceKind = "systemd" | "launchd" | "loop";
+
+/** Runs a command, quietly; how it exited, and what it said. */
+export async function quietly(command: string, args: string[]): Promise<{ code: number; output: string }> {
+	const { spawn } = await import("node:child_process");
+	return new Promise((resolve) => {
+		const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+		let output = "";
+		child.stdout.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+		child.stderr.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+		child.on("error", (error) => resolve({ code: -1, output: error.message }));
+		child.on("close", (code) => resolve({ code: code ?? -1, output }));
+	});
+}
+
+/** Writes `content` to `file` unless it's there already; whether it changed. */
+export async function writeChanged(file: string, content: string, mode = 0o644): Promise<boolean> {
+	const before = await fs.readFile(file, "utf8").catch(() => null);
+	if (before === content) return false;
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	await fs.writeFile(file, content, { mode });
+	await fs.chmod(file, mode);
+	return true;
+}
+
+export const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+
+async function serviceKind(): Promise<ServiceKind> {
+	if (process.platform === "darwin") return "launchd";
+	if (process.platform === "linux" && (await quietly("systemctl", ["--user", "show-environment"])).code === 0) return "systemd";
+	return "loop";
+}
+
+const unitFile = (service: Service, home: string) => path.join(home, ".config", "systemd", "user", `${service.name}.service`);
+const plistFile = (service: Service, home: string) => path.join(home, "Library", "LaunchAgents", `dev.pim.${service.name}.plist`);
+const launchdTarget = (service: Service) => `gui/${process.getuid?.()}/dev.pim.${service.name}`;
+
+/** Whether the background loop runs, by its process group. */
+async function loopRunning(service: Service): Promise<number | null> {
+	const pid = Number(await fs.readFile(path.join(service.dir, "loop.pid"), "utf8").catch(() => ""));
+	if (!pid) return null;
+	try {
+		process.kill(pid, 0);
+		return pid;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Sets the service up to run `service.dir/run`, and starts it: again, when
+ * `restart` (what it runs changed), or else only if it isn't running. Which
+ * kind it is, and whether it starts again after the machine restarts.
+ */
+export async function startService(service: Service, restart: boolean): Promise<{ kind: ServiceKind; atBoot: boolean }> {
+	const os = await import("node:os");
+	const home = os.homedir();
+	const run = path.join(service.dir, "run");
+	const kind = await serviceKind();
+	if (kind === "systemd") {
+		const changed = await writeChanged(
+			unitFile(service, home),
+			`[Unit]
+Description=${service.description}
+${service.desktop ? "After=graphical-session.target\nPartOf=graphical-session.target\n" : ""}
+[Service]
+ExecStart=${run}
+Restart=always
+RestartSec=5
+# A browser it starts goes on running across its restarts, and the new one uses it.
+KillMode=process
+
+[Install]
+WantedBy=${service.desktop ? "graphical-session.target" : "default.target"}
+`,
+		);
+		if (changed) await quietly("systemctl", ["--user", "daemon-reload"]);
+		await quietly("systemctl", ["--user", "enable", `${service.name}.service`]);
+		const started = await quietly("systemctl", ["--user", restart || changed ? "restart" : "start", `${service.name}.service`]);
+		if (started.code !== 0) throw new Error(`systemd didn't start ${service.name}: ${started.output.trim()}`);
+		// Lingering runs the user's services from boot, without signing in; the desktop's session starts its own.
+		const user = os.userInfo().username;
+		const lingers = async () => (await quietly("loginctl", ["show-user", user, "--property=Linger"])).output.includes("Linger=yes");
+		if (!service.desktop && !(await lingers())) await quietly("loginctl", ["enable-linger", user]);
+		return { kind, atBoot: service.desktop === true || (await lingers()) };
+	}
+	if (kind === "launchd") {
+		const changed = await writeChanged(
+			plistFile(service, home),
+			`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>dev.pim.${service.name}</string>
+	<key>ProgramArguments</key><array><string>${run}</string></array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>StandardOutPath</key><string>${path.join(service.dir, "log")}</string>
+	<key>StandardErrorPath</key><string>${path.join(service.dir, "log")}</string>
+</dict>
+</plist>
+`,
+		);
+		const loaded = (await quietly("launchctl", ["print", launchdTarget(service)])).code === 0;
+		if (loaded && (restart || changed)) await quietly("launchctl", ["bootout", launchdTarget(service)]);
+		if (!loaded || restart || changed) {
+			const started = await quietly("launchctl", ["bootstrap", `gui/${process.getuid?.()}`, plistFile(service, home)]);
+			if (started.code !== 0) throw new Error(`launchd didn't start ${service.name}: ${started.output.trim()}`);
+		}
+		return { kind, atBoot: false };
+	}
+	await startLoop(service, restart);
+	return { kind, atBoot: false };
+}
+
+/** Starts the background loop, in a process group of its own, unless it runs and needn't restart. */
+async function startLoop(service: Service, restart: boolean): Promise<void> {
+	const running = await loopRunning(service);
+	if (running && !restart) return;
+	if (running) process.kill(-running, "SIGTERM");
+	const { spawn } = await import("node:child_process");
+	const log = await fs.open(path.join(service.dir, "log"), "a");
+	const loop = `echo $$ >${shellQuote(path.join(service.dir, "loop.pid"))}; while :; do ${shellQuote(path.join(service.dir, "run"))}; sleep 5; done`;
+	// What it runs with is `run`'s to say, not what this was started with.
+	const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PIM_")));
+	spawn("/bin/sh", ["-c", loop], { detached: true, env, stdio: ["ignore", log.fd, log.fd] }).unref();
+	await log.close();
+}
+
+/** Restarts the service as it's set up, which gets the Pim's newest copy of the program. */
+export async function restartService(service: Service): Promise<boolean> {
+	const state = await serviceState(service);
+	if (!state) return false;
+	if (state.kind === "systemd") await quietly("systemctl", ["--user", "restart", `${service.name}.service`]);
+	else if (state.kind === "launchd") await quietly("launchctl", ["kickstart", "-k", launchdTarget(service)]);
+	else await startLoop(service, true);
+	return true;
+}
+
+/** Whether the service is set up, which kind it is, and whether it runs. */
+export async function serviceState(service: Service): Promise<{ kind: ServiceKind; running: boolean } | null> {
+	const os = await import("node:os");
+	const kind = await serviceKind();
+	if (kind === "systemd") {
+		if (!(await fs.stat(unitFile(service, os.homedir())).catch(() => null))) return (await loopRunning(service)) ? { kind: "loop", running: true } : null;
+		return { kind, running: (await quietly("systemctl", ["--user", "is-active", `${service.name}.service`])).output.trim() === "active" };
+	}
+	if (kind === "launchd") {
+		if (!(await fs.stat(plistFile(service, os.homedir())).catch(() => null))) return null;
+		return { kind, running: /state = running/.test((await quietly("launchctl", ["print", launchdTarget(service)])).output) };
+	}
+	const running = await loopRunning(service);
+	return running ? { kind, running: true } : null;
+}
+
+/** Stops the service and removes it. */
+export async function removeService(service: Service): Promise<void> {
+	const os = await import("node:os");
+	const home = os.homedir();
+	const kind = await serviceKind();
+	if (kind === "systemd" && (await fs.stat(unitFile(service, home)).catch(() => null))) {
+		await quietly("systemctl", ["--user", "disable", "--now", `${service.name}.service`]);
+		await fs.rm(unitFile(service, home));
+		await quietly("systemctl", ["--user", "daemon-reload"]);
+	}
+	if (kind === "launchd") {
+		await quietly("launchctl", ["bootout", launchdTarget(service)]);
+		await fs.rm(plistFile(service, home), { force: true });
+	}
+	const loop = await loopRunning(service);
+	if (loop) process.kill(-loop, "SIGTERM");
+}
+
+/** Shows the service's log: the last lines, and what comes next too when someone's watching. */
+export async function showLog(service: Service): Promise<void> {
+	const { spawn } = await import("node:child_process");
+	const follow = process.stdout.isTTY ? ["-f"] : [];
+	const state = await serviceState(service);
+	const [command, args] =
+		state?.kind === "systemd"
+			? ["journalctl", ["--user", "--unit", `${service.name}.service`, "--lines", "100", "--no-pager", ...follow]]
+			: ["tail", ["-n", "100", ...follow, path.join(service.dir, "log")]];
+	await new Promise((resolve) => spawn(command, args as string[], { stdio: "inherit" }).on("close", resolve));
+}
+
+/** A command named `name` on the PATH, in ~/.local/bin, that runs this program with this Node.js. */
+export async function installCommand(name: string, program: string): Promise<string | null> {
+	const os = await import("node:os");
+	const bin = path.join(os.homedir(), ".local", "bin");
+	await writeChanged(path.join(bin, name), `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(program)} "$@"\n`, 0o755);
+	return (process.env.PATH ?? "").split(":").includes(bin) ? null : bin;
+}
+
+const computerService = async (desktop = false): Promise<Service> => {
+	const os = await import("node:os");
+	return { name: "pim-computer", description: "pim-computer: this computer's connection to its Pim", dir: path.join(os.homedir(), ".pim-computer"), desktop };
+};
+
+/**
+ * `pim-computer install`: pim-computer as the user's service (see
+ * `Service`), connecting with `token` (or the one it has), and a
+ * `pim-computer` command to manage it. Running it again sets it up again,
+ * and restarts it if what it runs with changed.
+ */
+async function install(values: Record<string, string | boolean | undefined>): Promise<void> {
+	const os = await import("node:os");
+	const env = process.env;
+	const service = await computerService(values.desktop === true);
+	const dir = service.dir;
+	const url = (values.url as string | undefined) ?? env.PIM_URL;
+	if (!url) throw new Error("Give your Pim's address with --url.");
+	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+	const tokenFile = path.join(dir, "token");
+	const token = (values.token as string | undefined) || env.PIM_COMPUTER_TOKEN || (await fs.readFile(tokenFile, "utf8").catch(() => "")).trim();
+	if (!token) throw new Error("Give the token from Settings → Computer with --token.");
+	// The program lives in its folder, where `run` updates it; one run from elsewhere is copied there.
+	const program = path.join(dir, "pim-computer.ts");
+	const self = realpathSync(process.argv[1]!);
+	if (self !== program) await fs.copyFile(self, program);
+	const settings: [string, string | undefined][] = [
+		["PIM_URL", url],
+		["PIM_COMPUTER_TOKEN_FILE", tokenFile],
+		["PIM_COMPUTER_ROOT", values.root ? path.resolve(values.root as string) : undefined],
+		["PIM_CHROME", values.chrome as string | undefined],
+		["PIM_BROWSER_HEADFUL", values.headful ? "1" : undefined],
+		["PIM_SPACESD_URL", values.spacesd as string | undefined],
+	];
+	const changed = [
+		await writeChanged(tokenFile, `${token}\n`, 0o600),
+		await writeChanged(
+			path.join(dir, "env"),
+			settings
+				.filter(([, value]) => value)
+				.map(([name, value]) => `${name}=${shellQuote(value!)}\n`)
+				.join(""),
+			0o600,
+		),
+		await writeChanged(
+			path.join(dir, "run"),
+			`#!/bin/sh
+# Starts pim-computer with the Pim's newest copy, when it can be had, in the desktop's session where there is one.
+DIR=${shellQuote(dir)}
+[ -r /run/cua-desktop/desktop.env ] && { set -a; . /run/cua-desktop/desktop.env; set +a; }
+set -a; . "$DIR/env"; set +a
+curl -fsSL --max-time 30 "$PIM_URL/pim-computer.ts" -o "$DIR/next.ts" && mv "$DIR/next.ts" "$DIR/pim-computer.ts"
+exec ${shellQuote(process.execPath)} "$DIR/pim-computer.ts"
+`,
+			0o755,
+		),
+	].some(Boolean);
+	const { kind, atBoot } = await startService(service, changed);
+	const bin = await installCommand("pim-computer", program);
+	const root = values.root ? path.resolve(values.root as string) : path.join(os.homedir(), "pim");
+	console.log(`pim-computer ${VERSION} is installed and running, connecting to ${url}, with your files in ${root}.`);
+	if (kind === "systemd" && !atBoot && !service.desktop) {
+		console.log(`It runs while you're signed in. To run it from boot, without signing in: sudo loginctl enable-linger ${os.userInfo().username}`);
+	}
+	if (kind === "loop") console.log("This machine has no systemd for you, so it runs in the background until the machine restarts: run `pim-computer install` again then.");
+	console.log(`Manage it with: pim-computer status | logs | update | uninstall${bin ? ` (add ${bin} to your PATH)` : ""}`);
+}
+
+/** `pim-computer status`: whether it's installed and runs, where it connects, and its last words. */
+async function status(): Promise<void> {
+	const service = await computerService();
+	const state = await serviceState(service);
+	if (!state) {
+		console.log("pim-computer isn't installed here: run the command Settings → Computer gives.");
+		process.exitCode = 1;
+		return;
+	}
+	const env = await fs.readFile(path.join(service.dir, "env"), "utf8").catch(() => "");
+	const url = /^PIM_URL='(.*)'$/m.exec(env)?.[1];
+	const how = { systemd: "a systemd user service", launchd: "a launchd agent", loop: "a loop in the background" }[state.kind];
+	console.log(`pim-computer ${VERSION}, for ${url ?? "no Pim"}: ${state.running ? "running" : "not running"}, as ${how}.`);
+	if (!state.running) process.exitCode = 1;
+}
+
+/** `pim-computer uninstall`: stops it, and removes it and its token, browser profile and command; the files stay. */
+async function uninstall(): Promise<void> {
+	const os = await import("node:os");
+	const service = await computerService();
+	await removeService(service);
+	await fs.rm(service.dir, { recursive: true, force: true });
+	await fs.rm(path.join(os.homedir(), ".local", "bin", "pim-computer"), { force: true });
+	console.log("pim-computer is uninstalled: this computer no longer connects to your Pim. Your files are still where they were; remove the computer in Settings → Computer too.");
+}
+
 const USAGE = `pim-computer ${VERSION}: connects this machine to your Pim, for your agents to use.
+
+  curl -fsSL https://pim.example.com/install.sh | sh -s -- computer pimc_…
+
+installs it as your service, which keeps it running, and a pim-computer command:
+
+  pim-computer status      Whether it's running, and for which Pim
+  pim-computer logs        What it did lately
+  pim-computer update      Restart it with your Pim's newest pim-computer
+  pim-computer uninstall   Stop it and remove it (your files stay)
+
+Or run it yourself:
 
   PIM_URL=https://pim.example.com PIM_COMPUTER_TOKEN=pimc_… node pim-computer.ts
 
@@ -885,12 +1207,15 @@ Options (or the environment variables in brackets):
   --spacesd <url>   Where Cua's cua-spacesd streams this computer's desktop (PIM_SPACESD_URL; http://127.0.0.1:3211),
                     with its token in the file PIM_SPACESD_TOKEN_FILE names (/run/cua/env-token)
 
-The browser keeps its profile, with what you sign in to there, in ~/.pim-computer/browser.`;
+install takes the same options, which the service then runs with, and --desktop, to start with the desktop's
+session rather than at login or boot. The browser keeps its profile, with what you sign in to there, in
+~/.pim-computer/browser.`;
 
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
 	const os = await import("node:os");
-	const { values } = parseArgs({
+	const { values, positionals } = parseArgs({
+		allowPositionals: true,
 		options: {
 			url: { type: "string" },
 			token: { type: "string" },
@@ -898,9 +1223,34 @@ async function main(): Promise<void> {
 			chrome: { type: "string" },
 			headful: { type: "boolean" },
 			spacesd: { type: "string" },
+			desktop: { type: "boolean" },
 			help: { type: "boolean" },
 		},
 	});
+	const command = positionals[0];
+	if (command && !values.help) {
+		const commands: Record<string, () => Promise<void>> = {
+			install: () => install(values),
+			status,
+			logs: async () => showLog(await computerService()),
+			update: async () => {
+				if (!(await restartService(await computerService()))) throw new Error("pim-computer isn't installed here.");
+				console.log("pim-computer restarted with your Pim's newest copy.");
+			},
+			uninstall,
+		};
+		if (!commands[command]) {
+			console.log(USAGE);
+			process.exit(1);
+		}
+		try {
+			await commands[command]();
+		} catch (error) {
+			console.error((error as Error).message);
+			process.exit(1);
+		}
+		return;
+	}
 	const env = process.env;
 	const tokenFile = env.PIM_COMPUTER_TOKEN_FILE;
 	const url = values.url ?? env.PIM_URL;

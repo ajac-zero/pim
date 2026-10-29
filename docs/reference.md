@@ -166,14 +166,19 @@ and set `PIM_EMAIL_FROM` in the dashboard to an address on that domain, such as 
 
 ### Your computer
 
-Agents run commands and keep files on a machine of each person's own, or the one Pim keeps for them where it has a computer host (see [Computers Pim keeps](#computers-pim-keeps)), which runs [`computer/pim-computer.ts`](../computer/pim-computer.ts): a single file for Node.js 22.18 or later, with nothing to install, which the Pim serves at `/pim-computer.ts`. It connects out to the space over a WebSocket, so the machine needs no open port and can sit behind NAT. Settings → Computer makes its token and shows the commands to start it, with Node.js or Docker:
+Agents run commands and keep files on a machine of each person's own, or the one Pim keeps for them where it has a computer host (see [Computers Pim keeps](#computers-pim-keeps)), which runs [`computer/pim-computer.ts`](../computer/pim-computer.ts): a single file for Node.js 22.18 or later, which the Pim serves at `/pim-computer.ts`. It connects out to the space over a WebSocket, so the machine needs no open port and can sit behind NAT. Settings → Computer makes its token and shows the command that installs it, on Linux or macOS, or the Docker container to run instead:
 
 ```sh
-curl -fsSLO https://pim.example.com/pim-computer.ts
+curl -fsSL https://pim.example.com/install.sh | sh -s -- computer pimc_…
+```
+
+The Pim serves `/install.sh` with its own address in it. It gets Node.js where the machine has none new enough (Node's official build, checked against a checksum the script holds), downloads `pim-computer` into `~/.pim-computer`, and runs `pim-computer install`, which keeps it running as the user's own service: a systemd user service on Linux, which it lets linger so it runs from boot where `loginctl` allows (and says how otherwise), or a launchd agent on macOS. Where there's no systemd for the user, it runs in the background until the machine restarts. Each time the service starts, it gets the Pim's newest `pim-computer` first. A `pim-computer` command, in `~/.local/bin`, manages it: `status`, `logs`, `update` (a restart, with the newest copy) and `uninstall`, which leaves the files. Options after the token, such as `--root` or `--chrome`, are the service's from then on; running the command again sets it up again, and restarts it only if something changed. Or run it in the foreground yourself:
+
+```sh
 PIM_URL=https://pim.example.com PIM_COMPUTER_TOKEN=pimc_… node pim-computer.ts
 ```
 
-It keeps the files in `~/pim` (`PIM_COMPUTER_ROOT` or `--root` sets another folder), and reconnects by itself after a drop; to keep it running across restarts, run it under systemd or as the Docker container Settings shows, which installs Chromium the first time it starts.
+It keeps the files in `~/pim` (`PIM_COMPUTER_ROOT` or `--root` sets another folder), and reconnects by itself after a drop. The Docker container Settings shows installs Chromium the first time it starts.
 
 The computer's Chrome is the agents' browser: `pim-computer` finds Google Chrome or Chromium where it's usually installed (`PIM_CHROME` or `--chrome` names another), starts it headless when an agent first needs it (`--headful` shows its window instead), and lets the space drive it over the DevTools protocol through its connection. Its profile, in `~/.pim-computer/browser`, keeps what you signed in to between runs, including sign-ins that last only for the session. It quits after half an hour with nobody using it. Settings → Computer says when a computer has no browser. A space has one computer: a new token replaces the old one and disconnects it, and removing the computer in Settings forgets its token.
 
@@ -181,17 +186,17 @@ Commands run as the user who started `pim-computer`, with the files folder as th
 
 ### Computers Pim keeps
 
-Pim can keep a computer for everyone, so nobody needs to bring one: an [Omarchy](https://omarchy.org) desktop (Arch Linux with Hyprland), one for each space, which runs all the time and is never removed while its person is here. They run on a machine of the operator's, the **computer host**: Linux with KVM, Node.js 22.18 or later, and [Cua](https://github.com/trycua/cua)'s `cua` command, which makes each computer as a VM from Cua's image `ghcr.io/trycua/omarchy:edge`. Each VM's whole disk persists, so what agents and the person install there, such as Tailscale, stays.
+Pim can keep a computer for everyone, so nobody needs to bring one: an [Omarchy](https://omarchy.org) desktop (Arch Linux with Hyprland), one for each space, which runs all the time and is never removed while its person is here. They run on a machine of the operator's, the **computer host**: Linux with KVM, where [Cua](https://github.com/trycua/cua)'s `cua` command makes each computer as a VM (with QEMU) from Cua's image `ghcr.io/trycua/omarchy:edge`. Each VM's whole disk persists, so what agents and the person install there, such as Tailscale, stays.
 
-The admin pairs the host in Settings → Deployment → Computers, which makes its token, shown once with the command that starts [`computer/pim-host.ts`](../computer/pim-host.ts), which the Pim serves at `/pim-host.ts`:
+The admin pairs the host in Settings → Deployment → Computers, which makes its token, shown once with the command that installs [`computer/pim-host.ts`](../computer/pim-host.ts) from the Pim, run on the host as the user who'll keep the computers:
 
 ```sh
-curl -fsSL https://cua.ai/install.sh | sh -s -- --cli-only --no-onboarding
-curl -fsSLO https://pim.example.com/pim-host.ts
-PIM_URL=https://pim.example.com PIM_HOST_TOKEN=pimh_… node pim-host.ts
+curl -fsSL https://pim.example.com/install.sh | sh -s -- host pimh_…
 ```
 
-`pim-host` needs no open port: every five seconds it asks `/api/computer-host/sync` for work with its token, and reports what it did with the work it took before. Each space's computer is asked for the first time the app looks at it (`GET /api/computer`): the host makes the VM, named `pim-` and the space's owner, with 4 vCPUs and 8 GB of memory (`--cpu`, `--memory`, `--image` and `--kind` change that; `node pim-host.ts --help` lists them), and sets `pim-computer` up in it as a user service of its desktop session, with a token of its own, so it connects to its space like any other computer. The host starts any of its computers that stopped, as after the host restarted. A computer it couldn't make says why in Settings → Computer and on the Computer page, with **Try again**; one it took and never reported is given again after 20 minutes. Deleting an account removes its computer, with everything on it. Unpairing the host stops it getting work, and leaves the computers it keeps running. Settings → Deployment → Computers shows whether the host is connected, which image it uses, and how many computers it keeps and runs.
+The script gets Node.js where the host has none new enough, as for a person's own computer, and `pim-host install` checks the rest before it starts anything, saying what to do about what's missing: that the host has KVM and the user can use it; Cua's command, which it installs where it isn't there; Cua's runtime for the kind of computer, which `cua runtime setup` sets up where it can (it uses `sudo`, without asking for a password; otherwise the host's admin runs it); and that the Pim knows the token. Then it runs `pim-host` as a systemd user service, lingering so it runs from boot (or it says how), which gets the Pim's newest `pim-host` each time it starts. The `pim-host` command manages it: `status` says whether it runs, whether the Pim knows its token, and which computers it keeps; `logs`, `update` and `uninstall`, which leaves the computers as they are. Options after the token (`--cpu`, `--memory`, `--image`, `--kind`; `pim-host --help` lists them) are the service's from then on.
+
+`pim-host` needs no open port: every five seconds it asks `/api/computer-host/sync` for work with its token, and reports what it did with the work it took before. Each space's computer is asked for the first time the app looks at it (`GET /api/computer`): the host makes the VM, named `pim-` and the space's owner, with 4 vCPUs and 8 GB of memory unless set otherwise, and sets `pim-computer` up in it with the same install script, as a user service of its desktop session, with a token of its own, so it connects to its space like any other computer. The host starts any of its computers that stopped, as after the host restarted. A computer it couldn't make says why in Settings → Computer and on the Computer page, with **Try again**; one it took and never reported is given again after 20 minutes. Deleting an account removes its computer, with everything on it. Unpairing the host stops it getting work, and leaves the computers it keeps running. Settings → Deployment → Computers shows whether the host is connected, which image it uses, and how many computers it keeps and runs.
 
 There, the agents' Chrome is the desktop's Chromium, with its windows on the desktop, and it stays open. Chromium uses `pim-computer`'s profile however it's opened, so the person and the agents share one browser: what either signs in to, the other is signed in to.
 
@@ -285,7 +290,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/computer` | | Disconnects the computer and forgets its token; its files stay on it. `409` for one the host keeps |
 | GET | `/computer/connect` | `Authorization: Bearer <computer token>`, as a WebSocket | Where `pim-computer` connects; only the token's own space answers |
 | GET | `/computer/screen` | A WebSocket, from the signed-in browser only (`403` for an API token) | The computer's desktop, live: what `cua-spacesd` sends (`hello`, `session_opened`, then H.264 as binary packets), and what it takes (`interactive_input`, `frame_ack`, `request_keyframe`), passed through as they are. Closes with `4004` and why when the computer is offline or doesn't stream its desktop |
-| POST | `/computer-host/sync` | `Authorization: Bearer <host token>`, `{ results: [{ id, error? }], machines?, image?, version? }` | `{ requests: [{ id, op: "create", name, token } \| { id, op: "delete", name }] }`: the computer host's work (see [Computers Pim keeps](#computers-pim-keeps)) |
+| POST | `/computer-host/sync` | `Authorization: Bearer <host token>`, `{ results: [{ id, error? }], machines?, image?, version?, check? }` | `{ requests: [{ id, op: "create", name, token } \| { id, op: "delete", name }] }`: the computer host's work (see [Computers Pim keeps](#computers-pim-keeps)); with `check: true`, only whether the token is known, taking no work |
 | GET | `/files` | `?path=` (default `/workspace`) | `{ path, entries: [{ name, path, type, size, updatedAt }] }`: one folder, folders first. Every `/files` call is `503` while no computer is connected |
 | GET | `/files/content` | `?path=`, `&download` | The file's bytes, served as inert data: HTML, SVG and unknown types come back as `text/plain` with a sandboxing CSP |
 | PUT | `/files/content` | `?path=`, the file as the body | Saves it, making its folders; `413` over 25 MB |

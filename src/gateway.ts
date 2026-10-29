@@ -5,6 +5,7 @@ import { deploymentSettings } from "./deployment";
 import { accountApi, adminApi, contentOrigin, handleRegistration, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
+import { installScript } from "./install-script";
 import { BROWSER_LIVE_PATH } from "./browser";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
@@ -42,6 +43,8 @@ import { PimThemes } from "./themes";
  *   this connection, and the owner's space checks it.
  * - `/api/computer-host/sync`: this Pim's computer host (./computer-host.ts),
  *   with its own token, `pimh_<secret>`, which opens only this.
+ * - `/install.sh`: public, what installs pim-host or pim-computer from this
+ *   Pim (./install-script.ts).
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
  *   connected apps. Each is checked another way: the OAuth state, and the
  *   watch's signing secret.
@@ -392,6 +395,10 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	if (origin !== publicUrl) return Response.json({ error: `This Pim is at ${publicUrl}`, url: publicUrl }, { status: 421 });
 	// The page diagrams in agents' messages are drawn in, which holds nothing of anyone's.
 	if (pathname === "/api/diagram") return request.method === "GET" ? diagramPage(publicUrl) : fail(405, "/api/diagram takes GET");
+	if (pathname === "/install.sh") {
+		if (request.method !== "GET") return fail(405, "/install.sh takes GET");
+		return new Response(installScript(publicUrl), { headers: { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-cache" } });
+	}
 
 	if (under(pathname, "/auth") || under(pathname, "/oauth")) {
 		// Guessing at passkeys, recovery codes and tokens, and registering clients, is slowed down per address.

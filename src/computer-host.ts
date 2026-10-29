@@ -42,6 +42,8 @@ export type HostSync = {
 	/** The image it makes computers from, and its version, for the admin to see. */
 	readonly image?: string;
 	readonly version?: string;
+	/** Only checking its token, as `pim-host install` and `status` do: it takes no work and isn't counted as seen. */
+	readonly check?: true;
 };
 
 /** The host, as the admin sees it in Settings → Deployment. */
@@ -81,5 +83,6 @@ export function readSync(body: unknown): HostSync {
 		...(machines ? { machines } : {}),
 		...(typeof given.image === "string" ? { image: given.image.slice(0, 200) } : {}),
 		...(typeof given.version === "string" ? { version: given.version.slice(0, 50) } : {}),
+		...(given.check === true ? { check: true as const } : {}),
 	};
 }

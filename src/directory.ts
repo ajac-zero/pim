@@ -709,6 +709,7 @@ export class Directory extends DurableObject<Env> {
 	async syncComputerHost(token: string, sync: HostSync, now = Date.now()): Promise<{ requests: HostRequest[] } | null> {
 		const known = this.#meta("computer_host_token");
 		if (!known || !token.startsWith(HOST_TOKEN_PREFIX) || (await digestHex(token)) !== known) return null;
+		if (sync.check) return { requests: [] };
 		const stored = JSON.parse(this.#meta("computer_host") ?? "{}") as Record<string, unknown>;
 		this.#setMeta(
 			"computer_host",

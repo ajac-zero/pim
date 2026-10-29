@@ -312,6 +312,9 @@ describe("a computer this Pim's host keeps", () => {
 		// Only the host's token opens its work, which it gets once, until it says how it went.
 		expect((await sync(`${host.slice(0, -2)}xx`, { results: [] })).status).toBe(401);
 		expect((await sync(token, { results: [] })).status).toBe(401);
+		// Checking its token, as `pim-host install` does, takes no work and doesn't count as the host connecting.
+		expect(await (await sync(host, { results: [], check: true })).json()).toEqual({ requests: [] });
+		expect(await directory().computerHost()).toMatchObject({ connected: false, seenAt: null });
 		const first = await sync(host, { results: [], machines: [], image: "ghcr.io/trycua/omarchy:edge", version: "0.1.0" });
 		expect(first.status).toBe(200);
 		const { requests } = await first.json<Requests>();
@@ -383,6 +386,15 @@ describe("a computer this Pim's host keeps", () => {
 		expect(await directory().computerHost()).toMatchObject({ paired: false });
 		await runInDurableObject(agent(), (instance: Pim) => instance.computer.forget());
 		expect(await status()).toMatchObject({ state: "none", managed: false });
+	});
+
+	it("is set up, like a person's own computer, by the install script this Pim serves for its address", async () => {
+		const response = await exports.default.fetch(new Request("https://pim.test/install.sh"));
+		expect(response.status).toBe(200);
+		const script = await response.text();
+		expect(script).toContain('PIM_URL="${PIM_URL:-https://pim.test}"');
+		expect(script).toContain('host) program=pim-host; variable=PIM_HOST_TOKEN ;;');
+		expect(script).toContain('computer) program=pim-computer; variable=PIM_COMPUTER_TOKEN ;;');
 	});
 
 	it("is forgotten when it was a Sprite Pim started before, which nothing reaches anymore", async () => {

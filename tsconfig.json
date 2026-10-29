@@ -11,7 +11,8 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
-  "include": ["pim.config.ts", "src/**/*.ts", "test/**/*.ts", "preview/**/*.ts", "worker-configuration.d.ts"]
+  "include": ["pim.config.ts", "computer/**/*.ts", "src/**/*.ts", "test/**/*.ts", "preview/**/*.ts", "worker-configuration.d.ts"]
 }

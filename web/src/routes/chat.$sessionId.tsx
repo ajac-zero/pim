@@ -303,6 +303,12 @@ function ChatPage() {
                         )
                       : undefined
                   }
+                  // A group chat chooses each agent's model in its header menu.
+                  agent={
+                    session?.visit || session?.room?.members.length
+                      ? undefined
+                      : (session?.agent ?? undefined)
+                  }
                   disabled={!ready}
                   disclaimer={
                     session?.visit ? (

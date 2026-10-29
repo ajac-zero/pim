@@ -1,28 +1,28 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { ArtifactIcon } from "~/components/artifact";
+import {
+  ModelMark,
+  ModelMenuItems,
+  useAgentModel,
+} from "~/components/chat/model-menu";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowUp,
-  Check,
   Loader2,
   Plus,
   Sparkles,
   Square,
   X,
 } from "~/components/icons";
-import { ModelLogo } from "~/components/model-logo";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import {
@@ -46,8 +46,8 @@ import {
   pim,
   type UserContent,
 } from "~/lib/pim-api";
-import { artifactQuery, modelQuery } from "~/lib/queries";
-import { cn, modelName } from "~/lib/utils";
+import { artifactQuery } from "~/lib/queries";
+import { cn } from "~/lib/utils";
 
 export interface ComposerProps {
   onSend: (content: UserContent) => void;
@@ -64,6 +64,8 @@ export interface ComposerProps {
   initialInput?: string;
   /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
   draftKey?: string;
+  /** The agent the chat is with, whose model the picker chooses; none shows no picker, as in a group chat, which has it in the header. */
+  agent?: Pick<Agent, "id" | "name">;
   /** The agents in the chat, which an @ offers to mention. */
   mentions?: readonly Agent[];
 }
@@ -116,6 +118,7 @@ function ComposerInner({
   promptSuggestions = [],
   draftKey,
   mentions,
+  agent,
 }: ComposerProps) {
   const { t } = useI18n();
   const controller = usePromptInputController();
@@ -137,8 +140,9 @@ function ComposerInner({
     if (text) drafts.set(draftKey, text);
     else drafts.delete(draftKey);
   }, [draftKey, text]);
-  const { data: model } = useQuery(modelQuery());
-  const seesImages = model?.model.images ?? false;
+  const { settings, current, pinned, choose } = useAgentModel(agent?.id);
+  const model = current;
+  const seesImages = model?.images ?? false;
   const inputId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const touchInput = window.matchMedia("(pointer: coarse)").matches;
@@ -194,7 +198,7 @@ function ComposerInner({
   const showStop = busy && !hasContent && Boolean(onStop);
 
   const cantSeeImages = () =>
-    toast.info(t("modelCantSeeImages", { model: model?.model.name ?? "" }));
+    toast.info(t("modelCantSeeImages", { model: model?.name ?? "" }));
 
   const send = (content: UserContent) => {
     // Dismiss the phone's keyboard, including when sending opens a new chat.
@@ -444,8 +448,15 @@ function ComposerInner({
                 )}
               </Button>
             )}
-            {model && <ModelPicker settings={model} />}
-
+            {settings && current && agent && (
+              <ModelPicker
+                settings={settings}
+                current={current}
+                pinned={pinned}
+                choose={choose}
+                agent={agent}
+              />
+            )}
             <PromptInputSubmit
               status={
                 showStop ? "streaming" : preparing ? "submitted" : "ready"
@@ -473,36 +484,26 @@ function ComposerInner({
 }
 
 /**
- * The model, as its logo beside Send, with its name on hover. Pim has one
- * model for every chat, so choosing here does what Settings → Model does; the
- * menu says so, and links there for more models.
+ * The agent's model, as its logo beside Send, with its name on hover. Choosing
+ * here sets the model of this agent alone; "Default" has it follow Settings →
+ * Model again, which the menu links to for more models.
  */
-function ModelPicker({ settings }: { settings: ModelSettings }) {
+function ModelPicker({
+  settings,
+  current,
+  pinned,
+  choose,
+  agent,
+}: {
+  settings: ModelSettings;
+  /** The model the agent runs on now. */
+  current: ModelInfo;
+  /** Whether it was chosen for this agent, rather than followed from the default. */
+  pinned: boolean;
+  choose: ReturnType<typeof useAgentModel>["choose"];
+  agent: Pick<Agent, "id" | "name">;
+}) {
   const { t } = useI18n();
-  const queryClient = useQueryClient();
-  const choose = useMutation({
-    mutationFn: pim.chooseModel,
-    onSuccess: ({ model }) => {
-      queryClient.setQueryData<ModelSettings>(["model"], (old) =>
-        old ? { ...old, model } : old,
-      );
-      queryClient.invalidateQueries({ queryKey: ["model"] });
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  const current = settings.model;
-  // A provider someone added, if the model runs on one.
-  const providerOf = (choice: ModelInfo) =>
-    settings.providers.find(
-      (provider) => provider.provider === choice.provider,
-    );
-  const logo = (choice: ModelInfo, className: string) => (
-    <ModelLogo
-      model={choice}
-      custom={Boolean(providerOf(choice))}
-      className={className}
-    />
-  );
   return (
     <DropdownMenu>
       <TooltipProvider>
@@ -520,7 +521,11 @@ function ModelPicker({ settings }: { settings: ModelSettings }) {
                 {choose.isPending ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
-                  logo(current, "size-4.5")
+                  <ModelMark
+                    settings={settings}
+                    model={current}
+                    className="size-4.5"
+                  />
                 )}
               </Button>
             </DropdownMenuTrigger>
@@ -536,36 +541,14 @@ function ModelPicker({ settings }: { settings: ModelSettings }) {
         className="w-72 max-w-[calc(100vw-2rem)]"
       >
         <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
-          {t("modelForEveryChat")}
+          {t("modelForAgent", { name: agent.name })}
         </DropdownMenuLabel>
-        {settings.choices.map((choice) => {
-          const selected =
-            choice.provider === current.provider && choice.id === current.id;
-          return (
-            <DropdownMenuItem
-              key={`${choice.provider}/${choice.id}`}
-              onSelect={() => {
-                if (!selected) choose.mutate(choice);
-              }}
-              className="min-h-11 gap-3"
-            >
-              {logo(choice, "size-5 text-foreground")}
-              <span className="min-w-0 flex-1 truncate">
-                {modelName(choice.name)}
-              </span>
-              {selected && <Check className="size-4 text-primary" />}
-            </DropdownMenuItem>
-          );
-        })}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link
-            to="."
-            search={(prev) => ({ ...prev, dialog: "settings", tab: "model" })}
-          >
-            {t("moreModels")}
-          </Link>
-        </DropdownMenuItem>
+        <ModelMenuItems
+          settings={settings}
+          current={current}
+          pinned={pinned}
+          choose={choose.mutate}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -173,7 +173,7 @@ import {
 	TOOL_PERMISSIONS,
 	type ToolPermission,
 } from "./store";
-import { type Agent, type AgentInput, AgentStore, agentInput, checkContacts, freeName, MAX_AGENTS } from "./agents";
+import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, checkContacts, freeName, MAX_AGENTS } from "./agents";
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
@@ -1220,6 +1220,7 @@ export class Pim extends DurableAgent<Env> {
 			return (provider.startsWith(OWN_PROVIDER) || provider.startsWith(SHARED_PROVIDER)) && !catalog.getModel(provider, id);
 		};
 		if (missing(UTILITY_MODEL_KEY)) this.store.deleteMeta(UTILITY_MODEL_KEY);
+		this.#dropModels(({ provider, id }) => (provider.startsWith(OWN_PROVIDER) || provider.startsWith(SHARED_PROVIDER)) && !catalog.getModel(provider, id));
 		// Without Workers AI, the default is a provider's model, so it changes as providers come and go.
 		if (missing(MODEL_KEY) || (!this.#hasWorkersAi() && this.store.meta(MODEL_KEY) === undefined)) await this.chooseModel(null);
 	}
@@ -1295,7 +1296,7 @@ export class Pim extends DurableAgent<Env> {
 		return (this.env as AiEnv).AI !== undefined;
 	}
 
-	/** The model every session uses: the one chosen through the API, or the default. */
+	/** The model of agents that have none of their own: the one chosen for the space through the API, or the default. */
 	chosenModel(): PiModel {
 		const json = this.store.meta(MODEL_KEY);
 		if (json !== undefined) {
@@ -1304,6 +1305,15 @@ export class Pim extends DurableAgent<Env> {
 			if (model) return model;
 		}
 		return this.defaultModel();
+	}
+
+	/** The model an agent's conversations run on: its own, else the space's. One that's gone, or on a plan that isn't connected, is not read: see `#dropModels`. */
+	agentModel(agent: Agent): PiModel {
+		if (agent.model) {
+			const model = this.modelCatalog().getModel(agent.model.provider, agent.model.id);
+			if (model) return model;
+		}
+		return this.chosenModel();
 	}
 
 	/**
@@ -1322,15 +1332,33 @@ export class Pim extends DurableAgent<Env> {
 		return model;
 	}
 
-	/** Makes `model` every session's model, and new sessions'; null goes back to the default. */
+	/** Makes `model` the space's, for agents that have none of their own; null goes back to the default. */
 	async chooseModel(model: PiModel | null): Promise<PiModel> {
 		if (model === null) this.store.deleteMeta(MODEL_KEY);
 		else this.store.setMeta(MODEL_KEY, JSON.stringify({ provider: model.provider, id: model.id }));
-		const chosen = this.chosenModel();
+		await this.#syncModels();
+		return this.chosenModel();
+	}
+
+	/** Makes `model` an agent's; null follows the space's again. */
+	async chooseAgentModel(agent: Agent, model: PiModel | null): Promise<Agent> {
+		const changed = this.agents.setModel(agent.id, model);
+		await this.#syncModels();
+		return changed;
+	}
+
+	/** Puts every session on its agent's model. */
+	async #syncModels(): Promise<void> {
 		for (const session of await this.harness.sessions.list()) {
-			await this.harness.session(session.id).setModel(chosen);
+			await this.harness.session(session.id).setModel(this.agentModel(this.agents.ofSession(session.id)));
 		}
-		return chosen;
+	}
+
+	/** Agents whose model `gone` says can't be used any more go back to following the space's. */
+	#dropModels(gone: (model: AgentModel) => boolean): void {
+		for (const agent of this.agents.list()) {
+			if (agent.model && gone(agent.model)) this.agents.setModel(agent.id, null);
+		}
 	}
 
 	/**
@@ -1859,7 +1887,7 @@ export class Pim extends DurableAgent<Env> {
 			if (open >= sessions) throw new HttpError(429, `You can have up to ${sessions} chats. Delete one first.`);
 		}
 		const { id } = await this.harness.sessions.create();
-		await this.harness.session(id).setModel(this.chosenModel());
+		await this.harness.session(id).setModel(this.agentModel(agent));
 		this.agents.setSession(id, agent.id);
 		this.store.touchSession(id, title);
 		return id;
@@ -2695,7 +2723,7 @@ export class Pim extends DurableAgent<Env> {
 			if (!review) {
 				const majordomo = this.agents.majordomo();
 				const { id } = await this.harness.sessions.create();
-				await this.harness.session(id).setModel(this.chosenModel());
+				await this.harness.session(id).setModel(this.agentModel(majordomo));
 				const snapshot = this.registry.snapshot();
 				const extensions = [REVIEW_EXTENSION, this.memory.extension.name, TELEMETRY_EXTENSION].flatMap((name) => snapshot.extension(name) ?? []);
 				const tools = snapshot
@@ -2885,7 +2913,7 @@ export class Pim extends DurableAgent<Env> {
 	/** A new conversation for a task, as the agent it is for. */
 	async #taskConversation(agent: Agent): Promise<string> {
 		const { id } = await this.harness.sessions.create();
-		await this.harness.session(id).setModel(this.chosenModel());
+		await this.harness.session(id).setModel(this.agentModel(agent));
 		await (await this.harness.conversation(id)).configure(this.#taskAgent(agent), BACKGROUND_CONTEXT);
 		this.agents.setSession(id, agent.id);
 		return id;
@@ -3174,7 +3202,7 @@ export class Pim extends DurableAgent<Env> {
 	async #seat(room: string, agent: Agent): Promise<Seat> {
 		const host = this.agents.ofSession(room);
 		const { id } = await this.harness.sessions.create();
-		await this.harness.session(id).setModel(this.chosenModel());
+		await this.harness.session(id).setModel(this.agentModel(agent));
 		this.agents.setSession(id, agent.id);
 		this.#rooms.open(room, host.id);
 		const others = this.#rooms.seats(room);
@@ -5170,7 +5198,9 @@ export class Pim extends DurableAgent<Env> {
 			async () => {
 				await this.chatgpt.logout();
 				// Sessions on the plan would fail without it: back to the default.
+				this.#dropModels(({ provider }) => provider === CHATGPT_PROVIDER);
 				if (this.chosenModel().provider === CHATGPT_PROVIDER) await this.chooseModel(null);
+				else await this.#syncModels();
 				return this.chatgpt.status();
 			},
 		],
@@ -5519,6 +5549,18 @@ export class Pim extends DurableAgent<Env> {
 				const input = this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), agent))));
 				this.#checkNamedScopes(input.memoryScopes ?? []);
 				return this.agents.update(id!, checkContacts(agent, input, this.agents.list()));
+			},
+		],
+		// The model an agent runs on, from `GET /model`'s choices; null follows the space's.
+		[
+			"PUT",
+			"/agents/:agent/model",
+			async ({ agent: id }, request) => {
+				const agent = this.#agent(id!);
+				const { provider, id: model } = (await readJson<{ provider: string | null; id: string | null }>(request)) ?? {};
+				if (provider === null && model === null) return this.chooseAgentModel(agent, null);
+				if (typeof provider !== "string" || typeof model !== "string") throw new HttpError(400, "provider and id must be strings, or both null");
+				return this.chooseAgentModel(agent, await this.#choice(provider, model));
 			},
 		],
 		// Skills the agents wrote, with the person's approval, every version kept; each agent lists the ones it uses.

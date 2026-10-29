@@ -119,6 +119,7 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 3. **Data residency:** agents are created without a jurisdiction. Choosing one (for example `eu`) must happen before anyone joins, because an object can't move.
 4. **Policy:** `PIM_REGISTRATION`, the `PIM_LIMIT_*` variables and `PIM_MODELS` for what you're willing to pay for.
 5. **Monitoring:** alerts in Workers Logs on `pim.cleanup_failed` (with rising `attempts`) and `pim.misrouted` (which should never happen), and a watch on `pim.limit` and `pim.rate_limited`.
+6. **Computers**, if Pim should keep one for everyone: a Linux machine with KVM, with room for 4 vCPUs and 8 GB of memory per person unless you give them less. Pair it in Settings → Deployment → Computers and run the one command shown there on it (see [Computers Pim keeps](reference.md#computers-pim-keeps)).
 
 ## Preview locally
 

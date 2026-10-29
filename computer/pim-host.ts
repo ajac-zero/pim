@@ -14,13 +14,23 @@
  * It also starts any of its computers that stopped, as after this machine
  * restarted.
  *
- * Runs on Node.js 22.18 or later, with nothing to install:
+ * The Pim's install script installs it, with Node.js 22.18 or later where
+ * the machine has none, and `pim-host install` (`install`) does the rest:
+ * it checks for KVM and Cua, setting Cua up where it can, checks the token
+ * with the Pim, and runs pim-host as the user's service from then on:
+ *
+ *   curl -fsSL https://pim.example.com/install.sh | sh -s -- host pimh_…
+ *
+ * Or run it yourself, with ./pim-computer.ts beside it for the commands:
  *
  *   PIM_URL=https://pim.example.com PIM_HOST_TOKEN=pimh_… node pim-host.ts
  */
 
-import { realpathSync } from "node:fs";
+import { constants, realpathSync } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { Service } from "./pim-computer.ts";
 
 export const VERSION = "0.1.0";
 
@@ -28,9 +38,8 @@ export const VERSION = "0.1.0";
 const DEFAULT_IMAGE = "ghcr.io/trycua/omarchy:edge";
 /** The computers this program keeps are named `pim-<owner>`; it leaves every other sandbox alone. */
 const PREFIX = "pim-";
-/** Node.js for pim-computer, where the image has none new enough: its official build, checked. */
-const NODE_VERSION = "22.23.4";
-const NODE_SHA256 = "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce";
+/** What installs Cua's command. */
+const CUA_INSTALL = "curl -fsSL https://cua.ai/install.sh | sh -s -- --cli-only --no-onboarding";
 
 type Request = { id: string; op: "create"; name: string; token: string } | { id: string; op: "delete"; name: string };
 type Result = { id: string; error?: string };
@@ -93,88 +102,31 @@ const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 /**
  * What sets pim-computer up in a computer, run there as its desktop's user
- * with bash: Node.js, pim-computer as the Pim serves it, its token when one
- * is given, the agents' Chromium shared with the person's (one profile, so
- * whichever of them opens it, the other uses the same), and a user service
- * that runs it in the desktop's session, all the time. Where there's no
- * systemd for the user, as in a container, a loop in the background runs it
- * instead. Running it again sets it up again; with a new token, it
- * restarts pim-computer, and otherwise starts it if it isn't running. The
- * browser it started goes on running across its restarts.
+ * with bash: the agents' Chromium shared with the person's (one profile, so
+ * whichever of them opens it, the other uses the same), and then the Pim's
+ * install script, as a person's own computer is set up, which gets Node.js
+ * where the image has none new enough, and pim-computer, with its token when
+ * one is given, as a service of the desktop's session (or, where there's no
+ * systemd for the user, as in a container, a loop in the background).
+ * Running it again sets it up again: with a new token, it restarts
+ * pim-computer, and otherwise starts it if it isn't running. The browser it
+ * started goes on running across its restarts.
  */
 export function setupScript(pimUrl: string, token: string | null): string {
 	return `set -euo pipefail
 PIM_URL=${quote(pimUrl)}
 TOKEN=${token === null ? "''" : quote(token)}
 DIR="$HOME/.pim-computer"
-mkdir -p "$DIR" "$HOME/pim"
-chmod 700 "$DIR"
 export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-if [ -n "$TOKEN" ]; then (umask 077 && printf '%s\\n' "$TOKEN" >"$DIR/token"); fi
 # Not set up yet: its first request, with its token, sets it up.
-[ -s "$DIR/token" ] || { echo "This computer has no token for its Pim yet."; exit 0; }
-
-# Node.js 22.18 or later, for pim-computer: the image's own when it's new enough.
-new_enough() { "$1" -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 22 || (a === 22 && b >= 18) ? 0 : 1)' 2>/dev/null; }
-if ! { command -v node >/dev/null && new_enough node; } && ! new_enough "$DIR/node/bin/node"; then
-	curl -fsSL --retry 5 --retry-all-errors -o /tmp/pim-node.tar.xz https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz
-	echo "${NODE_SHA256}  /tmp/pim-node.tar.xz" | sha256sum -c - >/dev/null
-	rm -rf "$DIR/node" && mkdir -p "$DIR/node"
-	tar -xJf /tmp/pim-node.tar.xz -C "$DIR/node" --strip-components=1
-	rm -f /tmp/pim-node.tar.xz
-fi
-
-curl -fsSL --retry 5 --retry-all-errors "$PIM_URL/pim-computer.ts" -o "$DIR/pim-computer.ts"
-printf 'PIM_URL=%s\\nPIM_COMPUTER_TOKEN_FILE=%s\\nPIM_BROWSER_HEADFUL=1\\n' "$PIM_URL" "$DIR/token" >"$DIR/env"
-
-# Starts pim-computer in the desktop's session, with the Pim's newest copy when it can be had.
-cat >"$DIR/run" <<'RUN'
-#!/bin/bash
-DIR="$HOME/.pim-computer"
-[ -r /run/cua-desktop/desktop.env ] && { set -a; . /run/cua-desktop/desktop.env; set +a; }
-set -a; . "$DIR/env"; set +a
-export PATH="$DIR/node/bin:$PATH"
-curl -fsSL --max-time 30 "$PIM_URL/pim-computer.ts" -o "$DIR/next.ts" && mv "$DIR/next.ts" "$DIR/pim-computer.ts"
-exec node "$DIR/pim-computer.ts" --root "$HOME/pim"
-RUN
-chmod 755 "$DIR/run"
+[ -n "$TOKEN" ] || [ -s "$DIR/token" ] || { echo "This computer has no token for its Pim yet."; exit 0; }
 
 # One browser for the person and the agents: Chromium, however it's opened, uses pim-computer's profile, and says where DevTools is.
 FLAGS="\${XDG_CONFIG_HOME:-$HOME/.config}/chromium-flags.conf"
 mkdir -p "$(dirname "$FLAGS")"
 grep -q -- '--user-data-dir=' "$FLAGS" 2>/dev/null || printf -- '--user-data-dir=%s\\n--remote-debugging-port=0\\n' "$DIR/browser" >>"$FLAGS"
 
-if systemctl --user show-environment >/dev/null 2>&1; then
-	mkdir -p "$HOME/.config/systemd/user"
-	cat >"$HOME/.config/systemd/user/pim-computer.service" <<'UNIT'
-[Unit]
-Description=pim-computer: this computer's connection to its Pim
-After=graphical-session.target
-PartOf=graphical-session.target
-
-[Service]
-ExecStart=%h/.pim-computer/run
-Restart=always
-RestartSec=5
-# The browser it starts is the person's too: restarting pim-computer leaves it open, and the new one uses it.
-KillMode=process
-
-[Install]
-WantedBy=graphical-session.target
-UNIT
-	systemctl --user daemon-reload
-	systemctl --user enable pim-computer.service >/dev/null 2>&1
-	if [ -n "$TOKEN" ]; then systemctl --user restart pim-computer.service; else systemctl --user start pim-computer.service; fi
-else
-	# No systemd for the user: a loop in the background, which a new token replaces.
-	running=false
-	if [ -s "$DIR/loop.pid" ] && kill -0 "$(cat "$DIR/loop.pid")" 2>/dev/null; then running=true; fi
-	if $running && [ -n "$TOKEN" ]; then kill -- "-$(cat "$DIR/loop.pid")" 2>/dev/null || true; running=false; fi
-	if ! $running; then
-		setsid bash -c 'echo $$ >"$HOME/.pim-computer/loop.pid"; while :; do "$HOME/.pim-computer/run"; sleep 5; done' >>"$DIR/log" 2>&1 </dev/null &
-	fi
-fi
-echo "pim-computer is set up."
+curl -fsSL --retry 5 "$PIM_URL/install.sh" | PIM_URL="$PIM_URL" PIM_COMPUTER_TOKEN="$TOKEN" sh -s -- computer --root "$HOME/pim" --headful --desktop
 `;
 }
 
@@ -296,11 +248,232 @@ export async function serve(options: Options): Promise<never> {
 	}
 }
 
+/** The sandbox runtime each kind needs, as `cua runtime doctor` names it. */
+const RUNTIMES: Record<string, string> = { vm: "qemu", container: "container", microvm: "firecracker" };
+
+/** Where Cua's command is: as named, on the PATH, or where Cua's installer puts it; null where it isn't. */
+async function findCua(named: string): Promise<string | null> {
+	const os = await import("node:os");
+	const places = named.includes("/") ? [named] : [...(process.env.PATH ?? "").split(":"), path.join(os.homedir(), ".local", "bin")].filter(Boolean).map((dir) => path.join(dir, named));
+	for (const place of places) {
+		if (await fs.access(place, constants.X_OK).then(() => true, () => false)) return place;
+	}
+	return null;
+}
+
+/** Whether the Pim knows the token, asking without taking work: null when it does, and otherwise what's wrong. */
+async function checkToken(url: string, token: string): Promise<string | null> {
+	const response = await fetch(new URL("/api/computer-host/sync", url), {
+		method: "POST",
+		headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+		body: JSON.stringify({ results: [], check: true }),
+		signal: AbortSignal.timeout(30_000),
+	}).catch((error: Error) => error);
+	if (response instanceof Error) return `Couldn't reach ${url}: ${response.cause instanceof Error ? response.cause.message : response.message}`;
+	if (response.status === 401) return "The Pim doesn't know this token: pair the host again in Settings → Deployment → Computers, and use the command it gives.";
+	if (!response.ok) return `${url} answered ${response.status}: is it a Pim, and is this pim-host as new as it?`;
+	return null;
+}
+
+/** Settings as the options and environment give them, with their defaults. */
+function readOptions(values: Record<string, string | boolean | undefined>, env: Record<string, string | undefined>, token: string): Options {
+	const url = (values.url as string | undefined) ?? env.PIM_URL ?? "";
+	return {
+		url,
+		token,
+		computerUrl: (values["computer-url"] as string | undefined) ?? env.PIM_COMPUTER_URL ?? url,
+		image: (values.image as string | undefined) ?? env.PIM_HOST_IMAGE ?? DEFAULT_IMAGE,
+		kind: (values.kind as string | undefined) ?? env.PIM_HOST_KIND ?? "vm",
+		cpu: Number((values.cpu as string | undefined) ?? env.PIM_HOST_CPU ?? 4),
+		memory: (values.memory as string | undefined) ?? env.PIM_HOST_MEMORY ?? "8GB",
+		cua: (values.cua as string | undefined) ?? env.PIM_CUA ?? "cua",
+		intervalMs: 5_000,
+	};
+}
+
+const hostService = async (): Promise<Service> => {
+	const os = await import("node:os");
+	return { name: "pim-host", description: "pim-host: keeps the computers of everyone on a Pim", dir: path.join(os.homedir(), ".pim-host") };
+};
+
+/** What `install` wrote for the service to run with, as the environment. */
+async function installedEnv(service: Service): Promise<Record<string, string>> {
+	const written = await fs.readFile(path.join(service.dir, "env"), "utf8").catch(() => "");
+	return Object.fromEntries([...written.matchAll(/^(\w+)='(.*)'$/gm)].map(([, name, value]) => [name!, value!.replaceAll(`'"'"'`, "'")]));
+}
+
+/**
+ * `pim-host install`: checks that this machine can keep computers, with
+ * KVM and Cua's runtime for their kind, setting the runtime up where Cua
+ * can, and that the Pim knows the token; then runs pim-host as the user's
+ * service from boot (see pim-computer.ts's `Service`), with the options
+ * given, and a `pim-host` command to manage it. Running it again sets it up
+ * again, and restarts it if what it runs with changed.
+ */
+async function install(values: Record<string, string | boolean | undefined>): Promise<void> {
+	const os = await import("node:os");
+	const { startService, writeChanged, installCommand, shellQuote } = await import("./pim-computer.ts");
+	const say = (line: string) => console.log(line);
+	if (process.platform !== "linux") throw new Error("pim-host runs on Linux: Cua runs Omarchy as a VM with KVM.");
+	const service = await hostService();
+	const dir = service.dir;
+	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+	const tokenFile = path.join(dir, "token");
+	const token = (values.token as string | undefined) || process.env.PIM_HOST_TOKEN || (await fs.readFile(tokenFile, "utf8").catch(() => "")).trim();
+	const options = readOptions(values, process.env, token);
+	if (!options.url) throw new Error("Give your Pim's address with --url.");
+	if (!token) throw new Error("Give the token from Settings → Deployment → Computers with --token.");
+
+	if (options.kind === "vm") {
+		const kvm = await fs.stat("/dev/kvm").catch(() => null);
+		if (!kvm) throw new Error("This machine has no KVM (/dev/kvm), which Omarchy's VMs need: use a bare-metal machine, or a cloud VM with nested virtualization turned on.");
+		if (!(await fs.access("/dev/kvm", constants.R_OK | constants.W_OK).then(() => true, () => false))) {
+			throw new Error(`You can't use KVM yet: add yourself to its group (sudo usermod -aG kvm ${os.userInfo().username}), sign in again, and run this again.`);
+		}
+		say("KVM: yes.");
+	}
+
+	let cuaPath = await findCua(options.cua);
+	if (!cuaPath && options.cua === "cua") {
+		say("Installing Cua's command…");
+		const { spawnSync } = await import("node:child_process");
+		spawnSync("sh", ["-c", CUA_INSTALL], { stdio: ["ignore", "inherit", "inherit"] });
+		cuaPath = await findCua("cua");
+	}
+	if (!cuaPath) throw new Error(`Cua's command isn't there (${options.cua}). Install it: ${CUA_INSTALL}`);
+	const located = { ...options, cua: cuaPath };
+	say(`Cua: ${(await cua(located, ["--version"])).stdout.trim()}.`);
+
+	// Cua's runtime for this kind of computer, which `cua runtime setup` provisions where it can (with sudo, asking for no password).
+	const runtime = RUNTIMES[options.kind];
+	if (runtime) {
+		type Backend = { backend: string; ready: boolean; provisionable: boolean; detail: string; missing: string[] };
+		const doctor = async () => {
+			const run = await cua(located, ["runtime", "doctor", "--json"]);
+			return ((JSON.parse(run.stdout || "{}") as { backends?: Backend[] }).backends ?? []).find((backend) => backend.backend === runtime);
+		};
+		let backend = await doctor();
+		if (backend && !backend.ready && backend.provisionable) {
+			say(`Setting up Cua's ${runtime} runtime…`);
+			await cua(located, ["runtime", "setup", runtime]);
+			backend = await doctor();
+		}
+		if (backend && !backend.ready) {
+			throw new Error(`Cua's ${runtime} runtime isn't ready: ${backend.detail}${backend.missing.length ? ` (missing: ${backend.missing.join(", ")})` : ""}. Run \`cua runtime setup ${runtime}\`, which uses sudo, then run this again.`);
+		}
+		say(`Cua's ${runtime} runtime: ready.`);
+	}
+
+	const problem = await checkToken(options.url, token);
+	if (problem) throw new Error(problem);
+	say(`${options.url} knows this host's token.`);
+
+	// The programs live in the folder, where `run` updates them; ones run from elsewhere are copied there.
+	const program = path.join(dir, "pim-host.ts");
+	const self = realpathSync(process.argv[1]!);
+	if (self !== program) {
+		await fs.copyFile(self, program);
+		await fs.copyFile(path.join(path.dirname(self), "pim-computer.ts"), path.join(dir, "pim-computer.ts"));
+	}
+	const settings: [string, string | undefined][] = [
+		["PIM_URL", options.url],
+		["PIM_HOST_TOKEN_FILE", tokenFile],
+		["PIM_CUA", cuaPath],
+		["PIM_COMPUTER_URL", values["computer-url"] as string | undefined],
+		["PIM_HOST_IMAGE", values.image as string | undefined],
+		["PIM_HOST_KIND", values.kind as string | undefined],
+		["PIM_HOST_CPU", values.cpu as string | undefined],
+		["PIM_HOST_MEMORY", values.memory as string | undefined],
+	];
+	const changed = [
+		await writeChanged(tokenFile, `${token}\n`, 0o600),
+		await writeChanged(
+			path.join(dir, "env"),
+			settings
+				.filter(([, value]) => value)
+				.map(([name, value]) => `${name}=${shellQuote(value!)}\n`)
+				.join(""),
+			0o600,
+		),
+		await writeChanged(
+			path.join(dir, "run"),
+			`#!/bin/sh
+# Starts pim-host with the Pim's newest copy, when it can be had.
+DIR=${shellQuote(dir)}
+set -a; . "$DIR/env"; set +a
+for file in pim-host.ts pim-computer.ts; do
+	curl -fsSL --max-time 30 "$PIM_URL/$file" -o "$DIR/next-$file" && mv "$DIR/next-$file" "$DIR/$file"
+done
+exec ${shellQuote(process.execPath)} "$DIR/pim-host.ts"
+`,
+			0o755,
+		),
+	].some(Boolean);
+	const { kind, atBoot } = await startService(service, changed);
+	const bin = await installCommand("pim-host", program);
+	say(`pim-host ${VERSION} is installed and running: it keeps computers for ${options.url}, made from ${options.image}.`);
+	if (kind === "systemd" && !atBoot) {
+		say(`It stops when you sign out, and so would the computers it starts again. To run it from boot: sudo loginctl enable-linger ${os.userInfo().username}`);
+	}
+	if (kind === "loop") say("This machine has no systemd for you, so it runs in the background until the machine restarts: run `pim-host install` again then.");
+	say(`Settings → Deployment → Computers shows it connected in a few seconds. Manage it with: pim-host status | logs | update | uninstall${bin ? ` (add ${bin} to your PATH)` : ""}`);
+}
+
+/** `pim-host status`: whether it runs, whether the Pim knows its token, and the computers it keeps. */
+async function status(): Promise<void> {
+	const { serviceState } = await import("./pim-computer.ts");
+	const service = await hostService();
+	const state = await serviceState(service);
+	if (!state) {
+		console.log("pim-host isn't installed here: run the command Settings → Deployment → Computers gives.");
+		process.exitCode = 1;
+		return;
+	}
+	const env = await installedEnv(service);
+	const token = (await fs.readFile(env.PIM_HOST_TOKEN_FILE ?? path.join(service.dir, "token"), "utf8").catch(() => "")).trim();
+	const options = readOptions({}, env, token);
+	const how = { systemd: "a systemd user service", launchd: "a launchd agent", loop: "a loop in the background" }[state.kind];
+	console.log(`pim-host ${VERSION}, for ${options.url}: ${state.running ? "running" : "not running"}, as ${how}.`);
+	console.log((await checkToken(options.url, token)) ?? "The Pim knows its token.");
+	const kept = await machines(options).catch((error: Error) => error);
+	if (kept instanceof Error) console.log(kept.message);
+	else console.log(`Computers (${kept.length}), made from ${options.image}:${kept.map((machine) => `\n  ${machine.name}  ${machine.running ? "running" : "stopped"}`).join("") || " none yet"}`);
+	if (!state.running) process.exitCode = 1;
+}
+
+/** `pim-host uninstall`: stops it and removes it; the computers it keeps go on running, as they are. */
+async function uninstall(): Promise<void> {
+	const os = await import("node:os");
+	const { removeService } = await import("./pim-computer.ts");
+	const service = await hostService();
+	const env = await installedEnv(service);
+	await removeService(service);
+	await fs.rm(service.dir, { recursive: true, force: true });
+	await fs.rm(path.join(os.homedir(), ".local", "bin", "pim-host"), { force: true });
+	const kept = await machines(readOptions({}, env, "")).catch(() => []);
+	console.log("pim-host is uninstalled: this machine no longer keeps computers for your Pim. Unpair it in Settings → Deployment → Computers too.");
+	if (kept.length) {
+		console.log(`The ${kept.length} computers it kept are still here, as they were, and nothing starts them again; to remove one with everything on it: cua sb rm <name>`);
+	}
+}
+
 const USAGE = `pim-host ${VERSION}: keeps the computers of everyone on your Pim, on this machine, with Cua.
+
+  curl -fsSL https://pim.example.com/install.sh | sh -s -- host pimh_…
+
+installs it as your service, which keeps it running from boot, with the command Settings → Deployment →
+Computers gives, after checking for KVM and Cua (and installing Cua). Then:
+
+  pim-host status      Whether it's running, whether your Pim knows it, and the computers it keeps
+  pim-host logs        What it did lately
+  pim-host update      Restart it with your Pim's newest pim-host
+  pim-host uninstall   Stop it and remove it (the computers stay)
+
+Or run it yourself:
 
   PIM_URL=https://pim.example.com PIM_HOST_TOKEN=pimh_… node pim-host.ts
 
-Options (or the environment variables in brackets):
+Options, for install or running it (or the environment variables in brackets):
   --url <address>           Your Pim's address (PIM_URL)
   --token <token>           The token from Settings → Deployment → Computers (PIM_HOST_TOKEN, or a file named by PIM_HOST_TOKEN_FILE)
   --computer-url <address>  The Pim's address as the computers reach it, when it isn't --url (PIM_COMPUTER_URL)
@@ -308,15 +481,12 @@ Options (or the environment variables in brackets):
   --kind <kind>             vm, container or microvm, as cua sb create takes it (PIM_HOST_KIND; vm)
   --cpu <count>             Each computer's vCPUs (PIM_HOST_CPU; 4)
   --memory <size>           Each computer's memory (PIM_HOST_MEMORY; 8GB)
-  --cua <path>              Cua's command (PIM_CUA; cua)
-
-It needs Cua's cua command (curl -fsSL https://cua.ai/install.sh | sh -s -- --cli-only --no-onboarding)
-and, for Omarchy, KVM: check with cua runtime doctor.`;
+  --cua <path>              Cua's command (PIM_CUA; cua)`;
 
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
-	const fs = await import("node:fs/promises");
-	const { values } = parseArgs({
+	const { values, positionals } = parseArgs({
+		allowPositionals: true,
 		options: {
 			url: { type: "string" },
 			token: { type: "string" },
@@ -329,31 +499,44 @@ async function main(): Promise<void> {
 			help: { type: "boolean" },
 		},
 	});
+	const command = positionals[0];
+	if (command && !values.help) {
+		const commands: Record<string, () => Promise<void>> = {
+			install: () => install(values),
+			status,
+			logs: async () => (await import("./pim-computer.ts")).showLog(await hostService()),
+			update: async () => {
+				if (!(await (await import("./pim-computer.ts")).restartService(await hostService()))) throw new Error("pim-host isn't installed here.");
+				console.log("pim-host restarted with your Pim's newest copy.");
+			},
+			uninstall,
+		};
+		if (!commands[command]) {
+			console.log(USAGE);
+			process.exit(1);
+		}
+		try {
+			await commands[command]();
+		} catch (error) {
+			console.error((error as Error).message);
+			process.exit(1);
+		}
+		return;
+	}
 	const env = process.env;
 	const tokenFile = env.PIM_HOST_TOKEN_FILE;
-	const url = values.url ?? env.PIM_URL;
-	const token = values.token ?? env.PIM_HOST_TOKEN ?? (tokenFile ? (await fs.readFile(tokenFile, "utf8")).trim() : undefined);
-	if (values.help || !url || !token) {
+	const token = (values.token as string | undefined) ?? env.PIM_HOST_TOKEN ?? (tokenFile ? (await fs.readFile(tokenFile, "utf8")).trim() : undefined);
+	const options = readOptions(values, env, token ?? "");
+	if (values.help || !options.url || !token) {
 		console.log(USAGE);
 		process.exit(values.help ? 0 : 1);
 	}
-	const options: Options = {
-		url,
-		token,
-		computerUrl: values["computer-url"] ?? env.PIM_COMPUTER_URL ?? url,
-		image: values.image ?? env.PIM_HOST_IMAGE ?? DEFAULT_IMAGE,
-		kind: values.kind ?? env.PIM_HOST_KIND ?? "vm",
-		cpu: Number(values.cpu ?? env.PIM_HOST_CPU ?? 4),
-		memory: values.memory ?? env.PIM_HOST_MEMORY ?? "8GB",
-		cua: values.cua ?? env.PIM_CUA ?? "cua",
-		intervalMs: 5_000,
-	};
 	const version = await cua(options, ["--version"]);
 	if (version.code !== 0) {
-		console.error(`Cua's cua command isn't there (${options.cua}). Install it: curl -fsSL https://cua.ai/install.sh | sh -s -- --cli-only --no-onboarding`);
+		console.error(`Cua's cua command isn't there (${options.cua}). Install it: ${CUA_INSTALL}`);
 		process.exit(1);
 	}
-	log(`Keeping computers for ${url}, made from ${options.image} with ${version.stdout.trim()}.`);
+	log(`Keeping computers for ${options.url}, made from ${options.image} with ${version.stdout.trim()}.`);
 	await serve(options);
 }
 

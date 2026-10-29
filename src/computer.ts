@@ -497,8 +497,13 @@ export class Computer {
 	 * that reader's copy, made before anything is awaited: anything JSON would
 	 * convert (a getter, `toJSON`, a date) is refused, not converted. The host
 	 * checks the arguments against the tool's curated schema.
+	 *
+	 * `fence` is the caller's last word on the call: it is read once more
+	 * after every wait, in the same synchronous turn as the send, so nothing
+	 * can come between it and the call leaving. A reason it gives refuses the
+	 * call, unsent.
 	 */
-	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS): Promise<NativeOutcome> {
+	async native(tool: unknown, args: unknown, timeoutMs = NATIVE_CALL_MS, fence?: () => string | null): Promise<NativeOutcome> {
 		const refuse = (why: string) => new HttpError(409, `${why}, so no native-app call was sent.`);
 		if (this.#nativeApps() !== true) throw refuse("Native-app calls are off for this computer");
 		if (this.#selected() !== "cua") throw refuse("Only an operator's Cua computer takes native-app calls");
@@ -512,10 +517,10 @@ export class Computer {
 		if (!request) throw new HttpError(400, "The native-app call names no curated tool, or its arguments aren't a plain JSON object of a bounded size, so nothing was sent.");
 		// Spent now, whatever comes: the request's one call ID is taken.
 		trace.native = true;
-		return this.#call<NativeOutcome>(NATIVE_TOOL_OP, request, timeoutMs);
+		return this.#call<NativeOutcome>(NATIVE_TOOL_OP, request, timeoutMs, true, fence);
 	}
 
-	async #call<T>(op: string, args: Record<string, unknown>, timeoutMs: number, counts = true): Promise<T> {
+	async #call<T>(op: string, args: Record<string, unknown>, timeoutMs: number, counts = true, fence?: () => string | null): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
 		const refused = this.#refusal(op);
 		if (refused) throw refused;
@@ -532,6 +537,9 @@ export class Computer {
 		if (late) throw late;
 		const socket = this.#socket();
 		if (!socket) throw new HttpError(503, "The computer is offline: pim-computer isn't connected. Ask the person to start it again.");
+		// The caller's fence, with no await from here to the send.
+		const fenced = fence?.();
+		if (fenced) throw new HttpError(409, `${fenced}, so no native-app call was sent.`);
 		if (counts) this.#use();
 		const id = crypto.randomUUID();
 		// A request the control state admitted (see ./computer-control-runtime.ts) learns what became of its calls.

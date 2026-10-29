@@ -1534,6 +1534,78 @@ describe("a space whose operator chose its Cua VM", () => {
 			expect(elsewhere).toEqual([]);
 		});
 
+		it("fences the send itself: a chat deleted, or its agent removed, while the computer wakes after admission sends nothing; a stop or a reset then is after the claim, and the call goes once", async () => {
+			const chat = async (agent?: string) => (await desk.post<{ id: string }>("/sessions", agent ? { agent } : {})).body.id;
+			const statusOf = async (approval: Approval) => (await bindings()).find((binding) => binding.id === (approval.args as { binding: string }).binding)?.status;
+			const nativeSent = () => deskFixture.connections.flatMap((connection) => connection.received).filter((message) => message.includes('"op":"native_tool"')).length;
+
+			/** The agent asks to click in `session`; once approved, the decision waits on the computer's waking while `change` is made, then the wake goes on. */
+			async function whileWaking(session: string, x: number, change: () => Promise<unknown>) {
+				const turning = waits().start(`turn: click ${x}`, () => {
+					faux.setResponses([() => toolUse("desktop_click", { pid: 4242, x, y: 1 }), () => toolUse("send_to_user", { message: "Ok." })]);
+					return desk.post(`/sessions/${session}/messages`, { content: `Click ${x}`, wait: true });
+				});
+				const approval = await desk.pending();
+				await desk.within((instance) => instance.computer.disconnect("Asleep"));
+				const { opened, open: release } = waits().gate("bridge handshake");
+				handshake = opened;
+				held = 0;
+				try {
+					const deciding = desk.decide(approval.id);
+					await waits().watch("held handshake", vi.waitFor(() => expect(held).toBe(1)));
+					// By now the call is claimed and admitted, and waits for the computer.
+					expect(await statusOf(approval)).toBe("claimed");
+					expect((await natives()).filter((request) => request.requestId === `approval:${approval.id}`)).toHaveLength(1);
+					await change();
+					if (handshake === opened) handshake = null;
+					release();
+					const decided = await deciding;
+					await turning.catch(() => undefined);
+					faux.setResponses([]);
+					return { approval, result: (decided.body as Approval).result };
+				} finally {
+					if (handshake === opened) handshake = null;
+					release();
+				}
+			}
+
+			const executed = upstream.executed.length;
+			const sentBefore = nativeSent();
+
+			// Deleted through the person's route while the computer wakes: nothing is sent.
+			const deleted = await chat();
+			const gone = await whileWaking(deleted, 21, async () => expect((await desk.api(`/sessions/${deleted}`, { method: "DELETE" })).status).toBe(200));
+			expect(gone.result).toMatch(NOT_SENT);
+			expect(await statusOf(gone.approval)).toBe("closed");
+			expect((await natives()).find((request) => request.requestId === `approval:${gone.approval.id}`)).toMatchObject({ status: "rejected" });
+
+			// The chat's agent removed through the person's route while the computer wakes: the chat no longer talks as it, and nothing is sent.
+			const helper = (await desk.post<{ id: string }>("/agents", { name: "Desk helper", instructions: "Helps at the desk." })).body.id;
+			const helped = await chat(helper);
+			const orphaned = await whileWaking(helped, 22, async () => expect((await desk.api(`/agents/${helper}`, { method: "DELETE" })).status).toBe(200));
+			expect(orphaned.result).toMatch(NOT_SENT);
+			expect(await statusOf(orphaned.approval)).toBe("closed");
+			expect(upstream.executed.length).toBe(executed);
+			expect(nativeSent()).toBe(sentBefore);
+
+			// Stopped, or reset, while the computer wakes: both are the harness's, committed after the claim, which was the commit point; the call goes, once.
+			const stopped = await chat();
+			const stop = await whileWaking(stopped, 23, async () => expect((await desk.post(`/sessions/${stopped}/abort`)).status).toBe(200));
+			const reset = await chat();
+			const resetting = await whileWaking(reset, 24, async () => expect((await desk.post(`/sessions/${reset}/reset`)).status).toBe(200));
+			for (const { approval, result } of [stop, resetting]) {
+				expect(result).toBe("done");
+				expect(await statusOf(approval)).toBe("closed");
+				expect((await natives()).find((request) => request.requestId === `approval:${approval.id}`)).toMatchObject({ status: "completed" });
+			}
+			expect(upstream.executed.slice(executed).map((call) => call.arguments)).toEqual([
+				{ pid: 4242, x: 23, y: 1 },
+				{ pid: 4242, x: 24, y: 1 },
+			]);
+			expect(nativeSent()).toBe(sentBefore + 2);
+			expect(elsewhere).toEqual([]);
+		});
+
 		it("is off in Pim's own space, the preview's, whatever its environment tries: no tool, no native call, not even from a chat asking for one", async () => {
 			// The preview's Pim (preview/worker.ts) keeps Pim's own `nativeDesktop`; the tests' Pim is the only one that says otherwise.
 			const previews = (env as unknown as { PREVIEW_PIM: DurableObjectNamespace<PreviewPim> }).PREVIEW_PIM;

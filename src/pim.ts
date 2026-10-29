@@ -593,23 +593,29 @@ export class Pim extends DurableAgent<Env> {
 	 * binding; anything after may have run.
 	 *
 	 * A chat's deletion and its agent are Pim's own records, not the harness's,
-	 * so they aren't on the commit line the claim is: a deletion marked after
-	 * the authority read them, while the claim commits, would otherwise not
-	 * stop the call. Both are read again here, with no await before the
-	 * control state's synchronous admission, so a deletion marked before that
-	 * admission sends nothing, and one marked after it comes after the send.
+	 * so they aren't on the commit line the claim is. They are checked here,
+	 * before admission, and again as the computer's fence, in the same turn as
+	 * the call is sent, after every wait for the computer: a deletion or an
+	 * agent's removal before the send leaves it unsent, and one after it comes
+	 * after the send. A stop or reset of the chat is the harness's, ordered by
+	 * the claim's commit: before it, nothing is claimed; after it, the call is
+	 * taken as possibly sent, and goes.
 	 */
 	async #desktopSend(binding: NativeBinding, session: string, requestId: string, approvalId?: string): Promise<NativeOutcome> {
 		const { conversationId, agentId, runAnchor } = binding.identity;
-		if (conversationId !== session || this.#roleOf(session).agent.id !== agentId) {
-			throw new ControlRefused("identity", "the call's chat or agent isn't the one asking");
-		}
-		if (this.store.deletedSessions().has(session)) throw new ControlRefused("stopped", "the call's chat was deleted");
+		const fence = () =>
+			conversationId !== session || this.#roleOf(session).agent.id !== agentId
+				? "the call's chat or agent isn't the one it was bound for"
+				: this.store.deletedSessions().has(session)
+					? "the call's chat was deleted"
+					: null;
+		const early = fence();
+		if (early) throw new ControlRefused("identity", early);
 		return this.#controlled(
 			session,
 			requestId,
 			() =>
-				this.computer.native(binding.tool, binding.arguments).catch((error: unknown) => {
+				this.computer.native(binding.tool, binding.arguments, undefined, fence).catch((error: unknown) => {
 					if (currentTrace()?.sent === false) throw new ControlRefused("not_sent", errorMessage(error));
 					throw error;
 				}),

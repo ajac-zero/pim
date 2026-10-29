@@ -1,57 +1,34 @@
-# Starting the Cua computer from the installer: a plan for review
+# Native-app calls on a Cua VM: the host design, for review
 
-This page proposes the smallest change to the evaluation installer (`computer/cua-host/eval-install/`, `docs/cua-eval-install.md`) that would start the desktop endpoint with `--native on`. It also states what spacesd's token really authorizes, how the credential would be provisioned, rotated and revoked, how descriptor 3 would be qualified on a real kernel, and an ordinary smoke test that doesn't depend on any of it. **It is a plan. Nothing here is implemented in the installer, applied, provisioned or run.** Pim's `nativeDesktop()` stays false (`src/pim.ts`), so no agent is offered a native-app tool whatever the host does. Five decisions are Groves's (see "Decisions awaiting Groves"); nothing below assumes their answers. **Accepting that same-user processes can see the credential is not accepting that they can act past human control**: the two are separate decisions (see "Approvals, human control and the agent-owned machine"), and human takeover is unavailable today.
+This page is source and design only. **Groves rejected the earlier proposal**: spacesd's root token as a file of the desktop account, and spacesd running as that account ("placement A" for native calls). It is kept below only as a record. In its place, this page compares a minimal protected-account design: spacesd and its credential outside the desktop's UID, and native calls brokered by the trusted bridge account over a fixed nine-operation interface.
+
+**Nothing here is implemented or provisioned:** no new account, service, socket, token, configuration or process. Pim's `nativeDesktop()` stays false (`src/pim.ts`), so no agent is offered a native-app tool. **Human takeover is unavailable, and nothing here is a takeover safety claim.** The ordinary smoke test, which doesn't depend on any of this, is now its own page (`docs/cua-ordinary-smoke-plan.md`).
+
+## Executive decision (proposed)
+
+- **Adopt as the design to qualify:** spacesd in its own non-root account; the token readable only by that account and the bridge's; native calls executed by a broker inside the bridge process, which already holds the token for the viewer. The bridge demuxes `native_tool` away from pim-computer. The desktop account gets no token, socket or child for native calls.
+- **Don't build it yet.** Two upstream facts decide whether it works at all, and neither is verified:
+  - whether a separate-account spacesd can drive the desktop's X display;
+  - whether it can read the session's accessibility tree, given that D-Bus session buses normally admit only their own UID.
+
+  A bounded read-only qualification on a disposable VM comes first. If accessibility needs a grant on the desktop's session bus, that grant is a decision in its own right.
+- **Native calls stay off until then.** Even built, the design fences only Pim's own native calls, up to the broker's send. Same-user X11 clients and detached programs still act on the display through any pause, so human takeover stays unavailable.
 
 ## Where things stand
 
-- **The endpoint takes the setting.** `desktop.ts` starts the Cua computer only with `--native on --cua-computer <path> --cua-owner <space> --cua-origin <origin> --cua-credential <file>`. Without `--native`, or with `--native off`, it starts pim-computer as before. Partial, repeated or contradictory native settings stop it (`native-settings` or the usage), and a Cua computer that fails is never replaced by pim-computer (`docs/cua-bridge.md`). In-process stand-in tests cover it (`computer/cua-host/test/native-startup.test.ts`; `pnpm run test:native-standin` in `computer/cua-host`, 79 tests).
-- **Nothing passes it.** `renderUnits` (`eval-install/config.ts`) writes the desktop unit's `ExecStart` without `--native`, and no other service, script or variable gives it.
-- **spacesd is already installed with a viewer.** A configuration with `viewer` adds `pim-cua-spacesd.service`, running the pinned spacesd 0.7.0 as `pim-desktop`, on `127.0.0.1:3211`, with `--no-mcp --no-driver`, and its token in `/etc/pim-spacesd/token` (`pim-desktop`, `0600`, in root's `/etc/pim-spacesd`). `journal-provision.ts root-token` makes that file and the bridge's copy once; `start` refuses without it (`viewer-root-token-missing`). `docs/cua-viewer-first-startup.md` ("spacesd") records the decision to run spacesd as the desktop account ("Placement A").
-- **The bundle can't run the Cua computer.** `BUNDLE_SOURCES` (`eval-install/operator.ts`) holds `desktop.ts`, `cua-credential.ts` and `native-outcome.ts`, but not `cua-computer.ts`, `native-mcp.ts` or `native-mcp-upstream.ts`, which the Cua computer imports. A bundle missing a runtime import has already stopped an evaluation's endpoint once (`ERR_MODULE_NOT_FOUND`, `docs/cua-viewer-first-startup.md`).
+- **The desktop endpoint can start the Cua computer** (`desktop.ts --native on …`), a desktop-UID child that reads spacesd's token as descriptor 3 (`docs/cua-bridge.md`). That path belongs to the rejected placement. The code stays opt-in and unused: no installer step, service or variable passes `--native on`, and the protected design doesn't use it. Its descriptor-3 qualification (`computer/cua-host/qualification/`) stays unrun and is off this design's path.
+- **The viewer configuration already runs spacesd** (`pim-cua-spacesd.service`) as `pim-desktop` on `127.0.0.1:3211`, with `--no-mcp --no-driver`. Its token is `/etc/pim-spacesd/token` (`pim-desktop`, `0600`), and the bridge keeps a copy, `/etc/pim-bridge/viewer-root-token` (`pim-bridge`, `0600`), to mint view-only viewer tickets (`docs/cua-viewer-first-startup.md`, "spacesd").
+- **The bridge's relay** carries every message between Pim and pim-computer unchanged and parses none (`computer/cua-bridge.ts`).
+- **`createNativeDispatcher`** (`computer/cua-host/native-mcp.ts`) already does the host's side of a native call: one owner, the nine curated tools with tightened schemas, the pinned `tools/list` check, one driver session per run, one call per call ID, a run latched once unknown, and typed outcomes including `unknown`.
 
-## The proposed change
+## Why moving the file alone isn't enough
 
-One optional configuration field, three units' text and the bundle list. Nothing in Pim changes.
+A daemon that uses the token holds it in memory and reads it from a file at start, so both the file and the process must be beyond the desktop's UID. While spacesd runs as `pim-desktop`, any same-user process can:
+- read the token file spacesd reads at start;
+- stop spacesd and start its own with chosen arguments and data directory;
+- write spacesd's data directory.
 
-1. **Configuration.** An optional `"native": true`, accepted only beside `viewer` (it needs spacesd and its token file) and only as exactly `true`. Anything else, or `native` without `viewer`, is refused before anything changes (`config-native`). Absent, every rendered file is byte for byte what it is today.
-2. **The desktop unit.** With `native`, its `ExecStart` gains five settings after the ordinary ones, and nothing else in the unit changes:
-
-   ```
-   ExecStart=<node> <bundle>/computer/cua-host/desktop.ts --socket /run/pim-session/session.sock --root <workspace> --browser <browser> --pim-computer <bundle>/computer/pim-computer.ts --headful --native on --cua-computer <bundle>/computer/cua-host/cua-computer.ts --cua-owner <owner> --cua-origin <viewer.origin> --cua-credential /etc/pim-spacesd/token
-   ```
-
-   The owner is the configuration's `owner`, the space the bridge serves (`--space`). The origin is `viewer.origin`, spacesd's own `http://127.0.0.1:3211`. The credential is spacesd's own token file, which is already the desktop account's `0600` file with one name at a path with no links, as the endpoint requires. No new secret file is made.
-3. **The spacesd unit.** With `native`, its `ExecStart` drops exactly `--no-mcp`, so `/mcp` is served. `--no-driver` stays: by reading, it has no effect while the desktop services run (see "What `--no-driver` doesn't remove"). If the qualification finds `/mcp`'s `tools/list` empty with it, dropping it too is a reviewed follow-up, not a fallback. `--listen 127.0.0.1:3211`, `--quic-port 0`, `--cursor-probe false`, the token file and the data directory stay. Without `native` it is unchanged.
-4. **The bundle.** With `native`, `operator.ts bundle` also takes `computer/cua-host/cua-computer.ts`, `native-mcp.ts` and `native-mcp-upstream.ts`, and `BUNDLE` records it (a `native` line, as it records the viewer). The planner checks those files as it checks the rest (`bundle`). Without `native`, the bundle and its digest are unchanged.
-5. **The planner, `start`, `status` and `recover`.**
-   - The planner and `start` need nothing new: `start` already refuses without spacesd's token file (`viewer-root-token-missing`).
-   - The installer writes each unit itself, new, from `renderUnits`. Its `unit-check` reads back only `FragmentPath`, `DropInPaths`, `User` and `KillMode` (`checkUnits` in `install.ts`), not the text, so a unit root edited afterwards isn't caught. The proposal adds `ExecStart` to the properties it reads and compares it with the rendered line, so a native line where none was configured, a missing `--no-mcp`, or the reverse fails `unit-check`.
-   - `status` reports nothing new.
-   - `recover.ts` renders the desktop unit with `renderUnits`, so it follows the configuration it is given. A native configuration's unit can't be recovered as an ordinary one, and the reverse.
-6. **Tests**, all over synthetic VMs and stand-ins, as the installer's are now:
-   - Without `native`, the four units, the tmpfiles entry and the bundle list are byte for byte today's.
-   - With `native`:
-     - the desktop `ExecStart`, split as systemd splits it, gives `readEndpointArguments` exactly the five Cua settings above;
-     - the spacesd `ExecStart` differs from today's by exactly the removed `--no-mcp`;
-     - the bundle holds the three files;
-     - `unit-check` refuses an `ExecStart` that differs from the rendered one, in either direction;
-     - `native` without `viewer`, `false`, a string or an object is refused.
-
-A scratch check (not committed) rendered the `ExecStart` above for the documented example configuration and passed it to the real `readEndpointArguments`. It gave `cua` = program `/opt/pim-cua/bundle/computer/cua-host/cua-computer.ts`, owner `o_0123456789abcdefghijklmnop`, origin `http://127.0.0.1:3211`, credential `/etc/pim-spacesd/token`, and the same line without the native settings gave no `cua`.
-
-**Fixed accounts, paths and modes** (all already made by the installer or `root-token`; the change makes no new account, file or directory):
-
-| What | Owner | Mode | Made by |
-| --- | --- | --- | --- |
-| `/etc/pim-spacesd/` | root | `0755` | the installer (viewer) |
-| `/etc/pim-spacesd/token` (spacesd's token, also the Cua computer's credential) | `pim-desktop` | `0600` | `journal-provision.ts root-token`, once |
-| `/etc/pim-bridge/viewer-root-token` (the same value, the bridge's copy) | `pim-bridge` | `0600` | the same step |
-| `/run/pim-session/` | `pim-desktop:pim-session` | `2750` | tmpfiles.d |
-| `pim-cua-desktop.service`, `pim-cua-spacesd.service` | root | `0644` | the installer |
-
-**Startup order** stays `start`'s: the desktop endpoint, spacesd, the bridge, then Caddy. The endpoint checks the credential file when it starts and opens it again for each connection. The Cua computer makes no request until Pim's first native call, and Pim can make none before the bridge, which starts after spacesd. At boot both are enabled and may start in any order. A native call before spacesd is up fails its run's setup, which calls no tool, and is refused `unavailable` with nothing sent. Pim makes none anyway while `nativeDesktop()` is false.
-
-**What the change does on its own:** with Pim unchanged, the Cua computer serves the bridge exactly as pim-computer does, and `native_tool` never arrives. What it adds is spacesd's `/mcp` on loopback, reachable by everything that holds the token (next section), and a host process that holds the token in memory. By reading the source, the driver's tools are already reachable today over gRPC with the token, `--no-driver` notwithstanding (see "What `--no-driver` doesn't remove"). So it should be applied only together with an authorized qualification of the native path, not ahead of one.
+The only same-UID protection is Yama's `ptrace_scope` 1, which stops attaching to a non-descendant and so reading its `/proc/<pid>/mem`. It doesn't protect the file, which is the first thing read. So the credential is protected only if spacesd itself runs as another account.
 
 ## What spacesd's token authorizes
 
@@ -67,7 +44,7 @@ Read from [trycua/cua at `fca2193`](https://github.com/trycua/cua/tree/fca21937b
   - **Tickets:** the token mints tickets of any grant, including `ALLOW_ACTIVATION`, clipboard and files, for up to 24 hours (`services/system.rs` L962–1032). Their keys derive from the token (`auth.rs` L471–482).
   - **Relays:** `AttachRelay` and `DetachRelay` pass `require_root` for a token caller (`system.rs` L540–553, L931–960), so the token can attach spacesd to a relay of the caller's choosing.
   - **`Init`:** it can set a new token (`set_token`, L740–765), which locks out every other holder. That invalidates tickets and signed URLs but not open connections (it doesn't call `revoke_sessions`).
-- **`/mcp`, once the change drops `--no-mcp`, serves the whole Linux registry**, not the nine tools Pim curates (`cua-spacesd-desktop/src/lib.rs` L2418–2431 [`85ab80741b71`] → `platform-linux/src/tools/impl_.rs` L14609–14893 [`c67855ac30d6`]).
+- **`/mcp`, when served (without `--no-mcp`), carries the whole Linux registry**, not the nine tools Pim curates (`cua-spacesd-desktop/src/lib.rs` L2418–2431 [`85ab80741b71`] → `platform-linux/src/tools/impl_.rs` L14609–14893 [`c67855ac30d6`]).
   - **What it includes:**
     - `launch_app`, which runs `Command::new` on a caller's `name` or `launch_path` and arguments (`impl_.rs` L1910–1929, L2113–2115): `sh -c …` included;
     - `run_script`, on by default (`cua-driver-core/src/tool.rs` L1335–1395 [`afef86dc4e54`]);
@@ -89,201 +66,156 @@ Read from [trycua/cua at `fca2193`](https://github.com/trycua/cua/tree/fca21937b
 
 None of these binds anything else that holds the token.
 
-## Who holds it, and what descriptor 3 does and doesn't do
-
-Under placement A, spacesd runs as `pim-desktop`, so the token's authority over the guest is the desktop account's own, plus control of spacesd itself (tickets, relays, `Init`, `Shutdown`). Every process running as `pim-desktop` can read `/etc/pim-spacesd/token` directly, since it is that account's `0600` file, and call `127.0.0.1:3211` with it. That includes:
-- spacesd itself;
-- the desktop endpoint and the Cua computer (or pim-computer);
-- every command an agent's approved `shell` runs;
-- the browser pim-computer starts and the pages' downloads it saves;
-- every app launched in the session.
-
-Being the file's owner, any of them can also change or empty it. The endpoint's socket (`/run/pim-session/session.sock`, `0660`, `pim-desktop:pim-session`) is reachable by the same account and by `pim-bridge`. Anything as `pim-desktop` can connect to it, or run `cua-computer.ts` itself with the file as its descriptor 3.
-
-**Descriptor 3 is hygiene, not isolation.** It keeps the token out of the Cua computer's arguments, environment and logs, and out of the descriptors of the commands and browser it starts. It doesn't keep the token from any same-user process, which reads the file. Yama's `ptrace_scope` 1 (which the installer requires) stops a same-user process from reading another's memory unless it is its descendant, but that matters little while the file itself is readable.
-
-**Agent tools and approvals can't police same-user use of the bearer.** An approved `shell` command (`curl -H "authorization: Bearer $(cat /etc/pim-spacesd/token)" …`), a program it starts, or a page's download run later can use the token with no further approval. Pim's agents can already run anything as the desktop user through `shell` after its approval, and the token adds control of spacesd to that. A real boundary would need the token held by an account the agents aren't, with only the curated calls exposed to them. That is a new security boundary, not proposed here without Groves's decision.
-
 ## Approvals, human control and the agent-owned machine
 
-Three different things are easy to run together. Only the first two exist.
+Three different things are easy to run together. Only the first two exist, and the protected design changes neither the first nor the third.
 
-1. **Ordinary full agent OS access (exists).** Every agent of the space acts as `pim-desktop`. `shell`, once approved, or unasked where the person let it run, runs any command as that user, in a login shell, and may leave programs running detached (`src/extensions/files.ts`). Such a program outlives its approval, its chat and any later change of control. pim-computer passes the session's `DISPLAY` and `XAUTHORITY` to what it starts (`KEPT_ENVIRONMENT` in `desktop.ts`), so a command is a client of the person's X display. That X11 lets any client inject input (the XTEST extension) is general X11 behaviour and **not verified on the evaluation's Xvfb**. The spacesd token is one more same-user channel: the same OS authority, plus control of spacesd (tickets of any grant, `AttachRelay`, `Init`, `Shutdown`).
-2. **The curated-tool approval experience (exists, behind `nativeDesktop`).** Pim's approvals, its control state's admissions and lease, the run identity and the send fence decide whether **Pim** sends a given tool call, and record what it sent. They cover calls made through Pim's tools: `shell`, the file and browser tools, and the desktop tools where turned on. They are not consulted by spacesd, the driver, X11 or the kernel.
-3. **Global takeover exclusion (does not exist; unproven).** That while the person controls the desktop, nothing an agent started acts on it. Pim's control state can't give it: a takeover only closes Pim's own admissions and drops the lease, a command already sent may still run, and `inputQuiescence` is always `unproven` (`src/computer-control.ts`, `docs/computer-control-state.md`). No takeover or resume is exposed, and **human takeover is unavailable**.
+1. **Ordinary full agent OS access (exists).** Every agent of the space acts as `pim-desktop`.
+   - `shell`, once approved, or unasked where the person let it run, runs any command as that user and may leave programs running detached (`src/extensions/files.ts`). Such a program outlives its approval, its chat and any change of control.
+   - pim-computer passes the session's `DISPLAY` and `XAUTHORITY` to what it starts (`KEPT_ENVIRONMENT` in `desktop.ts`), so a command is a client of the person's X display. That such a client can inject input (XTEST, or `XSendEvent` as the driver itself uses) is general X11 behaviour, **not verified on the evaluation's Xvfb**.
+2. **The curated-tool approval experience (exists, behind `nativeDesktop`).** Pim's approvals, its control state's admissions and lease, the run identity, the send fence and, in the protected design, the broker's final check decide whether a given native call is sent, and record what was. spacesd, X11 and the kernel never consult them.
+3. **Global takeover exclusion (does not exist; unproven).** That while the person controls the desktop, nothing an agent started acts on it. A takeover in Pim's control state only closes Pim's own admissions and drops the lease. `inputQuiescence` is always `unproven` (`src/computer-control.ts`, `docs/computer-control-state.md`), no takeover or resume is exposed, and **human takeover is unavailable**.
 
-**Do same-user direct spacesd calls bypass Pim's approvals?** Yes. spacesd checks only the token. A process that reads it, such as one an approved command started or a program a page's download later ran, can call any service without any Pim approval. The approval that let a command run covered that command's text, not what it does afterwards.
+**Do same-user direct spacesd calls bypass Pim's approvals and a human-control pause?**
+- **Under placement A, yes, both.** Any same-user process reads the token, and spacesd checks nothing else.
+- **Under the protected design, they lose the token,** so direct spacesd calls fail (`401`).
+- **Same-user X11 clients and detached programs still bypass any pause.** They need no token: they act on the display as its user, and nothing on the VM consults Pim's control state or stops what is already running. The endpoint signals only the pim-computer it started, and the units use `KillMode=process`.
 
-**Do they bypass a human-control pause?** Yes, and so would any same-user process without the token. A pause, if one were exposed, closes Pim's admissions only. Nothing on the VM consults it, and nothing stops or signals what is already running: the endpoint signals only the pim-computer it started, and the units use `KillMode=process`. Under placement A that holds whether or not the native change is made, and, as far as the source shows, whether or not `/mcp` is on.
+**Agent-owned machine.** Pim's model for a Cua computer, as built, is a machine its agents act on with the desktop user's full authority through `shell`. The protected design fits it: it takes spacesd's control (tickets, relays, `Init`, `Shutdown`, the driver's whole registry) away from that user and keeps native calls behind Pim and the broker. It does not make the machine one the person can take back from the agents. **Accepting credential visibility, or removing it, is a separate question from takeover exclusion**, and this page claims neither takeover nor quiescence.
 
-**Compatibility with the agent-owned machine.** Pim's model for a Cua computer, as built, is a machine the agents share and act on with the desktop user's full authority through `shell`. Placement A's credential visibility is consistent with that: it adds control of spacesd, not new authority over the guest. It is **not** consistent with global takeover exclusion: with agents able to run arbitrary same-user programs, no Pim-side mechanism can keep them off the display while the person has it. **Accepting the first is not accepting the second.**
+## The protected-account design
 
-**Authority and revocation, by holder.** "Stops" means what ends that holder's authority, not what proves it ended.
+### Accounts, files and who holds the token
 
-| Holder | Authority | What Pim governs | What stops it |
-| --- | --- | --- | --- |
-| A desktop tool call through Pim | One curated call in its run's driver session | Approval (actions), admission, lease, run identity, send fence; once only; unknown latches and never replays | Denial, a stopped or deleted chat, or a closed admission before the send. A call already sent can't be recalled |
-| An approved `shell` command and everything it starts | All of `pim-desktop`'s: files, programs, network, the display, the spacesd token | Only whether Pim sends the command | Nothing in Pim. Its process ends by itself, or is killed on the VM (no Pim tool does that), or the VM is rebooted or discarded |
-| Any holder of the spacesd token | Every spacesd service, as `pim-desktop`, plus spacesd's own control | Nothing | spacesd stopped, or the token rotated by restart or `Init`, which any holder can do first. Tickets end with the token or spacesd. Discarding the VM ends all |
-| A ticket minted with the token | Its own grant, for up to 24 h; activation, clipboard or files if minted so | Only the viewer's own tickets, which the adapter mints view only | Token rotation or spacesd's stop |
-| The bridge (Pim's reach into the VM) | pim-computer's protocol | All of Pim's sends go through it | Stopping the bridge, or removing the preview's `CUA_BRIDGES` |
+| Holder | What | Can mint tickets, administer spacesd |
+| --- | --- | --- |
+| `pim-spacesd` (new system account, no login, in no other group) | Runs spacesd. Owns `/etc/pim-spacesd/token` (`0600`) in `/etc/pim-spacesd` (`0700`, `pim-spacesd`), and its data directory | Yes (it is spacesd) |
+| `pim-bridge` (exists) | `/etc/pim-bridge/viewer-root-token` (`0600`), already read for the viewer. Runs the broker | Yes: it holds the root token, as it already does for the viewer |
+| `pim-desktop` and every agent | No token file, no broker socket, no native child | No. It can reach `127.0.0.1:3211`, but every authenticated route answers `401`; `/health` and the static `/viewer` page need no token |
+| root | Everything | Yes |
 
-The only revocation that covers every row is **discarding the VM**. Stopping services leaves what they started.
+- **No root daemon by default.** Root would give spacesd every UID's authority (`ProcessService` switches users as root, `process/mod.rs` L301–340).
+- **The memory boundary:** another UID can't attach to spacesd, read its `/proc/<pid>/mem` or `environ`, or read its files, without `CAP_SYS_PTRACE` or root.
+- **What the desktop keeps:** it still owns its session and, presumably, Xvfb. It can stop the display and deny service; that is not new authority.
 
-## Decisions awaiting Groves
+### How a separate-account spacesd reaches the display (unverified)
 
-1. **Whose authority the native path carries.** Accept placement A for native calls: the token is known to every `pim-desktop` process, its reach is the desktop account's plus control of spacesd, and Pim's approvals cover only Pim's own tools. Or require a boundary first (placement B, or a curated proxy under another account). That needs a design and review of its own, and isn't drafted here.
-2. **Turning on `/mcp`.** This serves the whole driver registry over HTTP on loopback to every token holder, including `launch_app`, `run_script` and `set_config`. By reading, the same registry is already reachable over gRPC in today's viewer configuration (above). The driver's permission mode stays `standard` unless a policy is set. Whether to set a driver policy file (`CUA_DRIVER_POLICY_FILE`) or permission mode alongside is a further decision. Any such policy is process-wide, so it would also bind Pim's own calls.
-3. **Rotation in an evaluation.** The proposal below supports no rotation in place: revoking means discarding the VM. Rotating in place would need new reviewed tooling.
-4. **The token file's owner.** The desktop account owns its token file, so any same-user process can change or empty it, stopping the viewer and native calls; that is denial of service, not new authority. Making it root's `0640` with the desktop's group would stop that, but needs spacesd to accept it, and both the endpoint's and the Cua computer's credential checks to change (they require the user's own `0600` file). It doesn't stop reading.
-5. **Human takeover on a Cua space.** Required before activation, and separate from decision 1. Either:
-   - (a) human takeover stays unavailable on a space whose agents have `shell` or desktop tools, and nothing presents Pim's control state as keeping agents off the desktop; or
-   - (b) a boundary that could make takeover exclusion true is designed and proven first: agent processes and the token out of the person's session and account, and every agent process stopped or frozen, with that observed, before input is handed over.
+Read from the pinned source, not run. These decide whether the design works:
 
-   Neither is drafted, and nothing here enables takeover.
+- **X11 access:** `pim-spacesd` needs an X authorization for the desktop's display. Either the Xvfb `-auth` cookie is readable through a dedicated group, or the session grants `xhost +si:localuser:pim-spacesd`. Either makes `pim-spacesd` a full client of that display, which is the trusted direction, and gives the desktop nothing new. The driver discovers a cookie from the X server's `-auth` file only where it can read that file (`platform-linux/src/xauth.rs`). The viewer page already calls this grant untested ("Placement B").
+- **Input:** `click`, `type_text`, `press_key`, `hotkey` and `scroll` use X11 `XSendEvent` to a window (`platform-linux/src/input/mod.rs` [`f382aee62fce`]), which any authorized client can send. Terminal emulators are typed into through their pty master (`crate::tty`), which belongs to the desktop user, so **typing into a terminal will likely fail** from another UID. The MPX/uinput keyboard paths need `/dev/uinput` access, which is a device grant.
+- **Screenshots** (`get_window_state`'s image): MIT-SHM, with a segment the server creates and passes as a descriptor (`capture.rs` [`b2c04867dcfa`]). It is probably independent of the client's UID; unverified.
+- **Accessibility trees** (`get_window_state`): AT-SPI through `org.a11y.Bus` on the desktop's session bus, `/run/user/<uid>/bus` (`health_report.rs` [`fbdf341328c7`] L100–160). D-Bus session buses normally admit only their own UID, so **from `pim-spacesd` the trees will likely be empty** ("X11 input injection still works"). The fix is a bus policy admitting `pim-spacesd`, which gives it the desktop session's bus as a whole, and is a decision.
+- **Apps and windows:** `list_windows` and `bring_to_front` are X11 operations, and should work with the X grant. `list_apps` reads processes, which `/proc` shows across UIDs by default (`hidepid=0`).
 
-## Provisioning, rotation and revocation (proposal only)
+If the accessibility tree can't be had without a session-bus grant Groves rejects, `get_window_state` returns screenshots without trees, and the curated set shrinks or native calls stay off.
 
-- **Provisioning** is what it is now: `journal-provision.ts root-token`, as root, once, writes 32 random bytes as base64url to `/etc/pim-spacesd/token` and `/etc/pim-bridge/viewer-root-token`, each created exclusively. It never prints, logs or sends the value, and refuses if either file exists. The native change adds no file and no second value. No secret value appears in any configuration, script, unit, argument, variable, log or this page.
-- **What spacesd does with it.** The unit uses `--token-file`, which spacesd reads once at start (`cua-spacesd/src/main.rs` L611–612, L662 [`645e3ac49029`]). It handles only SIGTERM and Ctrl-C (L826–840) and has no reload, expiry or token-list API.
-  - **`--token-file` (the unit's mode):** replacing the file changes nothing until spacesd restarts. Any token holder can rotate the token in place with `Init`, which keeps open connections.
-  - **`--await-token-file`:** spacesd polls the file every 500 ms (`token_file.rs` L26 [`a900991c82bc`]), and replacing or emptying it drops every connection, tunnel and volume (`revoke_sessions`, `context.rs` L349–382 [`f0ac88edb9df`]). `Init` can't change the token in this mode (`system.rs` L673–684). It would close the `Init` lock-out, but it makes the desktop-owned file a live control: any same-user process can rotate or revoke at will.
-- **A running Cua computer keeps the token it read**, and file replacement is not revocation. The endpoint reopens the file for each connection, so only the next child reads a new value. The old one works for as long as spacesd accepts it.
-- **Revocation, proposed: discard the VM.** Nothing in the evaluation tooling restarts spacesd: `start` refuses a spacesd unit that has run and ended (`viewer-unit-state`), and `root-token` refuses existing files. So the fail-closed path is:
-  1. Stop the bridge, which ends Pim's reach.
-  2. Stop the desktop endpoint, which waits for the Cua computer's exit.
-  3. Stop spacesd.
-  4. Discard the VM.
+### The broker and the demux
 
-  Any call in flight at step 1 or 2 ends `unknown` in Pim, latches its run and is never replayed. **Limits:** until spacesd stops, every same-user process that read the token can still use it; tickets minted with it last until spacesd stops; and a stopped service is not a sign that nothing it started still runs (`docs/cua-eval-install.md`).
-- **Rotation in place, if Groves wants it later**, would be a new reviewed step run as root:
-  1. Stop the bridge, the desktop endpoint and spacesd, in that order.
-  2. Write a new value to both files, each as a new file renamed over the old in its root-owned directory, with the same owner and mode.
-  3. Start spacesd, the desktop endpoint and the bridge.
-  4. Change `start`'s spacesd rule to allow this one sequence.
+- **Where:** in the bridge process (`pim-bridge`), using `createNativeDispatcher` against `http://127.0.0.1:3211/mcp` with the bridge's existing token copy. There is no new socket, credential or desktop-owned child.
 
-  It doesn't remove the token from same-user processes: they read the new file.
+  **The alternative** is a broker process in `pim-spacesd`'s account behind a Unix socket only `pim-bridge`'s group can reach. It adds a socket, a group and a process, and changes nothing about who holds the token, because the bridge holds it for the viewer anyway. It would matter only if the viewer's ticket minting also moved out of the bridge.
+- **The interface** is the nine curated operations, as `createNativeDispatcher` already admits them, and nothing else. No `launch_app`, no `run_script`, no other driver tool, no gRPC, no ticket minting for native calls.
+- **The demux:**
+  - **What it adds:** the relay would parse what Pim sends only enough to recognize a call with op `native_tool`. It answers such calls itself through the broker and never forwards them to pim-computer.
+  - **Forged replies:** it records the IDs of native calls in flight. Any message from pim-computer naming one of them is dropped, and the session ends, so the untrusted side can't forge a native outcome.
+  - **Everything else** passes unchanged, both ways.
+  - **Pim's side:** `native_tool` stays answered by whatever Pim's link reaches. A bridge without the broker forwards it, and pim-computer answers `ENOSYS`, which Pim reads as `unknown`. So the bridge must declare the broker (in its `101` or `hello`), and Pim must refuse to send a native call to a bridge that doesn't.
 
-## Protection against wrong or partial settings, and no fallback
+### Request identity, the execution permit, and replay
 
-- **Configuration:** `native` other than `true`, or without `viewer`, is refused before anything changes. The units are rendered from the checked configuration only, and the proposed `ExecStart` comparison in `unit-check` would refuse a partial or edited `--native` line (today's check doesn't read `ExecStart`).
-- **The endpoint:**
-  - Partial, repeated or contradictory native settings stop it (`native-settings`, usage).
-  - An owner that isn't a space's identity (`cua-owner`), an origin that isn't exactly `https://host[:port]` or loopback `http://` (`cua-origin`), or a credential that isn't the desktop user's regular `0600` file with one name at a link-free path, of 1 to 4,097 bytes (`credential`), stops it before it listens.
-  - The Cua computer refuses another space's calls unsent (`identity`).
-- **No fallback:**
-  - A native endpoint never starts pim-computer instead: a Cua computer that can't start, refuses its credential, or fails before its hello leaves the connection closed, and Pim's call fails rather than reaching another computer.
-  - A refused endpoint exits 1 and its unit doesn't restart (`Restart=no`); `start` then refuses (`desktop-not-clean`), and the VM is rebooted or discarded.
-  - Pim never sends a native call to a Sprite or a paired computer (`docs/cua-native-mcp.md`).
+- **Authentication:** Pim's call reaches the bridge over the existing channel: TLS (Caddy, then the bridge's own certificate), the bridge's bearer token and the space check (`check` in `cua-bridge.ts`). The desktop side can't write into it, since the demux reads only Pim's half. While the broker is in the bridge, a signature on the permit adds no authenticity; it would if the broker were a separate process.
+- **The permit is the call, bound exactly:**
+  - Pim's frozen native request: owner, agent, run ID, call ID (the request ID) and the tool's arguments. The broker reads it once into its own frozen copy (`readNativeRequest`) and sends only that copy.
+  - The arguments' canonical SHA-256 (`canonical` in `native-mcp.ts`), the coordinator's epoch and lease, the bridge instance it is meant for, and a deadline.
 
-## Qualifying descriptor 3 (separately authorized; not run)
+  A permit that doesn't match exactly is refused unsent.
+- **Single use, bounded:**
+  - One permit per request ID. The coordinator never mints a request ID twice.
+  - The broker keeps the request IDs it has taken and the runs it latched, for its lifetime.
+  - The deadline is at most the call's own bound (60 s after Pim's send). Setup and the call keep their existing bounds (`setupMs` 10 s per request, `callMs` 60 s).
+- **Replay and epochs:**
+  - Each bridge start has a fresh instance ID, sent to Pim on connection, and a permit naming another instance is refused unsent. A restarted broker therefore can't take an earlier permit, and Pim doesn't re-send one.
+  - An `unknown` call latches its run in the binder, the coordinator and the broker. A reconnect reopens nothing, and nothing is replayed.
 
-No test starts a real child with a credential descriptor. The stand-in tests show the order of calls, not what a kernel does with an inherited descriptor. The qualification is in `computer/cua-host/qualification/`, outside every suite and the bundle. It is typechecked with the host (`tsconfig.json` includes it) and **has never been run**:
+### Authorization at the upstream send, and invalidation
 
-- **`fd3-inheritance.ts`** runs only with `--authorized-descriptor-qualification`, never as root, and only on Linux with `/proc/self/fd`.
-  - **Setup:** it makes a private `0700` temporary folder holding:
-    - a root folder;
-    - a never-run stand-in browser;
-    - a `0600` credential of synthetic bytes: `pim-fd3-qualification-` and 32 random hex digits, not a token of anything.
-  - **The endpoint:** the real `readEndpointArguments` and `createDesktopEndpoint`, with the real `spawn` and credential checks. `--cua-computer` names `fd3-child.ts`. The connection is in memory, through the endpoint's `listener` seam, so nothing listens.
-- **`fd3-child.ts`** stands where `cua-computer.ts` would.
-  - **Before anything:** it records the identity (device and inode) of the descriptor 3 it inherited.
-  - **The start:** it runs the real `startCuaComputer`, which reads and closes descriptor 3 with the real `readCredential`.
-  - **Stand-ins:** spacesd is a `fetch` that sends nothing and answers 503; serving is a check.
-  - **The check, when serving begins:** it looks for that identity among its own descriptors, then starts a grandchild (Node, no shell) that looks among its own. It then makes one native call of its own owner, so the dispatcher hands the bearer to the stand-in, which hashes it.
-  - **Its report:** one JSON line: `inherited`, `closedBeforeServe`, `grandchildClean` and the bearer's SHA-256. On a refusal, the fixed reason and whether it still held the file.
+- **The gap:** Pim authorizes a native call today at its own send (the gate and `transmit`, `docs/cua-native-identity.md`, "Authorized again at the send"). With the broker, transit, the broker's queue and, for a run's first call, up to three setup requests (up to 30 s) follow before the `tools/call`. Anything committed in Pim in that window is unseen by the broker unless it is told.
+- **The broker's last check:** immediately before handing the `tools/call` to `fetch`, with no await between, in the space's one serialized queue, it checks:
+  - the permit's deadline;
+  - the bridge instance;
+  - that its local table doesn't hold a revocation or fence for the request, its run or its epoch.
 
-**Steps,** each bounded at 15 s, stopping at the first failure, with no retry:
+  Setup happens before this check.
+- **Invalidation:**
+  - **Pim sends:** when a change commits that must stop a native call (the chat deleted, its agent changed, the run stopped or aborted), Pim sends the bridge `revoke` for the request, or `fence` for the space's epoch. A future takeover, if ever designed, would send the same.
+  - **The broker answers** for each request it holds: `revoked` if its last check hadn't passed, meaning nothing was sent (definitive), or `sent` if the call was already handed to `fetch`.
+  - **Pim counts a call unsent only on `revoked`.** On `sent`, silence, a timeout or a disconnect, the request is `unknown` and its run latched.
+  - **A lifecycle step that must know nothing more goes out** waits for the answer, bounded, or records the call as unknown. It never assumes it was stopped.
+- **What this doesn't give:**
+  - **No immediate revocation.** A permit, signed or not, stays good until the broker processes its revocation or the deadline passes.
+  - **Acceptance isn't input.** spacesd accepting a `tools/call`, or answering it, doesn't mean the input reached the window or finished. `XSendEvent` delivery is asynchronous, so a call answered `sent` may still act after the person did.
+  - **No fence for anything else on the display** (above).
 
-1. **`good`:**
-   - exactly one child, the fixture, started;
-   - the endpoint holds no descriptor of the file after the spawn;
-   - the child reports descriptor 3 inherited, closed before serving and absent from its grandchild;
-   - the bearer's hash equals the synthetic bytes';
-   - ending the connection ends the child with status 0.
-2. **`refused`:**
-   - the file rewritten to bytes the endpoint takes and the child refuses (`not a token`);
-   - the child reports `credential-format` and holds no descriptor of it;
-   - it exits 1;
-   - the endpoint holds none;
-   - no other program was started.
+### Unknown, and no replay
 
-**Cleanup always runs:** connections ended, the endpoint closed within 10 s, every started child checked to have exited and sent `SIGKILL` if not, and the temporary folder removed. A cleanup that fails is reported beside the result.
+Unchanged: any outcome after the broker hands the call to `fetch` that isn't a valid answer is `unknown`. The request stays unknown until reconciled, its run is latched in the binder, the coordinator and the broker, and nothing is sent again (`docs/cua-native-mcp.md`, "Outcomes and the commit point").
 
-**Output** is step names, booleans, exit codes and fixed reasons. It never includes the bytes, their hash or a path. It passes only with every check true and no cleanup failure.
+### Costs and limits
 
-**Not covered:** a close that fails in the parent or child (only the stand-in tests can make one fail), Chrome or a shell starting under pim-computer, and anything on the VM.
+- **New moving parts:**
+  - a new account and its unit;
+  - an X authorization grant, possibly a session-bus grant and a `/dev/uinput` grant;
+  - the token's two files owned by two accounts;
+  - message parsing in the internet-facing bridge;
+  - the broker declaration;
+  - the permit, revocation and fence messages on both sides;
+  - tests for each.
+- **Probable losses** under another UID: terminal typing, and accessibility trees unless the bus is granted.
+- **The bridge becomes the native executor.** A compromised bridge already has the root token through the viewer, so the design adds code, not authority.
+- **The same-user display remains open to agents** as in layer 1. There is no takeover, pause or quiescence claim.
 
-## The ordinary smoke test (proposal only; independent of the native stage)
+## Provisioning, rotation and revocation (protected design; proposal only)
 
-**What it qualifies:** the ordinary path of an evaluation's Cua computer, end to end: transport, approvals and the computer's effects. It is **not an autonomous-agent qualification**. The preview's stand-in model calls exactly the tool a message names (`/tool <name> {json}`, `preview/worker.ts` L69–70) and decides nothing.
+- **Provisioning:** the one-time `root-token` step (`journal-provision.ts`) would write spacesd's file as `pim-spacesd`'s and the bridge's copy as now. The desktop gets none. No value appears in any configuration, unit, argument, variable or log.
+- **What spacesd does with it:**
+  - **`--token-file`:** read once at start (`cua-spacesd/src/main.rs` L611–612, L662 [`645e3ac49029`]), with no reload, expiry or token list. `Init` lets any holder, now only the bridge and spacesd, set a new one.
+  - **`--await-token-file`:** polls the file (`token_file.rs` L26 [`a900991c82bc`]). Replacing or emptying it drops every session (`context.rs` L349–382 [`f0ac88edb9df`]), and `Init` is disabled. Under placement A that made the desktop-owned file a live control; under this design only `pim-spacesd` and root can write it, so it becomes a usable revocation. The bridge's copy must be replaced too, or the viewer and broker stop.
+- **Revocation in an evaluation:** stop the bridge, which ends Pim's reach, the broker and the viewer host; then stop spacesd; then discard the VM. A native call in flight ends `unknown` and latches. Tickets die with spacesd's token. **Limit:** this ends the token's holders, not what agents started as `pim-desktop`; that ends only with the VM.
 
-**Prerequisites:**
-- The owner is signed in to the evaluation's preview with their **existing passkey**, through the web app (`POST /auth/sign-in/options`, then `POST /auth/sign-in`, `src/auth/index.ts`). No dev sign-in, portal link or new enrollment.
-- The space's computer is the evaluation's Cua computer.
-- `shell` is set to ask first, so its approvals reach the owner.
-- A new chat with Pim.
+## Rejected: the desktop-owned placement (record)
 
-**Each directive is one message,** sent alone in order. Paths are absolute: `/workspace` for file tools, and `/srv/pim-workspace`, the configuration's `workspace`, in commands. The first command fails unless `$PIM_WORKSPACE` is that folder, so nothing depends on the shell's working directory. The names are fixed and new. `set -C` refuses to overwrite.
+The earlier proposal would have started the endpoint with `--native on`, handed it `/etc/pim-spacesd/token` (the desktop's own file), and dropped `--no-mcp` from a spacesd running as `pim-desktop`. Groves rejected it: the token's whole authority would be every same-user process's, and spacesd's in-memory copy would be in the desktop's UID. What it surfaced still holds:
+- the bundle lacks `cua-computer.ts`, `native-mcp.ts` and `native-mcp-upstream.ts`;
+- the installer's `unit-check` reads only `FragmentPath`, `DropInPaths`, `User` and `KillMode`, not `ExecStart`;
+- `--no-driver` probably doesn't remove the Driver service (above).
 
-1. **Shell writes a new file** (approve it in Approvals):
+## Qualifying descriptor 3 (rejected path; unrun)
 
-   ```text copy Copy Smoke Step 1
-   /tool shell {"command": "set -euo pipefail; set -C; test \"$PIM_WORKSPACE\" = /srv/pim-workspace; printf '%s\\n' pim-smoke-20261029 > /srv/pim-workspace/pim-smoke-20261029-shell.txt; cat /srv/pim-workspace/pim-smoke-20261029-shell.txt", "cwd": "/workspace", "timeout_seconds": 30}
-   ```
+The fixtures in `computer/cua-host/qualification/` (`fd3-inheritance.ts`, `fd3-child.ts`) would qualify the desktop-UID Cua child's descriptor 3 on a real kernel. They belong to the rejected placement, are off this design's path, and **have never been run**. They are in no suite and not in the bundle, and are only typechecked with the host.
 
-   Expect `Exit code 0` and `pim-smoke-20261029`.
-2. **Read it back**, with no approval:
+- **Guards:** the harness runs only with `--authorized-descriptor-qualification`, never as root, and only with `/proc/self/fd`.
+- **Setup:** synthetic non-secret bytes in a new private folder, and the real `readEndpointArguments` and `createDesktopEndpoint` with a real spawn and an in-memory connection, so nothing listens.
+- **The child** runs the real `startCuaComputer` against a stand-in spacesd that answers 503.
+- **Step `good`:**
+  - descriptor 3 is inherited, closed before serving and absent from a grandchild;
+  - the bearer's hash matches the synthetic bytes;
+  - the endpoint holds no copy;
+  - the child exits 0.
+- **Step `refused`:** a file the child refuses gives `credential-format`, with nothing held and no other program started.
+- **Bounds:** each step 15 s, stop at the first failure, no retry, cleanup always, and output of booleans and fixed reasons only.
 
-   ```text copy Copy Smoke Step 2
-   /tool file_read {"path": "/workspace/pim-smoke-20261029-shell.txt"}
-   ```
+## Open decisions and unverified upstream
 
-   Expect `pim-smoke-20261029`.
-3. **The structured browser on a harmless public page**, with no approval:
+1. **Accessibility across accounts.** A session-bus policy admitting `pim-spacesd`, or native calls without accessibility trees, or no native calls.
+2. **The X authorization grant**, and whether Xvfb's owner is the desktop account.
+3. **Broker placement:** in the bridge (proposed), or a separate process if viewer ticket minting is also to leave the bridge.
+4. **Unverified upstream, from reading only:**
+   - X11 access and MIT-SHM capture from another UID;
+   - AT-SPI from another UID;
+   - terminal typing;
+   - `--no-driver`'s effect;
+   - `/mcp`'s `tools/list` under the pinned binary.
 
-   ```text copy Copy Smoke Step 3
-   /tool browser_open {"url": "https://example.com/"}
-   ```
-
-   Expect `Page: Example Domain`, `URL: https://example.com/` and the page's text. Then close the window:
-
-   ```text copy Copy Smoke Step 3b
-   /tool browser_close {}
-   ```
-
-4. **A denied shell command** (deny it in Approvals):
-
-   ```text copy Copy Smoke Step 4
-   /tool shell {"command": "set -C; printf '%s\\n' denied > /srv/pim-workspace/pim-smoke-20261029-denied.txt", "cwd": "/workspace", "timeout_seconds": 30}
-   ```
-
-   Expect the tool to report the denial. Then check that nothing ran:
-
-   ```text copy Copy Smoke Step 4b
-   /tool file_list {"path": "/workspace"}
-   ```
-
-   Expect `pim-smoke-20261029-shell.txt` and no `pim-smoke-20261029-denied.txt`.
-5. **Clean up** (approve it in Approvals):
-
-   ```text copy Copy Smoke Step 5
-   /tool file_delete {"path": "/workspace/pim-smoke-20261029-shell.txt"}
-   ```
-
-   Then repeat step 4b and expect neither file.
-
-**Stop rules:**
-- Stop at the first unexpected result.
-- Any answer saying a call may have run, or a timeout, is unknown: don't send that directive or any later one again, and record the state.
-- Never retry a step. If step 1's file exists before the run, `set -C` refuses and the run stops there; choose a new date suffix for the whole run instead.
-- Approve and deny only the request each step names.
-
-**Checked against the source:**
-- the schemas of `shell` (`src/extensions/files.ts`: `command`, optional `cwd` under `/workspace`, `timeout_seconds` 1 to 600);
-- `file_read`, `file_list` and `file_delete` (`@cloudflare/computer` 0.5.1: `path` and optional fields);
-- `browser_open` (`src/extensions/browser.ts`: `url` matching `^(https?://|data:text/html)`) and `browser_close`;
-- the approval routes (`POST /approvals/:id/approve` and `/deny`, `src/pim.ts`);
-- `$PIM_WORKSPACE` (`computer/pim-computer.ts`).
-
-A scratch check (not committed) parsed each directive with the preview's own directive pattern and JSON, and found only the schemas' fields.
+   Each needs a bounded read-only check on a disposable VM, separately authorized.
+5. **Takeover** stays unavailable on any space whose agents have `shell` or desktop tools. Nothing here proposes otherwise.

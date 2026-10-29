@@ -43,13 +43,17 @@ type AbortEffect = {
 	readonly marked: readonly {
 		conversationId: ConversationId;
 		runId: RunId | null; // Tx.run(conversationId) in the same commit; null: no active run, or a run from before run IDs
-		newlyMarked: number; // tasks this commit marked; 0 on a repeat
+		newlyMarked: number; // tasks this commit itself marked; tasks marked earlier aren't counted
 	}[]; // one entry per conversation whose tasks the traversal reached
 	readonly withdrawn: readonly { conversationId: ConversationId; submissionId: SubmissionId; requestId?: string }[];
 };
 
 // agents: PiSession, beside abort(operationId?). The steps, order and commits of withdraw()/abort() are unchanged.
-abortWithEffect(operationId?: string): Promise<StopEffect>;
+// Resolves after the last commit the Stop makes (abortSubmission's, or the conversation abort's marking commit), without waiting for idle.
+abortWithEffect(operationId?: string): Promise<{
+	effect: StopEffect;
+	idle: Promise<void>; // the conversation abort's idle promise; already resolved when no conversation abort ran
+}>;
 
 type StopEffect = {
 	readonly aborted: boolean; // exactly what abort(operationId?) returns today
@@ -71,16 +75,16 @@ type StopEffect = {
 - A seat or a handed-out task's conversation is affected only if the traversal reached it, and then it appears in `marked` under its own `conversationId`. Pim's Stop and Delete, which abort seats one call at a time, get one effect per call.
 - Request, submission and run IDs are the harness's own, and are never re-minted.
 
-**Repeats are idempotent:**
-- A repeated operation Stop finds the input `settled`.
-- If the input is still placed, the repeat reaches the same run with `newlyMarked: 0`.
-- Pim deduplicates fences by scope (d1ee74d), so a repeat adds no fence.
+**Repeats report their own effect, not the first one's.**
+- A repeated operation Stop may find the input `settled`, and do nothing more.
+- If the input is still `placed`, the repeat runs the conversation abort again, as today. That reaches whatever work is live at that commit: the same run (with `newlyMarked` counting only tasks not marked before), or a run that has since replaced it, which is then marked and withdrawn as any Stop would.
+- Pim fences every run a result names. Deduplication by scope (d1ee74d) only stops a second fence record for a run already fenced. It doesn't make repeats equivalent.
 
 **A legacy run (`runId: null`) has no native intents,** because the authority refuses legacy runs (`legacy`). So the effect fences nothing for it, and the ordinary Stop is unchanged. Any intent Pim does hold in that conversation is still fenced by its own run, through the restore rule below.
 
 ## How Pim uses it, after the mutation
 
-1. The Stop route calls `abortWithEffect` where it calls `abort` today. It awaits `effect`, not `idle`.
+1. The Stop route calls `abortWithEffect` where it calls `abort` today. That resolves after the marking commit, with `{ effect, idle }`, so Pim never waits for idle before it can record the fence.
 2. In one synchronous step of Pim's SQL, for each `marked` entry with a non-null `runId`, Pim writes the run's closure and, if the run has `intended` or `unknown` intents, its fence (d1ee74d). Then it awaits durability.
 3. It then awaits `idle`, as `abort` does today, and answers with the existing boolean and `desktopFence`.
 
@@ -88,22 +92,28 @@ type StopEffect = {
 
 **No cross-store claim.** The harness commit and Pim's SQL write are two stores and two durability steps. A failed SQL write leaves the marks in place and latches Pim's native calls for the space, failing closed. The route still answers its existing boolean, with the fence reported `unconfirmed`.
 
-**A crash between the marking commit and Pim's write** loses the returned effect. **No new durable effect record is needed for native safety.**
-- Pim's restore rule (d1ee74d) turns every `intended` intent into `unknown` with a run fence, and `unknown` intents already have one.
-- An intent's own records name its tool task and run. `tx.task(toolTaskId).abortRequested`, or the run no longer being live, is durable evidence that the run was stopped or ended, if Pim needs to say so.
-- What is lost is only that Stop's own HTTP answer. Its `desktopFence` can be found again by run scope.
+**A crash between the marking commit and Pim's write** loses the returned effect, which nothing persists.
+
+**What still holds is narrow: native safety for intents Pim had already recorded.** Pim transmits nothing before its intent is durable (d1ee74d). On restore, every `intended` intent becomes `unknown` with a run fence, and every `unknown` intent already has one. No new harness record is needed for that.
+
+**What can't be recovered:**
+- the original Stop's result: which call marked which run, and which inputs it withdrew. Withdrawn submissions read `unanswered`/`aborted`, the same as a run's own aborted inputs;
+- a proof that every effect was seen;
+- any durable link from a mark to a run that had no tool task, since only `pi.tool` tasks carry `runId`.
+
+A task's `abortRequested`, or its run no longer being live, shows that a run with intents was stopped or ended. It doesn't show which Stop did it. After such a crash, the Stop's `desktopFence` can be found again only through the fences of runs that held intents. The UI must say the Stop's own result is unknown, not reconstruct it.
 
 **The plain Stop can use the same foundation.** Calling `abortWithEffect()` without an `operationId` names the run actually marked. That removes d1ee74d's documented gap, a run starting between Pim's closure commit and the abort, and makes the pre-closure commit unnecessary. I propose it, but it is optional.
 
 ## Compatibility cost
 
-- **pi-durable:** about 20 lines in Pim's existing patch:
+- **pi-durable:** an addition to Pim's existing patch:
   - `abortConversation` collects `marked` (with `Tx.run`) and the IDs it withdraws, and returns them with the idle promise;
   - `withdrawQueuedInputs` returns the IDs it settles;
   - `abort()` keeps returning `idle`.
 
   It is carried and reviewed on every upgrade, like the run-ID patch.
-- **agents:** a new patch, since there is none today, of about 15 lines: `abortWithEffect` beside `withdraw` and `abort`, with no change to either. Alternatively Pim could call `pi.abortSubmission` and `Conversation.abortWithEffect` itself, mirroring `withdraw`'s three steps. That avoids the patch but copies the adapter's logic, which then has to stay in step with it.
+- **agents:** a new patch, since there is none today: `abortWithEffect` beside `withdraw` and `abort`, with no change to either. Like the pi-durable patch, it has to be carried and reviewed on every upgrade. Alternatively Pim could call `pi.abortSubmission` and `Conversation.abortWithEffect` itself, mirroring `withdraw`'s three steps. That avoids the patch but copies the adapter's logic, which then has to stay in step with it.
 - **Pim:** no behaviour change while native calls are off. With them on, the route awaits one SQL sync more.
 
 ## Test requirements (not written or run)
@@ -119,7 +129,9 @@ type StopEffect = {
   The effect names the run actually marked, or none, and never a stale classification.
 - **Multi-input runs, seats and handed-out tasks:** one `marked` entry per reached conversation.
 - **Legacy runs:** `runId: null`, nothing fenced, the Stop unchanged.
-- **Repeats:** `newlyMarked: 0`, and no second fence.
+- **Two-stage result:** with the model held, `abortWithEffect` resolves with `{ effect, idle }` after the marking commit and before idle. `abort()` still resolves only once idle, with its old boolean.
+- **Repeats:** a repeat against the same live run counts only newly marked tasks and adds no second fence. A repeat after the run was replaced reports and marks the new run.
+- **Crash ambiguity:** after a crash between the mark and Pim's write, the UI shows the Stop's result as unknown, not a reconstructed effect.
 - **After the mark, nothing more is admitted:** a held native call's gate is refused from the marking commit on, both before and after settlement.
 - **Crash after the mark, before Pim's write:** restore fences every `intended` or `unknown` intent's run, and no call is admitted.
 - **Pim's SQL write fails:** native calls latch for the space, the route returns its boolean, and the fence is `unconfirmed`.

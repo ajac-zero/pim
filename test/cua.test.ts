@@ -1667,6 +1667,62 @@ describe("a space whose operator chose its Cua VM", () => {
 				{ pid: 4242, x: 25, y: 1 },
 			]);
 			expect(nativeSent()).toBe(sentBefore + 2);
+
+			// A change to Pim's own records, queued as a microtask during the authority's last read of them (`agentOf`), runs after that read and
+			// before the gate resumes from awaiting the authority's answer. The gate reads them again with nothing awaited before the send, so neither
+			// a deletion nor a reassignment of the chat's agent, Pim's store's own writes, is sent past. No route of Pim's moves a chat to another
+			// agent; `agents.setSession` is the store's write that ties a chat to one.
+			const second = (await desk.post<{ id: string }>("/agents", { name: "Second desk", instructions: "Helps elsewhere." })).body.id;
+			const changes: [string, (instance: Pim, conversation: string) => void][] = [
+				["deleted", (instance, conversation) => instance.store.deleteSession(conversation)],
+				["reassigned", (instance, conversation) => instance.agents.setSession(conversation, second)],
+			];
+			for (const [what, change] of changes) {
+				const target = await chat();
+				const changing = waits().start(`turn: ${what}`, () => {
+					faux.setResponses([() => toolUse("desktop_click", { pid: 4242, x: 26, y: 1 }), () => toolUse("send_to_user", { message: "Ok." })]);
+					return desk.post(`/sessions/${target}/messages`, { content: `Click, then ${what}`, wait: true });
+				});
+				const approval = await desk.pending();
+				const { conversationId, toolTaskId } = (await bindings()).find((binding) => binding.id === (approval.args as { binding: string }).binding)!.identity;
+				const queued: string[] = [];
+				const watching: { mockRestore(): void }[] = [];
+				await desk.within(async (instance) => {
+					const proto = await (await instance.harness.pi()).commit((tx) => Object.getPrototypeOf(tx) as { task: (id: number) => Promise<unknown> }, BACKGROUND_CONTEXT);
+					const read = proto.task;
+					let reads = 0;
+					let armed = false;
+					watching.push(
+						vi.spyOn(proto, "task").mockImplementation(async function (this: unknown, id: number) {
+							// The claim reads the call first; the second read is the send's authorization.
+							if (String(id) === toolTaskId && ++reads === 2) armed = true;
+							return read.call(this, id);
+						}),
+					);
+					const ofSession = instance.agents.ofSession.bind(instance.agents);
+					watching.push(
+						vi.spyOn(instance.agents, "ofSession").mockImplementation((session: string) => {
+							if (armed && session === conversationId) {
+								armed = false;
+								queueMicrotask(() => {
+									change(instance, conversationId);
+									queued.push(what);
+								});
+							}
+							return ofSession(session);
+						}),
+					);
+				});
+				const decided = await desk.decide(approval.id);
+				await changing.catch(() => undefined);
+				for (const spy of watching) spy.mockRestore();
+				faux.setResponses([]);
+				expect(queued, what).toEqual([what]);
+				expect((decided.body as Approval).result, what).toMatch(NOT_SENT);
+				expect(await statusOf(approval), what).toBe("closed");
+				expect((await natives()).find((request) => request.requestId === `approval:${approval.id}`), what).toMatchObject({ status: "rejected" });
+			}
+			expect(nativeSent()).toBe(sentBefore + 2);
 			expect(elsewhere).toEqual([]);
 		});
 

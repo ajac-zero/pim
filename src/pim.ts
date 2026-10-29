@@ -593,15 +593,18 @@ export class Pim extends DurableAgent<Env> {
 	 * before anything left the space is a `ControlRefused`, which closes the
 	 * binding; anything after may have run.
 	 *
-	 * The call is authorized again at the send itself (`NativeGate`): in one
-	 * harness commit, which holds the harness's commit line, Pim's authority
-	 * reads the call's tool task and run, and Pim's own records of the chat's
-	 * deletion and agent, and then, with nothing awaited after its last read,
-	 * the computer checks its link and sends. A stop or a run's end committed
+	 * The call is authorized again at the send itself (`NativeGate`), in one
+	 * harness commit, which holds the harness's commit line: Pim's authority
+	 * reads the call's tool task and run, so a stop or a run's end committed
 	 * before that commit leaves the call unsent, and one asked for during it
-	 * waits on the line until the call has left. Pim's records are read
-	 * synchronously in the same step, so a deletion or an agent's removal
-	 * there is wholly before the send, which it refuses, or after it.
+	 * waits on the line until the call has left. The line doesn't hold Pim's
+	 * own records of the chat's deletion and agent, which change outside it,
+	 * so after the authority's answer is awaited they are read again, and the
+	 * computer checks its link and sends, with nothing awaited from that read
+	 * to the send: a deletion or a change of agent there is wholly before the
+	 * send, which it refuses, or after it. A reset the person asks for is a
+	 * queued input, not yet the run's end: until the harness applies it, at
+	 * the run's next boundary, the run is live, and the call goes.
 	 */
 	async #desktopSend(binding: NativeBinding, session: string, requestId: string, approvalId?: string): Promise<NativeOutcome> {
 		const { conversationId, toolTaskId, callId, agentId, runAnchor } = binding.identity;
@@ -615,6 +618,10 @@ export class Pim extends DurableAgent<Env> {
 				const answer = await this.#authority(tx).verify({ conversationId, toolTaskId, callId });
 				if (answer.status !== "verified") throw new HttpError(409, `The call's run can't be shown at the moment of sending (${answer.reason})`);
 				if (answer.identity.agentId !== agentId || answer.identity.runAnchor !== runAnchor) throw new HttpError(409, "The call isn't the one it was bound as");
+				// Pim's own records aren't the harness's, so the line doesn't hold them: the authority read them before its answer was awaited.
+				// Read again here, with nothing awaited from this read to the send.
+				if (this.store.deletedSessions().has(session)) throw new HttpError(409, "The call's chat was deleted");
+				if (this.#roleOf(session).agent.id !== agentId) throw new HttpError(409, "The call's chat no longer talks as the agent it was bound for");
 				transmit();
 			}, BACKGROUND_CONTEXT);
 		return this.#controlled(

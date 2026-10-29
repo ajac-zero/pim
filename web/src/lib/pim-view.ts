@@ -222,7 +222,10 @@ export function modelErrorCode(text: string): string | undefined {
 }
 
 /** The error a model failure shows: its problem, and for an unclassified one its code. */
-function modelError(text: string): { problem: ModelProblem; code?: string } {
+export function modelError(text: string): {
+  problem: ModelProblem;
+  code?: string;
+} {
   const problem = modelProblem(text);
   const code = problem === "other" ? modelErrorCode(text) : undefined;
   return code ? { problem, code } : { problem };

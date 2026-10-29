@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
   Fragment,
@@ -47,6 +47,7 @@ import { pim, type Room, type UserContent } from "~/lib/pim-api";
 import {
   layoutThread,
   type ModelProblem,
+  modelError,
   type SessionView,
   type ThreadEntry,
   taskHistory,
@@ -113,6 +114,86 @@ function postedImages(text: string): Record<string, string> {
   );
 }
 
+/**
+ * What a model failure tells the person, with the ways out: ask again when
+ * the run is held, and the settings or the plan's usage page where they help.
+ * `name` is the agent it is about in a group chat.
+ */
+function ModelErrorNotice({
+  error: shownError,
+  held,
+  retrying,
+  onRetry,
+  name,
+}: {
+  error: ViewError;
+  held: boolean;
+  retrying: boolean;
+  onRetry: () => void;
+  name?: string;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="flex items-start gap-3 rounded-2xl bg-muted px-4 py-3 text-sm">
+      <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
+      <div className="flex-1 space-y-2">
+        {name && <p className="font-medium">{name}</p>}
+        {"problem" in shownError ? (
+          <>
+            <p>{t(PROBLEM_TEXT[shownError.problem])}</p>
+            {"code" in shownError && shownError.code && (
+              <p className="font-mono text-muted-foreground text-xs">
+                {shownError.code}
+              </p>
+            )}
+            {(held ||
+              shownError.problem === "usage_limit" ||
+              shownError.problem === "unauthorized" ||
+              shownError.problem === "other") && (
+              <div className="flex flex-wrap gap-2">
+                {/* The run is held where it stopped: this asks the model again, with whichever model the agent has now. */}
+                {held && (
+                  <Button size="sm" disabled={retrying} onClick={onRetry}>
+                    {t("tryAgain")}
+                  </Button>
+                )}
+                {/* OpenAI's settings show the plan's usage and Pim's App limit, and raise it. */}
+                {shownError.problem === "usage_limit" && (
+                  <Button asChild size="sm" variant="outline">
+                    <a
+                      href={CHATGPT_USAGE_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {t("manageUsage")}
+                    </a>
+                  </Button>
+                )}
+                <Button asChild size="sm" variant="outline">
+                  <Link
+                    to="."
+                    search={(prev) => ({
+                      ...prev,
+                      dialog: "settings",
+                      tab: "model",
+                    })}
+                  >
+                    {t("settings")}
+                  </Link>
+                </Button>
+              </div>
+            )}
+          </>
+        ) : "taskFailed" in shownError ? (
+          <p>{t("taskFailed")}</p>
+        ) : (
+          <p>{t("notAnswered", { reason: shownError.reason })}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export const Thread = memo(function Thread({
   sessionId,
   synced,
@@ -152,6 +233,12 @@ export const Thread = memo(function Thread({
         : view.error;
   const retry = useMutation({
     mutationFn: () => pim.retry(sessionId),
+    onError: (error) => toast.error(error.message),
+  });
+  const queryClient = useQueryClient();
+  const retryMember = useMutation({
+    mutationFn: (agent: string) => pim.retryInRoom(sessionId, agent),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
     onError: (error) => toast.error(error.message),
   });
 
@@ -541,67 +628,27 @@ export const Thread = memo(function Thread({
         )}
 
         {shownError && (
-          <div className="flex items-start gap-3 rounded-2xl bg-muted px-4 py-3 text-sm">
-            <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
-            <div className="flex-1 space-y-2">
-              {"problem" in shownError ? (
-                <>
-                  <p>{t(PROBLEM_TEXT[shownError.problem])}</p>
-                  {"code" in shownError && shownError.code && (
-                    <p className="font-mono text-muted-foreground text-xs">
-                      {shownError.code}
-                    </p>
-                  )}
-                  {(held ||
-                    shownError.problem === "usage_limit" ||
-                    shownError.problem === "unauthorized" ||
-                    shownError.problem === "other") && (
-                    <div className="flex flex-wrap gap-2">
-                      {/* The run is held where it stopped: this asks the model again, with whichever model the agent has now. */}
-                      {held && (
-                        <Button
-                          size="sm"
-                          disabled={retry.isPending}
-                          onClick={() => retry.mutate()}
-                        >
-                          {t("tryAgain")}
-                        </Button>
-                      )}
-                      {/* OpenAI's settings show the plan's usage and Pim's App limit, and raise it. */}
-                      {shownError.problem === "usage_limit" && (
-                        <Button asChild size="sm" variant="outline">
-                          <a
-                            href={CHATGPT_USAGE_URL}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {t("manageUsage")}
-                          </a>
-                        </Button>
-                      )}
-                      <Button asChild size="sm" variant="outline">
-                        <Link
-                          to="."
-                          search={(prev) => ({
-                            ...prev,
-                            dialog: "settings",
-                            tab: "model",
-                          })}
-                        >
-                          {t("settings")}
-                        </Link>
-                      </Button>
-                    </div>
-                  )}
-                </>
-              ) : "taskFailed" in shownError ? (
-                <p>{t("taskFailed")}</p>
-              ) : (
-                <p>{t("notAnswered", { reason: shownError.reason })}</p>
-              )}
-            </div>
-          </div>
+          <ModelErrorNotice
+            error={shownError}
+            held={held}
+            retrying={retry.isPending}
+            onRetry={() => retry.mutate()}
+          />
         )}
+
+        {/* An agent of a group chat has no chat of its own to show its error in. */}
+        {room?.members
+          .filter((member) => member.held)
+          .map((member) => (
+            <ModelErrorNotice
+              key={member.id}
+              name={member.name}
+              error={modelError(member.error ?? "")}
+              held
+              retrying={retryMember.isPending}
+              onRetry={() => retryMember.mutate(member.id)}
+            />
+          ))}
       </ConversationContent>
       {/* After the content, whose scroller its effects need. */}
       <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />

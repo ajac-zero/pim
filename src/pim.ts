@@ -3208,15 +3208,37 @@ export class Pim extends DurableAgent<Env> {
 		this.broadcastMessage({ type: "sessions" });
 	}
 
+	/** A room as the chat list shows it, read now. */
+	async #roomOf(session: string) {
+		const held = await this.#heldSessions();
+		const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy && !held.has(info.id) ? [info.id] : [])));
+		return this.#roomInfo(session, busy, await this.#heldErrors(held));
+	}
+
+	/**
+	 * What failed for each agent of a group chat whose run is held: its last error, which the chat classifies as it does a
+	 * held chat's own. An agent in a room has no chat of its own to show it in.
+	 */
+	async #heldErrors(held: ReadonlySet<string>): Promise<Map<string, string>> {
+		const errors = new Map<string, string>();
+		for (const conversation of held) {
+			const seat = this.#rooms.of(conversation);
+			if (!seat || seat.conversation === seat.room) continue;
+			const failed = projectEntries(await this.harness.session(conversation).messages()).findLast((message) => message.role === "assistant" && message.error !== undefined);
+			errors.set(conversation, failed && "error" in failed && failed.error ? failed.error : "");
+		}
+		return errors;
+	}
+
 	/** What the chat list says of a room: how agents take turns, and who is in it besides the host, each with whether it is at work. Every chat of the person's with their own agents is a room, with no one but its host at first. */
-	#roomInfo(session: string, busy: ReadonlySet<string>): { mode: RoomMode; members: { id: string; name: string; busy: boolean }[] } | null {
+	#roomInfo(session: string, busy: ReadonlySet<string>, held: ReadonlyMap<string, string>): { mode: RoomMode; members: { id: string; name: string; busy: boolean; held: boolean; error: string | null }[] } | null {
 		const [host, ...members] = this.#rooms.seats(session);
 		if (!host && !this.#roomable(session)) return null;
 		return {
 			mode: this.#rooms.mode(session),
 			members: members.flatMap((seat) => {
 				const agent = this.agents.get(seat.agent);
-				return agent ? [{ id: agent.id, name: agent.name, busy: busy.has(seat.conversation) }] : [];
+				return agent ? [{ id: agent.id, name: agent.name, busy: busy.has(seat.conversation), held: held.has(seat.conversation), error: held.get(seat.conversation) ?? null }] : [];
 			}),
 		};
 	}
@@ -4324,6 +4346,7 @@ export class Pim extends DurableAgent<Env> {
 				const archiveBefore = Date.now() - ARCHIVE_AFTER_MS;
 				// A run held for the person to try again isn't at work.
 				const held = await this.#heldSessions();
+				const heldErrors = await this.#heldErrors(held);
 				const all = (await this.harness.sessions.list()).map((session) => ({ ...session, busy: session.busy && !held.has(session.id) }));
 				const busy = new Set(all.flatMap((session) => (session.busy ? [session.id] : [])));
 				const sessions = all.filter((session) => !hidden.has(session.id)).map((session) => {
@@ -4343,7 +4366,7 @@ export class Pim extends DurableAgent<Env> {
 						archived: info?.archivedAt != null || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: this.#agentRef(session.id),
-						room: this.#roomInfo(session.id, busy),
+						room: this.#roomInfo(session.id, busy, heldErrors),
 					};
 				});
 				// Most recently active first; sessions never used last.
@@ -4416,8 +4439,7 @@ export class Pim extends DurableAgent<Env> {
 				this.#rooms.open(id, this.agents.ofSession(id).id);
 				this.#rooms.setMode(id, mode);
 				this.broadcastMessage({ type: "sessions" });
-				const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy ? [info.id] : [])));
-				return { room: this.#roomInfo(id, busy) };
+				return { room: await this.#roomOf(id) };
 			},
 		],
 		[
@@ -4430,8 +4452,7 @@ export class Pim extends DurableAgent<Env> {
 				if (!joining) throw new HttpError(404, "No such agent");
 				if (!this.#roomable(id)) throw new HttpError(400, "Only a chat with your own agents can be a group chat");
 				if (joining.id !== this.agents.ofSession(id).id) await this.#join(id, joining);
-				const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy ? [info.id] : [])));
-				return { room: this.#roomInfo(id, busy) };
+				return { room: await this.#roomOf(id) };
 			},
 		],
 		[
@@ -4442,8 +4463,20 @@ export class Pim extends DurableAgent<Env> {
 				const seat = this.#rooms.at(id, agent!);
 				if (!seat || seat.conversation === id) throw new HttpError(404, "No such agent in this chat besides its host");
 				await this.#leave(seat);
-				const busy = new Set((await this.harness.sessions.list()).flatMap((info) => (info.busy ? [info.id] : [])));
-				return { room: this.#roomInfo(id, busy) };
+				return { room: await this.#roomOf(id) };
+			},
+		],
+		// Asks an agent of a group chat again, whose run is held after a model error; the host has its own Try again.
+		[
+			"POST",
+			"/sessions/:session/room/members/:agent/retry",
+			async ({ session, agent }) => {
+				const id = await this.#session(session!);
+				const seat = this.#rooms.at(id, agent!);
+				if (!seat || seat.conversation === id) throw new HttpError(404, "No such agent in this chat besides its host");
+				if (!(await this.#resumeHeld(seat.conversation))) throw new HttpError(409, "This agent isn't waiting to try again");
+				this.broadcastMessage({ type: "sessions" });
+				return { room: await this.#roomOf(id) };
 			},
 		],
 		// Side jobs on the utility model (./utility.ts).

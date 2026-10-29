@@ -35,7 +35,14 @@ export type RoomMode = "mentions" | "open";
 
 export type Room = {
   mode: RoomMode;
-  members: { id: string; name: string; busy: boolean }[];
+  /** `held`: its run waits for a Try again after a model error, which `error` says. */
+  members: {
+    id: string;
+    name: string;
+    busy: boolean;
+    held: boolean;
+    error: string | null;
+  }[];
 };
 
 /**
@@ -1390,6 +1397,12 @@ export const pim = {
     call<{ room: Room | null }>(`/sessions/${session}/room/members/${agent}`, {
       method: "DELETE",
     }).then((body) => body.room),
+  /** Asks a group chat's agent again, whose run is held after a model error. */
+  retryInRoom: (session: string, agent: string) =>
+    call<{ room: Room | null }>(
+      `/sessions/${session}/room/members/${agent}/retry`,
+      { method: "POST" },
+    ).then((body) => body.room),
   abort: (session: string) =>
     call<{ aborted: boolean }>(`/sessions/${session}/abort`, {
       method: "POST",

@@ -563,8 +563,18 @@ export class Pim extends DurableAgent<Env> {
 		return null;
 	}
 
-	/** The fences of runs whose native-app calls were admitted (./cua-native-fences.ts). Its table is made only where the desktop's tools are on. */
-	readonly nativeFences = new NativeFences({ sql: this.ctx.storage.sql, sync: () => this.ctx.storage.sync(), transport: () => this.nativeFenceTransport() });
+	/** How long the space waits for the broker to acknowledge a fence before it is unconfirmed; it may be asked for again after. */
+	protected nativeFenceAskMs(): number {
+		return 30_000;
+	}
+
+	/** The fences of runs whose native-app calls were admitted (./cua-native-fences.ts). Its tables are made only where the desktop's tools are on. */
+	readonly nativeFences = new NativeFences({
+		sql: this.ctx.storage.sql,
+		sync: () => this.ctx.storage.sync(),
+		transport: () => this.nativeFenceTransport(),
+		askMs: () => this.nativeFenceAskMs(),
+	});
 
 	/**
 	 * Stops a chat's work as `PiSession.abort(operationId)` does, with its
@@ -662,6 +672,9 @@ export class Pim extends DurableAgent<Env> {
 				// Read again here, with nothing awaited from this read to the send.
 				if (this.store.deletedSessions().has(session)) throw new HttpError(409, "The call's chat was deleted");
 				if (this.#roleOf(session).agent.id !== agentId) throw new HttpError(409, "The call's chat no longer talks as the agent it was bound for");
+				// So are the run's fence record and the space's fence faults, which may have changed during any await since admission.
+				const unfenced = this.nativeFences.sendable(runAnchor);
+				if (unfenced) throw new HttpError(409, `The call's run can't send now (${unfenced})`);
 				transmit();
 			}, BACKGROUND_CONTEXT);
 		return this.#controlled(

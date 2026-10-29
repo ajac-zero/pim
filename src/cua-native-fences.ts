@@ -10,12 +10,15 @@ import { MAX_NATIVE_BINDINGS } from "./cua-native-identity";
  *
  * A run gets a record (`open`) when one of its calls is admitted, before the
  * control state admits it and before its send is authorized, so no call is
- * sent without one. A Stop that marked the run, an end the call can't be sure
+ * sent without one; and the send's authorization checks, with nothing
+ * awaited from that check to the send, that the run is still open under the
+ * instance the transport names and that nothing here has failed
+ * (`sendable`). A Stop that marked the run, an end the call can't be sure
  * of, or a restart that finds a call of the run unknown requires its fence
  * (`pending`); an acknowledgement from the broker instance the run's calls
- * were admitted under, recorded durably, confirms it (`confirmed`). One that
- * can't be had is `unconfirmed`, never success. A run whose fence was
- * required admits nothing more, for good.
+ * were admitted under, recorded and synced, confirms it (`confirmed`). One
+ * that can't be had in time is `unconfirmed`, never success. A run whose
+ * fence was required admits nothing more, for good.
  *
  * There is no broker yet: the transport is a seam that only tests give a
  * scripted stand-in for (`Pim.nativeFenceTransport`). Without one, every
@@ -23,11 +26,14 @@ import { MAX_NATIVE_BINDINGS } from "./cua-native-identity";
  *
  * Records live in the space's SQL storage, apart from the harness's, so no
  * write here is in a transaction with a harness commit. Every write is
- * followed by `sync`. A write or sync that fails latches this object: it
- * admits nothing and records nothing more for as long as the process lives.
- * A new process admits nothing until `reconcile` has rebuilt what the durable
- * binder records require, from records every possible send was claimed in
- * before it left (./cua-native-identity.ts).
+ * followed by `sync`. A write or sync that fails latches this object, which
+ * then admits, sends and records nothing more, and stores a fault that keeps
+ * the space's native calls closed after a restart too, until a
+ * reconciliation policy, which doesn't exist yet, reopens them. Where even
+ * the fault can't be stored, a restart still admits nothing until
+ * `reconcile` has rebuilt the fences the durable binder records require,
+ * from records every possible send was claimed in before it left
+ * (./cua-native-identity.ts).
  */
 
 /** Asks a broker instance to send nothing more of a run. */
@@ -44,8 +50,8 @@ export type NativeFenceTransport = {
 /**
  * `open`: calls of the run were admitted and no fence is required. `pending`:
  * required and asked for, not acknowledged. `confirmed`: acknowledged by the
- * instance it was asked of, durably recorded. `unconfirmed`: required, and no
- * acknowledgement could be had or counted.
+ * instance it was asked of, and synced. `unconfirmed`: required, and no
+ * acknowledgement could be had in time or counted.
  */
 export type NativeFenceState = "open" | "pending" | "confirmed" | "unconfirmed";
 /** Why a fence was required: a Stop that marked its run, a call whose end is unknown, or a restart that found one. */
@@ -78,39 +84,66 @@ CREATE TABLE IF NOT EXISTS pim_native_fences (
 	reason TEXT,
 	required_at INTEGER,
 	confirmed_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS pim_native_fence_faults (
+	at INTEGER NOT NULL,
+	why TEXT NOT NULL
 )`;
+
+const TIMED_OUT = Symbol("timed out");
 
 export class NativeFences {
 	readonly #sql: SqlStorage;
 	readonly #sync: () => Promise<void>;
 	readonly #transport: () => NativeFenceTransport | null;
+	readonly #askMs: () => number;
 	readonly #newId: () => string;
 	readonly #now: () => number;
 	#schema = false;
 	/** Why a write failed in this process; never cleared in it. */
 	#fault: string | null = null;
+	/** Why native calls stay closed: a fault stored before this process started, read by `reconcile`. */
+	#closed: string | null = null;
 	/** Whether this process has rebuilt what the durable binder records require (`reconcile`). */
 	#ready = false;
 	#reconciling: Promise<string | null> | undefined;
 	/** Fences being asked for now, so one isn't asked twice at once. */
 	readonly #asking = new Set<string>();
+	/** Runs whose confirmation is written and not yet synced, with the state they had: read as that state until it is. */
+	readonly #confirming = new Map<string, NativeFenceState>();
 
-	constructor(options: { sql: SqlStorage; sync: () => Promise<void>; transport: () => NativeFenceTransport | null; newId?: () => string; now?: () => number }) {
+	constructor(options: {
+		sql: SqlStorage;
+		sync: () => Promise<void>;
+		transport: () => NativeFenceTransport | null;
+		/** How long a fence's acknowledgement is waited for before the fence is unconfirmed. */
+		askMs: () => number;
+		newId?: () => string;
+		now?: () => number;
+	}) {
 		this.#sql = options.sql;
 		this.#sync = options.sync;
 		this.#transport = options.transport;
+		this.#askMs = options.askMs;
 		this.#newId = options.newId ?? (() => crypto.randomUUID());
 		this.#now = options.now ?? Date.now;
 	}
 
-	/** Every record, by run. Creates the table the first time, which nothing does where the desktop's tools are off. */
+	/**
+	 * Every record, by run, as synced: a confirmation not yet synced reads as
+	 * the state before it. Creates the tables the first time, which nothing
+	 * does where the desktop's tools are off.
+	 */
 	list(): NativeFenceRecord[] {
-		return this.#rows("SELECT * FROM pim_native_fences ORDER BY run");
+		return this.#rows("SELECT * FROM pim_native_fences ORDER BY run").map((row) => {
+			const before = this.#confirming.get(row.run);
+			return before === undefined ? row : { ...row, state: before, confirmedAt: null };
+		});
 	}
 
-	/** Why nothing is admitted in this process, or null. */
+	/** Why nothing is admitted or sent, or null. */
 	blocked(): string | null {
-		return this.#fault ?? (this.#ready ? null : "the native fences haven't been reconciled since the space started");
+		return this.#fault ?? this.#closed ?? (this.#ready ? null : "the native fences haven't been reconciled since the space started");
 	}
 
 	/**
@@ -120,12 +153,12 @@ export class NativeFences {
 	 * `unknownRuns` reads them (`NativeIdentityBinder.unknownRuns`) and
 	 * answers why it can't, as text. Fences required before and not
 	 * confirmed are asked for again, by the same fence ID: asking again for a
-	 * fence's status is not sending a call again. Resolves with why nothing
-	 * may be admitted, or null.
+	 * fence's status is not sending a call again. A fault stored by an earlier
+	 * process keeps native calls closed. Resolves with why nothing may be
+	 * admitted, or null.
 	 */
 	reconcile(unknownRuns: () => Promise<readonly string[] | string>): Promise<string | null> {
-		if (this.#fault) return Promise.resolve(this.#fault);
-		if (this.#ready) return Promise.resolve(null);
+		if (this.#ready || this.#fault) return Promise.resolve(this.blocked());
 		this.#reconciling ??= (async () => {
 			let runs: readonly string[] | string;
 			try {
@@ -138,10 +171,17 @@ export class NativeFences {
 				this.#reconciling = undefined;
 				return runs;
 			}
-			if (!(await this.#require(runs, "recovered"))) return this.#fault ?? "the native fences couldn't be stored";
+			try {
+				this.#ensure();
+				const [fault] = this.#sql.exec("SELECT at, why FROM pim_native_fence_faults ORDER BY at LIMIT 1").toArray();
+				if (fault) this.#closed = `a native fence record failed to be stored (${String(fault.why)}), so native calls stay closed until a reconciliation policy reopens them`;
+			} catch {
+				this.#latch("the native fence faults couldn't be read");
+			}
+			if (!(await this.#require(runs, "recovered"))) return this.blocked();
 			this.#ready = true;
 			this.#askAll();
-			return null;
+			return this.blocked();
 		})();
 		return this.#reconciling;
 	}
@@ -150,9 +190,9 @@ export class NativeFences {
 	 * Admits a call of `run`, before the control state does and before its
 	 * send is authorized: its run's record is stored, under the broker
 	 * instance the transport names now, and synced. Refused, with why, if
-	 * this process hasn't reconciled or can't write, if the run's fence was
-	 * required, if the run's calls were admitted under another instance, or
-	 * if no record more can be kept.
+	 * this process hasn't reconciled, can't write or is closed, if the run's
+	 * fence was required, if the run's calls were admitted under another
+	 * instance, or if no record more can be kept.
 	 */
 	async admit(run: string): Promise<string | null> {
 		const blocked = this.blocked();
@@ -175,7 +215,27 @@ export class NativeFences {
 		} catch {
 			return this.#latch("a native fence record couldn't be stored");
 		}
-		return this.#fault;
+		return this.blocked();
+	}
+
+	/**
+	 * Whether a call of `run` may leave now, read synchronously at its send's
+	 * authorization, after everything it awaited: nothing here has failed or
+	 * is closed, the run's record is still open, and the transport still
+	 * names the instance its calls were admitted under. Why not, or null.
+	 */
+	sendable(run: string): string | null {
+		const blocked = this.blocked();
+		if (blocked) return blocked;
+		try {
+			const row = this.#row(run);
+			if (!row) return "the run has no fence record";
+			if (row.state !== "open") return "a fence was required for this run, which sends nothing more";
+			if (row.instance !== (this.#transport()?.instance() ?? null)) return "the broker isn't the instance this run's calls were admitted under";
+		} catch {
+			return "the run's fence record can't be read";
+		}
+		return null;
 	}
 
 	/**
@@ -244,9 +304,12 @@ export class NativeFences {
 	}
 
 	/**
-	 * Asks the instance the run's calls were admitted under for its fence. A
-	 * transport that reaches another instance, or none, can't confirm it:
-	 * a new instance doesn't show the old one sends nothing more.
+	 * Asks the instance the run's calls were admitted under for its fence, and
+	 * waits at most `askMs` for its answer, after which the fence is
+	 * unconfirmed and may be asked for again. An answer that comes later is
+	 * still checked and counted. A transport that reaches another instance,
+	 * or none, can't confirm it: a new instance doesn't show the old one
+	 * sends nothing more.
 	 */
 	async #ask(row: NativeFenceRecord): Promise<void> {
 		const transport = this.#transport();
@@ -258,34 +321,45 @@ export class NativeFences {
 		}
 		if (!transport || row.instance === null || now !== row.instance) return this.#lapse(row.fenceId!);
 		const request: NativeFenceRequest = Object.freeze({ fenceId: row.fenceId!, run: row.run, instance: row.instance });
-		let answer: unknown;
-		try {
-			answer = await transport.fence(request);
-		} catch {
+		const asked = Promise.resolve().then(() => transport.fence(request));
+		const counted = asked.then(
+			(answer) => (sameRequest(answer, request) ? this.#confirm(request) : this.#lapse(request.fenceId)),
 			// The answer is lost, or the instance refused: unconfirmed until it is asked again and answers.
-			return this.#lapse(request.fenceId);
-		}
-		if (!sameRequest(answer, request)) return this.#lapse(request.fenceId);
-		await this.#confirm(request);
+			() => this.#lapse(request.fenceId),
+		);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timedOut = new Promise<typeof TIMED_OUT>((resolve) => {
+			timer = setTimeout(() => resolve(TIMED_OUT), this.#askMs());
+		});
+		const first = await Promise.race([counted, timedOut]);
+		clearTimeout(timer);
+		if (first === TIMED_OUT) await this.#lapse(request.fenceId);
 	}
 
-	/** Counts an acknowledgement `#ask` checked against its request: only while its fence is still required, and only once synced. */
+	/**
+	 * Counts an acknowledgement `#ask` checked against its request, only while
+	 * its fence is still required. It is written, read as the state before it
+	 * until synced, and counted only then; if the sync fails, the write is
+	 * undone and this object latches.
+	 */
 	async #confirm(request: NativeFenceRequest): Promise<void> {
-		if (this.#fault) return;
+		if (this.#fault || this.#confirming.has(request.run)) return;
 		let before: NativeFenceRecord | undefined;
 		try {
 			before = this.#row(request.run);
 			if (!before || before.fenceId !== request.fenceId || (before.state !== "pending" && before.state !== "unconfirmed")) return;
+			this.#confirming.set(request.run, before.state);
 			this.#sql.exec("UPDATE pim_native_fences SET state = 'confirmed', confirmed_at = ? WHERE run = ? AND fence_id = ?", this.#now(), request.run, request.fenceId);
 			await this.#sync();
 		} catch {
-			// Not counted: what this process reads goes back to what it was, and nothing more is recorded here.
 			try {
 				if (before) this.#sql.exec("UPDATE pim_native_fences SET state = ?, confirmed_at = NULL WHERE run = ? AND fence_id = ?", before.state, request.run, request.fenceId);
 			} catch {
 				// The latch below stands either way.
 			}
 			this.#latch("a native fence's acknowledgement couldn't be stored");
+		} finally {
+			this.#confirming.delete(request.run);
 		}
 	}
 
@@ -300,9 +374,22 @@ export class NativeFences {
 		}
 	}
 
+	/**
+	 * Latches this object for the process, and tries to store the fault, so
+	 * a restart keeps native calls closed too (`reconcile`). The fault may not
+	 * be stored, as the write that failed wasn't.
+	 */
 	#latch(why: string): string {
-		this.#fault ??= why;
-		return this.#fault;
+		if (this.#fault) return this.#fault;
+		this.#fault = why;
+		try {
+			this.#ensure();
+			this.#sql.exec("INSERT INTO pim_native_fence_faults (at, why) VALUES (?, ?)", this.#now(), why);
+			void this.#sync().catch(() => undefined);
+		} catch {
+			// Not stored: a restart rebuilds from the binder's records instead.
+		}
+		return why;
 	}
 
 	#row(run: string): NativeFenceRecord | undefined {

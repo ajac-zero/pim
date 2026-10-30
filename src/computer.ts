@@ -17,8 +17,8 @@ import { HttpError } from "./http";
  *
  * It is either the person's own, a server, a VM or a box at home that
  * Settings → Computer pairs by making a token, or the one this Pim's
- * computer host keeps for the space (`provide`): an Omarchy VM on the
- * operator's machine, made with Cua (../computer/pim-host.ts), which the
+ * computer host keeps for the space (`provide`): an Ubuntu desktop, a VM
+ * or a container, on the operator's machine, made with Cua (../computer/pim-host.ts), which the
  * host gives the token to. That one is permanent: it runs all the time, and
  * goes only with the space.
  *

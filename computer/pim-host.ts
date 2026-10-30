@@ -1,9 +1,9 @@
 /**
  * pim-host: keeps the computers of everyone on a Pim, on this machine. Each
  * space gets one, permanently, made with Cua (https://github.com/trycua/cua),
- * which runs all the time: a VM (Omarchy, or Ubuntu where Omarchy can't run,
- * as on a Mac with Apple silicon), or where the machine can't run VMs, an
- * Ubuntu container, which shares its kernel and can't run Docker inside.
+ * which runs all the time: an Ubuntu desktop, as a VM, or where the machine
+ * can't run VMs, as a container, which shares its kernel and can't run
+ * Docker inside.
  * pim-computer (./pim-computer.ts) runs in its desktop session, connected to
  * its space. The space's agents run commands, keep files and browse there,
  * and the person uses its desktop from the app, through cua-spacesd's stream.
@@ -39,14 +39,14 @@ import type { Service } from "./pim-computer.ts";
 export const VERSION = "0.1.0";
 
 /**
- * The image computers of a kind are made from, as Cua builds it, with
- * cua-spacesd and Chromium. VMs are Omarchy's edge channel, which is x86-64
- * only, or elsewhere (a Mac with Apple silicon, an ARM server) Cua's Ubuntu
- * desktop. Containers are Cua's Ubuntu desktop: Omarchy runs only as a VM.
+ * The image computers of a kind are made from: Cua's own Ubuntu desktop
+ * (24.04, with Xfce, cua-spacesd, Cua Driver and Chromium), the one Cua
+ * builds as both a container and a VM, for x86-64 and ARM. Other images
+ * with cua-spacesd work too, with --image, such as Omarchy's
+ * (`ghcr.io/trycua/omarchy:edge`, an x86-64 VM only).
  */
 function defaultImage(kind: string): string {
-	if (kind === "container") return "ghcr.io/trycua/linux:24.04";
-	return process.arch === "x64" ? "ghcr.io/trycua/omarchy:edge" : "ghcr.io/trycua/linux:24.04-disk";
+	return kind === "container" ? "ghcr.io/trycua/linux:24.04" : "ghcr.io/trycua/linux:24.04-disk";
 }
 /** The computers this program keeps are named `pim-<owner>`; it leaves every other sandbox alone. */
 const PREFIX = "pim-";
@@ -64,7 +64,7 @@ export type Options = {
 	/** The Pim's address as the computers reach it, which is `url` unless they reach it another way. */
 	readonly computerUrl: string;
 	readonly image: string;
-	/** The kind of sandbox, as `cua sb create --kind` takes it: Omarchy is a VM. */
+	/** The kind of sandbox, as `cua sb create --kind` takes it: `vm` or `container`. */
 	readonly kind: string;
 	readonly cpu: number;
 	readonly memory: string;
@@ -358,7 +358,7 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 		say(
 			values.kind
 				? "The computers are containers."
-				: "This machine has no KVM (/dev/kvm), so the computers are containers: Ubuntu desktops that share this machine's kernel, with no Docker inside. For VMs (Omarchy, with Docker inside), use a machine with KVM: bare metal, or a cloud VM with nested virtualization.",
+				: "This machine has no KVM (/dev/kvm), so the computers are containers, which share this machine's kernel and can't run Docker inside. For VMs, use a machine with KVM: bare metal, or a cloud VM with nested virtualization.",
 		);
 	}
 

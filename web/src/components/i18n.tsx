@@ -653,7 +653,7 @@ const translations = {
     computerDescription:
       "Connect a computer of yours, such as a server, a VM or a box at home, and your agents run commands, browse and keep your files there. Files shows its folder.",
     computerDescriptionManaged:
-      "This Pim keeps a computer for you, running Omarchy, all the time. Your agents run commands, browse and keep your files there, and you can use it yourself from Computer: sign in to sites in its browser, or take over from an agent at any time. Files shows its folder.",
+      "This Pim keeps a computer for you, running all the time. Your agents run commands, browse and keep your files there, and you can use it yourself from Computer: sign in to sites in its browser, or take over from an agent at any time. Files shows its folder.",
     computerWaiting: "Waiting for its first connection",
     computerOnline: "Online",
     computerOffline: "Offline",
@@ -679,7 +679,7 @@ const translations = {
     computerOpen: "Open",
     computerHost: "Computers",
     computerHostDescription:
-      "Pair a Linux machine with KVM, and Pim keeps a computer running Omarchy for everyone here, all the time, on it. Without one, people connect computers of their own.",
+      "Pair a Linux machine with KVM or a Mac with Apple silicon, and Pim keeps a computer for everyone here on it, running all the time: Omarchy on Linux, Ubuntu on a Mac. Without one, people connect computers of their own.",
     computerHostWaiting: "Waiting for the host to connect",
     computerHostMachines: "Computers: {count} · running: {running}",
     computerHostPending: "Waiting: {count}",
@@ -688,7 +688,7 @@ const translations = {
     computerHostRemoveConfirm:
       "Remove the computer host? Its token stops working, so it can't set up new computers. The computers it keeps go on running, connected to their spaces.",
     computerHostTokenOnce:
-      "Run this on the host, as the user who'll keep the computers. It checks for KVM, installs Cua and Node.js where they're missing, and keeps pim-host running from boot. It holds the host's token, shown only now.",
+      "Run this on the host, as the user who'll keep the computers. It checks that the host can run them, installs Cua and Node.js where they're missing, and keeps pim-host running from boot. It holds the host's token, shown only now.",
     computerHostCommand: "In a terminal on the host:",
     computerHostNewTokenConfirm:
       "Make a new token? The one the host has now stops working.",
@@ -1728,7 +1728,7 @@ const translations = {
     computerDescription:
       "Conecta una computadora tuya, como un servidor, una máquina virtual o un equipo en casa, y tus agentes ejecutarán comandos, navegarán y guardarán tus archivos allí. Archivos muestra su carpeta.",
     computerDescriptionManaged:
-      "Este Pim mantiene una computadora para ti, con Omarchy, siempre encendida. Tus agentes ejecutan comandos, navegan y guardan tus archivos allí, y puedes usarla tú desde Computadora: inicia sesión en sitios en su navegador o toma el control de un agente cuando quieras. Archivos muestra su carpeta.",
+      "Este Pim mantiene una computadora para ti, siempre encendida. Tus agentes ejecutan comandos, navegan y guardan tus archivos allí, y puedes usarla tú desde Computadora: inicia sesión en sitios en su navegador o toma el control de un agente cuando quieras. Archivos muestra su carpeta.",
     computerWaiting: "Esperando su primera conexión",
     computerOnline: "En línea",
     computerOffline: "Sin conexión",
@@ -1754,7 +1754,7 @@ const translations = {
     computerOpen: "Abrir",
     computerHost: "Computadoras",
     computerHostDescription:
-      "Vincula una máquina Linux con KVM, y Pim mantendrá en ella una computadora con Omarchy para cada persona aquí, siempre encendida. Sin ella, cada quien conecta una computadora propia.",
+      "Vincula una máquina Linux con KVM o una Mac con Apple silicon, y Pim mantendrá en ella una computadora para cada persona aquí, siempre encendida: Omarchy en Linux, Ubuntu en una Mac. Sin ella, cada quien conecta una computadora propia.",
     computerHostWaiting: "Esperando a que el host se conecte",
     computerHostMachines: "Computadoras: {count} · encendidas: {running}",
     computerHostPending: "En espera: {count}",
@@ -1763,7 +1763,7 @@ const translations = {
     computerHostRemoveConfirm:
       "¿Quitar el host de computadoras? Su token deja de funcionar, así que no puede preparar computadoras nuevas. Las que mantiene siguen encendidas y conectadas a sus espacios.",
     computerHostTokenOnce:
-      "Ejecuta esto en el host, como el usuario que mantendrá las computadoras. Comprueba que haya KVM, instala Cua y Node.js si faltan, y mantiene pim-host en marcha desde el arranque. Lleva el token del host, que solo se muestra ahora.",
+      "Ejecuta esto en el host, como el usuario que mantendrá las computadoras. Comprueba que el host pueda ejecutarlas, instala Cua y Node.js si faltan, y mantiene pim-host en marcha desde el arranque. Lleva el token del host, que solo se muestra ahora.",
     computerHostCommand: "En una terminal del host:",
     computerHostNewTokenConfirm:
       "¿Crear un token nuevo? El que tiene el host ahora deja de funcionar.",

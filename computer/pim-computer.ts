@@ -1003,7 +1003,8 @@ WantedBy=${service.desktop ? "graphical-session.target" : "default.target"}
 		if (loaded && (restart || changed)) await quietly("launchctl", ["bootout", launchdTarget(service)]);
 		if (!loaded || restart || changed) {
 			const started = await quietly("launchctl", ["bootstrap", `gui/${process.getuid?.()}`, plistFile(service, home)]);
-			if (started.code !== 0) throw new Error(`launchd didn't start ${service.name}: ${started.output.trim()}`);
+			// The agent belongs to the desktop's login session, which an SSH session alone doesn't have.
+			if (started.code !== 0) throw new Error(`launchd didn't start ${service.name}: sign in to this Mac's desktop, then run this again. (${started.output.trim()})`);
 		}
 		return { kind, atBoot: false };
 	}
@@ -1118,6 +1119,8 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 	const settings: [string, string | undefined][] = [
 		["PIM_URL", url],
 		["PIM_COMPUTER_TOKEN_FILE", tokenFile],
+		// Commands run with the PATH of whoever installed it, as in their terminal, not the service manager's short one.
+		["PATH", env.PATH],
 		["PIM_COMPUTER_ROOT", values.root ? path.resolve(values.root as string) : undefined],
 		["PIM_CHROME", values.chrome as string | undefined],
 		["PIM_BROWSER_HEADFUL", values.headful ? "1" : undefined],

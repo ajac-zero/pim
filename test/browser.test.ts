@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import type { Message } from "@earendil-works/pi-ai";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -14,6 +15,16 @@ const FORM = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>Orders</
 <button onclick="document.querySelector('h1').textContent = 'Ordered for ' + document.querySelector('#name').value">Order</button>
 <label><input type="checkbox" style="opacity:0">Extra bread</label>
 <button style="display:none">Hidden</button>`)}`;
+
+/** A page with a confirm, a list, a file field, a download and a menu that shows on hover, each telling in its heading what happened. */
+const CONTROLS = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>Soup</title>
+<h1>Ready</h1>
+<button onclick="document.querySelector('h1').textContent = confirm('Delete the soup?') ? 'Deleted' : 'Kept'">Delete</button>
+<select aria-label="Size"><option value="s">Small</option><option value="l">Large</option></select>
+<label>Attachment <input type="file" onchange="document.querySelector('h1').textContent = 'Attached ' + this.files[0].name"></label>
+<a id="recipe" download="recipe.txt">Recipe</a>
+<button onmouseover="document.querySelector('h1').textContent = 'Menu open'">Menu</button>
+<script>document.querySelector('#recipe').href = URL.createObjectURL(new Blob(['Tomato soup']))</script>`)}`;
 
 /** A page whose field and button are where the test clicks: the field at the top, the button 200 pixels down. */
 const PLACED = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>Placed</title>
@@ -55,6 +66,7 @@ afterEach(async () => {
 	await api("/browser", { method: "DELETE" });
 	await setPermission("browser_click", null);
 	await setPermission("browser_type", null);
+	await setPermission("browser_upload", null);
 });
 
 /** Takes a chat's window over, as the app does: a socket that hears the page as pictures, and sends the person's mouse and keyboard. */
@@ -70,9 +82,10 @@ async function takeOver(session?: string) {
 	return { socket, heard, closed, send: (message: unknown) => socket.send(JSON.stringify(message)) };
 }
 
-// The browser is the computer's.
+// The browser is the computer's, and so are the person's files.
+let root: string;
 beforeAll(async () => {
-	await pairTestComputer();
+	({ root } = await pairTestComputer());
 });
 
 describe("the browser", () => {
@@ -106,6 +119,60 @@ describe("the browser", () => {
 
 		// The person can see where it is.
 		expect((await api("/browser")).body).toEqual({ available: true, page: { url: FORM, title: "Orders" } });
+	});
+
+	it("answers the page's dialogs, chooses in lists, hovers, and uploads and downloads the person's files", async () => {
+		await setPermission("browser_click", "on");
+		const page = await callTool("browser_open", { url: CONTROLS });
+
+		// A list is typed into by its option's text, which the approval names as a choice.
+		faux.setResponses([toolUse("browser_type", { ref: refOf(page, "select", "Size"), text: "large" }), toolUse("send_to_user", { message: "Chosen." })]);
+		const choosing = say("Make it large.");
+		const choice = await pendingApproval();
+		expect(choice.summary).toBe("On a page the agent wrote, choose “large” in the list “Size”");
+		expect((await post<Approval>(`/approvals/${choice.id}/approve`)).body.result).toContain("“Size” = “Large”]");
+		await choosing;
+
+		// A confirm holds the page: the agent reads it in its place, as the approved click's result, and answers it.
+		await setPermission("browser_click", null);
+		let confirming = "";
+		faux.setResponses([
+			toolUse("browser_click", { ref: refOf(page, "button", "Delete") }),
+			(context) => {
+				confirming = lastToolResult(context.messages);
+				return toolUse("send_to_user", { message: "Asked." });
+			},
+		]);
+		const deleting = say("Delete it.");
+		const click = await pendingApproval();
+		expect(click.summary).toBe("On a page the agent wrote, click the button “Delete”");
+		await post<Approval>(`/approvals/${click.id}/approve`);
+		await deleting;
+		expect(confirming).toContain("The page shows a confirm: “Delete the soup?”");
+		await setPermission("browser_click", "on");
+		expect(await callTool("browser_read", {})).toContain("The page shows a confirm");
+		expect(await callTool("browser_click", { ref: refOf(page, "button", "Delete") })).toContain("A dialog on the page holds it");
+		expect(await callTool("browser_dialog", { accept: true })).toContain("# Deleted");
+		expect(await callTool("browser_dialog", { accept: true })).toContain("shows no dialog now");
+
+		expect(await callTool("browser_hover", { ref: refOf(page, "button", "Menu") })).toContain("# Menu open");
+
+		// Uploading asks, naming the files; they come from the person's files, on the computer.
+		await fs.writeFile(`${root}/notes.txt`, "Less salt");
+		faux.setResponses([
+			toolUse("browser_upload", { ref: refOf(page, "file field", "Attachment"), paths: ["/workspace/notes.txt"] }),
+			toolUse("send_to_user", { message: "Attached." }),
+		]);
+		const attaching = say("Attach my notes.");
+		const upload = await pendingApproval();
+		expect(upload.summary).toBe("On a page the agent wrote, upload notes.txt with the file field “Attachment”");
+		expect((await post<Approval>(`/approvals/${upload.id}/approve`)).body.result).toContain("# Attached notes.txt");
+		await attaching;
+		expect(await callTool("browser_upload", { ref: refOf(page, "file field", "Attachment"), paths: ["/workspace/missing.txt"] })).toMatch(/missing\.txt/);
+
+		// What a click downloads goes to the person's files, and the agent hears where.
+		const downloaded = await callTool("browser_click", { ref: refOf(page, "link", "Recipe") });
+		expect(downloaded).toContain("Downloaded “recipe.txt” to /workspace/downloads/recipe.txt.");
 	});
 
 	it("refuses an element that isn't on the page, and never reuses a number for another", async () => {

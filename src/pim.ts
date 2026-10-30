@@ -87,6 +87,7 @@ import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, browserClickAction, browserExtension, browserTypeAction } from "./extensions/browser";
+import { DESKTOP_ACT, DESKTOP_EXTENSION, desktopAction, desktopExtension } from "./extensions/desktop";
 import { IMAGES_EXTENSION, type ImageModel, imageGenerationExtension, workersAiImageModel } from "./extensions/image-generation";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
@@ -191,7 +192,7 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /** Pim's own widgets: every chat can show them. */
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
-const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE]);
+const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE, DESKTOP_ACT]);
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
 const PINNED_ARTIFACT = "artifact:";
 
@@ -664,18 +665,23 @@ export class Pim extends DurableAgent<Env> {
 		shellAction(this.computer),
 		browserClickAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
 		browserTypeAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
+		desktopAction(this.computer),
 		writeSkillAction(this.skills, this.#skillWriters, this.files),
 	];
 
 	/**
 	 * Pim's own actions whose tools agents are offered now: those that use the
-	 * computer only while one is paired, and adding apps to this Pim only in
-	 * its admin's space.
+	 * computer only while one is paired (its desktop's, while it has one they
+	 * can use), and adding apps to this Pim only in its admin's space.
 	 */
 	#offeredActions(): GatedAction[] {
 		const computer = this.computer.paired();
+		const desktop = this.computer.desktop();
 		const admin = this.store.meta(OWNER_ADMIN_KEY) === "1";
-		return this.#ownActions.filter((action) => (computer || !COMPUTER_ACTIONS.has(action.name)) && (admin || action.name !== ADD_CUSTOM_APP));
+		return this.#ownActions.filter(
+			(action) =>
+				(computer || !COMPUTER_ACTIONS.has(action.name)) && (desktop || action.name !== DESKTOP_ACT) && (admin || action.name !== ADD_CUSTOM_APP),
+		);
 	}
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
@@ -744,6 +750,7 @@ export class Pim extends DurableAgent<Env> {
 			);
 			this.#installImageGeneration();
 			this.#installBrowser(services);
+			this.#installDesktop();
 			// Restored connections reconnect in the background after a wake; give them a moment.
 			await this.mcp.waitForConnections({ timeout: 5_000 });
 			this.#migrateAlwaysApproved();
@@ -5999,6 +6006,7 @@ export class Pim extends DurableAgent<Env> {
 		this.registry.install(this.#skillsExtension(services));
 		this.registry.install(approvalsExtension(services, this.#offeredActions()));
 		this.#installBrowser(services);
+		this.#installDesktop();
 		this.#installAbilities(services);
 		this.#installApps();
 	}
@@ -6062,6 +6070,11 @@ export class Pim extends DurableAgent<Env> {
 				},
 			}),
 		);
+	}
+
+	/** The desktop's tools, while the person's computer has a desktop agents can use. */
+	#installDesktop(): void {
+		this.registry.install(this.computer.desktop() ? desktopExtension(this.computer) : defineExtension({ name: DESKTOP_EXTENSION, tools: [] }));
 	}
 
 	/** The model `generate_image` draws with: `PIM_IMAGE_MODEL` on Workers AI, or null when it's off. */
@@ -6297,8 +6310,13 @@ export class Pim extends DurableAgent<Env> {
 	/** A message from the computer: what it is, when it has just connected, an answer, or what a stream of its desktop says. */
 	#computerSaid(raw: string | ArrayBuffer | ArrayBufferView): void {
 		const message = typeof raw === "string" || raw instanceof ArrayBuffer ? raw : (raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer);
+		const hello = typeof message === "string" && message.startsWith('{"type":"hello"');
+		const desktop = hello && this.computer.desktop();
 		this.computer.receive(message);
-		if (typeof message === "string" && message.startsWith('{"type":"hello"')) this.#computerConnected();
+		if (!hello) return;
+		// A computer of the person's own that now has a desktop agents can use, or no longer has one: its tools come or go.
+		if (this.computer.desktop() !== desktop) this.#computerChanged();
+		this.#computerConnected();
 	}
 
 	/**

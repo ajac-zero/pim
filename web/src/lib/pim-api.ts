@@ -820,6 +820,8 @@ export type ComputerStatus = {
     browser: string | null;
     /** Whether it streams its desktop, for you to use on the Computer page. */
     screen: boolean;
+    /** Whether agents can use its desktop's apps. */
+    desktop: boolean;
     connectedAt: number;
   } | null;
 };

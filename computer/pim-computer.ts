@@ -13,7 +13,8 @@
  * drives it over the DevTools protocol, through this connection (`Link`).
  * Where it runs Cua's cua-spacesd, as the computers a Pim's host keeps do
  * (./pim-host.ts), its desktop is streamed to the person through this
- * connection too (`spacesdScreen`).
+ * connection too (`spacesdScreen`), and the agents use its apps with Cua
+ * Driver's tools (`spacesdDriver`).
  *
  * Runs on Node.js 22.18 or later. The Pim's install script, which Settings
  * shows with the token, gets Node.js where it's missing and runs `install`,
@@ -77,7 +78,21 @@ export type Machine = {
 	readonly browser?: BrowserHost;
 	/** Its desktop, for the person to see and use, or none where nothing streams it. */
 	readonly screen?: ScreenHost;
+	/** Cua Driver, for the agents to use its desktop's apps, or none where cua-spacesd doesn't run. */
+	readonly driver?: DriverHost;
 };
+
+/**
+ * Cua Driver's tools on this computer (Cua's MCP server for using a
+ * desktop: windows, apps' accessibility trees, pointer and keys, which act
+ * without taking the person's pointer or focus), as cua-spacesd serves them.
+ * A call names one of its tools; the answer is the tool's MCP result.
+ */
+export type DriverHost = {
+	call(tool: string, args: Record<string, unknown>): Promise<DriverResult>;
+};
+
+export type DriverResult = { readonly content: readonly unknown[]; readonly structuredContent?: unknown; readonly isError?: boolean };
 
 /**
  * The computer's desktop as a stream the person's app plays: Cua's media
@@ -196,6 +211,12 @@ export class Link {
 	}
 
 	async #call(op: string, args: Args): Promise<unknown> {
+		if (op === "driver") {
+			const driver = this.#machine.driver;
+			if (!driver) throw new CallError("This computer has no desktop tools: they need Cua's cua-spacesd.", "ENOSYS");
+			if (typeof args.tool !== "string") throw new CallError("tool must name one of Cua Driver's tools", "EINVAL");
+			return driver.call(args.tool, (args.arguments ?? {}) as Args);
+		}
 		if (op === "screen_open") return this.#openScreen(args.channel);
 		if (op === "screen_close") {
 			const screen = this.#screens.get(Number(args.channel));
@@ -819,6 +840,91 @@ async function grpcWeb(base: string, token: string, method: string, message: num
 }
 
 /**
+ * Cua Driver as Cua's cua-spacesd on this computer serves it, at `base`
+ * with the token in `tokenFile`: its MCP server, over streamable HTTP at
+ * `/mcp`, in one session, which opens again if cua-spacesd forgets it (as
+ * after it restarted). Only the result goes back to the space, which gets
+ * the structured part only when there's no other.
+ */
+export function spacesdDriver(base: string, tokenFile: string): DriverHost {
+	let session: Promise<string> | null = null;
+	let next = 1;
+	const post = async (body: unknown, sessionId?: string): Promise<Response> => {
+		let token: string;
+		try {
+			token = (await fs.readFile(tokenFile, "utf8")).trim();
+		} catch {
+			throw new CallError(`This computer has no desktop tools: there's no cua-spacesd token at ${tokenFile}.`, "ENOSYS");
+		}
+		return fetch(new URL("/mcp", base), {
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${token}`,
+				"content-type": "application/json",
+				accept: "application/json, text/event-stream",
+				...(sessionId ? { "mcp-session-id": sessionId } : {}),
+			},
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(120_000),
+		}).catch((error: Error) => {
+			throw new CallError(`cua-spacesd isn't answering at ${base}: ${error.message}`, "ESPACESD");
+		});
+	};
+	// The answer to a request, sent as JSON or as an event stream whose last message with an id is it.
+	const answer = async (response: Response): Promise<{ result?: Record<string, unknown>; error?: { message?: string } }> => {
+		const body = await response.text();
+		if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) return JSON.parse(body);
+		const messages = body
+			.split(/\r?\n/)
+			.filter((line) => line.startsWith("data:"))
+			.map((line) => JSON.parse(line.slice(5)) as Record<string, unknown>);
+		const reply = messages.reverse().find((message) => "id" in message);
+		if (!reply) throw new CallError("cua-spacesd's desktop tools sent no answer.", "ESPACESD");
+		return reply;
+	};
+	const open = async (): Promise<string> => {
+		const response = await post({
+			jsonrpc: "2.0",
+			id: next++,
+			method: "initialize",
+			params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "pim-computer", version: VERSION } },
+		});
+		await response.text();
+		if (!response.ok) throw new CallError(`cua-spacesd refused its desktop tools: HTTP ${response.status}`, "ESPACESD");
+		const id = response.headers.get("mcp-session-id") ?? "";
+		await (await post({ jsonrpc: "2.0", method: "notifications/initialized" }, id)).text();
+		return id;
+	};
+	return {
+		async call(tool, args) {
+			for (let attempt = 1; ; attempt++) {
+				const opening = (session ??= open().catch((error: unknown) => {
+					session = null;
+					throw error;
+				}));
+				const response = await post({ jsonrpc: "2.0", id: next++, method: "tools/call", params: { name: tool, arguments: args } }, await opening);
+				// A session it no longer knows: open another, once.
+				if (response.status >= 400 && response.status < 500 && response.status !== 401 && attempt === 1) {
+					await response.text();
+					if (session === opening) session = null;
+					continue;
+				}
+				if (!response.ok) throw new CallError(`cua-spacesd refused ${tool}: HTTP ${response.status}`, "ESPACESD");
+				const reply = await answer(response);
+				if (reply.error) throw new CallError(`${tool}: ${reply.error.message ?? "failed"}`, "EINVAL");
+				const result = reply.result ?? {};
+				const content = Array.isArray(result.content) ? result.content : [];
+				return {
+					content,
+					...(content.length === 0 && result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
+					...(result.isError === true ? { isError: true } : {}),
+				};
+			}
+		},
+	};
+}
+
+/**
  * The desktop as Cua's cua-spacesd on this computer streams it, at `base`
  * with the token in `tokenFile` (Cua's images keep it at /run/cua/env-token,
  * readable by the desktop's user). Each stream is a media session of its
@@ -1272,11 +1378,20 @@ async function main(): Promise<void> {
 	if (!chrome) log("No Chrome or Chromium found, so your agents have no browser here. Install one, or name it with --chrome.");
 	// The desktop streams where cua-spacesd runs, as it does on the computers a Pim's host keeps: its token is the sign.
 	const spacesdTokenFile = env.PIM_SPACESD_TOKEN_FILE ?? "/run/cua/env-token";
-	const screen = await fs
-		.access(spacesdTokenFile, fs.constants.R_OK)
-		.then(() => spacesdScreen(values.spacesd ?? env.PIM_SPACESD_URL ?? "http://127.0.0.1:3211", spacesdTokenFile))
-		.catch(() => undefined);
-	const machine: Machine = { root, exec: (args, cwd) => runCommand(args, cwd, root), ...(browser ? { browser } : {}), ...(screen ? { screen } : {}) };
+	const spacesd = values.spacesd ?? env.PIM_SPACESD_URL ?? "http://127.0.0.1:3211";
+	const hasSpacesd = await fs.access(spacesdTokenFile, fs.constants.R_OK).then(
+		() => true,
+		() => false,
+	);
+	const screen = hasSpacesd ? spacesdScreen(spacesd, spacesdTokenFile) : undefined;
+	const driver = hasSpacesd ? spacesdDriver(spacesd, spacesdTokenFile) : undefined;
+	const machine: Machine = {
+		root,
+		exec: (args, cwd) => runCommand(args, cwd, root),
+		...(browser ? { browser } : {}),
+		...(screen ? { screen } : {}),
+		...(driver ? { driver } : {}),
+	};
 	const hello = {
 		type: "hello",
 		version: 1,
@@ -1290,6 +1405,7 @@ async function main(): Promise<void> {
 		shell: env.SHELL || "/bin/bash",
 		browser: chrome ?? null,
 		screen: screen !== undefined,
+		desktop: driver !== undefined,
 	};
 	const logRun = (message: string) => {
 		if (message.startsWith('{"type":"call"') && message.includes('"op":"exec"')) {

@@ -663,13 +663,14 @@ export class Directory extends DurableObject<Env> {
 
 	computerHost(now = Date.now()): HostStatus {
 		const stored = this.#meta("computer_host");
-		const host = stored ? (JSON.parse(stored) as { pairedAt: number; seenAt?: number; image?: string; version?: string; machines?: number; running?: number }) : null;
+		const host = stored ? (JSON.parse(stored) as { pairedAt: number; seenAt?: number; image?: string; kind?: string; version?: string; machines?: number; running?: number }) : null;
 		return {
 			paired: host !== null,
 			pairedAt: host?.pairedAt ?? null,
 			seenAt: host?.seenAt ?? null,
 			connected: host?.seenAt !== undefined && now - host.seenAt < HOST_SEEN_MS,
 			image: host?.image ?? null,
+			kind: host?.kind ?? null,
 			version: host?.version ?? null,
 			machines: host?.machines ?? 0,
 			running: host?.running ?? 0,
@@ -717,6 +718,7 @@ export class Directory extends DurableObject<Env> {
 				...stored,
 				seenAt: now,
 				...(sync.image ? { image: sync.image } : {}),
+				...(sync.kind ? { kind: sync.kind } : {}),
 				...(sync.version ? { version: sync.version } : {}),
 				...(sync.machines ? { machines: sync.machines.length, running: sync.machines.filter((machine) => machine.running).length } : {}),
 			}),

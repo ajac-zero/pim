@@ -1,14 +1,15 @@
 /**
  * pim-host: keeps the computers of everyone on a Pim, on this machine. Each
- * space gets one, permanently: a VM made with Cua
- * (https://github.com/trycua/cua), which runs all the time (Omarchy, or
- * Ubuntu where Omarchy can't run, as on a Mac with Apple silicon), with
- * pim-computer (./pim-computer.ts) in its desktop session, connected to its
- * space. The space's agents run commands, keep files and browse there, and
- * the person uses its desktop from the app, through cua-spacesd's stream.
+ * space gets one, permanently, made with Cua (https://github.com/trycua/cua),
+ * which runs all the time: a VM (Omarchy, or Ubuntu where Omarchy can't run,
+ * as on a Mac with Apple silicon), or where the machine can't run VMs, an
+ * Ubuntu container, which shares its kernel and can't run Docker inside.
+ * pim-computer (./pim-computer.ts) runs in its desktop session, connected to
+ * its space. The space's agents run commands, keep files and browse there,
+ * and the person uses its desktop from the app, through cua-spacesd's stream.
  *
- * It needs Linux with KVM, or a Mac with Apple silicon, Cua's `cua` command, and no open
- * port: it asks the Pim for work at `/api/computer-host/sync` every few
+ * It needs Linux (with KVM, for VMs) or a Mac with Apple silicon, Cua's
+ * `cua` command, and no open port: it asks the Pim for work at `/api/computer-host/sync` every few
  * seconds, with the token Settings → Deployment → Computers gives, and
  * reports what it did (src/computer-host.ts). Work is to make a space's
  * computer, with the token it connects to its space with, or to remove one.
@@ -17,7 +18,9 @@
  *
  * The Pim's install script installs it, with Node.js 22.18 or later where
  * the machine has none, and `pim-host install` (`install`) does the rest:
- * it checks for KVM and Cua, setting Cua up where it can, checks the token
+ * it makes the computers VMs where the machine can run them (KVM, or a
+ * Mac) and containers where it can't, checks for Cua, setting it up where
+ * it can, checks the token
  * with the Pim, and runs pim-host as the user's service from then on:
  *
  *   curl -fsSL https://pim.example.com/install.sh | sh -s -- host pimh_…
@@ -36,11 +39,15 @@ import type { Service } from "./pim-computer.ts";
 export const VERSION = "0.1.0";
 
 /**
- * The image computers are made from, as Cua builds it, with cua-spacesd and
- * Chromium: Omarchy's edge channel, which is x86-64 only, or elsewhere (a Mac
- * with Apple silicon, an ARM server) Cua's Ubuntu desktop as a VM.
+ * The image computers of a kind are made from, as Cua builds it, with
+ * cua-spacesd and Chromium. VMs are Omarchy's edge channel, which is x86-64
+ * only, or elsewhere (a Mac with Apple silicon, an ARM server) Cua's Ubuntu
+ * desktop. Containers are Cua's Ubuntu desktop: Omarchy runs only as a VM.
  */
-const DEFAULT_IMAGE = process.arch === "x64" ? "ghcr.io/trycua/omarchy:edge" : "ghcr.io/trycua/linux:24.04-disk";
+function defaultImage(kind: string): string {
+	if (kind === "container") return "ghcr.io/trycua/linux:24.04";
+	return process.arch === "x64" ? "ghcr.io/trycua/omarchy:edge" : "ghcr.io/trycua/linux:24.04-disk";
+}
 /** The computers this program keeps are named `pim-<owner>`; it leaves every other sandbox alone. */
 const PREFIX = "pim-";
 /** What installs Cua's command. */
@@ -229,7 +236,7 @@ export async function serve(options: Options): Promise<never> {
 			const response = await fetch(new URL("/api/computer-host/sync", options.url), {
 				method: "POST",
 				headers: { Authorization: `Bearer ${options.token}`, "content-type": "application/json" },
-				body: JSON.stringify({ results: reporting, ...(known ? { machines: known } : {}), image: options.image, version: VERSION }),
+				body: JSON.stringify({ results: reporting, ...(known ? { machines: known } : {}), image: options.image, kind: options.kind, version: VERSION }),
 				signal: AbortSignal.timeout(30_000),
 			}).catch((error: Error) => error);
 			if (response instanceof Error || !response.ok) {
@@ -288,12 +295,13 @@ async function checkToken(url: string, token: string): Promise<string | null> {
 /** Settings as the options and environment give them, with their defaults. */
 function readOptions(values: Record<string, string | boolean | undefined>, env: Record<string, string | undefined>, token: string): Options {
 	const url = (values.url as string | undefined) ?? env.PIM_URL ?? "";
+	const kind = (values.kind as string | undefined) ?? env.PIM_HOST_KIND ?? "vm";
 	return {
 		url,
 		token,
 		computerUrl: (values["computer-url"] as string | undefined) ?? env.PIM_COMPUTER_URL ?? url,
-		image: (values.image as string | undefined) ?? env.PIM_HOST_IMAGE ?? DEFAULT_IMAGE,
-		kind: (values.kind as string | undefined) ?? env.PIM_HOST_KIND ?? "vm",
+		image: (values.image as string | undefined) ?? env.PIM_HOST_IMAGE ?? defaultImage(kind),
+		kind,
 		cpu: Number((values.cpu as string | undefined) ?? env.PIM_HOST_CPU ?? 4),
 		memory: (values.memory as string | undefined) ?? env.PIM_HOST_MEMORY ?? "8GB",
 		cua: (values.cua as string | undefined) ?? env.PIM_CUA ?? "cua",
@@ -313,8 +321,9 @@ async function installedEnv(service: Service): Promise<Record<string, string>> {
 }
 
 /**
- * `pim-host install`: checks that this machine can keep computers, with
- * KVM and Cua's runtime for their kind, setting the runtime up where Cua
+ * `pim-host install`: picks the kind of computer (VMs where this machine
+ * can run them, containers where it can't, unless `--kind` says), checks
+ * that it can keep them, with Cua's runtime for that kind, setting it up where Cua
  * can, and that the Pim knows the token; then runs pim-host as the user's
  * service from boot (see pim-computer.ts's `Service`), with the options
  * given, and a `pim-host` command to manage it. Running it again sets it up
@@ -330,18 +339,27 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 	const tokenFile = path.join(dir, "token");
 	const token = (values.token as string | undefined) || process.env.PIM_HOST_TOKEN || (await fs.readFile(tokenFile, "utf8").catch(() => "")).trim();
-	const options = readOptions(values, process.env, token);
-	if (!options.url) throw new Error("Give your Pim's address with --url.");
 	if (!token) throw new Error("Give the token from Settings → Deployment → Computers with --token.");
 
+	// VMs where this machine can run them, and containers where it can't, unless --kind says which.
 	// On a Mac, VMs run with Apple's Hypervisor.framework, which Cua's runtime check covers.
-	if (options.kind === "vm" && process.platform === "linux") {
-		const kvm = await fs.stat("/dev/kvm").catch(() => null);
-		if (!kvm) throw new Error("This machine has no KVM (/dev/kvm), which full VMs need: use a bare-metal machine, or a cloud VM with nested virtualization turned on. Or make the computers containers, which can't run Docker inside and share this machine's kernel: --image linux --kind container");
+	const kvm = process.platform === "linux" ? await fs.stat("/dev/kvm").catch(() => null) : null;
+	const kind = (values.kind as string | undefined) ?? (process.platform === "linux" && !kvm ? "container" : "vm");
+	const options = readOptions({ ...values, kind }, process.env, token);
+	if (!options.url) throw new Error("Give your Pim's address with --url.");
+	if (kind === "vm" && process.platform === "linux") {
+		if (!kvm) throw new Error("This machine has no KVM (/dev/kvm), which VMs need: use a bare-metal machine, or a cloud VM with nested virtualization turned on. Or leave out --kind vm, for containers.");
 		if (!(await fs.access("/dev/kvm", constants.R_OK | constants.W_OK).then(() => true, () => false))) {
-			throw new Error(`You can't use KVM yet: add yourself to its group (sudo usermod -aG kvm ${os.userInfo().username}), sign in again, and run this again.`);
+			throw new Error(`You can't use KVM yet: add yourself to its group (sudo usermod -aG kvm ${os.userInfo().username}), sign in again, and run this again. Or make the computers containers: --kind container`);
 		}
-		say("KVM: yes.");
+		say("KVM: yes, so the computers are VMs.");
+	}
+	if (kind === "container") {
+		say(
+			values.kind
+				? "The computers are containers."
+				: "This machine has no KVM (/dev/kvm), so the computers are containers: Ubuntu desktops that share this machine's kernel, with no Docker inside. For VMs (Omarchy, with Docker inside), use a machine with KVM: bare metal, or a cloud VM with nested virtualization.",
+		);
 	}
 
 	let cuaPath = await findCua(options.cua);
@@ -394,7 +412,8 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 		["PIM_CUA", cuaPath],
 		["PIM_COMPUTER_URL", values["computer-url"] as string | undefined],
 		["PIM_HOST_IMAGE", values.image as string | undefined],
-		["PIM_HOST_KIND", values.kind as string | undefined],
+		// The kind it chose stays, so a machine that gains or loses KVM keeps making the same kind.
+		["PIM_HOST_KIND", kind],
 		["PIM_HOST_CPU", values.cpu as string | undefined],
 		["PIM_HOST_MEMORY", values.memory as string | undefined],
 	];
@@ -422,14 +441,14 @@ exec ${shellQuote(process.execPath)} "$DIR/pim-host.ts"
 			0o755,
 		),
 	].some(Boolean);
-	const { kind, atBoot } = await startService(service, changed);
+	const { kind: runs, atBoot } = await startService(service, changed);
 	const bin = await installCommand("pim-host", program);
-	say(`pim-host ${VERSION} is installed and running: it keeps computers for ${options.url}, made from ${options.image}.`);
-	if (kind === "systemd" && !atBoot) {
+	say(`pim-host ${VERSION} is installed and running: it keeps computers for ${options.url}, as ${kind}s made from ${options.image}.`);
+	if (runs === "systemd" && !atBoot) {
 		say(`It stops when you sign out, and so would the computers it starts again. To run it from boot: sudo loginctl enable-linger ${os.userInfo().username}`);
 	}
-	if (kind === "launchd") say("It runs while you're signed in to this Mac: turn on automatic login, so it and the computers start again after the Mac restarts.");
-	if (kind === "loop") say("This machine has no systemd for you, so it runs in the background until the machine restarts: run `pim-host install` again then.");
+	if (runs === "launchd") say("It runs while you're signed in to this Mac: turn on automatic login, so it and the computers start again after the Mac restarts.");
+	if (runs === "loop") say("This machine has no systemd for you, so it runs in the background until the machine restarts: run `pim-host install` again then.");
 	say(`Settings → Deployment → Computers shows it connected in a few seconds. Manage it with: pim-host status | logs | update | uninstall${bin ? ` (add ${bin} to your PATH)` : ""}`);
 }
 
@@ -451,7 +470,7 @@ async function status(): Promise<void> {
 	console.log((await checkToken(options.url, token)) ?? "The Pim knows its token.");
 	const kept = await machines(options).catch((error: Error) => error);
 	if (kept instanceof Error) console.log(kept.message);
-	else console.log(`Computers (${kept.length}), made from ${options.image}:${kept.map((machine) => `\n  ${machine.name}  ${machine.running ? "running" : "stopped"}`).join("") || " none yet"}`);
+	else console.log(`Computers (${kept.length}), as ${options.kind}s made from ${options.image}:${kept.map((machine) => `\n  ${machine.name}  ${machine.running ? "running" : "stopped"}`).join("") || " none yet"}`);
 	if (!state.running) process.exitCode = 1;
 }
 
@@ -491,8 +510,10 @@ Options, for install or running it (or the environment variables in brackets):
   --url <address>           Your Pim's address (PIM_URL)
   --token <token>           The token from Settings → Deployment → Computers (PIM_HOST_TOKEN, or a file named by PIM_HOST_TOKEN_FILE)
   --computer-url <address>  The Pim's address as the computers reach it, when it isn't --url (PIM_COMPUTER_URL)
-  --image <image>           What computers are made from (PIM_HOST_IMAGE; ${DEFAULT_IMAGE})
-  --kind <kind>             vm, container or microvm, as cua sb create takes it (PIM_HOST_KIND; vm)
+  --kind <kind>             vm or container, as cua sb create takes it (PIM_HOST_KIND): install picks vm where
+                            this machine can run VMs and container where it can't, and keeps what it picked
+  --image <image>           What computers are made from (PIM_HOST_IMAGE): for VMs ${defaultImage("vm")},
+                            for containers ${defaultImage("container")}
   --cpu <count>             Each computer's vCPUs (PIM_HOST_CPU; 4)
   --memory <size>           Each computer's memory (PIM_HOST_MEMORY; 8GB)
   --cua <path>              Cua's command (PIM_CUA; cua)`;

@@ -679,8 +679,10 @@ const translations = {
     computerOpen: "Open",
     computerHost: "Computers",
     computerHostDescription:
-      "Pair a Linux machine with KVM or a Mac with Apple silicon, and Pim keeps a computer for everyone here on it, running all the time: Omarchy on Linux, Ubuntu on a Mac. Without one, people connect computers of their own.",
+      "Pair a Linux machine or a Mac with Apple silicon, and Pim keeps a computer for everyone here on it, running all the time: VMs where it can run them (Omarchy on Linux with KVM, Ubuntu on a Mac), or Ubuntu containers where it can't. Without one, people connect computers of their own.",
     computerHostWaiting: "Waiting for the host to connect",
+    computerHostVms: "VMs",
+    computerHostContainers: "Containers",
     computerHostMachines: "Computers: {count} · running: {running}",
     computerHostPending: "Waiting: {count}",
     computerHostSeen: "last seen {date}",
@@ -1754,8 +1756,10 @@ const translations = {
     computerOpen: "Abrir",
     computerHost: "Computadoras",
     computerHostDescription:
-      "Vincula una máquina Linux con KVM o una Mac con Apple silicon, y Pim mantendrá en ella una computadora para cada persona aquí, siempre encendida: Omarchy en Linux, Ubuntu en una Mac. Sin ella, cada quien conecta una computadora propia.",
+      "Vincula una máquina Linux o una Mac con Apple silicon, y Pim mantendrá en ella una computadora para cada persona aquí, siempre encendida: máquinas virtuales donde pueda ejecutarlas (Omarchy en Linux con KVM, Ubuntu en una Mac), o contenedores con Ubuntu donde no. Sin ella, cada quien conecta una computadora propia.",
     computerHostWaiting: "Esperando a que el host se conecte",
+    computerHostVms: "Máquinas virtuales",
+    computerHostContainers: "Contenedores",
     computerHostMachines: "Computadoras: {count} · encendidas: {running}",
     computerHostPending: "En espera: {count}",
     computerHostSeen: "visto por última vez {date}",

@@ -291,6 +291,15 @@ export function ComputerHostSection() {
                   {t(host.connected ? "computerOnline" : "computerOffline")}
                 </Badge>
               )}
+              {host.kind && (
+                <Badge variant="secondary" className="text-[11px]">
+                  {t(
+                    host.kind === "container"
+                      ? "computerHostContainers"
+                      : "computerHostVms",
+                  )}
+                </Badge>
+              )}
             </span>
             <span className="block truncate text-muted-foreground text-xs">
               {host.seenAt === null

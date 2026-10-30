@@ -58,6 +58,8 @@ const MACHINE_KEY = "computer_machine";
 const SETUP_ERROR_KEY = "computer_setup_error";
 const PAIRED_AT_KEY = "computer_paired_at";
 const INFO_KEY = "computer_info";
+/** How long one of Cua Driver's tools may take: it waits for windows and pages itself. */
+const DRIVER_CALL_MS = 120_000;
 
 /** The owner a computer's token names. Whether it is really theirs is for their space to say. */
 export function computerTokenOwner(token: string): string | null {
@@ -77,6 +79,8 @@ export type ComputerInfo = {
 	readonly browser: string | null;
 	/** Whether it streams its desktop, for the person to use from the app. */
 	readonly screen: boolean;
+	/** Whether its agents can use its desktop's apps, with Cua Driver's tools. */
+	readonly desktop: boolean;
 	readonly connectedAt: number;
 };
 
@@ -262,6 +266,7 @@ export class Computer {
 				root: String(hello.root ?? ""),
 				browser: typeof hello.browser === "string" ? hello.browser : null,
 				screen: hello.screen === true,
+				desktop: hello.desktop === true,
 				connectedAt: Date.now(),
 			};
 			this.#meta.setMeta(INFO_KEY, JSON.stringify(info));
@@ -331,6 +336,20 @@ export class Computer {
 	/** Closes a stream of the desktop. */
 	closeScreen(channel: number): void {
 		if (this.#socket()) void this.call("screen_close", { channel }).catch(() => undefined);
+	}
+
+	/**
+	 * Whether agents can use the computer's desktop: the one the computer host
+	 * keeps, which runs Cua Driver, or one of the person's own that said it
+	 * can when it last connected.
+	 */
+	desktop(): boolean {
+		return this.paired() && (this.machine() !== null || this.status().computer?.desktop === true);
+	}
+
+	/** Calls one of Cua Driver's tools on the computer's desktop, and returns its MCP result. */
+	driver(tool: string, args: Record<string, unknown>): Promise<{ content?: unknown[]; structuredContent?: unknown; isError?: boolean }> {
+		return this.call("driver", { tool, arguments: args }, DRIVER_CALL_MS);
 	}
 
 	/** Whether the computer has a browser, and whether it's running; neither while the computer is offline. */

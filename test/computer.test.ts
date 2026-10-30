@@ -4,7 +4,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import type { ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
+import type { DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
@@ -135,6 +135,8 @@ describe("the computer", () => {
 		expect((await opens("/computer/connect", `${token.slice(0, -2)}xx`)).status).toBe(401);
 		const tools = await offeredTools();
 		for (const tool of ["file_read", "file_write", "file_edit", "file_search", "shell", "generate_image", "browser_open", "browser_click"]) expect(tools).toContain(tool);
+		// It has no desktop for agents: no Cua Driver.
+		for (const tool of ["desktop_look", "desktop_read", "desktop_act"]) expect(tools).not.toContain(tool);
 	});
 
 	it("keeps the files the person and their agents share", async () => {
@@ -350,8 +352,37 @@ describe("a computer this Pim's host keeps", () => {
 				};
 			},
 		};
-		const hosted = await connectTestComputer(again!.token!, `/tmp/computer-${crypto.randomUUID()}`, async () => answer({ command: "true" }), undefined, screen);
-		expect(await status()).toMatchObject({ state: "online", managed: true, error: null, computer: { screen: true } });
+		// Its agents use its desktop's apps with Cua Driver, which answers as Cua Driver would.
+		const driven: { tool: string; args: Record<string, unknown> }[] = [];
+		const driver: DriverHost = {
+			async call(tool, args) {
+				driven.push({ tool, args });
+				if (tool === "get_desktop_state") {
+					return { content: [{ type: "image", data: btoa(String.fromCharCode(...PNG)), mimeType: "image/png" }, { type: "text", text: "pid=3547 window_id=7 \"Untitled - Mousepad\"" }] };
+				}
+				return { content: [{ type: "text", text: `${tool} done` }] };
+			},
+		};
+		const hosted = await connectTestComputer(again!.token!, `/tmp/computer-${crypto.randomUUID()}`, async () => answer({ command: "true" }), undefined, screen, driver);
+		expect(await status()).toMatchObject({ state: "online", managed: true, error: null, computer: { screen: true, desktop: true } });
+
+		// Looking runs at once, and shows the model the screen; acting asks first, naming what it does, and then runs in the agent's own driver session.
+		expect(await offeredTools()).toEqual(expect.arrayContaining(["desktop_look", "desktop_read", "desktop_act"]));
+		const looked = await callTool("desktop_look", {});
+		expect(looked).toMatchObject({ isError: false, images: ["image/png"] });
+		expect(looked.text).toContain("Untitled - Mousepad");
+		faux.setResponses([
+			toolUse("desktop_act", { action: "type_text", pid: 3547, window_id: 7, text: "Dear Ada," }),
+			toolUse("send_to_user", { message: "Typed." }),
+		]);
+		const typing = say("Start the letter.");
+		const typed = await pendingApproval();
+		expect(typed.summary).toBe("Type “Dear Ada,” on your computer in app 3547");
+		await post(`/approvals/${typed.id}/approve`);
+		await typing;
+		expect(driven.map(({ tool }) => tool)).toEqual(["get_desktop_state", "type_text"]);
+		expect(driven[1]!.args).toEqual({ pid: 3547, window_id: 7, text: "Dear Ada,", session: driven[0]!.args.session });
+		expect(driven[0]!.args.session).toMatch(/^pim-/);
 
 		// Only the person's own signed-in browser shows the desktop, which takes input as if at the computer: not an API token.
 		expect((await opens("/computer/screen", TOKEN)).status).toBe(403);

@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { posix } from "node:path";
 import type { Connection } from "agents";
 import type { ExecArgs, ExecResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
@@ -390,6 +391,21 @@ export class Computer {
 		const browser = this.#browser;
 		this.#browser = null;
 		browser?.transport.onclose?.();
+	}
+
+	/**
+	 * Where a file or folder in `/workspace` is on the computer itself, for
+	 * its programs to open: the browser uploads from it and downloads to it.
+	 * It must exist, and be in `/workspace` once links are followed.
+	 */
+	async localPath(path: string): Promise<string> {
+		await this.fs.stat(path);
+		const root = this.status().computer?.root;
+		if (!root) throw new Error("The computer is offline.");
+		const rest = posix.relative("/workspace", posix.resolve(path));
+		if (rest === "") return root;
+		const sep = root.includes("\\") ? "\\" : "/";
+		return `${root.replace(/[\\/]$/, "")}${sep}${rest.split("/").join(sep)}`;
 	}
 
 	/** Runs a shell command on the computer. */

@@ -86,7 +86,7 @@ import {
 import pimConfig from "../pim.config";
 import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
-import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, browserClickAction, browserExtension, browserTypeAction } from "./extensions/browser";
+import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, BROWSER_UPLOAD, browserClickAction, browserExtension, browserTypeAction, browserUploadAction } from "./extensions/browser";
 import { DESKTOP_ACT, DESKTOP_EXTENSION, desktopAction, desktopExtension } from "./extensions/desktop";
 import { IMAGES_EXTENSION, type ImageModel, imageGenerationExtension, workersAiImageModel } from "./extensions/image-generation";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
@@ -192,7 +192,7 @@ const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 /** Pim's own widgets: every chat can show them. */
 const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
-const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE, DESKTOP_ACT]);
+const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE, BROWSER_UPLOAD, DESKTOP_ACT]);
 /** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
 const PINNED_ARTIFACT = "artifact:";
 
@@ -665,6 +665,11 @@ export class Pim extends DurableAgent<Env> {
 		shellAction(this.computer),
 		browserClickAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
 		browserTypeAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
+		browserUploadAction(
+			this.browser,
+			(conversation) => this.#browserWindowOf(conversation),
+			(path) => this.computer.localPath(path),
+		),
 		desktopAction(this.computer),
 		writeSkillAction(this.skills, this.#skillWriters, this.files),
 	];
@@ -6068,6 +6073,7 @@ export class Pim extends DurableAgent<Env> {
 					const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
 					return (await this.files.write(target, png)).path;
 				},
+				localPath: (path) => this.computer.localPath(path),
 			}),
 		);
 	}

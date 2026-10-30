@@ -832,6 +832,8 @@ export type ComputerHostStatus = {
   seenAt: number | null;
   connected: boolean;
   image: string | null;
+  /** Whether it makes computers as `vm`s or `container`s. */
+  kind: string | null;
   version: string | null;
   machines: number;
   running: number;

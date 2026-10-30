@@ -315,7 +315,7 @@ describe("a computer this Pim's host keeps", () => {
 		// Checking its token, as `pim-host install` does, takes no work and doesn't count as the host connecting.
 		expect(await (await sync(host, { results: [], check: true })).json()).toEqual({ requests: [] });
 		expect(await directory().computerHost()).toMatchObject({ connected: false, seenAt: null });
-		const first = await sync(host, { results: [], machines: [], image: "ghcr.io/trycua/omarchy:edge", version: "0.1.0" });
+		const first = await sync(host, { results: [], machines: [], image: "ghcr.io/trycua/omarchy:edge", kind: "vm", version: "0.1.0" });
 		expect(first.status).toBe(200);
 		const { requests } = await first.json<Requests>();
 		const name = `pim-${OWNER.replace("_", "-")}`;
@@ -331,7 +331,7 @@ describe("a computer this Pim's host keeps", () => {
 		expect(again!.token).not.toBe(requests[0]!.token);
 		expect((await opens("/computer/connect", requests[0]!.token!)).status).toBe(401);
 		await sync(host, { results: [{ id: again!.id }], machines: [{ name, running: true }] });
-		expect(await directory().computerHost()).toMatchObject({ paired: true, connected: true, image: "ghcr.io/trycua/omarchy:edge", machines: 1, running: 1, pending: 0 });
+		expect(await directory().computerHost()).toMatchObject({ paired: true, connected: true, image: "ghcr.io/trycua/omarchy:edge", kind: "vm", machines: 1, running: 1, pending: 0 });
 
 		// Set up, it connects with its token, with its desktop to show.
 		const streams: { heard: string[]; closed: boolean; say(data: string | Uint8Array): void }[] = [];

@@ -27,7 +27,7 @@ Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on,
 - **Remember.** Long-term memory, after [OptMem](https://github.com/VictorTaelin/OptMem), in scopes: your majordomo knows everything, each other agent what you let it, and you can make any of it forget.
 - **Plan and follow up.** Goals with step-by-step plans, reminders and recurring work on a schedule.
 - **Make things.** Documents, pages and small React apps, kept with every version, which can sit on an agent's dashboard as widgets.
-- **Use your apps and your computer.** GitHub, Linear, Notion and more than 30 other apps over MCP; commands and a browser on a machine of yours, or on a desktop Pim keeps for you (Omarchy, or Ubuntu on a Mac), which you use from the app and take over from your agents at any time.
+- **Use your apps and your computer.** GitHub, Linear, Notion and more than 30 other apps over MCP; commands and a browser on a machine of yours, or on a desktop Pim keeps for you (Omarchy or Ubuntu), which you use from the app and take over from your agents at any time.
 - **Ask first.** Anything that acts on the world, such as a request, a command or a click, waits for your approval unless you allowed it.
 
 ## Screenshots

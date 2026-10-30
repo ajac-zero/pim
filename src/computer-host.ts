@@ -40,8 +40,9 @@ export type HostSync = {
 	readonly results: readonly HostResult[];
 	/** The computers it keeps, by name, and whether each runs. */
 	readonly machines?: readonly { readonly name: string; readonly running: boolean }[];
-	/** The image it makes computers from, and its version, for the admin to see. */
+	/** The image it makes computers from, as which kind (`vm` or `container`), and its version, for the admin to see. */
 	readonly image?: string;
+	readonly kind?: string;
 	readonly version?: string;
 	/** Only checking its token, as `pim-host install` and `status` do: it takes no work and isn't counted as seen. */
 	readonly check?: true;
@@ -55,6 +56,7 @@ export type HostStatus = {
 	readonly seenAt: number | null;
 	readonly connected: boolean;
 	readonly image: string | null;
+	readonly kind: string | null;
 	readonly version: string | null;
 	/** The computers it said it keeps, and how many of them run. */
 	readonly machines: number;
@@ -83,6 +85,7 @@ export function readSync(body: unknown): HostSync {
 		results,
 		...(machines ? { machines } : {}),
 		...(typeof given.image === "string" ? { image: given.image.slice(0, 200) } : {}),
+		...(typeof given.kind === "string" ? { kind: given.kind.slice(0, 20) } : {}),
 		...(typeof given.version === "string" ? { version: given.version.slice(0, 50) } : {}),
 		...(given.check === true ? { check: true as const } : {}),
 	};

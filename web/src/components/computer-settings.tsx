@@ -234,8 +234,8 @@ export function ComputerSection() {
 }
 
 /**
- * The machine that keeps everyone's computers: one of the operator's, with
- * KVM and Cua, that runs pim-host. Pairing it makes its token, shown once
+ * The machine that keeps everyone's computers: one of the operator's (Linux
+ * with KVM, or a Mac with Apple silicon) that runs pim-host with Cua. Pairing it makes its token, shown once
  * with the command that installs pim-host with it. The admin's alone.
  */
 export function ComputerHostSection() {

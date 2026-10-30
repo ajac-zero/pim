@@ -1,12 +1,13 @@
 /**
  * pim-host: keeps the computers of everyone on a Pim, on this machine. Each
- * space gets one, permanently: an Omarchy VM made with Cua
- * (https://github.com/trycua/cua), which runs all the time, with
+ * space gets one, permanently: a VM made with Cua
+ * (https://github.com/trycua/cua), which runs all the time (Omarchy, or
+ * Ubuntu where Omarchy can't run, as on a Mac with Apple silicon), with
  * pim-computer (./pim-computer.ts) in its desktop session, connected to its
  * space. The space's agents run commands, keep files and browse there, and
  * the person uses its desktop from the app, through cua-spacesd's stream.
  *
- * It needs a Linux machine with KVM and Cua's `cua` command, and no open
+ * It needs Linux with KVM, or a Mac with Apple silicon, Cua's `cua` command, and no open
  * port: it asks the Pim for work at `/api/computer-host/sync` every few
  * seconds, with the token Settings → Deployment → Computers gives, and
  * reports what it did (src/computer-host.ts). Work is to make a space's
@@ -34,8 +35,12 @@ import type { Service } from "./pim-computer.ts";
 
 export const VERSION = "0.1.0";
 
-/** The image computers are made from: Omarchy's edge channel, as Cua builds it, with cua-spacesd and Chromium. */
-const DEFAULT_IMAGE = "ghcr.io/trycua/omarchy:edge";
+/**
+ * The image computers are made from, as Cua builds it, with cua-spacesd and
+ * Chromium: Omarchy's edge channel, which is x86-64 only, or elsewhere (a Mac
+ * with Apple silicon, an ARM server) Cua's Ubuntu desktop as a VM.
+ */
+const DEFAULT_IMAGE = process.arch === "x64" ? "ghcr.io/trycua/omarchy:edge" : "ghcr.io/trycua/linux:24.04-disk";
 /** The computers this program keeps are named `pim-<owner>`; it leaves every other sandbox alone. */
 const PREFIX = "pim-";
 /** What installs Cua's command. */
@@ -314,7 +319,7 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 	const os = await import("node:os");
 	const { startService, writeChanged, installCommand, shellQuote } = await import("./pim-computer.ts");
 	const say = (line: string) => console.log(line);
-	if (process.platform !== "linux") throw new Error("pim-host runs on Linux: Cua runs Omarchy as a VM with KVM.");
+	if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("pim-host runs on Linux or macOS.");
 	const service = await hostService();
 	const dir = service.dir;
 	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
@@ -324,9 +329,10 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 	if (!options.url) throw new Error("Give your Pim's address with --url.");
 	if (!token) throw new Error("Give the token from Settings → Deployment → Computers with --token.");
 
-	if (options.kind === "vm") {
+	// On a Mac, VMs run with Apple's Hypervisor.framework, which Cua's runtime check covers.
+	if (options.kind === "vm" && process.platform === "linux") {
 		const kvm = await fs.stat("/dev/kvm").catch(() => null);
-		if (!kvm) throw new Error("This machine has no KVM (/dev/kvm), which Omarchy's VMs need: use a bare-metal machine, or a cloud VM with nested virtualization turned on.");
+		if (!kvm) throw new Error("This machine has no KVM (/dev/kvm), which full VMs need: use a bare-metal machine, or a cloud VM with nested virtualization turned on. Or make the computers containers, which can't run Docker inside and share this machine's kernel: --image linux --kind container");
 		if (!(await fs.access("/dev/kvm", constants.R_OK | constants.W_OK).then(() => true, () => false))) {
 			throw new Error(`You can't use KVM yet: add yourself to its group (sudo usermod -aG kvm ${os.userInfo().username}), sign in again, and run this again.`);
 		}
@@ -378,6 +384,8 @@ async function install(values: Record<string, string | boolean | undefined>): Pr
 	const settings: [string, string | undefined][] = [
 		["PIM_URL", options.url],
 		["PIM_HOST_TOKEN_FILE", tokenFile],
+		// Cua finds QEMU and the rest on the PATH of whoever installed it (Homebrew's, on a Mac), not the service manager's short one.
+		["PATH", process.env.PATH],
 		["PIM_CUA", cuaPath],
 		["PIM_COMPUTER_URL", values["computer-url"] as string | undefined],
 		["PIM_HOST_IMAGE", values.image as string | undefined],
@@ -415,6 +423,7 @@ exec ${shellQuote(process.execPath)} "$DIR/pim-host.ts"
 	if (kind === "systemd" && !atBoot) {
 		say(`It stops when you sign out, and so would the computers it starts again. To run it from boot: sudo loginctl enable-linger ${os.userInfo().username}`);
 	}
+	if (kind === "launchd") say("It runs while you're signed in to this Mac: turn on automatic login, so it and the computers start again after the Mac restarts.");
 	if (kind === "loop") say("This machine has no systemd for you, so it runs in the background until the machine restarts: run `pim-host install` again then.");
 	say(`Settings → Deployment → Computers shows it connected in a few seconds. Manage it with: pim-host status | logs | update | uninstall${bin ? ` (add ${bin} to your PATH)` : ""}`);
 }

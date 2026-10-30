@@ -1,7 +1,8 @@
 /**
- * This Pim's computer host: a Linux machine of the operator's, with KVM,
- * that runs Cua and ../computer/pim-host.ts, and keeps one computer for
- * each space that asks for one: an Omarchy VM that runs all the time. The
+ * This Pim's computer host: a machine of the operator's (Linux with KVM,
+ * or a Mac with Apple silicon) that runs Cua and ../computer/pim-host.ts,
+ * and keeps one computer for each space that asks for one: a VM that runs
+ * all the time, Omarchy, or Ubuntu where Omarchy can't run. The
  * admin pairs it in Settings → Deployment, which makes its token,
  * `pimh_<secret>`; the Directory keeps only the token's digest.
  *

@@ -127,9 +127,14 @@ export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 [ -n "$TOKEN" ] || [ -s "$DIR/token" ] || { echo "This computer has no token for its Pim yet."; exit 0; }
 
 # One browser for the person and the agents: Chromium, however it's opened, uses pim-computer's profile, and says where DevTools is.
+# Arch's launcher (Omarchy's) reads chromium-flags.conf; Debian's and Ubuntu's source /etc/chromium.d, which takes root.
 FLAGS="\${XDG_CONFIG_HOME:-$HOME/.config}/chromium-flags.conf"
 mkdir -p "$(dirname "$FLAGS")"
 grep -q -- '--user-data-dir=' "$FLAGS" 2>/dev/null || printf -- '--user-data-dir=%s\\n--remote-debugging-port=0\\n' "$DIR/browser" >>"$FLAGS"
+if [ -d /etc/chromium.d ] && [ ! -e /etc/chromium.d/pim ]; then
+	printf 'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --user-data-dir=%s --remote-debugging-port=0"\\n' "$DIR/browser" | sudo -n tee /etc/chromium.d/pim >/dev/null ||
+		echo "Couldn't make Chromium use pim-computer's profile, without sudo: the person's Chromium is a browser of its own."
+fi
 
 curl -fsSL --retry 5 "$PIM_URL/install.sh" | PIM_URL="$PIM_URL" PIM_COMPUTER_TOKEN="$TOKEN" sh -s -- computer --root "$HOME/pim" --headful --desktop
 `;

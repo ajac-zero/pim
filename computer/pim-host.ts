@@ -55,7 +55,8 @@ const CUA_INSTALL = "curl -fsSL https://cua.ai/install.sh | sh -s -- --cli-only 
 
 type Request = { id: string; op: "create"; name: string; token: string } | { id: string; op: "delete"; name: string };
 type Result = { id: string; error?: string };
-type Machine = { name: string; running: boolean };
+/** A computer Cua knows: `missing` when its record is all there is, its VM or container gone, as after making it failed. */
+type Machine = { name: string; running: boolean; missing: boolean };
 
 export type Options = {
 	/** The Pim's address, which this asks for work. */
@@ -107,7 +108,7 @@ async function machines(options: Options): Promise<Machine[]> {
 	const listed = JSON.parse(run.stdout || "[]") as { name?: string; state?: string; status?: string }[];
 	return listed
 		.filter((sandbox) => typeof sandbox.name === "string" && sandbox.name.startsWith(PREFIX))
-		.map((sandbox) => ({ name: sandbox.name!, running: sandbox.state === "running" }));
+		.map((sandbox) => ({ name: sandbox.name!, running: sandbox.state === "running", missing: sandbox.status === "missing" }));
 }
 
 const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -155,25 +156,34 @@ async function setUp(options: Options, name: string, token: string | null): Prom
 
 /** Makes a space's computer, or sets the one it has up again with a new token. */
 async function create(options: Options, name: string, token: string): Promise<void> {
-	const existing = (await machines(options)).find((machine) => machine.name === name);
+	let existing = (await machines(options)).find((machine) => machine.name === name);
+	if (existing && !existing.running && !existing.missing && !(await start(options, name))) existing = { ...existing, missing: true };
+	if (existing?.missing) {
+		// Cua can't start a record with nothing behind it, nor make another of its name.
+		log(`${name} is missing its ${options.kind === "container" ? "container" : "VM"}, as after making it failed: making it again.`);
+		await remove(options, name);
+		existing = undefined;
+	}
 	if (!existing) {
 		log(`Making ${name} from ${options.image}; the first one downloads the image, which takes a while.`);
 		const args = ["sb", "create", options.image, "--name", name, "--cpu", String(options.cpu), "--memory", options.memory, "--wait", "desktop"];
 		if (options.kind) args.push("--kind", options.kind);
 		const run = await cua(options, args);
 		if (run.code !== 0) throw failed(`Making ${name}`, run);
-	} else if (!existing.running) await start(options, name);
+	}
 	await setUp(options, name, token);
 	log(`${name} is set up.`);
 }
 
-/** Starts a computer that stopped. */
-async function start(options: Options, name: string): Promise<void> {
+/** Starts a computer that stopped; false when Cua lists it but has no such computer to start (it exits 3, not found). */
+async function start(options: Options, name: string): Promise<boolean> {
 	log(`Starting ${name}, which stopped.`);
 	const resumed = await cua(options, ["sb", "resume", name]);
-	if (resumed.code === 0) return;
+	if (resumed.code === 0) return true;
 	const restarted = await cua(options, ["sb", "restart", name]);
+	if (restarted.code === 3) return false;
 	if (restarted.code !== 0) throw failed(`Starting ${name}`, restarted);
+	return true;
 }
 
 /** Removes a space's computer, with everything on it; one that's gone already is removed. */
@@ -187,9 +197,10 @@ async function remove(options: Options, name: string): Promise<void> {
 /** Starts the computers that stopped, and pim-computer in them; at the start, pim-computer in every one, whose loop may have gone with this machine. */
 async function keepRunning(options: Options, everyone: boolean): Promise<void> {
 	for (const machine of await machines(options)) {
-		if (machine.running && !everyone) continue;
+		// One that's missing is made again when its space asks again (Try again, in Settings → Computer).
+		if (machine.missing || (machine.running && !everyone)) continue;
 		try {
-			if (!machine.running) await start(options, machine.name);
+			if (!machine.running && !(await start(options, machine.name))) continue;
 			await setUp(options, machine.name, null);
 		} catch (error) {
 			log(`Couldn't start ${machine.name}: ${(error as Error).message}`);

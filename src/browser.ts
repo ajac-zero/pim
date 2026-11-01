@@ -646,6 +646,7 @@ export class PimBrowser {
 		}
 		await this.#prepare(browser, page);
 		this.#pages.set(chat, page);
+		for (const other of this.#unclaimed.splice(0)) if (other !== page) await other.close().catch(() => {});
 		return page;
 	}
 
@@ -709,19 +710,24 @@ export class PimBrowser {
 	/**
 	 * Chrome opens the windows it had when it starts (so that sign-ins that
 	 * last only for the session stay), with new ids: each chat's window is
-	 * the one where it was, and the others close.
+	 * the one where it was, and the others close, once the chat that started
+	 * the browser has its window: Chrome on a desktop quits with its last.
 	 */
 	async #claimRestored(browser: Browser): Promise<void> {
 		const records = this.#records();
 		const unclaimed = Object.entries(records).sort(([, a], [, b]) => b.usedAt - a.usedAt);
 		for (const [, record] of unclaimed) record.target = null;
+		this.#unclaimed = [];
 		for (const page of await browser.pages()) {
 			const owner = unclaimed.find(([, record]) => record.target === null && record.url === page.url());
 			if (owner) owner[1].target = targetIdOf(page.target());
-			else await page.close().catch(() => {});
+			else this.#unclaimed.push(page);
 		}
 		this.#saveRecords(records);
 	}
+
+	/** The windows Chrome opened as it started that no chat claimed, closed once a chat's window is open. */
+	#unclaimed: Page[] = [];
 
 	/**
 	 * Has the browser save downloads to the person's files, and tell the

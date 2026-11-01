@@ -902,7 +902,12 @@ export function spacesdDriver(base: string, tokenFile: string): DriverHost {
 					session = null;
 					throw error;
 				}));
-				const response = await post({ jsonrpc: "2.0", id: next++, method: "tools/call", params: { name: tool, arguments: args } }, await opening);
+				const id = await opening;
+				// Cua Driver keeps a session for the MCP session that began it, and refuses it to another until it ends
+				// (idle, minutes on), so one this program began before it restarted, or before its MCP session, is out
+				// of reach: each MCP session's are its own.
+				const sent = typeof args.session === "string" ? { ...args, session: `${args.session}-${id.slice(0, 8)}` } : args;
+				const response = await post({ jsonrpc: "2.0", id: next++, method: "tools/call", params: { name: tool, arguments: sent } }, id);
 				// A session it no longer knows: open another, once.
 				if (response.status >= 400 && response.status < 500 && response.status !== 401 && attempt === 1) {
 					await response.text();
@@ -926,8 +931,8 @@ export function spacesdDriver(base: string, tokenFile: string): DriverHost {
 
 /**
  * The desktop as Cua's cua-spacesd on this computer streams it, at `base`
- * with the token in `tokenFile` (Cua's images keep it at /run/cua/env-token,
- * readable by the desktop's user). Each stream is a media session of its
+ * with the token in `tokenFile` (Cua's images keep one readable by the
+ * desktop's user: see `main`). Each stream is a media session of its
  * own: H.264 of the whole display, with the person's input allowed to
  * activate windows, as at the computer itself.
  */
@@ -1314,7 +1319,7 @@ Options (or the environment variables in brackets):
   --chrome <path>   The Chrome or Chromium your agents browse with (PIM_CHROME; found where it usually is unless set)
   --headful         Show the browser's windows rather than running it headless (PIM_BROWSER_HEADFUL=1)
   --spacesd <url>   Where Cua's cua-spacesd streams this computer's desktop (PIM_SPACESD_URL; http://127.0.0.1:3211),
-                    with its token in the file PIM_SPACESD_TOKEN_FILE names (/run/cua/env-token)
+                    with its token in the file PIM_SPACESD_TOKEN_FILE names (/run/cua-env/env-token or /run/cua/env-token)
 
 install takes the same options, which the service then runs with, and --desktop, to start with the desktop's
 session rather than at login or boot. The browser keeps its profile, with what you sign in to there, in
@@ -1377,14 +1382,21 @@ async function main(): Promise<void> {
 	const browser = chrome ? localBrowser(chrome, path.join(os.homedir(), ".pim-computer", "browser"), headful, log) : undefined;
 	if (!chrome) log("No Chrome or Chromium found, so your agents have no browser here. Install one, or name it with --chrome.");
 	// The desktop streams where cua-spacesd runs, as it does on the computers a Pim's host keeps: its token is the sign.
-	const spacesdTokenFile = env.PIM_SPACESD_TOKEN_FILE ?? "/run/cua/env-token";
+	// Cua's containers keep it readable by the desktop's user at /run/cua/env-token; its VMs keep that one root's
+	// own and a copy for the desktop's user at /run/cua-env/env-token, which appears a moment after cua-spacesd starts.
+	const readable = (file: string) => fs.access(file, fs.constants.R_OK).then(() => true, () => false);
+	const tokenFiles = env.PIM_SPACESD_TOKEN_FILE ? [env.PIM_SPACESD_TOKEN_FILE] : ["/run/cua-env/env-token", "/run/cua/env-token"];
+	const cuaImage = await readable("/usr/local/bin/cua-spacesd");
+	let spacesdTokenFile: string | undefined;
+	for (let waited = 0; ; waited += 1_000) {
+		for (const file of tokenFiles) if (!spacesdTokenFile && (await readable(file))) spacesdTokenFile = file;
+		if (spacesdTokenFile || !cuaImage || waited >= 60_000) break;
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+	}
+	if (cuaImage && !spacesdTokenFile) log(`cua-spacesd is here, but none of ${tokenFiles.join(", ")} is readable: the desktop won't stream, and the agents can't use its apps.`);
 	const spacesd = values.spacesd ?? env.PIM_SPACESD_URL ?? "http://127.0.0.1:3211";
-	const hasSpacesd = await fs.access(spacesdTokenFile, fs.constants.R_OK).then(
-		() => true,
-		() => false,
-	);
-	const screen = hasSpacesd ? spacesdScreen(spacesd, spacesdTokenFile) : undefined;
-	const driver = hasSpacesd ? spacesdDriver(spacesd, spacesdTokenFile) : undefined;
+	const screen = spacesdTokenFile ? spacesdScreen(spacesd, spacesdTokenFile) : undefined;
+	const driver = spacesdTokenFile ? spacesdDriver(spacesd, spacesdTokenFile) : undefined;
 	const machine: Machine = {
 		root,
 		exec: (args, cwd) => runCommand(args, cwd, root),

@@ -187,9 +187,25 @@ export function ComputerSection() {
         </div>
       )}
       {status.state === "offline" && !shown && machine && (
-        <p className="text-[13px] text-muted-foreground">
-          {t(status.managed ? "computerOfflineManaged" : "computerOfflineHint")}
-        </p>
+        <div className="flex items-center gap-3">
+          <p className="min-w-0 flex-1 text-[13px] text-muted-foreground">
+            {t(
+              status.managed ? "computerOfflineManaged" : "computerOfflineHint",
+            )}
+          </p>
+          {/* The host makes it again, starts it, or gives it a new token, as it needs. */}
+          {status.managed && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setUp.mutate()}
+              disabled={setUp.isPending}
+            >
+              {setUp.isPending && <Loader2 className="animate-spin" />}
+              {t("computerSetUpAgain")}
+            </Button>
+          )}
+        </div>
       )}
       {shown && (
         <div

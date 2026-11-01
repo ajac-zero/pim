@@ -668,7 +668,8 @@ const translations = {
     computerNone:
       "You have no computer yet. Connect one in Settings, and you can use its desktop here.",
     computerOfflineManaged:
-      "Your computer isn't connected right now. It comes back on its own; if it doesn't, tell whoever runs this Pim.",
+      "Your computer isn't connected right now. It usually comes back on its own; if it doesn't, set it up again.",
+    computerSetUpAgain: "Set up again",
     computerNoScreen:
       "Your computer doesn't share its desktop. Run pim-computer in its desktop session, with cua-spacesd, to use it here.",
     computerFullScreen: "Full screen",
@@ -1745,7 +1746,8 @@ const translations = {
     computerNone:
       "Aún no tienes computadora. Conecta una en Configuración y podrás usar su escritorio aquí.",
     computerOfflineManaged:
-      "Tu computadora no está conectada ahora. Vuelve sola; si no, avisa a quien administra este Pim.",
+      "Tu computadora no está conectada ahora. Suele volver sola; si no, configúrala de nuevo.",
+    computerSetUpAgain: "Configurar de nuevo",
     computerNoScreen:
       "Tu computadora no comparte su escritorio. Ejecuta pim-computer en su sesión de escritorio, con cua-spacesd, para usarla aquí.",
     computerFullScreen: "Pantalla completa",

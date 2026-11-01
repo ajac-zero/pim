@@ -140,10 +140,21 @@ function NotLive({ status }: { status: ComputerStatus }) {
     );
   if (status.managed && !status.computer)
     return line(t("computerSettingUpHint"), true);
-  if (status.state === "offline")
-    return line(
-      t(status.managed ? "computerOfflineManaged" : "computerOfflineHint"),
+  if (status.state === "offline" && status.managed)
+    return (
+      <div className="flex max-w-md flex-col items-center gap-4 text-center">
+        {line(t("computerOfflineManaged"))}
+        <Button
+          variant="secondary"
+          onClick={() => retry.mutate()}
+          disabled={retry.isPending}
+        >
+          {retry.isPending && <Loader2 className="animate-spin" />}
+          {t("computerSetUpAgain")}
+        </Button>
+      </div>
     );
+  if (status.state === "offline") return line(t("computerOfflineHint"));
   return line(t("computerNoScreen"));
 }
 

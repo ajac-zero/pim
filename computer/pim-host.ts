@@ -150,8 +150,13 @@ curl -fsSL --retry 5 "$PIM_URL/install.sh" | PIM_URL="$PIM_URL" PIM_COMPUTER_TOK
 
 /** Sets pim-computer up in a computer, as `setupScript` says, through cua-spacesd, with the script on standard input so the token stays off every command line. */
 async function setUp(options: Options, name: string, token: string | null): Promise<void> {
-	const run = await cua(options, ["sb", "exec", "--stdin", name, "--", "bash", "-s"], setupScript(options.computerUrl, token));
-	if (run.code !== 0) throw failed(`Setting up pim-computer in ${name}`, run);
+	for (let waited = 0; ; waited += 3_000) {
+		const run = await cua(options, ["sb", "exec", "--stdin", name, "--", "bash", "-s"], setupScript(options.computerUrl, token));
+		if (run.code === 0) return;
+		// 5: cua-spacesd isn't answering yet, as in a computer that has just started.
+		if (run.code !== 5 || waited >= 120_000) throw failed(`Setting up pim-computer in ${name}`, run);
+		await new Promise((resolve) => setTimeout(resolve, 3_000));
+	}
 }
 
 /** Makes a space's computer, or sets the one it has up again with a new token. */

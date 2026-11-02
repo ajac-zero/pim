@@ -144,6 +144,19 @@ if [ -d /etc/chromium.d ] && [ ! -e /etc/chromium.d/pim ]; then
 		echo "Couldn't make Chromium use pim-computer's profile, without sudo: the person's Chromium is a browser of its own."
 fi
 
+# pim-computer, and what the agents run through it, are in cua-spacesd's service, which systemd stops, with all of
+# them, when one of its processes runs out of memory: only that process goes.
+OOM=/etc/systemd/system/cua-spacesd.service.d/pim.conf
+if command -v systemctl >/dev/null 2>&1 && systemctl cat cua-spacesd.service >/dev/null 2>&1 && [ ! -e "$OOM" ]; then
+	sudo -n sh -c "mkdir -p '$(dirname "$OOM")' && printf '[Service]\\nOOMPolicy=continue\\n' >'$OOM' && systemctl daemon-reload" ||
+		echo "Couldn't keep cua-spacesd running when a program runs out of memory, without sudo."
+fi
+# Swap, so the computer slows down when its memory runs short rather than stopping (a container can't have its own).
+if [ -z "$(swapon --show --noheadings 2>/dev/null)" ] && [ ! -e /swapfile ] && sudo -n true 2>/dev/null; then
+	sudo -n sh -c 'fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile && echo "/swapfile none swap sw 0 0" >>/etc/fstab' 2>/dev/null ||
+		sudo -n rm -f /swapfile
+fi
+
 curl -fsSL --retry 5 "$PIM_URL/install.sh" | PIM_URL="$PIM_URL" PIM_COMPUTER_TOKEN="$TOKEN" sh -s -- computer --root "$HOME/pim" --headful --desktop
 `;
 }
@@ -203,9 +216,11 @@ async function remove(options: Options, name: string): Promise<void> {
 async function keepRunning(options: Options, everyone: boolean): Promise<void> {
 	for (const machine of await machines(options)) {
 		// One that's missing is made again when its space asks again (Try again, in Settings → Computer).
-		if (machine.missing || (machine.running && !everyone)) continue;
+		if (machine.missing) continue;
 		try {
 			if (!machine.running && !(await start(options, machine.name))) continue;
+			// A running one is set up again only where pim-computer has gone, as after something stopped it.
+			if (machine.running && !everyone && (await cua(options, ["sb", "exec", machine.name, "--", "pgrep -f '[p]im-computer.ts' >/dev/null"])).code !== 1) continue;
 			await setUp(options, machine.name, null);
 		} catch (error) {
 			log(`Couldn't start ${machine.name}: ${(error as Error).message}`);

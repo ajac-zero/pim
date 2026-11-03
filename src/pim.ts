@@ -841,6 +841,17 @@ export class Pim extends DurableAgent<Env> {
 		const existing = serverFor(this.apps.servers(), app);
 		if (existing) id = existing.id;
 		else if (this.apps.servers().some((server) => server.id === id)) id = `${id.slice(0, 15)}_${crypto.randomUUID().slice(0, 8)}`;
+		if (existing && ["connecting", "connected", "discovering"].includes(existing.state)) {
+			// Signed in, and the connection is being finished: clearing it would throw the sign-in away and ask for another.
+			await this.mcp.waitForConnections({ timeout: 20_000 }).catch(() => undefined);
+			const now = serverFor(this.apps.servers(), app);
+			if (now?.state === "ready") {
+				if (!this.catalog.known(id)) await this.catalog.refresh(id).catch((error) => console.warn(`reading ${id}'s catalog failed`, error));
+				this.#installApps();
+				return { id, state: "ready" };
+			}
+			if (now && now.state !== "failed") return { id, state: now.state };
+		}
 		if (existing && existing.state !== "ready") {
 			// A connection that failed, or is still waiting for sign-in (an abandoned or expired one), is not connected: clear it so the user can try again.
 			await this.#disconnect(id);

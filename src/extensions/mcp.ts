@@ -339,6 +339,7 @@ export function mcpExtensions(
 				if (result.authUrl) {
 					return text(`${app.name} needs the person to sign in before it can be used. Give them this link: ${result.authUrl}`);
 				}
+				if (result.state !== "ready") return text(`${app.name} is still finishing its connection. Try connect_app again in a moment; do not ask the person to sign in again.`);
 				const tools = bridge.tools().filter((tool) => tool.serverId === result.id);
 				return text(`Connected ${app.name}. Its tools: ${tools.map((tool) => toolName(result.id, tool.name)).join(", ") || "none"}.`);
 			} catch (error) {

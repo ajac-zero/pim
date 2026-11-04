@@ -83,9 +83,11 @@ async function takeOver(session?: string) {
 }
 
 // The browser is the computer's, and so are the person's files.
+let computer: Awaited<ReturnType<typeof pairTestComputer>>;
 let root: string;
 beforeAll(async () => {
-	({ root } = await pairTestComputer());
+	computer = await pairTestComputer();
+	({ root } = computer);
 });
 
 describe("the browser", () => {
@@ -242,6 +244,18 @@ describe("the browser", () => {
 		// Closing the browser ends the takeover.
 		await api("/browser", { method: "DELETE" });
 		expect((await live.closed).code).toBe(4000);
+	});
+
+	it("goes on when the computer connects again before the space hears its old connection close", async () => {
+		await callTool("browser_open", { url: FORM });
+		const live = await takeOver();
+		await vi.waitFor(() => expect(live.heard.find((message) => message.type === "frame")).toBeDefined());
+
+		// The old connection carried the browser's: the takeover ends, rather than freezing, and the agent finds its page where it was.
+		await computer.reconnect();
+		expect((await live.closed).code).toBe(4000);
+		expect(await callTool("browser_read", {})).toContain("Page: Orders");
+		expect((await api("/browser")).body.page).toEqual({ url: FORM, title: "Orders" });
 	});
 
 	it("gives each chat a window of its own, where its agent finds its page however others browse", async () => {

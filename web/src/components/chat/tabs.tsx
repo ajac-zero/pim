@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { type DragEvent, useEffect, useRef, useState } from "react";
+import { swatchClass } from "~/components/agent-icon";
 import {
   AwaitingApprovalMark,
   sessionTitle,
@@ -10,7 +11,7 @@ import { CopyChatId } from "~/components/chat/copy-conversation";
 import { useI18n } from "~/components/i18n";
 import { AlertCircle, Loader2, X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
-import { sessionsQuery } from "~/lib/queries";
+import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import {
   CHAT_DRAG_TYPE,
   closeTab,
@@ -59,6 +60,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   const navigate = useNavigate();
   const tabs = useTabs();
   const { data: sessions } = useQuery(sessionsQuery());
+  const { data: agents } = useQuery(agentsQuery());
   const awaitingApproval = useAwaitingApproval();
   const activeRef = useRef<HTMLLIElement>(null);
 
@@ -150,6 +152,10 @@ export function ChatTabs({ activeId }: { activeId: string }) {
           if (!session) return null;
           const active = session.id === activeId;
           const title = sessionTitle(session, t);
+          const color = swatchClass(
+            agents?.find((agent) => agent.id === session.agent?.id)?.color ??
+              null,
+          );
           const status = statusOf(session);
           const shortcut =
             position < 9 ? `${MAC ? "⌘" : "Ctrl+"}${position + 1}` : undefined;
@@ -163,9 +169,27 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                 // its bottom corners flare out into the shelf.
                 active
                   ? "z-10 bg-background text-foreground before:absolute before:bottom-0 before:-left-2 before:size-2 before:bg-[radial-gradient(circle_at_0_0,transparent_8px,var(--background)_8.5px)] after:absolute after:-right-2 after:bottom-0 after:size-2 after:bg-[radial-gradient(circle_at_100%_0,transparent_8px,var(--background)_8.5px)]"
-                  : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
+                  : "bg-sidebar-accent/50 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground",
               )}
             >
+              {color && (
+                // A strip in the agent's color tells tabs of different agents
+                // apart; the tab's rounded corners clip it so it follows them.
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-0 overflow-hidden rounded-t-xl"
+                >
+                  <span
+                    className={cn(
+                      "block h-0.5 transition-opacity",
+                      color,
+                      active
+                        ? "opacity-100"
+                        : "opacity-50 group-hover/tab:opacity-100",
+                    )}
+                  />
+                </span>
+              )}
               <Link
                 to="/chat/$sessionId"
                 params={{ sessionId: session.id }}

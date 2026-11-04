@@ -184,7 +184,7 @@ export function ActivityBox({
   const page = browser.data?.page;
 
   return (
-    <aside className="order-first flex max-h-[45%] shrink-0 flex-col px-3 pt-3 pb-2 md:order-none md:max-h-none md:w-80 md:pb-3 md:pl-0">
+    <aside className="order-first flex max-h-[45%] shrink-0 flex-col px-3 pt-3 pb-2 md:order-none md:absolute md:inset-y-0 md:right-(--scrollbar) md:max-h-none md:w-80 md:pb-3 md:pl-0">
       <div className="fade-in-0 min-h-0 animate-in overflow-y-auto rounded-[18px] border bg-muted/40 duration-150">
         {approvals.length > 0 && (
           <section className="space-y-2 border-b p-3">

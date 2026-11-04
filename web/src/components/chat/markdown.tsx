@@ -20,6 +20,7 @@ import {
 } from "~/components/chat/reply-blocks";
 import { FileLink } from "~/components/file-link";
 import { useI18n } from "~/components/i18n";
+import { newChatSearch } from "~/components/new-chat";
 import {
   CodeBlock,
   CodeBlockCopyButton,
@@ -380,8 +381,8 @@ function Mentions({ text, chip }: { text: string; chip: string }) {
       hit.agent ? (
         <Link
           key={match.index}
-          to="/agents/$agentId"
-          params={{ agentId: hit.agent.id }}
+          to="."
+          search={newChatSearch(hit.agent.id)}
           title={hit.agent.name}
           className={cn(
             "rounded px-1 font-medium no-underline transition-colors",

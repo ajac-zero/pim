@@ -281,7 +281,7 @@ function ChatPage() {
               }}
               className="pointer-events-none absolute bottom-0 z-10 flex justify-center bg-background pb-2"
             >
-              {/* As wide as the new chat page's, so a chat started there keeps it; messages sit 1rem inside it. */}
+              {/* Messages sit 1rem inside it. */}
               <div
                 ref={composerCardRef}
                 className="pointer-events-auto w-full max-w-4xl px-4"

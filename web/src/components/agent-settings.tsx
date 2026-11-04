@@ -37,6 +37,7 @@ import {
   WriteYourOwn,
 } from "~/components/majordomo-setup";
 import { AgentMemoryField } from "~/components/memory-settings";
+import { newChatSearch } from "~/components/new-chat";
 import { Button } from "~/components/ui/button";
 import {
   Collapsible,
@@ -213,7 +214,7 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
       </header>
       <div className="mt-5 flex flex-wrap items-center gap-2">
         <Button size="sm" asChild>
-          <Link to="/agents/$agentId" params={{ agentId: agent.id }}>
+          <Link to="." search={newChatSearch(agent.id)}>
             <MessageCircle /> {t("chatWithAgent")}
           </Link>
         </Button>

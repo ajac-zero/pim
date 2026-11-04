@@ -35,6 +35,7 @@ import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { MeetMajordomo } from "~/components/majordomo-setup";
 import { MobileNav } from "~/components/mobile-nav";
+import { NewChatDialog } from "~/components/new-chat";
 import { RouteError } from "~/components/route-error";
 import {
   SETTINGS_TABS,
@@ -57,18 +58,28 @@ export interface RouterContext {
   queryClient: QueryClient;
 }
 
-const DIALOGS = ["settings", "sharing", "discover", "apps"] as const;
+const DIALOGS = [
+  "settings",
+  "sharing",
+  "discover",
+  "apps",
+  "new-chat",
+] as const;
 type AppDialog = (typeof DIALOGS)[number];
 
 /**
- * Settings, Sharing, Discover and Apps open as dialogs over any page, named
- * in the URL so links and redirects can open them: `?dialog=settings&tab=model`.
+ * Settings, Sharing, Discover, Apps and New chat open as dialogs over any
+ * page, named in the URL so links and redirects can open them:
+ * `?dialog=settings&tab=model`, or `?dialog=new-chat&agent=<id>&prompt=…`
+ * for a chat with that agent, starting from that message.
  * What the sidebar shows is in the URL too (`?panel=artifacts`), and stays
  * as you move between chats.
  */
 type AppSearch = {
   dialog?: AppDialog;
   tab?: SettingsTab;
+  agent?: string;
+  prompt?: string;
   panel?: SidebarPanel;
 };
 
@@ -80,6 +91,8 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     ...(SETTINGS_TABS.includes(search.tab as SettingsTab) && {
       tab: search.tab as SettingsTab,
     }),
+    ...(typeof search.agent === "string" && { agent: search.agent }),
+    ...(typeof search.prompt === "string" && { prompt: search.prompt }),
     ...(SIDEBAR_PANELS.includes(search.panel as SidebarPanel) && {
       panel: search.panel as SidebarPanel,
     }),
@@ -456,13 +469,14 @@ function AppLayout() {
 }
 
 function AppDialogs() {
-  const { dialog, tab } = Route.useSearch();
+  const { dialog, tab, agent, prompt } = Route.useSearch();
   const navigate = useNavigate();
   const close = (open: boolean) => {
     if (open) return;
     navigate({
       to: ".",
-      search: ({ dialog: _, tab: __, ...rest }) => rest,
+      search: ({ dialog: _, tab: __, agent: ___, prompt: ____, ...rest }) =>
+        rest,
       replace: true,
     });
   };
@@ -476,6 +490,12 @@ function AppDialogs() {
       <SharingDialog open={dialog === "sharing"} onOpenChange={close} />
       <DiscoverDialog open={dialog === "discover"} onOpenChange={close} />
       <AppsDialog open={dialog === "apps"} onOpenChange={close} />
+      <NewChatDialog
+        open={dialog === "new-chat"}
+        agent={agent}
+        prompt={prompt}
+        onOpenChange={close}
+      />
     </>
   );
 }

@@ -26,6 +26,7 @@ import {
   Users,
   X,
 } from "~/components/icons";
+import { newChatSearch } from "~/components/new-chat";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import {
@@ -363,8 +364,11 @@ export function ArtifactView({
                 className="h-8 @max-2xl:w-8 @max-2xl:px-0"
               >
                 <Link
-                  to="/"
-                  search={{ prompt: `/artifacts/${artifact.id}\n\n` }}
+                  to="."
+                  search={newChatSearch(
+                    undefined,
+                    `/artifacts/${artifact.id}\n\n`,
+                  )}
                   aria-label={t("chatWithAgent")}
                   title={t("artifactAsk")}
                 >

@@ -451,12 +451,20 @@ describe("chats an agent names", () => {
         false,
         bubble,
       );
-      expect(
-        mentions(html).filter(([href]) => href?.startsWith("/agents/")),
-      ).toEqual([
-        ["/agents/p_coach", "@Coach"],
-        ["/agents/p_trip", "@trip planner"],
-        ["/agents/p_trip", "@Travel"],
+      // Each opens New chat with its agent.
+      const chats = mentions(html).flatMap(([href, text]) => {
+        const search = new URL(
+          (href ?? "").replaceAll("&amp;", "&"),
+          "https://pim.example",
+        ).searchParams;
+        return search.get("dialog") === "new-chat"
+          ? [[search.get("agent"), text]]
+          : [];
+      });
+      expect(chats).toEqual([
+        ["p_coach", "@Coach"],
+        ["p_trip", "@trip planner"],
+        ["p_trip", "@Travel"],
       ]);
       expect(html).toContain("@Twin, ");
     }

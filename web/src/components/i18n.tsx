@@ -687,6 +687,12 @@ const translations = {
     computerNoScreen:
       "Your computer doesn't share its desktop. Run pim-computer in its desktop session, with cua-spacesd, to use it here.",
     computerFullScreen: "Full screen",
+    computerLatency: "{total}\u00a0ms",
+    computerLatencyDetail:
+      "Round trip to your computer: {pim}\u00a0ms between you and Pim, {computer}\u00a0ms between Pim and your computer.",
+    computerLatencyNoAnswer: "No answer",
+    computerLatencyNoAnswerDetail:
+      "Your computer didn't answer the last check of its round trip.",
     computerConnecting: "Connecting to your computer…",
     computerCantPlay:
       "This browser can't show your computer's desktop. Try a recent Chrome, Edge, Safari or Firefox.",
@@ -1779,6 +1785,12 @@ const translations = {
     computerNoScreen:
       "Tu computadora no comparte su escritorio. Ejecuta pim-computer en su sesión de escritorio, con cua-spacesd, para usarla aquí.",
     computerFullScreen: "Pantalla completa",
+    computerLatency: "{total}\u00a0ms",
+    computerLatencyDetail:
+      "Ida y vuelta hasta tu computadora: {pim}\u00a0ms entre tú y Pim, {computer}\u00a0ms entre Pim y tu computadora.",
+    computerLatencyNoAnswer: "Sin respuesta",
+    computerLatencyNoAnswerDetail:
+      "Tu computadora no respondió a la última medición de ida y vuelta.",
     computerConnecting: "Conectando con tu computadora…",
     computerCantPlay:
       "Este navegador no puede mostrar el escritorio de tu computadora. Prueba un Chrome, Edge, Safari o Firefox reciente.",

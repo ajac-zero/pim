@@ -177,6 +177,17 @@ const MAX_DECODE_QUEUE = 4;
 /** How long the stream may send no video before it's asked for a keyframe, in case it's waiting for one. */
 const SILENT_MS = 3_000;
 
+/** How often the app times its round trips to the computer. */
+const PING_MS = 2_000;
+
+/**
+ * The round trips, in milliseconds, of a message from this browser to the
+ * space and on to the computer, the path the person's input and the video
+ * take: `total` is the whole of it, and `computer` the part between the
+ * space and the computer (null when the computer didn't answer).
+ */
+export type ScreenLatency = { total: number; computer: number | null };
+
 export type ScreenState =
   | { status: "connecting" }
   | { status: "live"; width: number; height: number }
@@ -185,11 +196,14 @@ export type ScreenState =
 /**
  * Plays the desktop on `canvas` and sends what the person does there: it
  * takes the canvas's pointer, wheel, keyboard and paste. `onState` hears
- * when it's live, at what size, and when the stream closed.
+ * when it's live, at what size, and when the stream closed; `onLatency`
+ * hears its round trips every couple of seconds, which the space answers
+ * itself (`pim_ping`, which the stream never sees).
  */
 export class ComputerScreen {
   readonly #canvas: HTMLCanvasElement;
   readonly #onState: (state: ScreenState) => void;
+  readonly #onLatency: (latency: ScreenLatency) => void;
   readonly #socket: WebSocket;
   #session = "";
   #decoder: VideoDecoder | null = null;
@@ -222,19 +236,23 @@ export class ComputerScreen {
     this.#askedSinceVideo = true;
     this.#askKeyframe();
   }, 1_000);
+  readonly #ping = setInterval(() => this.#timeRoundTrip(), PING_MS);
   readonly #listeners: [string, EventListener][] = [];
 
   constructor(
     canvas: HTMLCanvasElement,
     onState: (state: ScreenState) => void,
+    onLatency: (latency: ScreenLatency) => void = () => {},
   ) {
     this.#canvas = canvas;
     this.#onState = onState;
+    this.#onLatency = onLatency;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     this.#socket = new WebSocket(
       `${scheme}://${location.host}${COMPUTER_SCREEN_PATH}`,
     );
     this.#socket.binaryType = "arraybuffer";
+    this.#socket.addEventListener("open", () => this.#timeRoundTrip());
     this.#socket.addEventListener("message", (event) => this.#heard(event));
     this.#socket.addEventListener("close", (event) => {
       this.#decoder?.close();
@@ -255,6 +273,7 @@ export class ComputerScreen {
       this.#canvas.removeEventListener(type, listener);
     cancelAnimationFrame(this.#flush);
     clearInterval(this.#watch);
+    clearInterval(this.#ping);
     this.#socket.close(1000);
     if (this.#decoder?.state !== "closed") this.#decoder?.close();
   }
@@ -262,6 +281,10 @@ export class ComputerScreen {
   #control(type: string, payload: unknown): void {
     if (this.#socket.readyState === WebSocket.OPEN)
       this.#socket.send(JSON.stringify({ type, payload }));
+  }
+
+  #timeRoundTrip(): void {
+    this.#control("pim_ping", { sent: performance.now() });
   }
 
   #heard(event: MessageEvent): void {
@@ -274,7 +297,13 @@ export class ComputerScreen {
       payload?: Record<string, unknown>;
     };
     const payload = message.payload ?? {};
-    if (message.type === "hello") {
+    if (message.type === "pim_pong") {
+      this.#onLatency({
+        total: Math.round(performance.now() - Number(payload.sent)),
+        computer:
+          typeof payload.computer_ms === "number" ? payload.computer_ms : null,
+      });
+    } else if (message.type === "hello") {
       this.#acks =
         Array.isArray(payload.capabilities) &&
         payload.capabilities.includes("frame_ack.v1");

@@ -174,10 +174,8 @@ function usePimEvents() {
     pimClient.handlers = {
       onActivity: () => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        // A run may have changed what a dashboard shows: goals, schedules, memories, artifacts.
-        queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+        // A run may have scheduled work, made an agent, saved a skill, written files, or used the browser.
         queryClient.invalidateQueries({ queryKey: ["schedules"] });
-        // Or made an agent, saved a skill, written files, or used the browser.
         queryClient.invalidateQueries({ queryKey: ["agents"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });
         queryClient.invalidateQueries({ queryKey: ["browser"] });
@@ -237,7 +235,6 @@ function usePimEvents() {
         ) {
           queryClient.invalidateQueries({ queryKey: ["agents"] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
-          queryClient.invalidateQueries({ queryKey: ["dashboard"] });
           if (
             approval.action === "manage_apps" ||
             approval.action === "add_custom_app"

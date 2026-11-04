@@ -9,8 +9,8 @@ export { oauth2, ReconnectRequired } from "./native-apps";
 /**
  * Pim extensions: what a deployment adds to every person's agents, chosen in
  * `pim.config.ts`. An extension can bring blueprints, the definitions people's
- * agents build on, each with its own instructions, dashboard and conversation starters; widgets, the cards a
- * dashboard is made of; color themes for the web app; and an ability: tools,
+ * agents build on, each with its own instructions and conversation starters; widgets, the cards an
+ * agent shows with its messages; color themes for the web app; and an ability: tools,
  * prompt sections, hooks and background tasks, plus actions that ask the
  * person first. A person's space
  * builds on one extension's blueprint (its `blueprint`), and adds their own name and
@@ -82,7 +82,7 @@ export type AbilityContext = {
 export type Ability = Omit<Extension, "name"> & { readonly actions?: readonly GatedAction[] };
 
 export type WidgetContext = {
-	/** The agent whose dashboard shows the widget. */
+	/** The agent whose chat shows the widget. */
 	readonly agent: { readonly id: string; readonly name: string; readonly majordomo: boolean };
 	/**
 	 * The person's chat that a conversation is, or works for (a task's
@@ -102,15 +102,12 @@ export type Widget = {
 	readonly title: Text;
 	/** Shown when it has nothing to show. */
 	readonly empty: Text;
-	/**
-	 * For the model: what it shows. A widget with one can also go with a
-	 * message in chat (`send_to_user`'s `widgets`), as it is when sent.
-	 */
-	readonly description?: string;
+	/** For the model: what it shows, so it knows when to send it with a message (`send_to_user`'s `widgets`). */
+	readonly description: string;
 	load(context: WidgetContext): WidgetContent | Promise<WidgetContent>;
 };
 
-/** A widget as loaded for one space: on a dashboard, or kept with a message. Its text is in every language it has. */
+/** A widget as loaded for one space and kept with a message. Its text is in every language it has. */
 export type ShownWidget = { readonly id: string; readonly title: Text; readonly empty: Text } & (WidgetContent | { readonly failed: true });
 
 /** The widgets a `send_to_user` result says went with the message; none in a plain "Sent." */
@@ -322,8 +319,6 @@ export type BlueprintDefinition = {
 	readonly description: string;
 	/** The model reads these in every chat with an agent built on this blueprint, before the person's own instructions. */
 	readonly instructions: string;
-	/** Its dashboard's widgets, in order, each `<extension>/<widget>`. */
-	readonly dashboard: readonly string[];
 	/**
 	 * Other extensions whose abilities its chats get, by id; its own
 	 * extension's always. Pim's own abilities (memory, goals, schedules,
@@ -336,7 +331,7 @@ export type BlueprintDefinition = {
 	 * lists here or in the person's own agent, and of no other.
 	 */
 	readonly apps?: readonly string[];
-	/** Messages the dashboard offers to start a chat with. */
+	/** Messages offered for starting a chat with it, until its chats give Pim better ones. */
 	readonly starters?: readonly Text[];
 };
 
@@ -387,9 +382,8 @@ export const CUSTOM_APPS = "custom";
 
 /**
  * The extensions installed in this deployment, checked once: ids are unique
- * and well formed, every dashboard names a widget some extension provides,
- * every blueprint's apps are installed apps, and the default blueprint exists.
- * A mistake in `pim.config.ts` fails here, loudly, instead of drawing a broken dashboard.
+ * and well formed, every blueprint's abilities and apps are installed, and
+ * the default blueprint exists. A mistake in `pim.config.ts` fails here, loudly.
  */
 export class PimExtensions {
 	readonly #extensions = new Map<string, PimExtension>();
@@ -424,9 +418,6 @@ export class PimExtensions {
 			}
 		}
 		for (const { ref, blueprint } of this.blueprints()) {
-			for (const widget of blueprint.dashboard) {
-				if (!this.widget(widget)) throw new Error(`${ref}'s dashboard shows ${widget}, which no installed extension provides`);
-			}
 			for (const id of blueprint.abilities ?? []) {
 				if (!this.#extensions.get(id)?.ability) throw new Error(`${ref} uses the ability of ${id}, which no installed extension brings`);
 			}

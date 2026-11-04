@@ -114,7 +114,7 @@ export function scheduleExtension(services: PimServices, roleOf: (session: strin
 	return defineExtension({ name: SCHEDULE_EXTENSION, tools: [scheduleTask, listScheduled, cancelScheduled] });
 }
 
-/** On a dashboard: the space's scheduled tasks, soonest first. */
+/** The space's scheduled tasks, soonest first. */
 export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
 	return definePimExtension({
 		id: SCHEDULE_EXTENSION,
@@ -131,7 +131,7 @@ export function scheduleWidgets(listSchedules: PimServices["listSchedules"]) {
 						.sort((a, b) => a.time - b.time)
 						.flatMap((schedule) => {
 							const chat = chatOf(schedule.payload.session);
-							// A task that starts new chats shows on the dashboard of the agent it starts them with, without a link unless that agent scheduled it.
+							// A task that starts new chats shows in the chats of the agent it starts them with, without a link unless that agent scheduled it.
 							const startsHere = schedule.payload.newChat && (schedule.payload.agent ? schedule.payload.agent === agent.id : ofAgent(schedule.payload.session));
 							if (chat === null && !startsHere) return [];
 							const title = schedule.payload.label ?? schedule.payload.instruction;

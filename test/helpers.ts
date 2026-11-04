@@ -108,6 +108,25 @@ export async function say(content: string, session = ROOT) {
 	return body as { status: string; text?: string; reason?: string };
 }
 
+/**
+ * What widgets show in a chat now: its agent sends them with a message, and
+ * answers with what they showed, as the model reads them and the app draws them.
+ */
+export async function widgetsShown(chat: string, widgets: string[]): Promise<any[]> {
+	let shown: any[] = [];
+	faux.setResponses([
+		toolUse("send_to_user", { message: "Here.", widgets, complete: false }),
+		(context) => {
+			const result = context.messages.findLast((message) => message.role === "toolResult");
+			const text = result?.role === "toolResult" && result.content[0]?.type === "text" ? result.content[0].text : "{}";
+			shown = JSON.parse(text).widgets;
+			return toolUse("send_to_user", { message: "That's all." });
+		},
+	]);
+	await say("Show me.", chat);
+	return shown;
+}
+
 /** The approval waiting for the user. */
 export async function pendingApproval() {
 	return vi.waitFor(async () => {

@@ -26,8 +26,6 @@ export const assistant = definePimExtension({
 			name: "Pim",
 			description: "",
 			instructions: INSTRUCTIONS,
-			// Empty until the person asks for something there: the agent pins it with `update_dashboard`.
-			dashboard: [],
 			starters: [
 				{ en: "What can you do for me?", es: "¿Qué puedes hacer por mí?" },
 				{ en: "Help me plan my week", es: "Ayúdame a planear mi semana" },

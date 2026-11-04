@@ -6,7 +6,7 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes, type Theme, type ThemeList } from "../src/themes";
-import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse, widgetsShown } from "./helpers";
 import { faux, ledger, outbox, utility } from "./worker";
 
 type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean; memoryScope: string };
@@ -14,9 +14,8 @@ type Agent = { id: string; name: string; blueprint: string | null; majordomo: bo
 /** A message's result as API clients get it: what Pim sent, in order. */
 const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
 
-const dashboard = async (agent: Agent, locale = "en") => (await api(`/agents/${agent.id}/dashboard?locale=${locale}`)).body;
 const suggestions = async (agent: Agent, locale = "en") => (await api(`/agents/${agent.id}/suggestions?locale=${locale}`)).body.suggestions as string[];
-const widget = (board: { widgets: { id: string }[] }, id: string) => board.widgets.find((candidate) => candidate.id === id) as any;
+const widget = (shown: { id: string }[], id: string) => shown.find((candidate) => candidate.id === id) as any;
 type Request = { messages: Message[] };
 
 /** What the model got back from the tool call it made last. */
@@ -43,13 +42,10 @@ const agentOf = async (session: string) =>
 describe("extensions", () => {
 	it("checks a deployment's extensions before anything uses them", () => {
 		expect(() => new PimExtensions([ledger, ledger], null)).toThrow("Two extensions are called test.ledger");
-		// A dashboard naming a widget nobody brings would draw nothing: refused.
-		const typo = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, dashboard: ["test.ledger/bils"] }] };
-		expect(() => new PimExtensions([typo], null)).toThrow("test.ledger/budget's dashboard shows test.ledger/bils");
 		expect(() => new PimExtensions([{ ...ledger, blueprints: [] }], "test.ledger/budget")).toThrow("The default blueprint test.ledger/budget");
-		const borrows = { ...ledger, id: "test.other", blueprints: [{ ...ledger.blueprints![0]!, dashboard: [], abilities: ["test.nothing"] }] };
+		const borrows = { ...ledger, id: "test.other", blueprints: [{ ...ledger.blueprints![0]!, abilities: ["test.nothing"] }] };
 		expect(() => new PimExtensions([borrows], null)).toThrow("test.other/budget uses the ability of test.nothing");
-		const missing = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, dashboard: [], apps: ["test.ledger/nope"] }] };
+		const missing = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, apps: ["test.ledger/nope"] }] };
 		expect(() => new PimExtensions([missing], null)).toThrow("test.ledger/budget works with the app test.ledger/nope, which no installed extension brings");
 		const insecure = { ...ledger, apps: [{ id: "notes", name: "Notes", description: "", url: "http://notes.example.test/mcp" }] };
 		expect(() => new PimExtensions([insecure], null)).toThrow("test.ledger/notes needs a name and an https URL");
@@ -103,21 +99,18 @@ describe("extensions", () => {
 		expect(plain).not.toContain("Answer every money question");
 	});
 
-	it("shows each agent's dashboard, with what belongs to its chats", async () => {
-		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.majordomo)!;
+	it("shows Pim's own widgets in a chat with what belongs to its agent's chats", async () => {
 		const tracker = (await post("/agents", { name: "Tracker", instructions: "Track goals." })).body as Agent;
 		const coach = (await post("/agents", { name: "Run coach", contacts: [tracker.id] })).body as Agent;
 		const chat = (await post("/sessions", { agent: coach.id })).body.id;
-		const builtIn = ["pim.schedule/upcoming", "pim.goals/active", "pim.memory/recent", "pim.artifacts/recent"];
+		const builtIn = ["pim.schedule/upcoming", "pim.goals/active", "pim.memory/recent"];
 
 		faux.setResponses([
 			toolUse("schedule_task", { instruction: "Ask how the long run went.", label: "Long run check-in", delay_seconds: 3600 }),
-			toolUse("artifact_create", { title: "Training plan", kind: "markdown", content: "# Week 1" }),
-			toolUse("update_dashboard", { pin: builtIn }),
 			toolUse("send_to_user", { message: "Set." }),
 		]);
 		await say("Plan my training and check in later.", chat);
-		// A goal a contact makes in the chat its task started belongs to that chat, and so to the contact's dashboard, not the coach's.
+		// A goal a contact makes in the chat its task started belongs to that chat, and so to the contact's chats, not the coach's.
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ to: "Tracker", task: "Track a 10k goal." }] }),
@@ -136,38 +129,27 @@ describe("extensions", () => {
 		const forgotten = (await post("/memory/log", { text: "Lives in Lisbon", scope: "everyone" })).body;
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
-		const board = await dashboard(coach);
-		expect(board.agent).toMatchObject({ id: coach.id, name: "Run coach", majordomo: false });
 		// The blueprint's starters, while the utility model has nothing to suggest.
 		expect(await suggestions(coach)).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
-		expect(board.widgets.map((shown: { id: string }) => shown.id)).toEqual(builtIn);
-		const [scheduled] = widget(board, "pim.schedule/upcoming").items;
+		const coaching = await widgetsShown(chat, builtIn);
+		expect(coaching.map((shown) => shown.id)).toEqual(builtIn);
+		const [scheduled] = widget(coaching, "pim.schedule/upcoming").items;
 		expect(scheduled).toMatchObject({ title: "Long run check-in", link: { chat } });
 		const inAnHour = Date.parse(scheduled.time) - Date.now();
 		expect(inAnHour).toBeGreaterThan(55 * 60_000);
 		expect(inAnHour).toBeLessThan(61 * 60_000);
-		expect(widget(board, "pim.goals/active")).toMatchObject({ title: "Goals", kind: "progress", items: [] });
-		await api(`/agents/${tracker.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items: ["pim.goals/active"] }) });
-		expect(widget(await dashboard(tracker), "pim.goals/active").items).toMatchObject([
-			{ title: "Run a 10k", value: 0, max: 2, detail: "Buy shoes", link: { chat: tracking } },
-		]);
+		expect(widget(coaching, "pim.goals/active")).toMatchObject({ title: { en: "Goals", es: "Metas" }, kind: "progress", items: [] });
+		const tracked = await widgetsShown((await post("/sessions", { agent: tracker.id })).body.id, ["pim.goals/active"]);
+		expect(widget(tracked, "pim.goals/active").items).toMatchObject([{ title: "Run a 10k", value: 0, max: 2, detail: "Buy shoes", link: { chat: tracking } }]);
 		// Only what the coach reads: not the majordomo's own memories, nor a forgotten one.
-		expect(widget(board, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Prefers morning runs"]);
-		const artifact = widget(board, "pim.artifacts/recent").items;
-		expect(artifact).toMatchObject([{ title: "Training plan", link: { artifact: expect.any(String), chat } }]);
+		expect(widget(coaching, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Prefers morning runs"]);
 
-		// The default agent's dashboard, set by the person, shows its own chats' things, not the coach's.
-		expect((await dashboard(mine)).widgets).toEqual([]);
-		expect((await api(`/agents/${mine.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items: builtIn }) })).body).toEqual({ items: builtIn, sizes: {} });
-		const home = await dashboard(mine);
+		// The majordomo's chats show its own chats' things, not the coach's.
+		const home = await widgetsShown(ROOT, builtIn);
 		expect(widget(home, "pim.goals/active").items.map((item: { title: string }) => item.title)).toEqual(["Learn Portuguese"]);
 		expect(widget(home, "pim.schedule/upcoming").items).toEqual([]);
-		expect(widget(home, "pim.artifacts/recent")).toMatchObject({ items: [], empty: expect.stringContaining("Nothing made yet") });
 		expect(widget(home, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Saving for a new car", "Prefers morning runs"]);
-
-		// In the person's language, where the extension translated it.
-		const spanish = await dashboard(mine, "es");
-		expect(widget(spanish, "pim.goals/active").title).toBe("Metas");
+		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.majordomo)!;
 		expect((await suggestions(mine, "es"))[0]).toBe("¿Qué puedes hacer por mí?");
 	});
 
@@ -223,17 +205,15 @@ describe("extensions", () => {
 		expect(await suggestions(coach, "es")).toEqual(["Plan my recovery week"]);
 	});
 
-	it("draws a deployment extension's dashboard, and one widget failing leaves the rest", async () => {
+	it("shows a deployment extension's widgets, and one failing leaves the rest", async () => {
 		const books = (await post("/agents", { name: "Household", blueprint: "test.ledger/budget" })).body as Agent;
-		const board = await dashboard(books, "es");
 		expect(await suggestions(books, "es")).toEqual(["¿Cuánto gasté?"]);
-		expect(board.widgets).toEqual([
-			{ id: "test.ledger/bills", title: "Próximas facturas", empty: "No bills.", kind: "list", items: [] },
+		expect(await widgetsShown((await post("/sessions", { agent: books.id })).body.id, ["test.ledger/bills", "test.ledger/broken", "pim.goals/active"])).toEqual([
+			{ id: "test.ledger/bills", title: { en: "Upcoming bills", es: "Próximas facturas" }, empty: "No bills.", kind: "list", items: [] },
 			{ id: "test.ledger/broken", title: "Bank balance", empty: "", failed: true },
-			{ id: "pim.goals/active", title: "Metas", empty: expect.any(String), kind: "progress", items: [] },
+			{ id: "pim.goals/active", title: expect.objectContaining({ es: "Metas" }), empty: expect.any(Object), kind: "progress", items: [] },
 		]);
 		const bare = (await post("/agents", { name: "Blank", blueprint: null })).body as Agent;
-		expect(await dashboard(bare)).toMatchObject({ widgets: [] });
 		expect(await suggestions(bare)).toEqual([]);
 
 		// Published and made someone's own, an agent keeps what it builds on; so does an agent from nothing.
@@ -245,93 +225,6 @@ describe("extensions", () => {
 			expect(template.blueprint).toBe(blueprint);
 			expect((await post(`/templates/${template.id}/use`)).body.blueprint).toBe(blueprint);
 		}
-	});
-
-	it("starts empty, and shows what the person asks an agent to pin there until they take it off", async () => {
-		const scout = (await post("/agents", { name: "NYC Scout" })).body as Agent;
-		const other = (await post("/agents", { name: "Ledger keeper" })).body as Agent;
-		expect((await dashboard(scout)).widgets).toEqual([]);
-		const chat = (await post("/sessions", { agent: scout.id })).body.id;
-		const results: { text: string; isError: boolean }[] = [];
-		let made = "";
-		faux.setResponses([
-			toolUse("artifact_create", { title: "Headlines", kind: "html", content: "<!doctype html><ul><li>Second Avenue subway opens</li></ul>" }),
-			(context) => {
-				made = JSON.parse(lastToolResult(context.messages).text).artifact.id;
-				return toolUse("update_dashboard", { pin: [made, "pim.goals/active"] });
-			},
-			(context) => {
-				results.push(lastToolResult(context.messages));
-				// A dashboard shows an artifact's widget, so it gets one first.
-				return toolUse("artifact_update", { id: made, base_version: 1, files: [{ path: "widget.html", content: "<!doctype html><p>Subway opens</p>" }] });
-			},
-			() => toolUse("update_dashboard", { pin: [made, "pim.goals/active"], sizes: { [made]: "small" } }),
-			(context) => {
-				results.push(lastToolResult(context.messages));
-				// Another blueprint's widget, and an artifact that isn't there: refused, and nothing changes.
-				return toolUse("update_dashboard", { pin: ["pim.schedule/upcoming", "test.ledger/bills"] });
-			},
-			(context) => {
-				results.push(lastToolResult(context.messages));
-				return toolUse("update_dashboard", { pin: ["a-made-up-id"] });
-			},
-			(context) => {
-				results.push(lastToolResult(context.messages));
-				return toolUse("update_dashboard", { unpin: ["pim.goals/active"], pin: [made] });
-			},
-			(context) => {
-				results.push(lastToolResult(context.messages));
-				return toolUse("send_to_user", { message: "It's on your dashboard." });
-			},
-		]);
-		await say("Put today's NYC headlines on my dashboard.", chat);
-
-		const [noWidget, pinned, otherBlueprint, unknown, unpinned] = results;
-		expect(noWidget).toMatchObject({ isError: true, text: expect.stringContaining("Headlines has no widget") });
-		expect(pinned!.isError).toBe(false);
-		expect(JSON.parse(pinned!.text)).toMatchObject({
-			dashboard: [
-				{ artifact: made, title: "Headlines", size: "small" },
-				{ widget: "pim.goals/active", title: "Goals" },
-			],
-		});
-		expect(JSON.parse(pinned!.text).widgets_you_could_pin.map((widget: { name: string }) => widget.name)).toEqual([
-			"pim.schedule/upcoming",
-			"pim.memory/recent",
-			"pim.artifacts/recent",
-		]);
-		expect(otherBlueprint).toMatchObject({ isError: true, text: expect.stringContaining("test.ledger/bills is neither one of your artifacts") });
-		expect(unknown).toMatchObject({ isError: true, text: expect.stringContaining("artifact:a-made-up-id is neither") });
-		// Pinning what's there already moves nothing, and it keeps its size.
-		expect(JSON.parse(unpinned!.text).dashboard).toEqual([{ artifact: made, title: "Headlines", size: "small" }]);
-
-		// The dashboard runs the widget of the artifact's latest version; it's this agent's alone.
-		expect((await dashboard(scout)).widgets).toEqual([{ id: `artifact:${made}`, title: "Headlines", size: "small", artifact: { id: made, kind: "html", version: 2, widget: true } }]);
-		expect((await dashboard(other)).widgets).toEqual([]);
-		const frame = async (path: string) =>
-			(await exports.default.fetch(new Request(apiUrl(`/artifacts/${made}/versions/${path}`), { headers: { Authorization: `Bearer ${TOKEN}` } }))).text();
-		expect(await frame("2/frame?view=widget")).toContain("<p>Subway opens</p>");
-		expect(await frame("2/frame")).toContain("Second Avenue subway opens");
-		expect(await frame("1/frame?view=widget")).toContain("no widget");
-
-		// The person reorders, resizes and takes things off; they can't add what the agent couldn't.
-		const put = (items: string[], sizes?: Record<string, string>) => api(`/agents/${scout.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items, sizes }) });
-		expect((await put(["pim.memory/recent", `artifact:${made}`])).body).toEqual({ items: ["pim.memory/recent", `artifact:${made}`], sizes: { [`artifact:${made}`]: "small" } });
-		expect((await dashboard(scout)).widgets.map((shown: { id: string }) => shown.id)).toEqual(["pim.memory/recent", `artifact:${made}`]);
-		expect((await put(["test.ledger/bills"])).status).toBe(400);
-		// Only an artifact's widget comes in sizes, and only those three; a refused size changes nothing.
-		expect((await put(["pim.memory/recent", `artifact:${made}`], { "pim.memory/recent": "large" })).status).toBe(400);
-		expect((await put(["pim.memory/recent", `artifact:${made}`], { [`artifact:${made}`]: "huge" })).status).toBe(400);
-		expect((await put(["pim.memory/recent", `artifact:${made}`], { [`artifact:${made}`]: "large" })).status).toBe(200);
-		expect((await dashboard(scout)).widgets[1].size).toBe("large");
-		// Taken off and pinned again, it starts at the default size.
-		expect((await put(["pim.memory/recent"])).body.sizes).toEqual({});
-		expect((await put(["pim.memory/recent", `artifact:${made}`])).body.sizes).toEqual({});
-		expect((await dashboard(scout)).widgets[1].size).toBe("medium");
-
-		// A deleted artifact leaves the dashboard.
-		expect((await api(`/artifacts/${made}`, { method: "DELETE" })).status).toBe(200);
-		expect((await dashboard(scout)).widgets.map((shown: { id: string }) => shown.id)).toEqual(["pim.memory/recent"]);
 	});
 
 	it("has one majordomo, which the person names once, and which talks in chats started without an agent", async () => {
@@ -459,7 +352,6 @@ describe("extensions", () => {
 		expect(offered(seen)).toEqual(expect.arrayContaining(["ledger_add_bill", "ledger_pay_bill", "create_goal", "send_to_user"]));
 		// Its section is in the prompt, with the extension's data as the tool left it.
 		expect(systemPrompt(seen.messages)).toContain("Rent: 1850");
-		expect(widget(await dashboard(books), "test.ledger/bills").items).toEqual([{ title: "Rent: 1850", time: "2026-11-01T09:00:00.000Z" }]);
 
 		// The default agent builds on Pim's own blueprint: no ledger in its chats.
 		let home: Request = { messages: [] };
@@ -501,7 +393,6 @@ describe("extensions", () => {
 		expect(approval).toMatchObject({ action: "ledger_pay_bill", summary: "Pay Rent", session: chat });
 		expect((await post(`/approvals/${approval.id}/approve`)).body).toMatchObject({ status: "approved", result: "Paid Rent." });
 		expect(await paying).toMatchObject({ status: "done", replies: ["Paid."] });
-		expect(widget(await dashboard(books), "test.ledger/bills").items).toEqual([]);
 		// It is one of the tools Settings sets the permission of.
 		const permissions = (await api("/permissions")).body.tools.map((tool: { tool: string }) => tool.tool);
 		expect(permissions).toContain("ledger_pay_bill");
@@ -547,10 +438,9 @@ describe("extensions", () => {
 		]);
 		const answer = await ask("Gas is 40, due December 1st. What's due?", chat);
 
-		// The model is offered the widgets that describe themselves, from Pim's own and its agent's blueprint.
+		// The model is offered the widgets of Pim's own and its agent's blueprint, as they describe themselves.
 		expect(prompt).toContain("- test.ledger/bills: Bills not paid yet, with when each is due.");
 		expect(prompt).toContain("- pim.goals/active:");
-		expect(prompt).not.toContain("test.ledger/broken");
 		// It reads what they showed, as the app draws it from the same result.
 		const shown = JSON.parse(JSON.parse(result)[0].text);
 		expect(shown).toMatchObject({

@@ -18,7 +18,6 @@ import {
 } from "../artifacts";
 import { JSX_MODULES } from "../artifact-jsx";
 import { HttpError } from "../http";
-import { definePimExtension } from "./define";
 import { text } from "./services";
 
 /** What the artifact tools need from the space. */
@@ -48,7 +47,6 @@ const HOW_IT_RUNS =
 	"pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
 	"pim.tools.call(name, input) runs one of the user's app tools that runs without asking, by its tool name, and answers with its result as text. " +
 	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
-	"On a dashboard (see update_dashboard), pim.chat(text) puts a message about the artifact in the box under it, for the user to send or change, such as \"Tell me more about <headline>\" when they click one; it sends nothing itself, and fails anywhere else; in a dashboard's widget, pim.open() opens the full artifact and pim.size is the widget's size (small, medium or large). " +
 	`A jsx artifact is a React app, App.jsx: \`export default function App() { ... }\`, with hooks from "react". It may import ${JSX_MODULES.map((name) => `"${name}"`).join(", ")} (charts and icons), and its own files, and is styled with Tailwind classes. It's compiled when you save it: a compile error comes back to you to fix. ` +
 	"HTML and JSX artifacts can have more files than the main one, by relative path (\"app.js\", \"components/Chart.jsx\", \"data.json\", \"images/logo.png\"): " +
 	"a page loads its own with <script src=\"app.js\">, <link rel=\"stylesheet\" href=\"style.css\"> and <img src=\"images/logo.png\">, and reads data from <script type=\"application/json\" id=\"data\" src=\"data.json\"> (JSON.parse(document.getElementById(\"data\").textContent)), and keeps markup it reuses in <template> elements in index.html, not files of its own; " +
@@ -265,43 +263,4 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 	});
 
 	return defineExtension({ name: "pim.artifacts", tools: [create, update, read, show, list] });
-}
-
-const KIND_NAMES: Record<ArtifactKind, string> = { html: "HTML", markdown: "Markdown", svg: "SVG", mermaid: "Diagram", jsx: "App" };
-
-/**
- * On a dashboard: what the space made most recently. Artifacts made outside
- * any chat are the majordomo's. It has no description, so agents don't show
- * it in chats: it leaves out what other agents' chats made, so an agent
- * shows one artifact with `artifact_show` instead.
- */
-export function artifactsWidgets(artifacts: ArtifactStore) {
-	return definePimExtension({
-		id: "pim.artifacts",
-		name: "Artifacts",
-		description: "Documents and small pages Pim makes, with every version kept.",
-		widgets: {
-			recent: {
-				title: { en: "Recently made", es: "Hecho recientemente" },
-				empty: { en: "Nothing made yet. Ask for a document, a checklist or a small page.", es: "Nada hecho aún. Pide un documento, una lista o una página pequeña." },
-				load: ({ agent, chatOf }) => ({
-					kind: "list",
-					items: artifacts
-						.list()
-						.filter((artifact) => (artifact.session === null ? agent.majordomo : chatOf(artifact.session) !== null))
-						.sort((a, b) => b.updatedAt - a.updatedAt)
-						.slice(0, 5)
-						.map((artifact) => {
-							const chat = artifact.session === null ? null : chatOf(artifact.session);
-							return {
-								title: artifact.title,
-								detail: `${KIND_NAMES[artifact.kind]} · v${artifact.version}`,
-								time: new Date(artifact.updatedAt).toISOString(),
-								link: chat === null ? { artifact: artifact.id } : { artifact: artifact.id, chat },
-							};
-						}),
-				}),
-			},
-		},
-	});
 }

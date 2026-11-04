@@ -2,7 +2,7 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import { agentsQuery } from "~/lib/queries";
 
 /**
- * Opens the majordomo's dashboard, keeping the search and fragment: an
+ * Opens the majordomo's new chat page, keeping the search and fragment: an
  * open dialog (`?dialog=settings`) and a sign-in error (`#auth-error=…`).
  */
 export const Route = createFileRoute("/")({

@@ -84,7 +84,7 @@ export function goalsExtension({ store }: PimServices) {
 	});
 }
 
-/** On a dashboard: the space's active goals, newest first, each with its progress and next step. */
+/** The space's active goals, newest first, each with its progress and next step. */
 export function goalsWidgets(store: PimStore) {
 	return definePimExtension({
 		id: "pim.goals",

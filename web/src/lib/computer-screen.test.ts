@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { h264Codec, keyEvent, readPacket } from "~/lib/computer-screen";
+import {
+  contained,
+  h264Codec,
+  keyEvent,
+  normalized,
+  readPacket,
+} from "~/lib/computer-screen";
 
 /** A packet as cua-spacesd sends one: two big-endian lengths, a JSON header and the payload. */
 function packet(header: unknown, payload: number[]): ArrayBuffer {
@@ -79,5 +85,20 @@ describe("the computer's screen", () => {
       kind: "key",
       key: "enter",
     });
+  });
+
+  it("maps a pointer across the picture, not the bars around it", () => {
+    // A 1600×800 desktop in a 1000×1000 box: 1000×500, centred with 250px bars.
+    const box = contained(
+      { left: 10, top: 20, width: 1000, height: 1000 },
+      1600,
+      800,
+    );
+    expect(box).toEqual({ left: 10, top: 270, width: 1000, height: 500 });
+    expect(normalized({ clientX: 510, clientY: 520 }, box)).toEqual({
+      x_normalized: 0.5,
+      y_normalized: 0.5,
+    });
+    expect(normalized({ clientX: 10, clientY: 30 }, box).y_normalized).toBe(0);
   });
 });

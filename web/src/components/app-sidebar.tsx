@@ -1009,9 +1009,7 @@ function SessionRow({
         {/* Working takes priority: one dot shows at a time. */}
         {session.unread && !session.busy && (
           <span
-            className={cn(
-              "order-first size-1.5 shrink-0 rounded-full bg-link motion-safe:animate-pulse",
-            )}
+            className="order-first size-1.5 shrink-0 rounded-full bg-link"
             role="img"
             aria-label={t("unreadResponse")}
           />

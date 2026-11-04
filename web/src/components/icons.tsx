@@ -198,6 +198,7 @@ export const Plane = themedIcon(
 );
 export const Play = themedIcon(Lucide.Play, Pixel.Play);
 export const Plug = themedIcon(Lucide.Plug, Pixel.Plug);
+export const Paperclip = themedIcon(Lucide.Paperclip, Pixel.Attachment);
 export const Plus = themedIcon(Lucide.Plus, Pixel.Plus);
 export const Power = themedIcon(Lucide.Power, Pixel.CirclePower);
 export const Puzzle = themedIcon(

@@ -12,8 +12,9 @@ import {
 import { useI18n } from "~/components/i18n";
 import {
   ArrowUp,
+  Camera,
   Loader2,
-  Plus,
+  Paperclip,
   Sparkles,
   Square,
   X,
@@ -31,6 +32,7 @@ import {
   PromptInputProvider,
   PromptInputSubmit,
   PromptInputTextarea,
+  usePromptInputAttachments,
   usePromptInputController,
 } from "~/components/ui/prompt-input";
 import {
@@ -87,6 +89,56 @@ const MAX_PICKED_BYTES = 20_000_000;
  */
 const MAX_EDGE = 1568;
 const MAX_SENT_BYTES = 1_000_000;
+
+/**
+ * Takes a photo with the device's camera and attaches it. On a phone the
+ * input opens the camera app; a computer opens its file picker instead. It
+ * sits inside `PromptInput` so the photo goes through the same limits as a
+ * picked file.
+ */
+function CameraButton({
+  disabled,
+  seesImages,
+  onBlocked,
+}: {
+  disabled?: boolean;
+  seesImages: boolean;
+  onBlocked: () => void;
+}) {
+  const { t } = useI18n();
+  const attachments = usePromptInputAttachments();
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        tabIndex={-1}
+        aria-hidden
+        onChange={(event) => {
+          if (event.currentTarget.files)
+            attachments.add(event.currentTarget.files);
+          event.currentTarget.value = "";
+        }}
+      />
+      <Button
+        type="button"
+        size="icon"
+        variant="ghost"
+        aria-label={t("takePhoto")}
+        title={t("takePhoto")}
+        disabled={disabled}
+        onClick={() => (seesImages ? inputRef.current?.click() : onBlocked())}
+        className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
+      >
+        <Camera className="size-4.5" />
+      </Button>
+    </>
+  );
+}
 
 /**
  * Composer for text and images. `~/components/ui/prompt-input` handles
@@ -427,8 +479,13 @@ function ComposerInner({
             }
             className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
           >
-            <Plus className="size-4.5" />
+            <Paperclip className="size-4.5" />
           </Button>
+          <CameraButton
+            disabled={disabled}
+            onBlocked={cantSeeImages}
+            seesImages={seesImages}
+          />
           <div className="ml-auto flex items-center gap-1.5">
             {(hasText || improve.isPending) && (
               <Button

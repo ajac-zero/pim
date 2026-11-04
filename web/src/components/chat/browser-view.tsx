@@ -35,6 +35,7 @@ export function BrowserView({
     onError: (error) => toast.error(error.message),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["browser"] }),
   });
+  const takeOverUrl = `/browser?session=${encodeURIComponent(sessionId)}`;
   const title = page.title || hostOf(page.url);
   return (
     <Collapsible asChild>
@@ -59,11 +60,23 @@ export function BrowserView({
           />
           <div className="grid grid-cols-[3fr_1fr] gap-2">
             <Button className="w-full" asChild>
-              {/* A page of its own, beside the chat, where the person uses the browser. */}
+              {/* A popup of its own, beside the chat, where the person uses the
+                  browser. Window features make an installed app open a popup
+                  rather than a full window; without script it's a new tab. */}
               <a
-                href={`/browser?session=${encodeURIComponent(sessionId)}`}
+                href={takeOverUrl}
                 target="_blank"
                 rel="noopener"
+                onClick={(event) => {
+                  const width = Math.min(1280, screen.availWidth - 80);
+                  const height = Math.min(860, screen.availHeight - 80);
+                  const popup = window.open(
+                    takeOverUrl,
+                    "pim-browser",
+                    `popup,width=${width},height=${height}`,
+                  );
+                  if (popup) event.preventDefault();
+                }}
               >
                 <ExternalLink className="size-4" />
                 {t("takeOverBrowser")}

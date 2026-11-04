@@ -23,13 +23,13 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { AppsDialog } from "~/components/apps-dialog";
+import { ActivityToggle } from "~/components/chat/activity";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import {
   CopyChatId,
   CopyConversation,
 } from "~/components/chat/copy-conversation";
 import { SessionCostMenu } from "~/components/chat/session-cost";
-import { SummaryToggle } from "~/components/chat/summary";
 import { CommandPalette } from "~/components/command-palette";
 import { DiscoverDialog } from "~/components/discover-dialog";
 import { I18nProvider, useI18n } from "~/components/i18n";
@@ -425,7 +425,7 @@ function AppLayout() {
                   <CopyConversation sessionId={sessionId} />
                   <SessionCostMenu sessionId={sessionId} />
                   <ChatLinkMenu sessionId={sessionId} />
-                  <SummaryToggle sessionId={sessionId} />
+                  <ActivityToggle sessionId={sessionId} />
                 </div>
               )}
             </div>

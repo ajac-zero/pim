@@ -1,5 +1,11 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo, useState, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { BrowserView } from "~/components/chat/browser-view";
 import { ApprovalBlock } from "~/components/chat/items";
 import { Markdown } from "~/components/chat/markdown";
@@ -18,15 +24,21 @@ import {
   CollapsibleTrigger,
 } from "~/components/ui/collapsible";
 import { pim } from "~/lib/pim-api";
-import { approvalsQuery, browserQuery } from "~/lib/queries";
+import { approvalsQuery, browserQuery, sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /** How often the open box looks at the agents' browser again. */
 const BROWSER_REFRESH_MS = 4_000;
 
-/** Whether the summary box is open: one setting for every chat, kept across visits. */
+/** Whether the activity box is open: one setting for every chat, kept across visits. */
 const OPEN_KEY = "pim-summary-open";
 const listeners = new Set<() => void>();
+
+function writeSummaryOpen(next: boolean) {
+  if (next) localStorage.setItem(OPEN_KEY, "1");
+  else localStorage.removeItem(OPEN_KEY);
+  for (const listener of listeners) listener();
+}
 
 function useSummaryOpen(): [boolean, (open: boolean) => void] {
   const open = useSyncExternalStore(
@@ -37,12 +49,7 @@ function useSummaryOpen(): [boolean, (open: boolean) => void] {
     () => localStorage.getItem(OPEN_KEY) === "1",
     () => false,
   );
-  const setOpen = (next: boolean) => {
-    if (next) localStorage.setItem(OPEN_KEY, "1");
-    else localStorage.removeItem(OPEN_KEY);
-    for (const listener of listeners) listener();
-  };
-  return [open, setOpen];
+  return [open, writeSummaryOpen];
 }
 
 /** The approvals this chat is waiting on, oldest first: its own agent's, and its team members'. Requests from circles are answered in Sharing. */
@@ -62,8 +69,13 @@ function usePendingApprovals(sessionId: string) {
   );
 }
 
-/** The header button that shows or hides the summary box; a dot says the chat's browser window is open in it, or an approval waits. */
-export function SummaryToggle({
+/**
+ * The header button that shows or hides the activity box; a dot says the chat's
+ * browser window is open in it, or an approval waits. The box opens by itself
+ * when the browser opens or a task starts while the person is in the chat, not
+ * for ones the chat already had.
+ */
+export function ActivityToggle({
   sessionId,
   className,
 }: {
@@ -73,8 +85,35 @@ export function SummaryToggle({
   const { t } = useI18n();
   const [open, setOpen] = useSummaryOpen();
   const { data: browser } = useQuery(browserQuery(sessionId));
+  const { data: sessions } = useQuery(sessionsQuery());
+  const visit = !!sessions?.find((session) => session.id === sessionId)?.visit;
+  const { data: tasks } = useQuery({
+    queryKey: ["tasks", sessionId],
+    queryFn: () => pim.tasks(sessionId),
+    enabled: !visit,
+  });
   const waiting = usePendingApprovals(sessionId).length > 0;
-  const label = browser?.page ? t("summaryAndBrowser") : t("summary");
+  // What the chat had when its data first arrived; only a change from it opens the box.
+  const seen = useRef<{ session: string; browser: boolean; tasks: number }>(
+    undefined,
+  );
+  const hasBrowser = !!browser?.page;
+  const taskCount = tasks?.length;
+  const loaded = browser !== undefined && (visit || taskCount !== undefined);
+  useEffect(() => {
+    if (!loaded) return;
+    const now = {
+      session: sessionId,
+      browser: hasBrowser,
+      tasks: taskCount ?? 0,
+    };
+    const before = seen.current;
+    seen.current = now;
+    if (before?.session !== sessionId) return;
+    if ((now.browser && !before.browser) || now.tasks > before.tasks)
+      writeSummaryOpen(true);
+  }, [loaded, sessionId, hasBrowser, taskCount]);
+  const label = t("activity");
   return (
     <Button
       variant="ghost"
@@ -106,7 +145,7 @@ export function SummaryToggle({
  * when the chat has settled with new entries (`entries`),
  * and Pim writes a new summary only if something more was said.
  */
-export function SummaryBox({
+export function ActivityBox({
   sessionId,
   entries,
   settled,

@@ -10,6 +10,7 @@ import {
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
+import { ActivityBox, ActivityToggle } from "~/components/chat/activity";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { Composer } from "~/components/chat/composer";
 import {
@@ -18,7 +19,6 @@ import {
 } from "~/components/chat/copy-conversation";
 import { RoomMenu } from "~/components/chat/room";
 import { SessionCostMenu } from "~/components/chat/session-cost";
-import { SummaryBox, SummaryToggle } from "~/components/chat/summary";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
@@ -220,12 +220,12 @@ function ChatPage() {
           <CopyConversation sessionId={sessionId} />
           <SessionCostMenu sessionId={sessionId} />
           <ChatLinkMenu sessionId={sessionId} />
-          <SummaryToggle
+          <ActivityToggle
             sessionId={sessionId}
             className="shrink-0 self-center"
           />
         </header>
-        {/* The summary box takes a column of its own, so the thread makes room
+        {/* The activity box takes a column of its own, so the thread makes room
          * for it rather than sitting under it: at the right, or on top on phones. */}
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <div
@@ -325,7 +325,7 @@ function ChatPage() {
             </div>
           </div>
           {ready && !artifact && !file && !task && (
-            <SummaryBox
+            <ActivityBox
               sessionId={sessionId}
               entries={view.entries.length}
               settled={!view.running}

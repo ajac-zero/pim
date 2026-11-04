@@ -726,7 +726,7 @@ const translations = {
     noComputerFiles:
       "Your files live on your computer. Connect one, and your agents can keep files and run commands there.",
     browser: "Browser",
-    summaryAndBrowser: "Summary and browser",
+    activity: "Activity",
     browserPicture: "What the browser shows: {title}",
     takeOverBrowser: "Take over",
     closeBrowser: "Turn off browser",
@@ -1814,7 +1814,7 @@ const translations = {
     noComputerFiles:
       "Tus archivos viven en tu computadora. Conecta una, y tus agentes podrán guardar archivos y ejecutar comandos allí.",
     browser: "Navegador",
-    summaryAndBrowser: "Resumen y navegador",
+    activity: "Actividad",
     browserPicture: "Lo que muestra el navegador: {title}",
     takeOverBrowser: "Tomar el control",
     closeBrowser: "Apagar el navegador",

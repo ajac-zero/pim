@@ -209,6 +209,11 @@ const COLORS: Record<
   },
 };
 
+/** A solid mark in an agent's color; undefined for an agent with the default look. */
+export function swatchClass(color: string | null): string | undefined {
+  return color ? COLORS[color]?.swatch : undefined;
+}
+
 /** The tile behind an agent's symbol: tinted with its color, or the theme's. */
 export function tileClass(color: string | null): string {
   return (color && COLORS[color]?.tile) || "bg-primary/10 text-primary";

@@ -221,11 +221,18 @@ export class Computer {
 		return token !== null && known !== undefined && (await digestHex(token)) === known;
 	}
 
-	/** A computer connected: it takes the place of any other connection. */
+	/**
+	 * A computer connected: it takes the place of any other connection. What
+	 * went over the one before ends now, since this one knows nothing of it:
+	 * its calls fail, and the browser's DevTools connection closes. A
+	 * computer that lost its connection may connect again before the space
+	 * hears the old one close.
+	 */
 	connected(connection: Connection): void {
 		for (const socket of this.#sockets()) {
 			if (socket.id !== connection.id) socket.close(REPLACED, "Another computer connected with this token");
 		}
+		this.#failPending();
 	}
 
 	/** The connection closed: calls waiting on it fail now rather than at their timeouts. */

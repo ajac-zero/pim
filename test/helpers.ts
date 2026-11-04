@@ -292,15 +292,24 @@ export async function connectTestComputer(
 	return { socket, closed, root: machine.root };
 }
 
-/** Pairs a computer with the space and connects it, over a fresh folder, with the tests' Chrome; it runs no commands. */
+/**
+ * Pairs a computer with the space and connects it, over a fresh folder, with
+ * the tests' Chrome; it runs no commands. `reconnect` connects it again, as
+ * pim-computer does after losing its connection, with its browser still
+ * running.
+ */
 export async function pairTestComputer() {
 	const { body } = await post<{ token: string }>("/computer");
-	return connectTestComputer(
-		body.token,
-		`/tmp/computer-${crypto.randomUUID()}`,
-		async () => {
-			throw new Error("This test's computer runs no commands.");
-		},
-		testBrowser(),
-	);
+	const root = `/tmp/computer-${crypto.randomUUID()}`;
+	const browser = testBrowser();
+	const connect = () =>
+		connectTestComputer(
+			body.token,
+			root,
+			async () => {
+				throw new Error("This test's computer runs no commands.");
+			},
+			browser,
+		);
+	return { ...(await connect()), reconnect: connect };
 }

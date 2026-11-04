@@ -1050,6 +1050,7 @@ it("keeps handoffs anchored while linking each answer to its own notice, not an 
     id,
     parent,
     call,
+    session: null,
     agent: { id, name: id },
     from: { id: "lead", name: "Lead" },
     task: `Work for ${id}`,

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearch } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
@@ -8,8 +8,10 @@ import {
   ArrowDownIcon,
   Check,
   ChevronRight,
+  CornerDownRight,
   Loader2,
   ShieldAlert,
+  Workflow,
   Wrench,
   X,
 } from "~/components/icons";
@@ -19,7 +21,8 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "~/components/ui/collapsible";
-import { type AgentTask, pim } from "~/lib/pim-api";
+import { type AgentTask, pim, type StartedBy } from "~/lib/pim-api";
+import { sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /** How often a chat with tasks at work looks again, besides the server's `tasks` message. */
@@ -56,81 +59,123 @@ export function taskRows(tasks: readonly AgentTask[]): Row[] {
   return rows;
 }
 
-/** A handoff stays where it happened, with each task's current state and a link to its later answer. */
+/**
+ * A handoff stays where it happened, as a compact line like the notice its
+ * answers come in: the agents it went to, with how many of its tasks are
+ * done. It opens to each task's current state, its chat, and a link to its
+ * later answer.
+ */
 export function TaskCard({
+  id,
   sessionId,
   tasks,
   completions,
 }: {
+  /** The anchor the notices of its answers jump back to. */
+  id: string;
   sessionId: string;
   tasks: readonly AgentTask[];
   completions: ReadonlyMap<string, string>;
 }) {
-  const { t, formatDate } = useI18n();
+  const { t, locale, formatDate } = useI18n();
+  const [open, setOpen] = useState(false);
+  const agents = [...new Set(tasks.map((task) => task.agent.name))];
+  const done = tasks.filter((task) => !OPEN_STATES.has(task.state)).length;
+  // The line's mark says how the work as a whole is going.
+  const state: AgentTask["state"] = tasks.some(
+    (task) => task.state === "working",
+  )
+    ? "working"
+    : tasks.some((task) => task.state === "auth-required")
+      ? "auth-required"
+      : "completed";
   return (
-    <section className="rounded-2xl bg-muted p-2" aria-label={t("tasks")}>
-      <ul className="space-y-1">
-        {taskRows(tasks).map(({ task, depth }) => {
-          const completion = completions.get(task.id);
-          const delegatedAt = new Date(task.createdAt);
-          return (
-            <li
-              key={task.id}
-              id={`task-start-${task.id}`}
-              tabIndex={-1}
-              style={{ marginLeft: `${depth * 1.25}rem` }}
-              className="rounded-xl outline-none"
-            >
-              <TaskLink
-                sessionId={sessionId}
-                task={task}
-                className="flex w-full items-center gap-3 rounded-xl p-3 text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+    <section
+      id={id}
+      tabIndex={-1}
+      aria-label={t("tasks")}
+      className="flex w-full flex-col items-center rounded-xl outline-none"
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="inline-flex max-w-full items-center gap-1.5 px-3 py-1 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {state === "completed" ? (
+          <Workflow className="size-3.5 shrink-0" />
+        ) : (
+          <TaskState state={state} />
+        )}
+        <span className="truncate">
+          {t(tasks.length === 1 ? "handedOutOneTo" : "handedOutTo", {
+            agents: new Intl.ListFormat(locale, { type: "conjunction" }).format(
+              agents,
+            ),
+          })}
+        </span>
+        <span className="shrink-0 tabular-nums">
+          {done}/{tasks.length}
+        </span>
+        <ChevronRight
+          className={cn(
+            "size-3 shrink-0 transition-transform",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      {open && (
+        <ul className="mt-2 w-full space-y-px rounded-xl border bg-muted/50 p-1.5">
+          {taskRows(tasks).map(({ task, depth }) => {
+            const completion = completions.get(task.id);
+            const delegatedAt = new Date(task.createdAt);
+            return (
+              <li
+                key={task.id}
+                style={{ marginLeft: `${depth * 1.25}rem` }}
+                className="flex items-center gap-1"
               >
-                <span className="shrink-0">
+                <TaskLink
+                  sessionId={sessionId}
+                  task={task}
+                  className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                >
                   <TaskState state={task.state} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-baseline gap-x-1 text-[15px]">
-                    <span className="max-w-full truncate font-medium">
-                      {task.agent.name}
-                    </span>
-                    <span className="text-muted-foreground">
-                      {t(activityKey[task.state])}
-                    </span>
+                  <span className="shrink-0 font-medium">
+                    {task.agent.name}
                   </span>
                   <span
-                    className="mt-0.5 block truncate text-[13px] text-muted-foreground"
+                    className="min-w-0 flex-1 truncate text-muted-foreground"
                     title={task.task}
                   >
                     {task.task}
                   </span>
-                </span>
-                <time
-                  className="shrink-0 text-muted-foreground text-xs tabular-nums"
-                  dateTime={delegatedAt.toISOString()}
-                  title={t("taskDelegated", {
-                    time: formatDate(delegatedAt, {
-                      dateStyle: "full",
-                      timeStyle: "short",
-                    }),
-                  })}
-                >
-                  {formatDate(delegatedAt, { timeStyle: "short" })}
-                </time>
-                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-              </TaskLink>
-              {completion && (
-                <div className="pb-2 pl-[2.375rem] text-xs">
-                  <TaskJump target={`task-update-${completion}`}>
-                    {t("jumpToCompletion")}
-                    <ArrowDownIcon className="size-3" />
-                  </TaskJump>
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                  <time
+                    className="shrink-0 text-muted-foreground text-xs tabular-nums"
+                    dateTime={delegatedAt.toISOString()}
+                    title={t("taskDelegated", {
+                      time: formatDate(delegatedAt, {
+                        dateStyle: "full",
+                        timeStyle: "short",
+                      }),
+                    })}
+                  >
+                    {formatDate(delegatedAt, { timeStyle: "short" })}
+                  </time>
+                </TaskLink>
+                {completion && (
+                  <span className="shrink-0 px-1 text-xs">
+                    <TaskJump target={`task-update-${completion}`}>
+                      <span className="sr-only">{t("jumpToCompletion")}</span>
+                      <ArrowDownIcon className="size-3.5" aria-hidden="true" />
+                    </TaskJump>
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }
@@ -218,6 +263,37 @@ export function TaskList({
   );
 }
 
+/** Atop a chat another agent started for a task: who started it, from which chat, which it links back to. */
+export function StartedFrom({ startedBy }: { startedBy: StartedBy }) {
+  const { t } = useI18n();
+  const { data: sessions } = useQuery(sessionsQuery());
+  const from = sessions?.find((session) => session.id === startedBy.session);
+  return (
+    <p className="flex max-w-full items-center justify-center gap-1.5 px-3 text-[13px] text-muted-foreground">
+      <CornerDownRight className="size-3.5 shrink-0" />
+      {from ? (
+        <>
+          <span className="shrink-0">
+            {t("startedFrom", { agent: startedBy.agent.name })}
+          </span>
+          <Link
+            to="/chat/$sessionId"
+            params={{ sessionId: from.id }}
+            className="truncate text-foreground hover:underline"
+          >
+            {from.title ?? t("newChat")}
+          </Link>
+        </>
+      ) : (
+        // The chat it was started from is gone.
+        <span className="truncate">
+          {t("startedBy", { agent: startedBy.agent.name })}
+        </span>
+      )}
+    </p>
+  );
+}
+
 /** A transcript link releases the bottom lock and moves focus to the other end of the task's history. */
 export function TaskJump({
   target,
@@ -261,7 +337,11 @@ export function TaskJump({
   );
 }
 
-/** Opens a task in the canvas beside its chat (`?task=`), and marks the one open there. */
+/**
+ * Opens the chat a task runs in, like any chat; a task from before tasks
+ * were chats opens read-only in the canvas beside its chat (`?task=`),
+ * marked while it is open there.
+ */
 function TaskLink({
   sessionId,
   task,
@@ -278,6 +358,19 @@ function TaskLink({
     strict: false,
     select: (search: { task?: string }) => search.task === task.id,
   });
+  if (task.session !== null) {
+    return (
+      <Link
+        to="/chat/$sessionId"
+        params={{ sessionId: task.session }}
+        aria-label={t("openTaskChat", { agent: task.agent.name })}
+        title={task.task}
+        className={className}
+      >
+        {children}
+      </Link>
+    );
+  }
   return (
     <Link
       to="/chat/$sessionId"

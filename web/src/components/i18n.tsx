@@ -398,6 +398,16 @@ const translations = {
     jumpToCompletion: "Jump to completion",
     backToTask: "Back to {agent}'s task",
     viewTaskBy: "View {agent}'s task",
+    openTaskChat: "Open {agent}'s chat",
+    handedOutTo: "Handed tasks to {agents}",
+    handedOutOneTo: "Handed a task to {agents}",
+    startedBy: "Started by {agent}",
+    startedFrom: "{agent} started this chat from",
+    taskChatsDone: "{done} of {total} tasks done",
+    hideTaskChats:
+      "Hide the chats started from this one ({done} of {total} done)",
+    showTaskChats:
+      "Show the chats started from this one ({done} of {total} done)",
     taskWorking: "Working",
     taskWaiting: "Waiting for you",
     taskDone: "Done",
@@ -1472,6 +1482,16 @@ const translations = {
     jumpToCompletion: "Ir al resultado",
     backToTask: "Volver a la tarea de {agent}",
     viewTaskBy: "Ver la tarea de {agent}",
+    openTaskChat: "Abrir el chat de {agent}",
+    handedOutTo: "Encargó tareas a {agents}",
+    handedOutOneTo: "Encargó una tarea a {agents}",
+    startedBy: "Iniciado por {agent}",
+    startedFrom: "{agent} inició este chat desde",
+    taskChatsDone: "{done} de {total} tareas hechas",
+    hideTaskChats:
+      "Ocultar los chats iniciados desde este ({done} de {total} hechas)",
+    showTaskChats:
+      "Mostrar los chats iniciados desde este ({done} de {total} hechas)",
     taskWorking: "Trabajando",
     taskWaiting: "Te espera",
     taskDone: "Lista",

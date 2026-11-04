@@ -20,6 +20,7 @@ import {
   ChevronDown,
   Compass,
   Contact,
+  CornerDownRight,
   ExternalLink,
   Folder,
   Loader2,
@@ -67,7 +68,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { flatChats, groupByAge } from "~/lib/chat-list";
+import { flatChats, groupByAge, nestChats } from "~/lib/chat-list";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -613,18 +614,20 @@ function DatedChats({
   onNavigate?: () => void;
 }) {
   const { t } = useI18n();
-  return groupByAge(list).map(({ age, sessions }) => (
+  const { top, children } = nestChats(list);
+  return groupByAge(top).map(({ age, sessions }) => (
     <div key={age}>
       <div className="px-2 pt-2 pb-1 text-muted-foreground/70 text-xs">
         {t(age)}
       </div>
       <ul className="space-y-px">
         {sessions.map((session) => (
-          <SessionRow
+          <ChatTree
             key={session.id}
             session={session}
-            active={session.id === activeId}
-            awaitingApproval={awaitingApproval.has(session.id)}
+            under={children.get(session.id) ?? []}
+            activeId={activeId}
+            awaitingApproval={awaitingApproval}
             onNavigate={onNavigate}
           />
         ))}
@@ -632,6 +635,59 @@ function DatedChats({
     </div>
   ));
 }
+
+/**
+ * A chat with the chats your agents started from it for tasks below it, as
+ * Amp shows threads started by other threads. The chat's row counts how
+ * many of their tasks are done and folds them away; the one open stays in
+ * view.
+ */
+function ChatTree({
+  session,
+  under,
+  activeId,
+  awaitingApproval,
+  onNavigate,
+}: {
+  session: Session;
+  under: Session[];
+  activeId?: string;
+  awaitingApproval: ReadonlySet<string>;
+  onNavigate?: () => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const expanded = open || under.some((chat) => chat.id === activeId);
+  const row = (chat: Session, nested: boolean) => (
+    <SessionRow
+      key={chat.id}
+      session={chat}
+      nested={nested}
+      active={chat.id === activeId}
+      awaitingApproval={awaitingApproval.has(chat.id)}
+      onNavigate={onNavigate}
+      tasks={
+        !nested && under.length > 0
+          ? {
+              done: under.filter((child) =>
+                DONE_STATES.has(child.startedBy?.state ?? "completed"),
+              ).length,
+              total: under.length,
+              expanded,
+              toggle: () => setOpen(!expanded),
+            }
+          : undefined
+      }
+    />
+  );
+  return (
+    <>
+      {row(session, false)}
+      {expanded && under.map((chat) => row(chat, true))}
+    </>
+  );
+}
+
+const DONE_STATES = new Set(["completed", "failed", "canceled"]);
 
 /**
  * Chats with no activity for two weeks, folded away below the others. It
@@ -659,6 +715,7 @@ function ArchivedChats({
     if (holdsActive) setOpen(true);
   }
   const expanded = open || searching;
+  const nestedArchive = nestChats(list);
   return (
     <section className="mb-3" aria-label={t("archived")}>
       <button
@@ -678,12 +735,13 @@ function ArchivedChats({
       </button>
       {expanded && (
         <ul className="space-y-px">
-          {list.map((session) => (
-            <SessionRow
+          {nestedArchive.top.map((session) => (
+            <ChatTree
               key={session.id}
               session={session}
-              active={session.id === activeId}
-              awaitingApproval={awaitingApproval.has(session.id)}
+              under={nestedArchive.children.get(session.id) ?? []}
+              activeId={activeId}
+              awaitingApproval={awaitingApproval}
               onNavigate={onNavigate}
             />
           ))}
@@ -728,11 +786,22 @@ function SessionRow({
   active,
   awaitingApproval,
   onNavigate,
+  nested = false,
+  tasks,
 }: {
   session: Session;
   active: boolean;
   awaitingApproval: boolean;
   onNavigate?: () => void;
+  /** Shown under the chat it was started from. */
+  nested?: boolean;
+  /** The chats started from this one: how many of their tasks are done, and whether they show. */
+  tasks?: {
+    done: number;
+    total: number;
+    expanded: boolean;
+    toggle: () => void;
+  };
 }) {
   const { t } = useI18n();
   const { data: agents } = useQuery(agentsQuery());
@@ -740,6 +809,10 @@ function SessionRow({
   const agent = agents?.find((candidate) =>
     session.agent ? candidate.id === session.agent.id : candidate.majordomo,
   );
+  // The agent that started the chat marks its agent's icon.
+  const starter =
+    session.startedBy &&
+    agents?.find((candidate) => candidate.id === session.startedBy?.agent.id);
   // A group chat shows every agent in it, its host first.
   const chatAgents = [
     agent,
@@ -850,10 +923,16 @@ function SessionRow({
         className={cn(
           "flex items-center gap-2 rounded-lg px-2 py-2 text-sm transition-colors hover:bg-sidebar-accent group-focus-within/row:pr-8 group-hover/row:pr-8 pointer-coarse:pr-8",
           active && "bg-sidebar-accent pr-8",
+          tasks &&
+            "pr-14 group-focus-within/row:pr-20 group-hover/row:pr-20 pointer-coarse:pr-20",
+          tasks && active && "pr-20",
         )}
         onMouseEnter={scrollTitleIntoView}
         onFocus={scrollTitleIntoView}
       >
+        {nested && (
+          <CornerDownRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground/70" />
+        )}
         {session.visit ? (
           <span
             className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-[10px] text-primary uppercase"
@@ -863,7 +942,7 @@ function SessionRow({
           </span>
         ) : (
           chatAgents.length > 0 && (
-            <span className="flex shrink-0 items-center">
+            <span className="relative flex shrink-0 items-center">
               {chatAgents.slice(0, 4).map((member, index) => (
                 <span
                   key={member.id}
@@ -889,6 +968,20 @@ function SessionRow({
                   />
                 </span>
               ))}
+              {starter && (
+                <span
+                  className="-right-1 -bottom-1 absolute flex rounded-[4px] bg-sidebar ring-1 ring-sidebar"
+                  role="img"
+                  aria-label={t("startedBy", { agent: starter.name })}
+                  title={t("startedBy", { agent: starter.name })}
+                >
+                  <AgentIcon
+                    agent={{ ...starter, majordomo: false }}
+                    tile
+                    className="size-2.5 rounded-[3px]"
+                  />
+                </span>
+              )}
               {chatAgents.length > 4 && (
                 <span className="ml-1 text-muted-foreground text-xs">
                   +{chatAgents.length - 4}
@@ -941,6 +1034,30 @@ function SessionRow({
           <AwaitingApprovalMark className="order-first ml-0" />
         )}
       </Link>
+      {tasks && (
+        <button
+          type="button"
+          onClick={tasks.toggle}
+          aria-expanded={tasks.expanded}
+          aria-label={t(tasks.expanded ? "hideTaskChats" : "showTaskChats", {
+            done: tasks.done,
+            total: tasks.total,
+          })}
+          title={t("taskChatsDone", { done: tasks.done, total: tasks.total })}
+          className={cn(
+            "-translate-y-1/2 absolute top-1/2 right-1.5 flex items-center gap-0.5 rounded-md px-1 py-0.5 text-muted-foreground text-xs tabular-nums hover:bg-sidebar-accent hover:text-foreground group-focus-within/row:right-8 group-hover/row:right-8 pointer-coarse:right-8",
+            active && "right-8",
+          )}
+        >
+          <ChevronDown
+            className={cn(
+              "size-3.5 transition-transform",
+              tasks.expanded && "rotate-180",
+            )}
+          />
+          {tasks.done}/{tasks.total}
+        </button>
+      )}
       <DropdownMenu onOpenChange={() => setConfirmingDelete(false)}>
         <DropdownMenuTrigger asChild>
           <button

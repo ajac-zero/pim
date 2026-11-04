@@ -124,7 +124,7 @@ describe("the owner's agents", () => {
 		for (const symbol of ["🏃🏃", "hi there", "a😀", "<svg>", "Rocket"]) expect((await put({ symbol })).status).toBe(400);
 		expect((await put({ color: "#ff0000" })).status).toBe(400);
 		expect((await put({ symbol: null, color: null })).body).toMatchObject({ symbol: null, color: null });
-		expect((await api(`/agents/${runner.id}/dashboard`)).body.agent).toMatchObject({ symbol: null, color: null });
+		expect((await api(`/agents/${runner.id}`)).body).toMatchObject({ symbol: null, color: null });
 	});
 
 	it("knows the person's other agents, and makes one none of them covers", async () => {

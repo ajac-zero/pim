@@ -780,7 +780,6 @@ function ScheduleRow({
     onSuccess: () => {
       toast.success(t("scheduleCancelled"));
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (error) => toast.error(error.message),
   });

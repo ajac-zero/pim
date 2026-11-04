@@ -21,7 +21,6 @@ import {
   type ArtifactReference,
   artifactFrameUrl,
   pim,
-  type WidgetSize,
 } from "~/lib/pim-api";
 import { artifactQuery, artifactVersionQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -31,12 +30,6 @@ const HEIGHT_MESSAGE = "pim:artifact-height";
 const MIN_HEIGHT = 80;
 /** At most this many height messages a second are taken; a page that sends more is left as it is. */
 const MAX_MESSAGES_PER_SECOND = 20;
-
-/** `pim.chat(text)`: a message for the person to send, answered here, never by Pim. */
-const DRAFT_OP = "chat.draft";
-const MAX_DRAFT = 2000;
-/** `pim.open()`: from a dashboard's widget, opens the full artifact, answered here too. */
-const OPEN_OP = "app.open";
 
 /** A call the page makes through its bridge (`window.pim`), and the answer it's sent. */
 const CALL_MESSAGE = "pim:call";
@@ -120,24 +113,12 @@ export function ArtifactFrame({
   className,
   eager = false,
   from,
-  onDraft,
-  widget,
-  onOpen,
 }: {
   id: string;
   version: number;
   title: string;
   /** Whose it is, when it isn't yours: shared with you, or published. */
   from?: ArtifactFrom;
-  /**
-   * Where the page's `pim.chat(text)` goes: a message the person may send.
-   * Without it, as everywhere but a dashboard, the call fails.
-   */
-  onDraft?: (text: string) => void;
-  /** Shows the version's widget, its small view for a dashboard, at this size, instead of the artifact. */
-  widget?: WidgetSize;
-  /** What the page's `pim.open()` does; without it, the call fails. */
-  onOpen?: () => void;
   /** The tallest it grows to its page's height; ignored when `fill`. */
   maxHeight?: number;
   /** Fills its container instead of following its page's height. */
@@ -153,26 +134,11 @@ export function ArtifactFrame({
   const [attempt, setAttempt] = useState(0);
   // Loads of the frame now shown; a new version or a retry starts again.
   const loads = useRef({ key: "", count: 0 });
-  const key = `${id}:${version}:${widget}:${attempt}`;
+  const key = `${id}:${version}:${attempt}`;
   const bridge = useBridge(id, version, from);
   // The bridge as it is now, for the listener, which stays the same.
   const call = useRef(bridge.call);
-  call.current = async (op, args) => {
-    if (op === OPEN_OP) {
-      if (!onOpen)
-        throw new Error("pim.open works only in a dashboard's widget.");
-      onOpen();
-      return null;
-    }
-    if (op !== DRAFT_OP) return bridge.call(op, args);
-    if (!onDraft) throw new Error("pim.chat works only on a dashboard.");
-    const text = (args as { text?: unknown }).text;
-    if (typeof text !== "string" || !text.trim() || text.length > MAX_DRAFT) {
-      throw new Error(`pim.chat needs text, at most ${MAX_DRAFT} characters`);
-    }
-    onDraft(text.trim());
-    return null;
-  };
+  call.current = bridge.call;
   // The page now shown; a call is answered only while it still is.
   const shownKey = useRef(key);
   shownKey.current = key;
@@ -311,7 +277,7 @@ export function ArtifactFrame({
         key={key}
         ref={frame}
         title={title}
-        src={artifactFrameUrl(id, version, from, widget)}
+        src={artifactFrameUrl(id, version, from)}
         sandbox="allow-scripts"
         referrerPolicy="no-referrer"
         loading={eager ? "eager" : "lazy"}
@@ -343,7 +309,6 @@ export function ArtifactPreview({
   maxHeight,
   eager,
   from,
-  onDraft,
 }: {
   id: string;
   version: number;
@@ -354,8 +319,6 @@ export function ArtifactPreview({
   eager?: boolean;
   /** Whose it is, when it isn't yours: shared with you, or published. */
   from?: ArtifactFrom;
-  /** Where a framed page's `pim.chat(text)` goes; see `ArtifactFrame`. */
-  onDraft?: (text: string) => void;
 }) {
   if (kind !== "markdown") {
     return (
@@ -367,7 +330,6 @@ export function ArtifactPreview({
         maxHeight={maxHeight}
         eager={eager}
         from={from}
-        onDraft={onDraft}
       />
     );
   }

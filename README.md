@@ -26,7 +26,7 @@ Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on,
 
 - **Remember.** Long-term memory, after [OptMem](https://github.com/VictorTaelin/OptMem), in scopes: your majordomo knows everything, each other agent what you let it, and you can make any of it forget.
 - **Plan and follow up.** Goals with step-by-step plans, reminders and recurring work on a schedule.
-- **Make things.** Documents, pages and small React apps, kept with every version, which can sit on an agent's dashboard as widgets.
+- **Make things.** Documents, pages and small React apps, kept with every version.
 - **Use your apps and your computer.** GitHub, Linear, Notion and more than 30 other apps over MCP; commands and a browser on a machine of yours, or on an Ubuntu desktop Pim keeps for you, which you use from the app and take over from your agents at any time.
 - **Ask first.** Anything that acts on the world, such as a request, a command or a click, waits for your approval unless you allowed it.
 
@@ -34,12 +34,12 @@ Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on,
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/dashboard.png" alt="Coach's dashboard in dark mode: a widget with this week's runs and the plan's weekly distances, the goal, and a check-in coming up on Sunday."><br><sub>Each agent's dashboard holds what you asked it to show.</sub></td>
     <td width="50%"><img src="docs/images/artifact.png" alt="A chat with Coach beside the training plan, a small React app with a chart of weekly distances and this week's runs."><br><sub>Artifacts open beside the chat.</sub></td>
+    <td width="50%"><img src="docs/images/discover.png" alt="Discover, listing agents that Ada, Grace, Linus and Margaret published on the same Pim."><br><sub>Discover lists what people on your Pim published.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/discover.png" alt="Discover, listing agents that Ada, Grace, Linus and Margaret published on the same Pim."><br><sub>Discover lists what people on your Pim published.</sub></td>
     <td width="50%"><img src="docs/images/mobile.png" alt="Two phone screens: Jeeves asking for approval before booking the hotel, and the training plan on its own page."><br><sub>On a phone: an approval, and an artifact.</sub></td>
+    <td width="50%"></td>
   </tr>
 </table>
 

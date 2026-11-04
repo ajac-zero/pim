@@ -1,121 +1,46 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useState } from "react";
-import { toast } from "sonner";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { AgentIcon, tileClass } from "~/components/agent-icon";
-import { ArtifactFrame, ArtifactIcon } from "~/components/artifact";
 import { Composer } from "~/components/chat/composer";
 import { ChatTabs } from "~/components/chat/tabs";
 import { Thread } from "~/components/chat/thread";
 import { useI18n } from "~/components/i18n";
-import { Bot, ChevronDown, MoreHorizontal, X } from "~/components/icons";
-import { RouteError } from "~/components/route-error";
-import { Button } from "~/components/ui/button";
+import { ChevronDown } from "~/components/icons";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
-import { WidgetCard } from "~/components/widgets";
-import {
-  type PinnedArtifact,
-  pim,
-  type UserContent,
-  WIDGET_SIZES,
-  type WidgetSize,
-} from "~/lib/pim-api";
+import type { UserContent } from "~/lib/pim-api";
 import { EMPTY_STREAM } from "~/lib/pim-view";
-import { agentsQuery, dashboardQuery, suggestionsQuery } from "~/lib/queries";
+import { agentsQuery, suggestionsQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
 import { useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
-/**
- * An agent's dashboard: start a chat with it, above what it shows: widgets,
- * each loaded for this agent, and artifacts the agent pinned there, each as
- * the widget of its latest version. A pinned artifact's `pim.chat(text)` puts
- * a message about it in the composer, for the person to send.
- */
+/** Starts a chat with an agent: its first message, written here, makes the chat. */
 export const Route = createFileRoute("/agents/$agentId")({
   validateSearch: (search: Record<string, unknown>): { prompt?: string } => ({
     ...(typeof search.prompt === "string" && { prompt: search.prompt }),
   }),
-  component: DashboardPage,
+  component: NewChatPage,
 });
 
-function DashboardPage() {
+function NewChatPage() {
   const { t, locale } = useI18n();
   const navigate = useNavigate();
   const { agentId } = Route.useParams();
   const { prompt } = Route.useSearch();
   const { data: agents } = useQuery(agentsQuery());
-  const { data, error, refetch } = useQuery(dashboardQuery(agentId, locale));
   const { data: suggestions } = useQuery(suggestionsQuery(agentId, locale));
   const { start, sent } = useStartChat(agentId);
   const shelf = useTabs().length > 0;
-  const queryClient = useQueryClient();
-  // The room the widgets' scrollbar takes, if any (overlay scrollbars take none), which the composer leaves too, so the two line up.
-  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
-  const [gutter, setGutter] = useState(0);
-  useEffect(() => {
-    if (!scroller) return;
-    const observer = new ResizeObserver(() =>
-      setGutter(scroller.offsetWidth - scroller.clientWidth),
-    );
-    observer.observe(scroller);
-    return () => observer.disconnect();
-  }, [scroller]);
 
-  if (error) {
-    return <RouteError error={error} reset={() => refetch()} />;
-  }
-  // The header and composer show as soon as the agent is known, from the
-  // agents the sidebar already has; widgets follow when loaded, and suggestions when written.
-  const agent = data?.agent ?? agents?.find((choice) => choice.id === agentId);
+  // The header and composer show as soon as the agent is known, from the agents the sidebar already has; suggestions follow when written.
+  const agent = agents?.find((choice) => choice.id === agentId);
   if (!agent) return null;
-  const widgets = data?.widgets ?? [];
   const otherAgents = (agents ?? []).filter((choice) => choice.id !== agentId);
-  const change = async (
-    items: string[],
-    sizes: Record<string, WidgetSize> = {},
-  ) => {
-    try {
-      await pim.setDashboard(agentId, items, sizes);
-    } catch (failure) {
-      toast.error((failure as Error).message);
-    }
-    await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-  };
-  const remove = (id: string) =>
-    change(widgets.filter((item) => item.id !== id).map((item) => item.id));
-  const resize = (id: string, size: WidgetSize) =>
-    change(
-      widgets.map((item) => item.id),
-      { [id]: size },
-    );
-  const removeButton = (id: string, title: string) => (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="size-7 rounded-full text-muted-foreground"
-      aria-label={t("dashboardRemove", { title })}
-      title={t("dashboardRemove", { title })}
-      onClick={() => void remove(id)}
-    >
-      <X className="size-4" />
-    </Button>
-  );
-  // The message names the artifact, which the composer shows as a chip, so the agent knows what it's about.
-  const draft = (pinned: PinnedArtifact) => (text: string) =>
-    void navigate({
-      to: "/agents/$agentId",
-      params: { agentId },
-      search: { prompt: `/artifacts/${pinned.artifact.id}\n\n${text}` },
-      replace: true,
-    });
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
       {(shelf || sent !== null) && (
@@ -131,14 +56,11 @@ function DashboardPage() {
       {sent !== null && <StartingChat content={sent} />}
       {/* Kept while the chat starts, in case it can't. */}
       <div
-        ref={setScroller}
-        // Reaches under the composer's rounded top corners, so widgets show around them.
         className={cn(
-          "-mb-4 min-h-0 flex-1 overflow-y-auto scrollbar-thin",
+          "min-h-0 flex-1 overflow-y-auto scrollbar-thin",
           sent !== null && "hidden",
         )}
       >
-        {/* Bottom room so the last card scrolls clear of the composer's top and the suggestions floating over it. */}
         <div className="mx-auto w-full max-w-4xl px-4 pt-8 pb-24 md:pt-12">
           <header className="mb-6 flex items-center gap-3">
             {agent.icon === null && agent.symbol === null ? (
@@ -198,53 +120,9 @@ function DashboardPage() {
               )}
             </div>
           </header>
-          {!data ? null : widgets.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-10 text-center text-muted-foreground text-sm">
-              <Bot className="size-5" />
-              {t("noDashboard", { name: agent.name })}
-            </div>
-          ) : (
-            // Two columns on phones and four from a wide enough dashboard, as a phone's home screen
-            // has: `--cell` is a column's width, which a small widget's tile is as tall as.
-            <div className="@container">
-              <div className="grid grid-flow-row-dense grid-cols-2 gap-3 [--cell:calc((100cqw-0.75rem)/2)] @2xl:grid-cols-4 @2xl:[--cell:calc((100cqw-2.25rem)/4)]">
-                {widgets.map((item) =>
-                  "artifact" in item ? (
-                    <PinnedWidget
-                      key={item.id}
-                      pinned={item}
-                      actions={
-                        <>
-                          <SizeMenu
-                            title={item.title}
-                            size={item.size}
-                            onChange={(size) => void resize(item.id, size)}
-                          />
-                          {removeButton(item.id, item.title)}
-                        </>
-                      }
-                      onDraft={draft(item)}
-                    />
-                  ) : (
-                    <WidgetCard
-                      key={item.id}
-                      widget={item}
-                      className="col-span-2"
-                      actions={removeButton(item.id, item.title)}
-                    />
-                  ),
-                )}
-              </div>
-            </div>
-          )}
         </div>
       </div>
-      {/* As wide as the widgets above it, which have the same width and padding. */}
-      {/* Covers the widgets below its first 1rem, the composer's corner radius, where they show around its corners. */}
-      <div
-        className="relative flex shrink-0 justify-center bg-[linear-gradient(to_bottom,transparent_1rem,var(--background)_1rem)] pb-2"
-        style={{ marginRight: gutter }}
-      >
+      <div className="flex shrink-0 justify-center pb-2">
         <div className="w-full max-w-4xl px-4">
           <Composer
             key={`${agentId}:${prompt ?? ""}`}
@@ -261,149 +139,6 @@ function DashboardPage() {
         </div>
       </div>
     </main>
-  );
-}
-
-/**
- * Where each size of widget goes in the grid, and how tall its tile is: a
- * small one a square cell, a medium one two cells wide, and a large one two
- * cells wide and two rows tall, as tall as two small ones with their titles
- * (1.75rem, with 0.375rem above) and the gap between them.
- */
-const SIZE_CLASSES: Record<WidgetSize, { cell: string; tile: string }> = {
-  small: { cell: "col-span-1", tile: "h-(--cell)" },
-  medium: { cell: "col-span-2", tile: "h-(--cell)" },
-  large: {
-    cell: "col-span-2 row-span-2",
-    tile: "h-[calc(2*var(--cell)+2.875rem)]",
-  },
-};
-
-/**
- * A pinned artifact, as a phone's home screen shows an app: its widget, a
- * small view that runs live in a tile of the size it's pinned at, with its
- * title under it, and the whole artifact a tap away, from the title or the widget's
- * `pim.open()`. One without a widget, pinned before artifacts had them, is a
- * tile that opens it.
- */
-function PinnedWidget({
-  pinned,
-  actions,
-  onDraft,
-}: {
-  pinned: PinnedArtifact;
-  actions: ReactNode;
-  onDraft: (text: string) => void;
-}) {
-  const { t } = useI18n();
-  const navigate = useNavigate();
-  const { artifact, title } = pinned;
-  const open = () =>
-    void navigate({
-      to: "/artifacts/$artifactId",
-      params: { artifactId: artifact.id },
-    });
-  return (
-    <section
-      className={cn(
-        "group flex min-w-0 flex-col gap-1.5",
-        SIZE_CLASSES[pinned.size].cell,
-      )}
-      aria-label={title}
-    >
-      <div
-        className={cn(
-          "overflow-hidden rounded-2xl bg-muted",
-          SIZE_CLASSES[pinned.size].tile,
-        )}
-      >
-        {artifact.widget ? (
-          <ArtifactFrame
-            id={artifact.id}
-            version={artifact.version}
-            title={title}
-            widget={pinned.size}
-            fill
-            className="rounded-none border-0"
-            onDraft={onDraft}
-            onOpen={open}
-          />
-        ) : (
-          <Link
-            to="/artifacts/$artifactId"
-            params={{ artifactId: artifact.id }}
-            className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground transition-colors hover:bg-secondary"
-          >
-            <ArtifactIcon kind={artifact.kind} className="size-6" />
-            <span className="text-center text-[13px]">
-              {t("dashboardNoWidget")}
-            </span>
-          </Link>
-        )}
-      </div>
-      <div className="flex min-h-7 items-center gap-2 px-1">
-        <Link
-          to="/artifacts/$artifactId"
-          params={{ artifactId: artifact.id }}
-          title={t("dashboardOpen", { title })}
-          className="min-w-0 flex-1 truncate rounded-full text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {title}
-        </Link>
-        <div className="-my-1 -mr-1.5 flex shrink-0 items-center transition-opacity focus-within:opacity-100 group-hover:opacity-100 has-data-[state=open]:opacity-100 [@media(hover:hover)]:opacity-0">
-          {actions}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/** Chooses the size of a pinned artifact's widget. */
-function SizeMenu({
-  title,
-  size,
-  onChange,
-}: {
-  title: string;
-  size: WidgetSize;
-  onChange: (size: WidgetSize) => void;
-}) {
-  const { t } = useI18n();
-  const names: Record<WidgetSize, string> = {
-    small: t("widgetSmall"),
-    medium: t("widgetMedium"),
-    large: t("widgetLarge"),
-  };
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7 rounded-full text-muted-foreground"
-          aria-label={t("widgetSize", { title })}
-          title={t("widgetSize", { title })}
-        >
-          <MoreHorizontal className="size-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-36">
-        <DropdownMenuRadioGroup
-          value={size}
-          onValueChange={(value) => onChange(value as WidgetSize)}
-        >
-          {WIDGET_SIZES.map((choice) => (
-            <DropdownMenuRadioItem
-              key={choice}
-              value={choice}
-              className="min-h-9 pointer-coarse:min-h-11"
-            >
-              {names[choice]}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 

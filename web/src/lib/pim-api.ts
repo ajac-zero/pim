@@ -248,7 +248,7 @@ export type Agent = {
   contacts: string[];
   /** The model it runs on; null follows the default model (Settings → Model). */
   model: { provider: string; id: string } | null;
-  /** The blueprint it builds on, as `<extension>/<blueprint>`, which brings its dashboard; null for none. */
+  /** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
   blueprint: string | null;
   /** The template it was made from. */
   source: { template: string; author: string } | null;
@@ -341,48 +341,12 @@ export type SharedChat = {
   )[];
 };
 
-/** One card of a dashboard, loaded by the extension that brings it, in the kind the app draws. */
+/** A widget's card, loaded by the extension that brings it, in the kind the app draws, with its text in one language. */
 export type Widget = {
   id: string;
   title: string;
   empty: string;
 } & WidgetContent;
-
-export type Dashboard = {
-  agent: Pick<
-    Agent,
-    | "id"
-    | "name"
-    | "description"
-    | "majordomo"
-    | "blueprint"
-    | "icon"
-    | "symbol"
-    | "color"
-  >;
-  /** What it shows, in order: widgets, and artifacts pinned to it. */
-  widgets: (Widget | PinnedArtifact)[];
-};
-
-/** The sizes a pinned artifact's widget comes in, as on a phone's home screen. */
-export const WIDGET_SIZES = ["small", "medium", "large"] as const;
-export type WidgetSize = (typeof WIDGET_SIZES)[number];
-
-/** One of the person's artifacts pinned to a dashboard, shown as its latest version. */
-export type PinnedArtifact = {
-  /** `artifact:<id>`, as the dashboard names it. */
-  id: string;
-  title: string;
-  /** The size its widget is shown at. */
-  size: WidgetSize;
-  /** `widget`: whether its latest version has a widget, the small view a dashboard shows. */
-  artifact: {
-    id: string;
-    kind: ArtifactKind;
-    version: number;
-    widget: boolean;
-  };
-};
 
 export type AgentInput = {
   memoryScopes?: string[];
@@ -779,9 +743,7 @@ export const artifactFrameUrl = (
   id: string,
   version: number,
   from?: ArtifactFrom,
-  widget?: WidgetSize,
-) =>
-  `${artifactPath(id, version, from)}/frame${widget ? `?view=widget&size=${widget}` : ""}`;
+) => `${artifactPath(id, version, from)}/frame`;
 
 /** Where the browser downloads a version's file: its main one, unless `path` names another. */
 export const artifactDownloadUrl = (
@@ -1302,11 +1264,6 @@ export const pim = {
       method: "POST",
       body: JSON.stringify(setup),
     }),
-  /** An agent's dashboard, with its text in `locale` where the extensions translated it. */
-  dashboard: (id: string, locale: string) =>
-    call<Dashboard>(
-      `/agents/${id}/dashboard?locale=${encodeURIComponent(locale)}`,
-    ),
   /**
    * Messages to start a chat with the agent, written by the utility model from
    * its latest chats once it has had one. They can take a few seconds.
@@ -1315,19 +1272,6 @@ export const pim = {
     call<{ suggestions: string[] }>(
       `/agents/${id}/suggestions?locale=${encodeURIComponent(locale)}`,
     ).then((answer) => answer.suggestions),
-  /**
-   * Sets what an agent's dashboard shows, in order, by the ids it gives them,
-   * and the size of artifacts' widgets in `sizes`, by id; the others keep theirs.
-   */
-  setDashboard: (
-    id: string,
-    items: string[],
-    sizes: Record<string, WidgetSize> = {},
-  ) =>
-    call<{ items: string[]; sizes: Record<string, WidgetSize> }>(
-      `/agents/${id}/dashboard`,
-      { method: "PUT", body: JSON.stringify({ items, sizes }) },
-    ),
   publishAgent: (id: string) =>
     call<Template>(`/agents/${id}/publish`, { method: "POST" }),
   unpublishAgent: (id: string) =>

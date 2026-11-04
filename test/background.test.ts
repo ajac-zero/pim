@@ -2,7 +2,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { DELIVERY_REMINDER } from "../src/transcript";
-import { api, connect, lastUserText, OWNER, post, ROOT, say, toolUse } from "./helpers";
+import { api, connect, lastUserText, OWNER, post, ROOT, say, toolUse, widgetsShown } from "./helpers";
 import { faux, outbox, type Pim } from "./worker";
 
 describe("scheduled tasks", () => {
@@ -85,14 +85,13 @@ describe("scheduled tasks", () => {
 		const operations = [await fire(0, 2)];
 		expect((await api(`/sessions/${origin}/messages`)).body.messages).toHaveLength(originLength);
 
-		// Deleting the chat that scheduled it leaves it running, still on the agent's dashboard.
+		// Deleting the chat that scheduled it leaves it running.
 		expect((await api(`/sessions/${origin}`, { method: "DELETE" })).status).toBe(200);
 		expect((await api("/schedules")).body.schedules).toMatchObject([{ id: schedule.id }]);
-		await api(`/agents/${coach.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items: ["pim.schedule/upcoming"] }) });
-		const board = (await api(`/agents/${coach.id}/dashboard`)).body;
-		const upcoming = board.widgets.find((shown: { id: string }) => shown.id === "pim.schedule/upcoming").items;
-		expect(upcoming).toEqual([{ title: "Daily plan", time: expect.any(String) }]);
 		operations.push(await fire(1, 1));
+		// The agent's chats still show it coming up, without a link to the deleted chat.
+		const [upcoming] = await widgetsShown((await post("/sessions", { agent: coach.id })).body.id, ["pim.schedule/upcoming"]);
+		expect(upcoming.items).toEqual([{ title: "Daily plan", time: expect.any(String) }]);
 
 		const chats = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Daily plan");
 		expect(chats).toHaveLength(2);
@@ -134,11 +133,10 @@ describe("scheduled tasks", () => {
 		await say("Have Scout look for events every Friday.");
 		const [schedule] = (await api("/schedules")).body.schedules;
 		expect(schedule).toMatchObject({ session: ROOT, newChat: true, agent: scout.id });
-		// It is on Scout's dashboard, which does the work, and not on Coach's.
+		// Scout's chats show it coming up, since Scout does the work, and Coach's don't.
 		for (const [agent, shown] of [[scout.id, 1], [coach.id, 0]] as const) {
-			await api(`/agents/${agent}/dashboard`, { method: "PUT", body: JSON.stringify({ items: ["pim.schedule/upcoming"] }) });
-			const board = (await api(`/agents/${agent}/dashboard`)).body;
-			expect(board.widgets.find((widget: { id: string }) => widget.id === "pim.schedule/upcoming").items).toHaveLength(shown);
+			const [upcoming] = await widgetsShown((await post("/sessions", { agent })).body.id, ["pim.schedule/upcoming"]);
+			expect(upcoming.items).toHaveLength(shown);
 		}
 
 		faux.setResponses([fauxAssistantMessage("Found three.")]);

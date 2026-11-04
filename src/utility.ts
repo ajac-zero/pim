@@ -130,10 +130,10 @@ export type StructuredUtilityTask<T extends readonly unknown[]> = {
 	readonly result: (answer: unknown) => T;
 };
 
-/** The messages an agent's dashboard offers to start a chat with. */
+/** The messages offered for starting a chat with an agent. */
 export const SUGGEST_PROMPTS: StructuredUtilityTask<string[]> = {
 	instructions: [
-		"You suggest what a person might say next to their AI assistant, from what the assistant knows about them, what they talked about lately, and what is on its dashboard.",
+		"You suggest what a person might say next to their AI assistant, from what the assistant knows about them and what they talked about lately.",
 		"Write 4 messages the person could send, each one a short request in their own voice, of 3 to 9 words, that continues something they are doing or follows up on what they care about, or that starts something new that fits.",
 		"Use only what you are given: don't invent facts, and don't suggest what a recent chat already finished.",
 		"Write in the language of the recent chats, or else the language you are given.",

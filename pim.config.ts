@@ -8,7 +8,7 @@ import { spotifyExtension } from "./src/extensions/spotify";
 
 /**
  * This deployment's extensions: the blueprints people's agents build on, and the widgets
- * their dashboards show. Add an extension's import to the list and deploy;
+ * their chats show. Add an extension's import to the list and deploy;
  * take one out and nobody has it anymore. Agents built on a blueprint that's gone
  * keep their name and the person's own instructions. See docs/extensions.md.
  *

@@ -12,29 +12,19 @@ import type {
 import { cn } from "~/lib/utils";
 
 /**
- * A dashboard's card. Extensions send data of a known kind; the app draws
+ * A widget's card. Extensions send data of a known kind; the app draws
  * every kind itself, so no extension code runs here.
  */
-export function WidgetCard({
-  widget,
-  actions,
-  className,
-}: {
-  widget: Widget;
-  /** Beside its title, such as taking it off a dashboard. */
-  actions?: ReactNode;
-  className?: string;
-}) {
+function WidgetCard({ widget }: { widget: Widget }) {
   const { t } = useI18n();
   return (
     <section
-      className={cn(
-        "group flex min-w-0 flex-col rounded-2xl bg-muted px-4 py-4",
-        className,
-      )}
+      className="flex min-w-0 flex-col rounded-2xl bg-muted px-4 py-4"
       aria-label={widget.title}
     >
-      <WidgetHeader title={widget.title} actions={actions} />
+      <h2 className="mb-2 truncate text-[13px] text-muted-foreground leading-6">
+        {widget.title}
+      </h2>
       {"failed" in widget ? (
         <p className="text-muted-foreground text-sm">{t("widgetFailed")}</p>
       ) : widget.items.length === 0 ? (
@@ -56,28 +46,6 @@ export function WidgetCard({
         </ul>
       )}
     </section>
-  );
-}
-
-/** A card's title, with its actions on the right, shown on hover or focus where there's a pointer. */
-export function WidgetHeader({
-  title,
-  actions,
-}: {
-  title: string;
-  actions?: ReactNode;
-}) {
-  return (
-    <div className="mb-2 flex min-h-6 items-center gap-2">
-      <h2 className="min-w-0 flex-1 truncate text-muted-foreground text-[13px]">
-        {title}
-      </h2>
-      {actions && (
-        <div className="-my-1 -mr-1.5 flex shrink-0 items-center gap-0.5 transition-opacity focus-within:opacity-100 group-hover:opacity-100 [@media(hover:hover)]:opacity-0">
-          {actions}
-        </div>
-      )}
-    </div>
   );
 }
 

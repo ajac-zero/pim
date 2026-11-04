@@ -472,7 +472,7 @@ export function createOptMem(options: OptMemOptions) {
 
 export type OptMem = ReturnType<typeof createOptMem>;
 
-/** On a dashboard: the newest memories its agent reads. */
+/** The newest memories the chat's agent reads. */
 export function memoryWidgets(store: OptMemStore, scopesOf: (agent: string) => readonly string[]) {
 	return definePimExtension({
 		id: "pim.memory",

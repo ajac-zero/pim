@@ -191,15 +191,7 @@ export const extensionsQuery = () =>
     staleTime: Number.POSITIVE_INFINITY,
   });
 
-/** An agent's dashboard. Refetched when Pim's activity or the agent itself changes. */
-export const dashboardQuery = (id: string, locale: string) =>
-  queryOptions({
-    queryKey: ["dashboard", id, locale],
-    queryFn: () => pim.dashboard(id, locale),
-    retry: false,
-  });
-
-/** What an agent's dashboard suggests saying to it: instant when Pim has them, a few seconds when it writes them. */
+/** What to suggest saying to an agent to start a chat: instant when Pim has them, a few seconds when it writes them. */
 export const suggestionsQuery = (id: string, locale: string) =>
   queryOptions({
     queryKey: ["suggestions", id, locale],

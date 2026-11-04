@@ -1,6 +1,5 @@
 import { type DirectoryApp, storedApps } from "./extensions/app-directory";
 import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
-import type { WidgetSize } from "./extensions/dashboard";
 import type { BlueprintDefinition } from "./extensions/define";
 import { PRIVATE_SCOPE } from "./extensions/optmem/store";
 import { HttpError } from "./http";
@@ -66,14 +65,6 @@ export type Agent = {
 	readonly color: string | null;
 	/** The person's majordomo: the one that talks in chats started without choosing an agent. There is one, always the same, and it can't be deleted. */
 	readonly majordomo: boolean;
-	/**
-	 * What its dashboard shows, in order: widgets as `<extension>/<widget>` and
-	 * the person's artifacts as `artifact:<id>`. Null until it's changed: the
-	 * blueprint's dashboard.
-	 */
-	readonly dashboard: readonly string[] | null;
-	/** The size of each artifact's widget on its dashboard, by item, where it isn't the default. */
-	readonly dashboardSizes: Readonly<Record<string, WidgetSize>>;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -137,8 +128,6 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	color TEXT,
 	introduced INTEGER NOT NULL DEFAULT 0,
 	skills TEXT NOT NULL DEFAULT '[]',
-	dashboard TEXT,
-	dashboard_sizes TEXT,
 	contacts TEXT NOT NULL DEFAULT '[]',
 	memory_scope TEXT,
 	memory_scopes TEXT NOT NULL DEFAULT '[]',
@@ -220,8 +209,6 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	symbol: row.symbol === null ? null : String(row.symbol),
 	color: row.color === null ? null : String(row.color),
 	majordomo: Number(row.is_default) === 1,
-	dashboard: row.dashboard === null ? null : (JSON.parse(String(row.dashboard)) as string[]),
-	dashboardSizes: row.dashboard_sizes ? (JSON.parse(String(row.dashboard_sizes)) as Record<string, WidgetSize>) : {},
 	createdAt: Number(row.created_at),
 	updatedAt: Number(row.updated_at),
 });
@@ -372,8 +359,6 @@ export class AgentStore {
 		// Accounts from before majordomos already have the agent they talk with: it becomes theirs as it is.
 		if (!columns.includes("introduced")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN introduced INTEGER NOT NULL DEFAULT 1");
 		if (!columns.includes("skills")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN skills TEXT NOT NULL DEFAULT '[]'");
-		if (!columns.includes("dashboard")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard TEXT");
-		if (!columns.includes("dashboard_sizes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN dashboard_sizes TEXT");
 		if (!columns.includes("contacts")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN contacts TEXT NOT NULL DEFAULT '[]'");
 		if (!columns.includes("memory_scope")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scope TEXT");
 		if (!columns.includes("memory_scopes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scopes TEXT NOT NULL DEFAULT '[]'");
@@ -553,12 +538,6 @@ export class AgentStore {
 	/** Sets the model it runs on, checked by the space; null follows the space's choice. */
 	setModel(id: string, model: AgentModel | null): Agent {
 		this.#sql.exec("UPDATE pim_agents SET model = ? WHERE id = ?", model && JSON.stringify({ provider: model.provider, id: model.id }), id);
-		return this.get(id)!;
-	}
-
-	/** Sets what its dashboard shows, checked by the space. */
-	setDashboard(id: string, items: readonly string[], sizes: Readonly<Record<string, WidgetSize>>): Agent {
-		this.#sql.exec("UPDATE pim_agents SET dashboard = ?, dashboard_sizes = ? WHERE id = ?", JSON.stringify(items), JSON.stringify(sizes), id);
 		return this.get(id)!;
 	}
 

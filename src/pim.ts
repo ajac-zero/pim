@@ -34,7 +34,6 @@ import {
 	fileType,
 	isTextType,
 	framePage,
-	hasWidget,
 	type LoadedFiles,
 	readFiles,
 	textOf as fileText,
@@ -83,7 +82,7 @@ import {
 	type ResolvedPermission,
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
-import { artifactsExtension, artifactsWidgets } from "./extensions/artifacts";
+import { artifactsExtension } from "./extensions/artifacts";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, BROWSER_UPLOAD, browserClickAction, browserExtension, browserTypeAction, browserUploadAction } from "./extensions/browser";
 import { DESKTOP_ACT, DESKTOP_EXTENSION, desktopAction, desktopExtension } from "./extensions/desktop";
@@ -111,7 +110,6 @@ import {
 } from "./extensions/define";
 import { chatsExtension } from "./extensions/chats";
 import { goalsExtension, goalsWidgets } from "./extensions/goals";
-import { DEFAULT_WIDGET_SIZE, dashboardExtension, MAX_DASHBOARD, UPDATE_DASHBOARD, WIDGET_SIZES, type WidgetSize } from "./extensions/dashboard";
 import {
 	agentAudience,
 	agentToolPermission,
@@ -187,11 +185,9 @@ import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
 /** Pim's own widgets: every chat can show them. */
-const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory", "pim.artifacts"];
+const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory"];
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE, BROWSER_UPLOAD, DESKTOP_ACT]);
-/** How a dashboard names an artifact pinned to it: `artifact:<id>`. */
-const PINNED_ARTIFACT = "artifact:";
 
 /**
  * Set by the Worker on every request it forwards: the owner it resolved,
@@ -349,7 +345,7 @@ const NO_WORKERS_AI = {
 	},
 } as unknown as Ai;
 const UTILITY_MODEL_KEY = "utility_model";
-/** `pim_meta` keys of an agent's dashboard suggestions (see `Pim.#suggestions`) start with this, then its id. */
+/** `pim_meta` keys of the messages suggested for starting a chat with an agent (see `Pim.#suggestions`) start with this, then its id. */
 const SUGGESTIONS_KEY = "suggestions:";
 /** What the utility model reads to suggest prompts: the latest chats, and how much of each and of memory. */
 const SUGGESTION_CHATS = 3;
@@ -743,12 +739,6 @@ export class Pim extends DurableAgent<Env> {
 				}),
 			);
 			this.registry.install(filesExtension(this.#files));
-			this.registry.install(
-				dashboardExtension({
-					agentOf: (session) => (this.visits.bySession(session) ? null : this.#roleOf(session).agent),
-					change: (agent, changes) => this.#changeDashboard(agent, changes),
-				}),
-			);
 			this.#installImageGeneration();
 			this.#installBrowser(services);
 			this.#installDesktop();
@@ -3377,7 +3367,7 @@ export class Pim extends DurableAgent<Env> {
 		return agent;
 	}
 
-	// Extensions: the blueprints agents build on, and the widgets of their dashboards.
+	// Extensions: the blueprints agents build on, and the widgets their chats show.
 
 	/** The deployment's extensions (`pim.config.ts`). Tests add their own. */
 	protected pimConfig(): PimConfig {
@@ -3392,7 +3382,6 @@ export class Pim extends DurableAgent<Env> {
 				goalsWidgets(this.store),
 				scheduleWidgets(() => this.services().listSchedules()),
 				memoryWidgets(this.memory.store, (id) => this.#memoryAccess(this.agents.get(id) ?? this.agents.majordomo()).read.map((scope) => scope.key)),
-				artifactsWidgets(this.artifacts),
 				...this.pimConfig().extensions,
 			],
 			this.pimConfig().defaultBlueprint,
@@ -3478,49 +3467,10 @@ export class Pim extends DurableAgent<Env> {
 		return input;
 	}
 
-	/** What an agent's dashboard shows: its own, once it has been changed, or else its blueprint's. */
-	#dashboardItems(agent: Agent): readonly string[] {
-		if (agent.dashboard) return agent.dashboard;
-		return (agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint))?.dashboard ?? [];
-	}
-
-	/** The artifact a dashboard item pins: undefined for a widget, null for an artifact since deleted. */
-	#pinnedArtifact(item: string) {
-		if (!item.startsWith(PINNED_ARTIFACT)) return undefined;
-		return this.artifacts.get(item.slice(PINNED_ARTIFACT.length)) ?? null;
-	}
-
 	/**
-	 * An agent's dashboard: each widget loaded for this agent, and each pinned
-	 * artifact as its latest version, which the app runs. A widget that fails
-	 * shows as failed; the others still load. A widget no installed extension
-	 * brings anymore, and an artifact since deleted, are left out.
-	 */
-	async #dashboard(agent: Agent, locale: string) {
-		const items = await Promise.all(
-			this.#dashboardItems(agent).map(async (item) => {
-				const artifact = this.#pinnedArtifact(item);
-				if (artifact !== undefined) {
-					if (!artifact) return null;
-					const widget = hasWidget(artifact.kind, this.artifacts.version(artifact.id)!.files);
-					const size = agent.dashboardSizes[item] ?? DEFAULT_WIDGET_SIZE;
-					return { id: item, title: artifact.title, size, artifact: { id: artifact.id, kind: artifact.kind, version: artifact.version, widget } };
-				}
-				if (!this.extensions.widget(item)) return null;
-				const widget = await this.#loadWidget(agent, item);
-				return { ...widget, title: localize(widget.title, locale), empty: localize(widget.empty, locale) };
-			}),
-		);
-		return {
-			agent: { id: agent.id, name: agent.name, description: agent.description, majordomo: agent.majordomo, blueprint: agent.blueprint, icon: agent.icon, symbol: agent.symbol, color: agent.color },
-			widgets: items.filter((item) => item !== null),
-		};
-	}
-
-	/**
-	 * The messages an agent's dashboard offers to start a chat with. Once the
-	 * agent has had a chat, the utility model writes them from its latest chats,
-	 * what Pim remembers and what its dashboard shows, and writes them again
+	 * The messages offered for starting a chat with an agent. Once the
+	 * agent has had a chat, the utility model writes them from its latest chats
+	 * and what Pim remembers, and writes them again
 	 * only when that has changed since, so an agent nobody talks to costs
 	 * nothing. Until then, and when the model can't, its blueprint's starters.
 	 */
@@ -3535,13 +3485,11 @@ export class Pim extends DurableAgent<Env> {
 		const talked = (await Promise.all(chats.map(async (chat) => conversationText(projectEntries(await this.harness.session(chat.id).messages()), SUGGESTION_CHAT_CHARS)))).filter((text) => text !== "");
 		if (talked.length === 0) return starters;
 
-		const pinned = this.#dashboardItems(agent).flatMap((item) => this.#pinnedArtifact(item)?.title ?? []);
 		const memory = this.memory.view(this.#memoryAccess(agent).read).join("\n");
 		const input = [
 			`Assistant: ${agent.name}${agent.description === "" ? "" : `, ${agent.description}`}`,
 			`Language: ${locale}`,
 			memory === "" ? "" : `What it remembers about the person:\n${memory.length > SUGGESTION_MEMORY_CHARS ? `…${memory.slice(-SUGGESTION_MEMORY_CHARS)}` : memory}`,
-			pinned.length === 0 ? "" : `On its dashboard: ${pinned.join("; ")}`,
 			`Recent chats, latest first:\n\n${talked.join("\n\n---\n\n")}`,
 		]
 			.filter((part) => part !== "")
@@ -3552,7 +3500,7 @@ export class Pim extends DurableAgent<Env> {
 		const cached = stored === undefined ? undefined : (JSON.parse(stored) as { of: string; items: string[] });
 		if (cached?.of === of) return cached.items;
 
-		// Two dashboards opened together share one answer.
+		// Two asks at once share one answer.
 		let writing = this.#suggesting.get(key);
 		if (!writing || writing.of !== of) {
 			const promise = this.utilityStructured(SUGGEST_PROMPTS, input).then((items) => {
@@ -3572,77 +3520,6 @@ export class Pim extends DurableAgent<Env> {
 			if (!(error instanceof HttpError)) console.warn("prompt suggestions failed", error);
 			return cached?.items ?? starters;
 		}
-	}
-
-	/**
-	 * Sets what an agent's dashboard shows, in order. Each item must be on it
-	 * already, a widget the agent can show, or one of the person's artifacts
-	 * with a widget, which is what the dashboard shows of it; anything else is
-	 * refused, with the reason. `sizes` changes the size of artifacts' widgets,
-	 * by item; the others keep theirs.
-	 */
-	#setDashboard(agent: Agent, items: readonly string[], sizes: Readonly<Record<string, unknown>> = {}) {
-		const current = this.#dashboardItems(agent);
-		const widgets = this.#widgetsFor(agent.blueprint);
-		const next = [...new Set(items)];
-		for (const item of next) {
-			if (current.includes(item) || widgets.some(({ ref }) => ref === item)) continue;
-			const artifact = this.#pinnedArtifact(item);
-			if (artifact) {
-				if (hasWidget(artifact.kind, this.artifacts.version(artifact.id)!.files)) continue;
-				throw new HttpError(
-					400,
-					`${artifact.title} has no widget, the small view of it a dashboard shows: add widget.html to a page, or Widget.jsx to an app, with artifact_update, then pin it. Only html and jsx artifacts have widgets.`,
-				);
-			}
-			throw new HttpError(
-				400,
-				`${item} is neither one of your artifacts (as ${PINNED_ARTIFACT}<id>) nor a widget this dashboard can show. Widgets it can show: ${widgets.map(({ ref }) => ref).join(", ")}.`,
-			);
-		}
-		if (next.length > MAX_DASHBOARD) throw new HttpError(400, `A dashboard shows at most ${MAX_DASHBOARD} things: take some off first.`);
-		for (const [item, size] of Object.entries(sizes)) {
-			if (!next.includes(item) || !item.startsWith(PINNED_ARTIFACT)) throw new HttpError(400, `Only an artifact's widget on the dashboard has a size, and ${item} isn't one.`);
-			if (!WIDGET_SIZES.includes(size as WidgetSize)) throw new HttpError(400, `A widget's size is ${WIDGET_SIZES.join(", ")}.`);
-		}
-		// Kept only for what's still on it, and only where it isn't the default.
-		const merged = { ...agent.dashboardSizes, ...(sizes as Record<string, WidgetSize>) };
-		const kept = Object.fromEntries(next.flatMap((item) => (merged[item] && merged[item] !== DEFAULT_WIDGET_SIZE ? [[item, merged[item]]] : [])));
-		this.agents.setDashboard(agent.id, next, kept);
-		return { items: next, sizes: kept };
-	}
-
-	/**
-	 * `update_dashboard`: pins artifacts, by id, and widgets, by name, after
-	 * what's there; unpins others; sizes artifacts' widgets. Answers with what
-	 * the dashboard shows then and the widgets it could also show, for the model.
-	 */
-	#changeDashboard(agent: Agent, { pin, unpin, sizes }: { pin: readonly string[]; unpin: readonly string[]; sizes: Readonly<Record<string, WidgetSize>> }) {
-		const widgets = this.#widgetsFor(agent.blueprint);
-		// A widget by its name, or an artifact by its id, with or without the prefix.
-		const item = (given: string) => {
-			const name = given.trim();
-			if (name.startsWith(PINNED_ARTIFACT) || widgets.some(({ ref }) => ref === name) || this.extensions.widget(name)) return name;
-			return `${PINNED_ARTIFACT}${name}`;
-		};
-		const current = this.#dashboardItems(agent);
-		const removed = new Set(unpin.map(item));
-		const missing = [...removed].filter((name) => !current.includes(name));
-		if (missing.length > 0) throw new Error(`Not on your dashboard: ${missing.join(", ")}. Call ${UPDATE_DASHBOARD} with nothing to see what is.`);
-		// What's gone from under it, a deleted artifact or an uninstalled widget, goes with this change.
-		const kept = current.filter((name) => !removed.has(name) && (this.#pinnedArtifact(name) ?? this.extensions.widget(name)));
-		const sized = Object.fromEntries(Object.entries(sizes).map(([name, size]) => [item(name), size]));
-		const next = this.#setDashboard({ ...agent, dashboard: kept }, [...kept, ...pin.map(item)], sized);
-		const titled = (name: string) => {
-			const artifact = this.#pinnedArtifact(name);
-			if (artifact) return { artifact: artifact.id, title: artifact.title, size: next.sizes[name] ?? DEFAULT_WIDGET_SIZE };
-			return { widget: name, title: localize(this.extensions.widget(name)!.title, "en") };
-		};
-		return {
-			dashboard: next.items.map(titled),
-			...(next.items.length === 0 ? { note: "Your dashboard is empty." } : {}),
-			widgets_you_could_pin: widgets.filter(({ ref }) => !next.items.includes(ref)).map(({ ref, widget }) => ({ name: ref, title: localize(widget.title, "en") })),
-		};
 	}
 
 	/** Loads an installed widget for one of the owner's agents. One that throws comes back failed. */
@@ -3679,14 +3556,10 @@ export class Pim extends DurableAgent<Env> {
 			.flatMap((extension) => (extensions.has(extension.id) ? Object.entries(extension.widgets ?? {}).map(([name, widget]) => ({ ref: `${extension.id}/${name}`, widget })) : []));
 	}
 
-	/**
-	 * The widgets a chat can show with its messages: those its agent can show
-	 * that have a description for the model. None in a visit, or in a task's
-	 * conversation.
-	 */
+	/** The widgets a chat can show with its messages: those its agent can show. None in a visit, or in a task's conversation. */
 	#chatWidgets(session: string): { ref: string; description: string }[] {
 		if (this.visits.bySession(session) || this.#taskApart(session)) return [];
-		return this.#widgetsFor(this.agents.ofSession(session).blueprint).flatMap(({ ref, widget }) => (widget.description ? [{ ref, description: widget.description }] : []));
+		return this.#widgetsFor(this.agents.ofSession(session).blueprint).map(({ ref, widget }) => ({ ref, description: widget.description }));
 	}
 
 	/** Who started a chat to hand its agent a task, from which chat, and how the task is going; null for a chat the person started. */
@@ -5001,9 +4874,7 @@ export class Pim extends DurableAgent<Env> {
 			({ id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
-					// A dashboard shows an artifact's widget, a page of its own (`?view=widget`).
-					const widget = url.searchParams.get("view") === "widget";
-					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin, { widget });
+					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin);
 				}),
 		],
 		[
@@ -5741,18 +5612,7 @@ export class Pim extends DurableAgent<Env> {
 				return this.#agent(id!);
 			},
 		],
-		["GET", "/agents/:agent/dashboard", ({ agent }, _request, url) => this.#dashboard(this.#agent(agent!), url.searchParams.get("locale") ?? "en")],
 		["GET", "/agents/:agent/suggestions", async ({ agent }, _request, url) => ({ suggestions: await this.#suggestions(this.#agent(agent!), url.searchParams.get("locale") ?? "en") })],
-		[
-			"PUT",
-			"/agents/:agent/dashboard",
-			async ({ agent }, request) => {
-				const { items, sizes } = await readJson<{ items?: unknown; sizes?: unknown }>(request);
-				if (!Array.isArray(items) || items.some((item) => typeof item !== "string")) throw new HttpError(400, "items must be a list of a dashboard's items");
-				if (sizes !== undefined && (typeof sizes !== "object" || sizes === null || Array.isArray(sizes))) throw new HttpError(400, "sizes must be an object of widget sizes by item");
-				return this.#setDashboard(this.#agent(agent!), items as string[], (sizes ?? {}) as Record<string, unknown>);
-			},
-		],
 		[
 			"GET",
 			"/extensions",

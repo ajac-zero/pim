@@ -145,10 +145,7 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
     },
     onError: (error) => toast.error(error.message),
   });
-  const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-    return queryClient.invalidateQueries({ queryKey: ["agents"] });
-  };
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["agents"] });
   const remove = useMutation({
     mutationFn: () => pim.deleteAgent(agent.id),
     onSuccess: () => {
@@ -770,7 +767,7 @@ function BuildsOn({ blueprint }: { blueprint: string | null }) {
   );
 }
 
-/** Which blueprint an agent is based on: its habits, abilities and dashboard. */
+/** Which blueprint an agent is based on: its habits and abilities. */
 function BaseSelect({
   value,
   onChange,
@@ -877,7 +874,6 @@ function AgentForm({
     },
     onSuccess: async (saved) => {
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
       if (agent) toast.success(t("agentSaved"));
       onDone?.(saved);

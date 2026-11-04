@@ -58,8 +58,8 @@ const imageAi = {
 type Bill = { name: string; amount: number; due: string; paid: boolean };
 
 /**
- * A deployment's own extension, as tests install it: a blueprint with a dashboard
- * mixing its own widgets with Pim's, one of which always fails, and an
+ * A deployment's own extension, as tests install it: a blueprint, widgets,
+ * one of which always fails, and an
  * ability that keeps bills in the extension's data: a tool to add one, an
  * action that asks before paying one, and a section listing them.
  */
@@ -114,6 +114,7 @@ export const ledger = definePimExtension({
 		broken: {
 			title: "Bank balance",
 			empty: "",
+			description: "The bank balance.",
 			load: () => {
 				throw new Error("The bank is unreachable");
 			},
@@ -200,7 +201,6 @@ export const ledger = definePimExtension({
 			name: "Budget",
 			description: "Keeps the books.",
 			instructions: "Answer every money question with a number first.",
-			dashboard: ["test.ledger/bills", "test.ledger/broken", "pim.goals/active"],
 			apps: ["test.ledger/weather"],
 			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
 		},

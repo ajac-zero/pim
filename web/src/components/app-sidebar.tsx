@@ -92,8 +92,8 @@ export function sessionTitle(session: Pick<Session, "title">, t: T) {
 }
 
 /**
- * Opens the dashboard of the agent in the open chat, or of the agent whose
- * dashboard is open, or the majordomo's anywhere else, where a chat starts
+ * Opens the new chat page of the agent in the open chat, or of the agent
+ * whose page is open, or the majordomo's anywhere else, where a chat starts
  * with its first message.
  */
 export function useNewChat(onDone?: () => void) {

@@ -14,6 +14,7 @@ import {
   ArrowUp,
   Camera,
   Loader2,
+  Mic,
   Paperclip,
   Sparkles,
   Square,
@@ -89,6 +90,74 @@ const MAX_PICKED_BYTES = 20_000_000;
  */
 const MAX_EDGE = 1568;
 const MAX_SENT_BYTES = 1_000_000;
+
+/** The part of the browser's speech recognizer that dictation uses. */
+interface Recognizer {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult:
+    | ((event: {
+        results: ArrayLike<ArrayLike<{ transcript: string }>>;
+      }) => void)
+    | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+  abort(): void;
+}
+
+/** The browser's speech recognizer, where it has one (Chrome, Edge, Safari). */
+function speechRecognizer(): (new () => Recognizer) | undefined {
+  const w = window as unknown as {
+    SpeechRecognition?: new () => Recognizer;
+    webkitSpeechRecognition?: new () => Recognizer;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition;
+}
+
+/**
+ * Dictation into the draft: while listening, what is heard is appended to the
+ * text the draft held when listening began.
+ */
+function useVoiceInput(text: string, setText: (text: string) => void) {
+  const { locale, t } = useI18n();
+  const [listening, setListening] = useState(false);
+  const recognition = useRef<Recognizer | null>(null);
+  useEffect(() => () => recognition.current?.abort(), []);
+  const toggle = () => {
+    const Recognition = speechRecognizer();
+    if (!Recognition) return;
+    if (recognition.current) {
+      recognition.current.stop();
+      return;
+    }
+    const next = new Recognition();
+    const before = text.trim() ? `${text.trimEnd()} ` : "";
+    next.lang = locale;
+    next.continuous = true;
+    next.interimResults = true;
+    next.onresult = (event) => {
+      let heard = "";
+      for (const result of Array.from(event.results))
+        heard += result[0]?.transcript ?? "";
+      setText(before + heard.trimStart());
+    };
+    next.onerror = (event) => {
+      if (event.error !== "no-speech" && event.error !== "aborted")
+        toast.error(t("voiceInputFailed"));
+    };
+    next.onend = () => {
+      recognition.current = null;
+      setListening(false);
+    };
+    recognition.current = next;
+    setListening(true);
+    next.start();
+  };
+  return { supported: Boolean(speechRecognizer()), listening, toggle };
+}
 
 /**
  * Takes a photo with the device's camera and attaches it. On a phone the
@@ -233,6 +302,7 @@ function ComposerInner({
     });
   };
   const [preparing, setPreparing] = useState(false);
+  const voice = useVoiceInput(text, controller.textInput.setInput);
   const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
   const hasContent = hasText || files.length > 0;
@@ -514,19 +584,42 @@ function ComposerInner({
                 agent={agent}
               />
             )}
-            <PromptInputSubmit
-              status={
-                showStop ? "streaming" : preparing ? "submitted" : "ready"
-              }
-              onStop={onStop}
-              disabled={!showStop && !canSend}
-            >
-              {showStop ? (
-                <Square className="size-4 fill-current" />
-              ) : preparing ? undefined : (
-                <ArrowUp className="size-5" />
-              )}
-            </PromptInputSubmit>
+            {voice.supported && !hasContent && !showStop && !preparing ? (
+              <Button
+                type="button"
+                size="icon"
+                aria-label={t(
+                  voice.listening ? "stopVoiceInput" : "voiceInput",
+                )}
+                title={t(voice.listening ? "stopVoiceInput" : "voiceInput")}
+                disabled={disabled}
+                onClick={voice.toggle}
+                className={cn(
+                  "size-9 shrink-0 rounded-full",
+                  voice.listening && "animate-pulse",
+                )}
+              >
+                {voice.listening ? (
+                  <Square className="size-4 fill-current" />
+                ) : (
+                  <Mic className="size-4.5" />
+                )}
+              </Button>
+            ) : (
+              <PromptInputSubmit
+                status={
+                  showStop ? "streaming" : preparing ? "submitted" : "ready"
+                }
+                onStop={onStop}
+                disabled={!showStop && !canSend}
+              >
+                {showStop ? (
+                  <Square className="size-4 fill-current" />
+                ) : preparing ? undefined : (
+                  <ArrowUp className="size-5" />
+                )}
+              </PromptInputSubmit>
+            )}
           </div>
         </div>
       </PromptInput>

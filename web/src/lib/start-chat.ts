@@ -5,7 +5,6 @@ import { toast } from "sonner";
 import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import { sessionsQuery } from "~/lib/queries";
-import { openTab } from "~/lib/tabs";
 
 /**
  * Starts a chat with an agent (the majordomo when `agent` is undefined)
@@ -30,7 +29,6 @@ export function useStartChat(agent: string | undefined) {
         (sessions) => sessions && [session, ...sessions],
       );
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      openTab(session.id);
       pimClient.open(session.id);
       await Promise.all([
         pimClient.send(content),

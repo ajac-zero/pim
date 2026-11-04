@@ -32,7 +32,6 @@ import {
   pim,
 } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
-import { openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 type Tone = (typeof MAJORDOMO_TONES)[number];
@@ -128,7 +127,6 @@ export function MeetMajordomo({ majordomo }: { majordomo: Agent }) {
     onSuccess: async ({ session }) => {
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      openTab(session);
       pimClient.open(session);
       navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
     },

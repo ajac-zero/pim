@@ -117,17 +117,18 @@ describe("extensions", () => {
 			toolUse("send_to_user", { message: "Set." }),
 		]);
 		await say("Plan my training and check in later.", chat);
-		// The goal comes from a contact's conversation: it belongs to the chat the work began in.
+		// A goal a contact makes in the chat its task started belongs to that chat, and so to the contact's dashboard, not the coach's.
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ to: "Tracker", task: "Track a 10k goal." }] }),
 				() => toolUse("send_to_user", { message: "Asked Tracker." }),
 				() => toolUse("send_to_user", { message: "Tracking it." }),
 			],
-			Tracker: [() => toolUse("create_goal", { title: "Run a 10k", steps: ["Buy shoes", "Run 3x a week"] }), () => fauxAssistantMessage("Tracking it.")],
+			Tracker: [() => toolUse("create_goal", { title: "Run a 10k", steps: ["Buy shoes", "Run 3x a week"] }), () => toolUse("send_to_user", { message: "Tracking it." })],
 		});
 		await say("Track my 10k.", chat);
 		await settled(chat);
+		const tracking = (await api(`/sessions/${chat}/tasks`)).body.tasks[0].session;
 		faux.setResponses([toolUse("create_goal", { title: "Learn Portuguese", steps: ["Find a tutor"] }), toolUse("send_to_user", { message: "ok" })]);
 		await say("I want to learn Portuguese.", ROOT);
 		await post("/memory/log", { text: "Prefers morning runs", scope: "everyone" });
@@ -145,11 +146,11 @@ describe("extensions", () => {
 		const inAnHour = Date.parse(scheduled.time) - Date.now();
 		expect(inAnHour).toBeGreaterThan(55 * 60_000);
 		expect(inAnHour).toBeLessThan(61 * 60_000);
-		expect(widget(board, "pim.goals/active")).toMatchObject({
-			title: "Goals",
-			kind: "progress",
-			items: [{ title: "Run a 10k", value: 0, max: 2, detail: "Buy shoes", link: { chat } }],
-		});
+		expect(widget(board, "pim.goals/active")).toMatchObject({ title: "Goals", kind: "progress", items: [] });
+		await api(`/agents/${tracker.id}/dashboard`, { method: "PUT", body: JSON.stringify({ items: ["pim.goals/active"] }) });
+		expect(widget(await dashboard(tracker), "pim.goals/active").items).toMatchObject([
+			{ title: "Run a 10k", value: 0, max: 2, detail: "Buy shoes", link: { chat: tracking } },
+		]);
 		// Only what the coach reads: not the majordomo's own memories, nor a forgotten one.
 		expect(widget(board, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Prefers morning runs"]);
 		const artifact = widget(board, "pim.artifacts/recent").items;
@@ -474,7 +475,7 @@ describe("extensions", () => {
 		expect(offered(home)).not.toContain("ledger_pay_bill");
 		expect(systemPrompt(home.messages)).not.toContain("ledger_bills");
 
-		// A contact at work on a task works with its own blueprint's abilities.
+		// A contact at work on a task, in the chat it started, works with its own blueprint's abilities, as in any chat of its own.
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ to: "Clerk", task: "File the rent." }] }),
@@ -484,14 +485,14 @@ describe("extensions", () => {
 			Clerk: [
 				(context) => {
 					member = context;
-					return fauxAssistantMessage("Filed.");
+					return toolUse("send_to_user", { message: "Filed." });
 				},
 			],
 		});
 		await say("File it.", chat);
 		await settled(chat);
 		expect(offered(member)).toContain("ledger_add_bill");
-		expect(offered(member)).not.toContain("send_to_user");
+		expect(offered(member)).toContain("send_to_user");
 
 		// An action asks first; approved, it runs with the extension's data.
 		faux.setResponses([toolUse("ledger_pay_bill", { name: "Rent" }), toolUse("send_to_user", { message: "Paid." })]);

@@ -28,6 +28,16 @@ export type Session = {
    * one agent.
    */
   room?: Room | null;
+  /** Another of your agents started it to hand its agent a task: who, from which chat, and how the task is going. Null for chats you started. */
+  startedBy?: StartedBy | null;
+};
+
+export type StartedBy = {
+  /** The chat it was started from, which the sidebar lists it under. */
+  session: string;
+  agent: { id: string; name: string };
+  task: string;
+  state: AgentTask["state"];
 };
 
 /** How a group chat's agents take turns: `mentions`, answering when mentioned; `open`, each deciding for itself. */
@@ -128,6 +138,8 @@ export type AgentTask = {
   parent: string | null;
   /** The id of the `delegate` call that handed it out, in its requester's transcript; null for tasks from before it was kept. */
   call: string | null;
+  /** The chat it runs in, which opens like any other; null for tasks from before tasks were chats, which open read-only beside the chat. */
+  session: string | null;
   agent: TaskAgent;
   from: TaskAgent;
   task: string;

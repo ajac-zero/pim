@@ -110,6 +110,10 @@ export const ChevronRight = themedIcon(Lucide.ChevronRight, Pixel.ChevronRight);
 export const ChevronUpIcon = themedIcon(Lucide.ChevronUp, Pixel.ChevronUp);
 export const CircleHelp = themedIcon(Lucide.CircleHelp, Pixel.CircleQuestion);
 export const CircleIcon = themedIcon(Lucide.Circle, Pixel.Circle);
+export const CornerDownRight = themedIcon(
+  Lucide.CornerDownRight,
+  Pixel.CornerDownRight,
+);
 export const Clock = themedIcon(Lucide.Clock, Pixel.Clock);
 export const Code = themedIcon(Lucide.Code, Pixel.Code);
 export const Coffee = themedIcon(Lucide.Coffee, Pixel.Coffee);

@@ -48,3 +48,38 @@ export function groupByAge(sessions: readonly Session[], now = Date.now()) {
   }
   return groups;
 }
+
+/**
+ * Chats your agents started for tasks, under the chat they were started
+ * from: the chats with none above them in the list, in its order, and for
+ * each, every chat started from it or from one under it, oldest first. A
+ * chat whose starting chat isn't in the list, such as one deleted or left
+ * out by a search, stands on its own.
+ */
+export function nestChats(list: readonly Session[]) {
+  const byId = new Map(list.map((session) => [session.id, session]));
+  const topOf = (session: Session) => {
+    let top = session;
+    const seen = new Set([session.id]);
+    for (
+      let parent = byId.get(session.startedBy?.session ?? "");
+      parent && !seen.has(parent.id);
+      parent = byId.get(parent.startedBy?.session ?? "")
+    ) {
+      seen.add(parent.id);
+      top = parent;
+    }
+    return top;
+  };
+  const top: Session[] = [];
+  const children = new Map<string, Session[]>();
+  for (const session of list) {
+    const above = topOf(session);
+    if (above === session) top.push(session);
+    else children.set(above.id, [...(children.get(above.id) ?? []), session]);
+  }
+  for (const under of children.values()) {
+    under.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  }
+  return { top, children };
+}

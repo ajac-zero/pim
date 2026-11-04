@@ -26,7 +26,12 @@ import {
 import { mentionsUser, useUserNames } from "~/components/chat/markdown";
 import { sentImages } from "~/components/chat/reply-blocks";
 import { MembersWorking, Speaker } from "~/components/chat/room";
-import { TASK_POLL_MS, TaskCard, TaskJump } from "~/components/chat/tasks";
+import {
+  StartedFrom,
+  TASK_POLL_MS,
+  TaskCard,
+  TaskJump,
+} from "~/components/chat/tasks";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import { AlertCircle, ArrowUp, Clock } from "~/components/icons";
@@ -43,7 +48,12 @@ import type {
   FunctionCallOutputItem,
   MessageItem,
 } from "~/lib/openresponses";
-import { pim, type Room, type UserContent } from "~/lib/pim-api";
+import {
+  pim,
+  type Room,
+  type StartedBy,
+  type UserContent,
+} from "~/lib/pim-api";
 import {
   layoutThread,
   type ModelProblem,
@@ -200,6 +210,7 @@ export const Thread = memo(function Thread({
   visit,
   host,
   room,
+  startedBy,
   view,
   pending,
   composerHeight,
@@ -214,6 +225,8 @@ export const Thread = memo(function Thread({
   host?: { id: string; name: string } | null;
   /** The other agents in a group chat, if it is one. */
   room?: Room | null;
+  /** Who started the chat for a task, if another agent did. */
+  startedBy?: StartedBy | null;
   view: SessionView;
   /** A message sent but not yet in the transcript, shown right away. */
   pending: UserContent | null;
@@ -293,6 +306,16 @@ export const Thread = memo(function Thread({
         : false,
   });
   const history = useMemo(() => taskHistory(entries, tasks), [entries, tasks]);
+  // The card each task is handed out in, which its answer's notice jumps back to.
+  const cardOf = useMemo(
+    () =>
+      new Map(
+        [...history.delegations].flatMap(([call, handed]) =>
+          handed.map((task) => [task.id, call] as const),
+        ),
+      ),
+    [history],
+  );
   /* A gated tool call is a step like any other, marked with the answer to its approval, which waits in the summary box. */
   const { data: allApprovals } = useQuery(approvalsQuery());
   // Requests from people in your circles belong to their conversations, not yours.
@@ -433,6 +456,7 @@ export const Thread = memo(function Thread({
             (composerHeight ?? DEFAULT_COMPOSER_INSET) + COMPOSER_INSET_GAP,
         }}
       >
+        {startedBy && <StartedFrom startedBy={startedBy} />}
         {rows.map((row) => {
           if (row.kind === "sent" && row.sent.channel === "email") {
             return (
@@ -525,7 +549,10 @@ export const Thread = memo(function Thread({
                 {(history.notices.get(entry.key)?.length ?? 0) > 0 && (
                   <div className="flex flex-col items-center gap-2 text-xs">
                     {history.notices.get(entry.key)?.map((task) => (
-                      <TaskJump key={task.id} target={`task-start-${task.id}`}>
+                      <TaskJump
+                        key={task.id}
+                        target={`task-call-${cardOf.get(task.id)}`}
+                      >
                         <ArrowUp className="size-3" />
                         {t("backToTask", { agent: task.agent.name })}
                       </TaskJump>
@@ -552,6 +579,7 @@ export const Thread = memo(function Thread({
               return (
                 <TaskCard
                   key={entry.key}
+                  id={`task-call-${call.call_id}`}
                   sessionId={sessionId}
                   tasks={delegated}
                   completions={history.completions}

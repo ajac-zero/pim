@@ -250,6 +250,7 @@ function ChatPage() {
                 visit={session?.visit?.username}
                 host={session?.agent}
                 room={session?.room}
+                startedBy={session?.startedBy}
                 view={view}
                 pending={pending}
                 composerHeight={composerHeight}

@@ -153,12 +153,14 @@ export const toolUse = (name: string, args: Record<string, JsonValue>) =>
 type Context = Parameters<FauxResponseFactory>[0];
 
 /**
- * Who a request is from, by its prompt: an agent at work on a task, by name;
+ * Who a request is from, by its prompt: an agent at work on a task, in the
+ * chat the task started or in a task's conversation from before, by name;
  * the majordomo reviewing an approval; or the agent a chat is with (`lead`).
  */
 export function speaker(context: Context): string {
 	const prompt = systemPrompt(context.messages);
 	if (/the majordomo of one person/.test(prompt)) return "review";
+	if (/started this chat to hand you a task/.test(prompt)) return /In this conversation you are \\"([^"\\]+)\\"/.exec(prompt)?.[1] ?? "lead";
 	return /You are \\"([^"\\]+)\\", working on a task/.exec(prompt)?.[1] ?? "lead";
 }
 

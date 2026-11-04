@@ -21,7 +21,7 @@ export { Auth, Directory, Gallery } from "../src/index";
  *   `send_to_user`, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k"}`.
  *   After a tool runs, it calls the next one if the message has more `/tool` lines, and
  *   otherwise sends the last tool's result. Memory compression gets a short summary.
- *   An agent at work on a task answers in plain text, the majordomo introduces itself with a stock greeting,
+ *   An agent at work on a task from before tasks were chats answers in plain text, the majordomo introduces itself with a stock greeting,
  *   and it asks the person about every approval it reviews.
  *   The utility model titles a chat with the first words of its last message, appends a
  *   line to a prompt it improves, writes a placeholder summary, and names the tools an
@@ -40,8 +40,11 @@ const textOf = (message: Message | undefined): string => {
 	return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 };
 
-/** The tool calls a message asks for: one `/tool <name> {json}` per line, run one after another; a single one may span lines. */
-const directives = (text: string) => (/^\/tool\s/.test(text) ? text.split(/\n(?=\/tool\s)/).map((part) => /^\/tool\s+(\S+)\s*([\s\S]*)$/.exec(part.trim())) : []);
+/** The tool calls a message asks for: one `/tool <name> {json}` per line, run one after another; a single one may span lines. Another agent's message, such as a task that started a chat, asks after its `[From …]` line. */
+const directives = (message: string) => {
+	const text = message.replace(/^\[From [^\]\n]+\]\n/, "");
+	return /^\/tool\s/.test(text) ? text.split(/\n(?=\/tool\s)/).map((part) => /^\/tool\s+(\S+)\s*([\s\S]*)$/.exec(part.trim())) : [];
+};
 
 /** A call to the tool `directive` asks for, or a message saying its JSON is wrong. */
 const call = (directive: RegExpExecArray | null) => {
@@ -102,10 +105,10 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 			? fauxAssistantMessage("Asked the person.")
 			: fauxAssistantMessage(fauxToolCall("decide_approval", { decision: "escalate", note: "The preview model can't judge this: you decide." }), { stopReason: "toolUse" });
 	}
-	// An agent at work for another has no `send_to_user`: it answers in plain text, after a tool when told to call one.
+	// An agent at work on a task from before tasks were chats has no `send_to_user`: it answers in plain text, after a tool when told to call one.
 	if (!system.includes('"name":"send_to_user"')) {
 		if (last?.role === "toolResult") return fauxAssistantMessage(`\`${last.toolName}\` returned:\n\n${textOf(last).slice(0, 1_000) || "(nothing)"}`);
-		if (!/^\/tool\s/.test(textOf(last).trim())) return fauxAssistantMessage(`Done: ${textOf(last).trim()}`);
+		if (directives(textOf(last).trim()).length === 0) return fauxAssistantMessage(`Done: ${textOf(last).trim()}`);
 	}
 
 	if (last?.role === "toolResult") {

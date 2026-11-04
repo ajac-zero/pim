@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatAge, flatChats } from "~/lib/chat-list";
+import { chatAge, flatChats, nestChats } from "~/lib/chat-list";
 import type { Session } from "~/lib/pim-api";
 
 const chat = (
@@ -67,5 +67,34 @@ describe("chatAge", () => {
     expect(chatAge(at(15, 0), now)).toBe("lastWeek");
     expect(chatAge(at(14, 23), now)).toBe("last14Days");
     expect(chatAge(null, now)).toBe("today");
+  });
+});
+
+describe("nestChats", () => {
+  const started = (from: string, createdAt: number) => ({
+    createdAt,
+    startedBy: {
+      session: from,
+      agent: { id: "majordomo", name: "Pim" },
+      task: `t-${createdAt}`,
+      state: "completed" as const,
+    },
+  });
+  it("puts each chat a task started under the chat at the top of its chain, oldest first, and keeps the others on their own", () => {
+    const { top, children } = nestChats([
+      chat("second task", 95, started("trip", 3)),
+      chat("trip", 90),
+      chat("grandchild", 80, started("first task", 4)),
+      chat("first task", 60, started("trip", 2)),
+      chat("orphan", 50, started("deleted", 1)),
+      chat("solo", 40),
+    ]);
+    expect(ids(top)).toEqual(["trip", "orphan", "solo"]);
+    expect(ids(children.get("trip") ?? [])).toEqual([
+      "first task",
+      "second task",
+      "grandchild",
+    ]);
+    expect(children.has("orphan")).toBe(false);
   });
 });

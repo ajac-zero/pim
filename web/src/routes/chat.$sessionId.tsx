@@ -227,7 +227,12 @@ function ChatPage() {
         </header>
         {/* The activity box takes a column of its own, so the thread makes room
          * for it rather than sitting under it: at the right, or on top on phones. */}
-        <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        <div
+          // The box overlays the thread's right side, which keeps its own padding to match,
+          // so the thread's scrollbar stays at the edge of the page, beyond the box.
+          style={{ "--scrollbar": `${gutter * 2}px` } as CSSProperties}
+          className="relative flex min-h-0 flex-1 flex-col md:has-[>aside]:[--activity-inset:20rem]"
+        >
           <div
             ref={setStage}
             className="relative flex min-h-0 min-w-0 flex-1 flex-col"
@@ -270,7 +275,10 @@ function ChatPage() {
              * the thread's bottom padding, so the last message clears it. */}
             <div
               ref={composerOverlayRef}
-              style={{ left: gutter, right: gutter }}
+              style={{
+                left: gutter,
+                right: `calc(${gutter}px + var(--activity-inset, 0px))`,
+              }}
               className="pointer-events-none absolute bottom-0 z-10 flex justify-center bg-background pb-2"
             >
               {/* As wide as a dashboard's, so a chat started there keeps it; messages sit 1rem inside it. */}

@@ -392,13 +392,20 @@ export class PimBrowser {
 			watcher.page({ url: watched.page.url(), title: (await this.#titleOf(watched.page)) ?? "" });
 			return;
 		}
+		// The person may stop watching while the window opens: nothing starts for them then.
+		const left = () => this.#watching.get(id) !== chat;
 		await this.#use(chat, "reopen", async (page) => {
+			if (left()) return;
 			const started = this.#screencasts.get(chat);
 			if (started) {
 				started.watchers.set(id, watcher);
 				return;
 			}
 			const session = await page.createCDPSession();
+			if (left()) {
+				await session.detach().catch(() => {});
+				return;
+			}
 			const screencast: Screencast = { page, session, watchers: new Map([[id, watcher]]) };
 			this.#screencasts.set(chat, screencast);
 			session.on("Page.screencastFrame", (event) => {

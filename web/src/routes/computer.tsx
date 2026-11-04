@@ -7,8 +7,15 @@ import { Loader2, Maximize2, Monitor } from "~/components/icons";
 import { Action } from "~/components/ui/actions";
 import { Button } from "~/components/ui/button";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "~/components/ui/tooltip";
+import {
   ComputerScreen,
   canPlayScreen,
+  type ScreenLatency,
   type ScreenState,
 } from "~/lib/computer-screen";
 import { type ComputerStatus, pim } from "~/lib/pim-api";
@@ -37,6 +44,7 @@ function ComputerPage() {
         : false,
   });
   const live = status?.state === "online" && status.computer?.screen;
+  const [latency, setLatency] = useState<ScreenLatency | null>(null);
 
   useEffect(() => {
     document.title = t("computer");
@@ -51,6 +59,7 @@ function ComputerPage() {
             {status ? summary(status, t) : "\u00a0"}
           </p>
         </div>
+        {live && latency && <Latency latency={latency} />}
         {live && (
           <Action
             tooltip={t("computerFullScreen")}
@@ -68,7 +77,7 @@ function ComputerPage() {
         {!status ? (
           <Loader2 className="size-4 animate-spin text-muted-foreground" />
         ) : live ? (
-          <Desktop />
+          <Desktop onLatency={setLatency} />
         ) : (
           <NotLive status={status} />
         )}
@@ -91,6 +100,37 @@ function summary(status: ComputerStatus, t: Translate): string {
           ? t("computerSettingUp")
           : t("computerOffline");
   return [machine?.hostname, state].filter(Boolean).join(" · ");
+}
+
+/** The round trip to the computer, which the desktop's stream times, with its two parts on hover or focus. */
+function Latency({ latency }: { latency: ScreenLatency }) {
+  const { t } = useI18n();
+  const detail =
+    latency.computer === null
+      ? t("computerLatencyNoAnswerDetail")
+      : t("computerLatencyDetail", {
+          pim: Math.max(0, latency.total - latency.computer),
+          computer: latency.computer,
+        });
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="shrink-0 cursor-default rounded-full px-1 text-muted-foreground text-xs tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {latency.computer === null
+              ? t("computerLatencyNoAnswer")
+              : t("computerLatency", { total: latency.total })}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-64">
+          <p>{detail}</p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 /** Why the desktop isn't showing, and what to do about it. */
@@ -159,7 +199,11 @@ function NotLive({ status }: { status: ComputerStatus }) {
 }
 
 /** The desktop, live; it connects again when the stream drops, unless the computer said why it can't show it. */
-function Desktop() {
+function Desktop({
+  onLatency,
+}: {
+  onLatency: (latency: ScreenLatency | null) => void;
+}) {
   const { t } = useI18n();
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const [state, setState] = useState<ScreenState>({ status: "connecting" });
@@ -169,9 +213,12 @@ function Desktop() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new attempt connects again.
   useEffect(() => {
     if (!canvas.current || !playable) return;
-    const screen = new ComputerScreen(canvas.current, setState);
+    const screen = new ComputerScreen(canvas.current, setState, onLatency);
     canvas.current.focus({ preventScroll: true });
-    return () => screen.close();
+    return () => {
+      screen.close();
+      onLatency(null);
+    };
   }, [playable, attempt]);
 
   useEffect(() => {

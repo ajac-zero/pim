@@ -152,7 +152,7 @@ import {
 import { describeSchedule, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_TAG } from "./computer";
+import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -6245,6 +6245,26 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * The app times its round trip to here with a ping, which comes back
+	 * with what it said and the space's own round trip to the computer
+	 * (`computer_ms`, null when the computer didn't answer). The answer
+	 * waits for the computer's, so the whole wait is the app's round trip
+	 * to the computer through the space.
+	 */
+	async #screenPing(connection: Connection<SocketState>, raw: string): Promise<void> {
+		let payload: unknown;
+		try {
+			payload = (JSON.parse(raw) as { payload?: unknown }).payload;
+		} catch {
+			return;
+		}
+		const computer = await this.computer.ping();
+		if (connection.readyState === WebSocket.OPEN) {
+			connection.send(JSON.stringify({ type: "pim_pong", payload: { ...(payload as object), computer_ms: computer } }));
+		}
+	}
+
+	/**
 	 * Someone takes a chat's window over on this socket (`?session=`, as the
 	 * socket's state): it gets the page as pictures, and its mouse and
 	 * keyboard go to the page. It closes when the window does. One that
@@ -6301,6 +6321,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isComputer(connection)) return this.#computerSaid(raw);
 		if (typeof raw !== "string") return;
 		if (this.#isScreenViewer(connection)) {
+			if (raw.startsWith(SCREEN_PING)) return this.#screenPing(connection, raw);
 			if (connection.state?.channel) this.computer.screenInput(connection.state.channel, raw);
 			return;
 		}

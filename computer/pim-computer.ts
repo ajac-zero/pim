@@ -217,6 +217,8 @@ export class Link {
 			if (typeof args.tool !== "string") throw new CallError("tool must name one of Cua Driver's tools", "EINVAL");
 			return driver.call(args.tool, (args.arguments ?? {}) as Args);
 		}
+		// The space times its round trip to here, for the Computer page.
+		if (op === "ping") return null;
 		if (op === "screen_open") return this.#openScreen(args.channel);
 		if (op === "screen_close") {
 			const screen = this.#screens.get(Number(args.channel));

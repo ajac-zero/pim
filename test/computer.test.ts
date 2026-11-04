@@ -406,6 +406,14 @@ describe("a computer this Pim's host keeps", () => {
 		viewer.webSocket!.send(input);
 		await vi.waitFor(() => expect(streams[0]!.heard).toEqual([input]));
 
+		// The app times its round trips: the space answers with what it said and its own round trip to the computer, and the stream never hears of it.
+		viewer.webSocket!.send(JSON.stringify({ type: "pim_ping", payload: { sent: 1234.5 } }));
+		await vi.waitFor(() => expect(shown).toHaveLength(3));
+		const pong = JSON.parse(shown[2] as string) as { type: string; payload: { sent: number; computer_ms: unknown } };
+		expect(pong).toMatchObject({ type: "pim_pong", payload: { sent: 1234.5 } });
+		expect(pong.payload.computer_ms).toEqual(expect.any(Number));
+		expect(streams[0]!.heard).toEqual([input]);
+
 		// Closing the app closes the stream.
 		viewer.webSocket!.close(1000);
 		await vi.waitFor(() => expect(streams[0]!.closed).toBe(true));

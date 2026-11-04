@@ -40,6 +40,12 @@ export const COMPUTER_TAG = "computer";
 export const COMPUTER_SCREEN_PATH = "/computer/screen";
 /** The tag of the sockets of the apps showing the desktop. */
 export const SCREEN_TAG = "screen";
+/**
+ * How a message from an app showing the desktop begins when it times its
+ * round trips, which the space answers itself (with its own round trip to
+ * the computer) rather than passing it on to the stream.
+ */
+export const SCREEN_PING = '{"type":"pim_ping"';
 /** The close code an old connection gets when another one replaces it (pim-computer's `REPLACED`). */
 const REPLACED = 4409;
 /** The most bytes the computer gives in one read (pim-computer's `MAX_READ_BYTES`), and the most this sends in one write. */
@@ -61,6 +67,8 @@ const PAIRED_AT_KEY = "computer_paired_at";
 const INFO_KEY = "computer_info";
 /** How long one of Cua Driver's tools may take: it waits for windows and pages itself. */
 const DRIVER_CALL_MS = 120_000;
+/** How long the computer may take to answer a ping before it counts as no answer. */
+const PING_MS = 5_000;
 
 /** The owner a computer's token names. Whether it is really theirs is for their space to say. */
 export function computerTokenOwner(token: string): string | null {
@@ -339,6 +347,17 @@ export class Computer {
 	/** The person's input to a stream of the desktop, as the stream's own text messages. */
 	screenInput(channel: number, data: string): void {
 		this.#socket()?.send(JSON.stringify({ type: "screen", channel, data }));
+	}
+
+	/** The round trip between the space and the computer, in milliseconds, or null when it didn't answer. */
+	async ping(): Promise<number | null> {
+		const start = Date.now();
+		try {
+			await this.call("ping", {}, PING_MS);
+		} catch {
+			return null;
+		}
+		return Date.now() - start;
 	}
 
 	/** Closes a stream of the desktop. */

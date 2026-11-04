@@ -18,4 +18,5 @@ minimumReleaseAgeExclude:
 patchedDependencies:
   '@earendil-works/pi-ai@1.1.0': patches/@earendil-works__pi-ai@1.1.0.patch
   '@earendil-works/pi-durable@1.1.0': patches/@earendil-works__pi-durable@1.1.0.patch
+  '@modelcontextprotocol/client@2.0.0': patches/@modelcontextprotocol__client@2.0.0.patch
   agents@0.27.0: patches/agents@0.27.0.patch

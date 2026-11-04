@@ -1,0 +1,28 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 635f1c0134274c89e7efbcae2adf3d9ecba575ee..f3924ed4a52210fbd1e4cdf5cb36abf71afdacba 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -5374,7 +5374,8 @@ var StreamableHTTPClientTransport = class {
+ 						return this._send(message, options, isAuthRetry, stepUpRetries + 1);
+ 					}
+ 				}
+-				if (response.status === 400 && typeof text === "string" && this._isModernEnvelopedRequest(message)) try {
++				// On 2026-07-28 a method the server lacks is a 404 with a JSON-RPC error, which the request gets like a 400 one.
++				if ((response.status === 400 || response.status === 404) && typeof text === "string" && this._isModernEnvelopedRequest(message)) try {
+ 					const parsed = _modelcontextprotocol_core_internal.JSONRPCMessageSchema.parse(JSON.parse(text));
+ 					const requests = (Array.isArray(message) ? message : [message]).filter((m) => require_src.isJSONRPCRequest(m));
+ 					if (require_src.isJSONRPCErrorResponse(parsed) && requests.some((r) => r.id === parsed.id)) {
+diff --git a/dist/index.mjs b/dist/index.mjs
+index f02ce3ca394e826fc27c9848dbe9a214bf6ba7a9..a8174c5acbfb6012557874c2c192cacc3a89677a 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -5371,7 +5371,8 @@ var StreamableHTTPClientTransport = class {
+ 						return this._send(message, options, isAuthRetry, stepUpRetries + 1);
+ 					}
+ 				}
+-				if (response.status === 400 && typeof text === "string" && this._isModernEnvelopedRequest(message)) try {
++				// On 2026-07-28 a method the server lacks is a 404 with a JSON-RPC error, which the request gets like a 400 one.
++				if ((response.status === 400 || response.status === 404) && typeof text === "string" && this._isModernEnvelopedRequest(message)) try {
+ 					const parsed = JSONRPCMessageSchema.parse(JSON.parse(text));
+ 					const requests = (Array.isArray(message) ? message : [message]).filter((m) => isJSONRPCRequest(m));
+ 					if (isJSONRPCErrorResponse(parsed) && requests.some((r) => r.id === parsed.id)) {

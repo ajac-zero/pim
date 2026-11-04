@@ -49,10 +49,23 @@ function notes() {
 	return server;
 }
 
+/**
+ * Like Firecrawl's server: it lists resources but has no resource
+ * templates, and on the 2026-07-28 protocol it answers a method it doesn't
+ * have with a 404 (see the fetch below).
+ */
+function firecrawl() {
+	const server = notes();
+	server.registerResource("usage", "ui://firecrawl/usage.html", { mimeType: "text/html" }, async (uri) => ({
+		contents: [{ uri: uri.href, text: "<p>Credits left: 10</p>" }],
+	}));
+	return server;
+}
+
 const SERVERS: Record<string, () => McpServer> = {
 	"https://calendar.example.test/mcp": calendar,
 	"https://notes.example.test/mcp": notes,
-	"https://firecrawl.example.test/mcp": notes,
+	"https://firecrawl.example.test/mcp": firecrawl,
 	"https://weather.example.test/mcp": () => {
 		const server = new McpServer({ name: "weather", version: "1.0.0" });
 		server.registerTool(
@@ -135,6 +148,10 @@ beforeEach(() => {
 		if (target === "https://down.example.test/mcp") return new Response("unavailable", { status: 503 });
 		const server = SERVERS[target];
 		if (!server) return realFetch(input, init);
+		if (target === "https://firecrawl.example.test/mcp" && request.headers.get("mcp-method") === "resources/templates/list") {
+			const { id } = (await request.json()) as { id: number };
+			return Response.json({ jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } }, { status: 404 });
+		}
 		return createMcpHandler(server)(request, {}, createExecutionContext());
 	});
 });

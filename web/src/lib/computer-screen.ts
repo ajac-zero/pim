@@ -143,6 +143,22 @@ export function keyEvent(event: Keys, state: "down" | "up"): InputEvent | null {
 
 const BUTTONS = ["left", "middle", "right"] as const;
 
+/** The part of `box` a `width`×`height` picture covers when fitted inside it whole, as `object-fit: contain` does. */
+export function contained(
+  box: { left: number; top: number; width: number; height: number },
+  width: number,
+  height: number,
+): { left: number; top: number; width: number; height: number } {
+  const scale = Math.min(box.width / width, box.height / height);
+  if (!Number.isFinite(scale) || scale <= 0) return box;
+  const fitted = { width: width * scale, height: height * scale };
+  return {
+    ...fitted,
+    left: box.left + (box.width - fitted.width) / 2,
+    top: box.top + (box.height - fitted.height) / 2,
+  };
+}
+
 /** Where a pointer is on the desktop shown in `box`, as fractions of it, kept inside it. */
 export function normalized(
   event: { clientX: number; clientY: number },
@@ -413,7 +429,10 @@ export class ComputerScreen {
   #listen(): void {
     const canvas = this.#canvas;
     const at = (event: { clientX: number; clientY: number }) =>
-      normalized(event, canvas.getBoundingClientRect());
+      normalized(
+        event,
+        contained(canvas.getBoundingClientRect(), canvas.width, canvas.height),
+      );
     this.#on("pointerdown", (event) => {
       event.preventDefault();
       canvas.focus({ preventScroll: true });

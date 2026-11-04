@@ -195,14 +195,9 @@ function Desktop() {
         width={1280}
         height={800}
         className={cn(
-          "max-h-full max-w-full cursor-default touch-none select-none rounded-lg bg-black outline-none [:fullscreen_&]:rounded-none",
+          "size-full object-contain cursor-default touch-none select-none rounded-lg bg-black outline-none [:fullscreen_&]:rounded-none",
           state.status !== "live" && "opacity-0",
         )}
-        style={
-          state.status === "live"
-            ? { aspectRatio: `${state.width} / ${state.height}` }
-            : undefined
-        }
       />
       {state.status !== "live" && (
         <p className="absolute flex items-center gap-2 text-muted-foreground text-sm">

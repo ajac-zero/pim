@@ -1,25 +1,38 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
+import { AgentIcon } from "~/components/agent-icon";
+import { useNewChat } from "~/components/app-sidebar";
+import { ChatTabs } from "~/components/chat/tabs";
+import { useI18n } from "~/components/i18n";
+import { SquarePen } from "~/components/icons";
+import { Button } from "~/components/ui/button";
 import { agentsQuery } from "~/lib/queries";
+import { useTabs } from "~/lib/tabs";
 
-/**
- * Opens the majordomo's new chat page, keeping the search and fragment: an
- * open dialog (`?dialog=settings`) and a sign-in error (`#auth-error=…`).
- */
-export const Route = createFileRoute("/")({
-  validateSearch: (search: Record<string, unknown>): { prompt?: string } => ({
-    ...(typeof search.prompt === "string" && { prompt: search.prompt }),
-  }),
-  loader: async ({ context }) => {
-    // The agents already loaded will do: the majordomo stays the same one.
-    const agents = await context.queryClient.ensureQueryData(agentsQuery());
-    // Pim makes the majordomo the first time its agents are listed.
-    const majordomo = agents.find((agent) => agent.majordomo);
-    if (majordomo === undefined) throw new Error("No majordomo");
-    throw redirect({
-      to: "/agents/$agentId",
-      params: { agentId: majordomo.id },
-      search: true,
-      hash: true,
-    });
-  },
-});
+export const Route = createFileRoute("/")({ component: Home });
+
+/** The app's home, with no chat open: the open chats' tabs, none selected, and New chat. */
+function Home() {
+  const { t } = useI18n();
+  const { data: agents } = useQuery(agentsQuery());
+  const majordomo = agents?.find((agent) => agent.majordomo);
+  const shelf = useTabs().length > 0;
+  const newChat = useNewChat();
+  return (
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {shelf && (
+        <header className="hidden h-13 shrink-0 bg-sidebar pr-4 md:flex">
+          <ChatTabs activeId="" />
+        </header>
+      )}
+      <div className="flex flex-1 flex-col items-center justify-center gap-5 p-6">
+        {majordomo && (
+          <AgentIcon agent={majordomo} tile className="size-12 rounded-xl" />
+        )}
+        <Button onClick={newChat} className="rounded-full">
+          <SquarePen /> {t("newChat")}
+        </Button>
+      </div>
+    </main>
+  );
+}

@@ -5,6 +5,7 @@ import { AgentIcon, templateIconSrc } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import { Bot, Copy, ShieldAlert } from "~/components/icons";
+import { newChatSearch } from "~/components/new-chat";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";
@@ -30,7 +31,7 @@ function TemplatePage() {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       queryClient.invalidateQueries({ queryKey: ["templates"] });
       toast.success(t("madeYourOwn", { name: agent.name }));
-      navigate({ to: "/agents/$agentId", params: { agentId: agent.id } });
+      navigate({ to: ".", search: newChatSearch(agent.id) });
     },
     onError: (failure) => toast.error(failure.message),
   });
@@ -162,7 +163,7 @@ function TemplatePage() {
         <p className="mt-4 text-sm">
           {t("youHaveACopy")}{" "}
           <Link
-            to="/agents/$agentId"
+            to="/agents/$agentId/settings"
             params={{ agentId: copy.id }}
             className="underline underline-offset-2"
           >

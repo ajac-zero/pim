@@ -40,6 +40,7 @@ import {
   Users,
   X,
 } from "~/components/icons";
+import { newChatSearch } from "~/components/new-chat";
 import {
   ProfilePopover,
   ProfilePopoverTrigger,
@@ -91,27 +92,11 @@ export function sessionTitle(session: Pick<Session, "title">, t: T) {
   return session.title ?? t("newChat");
 }
 
-/**
- * Opens the new chat page of the agent in the open chat, or of the agent
- * whose page is open, or the majordomo's anywhere else, where a chat starts
- * with its first message.
- */
+/** Opens New chat over the page, with the open chat's agent, or the majordomo anywhere else. */
 export function useNewChat(onDone?: () => void) {
   const navigate = useNavigate();
-  const params = useParams({ strict: false }) as {
-    sessionId?: string;
-    agentId?: string;
-  };
-  const { data: sessions } = useQuery(sessionsQuery());
-  const agentId =
-    params.agentId ??
-    sessions?.find((session) => session.id === params.sessionId)?.agent?.id;
   return () => {
-    if (agentId) {
-      navigate({ to: "/agents/$agentId", params: { agentId } });
-    } else {
-      navigate({ to: "/" });
-    }
+    navigate({ to: ".", search: newChatSearch() });
     onDone?.();
   };
 }

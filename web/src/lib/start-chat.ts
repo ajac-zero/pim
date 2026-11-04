@@ -9,17 +9,17 @@ import { sessionsQuery } from "~/lib/queries";
 /**
  * Starts a chat with an agent (the majordomo when `agent` is undefined)
  * with its first message: the chat is made only when there is something to
- * send, then sent to and opened together. `sent` is that message from the moment
- * it is sent, so the page can show it at once rather than after Pim has made
- * the chat.
+ * send, then sent to and opened together, in place of the page that started
+ * it, so Back skips New chat. `starting` is true from the moment the message
+ * is sent until the chat opens, or fails to.
  */
 export function useStartChat(agent: string | undefined) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const [sent, setSent] = useState<UserContent | null>(null);
+  const [starting, setStarting] = useState(false);
 
   const start = async (content: UserContent) => {
-    setSent(content);
+    setStarting(true);
     try {
       const session = await pim.createSession(agent ? { agent } : {});
       // The chat's page finds the chat in the list at once, rather than
@@ -35,13 +35,15 @@ export function useStartChat(agent: string | undefined) {
         navigate({
           to: "/chat/$sessionId",
           params: { sessionId: session.id },
+          replace: true,
         }),
       ]);
     } catch (error) {
       toast.error((error as Error).message);
-      setSent(null);
+    } finally {
+      setStarting(false);
     }
   };
 
-  return { start, sent };
+  return { start, starting };
 }

@@ -13,7 +13,7 @@ import { sessionsQuery } from "~/lib/queries";
 import { openTab, pruneTabs } from "~/lib/tabs";
 
 it.each([["travel"], ["travel", "work", "weekend"]])(
-  "keeps open chats accessible with none selected while starting a new chat (%j)",
+  "keeps open chats accessible with none selected on the home page (%j)",
   async (...sessions) => {
     pruneTabs(new Set());
     for (const session of sessions) openTab(session);

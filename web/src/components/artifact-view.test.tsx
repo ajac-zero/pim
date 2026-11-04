@@ -64,8 +64,13 @@ it("offers a new-chat draft with the artifact reference instead of a change-requ
   ].find(([tag]) => tag.includes('aria-label="Chat"'));
   expect(link).toBeDefined();
   expect(link?.[2]?.replace(/<[^>]+>/g, "")).toBe("Chat");
-  const url = new URL(link?.[1] ?? "", "https://pim.example");
+  const url = new URL(
+    (link?.[1] ?? "").replaceAll("&amp;", "&"),
+    "https://pim.example",
+  );
+  // It opens New chat over the page it's on, with the artifact attached.
   expect(url.pathname).toBe("/");
+  expect(url.searchParams.get("dialog")).toBe("new-chat");
   expect(url.searchParams.get("prompt")).toBe("/artifacts/trip-plan\n\n");
   expect(html).not.toContain("<form");
   client.clear();

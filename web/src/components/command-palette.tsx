@@ -33,6 +33,7 @@ import {
   Sun,
   Users,
 } from "~/components/icons";
+import { newChatSearch } from "~/components/new-chat";
 import { Shortcut } from "~/components/shortcut";
 import { useTheme } from "~/components/theme";
 import {
@@ -302,8 +303,8 @@ export function CommandPalette({
                       className={ITEM}
                       onSelect={run(() =>
                         navigate({
-                          to: "/agents/$agentId",
-                          params: { agentId: agent.id },
+                          to: ".",
+                          search: newChatSearch(agent.id),
                         }),
                       )}
                     >

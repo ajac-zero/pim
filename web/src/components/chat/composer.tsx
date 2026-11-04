@@ -67,6 +67,8 @@ export interface ComposerProps {
   initialInput?: string;
   /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
   draftKey?: string;
+  /** Beside the attach buttons, such as whom a new chat is with. */
+  controls?: ReactNode;
   /** The agent the chat is with, whose model the picker chooses; none shows no picker, as in a group chat, which has it in the header. */
   agent?: Pick<Agent, "id" | "name">;
   /** The agents in the chat, which an @ offers to mention. */
@@ -240,6 +242,7 @@ function ComposerInner({
   draftKey,
   mentions,
   agent,
+  controls,
 }: ComposerProps) {
   const { t } = useI18n();
   const controller = usePromptInputController();
@@ -359,25 +362,6 @@ function ComposerInner({
 
   return (
     <div className="relative w-full">
-      {showSuggestions && (
-        // They float over what's above the composer, which scrolls on beneath them, so they take none of its room.
-        // Radix positions the scroll area itself, so a wrapper places it.
-        <div className="pointer-events-none absolute inset-x-0 bottom-full z-10 animate-in fade-in duration-700">
-          <Suggestions>
-            {promptSuggestions.map((suggestion) => (
-              <Suggestion
-                key={suggestion}
-                suggestion={suggestion}
-                disabled={disabled}
-                onClick={send}
-                variant="outline"
-                className="pointer-events-auto shadow-[0_4px_14px_-4px_rgb(0_0_0/0.2)]"
-              />
-            ))}
-          </Suggestions>
-        </div>
-      )}
-
       {choices.length > 0 && (
         <div
           id={mentionId}
@@ -556,6 +540,7 @@ function ComposerInner({
             onBlocked={cantSeeImages}
             seesImages={seesImages}
           />
+          {controls}
           <div className="ml-auto flex items-center gap-1.5">
             {(hasText || improve.isPending) && (
               <Button
@@ -623,6 +608,23 @@ function ComposerInner({
           </div>
         </div>
       </PromptInput>
+
+      {showSuggestions && (
+        // Radix positions the scroll area itself, so a wrapper fades it in.
+        <div className="animate-in fade-in duration-700">
+          <Suggestions>
+            {promptSuggestions.map((suggestion) => (
+              <Suggestion
+                key={suggestion}
+                suggestion={suggestion}
+                disabled={disabled}
+                onClick={send}
+                variant="outline"
+              />
+            ))}
+          </Suggestions>
+        </div>
+      )}
 
       {disclaimer != null && (
         <p className="flex items-center justify-center gap-1.5 px-2 pt-2 pb-1 text-center text-muted-foreground text-xs">

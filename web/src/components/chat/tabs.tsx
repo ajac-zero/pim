@@ -124,7 +124,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
       <AwaitingApprovalMark className="ml-0" />
     ) : null;
 
-  // A lone chat shows its title only while it is open, not while starting a new one.
+  // A lone chat shows its title only while it is open, not on the home page.
   if (open.length <= 1 && activeId) {
     const session = sessions?.find((candidate) => candidate.id === activeId);
     if (!session) return <div className="flex-1" />;

@@ -34,7 +34,6 @@ import {
   profileQuery,
   sessionsQuery,
 } from "~/lib/queries";
-import { openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
@@ -290,18 +289,6 @@ function ChatLink({
       to="/chat/$sessionId"
       params={{ sessionId: id }}
       title={title}
-      onClick={(event) => {
-        // A click the browser opens elsewhere leaves this window's tabs alone.
-        if (
-          event.button !== 0 ||
-          event.metaKey ||
-          event.ctrlKey ||
-          event.shiftKey ||
-          event.altKey
-        )
-          return;
-        openTab(id);
-      }}
       className={className}
     >
       {agent && (

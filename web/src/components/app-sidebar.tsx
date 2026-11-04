@@ -959,12 +959,8 @@ function SessionRow({
                         ? { ...member, majordomo: false }
                         : member
                     }
-                    tile={chatAgents.length > 1 || member.majordomo}
-                    className={
-                      chatAgents.length > 1 || member.majordomo
-                        ? "size-5 rounded-md"
-                        : "size-4"
-                    }
+                    tile
+                    className="size-5 rounded-md"
                   />
                 </span>
               ))}

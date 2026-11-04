@@ -13,13 +13,12 @@ export function TemplateCard({ template }: { template: TemplateSummary }) {
       className="flex h-full flex-col rounded-xl border px-4 py-3 transition-colors hover:bg-accent/50"
     >
       <span className="flex items-center gap-2">
-        <span className="text-primary">
-          <AgentIcon
-            agent={template}
-            src={templateIconSrc(template)}
-            className="size-4"
-          />
-        </span>
+        <AgentIcon
+          agent={template}
+          src={templateIconSrc(template)}
+          tile
+          className="size-6 rounded-md"
+        />
         <span className="truncate font-medium">{template.name}</span>
       </span>
       {template.description && (

@@ -316,7 +316,7 @@ export const Thread = memo(function Thread({
       ),
     [history],
   );
-  /* A gated tool call is a step like any other, marked with the answer to its approval, which waits in the summary box. */
+  /* A gated tool call is a step like any other, marked with the answer to its approval, which waits in the activity box. */
   const { data: allApprovals } = useQuery(approvalsQuery());
   // Requests from people in your circles belong to their conversations, not yours.
   const approvals = useMemo(

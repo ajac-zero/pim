@@ -367,7 +367,7 @@ export const EventNotice = memo(function EventNotice({
 
 /**
  * A gated tool call waiting for an answer: what Pim wants to do, and
- * Approve/Deny. It sits in the summary box beside the chat, not in the
+ * Approve/Deny. It sits in the activity box beside the chat, not in the
  * conversation, where the call is only a step; once decided it's gone from here.
  */
 export const ApprovalBlock = memo(function ApprovalBlock({

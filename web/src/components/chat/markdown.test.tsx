@@ -213,6 +213,20 @@ describe("formulas", () => {
   });
 });
 
+describe("formula delimiters", () => {
+  it("typesets \\[ \\] and \\( \\) but not inside code", () => {
+    const html = renderToStaticMarkup(
+      <Markdown
+        text={
+          "Sum:\n\n\\[\nG(w)=\\sum_i w_i\n\\]\n\nand \\(x^2\\) here, `\\(raw\\)`."
+        }
+      />,
+    );
+    expect(html.match(/class="katex"/g)).toHaveLength(2);
+    expect(html).toContain("\\(raw\\)");
+  });
+});
+
 describe("finished Markdown", () => {
   it("keeps a lone * as written, in a reply and in untrusted text", () => {
     for (const untrusted of [false, true]) {

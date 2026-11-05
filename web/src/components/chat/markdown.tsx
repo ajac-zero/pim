@@ -421,6 +421,27 @@ function Mentions({ text, chip }: { text: string; chip: string }) {
  * plugin is intentionally not installed, so there's a single source of
  * truth for code highlighting.
  */
+/**
+ * Models write formulas between `\[` and `\]` (display) or `\(` and `\)`
+ * (inline), which Markdown reads as escaped brackets. The math plugin wants
+ * `$$`, so they're rewritten, leaving code alone.
+ */
+function mathDelimiters(text: string): string {
+  return text
+    .split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/)
+    .map((part, index) =>
+      index % 2
+        ? part
+        : part
+            .replace(
+              /\\\[([\s\S]+?)\\\]/g,
+              (_, tex) => `\n\n$$\n${tex.trim()}\n$$\n\n`,
+            )
+            .replace(/\\\(([^\n]+?)\\\)/g, (_, tex) => `$$${tex}$$`),
+    )
+    .join("");
+}
+
 /** Links an untrusted text may keep: web and mail addresses, and places on the same page. */
 function safeLink(href: string | undefined): boolean {
   return href !== undefined && /^(https?:|mailto:|#)/i.test(href);
@@ -757,7 +778,7 @@ export const Markdown = memo(function Markdown({
           // that tag and silently breaks block-code detection.
         }}
       >
-        {text}
+        {mathDelimiters(text)}
       </Streamdown>
     </div>
   );

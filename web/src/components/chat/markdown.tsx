@@ -1,3 +1,4 @@
+import { math } from "@streamdown/math";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { isValidElement, memo, type ReactNode } from "react";
@@ -603,6 +604,7 @@ export const Markdown = memo(function Markdown({
     >
       <Streamdown
         isAnimating={streaming}
+        plugins={{ math }}
         animated
         // Streaming mode closes unclosed Markdown, as a reply still being
         // written needs. Finished text keeps what was written, so a lone `*`

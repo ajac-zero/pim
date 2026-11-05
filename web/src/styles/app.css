@@ -2,6 +2,8 @@
 @import "tw-animate-css";
 /* The fade a streaming reply's new words come in with. */
 @import "streamdown/styles.css";
+/* Formulas in replies. */
+@import "katex/dist/katex.min.css";
 
 /* Pixeloid 0.4 by GGBotNet, bundled under the SIL Open Font License.
    See public/licenses/pixeloid.txt and https://ggbot.itch.io/pixeloid-font. */

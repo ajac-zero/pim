@@ -201,6 +201,18 @@ describe("untrusted Markdown", () => {
   });
 });
 
+describe("formulas", () => {
+  it("are typeset, in chat and in untrusted text", () => {
+    const text = "Energy:\n\n$$\nE = mc^2\n$$";
+    for (const untrusted of [false, true]) {
+      const html = renderToStaticMarkup(
+        <Markdown text={text} untrusted={untrusted} />,
+      );
+      expect(html).toContain('class="katex');
+    }
+  });
+});
+
 describe("finished Markdown", () => {
   it("keeps a lone * as written, in a reply and in untrusted text", () => {
     for (const untrusted of [false, true]) {

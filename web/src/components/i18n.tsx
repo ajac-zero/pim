@@ -119,6 +119,14 @@ const translations = {
     removeFromChat: "Remove {name} from the chat",
     agentWorking: "{name} is working",
     mentionAgent: "Mention an agent",
+    mentionAgentOrApp: "Mention an agent or app",
+    mentionAdd: "Add",
+    letAgentUseApp: "Let {agent} use {app}?",
+    letAgentUseAppHint:
+      "{agent} gets {app}'s tools in its chats and tasks. Choose which ones it uses without asking on its page.",
+    letAgentUseAppSignIn:
+      "{agent} gets {app}'s tools in its chats and tasks. You'll sign in to {app} next.",
+    addAppTo: "Add to {agent}",
     scrollToMention: "Go to the message that mentions you",
     discover: "Discover",
     discoverDescription:
@@ -1248,6 +1256,14 @@ const translations = {
     removeFromChat: "Sacar a {name} del chat",
     agentWorking: "{name} está trabajando",
     mentionAgent: "Mencionar a un agente",
+    mentionAgentOrApp: "Mencionar a un agente o una app",
+    mentionAdd: "Añadir",
+    letAgentUseApp: "¿Dejar que {agent} use {app}?",
+    letAgentUseAppHint:
+      "{agent} recibe las herramientas de {app} en sus chats y tareas. En su página eliges cuáles usa sin preguntar.",
+    letAgentUseAppSignIn:
+      "{agent} recibe las herramientas de {app} en sus chats y tareas. Después inicias sesión en {app}.",
+    addAppTo: "Añadir a {agent}",
     scrollToMention: "Ir al mensaje que te menciona",
     discover: "Descubrir",
     discoverDescription:

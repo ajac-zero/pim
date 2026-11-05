@@ -1,8 +1,10 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Dialog } from "radix-ui";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
+import { AppIcon } from "~/components/app-icon";
 import { ArtifactIcon } from "~/components/artifact-icon";
 import {
   ModelMark,
@@ -16,6 +18,7 @@ import {
   Loader2,
   Mic,
   Paperclip,
+  Plus,
   Sparkles,
   Square,
   X,
@@ -44,12 +47,19 @@ import {
 } from "~/components/ui/tooltip";
 import {
   type Agent,
+  type DirectoryApp,
   type ModelInfo,
   type ModelSettings,
   pim,
   type UserContent,
 } from "~/lib/pim-api";
-import { artifactQuery } from "~/lib/queries";
+import {
+  agentsQuery,
+  appDirectoryQuery,
+  appsQuery,
+  artifactQuery,
+  extensionsQuery,
+} from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export interface ComposerProps {
@@ -69,7 +79,11 @@ export interface ComposerProps {
   draftKey?: string;
   /** Beside the attach buttons, such as whom a new chat is with. */
   controls?: ReactNode;
-  /** The agent the chat is with, whose model the picker chooses; none shows no picker, as in a group chat, which has it in the header. */
+  /**
+   * The agent the chat is with, whose model the picker chooses and whose apps
+   * an @ offers; none shows no picker, as in a group chat, which has it in
+   * the header.
+   */
   agent?: Pick<Agent, "id" | "name">;
   /** The agents in the chat, which an @ offers to mention. */
   mentions?: readonly Agent[];
@@ -77,6 +91,17 @@ export interface ComposerProps {
 
 /** The mention being typed just before the caret: an @ at the start of a word, and what follows it. */
 const MENTION = /(?:^|\s)@([^\s@]{0,40})$/;
+
+/** What an @ offers: an agent in the chat, or an app, with whether the chat's agent works with it already. */
+type MentionChoice =
+  | { kind: "agent"; agent: Agent }
+  | { kind: "app"; app: DirectoryApp; listed: boolean };
+
+/** An app picked from an @, and the text its mention replaces. */
+type AppMention = { app: DirectoryApp; start: number; end: number };
+
+/** How many choices an @ shows at once. */
+const MAX_MENTION_CHOICES = 6;
 
 /** Unsent text by draft key, for this page's lifetime. */
 const drafts = new Map<string, string>();
@@ -275,34 +300,115 @@ function ComposerInner({
     const input = textareaRef.current;
     if (input) input.setSelectionRange(input.value.length, input.value.length);
   }, [autoFocus, touchInput]);
-  // Typing @ offers the agents to mention, by the start of their name.
+  // Typing @ offers the agents to mention, by the start of their name, and
+  // apps, by the start of a word of theirs: the ones the chat's agent works
+  // with first, then those you connected, then the rest of the directory.
   const [caret, setCaret] = useState(0);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const typed = inputText.slice(0, caret);
   const mention = MENTION.exec(typed);
   const query = mention?.[1]?.toLowerCase();
-  const choices =
-    query === undefined || !mentions || dismissed === typed
+  const { data: agents } = useQuery({
+    ...agentsQuery(),
+    enabled: Boolean(agent),
+  });
+  const self = agents?.find((candidate) => candidate.id === agent?.id);
+  const { data: extensions } = useQuery({
+    ...extensionsQuery(),
+    enabled: Boolean(self),
+  });
+  const { data: directory = [] } = useQuery({
+    ...appDirectoryQuery(),
+    enabled: Boolean(self),
+  });
+  const { data: connected = [] } = useQuery({
+    ...appsQuery(),
+    enabled: Boolean(self),
+  });
+  const listed = new Set([
+    ...(extensions?.extensions
+      .flatMap((extension) => extension.blueprints)
+      .find((candidate) => candidate.ref === self?.blueprint)?.apps ?? []),
+    ...(self?.apps ?? []),
+  ]);
+  const rank = (app: DirectoryApp) =>
+    listed.has(app.ref)
+      ? 0
+      : connected.some((server) => server.app === app.ref)
+        ? 1
+        : 2;
+  const choices: MentionChoice[] =
+    query === undefined || dismissed === typed
       ? []
-      : mentions
-          .filter((agent) => agent.name.toLowerCase().startsWith(query))
-          .slice(0, 6);
+      : [
+          ...(mentions ?? [])
+            .filter((agent) => agent.name.toLowerCase().startsWith(query))
+            .map((agent) => ({ kind: "agent" as const, agent })),
+          ...(self ? directory : [])
+            .filter((app) =>
+              app.name
+                .toLowerCase()
+                .split(/\s+/)
+                .some((word) => word.startsWith(query)),
+            )
+            .sort((a, b) => rank(a) - rank(b))
+            .map((app) => ({
+              kind: "app" as const,
+              app,
+              listed: listed.has(app.ref),
+            })),
+        ].slice(0, MAX_MENTION_CHOICES);
   const mentionId = useId();
-  const pickMention = (agent: Agent) => {
-    if (query === undefined) return;
-    const start = caret - query.length - 1;
-    const next = `${inputText.slice(0, start)}@${agent.name} ${inputText.slice(caret)}`;
+  /** Puts `@name` in place of the text between `start` and `end`. */
+  const insertMention = (name: string, start: number, end: number) => {
+    const next = `${inputText.slice(0, start)}@${name} ${inputText.slice(end)}`;
     controller.textInput.setInput(
       (prefix ? `${prefix.trimEnd()}\n\n` : "") + next,
     );
-    const position = start + agent.name.length + 2;
+    const position = start + name.length + 2;
     setCaret(position);
     setHighlighted(0);
     queueMicrotask(() => {
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(position, position);
     });
+  };
+  // An app the agent doesn't work with yet is added to it, and connected,
+  // once you say so; then it's mentioned.
+  const [adding, setAdding] = useState<AppMention | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const queryClient = useQueryClient();
+  const addApp = useMutation({
+    mutationFn: async ({ app }: AppMention) => {
+      if (!self) return null;
+      await pim.updateAgent(self.id, { apps: [...self.apps, app.ref] });
+      const server = connected.find((candidate) => candidate.app === app.ref);
+      if (server?.state === "ready") return null;
+      return (await pim.connectApp(app.ref)).authUrl ?? null;
+    },
+    onSuccess: (authUrl, { app, start, end }) => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      queryClient.invalidateQueries({ queryKey: ["apps"] });
+      queryClient.invalidateQueries({ queryKey: ["permissions"] });
+      if (authUrl) window.open(authUrl, "_blank", "noopener");
+      setAdding(null);
+      insertMention(app.name, start, end);
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const pickMention = (choice: MentionChoice) => {
+    if (query === undefined) return;
+    const start = caret - query.length - 1;
+    if (choice.kind === "app" && !choice.listed) {
+      setAdding({ app: choice.app, start, end: caret });
+      return;
+    }
+    insertMention(
+      choice.kind === "agent" ? choice.agent.name : choice.app.name,
+      start,
+      caret,
+    );
   };
   const [preparing, setPreparing] = useState(false);
   const voice = useVoiceInput(text, controller.textInput.setInput);
@@ -366,30 +472,117 @@ function ComposerInner({
         <div
           id={mentionId}
           role="listbox"
-          aria-label={t("mentionAgent")}
+          aria-label={t(self ? "mentionAgentOrApp" : "mentionAgent")}
           className="absolute bottom-full left-0 z-20 mb-2 w-64 animate-in rounded-xl border bg-popover p-1 text-popover-foreground shadow-[0_8px_30px_-6px_rgb(0_0_0/0.18)] duration-150 fade-in"
         >
-          {choices.map((agent, index) => (
+          {choices.map((choice, index) => (
             <button
-              key={agent.id}
+              key={choice.kind === "agent" ? choice.agent.id : choice.app.ref}
               type="button"
               role="option"
               aria-selected={index === highlighted % choices.length}
               // Keeps the caret in the text, where the name goes.
               onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={() => setHighlighted(index)}
-              onClick={() => pickMention(agent)}
+              onClick={() => pickMention(choice)}
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm aria-selected:bg-muted"
             >
-              <AgentIcon
-                agent={agent}
-                tile
-                className="size-5 shrink-0 rounded-md"
-              />
-              <span className="truncate">{agent.name}</span>
+              {choice.kind === "agent" ? (
+                <AgentIcon
+                  agent={choice.agent}
+                  tile
+                  className="size-5 shrink-0 rounded-md"
+                />
+              ) : (
+                <AppIcon
+                  name={choice.app.name}
+                  icon={choice.app.icon}
+                  className="size-5 text-[11px]"
+                />
+              )}
+              <span className="min-w-0 flex-1 truncate">
+                {choice.kind === "agent" ? choice.agent.name : choice.app.name}
+              </span>
+              {choice.kind === "app" && !choice.listed && (
+                <span className="flex shrink-0 items-center gap-0.5 text-muted-foreground text-xs">
+                  <Plus className="size-3" />
+                  {t("mentionAdd")}
+                </span>
+              )}
             </button>
           ))}
         </div>
+      )}
+
+      {self && (
+        <Dialog.Root
+          open={adding !== null}
+          onOpenChange={(open) => {
+            if (!open && !addApp.isPending) setAdding(null);
+          }}
+        >
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
+            <Dialog.Content
+              // You picked the app to add it, so Enter adds it.
+              onOpenAutoFocus={(event) => {
+                event.preventDefault();
+                addButtonRef.current?.focus();
+              }}
+              // Back to the text, where the mention was being typed.
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                textareaRef.current?.focus();
+              }}
+              className="fixed top-1/2 left-1/2 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-[18px] border bg-background p-6 shadow-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95"
+            >
+              {adding && (
+                <>
+                  <AppIcon
+                    name={adding.app.name}
+                    icon={adding.app.icon}
+                    className="size-10 text-base"
+                  />
+                  <Dialog.Title className="mt-4 font-semibold text-xl">
+                    {t("letAgentUseApp", {
+                      agent: self.name,
+                      app: adding.app.name,
+                    })}
+                  </Dialog.Title>
+                  <Dialog.Description className="mt-2 text-muted-foreground text-sm">
+                    {t(
+                      connected.some(
+                        (server) =>
+                          server.app === adding.app.ref &&
+                          server.state === "ready",
+                      )
+                        ? "letAgentUseAppHint"
+                        : "letAgentUseAppSignIn",
+                      { agent: self.name, app: adding.app.name },
+                    )}
+                  </Dialog.Description>
+                  <div className="mt-6 flex justify-end gap-2">
+                    <Dialog.Close asChild>
+                      <Button variant="secondary" disabled={addApp.isPending}>
+                        {t("cancel")}
+                      </Button>
+                    </Dialog.Close>
+                    <Button
+                      ref={addButtonRef}
+                      onClick={() => addApp.mutate(adding)}
+                      disabled={addApp.isPending}
+                    >
+                      {addApp.isPending && (
+                        <Loader2 className="size-4 animate-spin" />
+                      )}
+                      {t("addAppTo", { agent: self.name })}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
       )}
 
       <PromptInput
@@ -499,7 +692,9 @@ function ComposerInner({
                 }
                 if (event.key === "Enter" || event.key === "Tab") {
                   event.preventDefault();
-                  pickMention(choices[highlighted % choices.length] as Agent);
+                  pickMention(
+                    choices[highlighted % choices.length] as MentionChoice,
+                  );
                   return;
                 }
                 if (event.key === "Escape") {

@@ -926,6 +926,8 @@ export type BotSharing = {
   id: string;
   url: string;
   dailyMessages: number | null;
+  /** The model guests use; null for this Pim's default. */
+  model: { provider: string; id: string } | null;
   sharedAt: number;
   guests: number;
 };
@@ -1314,10 +1316,14 @@ export const pim = {
       throw error;
     }),
   /** Shares the agent as it is now as a bot, or updates what its link shares. */
-  shareBot: (id: string, dailyMessages: number | null) =>
+  shareBot: (
+    id: string,
+    dailyMessages: number | null,
+    model: { provider: string; id: string } | null,
+  ) =>
     call<BotSharing>(`/agents/${id}/bot`, {
       method: "PUT",
-      body: JSON.stringify({ dailyMessages }),
+      body: JSON.stringify({ dailyMessages, model }),
     }),
   unshareBot: (id: string) =>
     call<{ deleted: boolean }>(`/agents/${id}/bot`, { method: "DELETE" }),

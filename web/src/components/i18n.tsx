@@ -609,6 +609,15 @@ const translations = {
     workersAI: "Workers AI",
     providerOn: "On",
     chatGPTPlan: "ChatGPT plan",
+    chatGPTImages: "ChatGPT images",
+    chatGPTImagesHint:
+      "Draw images with your plan instead of Workers AI, the way Codex does. It uses an unofficial route that OpenAI can change, and needs Plus or Pro.",
+    chatGPTImagesConnected:
+      "Connected as {email}. Agents draw images with your plan.",
+    chatGPTImagesWhyPaste:
+      "This is a separate sign-in from the plan above, and it can only send you back to an address on your own device (localhost), which Pim can't receive from the internet. So you carry that address over to Pim yourself, this once.",
+    chatGPTImagesStepCopy:
+      "The tab ends on a localhost page that doesn't load. That's expected. Copy the whole address from its address bar.",
     addProvider: "Add provider",
     providerName: "Name",
     providerAddress: "Address",
@@ -1733,6 +1742,15 @@ const translations = {
     workersAI: "Workers AI",
     providerOn: "Activo",
     chatGPTPlan: "Plan de ChatGPT",
+    chatGPTImages: "Imágenes de ChatGPT",
+    chatGPTImagesHint:
+      "Dibuja imágenes con tu plan en lugar de Workers AI, como lo hace Codex. Usa una vía no oficial que OpenAI puede cambiar, y requiere Plus o Pro.",
+    chatGPTImagesConnected:
+      "Conectado como {email}. Los agentes dibujan imágenes con tu plan.",
+    chatGPTImagesWhyPaste:
+      "Es un inicio de sesión aparte del plan de arriba, y solo puede devolverte a una dirección en tu propio dispositivo (localhost), que Pim no puede recibir desde internet. Por eso llevas tú esa dirección a Pim, esta única vez.",
+    chatGPTImagesStepCopy:
+      "La pestaña termina en una página de localhost que no carga. Es normal. Copia la dirección completa de la barra de direcciones.",
     addProvider: "Añadir proveedor",
     providerName: "Nombre",
     providerAddress: "Dirección",

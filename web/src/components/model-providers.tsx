@@ -73,6 +73,9 @@ export function ProvidersSection({
         <li>
           <ChatGPTProvider settings={settings} />
         </li>
+        <li>
+          <ChatGPTImagesProvider settings={settings} />
+        </li>
         {settings.providers.map((provider) => (
           <li key={provider.provider}>
             <CustomProvider provider={provider} admin={admin} />
@@ -627,56 +630,184 @@ function ChatGPTProvider({ settings }: { settings: ModelSettings }) {
       }
     >
       {!connected && waiting && (
-        <form
-          className="mt-4 space-y-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (address.trim()) finish.mutate();
+        <PasteAddress
+          why={t("chatGPTWhyPaste")}
+          steps={[
+            t("chatGPTStepApprove"),
+            t("chatGPTStepCopy"),
+            t("chatGPTStepPaste"),
+          ]}
+          placeholder="http://127.0.0.1:1455/auth/callback?code=…"
+          after={t("chatGPTAfterPaste")}
+          address={address}
+          onAddress={setAddress}
+          pending={finish.isPending}
+          onSubmit={() => finish.mutate()}
+          onCancel={() => {
+            setWaiting(false);
+            setAddress("");
           }}
-        >
-          <p className="text-muted-foreground text-sm">
-            {t("chatGPTWhyPaste")}
-          </p>
-          <ol className="list-decimal space-y-1 pl-5 text-sm">
-            <li>{t("chatGPTStepApprove")}</li>
-            <li>{t("chatGPTStepCopy")}</li>
-            <li>{t("chatGPTStepPaste")}</li>
-          </ol>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Input
-              value={address}
-              onChange={(event) => setAddress(event.target.value)}
-              placeholder="http://127.0.0.1:1455/auth/callback?code=…"
-              aria-label={t("pasteAddress")}
-              className="h-9 flex-1 font-mono text-xs"
-              autoFocus
-            />
-            <div className="flex gap-2">
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => {
-                  setWaiting(false);
-                  setAddress("");
-                }}
-              >
-                {t("cancel")}
-              </Button>
-              <Button
-                type="submit"
-                disabled={!address.trim() || finish.isPending}
-              >
-                {finish.isPending && (
-                  <Loader2 className="size-4 animate-spin" />
-                )}
-                {t("connect")}
-              </Button>
-            </div>
-          </div>
-          <p className="text-muted-foreground text-xs">
-            {t("chatGPTAfterPaste")}
-          </p>
-        </form>
+        />
+      )}
+    </Row>
+  );
+}
+
+/** The form that takes the address a sign-in's browser tab ended on, which can't load. */
+function PasteAddress({
+  why,
+  steps,
+  placeholder,
+  after,
+  address,
+  onAddress,
+  pending,
+  onSubmit,
+  onCancel,
+}: {
+  why: string;
+  steps: string[];
+  placeholder: string;
+  after: string;
+  address: string;
+  onAddress: (address: string) => void;
+  pending: boolean;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <form
+      className="mt-4 space-y-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (address.trim()) onSubmit();
+      }}
+    >
+      <p className="text-muted-foreground text-sm">{why}</p>
+      <ol className="list-decimal space-y-1 pl-5 text-sm">
+        {steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Input
+          value={address}
+          onChange={(event) => onAddress(event.target.value)}
+          placeholder={placeholder}
+          aria-label={t("pasteAddress")}
+          className="h-9 flex-1 font-mono text-xs"
+          autoFocus
+        />
+        <div className="flex gap-2">
+          <Button type="button" variant="ghost" onClick={onCancel}>
+            {t("cancel")}
+          </Button>
+          <Button type="submit" disabled={!address.trim() || pending}>
+            {pending && <Loader2 className="size-4 animate-spin" />}
+            {t("connect")}
+          </Button>
+        </div>
+      </div>
+      <p className="text-muted-foreground text-xs">{after}</p>
+    </form>
+  );
+}
+
+/**
+ * The ChatGPT plan's images: a second sign-in, with Codex's own client, since
+ * OpenAI's plan sharing can't draw. Agents draw with it while it's connected.
+ */
+function ChatGPTImagesProvider({ settings }: { settings: ModelSettings }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const [waiting, setWaiting] = useState(false);
+  const [address, setAddress] = useState("");
+  const { connected, email } = settings.chatgptImages;
+
+  const start = useMutation({
+    mutationFn: async () => {
+      // Opened now, while the click still counts, so popup blockers allow it.
+      const tab = window.open("", "_blank");
+      try {
+        const { url } = await pim.chatgptImagesLogin();
+        if (tab) tab.location.href = url;
+        else window.location.href = url;
+      } catch (error) {
+        tab?.close();
+        throw error;
+      }
+    },
+    onSuccess: () => setWaiting(true),
+    onError: (error) => toast.error(error.message),
+  });
+  const finish = useMutation({
+    mutationFn: () => pim.chatgptImagesCallback(address),
+    onSuccess: () => {
+      setWaiting(false);
+      setAddress("");
+      queryClient.invalidateQueries({ queryKey: ["model"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const disconnect = useMutation({
+    mutationFn: pim.chatgptImagesLogout,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model"] }),
+    onError: (error) => toast.error(error.message),
+  });
+
+  return (
+    <Row
+      icon={<ChatGPTLogo className="size-5 text-foreground" />}
+      title={t("chatGPTImages")}
+      detail={
+        connected
+          ? t("chatGPTImagesConnected", { email: email ?? t("yourAccount") })
+          : t("chatGPTImagesHint")
+      }
+      actions={
+        connected ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => disconnect.mutate()}
+            disabled={disconnect.isPending}
+          >
+            {t("disconnect")}
+          </Button>
+        ) : (
+          !waiting && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => start.mutate()}
+              disabled={start.isPending}
+            >
+              {t("connect")}
+            </Button>
+          )
+        )
+      }
+    >
+      {!connected && waiting && (
+        <PasteAddress
+          why={t("chatGPTImagesWhyPaste")}
+          steps={[
+            t("chatGPTStepApprove"),
+            t("chatGPTImagesStepCopy"),
+            t("chatGPTStepPaste"),
+          ]}
+          placeholder="http://localhost:1455/auth/callback?code=…"
+          after={t("chatGPTAfterPaste")}
+          address={address}
+          onAddress={setAddress}
+          pending={finish.isPending}
+          onSubmit={() => finish.mutate()}
+          onCancel={() => {
+            setWaiting(false);
+            setAddress("");
+          }}
+        />
       )}
     </Row>
   );

@@ -11,8 +11,8 @@ import { text } from "./services";
  * counts as a model request against the space's daily limit, and is billed to
  * the deployment's Cloudflare account like any Workers AI request.
  *
- * The ChatGPT plan can't make images: OpenAI's plan sharing serves the
- * Responses API without its image generation tool.
+ * The ChatGPT plan's model sharing serves the Responses API without its image
+ * generation tool, so a plan makes images another way (../codex-images.ts).
  */
 export const IMAGES_EXTENSION = "pim.images";
 export const GENERATE_IMAGE = "generate_image";

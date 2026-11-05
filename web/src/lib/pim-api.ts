@@ -1020,6 +1020,8 @@ export type ModelSettings = {
     choices: ModelInfo[];
   };
   chatgpt: ChatGPTStatus & { error: string | null };
+  /** Whether the plan is connected for images, which is a sign-in of its own. */
+  chatgptImages: ChatGPTStatus;
   /** Providers besides Workers AI and the ChatGPT plan: the admin's for everyone, then the person's own. */
   providers: ModelProvider[];
 };
@@ -1587,6 +1589,15 @@ export const pim = {
       body: JSON.stringify({ url }),
     }),
   chatgptLogout: () => call<ChatGPTStatus>("/chatgpt", { method: "DELETE" }),
+  chatgptImagesLogin: () =>
+    call<{ url: string }>("/chatgpt/images/login", { method: "POST" }),
+  chatgptImagesCallback: (url: string) =>
+    call<ChatGPTStatus>("/chatgpt/images/callback", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  chatgptImagesLogout: () =>
+    call<ChatGPTStatus>("/chatgpt/images", { method: "DELETE" }),
   email: () => call<EmailState>("/email"),
   startEmail: (address: string) =>
     call<EmailState>("/email", {

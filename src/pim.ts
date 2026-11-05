@@ -66,6 +66,7 @@ import {
 	type Member,
 } from "./circles";
 import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
+import { CodexImages } from "./codex-images";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
@@ -522,6 +523,8 @@ export class Pim extends DurableAgent<Env> {
 	/** Model credentials (the ChatGPT plan's tokens), refreshed by pi-ai. */
 	readonly credentials = new SqlCredentialStore(this.store);
 	readonly chatgpt = new ChatGPT(this.store, chatgptCredentials(this.credentials));
+	/** The ChatGPT plan's images, through Codex's own sign-in. */
+	readonly codexImages = new CodexImages(this.store, this.credentials);
 	#modelCatalog: Models | undefined;
 	/** Long-term memory: an OptMem-style log and summary tree for each scope, each conversation reading those of its agent. */
 	readonly memory = createOptMem({
@@ -4768,6 +4771,7 @@ export class Pim extends DurableAgent<Env> {
 						choices: utilityChoices.map(describeModel),
 					},
 					chatgpt: { ...chatgpt, error: chatgptError },
+					chatgptImages: await this.codexImages.status(),
 					// The providers the person can use besides Workers AI and the ChatGPT plan: the admin's, then their own.
 					providers: providers.map(({ catalogId, shared, provider }) => ({ ...providerInfo(provider), provider: catalogId, shared })),
 				};
@@ -5197,6 +5201,29 @@ export class Pim extends DurableAgent<Env> {
 				if (this.chosenModel().provider === CHATGPT_PROVIDER) await this.chooseModel(null);
 				else await this.#syncModels();
 				return this.chatgpt.status();
+			},
+		],
+
+		["GET", "/chatgpt/images", () => this.codexImages.status()],
+		["POST", "/chatgpt/images/login", () => this.codexImages.startLogin()],
+		[
+			"POST",
+			"/chatgpt/images/callback",
+			async (_params, request) => {
+				const { url } = await readJson<{ url: string }>(request);
+				if (typeof url !== "string" || url.trim() === "") throw new HttpError(400, "url must be the address the browser landed on");
+				const status = await this.codexImages.finishLogin(url);
+				this.#imagesChanged();
+				return status;
+			},
+		],
+		[
+			"DELETE",
+			"/chatgpt/images",
+			async () => {
+				await this.codexImages.logout();
+				this.#imagesChanged();
+				return this.codexImages.status();
 			},
 		],
 
@@ -5994,6 +6021,13 @@ export class Pim extends DurableAgent<Env> {
 		this.#reinstallApprovals();
 	}
 
+	/** The ChatGPT plan's images were connected or disconnected: `generate_image` changes models from the next request, in chats begun before too. */
+	#imagesChanged(): void {
+		if (!this.registry.snapshot().extension("pim.approvals")) return;
+		this.#installImageGeneration();
+		this.#reinstallApprovals();
+	}
+
 	#directory() {
 		return this.env.Directory.getByName("directory");
 	}
@@ -6054,9 +6088,10 @@ export class Pim extends DurableAgent<Env> {
 		return imageModel && ai ? workersAiImageModel(ai, imageModel) : null;
 	}
 
-	/** `generate_image`, where the deployment has an image model. Each image counts as a model request. */
+	/** `generate_image`, with the ChatGPT plan's images while it's signed in for them, else where the deployment has an image model. Each image counts as a model request. */
 	#installImageGeneration(): void {
-		const model = this.imageModel();
+		const plan = this.codexImages.connected();
+		const model = plan ? this.codexImages.model() : this.imageModel();
 		if (!model) return;
 		// Images are saved to the person's files, on their computer: without one, the extension is there with no tool.
 		if (!this.computer.paired()) {
@@ -6068,7 +6103,7 @@ export class Pim extends DurableAgent<Env> {
 				model,
 				reserve: () => {
 					this.#assertOpen();
-					const reserved = this.usage.reserveModel(CLOUDFLARE_PROVIDER_ID, model.id);
+					const reserved = this.usage.reserveModel(plan ? CHATGPT_PROVIDER : CLOUDFLARE_PROVIDER_ID, model.id);
 					return reserved.ok ? null : reserved.refusal;
 				},
 				save: async (path, bytes) => (await this.files.write(path, bytes)).path,

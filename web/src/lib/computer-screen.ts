@@ -303,6 +303,9 @@ export class ComputerScreen {
         computer:
           typeof payload.computer_ms === "number" ? payload.computer_ms : null,
       });
+    } else if (message.type === "pim_clipboard_text") {
+      if (typeof payload.text === "string" && payload.text)
+        void navigator.clipboard?.writeText(payload.text).catch(() => {});
     } else if (message.type === "hello") {
       this.#acks =
         Array.isArray(payload.capabilities) &&
@@ -517,6 +520,13 @@ export class ComputerScreen {
         // Pasting brings this device's clipboard over, as typed text (below), rather than pasting the computer's own.
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v")
           return;
+        // Copying and cutting happen on the computer; what they copied is brought here a moment later.
+        if (
+          state === "down" &&
+          (event.ctrlKey || event.metaKey) &&
+          ["c", "x"].includes(event.key.toLowerCase())
+        )
+          setTimeout(() => this.#control("pim_clipboard", {}), 250);
         const input = keyEvent(event, state);
         if (!input) return;
         event.preventDefault();

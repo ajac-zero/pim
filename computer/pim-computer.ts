@@ -102,6 +102,8 @@ export type DriverResult = { readonly content: readonly unknown[]; readonly stru
 export type ScreenHost = {
 	/** Opens a stream of the desktop, with the person's input going back into it. */
 	open(onMessage: (data: string | Uint8Array) => void, onClose: () => void): Promise<ScreenChannel>;
+	/** The text on the desktop's clipboard, for the person to copy back out; empty when there is none. */
+	clipboard(): Promise<string>;
 };
 
 export type ScreenChannel = { send(data: string): void; close(): void };
@@ -220,6 +222,11 @@ export class Link {
 		// The space times its round trip to here, for the Computer page.
 		if (op === "ping") return null;
 		if (op === "screen_open") return this.#openScreen(args.channel);
+		if (op === "screen_clipboard") {
+			const screen = this.#machine.screen;
+			if (!screen) throw new CallError("This computer doesn't stream its desktop: it needs Cua's cua-spacesd.", "ENOSYS");
+			return screen.clipboard();
+		}
 		if (op === "screen_close") {
 			const screen = this.#screens.get(Number(args.channel));
 			this.#screens.delete(Number(args.channel));
@@ -942,6 +949,13 @@ export function spacesdDriver(base: string, tokenFile: string): DriverHost {
  */
 export function spacesdScreen(base: string, tokenFile: string): ScreenHost {
 	return {
+		async clipboard() {
+			const token = (await fs.readFile(tokenFile, "utf8").catch(() => "")).trim();
+			if (!token) throw new CallError(`This computer doesn't stream its desktop: there's no cua-spacesd token at ${tokenFile}.`, "ENOSYS");
+			// GetClipboardResponse: its content (1), whose text is its first field.
+			const content = protoFields(await grpcWeb(base, token, "cua.env.v1.ComputerService/GetClipboard", [])).get(1);
+			return new TextDecoder().decode(content ? protoFields(content).get(1) : undefined);
+		},
 		async open(onMessage, onClose) {
 			let token: string;
 			try {

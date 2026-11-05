@@ -151,7 +151,7 @@ import {
 import { describeSchedule, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_PING, SCREEN_TAG } from "./computer";
+import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
 import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -6242,6 +6242,12 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
+	/** The app asks for what was copied on the computer, to copy it to the person's own device; the answer is `pim_clipboard_text`, with no text when there was none to read. */
+	async #screenClipboard(connection: Connection<SocketState>): Promise<void> {
+		const text = await this.computer.clipboard().catch(() => "");
+		if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "pim_clipboard_text", payload: { text } }));
+	}
+
 	/**
 	 * Someone takes a chat's window over on this socket (`?session=`, as the
 	 * socket's state): it gets the page as pictures, and its mouse and
@@ -6300,6 +6306,7 @@ export class Pim extends DurableAgent<Env> {
 		if (typeof raw !== "string") return;
 		if (this.#isScreenViewer(connection)) {
 			if (raw.startsWith(SCREEN_PING)) return this.#screenPing(connection, raw);
+			if (raw.startsWith(SCREEN_CLIPBOARD)) return this.#screenClipboard(connection);
 			if (connection.state?.channel) this.computer.screenInput(connection.state.channel, raw);
 			return;
 		}

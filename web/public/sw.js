@@ -1,8 +1,104 @@
 // Pim's service worker: shows the notifications Pim pushes while the app is
-// closed, and opens the right page when one is tapped.
+// closed, and opens the right page when one is tapped. It also keeps the app
+// on this device, so it opens without waiting on the network.
 
-self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+/** The app kept on this device: its page, the files the page starts with, and those loaded since. */
+const APP_CACHE = "pim-app-v1";
+/** Every page of the app is the same page; it's kept as this one. */
+const APP_PAGE = "/";
+/** What the Worker answers itself (`run_worker_first` in wrangler.jsonc and wrangler.preview.jsonc): never the app's page. */
+const WORKER_FIRST = ["/api", "/api/*", "/install.sh", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/__dev/*", "/p/*"];
+
+const workerFirst = (path) =>
+  WORKER_FIRST.some((rule) => (rule.endsWith("/*") ? path.startsWith(rule.slice(0, -1)) : path === rule));
+
+self.addEventListener("install", (event) => {
+  self.skipWaiting();
+  // Kept now, the app opens from here on the next visit.
+  event.waitUntil(caches.open(APP_CACHE).then((cache) => updateApp(cache, null)).catch(() => {}));
+});
+self.addEventListener("activate", (event) =>
+  event.waitUntil(
+    (async () => {
+      for (const name of await caches.keys()) if (name.startsWith("pim-app-") && name !== APP_CACHE) await caches.delete(name);
+      await self.clients.claim();
+    })(),
+  ),
+);
+
+self.addEventListener("fetch", (event) => {
+  const { request } = event;
+  if (request.method !== "GET") return;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+  // A page of the app; a file such as an icon, or what the Worker answers, comes from the network.
+  if (request.mode === "navigate" && !workerFirst(url.pathname) && !url.pathname.split("/").pop().includes(".")) {
+    event.respondWith(openApp(event));
+  } else if (url.pathname.startsWith("/assets/")) {
+    event.respondWith(appFile(event));
+  } else if (url.pathname === "/api/themes.css") {
+    // The page waits on the colors before it draws: the kept ones, refreshed for the next visit.
+    event.respondWith(keptThenRefreshed(event));
+  }
+});
+
+/** The kept page at once, while a newer one is looked for; the network's, the first time. */
+async function openApp(event) {
+  const cache = await caches.open(APP_CACHE);
+  const kept = await cache.match(APP_PAGE);
+  if (kept) {
+    event.waitUntil(kept.clone().text().then((page) => updateApp(cache, page)).catch(() => {}));
+    return kept;
+  }
+  const response = await fetch(event.request);
+  event.waitUntil(updateApp(cache, null, response.clone()).catch(() => {}));
+  return response;
+}
+
+/**
+ * Keeps the network's page in place of `kept` when it differs, but only once
+ * every file it starts with is kept too, so the two never disagree. Files of
+ * the older app are dropped; the open pages hear that a newer one is here.
+ */
+async function updateApp(cache, kept, response) {
+  response ??= await fetch(APP_PAGE, { cache: "no-cache" });
+  if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) return;
+  const page = await response.text();
+  if (page === kept) return;
+  const files = [...new Set([...page.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g)].map((match) => match[1]))];
+  // Only a built app is kept: the development server's page loads its code from elsewhere.
+  if (!files.some((file) => file.endsWith(".js"))) return;
+  await cache.addAll(files);
+  await cache.put(APP_PAGE, new Response(page, { headers: response.headers }));
+  for (const request of await cache.keys()) {
+    const { pathname } = new URL(request.url);
+    if (pathname.startsWith("/assets/") && !files.includes(pathname)) await cache.delete(request);
+  }
+  if (kept === null) return;
+  for (const client of await self.clients.matchAll({ type: "window" })) client.postMessage({ type: "pim-updated" });
+}
+
+/** A built file never changes under its name: the kept one, or the network's, kept. */
+async function appFile(event) {
+  const cache = await caches.open(APP_CACHE);
+  const kept = await cache.match(event.request);
+  if (kept) return kept;
+  const response = await fetch(event.request);
+  if (response.ok) event.waitUntil(cache.put(event.request, response.clone()));
+  return response;
+}
+
+async function keptThenRefreshed(event) {
+  const cache = await caches.open(APP_CACHE);
+  const kept = await cache.match(event.request);
+  const fresh = fetch(event.request).then(async (response) => {
+    if (response.ok) await cache.put(event.request, response.clone());
+    return response;
+  });
+  if (!kept) return fresh;
+  event.waitUntil(fresh.catch(() => {}));
+  return kept;
+}
 
 /** Device alerts use the agent's image, or an SVG of its symbol in the default palette. */
 async function notificationIcon(agent) {

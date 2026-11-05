@@ -40,7 +40,6 @@ import {
   Users,
   X,
 } from "~/components/icons";
-import { newChatSearch } from "~/components/new-chat";
 import {
   ProfilePopover,
   ProfilePopoverTrigger,
@@ -82,6 +81,7 @@ import {
   profileQuery,
   sessionsQuery,
 } from "~/lib/queries";
+import { newChatSearch } from "~/lib/start-chat";
 import { CHAT_DRAG_TYPE, closeTab, openTab } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 import { version } from "../../../package.json";

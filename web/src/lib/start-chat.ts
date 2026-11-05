@@ -47,3 +47,17 @@ export function useStartChat(agent: string | undefined) {
 
   return { start, starting };
 }
+
+/**
+ * The search that opens New chat over the page: with `agent`, a chat with
+ * that one rather than the open chat's agent or the majordomo, and with
+ * `prompt`, a message to start from.
+ */
+export const newChatSearch =
+  (agent?: string, prompt?: string) =>
+  <T extends object>(prev: T) => ({
+    ...prev,
+    dialog: "new-chat" as const,
+    ...(agent && { agent }),
+    ...(prompt && { prompt }),
+  });

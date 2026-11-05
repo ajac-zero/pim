@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
-import { ArtifactIcon } from "~/components/artifact";
+import { ArtifactIcon } from "~/components/artifact-icon";
 import {
   ModelMark,
   ModelMenuItems,

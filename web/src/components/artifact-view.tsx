@@ -6,7 +6,6 @@ import {
   ARTIFACT_LANGUAGES,
   ArtifactPreview,
   ArtifactPrint,
-  formatBytes,
 } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
 import {
@@ -26,7 +25,6 @@ import {
   Users,
   X,
 } from "~/components/icons";
-import { newChatSearch } from "~/components/new-chat";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import {
@@ -54,7 +52,8 @@ import {
   artifactVersionQuery,
   circlesQuery,
 } from "~/lib/queries";
-import { cn } from "~/lib/utils";
+import { newChatSearch } from "~/lib/start-chat";
+import { cn, formatBytes } from "~/lib/utils";
 
 /**
  * An artifact with its versions: a preview or its source, the person's own

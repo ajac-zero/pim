@@ -20,7 +20,6 @@ import {
 } from "~/components/chat/reply-blocks";
 import { FileLink } from "~/components/file-link";
 import { useI18n } from "~/components/i18n";
-import { newChatSearch } from "~/components/new-chat";
 import {
   CodeBlock,
   CodeBlockCopyButton,
@@ -35,6 +34,7 @@ import {
   profileQuery,
   sessionsQuery,
 } from "~/lib/queries";
+import { newChatSearch } from "~/lib/start-chat";
 import { cn } from "~/lib/utils";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";

@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
-import { formatBytes } from "~/components/artifact";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { Download, Trash2, X } from "~/components/icons";
@@ -11,7 +10,7 @@ import { CodeBlock } from "~/components/ui/code-block";
 import { baseName, displayPath, parentOf, previewOf } from "~/lib/files";
 import { ApiError, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
 import { filesQuery } from "~/lib/queries";
-import { cn } from "~/lib/utils";
+import { cn, formatBytes } from "~/lib/utils";
 
 /** The largest text file the page shows; bigger ones are for downloading. */
 const MAX_TEXT_PREVIEW = 1_000_000;

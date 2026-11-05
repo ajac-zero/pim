@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
@@ -19,7 +20,25 @@ export default defineConfig(({ mode }) => {
   const target = env.PIM_API_URL ?? "http://localhost:8787";
   const token = env.PIM_API_TOKEN;
 
+  // Names this build of the app by its source, so what an older one kept on a device is dropped (see `saved-queries.ts`).
+  const build = createHash("sha256");
+  const source = new URL("./src/", import.meta.url);
+  for (const file of readdirSync(source, {
+    recursive: true,
+    encoding: "utf8",
+  }).sort()) {
+    const path = new URL(file, source);
+    // The route tree is made from the routes, and only during a build.
+    if (file === "routeTree.gen.ts" || !statSync(path).isFile()) continue;
+    build.update(file).update(readFileSync(path));
+  }
+
   return {
+    define: {
+      "import.meta.env.PIM_BUILD": JSON.stringify(
+        build.digest("hex").slice(0, 16),
+      ),
+    },
     server: {
       port: 3000,
       host: true,

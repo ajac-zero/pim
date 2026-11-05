@@ -11,7 +11,14 @@ import {
   useParams,
   useRouterState,
 } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import {
@@ -22,8 +29,7 @@ import {
   sessionTitle,
   useAwaitingApproval,
 } from "~/components/app-sidebar";
-import { AppsDialog } from "~/components/apps-dialog";
-import { ActivityToggle } from "~/components/chat/activity";
+import { ActivityToggle } from "~/components/chat/activity-toggle";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import {
   CopyChatId,
@@ -31,19 +37,15 @@ import {
 } from "~/components/chat/copy-conversation";
 import { SessionCostMenu } from "~/components/chat/session-cost";
 import { CommandPalette } from "~/components/command-palette";
-import { DiscoverDialog } from "~/components/discover-dialog";
-import { GuestApp } from "~/components/guest-app";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { MeetMajordomo } from "~/components/majordomo-setup";
 import { MobileNav } from "~/components/mobile-nav";
-import { NewChatDialog } from "~/components/new-chat";
 import { RouteError } from "~/components/route-error";
 import {
   SETTINGS_TABS,
   SettingsDialog,
   type SettingsTab,
 } from "~/components/settings-dialog";
-import { SharingDialog } from "~/components/sharing-dialog";
 import { SignIn } from "~/components/sign-in";
 import { ThemeProvider } from "~/components/theme";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
@@ -84,6 +86,35 @@ type AppSearch = {
   panel?: SidebarPanel;
 };
 
+// The dialogs over the app bring much of what they draw, such as the composer
+// and approvals: they load after the app does, rather than before it draws.
+const NewChatDialog = lazy(() =>
+  import("~/components/new-chat").then((module) => ({
+    default: module.NewChatDialog,
+  })),
+);
+const SharingDialog = lazy(() =>
+  import("~/components/sharing-dialog").then((module) => ({
+    default: module.SharingDialog,
+  })),
+);
+const DiscoverDialog = lazy(() =>
+  import("~/components/discover-dialog").then((module) => ({
+    default: module.DiscoverDialog,
+  })),
+);
+const AppsDialog = lazy(() =>
+  import("~/components/apps-dialog").then((module) => ({
+    default: module.AppsDialog,
+  })),
+);
+/** Only a guest's account chats through this, so only a guest loads it. */
+const GuestApp = lazy(() =>
+  import("~/components/guest-app").then((module) => ({
+    default: module.GuestApp,
+  })),
+);
+
 export const Route = createRootRouteWithContext<RouterContext>()({
   validateSearch: (search: Record<string, unknown>): AppSearch => ({
     ...(DIALOGS.includes(search.dialog as AppDialog) && {
@@ -120,7 +151,9 @@ function Root() {
             {(role) =>
               // A guest only chats with the bot they joined through.
               role === "guest" ? (
-                <GuestApp />
+                <Suspense fallback={null}>
+                  <GuestApp />
+                </Suspense>
               ) : alone ? (
                 <Outlet />
               ) : (
@@ -153,11 +186,14 @@ function SignedIn({
     enabled: data?.signedIn === true && pushSupported(),
   });
   // An open socket would keep streaming after signing out. The sign-in screen takes the
-  // app's place, which unmounts every artifact frame; what was read of artifacts goes too.
+  // app's place, which unmounts every artifact frame; everything read of the space goes
+  // too, with what this device kept of it (see `saved-queries.ts`).
   useEffect(() => {
     if (!signedOut) return;
     pimClient.close();
-    queryClient.removeQueries({ queryKey: ["artifacts"] });
+    queryClient.removeQueries({
+      predicate: (query) => query.queryKey[0] !== "auth",
+    });
   }, [signedOut, queryClient]);
   if (error) {
     return (
@@ -497,15 +533,17 @@ function AppDialogs() {
         tab={tab}
         onOpenChange={close}
       />
-      <SharingDialog open={dialog === "sharing"} onOpenChange={close} />
-      <DiscoverDialog open={dialog === "discover"} onOpenChange={close} />
-      <AppsDialog open={dialog === "apps"} onOpenChange={close} />
-      <NewChatDialog
-        open={dialog === "new-chat"}
-        agent={agent}
-        prompt={prompt}
-        onOpenChange={close}
-      />
+      <Suspense fallback={null}>
+        <SharingDialog open={dialog === "sharing"} onOpenChange={close} />
+        <DiscoverDialog open={dialog === "discover"} onOpenChange={close} />
+        <AppsDialog open={dialog === "apps"} onOpenChange={close} />
+        <NewChatDialog
+          open={dialog === "new-chat"}
+          agent={agent}
+          prompt={prompt}
+          onOpenChange={close}
+        />
+      </Suspense>
     </>
   );
 }

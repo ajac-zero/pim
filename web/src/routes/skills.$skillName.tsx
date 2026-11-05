@@ -4,7 +4,6 @@ import { useState } from "react";
 import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import { formatBytes } from "~/components/artifact";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import {
@@ -40,7 +39,7 @@ import {
   skillFileUrl,
 } from "~/lib/pim-api";
 import { agentsQuery, skillQuery, skillVersionQuery } from "~/lib/queries";
-import { cn } from "~/lib/utils";
+import { cn, formatBytes } from "~/lib/utils";
 
 export const Route = createFileRoute("/skills/$skillName")({
   validateSearch: (search: Record<string, unknown>): { v?: number } => {

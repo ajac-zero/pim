@@ -38,7 +38,6 @@ import {
   WriteYourOwn,
 } from "~/components/majordomo-setup";
 import { AgentMemoryField } from "~/components/memory-settings";
-import { newChatSearch } from "~/components/new-chat";
 import { Button } from "~/components/ui/button";
 import {
   Collapsible,
@@ -79,6 +78,7 @@ import {
   extensionsQuery,
   majordomoQuery,
 } from "~/lib/queries";
+import { newChatSearch } from "~/lib/start-chat";
 
 const EMPTY: AgentInput = {
   name: "",

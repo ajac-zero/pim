@@ -2,16 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
-import {
-  Code,
-  FileCode2,
-  FileText,
-  ImageIcon,
-  ShieldAlert,
-  Workflow,
-} from "~/components/icons";
+import { ShieldAlert } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   ApiError,
@@ -422,32 +416,6 @@ export function ArtifactPrint({
   );
 }
 
-export function ArtifactIcon({
-  kind,
-  className,
-}: {
-  kind: ArtifactKind;
-  className?: string;
-}) {
-  const Icon = {
-    html: FileCode2,
-    markdown: FileText,
-    svg: ImageIcon,
-    mermaid: Workflow,
-    jsx: Code,
-  }[kind];
-  return <Icon className={className} />;
-}
-
-/** What each kind is called, short, next to an artifact's name. */
-export const ARTIFACT_KIND_NAMES: Record<ArtifactKind, string> = {
-  html: "HTML",
-  markdown: "Markdown",
-  svg: "SVG",
-  mermaid: "Mermaid",
-  jsx: "React",
-};
-
 /** The language an artifact's source is highlighted as. */
 export const ARTIFACT_LANGUAGES = {
   html: "html",
@@ -550,16 +518,4 @@ export function artifactReference(output: unknown): ArtifactReference | null {
     // Not JSON: an error the tool reported.
   }
   return null;
-}
-
-/** A size for people: bytes, kB or MB. */
-export function formatBytes(
-  bytes: number,
-  formatNumber: (value: number, options?: Intl.NumberFormatOptions) => string,
-): string {
-  if (bytes < 1000) return `${formatNumber(bytes)} B`;
-  if (bytes < 1_000_000) {
-    return `${formatNumber(bytes / 1000, { maximumFractionDigits: 1 })} kB`;
-  }
-  return `${formatNumber(bytes / 1_000_000, { maximumFractionDigits: 1 })} MB`;
 }

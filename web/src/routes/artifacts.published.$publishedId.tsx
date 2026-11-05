@@ -2,11 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
-import {
-  ARTIFACT_KIND_NAMES,
-  ArtifactPreview,
-  ArtifactPrint,
-} from "~/components/artifact";
+import { ArtifactPreview, ArtifactPrint } from "~/components/artifact";
+import { ARTIFACT_KIND_NAMES } from "~/components/artifact-icon";
 import { useI18n } from "~/components/i18n";
 import { ArrowLeft, Copy, Printer, Trash2 } from "~/components/icons";
 import { Button } from "~/components/ui/button";

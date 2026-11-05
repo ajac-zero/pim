@@ -508,6 +508,15 @@ describe("extensions", () => {
 		expect(css).toContain('.dark,\n[data-theme="tokyo-night"].dark {\n  --background: #1a1b26;');
 		expect(css).toContain('[data-theme="nord"].dark {\n  --background: #2e3440;');
 		expect(css).toContain('[data-theme="nord"].dark .shiki-token {\n  color: var(--shiki-nord-dark);');
+
+		// Browsers ask again on every load; until a deploy changes them, they hear nothing new.
+		const etag = sheet.headers.get("ETag")!;
+		const again = await exports.default.fetch(apiUrl("/themes.css"), { headers: { "If-None-Match": etag } });
+		expect(again.status).toBe(304);
+		expect(await again.text()).toBe("");
+		const listAgain = await exports.default.fetch(apiUrl("/themes"), { headers: { "If-None-Match": etag } });
+		expect(listAgain.status).toBe(200);
+		expect(listAgain.headers.get("ETag")).not.toBe(etag);
 	});
 
 	it("lets themes select bundled fonts and icons independently, with system defaults for older themes", () => {

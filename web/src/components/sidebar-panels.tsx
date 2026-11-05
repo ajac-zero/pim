@@ -8,11 +8,7 @@ import {
 import { type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import {
-  ARTIFACT_KIND_NAMES,
-  ArtifactIcon,
-  formatBytes,
-} from "~/components/artifact";
+import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
 import { useI18n } from "~/components/i18n";
 import {
   ArrowLeft,
@@ -64,7 +60,7 @@ import {
   sharedArtifactsQuery,
   skillsQuery,
 } from "~/lib/queries";
-import { cn } from "~/lib/utils";
+import { cn, formatBytes } from "~/lib/utils";
 
 /*
  * What the sidebar shows beside the rail besides your chats. The open chat

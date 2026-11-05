@@ -266,6 +266,57 @@ describe("the computer", () => {
 		expect(paintings.length).toBe(before.paintings + 1);
 	});
 
+	it("draws with the ChatGPT plan while it's signed in for images, and refreshes the sign-in", async () => {
+		const jwt = (claims: Record<string, unknown>) => `e30.${btoa(JSON.stringify(claims)).replace(/=+$/, "")}.sig`;
+		const auth = { "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } };
+		// The first access token is spent as soon as it's issued, so the next image refreshes it.
+		const tokens = [
+			{ access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 60, ...auth }), refresh_token: "refresh-1", id_token: jwt({ email: "me@example.com", ...auth }) },
+			{ access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600, ...auth }), refresh_token: "refresh-2" },
+		];
+		const refreshed = tokens[1]!.access_token;
+		const calls: { url: string; headers: Headers; body: string }[] = [];
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			const { origin, pathname } = new URL(request.url);
+			if (origin !== "https://auth.openai.com" && origin !== "https://chatgpt.com") return realFetch(input, init);
+			calls.push({ url: request.url, headers: request.headers, body: await request.text() });
+			if (pathname === "/oauth/token") return Response.json(tokens.shift());
+			return Response.json({ data: [{ b64_json: btoa(String.fromCharCode(...PNG)) }] });
+		});
+		try {
+			const { url } = (await post("/chatgpt/images/login")).body;
+			const state = new URL(url).searchParams.get("state");
+			expect(new URL(url)).toMatchObject({ origin: "https://auth.openai.com", pathname: "/oauth/authorize" });
+			const stranger = await post("/chatgpt/images/callback", { url: "http://localhost:1455/auth/callback?code=abc&state=other" });
+			expect(stranger.status).toBe(400);
+			const connected = await post("/chatgpt/images/callback", { url: `http://localhost:1455/auth/callback?code=abc&state=${state}` });
+			expect(connected.body).toEqual({ connected: true, email: "me@example.com" });
+			expect(Object.fromEntries(new URLSearchParams(calls[0]!.body))).toMatchObject({ grant_type: "authorization_code", code: "abc", redirect_uri: "http://localhost:1455/auth/callback" });
+
+			const before = paintings.length;
+			const made = await callTool("generate_image", { prompt: "A red fox asleep in snow", shape: "landscape" });
+			expect(made.isError).toBe(false);
+			expect(JSON.parse(made.text).image).toMatchObject({ model: "gpt-image-2", type: "image/png" });
+			// Workers AI wasn't asked; the plan was, as an expired token refreshed first.
+			expect(paintings.length).toBe(before);
+			expect(JSON.parse(calls[1]!.body)).toEqual({ client_id: "app_EMoamEEZ73f0CkXaXp7hrann", grant_type: "refresh_token", refresh_token: "refresh-1" });
+			const drawn = calls[2]!;
+			expect(drawn.url).toBe("https://chatgpt.com/backend-api/codex/images/generations");
+			expect(drawn.headers.get("authorization")).toBe(`Bearer ${refreshed}`);
+			expect(drawn.headers.get("chatgpt-account-id")).toBe("acct-1");
+			expect(JSON.parse(drawn.body).prompt).toBe("A red fox asleep in snow\n\nAspect ratio: 3:2, wide landscape (horizontal) canvas.");
+
+			// Disconnected, images are Workers AI's again.
+			expect((await api("/chatgpt/images", { method: "DELETE" })).body).toEqual({ connected: false, email: null });
+			await callTool("generate_image", { prompt: "A red fox asleep in snow" });
+			expect(paintings.length).toBe(before + 1);
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
 	it("is offline while it isn't connected, with the same tools", async () => {
 		computer.socket.close(1000, "Going away");
 		await vi.waitFor(async () => expect((await status()).state).toBe("offline"));

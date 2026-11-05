@@ -36,7 +36,7 @@ import { ALGORITHMS, type Assertion, type Registration, verifyAssertion, verifyR
 
 export { Auth } from "./store";
 
-export type Role = "admin" | "member";
+export type Role = "admin" | "member" | "guest";
 
 /** One person's sign-in, as the Worker resolved it from their stable owner ID. */
 export type AuthSite = {

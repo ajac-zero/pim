@@ -28,6 +28,7 @@ export { Auth, Directory, Gallery } from "../src/index";
  *   agent is calling as what it is doing, and suggests three prompts from the last thing you said. `generate_image` draws Pim's icon.
  * - `GET /__dev/sign-in/<username>?returnTo=/path` signs the browser in as
  *   that person, making the account if it's new, with a passkey made here.
+ *   `&bot=<id>` makes a new account a guest of that shared bot.
  */
 
 const PREVIEW_MODEL = "preview-model";
@@ -225,7 +226,8 @@ async function devSignIn(request: Request, env: Env, ctx: ExecutionContext, user
 		const { code } = await env.Auth.getByName(account.ownerId).issueSetupCode(Date.now(), 60_000);
 		setup = ownedCode(account.ownerId, code);
 	} else {
-		const registered = await call("/register", { username });
+		const bot = url.searchParams.get("bot");
+		const registered = await call("/register", { username, ...(bot ? { bot } : {}) });
 		if (!registered.ok) return registered;
 		setup = ((await registered.json()) as { setup: string }).setup;
 	}

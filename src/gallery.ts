@@ -27,6 +27,11 @@ import type { ArtifactFile, ArtifactKind } from "./artifacts";
  * The admin also chooses an agent everyone starts with: a copy of one of
  * theirs, which each new account gets besides its majordomo; and adds apps
  * anyone can connect besides the extensions' (`custom/<app>`).
+ *
+ * And the admin shares bots: copies of their agents, kept like templates,
+ * whose public link lets anyone join as a guest who chats with that bot
+ * alone (./accounts.ts). Sharing again replaces the copy, which guests'
+ * copies follow.
  */
 
 export type Profile = {
@@ -152,6 +157,35 @@ export type ArtifactToPublish = {
 	readonly size: number;
 };
 
+/** One of the admin's agents, shared through a public link: anyone who opens it can join as a guest and chat with a copy. */
+export type Bot = Contacts & {
+	readonly id: string;
+	/** The author's owner ID, which only the Worker reads. */
+	readonly ownerId: string;
+	/** The author's username. */
+	readonly author: string;
+	readonly authorName: string | null;
+	/** Which of the author's agents it is a copy of. */
+	readonly agentId: string;
+	readonly name: string;
+	readonly role: string;
+	readonly description: string;
+	readonly instructions: string;
+	readonly apps: readonly string[];
+	readonly blueprint: string | null;
+	readonly symbol: string | null;
+	readonly color: string | null;
+	/** When its uploaded icon was shared, to fetch it again when it changes; null without one. */
+	readonly icon: number | null;
+	/** When it was last shared: guests' copies follow it when this changes. */
+	readonly sharedAt: number;
+	/** Messages each guest may send it in a UTC day; null for the deployment's own limit. */
+	readonly dailyMessages: number | null;
+};
+
+/** What the public link shows of a bot: never its instructions. */
+export type BotCard = Pick<Bot, "id" | "author" | "authorName" | "name" | "description" | "symbol" | "color" | "icon">;
+
 /** A template in a list: everything but its instructions. */
 export type TemplateSummary = Omit<Template, "instructions">;
 
@@ -160,6 +194,9 @@ export const MAX_BIO = 280;
 export const MAX_TEMPLATES = 20;
 export const MAX_PUBLISHED_ARTIFACTS = 20;
 export const MAX_APP_NAME = 40;
+export const MAX_BOTS = 20;
+/** The most messages a day a bot may let each guest send. */
+export const MAX_DAILY_MESSAGES = 10_000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS profiles (
@@ -226,6 +263,27 @@ CREATE TABLE IF NOT EXISTS apps (
 	icon TEXT,
 	category TEXT,
 	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bots (
+	id TEXT PRIMARY KEY,
+	owner_id TEXT NOT NULL,
+	username TEXT NOT NULL,
+	agent_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	role TEXT NOT NULL,
+	description TEXT NOT NULL,
+	instructions TEXT NOT NULL,
+	apps TEXT NOT NULL,
+	contacts TEXT NOT NULL,
+	bundle TEXT NOT NULL,
+	blueprint TEXT,
+	symbol TEXT,
+	color TEXT,
+	icon_type TEXT,
+	icon_data BLOB,
+	shared_at INTEGER NOT NULL,
+	daily_messages INTEGER,
+	UNIQUE (owner_id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS providers (
 	id TEXT PRIMARY KEY,
@@ -296,6 +354,33 @@ const summaryOf = (row: Row, directory: () => readonly DirectoryApp[]): Template
 // Every column but the icon's bytes, which only its own route reads.
 const WITH_AUTHOR =
 	"SELECT t.id, t.owner_id, t.username, t.agent_id, t.name, t.role, t.description, t.instructions, t.apps, t.team, t.contacts, t.bundle, t.blueprint, t.symbol, t.color, t.icon_data IS NOT NULL AS has_icon, t.published_at, t.uses, p.display_name FROM templates t LEFT JOIN profiles p ON p.owner_id = t.owner_id";
+
+// Every column of a bot but its icon's bytes.
+const BOT =
+	"SELECT b.id, b.owner_id, b.username, b.agent_id, b.name, b.role, b.description, b.instructions, b.apps, b.contacts, b.bundle, b.blueprint, b.symbol, b.color, b.icon_data IS NOT NULL AS has_icon, b.shared_at, b.daily_messages, p.display_name FROM bots b LEFT JOIN profiles p ON p.owner_id = b.owner_id";
+
+function botOf(row: Row, directory: () => readonly DirectoryApp[]): Bot {
+	const apps = storedApps(JSON.parse(String(row.apps)) as unknown[], directory);
+	return {
+		id: String(row.id),
+		ownerId: String(row.owner_id),
+		author: String(row.username),
+		authorName: optional(row.display_name),
+		agentId: String(row.agent_id),
+		name: String(row.name),
+		role: String(row.role),
+		description: String(row.description),
+		instructions: String(row.instructions),
+		apps,
+		...contactsOf(row, apps),
+		blueprint: optional(row.blueprint),
+		symbol: optional(row.symbol),
+		color: optional(row.color),
+		icon: Number(row.has_icon) === 1 ? Number(row.shared_at) : null,
+		sharedAt: Number(row.shared_at),
+		dailyMessages: row.daily_messages === null ? null : Number(row.daily_messages),
+	};
+}
 
 // Every column but the files, which only opening one reads.
 const PUBLISHED_ARTIFACT =
@@ -570,10 +655,10 @@ export class Gallery extends DurableObject<Env> {
 		}
 	}
 
-	/** Forgets the icons of templates no longer published, and of an agent everyone starts with no longer chosen. */
+	/** Forgets the icons of templates and bots no longer shared, and of an agent everyone starts with no longer chosen. */
 	#pruneIcons(): void {
 		this.#sql(
-			"DELETE FROM bundle_icons WHERE (holder = 'default' AND NOT EXISTS (SELECT 1 FROM default_agent)) OR (holder != 'default' AND holder NOT IN (SELECT id FROM templates))",
+			"DELETE FROM bundle_icons WHERE (holder = 'default' AND NOT EXISTS (SELECT 1 FROM default_agent)) OR (holder != 'default' AND holder NOT IN (SELECT id FROM templates) AND holder NOT IN (SELECT id FROM bots))",
 		);
 	}
 
@@ -723,6 +808,59 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql("DELETE FROM published_artifacts WHERE id = ?", id).rowsWritten > 0;
 	}
 
+	/**
+	 * Shares one of the author's agents as a bot, or replaces what was shared
+	 * of it, with how many messages a day each guest may send it.
+	 */
+	shareBot(ownerId: string, username: string, agent: PublishedAgent, dailyMessages: number | null): Bot {
+		if (dailyMessages !== null && !(Number.isSafeInteger(dailyMessages) && dailyMessages >= 1 && dailyMessages <= MAX_DAILY_MESSAGES)) {
+			throw new HttpError(400, `dailyMessages must be a whole number from 1 to ${MAX_DAILY_MESSAGES}, or null for this Pim's own limit`);
+		}
+		const [known] = this.#sql("SELECT id FROM bots WHERE owner_id = ? AND agent_id = ?", ownerId, agent.id).toArray();
+		if (!known && Number(this.#sql("SELECT COUNT(*) AS n FROM bots WHERE owner_id = ?", ownerId).one().n) >= MAX_BOTS) {
+			throw new HttpError(429, `You can share up to ${MAX_BOTS} bots.`);
+		}
+		const id = known ? String(known.id) : `b_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+		const now = Date.now();
+		this.#sql(
+			`INSERT INTO bots (id, owner_id, username, agent_id, name, role, description, instructions, apps, contacts, bundle, blueprint, symbol, color, icon_type, icon_data, shared_at, daily_messages) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name, role = excluded.role, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, contacts = excluded.contacts, bundle = excluded.bundle,
+			blueprint = excluded.blueprint, symbol = excluded.symbol, color = excluded.color, icon_type = excluded.icon_type, icon_data = excluded.icon_data, shared_at = excluded.shared_at, daily_messages = excluded.daily_messages`,
+			id,
+			ownerId,
+			username,
+			agent.id,
+			...copyOf(agent, now),
+			now,
+			dailyMessages,
+		);
+		this.#keepIcons(id, agent);
+		return this.bot(id)!;
+	}
+
+	bot(id: string): Bot | null {
+		const [row] = this.#sql(`${BOT} WHERE b.id = ?`, id).toArray();
+		return row ? botOf(row, this.#directory) : null;
+	}
+
+	/** What the author shared of one of their agents, if they did. */
+	botOf(ownerId: string, agentId: string): Bot | null {
+		const [row] = this.#sql(`${BOT} WHERE b.owner_id = ? AND b.agent_id = ?`, ownerId, agentId).toArray();
+		return row ? botOf(row, this.#directory) : null;
+	}
+
+	/** A bot's uploaded icon, if it was shared with one. */
+	botIcon(id: string): AgentIcon | null {
+		return iconOf(this.#sql("SELECT icon_type, icon_data FROM bots WHERE id = ?", id).toArray()[0]);
+	}
+
+	/** Turns a bot's link off. Its guests keep their accounts and chats, and can't send it anything more. */
+	unshareBot(ownerId: string, agentId: string): boolean {
+		const removed = this.#sql("DELETE FROM bots WHERE owner_id = ? AND agent_id = ?", ownerId, agentId).rowsWritten > 0;
+		this.#pruneIcons();
+		return removed;
+	}
+
 	/** The agent everyone starts with besides their majordomo; null when the admin chose none. */
 	defaultAgent(): DefaultAgent | null {
 		const [row] = this.#sql("SELECT * FROM default_agent WHERE id = 1").toArray();
@@ -775,12 +913,13 @@ export class Gallery extends DurableObject<Env> {
 		return cleared;
 	}
 
-	/** Forgets a person: their profile, everything they published (agents and artifacts), and the agent everyone starts with if it was theirs. Run when their account is deleted. */
+	/** Forgets a person: their profile, everything they published (agents and artifacts) or shared (bots), and the agent everyone starts with if it was theirs. Run when their account is deleted. */
 	forgetOwner(ownerId: string): void {
 		this.#sql("DELETE FROM templates WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM published_artifacts WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM profiles WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM default_agent WHERE owner_id = ?", ownerId);
+		this.#sql("DELETE FROM bots WHERE owner_id = ?", ownerId);
 		this.#pruneIcons();
 	}
 
@@ -788,7 +927,8 @@ export class Gallery extends DurableObject<Env> {
 	holds(ownerId: string): boolean {
 		return (
 			this.#sql(
-				"SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? UNION SELECT 1 FROM published_artifacts WHERE owner_id = ? UNION SELECT 1 FROM default_agent WHERE owner_id = ? LIMIT 1",
+				"SELECT 1 FROM profiles WHERE owner_id = ? UNION SELECT 1 FROM templates WHERE owner_id = ? UNION SELECT 1 FROM published_artifacts WHERE owner_id = ? UNION SELECT 1 FROM default_agent WHERE owner_id = ? UNION SELECT 1 FROM bots WHERE owner_id = ? LIMIT 1",
+				ownerId,
 				ownerId,
 				ownerId,
 				ownerId,

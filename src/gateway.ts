@@ -2,7 +2,19 @@ import { getAgentByName } from "agents";
 import pimConfig from "../pim.config";
 import { diagramPage } from "./artifacts";
 import { deploymentSettings } from "./deployment";
-import { accountApi, adminApi, contentOrigin, handleRegistration, resolveAccount, servePublicArtifact, siteFor, sites, socialApi } from "./accounts";
+import {
+	accountApi,
+	adminApi,
+	contentOrigin,
+	guestRequest,
+	handleRegistration,
+	resolveAccount,
+	servePublicArtifact,
+	servePublicBot,
+	siteFor,
+	sites,
+	socialApi,
+} from "./accounts";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
 import { installScript } from "./install-script";
@@ -31,6 +43,9 @@ import { PimThemes } from "./themes";
  *   anyone signs in.
  * - `/api/shared/<owner>/<link>`: public, what a chat's public link shows
  *   (./chat-links.ts), which the app's page at `/shared/<owner>/<link>` draws.
+ * - `/api/bots/<id>`: public, what a bot's link shows before anyone joins
+ *   through it, which the app's page at `/b/<id>` draws. A guest who joined
+ *   reaches only what chatting with that bot needs (./accounts.ts).
  * - `/auth/*`: registration (./accounts.ts) and sign-in (./auth): passkeys, and
  *   accounts at Google, GitHub or a single sign-on provider.
  * - `/mcp`: the person's space as an MCP server (./mcp-server.ts), for MCP
@@ -76,6 +91,9 @@ function givenToken(request: Request): string | null {
 
 /** Whose request this is, and whether it came with a browser's session (some things an API token can't do). */
 type Caller = { readonly account: Account; readonly viaSession: boolean };
+
+/** Guests chat with their bot in the app, and connect nothing else to their space. */
+const notForGuests = (account: Account) => (account.role === "guest" ? fail(403, "A guest's account only chats with the bot it joined through.") : undefined);
 
 /** Why an account opens nothing, if it doesn't. */
 function closed(account: Account): Response | undefined {
@@ -132,14 +150,14 @@ const mcpAccess: McpAccess = {
 		async fetch(request, env, ctx) {
 			const account = await resolveAccount(env, (ctx.props as McpGrant).owner);
 			if (!account) return fail(410, "This account was deleted.");
-			const refused = closed(account) ?? (await throttled(env, account));
+			const refused = closed(account) ?? notForGuests(account) ?? (await throttled(env, account));
 			if (refused) return refused;
 			return toAgent(request, env, account.ownerId, MCP_SERVER_PATH);
 		},
 	},
 	async apiTokenOwner(token, env) {
 		const account = tokenOwner(token) ? await resolveAccount(env, tokenOwner(token)!) : null;
-		if (!account || closed(account)) return null;
+		if (!account || closed(account) || notForGuests(account)) return null;
 		return (await siteFor(env, account).store.checkToken(token, Date.now())) ? account.ownerId : null;
 	},
 };
@@ -417,6 +435,8 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 		const account = await signedIn(request, env);
 		if (!account) return fail(401, "Sign in to Pim");
 		if (account instanceof Response) return account;
+		const guest = notForGuests(account);
+		if (guest) return guest;
 		return serveConsent(request, env, account.ownerId, publicUrl, mcpAccess);
 	}
 
@@ -436,6 +456,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	if (under(pathname, "/app-pages")) return serveAppPage(request, pathname);
 
 	if (under(pathname, "/api/shared")) return withCors(await serveSharedChat(request, env, pathname, address));
+	if (under(pathname, "/api/bots")) return withCors(await servePublicBot(request, env, pathname, address));
 	if (under(pathname, "/shared")) {
 		// The app's page for a chat's public link, which search engines should leave out.
 		const asset = await env.ASSETS.fetch(request);
@@ -459,6 +480,10 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;
+	if (account.role === "guest") {
+		const answered = await guestRequest(env, account, request, path);
+		if (answered) return withCors(answered);
+	}
 	const site = siteFor(env, account);
 	const extensions = [
 		accountApi(env, account, site, request, viaSession),

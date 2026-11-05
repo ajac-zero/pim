@@ -16,7 +16,9 @@ import { HOST_SEEN_MS, HOST_TOKEN_PREFIX, type HostRequest, type HostStatus, typ
  * The first account is the admin's. It is made by whoever opens the Pim in
  * the minutes after a deploy, or with a link from the Worker's logs, which
  * only someone signed in to the Cloudflare account can read. Everyone else
- * joins with an invite the admin makes, unless registration is open.
+ * joins with an invite the admin makes, unless registration is open. A
+ * guest joins through the public link of a bot the admin shared, whatever
+ * the registration mode, and only chats with that bot (./accounts.ts).
  *
  * An owner ID is random and never changes; the person's space and sign-in
  * are named after it, never after the username. A username is never reused
@@ -37,7 +39,7 @@ import { HOST_SEEN_MS, HOST_TOKEN_PREFIX, type HostRequest, type HostStatus, typ
 
 export type AccountStatus = "pending" | "active" | "suspended" | "deleting" | "deleted";
 
-export type Role = "admin" | "member";
+export type Role = "admin" | "member" | "guest";
 
 export type Account = {
 	readonly ownerId: string;
@@ -51,6 +53,8 @@ export type Account = {
 	readonly pendingUntil: number | null;
 	readonly statusReason: string | null;
 	readonly statusChangedAt: number | null;
+	/** The bot a guest joined through, by its id in the gallery; null for everyone else. */
+	readonly bot: string | null;
 };
 
 export type Registration =
@@ -168,13 +172,14 @@ function accountOf(row: Row): Account {
 	return {
 		ownerId: String(row.owner_id),
 		username: String(row.username),
-		role: row.role === "admin" ? "admin" : "member",
+		role: row.role === "admin" || row.role === "guest" ? row.role : "member",
 		status: String(row.status) as AccountStatus,
 		createdAt: Number(row.created_at),
 		activatedAt: optionalNumber(row.activated_at),
 		pendingUntil: optionalNumber(row.pending_until),
 		statusReason: row.status_reason === null ? null : String(row.status_reason),
 		statusChangedAt: optionalNumber(row.status_changed_at),
+		bot: row.bot === null || row.bot === undefined ? null : String(row.bot),
 	};
 }
 
@@ -206,6 +211,8 @@ export class Directory extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.storage.sql.exec(SCHEMA);
+		const columns = ctx.storage.sql.exec("PRAGMA table_info(accounts)").toArray().map((row) => String(row.name));
+		if (!columns.includes("bot")) ctx.storage.sql.exec("ALTER TABLE accounts ADD COLUMN bot TEXT");
 	}
 
 	#sql(query: string, ...bindings: unknown[]) {
@@ -331,9 +338,14 @@ export class Directory extends DurableObject<Env> {
 		return row ? accountOf(row) : null;
 	}
 
-	/** Whether anyone but this owner has an active account: alone, there is nobody to share with or publish for. */
+	/** Whether anyone but this owner has an active account: alone, there is nobody to share with or publish for. Guests don't count: they only see their bot. */
 	hasOthers(ownerId: string): boolean {
-		return this.#sql("SELECT 1 FROM accounts WHERE status = 'active' AND owner_id != ? LIMIT 1", ownerId).toArray().length > 0;
+		return this.#sql("SELECT 1 FROM accounts WHERE status = 'active' AND role != 'guest' AND owner_id != ? LIMIT 1", ownerId).toArray().length > 0;
+	}
+
+	/** How many people joined through a bot's link and still have their account. */
+	botGuests(bot: string): number {
+		return Number(this.#sql("SELECT COUNT(*) AS n FROM accounts WHERE bot = ? AND status IN ('active', 'suspended')", bot).one().n);
 	}
 
 	/**
@@ -360,13 +372,16 @@ export class Directory extends DurableObject<Env> {
 	/**
 	 * Takes `username` for a new owner. While the Pim has no admin, only a
 	 * claim makes an account, and it is the admin's. After that, members join
-	 * as the policy says, within the address's recent registrations.
+	 * as the policy says, and guests through a bot's link (`bot`, which the
+	 * caller checked is shared), whatever the policy's mode; both within the
+	 * address's recent registrations and the cap on accounts.
 	 */
 	async register(input: {
 		username: string;
 		ip: string;
 		invite?: string;
 		claim?: Claim;
+		bot?: string;
 		policy: RegistrationPolicy;
 		now?: number;
 	}): Promise<Registration> {
@@ -377,13 +392,21 @@ export class Directory extends DurableObject<Env> {
 		// No awaits from here on: checking and taking the username, the invite, the admin's place and a place is one step.
 		// A code another registration used while this one checked it claims nothing.
 		const claimCode = matched !== null && this.#meta("claim_code") === matched;
-		const result = this.#takeUsername(input.username, address, invite, Boolean(input.claim?.window) || claimCode, input.policy, now);
+		const result = this.#takeUsername(input.username, address, invite, Boolean(input.claim?.window) || claimCode, input.policy, now, input.bot ?? null);
 		if (result.ok && result.account.role === "admin" && claimCode) this.#setMeta("claim_code", null);
 		await this.#scheduleAlarm();
 		return result;
 	}
 
-	#takeUsername(username: string, address: string, invite: string | null, claim: boolean, policy: RegistrationPolicy, now: number): Registration {
+	#takeUsername(
+		username: string,
+		address: string,
+		invite: string | null,
+		claim: boolean,
+		policy: RegistrationPolicy,
+		now: number,
+		bot: string | null,
+	): Registration {
 		this.#sql("DELETE FROM registrations WHERE at < ?", now - DAY_MS);
 		const recent = Number(this.#sql("SELECT COUNT(*) AS n FROM registrations WHERE address = ?", address).one().n);
 		if (recent >= policy.perAddressPerDay) {
@@ -391,7 +414,7 @@ export class Directory extends DurableObject<Env> {
 		}
 		// Lapsed registrations hold no username, place, invite or claim.
 		this.#releaseLapsed(now);
-		const role: Role = this.admin(now) === null ? "admin" : "member";
+		const role: Role = this.admin(now) === null ? "admin" : bot ? "guest" : "member";
 		if (role === "admin" && !claim) {
 			return {
 				ok: false,
@@ -399,9 +422,9 @@ export class Directory extends DurableObject<Env> {
 				error: "This Pim isn't set up yet. Open it within 15 minutes of deploying it, or use the setup link from the Worker's logs.",
 			};
 		}
-		if (role === "member") {
-			if (policy.mode === "closed") return { ok: false, status: 403, error: "Registration is closed." };
-			if (policy.mode === "invite") {
+		if (role !== "admin") {
+			if (role === "member" && policy.mode === "closed") return { ok: false, status: 403, error: "Registration is closed." };
+			if (role === "member" && policy.mode === "invite") {
 				const unused = invite && this.#sql("SELECT 1 FROM invites WHERE hash = ? AND used_at IS NULL", invite).toArray().length > 0;
 				if (!unused) return { ok: false, status: 403, error: "Joining needs an invite, and that one isn't valid." };
 			}
@@ -413,13 +436,14 @@ export class Directory extends DurableObject<Env> {
 		if (this.#byUsername(username)) return { ok: false, status: 409, error: "That username is taken." };
 		const ownerId = newOwnerId();
 		this.#sql(
-			"INSERT INTO accounts (owner_id, username, role, status, created_at, pending_until, status_changed_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+			"INSERT INTO accounts (owner_id, username, role, status, created_at, pending_until, status_changed_at, bot) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
 			ownerId,
 			username,
 			role,
 			now,
 			now + PENDING_MS,
 			now,
+			role === "guest" ? bot : null,
 		);
 		this.#sql("INSERT INTO registrations (address, at) VALUES (?, ?)", address, now);
 		if (role === "member" && invite) this.#sql("UPDATE invites SET used_by = ?, used_at = ? WHERE hash = ?", ownerId, now, invite);

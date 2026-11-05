@@ -4,12 +4,12 @@ import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE,
 import type { ApiExtension } from "./gateway";
 import { deploymentSettings, readDeployment } from "./deployment";
 import { FRAMED_KINDS, framePage, RUNTIME_PATH, ENTRY_FILES, readFiles, textOf } from "./artifacts";
-import type { PublishedArtifact } from "./gallery";
+import type { AgentIcon, Bot, BotCard, PublishedArtifact } from "./gallery";
 import { HttpError } from "./http";
 import { providerInfo } from "./providers";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
-import { claimWindowOpen } from "./runtime";
+import { claimWindowOpen, limited } from "./runtime";
 import { usernameProblem } from "./usernames";
 
 /**
@@ -89,6 +89,121 @@ export async function servePublicArtifact(request: Request, env: Env, pathname: 
 	const page = framePage(found.kind, await readFiles(env.ARTIFACTS, found.owner, found.files), contentOrigin(env)!);
 	page.headers.set("x-robots-tag", "noindex");
 	return page;
+}
+
+// Bots: the admin's agents shared through a public link, and the guests who join through one.
+
+const BOT_GONE = "This bot's link was turned off.";
+/** Messages a day each guest may send a bot shared without saying. */
+const DEFAULT_DAILY_MESSAGES = 50;
+const bots = new Map<string, { bot: Bot | null; at: number }>();
+/** Which sharing of their bot each guest's space was last brought up to here: its `sharedAt`, or 0 once it was turned off. */
+const synced = new Map<string, number>();
+
+/** A bot whose link works: shared by the admin, whose account is active. Cached for a moment, like accounts. */
+export async function sharedBot(env: Env, id: string): Promise<Bot | null> {
+	if (!/^b_[0-9a-f]{16}$/.test(id)) return null;
+	const cached = bots.get(id);
+	if (cached && Date.now() - cached.at < ACCOUNT_CACHE_MS) return cached.bot;
+	const found = await gallery(env).bot(id);
+	const author = found ? await resolveAccount(env, found.ownerId) : null;
+	const bot = author?.status === "active" && author.role === "admin" ? found : null;
+	if (bots.size > 1_000) bots.clear();
+	bots.set(id, { bot, at: Date.now() });
+	return bot;
+}
+
+/** What anyone may see of a bot: never its instructions. */
+const botCard = ({ id, author, authorName, name, description, symbol, color, icon }: Bot): BotCard => ({
+	id,
+	author,
+	authorName,
+	name,
+	description,
+	symbol,
+	color,
+	icon,
+});
+
+/** A bot as a guest's space copies it, with its icon and those of the agents that come with it. */
+async function botCopy(env: Env, bot: Bot) {
+	const { icon, bundle, ...rest } = bot;
+	const image: AgentIcon | null = icon === null ? null : await gallery(env).botIcon(bot.id);
+	const icons = bundle.length > 0 ? await gallery(env).bundleIcons(bot.id) : [];
+	return { ...rest, image, bundle: bundle.map(({ icon: _icon, ...agent }, position) => ({ ...agent, image: icons[position] ?? null })) };
+}
+
+/**
+ * What a guest may call in their own space: chatting with their bot, and
+ * what chatting needs, such as approvals, artifacts, files and the bot's
+ * apps. Not agents, models, sharing, publishing, memory or a computer.
+ */
+const GUEST_ROUTES: readonly (readonly [methods: string, path: RegExp])[] = [
+	["GET", /^\/(|usage|bot|majordomo|model|profile|extensions|app-directory|browser|ws)$/],
+	["GET DELETE", /^\/account$/],
+	["GET", /^\/account\/export$/],
+	["GET POST", /^\/sessions$/],
+	["GET PUT POST DELETE", /^\/sessions\/[^/]+(\/(messages|abort|archive|unarchive|read|reset|retry|summary|title|cost|tasks(\/[^/]+(\/cancel)?)?|operations\/[^/]+))?$/],
+	["GET PUT POST DELETE", /^\/approvals(\/.*)?$/],
+	["GET DELETE", /^\/artifacts(\/[^/]+)?$/],
+	["GET POST", /^\/artifacts\/[^/]+\/(restore|versions(\/\d+(\/(bridge|frame|grants|download))?)?)$/],
+	["GET PUT POST DELETE", /^\/(files|notifications|push|goals|schedules|mcp)(\/.*)?$/],
+	["GET", /^\/(images\/[^/]+|agents|agents\/[^/]+|agents\/[^/]+\/icon)$/],
+	["POST", /^\/(app-actions\/.+|prompts\/improve)$/],
+	["GET PUT", /^\/settings$/],
+];
+
+/**
+ * Before a guest's request reaches their space: refuses what guests may
+ * not do, brings their copy of the bot up to what its author shared last,
+ * and answers `/bot`. A bot whose link was turned off allows no more runs,
+ * whose chats stay to read.
+ */
+export async function guestRequest(env: Env, account: Account, request: Request, path: string): Promise<Response | undefined> {
+	const allowed = GUEST_ROUTES.some(([methods, pattern]) => methods.split(" ").includes(request.method) && pattern.test(path));
+	if (!allowed) return fail(403, "A guest's account only chats with the bot it joined through.");
+	const bot = account.bot ? await sharedBot(env, account.bot) : null;
+	const sharedAt = bot?.sharedAt ?? 0;
+	const pim = await pimOf(env, account.ownerId);
+	if (synced.get(account.ownerId) !== sharedAt) {
+		await pim.syncBot(bot ? await botCopy(env, bot) : null);
+		if (synced.size > 10_000) synced.clear();
+		synced.set(account.ownerId, sharedAt);
+	}
+	if (path === "/bot") {
+		const guest = await pim.guestBot();
+		return json({ bot: bot ? { ...botCard(bot), dailyMessages: bot.dailyMessages } : null, agent: guest?.agent ?? null });
+	}
+	return undefined;
+}
+
+/**
+ * `/api/bots/<id>` and `/api/bots/<id>/icon`: what a bot's public link
+ * shows before anyone joins. Nobody signs in to read it, so it is slowed
+ * down per address. A link that was turned off is the same `404` as one
+ * that never was.
+ */
+export async function servePublicBot(request: Request, env: Env, pathname: string, address: string): Promise<Response> {
+	if (request.method !== "GET" && request.method !== "HEAD") return fail(405, `${pathname} takes GET`);
+	if (await limited(env, "public", address)) return fail(429, "Too many requests. Slow down a little.");
+	const match = /^\/api\/bots\/([^/]+)(\/icon)?$/.exec(pathname);
+	const bot = match ? await sharedBot(env, decodeURIComponent(match[1]!)) : null;
+	if (!bot) return json({ error: BOT_GONE }, 404, { "cache-control": "no-store" });
+	if (!match![2]) return json(botCard(bot), 200, { "cache-control": "no-cache" });
+	const icon = bot.icon === null ? null : await gallery(env).botIcon(bot.id);
+	if (!icon) return fail(404, "This bot has no icon");
+	return new Response(icon.data, { headers: { "content-type": icon.type, "x-content-type-options": "nosniff", "cache-control": "public, max-age=31536000, immutable" } });
+}
+
+/** What the admin sees of a bot they shared: its public link, its daily messages, and how many people joined through it. */
+async function botSharing(env: Env, bot: Bot) {
+	return {
+		id: bot.id,
+		url: `${pimOrigin(env)}/b/${bot.id}`,
+		dailyMessages: bot.dailyMessages,
+		sharedAt: bot.sharedAt,
+		guests: await directory(env).botGuests(bot.id),
+	};
 }
 
 /** This Pim's address, `PIM_PUBLIC_URL`, which `serve` answers nothing without. */
@@ -209,10 +324,13 @@ export async function handleRegistration(request: Request, env: Env, address: st
 /** Makes an account, and hands back its setup code, to make its first passkey with, and its recovery codes. */
 async function register(request: Request, env: Env, address: string, now: number): Promise<Response> {
 	if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
-	const body = (await request.json().catch(() => null)) as { username?: unknown; invite?: unknown; claim?: unknown; timeZone?: unknown } | null;
+	const body = (await request.json().catch(() => null)) as { username?: unknown; invite?: unknown; claim?: unknown; bot?: unknown; timeZone?: unknown } | null;
 	const username = typeof body?.username === "string" ? body.username.trim().toLowerCase() : "";
 	const problem = usernameProblem(username);
 	if (problem) return fail(400, problem);
+	// Joining through a bot's link makes a guest, who gets a copy of that bot alone.
+	const bot = typeof body?.bot === "string" ? await sharedBot(env, body.bot) : null;
+	if (body?.bot !== undefined && !bot) return fail(404, BOT_GONE);
 	const policy = registrationPolicy(env);
 	const dir = directory(env);
 	const result = await dir.register({
@@ -221,6 +339,7 @@ async function register(request: Request, env: Env, address: string, now: number
 		policy,
 		claim: { window: claimWindowOpen(env, now), ...(typeof body?.claim === "string" ? { code: body.claim } : {}) },
 		...(typeof body?.invite === "string" ? { invite: body.invite } : {}),
+		...(bot ? { bot: bot.id } : {}),
 		now,
 	});
 	if (!result.ok) {
@@ -238,8 +357,9 @@ async function register(request: Request, env: Env, address: string, now: number
 		await pim.provision({ ownerId: account.ownerId, username });
 		// The deployment's limits are for members: the admin pays for the deployment.
 		if (account.role === "admin") await pim.setLimits(UNLIMITED);
-		// Everyone gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
-		const everyone = await gallery(env).defaultAgent();
+		if (account.role === "guest" && bot) await pim.adoptBot(await botCopy(env, bot));
+		// Everyone else gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
+		const everyone = account.role === "guest" ? null : await gallery(env).defaultAgent();
 		if (everyone) {
 			const { author, name, role, description, instructions, apps, contacts, bundle, blueprint, symbol, color } = everyone;
 			const image = everyone.icon ? await gallery(env).defaultAgentIcon() : null;
@@ -258,7 +378,7 @@ async function register(request: Request, env: Env, address: string, now: number
 		console.error(JSON.stringify({ event: "pim.registration_failed", owner: account.ownerId, username, error: String(error) }));
 		return fail(500, "Your account couldn't be set up. Try again in a moment.");
 	}
-	log("registered", { owner: account.ownerId, username, role: account.role, mode: policy.mode });
+	log("registered", { owner: account.ownerId, username, role: account.role, mode: policy.mode, ...(bot ? { bot: bot.id } : {}) });
 	return json(
 		{
 			username,
@@ -362,7 +482,8 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 		const pim = () => pimOf(env, account.ownerId);
 		const someone = async (username: string) => {
 			const found = usernameProblem(username) === null ? await directory(env).resolve(username) : null;
-			return found?.status === "active" ? found : null;
+			// Guests only chat with their bot: nobody shares with them, and they aren't shown.
+			return found?.status === "active" && found.role !== "guest" ? found : null;
 		};
 		try {
 			const member = /^\/circles\/([^/]+)\/members$/.exec(path);
@@ -507,9 +628,38 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				}
 				return undefined;
 			}
-			// A deleted agent leaves the gallery too; the space deletes it after.
+			// The admin shares an agent as a bot through a public link, which anyone may join through as a guest.
+			const shareBot = /^\/agents\/([^/]+)\/bot$/.exec(path);
+			if (shareBot) {
+				if (account.role !== "admin") return fail(403, "Only the admin can share a bot: the admin pays for its guests.");
+				const id = decodeURIComponent(shareBot[1]!);
+				const shared = await gallery(env).botOf(account.ownerId, id);
+				if (request.method === "GET") return shared ? json(await botSharing(env, shared)) : fail(404, "Not shared");
+				if (request.method === "PUT") {
+					const agent = await (await pim()).agentToPublish(id);
+					if (!agent) return fail(404, `No agent ${id}`);
+					const given = (await body()).dailyMessages;
+					if (given !== undefined && given !== null && typeof given !== "number") return fail(400, "dailyMessages must be a number, or null for this Pim's own limit");
+					const dailyMessages = given === undefined ? (shared ? shared.dailyMessages : DEFAULT_DAILY_MESSAGES) : given;
+					const bot = await gallery(env).shareBot(account.ownerId, account.username, agent, dailyMessages);
+					bots.delete(bot.id);
+					log("bot_shared", { owner: account.ownerId, bot: bot.id, dailyMessages });
+					return json(await botSharing(env, bot), shared ? 200 : 201);
+				}
+				if (request.method === "DELETE") {
+					const removed = await gallery(env).unshareBot(account.ownerId, id);
+					if (shared) bots.delete(shared.id);
+					log("bot_unshared", { owner: account.ownerId, agent: id });
+					return json({ deleted: removed });
+				}
+				return undefined;
+			}
+			// A deleted agent leaves the gallery too, and its bot's link is turned off; the space deletes it after.
 			const deleted = /^\/agents\/([^/]+)$/.exec(path);
-			if (deleted && request.method === "DELETE") await gallery(env).unpublish(account.ownerId, decodeURIComponent(deleted[1]!));
+			if (deleted && request.method === "DELETE") {
+				await gallery(env).unpublish(account.ownerId, decodeURIComponent(deleted[1]!));
+				await gallery(env).unshareBot(account.ownerId, decodeURIComponent(deleted[1]!));
+			}
 		} catch (error) {
 			return rpcFailure(error);
 		}

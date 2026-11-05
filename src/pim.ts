@@ -172,7 +172,7 @@ import {
 } from "./store";
 import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, checkContacts, freeName, MAX_AGENTS } from "./agents";
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
-import type { AgentIcon, ArtifactToPublish, Bot, PublishedAgent } from "./gallery";
+import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension, withPreferences } from "./majordomo";
@@ -3709,15 +3709,36 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * At registration of a guest: their copy of the bot they joined through,
-	 * with the agents that come with it, and the bot's daily messages as the
-	 * space's limit on runs. Their space never gets the agent everyone starts with.
+	 * on the bot's model, with the agents that come with it, and the bot's
+	 * daily messages as the space's limit on runs. Their space never gets the agent everyone starts with.
 	 */
 	async adoptBot(bot: Omit<Bot, "icon" | "bundle"> & Pick<PublishedAgent, "bundle"> & { image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
 		const agent = await this.#adopt(bot, { template: bot.id, author: bot.author });
 		this.store.setMeta(GUEST_BOT_KEY, JSON.stringify({ bot: bot.id, agent: agent.id, sharedAt: bot.sharedAt } satisfies GuestBot));
 		this.#guestLimit(bot.dailyMessages);
-		return agent;
+		return this.#guestModel(agent, bot.model);
+	}
+
+	/**
+	 * A model the admin may give a bot's guests: one this Pim offers everyone,
+	 * the deployment's or a provider the admin added for everyone, never the
+	 * admin's own ChatGPT plan or providers.
+	 */
+	async botModel(provider: string, id: string): Promise<BotModel> {
+		this.#assertOpen();
+		if (provider === CHATGPT_PROVIDER || provider.startsWith(OWN_PROVIDER)) {
+			throw new HttpError(400, "Guests can't use your ChatGPT plan or your own providers: choose a model this Pim offers everyone.");
+		}
+		await this.#refreshCustomApps(true);
+		const model = await this.#choice(provider, id);
+		return { provider: model.provider, id: model.id };
+	}
+
+	/** Puts a guest's copy of their bot on the bot's model; one this space can't use, such as a provider the admin removed since, leaves it on the default. */
+	async #guestModel(agent: Agent, model: BotModel | null): Promise<Agent> {
+		const chosen = model ? await this.#choice(model.provider, model.id).catch(() => null) : null;
+		return this.chooseAgentModel(agent, chosen);
 	}
 
 	/** In a guest's space, the bot they joined through and their copy of it; null in anyone else's. */
@@ -3728,7 +3749,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Brings a guest's copy of their bot up to what its author shared last:
-	 * its name, description, instructions, apps and look, and the daily
+	 * its name, description, instructions, apps, look and model, and the daily
 	 * messages it allows. The agents that came with it stay as they came.
 	 * Null when its link was turned off: the guest can read their chats, and
 	 * start nothing more.
@@ -3747,6 +3768,7 @@ export class Pim extends DurableAgent<Env> {
 			this.agents.update(copy.id, { ...input, role: copy.role });
 			if (bot.image) this.agents.setIcon(copy.id, bot.image.type, bot.image.data);
 			else this.agents.removeIcon(copy.id);
+			await this.#guestModel(this.agents.get(copy.id)!, bot.model);
 		}
 		this.store.setMeta(GUEST_BOT_KEY, JSON.stringify({ ...guest, sharedAt: bot.sharedAt } satisfies GuestBot));
 		this.#guestLimit(bot.dailyMessages);

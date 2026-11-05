@@ -15,9 +15,21 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "~/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import { type Agent, type BotSharing, pim } from "~/lib/pim-api";
+import { modelQuery } from "~/lib/queries";
 
 const DEFAULT_DAILY_MESSAGES = 50;
+/** The select's value for this Pim's default model: Radix needs a non-empty one. */
+const DEFAULT_MODEL = "-";
+const modelKey = (model: { provider: string; id: string }) =>
+  `${model.provider}\n${model.id}`;
 
 export const agentBotQuery = (id: string) =>
   queryOptions({
@@ -36,6 +48,25 @@ export function BotShareButton({ agent }: { agent: Agent }) {
   const inputId = useId();
   const { data: sharing } = useQuery(agentBotQuery(agent.id));
   const [daily, setDaily] = useState<string | null>(null);
+  const [model, setModel] = useState<string | null>(null);
+  const { data: models } = useQuery(modelQuery());
+  // Guests can't use the admin's ChatGPT plan or own providers: only what this Pim offers everyone.
+  const choices =
+    models?.choices.filter(
+      (choice) =>
+        !sameModel(choice, models.default) &&
+        choice.provider !== "openai" &&
+        !choice.provider.startsWith("own:"),
+    ) ?? [];
+  const kept = sharing?.model ?? null;
+  const stale =
+    kept &&
+    !choices.some((choice) => sameModel(choice, kept)) &&
+    !(models && sameModel(models.default, kept))
+      ? kept
+      : null;
+  const chosen =
+    model ?? (sharing?.model ? modelKey(sharing.model) : DEFAULT_MODEL);
   const [copied, setCopied] = useState(false);
   const shown =
     daily ?? String(sharing?.dailyMessages ?? DEFAULT_DAILY_MESSAGES);
@@ -44,9 +75,17 @@ export function BotShareButton({ agent }: { agent: Agent }) {
   const settle = (next: BotSharing | null) => {
     queryClient.setQueryData(agentBotQuery(agent.id).queryKey, next);
     setDaily(null);
+    setModel(null);
   };
   const share = useMutation({
-    mutationFn: () => pim.shareBot(agent.id, parsed),
+    mutationFn: () => {
+      const [provider, id] = chosen.split("\n");
+      return pim.shareBot(
+        agent.id,
+        parsed,
+        chosen === DEFAULT_MODEL || !provider || !id ? null : { provider, id },
+      );
+    },
     onSuccess: (next) => {
       settle(next);
       toast.success(t(sharing ? "botUpdated" : "botShared"));
@@ -131,6 +170,30 @@ export function BotShareButton({ agent }: { agent: Agent }) {
             className="mt-1.5 h-9 w-32"
           />
         </div>
+        <div>
+          <span className="block text-[13px] text-muted-foreground">
+            {t("botModel")}
+          </span>
+          <Select value={chosen} onValueChange={setModel}>
+            <SelectTrigger className="mt-1.5 w-full" aria-label={t("botModel")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={DEFAULT_MODEL}>
+                {t("botModelDefault", { name: models?.default.name ?? "" })}
+              </SelectItem>
+              {choices.map((choice) => (
+                <SelectItem key={modelKey(choice)} value={modelKey(choice)}>
+                  {choice.name}
+                </SelectItem>
+              ))}
+              {/* Shared on a model this Pim no longer offers: shown, so it can be changed. */}
+              {stale && (
+                <SelectItem value={modelKey(stale)}>{stale.id}</SelectItem>
+              )}
+            </SelectContent>
+          </Select>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="sm"
@@ -160,3 +223,8 @@ export function BotShareButton({ agent }: { agent: Agent }) {
     </Popover>
   );
 }
+
+const sameModel = (
+  a: { provider: string; id: string },
+  b: { provider: string; id: string },
+) => a.provider === b.provider && a.id === b.id;

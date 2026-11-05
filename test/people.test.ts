@@ -2167,6 +2167,47 @@ describe("bots", () => {
 		expect((await say(fresh.browser, theirs.id, "Hello?")).status).toBe(429);
 	});
 
+	it("runs guests on the model the admin chose for the bot, one this Pim offers everyone", async () => {
+		const gpu = { name: "Bot GPU", url: "https://bot-gpu.example.test/v1", key: "bot-key" };
+		const realFetch = globalThis.fetch;
+		const asked: string[] = [];
+		const server = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith(gpu.url)) return realFetch(input, init);
+			if (request.url.endsWith("/models")) return Response.json({ data: [{ id: "bot-model" }] });
+			const { model } = await request.json<{ model: string }>();
+			asked.push(model);
+			return completionStream(model, "Hello from the bot GPU");
+		});
+		try {
+			expect((await admin("/api/admin/providers", { method: "POST", json: gpu })).status).toBe(201);
+			const agent = (await admin("/api/agents", { method: "POST", json: { name: "Model bot", instructions: "Be brief." } })).body;
+			const share = (json: unknown) => admin(`/api/agents/${agent.id}/bot`, { method: "PUT", json });
+			// Never the admin's own ChatGPT plan, nor a model this Pim doesn't offer.
+			expect((await share({ model: { provider: "openai", id: "gpt-5" } })).status).toBe(400);
+			expect((await share({ model: { provider: "shared:bot-gpu", id: "no-such-model" } })).status).toBe(400);
+			expect((await share({ model: "bot-model" })).status).toBe(400);
+			const shared = await share({ model: { provider: "shared:bot-gpu", id: "bot-model" } });
+			expect(shared).toMatchObject({ status: 201, body: { model: { provider: "shared:bot-gpu", id: "bot-model" } } });
+
+			const guest = await person("model-guest", { bot: shared.body.id });
+			const { agent: copy } = (await guest.browser.json("/api/bot")).body;
+			expect((await guest.browser.json(`/api/agents/${copy}`)).body.model).toEqual({ provider: "shared:bot-gpu", id: "bot-model" });
+			const chat = (await guest.browser.json("/api/sessions", { method: "POST", json: {} })).body;
+			const answer = await guest.browser.json(`/api/sessions/${chat.id}/messages`, { method: "POST", json: { content: "Hi", wait: true } });
+			expect(answer.body.text).toBe("Hello from the bot GPU");
+			expect(asked).toEqual(["bot-model"]);
+
+			// Shared again without saying, it keeps its model; back to the default, guests follow.
+			expect((await share({ dailyMessages: 5 })).body.model).toEqual({ provider: "shared:bot-gpu", id: "bot-model" });
+			expect((await share({ model: null })).body.model).toBeNull();
+			expect((await guest.browser.json(`/api/agents/${copy}`)).body.model).toBeNull();
+		} finally {
+			server.mockRestore();
+			await admin("/api/admin/providers/bot-gpu", { method: "DELETE" });
+		}
+	});
+
 	it("lets guests join whatever the registration mode, without counting as someone to share with", async () => {
 		const stub = await freshDirectory();
 		const keeper = (await stub.resolve("keeper"))!;

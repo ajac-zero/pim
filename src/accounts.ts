@@ -201,6 +201,7 @@ async function botSharing(env: Env, bot: Bot) {
 		id: bot.id,
 		url: `${pimOrigin(env)}/b/${bot.id}`,
 		dailyMessages: bot.dailyMessages,
+		model: bot.model,
 		sharedAt: bot.sharedAt,
 		guests: await directory(env).botGuests(bot.id),
 	};
@@ -638,12 +639,19 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (request.method === "PUT") {
 					const agent = await (await pim()).agentToPublish(id);
 					if (!agent) return fail(404, `No agent ${id}`);
-					const given = (await body()).dailyMessages;
+					const { dailyMessages: given, model: wanted } = await body();
 					if (given !== undefined && given !== null && typeof given !== "number") return fail(400, "dailyMessages must be a number, or null for this Pim's own limit");
 					const dailyMessages = given === undefined ? (shared ? shared.dailyMessages : DEFAULT_DAILY_MESSAGES) : given;
-					const bot = await gallery(env).shareBot(account.ownerId, account.username, agent, dailyMessages);
+					const choice = wanted as { provider?: unknown; id?: unknown } | null | undefined;
+					if (choice !== undefined && choice !== null && (typeof choice.provider !== "string" || typeof choice.id !== "string")) {
+						return fail(400, "model must be { provider, id }, or null for this Pim's default");
+					}
+					// Checked by the admin's space, which knows what this Pim offers everyone.
+					const model =
+						choice === undefined ? (shared?.model ?? null) : choice === null ? null : await (await pim()).botModel(choice.provider as string, choice.id as string);
+					const bot = await gallery(env).shareBot(account.ownerId, account.username, agent, dailyMessages, model);
 					bots.delete(bot.id);
-					log("bot_shared", { owner: account.ownerId, bot: bot.id, dailyMessages });
+					log("bot_shared", { owner: account.ownerId, bot: bot.id, dailyMessages, model });
 					return json(await botSharing(env, bot), shared ? 200 : 201);
 				}
 				if (request.method === "DELETE") {

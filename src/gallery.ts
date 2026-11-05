@@ -181,7 +181,12 @@ export type Bot = Contacts & {
 	readonly sharedAt: number;
 	/** Messages each guest may send it in a UTC day; null for the deployment's own limit. */
 	readonly dailyMessages: number | null;
+	/** The model guests' copies run on, one this Pim offers everyone; null for the deployment's default. */
+	readonly model: BotModel | null;
 };
+
+/** A model by provider and id, as an agent keeps it. */
+export type BotModel = { readonly provider: string; readonly id: string };
 
 /** What the public link shows of a bot: never its instructions. */
 export type BotCard = Pick<Bot, "id" | "author" | "authorName" | "name" | "description" | "symbol" | "color" | "icon">;
@@ -283,6 +288,7 @@ CREATE TABLE IF NOT EXISTS bots (
 	icon_data BLOB,
 	shared_at INTEGER NOT NULL,
 	daily_messages INTEGER,
+	model TEXT,
 	UNIQUE (owner_id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS providers (
@@ -357,7 +363,7 @@ const WITH_AUTHOR =
 
 // Every column of a bot but its icon's bytes.
 const BOT =
-	"SELECT b.id, b.owner_id, b.username, b.agent_id, b.name, b.role, b.description, b.instructions, b.apps, b.contacts, b.bundle, b.blueprint, b.symbol, b.color, b.icon_data IS NOT NULL AS has_icon, b.shared_at, b.daily_messages, p.display_name FROM bots b LEFT JOIN profiles p ON p.owner_id = b.owner_id";
+	"SELECT b.id, b.owner_id, b.username, b.agent_id, b.name, b.role, b.description, b.instructions, b.apps, b.contacts, b.bundle, b.blueprint, b.symbol, b.color, b.icon_data IS NOT NULL AS has_icon, b.shared_at, b.daily_messages, b.model, p.display_name FROM bots b LEFT JOIN profiles p ON p.owner_id = b.owner_id";
 
 function botOf(row: Row, directory: () => readonly DirectoryApp[]): Bot {
 	const apps = storedApps(JSON.parse(String(row.apps)) as unknown[], directory);
@@ -379,6 +385,7 @@ function botOf(row: Row, directory: () => readonly DirectoryApp[]): Bot {
 		icon: Number(row.has_icon) === 1 ? Number(row.shared_at) : null,
 		sharedAt: Number(row.shared_at),
 		dailyMessages: row.daily_messages === null ? null : Number(row.daily_messages),
+		model: row.model ? (JSON.parse(String(row.model)) as BotModel) : null,
 	};
 }
 
@@ -460,6 +467,7 @@ export class Gallery extends DurableObject<Env> {
 			if (columns.has("base") && !columns.has("blueprint")) ctx.storage.sql.exec(`ALTER TABLE ${table} RENAME COLUMN base TO blueprint`);
 		}
 		ctx.storage.sql.exec(SCHEMA);
+		if (!names("PRAGMA table_info(bots)").has("model")) ctx.storage.sql.exec("ALTER TABLE bots ADD COLUMN model TEXT");
 		for (const table of ["templates", "default_agent"]) {
 			const columns = ctx.storage.sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name));
 			if (!columns.includes("team")) ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN team TEXT NOT NULL DEFAULT '[]'`);
@@ -810,9 +818,10 @@ export class Gallery extends DurableObject<Env> {
 
 	/**
 	 * Shares one of the author's agents as a bot, or replaces what was shared
-	 * of it, with how many messages a day each guest may send it.
+	 * of it, with how many messages a day each guest may send it and the model
+	 * guests use, which the author's space checked.
 	 */
-	shareBot(ownerId: string, username: string, agent: PublishedAgent, dailyMessages: number | null): Bot {
+	shareBot(ownerId: string, username: string, agent: PublishedAgent, dailyMessages: number | null, model: BotModel | null): Bot {
 		if (dailyMessages !== null && !(Number.isSafeInteger(dailyMessages) && dailyMessages >= 1 && dailyMessages <= MAX_DAILY_MESSAGES)) {
 			throw new HttpError(400, `dailyMessages must be a whole number from 1 to ${MAX_DAILY_MESSAGES}, or null for this Pim's own limit`);
 		}
@@ -823,9 +832,9 @@ export class Gallery extends DurableObject<Env> {
 		const id = known ? String(known.id) : `b_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		const now = Date.now();
 		this.#sql(
-			`INSERT INTO bots (id, owner_id, username, agent_id, name, role, description, instructions, apps, contacts, bundle, blueprint, symbol, color, icon_type, icon_data, shared_at, daily_messages) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO bots (id, owner_id, username, agent_id, name, role, description, instructions, apps, contacts, bundle, blueprint, symbol, color, icon_type, icon_data, shared_at, daily_messages, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET name = excluded.name, role = excluded.role, description = excluded.description, instructions = excluded.instructions, apps = excluded.apps, contacts = excluded.contacts, bundle = excluded.bundle,
-			blueprint = excluded.blueprint, symbol = excluded.symbol, color = excluded.color, icon_type = excluded.icon_type, icon_data = excluded.icon_data, shared_at = excluded.shared_at, daily_messages = excluded.daily_messages`,
+			blueprint = excluded.blueprint, symbol = excluded.symbol, color = excluded.color, icon_type = excluded.icon_type, icon_data = excluded.icon_data, shared_at = excluded.shared_at, daily_messages = excluded.daily_messages, model = excluded.model`,
 			id,
 			ownerId,
 			username,
@@ -833,6 +842,7 @@ export class Gallery extends DurableObject<Env> {
 			...copyOf(agent, now),
 			now,
 			dailyMessages,
+			model && JSON.stringify({ provider: model.provider, id: model.id }),
 		);
 		this.#keepIcons(id, agent);
 		return this.bot(id)!;

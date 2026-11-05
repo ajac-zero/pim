@@ -673,6 +673,8 @@ function localBrowser(executable: string, profile: string, headful: boolean, log
 		await keepSessions(profile);
 		const args = [
 			"--remote-debugging-port=0",
+			// Chrome started with the flag above tells pages it's automated (`navigator.webdriver`), and Google's sign-in turns it away.
+			"--disable-blink-features=AutomationControlled",
 			`--user-data-dir=${profile}`,
 			"--no-first-run",
 			"--no-default-browser-check",

@@ -136,11 +136,14 @@ export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 # One browser for the person and the agents: Chromium, however it's opened, uses pim-computer's profile, and says where DevTools is.
 # Arch's launcher (Omarchy's) reads chromium-flags.conf; Debian's and Ubuntu's source /etc/chromium.d, which takes root.
+# With DevTools on from the start, Chromium tells pages it's automated, and Google's sign-in turns it away: it's told not to.
+# Computers set up before that flag get it the next time this runs.
 FLAGS="\${XDG_CONFIG_HOME:-$HOME/.config}/chromium-flags.conf"
 mkdir -p "$(dirname "$FLAGS")"
 grep -q -- '--user-data-dir=' "$FLAGS" 2>/dev/null || printf -- '--user-data-dir=%s\\n--remote-debugging-port=0\\n' "$DIR/browser" >>"$FLAGS"
-if [ -d /etc/chromium.d ] && [ ! -e /etc/chromium.d/pim ]; then
-	printf 'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --user-data-dir=%s --remote-debugging-port=0"\\n' "$DIR/browser" | sudo -n tee /etc/chromium.d/pim >/dev/null ||
+grep -q -- 'AutomationControlled' "$FLAGS" || printf -- '--disable-blink-features=AutomationControlled\\n' >>"$FLAGS"
+if [ -d /etc/chromium.d ] && ! grep -q -- 'AutomationControlled' /etc/chromium.d/pim 2>/dev/null; then
+	printf 'CHROMIUM_FLAGS="$CHROMIUM_FLAGS --user-data-dir=%s --remote-debugging-port=0 --disable-blink-features=AutomationControlled"\\n' "$DIR/browser" | sudo -n tee /etc/chromium.d/pim >/dev/null ||
 		echo "Couldn't make Chromium use pim-computer's profile, without sudo: the person's Chromium is a browser of its own."
 fi
 

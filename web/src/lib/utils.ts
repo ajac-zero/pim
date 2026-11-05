@@ -14,3 +14,15 @@ export function modelName(name: string) {
 export const MAC =
   typeof navigator !== "undefined" &&
   /Mac|iPhone|iPad/.test(navigator.platform);
+
+/** A size for people: bytes, kB or MB. */
+export function formatBytes(
+  bytes: number,
+  formatNumber: (value: number, options?: Intl.NumberFormatOptions) => string,
+): string {
+  if (bytes < 1000) return `${formatNumber(bytes)} B`;
+  if (bytes < 1_000_000) {
+    return `${formatNumber(bytes / 1000, { maximumFractionDigits: 1 })} kB`;
+  }
+  return `${formatNumber(bytes / 1_000_000, { maximumFractionDigits: 1 })} MB`;
+}

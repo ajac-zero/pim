@@ -10,7 +10,8 @@ import {
 import { toast } from "sonner";
 import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
-import { ActivityBox, ActivityToggle } from "~/components/chat/activity";
+import { ActivityBox } from "~/components/chat/activity";
+import { ActivityToggle } from "~/components/chat/activity-toggle";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { Composer } from "~/components/chat/composer";
 import {

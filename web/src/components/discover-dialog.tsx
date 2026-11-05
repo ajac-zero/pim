@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Dialog } from "radix-ui";
 import { useEffect, useState } from "react";
-import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact";
+import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
 import { useI18n } from "~/components/i18n";
 import { Bot, Search, X } from "~/components/icons";
 import { EmptyState } from "~/components/page";

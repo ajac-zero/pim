@@ -1,8 +1,4 @@
-import {
-  type BundledTheme,
-  bundledThemes,
-  type ThemeRegistration,
-} from "shiki";
+import type { BundledTheme, ThemeRegistration } from "shiki";
 import {
   type CodeTheme,
   codeKey,
@@ -29,9 +25,6 @@ export function loadThemes(): Promise<ThemeList> {
   return list;
 }
 
-const shipped = (code: CodeTheme) =>
-  (typeof code === "string" ? code : code.base) in bundledThemes;
-
 let code:
   | Promise<{
       names: Record<string, string>;
@@ -44,35 +37,40 @@ let code:
  * `--shiki-<id>-<mode>`; the stylesheet's `.shiki-token` rules pick the
  * active one. `names` are the Shiki themes by those keys, and `loaders` what
  * the highlighter loads. A theme Shiki doesn't ship is left out, so the
- * others still color code.
+ * others still color code. Shiki loads only with code to color, not with
+ * the app's colors.
  */
 export function loadCodeThemes() {
-  code ??= loadThemes().then(({ themes }) => {
-    const names: Record<string, string> = {};
-    const loaders = new Map<
-      string,
-      BundledTheme | (() => Promise<ThemeRegistration>)
-    >();
-    for (const theme of themes) {
-      for (const mode of ["light", "dark"] as const) {
-        const spec = theme.code[mode];
-        const key = codeKey(theme.id, mode);
-        if (!shipped(spec)) {
-          console.error(`Shiki doesn't ship the code theme of ${key}`);
-          continue;
+  code ??= Promise.all([loadThemes(), import("shiki")]).then(
+    ([{ themes }, { bundledThemes }]) => {
+      const shipped = (code: CodeTheme) =>
+        (typeof code === "string" ? code : code.base) in bundledThemes;
+      const names: Record<string, string> = {};
+      const loaders = new Map<
+        string,
+        BundledTheme | (() => Promise<ThemeRegistration>)
+      >();
+      for (const theme of themes) {
+        for (const mode of ["light", "dark"] as const) {
+          const spec = theme.code[mode];
+          const key = codeKey(theme.id, mode);
+          if (!shipped(spec)) {
+            console.error(`Shiki doesn't ship the code theme of ${key}`);
+            continue;
+          }
+          const name = typeof spec === "string" ? spec : `recolored-${key}`;
+          names[key] = name;
+          loaders.set(
+            name,
+            typeof spec === "string"
+              ? (spec as BundledTheme)
+              : () => loadRecolored(name, spec, mode),
+          );
         }
-        const name = typeof spec === "string" ? spec : `recolored-${key}`;
-        names[key] = name;
-        loaders.set(
-          name,
-          typeof spec === "string"
-            ? (spec as BundledTheme)
-            : () => loadRecolored(name, spec, mode),
-        );
       }
-    }
-    return { names, loaders: [...loaders.values()] };
-  });
+      return { names, loaders: [...loaders.values()] };
+    },
+  );
   return code;
 }
 
@@ -82,6 +80,7 @@ export async function loadRecolored(
   { base, background, foreground, colors }: RecoloredCodeTheme,
   mode: "light" | "dark",
 ): Promise<ThemeRegistration> {
+  const { bundledThemes } = await import("shiki");
   const original = (await bundledThemes[base as BundledTheme]()).default;
   const recolor = (color: string | undefined) =>
     color && (colors[color.toLowerCase()] ?? color);

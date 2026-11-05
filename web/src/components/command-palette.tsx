@@ -10,7 +10,7 @@ import {
   useAwaitingApproval,
   useNewChat,
 } from "~/components/app-sidebar";
-import { ArtifactIcon } from "~/components/artifact";
+import { ArtifactIcon } from "~/components/artifact-icon";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   Bell,
@@ -33,7 +33,6 @@ import {
   Sun,
   Users,
 } from "~/components/icons";
-import { newChatSearch } from "~/components/new-chat";
 import { Shortcut } from "~/components/shortcut";
 import { useTheme } from "~/components/theme";
 import {
@@ -43,6 +42,7 @@ import {
   schedulesQuery,
   sessionsQuery,
 } from "~/lib/queries";
+import { newChatSearch } from "~/lib/start-chat";
 import { cn } from "~/lib/utils";
 
 const PANELS: {

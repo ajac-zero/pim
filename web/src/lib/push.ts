@@ -6,10 +6,21 @@ export const pushSupported = () =>
   "PushManager" in window &&
   "Notification" in window;
 
+/** How long after opening a page it still reloads into a newer app, before the person is likely busy with it. */
+const FRESH_PAGE_MS = 10_000;
+
+/**
+ * Registers the service worker, which shows pushes and keeps the app on this
+ * device. When it finds a newer app than the one it just opened, the page
+ * reloads into it; a page open longer gets it on its next visit.
+ */
 export function registerServiceWorker() {
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
-  }
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "pim-updated" && performance.now() < FRESH_PAGE_MS)
+      location.reload();
+  });
 }
 
 /** Registers this browser automatically only when permission is already granted. */

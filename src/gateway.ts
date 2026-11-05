@@ -379,13 +379,17 @@ async function serveComputerHost(request: Request, env: Env): Promise<Response> 
 let deployedThemes: PimThemes | undefined;
 
 /** The color themes, listed (`/themes`) or as the stylesheet the app loads before it draws (`/themes.css`). */
-function serveThemes(request: Request, path: string): Response {
+async function serveThemes(request: Request, path: string): Promise<Response> {
 	if (request.method !== "GET") return fail(405, `/api${path} takes GET`);
 	deployedThemes ??= new PimThemes([ownThemes, ...pimConfig.extensions], pimConfig.defaultTheme);
-	// Small, and they change with a deploy: the browser asks again every time.
-	const headers = { "Cache-Control": "no-cache" };
-	if (path === "/themes") return Response.json(deployedThemes.list(), { headers });
-	return new Response(deployedThemes.stylesheet(), { headers: { ...headers, "Content-Type": "text/css; charset=utf-8" } });
+	const [body, type] =
+		path === "/themes" ? [JSON.stringify(deployedThemes.list()), "application/json"] : [deployedThemes.stylesheet(), "text/css; charset=utf-8"];
+	// They change only with a deploy: the browser asks again every time, and hears they're the same until then.
+	const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+	const etag = `"${Array.from(digest.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("")}"`;
+	const headers = { "Cache-Control": "no-cache", ETag: etag, "Content-Type": type };
+	if (request.headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers });
+	return new Response(body, { headers });
 }
 
 export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -400,7 +404,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	}
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 	// The app's look, which the page asking for an address needs too.
-	if (pathname === "/api/themes" || pathname === "/api/themes.css") return withCors(serveThemes(request, pathname.slice("/api".length)));
+	if (pathname === "/api/themes" || pathname === "/api/themes.css") return withCors(await serveThemes(request, pathname.slice("/api".length)));
 
 	// Passkeys, sessions and apps' callbacks all belong to one address, which the deployment sets.
 	const { publicUrl } = deploymentSettings(env);

@@ -16,20 +16,6 @@ import { agentsQuery, sessionsQuery, suggestionsQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
 
 /**
- * The search that opens New chat over the page: with `agent`, a chat with
- * that one rather than the open chat's agent or the majordomo, and with
- * `prompt`, a message to start from.
- */
-export const newChatSearch =
-  (agent?: string, prompt?: string) =>
-  <T extends object>(prev: T) => ({
-    ...prev,
-    dialog: "new-chat" as const,
-    ...(agent && { agent }),
-    ...(prompt && { prompt }),
-  });
-
-/**
  * New chat, over whatever page is open: a composer for the first message,
  * which makes the chat and opens it in the current tab. It talks with the
  * agent chosen in its footer: the one asked for, or the open chat's agent,

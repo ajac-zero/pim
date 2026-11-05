@@ -5,11 +5,11 @@ import { AgentIcon, templateIconSrc } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
 import { useI18n } from "~/components/i18n";
 import { Bot, Copy, ShieldAlert } from "~/components/icons";
-import { newChatSearch } from "~/components/new-chat";
 import { Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import { pim } from "~/lib/pim-api";
 import { agentsQuery, appDirectoryQuery, templateQuery } from "~/lib/queries";
+import { newChatSearch } from "~/lib/start-chat";
 
 export const Route = createFileRoute("/templates/$templateId")({
   component: TemplatePage,

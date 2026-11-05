@@ -46,6 +46,8 @@ export const SCREEN_TAG = "screen";
  * the computer) rather than passing it on to the stream.
  */
 export const SCREEN_PING = '{"type":"pim_ping"';
+/** What the app sends, as text, to read what the person copied on the computer; answered by the space, like a ping. */
+export const SCREEN_CLIPBOARD = '{"type":"pim_clipboard"';
 /** The close code an old connection gets when another one replaces it (pim-computer's `REPLACED`). */
 const REPLACED = 4409;
 /** The most bytes the computer gives in one read (pim-computer's `MAX_READ_BYTES`), and the most this sends in one write. */
@@ -358,6 +360,11 @@ export class Computer {
 			return null;
 		}
 		return Date.now() - start;
+	}
+
+	/** The text on the computer's clipboard. */
+	async clipboard(): Promise<string> {
+		return (await this.call("screen_clipboard", {})) as string;
 	}
 
 	/** Closes a stream of the desktop. */

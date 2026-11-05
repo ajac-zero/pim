@@ -389,6 +389,9 @@ describe("a computer this Pim's host keeps", () => {
 		// Set up, it connects with its token, with its desktop to show.
 		const streams: { heard: string[]; closed: boolean; say(data: string | Uint8Array): void }[] = [];
 		const screen: ScreenHost = {
+			async clipboard() {
+				return "copied on the computer";
+			},
 			async open(onMessage, onClose) {
 				const stream = { heard: [] as string[], closed: false, say: onMessage };
 				streams.push(stream);
@@ -463,6 +466,12 @@ describe("a computer this Pim's host keeps", () => {
 		const pong = JSON.parse(shown[2] as string) as { type: string; payload: { sent: number; computer_ms: unknown } };
 		expect(pong).toMatchObject({ type: "pim_pong", payload: { sent: 1234.5 } });
 		expect(pong.payload.computer_ms).toEqual(expect.any(Number));
+		expect(streams[0]!.heard).toEqual([input]);
+
+		// What the person copied on the computer comes back to the app, which the stream never hears of either.
+		viewer.webSocket!.send(JSON.stringify({ type: "pim_clipboard", payload: {} }));
+		await vi.waitFor(() => expect(shown).toHaveLength(4));
+		expect(JSON.parse(shown[3] as string)).toEqual({ type: "pim_clipboard_text", payload: { text: "copied on the computer" } });
 		expect(streams[0]!.heard).toEqual([input]);
 
 		// Closing the app closes the stream.

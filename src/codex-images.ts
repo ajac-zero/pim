@@ -216,7 +216,11 @@ export class CodexImages {
 					const body = await response.text().catch(() => "");
 					if (response.status === 429) throw new Error("The ChatGPT plan's usage limit is reached. Try again after it resets.");
 					if (response.status === 401) throw new Error("ChatGPT turned the sign-in down. Sign in again in Settings.");
-					throw new Error(`ChatGPT's image service answered ${response.status}${body ? `: ${body.slice(0, 300)}` : ""}`);
+					// A page rather than JSON is usually Cloudflare in front of ChatGPT turning the Worker away: say so, with its ray.
+					const page = /<title>([^<]*)<\/title>/i.exec(body)?.[1]?.trim();
+					const mitigated = response.headers.get("cf-mitigated");
+					const detail = page || mitigated ? `a web page "${page ?? ""}"${mitigated ? ` (cf-mitigated: ${mitigated})` : ""}, ray ${response.headers.get("cf-ray") ?? "unknown"}` : body.slice(0, 300);
+					throw new Error(`ChatGPT's image service answered ${response.status}${detail ? `: ${detail}` : ""}`);
 				}
 				const image = ((await response.json()) as { data?: { b64_json?: unknown }[] }).data?.[0]?.b64_json;
 				if (typeof image !== "string") throw new Error("ChatGPT's image service answered without an image.");

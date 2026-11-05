@@ -965,6 +965,39 @@ const translations = {
     recoveryCodeBody:
       "Enter your username and one of the recovery codes you saved when you joined. It adds a passkey on this device, and works once.",
     recoveryCode: "Recovery code",
+    botJoinTitle: "Create an account to chat",
+    botJoinBody:
+      "Pick a username. Your chats are yours alone: nobody else here sees them.",
+    botJoinInstead: "Create an account instead",
+    botGone: "This bot's link was turned off, or never existed.",
+    botSignedInAs:
+      "You're signed in as @{username}. People who open this link join as guests and chat with this bot alone.",
+    botSignedInAsGuest:
+      "You're signed in as @{username}, a guest of another bot. Sign out to join this one.",
+    botOpenPim: "Open Pim",
+    guestBotBy: "By {author}",
+    guestPoweredBy: "Runs on Pim",
+    guestChats: "Chats",
+    guestBotOff:
+      "{name}'s link was turned off. You can read your chats, but not send it more.",
+    guestMessagesToday: "Messages today",
+    guestMessagesUsed: "{used} of {limit}",
+    guestMessagesUsedUp: "That's all for today. More at midnight UTC.",
+    shareAsBot: "Share as a bot",
+    shareAsBotBody:
+      "Anyone with the link can make a guest account and chat with a copy of {name}. Guests see nothing else of Pim, and their messages run on this Pim's model, so they count against it.",
+    botLinkOn: "Bot link on",
+    botLink: "Bot link",
+    botGuests: "People who joined: {people}",
+    botDailyMessages: "Messages a day for each person",
+    botCreateLink: "Create link",
+    botUpdate: "Update",
+    botUpdateHint:
+      "Update sends guests the agent as it is now, with its instructions and look.",
+    botTurnOff: "Turn off link",
+    botShared: "Bot link created.",
+    botUpdated: "Guests now chat with the agent as it is now.",
+    botUnshared: "Bot link turned off.",
     registerTitle: "Join this Pim",
     registerBody:
       "A personal agent that remembers what matters to you, keeps working while you're away, and asks before acting. Pick the username others here will know you by.",
@@ -1071,6 +1104,7 @@ const translations = {
     accountClosedBody:
       "Nobody can use it anymore, but erasing its data hasn't finished yet. Pim keeps retrying until everything is erased; you don't need to do anything.",
     adminBadge: "Admin",
+    guestBadge: "Guest of a bot",
     you: "you",
     leave: "Leave",
     members: "People on this Pim",
@@ -2061,6 +2095,39 @@ const translations = {
     recoveryCodeBody:
       "Escribe tu nombre de usuario y uno de los códigos de recuperación que guardaste al unirte. Añade una llave de acceso en este dispositivo y funciona una sola vez.",
     recoveryCode: "Código de recuperación",
+    botJoinTitle: "Crea una cuenta para chatear",
+    botJoinBody:
+      "Elige un nombre de usuario. Tus chats son solo tuyos: nadie más aquí los ve.",
+    botJoinInstead: "Crear una cuenta",
+    botGone: "El enlace de este bot se desactivó, o nunca existió.",
+    botSignedInAs:
+      "Has iniciado sesión como @{username}. Quienes abren este enlace se unen como invitados y chatean solo con este bot.",
+    botSignedInAsGuest:
+      "Has iniciado sesión como @{username}, invitado de otro bot. Cierra sesión para unirte a este.",
+    botOpenPim: "Abrir Pim",
+    guestBotBy: "De {author}",
+    guestPoweredBy: "Funciona con Pim",
+    guestChats: "Chats",
+    guestBotOff:
+      "El enlace de {name} se desactivó. Puedes leer tus chats, pero no enviarle más.",
+    guestMessagesToday: "Mensajes de hoy",
+    guestMessagesUsed: "{used} de {limit}",
+    guestMessagesUsedUp: "Eso es todo por hoy. Más a medianoche UTC.",
+    shareAsBot: "Compartir como bot",
+    shareAsBotBody:
+      "Cualquiera con el enlace puede crear una cuenta de invitado y chatear con una copia de {name}. Los invitados no ven nada más de Pim, y sus mensajes usan el modelo de este Pim, así que cuentan contra él.",
+    botLinkOn: "Enlace de bot activo",
+    botLink: "Enlace del bot",
+    botGuests: "Personas que se unieron: {people}",
+    botDailyMessages: "Mensajes al día por persona",
+    botCreateLink: "Crear enlace",
+    botUpdate: "Actualizar",
+    botUpdateHint:
+      "Actualizar envía a los invitados el agente tal como está ahora, con sus instrucciones y su aspecto.",
+    botTurnOff: "Desactivar enlace",
+    botShared: "Enlace del bot creado.",
+    botUpdated: "Los invitados ahora chatean con el agente tal como está.",
+    botUnshared: "Enlace del bot desactivado.",
     registerTitle: "Únete a este Pim",
     registerBody:
       "Un agente personal que recuerda lo que te importa, sigue trabajando mientras no estás y pregunta antes de actuar. Elige el nombre de usuario con el que te conocerán aquí.",
@@ -2168,6 +2235,7 @@ const translations = {
     accountClosedBody:
       "Ya nadie puede usarla, pero el borrado de sus datos aún no terminó. Pim lo sigue intentando hasta borrarlo todo; no tienes que hacer nada.",
     adminBadge: "Admin",
+    guestBadge: "Invitado de un bot",
     you: "tú",
     leave: "Salir",
     members: "Personas en este Pim",

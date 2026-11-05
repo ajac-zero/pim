@@ -191,9 +191,9 @@ function MemberRow({
       <span className="min-w-0 flex-1">
         <span className="block truncate font-medium text-sm">
           @{member.username}
-          {member.role === "admin" && (
+          {member.role !== "member" && (
             <span className="ml-2 font-normal text-muted-foreground text-xs">
-              {t("adminBadge")}
+              {t(member.role === "admin" ? "adminBadge" : "guestBadge")}
             </span>
           )}
           {self && (

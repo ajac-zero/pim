@@ -9,7 +9,7 @@ import { checkAddress, SignInRequired } from "~/lib/pim-api";
  * the browser to a provider's sign-in page, which sends it back to the Worker.
  */
 
-export type Role = "admin" | "member";
+export type Role = "admin" | "member" | "guest";
 
 export type AuthSession = {
   signedIn: boolean;
@@ -334,6 +334,8 @@ export const auth = {
     username: string;
     invite?: string;
     claim?: string;
+    /** Joining through a bot's public link, as a guest who chats with it. */
+    bot?: string;
     timeZone?: string;
   }) => post<Registered>("/register", input),
 };

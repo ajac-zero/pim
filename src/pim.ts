@@ -171,7 +171,7 @@ import {
 } from "./store";
 import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, checkContacts, freeName, MAX_AGENTS } from "./agents";
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
-import type { AgentIcon, ArtifactToPublish, PublishedAgent } from "./gallery";
+import type { AgentIcon, ArtifactToPublish, Bot, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension, withPreferences } from "./majordomo";
@@ -333,6 +333,10 @@ export type OwnerStatus = "active" | "suspended";
 
 /** What registration tells a space about its owner when it provisions it. */
 export type OwnerProfile = { readonly ownerId: string; readonly username: string };
+
+/** A guest's bot: its id in the gallery, their copy of it, and when the sharing their copy follows was made. */
+export type GuestBot = { readonly bot: string; readonly agent: string; readonly sharedAt: number };
+
 /** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
@@ -359,6 +363,8 @@ const PROFILE_KEY = "owner";
 const PERSON_NAME_KEY = "person_name";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
+/** In a guest's space: the bot they joined through, the agent that is their copy of it, and which sharing of it the copy follows. */
+const GUEST_BOT_KEY = "guest_bot";
 /** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
 /**
  * Only the majordomo is offered these: naming memory scopes and choosing which agents read them, as it reads every
@@ -3699,6 +3705,59 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * At registration of a guest: their copy of the bot they joined through,
+	 * with the agents that come with it, and the bot's daily messages as the
+	 * space's limit on runs. Their space never gets the agent everyone starts with.
+	 */
+	async adoptBot(bot: Omit<Bot, "icon" | "bundle"> & Pick<PublishedAgent, "bundle"> & { image: AgentIcon | null }): Promise<Agent> {
+		this.#assertOpen();
+		const agent = await this.#adopt(bot, { template: bot.id, author: bot.author });
+		this.store.setMeta(GUEST_BOT_KEY, JSON.stringify({ bot: bot.id, agent: agent.id, sharedAt: bot.sharedAt } satisfies GuestBot));
+		this.#guestLimit(bot.dailyMessages);
+		return agent;
+	}
+
+	/** In a guest's space, the bot they joined through and their copy of it; null in anyone else's. */
+	guestBot(): GuestBot | null {
+		const json = this.store.meta(GUEST_BOT_KEY);
+		return json === undefined ? null : (JSON.parse(json) as GuestBot);
+	}
+
+	/**
+	 * Brings a guest's copy of their bot up to what its author shared last:
+	 * its name, description, instructions, apps and look, and the daily
+	 * messages it allows. The agents that came with it stay as they came.
+	 * Null when its link was turned off: the guest can read their chats, and
+	 * start nothing more.
+	 */
+	async syncBot(bot: (Omit<Bot, "icon" | "bundle"> & { image: AgentIcon | null }) | null): Promise<void> {
+		this.#assertOpen();
+		const guest = this.guestBot();
+		if (!guest) return;
+		if (bot === null) return this.#guestLimit(0);
+		if (guest.bot !== bot.id || guest.sharedAt === bot.sharedAt) return;
+		const copy = this.agents.get(guest.agent);
+		if (copy) {
+			const { name, description, instructions, apps, blueprint, symbol, color } = bot;
+			const input = await this.#installed(agentInput({ name, description, instructions, apps, blueprint, symbol, color }, copy));
+			// It keeps the role it was given, which may differ from the bot's beside the agents that came with it.
+			this.agents.update(copy.id, { ...input, role: copy.role });
+			if (bot.image) this.agents.setIcon(copy.id, bot.image.type, bot.image.data);
+			else this.agents.removeIcon(copy.id);
+		}
+		this.store.setMeta(GUEST_BOT_KEY, JSON.stringify({ ...guest, sharedAt: bot.sharedAt } satisfies GuestBot));
+		this.#guestLimit(bot.dailyMessages);
+		this.broadcastMessage({ type: "sessions" });
+	}
+
+	/** A guest's runs a day are the messages their bot allows; null leaves the deployment's limit. */
+	#guestLimit(dailyMessages: number | null): void {
+		const own = JSON.parse(this.store.meta(LIMITS_KEY) ?? "{}") as Partial<Limits>;
+		const { dailyRuns: _dailyRuns, ...rest } = own;
+		this.store.setMeta(LIMITS_KEY, JSON.stringify(dailyMessages === null ? rest : { ...rest, dailyRuns: dailyMessages }));
+	}
+
+	/**
 	 * Copies an agent from the gallery into the owner's agents, and the agents
 	 * that come with it, each with its uploaded icon and a contact of the
 	 * copies that had it. A copy
@@ -4327,7 +4386,9 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions",
 			async (_params, request) => {
 				const { title, agent: agentId } = await readJson<{ title: string; agent: string }>(request);
-				const agent = agentId === undefined ? this.agents.majordomo() : this.#agent(agentId);
+				// A guest chats with their bot alone.
+				const guest = this.guestBot();
+				const agent = guest ? this.#agent(guest.agent) : agentId === undefined ? this.agents.majordomo() : this.#agent(agentId);
 				const id = await this.#startChat(agent, typeof title === "string" && title.trim() !== "" ? clipTitle(title) : undefined);
 				return { ...this.#sessionInfo(id), agent: this.#agentRef(id) };
 			},

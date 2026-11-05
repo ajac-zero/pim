@@ -881,7 +881,8 @@ export type UsageReport = {
 export type Account = {
   username: string;
   ownerId: string;
-  role: "admin" | "member";
+  /** A guest joined through a bot's public link, and only chats with that bot. */
+  role: "admin" | "member" | "guest";
   status: "active" | "pending" | "suspended";
   createdAt: number;
   usage: UsageReport;
@@ -894,11 +895,39 @@ export type Account = {
 export type Member = {
   ownerId: string;
   username: string;
-  role: "admin" | "member";
+  role: "admin" | "member" | "guest";
   status: "pending" | "active" | "suspended" | "deleting" | "deleted";
   createdAt: number;
   activatedAt: number | null;
   statusReason: string | null;
+};
+
+/** What a bot's public link shows before anyone joins through it. */
+export type BotCard = {
+  id: string;
+  author: string;
+  authorName: string | null;
+  name: string;
+  description: string;
+  symbol: string | null;
+  color: string | null;
+  /** When its uploaded icon was shared; null without one. */
+  icon: number | null;
+};
+
+/** A guest's bot: what its link shows and the messages a day it allows (null when it's turned off), and their copy of it. */
+export type GuestBot = {
+  bot: (BotCard & { dailyMessages: number | null }) | null;
+  agent: string | null;
+};
+
+/** One of the admin's agents shared as a bot: its public link, and who joined through it. */
+export type BotSharing = {
+  id: string;
+  url: string;
+  dailyMessages: number | null;
+  sharedAt: number;
+  guests: number;
 };
 
 /** Whether Pim may use a tool: not at all, after asking you, or without asking. */
@@ -1276,6 +1305,24 @@ export const pim = {
     call<Template>(`/agents/${id}/publish`, { method: "POST" }),
   unpublishAgent: (id: string) =>
     call<{ deleted: boolean }>(`/agents/${id}/publish`, { method: "DELETE" }),
+  /** The admin's agent's public bot link; null when it has none. */
+  agentBot: (id: string) =>
+    call<BotSharing>(`/agents/${id}/bot`).catch((error) => {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }),
+  /** Shares the agent as it is now as a bot, or updates what its link shares. */
+  shareBot: (id: string, dailyMessages: number | null) =>
+    call<BotSharing>(`/agents/${id}/bot`, {
+      method: "PUT",
+      body: JSON.stringify({ dailyMessages }),
+    }),
+  unshareBot: (id: string) =>
+    call<{ deleted: boolean }>(`/agents/${id}/bot`, { method: "DELETE" }),
+  /** A guest's bot. */
+  guestBot: () => call<GuestBot>("/bot"),
+  /** What a bot's public link shows; anyone can read it, signed in or not. */
+  publicBot: (id: string) => call<BotCard>(`/bots/${encodeURIComponent(id)}`),
   /** The tasks a chat led to, oldest first. */
   tasks: (session: string) =>
     call<{ tasks: AgentTask[] }>(`/sessions/${session}/tasks`).then(

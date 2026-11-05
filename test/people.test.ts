@@ -2050,3 +2050,136 @@ describe("profiles and published agents", () => {
 		expect((await fin.browser.json(`/api/templates/${template}`)).status).toBe(404);
 	});
 });
+
+describe("bots", () => {
+	const say = async (browser: Browser, session: string, content: string) =>
+		browser.json(`/api/sessions/${session}/messages`, { method: "POST", json: { content, wait: true } });
+	/** The system prompt of the next model request, which answers with `reply`. */
+	const nextPrompt = (reply: string) => {
+		const seen = { system: "" };
+		faux.setResponses([
+			(context) => {
+				seen.system = JSON.stringify(context.messages.filter((message) => message.role === "system"));
+				return toolUse("send_to_user", { message: reply });
+			},
+		]);
+		return seen;
+	};
+
+	it("lets the admin share an agent through a public link that anyone joins as a guest who only chats with it", async () => {
+		const tutor = (
+			await admin("/api/agents", {
+				method: "POST",
+				json: { name: "Spanish tutor", description: "Practise Spanish with me.", instructions: "Answer only in Spanish.", symbol: "🇪🇸", color: "amber" },
+			})
+		).body;
+		const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 11]);
+		await operator.browser.fetch(`/api/agents/${tutor.id}/icon`, { method: "PUT", headers: { "content-type": "image/png" }, body: png });
+
+		// Only the admin shares bots: the deployment pays for their guests.
+		const member = await person("bot-member");
+		const own = (await member.browser.json("/api/agents", { method: "POST", json: { name: "Mine", instructions: "Hi." } })).body;
+		expect((await member.browser.json(`/api/agents/${own.id}/bot`, { method: "PUT" })).status).toBe(403);
+		expect((await admin(`/api/agents/${tutor.id}/bot`)).status).toBe(404);
+		expect((await admin(`/api/agents/${tutor.id}/bot`, { method: "PUT", json: { dailyMessages: 0 } })).status).toBe(400);
+		const shared = await admin(`/api/agents/${tutor.id}/bot`, { method: "PUT", json: { dailyMessages: 2 } });
+		expect(shared).toMatchObject({ status: 201, body: { dailyMessages: 2, guests: 0, url: expect.stringMatching(/^https:\/\/pim\.test\/b\/b_[0-9a-f]{16}$/) } });
+		const botId = shared.body.id as string;
+
+		// Anyone with the link sees what it is, never its instructions.
+		const stranger = new Browser();
+		const card = await stranger.json(`/api/bots/${botId}`);
+		expect(card).toMatchObject({ status: 200, body: { id: botId, author: "boss", name: "Spanish tutor", description: "Practise Spanish with me.", symbol: "🇪🇸", icon: expect.any(Number) } });
+		expect(JSON.stringify(card.body)).not.toContain("Answer only in Spanish");
+		expect(new Uint8Array(await (await stranger.fetch(`/api/bots/${botId}/icon`)).arrayBuffer())).toEqual(png);
+		expect((await stranger.json("/api/bots/b_0000000000000000")).status).toBe(404);
+
+		// Joining through it makes a guest with a copy of the bot, and nothing the admin gives members.
+		expect((await register("bot-nobody", { bot: "b_0000000000000000" })).status).toBe(404);
+		const guest = await person("bot-guest", { bot: botId });
+		expect(guest.registered.role).toBe("guest");
+		const bot = (await guest.browser.json("/api/bot")).body;
+		expect(bot).toMatchObject({ bot: { id: botId, name: "Spanish tutor", dailyMessages: 2 }, agent: expect.any(String) });
+		expect(JSON.stringify(bot)).not.toContain("Answer only in Spanish");
+		const agents = (await guest.browser.json("/api/agents")).body.agents;
+		expect(agents.map((agent: { name: string }) => agent.name)).toEqual(["Majordomo", "Spanish tutor"]);
+		expect(agents[1]).toMatchObject({ id: bot.agent, instructions: "Answer only in Spanish.", source: { template: botId, author: "boss" } });
+		expect((await guest.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 2 });
+		expect((await admin(`/api/agents/${tutor.id}/bot`)).body.guests).toBe(1);
+
+		// Every chat a guest starts is with their bot.
+		const chat = (await guest.browser.json("/api/sessions", { method: "POST", json: {} })).body;
+		expect(chat.agent).toMatchObject({ id: bot.agent });
+		let seen = nextPrompt("¡Hola!");
+		expect((await say(guest.browser, chat.id, "Hello")).body).toMatchObject({ status: "done" });
+		expect(seen.system).toContain("Answer only in Spanish.");
+
+		// A guest reaches only what chatting needs: not agents, models, sharing, publishing, memory, a computer or MCP.
+		for (const [method, path] of [
+			["POST", "/api/agents"],
+			["PUT", `/api/agents/${bot.agent}`],
+			["DELETE", `/api/agents/${bot.agent}`],
+			["POST", `/api/agents/${bot.agent}/publish`],
+			["PUT", "/api/model"],
+			["GET", "/api/circles"],
+			["GET", "/api/memory"],
+			["GET", "/api/computer"],
+			["GET", "/api/templates"],
+			["GET", `/api/sessions/${chat.id}/link`],
+			["POST", "/api/admin/invites"],
+		] as const) {
+			expect([method, path, (await guest.browser.fetch(path, { method })).status]).toEqual([method, path, 403]);
+		}
+		const token = (await guest.browser.json("/auth/tokens", { method: "POST", json: { name: "cli" } })).body.token as string;
+		expect(token).toEqual(expect.any(String));
+		const viaMcp = await exports.default.fetch(
+			new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" }),
+		);
+		expect(viaMcp.status).toBe(401);
+		// Nobody finds a guest to share with.
+		expect((await member.browser.json("/api/people/bot-guest")).status).toBe(404);
+		const circle = (await member.browser.json("/api/circles", { method: "POST", json: { name: "Friends" } })).body;
+		expect((await member.browser.json(`/api/circles/${circle.id}/members`, { method: "POST", json: { username: "bot-guest" } })).status).toBe(404);
+
+		// Shared again, the guest's copy follows on their next request, with the new daily messages.
+		await admin(`/api/agents/${tutor.id}`, { method: "PUT", json: { instructions: "Answer only in Spanish, slowly." } });
+		await operator.browser.fetch(`/api/agents/${tutor.id}/icon`, { method: "DELETE" });
+		expect((await admin(`/api/agents/${tutor.id}/bot`, { method: "PUT", json: { dailyMessages: 3 } })).status).toBe(200);
+		expect((await guest.browser.json("/api/bot")).body.bot).toMatchObject({ dailyMessages: 3, icon: null });
+		expect((await guest.browser.json(`/api/agents/${bot.agent}`)).body).toMatchObject({ instructions: "Answer only in Spanish, slowly.", icon: null });
+		expect((await guest.browser.json("/api/usage")).body.limits).toMatchObject({ dailyRuns: 3 });
+		seen = nextPrompt("Muy bien.");
+		expect((await say(guest.browser, chat.id, "Again")).body).toMatchObject({ status: "done" });
+		expect(seen.system).toContain("Answer only in Spanish, slowly.");
+		// Past its daily messages, the bot answers nothing more today.
+		faux.setResponses([toolUse("send_to_user", { message: "Tres." })]);
+		await say(guest.browser, chat.id, "Three");
+		expect((await say(guest.browser, chat.id, "Four")).status).toBe(429);
+
+		// Turned off, the link shows nothing and lets nobody in; the guest keeps their chats to read, and can't send more.
+		const fresh = await person("bot-guest-two", { bot: botId });
+		expect((await admin(`/api/agents/${tutor.id}/bot`, { method: "DELETE" })).body).toEqual({ deleted: true });
+		expect((await stranger.json(`/api/bots/${botId}`)).status).toBe(404);
+		expect((await register("bot-late", { bot: botId })).status).toBe(404);
+		expect((await fresh.browser.json("/api/bot")).body.bot).toBeNull();
+		expect((await fresh.browser.json("/api/sessions")).status).toBe(200);
+		const theirs = (await fresh.browser.json("/api/sessions", { method: "POST", json: {} })).body;
+		expect((await say(fresh.browser, theirs.id, "Hello?")).status).toBe(429);
+	});
+
+	it("lets guests join whatever the registration mode, without counting as someone to share with", async () => {
+		const stub = await freshDirectory();
+		const keeper = (await stub.resolve("keeper"))!;
+		const closed: RegistrationPolicy = { mode: "closed", maxAccounts: 3, perAddressPerDay: 100 };
+		expect(await stub.register({ username: "walk-in", ip: "1", policy: closed })).toMatchObject({ ok: false, status: 403 });
+		const joined = await stub.register({ username: "visitor", ip: "1", policy: closed, bot: "b_0123456789abcdef" });
+		expect(joined).toMatchObject({ ok: true, account: { role: "guest", bot: "b_0123456789abcdef" } });
+		if (!joined.ok) return;
+		await stub.activate(joined.account.ownerId);
+		expect(await stub.hasOthers(keeper.ownerId)).toBe(false);
+		expect(await stub.botGuests("b_0123456789abcdef")).toBe(1);
+		// The cap on accounts holds for guests too.
+		await stub.register({ username: "visitor-two", ip: "2", policy: closed, bot: "b_0123456789abcdef" });
+		expect(await stub.register({ username: "visitor-three", ip: "3", policy: closed, bot: "b_0123456789abcdef" })).toMatchObject({ ok: false, status: 503 });
+	});
+});

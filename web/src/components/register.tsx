@@ -40,17 +40,20 @@ function useDebounced<T>(value: T, ms: number): T {
  * first passkey, right here. Signed in, the app asks you to name your
  * majordomo (see `MeetMajordomo`). `claim` is for the first person on a Pim with no
  * admin, who becomes it: in the minutes after a deploy (no code), or with
- * the link from the Worker's logs.
+ * the link from the Worker's logs. `bot` joins through a bot's public link,
+ * as a guest who chats with that bot.
  */
 export function Join({
   mode,
   claim,
   invite,
+  bot,
   onBack,
 }: {
-  mode: "claim" | "invite" | "open";
+  mode: "claim" | "invite" | "open" | "bot";
   claim?: string | null;
   invite?: string | null;
+  bot?: string;
   onBack?: () => void;
 }) {
   const [registered, setRegistered] = useState<Registered | null>(null);
@@ -70,6 +73,7 @@ export function Join({
       mode={mode}
       claim={claim}
       invite={invite}
+      bot={bot}
       onRegistered={(fresh) => {
         // The claim or invite is used: keep it out of the address bar and history.
         forgetSetupCode();
@@ -84,12 +88,14 @@ function RegistrationForm({
   mode,
   claim,
   invite: given,
+  bot,
   onRegistered,
   onBack,
 }: {
-  mode: "claim" | "invite" | "open";
+  mode: "claim" | "invite" | "open" | "bot";
   claim?: string | null;
   invite?: string | null;
+  bot?: string;
   onRegistered: (registered: Registered) => void;
   onBack?: () => void;
 }) {
@@ -111,6 +117,7 @@ function RegistrationForm({
         username: normalize(username),
         ...(mode === "invite" ? { invite: invite.trim() } : {}),
         ...(mode === "claim" && claim ? { claim } : {}),
+        ...(mode === "bot" && bot ? { bot } : {}),
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       }),
     onSuccess: onRegistered,
@@ -128,10 +135,18 @@ function RegistrationForm({
       }}
     >
       <h1 className="font-semibold text-2xl">
-        {mode === "claim" ? t("setUpTitle") : t("registerTitle")}
+        {mode === "claim"
+          ? t("setUpTitle")
+          : mode === "bot"
+            ? t("botJoinTitle")
+            : t("registerTitle")}
       </h1>
       <p className="mt-2 text-muted-foreground text-sm">
-        {mode === "claim" ? t("claimBody") : t("registerBody")}
+        {mode === "claim"
+          ? t("claimBody")
+          : mode === "bot"
+            ? t("botJoinBody")
+            : t("registerBody")}
       </p>
 
       <label htmlFor={usernameId} className="mt-6 block font-medium text-sm">

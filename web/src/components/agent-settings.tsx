@@ -14,6 +14,7 @@ import {
   type LookChoice,
 } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
+import { BotShareButton } from "~/components/bot-share";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -239,6 +240,8 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
             {t("unpublish")}
           </Button>
         )}
+        {/* The admin pays for guests, so only the admin shares bots. */}
+        {isAdmin && !agent.majordomo && <BotShareButton agent={agent} />}
         {isAdmin && everyones !== undefined && !forEveryone && (
           <Button
             size="sm"

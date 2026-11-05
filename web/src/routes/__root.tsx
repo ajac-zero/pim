@@ -32,6 +32,7 @@ import {
 import { SessionCostMenu } from "~/components/chat/session-cost";
 import { CommandPalette } from "~/components/command-palette";
 import { DiscoverDialog } from "~/components/discover-dialog";
+import { GuestApp } from "~/components/guest-app";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { MeetMajordomo } from "~/components/majordomo-setup";
 import { MobileNav } from "~/components/mobile-nav";
@@ -111,18 +112,23 @@ function Root() {
   return (
     <I18nProvider>
       <ThemeProvider>
-        {/* A chat's public link is for anyone, signed in or not. */}
-        {pathname.startsWith("/shared/") ? (
+        {/* A chat's public link, and a bot's, are for anyone, signed in or not. */}
+        {pathname.startsWith("/shared/") || pathname.startsWith("/b/") ? (
           <Outlet />
         ) : (
           <SignedIn>
-            {alone ? (
-              <Outlet />
-            ) : (
-              <Introduced>
-                <AppLayout />
-              </Introduced>
-            )}
+            {(role) =>
+              // A guest only chats with the bot they joined through.
+              role === "guest" ? (
+                <GuestApp />
+              ) : alone ? (
+                <Outlet />
+              ) : (
+                <Introduced>
+                  <AppLayout />
+                </Introduced>
+              )
+            }
           </SignedIn>
         )}
         <Toaster position="top-center" />
@@ -131,8 +137,12 @@ function Root() {
   );
 }
 
-/** The app once this browser is signed in; the sign-in screen until then. */
-function SignedIn({ children }: { children: ReactNode }) {
+/** The app once this browser is signed in, as fits the account's role; the sign-in screen until then. */
+function SignedIn({
+  children,
+}: {
+  children: (role: "admin" | "member" | "guest" | undefined) => ReactNode;
+}) {
   const { data, error, refetch } = useQuery(authSessionQuery());
   const queryClient = useQueryClient();
   const signedOut = data?.signedIn === false;
@@ -158,7 +168,7 @@ function SignedIn({ children }: { children: ReactNode }) {
   }
   if (!data) return null;
   if (!data.signedIn) return <SignIn session={data} />;
-  return children;
+  return children(data.account?.role);
 }
 
 /** The app once the person has named their majordomo; naming it until then, the first time they sign in. */

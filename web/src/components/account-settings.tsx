@@ -24,8 +24,8 @@ import {
 import {
   type Account,
   type ApprovalPolicy,
+  type DeviceAlerts,
   EXPORT_URL,
-  type PimSettings,
   pim,
 } from "~/lib/pim-api";
 import { accountQuery, majordomoQuery, settingsQuery } from "~/lib/queries";
@@ -226,6 +226,18 @@ export function PreferencesSection() {
     },
     { value: "auto", title: t("approvalAuto"), body: t("approvalAutoBody") },
   ];
+  const alerts: { value: DeviceAlerts; title: string; body: string }[] = [
+    {
+      value: "important",
+      title: t("deviceAlertsImportant"),
+      body: t("deviceAlertsImportantBody"),
+    },
+    {
+      value: "all",
+      title: t("deviceAlertsAll"),
+      body: t("deviceAlertsAllBody"),
+    },
+  ];
   return (
     <Section title={t("preferences")}>
       <label className="flex flex-col gap-2 rounded-2xl border bg-muted/20 px-4 py-4">
@@ -255,12 +267,33 @@ export function PreferencesSection() {
           aria-label={t("approvalPolicy")}
         >
           {policies.map((policy) => (
-            <PolicyChoice
+            <Choice
               key={policy.value}
-              policy={policy}
-              settings={settings}
+              title={policy.title}
+              body={policy.body}
+              selected={settings.approvalPolicy === policy.value}
               pending={update.isPending}
               onChoose={() => update.mutate({ approvalPolicy: policy.value })}
+            />
+          ))}
+        </ul>
+      </div>
+      <div className="space-y-2">
+        <p className="pt-2 text-[13px] text-muted-foreground">
+          {t("deviceAlertsDescription")}
+        </p>
+        <ul
+          className="divide-y overflow-hidden rounded-2xl border bg-muted/20"
+          aria-label={t("deviceAlerts")}
+        >
+          {alerts.map((alert) => (
+            <Choice
+              key={alert.value}
+              title={alert.title}
+              body={alert.body}
+              selected={settings.deviceAlerts === alert.value}
+              pending={update.isPending}
+              onChoose={() => update.mutate({ deviceAlerts: alert.value })}
             />
           ))}
         </ul>
@@ -269,18 +302,19 @@ export function PreferencesSection() {
   );
 }
 
-function PolicyChoice({
-  policy,
-  settings,
+function Choice({
+  title,
+  body,
+  selected,
   pending,
   onChoose,
 }: {
-  policy: { value: ApprovalPolicy; title: string; body: string };
-  settings: PimSettings;
+  title: string;
+  body: string;
+  selected: boolean;
   pending: boolean;
   onChoose: () => void;
 }) {
-  const selected = settings.approvalPolicy === policy.value;
   return (
     <li>
       <button
@@ -294,10 +328,8 @@ function PolicyChoice({
         )}
       >
         <span className="min-w-0 flex-1">
-          <span className="block font-medium text-sm">{policy.title}</span>
-          <span className="block text-muted-foreground text-xs">
-            {policy.body}
-          </span>
+          <span className="block font-medium text-sm">{title}</span>
+          <span className="block text-muted-foreground text-xs">{body}</span>
         </span>
         {selected && <Check className="mt-0.5 size-4 text-primary" />}
       </button>

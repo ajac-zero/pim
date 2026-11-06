@@ -228,6 +228,13 @@ const REVIEW_EXPIRY_CALLBACK = "expireReview";
 /** How long a reply may stay unread before it is pushed: time for an open chat to mark it read. */
 const REPLY_PUSH_DELAY_SECONDS = 10;
 const REPLY_PUSH_CALLBACK = "pushReply";
+/** How long a reply waits to be checked again while its chat is still at work. */
+const REPLY_PUSH_RETRY_SECONDS = 30;
+/** Set while a chat has a message from the person that no reply has settled (see `pushReply`). */
+const awaitingKey = (session: string) => `awaiting:${session}`;
+/** A device alert keeps adding sentences until it has this many characters, and never goes past the longer one. */
+const PUSH_BODY_MINIMUM = 90;
+const PUSH_BODY_LENGTH = 240;
 
 /** How long a guest's request waits for the owner before it is denied. */
 const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
@@ -1261,7 +1268,7 @@ export class Pim extends DurableAgent<Env> {
 
 	#defaultSettings(): Settings {
 		const { timeZone, approvalPolicy } = this.deployment();
-		return { timeZone, approvalPolicy };
+		return { timeZone, approvalPolicy, deviceAlerts: "important" };
 	}
 
 	/** How this deployment runs for everyone, from its variables (see ./deployment.ts). */
@@ -1730,6 +1737,7 @@ export class Pim extends DurableAgent<Env> {
 			await this.images.delete(kept);
 			throw error;
 		}
+		if (receipt.accepted && from === "user") this.store.setMeta(awaitingKey(session), "1");
 		// A retried submission (the same operation id) is not accepted again: one run, not two, and its images once.
 		if (!receipt.accepted) {
 			if (run !== undefined) this.usage.releaseRun(run);
@@ -1868,7 +1876,8 @@ export class Pim extends DurableAgent<Env> {
 			title: `Scheduled task ran: ${title.length > 80 ? `${title.slice(0, 79)}…` : title}`,
 			body: payload.label ? payload.instruction : "",
 		});
-		await this.deliverNotification(notification);
+		// The chat's own reply is pushed when it is ready; this one only tells open apps.
+		await this.deliverNotification(notification, { push: false });
 	}
 
 	/** A firing's new chat: started on its first try, and the same one when the firing is retried. */
@@ -1955,10 +1964,12 @@ export class Pim extends DurableAgent<Env> {
 		await this.deliverNotification(notification);
 	}
 
-	async deliverNotification(notification: Notification, options: { sockets?: boolean } = {}): Promise<void> {
+	/** Tells the person: open apps through the socket, other devices by push. A notification that only repeats what a device already hears, such as a task's own reply, can skip the push. */
+	async deliverNotification(notification: Notification, options: { sockets?: boolean; push?: boolean } = {}): Promise<void> {
 		if (this.#closed()) return;
 		const shown = this.#publicNotification(notification);
 		if (options.sockets !== false) this.broadcastMessage({ type: "notification", notification: shown });
+		if (options.push === false) return;
 		// A mention shows on a device unless its chat is on screen, as a reply does.
 		await this.#pushNotification({ ...notification, reply: notification.kind === "mention" });
 	}
@@ -1977,10 +1988,27 @@ export class Pim extends DurableAgent<Env> {
 	 * `responseSent`): an open chat marks its replies read, on any device, so
 	 * only a person who isn't looking at the conversation is alerted. A later
 	 * reply in the chat has its own check.
+	 *
+	 * Unless the person asked for every reply, only an answer is pushed: one
+	 * to a message they sent, once the chat has finished working on it, so
+	 * its progress and what agents do on their own stay quiet. An agent that
+	 * needs the person says so with a mention or an approval.
 	 */
 	async pushReply(payload: { session: string; at: number; body: string }): Promise<void> {
 		const info = this.store.sessionInfo(payload.session);
-		if (this.#closed() || !info?.unread || info.responseAt !== payload.at || this.#hiddenSessions().has(payload.session)) return;
+		if (this.#closed() || info?.responseAt !== payload.at || this.#hiddenSessions().has(payload.session)) return;
+		const all = this.settings().deviceAlerts === "all";
+		if (!all) {
+			// Still at work: this may be progress, so look again, unless a later reply takes over.
+			if (await this.#working(payload.session)) {
+				await this.schedule(REPLY_PUSH_RETRY_SECONDS, REPLY_PUSH_CALLBACK, payload);
+				return;
+			}
+			const asked = this.store.meta(awaitingKey(payload.session)) === "1";
+			this.store.setMeta(awaitingKey(payload.session), "");
+			if (!asked) return;
+		}
+		if (!info.unread) return;
 		await this.#pushNotification({
 			// The same reply pushed twice shows once.
 			id: `reply-${this.store.publicId(payload.session)}-${payload.at}`,
@@ -1988,7 +2016,14 @@ export class Pim extends DurableAgent<Env> {
 			title: info.title ?? this.#agentRef(payload.session)?.name ?? "Pim",
 			body: payload.body,
 			reply: true,
+			chatReply: true,
 		});
+	}
+
+	/** Whether the chat, or an agent in its room, is at work on something now. */
+	async #working(session: string): Promise<boolean> {
+		const ids = new Set([session, ...this.#rooms.seats(session).map((seat) => seat.conversation)]);
+		return (await this.harness.sessions.list()).some((info) => info.busy && ids.has(info.id));
 	}
 
 	/**
@@ -1996,16 +2031,22 @@ export class Pim extends DurableAgent<Env> {
 	 * app closed. A `reply` shows unless its own chat is on screen; anything
 	 * else shows only while the app is not, since the app shows it itself.
 	 */
-	async #pushNotification(notification: Pick<Notification, "id" | "session" | "title" | "body"> & { reply?: boolean }): Promise<void> {
+	async #pushNotification(notification: Pick<Notification, "id" | "session" | "title" | "body"> & { reply?: boolean; chatReply?: boolean }): Promise<void> {
 		const subscriptions = this.store.pushSubscriptions();
 		if (subscriptions.length === 0) return;
 		const keys = await this.#vapidKeys();
 		const subject = this.deployment().publicUrl ?? "https://pim.invalid";
 		const { id, session, title, body, reply, agent } = this.#publicNotification(notification);
-		// A device alert shows only the first sentence, and a push message
-		// holds about 4 KB; the full text is in the app.
-		const first = new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(body.trim())[Symbol.iterator]().next().value;
-		const message = { id, session, agent, title: title.slice(0, 120), body: (first?.segment.trim() ?? "").slice(0, 500), ...(reply ? { reply } : {}) };
+		// A device alert shows the opening sentences, enough to know what it is
+		// about, and a push message holds about 4 KB; the full text is in the app.
+		const plain = body.replace(/\*\*|`|^#+\s+/gm, "").replace(/\s*\n\s*/g, " ").trim();
+		let opening = "";
+		for (const { segment } of new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(plain)) {
+			if (opening !== "" && opening.length + segment.length > PUSH_BODY_LENGTH) break;
+			opening += segment;
+			if (opening.length >= PUSH_BODY_MINIMUM) break;
+		}
+		const message = { id, session, agent, title: title.slice(0, 120), body: opening.trim().slice(0, PUSH_BODY_LENGTH), ...(reply ? { reply } : {}), ...(notification.chatReply ? { kind: "reply" } : {}) };
 		await Promise.all(
 			subscriptions.map(async (subscription) => {
 				try {

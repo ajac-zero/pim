@@ -367,8 +367,8 @@ describe("web push", () => {
 			await deliver("Price drop", "Your flight is $80.50 cheaper.\nBook by **Friday** to keep it.");
 			const [[endpoint, init]] = fetched.mock.calls as [[string, RequestInit]];
 			expect(endpoint).toBe("https://push.example/phone");
-			// The alert shows only the first sentence.
-			expect(await phone.decrypt(new Uint8Array(init.body as ArrayBuffer))).toMatchObject({ title: "Price drop", body: "Your flight is $80.50 cheaper.", session: ROOT });
+			// The alert shows the opening sentences, without markdown.
+			expect(await phone.decrypt(new Uint8Array(init.body as ArrayBuffer))).toMatchObject({ title: "Price drop", body: "Your flight is $80.50 cheaper. Book by Friday to keep it.", session: ROOT });
 
 			// The VAPID token is signed by the key /push/key advertises, for the push service's origin.
 			const header = (init.headers as Record<string, string>).Authorization!;
@@ -417,7 +417,7 @@ describe("web push", () => {
 
 		faux.setResponses([toolUse("send_to_user", { message: "Booked the 9:40 to Lisbon. It leaves from Santa Apolónia." })]);
 		await say("Book the train.", chat.id);
-		expect(await runChecks()).toEqual([{ id: expect.any(String), session: chat.id, title: "Lisbon trip", body: "Booked the 9:40 to Lisbon.", reply: true, agent: { id: agent.id, icon: null, symbol: "🚂", color: "orange" } }]);
+		expect(await runChecks()).toEqual([{ id: expect.any(String), session: chat.id, title: "Lisbon trip", body: "Booked the 9:40 to Lisbon. It leaves from Santa Apolónia.", reply: true, kind: "reply", agent: { id: agent.id, icon: null, symbol: "🚂", color: "orange" } }]);
 
 		// Read on another device before the check: nothing to push.
 		faux.setResponses([toolUse("send_to_user", { message: "Seat 42A." })]);
@@ -425,6 +425,38 @@ describe("web push", () => {
 		const { responseAt } = (await api("/sessions")).body.sessions.find((session: { id: string }) => session.id === chat.id);
 		await post(`/sessions/${chat.id}/read`, { responseAt });
 		expect(await runChecks()).toEqual([]);
+	});
+
+	it("pushes an agent working on its own only when every reply is asked for", async () => {
+		const phone = await browser("https://push.example/phone");
+		expect((await api("/push/subscription", { method: "PUT", body: JSON.stringify(phone.subscription) })).status).toBe(200);
+		const { body: chat } = await post("/sessions", { title: "Flight watch" });
+		const stub = env.Pim.getByName(OWNER);
+		/** A scheduled task's reply, which nobody asked for in the chat, and the pushes that reach the phone once the checks run. */
+		const unprompted = async () => {
+			const fetched = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 201 }));
+			try {
+				faux.setResponses([toolUse("send_to_user", { message: "Prices moved." })]);
+				await runInDurableObject(stub, async (instance: Pim) => {
+					const session = instance.store.sessionOf(chat.id)!;
+					const receipt = await instance.submitTo(session, "[Scheduled task] check", {}, "pim");
+					await instance.harness.wait(receipt.operationId, { session });
+					for (const schedule of await instance.listSchedules()) {
+						if (schedule.callback !== "pushReply") continue;
+						await instance.pushReply(schedule.payload as never);
+						await instance.cancelSchedule(schedule.id);
+					}
+				});
+				return Promise.all((fetched.mock.calls as [[string, RequestInit]]).map(([, init]) => phone.decrypt(new Uint8Array(init.body as ArrayBuffer))));
+			} finally {
+				fetched.mockRestore();
+			}
+		};
+		expect(await unprompted()).toEqual([]);
+		expect((await api("/settings", { method: "PUT", body: JSON.stringify({ deviceAlerts: "all" }) })).body.deviceAlerts).toBe("all");
+		expect(await unprompted()).toEqual([expect.objectContaining({ title: "Flight watch", body: "Prices moved.", kind: "reply" })]);
+		expect((await api("/settings", { method: "PUT", body: JSON.stringify({ deviceAlerts: "never" }) })).status).toBe(400);
+		await api("/settings", { method: "PUT", body: JSON.stringify({ deviceAlerts: null }) });
 	});
 
 	it("rejects subscriptions that are not https push subscriptions", async () => {

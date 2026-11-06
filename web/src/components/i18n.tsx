@@ -1047,6 +1047,14 @@ const translations = {
     approvalAuto: "Approve it if I don't answer",
     approvalAutoBody:
       "Pim waits 30 seconds, then acts, so background work never stalls.",
+    deviceAlerts: "Alerts",
+    deviceAlertsDescription: "What vibrates your phone when you're away:",
+    deviceAlertsImportant: "Only what needs me",
+    deviceAlertsImportantBody:
+      "An agent mentions you, an approval waits for you, or an agent answers what you asked after you left the chat.",
+    deviceAlertsAll: "Every message",
+    deviceAlertsAllBody:
+      "Also each message an agent sends you, including progress and background work.",
     apiTokens: "API tokens",
     apiTokensDescription:
       "Tokens let apps and scripts use Pim's API. Each one can do anything you can, except manage sign-in.",
@@ -2185,6 +2193,14 @@ const translations = {
     approvalAuto: "Aprobarlo si no respondo",
     approvalAutoBody:
       "Pim espera 30 segundos y luego actúa, para que el trabajo en segundo plano nunca se detenga.",
+    deviceAlerts: "Avisos",
+    deviceAlertsDescription: "Lo que hace vibrar tu teléfono cuando no estás:",
+    deviceAlertsImportant: "Solo lo que me necesita",
+    deviceAlertsImportantBody:
+      "Un agente te menciona, una aprobación te espera, o un agente responde a lo que preguntaste después de que salieras del chat.",
+    deviceAlertsAll: "Todos los mensajes",
+    deviceAlertsAllBody:
+      "También cada mensaje que te envía un agente, incluidos el progreso y el trabajo en segundo plano.",
     apiTokens: "Tokens de API",
     apiTokensDescription:
       "Los tokens permiten que apps y scripts usen la API de Pim. Cada uno puede hacer todo lo que tú puedes, salvo gestionar el inicio de sesión.",

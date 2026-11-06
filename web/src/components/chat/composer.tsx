@@ -3,7 +3,6 @@ import { Dialog } from "radix-ui";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { AppIcon } from "~/components/app-icon";
 import { ArtifactIcon } from "~/components/artifact-icon";
 import {
@@ -87,7 +86,6 @@ export interface ComposerProps {
   /** Optional context below the input, such as whose agent this chat visits. */
   disclaimer?: ReactNode;
   autoFocus?: boolean;
-  promptSuggestions?: string[];
   /** Editable text to start a new message with; nothing is sent automatically. */
   initialInput?: string;
   /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
@@ -290,7 +288,6 @@ function ComposerInner({
   placeholder,
   disclaimer,
   autoFocus,
-  promptSuggestions = [],
   draftKey,
   mentions,
   agent,
@@ -514,8 +511,6 @@ function ComposerInner({
       setPreparing(false);
     }
   };
-
-  const showSuggestions = promptSuggestions.length > 0 && !hasContent && !busy;
 
   return (
     <div className="relative w-full">
@@ -880,23 +875,6 @@ function ComposerInner({
           </div>
         </div>
       </PromptInput>
-
-      {showSuggestions && (
-        // Radix positions the scroll area itself, so a wrapper fades it in.
-        <div className="animate-in fade-in duration-700">
-          <Suggestions>
-            {promptSuggestions.map((suggestion) => (
-              <Suggestion
-                key={suggestion}
-                suggestion={suggestion}
-                disabled={disabled}
-                onClick={send}
-                variant="outline"
-              />
-            ))}
-          </Suggestions>
-        </div>
-      )}
 
       {disclaimer != null && (
         <p className="flex items-center justify-center gap-1.5 px-2 pt-2 pb-1 text-center text-muted-foreground text-xs">

@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
 import { ActivityBox } from "~/components/chat/activity";
@@ -31,7 +32,7 @@ import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
 import { FILES_ROOT, pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
-import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { agentsQuery, sessionsQuery, suggestionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
@@ -89,7 +90,7 @@ function SessionNotFound() {
 }
 
 function ChatPage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { sessionId } = Route.useParams();
   const { artifact, v, file, task } = Route.useSearch();
   const navigate = useNavigate();
@@ -127,6 +128,24 @@ function ChatPage() {
   const pending = usePimClient((state) => state.pending);
   const connection = usePimClient((state) => state.connection);
   const ready = followed === sessionId;
+
+  // What to say next, after a response of an agent's own chat.
+  const alone =
+    !!session?.agent && !session.visit && !session.room?.members.length;
+  const settled =
+    ready &&
+    loaded &&
+    alone &&
+    !view.running &&
+    !roomBusy &&
+    pending === null &&
+    view.error === null &&
+    view.retry === null &&
+    view.entries.length > 0;
+  const { data: suggestions } = useQuery({
+    ...suggestionsQuery(session?.agent?.id ?? "", locale),
+    enabled: settled,
+  });
 
   const queryClient = useQueryClient();
   const { mutate: markRead } = useMutation({
@@ -285,8 +304,23 @@ function ChatPage() {
               {/* Messages sit 1rem inside it. */}
               <div
                 ref={composerCardRef}
-                className="pointer-events-auto w-full max-w-4xl px-4"
+                className="pointer-events-auto relative w-full max-w-4xl px-4"
               >
+                {/* Floats over the thread just above the input, so they never move it. */}
+                {settled && suggestions?.length ? (
+                  <div className="absolute inset-x-4 bottom-full animate-in duration-700 fade-in">
+                    <Suggestions>
+                      {suggestions.map((suggestion) => (
+                        <Suggestion
+                          key={suggestion}
+                          suggestion={suggestion}
+                          variant="outline"
+                          onClick={send}
+                        />
+                      ))}
+                    </Suggestions>
+                  </div>
+                ) : null}
                 <Composer
                   key={sessionId}
                   draftKey={sessionId}

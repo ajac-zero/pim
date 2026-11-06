@@ -47,6 +47,9 @@ type ChatSearch = {
   task?: string;
 };
 
+/** The strip, in pixels, an overlay scrollbar draws in at the thread's edge. */
+const OVERLAY_SCROLLBAR_ROOM = 12;
+
 export const Route = createFileRoute("/chat/$sessionId")({
   validateSearch: (search: Record<string, unknown>): ChatSearch => {
     const v = Number(search.v);
@@ -187,9 +190,9 @@ function ChatPage() {
   const [fill, setFill] = useState<{ text: string; id: number }>();
   const { ref: suggestionsRef, height: suggestionsHeight } =
     useElementHeight<HTMLDivElement>();
-  // Half the width of the thread's scrollbar (overlay scrollbars take none).
-  // The composer leaves the whole scrollbar free on the right, so it stays
-  // centered under the messages and never covers the scrollbar.
+  // Half the width of the thread's scrollbar. Overlay scrollbars take none, but
+  // they still draw over the thread's right edge, so the composer leaves a strip
+  // there either way, or it would cover the scrollbar as it reaches the bottom.
   const [stage, setStage] = useState<HTMLDivElement | null>(null);
   const [gutter, setGutter] = useState(0);
   useEffect(() => {
@@ -302,8 +305,10 @@ function ChatPage() {
             <div
               ref={composerOverlayRef}
               style={{
-                left: 0,
-                right: `calc(${gutter * 2}px + var(--activity-inset, 0px))`,
+                // A strip beside the scrollbar is kept free; with an overlay scrollbar
+                // both sides keep it, so the composer stays centered.
+                left: gutter ? 0 : OVERLAY_SCROLLBAR_ROOM,
+                right: `calc(${gutter ? gutter * 2 : OVERLAY_SCROLLBAR_ROOM}px + var(--activity-inset, 0px))`,
               }}
               className="pointer-events-none absolute bottom-0 z-10 flex justify-center bg-background pb-2"
             >

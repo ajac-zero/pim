@@ -198,86 +198,72 @@ describe("extensions", () => {
 		]);
 	});
 
-	it("has one majordomo, which the person names once, and which talks in chats started without an agent", async () => {
+	it("has one majordomo, which opens the first chat, is named there, and talks in chats started without an agent", async () => {
 		const { agent: first, introduced } = (await api("/majordomo")).body;
 		expect(introduced).toBe(false);
 		expect(first).toMatchObject({ name: "Majordomo", majordomo: true, instructions: "" });
 
-		// Refused in any part, none of it is applied.
-		const setup = {
-			name: "Alfred",
-			symbol: "🎩",
-			color: "violet",
-			yourName: "Anita",
-			tone: "formal",
-			customTone: "Like a gentle aunt",
-			helpWith: ["travel", "work", "money"],
-			otherHelp: ["my garden", " my taxes ", "my garden"],
-			involvement: "close",
-			locale: "es",
-			title: "Te damos la bienvenida, Anita",
-		};
-		for (const bad of [
-			{ ...setup, name: " " },
-			{ ...setup, yourName: "Ana\nSouza" },
-			{ ...setup, otherHelp: ["x".repeat(121)] },
-			{ ...setup, otherHelp: ["a", "b", "c", "d", "e", "f", "g"] },
-			{ ...setup, locale: "Spanish!" },
-			{ ...setup, tone: "grumpy" },
-			{ ...setup, involvement: "toString" },
-			{ ...setup, helpWith: ["work", "chores"] },
-		]) {
+		// Refused in any part, nothing starts.
+		for (const bad of [{ yourName: "Ana\nSouza" }, { locale: "Spanish!" }, { title: "x".repeat(101) }]) {
 			expect((await post("/majordomo", bad)).status).toBe(400);
 		}
 		expect((await api("/majordomo")).body).toMatchObject({ agent: { name: "Majordomo" }, introduced: false });
 		const before = (await api("/memory")).body.count;
 
-		// Named, it opens the main chat by introducing itself, in the person's language, and remembers their name.
+		// The first time the person opens Pim, it opens the main chat by introducing itself, in their language,
+		// greeting them by the name their account gave, which it remembers.
 		let prompt = "";
 		faux.setResponses([
 			(context) => {
 				prompt = lastUserText(context.messages);
-				return toolUse("send_to_user", { message: "¡Hola, Ana! Soy Alfred. Cuéntame de ti: ¿a qué te dedicas?" });
+				return toolUse("send_to_user", { message: "¡Hola, Anita! Soy tu mayordomo. ¿Cómo quieres llamarme?" });
 			},
 		]);
-		const named = (await post("/majordomo", setup)).body;
-		expect(named).toMatchObject({ introduced: true, session: ROOT, agent: { id: first.id, name: "Alfred", symbol: "🎩", color: "violet", majordomo: true } });
+		const started = (await post("/majordomo", { yourName: "Anita", locale: "es", title: "Te damos la bienvenida, Anita" })).body;
+		expect(started).toMatchObject({ introduced: true, session: ROOT, agent: { id: first.id, name: "Majordomo", majordomo: true } });
 		const intro = await vi.waitFor(async () => {
 			const { body } = await api(`/sessions/${ROOT}/operations/introduction`);
 			expect(body.status).toBe("done");
 			return body;
 		});
-		expect(intro.replies).toEqual(["¡Hola, Ana! Soy Alfred. Cuéntame de ti: ¿a qué te dedicas?"]);
-		expect(prompt).toMatch(
-			/^\[Introduction\] The person just joined and named you Alfred\. Their name is Anita\. They'd like a hand with work, money, travel, my garden and my taxes\./,
-		);
+		expect(intro.replies).toEqual(["¡Hola, Anita! Soy tu mayordomo. ¿Cómo quieres llamarme?"]);
+		expect(prompt).toMatch(/^\[Introduction\] The person just joined\. Their name is Anita\. You are their majordomo/);
 		expect(prompt).toContain('"es"');
-		// The name they gave is one an agent can mention them by.
+		expect(prompt).toContain("what they'd like to call you");
+		expect(prompt).not.toContain("what you should call them");
+		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === ROOT).title).toBe("Te damos la bienvenida, Anita");
 		expect((await api("/majordomo")).body.yourName).toBe("Anita");
+		expect((await api("/memory/log")).body.entries[0].text).toBe("Their name is Anita.");
+		expect((await api("/memory")).body.count).toBe(before + 1);
+		// Once: another tab finds the chat it opened, and it doesn't introduce itself again.
+		expect((await post("/majordomo", { locale: "es" })).body).toMatchObject({ introduced: true, session: ROOT });
+
+		// They name it in the chat, and it takes the name without asking them.
+		faux.setResponses([
+			toolUse("update_agent", { name: "Alfred", emoji: "🎩", color: "violet" }),
+			toolUse("send_to_user", { message: "Listo, soy Alfred. ¿Qué te tiene ocupada estos días?" }),
+		]);
+		await post(`/sessions/${ROOT}/messages`, { content: "Llámate Alfred.", wait: true });
+		expect((await api("/approvals")).body.approvals).toEqual([]);
+		expect((await api("/majordomo")).body.agent).toMatchObject({ id: first.id, name: "Alfred", symbol: "🎩", color: "violet", majordomo: true });
+
+		// The name they gave is one an agent can mention them by.
 		faux.setResponses([() => toolUse("send_to_user", { message: "Anita, which day suits you?" }), () => toolUse("send_to_user", { message: "@Anita, which day suits you?" })]);
 		await post(`/sessions/${ROOT}/messages`, { content: "Plan a trip.", wait: true });
 		expect((await api("/notifications")).body.notifications.filter((notification: { kind: string }) => notification.kind === "mention")).toEqual([]);
 		await post(`/sessions/${ROOT}/messages`, { content: "Any day.", wait: true });
 		expect((await api("/notifications")).body.notifications).toContainEqual(expect.objectContaining({ kind: "mention", body: "@Anita, which day suits you?" }));
-		// What they already chose, it doesn't ask again.
-		expect(prompt).not.toContain("what to call them");
-		expect(prompt).not.toContain("how they'd like you to talk");
-		expect(prompt).not.toContain("what they'd like a hand with");
-		// How it talks and how much it handles alone are its instructions, theirs to edit later.
-		expect(named.agent.instructions).toContain("formally");
-		expect(named.agent.instructions).toContain("in their words: Like a gentle aunt");
-		expect(named.agent.instructions).toContain("Keep them closely involved");
-		const memories = (await api("/memory/log")).body.entries.map((entry: { text: string }) => entry.text);
-		expect(memories.slice(0, 2).reverse()).toEqual(["Their name is Anita.", "They'd like a hand with work, money, travel, my garden and my taxes."]);
-		expect((await api("/memory")).body.count).toBe(before + 2);
-		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === ROOT).title).toBe("Te damos la bienvenida, Anita");
-		// Once: after that it is edited like any agent.
-		expect((await post("/majordomo", { name: "Jeeves" })).status).toBe(409);
+
+		// How it talks and how much it handles alone are set on its page, as lines of its instructions.
+		const changePreferences = (body: unknown) => api("/majordomo/preferences", { method: "PUT", body: JSON.stringify(body) });
+		const chosen = (await changePreferences({ tone: "formal", customTone: "Like a gentle aunt", involvement: "close" })).body.agent;
+		expect(chosen.instructions).toContain("formally");
+		expect(chosen.instructions).toContain("in their words: Like a gentle aunt");
+		expect(chosen.instructions).toContain("Keep them closely involved");
 
 		// Its preferences read back from those lines, and change them in place, keeping what the person wrote themselves.
 		expect((await api("/majordomo")).body.preferences).toEqual({ tone: "formal", customTone: "Like a gentle aunt", involvement: "close" });
-		await api(`/agents/${first.id}`, { method: "PUT", body: JSON.stringify({ instructions: `${named.agent.instructions}\nNever book flights before 9.` }) });
-		const changePreferences = (body: unknown) => api("/majordomo/preferences", { method: "PUT", body: JSON.stringify(body) });
+		await api(`/agents/${first.id}`, { method: "PUT", body: JSON.stringify({ instructions: `${chosen.instructions}\nNever book flights before 9.` }) });
 		expect((await changePreferences({ tone: "grumpy" })).status).toBe(400);
 		const changed = (await changePreferences({ tone: "brief", customTone: null, involvement: "hands_off" })).body;
 		expect(changed.preferences).toEqual({ tone: "brief", customTone: null, involvement: "hands_off" });

@@ -190,7 +190,7 @@ import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessag
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
-import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, REVIEW_EXTENSION, setupMemories, reviewExtension, withPreferences } from "./majordomo";
+import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
@@ -5786,7 +5786,7 @@ export class Pim extends DurableAgent<Env> {
 				return { tools: this.shareableTools(this.#agent(id!)) };
 			},
 		],
-		// The majordomo, and whether the person has named it yet.
+		// The majordomo, and whether it has opened the person's first chat yet.
 		[
 			"GET",
 			"/majordomo",
@@ -5799,7 +5799,7 @@ export class Pim extends DurableAgent<Env> {
 			"PUT",
 			"/majordomo/preferences",
 			async (_params, request) => {
-				// How it talks and how much it handles on its own, as at setup: lines of its instructions, in place of those it had.
+				// How it talks and how much it handles on its own, as its page sets them: lines of its instructions, in place of those it had.
 				const majordomo = this.agents.majordomo();
 				const instructions = withPreferences(majordomo.instructions, await readJson<Record<string, unknown>>(request));
 				const agent = this.agents.update(majordomo.id, agentInput({ instructions }, majordomo));
@@ -5810,26 +5810,26 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/majordomo",
 			async (_params, request) => {
-				// Named once, when the person first signs in; after that it is edited like any agent.
-				if (this.agents.introduced()) throw new HttpError(409, "Your majordomo already has a name");
-				const setup = majordomoSetup(await readJson<Record<string, unknown>>(request));
-				const majordomo = this.agents.majordomo();
-				const { name, symbol, color, instructions } = setup;
-				this.agents.update(majordomo.id, agentInput({ name, symbol, color, instructions }, majordomo));
-				if (setup.yourName) this.store.setMeta(PERSON_NAME_KEY, setup.yourName);
-				const memories = setupMemories(setup);
-				for (const { text, everyone } of memories) this.memory.store.append(text, this.memory.today(), { scope: everyone ? EVERYONE_SCOPE : PRIVATE_SCOPE });
-				if (memories.length > 0) await this.startMemoryNap();
+				// The first time the person opens Pim: their majordomo opens the main chat, where they set it up by talking with it.
+				const start = majordomoStart(await readJson<Record<string, unknown>>(request));
+				const session = this.store.publicId(ROOT_SESSION);
+				// Once; checked and marked before anything awaits, so a second tab doesn't start it again.
+				if (this.agents.introduced()) return { agent: this.agents.majordomo(), introduced: true, session };
 				this.agents.introduce();
-				// It opens the person's first chat by introducing itself; they answer with whatever they like it to know.
-				const title = setup.title ?? (setup.yourName ? `Welcome, ${setup.yourName}` : null);
-				if (title) this.store.renameSession(ROOT_SESSION, title);
+				// Their name, from the account they joined with: one agents can mention them by, which every agent remembers.
+				if (start.yourName) {
+					this.store.setMeta(PERSON_NAME_KEY, start.yourName);
+					this.memory.store.append(`Their name is ${start.yourName}.`, this.memory.today(), { scope: EVERYONE_SCOPE });
+					await this.startMemoryNap();
+				}
+				const title = start.title ?? (start.yourName ? `Welcome, ${start.yourName}` : "Welcome");
+				this.store.renameSession(ROOT_SESSION, title);
 				try {
-					await this.submitTo(ROOT_SESSION, introduction(this.agents.majordomo(), setup), { operationId: "introduction" }, "pim");
+					await this.submitTo(ROOT_SESSION, introduction(this.agents.majordomo(), start), { operationId: "introduction" }, "pim");
 				} catch (error) {
 					console.warn("the majordomo's introduction failed", error);
 				}
-				return { agent: this.agents.majordomo(), introduced: true, session: this.store.publicId(ROOT_SESSION) };
+				return { agent: this.agents.majordomo(), introduced: true, session };
 			},
 		],
 		["GET", "/agents/:agent", ({ agent }) => this.#agent(agent!)],

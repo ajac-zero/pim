@@ -128,10 +128,9 @@ const answer: FauxResponseFactory = (context, _options, _state, model) => {
 
 	const text = textOf(messages.findLast((message) => message.role === "user")).trim();
 	if (text.startsWith(INTRODUCTION)) {
-		const name = /named you (.+?)\.(?: |$)/m.exec(text)?.[1] ?? "your majordomo";
 		const them = /Their name is (.+?)\.(?: |$)/m.exec(text)?.[1];
 		return send(
-			`Hello${them ? `, ${them}` : ""}! I'm ${name}, your majordomo. Come to me for almost anything: I'll get to know you, set up agents for the bigger jobs, and look after what they need your approval for.\n\nTell me about yourself, as much or as little as you like. What keeps you busy these days?`,
+			`Hello${them ? `, ${them}` : ""}! I'm your majordomo. Come to me for almost anything: I'll get to know you, set up agents for the bigger jobs, and look after what they need your approval for.\n\n${them ? "What would you like to call me?" : "First, what should I call you?"}\n\n_Preview model: name me with \`/tool update_agent {"name": "Alfred", "emoji": "🎩", "color": "violet"}\`._`,
 		);
 	}
 	const [first] = directives(text);

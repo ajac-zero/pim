@@ -159,7 +159,7 @@ export type MajordomoState = {
   yourName: string | null;
 };
 
-/** How the majordomo talks with you and how much it handles on its own, as at setup. */
+/** How the majordomo talks with you and how much it handles on its own, as its page sets them. */
 export type MajordomoPreferences = {
   tone: (typeof MAJORDOMO_TONES)[number] | null;
   /** How it should talk, in your words. */
@@ -170,16 +170,6 @@ export type MajordomoPreferences = {
 /** How the majordomo talks. */
 export const MAJORDOMO_TONES = ["warm", "formal", "playful", "brief"] as const;
 
-/** What you can say you'd like a hand with. */
-export const MAJORDOMO_HELP_WITH = [
-  "work",
-  "home",
-  "health",
-  "money",
-  "learning",
-  "travel",
-] as const;
-
 /** How much the majordomo handles without asking you. */
 export const MAJORDOMO_INVOLVEMENT = [
   "close",
@@ -187,28 +177,15 @@ export const MAJORDOMO_INVOLVEMENT = [
   "hands_off",
 ] as const;
 
-export type MajordomoSetup = {
-  name: string;
-  symbol: string | null;
-  color: string | null;
-  /** Your name, which it remembers. */
+/** How your first chat starts, as the app gives it. */
+export type MajordomoStart = {
+  /** Your name, when the account you joined with says it; it remembers. */
   yourName: string | null;
-  tone?: (typeof MAJORDOMO_TONES)[number] | null;
-  /** How it should talk, in your words, instead of or besides `tone`. */
-  customTone?: string | null;
-  /** What you'd like a hand with, which it remembers. */
-  helpWith?: (typeof MAJORDOMO_HELP_WITH)[number][];
-  /** Anything else you'd like a hand with, in your words: a few things at most. */
-  otherHelp?: string[];
-  involvement?: (typeof MAJORDOMO_INVOLVEMENT)[number] | null;
   /** The language your app is in, for its introduction. */
   locale: string;
   /** The title of the chat it opens. */
-  title?: string;
+  title: string;
 };
-
-/** How long an agent's name may be. */
-export const MAX_PIM_NAME = 60;
 
 /** A memory scope, the agents that read it, and how much it holds. */
 export type MemoryScopeInfo = {
@@ -1325,16 +1302,16 @@ export const pim = {
   deleteAgent: (id: string) =>
     call<{ deleted: boolean }>(`/agents/${id}`, { method: "DELETE" }),
   extensions: () => call<Extensions>("/extensions"),
-  /** Your majordomo, and whether you named it yet. */
+  /** Your majordomo, and whether it has opened your first chat yet. */
   majordomo: () => call<MajordomoState>("/majordomo"),
-  /** Names your majordomo, once, and has it open your first chat, whose id it returns. */
   /** Changes how your majordomo talks and how much it handles on its own. */
   setMajordomoPreferences: (preferences: MajordomoPreferences) =>
     call<MajordomoState>("/majordomo/preferences", {
       method: "PUT",
       body: JSON.stringify(preferences),
     }),
-  setUpMajordomo: (setup: MajordomoSetup) =>
+  /** Has your majordomo open your first chat, once, where you set it up by talking with it; returns its id. */
+  setUpMajordomo: (setup: MajordomoStart) =>
     call<MajordomoState & { session: string }>("/majordomo", {
       method: "POST",
       body: JSON.stringify(setup),

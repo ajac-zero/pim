@@ -222,7 +222,7 @@ function SignedIn({
   return children(data.account?.role);
 }
 
-/** The app once the person has named their majordomo; naming it until then, the first time they sign in. */
+/** The app once the majordomo has opened the person's first chat; opening it until then, the first time they sign in. */
 function Introduced({ children }: { children: ReactNode }) {
   const { data, error, refetch } = useQuery(majordomoQuery());
   if (error) {
@@ -233,7 +233,7 @@ function Introduced({ children }: { children: ReactNode }) {
     );
   }
   if (!data) return null;
-  if (!data.introduced) return <MeetMajordomo majordomo={data.agent} />;
+  if (!data.introduced) return <MeetMajordomo />;
   return children;
 }
 

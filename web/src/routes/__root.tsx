@@ -52,6 +52,7 @@ import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { Toaster } from "~/components/ui/sonner";
 import { TooltipProvider } from "~/components/ui/tooltip";
 import { authSessionQuery } from "~/lib/auth";
+import { closeScreen } from "~/lib/computer-screen";
 import { pimClient } from "~/lib/pim-client";
 import { pushEnabled, pushSupported } from "~/lib/push";
 import { agentsQuery, majordomoQuery, sessionsQuery } from "~/lib/queries";
@@ -67,12 +68,13 @@ const DIALOGS = [
   "discover",
   "apps",
   "new-chat",
+  "computer",
 ] as const;
 type AppDialog = (typeof DIALOGS)[number];
 
 /**
- * Settings, Sharing, Discover, Apps and New chat open as dialogs over any
- * page, named in the URL so links and redirects can open them:
+ * Settings, Sharing, Discover, Apps, New chat and Computer open as dialogs
+ * over any page, named in the URL so links and redirects can open them:
  * `?dialog=settings&tab=model`, or `?dialog=new-chat&agent=<id>&prompt=…`
  * for a chat with that agent, starting from that message.
  * What the sidebar shows is in the URL too (`?panel=artifacts`), and stays
@@ -106,6 +108,11 @@ const DiscoverDialog = lazy(() =>
 const AppsDialog = lazy(() =>
   import("~/components/apps-dialog").then((module) => ({
     default: module.AppsDialog,
+  })),
+);
+const ComputerDialog = lazy(() =>
+  import("~/components/computer-dialog").then((module) => ({
+    default: module.ComputerDialog,
   })),
 );
 /** Only a guest's account chats through this, so only a guest loads it. */
@@ -191,6 +198,7 @@ function SignedIn({
   useEffect(() => {
     if (!signedOut) return;
     pimClient.close();
+    closeScreen();
     queryClient.removeQueries({
       predicate: (query) => query.queryKey[0] !== "auth",
     });
@@ -543,6 +551,7 @@ function AppDialogs() {
           prompt={prompt}
           onOpenChange={close}
         />
+        <ComputerDialog open={dialog === "computer"} onOpenChange={close} />
       </Suspense>
     </>
   );

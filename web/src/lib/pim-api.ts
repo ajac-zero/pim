@@ -792,7 +792,7 @@ export type ComputerStatus = {
     root: string;
     /** The Chrome your agents browse with there, or null where it has none. */
     browser: string | null;
-    /** Whether it streams its desktop, for you to use on the Computer page. */
+    /** Whether it streams its desktop, for you to use in the Computer dialog. */
     screen: boolean;
     /** Whether agents can use its desktop's apps. */
     desktop: boolean;

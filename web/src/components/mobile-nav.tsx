@@ -234,7 +234,7 @@ function MoreSheet({
     </Link>
   );
   const dialogRow = (
-    dialog: "settings" | "sharing" | "discover" | "apps",
+    dialog: "settings" | "sharing" | "discover" | "apps" | "computer",
     icon: ReactNode,
     label: string,
     count = 0,
@@ -296,19 +296,6 @@ function MoreSheet({
         )}
         {hasComputer &&
           panelRow("files", <Folder className={ROW_ICON_CLASS} />, t("files"))}
-        {hasDesktop && (
-          <Link
-            to="/computer"
-            onClick={() => {
-              close();
-              onHideList();
-            }}
-            className={ROW_CLASS}
-          >
-            <Monitor className={ROW_ICON_CLASS} />
-            {t("computer")}
-          </Link>
-        )}
         {panelRow(
           "skills",
           <ScrollText className={ROW_ICON_CLASS} />,
@@ -320,6 +307,12 @@ function MoreSheet({
           t("schedules"),
         )}
         <div className="mx-3 my-1 h-px bg-border" />
+        {hasDesktop &&
+          dialogRow(
+            "computer",
+            <Monitor className={ROW_ICON_CLASS} />,
+            t("computer"),
+          )}
         {withOthers &&
           dialogRow(
             "discover",

@@ -477,8 +477,17 @@ describe("a computer this Pim's host keeps", () => {
 		// Closing the app closes the stream.
 		viewer.webSocket!.close(1000);
 		await vi.waitFor(() => expect(streams[0]!.closed).toBe(true));
+
+		// A computer that disconnects takes its streams with it: the app showing one hears so, and connects again once it's back.
+		const second = await exports.default.fetch(
+			new Request(apiUrl("/computer/screen"), { headers: { Upgrade: "websocket", origin: "https://pim.test", cookie: await signedIn() } }),
+		);
+		const closedWith = new Promise<number>((resolve) => second.webSocket!.addEventListener("close", (event) => resolve(event.code)));
+		second.webSocket!.accept();
+		await vi.waitFor(() => expect(streams).toHaveLength(2));
 		hosted.socket.close(1000);
 		await hosted.closed;
+		expect(await closedWith).toBe(4000);
 
 		// Without a host, people connect their own computer again.
 		await directory().forgetComputerHost();

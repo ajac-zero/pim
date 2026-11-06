@@ -63,7 +63,6 @@ import {
   appsQuery,
   artifactQuery,
   computerQuery,
-  extensionsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -344,10 +343,6 @@ function ComposerInner({
     enabled: Boolean(agent),
   });
   const self = agents?.find((candidate) => candidate.id === agent?.id);
-  const { data: extensions } = useQuery({
-    ...extensionsQuery(),
-    enabled: Boolean(self),
-  });
   const { data: directory = [] } = useQuery({
     ...appDirectoryQuery(),
     enabled: Boolean(self),
@@ -356,12 +351,7 @@ function ComposerInner({
     ...appsQuery(),
     enabled: Boolean(self),
   });
-  const listed = new Set([
-    ...(extensions?.extensions
-      .flatMap((extension) => extension.blueprints)
-      .find((candidate) => candidate.ref === self?.blueprint)?.apps ?? []),
-    ...(self?.apps ?? []),
-  ]);
+  const listed = new Set(self?.apps ?? []);
   const rank = (app: DirectoryApp) =>
     listed.has(app.ref)
       ? 0

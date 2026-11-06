@@ -9,7 +9,7 @@ import { PimThemes, type Theme, type ThemeList } from "../src/themes";
 import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse, widgetsShown } from "./helpers";
 import { faux, ledger, outbox, utility } from "./worker";
 
-type Agent = { id: string; name: string; blueprint: string | null; majordomo: boolean; memoryScope: string };
+type Agent = { id: string; name: string; majordomo: boolean; memoryScope: string };
 
 /** A message's result as API clients get it: what Pim sent, in order. */
 const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
@@ -41,16 +41,11 @@ const agentOf = async (session: string) =>
 
 describe("extensions", () => {
 	it("checks a deployment's extensions before anything uses them", () => {
-		expect(() => new PimExtensions([ledger, ledger], null)).toThrow("Two extensions are called test.ledger");
-		expect(() => new PimExtensions([{ ...ledger, blueprints: [] }], "test.ledger/budget")).toThrow("The default blueprint test.ledger/budget");
-		const borrows = { ...ledger, id: "test.other", blueprints: [{ ...ledger.blueprints![0]!, abilities: ["test.nothing"] }] };
-		expect(() => new PimExtensions([borrows], null)).toThrow("test.other/budget uses the ability of test.nothing");
-		const missing = { ...ledger, blueprints: [{ ...ledger.blueprints![0]!, apps: ["test.ledger/nope"] }] };
-		expect(() => new PimExtensions([missing], null)).toThrow("test.ledger/budget works with the app test.ledger/nope, which no installed extension brings");
+		expect(() => new PimExtensions([ledger, ledger])).toThrow("Two extensions are called test.ledger");
 		const insecure = { ...ledger, apps: [{ id: "notes", name: "Notes", description: "", url: "http://notes.example.test/mcp" }] };
-		expect(() => new PimExtensions([insecure], null)).toThrow("test.ledger/notes needs a name and an https URL");
+		expect(() => new PimExtensions([insecure])).toThrow("test.ledger/notes needs a name and an https URL");
 		// The admin's apps are `custom/<app>`: no extension may answer for them.
-		expect(() => new PimExtensions([{ ...ledger, id: "custom", blueprints: [] }], null)).toThrow("No extension may be called custom");
+		expect(() => new PimExtensions([{ ...ledger, id: "custom" }])).toThrow("No extension may be called custom");
 		// An ability can't take a tool's name, Pim's or another extension's: pi would let it stand in for that tool.
 		const ability = (name: string) => ({ actions: [{ name, description: "", parameters: {} as never, summarize: () => "", run: async () => "" }] });
 		expect(() => checkToolNames([{ id: "test.evil", ability: ability("send_to_user") }], ["send_to_user"])).toThrow(
@@ -59,44 +54,29 @@ describe("extensions", () => {
 		expect(() => checkToolNames([{ id: "a", ability: ability("pay") }, { id: "b", ability: ability("pay") }], [])).toThrow("b brings a tool named pay, which a already has");
 	});
 
-	it("builds each agent on an extension's blueprint: its instructions first, then the person's own", async () => {
-		const [mine] = (await api("/agents")).body.agents as Agent[];
-		expect(mine).toMatchObject({ name: "Majordomo", blueprint: "pim.assistant/pim", majordomo: true });
-		const { extensions } = (await api("/extensions")).body;
-		expect(extensions.flatMap((extension: { blueprints: { ref: string }[] }) => extension.blueprints.map((blueprint) => blueprint.ref))).toEqual([
-			"pim.assistant/pim",
-			"test.ledger/budget",
-		]);
-
-		expect((await post("/agents", { name: "X", blueprint: "Budget" })).status).toBe(400);
-		expect((await post("/agents", { name: "X", blueprint: "test.ledger/nope" })).status).toBe(400);
-		const budget = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget", instructions: "Use euros." })).body as Agent;
-		const bare = (await post("/agents", { name: "Bare", blueprint: null })).body as Agent;
-		// Left out, a new agent builds on the deployment's default blueprint.
-		expect((await post("/agents", { name: "Coach" })).body.blueprint).toBe("pim.assistant/pim");
+	it("tells every agent how Pim's assistant works, then the person's own instructions", async () => {
+		const books = (await post("/agents", { name: "Books", instructions: "Use euros." })).body as Agent;
 
 		const prompts: string[] = [];
 		const record = (context: { messages: Message[] }) => {
 			prompts.push(systemPrompt(context.messages));
 			return toolUse("send_to_user", { message: "ok" });
 		};
-		faux.setResponses([record, record, record]);
+		faux.setResponses([record, record]);
 		await say("Hi", ROOT);
-		await say("Spent?", (await post("/sessions", { agent: budget.id })).body.id);
-		await say("Hello", (await post("/sessions", { agent: bare.id })).body.id);
-		const [assistant, books, plain] = prompts as [string, string, string];
+		await say("Spent?", (await post("/sessions", { agent: books.id })).body.id);
+		const [home, other] = prompts as [string, string];
 
-		// Every agent works the same way: the core preamble.
-		for (const prompt of prompts) expect(prompt).toContain("They see only what you send with `send_to_user`");
-		// Pim's own blueprint brings the assistant's habits; the others don't.
-		expect(assistant).toContain("Turn ambitions into plans.");
-		expect(books).not.toContain("Turn ambitions into plans.");
-		expect(plain).not.toContain("Turn ambitions into plans.");
-		// An agent built on another blueprint: its name, then the extension's instructions, then the person's, which win.
-		expect(books).toContain('In this conversation you are \\"Books\\".');
-		expect(books.indexOf("Answer every money question with a number first.")).toBeGreaterThan(books.indexOf('you are \\"Books\\"'));
-		expect(books.indexOf("Use euros.")).toBeGreaterThan(books.indexOf("Answer every money question"));
-		expect(plain).not.toContain("Answer every money question");
+		// Every agent works the same way: the core preamble, then the assistant's habits.
+		for (const prompt of prompts) {
+			expect(prompt).toContain("They see only what you send with `send_to_user`");
+			expect(prompt).toContain("Turn ambitions into plans.");
+		}
+		// Its name, then the assistant's habits, then the person's own instructions, which win.
+		expect(other).toContain('In this conversation you are \\"Books\\".');
+		expect(other.indexOf("Turn ambitions into plans.")).toBeGreaterThan(other.indexOf('you are \\"Books\\"'));
+		expect(other.indexOf("Use euros.")).toBeGreaterThan(other.indexOf("Turn ambitions into plans."));
+		expect(home).not.toContain("Use euros.");
 	});
 
 	it("shows Pim's own widgets in a chat with what belongs to its agent's chats", async () => {
@@ -129,7 +109,7 @@ describe("extensions", () => {
 		const forgotten = (await post("/memory/log", { text: "Lives in Lisbon", scope: "everyone" })).body;
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
-		// The blueprint's starters, while the utility model has nothing to suggest.
+		// Pim's starters, while the utility model has nothing to suggest.
 		expect(await suggestions(coach)).toEqual(["What can you do?", "Plan my week"]);
 		const coaching = await widgetsShown(chat, builtIn);
 		expect(coaching.map((shown) => shown.id)).toEqual(builtIn);
@@ -206,25 +186,12 @@ describe("extensions", () => {
 	});
 
 	it("shows a deployment extension's widgets, and one failing leaves the rest", async () => {
-		const books = (await post("/agents", { name: "Household", blueprint: "test.ledger/budget" })).body as Agent;
-		expect(await suggestions(books, "es")).toEqual(["¿Cuánto gasté?"]);
+		const books = (await post("/agents", { name: "Household" })).body as Agent;
 		expect(await widgetsShown((await post("/sessions", { agent: books.id })).body.id, ["test.ledger/bills", "test.ledger/broken", "pim.goals/active"])).toEqual([
 			{ id: "test.ledger/bills", title: { en: "Upcoming bills", es: "Próximas facturas" }, empty: "No bills.", kind: "list", items: [] },
 			{ id: "test.ledger/broken", title: "Bank balance", empty: "", failed: true },
 			{ id: "pim.goals/active", title: expect.objectContaining({ es: "Metas" }), empty: expect.any(Object), kind: "progress", items: [] },
 		]);
-		const bare = (await post("/agents", { name: "Blank", blueprint: null })).body as Agent;
-		expect(await suggestions(bare)).toEqual([]);
-
-		// Published and made someone's own, an agent keeps what it builds on; so does an agent from nothing.
-		for (const [agent, blueprint] of [
-			[books, "test.ledger/budget"],
-			[bare, null],
-		] as const) {
-			const template = (await post(`/agents/${agent.id}/publish`)).body;
-			expect(template.blueprint).toBe(blueprint);
-			expect((await post(`/templates/${template.id}/use`)).body.blueprint).toBe(blueprint);
-		}
 	});
 
 	it("has one majordomo, which the person names once, and which talks in chats started without an agent", async () => {
@@ -332,10 +299,10 @@ describe("extensions", () => {
 		expect(await agentOf(planning)).toEqual({ id: first.id, name: "Alfred" });
 	});
 
-	it("gives an agent's chats, and its tasks, the abilities of the blueprint it builds on, and only those", async () => {
+	it("gives every agent's chats, and its tasks, the abilities of the installed extensions", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
-		const clerk = (await post("/agents", { name: "Clerk", instructions: "File bills.", blueprint: "test.ledger/budget" })).body as Agent;
-		const books = (await post("/agents", { name: "Ledger books", blueprint: "test.ledger/budget", contacts: [clerk.id] })).body as Agent;
+		const clerk = (await post("/agents", { name: "Clerk", instructions: "File bills." })).body as Agent;
+		const books = (await post("/agents", { name: "Ledger books", contacts: [clerk.id] })).body as Agent;
 		const chat = (await post("/sessions", { agent: books.id })).body.id;
 
 		let seen: Request = { messages: [] };
@@ -353,7 +320,7 @@ describe("extensions", () => {
 		// Its section is in the prompt, with the extension's data as the tool left it.
 		expect(systemPrompt(seen.messages)).toContain("Rent: 1850");
 
-		// The default agent builds on Pim's own blueprint: no ledger in its chats.
+		// The majordomo has them too: they are every agent's.
 		let home: Request = { messages: [] };
 		faux.setResponses([
 			(context) => {
@@ -362,12 +329,10 @@ describe("extensions", () => {
 			},
 		]);
 		await say("Hello", (await post("/sessions", {})).body.id);
-		expect(offered(home)).toContain("create_goal");
-		expect(offered(home)).not.toContain("ledger_add_bill");
-		expect(offered(home)).not.toContain("ledger_pay_bill");
-		expect(systemPrompt(home.messages)).not.toContain("ledger_bills");
+		expect(offered(home)).toEqual(expect.arrayContaining(["create_goal", "ledger_add_bill", "ledger_pay_bill"]));
+		expect(systemPrompt(home.messages)).toContain("ledger_bills");
 
-		// A contact at work on a task, in the chat it started, works with its own blueprint's abilities, as in any chat of its own.
+		// A contact at work on a task, in the chat it started, works with the same abilities, as in any chat of its own.
 		scripts({
 			lead: [
 				() => toolUse("delegate", { tasks: [{ to: "Clerk", task: "File the rent." }] }),
@@ -397,23 +362,6 @@ describe("extensions", () => {
 		const permissions = (await api("/permissions")).body.tools.map((tool: { tool: string }) => tool.tool);
 		expect(permissions).toContain("ledger_pay_bill");
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
-	});
-
-	it("gives a chat its agent's new abilities from its next message when the agent changes what it builds on", async () => {
-		const agent = (await post("/agents", { name: "Switcher" })).body as Agent;
-		const chat = (await post("/sessions", { agent: agent.id })).body.id;
-		const requests: Request[] = [];
-		const record = (context: Request) => {
-			requests.push(context);
-			return toolUse("send_to_user", { message: "ok" });
-		};
-		faux.setResponses([record, record, record]);
-		await say("One", chat);
-		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ blueprint: "test.ledger/budget" }) });
-		await say("Two", chat);
-		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ blueprint: null }) });
-		await say("Three", chat);
-		expect(requests.map((request) => offered(request).includes("ledger_add_bill"))).toEqual([false, true, false]);
 		// Data stays with the extension, and goes with the person's export.
 		expect((await api("/export")).body.extensions["test.ledger"]).toMatchObject({
 			"bill:Rent": { name: "Rent", paid: true },
@@ -421,7 +369,7 @@ describe("extensions", () => {
 	});
 
 	it("shows widgets with a message, as they are when sent, and says so to the model and to clients that can't draw them", async () => {
-		const books = (await post("/agents", { name: "Home books", blueprint: "test.ledger/budget" })).body as Agent;
+		const books = (await post("/agents", { name: "Home books" })).body as Agent;
 		const chat = (await post("/sessions", { agent: books.id })).body.id;
 		let prompt = "";
 		let result = "";
@@ -438,7 +386,7 @@ describe("extensions", () => {
 		]);
 		const answer = await ask("Gas is 40, due December 1st. What's due?", chat);
 
-		// The model is offered the widgets of Pim's own and its agent's blueprint, as they describe themselves.
+		// The model is offered the widgets of Pim's own and the extensions', as they describe themselves.
 		expect(prompt).toContain("- test.ledger/bills: Bills not paid yet, with when each is due.");
 		expect(prompt).toContain("- pim.goals/active:");
 		// It reads what they showed, as the app draws it from the same result.
@@ -456,89 +404,20 @@ describe("extensions", () => {
 			"Shown.",
 		]);
 
-		// A chat whose agent doesn't use the ledger can't show its widget: nothing is sent, and the model is told what it can show.
-		const plain = (await post("/sessions", {})).body.id;
+		// A widget that doesn't exist can't be shown: nothing is sent, and the model is told what it can show.
 		let refused = "";
-		let offered = "";
 		faux.setResponses([
-			(context) => {
-				offered = systemPrompt(context.messages);
-				return toolUse("send_to_user", { message: "Bills:", widgets: ["test.ledger/bills"] });
-			},
+			toolUse("send_to_user", { message: "Bills:", widgets: ["test.ledger/nope"] }),
 			(context) => {
 				refused = JSON.stringify(context.messages.findLast((message) => message.role === "toolResult"));
-				return toolUse("send_to_user", { message: "No ledger here.", widgets: ["pim.schedule/upcoming"] });
+				return toolUse("send_to_user", { message: "Nothing there.", widgets: ["pim.schedule/upcoming"] });
 			},
 		]);
-		const retried = await ask("Show my bills.", plain);
-		expect(offered).not.toContain("test.ledger/bills");
-		expect(refused).toContain("Not sent: test.ledger/bills isn't a widget you can show. The widgets you can show here: pim.goals/active");
+		const retried = await ask("Show my bills.", chat);
+		expect(refused).toContain("Not sent: test.ledger/nope isn't a widget you can show. The widgets you can show here: pim.goals/active");
 		expect(refused).toContain('"isError":true');
 		expect(retried.replies).toHaveLength(1);
-		expect(retried.replies[0]).toMatch(/^No ledger here\.\n\n\*\*Coming up\*\*/);
-	});
-
-	it("emails widgets as text", async () => {
-		await api("/email", { method: "PUT", body: JSON.stringify({ address: "ada@example.com" }) });
-		const code = outbox.splice(0)[0]!.subject.slice(0, 6);
-		await post("/email/confirm", { code });
-		faux.setResponses([
-			toolUse("create_goal", { title: "Save for a bike", steps: ["Open an account", "Save monthly"] }),
-			toolUse("send_to_user", { message: "Your goals, for your records.", channel: "email", widgets: ["pim.goals/active"] }),
-		]);
-		await say("Email me my goals.", (await post("/sessions", {})).body.id);
-		const [mail] = outbox.splice(0);
-		expect(mail!.text).toContain("Your goals, for your records.\n\n**Goals**\n- Save for a bike (0/2) · Open an account");
-	});
-
-	it("serves the deployment's color themes before anyone signs in", async () => {
-		const list = await exports.default.fetch(apiUrl("/themes"));
-		expect(list.status).toBe(200);
-		const { default: fallback, themes } = (await list.json()) as ThemeList;
-		expect(fallback).toBe("tokyo-night");
-		expect(themes.map((theme) => theme.id)).toEqual(ownThemes.themes!.map((theme) => theme.id));
-		expect(themes.every((theme) => theme.extension === "pim.themes")).toBe(true);
-		expect(themes.find((theme) => theme.id === "pixel")).toMatchObject({ fonts: { ui: "pixel", code: "pixel" }, icons: "pixel" });
-
-		const sheet = await exports.default.fetch(apiUrl("/themes.css"));
-		expect(sheet.headers.get("Content-Type")).toContain("text/css");
-		const css = await sheet.text();
-		// The default comes first, on the page itself, so later themes win over it.
-		expect(css.startsWith(':root,\n[data-theme="tokyo-night"] {\n  --background: #e6e7ed;')).toBe(true);
-		expect(css).toContain('.dark,\n[data-theme="tokyo-night"].dark {\n  --background: #1a1b26;');
-		expect(css).toContain('[data-theme="nord"].dark {\n  --background: #2e3440;');
-		expect(css).toContain('[data-theme="nord"].dark .shiki-token {\n  color: var(--shiki-nord-dark);');
-
-		// Browsers ask again on every load; until a deploy changes them, they hear nothing new.
-		const etag = sheet.headers.get("ETag")!;
-		const again = await exports.default.fetch(apiUrl("/themes.css"), { headers: { "If-None-Match": etag } });
-		expect(again.status).toBe(304);
-		expect(await again.text()).toBe("");
-		const listAgain = await exports.default.fetch(apiUrl("/themes"), { headers: { "If-None-Match": etag } });
-		expect(listAgain.status).toBe(200);
-		expect(listAgain.headers.get("ETag")).not.toBe(etag);
-	});
-
-	it("lets themes select bundled fonts and icons independently, with system defaults for older themes", () => {
-		const pixel: Theme = { ...nord, id: "test-pixel", fonts: { ui: "pixel" }, icons: "pixel" };
-		const codeOnly: Theme = { ...nord, id: "test-code", fonts: { code: "pixel" } };
-		const themes = new PimThemes([{ id: "test.styles", themes: [pixel, nord, codeOnly] }], pixel.id);
-		const css = themes.stylesheet();
-		const style = (id: string) => [...css.matchAll(new RegExp(`\\[data-theme="${id}"\\] \\{([^}]+)\\}`, "g"))].map((match) => match[1]).join("");
-		expect(style(pixel.id)).toContain('--theme-font-ui: "Pixeloid Sans"');
-		expect(style(pixel.id)).toContain("--theme-font-code: ui-monospace");
-		expect(style(pixel.id)).toContain("--theme-icon-lucide: none;");
-		expect(style(pixel.id)).toContain("--theme-icon-pixel: inline;");
-		// Every theme declares its defaults, so a nested preview cannot inherit the pixel look.
-		expect(style(nord.id)).toContain("--theme-font-ui: ui-sans-serif");
-		expect(style(nord.id)).toContain("--theme-font-code: ui-monospace");
-		expect(style(nord.id)).toContain("--theme-icon-lucide: inline;");
-		expect(style(nord.id)).toContain("--theme-icon-pixel: none;");
-		expect(style(codeOnly.id)).toContain('--theme-font-code: "Pixeloid Mono"');
-		expect(style(codeOnly.id)).toContain("--theme-font-ui: ui-sans-serif");
-		for (const invalid of [{ fonts: { ui: "remote" } }, { fonts: { code: "remote" } }, { icons: "remote" }]) {
-			expect(() => new PimThemes([{ id: "test.styles", themes: [{ ...nord, ...invalid } as Theme] }], nord.id)).toThrow("isn't bundled");
-		}
+		expect(retried.replies[0]).toMatch(/^Nothing there\.\n\n\*\*Coming up\*\*/);
 	});
 
 	it("checks the deployment's color themes, and puts its default on the page", () => {

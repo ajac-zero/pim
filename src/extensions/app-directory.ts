@@ -2,7 +2,7 @@ import { type AppCategory, CUSTOM_APPS, isNativeApp, type PimExtension, type Tex
 
 /**
  * The apps people can connect: those the installed extensions bring, and
- * those the admin adds, named `custom/<app>`. Agents, blueprints and
+ * those the admin adds, named `custom/<app>`. Agents and
  * templates list apps by name (`<extension>/<app>`), never by URL, so every
  * agent of a person's that lists an app works with the one connection they
  * made, and nobody connects a server the deployment doesn't offer.

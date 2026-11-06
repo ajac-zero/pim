@@ -58,7 +58,7 @@ const imageAi = {
 type Bill = { name: string; amount: number; due: string; paid: boolean };
 
 /**
- * A deployment's own extension, as tests install it: a blueprint, widgets,
+ * A deployment's own extension, as tests install it: apps, widgets,
  * one of which always fails, and an
  * ability that keeps bills in the extension's data: a tool to add one, an
  * action that asks before paying one, and a section listing them.
@@ -193,16 +193,6 @@ export const ledger = definePimExtension({
 			signIn: async () => ({ url: "https://vault.example.test" }),
 			callback: async () => ({}),
 			tools: [],
-		},
-	],
-	blueprints: [
-		{
-			id: "budget",
-			name: "Budget",
-			description: "Keeps the books.",
-			instructions: "Answer every money question with a number first.",
-			apps: ["test.ledger/weather"],
-			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
 		},
 	],
 });

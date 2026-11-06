@@ -70,6 +70,7 @@ import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
 import { CodexImages } from "./codex-images";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
+import { ASSISTANT_STARTERS } from "./extensions/assistant";
 import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
 import { INSTALL_SKILL, type SkillWriters, skillsExtension, skillsSwitch, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
@@ -186,8 +187,6 @@ import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, 
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
-/** Pim's own widgets: every chat can show them. */
-const BUILT_IN_WIDGETS = ["pim.goals", "pim.schedule", "pim.memory"];
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE, BROWSER_UPLOAD, DESKTOP_ACT]);
 
@@ -471,10 +470,8 @@ export class Pim extends DurableAgent<Env> {
 	readonly #suggesting = new Map<string, { of: string; promise: Promise<string[]> }>();
 	/** The owner's agents: each with its own instructions, the majordomo first. */
 	readonly agents = new AgentStore(this.ctx.storage.sql, () => {
-		// The majordomo until the person names it: built on the deployment's default blueprint, or bare.
-		const ref = this.extensions.defaultBlueprint;
-		const blueprint = ref === null ? undefined : this.extensions.blueprint(ref);
-		return { name: "Majordomo", description: "", instructions: "", apps: [], skills: [], contacts: [], blueprint: blueprint ? ref : null };
+		// The majordomo until the person names it.
+		return { name: "Majordomo", description: "", instructions: "", apps: [], skills: [], contacts: [] };
 	}, () => this.appDirectory());
 	/** The skills the owner's agents wrote for work they do again. */
 	readonly skills = new SkillStore(this.ctx.storage.sql, {
@@ -764,7 +761,6 @@ export class Pim extends DurableAgent<Env> {
 			this.#migrateAlwaysApproved();
 			const apps = this.#appExtensions(services);
 			this.registry.install(apps.apps);
-			this.registry.install(this.memory.extension);
 			// No extension's tool may take the name of one of Pim's, or another extension's.
 			checkToolNames(
 				[...this.abilities].map(([id, ability]) => ({ id, ability })),
@@ -773,12 +769,15 @@ export class Pim extends DurableAgent<Env> {
 						.snapshot()
 						.tools()
 						// A harness opened again finds the abilities installed already: they don't count against themselves.
-						.filter(({ extension }) => !this.abilities.has(extension.name))
+						.filter(({ extension }) => !this.abilities.has(extension.name) && extension.name !== this.memory.extension.name)
 						.map(({ tool }) => tool.name),
+					...(this.memory.extension.tools ?? []).map((tool) => tool.name),
 					...this.#ownActions.map((action) => action.name),
 				],
 			);
+			// Before memory, whose view changes as the conversation goes: a section after it would make pi send every section again.
 			this.#installAbilities(services);
+			this.registry.install(this.memory.extension);
 			// Last: the apps' tools come and go, and pi only appends cheaply at the end.
 			this.#installAppTools(apps.tools);
 			// Visits' tools, as their hosts last allowed, so a visit's run resumes with them; each turn asks again.
@@ -1002,11 +1001,10 @@ export class Pim extends DurableAgent<Env> {
 		for (const extension of tools) this.registry.install(extension);
 	}
 
-	/** The apps an agent works with: those of the blueprint it builds on, then its own. */
+	/** The apps an agent works with: those it lists. */
 	#appsOf(agent: Agent): DirectoryApp[] {
-		const blueprint = agent.blueprint === null ? [] : (this.extensions.blueprint(agent.blueprint)?.apps ?? []);
 		const directory = this.appDirectory();
-		return [...new Set([...blueprint, ...agent.apps])].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
+		return [...new Set(agent.apps)].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
 	}
 
 	/** The apps people on this deployment can connect: the extensions', then the admin's, as last read from the gallery. */
@@ -1121,12 +1119,11 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Extensions only some conversations select: abilities, by the agents that
-	 * use them; apps, by the agents that list them; and reviews', by the
-	 * majordomo's reviews.
+	 * Extensions only some conversations select: apps, by the agents that list
+	 * them; and reviews', by the majordomo's reviews.
 	 */
 	#perPim(name: string): boolean {
-		return this.abilities.has(name) || name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION;
+		return name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION;
 	}
 
 	/** pi's run policy, shared by every session. */
@@ -1134,8 +1131,8 @@ export class Pim extends DurableAgent<Env> {
 		const registry = this.registry;
 		const perPim = (name: string) => this.#perPim(name);
 		return {
-			// Every extension but visits', abilities', apps' and reviews': a visit's own conversation selects its
-			// extension, the chats of agents that use an ability or list an app select it, and reviews select theirs.
+			// Every extension but visits', apps' and reviews': a visit's own conversation selects its
+			// extension, the chats of agents that list an app select it, and reviews select theirs.
 			get extensions() {
 				return registry
 					.snapshot()
@@ -2281,7 +2278,7 @@ export class Pim extends DurableAgent<Env> {
 			if (tool === WATCH_APP_EVENT) return resolved.chosen === "off" ? "off" : "ask";
 			if (this.#requiresExplicitApproval(approval)) return resolved.permission === "off" ? "off" : "ask";
 			if (!approval.requestedBy && resolved.chosen === null) {
-				const assigned = this.extensions.abilitiesOf(this.#roleOf(approval.session).agent.blueprint);
+				const assigned = this.extensions.withAbilities();
 				if (assigned.some((id) => this.abilities.get(id)?.actions?.some((action) => action.name === tool))) return "on";
 			}
 			return resolved.permission;
@@ -3418,7 +3415,7 @@ export class Pim extends DurableAgent<Env> {
 		return agent;
 	}
 
-	// Extensions: the blueprints agents build on, and the widgets their chats show.
+	// Extensions: the abilities every agent has, and the widgets their chats show.
 
 	/** The deployment's extensions (`pim.config.ts`). Tests add their own. */
 	protected pimConfig(): PimConfig {
@@ -3427,16 +3424,13 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Pim's own abilities' widgets, then the deployment's extensions, checked once. */
 	get extensions(): PimExtensions {
-		this.#extensions ??= new PimExtensions(
-			[
-				// Pim's own (BUILT_IN_WIDGETS): every chat can show their widgets.
+		this.#extensions ??= new PimExtensions([
+				// Pim's own: every chat can show their widgets.
 				goalsWidgets(this.store),
 				scheduleWidgets(() => this.services().listSchedules()),
 				memoryWidgets(this.memory.store, (id) => this.#memoryAccess(this.agents.get(id) ?? this.agents.majordomo()).read.map((scope) => scope.key)),
-				...this.pimConfig().extensions,
-			],
-			this.pimConfig().defaultBlueprint,
-		);
+			...this.pimConfig().extensions,
+		]);
 		return this.#extensions;
 	}
 
@@ -3477,7 +3471,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Gives a chat the abilities its agent uses and the apps it lists, less
 	 * the app tools switched off for the agent, as they are now, before its next
-	 * run: its agent, the agent's blueprint, the extensions, the connected apps
+	 * run: its agent, the extensions, the connected apps
 	 * or the switches may have changed since.
 	 * Visits choose their own extensions, and the conversations of tasks that
 	 * aren't chats got theirs when made. A chat whose selection is unchanged
@@ -3487,7 +3481,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.visits.bySession(session) || this.#taskApart(session)) return;
 		const agent = this.agents.ofSession(session);
 		// Apps last: their tools come and go, and pi only appends cheaply at the end.
-		const wanted = [...this.extensions.abilitiesOf(agent.blueprint), ...this.#appExtensionsOf(agent)];
+		const wanted = this.#appExtensionsOf(agent);
 		const off = [...this.#switchedOff(agent)];
 		const key = [...wanted, ...off.map((name) => `-${name}`)].join(" ");
 		if ((this.agents.abilities(session) ?? "") === key) return;
@@ -3501,21 +3495,14 @@ export class Pim extends DurableAgent<Env> {
 		this.agents.setAbilities(session, key);
 	}
 
-	/** A copy's blueprint, if this deployment still has it, else the default blueprint; and those of its apps it still offers. */
+	/** A copy's apps that this deployment still offers. */
 	async #installed(input: AgentInput): Promise<AgentInput> {
 		await this.#refreshCustomApps(true);
 		const directory = this.appDirectory();
 		return {
 			...input,
 			apps: input.apps.filter((ref) => directory.some((app) => app.ref === ref)),
-			...(input.blueprint && !this.extensions.blueprint(input.blueprint) ? { blueprint: undefined } : {}),
 		};
-	}
-
-	/** A blueprint given through the API must be a blueprint some installed extension brings. */
-	#checkBlueprint(input: AgentInput): AgentInput {
-		if (input.blueprint && !this.extensions.blueprint(input.blueprint)) throw new HttpError(400, `No installed extension brings the blueprint ${input.blueprint}`);
-		return input;
 	}
 
 	/**
@@ -3523,11 +3510,10 @@ export class Pim extends DurableAgent<Env> {
 	 * agent has had a chat, the utility model writes them from its latest chats
 	 * and what Pim remembers, and writes them again
 	 * only when that has changed since, so an agent nobody talks to costs
-	 * nothing. Until then, and when the model can't, its blueprint's starters.
+	 * nothing. Until then, and when the model can't, Pim's own starters.
 	 */
 	async #suggestions(agent: Agent, locale: string): Promise<string[]> {
-		const blueprint = agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint);
-		const starters = (blueprint?.starters ?? []).map((starter) => localize(starter, locale));
+		const starters = ASSISTANT_STARTERS.map((starter) => localize(starter, locale));
 		const hidden = this.#hiddenSessions();
 		const chats = (await this.harness.sessions.list())
 			.filter((session) => !hidden.has(session.id) && this.#agentRef(session.id)?.id === agent.id)
@@ -3599,18 +3585,15 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** The widgets an agent built on `blueprint` can show: Pim's own, and those of the extensions it builds on and uses. */
-	#widgetsFor(blueprint: string | null): { ref: string; widget: Widget }[] {
-		const extensions = new Set([...BUILT_IN_WIDGETS, ...(blueprint ? [blueprint.slice(0, blueprint.indexOf("/"))] : []), ...this.extensions.abilitiesOf(blueprint)]);
-		return this.extensions
-			.list()
-			.flatMap((extension) => (extensions.has(extension.id) ? Object.entries(extension.widgets ?? {}).map(([name, widget]) => ({ ref: `${extension.id}/${name}`, widget })) : []));
+	/** The widgets an agent can show: those of every installed extension. */
+	#widgetsFor(): { ref: string; widget: Widget }[] {
+		return this.extensions.list().flatMap((extension) => Object.entries(extension.widgets ?? {}).map(([name, widget]) => ({ ref: `${extension.id}/${name}`, widget })));
 	}
 
 	/** The widgets a chat can show with its messages: those its agent can show. None in a visit, or in a task's conversation. */
 	#chatWidgets(session: string): { ref: string; description: string }[] {
 		if (this.visits.bySession(session) || this.#taskApart(session)) return [];
-		return this.#widgetsFor(this.agents.ofSession(session).blueprint).map(({ ref, widget }) => ({ ref, description: widget.description }));
+		return this.#widgetsFor().map(({ ref, widget }) => ({ ref, description: widget.description }));
 	}
 
 	/** Who started a chat to hand its agent a task, from which chat, and how the task is going; null for a chat the person started. */
@@ -3648,7 +3631,7 @@ export class Pim extends DurableAgent<Env> {
 			bundle.push(other);
 			queue.push(...other.contacts);
 		}
-		const { name, role, description, instructions, apps, blueprint, symbol, color } = agent;
+		const { name, role, description, instructions, apps, symbol, color } = agent;
 		return {
 			id,
 			name,
@@ -3656,7 +3639,6 @@ export class Pim extends DurableAgent<Env> {
 			description,
 			instructions,
 			apps,
-			blueprint,
 			symbol,
 			color,
 			contacts: names(agent.contacts),
@@ -3666,7 +3648,6 @@ export class Pim extends DurableAgent<Env> {
 				description: other.description,
 				instructions: other.instructions,
 				apps: other.apps,
-				blueprint: other.blueprint,
 				symbol: other.symbol,
 				color: other.color,
 				contacts: names(other.contacts),
@@ -3804,8 +3785,8 @@ export class Pim extends DurableAgent<Env> {
 		if (guest.bot !== bot.id || guest.sharedAt === bot.sharedAt) return;
 		const copy = this.agents.get(guest.agent);
 		if (copy) {
-			const { name, description, instructions, apps, blueprint, symbol, color } = bot;
-			const input = await this.#installed(agentInput({ name, description, instructions, apps, blueprint, symbol, color }, copy));
+			const { name, description, instructions, apps, symbol, color } = bot;
+			const input = await this.#installed(agentInput({ name, description, instructions, apps, symbol, color }, copy));
 			// It keeps the role it was given, which may differ from the bot's beside the agents that came with it.
 			this.agents.update(copy.id, { ...input, role: copy.role });
 			if (bot.image) this.agents.setIcon(copy.id, bot.image.type, bot.image.data);
@@ -3838,8 +3819,8 @@ export class Pim extends DurableAgent<Env> {
 			throw new HttpError(429, `You can have up to ${MAX_AGENTS} agents, and ${copy.name} comes with ${all.length - 1} more.`);
 		}
 		const inputs: AgentInput[] = [];
-		for (const { name, role, description, instructions, apps, blueprint, symbol, color } of all) {
-			inputs.push(await this.#installed(agentInput({ name, role, description, instructions, apps, blueprint, symbol, color })));
+		for (const { name, role, description, instructions, apps, symbol, color } of all) {
+			inputs.push(await this.#installed(agentInput({ name, role, description, instructions, apps, symbol, color })));
 		}
 		const taken = new Set(this.agents.list().map((agent) => agent.role.toLowerCase()));
 		const names = new Set(this.agents.list().map((agent) => agent.name.toLowerCase()));
@@ -5636,7 +5617,7 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/agents",
 			async (_params, request) => {
-				const input = this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request)))));
+				const input = this.#checkSkills(this.#checkApps(agentInput(await readJson<Record<string, unknown>>(request))));
 				this.#checkNamedScopes(input.memoryScopes ?? []);
 				const agent = this.agents.create(checkContacts(null, input, this.agents.list()));
 				return Response.json(agent, { status: 201 });
@@ -5647,7 +5628,7 @@ export class Pim extends DurableAgent<Env> {
 			"/agents/:agent",
 			async ({ agent: id }, request) => {
 				const agent = this.#agent(id!);
-				const input = this.#checkSkills(this.#checkApps(this.#checkBlueprint(agentInput(await readJson<Record<string, unknown>>(request), agent))));
+				const input = this.#checkSkills(this.#checkApps(agentInput(await readJson<Record<string, unknown>>(request), agent)));
 				this.#checkNamedScopes(input.memoryScopes ?? []);
 				return this.agents.update(id!, checkContacts(agent, input, this.agents.list()));
 			},
@@ -5788,15 +5769,8 @@ export class Pim extends DurableAgent<Env> {
 					id: extension.id,
 					name: extension.name,
 					description: extension.description,
-					blueprints: (extension.blueprints ?? []).map((blueprint) => ({
-						ref: `${extension.id}/${blueprint.id}`,
-						name: blueprint.name,
-						description: blueprint.description,
-						apps: blueprint.apps ?? [],
-					})),
 					widgets: Object.keys(extension.widgets ?? {}).map((widget) => `${extension.id}/${widget}`),
 				})),
-				defaultBlueprint: this.extensions.defaultBlueprint,
 				logo: this.pimConfig().logo ?? null,
 			}),
 		],
@@ -6057,12 +6031,10 @@ export class Pim extends DurableAgent<Env> {
 		return agentExtension(
 			services,
 			(session) => this.#roleOf(session),
-			(agent) => (agent.blueprint === null ? undefined : this.extensions.blueprint(agent.blueprint)),
 			{
 				list: () => this.agents.list(),
-				blueprints: () => this.extensions.blueprints().map(({ ref, blueprint }) => ({ ref, name: blueprint.name, description: blueprint.description })),
 				apps: () => this.appDirectory(),
-				create: (input) => this.agents.create(checkContacts(null, this.#checkApps(this.#checkBlueprint(agentInput(input))), this.agents.list())),
+				create: (input) => this.agents.create(checkContacts(null, this.#checkApps(agentInput(input)), this.agents.list())),
 				files: this.files,
 			},
 		);

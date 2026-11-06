@@ -1177,7 +1177,7 @@ describe("a database from when agents were personas", () => {
 				},
 				directory,
 			);
-			expect(agents.list()).toMatchObject([{ id: "p_1", name: "Coach", blueprint: "test.ledger/budget", majordomo: true, icon: 7, apps: ["test.ledger/strava"] }]);
+			expect(agents.list()).toMatchObject([{ id: "p_1", name: "Coach", majordomo: true, icon: 7, apps: ["test.ledger/strava"] }]);
 			// Its name was its role; the majordomo's role is its title.
 			expect(agents.list()[0]!.role).toBe("Majordomo");
 			// Its default agent is its majordomo, already named: nobody is asked to name theirs again.
@@ -1196,14 +1196,14 @@ describe("a database from when agents had teams", () => {
 			const sql = state.storage.sql;
 			for (const table of ["pim_agents", "pim_agent_sessions", "pim_tasks", "pim_tool_permissions"]) sql.exec(`DELETE FROM ${table}`);
 			sql.exec("ALTER TABLE pim_agents ADD COLUMN team TEXT NOT NULL DEFAULT '[]'");
-			const insert = "INSERT INTO pim_agents (id, name, description, instructions, apps, skills, team, blueprint, color, created_at, updated_at, is_default) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, 1, 1, ?)";
-			sql.exec(insert, "p_major", "Alfred", "", "[]", "[]", "[]", null, null, 1);
-			sql.exec(insert, "p_writer", "Writer", "Write.", "[]", "[]", "[]", null, null, 0);
+			const insert = "INSERT INTO pim_agents (id, name, description, instructions, apps, skills, team, color, created_at, updated_at, is_default) VALUES (?, ?, '', ?, ?, ?, ?, ?, 1, 1, ?)";
+			sql.exec(insert, "p_major", "Alfred", "", "[]", "[]", "[]", null, 1);
+			sql.exec(insert, "p_writer", "Writer", "Write.", "[]", "[]", "[]", null, 0);
 			const team = [
 				{ name: "Researcher", instructions: "Find facts.\nCite them.", tools: ["fetch_url"] },
 				{ name: "Writer", instructions: "Write it up.", tools: null },
 			];
-			sql.exec(insert, "p_plan", "Planner", "Plan.", '["test.ledger/github"]', '["weekly-plan"]', JSON.stringify(team), "test.ledger/budget", "teal", 0);
+			sql.exec(insert, "p_plan", "Planner", "Plan.", '["test.ledger/github"]', '["weekly-plan"]', JSON.stringify(team), "teal", 0);
 			sql.exec("INSERT INTO pim_tool_permissions (audience, app, tool, permission, updated_at) VALUES ('agent:p_plan', 'github', 'github_merge', 'off', 1)");
 			const tasks = new TaskStore(sql);
 			tasks.start({ kind: "agent", conversation: "c1", requester: "chat", parent: null, root: "chat", batch: "b", position: 0, agent: "p_plan", task: "Look it up." });
@@ -1215,7 +1215,7 @@ describe("a database from when agents had teams", () => {
 			expect(Object.keys(byName).sort()).toEqual(["Alfred", "Planner", "Researcher", "Writer", "Writer (Planner)"]);
 			expect(byName["Writer (Planner)"]!.role).toBe("Writer (Planner)");
 			const researcher = byName.Researcher!;
-			expect(researcher).toMatchObject({ description: "Find facts.", instructions: "Find facts.\nCite them.", skills: ["weekly-plan"], blueprint: "test.ledger/budget", color: "teal", contacts: [] });
+			expect(researcher).toMatchObject({ description: "Find facts.", instructions: "Find facts.\nCite them.", skills: ["weekly-plan"], color: "teal", contacts: [] });
 			expect(byName.Planner!.contacts).toEqual([researcher.id, byName["Writer (Planner)"]!.id]);
 			// What it did as a member is its own now.
 			expect(tasks.of("c1")).toMatchObject({ kind: "agent", agent: researcher.id });

@@ -1,6 +1,6 @@
 # Working on Pim
 
-Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and the web app (`web/`, React). Each person's space is held by a Durable Object `Pim` (`src/pim.ts`) running on pi-durable. The README pitches the product; `docs/reference.md` explains how it works and its vocabulary. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a blueprint is what an extension defines; a template is an agent shared through the gallery.
+Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and the web app (`web/`, React). Each person's space is held by a Durable Object `Pim` (`src/pim.ts`) running on pi-durable. The README pitches the product; `docs/reference.md` explains how it works and its vocabulary. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a template is an agent shared through the gallery.
 
 ## Checks
 
@@ -36,5 +36,5 @@ Never run `pnpm dev` or `pnpm deploy` here: `wrangler dev` uses the remote Worke
 
 - Worker code in `src/` uses tabs; `web/` uses 2 spaces and Biome. Follow each file's style.
 - Comments and docs are plain prose about what something is for, in full sentences, as in `src/pim.ts` and `docs/`. Update the README or `docs/` when behavior they describe changes.
-- A tool with effects outside the conversation is a gated action (`src/extensions/approvals.ts`), so it runs only after approval. New blueprints and widgets are extensions listed in `pim.config.ts` (`docs/extensions.md`).
+- A tool with effects outside the conversation is a gated action (`src/extensions/approvals.ts`), so it runs only after approval. New apps, abilities and widgets are extensions listed in `pim.config.ts` (`docs/extensions.md`).
 - Commit messages are one short sentence in the imperative about what changes for people, such as "Let agents rename themselves and other agents through chat".

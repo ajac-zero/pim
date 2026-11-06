@@ -229,7 +229,7 @@ export type MemoryEntry = {
   scope: string;
 };
 
-/** One of your agents: its own name and instructions, on top of a blueprint. */
+/** One of your agents: its own name and instructions, on top of Pim's assistant. */
 export type Agent = {
   memoryScope: string;
   memoryScopes: string[];
@@ -248,8 +248,6 @@ export type Agent = {
   contacts: string[];
   /** The model it runs on; null follows the default model (Settings → Model). */
   model: { provider: string; id: string } | null;
-  /** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
-  blueprint: string | null;
   /** The template it was made from. */
   source: { template: string; author: string } | null;
   /** Its template in the gallery, while published. */
@@ -357,32 +355,21 @@ export type AgentInput = {
   apps: string[];
   skills?: string[];
   contacts: string[];
-  /** Left out, a new agent is based on the deployment's default blueprint. */
-  blueprint?: string | null;
   /** Left out, a new agent has the default look and an edited one keeps its own. */
   symbol?: string | null;
   color?: string | null;
 };
 
-/** What this deployment installed: the blueprints people's agents can be based on, and widgets. */
+/** What this deployment installed: its extensions and their widgets. */
 export type InstalledExtension = {
   id: string;
   name: string;
   description: string;
-  blueprints: {
-    ref: string;
-    name: string;
-    description: string;
-    /** The apps agents based on this blueprint work with, besides their own, by `ref`. */
-    apps: string[];
-  }[];
   widgets: string[];
 };
 
 export type Extensions = {
   extensions: InstalledExtension[];
-  /** What new agents are based on when not told otherwise. */
-  defaultBlueprint: string | null;
   /** The logo at the top of the sidebar (`logo` in `pim.config.ts`); null for Pim's own mark. */
   logo: string | null;
 };

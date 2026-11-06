@@ -248,7 +248,7 @@ export function mcpExtensions(
 	bridge: McpBridge,
 	services: PimServices,
 	extras: { catalog: AppCatalog; tools: readonly ToolRegistration[] },
-	/** The apps a conversation's agent works with: its blueprint's, then the person's own. */
+	/** The apps a conversation's agent works with: the person's own. */
 	appsOf: (session: string) => readonly DirectoryApp[],
 	/** Every app the person can connect. */
 	directory: () => readonly DirectoryApp[],

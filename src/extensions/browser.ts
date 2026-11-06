@@ -8,11 +8,19 @@ import { type PimServices, text } from "./services";
  * The person's browser as tools (see ../browser.ts). Opening and reading
  * pages, pointing at things, answering a page's dialogs, and saving
  * screenshots to the person's files run at once, as fetch_url does: a
- * dialog answers what an approved action, or the page itself, asked.
- * Clicking, typing and uploading files can do things on the web (send a
- * form, buy, post, share a file), so they ask first, as http_request does:
- * the request names the element as the page shows it, not as the model put
- * it, and the person can let them run without asking in Settings.
+ * dialog answers what an approved action, or the page itself, asked. So do
+ * clicking links and controls outside forms, typing into fields without
+ * sending them, and sending a form that says method="get", such as a search,
+ * which only loads the page its fields name, as browser_open could. Sending
+ * another form (clicking a button that belongs to one, or pressing Enter
+ * after typing) and uploading files can do things on the web (buy, post,
+ * share a file), so they ask first, as http_request does: the request names
+ * the element as the page shows it, not as the model put it, and the person
+ * can let them run without asking in Settings. A page's own scripts can
+ * still act on a click outside a form, such as a "Buy now" button made
+ * without one, or on a method="get" form they listen to; asking about every
+ * click to catch those asked so often that people stopped reading the
+ * requests.
  */
 export const BROWSER_EXTENSION = "pim.browser";
 export const BROWSER_CLICK = "browser_click";
@@ -55,7 +63,7 @@ function failure(error: unknown) {
 export function browserClickAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_CLICK,
-		description: "Click a link or button in the agents' browser.",
+		description: "Click a button that belongs to a form in the agents' browser, which may send it. Links, other controls, and buttons of forms that say method=\"get\" (searches) are clicked without asking.",
 		// Filed by the tool, which names the element as the page shows it.
 		internal: true,
 		parameters: ClickArgs,
@@ -70,7 +78,7 @@ export function browserClickAction(browser: PimBrowser, windowOf: (conversation:
 export function browserTypeAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_TYPE,
-		description: "Type into a field in the agents' browser, and press Enter if asked.",
+		description: "Type into a field in the agents' browser and press Enter, which usually sends the form. Typing without pressing Enter, or into a form that says method=\"get\" (a search), runs without asking.",
 		internal: true,
 		parameters: TypeArgs,
 		summarize: ({ ref, text }) => `Type “${text}” into [${ref}] in the browser`,
@@ -165,16 +173,18 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 
 	const browserClick = defineTool({
 		name: BROWSER_CLICK,
-		description: `Click a link, button or other element on your window's page, by its number, and read the page it leads to.${permissions.click === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Click a link, button or other element on your window's page, by its number, and read the page it leads to.${permissions.click === "ask" ? ` Clicking a button that belongs to a form may send it, so only that asks first, unless the form says method="get" and only loads a page, as a search does. ${approvalNote(services)}` : ""}`,
 		parameters: ClickArgs,
 		replay: "safe",
 		async execute(args, api, context) {
 			// The request keeps the summary it was filed with: when the call runs again after the decision, the page has changed (it may show a dialog the action opened).
 			let summary = await api.memo<string>(BROWSER_CLICK, context);
 			if (summary === undefined) {
+				const window = windowOf(String(api.conversationId));
 				try {
-					const element = await browser.describe(windowOf(String(api.conversationId)), args.ref);
+					const element = await browser.describe(window, args.ref);
 					if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
+					if (!element.submits) return text(describePage(await browser.click(window, args.ref)));
 					summary = `On ${element.host}, click ${element.label}`;
 				} catch (error) {
 					return failure(error);
@@ -187,20 +197,22 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 
 	const browserType = defineTool({
 		name: BROWSER_TYPE,
-		description: `Type into a field on your window's page, by its number, replacing what it held, and press Enter after if \`submit\`, or choose an option in a list by its text; then read the page. Never type passwords or payment details: the person does that when they take over.${permissions.type === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Type into a field on your window's page, by its number, replacing what it held, and press Enter after if \`submit\`, or choose an option in a list by its text; then read the page. Never type passwords or payment details: the person does that when they take over.${permissions.type === "ask" ? ` Pressing Enter usually sends the form, so only a call with \`submit\` asks first, unless the form says method="get" and only loads a page, as a search does. ${approvalNote(services)}` : ""}`,
 		parameters: TypeArgs,
 		replay: "safe",
 		async execute(args, api, context) {
 			// The request keeps the summary it was filed with: when the call runs again after the decision, the page has changed (it may show a dialog the action opened).
 			let summary = await api.memo<string>(BROWSER_TYPE, context);
 			if (summary === undefined) {
+				const window = windowOf(String(api.conversationId));
 				try {
-					const element = await browser.describe(windowOf(String(api.conversationId)), args.ref);
+					const element = await browser.describe(window, args.ref);
 					if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
+					if (!args.submit || element.enterLoads) return text(describePage(await browser.type(window, args.ref, args.text, args.submit === true)));
 					summary =
 						element.role === "list"
-							? `On ${element.host}, choose “${args.text}” in ${element.label}${args.submit ? " and press Enter" : ""}`
-							: `On ${element.host}, type “${args.text}” into ${element.label}${args.submit ? " and press Enter" : ""}`;
+							? `On ${element.host}, choose “${args.text}” in ${element.label} and press Enter`
+							: `On ${element.host}, type “${args.text}” into ${element.label} and press Enter`;
 				} catch (error) {
 					return failure(error);
 				}

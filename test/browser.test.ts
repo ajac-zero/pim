@@ -6,13 +6,18 @@ import type { Approval } from "../src/store";
 import { api, apiUrl, opens, pairTestComputer, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
-/** A page with a form whose button changes the page, so a click shows in what's read after. */
+/** A page with a form whose button changes the page, so a click shows in what's read after, a search form that says method="get", and a link and a checkbox outside them. */
 const FORM = `data:text/html;charset=utf-8,${encodeURIComponent(`<title>Orders</title>
 <h1>Order soup</h1>
 <p>Tomato, <b>4 €</b>.</p>
+<form method="get" onsubmit="document.querySelector('h1').textContent = 'Searched ' + this.q.value; return false">
+<input name="q" aria-label="Search"> <button>Search</button>
+</form>
+<form onsubmit="return false">
 <label>Name <input id="name"></label>
-<a href="#menu">Menu</a>
 <button onclick="document.querySelector('h1').textContent = 'Ordered for ' + document.querySelector('#name').value">Order</button>
+</form>
+<a href="#menu" onclick="document.querySelector('h1').textContent = 'Menu'">Menu</a>
 <label><input type="checkbox" style="opacity:0">Extra bread</label>
 <button style="display:none">Hidden</button>`)}`;
 
@@ -91,7 +96,7 @@ beforeAll(async () => {
 });
 
 describe("the browser", () => {
-	it("reads pages, and clicks and types only once the person approves what the page shows", async () => {
+	it("reads pages, clicks and types at once, and sends a form only once the person approves what the page shows", async () => {
 		const page = await callTool("browser_open", { url: FORM });
 		expect(page).toContain("Page: Orders");
 		expect(page).toContain("# Order soup");
@@ -102,21 +107,31 @@ describe("the browser", () => {
 		const name = refOf(page, "textbox", "Name");
 		const order = refOf(page, "button", "Order");
 
-		// Typing asks, naming the field as the page labels it.
-		faux.setResponses([toolUse("browser_type", { ref: name, text: "Ada" }), toolUse("send_to_user", { message: "Typed." })]);
-		const naming = say("Put my name in.");
-		const typing = await pendingApproval();
-		expect(typing.summary).toBe("On a page the agent wrote, type “Ada” into the text box “Name”");
-		await post<Approval>(`/approvals/${typing.id}/approve`);
-		expect(await naming).toMatchObject({ status: "done", replies: ["Typed."] });
+		// Typing into a field, clicking a link, and ticking a box outside a form don't ask.
+		expect(await callTool("browser_type", { ref: name, text: "Ada" })).toContain("“Name” = “Ada”]");
+		expect(await callTool("browser_click", { ref: refOf(page, "link", "Menu") })).toContain("# Menu");
+		expect(await callTool("browser_click", { ref: refOf(page, "checkbox", "Extra bread") })).toMatch(/“Extra bread” checked\]/);
+		// Nor does sending a search, whose form says method="get": by pressing Enter, or with its button.
+		expect(await callTool("browser_type", { ref: refOf(page, "textbox", "Search"), text: "leek", submit: true })).toContain("# Searched leek");
+		expect(await callTool("browser_type", { ref: refOf(page, "textbox", "Search"), text: "kale" })).not.toContain("# Searched kale");
+		expect(await callTool("browser_click", { ref: refOf(page, "button", "Search") })).toContain("# Searched kale");
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
 
-		// So does clicking; the page as it is after comes back with the decision, as the call's result.
+		// Pressing Enter after typing sends the other form, so it asks, naming the field as the page labels it.
+		faux.setResponses([toolUse("browser_type", { ref: name, text: "Bea", submit: true }), toolUse("send_to_user", { message: "Sent." })]);
+		const sending = say("Put my name in and send it.");
+		const typing = await pendingApproval();
+		expect(typing.summary).toBe("On a page the agent wrote, type “Bea” into the text box “Name” and press Enter");
+		await post<Approval>(`/approvals/${typing.id}/approve`);
+		expect(await sending).toMatchObject({ status: "done", replies: ["Sent."] });
+
+		// So does clicking a button in the form; the page as it is after comes back with the decision, as the call's result.
 		faux.setResponses([toolUse("browser_click", { ref: order }), toolUse("send_to_user", { message: "Ordered." })]);
 		const ordering = say("Order it.");
 		const clicking = await pendingApproval();
 		expect(clicking.summary).toBe("On a page the agent wrote, click the button “Order”");
 		const decided = await post<Approval>(`/approvals/${clicking.id}/approve`);
-		expect(decided.body.result).toContain("# Ordered for Ada");
+		expect(decided.body.result).toContain("# Ordered for Bea");
 		expect(await ordering).toMatchObject({ status: "done", replies: ["Ordered."] });
 
 		// The person can see where it is.
@@ -124,34 +139,13 @@ describe("the browser", () => {
 	});
 
 	it("answers the page's dialogs, chooses in lists, hovers, and uploads and downloads the person's files", async () => {
-		await setPermission("browser_click", "on");
 		const page = await callTool("browser_open", { url: CONTROLS });
 
-		// A list is typed into by its option's text, which the approval names as a choice.
-		faux.setResponses([toolUse("browser_type", { ref: refOf(page, "select", "Size"), text: "large" }), toolUse("send_to_user", { message: "Chosen." })]);
-		const choosing = say("Make it large.");
-		const choice = await pendingApproval();
-		expect(choice.summary).toBe("On a page the agent wrote, choose “large” in the list “Size”");
-		expect((await post<Approval>(`/approvals/${choice.id}/approve`)).body.result).toContain("“Size” = “Large”]");
-		await choosing;
+		// A list is typed into by its option's text.
+		expect(await callTool("browser_type", { ref: refOf(page, "select", "Size"), text: "large" })).toContain("“Size” = “Large”]");
 
-		// A confirm holds the page: the agent reads it in its place, as the approved click's result, and answers it.
-		await setPermission("browser_click", null);
-		let confirming = "";
-		faux.setResponses([
-			toolUse("browser_click", { ref: refOf(page, "button", "Delete") }),
-			(context) => {
-				confirming = lastToolResult(context.messages);
-				return toolUse("send_to_user", { message: "Asked." });
-			},
-		]);
-		const deleting = say("Delete it.");
-		const click = await pendingApproval();
-		expect(click.summary).toBe("On a page the agent wrote, click the button “Delete”");
-		await post<Approval>(`/approvals/${click.id}/approve`);
-		await deleting;
-		expect(confirming).toContain("The page shows a confirm: “Delete the soup?”");
-		await setPermission("browser_click", "on");
+		// A confirm holds the page: the agent reads it in its place, as the click's result, and answers it.
+		expect(await callTool("browser_click", { ref: refOf(page, "button", "Delete") })).toContain("The page shows a confirm: “Delete the soup?”");
 		expect(await callTool("browser_read", {})).toContain("The page shows a confirm");
 		expect(await callTool("browser_click", { ref: refOf(page, "button", "Delete") })).toContain("A dialog on the page holds it");
 		expect(await callTool("browser_dialog", { accept: true })).toContain("# Deleted");

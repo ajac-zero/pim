@@ -10,7 +10,6 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { useStickToBottomContext } from "use-stick-to-bottom";
-import { PimMark } from "~/components/app-sidebar";
 import { ArtifactCard, artifactReference } from "~/components/artifact";
 import {
   AssistantMessage,
@@ -616,18 +615,13 @@ export const Thread = memo(function Thread({
           return null;
         })}
 
-        {empty && (
+        {empty && visit && (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 py-16 text-center">
-            <PimMark className="mb-2 h-8 w-16" />
             <p className="font-medium text-xl">
-              {visit
-                ? t("visitEmptyTitle", { username: visit })
-                : t("emptyChatTitle")}
+              {t("visitEmptyTitle", { username: visit })}
             </p>
             <p className="max-w-sm text-muted-foreground text-sm">
-              {visit
-                ? t("visitEmptyHint", { username: visit })
-                : t("emptyChatHint")}
+              {t("visitEmptyHint", { username: visit })}
             </p>
           </div>
         )}

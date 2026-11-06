@@ -69,8 +69,12 @@ type Meta = { get(key: string): string | null; set(key: string, value: string | 
 /** A page as an agent reads it, with what it should know first: the downloads its action started. */
 export type PageView = { url: string; title: string; text: string; note?: string };
 
-/** What a reference points to, for the person deciding whether to let an agent use it: `label` names it, as "the button “Buy”". */
-export type ElementDescription = { host: string; role: string; label: string };
+/**
+ * What a reference points to, for the person deciding whether to let an agent use it: `label` names it, as "the button “Buy”".
+ * `submits` when it is a button that belongs to a form, which clicking may send, unless the button sends a form that says
+ * method="get", which only loads a page (a search). `enterLoads` when pressing Enter in it sends such a form.
+ */
+export type ElementDescription = { host: string; role: string; label: string; submits: boolean; enterLoads: boolean };
 
 /** A download the browser started: what it's called, the frame that started it, and, once it's done, where it went. */
 type Download = { name: string; frame: string; startedAt: number; state: "inProgress" | "completed" | "canceled"; path: string | null };
@@ -215,7 +219,19 @@ const DESCRIBE = `((ref) => {
 	const type = (el.getAttribute("type") || "").toLowerCase();
 	const role = el.getAttribute("role") || (tag === "A" ? "link" : tag === "SELECT" ? "list" : tag === "INPUT" && type === "file" ? "file field" : tag === "TEXTAREA" || (tag === "INPUT" && !["button", "submit", "reset", "image", "checkbox", "radio"].includes(type)) ? "text box" : tag === "INPUT" ? (["checkbox", "radio"].includes(type) ? type : "button") : tag === "BUTTON" || tag === "SUMMARY" ? "button" : tag.toLowerCase());
 	const name = clean(el.getAttribute("aria-label") || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute("placeholder") || el.getAttribute("title") || el.innerText || el.value);
-	return [role, name ? "the " + role + " “" + name + "”" : "a " + role + " with no name"];
+	const form = el.form || el.closest("form");
+	const isSubmitter = (button) => (button.tagName === "BUTTON" && ["", "submit"].includes((button.getAttribute("type") || "").toLowerCase())) || (button.tagName === "INPUT" && ["submit", "image"].includes((button.getAttribute("type") || "").toLowerCase()));
+	// A form that says method="get" (on its button, or on the form) only loads the page its fields name, as browser_open could, though a script that listens for it can still do more.
+	const loads = (submitter) => {
+		if (!form) return false;
+		const method = (submitter && submitter.getAttribute("formmethod")) || form.getAttribute("method") || "";
+		const action = (submitter && submitter.getAttribute("formaction")) || form.getAttribute("action") || "";
+		return method.toLowerCase() === "get" && !/^\\s*javascript:/i.test(action);
+	};
+	// Enter in a field sends its form as the form's first submit button would.
+	const fallback = form && Array.from(form.elements).find(isSubmitter);
+	const submits = !!form && (tag === "BUTTON" || (tag === "INPUT" && ["submit", "image", "button", "reset"].includes(type)) || el.getAttribute("role") === "button") && !(isSubmitter(el) && loads(el));
+	return [role, name ? "the " + role + " “" + name + "”" : "a " + role + " with no name", submits, loads(fallback)];
 })`;
 
 export class PimBrowser {
@@ -284,8 +300,8 @@ export class PimBrowser {
 	async describe(chat: string, ref: number): Promise<ElementDescription | null> {
 		const described = await this.#use(chat, "existing", async (page) => {
 			this.#noDialog(page);
-			const found = (await page.evaluate(`${DESCRIBE}(${JSON.stringify(String(ref))})`)) as [string, string] | null;
-			return found ? { host: hostOf(page.url()), role: found[0], label: found[1] } : null;
+			const found = (await page.evaluate(`${DESCRIBE}(${JSON.stringify(String(ref))})`)) as [string, string, boolean, boolean] | null;
+			return found ? { host: hostOf(page.url()), role: found[0], label: found[1], submits: found[2], enterLoads: found[3] } : null;
 		});
 		return described ?? null;
 	}

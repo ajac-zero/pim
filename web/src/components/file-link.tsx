@@ -1,5 +1,6 @@
 import { Link, useParams } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { type CanvasSearch, openCanvasTab } from "~/lib/canvas";
 
 /** A file opens beside its chat, or on its own page outside a chat. */
 export function FileLink({
@@ -21,10 +22,7 @@ export function FileLink({
     <Link
       to="/chat/$sessionId"
       params={{ sessionId }}
-      search={(previous: { file?: string; files?: string[] }) => {
-        const files = [...new Set([...(previous.files ?? []), path])];
-        return files.length > 1 ? { file: path, files } : { file: path };
-      }}
+      search={(previous: CanvasSearch) => openCanvasTab(previous, path)}
       className={className}
       title={title}
     >

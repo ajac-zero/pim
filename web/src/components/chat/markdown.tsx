@@ -29,6 +29,7 @@ import {
   CodeBlockHeader,
   CodeBlockTitle,
 } from "~/components/ui/code-block";
+import { type CanvasSearch, openCanvasTab } from "~/lib/canvas";
 import { type Agent, FILES_ROOT } from "~/lib/pim-api";
 import {
   agentsQuery,
@@ -235,7 +236,7 @@ function ArtifactLink({
     <Link
       to="/chat/$sessionId"
       params={{ sessionId }}
-      search={{ artifact: id, v: version }}
+      search={(previous: CanvasSearch) => openCanvasTab(previous, id, version)}
       className={LINK_CLASS}
     >
       {children}

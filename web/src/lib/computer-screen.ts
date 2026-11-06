@@ -176,6 +176,16 @@ export function normalized(
 const MAX_DECODE_QUEUE = 4;
 /** How long the stream may send no video before it's asked for a keyframe, in case it's waiting for one. */
 const SILENT_MS = 3_000;
+/**
+ * How far behind the picture may fall before the stream counts as having
+ * waited on this browser, and how soon it's asked for a keyframe when it
+ * then goes quiet. cua-spacesd lets about two seconds of frames go
+ * unacknowledged; past that it leaves frames out and waits for a keyframe
+ * without asking its encoder for one, so the picture would stay as it was
+ * until `SILENT_MS` had passed.
+ */
+const BEHIND_MS = 1_000;
+const STALLED_MS = 500;
 
 /** How often the app times its round trips to the computer. */
 const PING_MS = 2_000;
@@ -195,15 +205,17 @@ export type ScreenState =
 
 /**
  * Plays the desktop on `canvas` and sends what the person does there: it
- * takes the canvas's pointer, wheel, keyboard and paste. `onState` hears
- * when it's live, at what size, and when the stream closed; `onLatency`
- * hears its round trips every couple of seconds, which the space answers
- * itself (`pim_ping`, which the stream never sees).
+ * takes the canvas's pointer, wheel, keyboard and paste. Whoever `observe`s
+ * it hears when it's live, at what size, and when the stream closed, and
+ * its round trips every couple of seconds, which the space answers itself
+ * (`pim_ping`, which the stream never sees).
  */
 export class ComputerScreen {
-  readonly #canvas: HTMLCanvasElement;
-  readonly #onState: (state: ScreenState) => void;
-  readonly #onLatency: (latency: ScreenLatency) => void;
+  readonly canvas: HTMLCanvasElement;
+  #state: ScreenState = { status: "connecting" };
+  #latency: ScreenLatency | null = null;
+  #onState: (state: ScreenState) => void = () => {};
+  #onLatency: (latency: ScreenLatency | null) => void = () => {};
   readonly #socket: WebSocket;
   #session = "";
   #decoder: VideoDecoder | null = null;
@@ -224,29 +236,34 @@ export class ComputerScreen {
    * one was last asked for, and when video last came. The stream stops
    * sending, waiting for a keyframe, when this browser fell too far behind,
    * and sends none of itself while the desktop changes: a stream silent for
-   * `SILENT_MS` is asked for one, once until video comes again.
+   * `SILENT_MS` is asked for one, once until video comes again (sooner,
+   * `STALLED_MS`, when the last frame came `BEHIND_MS` late).
    */
   #awaitingKeyframe = false;
   #askedAt = 0;
   #videoAt = performance.now();
   #askedSinceVideo = false;
+  /**
+   * The least time between a frame's capture and its arrival, which is the
+   * two clocks' difference plus the quickest trip, and how much longer the
+   * last frame took: how far behind the picture is.
+   */
+  #offset = Number.POSITIVE_INFINITY;
+  #behind = 0;
   readonly #watch = setInterval(() => {
-    if (this.#askedSinceVideo || performance.now() - this.#videoAt < SILENT_MS)
+    const silent = this.#behind > BEHIND_MS ? STALLED_MS : SILENT_MS;
+    if (this.#askedSinceVideo || performance.now() - this.#videoAt < silent)
       return;
     this.#askedSinceVideo = true;
     this.#askKeyframe();
-  }, 1_000);
+  }, 250);
   readonly #ping = setInterval(() => this.#timeRoundTrip(), PING_MS);
   readonly #listeners: [string, EventListener][] = [];
+  /** Keys pressed on the desktop and not yet let go, which go up when it loses the keyboard. */
+  readonly #held = new Map<string, Extract<InputEvent, { kind: "key" }>>();
 
-  constructor(
-    canvas: HTMLCanvasElement,
-    onState: (state: ScreenState) => void,
-    onLatency: (latency: ScreenLatency) => void = () => {},
-  ) {
-    this.#canvas = canvas;
-    this.#onState = onState;
-    this.#onLatency = onLatency;
+  constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     this.#socket = new WebSocket(
       `${scheme}://${location.host}${COMPUTER_SCREEN_PATH}`,
@@ -257,20 +274,46 @@ export class ComputerScreen {
     this.#socket.addEventListener("close", (event) => {
       this.#decoder?.close();
       this.#decoder = null;
-      this.#onState({
+      this.#setState({
         status: "closed",
         code: event.code,
         reason: event.reason,
       });
     });
-    this.#onState({ status: "connecting" });
     this.#listen();
+  }
+
+  get state(): ScreenState {
+    return this.#state;
+  }
+
+  /** Who hears of the stream from now on, told at once where it is, as when the dialog shows a stream it kept. */
+  observe(
+    onState: (state: ScreenState) => void,
+    onLatency: (latency: ScreenLatency | null) => void,
+  ): void {
+    this.#onState = onState;
+    this.#onLatency = onLatency;
+    onState(this.#state);
+    onLatency(this.#latency);
+  }
+
+  #setState(state: ScreenState): void {
+    this.#state = state;
+    this.#onState(state);
+  }
+
+  /** Lets go of the keys still held on the desktop, as when it loses the keyboard before they're released. */
+  releaseKeys(): void {
+    for (const input of this.#held.values())
+      this.#send({ ...input, state: "up", repeat: false });
+    this.#held.clear();
   }
 
   /** Stops playing, and lets the canvas go. */
   close(): void {
     for (const [type, listener] of this.#listeners)
-      this.#canvas.removeEventListener(type, listener);
+      this.canvas.removeEventListener(type, listener);
     cancelAnimationFrame(this.#flush);
     clearInterval(this.#watch);
     clearInterval(this.#ping);
@@ -298,11 +341,12 @@ export class ComputerScreen {
     };
     const payload = message.payload ?? {};
     if (message.type === "pim_pong") {
-      this.#onLatency({
+      this.#latency = {
         total: Math.round(performance.now() - Number(payload.sent)),
         computer:
           typeof payload.computer_ms === "number" ? payload.computer_ms : null,
-      });
+      };
+      this.#onLatency(this.#latency);
     } else if (message.type === "pim_clipboard_text") {
       if (typeof payload.text === "string" && payload.text)
         void navigator.clipboard
@@ -330,17 +374,30 @@ export class ComputerScreen {
   }
 
   #resize(width: number, height: number): void {
-    if (this.#canvas.width !== width) this.#canvas.width = width;
-    if (this.#canvas.height !== height) this.#canvas.height = height;
-    this.#onState({ status: "live", width, height });
+    if (this.canvas.width !== width) this.canvas.width = width;
+    if (this.canvas.height !== height) this.canvas.height = height;
+    if (
+      this.#state.status !== "live" ||
+      this.#state.width !== width ||
+      this.#state.height !== height
+    )
+      this.#setState({ status: "live", width, height });
   }
 
   #play(packet: ArrayBuffer): void {
     const read = readPacket(packet);
     if (read?.frame.codec !== "h264") return;
-    this.#videoAt = performance.now();
-    this.#askedSinceVideo = false;
     const { frame, payload } = read;
+    const now = performance.now();
+    const offset = now - frame.capture_timestamp_us / 1_000;
+    // The least difference creeps up a millisecond a second, so the clocks drifting apart isn't taken for the picture falling behind.
+    this.#offset = Math.min(
+      offset,
+      this.#offset + (now - this.#videoAt) / 1_000,
+    );
+    this.#behind = offset - this.#offset;
+    this.#videoAt = now;
+    this.#askedSinceVideo = false;
     // A new encoder starts with a keyframe, which says how to decode what follows.
     const decoder =
       frame.codec_epoch === this.#epoch && this.#decoder
@@ -381,7 +438,7 @@ export class ComputerScreen {
 
   #configure(codec: string, epoch: number): VideoDecoder {
     if (this.#decoder?.state !== "closed") this.#decoder?.close();
-    const context = this.#canvas.getContext("2d");
+    const context = this.canvas.getContext("2d");
     const decoder = new VideoDecoder({
       output: (picture) => {
         this.#resize(picture.displayWidth, picture.displayHeight);
@@ -458,12 +515,12 @@ export class ComputerScreen {
     listener: (event: HTMLElementEventMap[K]) => void,
     options?: AddEventListenerOptions,
   ): void {
-    this.#canvas.addEventListener(type, listener, options);
+    this.canvas.addEventListener(type, listener, options);
     this.#listeners.push([type, listener as EventListener]);
   }
 
   #listen(): void {
-    const canvas = this.#canvas;
+    const canvas = this.canvas;
     const at = (event: { clientX: number; clientY: number }) =>
       normalized(
         event,
@@ -533,16 +590,56 @@ export class ComputerScreen {
           setTimeout(() => this.#control("pim_clipboard", {}), 250);
         const input = keyEvent(event, state);
         if (!input) return;
+        // The computer's keys aren't the app's shortcuts too.
         event.preventDefault();
+        event.stopPropagation();
+        if (input.kind === "key") {
+          if (state === "down") this.#held.set(input.key, input);
+          else this.#held.delete(input.key);
+        }
         this.#send(input);
       });
     }
+    this.#on("blur", () => this.releaseKeys());
     this.#on("paste", (event) => {
       const text = event.clipboardData?.getData("text");
       event.preventDefault();
       if (text) this.#send({ kind: "text_commit", text });
     });
   }
+}
+
+/** How long the desktop's stream stays open after the Computer dialog lets it go. */
+const KEEP_MS = 5 * 60_000;
+let kept: {
+  screen: ComputerScreen;
+  closing?: ReturnType<typeof setTimeout>;
+} | null = null;
+
+/**
+ * The desktop's stream for the Computer dialog: the one it showed last, while
+ * that's still open, or a new one from `open`. A stream the dialog lets go
+ * (`releaseScreen`) stays open for `KEEP_MS`, so opening it again
+ * shows the desktop at once rather than connecting again.
+ */
+export function holdScreen(open: () => ComputerScreen): ComputerScreen {
+  if (kept?.screen.state.status === "closed") closeScreen();
+  clearTimeout(kept?.closing);
+  kept ??= { screen: open() };
+  return kept.screen;
+}
+
+/** The Computer dialog lets its stream go: it closes in `KEEP_MS`, unless it holds it again. */
+export function releaseScreen(screen: ComputerScreen): void {
+  if (kept?.screen === screen) kept.closing = setTimeout(closeScreen, KEEP_MS);
+  else screen.close();
+}
+
+/** Closes the stream the Computer dialog kept, as on signing out. */
+export function closeScreen(): void {
+  clearTimeout(kept?.closing);
+  kept?.screen.close();
+  kept = null;
 }
 
 /** Whether this browser can play the desktop: it decodes H.264 with WebCodecs. */

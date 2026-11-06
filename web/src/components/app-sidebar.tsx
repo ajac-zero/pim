@@ -147,7 +147,7 @@ export function useNavigationState() {
     account,
     profile,
     hasComputer: !!computer && computer.state !== "none",
-    // The Computer page shows its desktop: the one this Pim keeps for you, or yours when it streams it.
+    // The Computer dialog shows its desktop: the one this Pim keeps for you, or yours when it streams it.
     hasDesktop: !!computer && (computer.managed || !!computer.computer?.screen),
     // Alone on this Pim, there is nobody to share with or discover.
     withOthers: !!account && !account.alone,
@@ -263,22 +263,6 @@ export function AppSidebar({
               label={t("files")}
             />
           )}
-          {hasDesktop && (
-            <RailItem
-              icon={<Monitor className="size-4.5" />}
-              label={t("computer")}
-            >
-              {(content) => (
-                <Link
-                  to="/computer"
-                  className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
-                  aria-label={t("computer")}
-                >
-                  {content}
-                </Link>
-              )}
-            </RailItem>
-          )}
           <RailPanel
             {...railPanel}
             panel="skills"
@@ -293,6 +277,13 @@ export function AppSidebar({
           />
           {/* Below, what opens over the chat instead of beside it. */}
           <div className="mt-auto" />
+          {hasDesktop && (
+            <RailDialogLink
+              dialog="computer"
+              icon={<Monitor className="size-4.5" />}
+              label={t("computer")}
+            />
+          )}
           {withOthers && (
             <RailDialogLink
               dialog="discover"
@@ -565,7 +556,7 @@ function RailDialogLink({
   dialog,
   ...props
 }: {
-  dialog: "settings" | "sharing" | "discover" | "apps";
+  dialog: "settings" | "sharing" | "discover" | "apps" | "computer";
   icon: ReactNode;
   label: string;
   count?: number;

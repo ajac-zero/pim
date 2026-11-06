@@ -39,6 +39,7 @@ import {
   accountQuery,
   agentsQuery,
   artifactsQuery,
+  computerQuery,
   schedulesQuery,
   sessionsQuery,
 } from "~/lib/queries";
@@ -81,10 +82,42 @@ export function CommandPalette({
   const { data } = useQuery(artifactsQuery());
   const artifacts = data?.artifacts;
   const { data: schedules } = useQuery(schedulesQuery());
+  const { data: computer } = useQuery(computerQuery());
+  const hasDesktop =
+    !!computer && (computer.managed || !!computer.computer?.screen);
   const newChat = useNewChat();
   const awaitingApproval = useAwaitingApproval();
   const { preference, setPreference, themes, colorTheme, setColorTheme } =
     useTheme();
+
+  // ⌘⇧D shows or hides the computer's desktop. It's heard before the desktop
+  // itself, which otherwise takes every key, so it closes the dialog from there too.
+  useEffect(() => {
+    if (!hasDesktop) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (
+        !(event.metaKey || event.ctrlKey) ||
+        event.altKey ||
+        !event.shiftKey ||
+        event.key.toLowerCase() !== "d"
+      )
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.type !== "keydown" || event.repeat) return;
+      navigate({
+        to: ".",
+        search: ({ dialog, tab: _, agent: __, prompt: ___, ...rest }) =>
+          dialog === "computer" ? rest : { ...rest, dialog: "computer" },
+      });
+    };
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("keyup", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("keyup", onKey, true);
+    };
+  }, [hasDesktop, navigate]);
 
   // ⌘K opens the palette, ⌘⇧O starts a chat and ⌘B hides or shows the sidebar
   // (Ctrl instead of ⌘ away from a Mac).
@@ -106,7 +139,9 @@ export function CommandPalette({
     setOpen(false);
     action();
   };
-  const openDialog = (dialog: "settings" | "sharing" | "discover" | "apps") =>
+  const openDialog = (
+    dialog: "settings" | "sharing" | "discover" | "apps" | "computer",
+  ) =>
     run(() => navigate({ to: ".", search: (prev) => ({ ...prev, dialog }) }));
 
   return (
@@ -168,6 +203,15 @@ export function CommandPalette({
                     onSelect={openDialog("discover")}
                   >
                     <Compass /> {t("discover")}
+                  </Command.Item>
+                )}
+                {hasDesktop && (
+                  <Command.Item
+                    className={ITEM}
+                    onSelect={openDialog("computer")}
+                  >
+                    <Monitor /> {t("computer")}
+                    <Shortcut keys="⇧D" />
                   </Command.Item>
                 )}
                 <Command.Item className={ITEM} onSelect={openDialog("apps")}>

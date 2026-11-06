@@ -140,7 +140,16 @@ export function ComputerSection() {
           )}
           {machine?.screen && status.state === "online" && (
             <Button variant="secondary" size="sm" asChild>
-              <Link to="/computer">{t("computerOpen")}</Link>
+              <Link
+                to="."
+                search={(prev) => ({
+                  ...prev,
+                  dialog: "computer",
+                  tab: undefined,
+                })}
+              >
+                {t("computerOpen")}
+              </Link>
             </Button>
           )}
           {!status.managed && (

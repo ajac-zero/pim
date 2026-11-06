@@ -6282,6 +6282,7 @@ export class Pim extends DurableAgent<Env> {
 	async onConnect(connection: Connection<SocketState>, ctx: ConnectionContext): Promise<void> {
 		if (this.#isComputer(connection)) {
 			this.computer.connected(connection);
+			this.#closeScreens();
 			return;
 		}
 		if (this.#isBrowserWatcher(connection)) {
@@ -6399,7 +6400,17 @@ export class Pim extends DurableAgent<Env> {
 
 	#computerDisconnected(): void {
 		this.computer.disconnected();
+		this.#closeScreens();
 		this.broadcastMessage({ type: "computer" });
+	}
+
+	/**
+	 * The desktop's streams go with the computer's connection they came on,
+	 * when it closes or another takes its place: the apps showing them
+	 * connect again, once the computer is back.
+	 */
+	#closeScreens(): void {
+		for (const viewer of this.getConnections(SCREEN_TAG)) viewer.close(4000, "The computer's connection changed");
 	}
 
 	async #command(connection: Connection<SocketState>, session: string, message: ClientMessage): Promise<JsonValue> {

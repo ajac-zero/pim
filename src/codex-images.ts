@@ -220,7 +220,9 @@ export class CodexImages {
 					const page = /<title>([^<]*)<\/title>/i.exec(body)?.[1]?.trim();
 					const mitigated = response.headers.get("cf-mitigated");
 					const detail = page || mitigated ? `a web page "${page ?? ""}"${mitigated ? ` (cf-mitigated: ${mitigated})` : ""}, ray ${response.headers.get("cf-ray") ?? "unknown"}` : body.slice(0, 300);
-					throw new Error(`ChatGPT's image service answered ${response.status}${detail ? `: ${detail}` : ""}`);
+					const message = `ChatGPT's image service answered ${response.status}${detail ? `: ${detail}` : ""}`;
+					console.warn(JSON.stringify({ event: "pim.codex_images_error", status: response.status, headers: Object.fromEntries(response.headers), body: body.slice(0, 2_000) }));
+					throw new Error(message);
 				}
 				const image = ((await response.json()) as { data?: { b64_json?: unknown }[] }).data?.[0]?.b64_json;
 				if (typeof image !== "string") throw new Error("ChatGPT's image service answered without an image.");

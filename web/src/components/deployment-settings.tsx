@@ -13,6 +13,7 @@ const LIMITS: [keyof Limits, TranslationKey][] = [
   ["dailyTokens", "limitDailyTokens"],
   ["dailyModelRequests", "limitDailyModelRequests"],
   ["dailyRuns", "limitDailyRuns"],
+  ["dailyToolCalls", "limitDailyToolCalls"],
   ["sessions", "limitSessions"],
   ["schedules", "limitSchedules"],
   ["storageBytes", "limitStorageBytes"],

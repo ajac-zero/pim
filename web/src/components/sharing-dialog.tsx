@@ -65,12 +65,15 @@ export function SharingDialog({
   );
 }
 
-/** Requests from people in your circles, waiting for your answer. */
+/** Requests from people in your circles, waiting for your answer; your bots' guests' wait in Notifications. */
 function RequestsSection() {
   const { t } = useI18n();
   const { data: approvals } = useQuery(approvalsQuery());
   const asked = (approvals ?? []).filter(
-    (approval) => approval.requestedBy && approval.status === "pending",
+    (approval) =>
+      approval.requestedBy &&
+      approval.requestedBy.bot === undefined &&
+      approval.status === "pending",
   );
   if (asked.length === 0) return null;
   return (

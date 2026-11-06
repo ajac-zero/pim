@@ -19,10 +19,10 @@ import { sessionTitle } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
 import { Composer } from "~/components/chat/composer";
 import { Thread } from "~/components/chat/thread";
-import { FileView } from "~/components/file-view";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
+  Download,
   Loader2,
   LogOut,
   MessagesSquare,
@@ -43,6 +43,7 @@ import { auth, authSessionQuery } from "~/lib/auth";
 import {
   type Agent,
   FILES_ROOT,
+  fileContentUrl,
   type GuestBot,
   pim,
   type UserContent,
@@ -278,24 +279,59 @@ function GuestSidebar({
   );
 }
 
-/** How many of today's messages the guest has sent, out of what their bot allows. */
+/**
+ * How many of today's messages the guest has sent, out of what their bot
+ * allows, and, once the bot has used any tools, how many tool calls.
+ */
 function UsageMeter() {
   const { t } = useI18n();
   const { data: account } = useQuery(accountQuery());
   if (!account) return null;
-  const used = account.usage.today.runs;
-  const limit = account.usage.limits.dailyRuns;
-  if (limit === null) return null;
+  const { today, limits } = account.usage;
+  return (
+    <>
+      {limits.dailyRuns !== null && (
+        <Meter
+          label={t("guestMessagesToday")}
+          used={today.runs}
+          limit={limits.dailyRuns}
+          usedUp={t("guestMessagesUsedUp")}
+        />
+      )}
+      {limits.dailyToolCalls !== null && today.toolCalls > 0 && (
+        <Meter
+          label={t("guestToolCallsToday")}
+          used={today.toolCalls}
+          limit={limits.dailyToolCalls}
+          usedUp={t("guestToolCallsUsedUp")}
+        />
+      )}
+    </>
+  );
+}
+
+function Meter({
+  label,
+  used,
+  limit,
+  usedUp,
+}: {
+  label: string;
+  used: number;
+  limit: number;
+  usedUp: string;
+}) {
+  const { t } = useI18n();
   const share = limit === 0 ? 1 : Math.min(used / limit, 1);
   return (
     <div>
       <div className="flex items-baseline justify-between text-[13px] text-muted-foreground">
-        <span>{t("guestMessagesToday")}</span>
+        <span>{label}</span>
         <span>{t("guestMessagesUsed", { used, limit })}</span>
       </div>
       <div
         role="meter"
-        aria-label={t("guestMessagesToday")}
+        aria-label={label}
         aria-valuemin={0}
         aria-valuemax={limit}
         aria-valuenow={Math.min(used, limit)}
@@ -310,9 +346,7 @@ function UsageMeter() {
         />
       </div>
       {share >= 1 && (
-        <p className="mt-1.5 text-[13px] text-muted-foreground">
-          {t("guestMessagesUsedUp")}
-        </p>
+        <p className="mt-1.5 text-[13px] text-muted-foreground">{usedUp}</p>
       )}
     </div>
   );
@@ -547,9 +581,48 @@ function GuestCanvas({
         />
       ) : (
         file?.startsWith(`${FILES_ROOT}/`) && (
-          <FileView key={file} path={file} onClose={() => show({})} />
+          <GuestImage key={file} path={file} onClose={() => show({})} />
         )
       )}
     </aside>
+  );
+}
+
+/**
+ * An image the bot made. A guest has no files of their own: it is kept in
+ * the bot's author's, which the guest's space reads it from.
+ */
+function GuestImage({ path, onClose }: { path: string; onClose: () => void }) {
+  const { t } = useI18n();
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return (
+    <main className="flex min-h-0 flex-1 flex-col">
+      <header className="flex items-center gap-2 border-b px-4 py-3">
+        <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
+        <Button asChild size="sm" variant="outline" className="h-8">
+          <a href={fileContentUrl(path, true)} download>
+            <Download className="size-3.5" />
+            {t("download")}
+          </a>
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="size-8 shrink-0"
+          aria-label={t("close")}
+          title={t("close")}
+          onClick={onClose}
+        >
+          <X className="size-4" />
+        </Button>
+      </header>
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 md:p-4">
+        <img
+          src={fileContentUrl(path)}
+          alt={name}
+          className="max-h-full max-w-full rounded-lg object-contain"
+        />
+      </div>
+    </main>
   );
 }

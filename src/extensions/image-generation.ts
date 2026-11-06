@@ -81,15 +81,59 @@ export type ImageServices = {
 	save(path: string, bytes: Uint8Array): Promise<string>;
 };
 
-export function imageGenerationExtension({ model, reserve, save }: ImageServices) {
+const HOW_TO_DESCRIBE =
+	"Describe what to draw in detail, in English: the subject, the setting, the style (photo, illustration, watercolor...), composition, lighting and colors, and any words it should show, in quotes. Make one image unless they ask for more: each one costs. It can't change an existing image; describe a new one instead.";
+
+const PROMPT = Type.String({ minLength: 1, maxLength: 2_000, description: "What to draw, in detail." });
+const SHAPE = Type.Optional(
+	Type.Union([Type.Literal("square"), Type.Literal("landscape"), Type.Literal("portrait")], { description: "The image's shape; square by default." }),
+);
+
+/** `generate_image` as a bot's guests get it: the author's space keeps the image, and the guest only sees it in the chat. */
+export const SHARED_IMAGE_TOOL = {
+	description: `Make an image from a description; the chat shows it to the person as soon as it's made, so don't link or describe it again. ${HOW_TO_DESCRIBE}`,
+	parameters: Type.Object({ prompt: PROMPT, shape: SHAPE }),
+};
+
+/**
+ * Draws one image and saves it at `target`, with the extension its type
+ * takes when it has none, answering as `generate_image` does: where it was
+ * saved, which the chat shows, or why it wasn't made.
+ */
+export async function drawImage(
+	{ model, reserve, save }: ImageServices,
+	prompt: string,
+	shape: keyof typeof SHAPES | undefined,
+	target: string,
+	signal?: AbortSignal,
+	note = "The person sees it in the chat now, and in Files. To look at it yourself, file_read it.",
+) {
+	const refusal = reserve();
+	if (refusal) return text(refusal, true);
+	try {
+		const bytes = await model.generate(prompt, SHAPES[shape ?? "square"], signal);
+		const type = imageType(bytes);
+		if (!type) throw new Error("The image model answered with something that isn't an image.");
+		const named = /\.(png|jpe?g|webp|gif)$/i.test(target) ? target : `${target}.${EXTENSIONS[type]}`;
+		const saved = await save(named, bytes);
+		return text(
+			JSON.stringify({
+				image: { path: saved, model: model.id, type, bytes: bytes.byteLength },
+				note,
+			}),
+		);
+	} catch (error) {
+		return text(`The image wasn't made: ${error instanceof Error ? error.message : String(error)}`, true);
+	}
+}
+
+export function imageGenerationExtension(services: ImageServices) {
 	const generateImage = defineTool({
 		name: GENERATE_IMAGE,
-		description: `Make an image from a description, and save it to the person's files; the chat shows it to them as soon as it's made, so don't link or describe it again. Describe what to draw in detail, in English: the subject, the setting, the style (photo, illustration, watercolor...), composition, lighting and colors, and any words it should show, in quotes. Make one image unless they ask for more: each one costs. It can't change an existing image; describe a new one instead.`,
+		description: `Make an image from a description, and save it to the person's files; the chat shows it to them as soon as it's made, so don't link or describe it again. ${HOW_TO_DESCRIBE}`,
 		parameters: Type.Object({
-			prompt: Type.String({ minLength: 1, maxLength: 2_000, description: "What to draw, in detail." }),
-			shape: Type.Optional(
-				Type.Union([Type.Literal("square"), Type.Literal("landscape"), Type.Literal("portrait")], { description: "The image's shape; square by default." }),
-			),
+			prompt: PROMPT,
+			shape: SHAPE,
 			path: Type.Optional(
 				Type.String({ description: `Where to save it, under ${FILES_ROOT}, such as ${FILES_ROOT}/images/birthday-card.png. Defaults to ${FILES_ROOT}/images/, named by the time.` }),
 			),
@@ -99,23 +143,7 @@ export function imageGenerationExtension({ model, reserve, save }: ImageServices
 			if (path !== undefined && filesPath(path) === null) return text(`${path} is not one of the person's files. Use an absolute path under ${FILES_ROOT}.`, true);
 			// A call run again after an eviction saves to the same place.
 			const target = await api.memo("path", path ?? `${FILES_ROOT}/images/${new Date().toISOString().replace(/[:.]/g, "-")}`, context);
-			const refusal = reserve();
-			if (refusal) return text(refusal, true);
-			try {
-				const bytes = await model.generate(prompt, SHAPES[shape ?? "square"], context.abortSignal);
-				const type = imageType(bytes);
-				if (!type) throw new Error("The image model answered with something that isn't an image.");
-				const named = /\.(png|jpe?g|webp|gif)$/i.test(target) ? target : `${target}.${EXTENSIONS[type]}`;
-				const saved = await save(named, bytes);
-				return text(
-					JSON.stringify({
-						image: { path: saved, model: model.id, type, bytes: bytes.byteLength },
-						note: "The person sees it in the chat now, and in Files. To look at it yourself, file_read it.",
-					}),
-				);
-			} catch (error) {
-				return text(`The image wasn't made: ${error instanceof Error ? error.message : String(error)}`, true);
-			}
+			return drawImage(services, prompt, shape, target, context.abortSignal);
 		},
 	});
 	return defineExtension({ name: IMAGES_EXTENSION, tools: [generateImage] });

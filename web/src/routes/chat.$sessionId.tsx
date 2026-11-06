@@ -183,9 +183,9 @@ function ChatPage() {
     useElementHeight<HTMLDivElement>();
   const { ref: composerCardRef, height: composerCardHeight } =
     useElementHeight<HTMLDivElement>();
-  // The room the thread keeps for its scrollbar on each side (it keeps it on
-  // both, so it stays centered; overlay scrollbars take none), which the
-  // composer leaves too, so it stays centered under the messages.
+  // Half the width of the thread's scrollbar (overlay scrollbars take none).
+  // The composer leaves the whole scrollbar free on the right, so it stays
+  // centered under the messages and never covers the scrollbar.
   const [stage, setStage] = useState<HTMLDivElement | null>(null);
   const [gutter, setGutter] = useState(0);
   useEffect(() => {
@@ -296,8 +296,7 @@ function ChatPage() {
             <div
               ref={composerOverlayRef}
               style={{
-                left: gutter,
-                right: `calc(${gutter}px + var(--activity-inset, 0px))`,
+                right: `calc(${gutter * 2}px + var(--activity-inset, 0px))`,
               }}
               className="pointer-events-none absolute bottom-0 z-10 flex justify-center bg-background pb-2"
             >

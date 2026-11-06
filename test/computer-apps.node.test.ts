@@ -393,7 +393,11 @@ describe("an app's backend on the computer", () => {
 
 	it("gives the end of its output, from its stdout and stderr together, at most 64,000 bytes", async () => {
 		await start({ command: `echo first-line; echo err-line >&2; head -c 300000 /dev/zero | tr '\\0' 'z'; echo; echo last-line; ${node} server.js` });
-		const logs = (await call("app_logs", { id: ID })).result.text as string;
+		// The port can accept connections a moment before the app's "listening" line reaches the log.
+		const logs = await until(
+			async () => (await call("app_logs", { id: ID })).result.text as string,
+			(text) => text.includes("listening"),
+		);
 		expect(logs.length).toBeLessThanOrEqual(16_000);
 		expect(logs).toContain("last-line");
 		expect(logs).toContain("listening");

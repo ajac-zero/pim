@@ -173,6 +173,21 @@ describe("conversation", () => {
 		expect(body.busy).toBe(false);
 	});
 
+	it("counts what a chat has cost across new contexts", async () => {
+		const { body: created } = await post("/sessions");
+		const output = async () => (await api<{ models: { output: number }[] }>(`/sessions/${created.id}/cost`)).body.models.reduce((sum, row) => sum + row.output, 0);
+		faux.setResponses([toolUse("send_to_user", { message: "x".repeat(400) })]);
+		await say("hi", created.id);
+		const first = await output();
+		expect(first).toBeGreaterThan(100);
+		// A new context leaves what the requests before it cost on the chat's bill.
+		expect((await post(`/sessions/${created.id}/reset`)).status).toBe(200);
+		expect(await output()).toBe(first);
+		faux.setResponses([toolUse("send_to_user", { message: "y".repeat(400) })]);
+		await say("again", created.id);
+		expect(await output()).toBeGreaterThan(first + 100);
+	});
+
 	it("keeps sessions separate", async () => {
 		const { body: created } = await post("/sessions");
 		faux.setResponses([toolUse("send_to_user", { message: "In the new session." })]);

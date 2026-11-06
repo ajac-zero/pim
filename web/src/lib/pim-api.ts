@@ -307,7 +307,6 @@ export type SessionCost = {
   models: {
     provider: string;
     model: string;
-    requests: number;
     input: number;
     output: number;
     cacheRead: number;

@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS pim_room_seats (
 	UNIQUE (room, agent)
 );
 CREATE INDEX IF NOT EXISTS pim_room_seats_by_room ON pim_room_seats (room, joined_at);
+CREATE TABLE IF NOT EXISTS pim_room_past_seats (
+	conversation TEXT PRIMARY KEY,
+	room TEXT NOT NULL
+);
 `;
 
 const seatOf = (row: Record<string, SqlStorageValue>): Seat => ({
@@ -115,9 +119,17 @@ export class RoomStore {
 		return this.at(room, agent)!;
 	}
 
-	/** Takes an agent's seat away; the host's stays. */
+	/** Takes an agent's seat away; the host's stays. The room remembers the seat's conversation, for what it cost. */
 	unseat(seat: Seat): void {
-		this.#sql.exec("DELETE FROM pim_room_seats WHERE conversation = ? AND conversation != room", seat.conversation);
+		if (seat.conversation === seat.room) return;
+		this.#sql.exec("DELETE FROM pim_room_seats WHERE conversation = ?", seat.conversation);
+		this.#sql.exec("INSERT OR IGNORE INTO pim_room_past_seats (conversation, room) VALUES (?, ?)", seat.conversation, seat.room);
+	}
+
+	/** Every conversation agents have talked in in a chat: the chat itself, and the seats of agents in it now or before. */
+	everyConversation(room: string): string[] {
+		const seats = this.#sql.exec("SELECT conversation FROM pim_room_seats WHERE room = ? UNION SELECT conversation FROM pim_room_past_seats WHERE room = ?", room, room);
+		return [...new Set([room, ...seats.toArray().map((row) => String(row.conversation))])];
 	}
 
 	/** The seat a conversation is, in whichever room. */

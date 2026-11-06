@@ -8,7 +8,7 @@ import {
 	type Usage as ModelUsage,
 } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
-import type { EntryRecord } from "@earendil-works/pi-durable";
+import type { UsageState } from "@earendil-works/pi-durable";
 import { HttpError } from "./http";
 
 /**
@@ -390,7 +390,6 @@ export type SessionCost = {
 	readonly models: readonly {
 		readonly provider: string;
 		readonly model: string;
-		readonly requests: number;
 		readonly input: number;
 		readonly output: number;
 		readonly cacheRead: number;
@@ -399,21 +398,25 @@ export type SessionCost = {
 	}[];
 };
 
-/** What the model requests in a conversation have cost, by model, from the usage each reply carries. */
-export function sessionCost(entries: readonly EntryRecord[]): SessionCost {
+/**
+ * What a chat's model requests have cost, by model, from pi's ledgers of
+ * its conversations: one per agent that talked in it. A ledger keeps every
+ * response the conversation got, from before compactions and new contexts
+ * too, and its compactions' summaries.
+ */
+export function sessionCost(ledgers: readonly Readonly<UsageState>[]): SessionCost {
 	const models = new Map<string, { -readonly [K in keyof SessionCost["models"][number]]: SessionCost["models"][number][K] }>();
-	for (const entry of entries) {
-		const message = entry.model?.[0];
-		if (message?.role !== "assistant" || !message.usage) continue;
-		const key = `${message.provider}/${message.model}`;
-		const row = models.get(key) ?? { provider: message.provider, model: message.model, requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-		row.requests += 1;
-		row.input += message.usage.input;
-		row.output += message.usage.output;
-		row.cacheRead += message.usage.cacheRead;
-		row.cacheWrite += message.usage.cacheWrite;
-		row.cost += message.usage.cost.total;
-		models.set(key, row);
+	for (const ledger of ledgers) {
+		for (const [key, usage] of Object.entries(ledger.models)) {
+			const slash = key.indexOf("/");
+			const row = models.get(key) ?? { provider: key.slice(0, slash), model: key.slice(slash + 1), input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+			row.input += usage.input;
+			row.output += usage.output;
+			row.cacheRead += usage.cacheRead;
+			row.cacheWrite += usage.cacheWrite;
+			row.cost += usage.cost.total;
+			models.set(key, row);
+		}
 	}
 	const rows = [...models.values()].sort((a, b) => b.cost - a.cost);
 	return { total: rows.reduce((sum, row) => sum + row.cost, 0), models: rows };

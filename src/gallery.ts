@@ -13,7 +13,7 @@ import type { ArtifactFile, ArtifactKind } from "./artifacts";
  * the instance, apart from the Directory, so browsing never touches accounts.
  *
  * A template is a copy of one of its author's agents when they published it:
- * its name, description, instructions, suggested apps and look (its
+ * its name, description, instructions, suggested connectors and look (its
  * symbol, color and uploaded icon), never their memory, conversations or
  * credentials. Its contacts come with it, and theirs: copies of the other
  * agents it hands tasks to, with their looks and uploaded icons, which
@@ -25,8 +25,8 @@ import type { ArtifactFile, ArtifactKind } from "./artifacts";
  * or make their own. Publishing again replaces it with the latest version.
  *
  * The admin also chooses an agent everyone starts with: a copy of one of
- * theirs, which each new account gets besides its majordomo; and adds apps
- * anyone can connect besides the extensions' (`custom/<app>`).
+ * theirs, which each new account gets besides its majordomo; and adds connectors
+ * anyone can connect besides the extensions' (`custom/<connector>`).
  *
  * And the admin shares bots: copies of their agents, kept like templates,
  * whose public link lets anyone join as a guest who chats with that bot
@@ -175,7 +175,7 @@ export type Bot = Contacts & {
 	readonly sharedAt: number;
 	/** Messages each guest may send it in a UTC day; null for the deployment's own limit. */
 	readonly dailyMessages: number | null;
-	/** Tool calls each guest's copy may make in a UTC day, to its apps and to the tools shared with it; null for the deployment's own limit. */
+	/** Tool calls each guest's copy may make in a UTC day, to its connectors and to the tools shared with it; null for the deployment's own limit. */
 	readonly dailyToolCalls: number | null;
 	/** The model guests' copies run on, one this Pim offers everyone; null for the deployment's default. */
 	readonly model: BotModel | null;
@@ -307,7 +307,7 @@ const optional = (value: SqlStorageValue | undefined) => (value === null || valu
 /**
  * The contacts kept with a template or the agent everyone starts with.
  * Published when agents had teams, its members come with it as agents of
- * their own, with its apps.
+ * their own, with its connectors.
  */
 function contactsOf(row: Row, apps: readonly string[]): Contacts {
 	const team = JSON.parse(String(row.team ?? "[]")) as { name: string; instructions: string }[];
@@ -409,7 +409,7 @@ const publishedArtifactOf = (row: Row): PublishedArtifact => ({
 	public: Number(row.public) === 1,
 });
 
-/** The category the admin filed an app under, or null for Other. */
+/** The category the admin filed a connector under, or null for Other. */
 function appCategory(value: unknown): AppCategory | null {
 	if (value === undefined || value === null || value === "") return null;
 	if (!APP_CATEGORIES.includes(value as AppCategory)) throw new HttpError(400, `category must be one of ${APP_CATEGORIES.join(", ")}`);
@@ -487,10 +487,10 @@ export class Gallery extends DurableObject<Env> {
 		return this.ctx.storage.sql.exec(query, ...bindings);
 	}
 
-	/** The deployment's apps, for templates that listed them by URL before the directory. */
+	/** The deployment's connectors, for templates that listed them by URL before the directory. */
 	readonly #directory = () => appDirectory(pimConfig.extensions, this.customApps());
 
-	/** The apps the admin added, as they added them. */
+	/** The connectors the admin added, as they added them. */
 	customApps(): CustomApp[] {
 		return this.#sql("SELECT id, name, description, url, icon, category FROM apps ORDER BY created_at, id")
 			.toArray()
@@ -504,7 +504,7 @@ export class Gallery extends DurableObject<Env> {
 			}));
 	}
 
-	/** The admin adds an app anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name, with the icon they give or else its site's. */
+	/** The admin adds a connector anyone on this Pim can connect: a remote MCP server, named `custom/<id>` after its name, with the icon they give or else its site's. */
 	async addCustomApp(input: { name?: unknown; description?: unknown; url?: unknown; icon?: unknown; category?: unknown }): Promise<CustomApp> {
 		const name = optionalText(input.name, "name", MAX_APP_NAME);
 		if (name === null) throw new HttpError(400, "name is required");
@@ -514,10 +514,10 @@ export class Gallery extends DurableObject<Env> {
 		const given = iconUrl(input.icon);
 		const category = appCategory(input.category);
 		const added = () => this.customApps().some((app) => app.url === url);
-		if (added()) throw new HttpError(409, "An app with that URL is already here");
+		if (added()) throw new HttpError(409, "A connector with that URL is already here");
 		const icon = given ?? (await findSiteIcon(url));
 		// Looking took a while: the same app may have been added since.
-		if (added()) throw new HttpError(409, "An app with that URL is already here");
+		if (added()) throw new HttpError(409, "A connector with that URL is already here");
 		const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "app";
 		const taken = new Set(this.customApps().map((app) => app.id));
 		let id = base;
@@ -535,7 +535,7 @@ export class Gallery extends DurableObject<Env> {
 		return { id, name, description, url, icon, category };
 	}
 
-	/** The admin changes an app's icon; with none given, its site's is looked up again. Null when there's no such app. */
+	/** The admin changes a connector's icon; with none given, its site's is looked up again. Null when there's no such connector. */
 	async setCustomAppIcon(id: string, input: { icon?: unknown }): Promise<CustomApp | null> {
 		const given = iconUrl(input.icon);
 		const app = this.customApps().find((candidate) => candidate.id === id);
@@ -545,7 +545,7 @@ export class Gallery extends DurableObject<Env> {
 		return { ...app, icon };
 	}
 
-	/** Takes an app the admin added out of the directory. People's connections to it stay until they remove them. */
+	/** Takes a connector the admin added out of the directory. People's connections to it stay until they remove them. */
 	removeCustomApp(id: string): boolean {
 		return this.#sql("DELETE FROM apps WHERE id = ?", id).rowsWritten > 0;
 	}

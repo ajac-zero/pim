@@ -142,14 +142,14 @@ describe("the owner's agents", () => {
 			name: "Code reviewer",
 			description: "Reviews my pull requests.",
 			instructions: "Point out bugs before style.",
-			apps: ["test.ledger/github"],
+			connectors: ["test.ledger/github"],
 			contacts: ["trip PLANNER"],
 			emoji: "🧐",
 			color: "indigo",
 		};
 		faux.setResponses([
 			record,
-			toolUse(CREATE_AGENT, { ...reviewer, apps: ["custom/github"] }),
+			toolUse(CREATE_AGENT, { ...reviewer, connectors: ["custom/github"] }),
 			record,
 			toolUse(CREATE_AGENT, { ...reviewer, contacts: ["Linter"] }),
 			record,
@@ -166,7 +166,7 @@ describe("the owner's agents", () => {
 
 		// Refused as the API refuses it: nothing made.
 		await say("Make me a code reviewer", session);
-		expect(seen[1]!.result).toContain("This Pim offers no app custom/github");
+		expect(seen[1]!.result).toContain("This Pim offers no connector custom/github");
 		await say("Hand linting to someone", session);
 		expect(seen[2]!.result).toContain("The person has no agent called Linter.");
 		await say("Try again", session);
@@ -176,8 +176,8 @@ describe("the owner's agents", () => {
 		expect(seen[4]!.result).toContain('\\"created\\": true');
 		expect(seen[4]!.result).toContain("Trip planner");
 		const made = (await api("/agents")).body.agents.find((agent: { name: string }) => agent.name === "Code reviewer");
-		const { emoji, contacts: _contacts, ...given } = reviewer;
-		expect(made).toMatchObject({ ...given, contacts: [planner.id], symbol: emoji, color: "indigo", majordomo: false, source: null });
+		const { emoji, contacts: _contacts, connectors, ...given } = reviewer;
+		expect(made).toMatchObject({ ...given, apps: connectors, contacts: [planner.id], symbol: emoji, color: "indigo", majordomo: false, source: null });
 		// One the person has already isn't made again, whatever its case.
 		await say("And another code reviewer", session);
 		expect(seen[5]!.result).toContain('\\"exists\\": true');

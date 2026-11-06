@@ -61,20 +61,20 @@ const CATEGORY_LABELS = {
 
 const CATEGORIES: readonly Category[] = [...APP_CATEGORIES, "other"];
 
-/** An app this Pim offers with your connection to it, or a connection to one it no longer offers. */
+/** A connector this Pim offers with your connection to it, or a connection to one it no longer offers. */
 type Row = { app: DirectoryApp | null; connection: ConnectedApp | undefined };
 
-/** An app is connected once its sign-in succeeds, not while it waits for one or after one failed. */
+/** A connector is connected once its sign-in succeeds, not while it waits for one or after one failed. */
 const isConnected = ({ connection }: Row) =>
   connection !== undefined &&
   connection.state !== "authenticating" &&
   connection.state !== "failed";
 
 /**
- * The apps this Pim offers, as a dialog over whatever is open, each with
- * your connection to it: you connect an app once, and every agent of yours
- * that lists it works with it. Apps you connected that it no longer offers
- * can only be disconnected here. The admin adds apps of their own, and takes
+ * The connectors this Pim offers, as a dialog over whatever is open, each with
+ * your connection to it: you connect a connector once, and every agent of yours
+ * that lists it works with it. Connectors you connected that it no longer offers
+ * can only be disconnected here. The admin adds connectors of their own, and takes
  * them out.
  *
  * The dialog keeps its height: its search and filters stay put while the
@@ -115,7 +115,7 @@ function Apps() {
   const [onlyConnected, setOnlyConnected] = useState(false);
   const [category, setCategory] = useState<Category | null>(null);
   const [creating, setCreating] = useState(false);
-  // The admin's app whose icon they're changing.
+  // The admin's connector whose icon they're changing.
   const [changingIcon, setChangingIcon] = useState<DirectoryApp | null>(null);
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["apps"] });
@@ -179,7 +179,7 @@ function Apps() {
   for (const row of found) {
     counts.set(categoryOf(row), (counts.get(categoryOf(row)) ?? 0) + 1);
   }
-  // The categories this Pim has apps in, whatever the search.
+  // The categories this Pim has connectors in, whatever the search.
   const offered = CATEGORIES.filter((candidate) =>
     rows.some((row) => categoryOf(row) === candidate),
   );
@@ -399,8 +399,8 @@ function Apps() {
 }
 
 /**
- * One app as a card: its logo, what it does, your connection, and what you
- * can do with it. An app with a page of its own, such as Drive's file
+ * One connector as a card: its logo, what it does, your connection, and what you
+ * can do with it. A connector with a page of its own, such as Drive's file
  * picker, offers it once the connection is ready; one whose sign-in failed
  * or was revoked says why, and connects again.
  */
@@ -588,7 +588,7 @@ function AppDialog({
   );
 }
 
-/** The admin gives an app they added another icon, or empties it to use its site's again. */
+/** The admin gives a connector they added another icon, or empties it to use its site's again. */
 function AppIconForm({
   app,
   onDone,
@@ -651,7 +651,7 @@ function AppIconForm({
   );
 }
 
-/** The admin adds an app everyone on this Pim can connect: a remote MCP server. */
+/** The admin adds a connector everyone on this Pim can connect: a remote MCP server. */
 function CreateAppForm({ onDone }: { onDone: () => void }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();

@@ -65,7 +65,7 @@ const Write = Type.Object({
 		Type.String({
 			maxLength: MAX_SKILL_INSTRUCTIONS,
 			description:
-				"The whole procedure in Markdown, for an agent that knows nothing else about it: the steps, the apps and tools to use, what to check, and what the result looks like. A rewrite replaces all of it.",
+				"The whole procedure in Markdown, for an agent that knows nothing else about it: the steps, the connectors and tools to use, what to check, and what the result looks like. A rewrite replaces all of it.",
 		}),
 	),
 	files: Type.Optional(
@@ -134,7 +134,7 @@ const failure = (error: unknown) => {
  * An agent's switch for skills: on, it writes and installs skills, and the
  * majordomo may for it; off, no agent changes its skills. On unless the
  * person turned it off, as agents wrote skills before there were switches.
- * Kept with its app tools' switches (`agent:<id>`), and only the person sets it.
+ * Kept with its connector tools' switches (`agent:<id>`), and only the person sets it.
  */
 export function skillsSwitch(store: PimStore, agent: string): ResolvedPermission {
 	return resolvePermission(store, agentAudience(agent), "", WRITE_SKILL, "on", null);
@@ -384,7 +384,7 @@ export function skillsExtension(services: PimServices, writers: SkillWriters, sk
 					...(mine.length === 0
 						? ["You have no skills yet."]
 						: [
-								"Your skills: how the person wants work that comes up again done. Before such work, load its skill with read_skill (its name, no app) and follow it.",
+								"Your skills: how the person wants work that comes up again done. Before such work, load its skill with read_skill (its name, no connector) and follow it.",
 								...mine.map((skill) => `- ${skill.name}: ${skill.description}`),
 							]),
 					...(writes ? ["When the person asks you to remember how to do something, or you have worked out with them how to do a task they'll ask for again, save it with write_skill."] : []),

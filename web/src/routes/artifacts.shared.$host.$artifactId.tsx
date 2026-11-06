@@ -15,7 +15,7 @@ export const Route = createFileRoute("/artifacts/shared/$host/$artifactId")({
 /**
  * An artifact someone shared with you, as its latest version: to use, and
  * print, but not to change. Its page runs here as yours does: what it keeps
- * for you stays in your Pim, and the model and apps it asks for are yours.
+ * for you stays in your Pim, and the model and connectors it asks for are yours.
  */
 function SharedArtifactPage() {
   const { t } = useI18n();

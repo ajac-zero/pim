@@ -24,7 +24,7 @@ export type BriefTool = {
 	readonly appName: string;
 	readonly description: string;
 	readonly inputSchema: Record<string, unknown>;
-	/** The app says the tool only reads. */
+	/** The connector says the tool only reads. */
 	readonly readOnly: boolean;
 	/** Each call asks the host's owner first. */
 	readonly asks: boolean;

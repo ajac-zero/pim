@@ -1157,7 +1157,7 @@ describe("noticeOf", () => {
   });
 
   it("clips long titles to 120 characters", () => {
-    const title = noticeOf(`[App event] ${"x".repeat(200)}`)?.title ?? "";
+    const title = noticeOf(`[Connector event] ${"x".repeat(200)}`)?.title ?? "";
     expect(title).toHaveLength(120);
     expect(title.endsWith("…")).toBe(true);
   });

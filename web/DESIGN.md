@@ -103,7 +103,7 @@ On narrow screens there is no sidebar. A bar along the bottom, in the sidebar's 
 - **Mentions.** Typing `@` in the composer offers your agents in a small menu above it, filtered by the start of their names; arrows move, Enter or Tab picks one, Escape closes it.
 - **User messages** are `--bubble` bubbles with `--bubble-foreground` text, aligned right. Their Markdown renders as in agent messages, except that line breaks stay as typed and headings are bold text. Links, inline code, quotes and tables keep the bubble's text color at full opacity. Inline code and table headers use a wash of the canvas color so their fills do not weaken text contrast.
 - **Message times** are small muted text under each message: left-aligned under an agent's, right-aligned under a user's bubble. They fade in and out with the copy button on hover or keyboard focus, keeping their space when hidden. A message from another day shows its date too.
-- **Work in progress** shows under the last message as a list of the agent's steps, muted 13px lines that grow as it works, with three pulsing dots below. Each step starts with a 14px mark: a lightbulb for a heading of the agent's reasoning, the app's own icon for an app's tool, a symbol for Pim's tools it knows (a magnifier for web search, a globe for web pages), and a wrench for the rest. Once the agent sends a message, the list folds into a muted 13px "Worked for 42s" line with a chevron, left-aligned above the message, that opens to its steps again, with their marks, beside a hairline.
+- **Work in progress** shows under the last message as a list of the agent's steps, muted 13px lines that grow as it works, with three pulsing dots below. Each step starts with a 14px mark: a lightbulb for a heading of the agent's reasoning, the connector's own icon for a connector's tool, a symbol for Pim's tools it knows (a magnifier for web search, a globe for web pages), and a wrench for the rest. Once the agent sends a message, the list folds into a muted 13px "Worked for 42s" line with a chevron, left-aligned above the message, that opens to its steps again, with their marks, beside a hairline.
 - **Hover actions** (copy, retry) are bare icons beside the message's time and appear only on hover or keyboard focus.
 - **Timestamps** ("Today 10:01 AM") and **system events** ("Approved: rename the agent", "Scheduled check-in") are centered muted text, never bubbles. A referenced object shows its icon inline and is clickable.
 
@@ -147,13 +147,13 @@ A disabled button keeps its shape and turns muted with muted text. A destructive
 - **Tags** next to a title ("Team", "SEO content"): small muted pills with 13px muted text and an optional leading icon.
 - **Status pills:** a colored dot and a label, on a tint of the status color.
 
-### Lists of apps and templates
+### Lists of connectors and templates
 
 Rows with an icon tile, a name, a one-line muted description, and a secondary pill action on the right. Name each section with a muted label.
 
 ### Modals
 
-A modal is a centered background surface with an 18px radius, a soft shadow, and the dimming scrim. On narrow screens, large modals (Settings, Apps, Sharing, Discover) fill the screen, and small ones, such as an agent's settings, rise from the bottom as sheets with rounded top corners. It has a title, muted body copy, and actions at the bottom: the secondary button on the left and the primary on the right. Close with a bare `×` in the top right.
+A modal is a centered background surface with an 18px radius, a soft shadow, and the dimming scrim. On narrow screens, large modals (Settings, Connectors, Sharing, Discover) fill the screen, and small ones, such as an agent's settings, rise from the bottom as sheets with rounded top corners. It has a title, muted body copy, and actions at the bottom: the secondary button on the left and the primary on the right. Close with a bare `×` in the top right.
 
 ### Sign-in and onboarding
 
@@ -161,7 +161,7 @@ Keep these screens plain: Pim's mark, a title, one muted sentence, the fields, a
 
 ## Icons
 
-Import utility icons from `src/components/icons.tsx`, not directly from an icon library, so the theme selects their drawings. The default is Lucide; Pixel uses grid-aligned outlines. Use icons at 16–20px, in muted or foreground color. Icons support labels. Avoid filled or colored icons except brand logos for connected apps.
+Import utility icons from `src/components/icons.tsx`, not directly from an icon library, so the theme selects their drawings. The default is Lucide; Pixel uses grid-aligned outlines. Use icons at 16–20px, in muted or foreground color. Icons support labels. Avoid filled or colored icons except brand logos for connectors.
 
 ## Motion
 
@@ -169,4 +169,4 @@ Motion is quick and subtle: 150–200ms ease-out fades and small rises for new m
 
 ## Writing
 
-UI text is short and plain. Write labels in sentence case ("Add app", "Mark all as read"). Agents speak in first person and report results tersely. System events read as past-tense facts ("Approved the rename").
+UI text is short and plain. Write labels in sentence case ("Add connector", "Mark all as read"). Agents speak in first person and report results tersely. System events read as past-tense facts ("Approved the rename").

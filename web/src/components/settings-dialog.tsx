@@ -482,7 +482,7 @@ function AppearanceSection() {
   );
 }
 
-/** What Pim may do with each tool that acts on the world or comes from an app. */
+/** What Pim may do with each tool that acts on the world or comes from a connector. */
 function ToolPermissionsSection() {
   const { t } = useI18n();
   return (

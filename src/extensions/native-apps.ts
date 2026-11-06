@@ -3,12 +3,12 @@ import type { AppCredential, AppSecrets, AppSignInContext, AppToolContext, Nativ
 import type { McpCallResult, McpToolInfo } from "./mcp";
 
 /**
- * The person's connections to apps extensions implement themselves (see
- * `NativeAppDefinition`): one per app, with its sign-in and credential, in
+ * The person's connections to connectors extensions implement themselves (see
+ * `NativeAppDefinition`): one per connector, with its sign-in and credential, in
  * this space's database. The space's bridge lists them and their tools beside
  * the MCP servers', so everything else treats both alike.
  *
- * Sign-in: `connect` asks the app where to send the person, with a `state`
+ * Sign-in: `connect` asks the connector where to send the person, with a `state`
  * of `<owner>.<nonce>`; they come back to `/mcp/callback/apps`, one address
  * for everyone (which services like Spotify need registered), and the Worker
  * finds their space by the owner in `state`. The Worker hands the return on
@@ -18,7 +18,7 @@ import type { McpCallResult, McpToolInfo } from "./mcp";
  *
  * Credentials and sign-ins under way are encrypted with the deployment's
  * `APP_CREDENTIALS_KEY` once it is set, bound to the owner, the connection
- * and the app, so one can't be read elsewhere or moved to another
+ * and the connector, so one can't be read elsewhere or moved to another
  * connection. Ones kept before the key was set are encrypted when next used.
  */
 
@@ -52,7 +52,7 @@ const ENCRYPTED = "sealed:v1:";
 type Row = Record<string, SqlStorageValue>;
 
 /**
- * One sign-in of a connection: its id and app, and the random generation
+ * One sign-in of a connection: its id and connector, and the random generation
  * every sign-in gets. A connection removed and made again under the same id
  * is a new generation, so work begun on the old one (a call, an action, a
  * renewal) can't read, renew or change the new one's credential.
@@ -65,7 +65,7 @@ const newGeneration = () => base64UrlEncode(crypto.getRandomValues(new Uint8Arra
 
 export type NativeAppsHost = {
 	readonly sql: SqlStorage;
-	/** The installed app, by `<extension>/<app>`. */
+	/** The installed connector, by `<extension>/<app>`. */
 	app(ref: string): NativeAppDefinition | undefined;
 	secrets(app: NativeAppDefinition): AppSecrets;
 	/** The deployment's `APP_CREDENTIALS_KEY`, if it is set. */
@@ -77,10 +77,10 @@ export type NativeAppsHost = {
 	changed(): void;
 };
 
-/** A native app's connection, as the bridge lists servers. */
+/** A native connector's connection, as the bridge lists servers. */
 export type NativeConnection = {
 	readonly id: string;
-	/** The app it connects, `<extension>/<app>`. */
+	/** The connector it connects, `<extension>/<app>`. */
 	readonly app: string;
 	readonly name: string;
 	readonly state: "authenticating" | "ready" | "failed";
@@ -89,9 +89,9 @@ export type NativeConnection = {
 };
 
 /**
- * Thrown by an app's `callback`, `refresh` or tools when the person's grant
+ * Thrown by a connector's `callback`, `refresh` or tools when the person's grant
  * is gone: revoked, expired, or never renewable. Pim forgets the credential,
- * shows the app as failed with this message, and the person connects it
+ * shows the connector as failed with this message, and the person connects it
  * again. Any other error is passing: the connection stays, and the next call
  * tries again.
  */
@@ -157,7 +157,7 @@ export class NativeApps {
 			app: String(row.app),
 			name: String(row.name),
 			state: String(row.state) as NativeConnection["state"],
-			// An app the deployment took out can't be used.
+			// A connector the deployment took out can't be used.
 			error: this.#host.app(String(row.app)) ? (row.error === null ? null : String(row.error)) : "This Pim no longer offers it.",
 			authUrl: row.auth_url === null ? null : String(row.auth_url),
 		}));
@@ -188,7 +188,7 @@ export class NativeApps {
 	/** Starts the person's sign-in to `ref` under the connection id `id`: where to send them. */
 	async connect(ref: string, id: string): Promise<{ id: string; state: string; authUrl: string }> {
 		const app = this.#host.app(ref);
-		if (!app) throw new Error(`No installed app ${ref}`);
+		if (!app) throw new Error(`No installed connector ${ref}`);
 		const state = `${this.#host.owner()}.${base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))}`;
 		const { url, pending } = await app.signIn({ callbackUrl: this.#host.callbackUrl(), state, secrets: this.#host.secrets(app) });
 		const kept = await this.#encrypt(app, { id, app: ref }, "pending", pending ?? null);
@@ -209,19 +209,19 @@ export class NativeApps {
 
 	/**
 	 * The person came back from signing in to `url`: their connection is
-	 * ready, or failed with the app's reason. The Worker checked they are
+	 * ready, or failed with the connector's reason. The Worker checked they are
 	 * signed in as this space's owner.
 	 */
 	async finish(url: URL): Promise<{ name: string } | { error: string }> {
 		const state = url.searchParams.get("state");
 		const [row] = state && !this.#finishing.has(state) ? this.#host.sql.exec("SELECT * FROM pim_app_connections WHERE sign_in_state = ?", state).toArray() : [];
-		if (!state || !row) return { error: "This sign-in expired, or was finished already. Connect the app again." };
+		if (!state || !row) return { error: "This sign-in expired, or was finished already. Connect the connector again." };
 		const id = String(row.id);
 		const ref = String(row.app);
 		if (Number(row.created_at) + SIGN_IN_TTL_MS < Date.now()) {
-			this.#fail(id, "The sign-in took too long. Connect the app again.");
+			this.#fail(id, "The sign-in took too long. Connect the connector again.");
 			this.#host.changed();
-			return { error: "This sign-in expired. Connect the app again." };
+			return { error: "This sign-in expired. Connect the connector again." };
 		}
 		const app = this.#host.app(ref);
 		this.#finishing.add(state);
@@ -290,7 +290,7 @@ export class NativeApps {
 	}
 
 	/**
-	 * Runs one of an app's actions (`NativeAppDefinition.actions`) for the
+	 * Runs one of a connector's actions (`NativeAppDefinition.actions`) for the
 	 * person, with their ready connection to it. The caller checked it is the
 	 * person, in their own browser. Throws what the person should read.
 	 */
@@ -299,7 +299,7 @@ export class NativeApps {
 		const app = this.#host.app(ref);
 		const action = app?.actions && Object.hasOwn(app.actions, name) ? app.actions[name] : undefined;
 		if (!app || !action) throw new Error(`${ref} has no action ${name}`);
-		if (!row || row.state !== "ready") throw new Error(`Connect ${app.name} first, from the Apps page.`);
+		if (!row || row.state !== "ready") throw new Error(`Connect ${app.name} first, from the Connectors page.`);
 		const sign = signOf(row);
 		let current: Stored;
 		try {
@@ -348,7 +348,7 @@ export class NativeApps {
 
 	/**
 	 * Ends a connection: Pim forgets its credential at once, then asks the
-	 * service to revoke the grant, if the app can. Whether that worked, the
+	 * service to revoke the grant, if the connector can. Whether that worked, the
 	 * connection is gone.
 	 */
 	async remove(id: string): Promise<boolean> {
@@ -390,7 +390,7 @@ export class NativeApps {
 
 	/**
 	 * The grant is gone: the sign-in fails, without its credential, until the
-	 * person connects the app again. A connection they removed and made again
+	 * person connects the connector again. A connection they removed and made again
 	 * meanwhile (which the removal's revocation can make the service refuse)
 	 * is another sign-in, and is left alone.
 	 */
@@ -405,7 +405,7 @@ export class NativeApps {
 			this.#refreshing.delete(sign.generation);
 			this.#host.changed();
 		}
-		return { content: [{ type: "text", text: `${app.name} needs the person to connect it again from the Apps page.` }], isError: true };
+		return { content: [{ type: "text", text: `${app.name} needs the person to connect it again from the Connectors page.` }], isError: true };
 	}
 
 	#fail(id: string, error: string): void {
@@ -470,7 +470,7 @@ export class NativeApps {
 		return work;
 	}
 
-	/** What the database keeps for `value`: encrypted once the deployment has a key, required for apps that ask for it. */
+	/** What the database keeps for `value`: encrypted once the deployment has a key, required for connectors that ask for it. */
 	async #encrypt(app: NativeAppDefinition, where: { id: string; app: string }, purpose: "credential" | "pending", value: unknown): Promise<string> {
 		const json = JSON.stringify(value);
 		const raw = this.#host.credentialsKey();
@@ -501,7 +501,7 @@ export class NativeApps {
 		}
 	}
 
-	/** What an encrypted value is bound to: this owner, connection and app, and what it is. */
+	/** What an encrypted value is bound to: this owner, connection and connector, and what it is. */
 	#binding(where: { id: string; app: string }, purpose: string): Uint8Array {
 		return new TextEncoder().encode(["pim.app-credential.v1", this.#host.owner(), where.id, where.app, purpose].join("\n"));
 	}
@@ -573,9 +573,9 @@ type TokenResponse = { access_token?: string; refresh_token?: string; expires_in
 const TOKEN_TIMEOUT_MS = 15_000;
 
 /**
- * The sign-in of an app whose service speaks OAuth 2.0: the authorization
+ * The sign-in of a connector whose service speaks OAuth 2.0: the authorization
  * code flow with PKCE, and refresh tokens. `clientId` and `clientSecret`
- * name the secrets that hold them, which the app lists in its `secrets`;
+ * name the secrets that hold them, which the connector lists in its `secrets`;
  * `authorizeParams` adds the service's own to the authorization URL. The
  * credential is `{ accessToken, refreshToken?, expiresAt?, scope? }`; a
  * renewal keeps the refresh token when the service leaves it out, and a
@@ -642,7 +642,7 @@ export function oauth2(options: {
 		async refresh(credential, { secrets }) {
 			if (typeof credential.refreshToken !== "string") throw new ReconnectRequired("the sign-in expired.");
 			const renewed = await token(secrets, { grant_type: "refresh_token", refresh_token: credential.refreshToken });
-			// Services may keep the refresh token the same and leave it out; what else the app kept stays.
+			// Services may keep the refresh token the same and leave it out; what else the connector kept stays.
 			const { expiresAt: _expired, ...kept } = credential;
 			return { ...kept, ...renewed };
 		},

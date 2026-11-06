@@ -30,7 +30,7 @@ import { admitIngress, limited } from "./runtime";
 import { PimThemes } from "./themes";
 
 /**
- * Serves a Pim: everyone's web app, sign-in, API and app callbacks, on one
+ * Serves a Pim: everyone's web app, sign-in, API and connector callbacks, on one
  * hostname. Before anything else, the runtime vouches for where a request
  * came from (./runtime.ts).
  *
@@ -61,7 +61,7 @@ import { PimThemes } from "./themes";
  * - `/install.sh`: public, what installs pim-host or pim-computer from this
  *   Pim (./install-script.ts).
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
- *   connected apps. Each is checked another way: the OAuth state, and the
+ *   connectors. Each is checked another way: the OAuth state, and the
  *   watch's signing secret.
  * - Everything else: the web app (`web/`, built to `web/dist`).
  */
@@ -191,9 +191,9 @@ export async function toAgent(request: Request, env: Env, owner: string, path: s
 export type ApiExtension = (path: string, request: Request) => Promise<Response | undefined>;
 
 /**
- * An app's callback or event delivery: `/mcp/callback/<owner>` (GET, the
+ * A connector's callback or event delivery: `/mcp/callback/<owner>` (GET, the
  * OAuth sign-in's redirect, which the space matches against the callback URL
- * it gave), `/mcp/callback/apps` (the same for the apps extensions
+ * it gave), `/mcp/callback/apps` (the same for the connectors extensions
  * implement, whose `state` starts with the owner: see `serveAppReturn`), or
  * `/mcp/events/<owner>/<watch>` (POST, which the space answers as `/mcp/events/<watch>`).
  * Also `/mcp/client/<owner>` (GET): Pim's client metadata document for that
@@ -248,7 +248,7 @@ function appReturnPage(status: number, body: string, script = ""): Response {
 }
 
 /**
- * The person's return from signing in to an app an extension implements,
+ * The person's return from signing in to a connector an extension implements,
  * at `/mcp/callback/apps`. The service sends the browser back with a GET
  * from its own site, which doesn't carry Pim's session cookie (it is
  * SameSite=Strict), so the page answering it posts the same parameters
@@ -279,16 +279,16 @@ async function serveAppReturn(request: Request, env: Env): Promise<Response> {
 	if (refused) return refused;
 	const browser = await signedIn(request, env);
 	if (!browser || browser instanceof Response || browser.ownerId !== account.ownerId) {
-		return appReturnPage(403, "<p>Sign in to Pim in this browser, as the person who is connecting the app, then reload this page.</p>");
+		return appReturnPage(403, "<p>Sign in to Pim in this browser, as the person who is connecting the connector, then reload this page.</p>");
 	}
 	return toAgent(request, env, account.ownerId, APPS_CALLBACK_PATH, true);
 }
 
 /**
- * An app's page for the person (`NativeAppDefinition.page`), such as
+ * A connector's page for the person (`NativeAppDefinition.page`), such as
  * Drive's file picker: `/app-pages/<extension>/<app>`. The page holds
- * nothing of anyone's; what it does goes through the app's actions, which
- * check the person's session. It runs under the app's own content security
+ * nothing of anyone's; what it does goes through the connector's actions, which
+ * check the person's session. It runs under the connector's own content security
  * policy, in no frame, and its address goes nowhere else.
  */
 function serveAppPage(request: Request, pathname: string): Response {
@@ -406,7 +406,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	// The app's look, which the page asking for an address needs too.
 	if (pathname === "/api/themes" || pathname === "/api/themes.css") return withCors(await serveThemes(request, pathname.slice("/api".length)));
 
-	// Passkeys, sessions and apps' callbacks all belong to one address, which the deployment sets.
+	// Passkeys, sessions and connectors' callbacks all belong to one address, which the deployment sets.
 	const { publicUrl } = deploymentSettings(env);
 	if (!publicUrl) {
 		// `missing` lets the web app show how to set it.

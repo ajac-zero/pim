@@ -151,7 +151,7 @@ import { CREATE_MEMORY_SCOPE, createOptMem, type MemoryAccess, type MemoryScope,
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, EVERYONE_SCOPE, entryLine, MAX_NAMED_SCOPES, MAX_SCOPE_NAME, PRIVATE_SCOPE } from "./extensions/optmem/store";
 import {
-	ADD_CUSTOM_APP,
+	ADD_CUSTOM_CONNECTOR,
 	addCustomAppAction,
 	agentExtension,
 	manageAppsAction,
@@ -210,14 +210,14 @@ export const OWNER_HEADER = "x-pim-owner";
 /**
  * Set by the Worker, and only by it, on API requests from the person's
  * signed-in browser rather than an API token: what runs this Pim, such as
- * approving an app for everyone on it, needs that, as the admin API does.
+ * approving a connector for everyone on it, needs that, as the admin API does.
  */
 export const SIGNED_IN_HEADER = "x-pim-signed-in";
 
-/** Where apps' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose space the callback is for. */
+/** Where connectors' sign-ins return, as `/mcp/callback/<owner>`, so the Worker knows whose space the callback is for. */
 export const MCP_CALLBACK_PATH = "/mcp/callback";
 /**
- * Where sign-ins to the apps extensions implement return, the same for
+ * Where sign-ins to the connectors extensions implement return, the same for
  * everyone so services can have it registered: `state` names the owner,
  * `<owner>.<nonce>`. Owner ids start with `o_`, so it is nobody's `/mcp/callback/<owner>`.
  */
@@ -226,7 +226,7 @@ export const APPS_CALLBACK_PATH = `${MCP_CALLBACK_PATH}/apps`;
 export const MCP_CLIENT_PATH = "/mcp/client";
 /** Where the Worker sends `/mcp`: this space as an MCP server (./mcp-server.ts). */
 export const MCP_SERVER_PATH = "/mcp-server";
-/** Where apps deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The space sees `/mcp/events/<watch id>`. */
+/** Where connectors deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The space sees `/mcp/events/<watch id>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
 const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
 /** How long an approval waits for the user under the `auto` policy before it is granted, so background work never stalls. */
@@ -254,11 +254,11 @@ const BOT_TOOL_ACTION = "bot_tool";
 /** How long a chat goes without activity before it is archived: listed apart, not deleted. */
 const ARCHIVE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
-/** The page a browser lands on after signing in to an app: what happened, and a way back to Pim. */
+/** The page a browser lands on after signing in to a connector: what happened, and a way back to Pim. */
 function signInResultPage(connected: boolean, home: string | undefined, error?: string): Response {
 	const escape = (text: string) => text.replace(/[&<>"']/g, (character) => `&#${character.charCodeAt(0)};`);
 	const title = connected ? "Connected" : "Not connected";
-	const detail = connected ? "The app is ready to use. You can close this tab or go back to Pim." : `Sign-in failed: ${escape(error ?? "unknown error")}`;
+	const detail = connected ? "The connector is ready to use. You can close this tab or go back to Pim." : `Sign-in failed: ${escape(error ?? "unknown error")}`;
 	const back = home ? `<a href="${escape(home)}">Back to Pim</a>` : "";
 	const body = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
 <style>
@@ -333,7 +333,7 @@ type AutoApproval = "timeout" | "always" | "majordomo";
 
 /** A tool a permission can be set for, as the API shows it. */
 export type ToolPermissionInfo = ResolvedPermission & {
-	/** The connected app's id; null for Pim's own tools. */
+	/** The connector's id; null for Pim's own tools. */
 	readonly app: string | null;
 	readonly appName: string | null;
 	/** The tool's own name, which its permission is set by. */
@@ -341,9 +341,9 @@ export type ToolPermissionInfo = ResolvedPermission & {
 	/** The name the model sees. */
 	readonly name: string;
 	readonly description: string | null;
-	/** The app says the tool only reads. */
+	/** The connector says the tool only reads. */
 	readonly readOnly: boolean;
-	/** The app says the tool may delete or overwrite things. */
+	/** The connector says the tool may delete or overwrite things. */
 	readonly destructive: boolean;
 	/** The permissions it can have. */
 	readonly choices: readonly ToolPermission[];
@@ -370,7 +370,7 @@ export type GuestBot = {
 	readonly tools?: readonly BotTool[];
 };
 
-/** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
+/** How long an erasure waits for runs to stop and connectors to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
 const MODEL_KEY = "model";
@@ -401,17 +401,17 @@ const GUEST_BOT_KEY = "guest_bot";
 /** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
 /**
  * Only the majordomo is offered these: naming memory scopes and choosing which agents read them, as it reads every
- * scope; and, in the admin's space, adding apps to this Pim.
+ * scope; and, in the admin's space, adding connectors to this Pim.
  */
-const MAJORDOMO_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE, ADD_CUSTOM_APP];
-/** Subscribing to an app's events needs no approval, so its setting is only Off or On, and Ask (from before) counts as On. */
-const WATCH_APP_EVENT = "watch_app_event";
+const MAJORDOMO_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE, ADD_CUSTOM_CONNECTOR];
+/** Subscribing to a connector's events needs no approval, so its setting is only Off or On, and Ask (from before) counts as On. */
+const WATCH_APP_EVENT = "watch_connector_event";
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
-/** The admin's apps, as this space last read them from the gallery, and how long before it reads them again. */
+/** The admin's connectors, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
-/** "1" when the owner is this Pim's admin, as last read from the directory with the admin's apps. */
+/** "1" when the owner is this Pim's admin, as last read from the directory with the admin's connectors. */
 const OWNER_ADMIN_KEY = "owner_admin";
-/** How long what the admin shares through the gallery (apps and model providers) is used before it's read again. */
+/** How long what the admin shares through the gallery (connectors and model providers) is used before it's read again. */
 const CUSTOM_APPS_TTL_MS = 60_000;
 /** The person's own model providers (./providers.ts), keys included. */
 const OWN_PROVIDERS_KEY = "own_providers";
@@ -600,7 +600,7 @@ export class Pim extends DurableAgent<Env> {
 		// The person's own plan and providers: their tokens are theirs, not the deployment's.
 		ownProvider: (provider) => provider === CHATGPT_PROVIDER || provider.startsWith(OWN_PROVIDER),
 	});
-	/** The person's connections to apps extensions implement themselves, with their sign-ins. */
+	/** The person's connections to connectors extensions implement themselves, with their sign-ins. */
 	readonly nativeApps = new NativeApps({
 		sql: this.ctx.storage.sql,
 		app: (ref) => {
@@ -614,7 +614,7 @@ export class Pim extends DurableAgent<Env> {
 		changed: () => this.#installApps(),
 	});
 	/**
-	 * Connected apps: the SDK's MCP client, and the apps extensions implement,
+	 * Connectors: the SDK's MCP client, and the connectors extensions implement,
 	 * as the bridge pim's extension builds tools from.
 	 */
 	readonly apps: McpBridge = {
@@ -657,15 +657,15 @@ export class Pim extends DurableAgent<Env> {
 		capabilities: (serverId) => this.mcp.mcpConnections[serverId]?.serverCapabilities as McpCapabilities | undefined,
 		request: async (serverId, method, params) => {
 			const connection = this.mcp.mcpConnections[serverId];
-			if (!connection) throw new Error(`The app ${serverId} is not connected`);
+			if (!connection) throw new Error(`The connector ${serverId} is not connected`);
 			return connection.client.request({ method, params } as never, ANY_RESULT as never);
 		},
 		readResource: async (serverId, uri) =>
 			(await this.mcp.readResource({ serverId, uri })) as { contents: readonly McpResourceContent[] },
 	};
-	/** Apps' skills and event types, cached in this object's database. */
+	/** Connectors' skills and event types, cached in this object's database. */
 	readonly catalog = new AppCatalog(this.apps, this.store);
-	/** Watches on apps' events (MCP Events, webhook delivery). */
+	/** Watches on connectors' events (MCP Events, webhook delivery). */
 	readonly appEvents = new AppEvents({
 		bridge: this.apps,
 		store: this.store,
@@ -679,8 +679,8 @@ export class Pim extends DurableAgent<Env> {
 			const seat = this.#rooms.of(session);
 			if (seat && seat.conversation !== seat.room) {
 				const name = this.agents.get(seat.agent)?.name ?? "An agent";
-				const first = content.split("\n")[0]?.replace(/^\[App event\]\s*/, "") ?? "";
-				await this.#write(seat.room, `${ROOM_NOTICE} ${name} got an app event: ${first}`, `event:${operationId}`);
+				const first = content.split("\n")[0]?.replace(/^\[(?:Connector|App) event\]\s*/, "") ?? "";
+				await this.#write(seat.room, `${ROOM_NOTICE} ${name} got a connector event: ${first}`, `event:${operationId}`);
 				this.broadcastMessage({ type: "sessions" });
 			}
 		},
@@ -716,7 +716,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Pim's own actions whose tools agents are offered now: those that use the
 	 * computer only while one is paired (its desktop's, while it has one they
-	 * can use), and adding apps to this Pim only in its admin's space.
+	 * can use), and adding connectors to this Pim only in its admin's space.
 	 */
 	#offeredActions(): GatedAction[] {
 		const computer = this.computer.paired();
@@ -724,7 +724,7 @@ export class Pim extends DurableAgent<Env> {
 		const admin = this.store.meta(OWNER_ADMIN_KEY) === "1";
 		return this.#ownActions.filter(
 			(action) =>
-				(computer || !COMPUTER_ACTIONS.has(action.name)) && (desktop || action.name !== DESKTOP_ACT) && (admin || action.name !== ADD_CUSTOM_APP),
+				(computer || !COMPUTER_ACTIONS.has(action.name)) && (desktop || action.name !== DESKTOP_ACT) && (admin || action.name !== ADD_CUSTOM_CONNECTOR),
 		);
 	}
 
@@ -854,10 +854,10 @@ export class Pim extends DurableAgent<Env> {
 		// The computer pings to keep its connection open; the answer doesn't wake the space.
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 		this.lifecycle.use(this.harness);
-		// A new, removed, signed-in or failed app changes the tools: pi uses the new set from the next request.
+		// A new, removed, signed-in or failed connector changes the tools: pi uses the new set from the next request.
 		this.mcp.onServerStateChanged(() => {
 			this.#installApps();
-			// An app that just became ready gets its skills and event types read once.
+			// A connector that just became ready gets its skills and event types read once.
 			for (const server of this.apps.servers()) {
 				if (server.state === "ready" && !this.catalog.known(server.id)) {
 					void this.catalog.refresh(server.id).catch((error) => console.warn(`reading ${server.id}'s catalog failed`, error));
@@ -867,12 +867,12 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Connects one of the directory's apps. A failed connection leaves
+	 * Connects one of the directory's connectors. A failed connection leaves
 	 * nothing behind; `authUrl` is set when the user must sign in.
 	 */
 	async connectApp(app: DirectoryApp, options: { approval?: McpApproval } = {}): Promise<{ id: string; state: string; authUrl?: string }> {
 		const { name, url } = app;
-		// A connection is the app's, found by its server: another app with the same name gets one of its own.
+		// A connection is the connector's, found by its server: another connector with the same name gets one of its own.
 		let id = slug(name);
 		const existing = serverFor(this.apps.servers(), app);
 		if (existing) id = existing.id;
@@ -919,7 +919,7 @@ export class Pim extends DurableAgent<Env> {
 		this.store.deleteMcpApproval(id);
 	}
 
-	/** The deployment's secrets a native app names, from the Worker's environment. */
+	/** The deployment's secrets a native connector names, from the Worker's environment. */
 	#secrets(app: NativeAppDefinition): Record<string, string> {
 		return this.#env(app.secrets ?? []);
 	}
@@ -932,7 +932,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Signs in to MCP servers as the SDK does, registering Pim with each,
-	 * except for an app whose definition says otherwise (see
+	 * except for a connector whose definition says otherwise (see
 	 * `McpAppDefinition.client`): the client the deployment registered
 	 * beforehand, or Pim's client metadata document.
 	 */
@@ -1005,7 +1005,7 @@ export class Pim extends DurableAgent<Env> {
 		await this.appEvents.refresh(payload.id);
 	}
 
-	/** Rebuilds the connected apps' extensions, once pi's registry has been set up. */
+	/** Rebuilds the connectors' extensions, once pi's registry has been set up. */
 	#installApps(): void {
 		if (!this.registry.snapshot().extension("pim.apps")) return;
 		this.#migrateAlwaysApproved();
@@ -1026,7 +1026,7 @@ export class Pim extends DurableAgent<Env> {
 		);
 	}
 
-	/** Installs each ready app's tools as its own extension, and takes out those of apps that no longer are. */
+	/** Installs each ready connector's tools as its own extension, and takes out those of connectors that no longer are. */
 	#installAppTools(tools: readonly Extension[]): void {
 		const names = new Set(tools.map((extension) => extension.name));
 		for (const extension of this.registry.snapshot().installed()) {
@@ -1035,17 +1035,17 @@ export class Pim extends DurableAgent<Env> {
 		for (const extension of tools) this.registry.install(extension);
 	}
 
-	/** The apps an agent works with: those it lists. */
+	/** The connectors an agent works with: those it lists. */
 	#appsOf(agent: Agent): DirectoryApp[] {
 		const directory = this.appDirectory();
 		return [...new Set(agent.apps)].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
 	}
 
-	/** The apps people on this deployment can connect: the extensions', then the admin's, as last read from the gallery. */
+	/** The connectors people on this deployment can connect: the extensions', then the admin's, as last read from the gallery. */
 	appDirectory(): DirectoryApp[] {
 		const custom = this.store.meta(CUSTOM_APPS_KEY);
 		return appDirectory(this.extensions.list(), custom === undefined ? [] : (JSON.parse(custom) as CustomApp[])).filter((app) => {
-			// An extension's app is offered once the deployment set every secret it needs.
+			// An extension's connector is offered once the deployment set every secret it needs.
 			const names = secretsOf(this.extensions.app(app.ref));
 			return names.every((name) => name in this.#env(names));
 		});
@@ -1054,7 +1054,7 @@ export class Pim extends DurableAgent<Env> {
 	#customAppsReadAt = 0;
 
 	/**
-	 * Reads the admin's apps and model providers from the gallery again, and
+	 * Reads the admin's connectors and model providers from the gallery again, and
 	 * whether the owner is the admin from the directory, at most once a minute
 	 * unless `now`.
 	 */
@@ -1077,7 +1077,7 @@ export class Pim extends DurableAgent<Env> {
 				await this.#providersChanged();
 			}
 		} catch (error) {
-			console.warn("reading the admin's apps and providers failed", error);
+			console.warn("reading the admin's connectors and providers failed", error);
 		}
 	}
 
@@ -1088,13 +1088,13 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * The admin's majordomo adds a remote MCP server to this Pim's apps, as
-	 * the admin does in Apps → Create new app (`POST /admin/apps`), and gets
+	 * The admin's majordomo adds a remote MCP server to this Pim's connectors, as
+	 * the admin does in Connectors → Create new connector (`POST /admin/apps`), and gets
 	 * it back from the directory. A server the directory has already is that
-	 * app, whoever added it.
+	 * connector, whoever added it.
 	 */
 	async #addCustomApp(input: { name: string; url: string; description?: string }): Promise<DirectoryApp> {
-		if (!(await this.#ownerIsAdmin())) throw new Error("Only this Pim's admin adds apps to it.");
+		if (!(await this.#ownerIsAdmin())) throw new Error("Only this Pim's admin adds connectors to it.");
 		const url = input.url.trim();
 		await this.#refreshCustomApps(true);
 		let app = this.appDirectory().find((candidate) => candidate.url === url);
@@ -1108,11 +1108,11 @@ export class Pim extends DurableAgent<Env> {
 		return app;
 	}
 
-	/** Apps given through the API must be in the directory. */
+	/** Connectors given through the API must be in the directory. */
 	#checkApps<T extends { apps: readonly string[] }>(input: T): T {
 		const directory = this.appDirectory();
 		const missing = input.apps.find((ref) => !directory.some((app) => app.ref === ref));
-		if (missing) throw new HttpError(400, `This Pim offers no app ${missing}`);
+		if (missing) throw new HttpError(400, `This Pim offers no connector ${missing}`);
 		return input;
 	}
 
@@ -1143,7 +1143,7 @@ export class Pim extends DurableAgent<Env> {
 		return input;
 	}
 
-	/** The extensions of the connected apps an agent works with. */
+	/** The extensions of the connectors an agent works with. */
 	#appExtensionsOf(agent: Agent): string[] {
 		const servers = this.apps.servers();
 		return this.#appsOf(agent).flatMap((app) => {
@@ -1153,7 +1153,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Extensions only some conversations select: apps, by the agents that list
+	 * Extensions only some conversations select: connectors, by the agents that list
 	 * them; and reviews', by the majordomo's reviews.
 	 */
 	#perPim(name: string): boolean {
@@ -1165,8 +1165,8 @@ export class Pim extends DurableAgent<Env> {
 		const registry = this.registry;
 		const perPim = (name: string) => this.#perPim(name);
 		return {
-			// Every extension but visits', apps' and reviews': a visit's own conversation selects its
-			// extension, the chats of agents that list an app select it, and reviews select theirs.
+			// Every extension but visits', connectors' and reviews': a visit's own conversation selects its
+			// extension, the chats of agents that list a connector select it, and reviews select theirs.
 			get extensions() {
 				return registry
 					.snapshot()
@@ -1721,7 +1721,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Every message into a session goes through here, so the session list
 	 * knows its activity; the user's first message also names it. A new run
-	 * (from the user, a schedule or an app) counts against the daily limit;
+	 * (from the user, a schedule or a connector) counts against the daily limit;
 	 * an approval's outcome, or tasks' answers, continue work already
 	 * counted, so they do not.
 	 */
@@ -2223,7 +2223,7 @@ export class Pim extends DurableAgent<Env> {
 			return decided;
 		}
 		if (call) {
-			// What it approved may have changed the agent, such as its apps: the turn goes on with the tools it has now.
+			// What it approved may have changed the agent, such as its connectors: the turn goes on with the tools it has now.
 			await this.#selectAbilities(approval.session);
 			const task = this.#tasks.of(approval.session);
 			if (task && this.#tasks.setState(task.id, "working")) this.#tasksChanged(task.root);
@@ -2271,22 +2271,22 @@ export class Pim extends DurableAgent<Env> {
 		return this.decideApproval(id, "approve", note);
 	}
 
-	// Tool permissions: whether Pim may use each tool that acts on the world or comes from an app,
+	// Tool permissions: whether Pim may use each tool that acts on the world or comes from a connector,
 	// for its owner and for each circle.
 
-	/** Pim's own tools that ask first unless the user chooses otherwise; `mcp_call` is filed by the apps' tools. */
+	/** Pim's own tools that ask first unless the user chooses otherwise; `mcp_call` is filed by the connectors' tools. */
 	#ownGatedActions(): GatedAction[] {
 		const offered = new Set(this.#offeredActions().map((action) => action.name));
 		return this.actions.filter((action) => action.name !== "mcp_call" && (offered.has(action.name) || !this.#ownActions.includes(action)));
 	}
 
-	/** `watch_app_event`'s permission: on unless switched off, whatever else was chosen before it stopped asking. */
+	/** `watch_connector_event`'s permission: on unless switched off, whatever else was chosen before it stopped asking. */
 	#watchPermission(): ResolvedPermission {
 		const { chosen } = ownToolPermission(this.store, WATCH_APP_EVENT);
 		return { permission: chosen === "off" ? "off" : "on", default: "on", chosen: chosen === "ask" ? null : chosen, changed: false };
 	}
 
-	/** The tool an approval was filed for, as permissions name it: by its app and the app's own name for it. */
+	/** The tool an approval was filed for, as permissions name it: by its connector and the connector's own name for it. */
 	#approvalTool(approval: Approval): { app: string; tool: string } {
 		if (approval.action === "mcp_call") {
 			const { server, tool } = approval.args as { server: string; tool: string };
@@ -2304,7 +2304,7 @@ export class Pim extends DurableAgent<Env> {
 		return this.apps.tools().some((info) => info.serverId === app && info.name === tool && info.annotations?.destructiveHint === true);
 	}
 
-	/** The permission of the tool that filed an approval, for whoever asked; `ask` for an app tool that is gone. */
+	/** The permission of the tool that filed an approval, for whoever asked; `ask` for a connector tool that is gone. */
 	#approvalPermission(approval: Approval): ToolPermission {
 		const { app, tool } = this.#approvalTool(approval);
 		if (app === "") {
@@ -2337,7 +2337,7 @@ export class Pim extends DurableAgent<Env> {
 	 * Every tool a permission can be set for, for the owner (`OWNER`) or a
 	 * circle, with the permission that applies: for the owner, Pim's own tools
 	 * that act on the world, since each agent has its own switches for its
-	 * apps' tools; for a circle, every app's tools. What a circle remembers is
+	 * connectors' tools; for a circle, every connector's tools. What a circle remembers is
 	 * the memory scopes ticked for it.
 	 */
 	toolPermissions(audience: string = OWNER): ToolPermissionInfo[] {
@@ -2364,7 +2364,7 @@ export class Pim extends DurableAgent<Env> {
 		return apps;
 	}
 
-	/** What a permission row says about an app's tool, besides the permission. */
+	/** What a permission row says about a connector's tool, besides the permission. */
 	#appToolInfo(server: McpServerInfo, tool: McpToolInfo) {
 		return {
 			app: server.id,
@@ -2377,7 +2377,7 @@ export class Pim extends DurableAgent<Env> {
 		};
 	}
 
-	/** The tools of the connected apps an agent works with, each with its switch for that agent. */
+	/** The tools of the connectors an agent works with, each with its switch for that agent. */
 	agentToolPermissions(agent: Agent): ToolPermissionInfo[] {
 		const servers = this.apps.servers();
 		const tools = this.apps.tools();
@@ -2410,13 +2410,13 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Switches an app's tool on or off for one agent, or back to its default
+	 * Switches a connector's tool on or off for one agent, or back to its default
 	 * (null); or, as Pim's own `write_skill` (`app` empty), its switch for
-	 * skills. Switched on, an app's tool is held to the tool's definition now.
+	 * skills. Switched on, a connector's tool is held to the tool's definition now.
 	 * The agent's conversations see it from their next request.
 	 */
 	setAgentToolPermission(agent: Agent, app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
-		if (permission === "ask") throw new HttpError(400, "An agent's app tools are either on or off");
+		if (permission === "ask") throw new HttpError(400, "An agent's connector tools are either on or off");
 		if (app === "") {
 			if (tool !== WRITE_SKILL) throw new HttpError(404, `${agent.name} has no switch for ${tool}`);
 			if (permission === null) this.store.clearToolPermission(agentAudience(agent.id), "", WRITE_SKILL);
@@ -2424,7 +2424,7 @@ export class Pim extends DurableAgent<Env> {
 			return this.agentSkillsPermission(agent);
 		}
 		const found = this.agentToolPermissions(agent).find((info) => info.app === app && info.tool === tool);
-		if (!found) throw new HttpError(404, `${agent.name} has no tool ${tool} in the app ${app}`);
+		if (!found) throw new HttpError(404, `${agent.name} has no tool ${tool} in the connector ${app}`);
 		const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool)!;
 		if (permission === null) this.store.clearToolPermission(agentAudience(agent.id), app, tool);
 		else this.store.setToolPermission(agentAudience(agent.id), app, tool, permission, toolDefinition(info));
@@ -2433,8 +2433,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Sets the permission of a tool for the owner (`OWNER`) or a circle: one of
-	 * Pim's own (`app` empty), or, for a circle, an app's; null goes back to its
-	 * default. An app tool's choice is tied to its definition now. The model sees
+	 * Pim's own (`app` empty), or, for a circle, a connector's; null goes back to its
+	 * default. A connector tool's choice is tied to its definition now. The model sees
 	 * the change from its next request; a guest, from their next call.
 	 */
 	setToolPermission(audience: string, app: string, tool: string, permission: ToolPermission | null): ToolPermissionInfo {
@@ -2443,14 +2443,14 @@ export class Pim extends DurableAgent<Env> {
 		if (app === "") {
 			const known = audience === OWNER && this.#ownGatedActions().some((action) => action.name === tool);
 			if (!known) throw new HttpError(404, `No tool ${tool}`);
-			if (tool === WATCH_APP_EVENT && permission === "ask") throw new HttpError(400, "This tool can only be off or on: watching an app's events needs no approval");
+			if (tool === WATCH_APP_EVENT && permission === "ask") throw new HttpError(400, "This tool can only be off or on: watching a connector's events needs no approval");
 			if (permission === "on" && this.#ownGatedActions().find((action) => action.name === tool)?.explicitApproval) {
 				throw new HttpError(400, "This tool can only be off or ask: every change requires explicit approval");
 			}
 		} else {
-			if (audience === OWNER) throw new HttpError(400, "An app's tools are switched on or off for each agent");
+			if (audience === OWNER) throw new HttpError(400, "A connector's tools are switched on or off for each agent");
 			const info = this.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool);
-			if (!info) throw new HttpError(404, `No tool ${tool} in the app ${app}`);
+			if (!info) throw new HttpError(404, `No tool ${tool} in the connector ${app}`);
 			if (permission === "on" && info.annotations?.destructiveHint === true) {
 				throw new HttpError(400, "This tool can only be off or ask: every call requires explicit approval");
 			}
@@ -2465,7 +2465,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Turns each tool chosen with "Always approve" before tool permissions
 	 * into an `on` permission, once the tool its name belongs to is known (an
-	 * app's tools only once it is connected).
+	 * connector's tools only once it is connected).
 	 */
 	#migrateAlwaysApproved(): void {
 		for (const name of this.store.legacyAlwaysApproved()) {
@@ -2551,7 +2551,7 @@ export class Pim extends DurableAgent<Env> {
 		return { ok: true, circle, member };
 	}
 
-	/** The app tools a circle may use now, with the permission each has. */
+	/** The connector tools a circle may use now, with the permission each has. */
 	#guestTools(circle: string) {
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
 		return this.apps.tools().flatMap((tool) => {
@@ -2946,10 +2946,10 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * The names of the tools an agent's conversations aren't offered: the app
+	 * The names of the tools an agent's conversations aren't offered: the connector
 	 * tools switched off for it, writing and installing skills when its switch
 	 * for skills is off, and, for any agent but the majordomo, the majordomo's
-	 * own: naming and sharing memory scopes, and adding apps.
+	 * own: naming and sharing memory scopes, and adding connectors.
 	 */
 	#switchedOff(agent: Agent): Set<string> {
 		const off = this.agentToolPermissions(agent).flatMap((info) => (info.permission === "off" ? [info.name] : []));
@@ -3504,9 +3504,9 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Gives a chat the abilities its agent uses and the apps it lists, less
-	 * the app tools switched off for the agent, as they are now, before its next
-	 * run: its agent, the extensions, the connected apps
+	 * Gives a chat the abilities its agent uses and the connectors it lists, less
+	 * the connector tools switched off for the agent, as they are now, before its next
+	 * run: its agent, the extensions, the connected connectors
 	 * or the switches may have changed since.
 	 * Visits choose their own extensions, and the conversations of tasks that
 	 * aren't chats got theirs when made. A chat whose selection is unchanged
@@ -3515,7 +3515,7 @@ export class Pim extends DurableAgent<Env> {
 	async #selectAbilities(session: string): Promise<void> {
 		if (this.visits.bySession(session) || this.#taskApart(session)) return;
 		const agent = this.agents.ofSession(session);
-		// Apps last: their tools come and go, and pi only appends cheaply at the end.
+		// Connectors last: their tools come and go, and pi only appends cheaply at the end.
 		const wanted = this.#appExtensionsOf(agent);
 		const off = [...this.#switchedOff(agent)];
 		const key = [...wanted, ...off.map((name) => `-${name}`)].join(" ");
@@ -3530,7 +3530,7 @@ export class Pim extends DurableAgent<Env> {
 		this.agents.setAbilities(session, key);
 	}
 
-	/** A copy's apps that this deployment still offers. */
+	/** A copy's connectors that this deployment still offers. */
 	async #installed(input: AgentInput): Promise<AgentInput> {
 		await this.#refreshCustomApps(true);
 		const directory = this.appDirectory();
@@ -3773,7 +3773,7 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async adoptBot(bot: Omit<Bot, "icon" | "bundle"> & Pick<PublishedAgent, "bundle"> & { image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
-		// Its apps' tools are the author's to share, as the bot's tools: the copy connects none of its own.
+		// Its connectors' tools are the author's to share, as the bot's tools: the copy connects none of its own.
 		const agent = await this.#adopt({ ...bot, apps: [] }, { template: bot.id, author: bot.author });
 		this.store.setMeta(
 			GUEST_BOT_KEY,
@@ -3813,7 +3813,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Brings a guest's copy of their bot up to what its author shared last:
-	 * its name, description, instructions, apps, look and model, and the daily
+	 * its name, description, instructions, connectors, look and model, and the daily
 	 * messages and tool calls it allows. The agents that came with it stay as they came.
 	 * Null when its link was turned off: the guest can read their chats, and
 	 * start nothing more.
@@ -4083,8 +4083,8 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Everything the person put in or the agent made, as JSON they can take
 	 * elsewhere: conversations, memories, goals, schedules, approvals,
-	 * notifications, connected apps and settings. Credentials are not
-	 * included: the ChatGPT plan's tokens, apps' sign-ins, webhook secrets
+	 * notifications, connectors and settings. Credentials are not
+	 * included: the ChatGPT plan's tokens, connectors' sign-ins, webhook secrets
 	 * and push keys stay behind. JSON text, ready to download.
 	 */
 	async exportData(): Promise<string> {
@@ -4143,7 +4143,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.memory.store.count() > 0) remaining.push("memories");
 		const own = new Set([SCHEDULED_TASK_CALLBACK, WATCH_REFRESH_CALLBACK]);
 		if ((await this.listSchedules()).some((schedule) => own.has(schedule.callback))) remaining.push("schedules");
-		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("app connections");
+		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("connector connections");
 		if (await this.images.any()) remaining.push("images");
 		if (await this.artifacts.anyFiles()) remaining.push("artifact files");
 		return remaining;
@@ -4155,7 +4155,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Erases the space: stops its runs, ends apps' event subscriptions,
+	 * Erases the space: stops its runs, ends connectors' event subscriptions,
 	 * closes its sockets, wipes its storage (alarms included), then marks it
 	 * erased, flushes the mark, and ends this instance, so nothing that was
 	 * under way here can write afterwards. Later instances find the mark and
@@ -4166,9 +4166,9 @@ export class Pim extends DurableAgent<Env> {
 	async deleteEverything(): Promise<void> {
 		this.#erasing = true;
 		for (const connection of this.getConnections()) connection.close(4010, "Deleted");
-		// Stopping runs and ending apps' subscriptions is courtesy: the wipe and the end of this
+		// Stopping runs and ending connectors' subscriptions is courtesy: the wipe and the end of this
 		// instance stop everything regardless. So they get a few seconds, and a hung model
-		// request or app can't hold the deletion.
+		// request or connector can't hold the deletion.
 		const courtesy = async () => {
 			const sessions = await this.harness.sessions.list();
 			await Promise.allSettled(sessions.map((session) => this.harness.session(session.id).abort()));
@@ -4339,7 +4339,7 @@ export class Pim extends DurableAgent<Env> {
 			}
 			return { server, tool, label: `${server.name}: ${tool.annotations?.title ?? tool.name}` };
 		}
-		throw new HttpError(404, `No app tool ${String(name)}`);
+		throw new HttpError(404, `No connector tool ${String(name)}`);
 	}
 
 	/**
@@ -4347,7 +4347,7 @@ export class Pim extends DurableAgent<Env> {
 	 * for the person this space is: on their own artifact, or one shared with
 	 * them, which this space knows by `key` (its own artifact's id, or
 	 * `<host>/<id>`). What it keeps for them (`storage`) and needs no
-	 * permission is kept here; the model and app tools are theirs too, and
+	 * permission is kept here; the model and connector tools are theirs too, and
 	 * need their permission, given to this version (`needs` asks for it).
 	 * What everyone using it sees (`shared`) is the artifact owner's,
 	 * reached through `shared`.
@@ -5555,8 +5555,8 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/approvals/:id/approve",
 			async ({ id }, request) => {
-				if (this.store.approval(id!)?.action === ADD_CUSTOM_APP && request.headers.get(SIGNED_IN_HEADER) !== "1") {
-					throw new HttpError(403, "Adding an app to this Pim needs you signed in to the app.");
+				if (this.store.approval(id!)?.action === ADD_CUSTOM_CONNECTOR && request.headers.get(SIGNED_IN_HEADER) !== "1") {
+					throw new HttpError(403, "Adding a connector to this Pim needs you signed in to the app.");
 				}
 				const { note, always } = await readJson<{ note: string; always: boolean }>(request);
 				const given = typeof note === "string" ? note : undefined;
@@ -5576,7 +5576,7 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/permissions",
 			(_params, _request, url) => {
-				// One of the owner's agents: the switches of its apps' tools, and its switch for skills.
+				// One of the owner's agents: the switches of its connectors' tools, and its switch for skills.
 				const agent = url.searchParams.get("agent");
 				if (agent !== null) {
 					const found = this.#agent(agent);
@@ -5600,13 +5600,13 @@ export class Pim extends DurableAgent<Env> {
 				}>(request);
 				if (agent !== null && agent !== undefined) {
 					if (typeof agent !== "string") throw new HttpError(400, "agent must be an agent's id");
-					if (typeof app !== "string" || typeof tool !== "string") throw new HttpError(400, "app and tool name an app's tool");
+					if (typeof app !== "string" || typeof tool !== "string") throw new HttpError(400, "app and tool name a connector's tool");
 					if (permission !== null && permission !== "on" && permission !== "off") throw new HttpError(400, "permission must be on, off, or null for the default");
 					return this.setAgentToolPermission(this.#agent(agent), app, tool, permission);
 				}
 				if (circle !== null && circle !== undefined && typeof circle !== "string") throw new HttpError(400, "circle must be a circle's id");
 				if (app !== null && app !== undefined && (typeof app !== "string" || app === "")) {
-					throw new HttpError(400, "app must be an app's id, or null for Pim's own tools");
+					throw new HttpError(400, "app must be a connector's id, or null for Pim's own tools");
 				}
 				if (typeof tool !== "string" || tool === "") throw new HttpError(400, "tool is required");
 				if (permission === undefined || (permission !== null && !TOOL_PERMISSIONS.includes(permission))) {
@@ -5920,7 +5920,7 @@ export class Pim extends DurableAgent<Env> {
 		],
 		["POST", "/visits/:username", async ({ username }) => ({ session: this.store.publicId(await this.startVisit(username!)) })],
 
-		// The apps people can connect, and the person's connections to them.
+		// The connectors people can connect, and the person's connections to them.
 		[
 			"GET",
 			"/app-directory",
@@ -5930,7 +5930,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		["GET", "/mcp", () => ({ servers: this.#describeApps() })],
-		// Where the person comes back from signing in to an app its extension implements: the Worker found this space by
+		// Where the person comes back from signing in to a connector its extension implements: the Worker found this space by
 		// its `state`, and posts what the service sent back (as a form) only from a browser signed in as this owner.
 		[
 			"POST",
@@ -5943,7 +5943,7 @@ export class Pim extends DurableAgent<Env> {
 				return "name" in result ? signInResultPage(true, this.deployment().publicUrl ?? undefined) : signInResultPage(false, this.deployment().publicUrl ?? undefined, result.error);
 			},
 		],
-		// An app's action, for the person in their own browser only (see `NativeAppDefinition.actions`), such as Drive's file picker.
+		// A connector's action, for the person in their own browser only (see `NativeAppDefinition.actions`), such as Drive's file picker.
 		[
 			"POST",
 			"/app-actions/:extension/:app/:action",
@@ -5977,7 +5977,7 @@ export class Pim extends DurableAgent<Env> {
 				}
 				await this.#refreshCustomApps(true);
 				const app = this.appDirectory().find((candidate) => candidate.ref === body.app);
-				if (!app) throw new HttpError(400, "app must be the id of an app this Pim offers");
+				if (!app) throw new HttpError(400, "app must be the id of a connector this Pim offers");
 				const result = await this.connectApp(app, body.approval ? { approval: body.approval } : {});
 				return Response.json(result, { status: 201 });
 			},
@@ -5986,7 +5986,7 @@ export class Pim extends DurableAgent<Env> {
 			"PUT",
 			"/mcp/:id",
 			async ({ id }, request) => {
-				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No connector ${id}`);
 				const { approval } = await readJson<{ approval: McpApproval }>(request);
 				if (!MCP_APPROVALS.includes(approval as McpApproval)) {
 					throw new HttpError(400, `approval must be one of ${MCP_APPROVALS.join(", ")}`);
@@ -6000,7 +6000,7 @@ export class Pim extends DurableAgent<Env> {
 			"DELETE",
 			"/mcp/:id",
 			async ({ id }) => {
-				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No connector ${id}`);
 				for (const watch of this.store.watches(id)) await this.appEvents.stop(watch.id);
 				await this.#disconnect(id!);
 				this.catalog.forget(id!);
@@ -6013,7 +6013,7 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/mcp/:id/skills",
 			({ id }) => {
-				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No connector ${id}`);
 				return { skills: this.catalog.skills(id!) };
 			},
 		],
@@ -6021,11 +6021,11 @@ export class Pim extends DurableAgent<Env> {
 			"GET",
 			"/mcp/:id/events",
 			({ id }) => {
-				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No app ${id}`);
+				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No connector ${id}`);
 				return { events: this.catalog.events(id!) };
 			},
 		],
-		// Deliveries from apps; authenticated by their Standard Webhooks signature, not the API token.
+		// Deliveries from connectors; authenticated by their Standard Webhooks signature, not the API token.
 		["POST", "/mcp/events/:watch", ({ watch }, request) => this.appEvents.receive(watch!, request)],
 
 		// Event watches.
@@ -6452,9 +6452,9 @@ export class Pim extends DurableAgent<Env> {
 		const agents = this.agents.list().map((agent) => ({ name: agent.name, servers: new Set(this.#appsOf(agent).map((app) => serverFor(servers, app)?.id)) }));
 		return servers.map((server) => ({
 			...server,
-			// The directory's app it connects; null for one this Pim no longer offers.
+			// The directory's connector it connects; null for one this Pim no longer offers.
 			app: directory.find((app) => serverFor([server], app))?.ref ?? null,
-			// The person's agents that list the app: only their chats get its tools.
+			// The person's agents that list the connector: only their chats get its tools.
 			agents: agents.filter((agent) => agent.servers.has(server.id)).map((agent) => agent.name),
 			// Each agent has its own switches for them (`GET /permissions?agent=`).
 			tools: catalog

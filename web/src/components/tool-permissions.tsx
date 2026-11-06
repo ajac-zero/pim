@@ -17,7 +17,7 @@ import { permissionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /**
- * Off, Ask or On for each tool, grouped by app, Pim's own first: for you,
+ * Off, Ask or On for each tool, grouped by connector, Pim's own first: for you,
  * or, given `circle`, for the people in that circle.
  */
 export function ToolPermissionList({ circle }: { circle?: string }) {

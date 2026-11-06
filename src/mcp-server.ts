@@ -54,7 +54,7 @@ function pimServer({ majordomo, send }: PimChat): McpServer {
 		{
 			title: `Message ${name}`,
 			description:
-				`Send a message to ${name}, the person's majordomo in Pim, and get its reply. It knows them, their memory, goals, schedules and apps, ` +
+				`Send a message to ${name}, the person's majordomo in Pim, and get its reply. It knows them, their memory, goals, schedules and connectors, ` +
 				"and hands bigger work to their other agents, whose answers come back to it. " +
 				"Each call starts a new conversation, which the person can also continue in Pim. Every reply names its conversation: " +
 				"pass it back as conversation to continue, for example to follow up or to hear how handed-off work went.",

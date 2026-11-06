@@ -74,7 +74,7 @@ const DIALOGS = [
 type AppDialog = (typeof DIALOGS)[number];
 
 /**
- * Settings, Sharing, Discover, Apps, New chat, Computer and Agents open as
+ * Settings, Sharing, Discover, Connectors, New chat, Computer and Agents open as
  * dialogs over any page, named in the URL so links and redirects can open
  * them: `?dialog=settings&tab=model`, `?dialog=new-chat&agent=<id>&prompt=…`
  * for a chat with that agent, starting from that message, or
@@ -303,18 +303,18 @@ function usePimEvents() {
           queryClient.invalidateQueries({ queryKey: ["files"] });
         if (
           (approval.action === "update_agent" ||
-            approval.action === "manage_apps" ||
-            approval.action === "add_custom_app") &&
+            approval.action === "manage_connectors" ||
+            approval.action === "add_custom_connector") &&
           approval.status === "approved"
         ) {
           queryClient.invalidateQueries({ queryKey: ["agents"] });
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
           if (
-            approval.action === "manage_apps" ||
-            approval.action === "add_custom_app"
+            approval.action === "manage_connectors" ||
+            approval.action === "add_custom_connector"
           )
             queryClient.invalidateQueries({ queryKey: ["apps"] });
-          if (approval.action === "add_custom_app")
+          if (approval.action === "add_custom_connector")
             queryClient.invalidateQueries({ queryKey: ["app-directory"] });
         }
         if (

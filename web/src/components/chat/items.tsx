@@ -313,7 +313,7 @@ const NOTICE_ICONS = {
 
 /**
  * Something Pim fed itself rather than something the user said: an approval
- * decision, a scheduled task firing, an app event. Shown as a compact,
+ * decision, a scheduled task firing, a connector event. Shown as a compact,
  * expandable line so the conversation reads as the user experienced it.
  */
 export const EventNotice = memo(function EventNotice({
@@ -754,12 +754,12 @@ const TOOL_STEPS: ReadonlyArray<[RegExp, TranslationKey, LucideIcon]> = [
   [/^(note|recall|zoom|forget|optmem)$/, "stepMemory", Brain],
   [/_goals?$/, "stepGoals", ListChecks],
   [/scheduled?_task/, "stepSchedule", CalendarClock],
-  [/^(mcp_call|list_apps|connect_app|find_app)$/, "stepApps", Blocks],
+  [/^(mcp_call|(list|connect|find)_(connectors?|apps?))$/, "stepApps", Blocks],
   [/^file_/, "stepFiles", Folder],
   [/^delegate$/, "stepDelegating", Contact],
 ];
 
-/** The connected app a tool belongs to, by the tool's name as the agent calls it. */
+/** The connector a tool belongs to, by the tool's name as the agent calls it. */
 export type ToolApps = ReadonlyMap<
   string,
   { name: string; icon: string | null }
@@ -767,7 +767,7 @@ export type ToolApps = ReadonlyMap<
 
 /**
  * A step as the person reads it, and its mark: a lightbulb for a heading of
- * the agent's reasoning, an app's own icon for its tools, a symbol for Pim's.
+ * the agent's reasoning, a connector's own icon for its tools, a symbol for Pim's.
  */
 function stepView(
   step: WorkStep,

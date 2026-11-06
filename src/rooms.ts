@@ -15,7 +15,7 @@ export { ROOM_POST };
  * say and answering where the person reads it.
  *
  * Each agent in a room has a seat: a conversation of its own, as a chat's,
- * so it works as itself, with its own instructions, apps, memory and tools.
+ * so it works as itself, with its own instructions, connectors, memory and tools.
  * The host's seat is the chat itself, the conversation the person reads.
  * What the person says goes into every seat; what an agent sends goes into
  * every other seat as a message starting "[From Coach]", which the chat
@@ -281,14 +281,14 @@ export function roomSection(self: Agent, seats: readonly { agent: Agent; host: b
 	const host = seats.find((seat) => seat.host)?.agent;
 	const imHost = host?.id === self.id;
 	return [
-		"This chat is a group chat: the person, and these agents of theirs, each with its own instructions, apps and memory:",
+		"This chat is a group chat: the person, and these agents of theirs, each with its own instructions, connectors and memory:",
 		...seats.map(
 			({ agent, host }) =>
 				`- @${agent.name}${agent.role.toLowerCase() === agent.name.toLowerCase() ? "" : ` (${agent.role})`}${agent.id === self.id ? " (you)" : ""}${host ? " (the chat's host)" : ""}${agent.description ? `: ${agent.description}` : ""}`,
 		),
 		`Everyone in the chat reads what you send with \`send_to_user\`. What the other agents send comes to you in messages starting "[From Name]"; Pim's notes about the chat start "${ROOM_NOTICE}"; every other message is the person's. Speak to someone by mentioning them as @Name.`,
 		mode === "open"
-			? "Everything said here comes to you, and you decide whether to answer. Answer when you are mentioned, or when you have something to add that is yours to say: what your instructions, apps or memory give you that the others' don't. Otherwise end your turn without sending anything; staying quiet is often right. Don't repeat what others said, agree with them or thank them."
+			? "Everything said here comes to you, and you decide whether to answer. Answer when you are mentioned, or when you have something to add that is yours to say: what your instructions, connectors or memory give you that the others' don't. Otherwise end your turn without sending anything; staying quiet is often right. Don't repeat what others said, agree with them or thank them."
 			: `You answer when you are mentioned${imHost ? ", and when the person says something without mentioning anyone" : ""}. Everything else said here comes to you without needing an answer, so you know it when you next speak: end your turn without sending anything then.`,
 		"Answer the agents here, in the chat, rather than handing them tasks, unless the work should go on out of the person's sight.",
 		imHost

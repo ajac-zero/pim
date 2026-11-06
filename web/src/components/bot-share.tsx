@@ -123,7 +123,7 @@ export function BotShareButton({ agent }: { agent: Agent }) {
           chosen === DEFAULT_MODEL || !provider || !id
             ? null
             : { provider, id },
-        // A tool the agent no longer has, such as one of an app since disconnected, stops being shared.
+        // A tool the agent no longer has, such as one of a connector since disconnected, stops being shared.
         tools: sharedTools.filter((name) =>
           shareable?.some((tool) => tool.name === name),
         ),
@@ -304,7 +304,7 @@ export function BotShareButton({ agent }: { agent: Agent }) {
 type BotToolChoice = "off" | "ask" | "on";
 
 /**
- * The agent's tools the bot shares, an app at a time or one by one: off,
+ * The agent's tools the bot shares, a connector at a time or one by one: off,
  * on, or on after the admin approves each call. Each runs in the admin's
  * space, as the admin.
  */
@@ -340,7 +340,7 @@ function BotTools({
   for (const tool of tools ?? []) {
     groups.set(tool.appName, [...(groups.get(tool.appName) ?? []), tool]);
   }
-  // Switching an app on shares the tools that were off; those that ask still do.
+  // Switching a connector on shares the tools that were off; those that ask still do.
   const set = (names: string[], on: boolean) =>
     on
       ? onChange([...new Set([...chosen, ...names])], asked)

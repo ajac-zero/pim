@@ -17,7 +17,7 @@ export type ResolvedPermission = {
 	/** What the user chose, if anything. */
 	readonly chosen: ToolPermission | null;
 	/**
-	 * The app changed the tool since the user chose to let it run: the owner's
+	 * The connector changed the tool since the user chose to let it run: the owner's
 	 * Pim asks again, and a circle's guests lose it, until they choose anew.
 	 */
 	readonly changed: boolean;
@@ -26,7 +26,7 @@ export type ResolvedPermission = {
 /**
  * The user's choice for a tool, for the owner (`OWNER`) or a circle, or
  * `fallback` without one. A choice is tied to the tool's `definition` when it
- * was made: an app that changes a tool the user let run (its description,
+ * was made: a connector that changes a tool the user let run (its description,
  * inputs, or claims about itself) gets it asked about again in the owner's
  * Pim, and taken from guests, so a tool can't turn into something else under
  * a permission given to what it was.

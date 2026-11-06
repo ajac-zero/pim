@@ -7,7 +7,7 @@ import { HttpError } from "./http";
  * Skills the person's agents write for work they do again and again, such as
  * "how we write the weekly report": named instructions in the Agent Skills
  * format (https://agentskills.io), kept in the owner's own Durable Object.
- * Each agent lists the skills it uses, the way it lists apps; the prompt
+ * Each agent lists the skills it uses, the way it lists connectors; the prompt
  * shows their names and descriptions, and the model loads one with
  * `read_skill` before the work it describes. Agents write them only with the
  * person's approval (./extensions/skills.ts), since what a skill says steers

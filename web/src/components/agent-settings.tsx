@@ -73,7 +73,7 @@ const EMPTY: AgentInput = {
   contacts: [],
 };
 
-/** Making an agent: once it exists, `onCreated` shows its settings, where its apps are added. */
+/** Making an agent: once it exists, `onCreated` shows its settings, where its connectors are added. */
 export function NewAgent({ onCreated }: { onCreated: (agent: Agent) => void }) {
   const { t } = useI18n();
   return (
@@ -86,7 +86,7 @@ export function NewAgent({ onCreated }: { onCreated: (agent: Agent) => void }) {
 
 /**
  * An agent's settings: what it is and the actions on it, then how the
- * majordomo works with you, the apps it works with and their tools, and its
+ * majordomo works with you, the connectors it works with and their tools, and its
  * details, which save together. `onDeleted` says where to go once it's gone.
  */
 export function AgentSettings({
@@ -333,9 +333,9 @@ function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
 }
 
 /**
- * The apps an agent works with, which can be taken off. Apps are added from those already
- * connected, and connected in Apps; one listed but not connected yet
- * connects from here. A connected app's tools each have a switch: on, the
+ * The connectors an agent works with, which can be taken off. Connectors are added from those already
+ * connected, and connected in Connectors; one listed but not connected yet
+ * connects from here. A connected connector's tools each have a switch: on, the
  * agent uses the tool without asking; off, it can't use it.
  */
 function AgentApps({ agent }: { agent: Agent }) {
@@ -375,7 +375,7 @@ function AgentApps({ agent }: { agent: Agent }) {
       ),
     onError: (error) => toast.error(error.message),
   });
-  // Its own apps save as they change, apart from its other details.
+  // Its own connectors save as they change, apart from its other details.
   const change = useMutation({
     mutationFn: (own: string[]) => pim.updateAgent(agent.id, { apps: own }),
     onSuccess: () => {
@@ -550,19 +550,19 @@ export function AgentSkills({ agent }: { agent: Agent }) {
   );
 }
 
-/** How many apps of its own an agent can have, as the API allows. */
+/** How many connectors of its own an agent can have, as the API allows. */
 const MAX_AGENT_APPS = 10;
 
 /**
- * Adds one of the apps you connected, found by its name or what it does.
- * Apps not connected yet are connected in Apps, which it opens.
+ * Adds one of the connectors you connected, found by its name or what it does.
+ * Connectors not connected yet are connected in Connectors, which it opens.
  */
 function AddApp({
   listed,
   full,
   onAdd,
 }: {
-  /** The apps the agent already works with, which aren't offered. */
+  /** The connectors the agent already works with, which aren't offered. */
   listed: string[];
   full: boolean;
   onAdd: (ref: string) => void;
@@ -588,7 +588,7 @@ function AddApp({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        // Each time it opens, it starts from all your apps.
+        // Each time it opens, it starts from all your connectors.
         if (!next) setSearch("");
       }}
     >
@@ -668,7 +668,7 @@ function AddApp({
   );
 }
 
-/** One of an app's tools, with its switch for the agent. */
+/** One of a connector's tools, with its switch for the agent. */
 function AgentToolRow({
   info,
   pending,
@@ -717,7 +717,7 @@ function AgentToolRow({
 
 /**
  * An agent's details: how it looks, its name, what it's for,
- * instructions and contacts. Its apps are chosen on its page, where they save as
+ * instructions and contacts. Its connectors are chosen on its page, where they save as
  * they change, so saving these leaves them as they are.
  */
 function AgentForm({

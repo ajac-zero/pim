@@ -56,27 +56,27 @@ export type Room = {
 };
 
 /**
- * An app people on this Pim can connect: an extension's, or one the admin
- * added (`custom/<app>`). Agents list apps by `ref`; you connect each once,
+ * A connector people on this Pim can connect: an extension's, or one the admin
+ * added (`custom/<connector>`). Agents list connectors by `ref`; you connect each once,
  * for all your agents.
  */
 export type DirectoryApp = {
   ref: string;
   name: string;
   description: string;
-  /** Its MCP server; null for an app its extension implements. */
+  /** Its MCP server; null for a connector its extension implements. */
   url: string | null;
   /** Added by the admin, not brought by an extension. */
   custom: boolean;
   /** Its logo, an https or `data:` image URL; null for none. */
   icon: string | null;
-  /** Where the Apps page files it; null for Other. */
+  /** Where the Connectors page files it; null for Other. */
   category: AppCategory | null;
   /** Its page for you once you've connected it, such as Drive's file picker, and what its button says. */
   page?: { url: string; label: ExtensionText };
 };
 
-/** The categories apps are filed under, in the order the Apps page shows them (src/extensions/define.ts). */
+/** The categories connectors are filed under, in the order the Connectors page shows them (src/extensions/define.ts). */
 export const APP_CATEGORIES = [
   "productivity",
   "meetings",
@@ -240,7 +240,7 @@ export type Agent = {
   role: string;
   description: string;
   instructions: string;
-  /** The apps it works with, by `ref`: its chats get only these apps' tools. */
+  /** The connectors it works with, by `ref`: its chats get only these connectors' tools. */
   apps: string[];
   /** The names of your skills it uses. */
   skills: string[];
@@ -407,10 +407,10 @@ export type Profile = {
 /** Someone on this Pim, and what they published. */
 export type Person = Profile & { templates: TemplateSummary[] };
 
-/** A connected app, as Pim lists them. */
+/** A connector, as Pim lists them. */
 export type ConnectedApp = {
   id: string;
-  /** The directory's app it connects, by `ref`; null for one this Pim no longer offers. */
+  /** The directory's connector it connects, by `ref`; null for one this Pim no longer offers. */
   app: string | null;
   name: string;
   url: string;
@@ -923,10 +923,10 @@ export type GuestBot = {
 /** A tool of an agent's that a bot can share with its guests. */
 export type ShareableTool = {
   name: string;
-  /** Its app; null for Pim's own, such as generate_image. */
+  /** Its connector; null for Pim's own, such as generate_image. */
   appName: string | null;
   description: string;
-  /** The app says it changes or deletes things. */
+  /** The connector says it changes or deletes things. */
   destructive: boolean;
 };
 
@@ -952,7 +952,7 @@ export type ToolPermission = "off" | "ask" | "on";
 
 /** A tool you can set a permission for, and the permission that applies. */
 export type ToolPermissionInfo = {
-  /** The connected app's id; null for Pim's own tools. */
+  /** The connector's id; null for Pim's own tools. */
   app: string | null;
   appName: string | null;
   /** The tool's own name, which its permission is set by. */
@@ -960,15 +960,15 @@ export type ToolPermissionInfo = {
   /** The name the model sees. */
   name: string;
   description: string | null;
-  /** The app says the tool only reads. */
+  /** The connector says the tool only reads. */
   readOnly: boolean;
-  /** The app says the tool may delete or overwrite things. */
+  /** The connector says the tool may delete or overwrite things. */
   destructive: boolean;
   permission: ToolPermission;
   /** What applies when you haven't chosen. */
   default: ToolPermission;
   chosen: ToolPermission | null;
-  /** The app changed the tool since you chose to let it run: Pim asks again, and circles lose it. */
+  /** The connector changed the tool since you chose to let it run: Pim asks again, and circles lose it. */
   changed: boolean;
   /** The permissions it can have. */
   choices: ToolPermission[];
@@ -1385,7 +1385,7 @@ export const pim = {
     }),
   apps: () =>
     call<{ servers: ConnectedApp[] }>("/mcp").then((body) => body.servers),
-  /** The apps you can connect. */
+  /** The connectors you can connect. */
   appDirectory: () =>
     call<{ apps: DirectoryApp[] }>("/app-directory").then((body) => body.apps),
   connectApp: (ref: string) =>
@@ -1481,7 +1481,7 @@ export const pim = {
     call<{ tools: ToolPermissionInfo[] }>(
       `/permissions${circle ? `?circle=${encodeURIComponent(circle)}` : ""}`,
     ).then((body) => body.tools),
-  /** Whether an agent may use each tool of the connected apps it works with: on or off. */
+  /** Whether an agent may use each tool of the connectors it works with: on or off. */
   agentPermissions: (agent: string) =>
     call<{ tools: ToolPermissionInfo[] }>(
       `/permissions?agent=${encodeURIComponent(agent)}`,
@@ -1858,7 +1858,7 @@ export const admin = {
         ? { method: "DELETE", body: "{}" }
         : { method: "PUT", body: JSON.stringify({ agent: id }) },
     ).then((body) => body.agent),
-  /** Adds an app everyone on this Pim can connect: a remote MCP server. */
+  /** Adds a connector everyone on this Pim can connect: a remote MCP server. */
   addApp: (app: {
     name: string;
     description: string;
@@ -1870,13 +1870,13 @@ export const admin = {
       method: "POST",
       body: JSON.stringify(app),
     }),
-  /** Gives an app the admin added another icon, by its id; an empty one looks its site's up again. */
+  /** Gives a connector the admin added another icon, by its id; an empty one looks its site's up again. */
   setAppIcon: (id: string, icon: string) =>
     call<{ app: { id: string } }>(`/admin/apps/${encodeURIComponent(id)}`, {
       method: "PUT",
       body: JSON.stringify({ icon }),
     }),
-  /** Takes an app the admin added out of the directory, by its id (`custom/<id>`). */
+  /** Takes a connector the admin added out of the directory, by its id (`custom/<id>`). */
   removeApp: (id: string) =>
     call<{ deleted: boolean }>(`/admin/apps/${encodeURIComponent(id)}`, {
       method: "DELETE",

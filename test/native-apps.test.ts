@@ -412,7 +412,7 @@ describe("Google apps", () => {
 		expect((await stored("mail"))!.state).toBe("ready");
 
 		google.refresh = () => Response.json({ error: "invalid_grant", error_description: "Token has been expired or revoked." }, { status: 400 });
-		expect(await callTool("mail", { url: PROFILE })).toEqual({ content: [{ type: "text", text: "Mail needs the person to connect it again from the Apps page." }], isError: true });
+		expect(await callTool("mail", { url: PROFILE })).toEqual({ content: [{ type: "text", text: "Mail needs the person to connect it again from the Connectors page." }], isError: true });
 		expect((await stored("mail"))!).toMatchObject({ state: "failed", credential: null, error: "Sign in again: Token has been expired or revoked." });
 		expect((await api("/mcp")).body.servers.find((server: { id: string }) => server.id === "mail").tools).toEqual([]);
 	});
@@ -447,7 +447,7 @@ describe("Google apps", () => {
 			refuse();
 			return call;
 		});
-		expect(result).toMatchObject({ isError: true, content: [{ text: "Mail needs the person to connect it again from the Apps page." }] });
+		expect(result).toMatchObject({ isError: true, content: [{ text: "Mail needs the person to connect it again from the Connectors page." }] });
 		expect((await stored("mail"))!).toMatchObject({ state: "ready", error: null, credential: expect.stringMatching(/^sealed:v1:/) });
 	});
 
@@ -525,7 +525,7 @@ describe("Spotify, signing in with its own OAuth", () => {
 		expect((await stored("spotify"))!.state).toBe("ready");
 
 		spotify.refresh = () => Response.json({ error: "invalid_grant", error_description: "Refresh token revoked" }, { status: 400 });
-		expect(await nowPlaying()).toEqual({ content: [{ type: "text", text: "Spotify needs the person to connect it again from the Apps page." }], isError: true });
+		expect(await nowPlaying()).toEqual({ content: [{ type: "text", text: "Spotify needs the person to connect it again from the Connectors page." }], isError: true });
 		expect((await stored("spotify"))!).toMatchObject({ state: "failed", credential: null, error: "Sign in again: Refresh token revoked" });
 		spotify.refresh = null;
 	});

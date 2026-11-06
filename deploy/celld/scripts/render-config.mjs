@@ -101,7 +101,7 @@ function readPrivate(file) {
 	return readFileSync(file, "utf8");
 }
 
-/** The key that encrypts people's sign-ins to apps: 32 random bytes in base64, alone in its file. */
+/** The key that encrypts people's sign-ins to connectors: 32 random bytes in base64, alone in its file. */
 export function readAppCredentialsKey(text, file) {
 	const key = text.trim();
 	if (!/^[A-Za-z0-9+/]{43}=$/.test(key) || Buffer.from(key, "base64").length !== 32) {
@@ -198,7 +198,7 @@ function main() {
 	// `wx`: never over an existing file, and never readable by anyone else, even for a moment.
 	writeFileSync(values.out, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
 	for (const [name, source] of [...sources].sort()) process.stderr.write(`  ${name.padEnd(36)} ${source}\n`);
-	if (!keyFile) process.stderr.write(`  (no ${APP_CREDENTIALS_KEY}: Gmail and Google Drive aren't offered, other apps' sign-ins aren't encrypted)\n`);
+	if (!keyFile) process.stderr.write(`  (no ${APP_CREDENTIALS_KEY}: Gmail and Google Drive aren't offered, other connectors' sign-ins aren't encrypted)\n`);
 }
 
 // Run as a command, not when imported (by the checks, or `node -e`, where there is no argv[1]).

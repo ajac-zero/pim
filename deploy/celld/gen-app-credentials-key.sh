@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Makes APP_CREDENTIALS_KEY, the key that encrypts people's sign-ins to apps Pim implements (Gmail,
+# Makes APP_CREDENTIALS_KEY, the key that encrypts people's sign-ins to connectors Pim implements (Gmail,
 # Google Drive, Spotify), in a file of its own that only its owner can read. Make it once per Pim
 # and back it up apart from everything else (docs/celld.md, "APP_CREDENTIALS_KEY"): a Pim that
-# loses it, or gets another, makes everyone connect those apps again. It never replaces a key.
+# loses it, or gets another, makes everyone connect those connectors again. It never replaces a key.
 #
 #   deploy/celld/gen-app-credentials-key.sh FILE     such as /etc/pim/app-credentials-key
 #

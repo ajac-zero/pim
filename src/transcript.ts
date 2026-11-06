@@ -7,11 +7,11 @@ export const DELIVERY_REMINDER = "[Delivery required] Use send_to_user to delive
 /** How the message starts that has the majordomo open its first chat by introducing itself (see ../majordomo.ts); apps don't show it. */
 export const INTRODUCTION = "[Introduction]";
 
-/** How the messages start that Pim gives an agent itself, not the person: an approval's decision, a scheduled task, an app event, tasks' answers. */
+/** How the messages start that Pim gives an agent itself, not the person: an approval's decision, a scheduled task, a connector event, tasks' answers. */
 export const NOTICE_PREFIXES = [
 	[/^\[Approval ([^\]]+)\]\s*/, "approval"],
 	[/^\[Scheduled task[^\]]*\]\s*/, "schedule"],
-	[/^\[App event\]\s*/, "event"],
+	[/^\[(?:Connector|App) event\]\s*/, "event"],
 	[/^\[Task update\]\s*/, "task"],
 	[/^\[Room\]\s*/, "room"],
 ] as const;

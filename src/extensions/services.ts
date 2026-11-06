@@ -74,7 +74,7 @@ export type PimServices = {
 	widgetsFor(session: string): { ref: string; description: string }[];
 	/** Loads one of them, or one kept from a tool's result, for this space, as the person will see it with the message. */
 	showWidget(session: string, ref: string): Promise<ShownWidget>;
-	/** Keeps what an app tool's result shows, for the chat to put under a message: its ref, `tool:<id>`. */
+	/** Keeps what a connector tool's result shows, for the chat to put under a message: its ref, `tool:<id>`. */
 	keepWidget(session: string, widget: ToolWidget): string;
 	/** The refs of the widgets kept from tool results in a chat. */
 	keptWidgets(session: string): string[];

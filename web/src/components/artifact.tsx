@@ -91,7 +91,7 @@ function useBridge(id: string, version: number, from?: ArtifactFrom) {
 /**
  * An HTML artifact's version, in a sandboxed frame. The page it loads gets an
  * opaque origin from its own response (and from `sandbox`, again here): it
- * can't reach this app's cookies, storage or API. The frame listens only to
+ * can't reach the web app's cookies, storage or API. The frame listens only to
  * this frame's window: for the page's height, and for calls through its
  * bridge, which it makes to Pim for the page (asking the person when they
  * must allow something) and answers. If the page navigates itself away, it's

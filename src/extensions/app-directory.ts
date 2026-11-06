@@ -1,14 +1,14 @@
 import { type AppCategory, CUSTOM_APPS, isNativeApp, type PimExtension, type Text } from "./define";
 
 /**
- * The apps people can connect: those the installed extensions bring, and
+ * The connectors people can connect: those the installed extensions bring, and
  * those the admin adds, named `custom/<app>`. Agents and
- * templates list apps by name (`<extension>/<app>`), never by URL, so every
- * agent of a person's that lists an app works with the one connection they
+ * templates list connectors by name (`<extension>/<app>`), never by URL, so every
+ * agent of a person's that lists a connector works with the one connection they
  * made, and nobody connects a server the deployment doesn't offer.
  */
 
-/** An app the admin added: a remote MCP server anyone on this Pim can connect, named `custom/<id>`. */
+/** A connector the admin added: a remote MCP server anyone on this Pim can connect, named `custom/<id>`. */
 export type CustomApp = {
 	readonly id: string;
 	readonly name: string;
@@ -24,7 +24,7 @@ export type DirectoryApp = {
 	readonly ref: string;
 	readonly name: string;
 	readonly description: string;
-	/** Its remote MCP server; null for an app its extension implements. */
+	/** Its remote MCP server; null for a connector its extension implements. */
 	readonly url: string | null;
 	/** Added by the admin, not brought by an extension. */
 	readonly custom: boolean;
@@ -32,13 +32,13 @@ export type DirectoryApp = {
 	readonly icon: string | null;
 	/** Null files it under Other. */
 	readonly category: AppCategory | null;
-	/** The app's page for the person once connected (`NativeAppDefinition.page`), and what its button says; absent for none. */
+	/** The connector's page for the person once connected (`NativeAppDefinition.page`), and what its button says; absent for none. */
 	readonly page?: { readonly url: string; readonly label: Text };
 };
 
 const MAX_FOUND = 8;
 
-/** The extensions' apps, then the admin's. */
+/** The extensions' connectors, then the admin's. */
 export function appDirectory(extensions: readonly PimExtension[], custom: readonly CustomApp[]): DirectoryApp[] {
 	return [
 		...extensions.flatMap((extension) =>
@@ -106,8 +106,8 @@ export async function findSiteIcon(server: string): Promise<string | null> {
 }
 
 /**
- * An agent's or template's apps as stored. Before the directory, each was
- * `{ name, url }`: one is kept as the directory's app at its URL, and left
+ * An agent's or template's connectors as stored. Before the directory, each was
+ * `{ name, url }`: one is kept as the directory's connector at its URL, and left
  * out when the directory has none (the admin can add it, and it comes back).
  */
 export function storedApps(entries: readonly unknown[], directory: () => readonly DirectoryApp[]): string[] {
@@ -127,7 +127,7 @@ function words(value: string): string[] {
 		.filter((word) => word.length > 1);
 }
 
-/** The apps a query names: those whose name has its words first, then those whose description does. */
+/** The connectors a query names: those whose name has its words first, then those whose description does. */
 export function findApps(directory: readonly DirectoryApp[], query: string): DirectoryApp[] {
 	const wanted = words(query);
 	const rank = (app: DirectoryApp) => {
@@ -148,14 +148,14 @@ export function findApps(directory: readonly DirectoryApp[], query: string): Dir
 		.map(({ app }) => app);
 }
 
-/** The apps found, as the model reads them. */
+/** The connectors found, as the model reads them. */
 export function describeFound(query: string, found: readonly DirectoryApp[]): string {
 	if (found.length === 0) {
-		return `No app on this Pim matches "${query}". Only the apps this Pim offers can be connected: tell the person, and that its admin can add one. If you have add_custom_app, the person is its admin: ask for the app's MCP server URL and add it.`;
+		return `No connector on this Pim matches "${query}". Only the connectors this Pim offers can be connected: tell the person, and that its admin can add one. If you have add_custom_connector, the person is its admin: ask for the connector's MCP server URL and add it.`;
 	}
 	return [
 		`Apps on this Pim matching "${query}":`,
 		...found.map((app) => `- ${app.name} [id: ${app.ref}]${app.description ? `: ${app.description}` : ""}`),
-		"Use manage_apps if available to request adding one by its id, with the person's approval. If app management is off, explain how they can add it in Your agents.",
+		"Use manage_connectors if available to request adding one by its id, with the person's approval. If connector management is off, explain how they can add it in Your agents.",
 	].join("\n");
 }

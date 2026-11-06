@@ -163,7 +163,7 @@ export function messagingExtension(services: PimServices) {
 			Type.Array(Type.String(), {
 				maxItems: MAX_WIDGETS,
 				description:
-					"Widgets to show under the message, from the ones your prompt lists or an app tool's result offers, by name. They show the person's data, drawn by the app: use one instead of retyping what it shows.",
+					"Widgets to show under the message, from the ones your prompt lists or a connector tool's result offers, by name. They show the person's data, drawn by the app: use one instead of retyping what it shows.",
 			}),
 		),
 	};
@@ -265,7 +265,7 @@ export function messagingExtension(services: PimServices) {
 							// What others said in a room that wasn't for this agent leaves what it owes as it was.
 							if (services.maySkip(session, input)) continue;
 							// Background work may deliberately stay silent.
-							required = !/^\[(?:Scheduled task|Approval |App event\]|Team:|Chat with )/.test(input);
+							required = !/^\[(?:Scheduled task|Approval |Connector event\]|Team:|Chat with )/.test(input);
 							reminders = 0;
 						}
 					}

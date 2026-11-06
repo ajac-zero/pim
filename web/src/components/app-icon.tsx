@@ -2,7 +2,7 @@ import { useState } from "react";
 import { cn } from "~/lib/utils";
 
 /**
- * An app's logo, as it is, on whatever it sits on; its initial on a tile
+ * A connector's logo, as it is, on whatever it sits on; its initial on a tile
  * when it has none or the image doesn't load. Size it with `className`.
  */
 export function AppIcon({

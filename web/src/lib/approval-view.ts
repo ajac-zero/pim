@@ -120,7 +120,7 @@ export function approvalView(
       ],
     };
   }
-  // A connected app's tool: Pim's summary is "<App>: <tool> <JSON>".
+  // A connector's tool: Pim's summary is "<Connector>: <tool> <JSON>".
   if (
     action === "mcp_call" &&
     isRecord(args) &&

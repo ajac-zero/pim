@@ -33,7 +33,7 @@ import { SKILL_NAME } from "./skills";
 
 export type Agent = {
 	readonly id: string;
-	/** What people call it, such as "Ada". Agents may share a name. */
+	/** What people call it, such as "Ada". Each of a person's agents has a name of its own. */
 	readonly name: string;
 	/** What it is for, such as "Researcher", which is how agents and templates refer to it. Each of the person's agents has its own. */
 	readonly role: string;
@@ -485,7 +485,14 @@ export class AgentStore {
 		if (taken) throw new HttpError(409, `You already have an agent for the role ${role}: ${String(taken.name)}. Each agent has a role of its own.`);
 	}
 
+	/** Each of the person's agents has a name of its own too, so that neither they nor the app mistake one for another. */
+	#checkName(name: string, self: string | null): void {
+		const [taken] = this.#sql.exec("SELECT role FROM pim_agents WHERE lower(name) = ? AND id IS NOT ?", name.toLowerCase(), self).toArray();
+		if (taken) throw new HttpError(409, `You already have an agent named ${name}: ${String(taken.role)}. Each agent has a name of its own.`);
+	}
+
 	#insert(input: AgentInput, source: Agent["source"], isDefault: boolean, copyOf: string | null = null): Agent {
+		if (!isDefault) this.#checkName(input.name, null);
 		if (!isDefault) this.#checkRole(input.role ?? input.name, null);
 		const id = newAgentId();
 		const now = Date.now();
@@ -515,6 +522,7 @@ export class AgentStore {
 
 	update(id: string, input: AgentInput): Agent {
 		const before = this.get(id);
+		if (input.name.toLowerCase() !== before?.name.toLowerCase()) this.#checkName(input.name, id);
 		if (input.role !== undefined && !before?.majordomo && input.role.toLowerCase() !== before?.role.toLowerCase()) this.#checkRole(input.role, id);
 		this.#sql.exec(
 			"UPDATE pim_agents SET name = ?, role = COALESCE(?, role), description = ?, instructions = ?, apps = ?, skills = ?, contacts = ?, updated_at = ? WHERE id = ?",

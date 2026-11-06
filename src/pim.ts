@@ -3787,7 +3787,8 @@ export class Pim extends DurableAgent<Env> {
 	 * that come with it, each with its uploaded icon and a contact of the
 	 * copies that had it. A copy
 	 * whose role one of the owner's agents already has gets a role of its own,
-	 * so that agents hand it tasks by its role.
+	 * so that agents hand it tasks by its role, and one whose name is taken gets
+	 * another name.
 	 */
 	async #adopt(copy: Omit<PublishedAgent, "id" | "image"> & { image: AgentIcon | null }, source: NonNullable<Agent["source"]>): Promise<Agent> {
 		const all = [copy, ...copy.bundle];
@@ -3799,10 +3800,13 @@ export class Pim extends DurableAgent<Env> {
 			inputs.push(await this.#installed(agentInput({ name, role, description, instructions, apps, blueprint, symbol, color })));
 		}
 		const taken = new Set(this.agents.list().map((agent) => agent.role.toLowerCase()));
+		const names = new Set(this.agents.list().map((agent) => agent.name.toLowerCase()));
 		const made = inputs.map((input, index) => {
 			const role = freeName(input.role!, copy.name, taken);
 			taken.add(role.toLowerCase());
-			return this.agents.create({ ...input, role }, source, index === 0 ? source.template : `${source.template}/${all[index]!.role.toLowerCase()}`);
+			const name = freeName(input.name, index === 0 ? role : copy.name, names);
+			names.add(name.toLowerCase());
+			return this.agents.create({ ...input, name, role }, source, index === 0 ? source.template : `${source.template}/${all[index]!.role.toLowerCase()}`);
 		});
 		const copyOf = new Map(all.map((agent, index) => [agent.role.toLowerCase(), made[index]!]));
 		for (const [index, agent] of all.entries()) {

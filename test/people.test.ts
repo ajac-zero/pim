@@ -1920,11 +1920,11 @@ describe("profiles and published agents", () => {
 				published: null,
 			},
 		});
-		// The physio's copy takes a role of its own beside Eli's own physio, keeping the name it came with, and each copy hands tasks to the copies of its contacts.
+		// The physio's copy takes a role of its own beside Eli's own physio, and a name of its own too, and each copy hands tasks to the copies of its contacts.
 		const eliAgents = (await eli.browser.json("/api/agents")).body.agents as { id: string; name: string; role: string; contacts: string[]; source: unknown }[];
 		const named = (role: string) => eliAgents.find((agent) => agent.role === role)!;
 		expect(eliAgents.map((agent) => agent.role)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
-		expect(eliAgents.map((agent) => agent.name)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio", "Dietitian"]);
+		expect(eliAgents.map((agent) => agent.name)).toEqual(["Majordomo", "Physio", "Marathon coach", "Physio (Marathon coach)", "Dietitian"]);
 		expect(mine.body.contacts).toEqual([named("Physio (Marathon coach)").id]);
 		expect(named("Physio (Marathon coach)")).toMatchObject({ contacts: [named("Dietitian").id], source: { template: templateId, author: "dee" } });
 		expect(named("Physio").contacts).toEqual([]);

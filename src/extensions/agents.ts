@@ -38,7 +38,7 @@ export const SHARE_MEMORY_SCOPE = "share_memory_scope";
 
 /** What `update_agent` changes. Contacts are added and removed by name. */
 const Changes = Type.Object({
-	name: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, pattern: "\\S", description: "A new name for the agent: what the person calls it, such as Ada. Agents may share a name." })),
+	name: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, pattern: "\\S", description: "A new name for the agent: what the person calls it, such as Ada. Each agent has a name of its own." })),
 	role: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, pattern: "\\S", description: "A new role: what it is for, such as Researcher. Each of the person's agents has its own." })),
 	description: Type.Optional(Type.String({ maxLength: MAX_DESCRIPTION })),
 	instructions: Type.Optional(Type.String({ maxLength: MAX_INSTRUCTIONS, description: "The complete new instructions: they replace the old ones." })),
@@ -343,7 +343,7 @@ export function agentExtension(
 		description:
 			"Make a new agent for the person: a named agent with its own instructions and the apps it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Give it an emoji and a color that fit what it's for, so the person tells it apart in the sidebar. Apps are ids of apps this Pim offers, as `find_app` finds them; the person connects each the first time they use it.",
 		parameters: Type.Object({
-			name: Type.String({ minLength: 1, maxLength: MAX_NAME, description: "What the person calls it: a given name, such as Ada, which the person may change. Agents may share one." }),
+			name: Type.String({ minLength: 1, maxLength: MAX_NAME, description: "What the person calls it: a given name, such as Ada, which the person may change. Each agent has a name of its own." }),
 			role: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, description: "What it is for, such as Researcher. Each of the person's agents has a role of its own; left out, it is the name." })),
 			description: Type.String({ maxLength: MAX_DESCRIPTION, description: "One line, shown under its name." }),
 			instructions: Type.String({ maxLength: MAX_INSTRUCTIONS }),

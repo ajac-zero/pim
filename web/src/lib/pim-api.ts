@@ -1340,12 +1340,12 @@ export const pim = {
       body: JSON.stringify(setup),
     }),
   /**
-   * Messages to start a chat with the agent, written by the utility model from
-   * its latest chats once it has had one. They can take a few seconds.
+   * Messages to say next in a chat, written by the utility model from that chat
+   * once something has been said in it. They can take a few seconds.
    */
-  suggestions: (id: string, locale: string) =>
+  suggestions: (session: string, locale: string) =>
     call<{ suggestions: string[] }>(
-      `/agents/${id}/suggestions?locale=${encodeURIComponent(locale)}`,
+      `/sessions/${session}/suggestions?locale=${encodeURIComponent(locale)}`,
     ).then((answer) => answer.suggestions),
   publishAgent: (id: string) =>
     call<Template>(`/agents/${id}/publish`, { method: "POST" }),

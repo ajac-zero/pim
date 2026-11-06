@@ -384,10 +384,9 @@ const NO_WORKERS_AI = {
 	},
 } as unknown as Ai;
 const UTILITY_MODEL_KEY = "utility_model";
-/** `pim_meta` keys of the messages suggested for starting a chat with an agent (see `Pim.#suggestions`) start with this, then its id. */
+/** `pim_meta` keys of the messages suggested under a chat (see `Pim.#suggestions`) start with this, then its session id. */
 const SUGGESTIONS_KEY = "suggestions:";
-/** What the utility model reads to suggest prompts: the latest chats, and how much of each and of memory. */
-const SUGGESTION_CHATS = 3;
+/** What the utility model reads to suggest prompts: the chat, and how much of it and of memory. */
 const SUGGESTION_CHAT_CHARS = 2_000;
 /** How much of a chat an agent reads with `read_chat`: its latest part. */
 const READ_CHAT_CHARS = 48_000;
@@ -3556,32 +3555,27 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * The messages offered for starting a chat with an agent. Once the
-	 * agent has had a chat, the utility model writes them from its latest chats
-	 * and what Pim remembers, and writes them again
-	 * only when that has changed since, so an agent nobody talks to costs
-	 * nothing. Until then, and when the model can't, Pim's own starters.
+	 * The messages offered under a chat. Once the chat has something said in
+	 * it, the utility model writes them from that chat and what Pim remembers,
+	 * and writes them again only when either has changed since, so a chat nobody
+	 * continues costs nothing. Until then, and when the model can't, Pim's own
+	 * starters.
 	 */
-	async #suggestions(agent: Agent, locale: string): Promise<string[]> {
+	async #suggestions(agent: Agent, session: string, locale: string): Promise<string[]> {
 		const starters = ASSISTANT_STARTERS.map((starter) => localize(starter, locale));
-		const hidden = this.#hiddenSessions();
-		const chats = (await this.harness.sessions.list())
-			.filter((session) => !hidden.has(session.id) && this.#agentRef(session.id)?.id === agent.id)
-			.sort((a, b) => (this.store.sessionInfo(b.id)?.updatedAt ?? 0) - (this.store.sessionInfo(a.id)?.updatedAt ?? 0))
-			.slice(0, SUGGESTION_CHATS);
-		const talked = (await Promise.all(chats.map(async (chat) => conversationText(projectEntries(await this.harness.session(chat.id).messages()), SUGGESTION_CHAT_CHARS)))).filter((text) => text !== "");
-		if (talked.length === 0) return starters;
+		const talk = conversationText(projectEntries(await this.harness.session(session).messages()), SUGGESTION_CHAT_CHARS);
+		if (talk === "") return starters;
 
 		const memory = this.memory.view(this.#memoryAccess(agent).read).join("\n");
 		const input = [
 			`Assistant: ${agent.name}${agent.description === "" ? "" : `, ${agent.description}`}`,
 			`Language: ${locale}`,
 			memory === "" ? "" : `What it remembers about the person:\n${memory.length > SUGGESTION_MEMORY_CHARS ? `…${memory.slice(-SUGGESTION_MEMORY_CHARS)}` : memory}`,
-			`Recent chats, latest first:\n\n${talked.join("\n\n---\n\n")}`,
+			`The chat:\n\n${talk}`,
 		]
 			.filter((part) => part !== "")
 			.join("\n\n");
-		const key = `${SUGGESTIONS_KEY}${agent.id}`;
+		const key = `${SUGGESTIONS_KEY}${session}`;
 		const of = await digestHex(input);
 		const stored = this.store.meta(key);
 		const cached = stored === undefined ? undefined : (JSON.parse(stored) as { of: string; items: string[] });
@@ -4761,6 +4755,7 @@ export class Pim extends DurableAgent<Env> {
 			async ({ session }) => {
 				const id = await this.#session(session!);
 				this.store.deleteSession(id);
+				this.store.deleteMeta(`${SUGGESTIONS_KEY}${id}`);
 				this.chatLinks.delete(id);
 				await this.images.deleteSession(id);
 				const visit = this.visits.bySession(id);
@@ -5983,7 +5978,15 @@ export class Pim extends DurableAgent<Env> {
 				return this.#agent(id!);
 			},
 		],
-		["GET", "/agents/:agent/suggestions", async ({ agent }, _request, url) => ({ suggestions: (await this.#suggestions(this.#agent(agent!), url.searchParams.get("locale") ?? "en")).slice(0, MAX_SUGGESTIONS) })],
+		[
+			"GET",
+			"/sessions/:session/suggestions",
+			async ({ session }, _request, url) => {
+				const id = await this.#session(session!);
+				const agent = this.agents.ofSession(id);
+				return { suggestions: (await this.#suggestions(agent, id, url.searchParams.get("locale") ?? "en")).slice(0, MAX_SUGGESTIONS) };
+			},
+		],
 		[
 			"GET",
 			"/extensions",
@@ -6005,7 +6008,6 @@ export class Pim extends DurableAgent<Env> {
 				// Its tasks stop with it: no other agent takes them over. It leaves the contacts of the agents that had it.
 				for (const task of this.#tasks.open()) if (task.agent === id) await this.#cancelTask(task, "Its agent was deleted.");
 				this.agents.delete(id!);
-				this.store.deleteMeta(`${SUGGESTIONS_KEY}${id}`);
 				this.store.clearAudience(agentAudience(id!));
 				return { deleted: true };
 			},

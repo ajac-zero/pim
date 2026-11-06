@@ -14,7 +14,7 @@ type Agent = { id: string; name: string; majordomo: boolean; memoryScope: string
 /** A message's result as API clients get it: what Pim sent, in order. */
 const ask = async (content: string, session: string) => (await say(content, session)) as unknown as { replies: string[] };
 
-const suggestions = async (agent: Agent, locale = "en") => (await api(`/agents/${agent.id}/suggestions?locale=${locale}`)).body.suggestions as string[];
+const suggestions = async (chat: string, locale = "en") => (await api(`/sessions/${chat}/suggestions?locale=${locale}`)).body.suggestions as string[];
 const widget = (shown: { id: string }[], id: string) => shown.find((candidate) => candidate.id === id) as any;
 type Request = { messages: Message[] };
 
@@ -110,7 +110,7 @@ describe("extensions", () => {
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
 		// Pim's starters, while the utility model has nothing to suggest.
-		expect(await suggestions(coach)).toEqual(["What can you do?", "Plan my week"]);
+		expect(await suggestions(chat)).toEqual(["What can you do?", "Plan my week"]);
 		const coaching = await widgetsShown(chat, builtIn);
 		expect(coaching.map((shown) => shown.id)).toEqual(builtIn);
 		const [scheduled] = widget(coaching, "pim.schedule/upcoming").items;
@@ -130,23 +130,22 @@ describe("extensions", () => {
 		expect(widget(home, "pim.schedule/upcoming").items).toEqual([]);
 		expect(widget(home, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Saving for a new car", "Prefers morning runs"]);
 		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.majordomo)!;
-		expect((await suggestions(mine, "es"))[0]).toBe("¿Qué puedes hacer?");
+		expect((await suggestions(ROOT, "es"))[0]).toBe("¿Qué puedes hacer?");
 	});
 
-	it("suggests what to say to an agent from its latest chats and memory, writing them again only when that changes", async () => {
+	it("suggests what to say next in a chat from that chat and memory, writing them again only when that changes", async () => {
 		const coach = (await post("/agents", { name: "Race coach", description: "Trains people for races." })).body as Agent;
-		const other = (await post("/agents", { name: "Chef" })).body as Agent;
-		// An agent nobody has talked to costs nothing: no model is asked.
-		expect(await suggestions(coach)).toEqual(["What can you do?", "Plan my week"]);
-
 		await post("/memory/log", { text: "Training for the Lisbon half marathon in March", scope: coach.memoryScope });
-		await post("/memory/log", { text: "Allergic to shellfish", scope: other.memoryScope });
+		// A chat nobody has said anything in costs nothing: no model is asked.
 		const chat = (await post("/sessions", { agent: coach.id })).body.id;
+		expect(await suggestions(chat)).toEqual(["What can you do?", "Plan my week"]);
+
 		faux.setResponses([toolUse("send_to_user", { message: "Long run on Sunday?" })]);
 		await say("Plan my week of training", chat);
-		const otherChat = (await post("/sessions", { agent: other.id })).body.id;
+		// Another chat with the same agent is about something else.
+		const other = (await post("/sessions", { agent: coach.id })).body.id;
 		faux.setResponses([toolUse("send_to_user", { message: "Pasta tonight." })]);
-		await say("What should I cook?", otherChat);
+		await say("What should I cook?", other);
 
 		const inputs: string[] = [];
 		const write =
@@ -158,31 +157,36 @@ describe("extensions", () => {
 		// What a small model still gets wrong is dropped: repeats, blanks, and what runs past two.
 		utility.setResponses([write("Plan my long run", " Plan my long run ", "", "How was my pace?", "Add a rest day", "Should I taper?", "One more")]);
 		const written = ["Plan my long run", "How was my pace?"];
-		expect(await suggestions(coach, "es")).toEqual(written);
-		// It read this agent's chat and what Pim remembers, not another agent's chat.
+		expect(await suggestions(chat, "es")).toEqual(written);
+		// It read this chat and what Pim remembers, not the agent's other chat.
 		expect(inputs[0]).toContain("Race coach, Trains people for races.");
 		expect(inputs[0]).toContain("Language: es");
 		expect(inputs[0]).toContain("Lisbon half marathon");
-		expect(inputs[0]).not.toContain("shellfish");
 		expect(inputs[0]).toContain("Long run on Sunday?");
 		expect(inputs[0]).not.toContain("Pasta tonight");
 
-		// Nothing has changed, so nobody asks the model again, and another agent's chat is no change.
-		expect(await suggestions(coach, "es")).toEqual(written);
+		// Nothing has changed, so nobody asks the model again, and more said in the other chat is no change.
+		expect(await suggestions(chat, "es")).toEqual(written);
 		faux.setResponses([toolUse("send_to_user", { message: "More pasta." })]);
-		await say("And tomorrow?", otherChat);
-		expect(await suggestions(coach, "es")).toEqual(written);
+		await say("And tomorrow?", other);
+		expect(await suggestions(chat, "es")).toEqual(written);
 		expect(utility.getPendingResponseCount()).toBe(0);
 
-		// More said in its chat, and they are written again; if the model then fails, the last ones stay.
+		// The other chat gets its own.
+		utility.setResponses([write("Plan dinner")]);
+		expect(await suggestions(other, "es")).toEqual(["Plan dinner"]);
+		expect(inputs[1]).toContain("Pasta tonight");
+		expect(inputs[1]).not.toContain("Long run on Sunday?");
+
+		// More said in this chat, and they are written again; if the model then fails, the last ones stay.
 		faux.setResponses([toolUse("send_to_user", { message: "Rest on Monday." })]);
 		await say("I ran 15 km", chat);
 		utility.setResponses([write("Plan my recovery week")]);
-		expect(await suggestions(coach, "es")).toEqual(["Plan my recovery week"]);
-		expect(inputs[1]).toContain("Rest on Monday.");
+		expect(await suggestions(chat, "es")).toEqual(["Plan my recovery week"]);
+		expect(inputs[2]).toContain("Rest on Monday.");
 		faux.setResponses([toolUse("send_to_user", { message: "Good." })]);
 		await say("Thanks", chat);
-		expect(await suggestions(coach, "es")).toEqual(["Plan my recovery week"]);
+		expect(await suggestions(chat, "es")).toEqual(["Plan my recovery week"]);
 	});
 
 	it("shows a deployment extension's widgets, and one failing leaves the rest", async () => {

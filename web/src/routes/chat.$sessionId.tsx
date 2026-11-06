@@ -160,7 +160,7 @@ function ChatPage() {
     view.retry === null &&
     view.entries.length > 0;
   const { data: suggestions } = useQuery({
-    ...suggestionsQuery(session?.agent?.id ?? "", locale),
+    ...suggestionsQuery(sessionId, locale),
     enabled: settled,
   });
 

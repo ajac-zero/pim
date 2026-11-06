@@ -206,11 +206,11 @@ export const extensionsQuery = () =>
     staleTime: Number.POSITIVE_INFINITY,
   });
 
-/** What to suggest saying to an agent to start a chat: instant when Pim has them, a few seconds when it writes them. */
-export const suggestionsQuery = (id: string, locale: string) =>
+/** What to suggest saying next in a chat: instant when Pim has them, a few seconds when it writes them. */
+export const suggestionsQuery = (session: string, locale: string) =>
   queryOptions({
-    queryKey: ["suggestions", id, locale],
-    queryFn: () => pim.suggestions(id, locale),
+    queryKey: ["suggestions", session, locale],
+    queryFn: () => pim.suggestions(session, locale),
     retry: false,
   });
 

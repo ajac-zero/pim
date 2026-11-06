@@ -88,6 +88,8 @@ export interface ComposerProps {
   autoFocus?: boolean;
   /** Editable text to start a new message with; nothing is sent automatically. */
   initialInput?: string;
+  /** Replaces the text and focuses the box each time it changes, such as for a suggestion to edit. */
+  fill?: { text: string; id: number };
   /** Keeps unsent text under this key, such as the chat's id, while other chats are open. */
   draftKey?: string;
   /** Beside the attach buttons, such as whom a new chat is with. */
@@ -289,6 +291,7 @@ function ComposerInner({
   disclaimer,
   autoFocus,
   draftKey,
+  fill,
   mentions,
   agent,
   controls,
@@ -329,6 +332,13 @@ function ComposerInner({
     const input = textareaRef.current;
     if (input) input.setSelectionRange(input.value.length, input.value.length);
   }, [autoFocus, touchInput]);
+  useEffect(() => {
+    if (!fill) return;
+    controller.textInput.setInput(fill.text);
+    const input = textareaRef.current;
+    input?.focus();
+    input?.setSelectionRange(fill.text.length, fill.text.length);
+  }, [fill, controller.textInput.setInput]);
   // Typing @ offers the agents to mention, by the start of their name, and
   // apps, by the start of a word of theirs: the ones the chat's agent works
   // with first, then those you connected, then the rest of the directory.

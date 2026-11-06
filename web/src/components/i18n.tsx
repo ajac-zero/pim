@@ -128,6 +128,7 @@ const translations = {
       "{agent} gets {app}'s tools in its chats and tasks. You'll sign in to {app} next.",
     addAppTo: "Add to {agent}",
     scrollToMention: "Go to the message that mentions you",
+    suggestionHint: "Click to send. ⌘-click to edit first.",
     discover: "Discover",
     discoverDescription:
       "Agents and artifacts people published. Make one your own: you get a copy of it, never anything of theirs.",
@@ -1251,6 +1252,7 @@ const translations = {
       "{agent} recibe las herramientas de {app} en sus chats y tareas. Después inicias sesión en {app}.",
     addAppTo: "Añadir a {agent}",
     scrollToMention: "Ir al mensaje que te menciona",
+    suggestionHint: "Clic para enviar. ⌘-clic para editar antes.",
     discover: "Descubrir",
     discoverDescription:
       "Agentes y artefactos que otros publicaron. Haz uno tuyo: recibes una copia, nunca nada suyo.",

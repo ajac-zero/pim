@@ -27,9 +27,8 @@ export const assistant = definePimExtension({
 			description: "",
 			instructions: INSTRUCTIONS,
 			starters: [
-				{ en: "What can you do for me?", es: "¿Qué puedes hacer por mí?" },
-				{ en: "Help me plan my week", es: "Ayúdame a planear mi semana" },
-				{ en: "Start tracking a goal with me", es: "Empieza a seguir una meta conmigo" },
+				{ en: "What can you do?", es: "¿Qué puedes hacer?" },
+				{ en: "Plan my week", es: "Planea mi semana" },
 			],
 		},
 	],

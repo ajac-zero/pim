@@ -687,7 +687,6 @@ const translations = {
     computerSettingUpHint:
       "The first time takes a few minutes. It shows up here once it's ready.",
     computerSetupFailed: "Your computer couldn't be set up.",
-    computerNotSetUp: "Not set up",
     computerNone:
       "You have no computer yet. Connect one in Settings, and you can use its desktop here.",
     computerOfflineManaged:
@@ -1830,7 +1829,6 @@ const translations = {
     computerSettingUpHint:
       "La primera vez tarda unos minutos. Aparece aquí cuando está lista.",
     computerSetupFailed: "No se pudo preparar tu computadora.",
-    computerNotSetUp: "Sin preparar",
     computerNone:
       "Aún no tienes computadora. Conecta una en Configuración y podrás usar su escritorio aquí.",
     computerOfflineManaged:

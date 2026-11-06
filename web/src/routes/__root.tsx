@@ -338,10 +338,14 @@ function usePimEvents() {
               description: approval.summary,
               action: {
                 label: t("review"),
+                // A bot's guest's request waits in Notifications; a circle's, in Sharing.
                 onClick: () =>
                   navigate({
                     to: ".",
-                    search: (prev) => ({ ...prev, dialog: "sharing" }),
+                    search: (prev) =>
+                      approval.requestedBy?.bot !== undefined
+                        ? { ...prev, panel: "notifications" }
+                        : { ...prev, dialog: "sharing" },
                   }),
               },
             },

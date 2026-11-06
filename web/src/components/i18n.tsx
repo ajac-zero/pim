@@ -883,6 +883,7 @@ const translations = {
     limitDailyTokens: "Tokens a day",
     limitDailyModelRequests: "Model requests a day",
     limitDailyRuns: "Runs a day",
+    limitDailyToolCalls: "Tool calls a day",
     limitSessions: "Chats",
     limitSchedules: "Scheduled tasks",
     limitStorageBytes: "Storage, in bytes",
@@ -980,6 +981,8 @@ const translations = {
     guestMessagesToday: "Messages today",
     guestMessagesUsed: "{used} of {limit}",
     guestMessagesUsedUp: "That's all for today. More at midnight UTC.",
+    guestToolCallsToday: "Tool calls today",
+    guestToolCallsUsedUp: "The bot can use its tools again at midnight UTC.",
     shareAsBot: "Share as a bot",
     shareAsBotBody:
       "Anyone with the link can make a guest account and chat with a copy of {name}. Guests see nothing else of Pim, and you pay for their messages.",
@@ -987,12 +990,21 @@ const translations = {
     botLink: "Bot link",
     botGuests: "People who joined: {people}",
     botDailyMessages: "Messages a day for each person",
+    botDailyToolCalls: "Tool calls a day for each person",
     botModel: "Model guests use",
+    botTools: "Tools guests can use",
+    botToolsHint:
+      "They run as you, with your connections and your computer, and count toward each guest's tool calls. Ask sends you each call to approve first, in Notifications.",
+    botToolsNone:
+      "This agent has nothing to share yet: connect its apps, or a computer for images.",
+    botToolsPim: "Pim",
+    botToolsAll: "Share all of {app}",
+    botToolChanges: "changes things",
     botModelDefault: "This Pim's default ({name})",
     botCreateLink: "Create link",
     botUpdate: "Update",
     botUpdateHint:
-      "Update sends guests the agent as it is now, with its instructions, look and model.",
+      "Update sends guests the agent as it is now, with its instructions, look, model and tools.",
     botTurnOff: "Turn off link",
     botShared: "Bot link created.",
     botUpdated: "Guests now chat with the agent as it is now.",
@@ -1019,6 +1031,7 @@ const translations = {
     accountUsageToday: "What you used today. Limits reset at midnight UTC.",
     usageTokens: "Tokens",
     usageRuns: "Runs",
+    usageToolCalls: "Tool calls",
     usageModelRequests: "Model requests",
     usedOf: "{used} of {limit}",
     planTokensToday:
@@ -2016,6 +2029,7 @@ const translations = {
     limitDailyTokens: "Tokens al día",
     limitDailyModelRequests: "Peticiones al modelo al día",
     limitDailyRuns: "Ejecuciones al día",
+    limitDailyToolCalls: "Llamadas a herramientas al día",
     limitSessions: "Chats",
     limitSchedules: "Tareas programadas",
     limitStorageBytes: "Almacenamiento, en bytes",
@@ -2117,6 +2131,9 @@ const translations = {
     guestMessagesToday: "Mensajes de hoy",
     guestMessagesUsed: "{used} de {limit}",
     guestMessagesUsedUp: "Eso es todo por hoy. Más a medianoche UTC.",
+    guestToolCallsToday: "Llamadas a herramientas de hoy",
+    guestToolCallsUsedUp:
+      "El bot puede volver a usar sus herramientas a medianoche UTC.",
     shareAsBot: "Compartir como bot",
     shareAsBotBody:
       "Cualquiera con el enlace puede crear una cuenta de invitado y chatear con una copia de {name}. Los invitados no ven nada más de Pim, y sus mensajes los pagas tú.",
@@ -2124,12 +2141,21 @@ const translations = {
     botLink: "Enlace del bot",
     botGuests: "Personas que se unieron: {people}",
     botDailyMessages: "Mensajes al día por persona",
+    botDailyToolCalls: "Llamadas a herramientas al día por persona",
     botModel: "Modelo que usan los invitados",
+    botTools: "Herramientas que pueden usar los invitados",
+    botToolsHint:
+      "Funcionan como tú, con tus conexiones y tu computadora, y cuentan para las llamadas a herramientas de cada invitado. Preguntar te envía cada llamada para que la apruebes antes, en Notificaciones.",
+    botToolsNone:
+      "Este agente aún no tiene nada que compartir: conecta sus apps, o una computadora para las imágenes.",
+    botToolsPim: "Pim",
+    botToolsAll: "Compartir todo {app}",
+    botToolChanges: "hace cambios",
     botModelDefault: "El predeterminado de este Pim ({name})",
     botCreateLink: "Crear enlace",
     botUpdate: "Actualizar",
     botUpdateHint:
-      "Actualizar envía a los invitados el agente tal como está ahora, con sus instrucciones, su aspecto y su modelo.",
+      "Actualizar envía a los invitados el agente tal como está ahora, con sus instrucciones, su aspecto, su modelo y sus herramientas.",
     botTurnOff: "Desactivar enlace",
     botShared: "Enlace del bot creado.",
     botUpdated: "Los invitados ahora chatean con el agente tal como está.",
@@ -2158,6 +2184,7 @@ const translations = {
       "Lo que usaste hoy. Los límites se reinician a medianoche UTC.",
     usageTokens: "Tokens",
     usageRuns: "Ejecuciones",
+    usageToolCalls: "Llamadas a herramientas",
     usageModelRequests: "Solicitudes al modelo",
     usedOf: "{used} de {limit}",
     planTokensToday:

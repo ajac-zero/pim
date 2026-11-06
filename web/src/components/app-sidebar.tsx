@@ -148,7 +148,10 @@ export function useNavigationState() {
     /* Requests from people in your circles, waiting in Sharing. */
     guestRequests:
       approvals?.filter(
-        (approval) => approval.status === "pending" && approval.requestedBy,
+        (approval) =>
+          approval.status === "pending" &&
+          approval.requestedBy &&
+          approval.requestedBy.bot === undefined,
       ).length ?? 0,
     unreadNotifications:
       notifications?.filter((notification) => notification.readAt === null)

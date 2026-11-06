@@ -79,6 +79,11 @@ export function AccountSection() {
     { label: t("usageTokens"), used: today.tokens, limit: limits.dailyTokens },
     { label: t("usageRuns"), used: today.runs, limit: limits.dailyRuns },
     {
+      label: t("usageToolCalls"),
+      used: today.toolCalls,
+      limit: limits.dailyToolCalls,
+    },
+    {
       label: t("usageModelRequests"),
       used: today.modelRequests,
       limit: limits.dailyModelRequests,

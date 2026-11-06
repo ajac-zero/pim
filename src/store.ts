@@ -71,12 +71,18 @@ export type ApprovalReview = { readonly status: "reviewing" | "escalated"; reado
 /** The agent at work on a task whose call filed an approval, by name, and the chat the work began in. */
 export type ApprovalMember = { readonly name: string; readonly session: string };
 
-/** A guest whose call filed an approval. Its `session` is then the guest's conversation, in the guest's space. */
+/**
+ * A guest whose call filed an approval. Its `session` is then the guest's
+ * conversation, in the guest's space. A guest of one of the owner's bots
+ * asks through the bot (`bot`), not a circle: their `circle` is empty and
+ * `circleName` is the bot's name.
+ */
 export type ApprovalRequester = {
 	readonly ownerId: string;
 	readonly username: string;
 	readonly circle: string;
 	readonly circleName: string;
+	readonly bot?: string;
 };
 
 export type ApprovalDecider = "user" | "timeout" | "always" | "majordomo";

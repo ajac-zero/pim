@@ -89,7 +89,17 @@ import { artifactsExtension } from "./extensions/artifacts";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, BROWSER_UPLOAD, browserClickAction, browserExtension, browserTypeAction, browserUploadAction } from "./extensions/browser";
 import { DESKTOP_ACT, DESKTOP_EXTENSION, desktopAction, desktopExtension } from "./extensions/desktop";
-import { IMAGES_EXTENSION, type ImageModel, imageGenerationExtension, workersAiImageModel } from "./extensions/image-generation";
+import { type BotTool, type BotToolCall, type BotToolResult, botToolError, botToolsExtension } from "./extensions/bot-tools";
+import {
+	drawImage,
+	GENERATE_IMAGE,
+	IMAGES_EXTENSION,
+	type ImageModel,
+	type ImageServices,
+	imageGenerationExtension,
+	SHARED_IMAGE_TOOL,
+	workersAiImageModel,
+} from "./extensions/image-generation";
 import { appDirectory, type CustomApp, type DirectoryApp } from "./extensions/app-directory";
 import { ExtensionDataStore } from "./extensions/data";
 import { NativeApps } from "./extensions/native-apps";
@@ -132,6 +142,7 @@ import {
 	slug,
 	summarizeCall,
 	toolDefinition,
+	toContent,
 	toolName,
 	toText,
 } from "./extensions/mcp";
@@ -155,7 +166,7 @@ import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
-import { FILES_ROOT, Files, fileHeaders, MAX_UPLOAD_BYTES } from "./files";
+import { FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
 import { type DeploymentSettings, deploymentSettings } from "./deployment";
@@ -238,6 +249,8 @@ const PUSH_BODY_LENGTH = 240;
 
 /** How long a guest's request waits for the owner before it is denied. */
 const GUEST_APPROVAL_MS = 24 * 60 * 60 * 1000;
+/** The action of an approval a bot's guest's call filed: the call itself runs the tool, once approved. */
+const BOT_TOOL_ACTION = "bot_tool";
 /** How long a chat goes without activity before it is archived: listed apart, not deleted. */
 const ARCHIVE_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -343,7 +356,19 @@ export type OwnerStatus = "active" | "suspended";
 export type OwnerProfile = { readonly ownerId: string; readonly username: string };
 
 /** A guest's bot: its id in the gallery, their copy of it, and when the sharing their copy follows was made. */
-export type GuestBot = { readonly bot: string; readonly agent: string; readonly sharedAt: number };
+/**
+ * In a guest's space, the bot they joined through: its id, the guest's copy
+ * of it, which sharing of it the copy follows, its author's owner id, and the
+ * tools it shares, which run in the author's space. Guests who joined before
+ * bots shared tools have neither until the bot is shared again.
+ */
+export type GuestBot = {
+	readonly bot: string;
+	readonly agent: string;
+	readonly sharedAt: number;
+	readonly owner?: string;
+	readonly tools?: readonly BotTool[];
+};
 
 /** How long an erasure waits for runs to stop and apps to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
@@ -404,6 +429,9 @@ const ARTIFACT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const VERSION = /^[1-9][0-9]{0,8}$/;
 
 /** An artifact API answer the browser must never keep: what it shows can be deleted, or the sign-in end. */
+/** Where the author's space keeps what one of their bots' tools made for one guest: images, so far. */
+const botFolder = (botId: string, guest: string) => `${FILES_ROOT}/bots/${botId}/${guest}`;
+
 function noStore(value: unknown, status = 200): Response {
 	return Response.json(value, { status, headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
 }
@@ -617,6 +645,11 @@ export class Pim extends DurableAgent<Env> {
 		call: async (serverId, name, args) => {
 			// Work still under way on a space being erased acts on nobody's behalf.
 			this.#assertOpen();
+			const refusal = this.usage.reserveToolCall();
+			if (refusal !== null) {
+				console.warn(JSON.stringify({ event: "pim.limit", limit: "toolCalls", reason: refusal }));
+				return { content: [{ type: "text", text: refusal }], isError: true };
+			}
 			if (this.nativeApps.has(serverId)) return this.nativeApps.call(serverId, name, args);
 			return this.mcp.callTool({ serverId, name, arguments: args });
 		},
@@ -754,6 +787,7 @@ export class Pim extends DurableAgent<Env> {
 			);
 			this.registry.install(filesExtension(this.#files));
 			this.#installImageGeneration();
+			this.#installBotTools();
 			this.#installBrowser(services);
 			this.#installDesktop();
 			// Restored connections reconnect in the background after a wake; give them a moment.
@@ -2152,7 +2186,9 @@ export class Pim extends DurableAgent<Env> {
 			if (this.#approvalPermission(approval) === "off") throw new HttpError(403, "This capability is turned off");
 		}
 		const call = approval.requestedBy || options.inTurn ? undefined : await this.#waitingCall(approval);
-		const stopped = call === null;
+		// A bot's guest's call waits in their own space, and runs its tool there once it wakes.
+		const bot = approval.requestedBy?.bot !== undefined;
+		const stopped = call === null || (bot && decision === "approve" && !(await this.#botCallWaits(approval)));
 		if (stopped) {
 			decision = "deny";
 			note = "Its chat stopped before the decision, so nothing ran.";
@@ -2160,7 +2196,7 @@ export class Pim extends DurableAgent<Env> {
 		if (!this.store.decideApproval(id, decision === "approve" ? "approved" : "denied", note ?? null, auto ?? "user")) {
 			throw new HttpError(409, `Approval ${id} is already ${approval.status}`);
 		}
-		if (decision === "approve") {
+		if (decision === "approve" && !bot) {
 			const action = this.actions.find((candidate) => candidate.name === approval.action);
 			let result: string;
 			try {
@@ -2175,14 +2211,12 @@ export class Pim extends DurableAgent<Env> {
 		const decided = this.store.approval(id)!;
 		this.broadcastMessage({ type: "approval", approval: this.#publicApproval(decided) });
 		if (decided.requestedBy) {
-			// A guest asked: the outcome continues their visit, in their own space, on their own usage.
+			// A guest asked: the outcome continues their visit, in their own space, on their own usage;
+			// a bot's guest's call, waiting there, wakes and asks for it.
 			try {
-				await (await this.#pimOf(decided.requestedBy.ownerId)).visitAnswer(
-					this.name,
-					decided.session,
-					this.#guestOutcome(decided),
-					`approval:${this.name}:${id}`,
-				);
+				const guest = await this.#pimOf(decided.requestedBy.ownerId);
+				if (bot) await guest.botToolDecided(this.name, decided.session, decided.callId ?? "");
+				else await guest.visitAnswer(this.name, decided.session, this.#guestOutcome(decided), `approval:${this.name}:${id}`);
 			} catch (error) {
 				console.warn(`telling ${decided.requestedBy.username} about approval ${id} failed`, error);
 			}
@@ -2199,7 +2233,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** The task of the tool call waiting for `approval`'s decision, or null when none is. */
-	async #waitingCall(approval: Approval): Promise<TaskId | null> {
+	async #waitingCall(approval: Pick<Approval, "session" | "callId">): Promise<TaskId | null> {
 		const { tasks } = await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT);
 		const call = tasks.find(
 			({ record }) =>
@@ -2261,8 +2295,9 @@ export class Pim extends DurableAgent<Env> {
 		return { app: "", tool: approval.action };
 	}
 
-	/** Risky tools always need the person's decision, even when assigned to an agent. */
+	/** Risky tools always need the person's decision, even when assigned to an agent, as does every call a bot's guest asks for. */
 	#requiresExplicitApproval(approval: Approval): boolean {
+		if (approval.requestedBy?.bot !== undefined) return true;
 		if (approval.action !== "mcp_call") return this.actions.some((action) => action.name === approval.action && action.explicitApproval);
 		if (approval.tool === null) return true;
 		const { app, tool } = this.#approvalTool(approval);
@@ -3733,13 +3768,19 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * At registration of a guest: their copy of the bot they joined through,
 	 * on the bot's model, with the agents that come with it, and the bot's
-	 * daily messages as the space's limit on runs. Their space never gets the agent everyone starts with.
+	 * daily messages and tool calls as the space's limits on runs and tool
+	 * calls. Their space never gets the agent everyone starts with.
 	 */
 	async adoptBot(bot: Omit<Bot, "icon" | "bundle"> & Pick<PublishedAgent, "bundle"> & { image: AgentIcon | null }): Promise<Agent> {
 		this.#assertOpen();
-		const agent = await this.#adopt(bot, { template: bot.id, author: bot.author });
-		this.store.setMeta(GUEST_BOT_KEY, JSON.stringify({ bot: bot.id, agent: agent.id, sharedAt: bot.sharedAt } satisfies GuestBot));
-		this.#guestLimit(bot.dailyMessages);
+		// Its apps' tools are the author's to share, as the bot's tools: the copy connects none of its own.
+		const agent = await this.#adopt({ ...bot, apps: [] }, { template: bot.id, author: bot.author });
+		this.store.setMeta(
+			GUEST_BOT_KEY,
+			JSON.stringify({ bot: bot.id, agent: agent.id, sharedAt: bot.sharedAt, owner: bot.ownerId, tools: bot.tools } satisfies GuestBot),
+		);
+		this.#guestLimit(bot);
+		this.#botToolsChanged();
 		return this.#guestModel(agent, bot.model);
 	}
 
@@ -3773,7 +3814,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Brings a guest's copy of their bot up to what its author shared last:
 	 * its name, description, instructions, apps, look and model, and the daily
-	 * messages it allows. The agents that came with it stay as they came.
+	 * messages and tool calls it allows. The agents that came with it stay as they came.
 	 * Null when its link was turned off: the guest can read their chats, and
 	 * start nothing more.
 	 */
@@ -3781,28 +3822,32 @@ export class Pim extends DurableAgent<Env> {
 		this.#assertOpen();
 		const guest = this.guestBot();
 		if (!guest) return;
-		if (bot === null) return this.#guestLimit(0);
-		if (guest.bot !== bot.id || guest.sharedAt === bot.sharedAt) return;
+		if (bot === null) return this.#guestLimit({ dailyMessages: 0, dailyToolCalls: 0 });
+		if (guest.bot !== bot.id || (guest.sharedAt === bot.sharedAt && guest.owner !== undefined)) return;
 		const copy = this.agents.get(guest.agent);
 		if (copy) {
-			const { name, description, instructions, apps, symbol, color } = bot;
-			const input = await this.#installed(agentInput({ name, description, instructions, apps, symbol, color }, copy));
+			const { name, description, instructions, symbol, color } = bot;
+			const input = await this.#installed(agentInput({ name, description, instructions, apps: [], symbol, color }, copy));
 			// It keeps the role it was given, which may differ from the bot's beside the agents that came with it.
 			this.agents.update(copy.id, { ...input, role: copy.role });
 			if (bot.image) this.agents.setIcon(copy.id, bot.image.type, bot.image.data);
 			else this.agents.removeIcon(copy.id);
 			await this.#guestModel(this.agents.get(copy.id)!, bot.model);
 		}
-		this.store.setMeta(GUEST_BOT_KEY, JSON.stringify({ ...guest, sharedAt: bot.sharedAt } satisfies GuestBot));
-		this.#guestLimit(bot.dailyMessages);
+		this.store.setMeta(GUEST_BOT_KEY, JSON.stringify({ ...guest, sharedAt: bot.sharedAt, owner: bot.ownerId, tools: bot.tools } satisfies GuestBot));
+		this.#guestLimit(bot);
+		this.#botToolsChanged();
 		this.broadcastMessage({ type: "sessions" });
 	}
 
-	/** A guest's runs a day are the messages their bot allows; null leaves the deployment's limit. */
-	#guestLimit(dailyMessages: number | null): void {
+	/** A guest's runs a day are the messages their bot allows, and their tool calls the calls it allows; null leaves the deployment's limit. */
+	#guestLimit({ dailyMessages, dailyToolCalls }: Pick<Bot, "dailyMessages" | "dailyToolCalls">): void {
 		const own = JSON.parse(this.store.meta(LIMITS_KEY) ?? "{}") as Partial<Limits>;
-		const { dailyRuns: _dailyRuns, ...rest } = own;
-		this.store.setMeta(LIMITS_KEY, JSON.stringify(dailyMessages === null ? rest : { ...rest, dailyRuns: dailyMessages }));
+		const { dailyRuns: _dailyRuns, dailyToolCalls: _dailyToolCalls, ...rest } = own;
+		this.store.setMeta(
+			LIMITS_KEY,
+			JSON.stringify({ ...rest, ...(dailyMessages === null ? {} : { dailyRuns: dailyMessages }), ...(dailyToolCalls === null ? {} : { dailyToolCalls }) }),
+		);
 	}
 
 	/**
@@ -5177,6 +5222,13 @@ export class Pim extends DurableAgent<Env> {
 			"/files/content",
 			(_params, _request, url) =>
 				this.#artifactRequest(url, async () => {
+					// A guest has no files: the images their bot made are in its author's, where only this guest's folder is theirs to read.
+					const guest = this.guestBot();
+					if (guest?.owner !== undefined) {
+						const image = await (await this.#pimOf(guest.owner)).botImage(guest.bot, this.name, url.searchParams.get("path") ?? "");
+						if (!image) throw new HttpError(404, "No such image");
+						return new Response(image.bytes, { headers: fileHeaders({ name: image.name, size: image.bytes.byteLength, type: image.type }, url.searchParams.has("download")) });
+					}
 					const file = await this.files.read(url.searchParams.get("path"));
 					return new Response(file.body, { headers: fileHeaders(file, url.searchParams.has("download")) });
 				}),
@@ -5566,6 +5618,15 @@ export class Pim extends DurableAgent<Env> {
 
 		// The owner's agents, the majordomo first.
 		["GET", "/agents", () => ({ agents: this.agents.list() })],
+		// What of an agent's the owner can share with a bot's guests, to run here as the owner.
+		[
+			"GET",
+			"/agents/:id/bot-tools",
+			async ({ id }) => {
+				await this.#refreshCustomApps();
+				return { tools: this.shareableTools(this.#agent(id!)) };
+			},
+		],
 		// The majordomo, and whether the person has named it yet.
 		[
 			"GET",
@@ -6139,27 +6200,241 @@ export class Pim extends DurableAgent<Env> {
 		return imageModel && ai ? workersAiImageModel(ai, imageModel) : null;
 	}
 
-	/** `generate_image`, with the ChatGPT plan's images while it's signed in for them, else where the deployment has an image model. Each image counts as a model request. */
-	#installImageGeneration(): void {
+	/**
+	 * How this space makes images: with the ChatGPT plan's images while it's
+	 * signed in for them, else with the deployment's image model, saved to the
+	 * person's files, on their computer. Null without a model or a computer.
+	 * Each image counts as a model request.
+	 */
+	#imageServices(): ImageServices | null {
 		const plan = this.codexImages.connected();
 		const model = plan ? this.codexImages.model(this.computer) : this.imageModel();
-		if (!model) return;
+		if (!model || !this.computer.paired()) return null;
+		return {
+			model,
+			reserve: () => {
+				this.#assertOpen();
+				const reserved = this.usage.reserveModel(plan ? CHATGPT_PROVIDER : CLOUDFLARE_PROVIDER_ID, model.id);
+				return reserved.ok ? null : reserved.refusal;
+			},
+			save: async (path, bytes) => (await this.files.write(path, bytes)).path,
+		};
+	}
+
+	/** `generate_image`, as `#imageServices` makes images. */
+	#installImageGeneration(): void {
+		const plan = this.codexImages.connected();
+		if (!(plan ? this.codexImages.model(this.computer) : this.imageModel())) return;
+		const services = this.#imageServices();
 		// Images are saved to the person's files, on their computer: without one, the extension is there with no tool.
-		if (!this.computer.paired()) {
-			this.registry.install(defineExtension({ name: IMAGES_EXTENSION, tools: [] }));
-			return;
+		this.registry.install(services ? imageGenerationExtension(services) : defineExtension({ name: IMAGES_EXTENSION, tools: [] }));
+	}
+
+	// Bots' shared tools: the author's side runs them (`runBotTool`), a guest's side calls them.
+
+	/**
+	 * The tools of one of the owner's agents they can share with a bot's
+	 * guests, which then run here, as the owner: the tools of the agent's
+	 * connected apps, and `generate_image` while this space makes images.
+	 * Never the computer's own tools, which would open it to anyone.
+	 */
+	shareableTools(agent: Agent): BotTool[] {
+		const servers = this.apps.servers();
+		const tools = this.apps.tools();
+		const shared: BotTool[] = this.#appsOf(agent).flatMap((app) => {
+			const server = serverFor(servers, app);
+			if (server?.state !== "ready") return [];
+			return tools
+				.filter((tool) => tool.serverId === server.id)
+				.map((tool) => ({
+					name: toolName(server.id, tool.name),
+					appName: server.name,
+					description: `[${server.name}] ${tool.description ?? tool.annotations?.title ?? tool.name}`,
+					parameters: JSON.stringify(tool.inputSchema),
+					destructive: tool.annotations?.destructiveHint === true,
+				}));
+		});
+		if (this.#imageServices()) {
+			shared.push({ name: GENERATE_IMAGE, appName: null, description: SHARED_IMAGE_TOOL.description, parameters: JSON.stringify(SHARED_IMAGE_TOOL.parameters), destructive: false });
 		}
+		return shared;
+	}
+
+	/** The tools named, as one of the owner's agents shares them now, and the names it can't share. */
+	async botTools(agentId: string, names: readonly string[]): Promise<{ tools: BotTool[]; missing: string[] }> {
+		this.#assertOpen();
+		await this.#refreshCustomApps();
+		const shareable = this.shareableTools(this.#agent(agentId));
+		const wanted = [...new Set(names)];
+		return {
+			tools: shareable.filter((tool) => wanted.includes(tool.name)),
+			missing: wanted.filter((name) => !shareable.some((tool) => tool.name === name)),
+		};
+	}
+
+	/**
+	 * Runs a tool for a guest of one of the owner's bots, called by the
+	 * guest's space: only one the bot shares now, as the owner, with their
+	 * connections. An image is kept in the owner's files, in a folder of the
+	 * guest's under `bots/`, which their chat reads it from (`botImage`).
+	 * A tool the owner approves first runs only once they approve: the guest's
+	 * `call` files an approval and gets null, and, woken by the decision, asks
+	 * again and gets the outcome (`#askForBotGuest`).
+	 */
+	async runBotTool(botId: string, guest: string, name: string, args: Record<string, unknown>, call: BotToolCall | null = null): Promise<BotToolResult | null> {
+		this.#assertOpen();
+		const bot = await this.env.Gallery.getByName("gallery").bot(botId);
+		if (!bot || bot.ownerId !== this.name) return botToolError("This bot's link was turned off.");
+		const tool = bot.tools.find((candidate) => candidate.name === name);
+		if (!tool) return botToolError(`${bot.name} doesn't share ${name}.`);
+		if (!tool.ask) return this.#runBotTool(botId, guest, name, args);
+		// A guest's space that hasn't heard yet can't wait for a decision: it hears before their next message.
+		if (!call) return botToolError(`${this.#me()?.username ?? "Its author"} now approves each call to ${name} first. Tell the person to ask again in a new message.`);
+		return this.#askForBotGuest(bot, guest, tool, args, call);
+	}
+
+	/** Runs a tool a bot shares, for one of its guests, checked already. */
+	async #runBotTool(botId: string, guest: string, name: string, args: Record<string, unknown>): Promise<BotToolResult> {
+		console.log(JSON.stringify({ event: "pim.bot_tool", bot: botId, guest, tool: name }));
+		if (name === GENERATE_IMAGE) {
+			const services = this.#imageServices();
+			if (!services) return botToolError("Images can't be made right now.");
+			const { prompt, shape } = args as { prompt?: unknown; shape?: unknown };
+			if (typeof prompt !== "string" || prompt === "") return botToolError("prompt is required.");
+			const shapes = ["square", "landscape", "portrait"] as const;
+			const target = `${botFolder(botId, guest)}/${new Date().toISOString().replace(/[:.]/g, "-")}`;
+			return (await drawImage(
+				services,
+				prompt,
+				shapes.find((candidate) => candidate === shape),
+				target,
+				undefined,
+				"The person sees it in the chat now.",
+			)) as BotToolResult;
+		}
+		const servers = this.apps.servers();
+		for (const tool of this.apps.tools()) {
+			const server = servers.find((candidate) => candidate.id === tool.serverId);
+			if (!server || toolName(server.id, tool.name) !== name) continue;
+			if (server.state !== "ready") break;
+			const result = await this.apps.call(server.id, tool.name, args);
+			return { content: toContent(result), ...(result.isError ? { isError: true } : {}) };
+		}
+		return botToolError(`${name} isn't available right now.`);
+	}
+
+	/**
+	 * A bot's guest's call to a tool the owner approves first. The first time,
+	 * it files an approval, which the owner is told about and which is denied
+	 * if they don't answer within a day, and answers null: the guest's call
+	 * waits. Once decided (see `decideApproval`), the call, woken, asks again:
+	 * approved, the tool runs then, once, and later asks get what it answered.
+	 */
+	async #askForBotGuest(bot: Bot, guest: string, tool: BotTool, args: Record<string, unknown>, call: BotToolCall): Promise<BotToolResult | null> {
+		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${bot.id}\n${guest}\n${call.session}\n${call.callId}`));
+		const id = `b-${[...new Uint8Array(digest)].slice(0, 16).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+		const known = this.store.approval(id);
+		if (known?.status === "denied") {
+			const host = this.#me()?.username ?? "Its author";
+			const why = known.decidedBy === "timeout" ? `${host} didn't answer within a day` : `${host} said no`;
+			return botToolError(`${why}, so ${tool.name} didn't run.${known.note ? ` ${host}'s note: ${known.note}` : ""}`);
+		}
+		if (known?.status === "approved") {
+			if (known.result !== null) return known.result === "" ? botToolError(`${tool.name} was approved and started, but its result was lost.`) : { content: [{ type: "text", text: known.result }] };
+			// Marked first, so it never runs twice for one approval.
+			this.store.recordApprovalResult(id, "");
+			const result = await this.#runBotTool(bot.id, guest, tool.name, args);
+			this.store.recordApprovalResult(id, result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"));
+			return result;
+		}
+		if (known) return null;
+		const now = Date.now();
+		const summary = summarizeCall(tool.appName ?? "Pim", tool.name, args);
+		const approval = this.store.requestApproval({
+			id,
+			session: call.session,
+			callId: call.callId,
+			action: BOT_TOOL_ACTION,
+			tool: null,
+			args: { bot: bot.id, tool: tool.name, arguments: args },
+			summary,
+			createdAt: now,
+			expiresAt: now + GUEST_APPROVAL_MS,
+			onTimeout: "deny",
+			requestedBy: { ownerId: guest, username: call.username, circle: "", circleName: bot.name, bot: bot.id },
+		});
+		await this.schedule(new Date(approval.expiresAt!), APPROVAL_EXPIRY_CALLBACK, { id });
+		this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
+		const notification = this.store.addNotification({
+			id: crypto.randomUUID(),
+			session: null,
+			title: `${call.username} asked ${bot.name}`,
+			body: `${call.username} (${bot.name}) wants: ${summary}`,
+		});
+		await this.deliverNotification(notification, { sockets: false });
+		return null;
+	}
+
+	/** Whether the bot's guest's call that filed `approval` still waits for it, in their space. */
+	async #botCallWaits(approval: Approval): Promise<boolean> {
+		return (await this.#pimOf(approval.requestedBy!.ownerId)).botCallWaits(this.name, approval.session, approval.callId ?? "").catch(() => false);
+	}
+
+	/** In a guest's space: whether a call to one of their bot's tools still waits for the bot's author (`owner`) to decide. */
+	async botCallWaits(owner: string, session: string, callId: string): Promise<boolean> {
+		this.#assertOpen();
+		return this.guestBot()?.owner === owner && (await this.#waitingCall({ session, callId })) !== null;
+	}
+
+	/** In a guest's space: the bot's author decided about a call that waits for them. It runs again, and finds their decision. */
+	async botToolDecided(owner: string, session: string, callId: string): Promise<void> {
+		this.#assertOpen();
+		if (this.guestBot()?.owner !== owner) return;
+		const call = await this.#waitingCall({ session, callId });
+		if (call) await this.harness.resumeTask(session, call);
+	}
+
+	/**
+	 * An image a guest of one of the owner's bots had made, from the guest's
+	 * own folder only, for their chat to show. Null for anything else, or
+	 * while the owner's computer is offline.
+	 */
+	async botImage(botId: string, guest: string, path: string): Promise<{ name: string; type: string; bytes: Uint8Array } | null> {
+		this.#assertOpen();
+		const file = filesPath(path);
+		if (file === null || !file.startsWith(`${botFolder(botId, guest)}/`)) return null;
+		try {
+			const found = await this.files.read(file);
+			return { name: found.name, type: found.type, bytes: new Uint8Array(await new Response(found.body).arrayBuffer()) };
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * In a guest's space: stand-ins for the tools their bot shares, each run by
+	 * its author's space. Installed in every space, with no tools but in a
+	 * guest's, so that chats begun before a change see it.
+	 */
+	#installBotTools(): void {
+		const guest = this.guestBot();
+		const owner = guest?.owner;
 		this.registry.install(
-			imageGenerationExtension({
-				model,
-				reserve: () => {
+			botToolsExtension(
+				guest && owner !== undefined ? (guest.tools ?? []) : [],
+				() => {
 					this.#assertOpen();
-					const reserved = this.usage.reserveModel(plan ? CHATGPT_PROVIDER : CLOUDFLARE_PROVIDER_ID, model.id);
-					return reserved.ok ? null : reserved.refusal;
+					return this.usage.reserveToolCall();
 				},
-				save: async (path, bytes) => (await this.files.write(path, bytes)).path,
-			}),
+				async (name, args, call) => (await this.#pimOf(owner!)).runBotTool(guest!.bot, this.name, name, args, call),
+				this.#me()?.username ?? this.name,
+			),
 		);
+	}
+
+	/** The bot's tools changed: the guest's chats get the new set from their next request, once the harness is set up. */
+	#botToolsChanged(): void {
+		if (this.registry.snapshot().extension("pim.approvals")) this.#installBotTools();
 	}
 
 	#describeCircles() {

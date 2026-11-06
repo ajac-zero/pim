@@ -96,6 +96,8 @@ export async function servePublicArtifact(request: Request, env: Env, pathname: 
 const BOT_GONE = "This bot's link was turned off.";
 /** Messages a day each guest may send a bot shared without saying. */
 const DEFAULT_DAILY_MESSAGES = 50;
+/** Tool calls a day each guest may make for a bot shared without saying: calls to its apps and to the tools the admin shares with it. */
+const DEFAULT_DAILY_TOOL_CALLS = 20;
 const bots = new Map<string, { bot: Bot | null; at: number }>();
 /** Which sharing of their bot each guest's space was last brought up to here: its `sharedAt`, or 0 once it was turned off. */
 const synced = new Map<string, number>();
@@ -172,7 +174,7 @@ export async function guestRequest(env: Env, account: Account, request: Request,
 	}
 	if (path === "/bot") {
 		const guest = await pim.guestBot();
-		return json({ bot: bot ? { ...botCard(bot), dailyMessages: bot.dailyMessages } : null, agent: guest?.agent ?? null });
+		return json({ bot: bot ? { ...botCard(bot), dailyMessages: bot.dailyMessages, dailyToolCalls: bot.dailyToolCalls } : null, agent: guest?.agent ?? null });
 	}
 	return undefined;
 }
@@ -201,7 +203,10 @@ async function botSharing(env: Env, bot: Bot) {
 		id: bot.id,
 		url: `${pimOrigin(env)}/b/${bot.id}`,
 		dailyMessages: bot.dailyMessages,
+		dailyToolCalls: bot.dailyToolCalls,
 		model: bot.model,
+		tools: bot.tools.map((tool) => tool.name),
+		ask: bot.tools.filter((tool) => tool.ask).map((tool) => tool.name),
 		sharedAt: bot.sharedAt,
 		guests: await directory(env).botGuests(bot.id),
 	};
@@ -639,9 +644,11 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (request.method === "PUT") {
 					const agent = await (await pim()).agentToPublish(id);
 					if (!agent) return fail(404, `No agent ${id}`);
-					const { dailyMessages: given, model: wanted } = await body();
+					const { dailyMessages: given, dailyToolCalls: givenToolCalls, model: wanted, tools: named, ask: asked } = await body();
 					if (given !== undefined && given !== null && typeof given !== "number") return fail(400, "dailyMessages must be a number, or null for this Pim's own limit");
+					if (givenToolCalls !== undefined && givenToolCalls !== null && typeof givenToolCalls !== "number") return fail(400, "dailyToolCalls must be a number, or null for this Pim's own limit");
 					const dailyMessages = given === undefined ? (shared ? shared.dailyMessages : DEFAULT_DAILY_MESSAGES) : given;
+					const dailyToolCalls = givenToolCalls === undefined ? (shared ? shared.dailyToolCalls : DEFAULT_DAILY_TOOL_CALLS) : givenToolCalls;
 					const choice = wanted as { provider?: unknown; id?: unknown } | null | undefined;
 					if (choice !== undefined && choice !== null && (typeof choice.provider !== "string" || typeof choice.id !== "string")) {
 						return fail(400, "model must be { provider, id }, or null for this Pim's default");
@@ -649,9 +656,23 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 					// Checked by the admin's space, which knows what this Pim offers everyone.
 					const model =
 						choice === undefined ? (shared?.model ?? null) : choice === null ? null : await (await pim()).botModel(choice.provider as string, choice.id as string);
-					const bot = await gallery(env).shareBot(account.ownerId, account.username, agent, dailyMessages, model);
+					if (named !== undefined && !(Array.isArray(named) && named.every((name) => typeof name === "string"))) {
+						return fail(400, "tools must be the names of the agent's tools to share");
+					}
+					// Checked by the admin's space, which runs them; left out, the ones shared before that it still has, as they are now.
+					const { tools: found, missing } = await (await pim()).botTools(id, (named as string[] | undefined) ?? shared?.tools.map((tool) => tool.name) ?? []);
+					if (named !== undefined && missing.length > 0) return fail(400, `${agent.name} can't share ${missing.join(", ")}: it isn't one of its tools you can share.`);
+					if (asked !== undefined && !(Array.isArray(asked) && asked.every((name) => typeof name === "string"))) {
+						return fail(400, "ask must be the names of the shared tools you approve each call to first");
+					}
+					// Left out, the tools asked about before still are.
+					const ask = new Set((asked as string[] | undefined) ?? shared?.tools.filter((tool) => tool.ask).map((tool) => tool.name) ?? []);
+					const unshared = [...ask].filter((name) => !found.some((tool) => tool.name === name));
+					if (asked !== undefined && unshared.length > 0) return fail(400, `${unshared.join(", ")} isn't shared: only a shared tool can ask you first.`);
+					const tools = found.map((tool) => ({ ...tool, ask: ask.has(tool.name) }));
+					const bot = await gallery(env).shareBot(account.ownerId, account.username, agent, { dailyMessages, dailyToolCalls, model, tools });
 					bots.delete(bot.id);
-					log("bot_shared", { owner: account.ownerId, bot: bot.id, dailyMessages, model });
+					log("bot_shared", { owner: account.ownerId, bot: bot.id, dailyMessages, dailyToolCalls, model, tools: tools.map((tool) => tool.name), ask: tools.filter((tool) => tool.ask).map((tool) => tool.name) });
 					return json(await botSharing(env, bot), shared ? 200 : 201);
 				}
 				if (request.method === "DELETE") {

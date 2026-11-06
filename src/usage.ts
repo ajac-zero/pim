@@ -27,6 +27,8 @@ export type Limits = {
 	readonly dailyModelRequests: number | null;
 	/** Runs started per UTC day: messages into sessions, scheduled tasks firing, and app events. */
 	readonly dailyRuns: number | null;
+	/** Tool calls per UTC day to connected apps, and, for a bot's guest, to the tools its author shares, which run as the author. */
+	readonly dailyToolCalls: number | null;
 	/** Open conversations. */
 	readonly sessions: number | null;
 	/** Pending scheduled tasks. */
@@ -47,6 +49,7 @@ export const LIMIT_NAMES = [
 	"dailyTokens",
 	"dailyModelRequests",
 	"dailyRuns",
+	"dailyToolCalls",
 	"sessions",
 	"schedules",
 	"storageBytes",
@@ -80,6 +83,7 @@ export type DayUsage = {
 	readonly planTokens: number;
 	readonly modelRequests: number;
 	readonly runs: number;
+	readonly toolCalls: number;
 	readonly models: readonly { provider: string; model: string; requests: number; input: number; output: number; cacheRead: number; cacheWrite: number }[];
 };
 
@@ -98,6 +102,10 @@ CREATE TABLE IF NOT EXISTS pim_usage_models (
 CREATE TABLE IF NOT EXISTS pim_usage_runs (
 	day TEXT PRIMARY KEY,
 	runs INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS pim_usage_tool_calls (
+	day TEXT PRIMARY KEY,
+	calls INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -197,6 +205,7 @@ export class UsageMeter {
 			const cutoff = utcDay(this.#now() - KEEP_DAYS * 86_400_000);
 			this.#sql.exec("DELETE FROM pim_usage_models WHERE day < ?", cutoff);
 			this.#sql.exec("DELETE FROM pim_usage_runs WHERE day < ?", cutoff);
+			this.#sql.exec("DELETE FROM pim_usage_tool_calls WHERE day < ?", cutoff);
 		}
 		return day;
 	}
@@ -268,6 +277,17 @@ export class UsageMeter {
 		this.#sql.exec("UPDATE pim_usage_runs SET runs = runs - 1 WHERE day = ? AND runs > 0", day);
 	}
 
+	/** Checks the tool call limit and counts the call in one synchronous step; why it may not be made, or null. A call made counts, whatever it answers. */
+	reserveToolCall(): string | null {
+		const day = this.#today();
+		const { dailyToolCalls } = this.#limits();
+		if (dailyToolCalls !== null && this.day(day).toolCalls >= dailyToolCalls) {
+			return `${QUOTA_MESSAGE}: today's ${dailyToolCalls} tool calls are used up. It resets at midnight UTC.`;
+		}
+		this.#sql.exec("INSERT INTO pim_usage_tool_calls (day, calls) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET calls = calls + 1", day);
+		return null;
+	}
+
 	day(day: string): DayUsage {
 		const models = this.#sql
 			.exec("SELECT provider, model, requests, input, output, cache_read, cache_write FROM pim_usage_models WHERE day = ? ORDER BY provider, model", day)
@@ -289,7 +309,8 @@ export class UsageMeter {
 			else tokens += used;
 		}
 		const runs = Number(this.#sql.exec("SELECT runs FROM pim_usage_runs WHERE day = ?", day).toArray()[0]?.runs ?? 0);
-		return { day, tokens, planTokens, modelRequests: models.reduce((n, model) => n + model.requests, 0), runs, models };
+		const toolCalls = Number(this.#sql.exec("SELECT calls FROM pim_usage_tool_calls WHERE day = ?", day).toArray()[0]?.calls ?? 0);
+		return { day, tokens, planTokens, modelRequests: models.reduce((n, model) => n + model.requests, 0), runs, toolCalls, models };
 	}
 
 	today(): DayUsage {
@@ -301,7 +322,8 @@ export class UsageMeter {
 		const since = utcDay(this.#now() - (days - 1) * 86_400_000);
 		const rows = this.#sql
 			.exec(
-				"SELECT day FROM pim_usage_models WHERE day >= ? UNION SELECT day FROM pim_usage_runs WHERE day >= ? ORDER BY day DESC",
+				"SELECT day FROM pim_usage_models WHERE day >= ? UNION SELECT day FROM pim_usage_runs WHERE day >= ? UNION SELECT day FROM pim_usage_tool_calls WHERE day >= ? ORDER BY day DESC",
+				since,
 				since,
 				since,
 			)

@@ -2167,6 +2167,127 @@ describe("bots", () => {
 		expect((await say(fresh.browser, theirs.id, "Hello?")).status).toBe(429);
 	});
 
+	it("gives guests only the tools the admin shares, run with the admin's connection, up to the bot's tool calls a day", async () => {
+		const search = { name: "Web search", description: "Searches the web.", url: "https://search.example.test/mcp", icon: "https://search.example.test/icon.png" };
+		let found = 0;
+		const realFetch = globalThis.fetch;
+		const server = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith(search.url)) return realFetch(input, init);
+			const mcp = () => {
+				const app = new McpServer({ name: "search", version: "1.0.0" });
+				app.registerTool("find", { description: "Search the web.", annotations: { readOnlyHint: true } }, async () => {
+					found += 1;
+					return { content: [{ type: "text", text: "Found it." }] };
+				});
+				app.registerTool("forget", { description: "Delete the search history.", annotations: { destructiveHint: true } }, async () => ({ content: [{ type: "text", text: "Gone." }] }));
+				return app;
+			};
+			return createMcpHandler(mcp)(request, {}, createExecutionContext());
+		});
+		try {
+			expect((await admin("/api/admin/apps", { method: "POST", json: search })).status).toBe(201);
+			// The admin connects it once, in their own space.
+			expect((await admin("/api/mcp", { method: "POST", json: { app: "custom/web-search" } })).body).toMatchObject({ state: "ready" });
+			const agent = (await admin("/api/agents", { method: "POST", json: { name: "Researcher", instructions: "Look things up.", apps: ["custom/web-search"] } })).body;
+			expect((await admin(`/api/agents/${agent.id}/bot-tools`)).body.tools).toEqual([
+				expect.objectContaining({ name: "web_search_find", appName: "Web search", destructive: false }),
+				expect.objectContaining({ name: "web_search_forget", appName: "Web search", destructive: true }),
+			]);
+			const share = (json: unknown) => admin(`/api/agents/${agent.id}/bot`, { method: "PUT", json });
+			expect((await share({ tools: ["shell"] })).status).toBe(400);
+			const shared = await share({ tools: ["web_search_find"], dailyToolCalls: 1 });
+			expect(shared.body).toMatchObject({ tools: ["web_search_find"], dailyToolCalls: 1 });
+
+			// The guest's copy works with no apps of its own: it has the one tool shared, and connects nothing.
+			const guest = await person("search-guest", { bot: shared.body.id });
+			const { agent: copy } = (await guest.browser.json("/api/bot")).body;
+			expect((await guest.browser.json(`/api/agents/${copy}`)).body.apps).toEqual([]);
+			const results: string[] = [];
+			const seen = { tools: [] as string[] };
+			faux.setResponses([
+				(context) => {
+					// Every tool the system messages added, less those they removed.
+					const tools = new Set<string>();
+					for (const message of context.messages) {
+						if (message.role !== "system") continue;
+						for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+						for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+					}
+					seen.tools = [...tools];
+					return toolUse("web_search_find", { query: "pim" });
+				},
+				toolUse("web_search_find", { query: "pim again" }),
+				(context) => {
+					for (const message of context.messages) if (message.role === "toolResult") results.push(JSON.stringify(message.content));
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			]);
+			const chat = (await guest.browser.json("/api/sessions", { method: "POST", json: {} })).body;
+			expect((await say(guest.browser, chat.id, "Look it up twice")).body).toMatchObject({ status: "done" });
+			expect(seen.tools).toContain("web_search_find");
+			expect(seen.tools).not.toContain("web_search_forget");
+			expect(results[0]).toContain("Found it.");
+			// One call a day: the second never leaves the guest's space.
+			expect(results[1]).toContain("today's 1 tool calls are used up");
+			expect(found).toBe(1);
+			expect((await guest.browser.json("/api/usage")).body.today).toMatchObject({ toolCalls: 1 });
+			expect((await guest.browser.json("/api/mcp")).body.servers).toEqual([]);
+
+			// Shared again without it, the admin's space refuses it, whatever the guest's space asks.
+			expect((await share({ tools: [], dailyToolCalls: 5 })).body.tools).toEqual([]);
+			const refused = await runInDurableObject(env.Pim.getByName(operator.ownerId), (instance: Pim) =>
+				instance.runBotTool(shared.body.id, guest.ownerId, "web_search_find", { query: "pim" }),
+			);
+			expect(refused).toMatchObject({ isError: true, content: [{ text: "Researcher doesn't share web_search_find." }] });
+			expect(found).toBe(1);
+
+			// Shared to ask first: each call waits for the admin, who approves one and denies the next.
+			expect((await share({ tools: ["web_search_find"], ask: ["shell"] })).status).toBe(400);
+			expect((await share({ tools: ["web_search_find"], ask: ["web_search_find"], dailyToolCalls: 5 })).body).toMatchObject({ ask: ["web_search_find"] });
+			const asked: string[] = [];
+			faux.setResponses([
+				toolUse("web_search_find", { query: "asked" }),
+				toolUse("web_search_find", { query: "asked again" }),
+				(context) => {
+					for (const message of context.messages) if (message.role === "toolResult") asked.push(JSON.stringify(message.content));
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			]);
+			const later = (await guest.browser.json("/api/sessions", { method: "POST", json: {} })).body;
+			expect((await guest.browser.json(`/api/sessions/${later.id}/messages`, { method: "POST", json: { content: "Ask first" } })).status).toBe(202);
+			const request = () =>
+				vi.waitFor(async () => {
+					const [pending] = (await admin("/api/approvals?status=pending")).body.approvals;
+					expect(pending).toMatchObject({ requestedBy: { username: "search-guest", bot: shared.body.id } });
+					return pending;
+				});
+			const first = await request();
+			expect(first.summary).toContain("web_search_find");
+			// Nothing runs until the admin answers, and only they can: never "always".
+			expect(found).toBe(1);
+			expect((await admin(`/api/approvals/${first.id}/approve`, { method: "POST", json: { always: true } })).status).toBe(400);
+			expect((await admin(`/api/approvals/${first.id}/approve`, { method: "POST", json: {} })).body).toMatchObject({ status: "approved" });
+			const second = await vi.waitFor(async () => {
+				const next = await request();
+				expect(next.id).not.toBe(first.id);
+				return next;
+			});
+			expect((await admin(`/api/approvals/${second.id}/deny`, { method: "POST", json: { note: "Once is enough." } })).body).toMatchObject({ status: "denied" });
+			await vi.waitFor(() => expect(asked).toHaveLength(2), { timeout: 10_000 });
+			expect(asked[0]).toContain("Found it.");
+			expect(asked[1]).toContain("said no, so web_search_find didn't run. boss's note: Once is enough.");
+			expect(found).toBe(2);
+			// Each call counts once, though it ran again when the admin's answer woke it.
+			expect((await guest.browser.json("/api/usage")).body.today).toMatchObject({ toolCalls: 3 });
+		} finally {
+			// The admin's connection goes before the server it talks to does.
+			await admin("/api/mcp/web_search", { method: "DELETE" });
+			server.mockRestore();
+			await admin("/api/admin/apps/web-search", { method: "DELETE" });
+		}
+	});
+
 	it("runs guests on the model the admin chose for the bot, one this Pim offers everyone", async () => {
 		const gpu = { name: "Bot GPU", url: "https://bot-gpu.example.test/v1", key: "bot-key" };
 		const realFetch = globalThis.fetch;

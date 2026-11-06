@@ -269,6 +269,41 @@ describe("the computer", () => {
 		expect(paintings.length).toBe(before.paintings + 1);
 	});
 
+	it("draws images for a bot's guests, kept in each guest's own folder, and shares nothing of the computer", async () => {
+		const gallery = env.Gallery.getByName("gallery");
+		const { tools, published } = await runInDurableObject(agent(), async (instance: Pim) => {
+			const majordomo = instance.agents.majordomo();
+			const shareable = instance.shareableTools(majordomo).map((tool) => tool.name);
+			// Images can be shared; the computer's own tools never are.
+			expect(shareable).toContain("generate_image");
+			for (const tool of ["file_read", "file_write", "shell", "browser_open"]) expect(shareable).not.toContain(tool);
+			return { ...(await instance.botTools(majordomo.id, ["generate_image"])), published: (await instance.agentToPublish(majordomo.id))! };
+		});
+		const bot = await gallery.shareBot(OWNER, "owner", published, { dailyMessages: null, dailyToolCalls: null, model: null, tools });
+		const before = paintings.length;
+		const { made, other } = await runInDurableObject(agent(), async (instance: Pim) => ({
+			// The guest's model can't choose where it goes.
+			made: await instance.runBotTool(bot.id, "o_guest", "generate_image", { prompt: "A lighthouse at dusk", path: "/workspace/notes.md" }),
+			other: await instance.runBotTool(bot.id, "o_guest", "file_read", { path: "/workspace/notes.md" }),
+		}));
+		expect(made?.isError).toBeFalsy();
+		const { image } = JSON.parse((made!.content[0] as { text: string }).text);
+		expect(image.path).toMatch(new RegExp(`^/workspace/bots/${bot.id}/o_guest/[\\dT-]+Z\\.png$`));
+		expect(new Uint8Array(await fs.readFile(`${ROOT}${image.path.slice("/workspace".length)}`))).toEqual(PNG);
+		expect(paintings.length).toBe(before + 1);
+		expect(other).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("doesn't share file_read") }] });
+
+		// The guest's chat reads it back; no other guest can, nor anything outside the guest's folder.
+		const read = (guest: string, path: string) => runInDurableObject(agent(), (instance: Pim) => instance.botImage(bot.id, guest, path));
+		expect((await read("o_guest", image.path))?.bytes).toEqual(PNG);
+		expect(await read("o_other", image.path)).toBeNull();
+		expect(await read("o_guest", `/workspace/bots/${bot.id}/o_guest/../../../notes.md`)).toBeNull();
+		await gallery.unshareBot(OWNER, bot.agentId);
+		const off = await runInDurableObject(agent(), (instance: Pim) => instance.runBotTool(bot.id, "o_guest", "generate_image", { prompt: "Again" }));
+		expect(off).toMatchObject({ isError: true });
+		expect(paintings.length).toBe(before + 1);
+	});
+
 	it("draws with the ChatGPT plan from the computer while it's signed in for images, and refreshes the sign-in", async () => {
 		const jwt = (claims: Record<string, unknown>) => `e30.${btoa(JSON.stringify(claims)).replace(/=+$/, "")}.sig`;
 		const auth = { "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } };

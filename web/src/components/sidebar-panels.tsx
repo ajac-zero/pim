@@ -4,6 +4,7 @@ import { type ReactNode, type Ref, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
+import { ApprovalBlock } from "~/components/chat/items";
 import { useI18n } from "~/components/i18n";
 import {
   AtSign,
@@ -28,6 +29,7 @@ import {
 } from "~/components/ui/tooltip";
 import { type PimNotification, type PimSchedule, pim } from "~/lib/pim-api";
 import {
+  approvalsQuery,
   artifactsQuery,
   notificationsQuery,
   schedulesQuery,
@@ -150,6 +152,12 @@ export function NotificationsPanel({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data: notifications } = useQuery(notificationsQuery());
+  // Calls your bots' guests asked to make with tools you approve first: they wait here, in any Pim.
+  const { data: approvals } = useQuery(approvalsQuery());
+  const botRequests = (approvals ?? []).filter(
+    (approval) =>
+      approval.status === "pending" && approval.requestedBy?.bot !== undefined,
+  );
   const [seen, setSeen] = useState<Set<string>>(() => new Set());
   const pending = (notifications ?? []).filter(
     (n) => n.readAt === null || seen.has(n.id),
@@ -184,6 +192,19 @@ export function NotificationsPanel({
           </SidebarPanelAction>
         )}
       </SidebarPanelHeader>
+      {botRequests.length > 0 && (
+        <section
+          aria-label={t("waitingForYou")}
+          className="max-h-[60%] shrink-0 space-y-2 overflow-y-auto px-3 pb-3 scrollbar-thin"
+        >
+          <h3 className="px-2 text-muted-foreground text-xs">
+            {t("waitingForYou")}
+          </h3>
+          {botRequests.map((approval) => (
+            <ApprovalBlock key={approval.id} approval={approval} />
+          ))}
+        </section>
+      )}
       <PanelList
         label={t("notifications")}
         empty={

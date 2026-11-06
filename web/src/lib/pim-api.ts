@@ -454,6 +454,8 @@ export type Approval = {
     username: string;
     circle: string;
     circleName: string;
+    /** A guest of one of your bots asked, through it: `circleName` is then the bot's name. */
+    bot?: string;
   } | null;
   /** An agent at work on a task asked, for the chat `session` names; the approval's own `session` is the task's conversation. */
   member?: { name: string; session: string } | null;
@@ -523,6 +525,7 @@ export type Limits = {
   dailyTokens: number | null;
   dailyModelRequests: number | null;
   dailyRuns: number | null;
+  dailyToolCalls: number | null;
   sessions: number | null;
   schedules: number | null;
   storageBytes: number | null;
@@ -858,6 +861,7 @@ export type DayUsage = {
   planTokens: number;
   modelRequests: number;
   runs: number;
+  toolCalls: number;
 };
 
 export type UsageReport = {
@@ -905,10 +909,25 @@ export type BotCard = {
   icon: number | null;
 };
 
-/** A guest's bot: what its link shows and the messages a day it allows (null when it's turned off), and their copy of it. */
+/** A guest's bot: what its link shows and the messages and tool calls a day it allows (null when it's turned off), and their copy of it. */
 export type GuestBot = {
-  bot: (BotCard & { dailyMessages: number | null }) | null;
+  bot:
+    | (BotCard & {
+        dailyMessages: number | null;
+        dailyToolCalls: number | null;
+      })
+    | null;
   agent: string | null;
+};
+
+/** A tool of an agent's that a bot can share with its guests. */
+export type ShareableTool = {
+  name: string;
+  /** Its app; null for Pim's own, such as generate_image. */
+  appName: string | null;
+  description: string;
+  /** The app says it changes or deletes things. */
+  destructive: boolean;
 };
 
 /** One of the admin's agents shared as a bot: its public link, and who joined through it. */
@@ -916,8 +935,14 @@ export type BotSharing = {
   id: string;
   url: string;
   dailyMessages: number | null;
+  /** Tool calls each guest may make a day; null for this Pim's own limit. */
+  dailyToolCalls: number | null;
   /** The model guests use; null for this Pim's default. */
   model: { provider: string; id: string } | null;
+  /** The tools it shares, by name, which run in your space, as you. */
+  tools: string[];
+  /** Those of them you approve each call to first. */
+  ask: string[];
   sharedAt: number;
   guests: number;
 };
@@ -1308,13 +1333,20 @@ export const pim = {
   /** Shares the agent as it is now as a bot, or updates what its link shares. */
   shareBot: (
     id: string,
-    dailyMessages: number | null,
-    model: { provider: string; id: string } | null,
+    settings: Pick<
+      BotSharing,
+      "dailyMessages" | "dailyToolCalls" | "model" | "tools" | "ask"
+    >,
   ) =>
     call<BotSharing>(`/agents/${id}/bot`, {
       method: "PUT",
-      body: JSON.stringify({ dailyMessages, model }),
+      body: JSON.stringify(settings),
     }),
+  /** What of the agent's you can share with a bot's guests: its connected apps' tools, and generate_image while you make images. */
+  agentBotTools: (id: string) =>
+    call<{ tools: ShareableTool[] }>(`/agents/${id}/bot-tools`).then(
+      (body) => body.tools,
+    ),
   unshareBot: (id: string) =>
     call<{ deleted: boolean }>(`/agents/${id}/bot`, { method: "DELETE" }),
   /** A guest's bot. */

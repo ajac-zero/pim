@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { Download, Trash2, X } from "~/components/icons";
+import { PdfView } from "~/components/pdf-view";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import { baseName, displayPath, parentOf, previewOf } from "~/lib/files";
@@ -156,6 +157,8 @@ export function FileView({
         ) : preview.kind === "video" ? (
           // biome-ignore lint/a11y/useMediaCaption: the person's own video, with no captions to give.
           <video src={url} controls className="max-h-full max-w-full" />
+        ) : preview.kind === "pdf" ? (
+          <PdfView url={url} name={name} />
         ) : !showText ? (
           <p className="m-auto text-muted-foreground text-sm">
             {t("noFilePreview")}

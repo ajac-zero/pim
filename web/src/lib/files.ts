@@ -40,7 +40,7 @@ const CODE: Record<string, BundledLanguage> = {
 const PLAIN = new Set(["txt", "csv", "tsv", "log", "ics", "vcf"]);
 
 export type FilePreview =
-  | { kind: "image" | "audio" | "video" | "markdown" | "text" | "none" }
+  | { kind: "image" | "audio" | "video" | "pdf" | "markdown" | "text" | "none" }
   | { kind: "code"; language: BundledLanguage };
 
 /** How the app shows a file, by its name; the bytes are served as inert data whatever it is. */
@@ -50,6 +50,7 @@ export function previewOf(name: string): FilePreview {
   if (IMAGES.has(extension)) return { kind: "image" };
   if (AUDIO.has(extension)) return { kind: "audio" };
   if (VIDEO.has(extension)) return { kind: "video" };
+  if (extension === "pdf") return { kind: "pdf" };
   if (extension === "md" || extension === "markdown")
     return { kind: "markdown" };
   const language = CODE[extension];

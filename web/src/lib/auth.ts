@@ -332,6 +332,8 @@ export const auth = {
     ),
   register: (input: {
     username: string;
+    /** What you'd like to be called: your majordomo greets you by it. */
+    name?: string;
     invite?: string;
     claim?: string;
     /** Joining through a bot's public link, as a guest who chats with it. */
@@ -339,6 +341,55 @@ export const auth = {
     timeZone?: string;
   }) => post<Registered>("/register", input),
 };
+
+/** How long a username may be, and how long one made from a name is before any number goes after it. */
+const USERNAME_MAX = 32;
+const NAME_PART_MAX = USERNAME_MAX - 5;
+
+/** Latin letters that don't come apart into a plain letter and its accents. */
+const LATIN_LETTERS: Record<string, string> = {
+  æ: "ae",
+  ø: "o",
+  œ: "oe",
+  ß: "ss",
+  ł: "l",
+  đ: "d",
+  ð: "d",
+  þ: "th",
+};
+
+/** A name as usernames allow it, such as "Grace Hopper" as `grace-hopper`; short or empty when the name has little in Latin letters or digits. */
+export function usernameFrom(name: string): string {
+  return name
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[æøœßłđðþ]/g, (letter) => LATIN_LETTERS[letter] ?? "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+/, "")
+    .slice(0, NAME_PART_MAX)
+    .replace(/-+$/, "");
+}
+
+/**
+ * The first free username made from a name: the name itself, then numbered,
+ * then with random digits; `person-` and digits when the name gives too
+ * little. One that every check found taken is still returned: registering
+ * says so, and the person can change it.
+ */
+export async function freeUsername(name: string): Promise<string> {
+  const base = usernameFrom(name);
+  const random = () =>
+    `${base.length >= 3 ? base : base || "person"}-${Math.floor(1000 + Math.random() * 9000)}`;
+  const candidates =
+    base.length >= 3
+      ? [base, `${base}-2`, `${base}-3`, random(), random()]
+      : [random(), random(), random()];
+  for (const candidate of candidates) {
+    if ((await auth.usernameAvailable(candidate)).available) return candidate;
+  }
+  return candidates[candidates.length - 1] as string;
+}
 
 export const tokensQuery = () =>
   queryOptions({ queryKey: ["auth", "tokens"], queryFn: auth.tokens });

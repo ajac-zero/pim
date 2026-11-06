@@ -233,7 +233,7 @@ function Introduced({ children }: { children: ReactNode }) {
     );
   }
   if (!data) return null;
-  if (!data.introduced) return <MeetMajordomo />;
+  if (!data.introduced) return <MeetMajordomo given={data.yourName} />;
   return children;
 }
 

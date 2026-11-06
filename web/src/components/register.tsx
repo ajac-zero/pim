@@ -19,7 +19,9 @@ import {
   authSessionQuery,
   cancelled,
   forgetSetupCode,
+  freeUsername,
   type Registered,
+  usernameFrom,
 } from "~/lib/auth";
 import { cn } from "~/lib/utils";
 
@@ -36,9 +38,9 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 /**
- * Joining this Pim: pick a username, save the recovery codes, make the
- * first passkey, right here. Signed in, the app asks you to name your
- * majordomo (see `MeetMajordomo`). `claim` is for the first person on a Pim with no
+ * Joining this Pim: give your name, and keep the username made from it or
+ * change it, save the recovery codes, make the first passkey, right here. Signed in, your majordomo
+ * greets you by that name in your first chat (see `MeetMajordomo`). `claim` is for the first person on a Pim with no
  * admin, who becomes it: in the minutes after a deploy (no code), or with
  * the link from the Worker's logs. `bot` joins through a bot's public link,
  * as a guest who chats with that bot.
@@ -100,21 +102,33 @@ function RegistrationForm({
   onBack?: () => void;
 }) {
   const { t } = useI18n();
+  const nameId = useId();
   const usernameId = useId();
   const inviteId = useId();
-  const [username, setUsername] = useState("");
+  const [yourName, setYourName] = useState("");
+  // Made from their name until they change it: null until then.
+  const [username, setUsername] = useState<string | null>(null);
   const [invite, setInvite] = useState(given ?? "");
-  const name = useDebounced(normalize(username), 300);
+  const typedName = useDebounced(yourName.trim(), 300);
+  const made = useQuery({
+    queryKey: ["username-from", usernameFrom(typedName)],
+    queryFn: () => freeUsername(typedName),
+    enabled: typedName !== "" && username === null,
+    staleTime: 10_000,
+  });
+  const madeFor = typedName === yourName.trim() ? made.data : undefined;
+  const name = useDebounced(normalize(username ?? ""), 300);
   const availability = useQuery({
     queryKey: ["username", name],
     queryFn: () => auth.usernameAvailable(name),
-    enabled: name.length > 0,
+    enabled: username !== null && name.length > 0,
     staleTime: 10_000,
   });
   const register = useMutation({
     mutationFn: () =>
       auth.register({
-        username: normalize(username),
+        username: normalize(username ?? madeFor ?? ""),
+        name: yourName.trim(),
         ...(mode === "invite" ? { invite: invite.trim() } : {}),
         ...(mode === "claim" && claim ? { claim } : {}),
         ...(mode === "bot" && bot ? { bot } : {}),
@@ -123,9 +137,14 @@ function RegistrationForm({
     onSuccess: onRegistered,
   });
 
-  const current = name === normalize(username) ? availability.data : undefined;
+  const current =
+    username !== null && name === normalize(username)
+      ? availability.data
+      : undefined;
   const ready =
-    current?.available === true && (mode !== "invite" || invite.trim() !== "");
+    yourName.trim() !== "" &&
+    (username === null ? madeFor !== undefined : current?.available === true) &&
+    (mode !== "invite" || invite.trim() !== "");
 
   return (
     <form
@@ -149,47 +168,91 @@ function RegistrationForm({
             : t("registerBody")}
       </p>
 
-      <label htmlFor={usernameId} className="mt-6 block font-medium text-sm">
-        {t("username")}
+      <label htmlFor={nameId} className="mt-6 block font-medium text-sm">
+        {t("yourName")}
       </label>
       <Input
-        id={usernameId}
-        value={username}
-        onChange={(event) => setUsername(event.target.value)}
-        autoComplete="username"
-        autoCapitalize="none"
-        spellCheck={false}
-        maxLength={32}
+        id={nameId}
+        value={yourName}
+        onChange={(event) => setYourName(event.target.value)}
+        autoComplete="name"
+        maxLength={80}
         className="mt-1.5 h-10"
-        aria-describedby={`${usernameId}-hint`}
+        aria-describedby={`${nameId}-hint`}
         autoFocus
       />
       <p
-        id={`${usernameId}-hint`}
-        className={cn(
-          "mt-1.5 flex min-h-5 items-center gap-1.5 text-xs",
-          current?.available === false
-            ? "text-destructive"
-            : "text-muted-foreground",
-        )}
+        id={`${nameId}-hint`}
+        className="mt-1.5 flex min-h-5 items-center gap-1.5 text-muted-foreground text-xs"
         aria-live="polite"
       >
-        {name === "" ? (
-          t("usernameHint")
-        ) : !current ? (
+        {username !== null || yourName.trim() === "" ? (
+          t("yourNameHint")
+        ) : madeFor === undefined ? (
           <Loader2 className="size-3.5 animate-spin" />
-        ) : current.available ? (
-          <>
-            <Check className="size-3.5 text-primary" />
-            {t("usernameAvailable", { username: name })}
-          </>
         ) : (
           <>
-            <X className="size-3.5" />
-            {current.reason}
+            {t("usernameFromName", { username: madeFor })}
+            <span aria-hidden>·</span>
+            <button
+              type="button"
+              className="font-medium text-foreground underline-offset-2 hover:underline"
+              onClick={() => setUsername(madeFor)}
+            >
+              {t("changeUsername")}
+            </button>
           </>
         )}
       </p>
+
+      {username !== null && (
+        <>
+          <label
+            htmlFor={usernameId}
+            className="mt-4 block font-medium text-sm"
+          >
+            {t("username")}
+          </label>
+          <Input
+            id={usernameId}
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            maxLength={32}
+            className="mt-1.5 h-10"
+            aria-describedby={`${usernameId}-hint`}
+            autoFocus
+          />
+          <p
+            id={`${usernameId}-hint`}
+            className={cn(
+              "mt-1.5 flex min-h-5 items-center gap-1.5 text-xs",
+              current?.available === false
+                ? "text-destructive"
+                : "text-muted-foreground",
+            )}
+            aria-live="polite"
+          >
+            {name === "" ? (
+              t("usernameHint")
+            ) : !current ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : current.available ? (
+              <>
+                <Check className="size-3.5 text-primary" />
+                {t("usernameAvailable", { username: name })}
+              </>
+            ) : (
+              <>
+                <X className="size-3.5" />
+                {current.reason}
+              </>
+            )}
+          </p>
+        </>
+      )}
 
       {/* An invite link fills it in; typed only when someone sent the code alone. */}
       {mode === "invite" && !given && (

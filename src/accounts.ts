@@ -6,6 +6,7 @@ import { deploymentSettings, readDeployment } from "./deployment";
 import { FRAMED_KINDS, framePage, RUNTIME_PATH, ENTRY_FILES, readFiles, textOf } from "./artifacts";
 import type { AgentIcon, Bot, BotCard, PublishedArtifact } from "./gallery";
 import { HttpError } from "./http";
+import { MAX_YOUR_NAME } from "./majordomo";
 import { providerInfo } from "./providers";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
@@ -330,10 +331,15 @@ export async function handleRegistration(request: Request, env: Env, address: st
 /** Makes an account, and hands back its setup code, to make its first passkey with, and its recovery codes. */
 async function register(request: Request, env: Env, address: string, now: number): Promise<Response> {
 	if (fromAnotherSite(request)) return fail(403, "Requests must come from this app");
-	const body = (await request.json().catch(() => null)) as { username?: unknown; invite?: unknown; claim?: unknown; bot?: unknown; timeZone?: unknown } | null;
+	const body = (await request.json().catch(() => null)) as { username?: unknown; name?: unknown; invite?: unknown; claim?: unknown; bot?: unknown; timeZone?: unknown } | null;
 	const username = typeof body?.username === "string" ? body.username.trim().toLowerCase() : "";
 	const problem = usernameProblem(username);
 	if (problem) return fail(400, problem);
+	// What they'd like to be called, which their majordomo greets them by.
+	const name = body?.name ?? null;
+	if (name !== null && (typeof name !== "string" || /[\r\n]/.test(name) || name.trim().length > MAX_YOUR_NAME)) {
+		return fail(400, `name must be one line of at most ${MAX_YOUR_NAME} characters`);
+	}
 	// Joining through a bot's link makes a guest, who gets a copy of that bot alone.
 	const bot = typeof body?.bot === "string" ? await sharedBot(env, body.bot) : null;
 	if (body?.bot !== undefined && !bot) return fail(404, BOT_GONE);
@@ -360,7 +366,7 @@ async function register(request: Request, env: Env, address: string, now: number
 	try {
 		[setup, recoveryCodes] = await Promise.all([auth.issueSetupCode(now, PENDING_MS), auth.newRecoveryCodes(now)]);
 		const pim = await pimOf(env, account.ownerId);
-		await pim.provision({ ownerId: account.ownerId, username });
+		await pim.provision({ ownerId: account.ownerId, username }, name?.trim() || null);
 		// The deployment's limits are for members: the admin pays for the deployment.
 		if (account.role === "admin") await pim.setLimits(UNLIMITED);
 		if (account.role === "guest" && bot) await pim.adoptBot(await botCopy(env, bot));

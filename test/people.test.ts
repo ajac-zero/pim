@@ -2071,9 +2071,10 @@ describe("profiles and published agents", () => {
 			icon: true,
 		});
 
-		// A newcomer gets a copy besides the majordomo they are yet to name; whoever joined before doesn't.
-		const otto = await person("otto");
-		expect((await otto.browser.json("/api/majordomo")).body).toMatchObject({ agent: { name: "Majordomo", majordomo: true }, introduced: false });
+		// A newcomer gets a copy besides their majordomo; whoever joined before doesn't. The name they gave when they joined is the one it greets them by.
+		expect((await register("otto", { name: "Otto\nLilienthal" })).status).toBe(400);
+		const otto = await person("otto", { name: " Otto Lilienthal " });
+		expect((await otto.browser.json("/api/majordomo")).body).toMatchObject({ agent: { name: "Majordomo", majordomo: true }, introduced: false, yourName: "Otto Lilienthal" });
 		const [, copy, shopperCopy] = (await otto.browser.json("/api/agents")).body.agents;
 		expect(shopperCopy).toMatchObject({ name: "Shopper", instructions: "Keep the shopping list.", source: { template: "default", author: "boss" } });
 		expect(copy).toMatchObject({

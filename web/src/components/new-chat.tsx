@@ -12,7 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import type { Agent } from "~/lib/pim-api";
-import { agentsQuery, sessionsQuery, suggestionsQuery } from "~/lib/queries";
+import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { useStartChat } from "~/lib/start-chat";
 
 /**
@@ -32,7 +32,7 @@ export function NewChatDialog({
   prompt?: string;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
   const { data: agents } = useQuery(agentsQuery());
@@ -43,10 +43,6 @@ export function NewChatDialog({
     agents?.find((choice) => choice.id === asked) ??
     agents?.find((choice) => choice.id === chatAgent) ??
     agents?.find((choice) => choice.majordomo);
-  const { data: suggestions } = useQuery({
-    ...suggestionsQuery(agent?.id ?? "", locale),
-    enabled: open && agent !== undefined,
-  });
   const { start, starting } = useStartChat(agent?.id);
   const choose = (id: string) =>
     navigate({
@@ -73,8 +69,18 @@ export function NewChatDialog({
           className="fixed inset-x-0 bottom-0 z-50 rounded-t-[18px] border-t bg-background p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] shadow-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 max-md:data-[state=open]:slide-in-from-bottom-4 md:inset-x-auto md:top-[15vh] md:bottom-auto md:left-1/2 md:w-[calc(100%-2rem)] md:max-w-3xl md:-translate-x-1/2 md:rounded-[18px] md:border md:pb-2 md:data-[state=open]:zoom-in-95"
         >
           <div className="flex items-center justify-between py-1 pr-1 pl-3">
-            <Dialog.Title className="text-[13px] text-muted-foreground">
-              {t("newChat")}
+            <Dialog.Title className="flex min-w-0 flex-1 text-[13px] text-muted-foreground">
+              {agent ? (
+                <AgentPicker
+                  agent={agent}
+                  others={(agents ?? []).filter(
+                    (choice) => choice.id !== agent.id,
+                  )}
+                  onChoose={choose}
+                />
+              ) : (
+                t("newChat")
+              )}
             </Dialog.Title>
             <Dialog.Close
               aria-label={t("close")}
@@ -93,18 +99,8 @@ export function NewChatDialog({
               busy={starting}
               disabled={starting}
               placeholder={t("messageAgent", { name: agent.name })}
-              promptSuggestions={suggestions}
               agent={agent}
               uploads
-              controls={
-                <AgentPicker
-                  agent={agent}
-                  others={(agents ?? []).filter(
-                    (choice) => choice.id !== agent.id,
-                  )}
-                  onChoose={choose}
-                />
-              }
             />
           )}
         </Dialog.Content>
@@ -113,7 +109,7 @@ export function NewChatDialog({
   );
 }
 
-/** Whom the chat is with: the agent's icon and name, opening a menu of your other agents. */
+/** The header's "New chat with" the agent, opening a menu of your other agents. */
 function AgentPicker({
   agent,
   others,
@@ -128,18 +124,12 @@ function AgentPicker({
     <DropdownMenu>
       <DropdownMenuTrigger
         disabled={others.length === 0}
-        aria-label={t("chatWithName", { name: agent.name })}
-        className="flex h-9 min-w-0 items-center gap-1.5 rounded-full bg-muted pr-2.5 pl-1.5 text-sm outline-none hover:bg-secondary focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-muted"
+        className="-ml-1.5 flex max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
       >
-        <AgentIcon
-          agent={agent}
-          tile
-          className="size-6 shrink-0 rounded-full"
-        />
-        <span className="max-w-40 truncate">{agent.name}</span>
-        {others.length > 0 && (
-          <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-        )}
+        <span className="truncate">
+          {t("newChatWith", { name: agent.name })}
+        </span>
+        {others.length > 0 && <ChevronDown className="size-4 shrink-0" />}
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"

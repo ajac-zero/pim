@@ -655,12 +655,9 @@ describe("connected apps (MCP)", () => {
 			},
 			toolUse("send_to_user", { message: "Edited." }),
 		]);
-		const editing = say("Try the old edit tool", session);
-		const edit = await pendingApproval();
+		expect(await say("Try the old edit tool", session)).toMatchObject({ status: "done", replies: ["Edited."] });
 		expect(tools).not.toContain(MANAGE_CONNECTORS);
 		expect(tools).toContain(UPDATE_AGENT);
-		await post(`/approvals/${edit.id}/approve`);
-		expect(await editing).toMatchObject({ status: "done", replies: ["Edited."] });
 		expect((await api(`/agents/${agent.id}`)).body).toMatchObject({ apps: [], instructions: "Keep it short." });
 		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_CONNECTORS, permission: null }) });
 		faux.setResponses([

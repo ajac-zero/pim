@@ -185,7 +185,7 @@ describe("the owner's agents", () => {
 		expect(seen[5]!.prompt).toContain("- Code reviewer: Reviews my pull requests.");
 	});
 
-	it("renames another agent or itself in chat only after approval, keeping its identity and settings", async () => {
+	it("renames another agent or itself in chat without asking, keeping its identity and settings", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const creator = (await post("/agents", { name: "Organizer", instructions: "Organize my work." })).body;
 		const session = (await post("/sessions", { agent: creator.id })).body.id;
@@ -202,14 +202,10 @@ describe("the owner's agents", () => {
 			toolUse(UPDATE_AGENT, { agent: target.id, name: "  Quill  " }),
 			toolUse("send_to_user", { message: "Renamed." }),
 		]);
-		const renaming = say("Rename the assistant you just made to Quill", major);
-		const approval = await pendingApproval();
-		expect(approval.summary).toBe('Majordomo renames Draft helper to "Quill"');
-		expect((await api(`/agents/${target.id}`)).body.name).toBe("Draft helper");
-		// Approval changes only the name, retaining edits made while it was waiting.
 		await api(`/agents/${target.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Use short paragraphs." }) });
-		await post(`/approvals/${approval.id}/approve`);
-		expect(await renaming).toMatchObject({ status: "done", replies: ["Renamed."] });
+		// Even under the explicit policy, it asks nothing: only the name changes, at once.
+		expect(await say("Rename the assistant you just made to Quill", major)).toMatchObject({ status: "done", replies: ["Renamed."] });
+		expect((await api("/approvals")).body.approvals).toEqual([]);
 		expect((await api(`/agents/${target.id}`)).body).toEqual({
 			...target, name: "Quill", instructions: "Use short paragraphs.", updatedAt: expect.any(Number),
 		});
@@ -224,15 +220,22 @@ describe("the owner's agents", () => {
 		expect(prompt).toContain('you are \\"Quill\\"');
 		expect(prompt).toContain("Use short paragraphs.");
 
-		// The same tool can rename the agent in this chat; denying it leaves the name alone.
-		for (const decision of ["deny", "approve"]) {
-			faux.setResponses([toolUse(UPDATE_AGENT, { name: "Atlas" }), toolUse("send_to_user", { message: "Understood." })]);
-			const asking = say("Call yourself Atlas", session);
-			const request = await pendingApproval();
-			await post(`/approvals/${request.id}/${decision}`);
-			expect(await asking).toMatchObject({ status: "done", replies: ["Understood."] });
-			expect((await api(`/agents/${creator.id}`)).body.name).toBe(decision === "approve" ? "Atlas" : "Organizer");
-		}
+		// The same tool renames the agent in this chat.
+		faux.setResponses([toolUse(UPDATE_AGENT, { name: "Atlas" }), toolUse("send_to_user", { message: "Understood." })]);
+		expect(await say("Call yourself Atlas", session)).toMatchObject({ status: "done", replies: ["Understood."] });
+		expect((await api(`/agents/${creator.id}`)).body.name).toBe("Atlas");
+		// Switched off, no agent is offered it.
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: UPDATE_AGENT, permission: "ask" }) }).then(({ status }) => expect(status).toBe(400));
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: UPDATE_AGENT, permission: "off" }) });
+		let tools = "";
+		faux.setResponses([(context) => {
+			tools = JSON.stringify(context.messages.filter((m) => m.role === "system"));
+			return toolUse("send_to_user", { message: "I can't." });
+		}]);
+		await say("Call yourself Atlas again", (await post("/sessions", { agent: creator.id })).body.id);
+		expect(tools).toContain('"name":"create_agent"');
+		expect(tools).not.toContain('"name":"update_agent"');
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: UPDATE_AGENT, permission: null }) });
 		// Only the majordomo changes another agent.
 		faux.setResponses([toolUse(UPDATE_AGENT, { agent: target.id, instructions: "Be rude." }), (context) => {
 			expect(JSON.stringify(context.messages.findLast((m) => m.role === "toolResult")?.content)).toContain("Only the person's majordomo");
@@ -243,7 +246,7 @@ describe("the owner's agents", () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
-	it("changes itself, its contacts included, once the person approves", async () => {
+	it("changes itself, its contacts included", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const editor = (await post("/agents", { name: "Editor", instructions: "Fix grammar." })).body;
 		const checker = (await post("/agents", { name: "Fact checker", instructions: "Check every claim." })).body;
@@ -279,14 +282,7 @@ describe("the owner's agents", () => {
 		expect(results[1]).toContain("contacts can't include the agent itself");
 		await say("Again?", session);
 		expect(results[2]).toContain("That changes nothing.");
-		const asking = say("Please", session);
-		const approval = await pendingApproval();
-		expect(approval.summary).toBe("Ghostwriter changes its instructions, adds Source finder to its contacts, to hand tasks to, removes Fact checker from its contacts");
-		// Nothing changes until the person says yes.
-		expect((await api(`/agents/${writer.id}`)).body.instructions).toBe("Write short.");
-
-		await post(`/approvals/${approval.id}/approve`);
-		expect(await asking).toMatchObject({ status: "done", replies: ["Done."] });
+		expect(await say("Please", session)).toMatchObject({ status: "done", replies: ["Done."] });
 		expect((await api(`/agents/${writer.id}`)).body).toMatchObject({
 			instructions: "Write long.",
 			apps: ["test.ledger/docs"],
@@ -298,14 +294,13 @@ describe("the owner's agents", () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});
 
-	it("lets the majordomo give another agent an image from the person's files or the web as its icon, as the person approved it", async () => {
+	it("lets the majordomo give another agent an image from the person's files or the web as its icon, without asking", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		await pairTestComputer();
 		const raw = (path: string, init: RequestInit = {}) => exports.default.fetch(new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${TOKEN}` } }));
 		const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
 		await raw("/files/content?path=/workspace/images/coach.png", { method: "PUT", body: png });
 		await raw("/files/content?path=/workspace/notes.txt", { method: "PUT", body: new TextEncoder().encode("not an image") });
-		const majordomo = (await api("/agents")).body.agents.find((agent: { majordomo: boolean }) => agent.majordomo);
 		const coach = (await post("/agents", { name: "Running coach", instructions: "Coach my runs.", symbol: "rocket", color: "gray" })).body;
 		const helper = (await post("/agents", { name: "Helper", instructions: "Help." })).body;
 		const results: string[] = [];
@@ -321,59 +316,35 @@ describe("the owner's agents", () => {
 		faux.setResponses([toolUse(UPDATE_AGENT, { agent: coach.id, icon: "/workspace/notes.txt" }), record]);
 		await say("Use my notes as the coach's icon", ROOT);
 		expect(results[1]).toContain("An icon must be a PNG, JPEG, WebP or GIF image.");
+		expect((await api(`/agents/${coach.id}`)).body).toMatchObject({ icon: null, symbol: "rocket", color: "gray" });
 
 		faux.setResponses([toolUse(UPDATE_AGENT, { agent: coach.id, emoji: "🏃", color: "teal", icon: "/workspace/images/coach.png" }), record]);
-		let asking = say("Give the coach the picture I made", ROOT);
-		const approval = await pendingApproval();
-		expect(approval.summary).toBe(
-			`${majordomo.name} makes Running coach's emoji 🏃, makes Running coach's color teal, makes Running coach's icon the image at /workspace/images/coach.png`,
-		);
-		expect((await api(`/agents/${coach.id}`)).body).toMatchObject({ icon: null, symbol: "rocket", color: "gray" });
-		// The person sees the picture they're asked about.
-		const preview = await raw(`/approvals/${approval.id}/icon`);
-		expect(preview.headers.get("content-type")).toBe("image/png");
-		expect(new Uint8Array(await preview.arrayBuffer())).toEqual(png);
-		await post(`/approvals/${approval.id}/approve`);
-		await asking;
+		await say("Give the coach the picture I made", ROOT);
+		expect(results[2]).toContain("Running coach is updated.");
+		expect((await api("/approvals")).body.approvals).toEqual([]);
 		expect((await api(`/agents/${coach.id}`)).body).toMatchObject({ icon: expect.any(Number), symbol: "🏃", color: "teal", instructions: "Coach my runs." });
 		const icon = await raw(`/agents/${coach.id}/icon`);
 		expect(icon.headers.get("content-type")).toBe("image/png");
 		expect(new Uint8Array(await icon.arrayBuffer())).toEqual(png);
 
-		// An image on the web is set only if it is still the one the person approved.
+		// An image on the web.
 		const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0]);
-		let served = gif;
 		const realFetch = globalThis.fetch;
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const request = new Request(input, init);
-			return request.url === "https://images.example.test/shoe.gif" ? new Response(served, { headers: { "content-type": "image/gif" } }) : realFetch(input, init);
+			return request.url === "https://images.example.test/shoe.gif" ? new Response(gif, { headers: { "content-type": "image/gif" } }) : realFetch(input, init);
 		});
 		try {
-			for (const swapped of [true, false]) {
-				served = gif;
-				faux.setResponses([toolUse(UPDATE_AGENT, { agent: coach.id, icon: "https://images.example.test/shoe.gif" }), record]);
-				asking = say("Use that shoe picture for the coach", ROOT);
-				const request = await pendingApproval();
-				if (swapped) {
-					served = new Uint8Array([...gif, 9]);
-					expect((await raw(`/approvals/${request.id}/icon`)).status).toBe(409);
-				}
-				await post(`/approvals/${request.id}/approve`);
-				await asking;
-			}
+			faux.setResponses([toolUse(UPDATE_AGENT, { agent: coach.id, icon: "https://images.example.test/shoe.gif" }), record]);
+			await say("Use that shoe picture for the coach", ROOT);
 		} finally {
 			vi.restoreAllMocks();
 		}
-		expect(results[3]).toContain("isn't the image the person approved");
 		expect(new Uint8Array(await (await raw(`/agents/${coach.id}/icon`)).arrayBuffer())).toEqual(gif);
 
 		// And it removes an image, to show the emoji again.
 		faux.setResponses([toolUse(UPDATE_AGENT, { agent: coach.id, icon: null }), record]);
-		asking = say("Take the coach's picture off", ROOT);
-		const removal = await pendingApproval();
-		expect(removal.summary).toBe(`${majordomo.name} removes Running coach's icon image`);
-		await post(`/approvals/${removal.id}/approve`);
-		await asking;
+		await say("Take the coach's picture off", ROOT);
 		expect((await api(`/agents/${coach.id}`)).body).toMatchObject({ icon: null, symbol: "🏃" });
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: null }) });
 	});

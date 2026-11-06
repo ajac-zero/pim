@@ -407,6 +407,8 @@ const GUEST_BOT_KEY = "guest_bot";
 const MAJORDOMO_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE, ADD_CUSTOM_CONNECTOR];
 /** Subscribing to a connector's events needs no approval, so its setting is only Off or On, and Ask (from before) counts as On. */
 const WATCH_APP_EVENT = "watch_connector_event";
+/** Pim's own tools that asked first once and run without asking now: their settings are only Off or On, as `WATCH_APP_EVENT`'s. */
+const UNASKED_TOOLS: readonly string[] = [WATCH_APP_EVENT, UPDATE_AGENT];
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's connectors, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
@@ -2291,9 +2293,9 @@ export class Pim extends DurableAgent<Env> {
 		return this.actions.filter((action) => action.name !== "mcp_call" && (offered.has(action.name) || !this.#ownActions.includes(action)));
 	}
 
-	/** `watch_connector_event`'s permission: on unless switched off, whatever else was chosen before it stopped asking. */
-	#watchPermission(): ResolvedPermission {
-		const { chosen } = ownToolPermission(this.store, WATCH_APP_EVENT);
+	/** The permission of a tool that no longer asks first: on unless switched off, whatever else was chosen before it stopped asking. */
+	#unaskedPermission(tool: string): ResolvedPermission {
+		const { chosen } = ownToolPermission(this.store, tool);
 		return { permission: chosen === "off" ? "off" : "on", default: "on", chosen: chosen === "ask" ? null : chosen, changed: false };
 	}
 
@@ -2320,8 +2322,8 @@ export class Pim extends DurableAgent<Env> {
 		const { app, tool } = this.#approvalTool(approval);
 		if (app === "") {
 			const resolved = ownToolPermission(this.store, tool);
-			// An approval filed before watching needed none stays pending unless the person switched the tool off.
-			if (tool === WATCH_APP_EVENT) return resolved.chosen === "off" ? "off" : "ask";
+			// An approval filed before its tool stopped asking stays pending unless the person switched the tool off.
+			if (UNASKED_TOOLS.includes(tool)) return resolved.chosen === "off" ? "off" : "ask";
 			if (this.#requiresExplicitApproval(approval)) return resolved.permission === "off" ? "off" : "ask";
 			if (!approval.requestedBy && resolved.chosen === null) {
 				const assigned = this.extensions.withAbilities();
@@ -2361,8 +2363,8 @@ export class Pim extends DurableAgent<Env> {
 				description: action.description,
 				readOnly: false,
 				destructive: false,
-				choices: action.name === WATCH_APP_EVENT ? ["off", "on"] : action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
-				...(action.name === WATCH_APP_EVENT ? this.#watchPermission() : ownToolPermission(this.store, action.name)),
+				choices: UNASKED_TOOLS.includes(action.name) ? ["off", "on"] : action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
+				...(UNASKED_TOOLS.includes(action.name) ? this.#unaskedPermission(action.name) : ownToolPermission(this.store, action.name)),
 			}));
 		}
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
@@ -2454,7 +2456,7 @@ export class Pim extends DurableAgent<Env> {
 		if (app === "") {
 			const known = audience === OWNER && this.#ownGatedActions().some((action) => action.name === tool);
 			if (!known) throw new HttpError(404, `No tool ${tool}`);
-			if (tool === WATCH_APP_EVENT && permission === "ask") throw new HttpError(400, "This tool can only be off or on: watching a connector's events needs no approval");
+			if (UNASKED_TOOLS.includes(tool) && permission === "ask") throw new HttpError(400, "This tool can only be off or on: it runs without asking");
 			if (permission === "on" && this.#ownGatedActions().find((action) => action.name === tool)?.explicitApproval) {
 				throw new HttpError(400, "This tool can only be off or ask: every change requires explicit approval");
 			}
@@ -6251,7 +6253,7 @@ export class Pim extends DurableAgent<Env> {
 		return { ...settings, approvalTimeoutSeconds: timeout === null ? null : timeout / 1000 };
 	}
 
-	/** How every agent works, and the person's agents: rebuilt when whether `update_agent` asks first changes. */
+	/** How every agent works, and the person's agents: rebuilt when `update_agent` is switched off or on. */
 	#agentExtension(services: PimServices) {
 		return agentExtension(
 			services,
@@ -6260,6 +6262,7 @@ export class Pim extends DurableAgent<Env> {
 				list: () => this.agents.list(),
 				apps: () => this.appDirectory(),
 				create: (input) => this.agents.create(checkContacts(null, this.#checkApps(agentInput(input)), this.agents.list())),
+				editor: this.agents,
 				files: this.files,
 			},
 		);

@@ -6244,8 +6244,13 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The app asks for what was copied on the computer, to copy it to the person's own device; the answer is `pim_clipboard_text`, with no text when there was none to read. */
 	async #screenClipboard(connection: Connection<SocketState>): Promise<void> {
-		const text = await this.computer.clipboard().catch(() => "");
-		if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "pim_clipboard_text", payload: { text } }));
+		let payload: { text: string; error?: string };
+		try {
+			payload = { text: await this.computer.clipboard() };
+		} catch (error) {
+			payload = { text: "", error: errorMessage(error) };
+		}
+		if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: "pim_clipboard_text", payload }));
 	}
 
 	/**

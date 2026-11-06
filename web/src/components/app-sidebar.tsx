@@ -66,7 +66,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { flatChats, groupByAge, nestChats } from "~/lib/chat-list";
+import { flatChats, groupByAge, isInactive, nestChats } from "~/lib/chat-list";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -354,8 +354,11 @@ function ChatsPanel({
     () => flatChats(sessions ?? [], search, t("newChat")),
     [sessions, search, t],
   );
-  const open = current.filter((session) => !session.archived);
   const archived = current.filter((session) => session.archived);
+  const inactive = current.filter((session) => isInactive(session));
+  const open = current.filter(
+    (session) => !session.archived && !inactive.includes(session),
+  );
 
   return (
     <>
@@ -389,10 +392,10 @@ function ChatsPanel({
         className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin [mask-image:linear-gradient(to_bottom,transparent,black_12px,black_calc(100%-12px),transparent)]"
       >
         {open.length === 0 ? (
-          (archived.length === 0 || !search) && (
+          (archived.length + inactive.length === 0 || !search) && (
             <p className="px-2 py-6 text-center text-muted-foreground text-sm">
               {t(
-                archived.length > 0
+                archived.length + inactive.length > 0
                   ? "noRecentChats"
                   : search
                     ? "noChatsMatch"
@@ -408,8 +411,19 @@ function ChatsPanel({
             onNavigate={onNavigate}
           />
         )}
+        {inactive.length > 0 && (
+          <FoldedChats
+            label={t("inactive")}
+            list={inactive}
+            activeId={activeId}
+            searching={!!search}
+            awaitingApproval={awaitingApproval}
+            onNavigate={onNavigate}
+          />
+        )}
         {archived.length > 0 && (
-          <ArchivedChats
+          <FoldedChats
+            label={t("archived")}
             list={archived}
             activeId={activeId}
             searching={!!search}
@@ -650,23 +664,24 @@ function ChatTree({
 const DONE_STATES = new Set(["completed", "failed", "canceled"]);
 
 /**
- * Chats with no activity for two weeks, folded away below the others. It
- * opens while searching, and when the open chat is one of them.
+ * Chats folded away below the others, such as those inactive for 72 hours or
+ * archived. It opens while searching, and when the open chat is one of them.
  */
-function ArchivedChats({
+function FoldedChats({
+  label,
   list,
   activeId,
   searching,
   awaitingApproval,
   onNavigate,
 }: {
+  label: string;
   list: Session[];
   activeId?: string;
   searching: boolean;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
 }) {
-  const { t } = useI18n();
   const holdsActive = list.some((session) => session.id === activeId);
   const [open, setOpen] = useState(holdsActive);
   const [shownFor, setShownFor] = useState(activeId);
@@ -675,16 +690,16 @@ function ArchivedChats({
     if (holdsActive) setOpen(true);
   }
   const expanded = open || searching;
-  const nestedArchive = nestChats(list);
+  const nested = nestChats(list);
   return (
-    <section className="mb-3" aria-label={t("archived")}>
+    <section className="mb-3" aria-label={label}>
       <button
         type="button"
         className="flex items-center gap-1 rounded-md px-2 py-1.5 font-medium text-muted-foreground text-xs hover:text-foreground"
         onClick={() => setOpen(!expanded)}
         aria-expanded={expanded}
       >
-        {t("archived")}
+        {label}
         <span className="font-normal">{list.length}</span>
         <ChevronDown
           className={cn(
@@ -695,11 +710,11 @@ function ArchivedChats({
       </button>
       {expanded && (
         <ul className="space-y-px">
-          {nestedArchive.top.map((session) => (
+          {nested.top.map((session) => (
             <ChatTree
               key={session.id}
               session={session}
-              under={nestedArchive.children.get(session.id) ?? []}
+              under={nested.children.get(session.id) ?? []}
               activeId={activeId}
               awaitingApproval={awaitingApproval}
               onNavigate={onNavigate}

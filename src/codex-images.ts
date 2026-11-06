@@ -1,4 +1,5 @@
 import type { OAuthCredential } from "@earendil-works/pi-ai";
+import type { Computer } from "./computer";
 import type { SqlCredentialStore } from "./credentials";
 import type { ImageModel } from "./extensions/image-generation";
 import { HttpError } from "./http";
@@ -14,6 +15,11 @@ import type { PimStore } from "./store";
  *
  * The sign-in is a second, separate one from the plan's: the same paste-back
  * dance, since the client's only redirect is a loopback address.
+ *
+ * The request itself is made from the person's computer, not the Worker:
+ * ChatGPT's firewall answers requests from Cloudflare Workers with a 403 page.
+ * The Worker hands the computer the request in a file, a few lines of Node.js
+ * send it, and the Worker reads the answer back from a file.
  */
 
 export const CODEX_IMAGES_PROVIDER = "chatgpt-images";
@@ -30,6 +36,26 @@ const LOGIN_TTL_MS = 15 * 60 * 1000;
 /** Refresh this long before expiry. Refresh tokens are single-use, so a refresh runs inside the credential store's lock. */
 const EXPIRY_MARGIN_MS = 5 * 60 * 1000;
 const PENDING_KEY = "codex_images_login";
+const REQUEST_MS = 120_000;
+
+/** What the computer runs: sends the request in the file it's given, which it deletes first (it holds the token), and writes the answer beside it. */
+const SEND = `const fs = require("node:fs");
+const [file, out] = process.argv.slice(2);
+const { url, headers, body } = JSON.parse(fs.readFileSync(file, "utf8"));
+fs.rmSync(file);
+fetch(url, { method: "POST", headers, body })
+	.then(async (response) => {
+		fs.writeFileSync(out, Buffer.from(await response.arrayBuffer()));
+		console.log(JSON.stringify({ status: response.status, mitigated: response.headers.get("cf-mitigated"), ray: response.headers.get("cf-ray") }));
+	})
+	.catch((error) => {
+		console.error(String(error));
+		process.exit(1);
+	});
+`;
+
+/** The computer's parts that sending a request uses. */
+export type ImageComputer = Pick<Computer, "exec" | "fs" | "localPath">;
 
 type Credential = OAuthCredential & { readonly accountId: string; readonly email: string | null };
 
@@ -193,15 +219,14 @@ export class CodexImages {
 		}
 	}
 
-	model(): ImageModel {
+	model(computer: ImageComputer): ImageModel {
 		return {
 			id: CODEX_IMAGE_MODEL,
-			generate: async (prompt, { width, height }, signal) => {
+			generate: async (prompt, { width, height }) => {
 				const { access, accountId } = await this.#credential();
 				const canvas = width === height ? CANVAS.square : width > height ? CANVAS.landscape : CANVAS.portrait;
-				const response = await fetch(IMAGES_URL, {
-					method: "POST",
-					signal,
+				const request = {
+					url: IMAGES_URL,
 					headers: {
 						authorization: `Bearer ${access}`,
 						"chatgpt-account-id": accountId,
@@ -211,23 +236,40 @@ export class CodexImages {
 						accept: "application/json",
 					},
 					body: JSON.stringify({ prompt: `${prompt}\n\n${canvas}`, background: "auto", model: CODEX_IMAGE_MODEL, quality: "auto", size: "auto" }),
-				});
-				if (!response.ok) {
-					const body = await response.text().catch(() => "");
-					if (response.status === 429) throw new Error("The ChatGPT plan's usage limit is reached. Try again after it resets.");
-					if (response.status === 401) throw new Error("ChatGPT turned the sign-in down. Sign in again in Settings.");
-					// A page rather than JSON is usually Cloudflare in front of ChatGPT turning the Worker away: say so, with its ray.
-					const page = /<title>([^<]*)<\/title>/i.exec(body)?.[1]?.trim();
-					const mitigated = response.headers.get("cf-mitigated");
-					const detail = page || mitigated ? `a web page "${page ?? ""}"${mitigated ? ` (cf-mitigated: ${mitigated})` : ""}, ray ${response.headers.get("cf-ray") ?? "unknown"}` : body.slice(0, 300);
-					const message = `ChatGPT's image service answered ${response.status}${detail ? `: ${detail}` : ""}`;
-					console.warn(JSON.stringify({ event: "pim.codex_images_error", status: response.status, headers: Object.fromEntries(response.headers), body: body.slice(0, 2_000) }));
-					throw new Error(message);
+				};
+				const dir = `/workspace/.pim/images-${crypto.randomUUID()}`;
+				try {
+					await computer.fs.mkdir(dir, { recursive: true });
+					await computer.fs.writeFile(`${dir}/send.cjs`, SEND);
+					await computer.fs.writeFile(`${dir}/request.json`, JSON.stringify(request), { mode: 0o600 });
+					await computer.fs.writeFile(`${dir}/response.bin`, "");
+					const [send, file, out] = await Promise.all(["send.cjs", "request.json", "response.bin"].map((name) => computer.localPath(`${dir}/${name}`)));
+					const ran = await computer.exec(`node "${send}" "${file}" "${out}"`, { timeoutMs: REQUEST_MS });
+					if (ran.exitCode !== 0) {
+						throw new Error(`Your computer couldn't send the request${ran.timedOut ? " in time" : ""}: ${(ran.stderr || ran.stdout).trim().slice(0, 300) || "is Node.js on its PATH?"}`);
+					}
+					const sent = JSON.parse(ran.stdout.trim().split("\n").pop() ?? "{}") as { status: number; mitigated: string | null; ray: string | null };
+					const body = new TextDecoder().decode(await new Response(await computer.fs.readFile(`${dir}/response.bin`)).arrayBuffer());
+					if (sent.status !== 200) throw this.#refused(sent.status, body, sent);
+					const image = (JSON.parse(body) as { data?: { b64_json?: unknown }[] }).data?.[0]?.b64_json;
+					if (typeof image !== "string") throw new Error("ChatGPT's image service answered without an image.");
+					return Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
+				} finally {
+					await computer.fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
 				}
-				const image = ((await response.json()) as { data?: { b64_json?: unknown }[] }).data?.[0]?.b64_json;
-				if (typeof image !== "string") throw new Error("ChatGPT's image service answered without an image.");
-				return Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
 			},
 		};
+	}
+
+	/** The error for an answer that isn't an image; the log keeps what the person's agent won't see. */
+	#refused(status: number, body: string, sent: { mitigated: string | null; ray: string | null }): Error {
+		if (status === 429) return new Error("The ChatGPT plan's usage limit is reached. Try again after it resets.");
+		if (status === 401) return new Error("ChatGPT turned the sign-in down. Sign in again in Settings.");
+		// A page rather than JSON is a firewall in front of ChatGPT turning the request away: say so, with its ray.
+		const page = /<title>([^<]*)<\/title>/i.exec(body)?.[1]?.trim();
+		const detail = page || sent.mitigated ? `a web page "${page ?? ""}"${sent.mitigated ? ` (cf-mitigated: ${sent.mitigated})` : ""}, ray ${sent.ray ?? "unknown"}` : body.slice(0, 300);
+		const message = `ChatGPT's image service answered ${status}${detail ? `: ${detail}` : ""}`;
+		console.warn(JSON.stringify({ event: "pim.codex_images_error", status, ray: sent.ray, body: body.slice(0, 2_000) }));
+		return new Error(message);
 	}
 }

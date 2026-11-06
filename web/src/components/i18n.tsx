@@ -622,7 +622,7 @@ const translations = {
     chatGPTPlan: "ChatGPT plan",
     chatGPTImages: "ChatGPT images",
     chatGPTImagesHint:
-      "Draw images with your plan instead of Workers AI, the way Codex does. It uses an unofficial route that OpenAI can change, and needs Plus or Pro.",
+      "Draw images with your plan instead of Workers AI, the way Codex does. Your computer sends the request, since ChatGPT blocks Cloudflare. It uses an unofficial route that OpenAI can change, and needs Plus or Pro.",
     chatGPTImagesConnected:
       "Connected as {email}. Agents draw images with your plan.",
     chatGPTImagesWhyPaste:
@@ -1752,7 +1752,7 @@ const translations = {
     chatGPTPlan: "Plan de ChatGPT",
     chatGPTImages: "Imágenes de ChatGPT",
     chatGPTImagesHint:
-      "Dibuja imágenes con tu plan en lugar de Workers AI, como lo hace Codex. Usa una vía no oficial que OpenAI puede cambiar, y requiere Plus o Pro.",
+      "Dibuja imágenes con tu plan en lugar de Workers AI, como lo hace Codex. Tu computadora envía la solicitud, porque ChatGPT bloquea a Cloudflare. Usa una vía no oficial que OpenAI puede cambiar, y requiere Plus o Pro.",
     chatGPTImagesConnected:
       "Conectado como {email}. Los agentes dibujan imágenes con tu plan.",
     chatGPTImagesWhyPaste:

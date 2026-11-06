@@ -236,7 +236,7 @@ export const opens = (path: string, token: string) =>
  * stands in for Browser Run, reached through its binding. Each connection
  * is a DevTools socket to one session it keeps until stopped.
  */
-export function testBrowser(): BrowserHost {
+export function testBrowser(): BrowserHost & { devtools(method: string, params?: Record<string, unknown>): Promise<any> } {
 	const binding = (env as unknown as { BROWSER: Fetcher }).BROWSER;
 	let session: string | undefined;
 	const open = async (id: string) => {
@@ -257,6 +257,21 @@ export function testBrowser(): BrowserHost {
 			return { send: (data) => socket.send(data), close: () => socket.close() };
 		},
 		running: async () => session !== undefined,
+		/** Sends the running browser one DevTools command beside the space's connection, as the person's desktop does to its windows. */
+		async devtools(method: string, params: Record<string, unknown> = {}): Promise<any> {
+			const socket = await open(session!);
+			const reply = new Promise<{ result?: unknown; error?: { message: string } }>((resolve) =>
+				socket.addEventListener("message", (event) => {
+					const message = JSON.parse(String(event.data));
+					if (message.id === 1) resolve(message);
+				}),
+			);
+			socket.send(JSON.stringify({ id: 1, method, params }));
+			const { result, error } = await reply;
+			socket.close();
+			if (error) throw new Error(error.message);
+			return result;
+		},
 		async stop() {
 			if (!session) return;
 			const socket = await open(session);
@@ -342,5 +357,5 @@ export async function pairTestComputer() {
 			},
 			browser,
 		);
-	return { ...(await connect()), reconnect: connect };
+	return { ...(await connect()), reconnect: connect, browser };
 }

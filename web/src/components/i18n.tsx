@@ -740,6 +740,8 @@ const translations = {
     browserKeyboard: "Type into the page",
     browserConnecting: "Connecting to the browser on your computer…",
     browserGone: "This window closed. Reload this page to open it again.",
+    zoomIn: "Zoom in",
+    zoomOut: "Zoom out",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
     deleteFileConfirm:
@@ -1909,6 +1911,8 @@ const translations = {
     browserConnecting: "Conectando con el navegador de tu computadora…",
     browserGone:
       "Esta ventana se cerró. Recarga esta página para abrirla de nuevo.",
+    zoomIn: "Acercar",
+    zoomOut: "Alejar",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",
     deleteFileNamed: "Eliminar {name}",

@@ -15,6 +15,7 @@ import { useI18n } from "~/components/i18n";
 import {
   ArrowUp,
   Camera,
+  Check,
   Loader2,
   Mic,
   Paperclip,
@@ -431,6 +432,11 @@ function ComposerInner({
     );
   };
   const [preparing, setPreparing] = useState(false);
+  // Where each attachment is already saved, so a send that failed part way doesn't upload those again.
+  const savedPaths = useRef(new Map<string, string>());
+  // The attachment being uploaded now, and those saved, for the chips to show.
+  const [uploading, setUploading] = useState<string | null>(null);
+  const [uploaded, setUploaded] = useState<ReadonlySet<string>>(new Set());
   const voice = useVoiceInput(text, controller.textInput.setInput);
   const files = controller.attachments.files;
   const hasText = text.trim().length > 0;
@@ -482,7 +488,12 @@ function ComposerInner({
             }),
           ),
         ),
-        saves ? saveAttachments(message.files) : [],
+        saves
+          ? saveAttachments(message.files, savedPaths.current, (id, done) => {
+              setUploading(done ? null : id);
+              if (done) setUploaded((all) => new Set(all).add(id));
+            })
+          : [],
       ]);
       // Each saved file is linked by its path, which opens it in the chat and tells the agent where it is.
       const links = saved.map((path) => `[${baseName(path)}](<${path}>)`);
@@ -499,6 +510,7 @@ function ComposerInner({
       toast.error((error as Error).message);
       throw error;
     } finally {
+      setUploading(null);
       setPreparing(false);
     }
   };
@@ -686,6 +698,11 @@ function ComposerInner({
                     alt={file.filename}
                     className="size-8 rounded-lg border object-cover"
                   />
+                  {uploading === file.id && (
+                    <span className="absolute inset-0 grid place-items-center rounded-lg bg-background/60">
+                      <Loader2 className="size-3.5 animate-spin" />
+                    </span>
+                  )}
                   <Button
                     type="button"
                     size="icon"
@@ -705,16 +722,22 @@ function ComposerInner({
                 >
                   <FileKindIcon name={file.filename} type={file.mediaType} />
                   <span className="min-w-0 truncate">{file.filename}</span>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    className="size-6 shrink-0 rounded-full text-muted-foreground"
-                    aria-label={t("removeImage", { name: file.filename })}
-                    onClick={() => controller.attachments.remove(file.id)}
-                  >
-                    <X className="size-3" />
-                  </Button>
+                  {uploading === file.id ? (
+                    <Loader2 className="mx-1.5 size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                  ) : preparing && uploaded.has(file.id) ? (
+                    <Check className="mx-1.5 size-3.5 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="size-6 shrink-0 rounded-full text-muted-foreground"
+                      aria-label={t("removeImage", { name: file.filename })}
+                      onClick={() => controller.attachments.remove(file.id)}
+                    >
+                      <X className="size-3" />
+                    </Button>
+                  )}
                 </li>
               ),
             )}
@@ -950,37 +973,47 @@ function ModelPicker({
 /**
  * Saves attachments to your files, under `UPLOADS`, by their own names: a
  * name already there gets a number, as `cv (2).pdf`, so nothing is replaced.
- * Gives each one's path.
+ * Gives each one's path. They go one at a time, since your computer takes
+ * them over one connection and many at once leave most waiting until the
+ * browser gives up. `saved` remembers the paths of those already uploaded,
+ * so sending again after a failure continues where it stopped.
  */
 async function saveAttachments(
   files: readonly PromptInputAttachment[],
+  saved: Map<string, string>,
+  progress: (id: string, done: boolean) => void,
 ): Promise<string[]> {
   const listed = await pim.files(UPLOADS).catch((error: unknown) => {
     if (error instanceof ApiError && error.status === 404) return null;
     throw error;
   });
   const taken = new Set(listed?.entries.map((entry) => entry.name));
-  const paths = files.map((file) => {
-    // Characters that would end a Markdown link, or no name at all, give way.
-    const name =
-      file.filename.replace(/[\p{Cc}<>[\]\\]/gu, "_").replace(/^\.+$/, "") ||
-      "file";
-    const dot = name.lastIndexOf(".");
-    const [stem, extension] =
-      dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
-    let free = name;
-    for (let n = 2; taken.has(free); n++) free = `${stem} (${n})${extension}`;
-    taken.add(free);
-    return `${UPLOADS}/${free}`;
-  });
-  await Promise.all(
-    files.map(async (file, index) =>
-      pim.uploadFile(
-        paths[index] as string,
-        await (await fetch(file.url)).blob(),
-      ),
-    ),
-  );
+  const paths: string[] = [];
+  for (const file of files) {
+    let path = saved.get(file.id);
+    if (!path) {
+      // Characters that would end a Markdown link, or no name at all, give way.
+      const name =
+        file.filename.replace(/[\p{Cc}<>[\]\\]/gu, "_").replace(/^\.+$/, "") ||
+        "file";
+      const dot = name.lastIndexOf(".");
+      const [stem, extension] =
+        dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+      let free = name;
+      for (let n = 2; taken.has(free); n++) free = `${stem} (${n})${extension}`;
+      taken.add(free);
+      path = `${UPLOADS}/${free}`;
+      progress(file.id, false);
+      try {
+        await pim.uploadFile(path, await (await fetch(file.url)).blob());
+      } catch (error) {
+        throw new Error(`${file.filename}: ${(error as Error).message}`);
+      }
+      saved.set(file.id, path);
+      progress(file.id, true);
+    }
+    paths.push(path);
+  }
   return paths;
 }
 

@@ -11,7 +11,8 @@ import {
 import { sessionCostQuery, sessionsQuery } from "~/lib/queries";
 
 /**
- * What this chat has cost so far, in total and by model. Not offered in a
+ * What this chat has cost so far, in total and by model, with every agent
+ * that has talked in it and every context it has had. Not offered in a
  * visit, whose agent is someone else's. A model without a price, such as a
  * custom provider's, shows its tokens and costs nothing.
  */
@@ -63,7 +64,6 @@ export function SessionCostMenu({ sessionId }: { sessionId: string }) {
               <span className="shrink-0">{money(row.cost)}</span>
             </div>
             <div className="text-muted-foreground text-xs leading-5">
-              {t("sessionCostRequests", { count: row.requests })} ·{" "}
               {t("sessionCostTokens", {
                 input: formatNumber(row.input),
                 output: formatNumber(row.output),

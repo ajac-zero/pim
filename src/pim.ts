@@ -15,6 +15,7 @@ import {
 	type ModelRef,
 	type TaskId,
 	ROOT_CONVERSATION_ID,
+	UsageDoc,
 } from "@earendil-works/pi-durable";
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type Schedule, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
@@ -4675,7 +4676,18 @@ export class Pim extends DurableAgent<Env> {
 				return { session, busy, pending, messages: projectEntries(entries) };
 			},
 		],
-		["GET", "/sessions/:session/cost", async ({ session }) => sessionCost(await this.harness.session(await this.#session(session!)).messages())],
+		[
+			"GET",
+			"/sessions/:session/cost",
+			async ({ session }) => {
+				const id = await this.#session(session!);
+				const pi = await this.harness.pi();
+				const ledgers = await Promise.all(
+					this.#rooms.everyConversation(id).map((conversation) => pi.snapshot(UsageDoc, Number(conversation) as ConversationId, BACKGROUND_CONTEXT)),
+				);
+				return sessionCost(ledgers.filter((ledger) => ledger !== undefined));
+			},
+		],
 		[
 			"POST",
 			"/sessions/:session/messages",

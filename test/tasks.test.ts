@@ -868,6 +868,8 @@ describe("a group chat", () => {
 		await quiet(session);
 	expect(await roomOf(session)).toEqual({ mode: "mentions", members: [] });
 		const before = await chats();
+		const output = async () => (await api<{ models: { output: number }[] }>(`/sessions/${session}/cost`)).body.models.reduce((sum, row) => sum + row.output, 0);
+		const hostOnly = await output();
 
 		// Mentioned, Coach joins knowing nothing of what was said before, reads it back, and answers in the chat; the host isn't woken.
 		let readBack = "";
@@ -898,6 +900,8 @@ describe("a group chat", () => {
 			"[From Coach]\nStart with 5 km on Monday.",
 		]);
 		expect(await roomOf(session)).toEqual({ mode: "mentions", members: [{ id: coach.id, name: "Coach", busy: false, held: false, error: null }] });
+		// What Coach's requests cost is on the chat's bill.
+		expect(await output()).toBeGreaterThan(hostOnly);
 		// Coach's own conversation isn't one of the person's chats.
 		expect(await chats()).toBe(before);
 
@@ -988,8 +992,11 @@ describe("a group chat", () => {
 		await say("@Coach remove the host", session);
 		await quiet(session);
 		expect(coachTried[0]).toContain("Only the chat's host takes agents out of it.");
+		const spent = await output();
 		const removing = await api(`/sessions/${session}/room/members/${coach.id}`, { method: "DELETE" });
 		expect(removing.body).toEqual({ room: { mode: "mentions", members: [] } });
+		// Taken out, an agent leaves what it cost on the bill.
+		expect(await output()).toBe(spent);
 		expect((await api(`/sessions/${session}/room/members/${coach.id}`, { method: "DELETE" })).status).toBe(404);
 		expect((await api(`/sessions/${session}/room/members/${host.id}`, { method: "DELETE" })).status).toBe(404);
 		expect(await chats()).toBe(before);

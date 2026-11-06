@@ -581,6 +581,26 @@ export const ARTIFACT_KINDS = [
 ] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
+/** How an app's backend, which runs on your computer, is doing. */
+export type BackendState =
+  | "starting"
+  | "running"
+  | "crashed"
+  | "failed"
+  | "stopped";
+
+export type ArtifactBackend = {
+  /** The version run last; null for one never run. */
+  version: number | null;
+  /** What the computer says; null while it can't say: offline, or never run. */
+  status: {
+    state: BackendState;
+    restarts: number;
+    since: number | null;
+  } | null;
+  computer: "none" | "offline" | "online";
+};
+
 /** An app, as its latest version. */
 export type Artifact = {
   id: string;
@@ -1699,6 +1719,23 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify({ circles }),
     }),
+  artifactBackend: (id: string) =>
+    call<ArtifactBackend>(`/artifacts/${encodeURIComponent(id)}/backend`),
+  artifactBackendLogs: (id: string) =>
+    call<{ text: string }>(
+      `/artifacts/${encodeURIComponent(id)}/backend/logs`,
+    ).then((body) => body.text),
+  stopArtifactBackend: (id: string) =>
+    call<{ stopped: boolean }>(
+      `/artifacts/${encodeURIComponent(id)}/backend/stop`,
+      { method: "POST", body: "{}" },
+    ),
+  /** Runs a version's backend on the computer, in place of the one running; it waits for the backend to come up. */
+  runArtifactBackend: (id: string, version: number) =>
+    call<{ running: number }>(
+      `/artifacts/${encodeURIComponent(id)}/backend/run`,
+      { method: "POST", body: JSON.stringify({ version }) },
+    ),
   restoreArtifact: (id: string, version: number, baseVersion: number) =>
     call<Artifact & { restored: number }>(
       `/artifacts/${encodeURIComponent(id)}/restore`,

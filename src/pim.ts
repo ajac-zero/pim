@@ -4316,6 +4316,13 @@ export class Pim extends DurableAgent<Env> {
 	 * takes one there only for WebSockets, and an address with a token in it
 	 * can be passed on, logged or kept in history.
 	 */
+	/** An app with a backend, or 404. */
+	#hostedApp(id: string) {
+		const app = this.#artifact(id);
+		if (app.kind !== "hosted") throw new HttpError(404, `${id} is not an app with a backend`);
+		return app;
+	}
+
 	#artifactRequest(url: URL, answer: () => Response | Promise<Response>): Response | Promise<Response> {
 		if (url.searchParams.has("token")) throw new HttpError(400, "Send the API token in the Authorization header, not the address");
 		return answer();
@@ -5098,6 +5105,55 @@ export class Pim extends DurableAgent<Env> {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
 					const { capability } = await readJson<{ capability: string }>(request);
 					return noStore({ granted: this.#grantArtifact(artifact.id, found.sha256, capability) }, 201);
+				}),
+		],
+		// The backend of an app that has one (see ./hosted.ts): how it is doing, what it printed, and the person's own choice to stop it or run a version.
+		[
+			"GET",
+			"/artifacts/:id/backend",
+			({ id }, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const app = this.#hostedApp(id!);
+					return noStore({ version: this.hosted.version(app.id) ?? null, status: await this.hosted.status(app.id), computer: this.computer.status().state });
+				}),
+		],
+		[
+			"GET",
+			"/artifacts/:id/backend/logs",
+			({ id }, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					const app = this.#hostedApp(id!);
+					// A backend that has never run has printed nothing.
+					const text = await this.hosted.logs(app.id, 16_000).catch((error: unknown) => {
+						if ((error as { code?: unknown }).code === "ENOENT") return "";
+						throw error;
+					});
+					return noStore({ text });
+				}),
+		],
+		[
+			"POST",
+			"/artifacts/:id/backend/stop",
+			({ id }, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					this.#assertOpen();
+					await this.hosted.stop(this.#hostedApp(id!).id);
+					return noStore({ stopped: true });
+				}),
+		],
+		[
+			"POST",
+			"/artifacts/:id/backend/run",
+			({ id }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					// Running a version starts its program on the computer: only the person, in their browser, chooses that without an approval.
+					if (request.headers.get(SIGNED_IN_HEADER) !== "1") throw new HttpError(403, "Only the person, signed in to Pim in their browser, can run an app's backend");
+					this.#assertOpen();
+					const app = this.#hostedApp(id!);
+					const wanted = Number((await readJson<{ version?: unknown }>(request)).version);
+					if (!Number.isInteger(wanted) || !this.artifacts.version(app.id, wanted)) throw new HttpError(404, `No version ${wanted} of app ${app.id}`);
+					await this.hosted.run(app.id, wanted);
+					return noStore({ running: wanted });
 				}),
 		],
 		[

@@ -20,7 +20,10 @@ import {
   MessageCircle,
   MoreHorizontal,
   Pencil,
+  Play,
   Printer,
+  Square,
+  Terminal,
   Trash2,
   Users,
   X,
@@ -40,6 +43,7 @@ import {
 } from "~/components/ui/dropdown-menu";
 import {
   ApiError,
+  type ArtifactBackend,
   type ArtifactDetail,
   type ArtifactKind,
   artifactDownloadUrl,
@@ -47,6 +51,8 @@ import {
 } from "~/lib/pim-api";
 import {
   accountQuery,
+  artifactBackendLogsQuery,
+  artifactBackendQuery,
   artifactPublicationQuery,
   artifactQuery,
   artifactVersionQuery,
@@ -82,6 +88,8 @@ export function ArtifactView({
   const router = useRouter();
   const canGoBack = useCanGoBack();
   const [view, setView] = useState<"preview" | "source">("preview");
+  // Counts the times the backend was started or stopped, so the preview loads its page again.
+  const [reload, setReload] = useState(0);
   // The source being edited, from the latest version; null when not editing.
   const [draft, setDraft] = useState<string | null>(null);
   // The file the source view shows and the editor changes; the main one when unset.
@@ -320,7 +328,7 @@ export function ArtifactView({
                 );
               })}
             </div>
-            <ShareMenu artifact={artifact} />
+            {artifact.kind !== "hosted" && <ShareMenu artifact={artifact} />}
             {isLatest ? (
               <Button
                 size="sm"
@@ -481,6 +489,13 @@ export function ArtifactView({
         )}
       </header>
       <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 md:p-3">
+        {artifact.kind === "hosted" && (
+          <BackendPanel
+            artifactId={artifactId}
+            version={artifact.version}
+            onChanged={() => setReload((count) => count + 1)}
+          />
+        )}
         {(view === "source" || draft !== null) &&
           shown &&
           shown.files.length > 1 && (
@@ -507,7 +522,7 @@ export function ArtifactView({
             className="min-h-0 flex-1 resize-none rounded-lg border bg-background p-3 font-mono text-sm leading-6 outline-none scrollbar-thin focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20"
           />
         ) : view === "preview" ? (
-          <div className="min-h-0 flex-1">
+          <div key={reload} className="min-h-0 flex-1">
             <ArtifactPreview
               id={artifactId}
               version={version}
@@ -733,4 +748,167 @@ function languageOf(path: string, kind: ArtifactKind) {
   return extension in languages
     ? languages[extension as keyof typeof languages]
     : ARTIFACT_LANGUAGES[kind];
+}
+
+/**
+ * How an app's backend, which runs on your computer, is doing: whether it
+ * runs, which version, how often it restarted, and what it printed. You can
+ * stop it, or run the latest version, which is how an app made after its last
+ * deploy, or one that gave up, starts again.
+ */
+function BackendPanel({
+  artifactId,
+  version,
+  onChanged,
+}: {
+  artifactId: string;
+  /** The app's latest version. */
+  version: number;
+  onChanged: () => void;
+}) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const [logsOpen, setLogsOpen] = useState(false);
+  const { data: backend } = useQuery(artifactBackendQuery(artifactId));
+  const logs = useQuery({
+    ...artifactBackendLogsQuery(artifactId),
+    enabled: logsOpen,
+  });
+  const changed = () => {
+    void queryClient.invalidateQueries({
+      queryKey: ["artifacts", artifactId, "backend"],
+    });
+    onChanged();
+  };
+  const stop = useMutation({
+    mutationFn: () => pim.stopArtifactBackend(artifactId),
+    onSuccess: changed,
+    onError: (failure) => toast.error(failure.message),
+  });
+  const run = useMutation({
+    mutationFn: () => pim.runArtifactBackend(artifactId, version),
+    onSuccess: changed,
+    onError: (failure) =>
+      toast.error(`${t("backendRunFailed")}: ${failure.message}`),
+  });
+  if (!backend) return null;
+  const { state, text } = describeBackend(backend, t);
+  const running = backend.status?.state === "running";
+  const latestRuns = running && backend.version === version;
+  return (
+    <div className="shrink-0 rounded-lg border bg-muted/30 px-3 py-2 text-sm">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <span
+          className={cn(
+            "size-2 shrink-0 rounded-full",
+            state === "ok" && "bg-emerald-500",
+            state === "busy" && "animate-pulse bg-amber-500",
+            state === "bad" && "bg-red-500",
+            state === "idle" && "bg-muted-foreground/50",
+          )}
+        />
+        <span className="font-medium">{text}</span>
+        {backend.version !== null && (
+          <span className="text-muted-foreground">
+            {t("backendRunsVersion", { version: backend.version })}
+            {backend.status && backend.status.restarts > 0
+              ? ` · ${t("backendRestarts", { count: backend.status.restarts })}`
+              : ""}
+          </span>
+        )}
+        <span className="flex-1" />
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 gap-1.5 px-2"
+          aria-pressed={logsOpen}
+          onClick={() => setLogsOpen((open) => !open)}
+        >
+          <Terminal className="size-3.5" />
+          {t("backendLogs")}
+        </Button>
+        {backend.status &&
+          backend.status.state !== "stopped" &&
+          backend.status.state !== "failed" && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 gap-1.5 px-2"
+              disabled={stop.isPending}
+              onClick={() => stop.mutate()}
+            >
+              <Square className="size-3.5" />
+              {t("backendStop")}
+            </Button>
+          )}
+        {!latestRuns && backend.computer === "online" && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 px-2"
+            disabled={run.isPending}
+            onClick={() => run.mutate()}
+          >
+            <Play className="size-3.5" />
+            {run.isPending ? t("backendStarts") : t("backendRun", { version })}
+          </Button>
+        )}
+      </div>
+      {logsOpen && (
+        <pre
+          role="log"
+          aria-label={t("backendLogs")}
+          className="mt-2 max-h-48 overflow-auto rounded-md border bg-background p-2 font-mono text-xs leading-5 scrollbar-thin"
+        >
+          {logs.data !== undefined
+            ? logs.data.trimEnd() || t("backendNoLogs")
+            : (logs.error?.message ?? t("loading"))}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/** What a backend's state is called, and whether that is good, in progress, bad or nothing running. */
+function describeBackend(
+  backend: ArtifactBackend,
+  t: (
+    key:
+      | "backendNotRun"
+      | "backendStarting"
+      | "backendRunning"
+      | "backendCrashed"
+      | "backendFailed"
+      | "backendStopped"
+      | "backendOffline"
+      | "backendNoComputer",
+  ) => string,
+): { state: "ok" | "busy" | "bad" | "idle"; text: string } {
+  if (backend.computer === "none") {
+    return { state: "bad", text: t("backendNoComputer") };
+  }
+  if (backend.version === null) {
+    return { state: "idle", text: t("backendNotRun") };
+  }
+  if (!backend.status) {
+    return {
+      state: "bad",
+      text:
+        backend.computer === "offline"
+          ? t("backendOffline")
+          : t("backendStopped"),
+    };
+  }
+  switch (backend.status.state) {
+    case "running":
+      return { state: "ok", text: t("backendRunning") };
+    case "starting":
+      return { state: "busy", text: t("backendStarting") };
+    case "crashed":
+      return { state: "busy", text: t("backendCrashed") };
+    case "failed":
+      return { state: "bad", text: t("backendFailed") };
+    default:
+      return { state: "idle", text: t("backendStopped") };
+  }
 }

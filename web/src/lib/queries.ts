@@ -142,6 +142,21 @@ export const publishedArtifactQuery = (id: string) =>
   });
 
 /** What you published of one of your apps, or null. */
+/** How an app's backend is doing, asked again while it is shown. */
+export const artifactBackendQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["artifacts", id, "backend"],
+    queryFn: () => pim.artifactBackend(id),
+    refetchInterval: 5000,
+  });
+
+export const artifactBackendLogsQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["artifacts", id, "backend", "logs"],
+    queryFn: () => pim.artifactBackendLogs(id),
+    refetchInterval: 3000,
+  });
+
 export const artifactPublicationQuery = (id: string) =>
   queryOptions({
     queryKey: ["artifacts", id, "publication"],

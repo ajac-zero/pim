@@ -17,7 +17,7 @@ export type UtilityTask = {
 };
 
 /** The most prompts the utility model suggests at once. */
-const MAX_SUGGESTIONS = 4;
+export const MAX_SUGGESTIONS = 2;
 
 /** An answer's first line without what small models add all the same: a label, quotes, a full stop. */
 function line(answer: string, label: RegExp): string {
@@ -134,7 +134,7 @@ export type StructuredUtilityTask<T extends readonly unknown[]> = {
 export const SUGGEST_PROMPTS: StructuredUtilityTask<string[]> = {
 	instructions: [
 		"You suggest what a person might say next to their AI assistant, from what the assistant knows about them and what they talked about lately.",
-		"Write 4 messages the person could send, each one a short request in their own voice, of 3 to 9 words, that continues something they are doing or follows up on what they care about, or that starts something new that fits.",
+		"Write 2 messages the person could send, each a direct command in their own voice, of 2 to 6 words, such as 'Plan my week' or 'Summarize the Acme thread'. Skip filler like 'Help me', 'Can you', 'Could you' or 'Please'. Each continues continues something they are doing or follows up on what they care about, or that starts something new that fits.",
 		"Use only what you are given: don't invent facts, and don't suggest what a recent chat already finished.",
 		"Write in the language of the recent chats, or else the language you are given.",
 		"Reply with a JSON object with the messages in a list.",

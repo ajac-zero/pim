@@ -1,6 +1,6 @@
 "use client";
 
-import type { ComponentProps } from "react";
+import type { ComponentProps, MouseEvent } from "react";
 import { useCallback } from "react";
 import { Button } from "~/components/ui/button";
 import { ScrollArea, ScrollBar } from "~/components/ui/scroll-area";
@@ -30,7 +30,8 @@ export const Suggestions = ({
 
 export type SuggestionProps = Omit<ComponentProps<typeof Button>, "onClick"> & {
   suggestion: string;
-  onClick?: (suggestion: string) => void;
+  /** Called with whether ⌘ or Ctrl was held, which asks to edit the text rather than send it. */
+  onClick?: (suggestion: string, edit: boolean) => void;
 };
 
 export const Suggestion = ({
@@ -42,9 +43,12 @@ export const Suggestion = ({
   children,
   ...props
 }: SuggestionProps) => {
-  const handleClick = useCallback(() => {
-    onClick?.(suggestion);
-  }, [onClick, suggestion]);
+  const handleClick = useCallback(
+    (event: MouseEvent) => {
+      onClick?.(suggestion, event.metaKey || event.ctrlKey);
+    },
+    [onClick, suggestion],
+  );
 
   return (
     <Button

@@ -183,6 +183,10 @@ function ChatPage() {
     useElementHeight<HTMLDivElement>();
   const { ref: composerCardRef, height: composerCardHeight } =
     useElementHeight<HTMLDivElement>();
+  // Text a suggestion puts in the message box to edit, not sent.
+  const [fill, setFill] = useState<{ text: string; id: number }>();
+  const { ref: suggestionsRef, height: suggestionsHeight } =
+    useElementHeight<HTMLDivElement>();
   // Half the width of the thread's scrollbar (overlay scrollbars take none).
   // The composer leaves the whole scrollbar free on the right, so it stays
   // centered under the messages and never covers the scrollbar.
@@ -279,7 +283,9 @@ function ChatPage() {
                 view={view}
                 pending={pending}
                 composerHeight={composerHeight}
-                composerCardHeight={composerCardHeight}
+                composerCardHeight={
+                  (composerCardHeight ?? 0) + (suggestionsHeight ?? 0)
+                }
               />
             ) : (
               // Fades in late, so a chat that loads at once doesn't flash it.
@@ -306,22 +312,33 @@ function ChatPage() {
                 className="pointer-events-auto relative w-full max-w-4xl px-4"
               >
                 {/* Floats over the thread just above the input, so they never move it. */}
-                {settled && suggestions?.length ? (
-                  <div className="absolute inset-x-4 bottom-full animate-in duration-700 fade-in">
-                    <Suggestions>
-                      {suggestions.map((suggestion) => (
-                        <Suggestion
-                          key={suggestion}
-                          suggestion={suggestion}
-                          variant="outline"
-                          onClick={send}
-                        />
-                      ))}
-                    </Suggestions>
-                  </div>
-                ) : null}
+                <div
+                  ref={suggestionsRef}
+                  className="absolute inset-x-4 bottom-full"
+                >
+                  {settled && suggestions?.length ? (
+                    <div className="animate-in duration-700 fade-in">
+                      <Suggestions>
+                        {suggestions.map((suggestion) => (
+                          <Suggestion
+                            key={suggestion}
+                            suggestion={suggestion}
+                            variant="outline"
+                            title={t("suggestionHint")}
+                            onClick={(text, edit) =>
+                              edit
+                                ? setFill({ text, id: Date.now() })
+                                : send(text)
+                            }
+                          />
+                        ))}
+                      </Suggestions>
+                    </div>
+                  ) : null}
+                </div>
                 <Composer
                   key={sessionId}
+                  fill={fill}
                   draftKey={sessionId}
                   onSend={send}
                   placeholder={

@@ -23,7 +23,7 @@ describe("structured utility answers", () => {
 
 	it("keeps the usable suggestions of an answer that follows the schema but holds nonsense", () => {
 		const messages = [" Plan my long run ", "Plan my long run", "", 7, "x".repeat(101), "How was my pace?", "Add a rest day", "Should I taper?", "One more"];
-		expect(SUGGEST_PROMPTS.result({ messages })).toEqual(["Plan my long run", "How was my pace?", "Add a rest day", "Should I taper?"]);
+		expect(SUGGEST_PROMPTS.result({ messages })).toEqual(["Plan my long run", "How was my pace?"]);
 		for (const nothing of [undefined, null, {}, { messages: "no" }, { messages: [] }]) expect(SUGGEST_PROMPTS.result(nothing)).toEqual([]);
 	});
 });

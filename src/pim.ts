@@ -179,7 +179,7 @@ import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoSetup, RE
 import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { projectEntries } from "./transcript";
-import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
+import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
@@ -5726,7 +5726,7 @@ export class Pim extends DurableAgent<Env> {
 				return this.#agent(id!);
 			},
 		],
-		["GET", "/agents/:agent/suggestions", async ({ agent }, _request, url) => ({ suggestions: await this.#suggestions(this.#agent(agent!), url.searchParams.get("locale") ?? "en") })],
+		["GET", "/agents/:agent/suggestions", async ({ agent }, _request, url) => ({ suggestions: (await this.#suggestions(this.#agent(agent!), url.searchParams.get("locale") ?? "en")).slice(0, MAX_SUGGESTIONS) })],
 		[
 			"GET",
 			"/extensions",

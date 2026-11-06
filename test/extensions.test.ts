@@ -130,7 +130,7 @@ describe("extensions", () => {
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
 		// The blueprint's starters, while the utility model has nothing to suggest.
-		expect(await suggestions(coach)).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
+		expect(await suggestions(coach)).toEqual(["What can you do?", "Plan my week"]);
 		const coaching = await widgetsShown(chat, builtIn);
 		expect(coaching.map((shown) => shown.id)).toEqual(builtIn);
 		const [scheduled] = widget(coaching, "pim.schedule/upcoming").items;
@@ -150,14 +150,14 @@ describe("extensions", () => {
 		expect(widget(home, "pim.schedule/upcoming").items).toEqual([]);
 		expect(widget(home, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Saving for a new car", "Prefers morning runs"]);
 		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.majordomo)!;
-		expect((await suggestions(mine, "es"))[0]).toBe("¿Qué puedes hacer por mí?");
+		expect((await suggestions(mine, "es"))[0]).toBe("¿Qué puedes hacer?");
 	});
 
 	it("suggests what to say to an agent from its latest chats and memory, writing them again only when that changes", async () => {
 		const coach = (await post("/agents", { name: "Race coach", description: "Trains people for races." })).body as Agent;
 		const other = (await post("/agents", { name: "Chef" })).body as Agent;
 		// An agent nobody has talked to costs nothing: no model is asked.
-		expect(await suggestions(coach)).toEqual(["What can you do for me?", "Help me plan my week", "Start tracking a goal with me"]);
+		expect(await suggestions(coach)).toEqual(["What can you do?", "Plan my week"]);
 
 		await post("/memory/log", { text: "Training for the Lisbon half marathon in March", scope: coach.memoryScope });
 		await post("/memory/log", { text: "Allergic to shellfish", scope: other.memoryScope });
@@ -175,9 +175,9 @@ describe("extensions", () => {
 				inputs.push(JSON.stringify(request.messages.at(-1)?.content));
 				return fauxAssistantMessage(JSON.stringify({ messages }));
 			};
-		// What a small model still gets wrong is dropped: repeats, blanks, and what runs past four.
+		// What a small model still gets wrong is dropped: repeats, blanks, and what runs past two.
 		utility.setResponses([write("Plan my long run", " Plan my long run ", "", "How was my pace?", "Add a rest day", "Should I taper?", "One more")]);
-		const written = ["Plan my long run", "How was my pace?", "Add a rest day", "Should I taper?"];
+		const written = ["Plan my long run", "How was my pace?"];
 		expect(await suggestions(coach, "es")).toEqual(written);
 		// It read this agent's chat and what Pim remembers, not another agent's chat.
 		expect(inputs[0]).toContain("Race coach, Trains people for races.");

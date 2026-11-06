@@ -1,34 +1,24 @@
 "use client";
 
+import { ArrowDownRight } from "lucide-react";
 import type { ComponentProps, MouseEvent } from "react";
 import { useCallback } from "react";
-import { Button } from "~/components/ui/button";
-import { ScrollArea, ScrollBar } from "~/components/ui/scroll-area";
 import { cn } from "~/lib/utils";
 
-export type SuggestionsProps = ComponentProps<typeof ScrollArea>;
+export type SuggestionsProps = ComponentProps<"div">;
 
+/** A short list of follow-ups, one per line, in the style of Grok's. */
 export const Suggestions = ({
   className,
   children,
   ...props
 }: SuggestionsProps) => (
-  <ScrollArea
-    className={cn(
-      "w-full overflow-x-auto whitespace-nowrap [mask-image:linear-gradient(to_right,transparent,black_1rem,black_calc(100%_-_1rem),transparent)] [-webkit-mask-image:linear-gradient(to_right,transparent,black_1rem,black_calc(100%_-_1rem),transparent)]",
-      className,
-    )}
-    {...props}
-  >
-    {/* Room inside the scrolling viewport for the chips' shadows. */}
-    <div className="flex w-max flex-nowrap items-center gap-2 px-1 py-3">
-      {children}
-    </div>
-    <ScrollBar className="hidden" orientation="horizontal" />
-  </ScrollArea>
+  <div className={cn("-mt-4 flex flex-col items-start", className)} {...props}>
+    {children}
+  </div>
 );
 
-export type SuggestionProps = Omit<ComponentProps<typeof Button>, "onClick"> & {
+export type SuggestionProps = Omit<ComponentProps<"button">, "onClick"> & {
   suggestion: string;
   /** Called with whether ⌘ or Ctrl was held, which asks to edit the text rather than send it. */
   onClick?: (suggestion: string, edit: boolean) => void;
@@ -38,8 +28,6 @@ export const Suggestion = ({
   suggestion,
   onClick,
   className,
-  variant = "secondary",
-  size = "sm",
   children,
   ...props
 }: SuggestionProps) => {
@@ -51,15 +39,17 @@ export const Suggestion = ({
   );
 
   return (
-    <Button
-      className={cn("cursor-pointer rounded-full px-4", className)}
+    <button
+      className={cn(
+        "-ml-2 flex max-w-full text-[15px] cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-left text-muted-foreground transition-colors hover:text-foreground",
+        className,
+      )}
       onClick={handleClick}
-      size={size}
       type="button"
-      variant={variant}
       {...props}
     >
-      {children || suggestion}
-    </Button>
+      <ArrowDownRight className="size-4 shrink-0 opacity-60" />
+      <span className="truncate">{children || suggestion}</span>
+    </button>
   );
 };

@@ -4040,11 +4040,12 @@ export class Pim extends DurableAgent<Env> {
 		return super.alarm();
 	}
 
-	/** Records who owns this space. */
-	async provision(profile: OwnerProfile): Promise<void> {
+	/** Records who owns this space, and the name they gave when they joined, if they gave one, for their majordomo to greet them by. */
+	async provision(profile: OwnerProfile, name: string | null = null): Promise<void> {
 		this.#assertOpen();
 		if (profile.ownerId !== this.name) throw new Error(`Owner ${profile.ownerId} is not this agent's (${this.name})`);
 		this.store.setMeta(PROFILE_KEY, JSON.stringify(profile));
+		if (name) this.store.setMeta(PERSON_NAME_KEY, name);
 	}
 
 	profile(): OwnerProfile | null {
@@ -5816,16 +5817,18 @@ export class Pim extends DurableAgent<Env> {
 				// Once; checked and marked before anything awaits, so a second tab doesn't start it again.
 				if (this.agents.introduced()) return { agent: this.agents.majordomo(), introduced: true, session };
 				this.agents.introduce();
-				// Their name, from the account they joined with: one agents can mention them by, which every agent remembers.
-				if (start.yourName) {
-					this.store.setMeta(PERSON_NAME_KEY, start.yourName);
-					this.memory.store.append(`Their name is ${start.yourName}.`, this.memory.today(), { scope: EVERYONE_SCOPE });
+				// Their name, as they gave it when they joined, or as the account they joined with says it:
+				// one agents can mention them by, which every agent remembers.
+				const yourName = this.store.meta(PERSON_NAME_KEY) ?? start.yourName;
+				if (yourName) {
+					this.store.setMeta(PERSON_NAME_KEY, yourName);
+					this.memory.store.append(`Their name is ${yourName}.`, this.memory.today(), { scope: EVERYONE_SCOPE });
 					await this.startMemoryNap();
 				}
-				const title = start.title ?? (start.yourName ? `Welcome, ${start.yourName}` : "Welcome");
+				const title = start.title ?? (yourName ? `Welcome, ${yourName}` : "Welcome");
 				this.store.renameSession(ROOT_SESSION, title);
 				try {
-					await this.submitTo(ROOT_SESSION, introduction(this.agents.majordomo(), start), { operationId: "introduction" }, "pim");
+					await this.submitTo(ROOT_SESSION, introduction(this.agents.majordomo(), { ...start, yourName }), { operationId: "introduction" }, "pim");
 				} catch (error) {
 					console.warn("the majordomo's introduction failed", error);
 				}

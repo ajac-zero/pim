@@ -155,7 +155,7 @@ export type MajordomoState = {
   introduced: boolean;
   /** How it talks and how much it handles on its own, read from its instructions. */
   preferences: MajordomoPreferences;
-  /** What you told it to call you at setup; agents can mention you by it. */
+  /** Your name, as you gave it when you joined or as an account you linked says it; agents can mention you by it. */
   yourName: string | null;
 };
 

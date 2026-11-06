@@ -103,7 +103,7 @@ export type MajordomoStart = {
 };
 
 /** How long the person's name may be. */
-const MAX_YOUR_NAME = 80;
+export const MAX_YOUR_NAME = 80;
 
 const LOCALE = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 

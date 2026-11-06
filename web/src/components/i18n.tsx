@@ -951,7 +951,7 @@ const translations = {
     setUpBody:
       "Nobody has set up this Pim yet. Anyone can do it from this page only in the 15 minutes after deploying, so now it takes a setup link. Pim just wrote one to its logs in your Cloudflare account, where only you can read it.",
     claimBody:
-      "You're the first one here, so you'll run this Pim: you invite others, and help them back in if they lose every passkey. Pick your username, then create a passkey on this device.",
+      "You're the first one here, so you'll run this Pim: you invite others, and help them back in if they lose every passkey. Tell us your name, then create a passkey on this device.",
     setUpTitle: "Set up Pim",
     setupLinkWritten: "Link written to the logs. It works once, for an hour.",
     setupStepDashboard:
@@ -968,7 +968,7 @@ const translations = {
     recoveryCode: "Recovery code",
     botJoinTitle: "Create an account to chat",
     botJoinBody:
-      "Pick a username. Your chats are yours alone: nobody else here sees them.",
+      "Tell us your name. Your chats are yours alone: nobody else here sees them.",
     botJoinInstead: "Create an account instead",
     botGone: "This bot's link was turned off, or never existed.",
     botSignedInAs:
@@ -1014,8 +1014,12 @@ const translations = {
     botUnshared: "Bot link turned off.",
     registerTitle: "Join this Pim",
     registerBody:
-      "A personal agent that remembers what matters to you, keeps working while you're away, and asks before acting. Pick the username others here will know you by.",
+      "A personal agent that remembers what matters to you, keeps working while you're away, and asks before acting.",
     registrationClosed: "This Pim isn't taking new people right now.",
+    yourName: "Your name",
+    yourNameHint: "What your agents will call you.",
+    usernameFromName: "You'll be @{username}",
+    changeUsername: "Change",
     username: "Username",
     usernameHint: "Lowercase letters, digits, and hyphens.",
     usernameAvailable: "{username} is available",
@@ -2102,7 +2106,7 @@ const translations = {
     setUpBody:
       "Nadie ha configurado este Pim todavía. Cualquiera puede hacerlo desde esta página solo en los 15 minutos después de desplegarlo, así que ahora hace falta un enlace de configuración. Pim acaba de escribir uno en sus registros de tu cuenta de Cloudflare, donde solo tú puedes leerlo.",
     claimBody:
-      "Eres la primera persona aquí, así que tú administrarás este Pim: invitas a otros y los ayudas a volver si pierden todas sus llaves de acceso. Elige tu nombre de usuario y luego crea una llave de acceso en este dispositivo.",
+      "Eres la primera persona aquí, así que tú administrarás este Pim: invitas a otros y los ayudas a volver si pierden todas sus llaves de acceso. Dinos tu nombre y luego crea una llave de acceso en este dispositivo.",
     setUpTitle: "Configura Pim",
     setupLinkWritten:
       "Enlace escrito en los registros. Funciona una vez, durante una hora.",
@@ -2121,7 +2125,7 @@ const translations = {
     recoveryCode: "Código de recuperación",
     botJoinTitle: "Crea una cuenta para chatear",
     botJoinBody:
-      "Elige un nombre de usuario. Tus chats son solo tuyos: nadie más aquí los ve.",
+      "Dinos tu nombre. Tus chats son solo tuyos: nadie más aquí los ve.",
     botJoinInstead: "Crear una cuenta",
     botGone: "El enlace de este bot se desactivó, o nunca existió.",
     botSignedInAs:
@@ -2168,8 +2172,12 @@ const translations = {
     botUnshared: "Enlace del bot desactivado.",
     registerTitle: "Únete a este Pim",
     registerBody:
-      "Un agente personal que recuerda lo que te importa, sigue trabajando mientras no estás y pregunta antes de actuar. Elige el nombre de usuario con el que te conocerán aquí.",
+      "Un agente personal que recuerda lo que te importa, sigue trabajando mientras no estás y pregunta antes de actuar.",
     registrationClosed: "Este Pim no está aceptando personas nuevas por ahora.",
+    yourName: "Tu nombre",
+    yourNameHint: "Así te llamarán tus agentes.",
+    usernameFromName: "Serás @{username}",
+    changeUsername: "Cambiar",
     username: "Nombre de usuario",
     usernameHint: "Letras minúsculas, dígitos y guiones.",
     usernameAvailable: "{username} está disponible",

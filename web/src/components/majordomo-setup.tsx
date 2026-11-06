@@ -27,14 +27,16 @@ const involvementKey = {
 /**
  * The first time the person opens Pim: their majordomo opens the main chat
  * by introducing itself, and the chat opens, where they set it up by talking
- * with it. Nothing to fill in first.
+ * with it. Nothing to fill in first. `given` is the name they gave when they
+ * joined, if they gave one.
  */
-export function MeetMajordomo() {
+export function MeetMajordomo({ given }: { given: string | null }) {
   const { t, locale } = useI18n();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  // The account they joined with may say their name already: it greets them by it.
-  const yourName = useQuery(authSessionQuery()).data?.name ?? null;
+  // The name they gave when they joined, or the one the account they joined with says: it greets them by it.
+  const linked = useQuery(authSessionQuery()).data?.name ?? null;
+  const yourName = given ?? linked;
   const meet = useMutation({
     mutationFn: () =>
       pim.setUpMajordomo({

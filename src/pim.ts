@@ -6113,7 +6113,7 @@ export class Pim extends DurableAgent<Env> {
 	/** `generate_image`, with the ChatGPT plan's images while it's signed in for them, else where the deployment has an image model. Each image counts as a model request. */
 	#installImageGeneration(): void {
 		const plan = this.codexImages.connected();
-		const model = plan ? this.codexImages.model() : this.imageModel();
+		const model = plan ? this.codexImages.model(this.computer) : this.imageModel();
 		if (!model) return;
 		// Images are saved to the person's files, on their computer: without one, the extension is there with no tool.
 		if (!this.computer.paired()) {

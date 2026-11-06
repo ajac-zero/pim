@@ -67,13 +67,16 @@ const status = async () => (await api<{ state: string; computer: { hostname: str
 
 /** What the test computer ran, and what it answers commands with. */
 const ran: ExecArgs[] = [];
-let answer: (args: ExecArgs) => ExecResult = (args) => ({ exitCode: 0, signal: null, stdout: `ran ${args.command}\n`, stderr: "", timedOut: false, truncated: false });
+let answer: (args: ExecArgs) => ExecResult | Promise<ExecResult> = (args) => ({ exitCode: 0, signal: null, stdout: `ran ${args.command}\n`, stderr: "", timedOut: false, truncated: false });
 
 const connectComputer = (token: string, root: string) =>
 	connectTestComputer(token, root, async (args) => {
 		ran.push(args);
 		return answer(args);
 	});
+
+/** The script, request and response files of the `node` command that sends an image request from the computer. */
+const nodeArgs = (command: string) => /^node "(.+)" "(.+)" "(.+)"$/.exec(command)!.slice(1) as [string, string, string];
 
 const ROOT = `/tmp/computer-${crypto.randomUUID()}`;
 let computer: Awaited<ReturnType<typeof connectComputer>>;
@@ -266,7 +269,7 @@ describe("the computer", () => {
 		expect(paintings.length).toBe(before.paintings + 1);
 	});
 
-	it("draws with the ChatGPT plan while it's signed in for images, and refreshes the sign-in", async () => {
+	it("draws with the ChatGPT plan from the computer while it's signed in for images, and refreshes the sign-in", async () => {
 		const jwt = (claims: Record<string, unknown>) => `e30.${btoa(JSON.stringify(claims)).replace(/=+$/, "")}.sig`;
 		const auth = { "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } };
 		// The first access token is spent as soon as it's issued, so the next image refreshes it.
@@ -275,16 +278,25 @@ describe("the computer", () => {
 			{ access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600, ...auth }), refresh_token: "refresh-2" },
 		];
 		const refreshed = tokens[1]!.access_token;
-		const calls: { url: string; headers: Headers; body: string }[] = [];
+		const calls: { url: string; body: string }[] = [];
 		const realFetch = globalThis.fetch;
 		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
 			const request = new Request(input, init);
-			const { origin, pathname } = new URL(request.url);
-			if (origin !== "https://auth.openai.com" && origin !== "https://chatgpt.com") return realFetch(input, init);
-			calls.push({ url: request.url, headers: request.headers, body: await request.text() });
-			if (pathname === "/oauth/token") return Response.json(tokens.shift());
-			return Response.json({ data: [{ b64_json: btoa(String.fromCharCode(...PNG)) }] });
+			if (new URL(request.url).origin !== "https://auth.openai.com") return realFetch(input, init);
+			calls.push({ url: request.url, body: await request.text() });
+			return Response.json(tokens.shift());
 		});
+		// The computer's side: the request goes to it in a file, and it never goes from the Worker.
+		const sent: { url: string; headers: Record<string, string>; body: string }[] = [];
+		const wasAnswer = answer;
+		answer = async ({ command }) => {
+			const [script, request, response] = nodeArgs(command);
+			expect(await fs.readFile(script, "utf8")).toContain("fetch(url");
+			sent.push(JSON.parse(await fs.readFile(request, "utf8")));
+			await fs.rm(request);
+			await fs.writeFile(response, JSON.stringify({ data: [{ b64_json: btoa(String.fromCharCode(...PNG)) }] }));
+			return { exitCode: 0, signal: null, stdout: JSON.stringify({ status: 200, mitigated: null, ray: "r" }), stderr: "", timedOut: false, truncated: false };
+		};
 		try {
 			const { url } = (await post("/chatgpt/images/login")).body;
 			const state = new URL(url).searchParams.get("state");
@@ -299,20 +311,32 @@ describe("the computer", () => {
 			const made = await callTool("generate_image", { prompt: "A red fox asleep in snow", shape: "landscape" });
 			expect(made.isError).toBe(false);
 			expect(JSON.parse(made.text).image).toMatchObject({ model: "gpt-image-2", type: "image/png" });
-			// Workers AI wasn't asked; the plan was, as an expired token refreshed first.
+			// Workers AI wasn't asked; the plan was, through the computer, as an expired token refreshed first.
 			expect(paintings.length).toBe(before);
 			expect(JSON.parse(calls[1]!.body)).toEqual({ client_id: "app_EMoamEEZ73f0CkXaXp7hrann", grant_type: "refresh_token", refresh_token: "refresh-1" });
-			const drawn = calls[2]!;
-			expect(drawn.url).toBe("https://chatgpt.com/backend-api/codex/images/generations");
-			expect(drawn.headers.get("authorization")).toBe(`Bearer ${refreshed}`);
-			expect(drawn.headers.get("chatgpt-account-id")).toBe("acct-1");
-			expect(JSON.parse(drawn.body).prompt).toBe("A red fox asleep in snow\n\nAspect ratio: 3:2, wide landscape (horizontal) canvas.");
+			expect(sent).toHaveLength(1);
+			expect(sent[0]!.url).toBe("https://chatgpt.com/backend-api/codex/images/generations");
+			expect(sent[0]!.headers).toMatchObject({ authorization: `Bearer ${refreshed}`, "chatgpt-account-id": "acct-1" });
+			expect(JSON.parse(sent[0]!.body).prompt).toBe("A red fox asleep in snow\n\nAspect ratio: 3:2, wide landscape (horizontal) canvas.");
+			// Nothing is left on the computer.
+			expect(await fs.readdir(`${ROOT}/.pim`)).toEqual([]);
+
+			// A firewall's page is reported as one, with its ray.
+			answer = async ({ command }) => {
+				const [, request, response] = nodeArgs(command);
+				await fs.rm(request);
+				await fs.writeFile(response, "<html><head><title>Blocked</title></head></html>");
+				return { exitCode: 0, signal: null, stdout: JSON.stringify({ status: 403, mitigated: null, ray: "abc123" }), stderr: "", timedOut: false, truncated: false };
+			};
+			const blocked = await callTool("generate_image", { prompt: "A red fox" });
+			expect(blocked).toMatchObject({ isError: true, text: expect.stringContaining('answered 403: a web page "Blocked", ray abc123') });
 
 			// Disconnected, images are Workers AI's again.
 			expect((await api("/chatgpt/images", { method: "DELETE" })).body).toEqual({ connected: false, email: null });
 			await callTool("generate_image", { prompt: "A red fox asleep in snow" });
 			expect(paintings.length).toBe(before + 1);
 		} finally {
+			answer = wasAnswer;
 			vi.restoreAllMocks();
 		}
 	});

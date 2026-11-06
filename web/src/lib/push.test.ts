@@ -186,6 +186,7 @@ describe("push alerts", () => {
       data: {
         json: () => ({
           id: "notice",
+          kind: "reply",
           session: "trip",
           title: "Price drop",
           body: "$80 cheaper",
@@ -208,9 +209,10 @@ describe("push alerts", () => {
       options: {
         body: "$80 cheaper",
         icon: "/api/agents/planner/icon?v=42",
+        badge: "/badge-96.png",
         tag: "pim-chat-trip",
         renotify: true,
-        data: { url: "/chat/trip", chats: { trip: 1 }, ids: ["notice"] },
+        data: { url: "/chat/trip", count: 1, ids: ["notice"] },
       },
     });
   });
@@ -304,10 +306,16 @@ describe("grouped push alerts", () => {
       btoa,
     });
     return {
-      async push(id: string, session: string, title: string, body: string) {
+      async push(
+        id: string,
+        session: string,
+        title: string,
+        body: string,
+        kind = "reply",
+      ) {
         let finished: Promise<void> | undefined;
         receive({
-          data: { json: () => ({ id, session, title, body }) },
+          data: { json: () => ({ id, session, title, body, kind }) },
           waitUntil: (promise: Promise<void>) => {
             finished = promise;
           },
@@ -329,17 +337,31 @@ describe("grouped push alerts", () => {
     ]);
   });
 
-  it("replaces chat alerts with one summary once a second chat speaks", async () => {
+  it("keeps each chat's alert apart, with no summary of several chats", async () => {
     const phone = device();
     await phone.push("a", "trip", "Trip", "First");
-    await phone.push("b", "trip", "Trip", "Second");
-    await phone.push("c", "work", "Work", "Hello");
+    await phone.push("b", "work", "Work", "Hello");
     expect(phone.alerts()).toEqual([
-      { title: "Pim", body: "3 new messages in 2 chats" },
+      { title: "Trip", body: "First" },
+      { title: "Work", body: "Hello" },
     ]);
-    await phone.push("d", "work", "Work", "Again");
+  });
+
+  it("shows a mention or an approval by itself, never folded into a reply count", async () => {
+    const phone = device();
+    await phone.push("a", "trip", "Trip", "First");
+    await phone.push("b", "trip", "Planner mentioned you", "Which hotel?", "");
+    await phone.push(
+      "c",
+      "trip",
+      "Pim needs your approval",
+      "Send the email",
+      "",
+    );
     expect(phone.alerts()).toEqual([
-      { title: "Pim", body: "4 new messages in 2 chats" },
+      { title: "Trip", body: "First" },
+      { title: "Planner mentioned you", body: "Which hotel?" },
+      { title: "Pim needs your approval", body: "Send the email" },
     ]);
   });
 

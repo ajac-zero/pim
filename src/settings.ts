@@ -19,10 +19,21 @@ export type ApprovalPolicy = "majordomo" | "auto" | "explicit";
 
 export const APPROVAL_POLICIES: readonly ApprovalPolicy[] = ["majordomo", "auto", "explicit"];
 
+/**
+ * Which messages alert the person's devices: `important` ones only, which are
+ * an agent mentioning them, an approval waiting for them, and an answer to
+ * what they asked when they have left the chat; or `all`, every message an
+ * agent sends them while they aren't looking, including its progress.
+ */
+export type DeviceAlerts = "important" | "all";
+
+export const DEVICE_ALERTS: readonly DeviceAlerts[] = ["important", "all"];
+
 export type Settings = {
 	/** IANA time zone the person lives in. */
 	readonly timeZone: string;
 	readonly approvalPolicy: ApprovalPolicy;
+	readonly deviceAlerts: DeviceAlerts;
 };
 
 const SETTINGS_KEY = "settings";
@@ -64,6 +75,9 @@ export function updateSettings(store: PimStore, defaults: Settings, update: Reco
 				break;
 			case "approvalPolicy":
 				if (!APPROVAL_POLICIES.includes(value as ApprovalPolicy)) throw new HttpError(400, `approvalPolicy must be one of ${APPROVAL_POLICIES.join(", ")}`);
+				break;
+			case "deviceAlerts":
+				if (!DEVICE_ALERTS.includes(value as DeviceAlerts)) throw new HttpError(400, `deviceAlerts must be one of ${DEVICE_ALERTS.join(", ")}`);
 				break;
 			default:
 				throw new HttpError(400, `Unknown setting ${key}`);

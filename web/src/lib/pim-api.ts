@@ -512,6 +512,9 @@ export type Visit = {
 
 export type ApprovalPolicy = "majordomo" | "auto" | "explicit";
 
+/** Which messages alert the devices: those that need you, or every one. */
+export type DeviceAlerts = "important" | "all";
+
 /** The address Pim emails you at. */
 export type EmailState = {
   /** This Pim can send email at all. */
@@ -525,6 +528,7 @@ export type EmailState = {
 export type PimSettings = {
   timeZone: string;
   approvalPolicy: ApprovalPolicy;
+  deviceAlerts: DeviceAlerts;
   /** Null: approvals wait for an answer however long. */
   approvalTimeoutSeconds: number | null;
 };

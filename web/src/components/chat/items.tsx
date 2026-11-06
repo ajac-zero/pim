@@ -236,6 +236,9 @@ function MessageEditor({
 
 /* ------------------------------ user message ----------------------------- */
 
+const SAVED_IMAGE_LINK =
+  /^\[[^\]\n]*\]\(<\/workspace\/uploads\/[^>\n]*\.(?:png|jpe?g|webp|gif)>\)[ \t]*$/gim;
+
 export const UserMessage = memo(function UserMessage({
   item,
   at,
@@ -261,6 +264,14 @@ export const UserMessage = memo(function UserMessage({
               : undefined;
           return url ? [url] : [];
         });
+  // A saved image is shown as its preview, so its link to the file isn't shown too.
+  const shown =
+    images.length > 0
+      ? text
+          .replace(SAVED_IMAGE_LINK, "")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim()
+      : text;
 
   return (
     <div
@@ -293,9 +304,9 @@ export const UserMessage = memo(function UserMessage({
           }
         />
       ) : (
-        text.length > 0 && (
+        shown.length > 0 && (
           <div className="min-w-0 max-w-[88%] md:max-w-[80%] rounded-2xl bg-bubble px-4 py-3 text-bubble-foreground">
-            <Markdown text={text} bubble />
+            <Markdown text={shown} bubble />
           </div>
         )
       )}

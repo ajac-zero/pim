@@ -85,7 +85,7 @@ export interface ComposerProps {
   /** Beside the attach buttons, such as whom a new chat is with. */
   controls?: ReactNode;
   /**
-   * The agent the chat is with, whose model the picker chooses and whose apps
+   * The agent the chat is with, whose model the picker chooses and whose connectors
    * an @ offers; none shows no picker, as in a group chat, which has it in
    * the header.
    */
@@ -103,12 +103,12 @@ export interface ComposerProps {
 /** The mention being typed just before the caret: an @ at the start of a word, and what follows it. */
 const MENTION = /(?:^|\s)@([^\s@]{0,40})$/;
 
-/** What an @ offers: an agent in the chat, or an app, with whether the chat's agent works with it already. */
+/** What an @ offers: an agent in the chat, or a connector, with whether the chat's agent works with it already. */
 type MentionChoice =
   | { kind: "agent"; agent: Agent }
   | { kind: "app"; app: DirectoryApp; listed: boolean };
 
-/** An app picked from an @, and the text its mention replaces. */
+/** A connector picked from an @, and the text its mention replaces. */
 type AppMention = { app: DirectoryApp; start: number; end: number };
 
 /** How many choices an @ shows at once. */
@@ -330,7 +330,7 @@ function ComposerInner({
     input?.setSelectionRange(fill.text.length, fill.text.length);
   }, [fill, controller.textInput.setInput]);
   // Typing @ offers the agents to mention, by the start of their name, and
-  // apps, by the start of a word of theirs: the ones the chat's agent works
+  // connectors, by the start of a word of theirs: the ones the chat's agent works
   // with first, then those you connected, then the rest of the directory.
   const [caret, setCaret] = useState(0);
   const [highlighted, setHighlighted] = useState(0);
@@ -394,7 +394,7 @@ function ComposerInner({
       textareaRef.current?.setSelectionRange(position, position);
     });
   };
-  // An app the agent doesn't work with yet is added to it, and connected,
+  // A connector the agent doesn't work with yet is added to it, and connected,
   // once you say so; then it's mentioned.
   const [adding, setAdding] = useState<AppMention | null>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
@@ -561,7 +561,7 @@ function ComposerInner({
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 data-[state=open]:animate-in data-[state=open]:fade-in-0" />
             <Dialog.Content
-              // You picked the app to add it, so Enter adds it.
+              // You picked the connector to add it, so Enter adds it.
               onOpenAutoFocus={(event) => {
                 event.preventDefault();
                 addButtonRef.current?.focus();

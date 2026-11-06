@@ -26,8 +26,8 @@ Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on,
 
 - **Remember.** Long-term memory, after [OptMem](https://github.com/VictorTaelin/OptMem), in scopes: your majordomo knows everything, each other agent what you let it, and you can make any of it forget.
 - **Plan and follow up.** Goals with step-by-step plans, reminders and recurring work on a schedule.
-- **Make things.** Documents, pages and small React apps, kept with every version.
-- **Use your apps and your computer.** GitHub, Linear, Notion and more than 30 other apps over MCP; commands and a browser on a machine of yours, or on an Ubuntu desktop Pim keeps for you, which you use from the app and take over from your agents at any time.
+- **Make things.** Documents, pages and small React apps, kept with every version: Pim Apps.
+- **Use your connectors and your computer.** GitHub, Linear, Notion and more than 30 other connectors over MCP; commands and a browser on a machine of yours, or on an Ubuntu desktop Pim keeps for you, which you use from the app and take over from your agents at any time.
 - **Ask first.** Anything that acts on the world, such as a request, a command or a click, waits for your approval unless you allowed it.
 
 ## Screenshots
@@ -51,7 +51,7 @@ Pim is one server application, written to the Workers and Durable Objects APIs: 
 
   [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ajac-zero/pim)
 
-- **Next, anywhere.** The aim is a Pim that runs entirely off Cloudflare: on your own machines with [celld](https://celld.dev), which runs the same APIs, keeping its state in any S3-compatible bucket, with the models of your choice. A beta for one node at home, [Pim on celld](docs/celld.md), is there to try; it hasn't been checked with real sign-in providers or apps yet.
+- **Next, anywhere.** The aim is a Pim that runs entirely off Cloudflare: on your own machines with [celld](https://celld.dev), which runs the same APIs, keeping its state in any S3-compatible bucket, with the models of your choice. A beta for one node at home, [Pim on celld](docs/celld.md), is there to try; it hasn't been checked with real sign-in providers or connectors yet.
 
 To try it on your machine first, `pnpm install && pnpm preview` starts a Pim at `http://localhost:8787` with a stand-in model, to look around without a Cloudflare account.
 
@@ -68,7 +68,7 @@ A Pim on Cloudflare can reach only servers on the public internet; one on your o
 
 ## Learn more
 
-- [How Pim works](docs/reference.md): deploying, the API, memory, models, apps, agents and sharing
+- [How Pim works](docs/reference.md): deploying, the API, memory, models, connectors, agents and sharing
 - [Running a Pim for several people](docs/instance.md), and [on celld](docs/celld.md) (beta)
 - [Artifacts](docs/artifacts.md) and [extensions](docs/extensions.md)
 

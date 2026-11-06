@@ -31,7 +31,7 @@ export const permissionsQuery = (circle?: string) =>
     queryFn: () => pim.permissions(circle),
   });
 
-/** Whether an agent may use each tool of its connected apps. */
+/** Whether an agent may use each tool of its connectors. */
 export const agentPermissionsQuery = (agent: string) =>
   queryOptions({
     queryKey: ["permissions", "agent", agent],
@@ -216,7 +216,7 @@ export const emailQuery = () =>
 export const appsQuery = () =>
   queryOptions({ queryKey: ["apps"], queryFn: pim.apps });
 
-/** The apps you can connect: the extensions', and those the admin added. */
+/** The connectors you can connect: the extensions', and those the admin added. */
 export const appDirectoryQuery = () =>
   queryOptions({ queryKey: ["app-directory"], queryFn: pim.appDirectory });
 

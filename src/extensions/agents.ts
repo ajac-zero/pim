@@ -31,8 +31,8 @@ import { type PimServices, json, text } from "./services";
 
 export const CREATE_AGENT = "create_agent";
 export const UPDATE_AGENT = "update_agent";
-export const MANAGE_APPS = "manage_apps";
-export const ADD_CUSTOM_APP = "add_custom_app";
+export const MANAGE_CONNECTORS = "manage_connectors";
+export const ADD_CUSTOM_CONNECTOR = "add_custom_connector";
 export const SHARE_MEMORY_SCOPE = "share_memory_scope";
 
 /** What `update_agent` changes. Contacts are added and removed by name. */
@@ -149,45 +149,45 @@ export function updateAgentAction(agents: Pick<AgentStore, "get" | "update" | "l
 }
 
 const AppChanges = Type.Object({
-	add: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Ids of apps to add and connect after approval, as find_app gives them." })),
-	remove: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Ids of apps to remove from this agent. The person's connection stays, for their other agents." })),
+	add: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Ids of connectors to add and connect after approval, as find_connector gives them." })),
+	remove: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_APPS, description: "Ids of connectors to remove from this agent. The person's connection stays, for their other agents." })),
 });
 type AppChanges = Static<typeof AppChanges>;
 
-/** Applies only the approved additions and removals to the agent as it is now; an app this Pim doesn't offer is refused. */
+/** Applies only the approved additions and removals to the agent as it is now; a connector this Pim doesn't offer is refused. */
 function changedApps(agent: Agent, changes: AppChanges, directory: readonly DirectoryApp[]): AgentInput {
 	for (const ref of changes.add ?? []) {
-		if (!directory.some((app) => app.ref === ref)) throw new Error(`This Pim offers no app ${ref}. Use find_app for an app's id.`);
+		if (!directory.some((app) => app.ref === ref)) throw new Error(`This Pim offers no connector ${ref}. Use find_connector for a connector's id.`);
 	}
 	const kept = agent.apps.filter((ref) => !changes.remove?.includes(ref));
 	return agentInput({ apps: [...new Set([...kept, ...(changes.add ?? [])])] }, agent);
 }
 
-/** Changes this agent's app list and connects additions; never disconnects a shared app. */
+/** Changes this agent's connector list and connects additions; never disconnects a shared connector. */
 export function manageAppsAction(
 	agents: Pick<AgentStore, "get" | "update">,
 	bridge: Pick<McpBridge, "servers" | "connect">,
 	directory: () => readonly DirectoryApp[],
 ): GatedAction {
 	return defineGatedAction({
-		name: MANAGE_APPS,
-		description: "An agent manages its own apps with explicit approval for every change.",
+		name: MANAGE_CONNECTORS,
+		description: "An agent manages its own connectors with explicit approval for every change.",
 		internal: true,
 		explicitApproval: true,
 		parameters: Type.Object({ agent: Type.String(), ...AppChanges.properties }),
-		summarize: ({ agent }) => `Change the apps of ${agent}`,
+		summarize: ({ agent }) => `Change the connectors of ${agent}`,
 		async run({ agent: id, ...changes }) {
 			const agent = agents.get(id);
 			if (!agent) return "That agent no longer exists.";
 			const apps = directory();
 			const updated = agents.update(id, changedApps(agent, changes, apps));
 			const added = apps.filter((app) => changes.add?.includes(app.ref) && updated.apps.includes(app.ref));
-			return [`${agent.name}'s apps are updated. Shared connections and their tool permissions are unchanged.`, ...(await connectAdded(bridge, added))].join("\n");
+			return [`${agent.name}'s connectors are updated. Shared connections and their tool permissions are unchanged.`, ...(await connectAdded(bridge, added))].join("\n");
 		},
 	}) as GatedAction;
 }
 
-/** Connects apps just added to an agent, saying for each what came of it. */
+/** Connects connectors just added to an agent, saying for each what came of it. */
 async function connectAdded(bridge: Pick<McpBridge, "servers" | "connect">, apps: readonly DirectoryApp[]): Promise<string[]> {
 	const results: string[] = [];
 	for (const app of apps) {
@@ -199,39 +199,39 @@ async function connectAdded(bridge: Pick<McpBridge, "servers" | "connect">, apps
 			const result = await bridge.connect(app);
 			results.push(result.authUrl ? `${app.name} needs the person to sign in: ${result.authUrl}` : `Connected ${app.name}.`);
 		} catch (error) {
-			results.push(`${app.name} was added, but connecting failed: ${error instanceof Error ? error.message : String(error)}. Use connect_app to retry.`);
+			results.push(`${app.name} was added, but connecting failed: ${error instanceof Error ? error.message : String(error)}. Use connect_connector to retry.`);
 		}
 	}
 	return results;
 }
 
 /**
- * The admin's majordomo adds a remote MCP server to this Pim's apps, as the
- * admin does in Apps → Create new app, then works with it and connects it.
+ * The admin's majordomo adds a remote MCP server to this Pim's connectors, as the
+ * admin does in Connectors → Create new connector, then works with it and connects it.
  * The space offers it only to the admin's majordomo; `add` checks again.
  */
 export function addCustomAppAction(
 	agents: Pick<AgentStore, "majordomo" | "update">,
 	bridge: Pick<McpBridge, "servers" | "connect">,
-	/** Puts the server in the directory, unless an app there has its URL already, and returns that app. */
+	/** Puts the server in the directory, unless a connector there has its URL already, and returns that connector. */
 	add: (app: { name: string; url: string; description?: string }) => Promise<DirectoryApp>,
 ): GatedAction {
 	return defineGatedAction({
-		name: ADD_CUSTOM_APP,
+		name: ADD_CUSTOM_CONNECTOR,
 		description:
-			"The person runs this Pim: add a remote MCP server they give you to its apps, for everyone on it, then add it to your apps and connect it. Only for an app find_app doesn't find. Give the server's https URL as the person gave it, never with credentials in it; if it needs a sign-in, you get the link to give them. Then hand it to an agent with create_agent's apps, or they add it to one in Your agents.",
+			"The person runs this Pim: add a remote MCP server they give you to its connectors, for everyone on it, then add it to your connectors and connect it. Only for a connector find_connector doesn't find. Give the server's https URL as the person gave it, never with credentials in it; if it needs a sign-in, you get the link to give them. Then hand it to an agent with create_agent's connectors, or they add it to one in Your agents.",
 		explicitApproval: true,
 		parameters: Type.Object({
-			name: Type.String({ minLength: 1, maxLength: 60, description: "The app's name, as people will see it." }),
+			name: Type.String({ minLength: 1, maxLength: 60, description: "The connector's name, as people will see it." }),
 			url: Type.String({ pattern: "^https://\\S+$", maxLength: 500, description: "The MCP server's https URL." }),
 			description: Type.Optional(Type.String({ maxLength: 160, description: "What it does, in a sentence." })),
 		}),
-		summarize: ({ name, url }) => `Add ${name} (${url}) to this Pim's apps for everyone, and connect it`,
+		summarize: ({ name, url }) => `Add ${name} (${url}) to this Pim's connectors for everyone, and connect it`,
 		async run(input) {
 			const app = await add(input);
 			const majordomo = agents.majordomo();
 			agents.update(majordomo.id, agentInput({ apps: [...new Set([...majordomo.apps, app.ref])] }, majordomo));
-			return [`${app.name} is one of this Pim's apps [id: ${app.ref}], and one of yours.`, ...(await connectAdded(bridge, [app]))].join("\n");
+			return [`${app.name} is one of this Pim's connectors [id: ${app.ref}], and one of yours.`, ...(await connectAdded(bridge, [app]))].join("\n");
 		},
 	}) as GatedAction;
 }
@@ -273,7 +273,7 @@ export function shareMemoryScopeAction(agents: Pick<AgentStore, "get" | "update"
 /** The person's agents, for a chat's agent to know them and make new ones. */
 export type AgentsHost = {
 	list(): readonly Agent[];
-	/** The apps the person can connect. */
+	/** The connectors the person can connect. */
 	apps(): readonly DirectoryApp[];
 	/** Checked as the API checks a new agent; throws what it refuses. */
 	create(input: Record<string, unknown>): Agent;
@@ -284,7 +284,7 @@ export type AgentsHost = {
 /** What the agent a person talks with knows of their other agents, and when to make one. */
 function agentsSection(self: Agent, host: AgentsHost): string {
 	return [
-		"The person's agents. Each has its own chats in the sidebar; they share apps, goals and schedules, and each remembers what its memory scopes hold.",
+		"The person's agents. Each has its own chats in the sidebar; they share connectors, goals and schedules, and each remembers what its memory scopes hold.",
 		...host
 			.list()
 			.map(
@@ -309,7 +309,7 @@ How you talk to the person:
 - They see only what you send with \`send_to_user\`. Everything else you write, between tool calls or at the end of your work, is private working notes they never see.
 - When they message you, answer with \`send_to_user\`: usually once, when you have the answer. A successful send finishes the turn by default: call it separately, after all other tools. For long work, a short note first with \`complete: false\` is fine, but you must still send the final answer when done.
 - A failed send does not finish the turn; fix it or send a chat message explaining the problem.
-- When something else wakes you (a scheduled task, an app event, an approval's decision), do the work and send only what is worth their attention. Staying silent is fine, and often right.
+- When something else wakes you (a scheduled task, a connector event, an approval's decision), do the work and send only what is worth their attention. Staying silent is fine, and often right.
 - Write like a capable assistant messaging them: short, warm, direct. No filler.
 
 Rules that always hold:
@@ -329,13 +329,13 @@ export function agentExtension(
 	const createAgent = defineTool({
 		name: CREATE_AGENT,
 		description:
-			"Make a new agent for the person: a named agent with its own instructions and the apps it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Give it an emoji and a color that fit what it's for, so the person tells it apart in the sidebar. Apps are ids of apps this Pim offers, as `find_app` finds them; the person connects each the first time they use it.",
+			"Make a new agent for the person: a named agent with its own instructions and the connectors it works with, with its own chats in the sidebar. Only when none of their agents already does what they want. Write its instructions as the person would: what it's for, what to focus on, how to answer. Give it an emoji and a color that fit what it's for, so the person tells it apart in the sidebar. Connectors are ids of connectors this Pim offers, as `find_connector` finds them; the person connects each the first time they use it.",
 		parameters: Type.Object({
 			name: Type.String({ minLength: 1, maxLength: MAX_NAME, description: "What the person calls it: a given name, such as Ada, which the person may change. Each agent has a name of its own." }),
 			role: Type.Optional(Type.String({ minLength: 1, maxLength: MAX_NAME, description: "What it is for, such as Researcher. Each of the person's agents has a role of its own; left out, it is the name." })),
 			description: Type.String({ maxLength: MAX_DESCRIPTION, description: "One line, shown under its name." }),
 			instructions: Type.String({ maxLength: MAX_INSTRUCTIONS }),
-			apps: Type.Optional(Type.Array(Type.String({ description: "An app's id, from find_app." }), { maxItems: MAX_APPS })),
+			connectors: Type.Optional(Type.Array(Type.String({ description: "A connector's id, from find_connector." }), { maxItems: MAX_APPS })),
 			contacts: Type.Optional(
 				Type.Array(Type.String(), {
 					maxItems: MAX_AGENTS,
@@ -357,7 +357,7 @@ export function agentExtension(
 				const name = (id: string) => all.find((other) => other.id === id)?.name ?? id;
 				return json({
 					created: true,
-					agent: { id: agent.id, name: agent.name, description: agent.description, apps: agent.apps, contacts: agent.contacts.map(name) },
+					agent: { id: agent.id, name: agent.name, description: agent.description, connectors: agent.apps, contacts: agent.contacts.map(name) },
 				});
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
@@ -368,7 +368,7 @@ export function agentExtension(
 	const editing = ownToolPermission(services.store, UPDATE_AGENT).permission;
 	const updateAgent = defineTool({
 		name: UPDATE_AGENT,
-		description: `Change yourself, the agent this chat is with: your name, your role, your description, your instructions, your contacts (the person's other agents you hand tasks to), or how you look in the sidebar: your emoji and color, or an image as your icon, such as one made with generate_image or found on the web. App changes use manage_apps instead. Do it when the person asks, or when handing parts of work you'll do again to another agent would help. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
+		description: `Change yourself, the agent this chat is with: your name, your role, your description, your instructions, your contacts (the person's other agents you hand tasks to), or how you look in the sidebar: your emoji and color, or an image as your icon, such as one made with generate_image or found on the web. Connector changes use manage_connectors instead. Do it when the person asks, or when handing parts of work you'll do again to another agent would help. Only the fields you give change.${editing === "ask" ? ` ${approvalNote(services)}` : ""}`,
 		parameters: Type.Object({
 			agent: Type.Optional(
 				Type.String({ description: "The id of another of the person's agents to change instead, from your_agents. Only their majordomo changes other agents." }),
@@ -399,15 +399,15 @@ export function agentExtension(
 	});
 
 	const manageApps = defineTool({
-		name: MANAGE_APPS,
-		description: `Change the apps this agent works with when the person asks: add apps this Pim offers, by their ids from find_app, or remove them. Approval connects additions automatically; continue the original task once the result arrives. Removing an app affects only this agent, not the person's connection, which their other agents share. Only the person's majordomo can give \`agent\`, to change another of their agents. ${approvalNote(services, true)}`,
+		name: MANAGE_CONNECTORS,
+		description: `Change the connectors this agent works with when the person asks: add connectors this Pim offers, by their ids from find_connector, or remove them. Approval connects additions automatically; continue the original task once the result arrives. Removing a connector affects only this agent, not the person's connection, which their other agents share. Only the person's majordomo can give \`agent\`, to change another of their agents. ${approvalNote(services, true)}`,
 		parameters: Type.Object({
 			agent: Type.Optional(Type.String({ description: "The id of another of the person's agents to change instead, from your_agents." })),
 			...AppChanges.properties,
 		}),
 		replay: "safe",
 		async execute({ agent: id, ...changes }, api, context) {
-			if (ownToolPermission(services.store, MANAGE_APPS).permission === "off") return text("The user turned off app management. Do not try it another way.", true);
+			if (ownToolPermission(services.store, MANAGE_CONNECTORS).permission === "off") return text("The user turned off connector management. Do not try it another way.", true);
 			const { agent: self } = roleOf(String(api.conversationId));
 			const agent = id === undefined ? self : agents.list().find((other) => other.id === id);
 			if (!agent) return text(`The person has no agent with the id ${id}. Use an id from your_agents.`, true);
@@ -423,9 +423,9 @@ export function agentExtension(
 			} catch (error) {
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
-			summary = await api.memo(MANAGE_APPS, summary, context);
-			if (summary === "") return text("That changes no editable apps. Use connect_app if an existing app needs connecting.", true);
-			return fileApproval(services, api, context, { action: MANAGE_APPS, tool: null, args: { agent: agent.id, add: changes.add, remove: changes.remove }, summary }, true);
+			summary = await api.memo(MANAGE_CONNECTORS, summary, context);
+			if (summary === "") return text("That changes no editable connectors. Use connect_connector if an existing connector needs connecting.", true);
+			return fileApproval(services, api, context, { action: MANAGE_CONNECTORS, tool: null, args: { agent: agent.id, add: changes.add, remove: changes.remove }, summary }, true);
 		},
 	});
 
@@ -466,6 +466,6 @@ export function agentExtension(
 				return from === null ? agentsSection(agent, agents) : undefined;
 			}),
 		],
-		tools: [currentTime, createAgent, ...(editing === "off" ? [] : [updateAgent]), ...(ownToolPermission(services.store, MANAGE_APPS).permission === "off" ? [] : [manageApps])],
+		tools: [currentTime, createAgent, ...(editing === "off" ? [] : [updateAgent]), ...(ownToolPermission(services.store, MANAGE_CONNECTORS).permission === "off" ? [] : [manageApps])],
 	});
 }

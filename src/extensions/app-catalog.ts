@@ -2,7 +2,7 @@ import type { PimStore } from "../store";
 import type { McpBridge } from "./mcp";
 
 /**
- * What connected apps offer beyond tools, cached per app in the space's
+ * What connected connectors offer beyond tools, cached per connector in the space's
  * database so prompts render without a network call:
  * - skills, from the MCP Skills extension (`io.modelcontextprotocol/skills`);
  * - event types, from the draft MCP Events extension (`events` capability).
@@ -16,11 +16,11 @@ export const EVENTS_EXTENSION = "io.modelcontextprotocol/events";
 export type SkillFile = { readonly uri: string; readonly digest: string; readonly size: number };
 
 export type AppSkill = {
-	/** The URI of its `SKILL.md`; with the app, the skill's identity. */
+	/** The URI of its `SKILL.md`; with the connector, the skill's identity. */
 	readonly uri: string;
 	readonly name: string;
 	readonly description: string;
-	/** The manifest of every file with its digest, or "dynamic" when the app cannot publish one. */
+	/** The manifest of every file with its digest, or "dynamic" when the connector cannot publish one. */
 	readonly files: readonly SkillFile[] | "dynamic";
 };
 
@@ -30,7 +30,7 @@ export type AppEventType = {
 	readonly inputSchema?: Record<string, unknown>;
 };
 
-/** How long a catalog is kept when the app gives no TTL, and the longest any is kept. */
+/** How long a catalog is kept when the connector gives no TTL, and the longest any is kept. */
 const DEFAULT_TTL_MS = 3_600_000;
 const MAX_TTL_MS = 86_400_000;
 const MAX_PAGES = 10;
@@ -83,8 +83,8 @@ export class AppCatalog {
 	}
 
 	/**
-	 * Whether the app declares Events. The draft is unsettled and today's MCP SDKs drop the
-	 * capability it defines from the handshake, so an app that declares nothing is still
+	 * Whether the connector declares Events. The draft is unsettled and today's MCP SDKs drop the
+	 * capability it defines from the handshake, so a connector that declares nothing is still
 	 * asked once per catalog refresh (see `#load`).
 	 */
 	declaresEvents(serverId: string): boolean {
@@ -92,7 +92,7 @@ export class AppCatalog {
 		return capabilities?.events !== undefined || capabilities?.extensions?.[EVENTS_EXTENSION] !== undefined;
 	}
 
-	/** Whether the app's catalog has been read at least once. */
+	/** Whether the connector's catalog has been read at least once. */
 	known(serverId: string): boolean {
 		return this.#store.catalog(serverId, "skills") !== undefined;
 	}
@@ -105,7 +105,7 @@ export class AppCatalog {
 		return this.#cached<AppEventType[]>(serverId, "events") ?? [];
 	}
 
-	/** Re-reads an app's skills and event types now. One refresh per app runs at a time. */
+	/** Re-reads a connector's skills and event types now. One refresh per connector runs at a time. */
 	refresh(serverId: string): Promise<void> {
 		const running = this.#refreshing.get(serverId);
 		if (running) return running;
@@ -127,7 +127,7 @@ export class AppCatalog {
 	}
 
 	async #load(serverId: string): Promise<void> {
-		// Both kinds are always stored, empty when the app offers none, so it is read once per TTL.
+		// Both kinds are always stored, empty when the connector offers none, so it is read once per TTL.
 		let skills: AppSkill[] = [];
 		let skillsTtl = DEFAULT_TTL_MS;
 		if (this.servesSkills(serverId)) {
@@ -144,7 +144,7 @@ export class AppCatalog {
 		try {
 			listing = await this.#pages(serverId, "events/list", "events");
 		} catch (error) {
-			// An app that declared Events and fails is broken; one that declared nothing just has none.
+			// A connector that declared Events and fails is broken; one that declared nothing just has none.
 			if (this.declaresEvents(serverId)) throw error;
 			listing = { items: [], ttlMs: DEFAULT_TTL_MS };
 		}

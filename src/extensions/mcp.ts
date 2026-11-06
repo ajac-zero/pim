@@ -8,7 +8,7 @@ import type { ToolWidget } from "./define";
 import { json, type PimServices, text } from "./services";
 
 /**
- * Remote MCP servers as pi tools: the apps the user connects (calendar, mail,
+ * Remote MCP servers as pi tools: the connectors the user connects (calendar, mail,
  * notes...). The `agents` SDK's MCP client owns connections, OAuth and
  * reconnecting after a wake; this module turns its catalog into a pi
  * extension, which the space reinstalls whenever the catalog changes. pi
@@ -26,7 +26,7 @@ export const MCP_APPROVALS: readonly McpApproval[] = ["writes", "all", "none"];
 
 export type McpServerInfo = {
 	readonly id: string;
-	/** The app an extension implements that it connects, `<extension>/<app>`; MCP servers have none. */
+	/** The connector an extension implements that it connects, `<extension>/<app>`; MCP servers have none. */
 	readonly app?: string;
 	readonly name: string;
 	readonly url: string;
@@ -54,7 +54,7 @@ export type McpCallResult = {
 	readonly content?: readonly McpContent[];
 	readonly structuredContent?: unknown;
 	readonly isError?: boolean;
-	/** What the result shows the person, from an app an extension implements. */
+	/** What the result shows the person, from a connector an extension implements. */
 	readonly widget?: ToolWidget;
 };
 
@@ -63,7 +63,7 @@ export type McpBridge = {
 	servers(): readonly McpServerInfo[];
 	tools(): readonly McpToolInfo[];
 	call(serverId: string, name: string, args: Record<string, unknown>): Promise<McpCallResult>;
-	/** Connects one of the directory's apps; `authUrl` when the user must sign in first. */
+	/** Connects one of the directory's connectors; `authUrl` when the user must sign in first. */
 	connect(app: DirectoryApp): Promise<{ id: string; state: string; authUrl?: string }>;
 	/** The server's capabilities from its handshake, or undefined while it is not connected. */
 	capabilities(serverId: string): McpCapabilities | undefined;
@@ -134,8 +134,8 @@ export function toolDefinition(tool: McpToolInfo): string {
 }
 
 /**
- * An app tool's permission for the owner (`OWNER`) or a circle: the user's
- * choice, or else, for the owner, the app's approval policy (`writes`:
+ * A connector tool's permission for the owner (`OWNER`) or a circle: the user's
+ * choice, or else, for the owner, the connector's approval policy (`writes`:
  * read-only tools run, others ask), and for a circle, off.
  */
 export function appToolPermission(
@@ -153,11 +153,11 @@ export function appToolPermission(
 export const agentAudience = (agentId: string) => `agent:${agentId}`;
 
 /**
- * An app tool's switch in one of the owner's agents: on, the agent uses it
+ * A connector tool's switch in one of the owner's agents: on, the agent uses it
  * without asking; off, it isn't offered the tool. The person's choice for
  * that agent, held to the tool as it was when they switched it on, as a
  * circle's is; else what they chose for every agent before switches were
- * each agent's (asking counts as off); else on, unless the app marks the
+ * each agent's (asking counts as off); else on, unless the connector marks the
  * tool destructive or asks before every call.
  */
 export function agentToolPermission(store: PimStore, agentId: string, server: McpServerInfo, tool: McpToolInfo): ResolvedPermission {
@@ -205,7 +205,7 @@ export function summarizeCall(server: string, tool: string, args: Record<string,
 export function mcpActions(bridge: McpBridge): GatedAction[] {
 	const call = defineGatedAction({
 		name: "mcp_call",
-		description: "Call a tool of a connected app.",
+		description: "Call a tool of a connected connector.",
 		internal: true,
 		parameters: Type.Object({
 			server: Type.String(),
@@ -215,7 +215,7 @@ export function mcpActions(bridge: McpBridge): GatedAction[] {
 		summarize: ({ server, tool, arguments: args }) => summarizeCall(server, tool, args),
 		async run({ server, tool, arguments: args }) {
 			if (!bridge.servers().some((candidate) => candidate.id === server)) {
-				return `The app ${server} is no longer connected.`;
+				return `The connector ${server} is no longer connected.`;
 			}
 			return toText(await bridge.call(server, tool, args));
 		},
@@ -224,35 +224,35 @@ export function mcpActions(bridge: McpBridge): GatedAction[] {
 	return [call as GatedAction];
 }
 
-/** Each connected app's tools are a pi extension of their own; a chat selects those of the apps its agent works with. */
+/** Each connected connector's tools are a pi extension of their own; a chat selects those of the connectors its agent works with. */
 export const APP_PREFIX = "pim.app.";
 export const appExtensionName = (serverId: string) => `${APP_PREFIX}${serverId}`;
 
-/** The person's connection to an app of the directory: the one to its server, or to the app its extension implements. */
+/** The person's connection to a connector of the directory: the one to its server, or to the connector its extension implements. */
 export function serverFor(servers: readonly McpServerInfo[], app: Pick<DirectoryApp, "ref" | "url">): McpServerInfo | undefined {
 	return servers.find((server) => (app.url === null ? server.app === app.ref : server.url === app.url));
 }
 
 /**
- * The connected apps as pi extensions, rebuilt whenever the catalog changes:
- * `apps`, which every chat has (the `connected_apps` section and the tools
- * that find, list and connect apps), and one extension per ready app with its
- * tools, which only the chats of agents that list the app select.
+ * The connected connectors as pi extensions, rebuilt whenever the catalog changes:
+ * `apps`, which every chat has (the `connectors` section and the tools
+ * that find, list and connect connectors), and one extension per ready connector with its
+ * tools, which only the chats of agents that list the connector select.
  *
  * pi sends tools and sections in registry order and re-sends all of them when
  * one appears out of order, so the parts that come and go must sit at the end:
- * `apps` (always present) goes anywhere, the apps' own tools go last. A newly
- * connected app's tools are then appended to what the provider has cached.
+ * `apps` (always present) goes anywhere, the connectors' own tools go last. A newly
+ * connected connector's tools are then appended to what the provider has cached.
  */
 export function mcpExtensions(
 	bridge: McpBridge,
 	services: PimServices,
 	extras: { catalog: AppCatalog; tools: readonly ToolRegistration[] },
-	/** The apps a conversation's agent works with: the person's own. */
+	/** The connectors a conversation's agent works with: the person's own. */
 	appsOf: (session: string) => readonly DirectoryApp[],
-	/** Every app the person can connect. */
+	/** Every connector the person can connect. */
 	directory: () => readonly DirectoryApp[],
-	/** Whether a conversation's agent may use an app's tool, as its switch is now. */
+	/** Whether a conversation's agent may use a connector's tool, as its switch is now. */
 	permissionIn: (session: string, server: McpServerInfo, tool: McpToolInfo) => ToolPermission,
 ) {
 	const all = bridge.servers();
@@ -270,11 +270,11 @@ export function mcpExtensions(
 				description: `[${server.name}] ${tool.description ?? tool.annotations?.title ?? tool.name}`,
 				// MCP input schemas are JSON Schema, which pi validates as given.
 				parameters: { type: "object", ...tool.inputSchema } as unknown as TSchema,
-				// A call is replay-safe only if the app says the tool only reads.
+				// A call is replay-safe only if the connector says the tool only reads.
 				replay: tool.annotations?.readOnlyHint === true ? "safe" : "unsafe",
 				async execute(args, api) {
 					const call = { server: server.id, tool: tool.name, arguments: (args ?? {}) as Record<string, unknown> };
-					// Checked again as the app and the agent's switch are now: a tool switched off, or changed by its app,
+					// Checked again as the connector and the agent's switch are now: a tool switched off, or changed by its connector,
 					// since the conversation's tools were chosen is refused.
 					const now = bridge.tools().find((candidate) => candidate.serverId === server.id && candidate.name === tool.name);
 					if (!now) return text(`${server.name} doesn't offer ${tool.name} right now.`, true);
@@ -295,8 +295,8 @@ export function mcpExtensions(
 	}
 
 	const listApps = defineTool({
-		name: "list_apps",
-		description: "List the apps this agent works with, whether each is connected, and their tools.",
+		name: "list_connectors",
+		description: "List the connectors this agent works with, whether each is connected, and their tools.",
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute(_args, api) {
@@ -317,18 +317,18 @@ export function mcpExtensions(
 	});
 
 	const connectApp = defineTool({
-		name: "connect_app",
+		name: "connect_connector",
 		description:
-			"Connect one of the apps this agent works with that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Only the apps listed in connected_apps can be connected.",
-		parameters: Type.Object({ app: Type.String({ description: "The app's id or name, as connected_apps lists it." }) }),
+			"Connect one of the connectors this agent works with that isn't connected yet, giving you its tools. If the person must sign in first, you get a link to give them. Only the connectors listed in connectors can be connected.",
+		parameters: Type.Object({ connector: Type.String({ description: "The connector's id or name, as connectors lists it." }) }),
 		replay: "safe",
-		async execute({ app: wanted }, api) {
+		async execute({ connector: wanted }, api) {
 			const mine = appsOf(String(api.conversationId));
 			const app = mine.find((candidate) => candidate.ref === wanted.trim() || candidate.name.toLowerCase() === wanted.trim().toLowerCase());
 			if (!app) {
 				const names = mine.map((candidate) => candidate.name).join(", ");
 				return text(
-					`This agent doesn't work with ${wanted}${names ? `; its apps are ${names}` : ""}. If manage_apps is available, request adding it there by its id from find_app; approval adds and connects it. Otherwise the person can add it in Your agents.`,
+					`This agent doesn't work with ${wanted}${names ? `; its connectors are ${names}` : ""}. If manage_connectors is available, request adding it there by its id from find_connector; approval adds and connects it. Otherwise the person can add it in Your agents.`,
 					true,
 				);
 			}
@@ -339,7 +339,7 @@ export function mcpExtensions(
 				if (result.authUrl) {
 					return text(`${app.name} needs the person to sign in before it can be used. Give them this link: ${result.authUrl}`);
 				}
-				if (result.state !== "ready") return text(`${app.name} is still finishing its connection. Try connect_app again in a moment; do not ask the person to sign in again.`);
+				if (result.state !== "ready") return text(`${app.name} is still finishing its connection. Try connect_connector again in a moment; do not ask the person to sign in again.`);
 				const tools = bridge.tools().filter((tool) => tool.serverId === result.id);
 				return text(`Connected ${app.name}. Its tools: ${tools.map((tool) => toolName(result.id, tool.name)).join(", ") || "none"}.`);
 			} catch (error) {
@@ -349,15 +349,15 @@ export function mcpExtensions(
 	});
 
 	const findApp = defineTool({
-		name: "find_app",
+		name: "find_connector",
 		description:
-			"Find an app this Pim offers by what the person calls it, for its id, which manage_apps adds. Only apps this Pim offers can be connected.",
+			"Find a connector this Pim offers by what the person calls it, for its id, which manage_connectors adds. Only connectors this Pim offers can be connected.",
 		parameters: Type.Object({
-			app: Type.String({ minLength: 2, maxLength: 60, description: "The app's name, like Linear or Notion, or what it does." }),
+			connector: Type.String({ minLength: 2, maxLength: 60, description: "The connector's name, like Linear or Notion, or what it does." }),
 		}),
 		replay: "safe",
-		async execute({ app }) {
-			return text(describeFound(app, findApps(directory(), app)));
+		async execute({ connector }) {
+			return text(describeFound(connector, findApps(directory(), connector)));
 		},
 	});
 
@@ -366,21 +366,21 @@ export function mcpExtensions(
 		tools: [listApps, connectApp, findApp, ...extras.tools],
 		sections: [
 			// Always present, so it never appears out of order (which makes pi re-send every section).
-			section("connected_apps", ({ conversationId }) => {
+			section("connectors", ({ conversationId }) => {
 				const mine = appsOf(String(conversationId));
 				if (mine.length === 0) {
-					return "This agent works with no apps. When the person wants one, find it with find_app, then use manage_apps if available to request adding and connecting it with their approval. If app management is off, the person can add apps in Your agents.";
+					return "This agent works with no connectors. When the person wants one, find it with find_connector, then use manage_connectors if available to request adding and connecting it with their approval. If connector management is off, the person can add connectors in Your agents.";
 				}
 				return mine
 					.map((app) => {
 						const server = serverFor(all, app);
 						if (server?.state !== "ready") {
 							const why = server?.state === "authenticating" ? "waiting for the person to sign in" : "not connected";
-							return `## ${app.name} [id: ${app.ref}]\n(${why}: connect_app connects it)`;
+							return `## ${app.name} [id: ${app.ref}]\n(${why}: connect_connector connects it)`;
 						}
 						const lines = [`## ${app.name} [id: ${app.ref}]`];
 						if (server.instructions) lines.push(clip(server.instructions, MAX_INSTRUCTION_CHARS));
-						// Skills come from the app and are untrusted like its instructions; they load with read_skill.
+						// Skills come from the connector and are untrusted like its instructions; they load with read_skill.
 						const skills = extras.catalog.skills(server.id);
 						if (skills.length > 0) {
 							lines.push(
@@ -390,7 +390,7 @@ export function mcpExtensions(
 						}
 						const events = extras.catalog.events(server.id);
 						if (events.length > 0) {
-							lines.push(`Events you can watch (watch_app_event): ${events.map((event) => event.name).join(", ")}`);
+							lines.push(`Events you can watch (watch_connector_event): ${events.map((event) => event.name).join(", ")}`);
 						}
 						return lines.join("\n");
 					})

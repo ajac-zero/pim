@@ -2,7 +2,7 @@ import { definePimExtension } from "./define";
 import { LOGOS } from "./logos";
 
 /**
- * Popular apps with remote MCP servers of their own, which each person
+ * Popular connectors with remote MCP servers of their own, which each person
  * connects with their own account. Every one lets Pim register itself at
  * sign-in except two. Amp's takes Pim's client metadata document instead.
  * GitHub's is offered once the deployment registers an OAuth app at
@@ -14,8 +14,8 @@ import { LOGOS } from "./logos";
  */
 export const popularApps = definePimExtension({
 	id: "pim.apps",
-	name: "Popular apps",
-	description: "Apps people use every day, each connected with your own account.",
+	name: "Popular connectors",
+	description: "Connectors people use every day, each connected with your own account.",
 	apps: [
 		{
 			id: "airtable",

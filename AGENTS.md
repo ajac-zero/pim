@@ -1,6 +1,6 @@
 # Working on Pim
 
-Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and the web app (`web/`, React). Each person's space is held by a Durable Object `Pim` (`src/pim.ts`) running on pi-durable. The README pitches the product; `docs/reference.md` explains how it works and its vocabulary. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a template is an agent shared through the gallery.
+Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and the web app (`web/`, React). Each person's space is held by a Durable Object `Pim` (`src/pim.ts`) running on pi-durable. The README pitches the product; `docs/reference.md` explains how it works and its vocabulary. Use the same words: Pim is the platform; a space is one person's own part of it; an agent is what people chat with; a template is an agent shared through the gallery; an app is what an agent builds that people use, with every version kept; a connector is a service an agent works with, such as Gmail.
 
 ## Checks
 

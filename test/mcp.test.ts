@@ -6,7 +6,7 @@ import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { Approval } from "../src/store";
-import { MANAGE_APPS, UPDATE_AGENT } from "../src/extensions/agents";
+import { MANAGE_CONNECTORS, UPDATE_AGENT } from "../src/extensions/agents";
 import { api, apiUrl, OWNER, pendingApproval, post, say, systemPrompt, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
@@ -368,7 +368,7 @@ describe("connected apps (MCP)", () => {
 		const added = second.slice(first.length).filter((message) => message.role === "system");
 		expect(added).toHaveLength(1);
 		const entry = added[0]! as Extract<Message, { role: "system" }>;
-		expect(Object.keys(entry.sections ?? {})).toEqual(["connected_apps"]);
+		expect(Object.keys(entry.sections ?? {})).toEqual(["connectors"]);
 		expect(entry.toolsAdded?.map((tool) => tool.name)).toEqual(["notes_search"]);
 	});
 
@@ -388,14 +388,14 @@ describe("connected apps (MCP)", () => {
 		// The default agent doesn't list Weather: the model can't connect it from there.
 		let refused = "";
 		faux.setResponses([
-			toolUse("connect_app", { app: "Weather" }),
+			toolUse("connect_connector", { connector: "Weather" }),
 			(context) => {
 				refused = toolResults(context.messages);
 				return toolUse("send_to_user", { message: "I can't." });
 			},
 		]);
 		await say("Connect the weather app.");
-		expect(refused).toContain("This agent doesn't work with Weather; its apps are Calendar, Notes.");
+		expect(refused).toContain("This agent doesn't work with Weather; its connectors are Calendar, Notes.");
 		expect((await api("/mcp")).body.servers.map((server: { id: string }) => server.id)).toEqual(["calendar"]);
 
 		// The Books agent lists it: connecting it needs no approval, as its agent already chose it.
@@ -404,7 +404,7 @@ describe("connected apps (MCP)", () => {
 		faux.setResponses([
 			(context) => {
 				system = systemPrompt(context.messages);
-				return toolUse("connect_app", { app: "weather" });
+				return toolUse("connect_connector", { connector: "weather" });
 			},
 			(context) => {
 				connected = toolResults(context.messages);
@@ -412,7 +412,7 @@ describe("connected apps (MCP)", () => {
 			},
 		]);
 		await say("Connect the weather app.", budget);
-		expect(system).toContain("## Weather [id: test.ledger/weather]\\n(not connected: connect_app connects it)");
+		expect(system).toContain("## Weather [id: test.ledger/weather]\\n(not connected: connect_connector connects it)");
 		expect(connected).toContain("Connected Weather. Its tools: weather_forecast.");
 		const servers = (await api("/mcp")).body.servers;
 		expect(servers.find((server: { id: string }) => server.id === "weather")).toMatchObject({ url: weather, agents: ["Books"] });
@@ -532,14 +532,14 @@ describe("connected apps (MCP)", () => {
 		let outcome = "";
 		let result = "";
 		faux.setResponses([
-			toolUse("find_app", { app: "firecrawl" }),
+			toolUse("find_connector", { connector: "firecrawl" }),
 			(context) => {
 				found = toolResults(context.messages);
-				return toolUse(MANAGE_APPS, { add: ["test.ledger/nope"] });
+				return toolUse(MANAGE_CONNECTORS, { add: ["test.ledger/nope"] });
 			},
 			(context) => {
 				found += toolResults(context.messages);
-				return toolUse(MANAGE_APPS, { add: [app] });
+				return toolUse(MANAGE_CONNECTORS, { add: [app] });
 			},
 			// Once approved, the call returns, and the turn goes on with the app's tools.
 			(context) => {
@@ -556,16 +556,16 @@ describe("connected apps (MCP)", () => {
 		const approval = await pendingApproval();
 		// The directory's apps only: one this Pim doesn't offer is refused before anyone is asked.
 		expect(found).toContain("- Firecrawl [id: test.ledger/firecrawl]: Crawls web pages.");
-		expect(found).toContain("This Pim offers no app test.ledger/nope");
-		expect(approval).toMatchObject({ action: MANAGE_APPS, tool: null, expiresAt: null, onTimeout: "deny", summary: "Researcher: add and connect Firecrawl" });
+		expect(found).toContain("This Pim offers no connector test.ledger/nope");
+		expect(approval).toMatchObject({ action: MANAGE_CONNECTORS, tool: null, expiresAt: null, onTimeout: "deny", summary: "Researcher: add and connect Firecrawl" });
 		await new Promise((resolve) => setTimeout(resolve, 1_600));
 		expect((await api(`/approvals/${approval.id}`)).body.status).toBe("pending");
 		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([]);
 		expect((await api("/mcp")).body.servers.some((server: { id: string }) => server.id === "firecrawl")).toBe(false);
 		// Neither "always approve" nor a tool permission can bypass per-change consent.
 		expect((await post(`/approvals/${approval.id}/approve`, { always: true })).status).toBe(400);
-		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: "on" }) })).status).toBe(400);
-		const permission = (await api("/permissions")).body.tools.find((info: { tool: string }) => info.tool === MANAGE_APPS);
+		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_CONNECTORS, permission: "on" }) })).status).toBe(400);
+		const permission = (await api("/permissions")).body.tools.find((info: { tool: string }) => info.tool === MANAGE_CONNECTORS);
 		expect(permission).toMatchObject({ permission: "ask", choices: ["off", "ask"] });
 		// A pending edit applies only its app delta, not a stale snapshot of the agent.
 		await api(`/agents/${agent.id}`, { method: "PUT", body: JSON.stringify({ instructions: "Cite sources." }) });
@@ -582,7 +582,7 @@ describe("connected apps (MCP)", () => {
 		expect(servers).toEqual([expect.objectContaining({ id: "firecrawl", state: "ready", agents: ["Researcher", "Other researcher"] })]);
 
 		// Removing it from this agent does not disconnect it or remove it from another agent.
-		faux.setResponses([toolUse(MANAGE_APPS, { remove: [app] }), toolUse("send_to_user", { message: "Removed." })]);
+		faux.setResponses([toolUse(MANAGE_CONNECTORS, { remove: [app] }), toolUse("send_to_user", { message: "Removed." })]);
 		const removing = say("Stop working with Firecrawl", session);
 		const removal = await pendingApproval();
 		expect(removal.summary).toBe("Researcher: remove Firecrawl");
@@ -608,7 +608,7 @@ describe("connected apps (MCP)", () => {
 		const margaret = (await post("/agents", { name: "Margaret", apps: [app] })).body;
 		const ada = (await post("/agents", { name: "Ada", apps: [app] })).body;
 
-		faux.setResponses([toolUse(MANAGE_APPS, { agent: margaret.id, remove: [app] }), toolUse("send_to_user", { message: "Done." })]);
+		faux.setResponses([toolUse(MANAGE_CONNECTORS, { agent: margaret.id, remove: [app] }), toolUse("send_to_user", { message: "Done." })]);
 		const turn = say("Take Firecrawl away from Margaret");
 		const approval = await pendingApproval();
 		expect(approval.summary).toBe("Margaret: remove Firecrawl");
@@ -621,7 +621,7 @@ describe("connected apps (MCP)", () => {
 		// Another agent can't reach past itself.
 		let refusal = "";
 		faux.setResponses([
-			toolUse(MANAGE_APPS, { agent: ada.id, remove: [app] }),
+			toolUse(MANAGE_CONNECTORS, { agent: ada.id, remove: [app] }),
 			(context) => {
 				refusal = toolResults(context.messages);
 				return toolUse("send_to_user", { message: "Refused." });
@@ -638,10 +638,10 @@ describe("connected apps (MCP)", () => {
 		const app = "test.ledger/down";
 		const agent = (await post("/agents", { name: "App manager" })).body;
 		const session = (await post("/sessions", { agent: agent.id })).body.id;
-		faux.setResponses([toolUse(MANAGE_APPS, { add: [app] }), toolUse("send_to_user", { message: "Understood." })]);
+		faux.setResponses([toolUse(MANAGE_CONNECTORS, { add: [app] }), toolUse("send_to_user", { message: "Understood." })]);
 		const adding = say("Add this server", session);
 		const approval = await pendingApproval();
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: "off" }) });
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_CONNECTORS, permission: "off" }) });
 		expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(403);
 		await post(`/approvals/${approval.id}/deny`);
 		expect(await adding).toMatchObject({ status: "done", replies: ["Understood."] });
@@ -657,14 +657,14 @@ describe("connected apps (MCP)", () => {
 		]);
 		const editing = say("Try the old edit tool", session);
 		const edit = await pendingApproval();
-		expect(tools).not.toContain(MANAGE_APPS);
+		expect(tools).not.toContain(MANAGE_CONNECTORS);
 		expect(tools).toContain(UPDATE_AGENT);
 		await post(`/approvals/${edit.id}/approve`);
 		expect(await editing).toMatchObject({ status: "done", replies: ["Edited."] });
 		expect((await api(`/agents/${agent.id}`)).body).toMatchObject({ apps: [], instructions: "Keep it short." });
-		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_APPS, permission: null }) });
+		await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: MANAGE_CONNECTORS, permission: null }) });
 		faux.setResponses([
-			toolUse(MANAGE_APPS, { add: [app] }),
+			toolUse(MANAGE_CONNECTORS, { add: [app] }),
 			(context) => {
 				result = toolResults(context.messages);
 				return toolUse("send_to_user", { message: "Connection failed." });
@@ -675,7 +675,7 @@ describe("connected apps (MCP)", () => {
 		await post(`/approvals/${retry.id}/approve`);
 		expect(await retrying).toMatchObject({ status: "done", replies: ["Connection failed."] });
 		expect(result).toContain("was added, but connecting failed");
-		expect(result).toContain("Use connect_app to retry");
+		expect(result).toContain("Use connect_connector to retry");
 		expect((await api(`/agents/${agent.id}`)).body.apps).toEqual([app]);
 		expect((await api("/mcp")).body.servers.some((server: { url: string }) => server.url === "https://down.example.test/mcp")).toBe(false);
 	});

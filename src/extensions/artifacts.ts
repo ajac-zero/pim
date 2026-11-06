@@ -45,7 +45,7 @@ const HOW_IT_RUNS =
 	"pim.storage.get(key), .set(key, text), .delete(key) and .list(prefix) keep text that stays across visits and new versions (up to 1 MB; JSON.stringify anything else); " +
 	"pim.shared has the same calls, for text everyone the user shares the artifact with sees and changes (a family list, scores); it's the user's own when nobody else uses it; " +
 	"pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
-	"pim.tools.call(name, input) runs one of the user's app tools that runs without asking, by its tool name, and answers with its result as text. " +
+	"pim.tools.call(name, input) runs one of the user's connector tools that runs without asking, by its tool name, and answers with its result as text. " +
 	"The user is asked once per version before ask or a tool first runs; tools that ask before they run can't be used. Show a message when a call fails. " +
 	`A jsx artifact is a React app, App.jsx: \`export default function App() { ... }\`, with hooks from "react". It may import ${JSX_MODULES.map((name) => `"${name}"`).join(", ")} (charts and icons), and its own files, and is styled with Tailwind classes. It's compiled when you save it: a compile error comes back to you to fix. ` +
 	"HTML and JSX artifacts can have more files than the main one, by relative path (\"app.js\", \"components/Chart.jsx\", \"data.json\", \"images/logo.png\"): " +

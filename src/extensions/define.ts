@@ -132,14 +132,14 @@ export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
 }
 
 /**
- * An app people connect with their own accounts. It is named
+ * A connector people connect with their own accounts. It is named
  * `<extension>/<id>`, as people's agents list it, and each
  * person connects it once for all of their agents. It is a remote MCP
  * server, or the extension implements it: its sign-in and its tools.
  */
 export type AppDefinition = McpAppDefinition | NativeAppDefinition;
 
-/** Where the Apps page files an app; the web app names each. */
+/** Where the Connectors page files a connector; the web app names each. */
 export const APP_CATEGORIES = ["productivity", "meetings", "development", "data", "finance", "customers", "websites", "automation", "research", "media"] as const;
 export type AppCategory = (typeof APP_CATEGORIES)[number];
 
@@ -154,7 +154,7 @@ type AppIdentity = {
 	readonly category?: AppCategory;
 };
 
-/** An app that is a remote MCP server. */
+/** A connector that is a remote MCP server. */
 export type McpAppDefinition = AppIdentity & {
 	/** Its remote MCP server, https. */
 	readonly url: string;
@@ -162,17 +162,17 @@ export type McpAppDefinition = AppIdentity & {
 	 * For a server whose sign-in doesn't let apps register themselves. Either
 	 * the Worker's environment variables holding the OAuth client the deployment
 	 * registered with the service, whose redirect URL is this Pim's `/mcp/callback`
-	 * (GitHub's); until they're set, nobody is offered the app. Or
+	 * (GitHub's); until they're set, nobody is offered the connector. Or
 	 * `"metadata-document"`, for a sign-in that takes a client metadata document
 	 * instead (Amp's): Pim names itself by one it serves at `/mcp/client/<owner>`.
 	 */
 	readonly client?: { readonly id: string; readonly secret?: string } | "metadata-document";
 };
 
-/** The deployment's secrets an app named in `secrets`, from the Worker's environment. */
+/** The deployment's secrets a connector named in `secrets`, from the Worker's environment. */
 export type AppSecrets = Readonly<Record<string, string>>;
 
-/** A person's sign-in to an app, as its `callback` made it: JSON. With `expiresAt` (ms), Pim has `refresh` renew it first. */
+/** A person's sign-in to a connector, as its `callback` made it: JSON. With `expiresAt` (ms), Pim has `refresh` renew it first. */
 export type AppCredential = { readonly expiresAt?: number; readonly [key: string]: unknown };
 
 export type AppSignInContext = {
@@ -207,22 +207,22 @@ export type AppToolContext = {
 };
 
 export type AppTool = {
-	/** Lowercase letters, digits and underscores; unique in its app. The model sees it as `<app>_<name>`. */
+	/** Lowercase letters, digits and underscores; unique in its connector. The model sees it as `<app>_<name>`. */
 	readonly name: string;
 	readonly description: string;
 	/** Its arguments' JSON Schema, such as a TypeBox `Type.Object`. */
 	readonly parameters: TSchema;
 	/** It only reads: it runs without asking under the default approval policy. */
 	readonly readOnly?: boolean;
-	/** A risky action that needs the person's decision on every call, even when its app is assigned. */
+	/** A risky action that needs the person's decision on every call, even when its connector is assigned. */
 	readonly destructive?: boolean;
 	execute(args: Record<string, unknown>, context: AppToolContext): Promise<string | AppToolResult>;
 };
 
 /**
- * An app the extension implements, for a service with no MCP server of its
+ * A connector the extension implements, for a service with no MCP server of its
  * own: its sign-in, run once by each person, and its tools, run in their
- * Pim with their credential. To everything else it is an app like an MCP
+ * Pim with their credential. To everything else it is a connector like an MCP
  * server: agents list it, tool permissions and approvals cover its tools.
  */
 export type NativeAppDefinition = AppIdentity & {
@@ -235,7 +235,7 @@ export type NativeAppDefinition = AppIdentity & {
 	/** A credential renewed before it expires; without it, the person signs in again. Throw `ReconnectRequired` when the grant is gone. */
 	refresh?(credential: AppCredential, context: { readonly secrets: AppSecrets }): Promise<AppCredential>;
 	/**
-	 * Ends the person's grant at the service, when they disconnect the app or
+	 * Ends the person's grant at the service, when they disconnect the connector or
 	 * their space is erased. Pim has already forgotten the credential, so this
 	 * is best effort: a failure is logged, and the person can still remove the
 	 * grant in the service's own settings.
@@ -244,7 +244,7 @@ export type NativeAppDefinition = AppIdentity & {
 	/**
 	 * Its credentials are kept encrypted with the deployment's
 	 * `APP_CREDENTIALS_KEY`: nobody is offered it until that is set. (Once the
-	 * key is set, every app's credentials are encrypted; this makes it a
+	 * key is set, every connector's credentials are encrypted; this makes it a
 	 * requirement.)
 	 */
 	readonly encrypted?: boolean;
@@ -265,7 +265,7 @@ export type NativeAppDefinition = AppIdentity & {
 	 * carry it, and the policy allows them by it.
 	 */
 	page?(nonce: string): { readonly html: string; readonly contentSecurityPolicy: string };
-	/** What the button that opens the page says on the Apps page, once the person has connected the app, such as "Choose files". */
+	/** What the button that opens the page says on the Connectors page, once the person has connected the connector, such as "Choose files". */
 	readonly pageLabel?: Text;
 };
 
@@ -285,19 +285,19 @@ export type AppAction = (input: Record<string, unknown>, context: AppActionConte
 export const isNativeApp = (app: AppDefinition): app is NativeAppDefinition => !("url" in app);
 
 /**
- * The Worker secret that encrypts people's credentials for native apps: 32
+ * The Worker secret that encrypts people's credentials for native connectors: 32
  * random bytes in base64, such as `openssl rand -base64 32` makes.
  */
 export const APP_CREDENTIALS_KEY = "APP_CREDENTIALS_KEY";
 
-/** The Worker's environment variables an app needs set before anyone is offered it. */
+/** The Worker's environment variables a connector needs set before anyone is offered it. */
 export function secretsOf(app: AppDefinition | undefined): string[] {
 	if (!app) return [];
 	if (isNativeApp(app)) return [...(app.secrets ?? []), ...(app.encrypted ? [APP_CREDENTIALS_KEY] : [])];
 	return typeof app.client === "object" ? [app.client.id, ...(app.client.secret ? [app.client.secret] : [])] : [];
 }
 
-/** Types an app tool's `execute` by its `parameters`. */
+/** Types a connector tool's `execute` by its `parameters`. */
 export function defineAppTool<T extends TSchema>(
 	tool: Omit<AppTool, "parameters" | "execute"> & {
 		readonly parameters: T;
@@ -315,7 +315,7 @@ export type PimExtension = {
 	readonly widgets?: Readonly<Record<string, Widget>>;
 	/** Themes people can pick for the web app, in Settings → Appearance. See ../themes.ts. */
 	readonly themes?: readonly Theme[];
-	/** Apps people can connect, and agents list as `<extension>/<app>`. */
+	/** Connectors people can connect, and agents list as `<extension>/<app>`. */
 	readonly apps?: readonly AppDefinition[];
 	/** Built once in each person's space. Its tools and actions must be named apart from every other tool. */
 	readonly ability?: (context: AbilityContext) => Ability;
@@ -346,12 +346,12 @@ export function localize(text: Text, locale: string): string {
 
 const ID = /^[a-z0-9][a-z0-9.-]{0,62}$/;
 
-/** Where the apps the admin adds are named: `custom/<app>`. No extension may take the name. */
+/** Where the connectors the admin adds are named: `custom/<app>`. No extension may take the name. */
 export const CUSTOM_APPS = "custom";
 
 /**
  * The extensions installed in this deployment, checked once: ids are unique
- * and well formed, and so are their apps. A mistake in `pim.config.ts` fails here, loudly.
+ * and well formed, and so are their connectors. A mistake in `pim.config.ts` fails here, loudly.
  */
 export class PimExtensions {
 	readonly #extensions = new Map<string, PimExtension>();
@@ -359,13 +359,13 @@ export class PimExtensions {
 	constructor(extensions: readonly PimExtension[]) {
 		for (const extension of extensions) {
 			if (!ID.test(extension.id)) throw new Error(`Extension id ${JSON.stringify(extension.id)} must be lowercase letters, digits, dots and hyphens`);
-			if (extension.id === CUSTOM_APPS) throw new Error(`No extension may be called ${CUSTOM_APPS}: the admin's apps are`);
+			if (extension.id === CUSTOM_APPS) throw new Error(`No extension may be called ${CUSTOM_APPS}: the admin's connectors are`);
 			if (this.#extensions.has(extension.id)) throw new Error(`Two extensions are called ${extension.id}`);
 			this.#extensions.set(extension.id, extension);
 			const apps = new Set<string>();
 			for (const app of extension.apps ?? []) {
 				const ref = `${extension.id}/${app.id}`;
-				if (!ID.test(app.id) || apps.has(app.id)) throw new Error(`${extension.id} has a missing, malformed or repeated app id ${JSON.stringify(app.id)}`);
+				if (!ID.test(app.id) || apps.has(app.id)) throw new Error(`${extension.id} has a missing, malformed or repeated connector id ${JSON.stringify(app.id)}`);
 				if (!app.name.trim()) throw new Error(`${ref} needs a name`);
 				if (!isNativeApp(app)) {
 					if (!/^https:\/\/\S+$/.test(app.url)) throw new Error(`${ref} needs a name and an https URL`);

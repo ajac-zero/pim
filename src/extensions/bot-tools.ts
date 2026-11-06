@@ -4,7 +4,7 @@ import { text } from "./services";
 
 /**
  * The tools a bot's author shares with its guests. The author picks them,
- * one by one, from what their agent can use in their own space: its apps'
+ * one by one, from what their agent can use in their own space: its connectors'
  * tools and `generate_image`. Each runs in the author's space, as the
  * author, with their connections, model and computer; a guest's copy of the
  * bot gets a stand-in for each, which calls the author's space
@@ -20,12 +20,12 @@ export const BOT_TOOLS_EXTENSION = "pim.bot-tools";
 export type BotTool = {
 	/** As the model sees it: `<app>_<tool>`, or `generate_image`. */
 	readonly name: string;
-	/** The app it belongs to; null for Pim's own. */
+	/** The connector it belongs to; null for Pim's own. */
 	readonly appName: string | null;
 	readonly description: string;
 	/** Its input, as JSON Schema text: as text, it crosses between spaces as it is. */
 	readonly parameters: string;
-	/** The app says it changes or deletes things. */
+	/** The connector says it changes or deletes things. */
 	readonly destructive: boolean;
 	/** The author approves each call first; missing in bots shared before they could. */
 	readonly ask?: boolean;

@@ -33,7 +33,7 @@ import {
  * function_call / function_call_output.
  */
 
-/** Something Pim fed itself: an approval decision, a scheduled task, an app event, tasks' answers, who joined a group chat, a reset. */
+/** Something Pim fed itself: an approval decision, a scheduled task, a connector event, tasks' answers, who joined a group chat, a reset. */
 export type PimNotice = {
   kind: "approval" | "schedule" | "event" | "task" | "room" | "reset";
   /** One line, without the machine prefix. */

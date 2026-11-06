@@ -61,7 +61,7 @@ function profile(env: Env): { runtime: "cloudflare" } | { runtime: "celld"; secr
 	if (secret.length < MIN_INGRESS_SECRET_LENGTH || !/^[\x21-\x7e]+$/.test(secret)) {
 		return { problem: `PIM_INGRESS_SECRET must be at least ${MIN_INGRESS_SECRET_LENGTH} visible ASCII characters, such as \`openssl rand -hex 32\` makes` };
 	}
-	// The key that seals people's app sign-ins is never also something every request carries.
+	// The key that seals people's connector sign-ins is never also something every request carries.
 	if (secret === vars.APP_CREDENTIALS_KEY) return { problem: "PIM_INGRESS_SECRET must not be APP_CREDENTIALS_KEY" };
 	if (!vars.Directory) return { problem: "the Directory binding is missing, so requests can't be counted" };
 	return { runtime: "celld", secret };

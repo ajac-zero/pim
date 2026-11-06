@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { type AppToolContext, defineAppTool, definePimExtension, oauth2 } from "./define";
 
 /**
- * Spotify, which has no MCP server of its own: an app this extension
+ * Spotify, which has no MCP server of its own: a connector this extension
  * implements, with Spotify's OAuth sign-in and its Web API. Offered once
  * the deployment sets `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, from
  * an app made at developer.spotify.com whose redirect URI is this Pim's

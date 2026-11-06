@@ -99,12 +99,12 @@ export const OWNER = "";
 export type ToolPermissionChoice = {
 	/** `OWNER`, or the id of the circle the permission is for. */
 	readonly audience: string;
-	/** The connected app's id; empty for Pim's own tools. */
+	/** The connector's id; empty for Pim's own tools. */
 	readonly app: string;
-	/** The tool's own name: the app's name for it, not the `<app>_<tool>` name the model sees. */
+	/** The tool's own name: the connector's name for it, not the `<app>_<tool>` name the model sees. */
 	readonly tool: string;
 	readonly permission: ToolPermission;
-	/** An app tool's definition when the user chose, so a tool the app changes since is noticed; null for Pim's own. */
+	/** A connector tool's definition when the user chose, so a tool the connector changes since is noticed; null for Pim's own. */
 	readonly definition: string | null;
 	readonly updatedAt: number;
 };
@@ -120,7 +120,7 @@ export type Notification = {
 	readonly readAt: number | null;
 };
 
-/** A subscription to one event type of a connected app, and what to do when it fires. */
+/** A subscription to one event type of a connector, and what to do when it fires. */
 export type AppWatch = {
 	readonly id: string;
 	readonly serverId: string;
@@ -129,9 +129,9 @@ export type AppWatch = {
 	readonly instruction: string;
 	/** The session events are delivered to. */
 	readonly session: string;
-	/** Standard Webhooks secret (`whsec_...`) the app signs deliveries with. */
+	/** Standard Webhooks secret (`whsec_...`) the connector signs deliveries with. */
 	readonly secret: string;
-	/** The callback URL the app delivers to. */
+	/** The callback URL the connector delivers to. */
 	readonly url: string;
 	readonly remoteId: string | null;
 	readonly cursor: string | null;
@@ -402,14 +402,14 @@ export class PimStore {
 			pim_team_runs: "Agents' team work",
 			pim_agent_sessions: "Agents' chats",
 			pim_shares: "Spaces shared with them",
-			pim_mcp_servers: "apps",
+			pim_mcp_servers: "connectors",
 			pim_app_watches: "watches",
 			pim_sessions: "chats",
 			pim_session_ids: "chat ids",
 			pim_chat_links: "public links to chats",
 			pim_credentials: "credentials",
-			pim_app_connections: "app connections",
-			pim_tool_widgets: "widgets from apps' results",
+			pim_app_connections: "connector connections",
+			pim_tool_widgets: "widgets from connectors' results",
 			pim_notifications: "notifications",
 			pim_emails: "emails sent",
 			pim_push_subscriptions: "push subscriptions",
@@ -651,7 +651,7 @@ export class PimStore {
 		this.#sql.exec("DELETE FROM pim_always_approved WHERE tool = ?", tool);
 	}
 
-	// Connected apps: the MCP client stores the servers; this is pim's policy for each.
+	// Connectors: the MCP client stores the servers; this is pim's policy for each.
 
 	mcpApproval(id: string): string | undefined {
 		const [row] = this.#sql.exec("SELECT approval FROM pim_mcp_servers WHERE id = ?", id).toArray();
@@ -666,13 +666,13 @@ export class PimStore {
 		);
 	}
 
-	/** Forgets an app's policy and the permissions set for its tools. */
+	/** Forgets a connector's policy and the permissions set for its tools. */
 	deleteMcpApproval(id: string): void {
 		this.#sql.exec("DELETE FROM pim_mcp_servers WHERE id = ?", id);
 		this.#sql.exec("DELETE FROM pim_tool_permissions WHERE app = ?", id);
 	}
 
-	// What connected apps offer beyond tools: skills and event types, cached per app.
+	// What connectors offer beyond tools: skills and event types, cached per connector.
 
 	catalog<T>(serverId: string, kind: "skills" | "events"): { data: T; expiresAt: number } | undefined {
 		const [row] = this.#sql
@@ -695,7 +695,7 @@ export class PimStore {
 		this.#sql.exec("DELETE FROM pim_app_catalog WHERE server_id = ?", serverId);
 	}
 
-	// Event watches: subscriptions to connected apps' events.
+	// Event watches: subscriptions to connectors' events.
 
 	addWatch(watch: Omit<AppWatch, "remoteId" | "cursor" | "refreshBefore" | "status" | "lastError" | "lastEventAt" | "createdAt">): AppWatch {
 		this.#sql.exec(
@@ -873,7 +873,7 @@ export class PimStore {
 		);
 	}
 
-	// What app tools' results showed, kept for their chat to put under a message: the latest few of each
+	// What connector tools' results showed, kept for their chat to put under a message: the latest few of each
 
 	keepWidget(session: string, widget: unknown): string {
 		const id = `tool:${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;

@@ -18,7 +18,7 @@ export default definePimConfig({
 	// GitHub is offered once GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET are set (see src/extensions/popular-apps.ts),
 	// and Spotify once SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are (see src/extensions/spotify.ts).
 	// Gmail and Google Drive each need an OAuth client in a Google Cloud project of its own, and APP_CREDENTIALS_KEY
-	// (see "Apps" in docs/reference.md); until they are set, nobody is offered them.
+	// (see "Connectors" in docs/reference.md); until they are set, nobody is offered them.
 	extensions: [popularApps, spotifyExtension, googleExtension([gmail, googleDrive])],
 	// The color theme people see until they pick another: a theme's id, Pim's own (src/extensions/themes) or an extension's.
 	defaultTheme: "tokyo-night",

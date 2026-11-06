@@ -2,7 +2,7 @@
 
 [celld](https://celld.dev) runs Cloudflare Workers and Durable Objects on your own machines, and keeps their state in a bucket you own. This page runs Pim on one celld node at home or on a small server: a fresh install, from a commit of this repository, behind your own TLS proxy. Everything it uses is in [`deploy/celld/`](../deploy/celld/).
 
-**This is a beta, on a beta.** celld v0.6.3 calls itself beta and not safe for hostile multi-tenant use. Pim on celld has been run end to end only on a disposable machine, with a stand-in bucket and a stand-in model (see [What has been checked](#what-has-been-checked)). Real passkeys in a browser on a real domain, sign-in with Google, GitHub or OpenID Connect, apps' OAuth (Gmail, Drive, Spotify, GitHub), real model providers, the ChatGPT plan, MCP clients and the computer companion have **not** been checked on celld. Use it for yourself and people you trust, and keep backups.
+**This is a beta, on a beta.** celld v0.6.3 calls itself beta and not safe for hostile multi-tenant use. Pim on celld has been run end to end only on a disposable machine, with a stand-in bucket and a stand-in model (see [What has been checked](#what-has-been-checked)). Real passkeys in a browser on a real domain, sign-in with Google, GitHub or OpenID Connect, connectors' OAuth (Gmail, Drive, Spotify, GitHub), real model providers, the ChatGPT plan, MCP clients and the computer companion have **not** been checked on celld. Use it for yourself and people you trust, and keep backups.
 
 It needs a commit with Pim's celld runtime (`PIM_RUNTIME=celld`, [Trusted ingress](#trusted-ingress)); `deploy.sh` refuses an earlier one. Out of scope here: moving a Pim from Cloudflare to celld or back (there is no import), and more than one node.
 
@@ -116,7 +116,7 @@ On a Linux machine (x86-64 or ARM64) with ports 80 and 443 reachable, and DNS fo
 There is no dashboard: `deploy.sh` reads four files on every deploy, and a change is a new deploy, which nodes adopt within 30 seconds without a restart. Settings → Deployment still shows the admin what each variable is and any Pim can't read.
 
 - **`pim.env`**: the variables in [docs/reference.md's Deploy table](reference.md#deploy), such as `PIM_PUBLIC_URL`, `PIM_REGISTRATION` and the `PIM_LIMIT_*` limits, and `PIM_OIDC_ISSUER`. Nothing secret: `deploy.sh` refuses a name that looks like one there.
-- **`secrets.env`**, mode 600: OAuth clients' IDs and secrets, apps' secrets, an OTLP collector's headers.
+- **`secrets.env`**, mode 600: OAuth clients' IDs and secrets, connectors' secrets, an OTLP collector's headers.
 - **`ingress.env`**, mode 400: `PIM_INGRESS_SECRET`, alone, which Caddy reads too ([Trusted ingress](#trusted-ingress)).
 - **`app-credentials-key`**, mode 400: [`APP_CREDENTIALS_KEY`](#app_credentials_key), alone.
 
@@ -135,13 +135,13 @@ celld v0.6.3 has no store for secrets: every variable is a plain-text binding in
 
 ### APP_CREDENTIALS_KEY
 
-The key that encrypts people's sign-ins to apps Pim implements (Gmail and Google Drive need it; Spotify's are encrypted with it once it's set). Make it once per Pim, on the machine that deploys:
+The key that encrypts people's sign-ins to connectors Pim implements (Gmail and Google Drive need it; Spotify's are encrypted with it once it's set). Make it once per Pim, on the machine that deploys:
 
 ```sh
 deploy/celld/gen-app-credentials-key.sh /etc/pim/app-credentials-key     # prints its fingerprint
 ```
 
-It never replaces an existing key. Back it up **apart from the bucket's backups**, such as in a password manager or offline, with its fingerprint: the bucket holds it too (in each manifest), but the copy you deploy from is yours to keep. To check a copy: `tr -d '\n' < COPY | sha256sum | cut -c1-16` prints the same fingerprint. Losing it, or deploying another, makes everyone connect those apps again; nothing else is lost.
+It never replaces an existing key. Back it up **apart from the bucket's backups**, such as in a password manager or offline, with its fingerprint: the bucket holds it too (in each manifest), but the copy you deploy from is yours to keep. To check a copy: `tr -d '\n' < COPY | sha256sum | cut -c1-16` prints the same fingerprint. Losing it, or deploying another, makes everyone connect those connectors again; nothing else is lost.
 
 ## Models
 
@@ -176,7 +176,7 @@ With `PIM_RUNTIME=celld`, which the profile sets, Pim answers only requests that
 
 - Each request must carry `X-Pim-Ingress-Secret` with `PIM_INGRESS_SECRET`, at least 32 visible ASCII characters and not the app credentials key. Without it, or with another, Pim answers 403.
 - The client's address is `X-Pim-Client-IP`, set by the proxy: one bare IPv4 or IPv6 address, never a list. Anything else is 400. An IPv4 address mapped into IPv6 counts as the IPv4 address, and an IPv6 address counts by its /64.
-- Pim strips `X-Pim-Ingress-Secret`, `X-Pim-Client-IP` and `CF-Connecting-IP` before anything else reads the request, so none reaches a person's space or an app.
+- Pim strips `X-Pim-Ingress-Secret`, `X-Pim-Client-IP` and `CF-Connecting-IP` before anything else reads the request, so none reaches a person's space or a connector.
 - A missing or unreadable `PIM_INGRESS_SECRET` is a configuration error: 503 for everything. `deploy.sh` refuses to deploy without one.
 
 So even a mistake in the network, such as celld's listener reachable from the LAN, doesn't let anyone claim another address or skip the proxy into the Worker. The web app's own files (`/`, `/assets/*`), which celld serves without the Worker, answer there regardless; they hold nothing of anyone's. The secret lives in `/etc/pim/ingress.env` (mode 400, root's), which `deploy.sh` and Caddy (through its systemd drop-in) both read, and in the deployment's manifest in the bucket. Back it up with `/etc/pim`; losing it costs nothing but making a new one.
@@ -216,7 +216,7 @@ What this is and isn't:
 
 - **All or nothing.** A restore takes every person back to the backup's moment. There is no restoring one person, and no point in time between backups.
 - **Copies of a running node aren't consistent.** A copy made while celld writes can catch databases mid-history; nothing here claims it restores. Bucket versioning or object lock at your provider protect against deletion, but restoring from them hasn't been tested.
-- **A person's export is not a backup.** Settings' export (`pim.exported`) is a copy for the person to keep. Pim can't import it, and it leaves out credentials and apps' sign-ins.
+- **A person's export is not a backup.** Settings' export (`pim.exported`) is a copy for the person to keep. Pim can't import it, and it leaves out credentials and connectors' sign-ins.
 - **Backups hold secrets**: every deployment's variables and celld's fleet secret. Encrypt them (`rclone crypt`, or provider-side encryption with your own key) and keep their credentials apart from the live bucket's.
 - **The bucket grows.** With `CELLD_LTX_RETENTION_SECS` unset, celld keeps every activation's history; backups grow with it. Turning on epoch GC is your decision ([celld's guarantees](https://celld.dev/docs/guarantees#epoch-gc)), and hasn't been tested with Pim.
 - **Practice.** Restore into a scratch prefix and start a second node on other ports against it, now and then. Never start two nodes on the same prefix with different `CELLD_WATCH` directories at once, and never let the restored node's Pim send anything real while you test.
@@ -239,4 +239,4 @@ Keep `APP_CREDENTIALS_KEY`, `/etc/pim` and `/etc/celld` backed up apart from the
 - `CADDY=... node --test deploy/celld/test/proxy.check.mjs`: the Caddyfile, as above.
 - `CELLD=... deploy/celld/test/run-scratch.sh [REF]`: the whole install on one machine, with [moto](https://github.com/getmoto/moto) as a throwaway S3 (not a qualified store), random canary secrets, and [`mock-model.mjs`](../deploy/celld/test/mock-model.mjs) as a custom-endpoint model. It builds and deploys the commit, starts celld v0.6.3 and the Caddyfile, then checks through the proxy: `/health`; `/`, a page of the app and a script are the build's files; `/api` goes to the Worker; past the proxy, Pim refuses a missing or wrong ingress secret (403), a bad client address (400) and `http://` (421); claiming from the setup link in celld's log; a passkey (a software one, as the Worker's tests make), an API token, a provider, a chat with an image kept in R2, a goal, a WebSocket. It restarts the node gracefully and checks it all again, searches all of the bucket and the build for the canaries (found in the deployment's manifest only), then restores a cold backup into an empty prefix on a fresh node and checks it all again. It refuses a commit without Pim's celld runtime unless `ALLOW_PRE_RUNTIME=1`, which runs everything but the ingress checks. Without that override, it has passed on the integration candidate, `review/linus-celld-integrated` (the celld security change from `9c79fe6`, these deploy changes, and main merged in), along with the ingress and rate-limit checks above. It hasn't run on main itself, which doesn't have the runtime yet.
 
-Not checked on celld, and each needs a real deployment: a qualified bucket's latency and errors, Caddy's real certificates, passkeys in browsers, Google/GitHub/OIDC sign-in, apps' OAuth and encrypted credentials in use, real model providers, the ChatGPT plan, MCP clients, the computer companion, alarms that fire across a restart, push notifications, sustained load, and the bucket's growth over months.
+Not checked on celld, and each needs a real deployment: a qualified bucket's latency and errors, Caddy's real certificates, passkeys in browsers, Google/GitHub/OIDC sign-in, connectors' OAuth and encrypted credentials in use, real model providers, the ChatGPT plan, MCP clients, the computer companion, alarms that fire across a restart, push notifications, sustained load, and the bucket's growth over months.

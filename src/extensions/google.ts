@@ -13,23 +13,23 @@ import {
 import { readBody, readJsonObject, serviceText } from "./native-apps";
 
 /**
- * What Pim's Google apps share: Google's OAuth sign-in and its APIs, for
- * apps such as Gmail and Google Drive that each connect on their own (see
- * "Google apps" in docs/extensions.md).
+ * What Pim's Google connectors share: Google's OAuth sign-in and its APIs, for
+ * connectors such as Gmail and Google Drive that each connect on their own (see
+ * "Google connectors" in docs/extensions.md).
  *
- * Each app has an OAuth client of its own, in the Worker's secrets, made
+ * Each connector has an OAuth client of its own, in the Worker's secrets, made
  * in a Google Cloud project of its own: Google keeps a person's grant per
  * project, and revoking it revokes every client's tokens in that project.
  * So a person's grant to Gmail is apart from their grant to Drive, and
  * disconnecting Gmail, which revokes its grant at Google, leaves Drive
- * connected. Apps may ask only for the narrow scopes in `GOOGLE_SCOPES`.
+ * connected. Connectors may ask only for the narrow scopes in `GOOGLE_SCOPES`.
  * A sign-in asks Google to show every scope the person granted the
- * project, so one that grants less than the app asked for, or more (the
+ * project, so one that grants less than the connector asked for, or more (the
  * project is shared with something else), is refused. Their credentials are kept encrypted (`encrypted`), so they are
  * offered only once the deployment sets `APP_CREDENTIALS_KEY` too.
  */
 
-/** The scopes a Google app may ask for: reading Gmail, and only the Drive files the person picks for Pim. */
+/** The scopes a Google connector may ask for: reading Gmail, and only the Drive files the person picks for Pim. */
 export const GOOGLE_SCOPES = {
 	gmailReadonly: "https://www.googleapis.com/auth/gmail.readonly",
 	driveFile: "https://www.googleapis.com/auth/drive.file",
@@ -40,7 +40,7 @@ const AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 
-/** A person's sign-in to a Google app, as Pim keeps it. */
+/** A person's sign-in to a Google connector, as Pim keeps it. */
 export type GoogleCredential = AppCredential & {
 	readonly accessToken: string;
 	readonly refreshToken: string;
@@ -56,10 +56,10 @@ export type GoogleAppOptions = {
 	readonly description: string;
 	readonly icon?: string;
 	readonly category?: AppCategory;
-	/** The Worker secrets holding this app's own OAuth client, such as `GOOGLE_GMAIL_CLIENT_ID`: one in a Google Cloud project no other app's client is in. */
+	/** The Worker secrets holding this connector's own OAuth client, such as `GOOGLE_GMAIL_CLIENT_ID`: one in a Google Cloud project no other connector's client is in. */
 	readonly client: { readonly id: string; readonly secret: string };
 	readonly scopes: readonly GoogleScope[];
-	/** Other Worker secrets the app needs, such as the Drive Picker's API key; nobody is offered it until they are set. */
+	/** Other Worker secrets the connector needs, such as the Drive Picker's API key; nobody is offered it until they are set. */
 	readonly secrets?: readonly string[];
 	readonly tools: readonly AppTool[];
 	readonly actions?: NativeAppDefinition["actions"];
@@ -70,9 +70,9 @@ export type GoogleAppOptions = {
 const allowed = new Set<string>(Object.values(GOOGLE_SCOPES));
 
 /**
- * A Google app: Google's sign-in, with offline access and its consent screen
+ * A Google connector: Google's sign-in, with offline access and its consent screen
  * every time, so each sign-in has a refresh token; renewal; revocation when
- * the person disconnects; and the app's tools, which call Google with
+ * the person disconnects; and the connector's tools, which call Google with
  * `googleFetch`.
  */
 export function googleApp(options: GoogleAppOptions): NativeAppDefinition {
@@ -109,7 +109,7 @@ export function googleApp(options: GoogleAppOptions): NativeAppDefinition {
 			const granted = new Set(String(credential.scope ?? "").split(/\s+/).filter(Boolean));
 			const extra = [...granted].filter((scope) => !(scopes as readonly string[]).includes(scope));
 			if (extra.length > 0) {
-				// The project's grant has more in it than this app: revoking it would end someone else's, so it is left alone.
+				// The project's grant has more in it than this connector: revoking it would end someone else's, so it is left alone.
 				throw new Error(`Google granted more than ${options.name} asks for. Its OAuth client must be in a Google Cloud project of its own.`);
 			}
 			const problem =
@@ -119,7 +119,7 @@ export function googleApp(options: GoogleAppOptions): NativeAppDefinition {
 						? `Google didn't grant everything ${options.name} needs: connect it again and allow all it asks for.`
 						: null;
 			if (problem) {
-				// The grant has only this app's scopes in it: nothing is kept of it, at Google either.
+				// The grant has only this connector's scopes in it: nothing is kept of it, at Google either.
 				await revokeGoogle(credential).catch(() => undefined);
 				throw new Error(problem);
 			}
@@ -138,7 +138,7 @@ export function googleApp(options: GoogleAppOptions): NativeAppDefinition {
 
 /**
  * Revokes the grant a credential belongs to. Revoking the refresh token
- * ends the person's whole grant to this app's OAuth client, and its access
+ * ends the person's whole grant to this connector's OAuth client, and its access
  * tokens with it; a token Google no longer knows is already revoked.
  */
 async function revokeGoogle(credential: AppCredential): Promise<void> {
@@ -156,9 +156,9 @@ async function revokeGoogle(credential: AppCredential): Promise<void> {
 	throw new Error(`Google answered ${response.status}${typeof answer.error === "string" ? ` (${serviceText(answer.error)})` : ""}`);
 }
 
-/** The Google extension, with the Google apps this deployment offers (`pim.config.ts`). Its apps are `google/<app>`. */
+/** The Google extension, with the Google connectors this deployment offers (`pim.config.ts`). Its connectors are `google/<app>`. */
 export function googleExtension(apps: readonly NativeAppDefinition[]): PimExtension {
-	return definePimExtension({ id: "google", name: "Google", description: "Google's apps, each connected on its own.", apps });
+	return definePimExtension({ id: "google", name: "Google", description: "Google's connectors, each connected on its own.", apps });
 }
 
 /** A Google API's refusal: its HTTP status, Google's reason, and its message. Never the request's token. */
@@ -232,12 +232,12 @@ async function refusal(response: Response): Promise<GoogleApiError> {
  * answers 429, a 5xx, or a rate-limit 403, or can't be reached; requests that
  * aren't idempotent are sent once. When Google refuses the token (401) it
  * renews it once and sends the request again; refused again, the person must
- * connect the app again (`ReconnectRequired`). Any other refusal throws a
+ * connect the connector again (`ReconnectRequired`). Any other refusal throws a
  * `GoogleApiError`. Answers the successful response.
  */
 export async function googleFetch(context: AppToolContext, url: string, request: GoogleRequest = {}): Promise<Response> {
 	const target = new URL(url);
-	if (target.protocol !== "https:" || !target.hostname.endsWith(".googleapis.com")) throw new Error(`Google apps only call Google's APIs, not ${target.origin}`);
+	if (target.protocol !== "https:" || !target.hostname.endsWith(".googleapis.com")) throw new Error(`Google connectors only call Google's APIs, not ${target.origin}`);
 	for (const [name, value] of Object.entries(request.query ?? {})) {
 		if (value === undefined) continue;
 		for (const one of Array.isArray(value) ? value : [value]) target.searchParams.append(name, String(one));

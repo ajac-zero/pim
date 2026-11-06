@@ -96,7 +96,7 @@ export async function servePublicArtifact(request: Request, env: Env, pathname: 
 const BOT_GONE = "This bot's link was turned off.";
 /** Messages a day each guest may send a bot shared without saying. */
 const DEFAULT_DAILY_MESSAGES = 50;
-/** Tool calls a day each guest may make for a bot shared without saying: calls to its apps and to the tools the admin shares with it. */
+/** Tool calls a day each guest may make for a bot shared without saying: calls to its connectors and to the tools the admin shares with it. */
 const DEFAULT_DAILY_TOOL_CALLS = 20;
 const bots = new Map<string, { bot: Bot | null; at: number }>();
 /** Which sharing of their bot each guest's space was last brought up to here: its `sharedAt`, or 0 once it was turned off. */
@@ -777,12 +777,12 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 					.setCustomAppIcon(decodeURIComponent(customApp[1]!), await body())
 					.catch((error: unknown) => rpcFailure(error));
 				if (app instanceof Response) return app;
-				if (!app) return fail(404, "No such app");
+				if (!app) return fail(404, "No such connector");
 				log("app_changed", { app: app.id, by: admin.ownerId });
 				return json({ app });
 			}
 			if (customApp && request.method === "DELETE") {
-				if (!(await gallery(env).removeCustomApp(decodeURIComponent(customApp[1]!)))) return fail(404, "No such app");
+				if (!(await gallery(env).removeCustomApp(decodeURIComponent(customApp[1]!)))) return fail(404, "No such connector");
 				log("app_removed", { app: customApp[1], by: admin.ownerId });
 				return json({ deleted: true });
 			}

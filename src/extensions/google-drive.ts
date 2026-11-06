@@ -90,7 +90,7 @@ function refusal(error: unknown, name: string): Error {
 		insufficientFilePermissions: `Pim isn't allowed to read ${name}. The person can pick it again at ${pickerUrl()}.`,
 		appNotAuthorizedToFile: `Pim isn't allowed to read ${name}. The person can pick it again at ${pickerUrl()}.`,
 		teamDriveMembershipRequired: `${name} is in a shared drive the person is no longer a member of.`,
-		domainPolicy: `The person's Google Workspace administrator doesn't let apps read ${name}.`,
+		domainPolicy: `The person's Google Workspace administrator doesn't let connectors read ${name}.`,
 	};
 	return new Error((error.reason && reasons[error.reason]) || `${error.message} (${name})`);
 }

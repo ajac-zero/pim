@@ -45,7 +45,7 @@ function missing(error: unknown, what: string): never {
 
 const TOO_LARGE = "[Gmail's copy of this is too large for Pim to read whole: only its headers are shown.]";
 
-/** The Gmail app, reading mail through `content`. */
+/** The Gmail connector, reading mail through `content`. */
 export function gmailApp(content: GmailContent): NativeAppDefinition {
 	/** A message or thread in the adapter's format; one too large for that, in `metadata`, said so. */
 	async function fetchFor(context: AppToolContext, path: string, maxBytes: number): Promise<{ json: unknown; whole: boolean }> {

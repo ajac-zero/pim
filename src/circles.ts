@@ -84,7 +84,7 @@ const ACTIVITY_KEPT = 500;
 export const MAX_CIRCLES = 20;
 /** People in all circles together. */
 export const MAX_MEMBERS = 200;
-/** Tool calls one guest may make in a UTC day: their model is theirs, but the owner's apps and their limits are the owner's. */
+/** Tool calls one guest may make in a UTC day: their model is theirs, but the owner's connectors and their limits are the owner's. */
 export const GUEST_CALLS_PER_DAY = 200;
 export const MAX_CIRCLE_NAME = 40;
 

@@ -342,7 +342,7 @@ export const Thread = memo(function Thread({
     () => new Set([...approvalsByCall.values()].map((approval) => approval.id)),
     [approvalsByCall],
   );
-  /* The connected app of each app tool, for the steps that used it. */
+  /* The connector of each connector tool, for the steps that used it. */
   const { data: connected } = useQuery(appsQuery());
   const { data: directory } = useQuery(appDirectoryQuery());
   const toolApps = useMemo<ToolApps>(

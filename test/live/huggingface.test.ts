@@ -36,7 +36,7 @@ describe("Hugging Face MCP server (live)", () => {
 		faux.setResponses([
 			(context) => {
 				system = JSON.stringify(context.messages.filter((message) => message.role === "system"));
-				return toolUse("read_skill", { app: "Hugging Face", skill: "hf-cli" });
+				return toolUse("read_skill", { connector: "Hugging Face", skill: "hf-cli" });
 			},
 			(context: { messages: Message[] }) => {
 				results = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
@@ -45,7 +45,7 @@ describe("Hugging Face MCP server (live)", () => {
 		]);
 		await say("How do I download a model with the hf CLI?");
 		expect(system).toContain("Skills from Hugging Face (load with read_skill):\\n- hf-cli: ");
-		expect(results).toContain('Skill \\"hf-cli\\" from the app Hugging Face (skill://hf-cli/SKILL.md).');
+		expect(results).toContain('Skill \\"hf-cli\\" from the connector Hugging Face (skill://hf-cli/SKILL.md).');
 		expect(results).toContain("name: hf-cli");
 		expect(results).not.toContain("does not match the digest");
 	});

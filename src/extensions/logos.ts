@@ -1,5 +1,5 @@
 /**
- * The logos of the apps Pim brings, by app id, as `data:` URLs so no page
+ * The logos of the connectors Pim brings, by connector id, as `data:` URLs so no page
  * loads them from the services. Marks from Simple Icons (CC0) in each
  * brand's colour, a dark one on a tile of its own so it shows on dark themes
  * too; the rest are the services' own icons, from their sites.

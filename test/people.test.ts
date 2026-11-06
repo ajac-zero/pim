@@ -1280,13 +1280,13 @@ describe("the admin", () => {
 	it("lets the admin's majordomo add an app for everyone, once the admin approves it in the app", async () => {
 		const vera = await person("app-vera");
 		const tools = async (browser: Browser) => ((await browser.json("/api/permissions")).body.tools as { tool: string }[]).map((info) => info.tool);
-		expect(await tools(vera.browser)).not.toContain("add_custom_app");
-		expect(await tools(operator.browser)).toContain("add_custom_app");
+		expect(await tools(vera.browser)).not.toContain("add_custom_connector");
+		expect(await tools(operator.browser)).toContain("add_custom_connector");
 
 		const wiki = { name: "Acme Wiki", url: "https://wiki.example.test/mcp", description: "The team's pages." };
 		let result = "";
 		faux.setResponses([
-			toolUse("add_custom_app", wiki),
+			toolUse("add_custom_connector", wiki),
 			(context) => {
 				result = JSON.stringify(context.messages.filter((message) => message.role === "toolResult"));
 				return toolUse("send_to_user", { message: "Added." });
@@ -1314,7 +1314,7 @@ describe("the admin", () => {
 				expect(asked).toBeDefined();
 				return asked;
 			});
-			expect(approval).toMatchObject({ action: "add_custom_app", summary: "Add Acme Wiki (https://wiki.example.test/mcp) to this Pim's apps for everyone, and connect it" });
+			expect(approval).toMatchObject({ action: "add_custom_connector", summary: "Add Acme Wiki (https://wiki.example.test/mcp) to this Pim's connectors for everyone, and connect it" });
 			// Not with an API token, even the admin's, nor by claiming to be signed in.
 			const byToken = await new Browser().json(`/api/approvals/${approval.id}/approve`, {
 				method: "POST",
@@ -2199,7 +2199,7 @@ describe("bots", () => {
 			const shared = await share({ tools: ["web_search_find"], dailyToolCalls: 1 });
 			expect(shared.body).toMatchObject({ tools: ["web_search_find"], dailyToolCalls: 1 });
 
-			// The guest's copy works with no apps of its own: it has the one tool shared, and connects nothing.
+			// The guest's copy works with no connectors of its own: it has the one tool shared, and connects nothing.
 			const guest = await person("search-guest", { bot: shared.body.id });
 			const { agent: copy } = (await guest.browser.json("/api/bot")).body;
 			expect((await guest.browser.json(`/api/agents/${copy}`)).body.apps).toEqual([]);

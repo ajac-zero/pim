@@ -81,7 +81,7 @@ const fetchUrl = defineTool({
 });
 
 /**
- * Reading a page the agent already has the address of. Searching is an
- * app's, such as Exa or Firecrawl, which each person connects.
+ * Reading a page the agent already has the address of. Searching is a
+ * connector's, such as Exa or Firecrawl, which each person connects.
  */
 export const webExtension = defineExtension({ name: "pim.web", tools: [fetchUrl] });

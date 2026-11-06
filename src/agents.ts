@@ -13,17 +13,17 @@ import { SKILL_NAME } from "./skills";
  * their approvals (see ./majordomo.ts). It talks in chats started without
  * choosing an agent, and it is always the same one: the title can't move to
  * another agent, and it can't be deleted. The person names it and chooses
- * its look when they first sign in. Approvals and connected apps
- * are shared by all of them: an agent lists the apps it works with by name, from the
+ * its look when they first sign in. Approvals and connectors
+ * are shared by all of them: an agent lists the connectors it works with by name, from the
  * deployment's directory (./extensions/app-directory.ts), and the person
- * connects each app once. Memory is kept in scopes: each agent has its own,
+ * connects each connector once. Memory is kept in scopes: each agent has its own,
  * which copies of one template share, and reads the scope every agent reads
  * and the person's named scopes they chose for it; the majordomo's own is
  * the private scope, and it reads them all.
  * One can be published as a template others make their own (see
  * ./gallery.ts); a copy made from a template remembers where it came from.
  *
- * An agent lists its contacts, as it lists its apps: others of the person's
+ * An agent lists its contacts, as it lists its connectors: others of the person's
  * agents it hands tasks to (see ./tasks.ts). Every agent that works is one
  * of the person's own, in the sidebar with its own page; the majordomo
  * hands tasks to all of them without a list.
@@ -37,7 +37,7 @@ export type Agent = {
 	readonly role: string;
 	readonly description: string;
 	readonly instructions: string;
-	/** The apps it works with, by name in the directory: `<extension>/<app>`. */
+	/** The connectors it works with, by name in the directory: `<extension>/<connector>`. */
 	readonly apps: readonly string[];
 	/** The person's skills it uses, by name (see ./skills.ts). */
 	readonly skills: readonly string[];
@@ -228,7 +228,7 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 		apps: [
 			...new Set(
 				apps.map((app) => {
-					if (typeof app !== "string" || !REF.test(app)) throw new HttpError(400, "Each app must be an app's id, such as custom/notes");
+					if (typeof app !== "string" || !REF.test(app)) throw new HttpError(400, "Each connector must be a connector's id, such as custom/notes");
 					return app;
 				}),
 			),
@@ -319,7 +319,7 @@ export class AgentStore {
 
 	/**
 	 * `starter` is the majordomo as it is made, the first time any agent is
-	 * asked for, until the person names it. `directory` finds the apps agents
+	 * asked for, until the person names it. `directory` finds the connectors agents
 	 * listed by URL before it.
 	 */
 	constructor(sql: SqlStorage, starter: () => AgentInput, directory: () => readonly DirectoryApp[]) {
@@ -367,9 +367,9 @@ export class AgentStore {
 
 	/**
 	 * Agents once had teams: members with a name and instructions, which
-	 * worked with their agent's apps and answered only it. Each member becomes
+	 * worked with their agent's connectors and answered only it. Each member becomes
 	 * an agent of its own, with its instructions and its agent's
-	 * apps, skills and app tool permissions, and one of its agent's contacts;
+	 * connectors, skills and connector tool permissions, and one of its agent's contacts;
 	 * its tasks, done and not, become the new agent's. A member's list of
 	 * tools has no counterpart and is left behind.
 	 */

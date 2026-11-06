@@ -25,7 +25,7 @@ export type Limits = {
 	readonly dailyTokens: number | null;
 	/** Model requests per UTC day, on any model, the ChatGPT plan's included: a ceiling for runaway loops. */
 	readonly dailyModelRequests: number | null;
-	/** Runs started per UTC day: messages into sessions, scheduled tasks firing, and app events. */
+	/** Runs started per UTC day: messages into sessions, scheduled tasks firing, and connector events. */
 	readonly dailyRuns: number | null;
 	/** Tool calls per UTC day to connected apps, and, for a bot's guest, to the tools its author shares, which run as the author. */
 	readonly dailyToolCalls: number | null;

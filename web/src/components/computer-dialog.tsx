@@ -67,15 +67,10 @@ export function ComputerDialog({
           }}
           className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-background outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:shadow-xl"
         >
-          <header className="flex items-center gap-3 py-3 pr-3 pl-5">
-            <div className="min-w-0 flex-1">
-              <Dialog.Title className="truncate font-semibold">
-                {t("computer")}
-              </Dialog.Title>
-              <p className="truncate text-muted-foreground text-xs">
-                {status ? summary(status, t) : "\u00a0"}
-              </p>
-            </div>
+          <header className="flex items-center gap-2 py-1.5 pr-1.5 pl-4">
+            <Dialog.Title className="min-w-0 flex-1 truncate font-medium text-[15px]">
+              {t("computer")}
+            </Dialog.Title>
             {live && latency && <Latency latency={latency} />}
             {live && (
               <Action
@@ -97,7 +92,7 @@ export function ComputerDialog({
             // Without one, just room for what it says.
             style={
               {
-                "--desktop-width": `min(calc(100vw - 4rem), calc((100dvh - 8rem) * ${size.width / size.height}))`,
+                "--desktop-width": `min(calc(100vw - 4rem), calc((100dvh - 7rem) * ${size.width / size.height}))`,
                 "--desktop-ratio": `${size.width} / ${size.height}`,
               } as CSSProperties
             }
@@ -123,22 +118,6 @@ export function ComputerDialog({
       </Dialog.Portal>
     </Dialog.Root>
   );
-}
-
-type Translate = ReturnType<typeof useI18n>["t"];
-
-/** The line under the title: what the computer is, and whether it's there. */
-function summary(status: ComputerStatus, t: Translate): string {
-  const machine = status.computer;
-  const state =
-    status.state === "online"
-      ? t("computerOnline")
-      : status.error
-        ? t("computerNotSetUp")
-        : status.managed && !machine
-          ? t("computerSettingUp")
-          : t("computerOffline");
-  return [machine?.hostname, state].filter(Boolean).join(" · ");
 }
 
 /** The round trip to the computer, which the desktop's stream times, with its two parts on hover or focus. */

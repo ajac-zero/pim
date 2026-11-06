@@ -384,6 +384,7 @@ const translations = {
     yesterday: "Yesterday",
     lastWeek: "Last week",
     last14Days: "Last 14 days",
+    inactive: "Inactive",
     archived: "Archived",
     contacts: "Contacts",
     contactsHint:
@@ -1507,6 +1508,7 @@ const translations = {
     yesterday: "Ayer",
     lastWeek: "La semana pasada",
     last14Days: "Últimos 14 días",
+    inactive: "Inactivos",
     archived: "Archivados",
     contacts: "Contactos",
     contactsHint:

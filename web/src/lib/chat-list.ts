@@ -14,6 +14,23 @@ export function flatChats(
     .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }
 
+const INACTIVE_AFTER_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * A chat that has gone 72 hours without activity, with nothing unread or
+ * running: folded away before it is archived. Sending it a message brings it
+ * back.
+ */
+export function isInactive(session: Session, now = Date.now()) {
+  return (
+    !session.archived &&
+    !session.busy &&
+    !session.unread &&
+    session.updatedAt !== null &&
+    session.updatedAt < now - INACTIVE_AFTER_MS
+  );
+}
+
 export type ChatAge = "today" | "yesterday" | "lastWeek" | "last14Days";
 
 /**

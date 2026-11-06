@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatAge, flatChats, nestChats } from "~/lib/chat-list";
+import { chatAge, flatChats, isInactive, nestChats } from "~/lib/chat-list";
 import type { Session } from "~/lib/pim-api";
 
 const chat = (
@@ -96,5 +96,29 @@ describe("nestChats", () => {
       "grandchild",
     ]);
     expect(children.has("orphan")).toBe(false);
+  });
+});
+
+describe("isInactive", () => {
+  const now = 1_000_000_000_000;
+  const hours = (n: number) => now - n * 60 * 60 * 1000;
+
+  it("folds a read, idle chat after 72 hours, not before", () => {
+    expect(isInactive(chat("a", hours(73)), now)).toBe(true);
+    expect(isInactive(chat("b", hours(71)), now)).toBe(false);
+  });
+
+  it("keeps old chats with unread replies, work running, or no activity yet", () => {
+    expect(isInactive(chat("a", hours(200), { unread: true }), now)).toBe(
+      false,
+    );
+    expect(isInactive(chat("b", hours(200), { busy: true }), now)).toBe(false);
+    expect(isInactive(chat("c", null), now)).toBe(false);
+  });
+
+  it("leaves archived chats to Archived", () => {
+    expect(isInactive(chat("a", hours(200), { archived: true }), now)).toBe(
+      false,
+    );
   });
 });

@@ -19,7 +19,6 @@ import {
   Check,
   Compass,
   FileIcon,
-  Folder,
   Lightbulb,
   MessagesSquare,
   Monitor,
@@ -54,7 +53,6 @@ const PANELS: {
   { panel: "notifications", label: "notifications", icon: <Bell /> },
   { panel: "agents", label: "agents", icon: <Users /> },
   { panel: "artifacts", label: "artifacts", icon: <FileIcon /> },
-  { panel: "files", label: "files", icon: <Folder /> },
   { panel: "skills", label: "skills", icon: <Lightbulb /> },
   { panel: "schedules", label: "schedules", icon: <CalendarClock /> },
 ];

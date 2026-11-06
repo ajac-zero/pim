@@ -1,32 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Link,
-  useNavigate,
-  useParams,
-  useSearch,
-} from "@tanstack/react-router";
-import { type ReactNode, type Ref, useEffect, useRef, useState } from "react";
+import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { type ReactNode, type Ref, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
 import { useI18n } from "~/components/i18n";
 import {
-  ArrowLeft,
   AtSign,
   CalendarClock,
   Check,
   CheckCheck,
-  Download,
-  FileIcon,
-  Folder,
   MoreHorizontal,
   Plus,
   Repeat,
   ScrollText,
   Trash2,
-  Upload,
 } from "~/components/icons";
-import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,13 +27,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { baseName, parentOf } from "~/lib/files";
 import {
   type Agent,
-  ApiError,
-  FILES_ROOT,
-  type FileEntry,
-  fileContentUrl,
   type PimNotification,
   type PimSchedule,
   pim,
@@ -52,15 +36,13 @@ import {
 import {
   agentsQuery,
   artifactsQuery,
-  computerQuery,
-  filesQuery,
   notificationsQuery,
   schedulesQuery,
   sessionsQuery,
   sharedArtifactsQuery,
   skillsQuery,
 } from "~/lib/queries";
-import { cn, formatBytes } from "~/lib/utils";
+import { cn } from "~/lib/utils";
 
 /*
  * What the sidebar shows beside the rail besides your chats. The open chat
@@ -378,240 +360,6 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
         )}
       </PanelList>
     </>
-  );
-}
-
-/**
- * Your files, on your computer, which your agents read and write too: one
- * folder at a time, folders first. Opening a file shows it beside the
- * sidebar; uploads go to the folder showing. Without a computer online,
- * it says why there are none to show.
- */
-export function FilesPanel({ onNavigate }: { onNavigate?: () => void }) {
-  const { t } = useI18n();
-  const queryClient = useQueryClient();
-  // The panel opens on the folder of the file showing, if one is.
-  const { path: open } = useSearch({ strict: false }) as { path?: string };
-  const [folder, setFolder] = useState(
-    () => (open && parentOf(open)) || FILES_ROOT,
-  );
-  const { data: computer } = useQuery(computerQuery());
-  // One Pim started wakes when it's asked for files.
-  const online = computer?.state === "online" || computer?.managed === true;
-  const { data, error } = useQuery({
-    ...filesQuery(folder),
-    enabled: online,
-  });
-  // A folder deleted meanwhile leaves you at the top.
-  useEffect(() => {
-    if (error instanceof ApiError && error.status === 404)
-      setFolder(FILES_ROOT);
-  }, [error]);
-  const input = useRef<HTMLInputElement>(null);
-  const upload = useMutation({
-    mutationFn: (files: File[]) =>
-      Promise.all(
-        files.map((file) => pim.uploadFile(`${folder}/${file.name}`, file)),
-      ),
-    onSuccess: (saved) =>
-      toast.success(t("filesUploaded", { count: saved.length })),
-    onError: (failure) => toast.error(failure.message),
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["files"] }),
-  });
-  const parent = parentOf(folder);
-  return (
-    <>
-      <SidebarPanelHeader title={t("files")}>
-        <SidebarPanelAction
-          label={t("uploadFiles")}
-          onClick={() => input.current?.click()}
-          disabled={upload.isPending || !online}
-        >
-          <Upload className="size-4.5" />
-        </SidebarPanelAction>
-        <input
-          ref={input}
-          type="file"
-          multiple
-          hidden
-          onChange={(event) => {
-            const files = [...(event.target.files ?? [])];
-            event.target.value = "";
-            if (files.length > 0) upload.mutate(files);
-          }}
-        />
-      </SidebarPanelHeader>
-      {computer && !online && (
-        <div className="space-y-3 px-5 py-1">
-          <p className="text-muted-foreground text-xs">
-            {computer.state === "none"
-              ? t("noComputerFiles")
-              : t("computerOfflineFiles")}
-          </p>
-          {computer.state === "none" && (
-            <Button asChild size="sm" variant="secondary">
-              <Link
-                to="."
-                search={(prev) => ({
-                  ...prev,
-                  dialog: "settings",
-                  tab: "computer",
-                })}
-              >
-                {t("connectComputer")}
-              </Link>
-            </Button>
-          )}
-        </div>
-      )}
-      {online && parent !== null && (
-        <button
-          type="button"
-          onClick={() => setFolder(parent)}
-          className="mx-3 mb-1 flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-muted-foreground text-sm transition-colors hover:bg-sidebar-accent hover:text-foreground"
-        >
-          <ArrowLeft className="size-4 shrink-0" />
-          <span className="truncate">
-            {parent === FILES_ROOT ? t("files") : baseName(parent)}
-            <span className="sr-only">: {t("parentFolder")}</span>
-          </span>
-          <span className="ml-auto truncate text-foreground">
-            {baseName(folder)}
-          </span>
-        </button>
-      )}
-      <PanelList
-        label={t("files")}
-        empty={
-          online &&
-          data?.entries.length === 0 &&
-          t(folder === FILES_ROOT ? "noFiles" : "emptyFolder")
-        }
-      >
-        {data?.entries.map((entry) => (
-          <FileRow
-            key={entry.path}
-            entry={entry}
-            active={entry.path === open}
-            onOpenFolder={() => setFolder(entry.path)}
-            onNavigate={onNavigate}
-          />
-        ))}
-      </PanelList>
-    </>
-  );
-}
-
-function FileRow({
-  entry,
-  active,
-  onOpenFolder,
-  onNavigate,
-}: {
-  entry: FileEntry;
-  active: boolean;
-  onOpenFolder: () => void;
-  onNavigate?: () => void;
-}) {
-  const { t, formatDate, formatNumber } = useI18n();
-  const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  const folder = entry.type === "directory";
-  // Deleting asks twice: the first click turns the item into a confirmation.
-  const [confirming, setConfirming] = useState(false);
-  const remove = useMutation({
-    mutationFn: () => pim.deleteFile(entry.path),
-    onSuccess: () => {
-      toast.success(t("fileDeleted", { name: entry.name }));
-      void queryClient.invalidateQueries({ queryKey: ["files"] });
-      if (active) void navigate({ to: "/" });
-    },
-    onError: (failure) => toast.error(failure.message),
-  });
-  const date = formatDate(new Date(entry.updatedAt), { dateStyle: "medium" });
-  const content = (
-    <>
-      {folder ? (
-        <Folder className={ROW_ICON_CLASS} />
-      ) : (
-        <FileIcon className={ROW_ICON_CLASS} />
-      )}
-      <RowText
-        title={entry.name}
-        meta={
-          folder
-            ? t("folder")
-            : `${formatBytes(entry.size, formatNumber)} · ${date}`
-        }
-      />
-    </>
-  );
-  return (
-    <li className="group/row relative">
-      {folder ? (
-        <button
-          type="button"
-          onClick={onOpenFolder}
-          className={cn(ROW_CLASS, "pr-8")}
-        >
-          {content}
-        </button>
-      ) : (
-        <Link
-          to="/files"
-          search={{ path: entry.path }}
-          onClick={onNavigate}
-          className={cn(ROW_CLASS, "pr-8", active && "bg-sidebar-accent")}
-        >
-          {content}
-        </Link>
-      )}
-      <DropdownMenu onOpenChange={() => setConfirming(false)}>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className={cn(
-              "-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100",
-              active && "opacity-100",
-            )}
-            aria-label={t("fileOptions", { name: entry.name })}
-          >
-            <MoreHorizontal className="size-4" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="right">
-          {!folder && (
-            <DropdownMenuItem asChild>
-              <a href={fileContentUrl(entry.path, true)} download>
-                <Download className="size-4" />
-                {t("download")}
-              </a>
-            </DropdownMenuItem>
-          )}
-          <DropdownMenuItem
-            variant="destructive"
-            disabled={remove.isPending}
-            onSelect={(event) => {
-              if (!confirming) {
-                event.preventDefault();
-                setConfirming(true);
-                return;
-              }
-              remove.mutate();
-            }}
-          >
-            {confirming ? (
-              <Check className="size-4" />
-            ) : (
-              <Trash2 className="size-4" />
-            )}
-            {confirming
-              ? t(folder ? "confirmDeleteFolder" : "confirmDeleteFile")
-              : t("deleteFile")}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </li>
   );
 }
 

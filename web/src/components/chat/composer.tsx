@@ -15,10 +15,20 @@ import { useI18n } from "~/components/i18n";
 import {
   ArrowUp,
   Camera,
+  FileArchive,
+  FileAudio,
+  FileCode2,
+  FileIcon,
+  FileImage,
+  FileSpreadsheet,
+  FileText,
+  FileVideo,
   Loader2,
+  type LucideIcon,
   Mic,
   Paperclip,
   Plus,
+  Presentation,
   Sparkles,
   Square,
   X,
@@ -32,6 +42,7 @@ import {
 } from "~/components/ui/dropdown-menu";
 import {
   PromptInput,
+  type PromptInputAttachment,
   type PromptInputMessage,
   PromptInputProvider,
   PromptInputSubmit,
@@ -45,9 +56,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
+import { baseName } from "~/lib/files";
 import {
   type Agent,
+  ApiError,
   type DirectoryApp,
+  FILES_ROOT,
   type ModelInfo,
   type ModelSettings,
   pim,
@@ -58,6 +72,7 @@ import {
   appDirectoryQuery,
   appsQuery,
   artifactQuery,
+  computerQuery,
   extensionsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -87,6 +102,12 @@ export interface ComposerProps {
   agent?: Pick<Agent, "id" | "name">;
   /** The agents in the chat, which an @ offers to mention. */
   mentions?: readonly Agent[];
+  /**
+   * Whether attachments are saved to your files, where your agents read
+   * them. Not in a visit or a guest's app, whose agent can't reach your
+   * computer: there only images go, to a model that sees them.
+   */
+  uploads?: boolean;
 }
 
 /** The mention being typed just before the caret: an @ at the start of a word, and what follows it. */
@@ -109,8 +130,12 @@ const drafts = new Map<string, string>();
 /** Image types Pim takes, as the server checks them. */
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 const MAX_IMAGES = 4;
-/** What a picked file may be before it's shrunk. */
+/** What a picked image may be before it's shrunk. */
 const MAX_PICKED_BYTES = 20_000_000;
+/** Where attachments are saved, and how many and how large, as the server allows uploads. */
+const UPLOADS = `${FILES_ROOT}/uploads`;
+const MAX_UPLOADS = 10;
+const MAX_UPLOAD_BYTES = 25_000_000;
 /**
  * Longest side, and size, an image is sent at. Models see no more detail in
  * a larger one, and every model request in the chat carries it again.
@@ -194,11 +219,11 @@ function useVoiceInput(text: string, setText: (text: string) => void) {
  */
 function CameraButton({
   disabled,
-  seesImages,
+  allowed,
   onBlocked,
 }: {
   disabled?: boolean;
-  seesImages: boolean;
+  allowed: boolean;
   onBlocked: () => void;
 }) {
   const { t } = useI18n();
@@ -227,7 +252,7 @@ function CameraButton({
         aria-label={t("takePhoto")}
         title={t("takePhoto")}
         disabled={disabled}
-        onClick={() => (seesImages ? inputRef.current?.click() : onBlocked())}
+        onClick={() => (allowed ? inputRef.current?.click() : onBlocked())}
         className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
       >
         <Camera className="size-4.5" />
@@ -237,10 +262,12 @@ function CameraButton({
 }
 
 /**
- * Composer for text and images. `~/components/ui/prompt-input` handles
- * IME-safe Enter-to-send, auto-resize, paste and drop. Images go only to a
- * model that can see them. While Pim is busy, the button is Stop when the box
- * is empty and Send (a queued follow-up) when there is something to send.
+ * Composer for text and attachments. `~/components/ui/prompt-input` handles
+ * IME-safe Enter-to-send, auto-resize, paste and drop. Images go to a model
+ * that can see them; with `uploads`, every attachment is also saved to your
+ * files and linked in the message, so the agent can read it there. While
+ * Pim is busy, the button is Stop when the box is empty and Send (a queued
+ * follow-up) when there is something to send.
  */
 export function Composer(props: ComposerProps) {
   return (
@@ -268,6 +295,7 @@ function ComposerInner({
   mentions,
   agent,
   controls,
+  uploads = false,
 }: ComposerProps) {
   const { t } = useI18n();
   const controller = usePromptInputController();
@@ -292,6 +320,10 @@ function ComposerInner({
   const { settings, current, pinned, choose } = useAgentModel(agent?.id);
   const model = current;
   const seesImages = model?.images ?? false;
+  const { data: computer } = useQuery({ ...computerQuery(), enabled: uploads });
+  // The computer Pim keeps wakes when it's asked for files.
+  const saves =
+    uploads && (computer?.state === "online" || computer?.managed === true);
   const inputId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const touchInput = window.matchMedia("(pointer: coarse)").matches;
@@ -442,26 +474,45 @@ function ComposerInner({
     // Throwing tells PromptInput not to clear the text, so Enter on a
     // disabled composer doesn't wipe what the user typed.
     if (!canSend) throw new Error("Composer is not ready to send.");
-    const typed = message.text.trim();
-    let content: UserContent = typed;
-    if (message.files.length > 0) {
-      setPreparing(true);
-      try {
-        const images = await Promise.all(
-          message.files.map((file) => imageContent(file.url)),
-        );
-        content = [
-          ...(typed ? [{ type: "text" as const, text: typed }] : []),
-          ...images,
-        ];
-      } catch (error) {
-        toast.error(t("couldNotReadImage"));
-        throw error;
-      } finally {
-        setPreparing(false);
-      }
+    let typed = message.text.trim();
+    if (message.files.length === 0) {
+      send(typed);
+      return;
     }
-    send(content);
+    setPreparing(true);
+    try {
+      const shown = seesImages
+        ? message.files
+            .filter((file) => IMAGE_TYPES.includes(file.mediaType))
+            .slice(0, MAX_IMAGES)
+        : [];
+      const [images, saved] = await Promise.all([
+        Promise.all(
+          shown.map((file) =>
+            imageContent(file.url).catch(() => {
+              throw new Error(t("couldNotReadImage"));
+            }),
+          ),
+        ),
+        saves ? saveAttachments(message.files) : [],
+      ]);
+      // Each saved file is linked by its path, which opens it in the chat and tells the agent where it is.
+      const links = saved.map((path) => `[${baseName(path)}](<${path}>)`);
+      typed = [typed, links.join("\n")].filter(Boolean).join("\n\n");
+      send(
+        images.length > 0
+          ? [
+              ...(typed ? [{ type: "text" as const, text: typed }] : []),
+              ...images,
+            ]
+          : typed,
+      );
+    } catch (error) {
+      toast.error((error as Error).message);
+      throw error;
+    } finally {
+      setPreparing(false);
+    }
   };
 
   const showSuggestions = promptSuggestions.length > 0 && !hasContent && !busy;
@@ -593,13 +644,16 @@ function ComposerInner({
           if (!(event.target as Element).closest("button, a, textarea"))
             textareaRef.current?.focus();
         }}
-        accept={IMAGE_TYPES.join(",")}
+        accept={saves ? undefined : IMAGE_TYPES.join(",")}
         multiple
-        maxFiles={seesImages ? MAX_IMAGES : 0}
-        maxFileSize={MAX_PICKED_BYTES}
+        maxFiles={saves ? MAX_UPLOADS : seesImages ? MAX_IMAGES : 0}
+        maxFileSize={saves ? MAX_UPLOAD_BYTES : MAX_PICKED_BYTES}
         onError={({ code }) => {
           if (code === "accept") toast.error(t("imagesOnly"));
-          else if (code === "max_file_size") toast.error(t("imageTooLarge"));
+          else if (code === "max_file_size")
+            toast.error(t(saves ? "fileTooLarge" : "imageTooLarge"));
+          else if (saves)
+            toast.error(t("tooManyFiles", { count: MAX_UPLOADS }));
           else if (seesImages)
             toast.error(t("tooManyImages", { count: MAX_IMAGES }));
           else cantSeeImages();
@@ -634,27 +688,50 @@ function ComposerInner({
             </span>
           </div>
         )}
+        {/* An image is a small preview of itself; any other file is a chip,
+            as the artifact above is, with its kind and its name. */}
         {files.length > 0 && (
-          <ul className="flex flex-wrap gap-2 px-4 pt-3">
-            {files.map((file) => (
-              <li key={file.id} className="group/image relative">
-                <img
-                  src={file.url}
-                  alt={file.filename}
-                  className="size-16 rounded-xl border object-cover"
-                />
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="secondary"
-                  aria-label={t("removeImage", { name: file.filename })}
-                  onClick={() => controller.attachments.remove(file.id)}
-                  className="-top-1.5 -right-1.5 absolute size-5 rounded-full border shadow-sm"
+          <ul className="flex flex-wrap items-center gap-2 px-4 pt-3">
+            {files.map((file) =>
+              IMAGE_TYPES.includes(file.mediaType) ? (
+                <li key={file.id} title={file.filename} className="relative">
+                  <img
+                    src={file.url}
+                    alt={file.filename}
+                    className="size-8 rounded-lg border object-cover"
+                  />
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="secondary"
+                    aria-label={t("removeImage", { name: file.filename })}
+                    onClick={() => controller.attachments.remove(file.id)}
+                    className="-top-1.5 -right-1.5 absolute size-4 rounded-full border shadow-sm"
+                  >
+                    <X className="size-2.5" />
+                  </Button>
+                </li>
+              ) : (
+                <li
+                  key={file.id}
+                  title={file.filename}
+                  className="inline-flex max-w-60 items-center gap-1.5 rounded-full bg-muted py-1 pr-1 pl-3 text-sm"
                 >
-                  <X className="size-3" />
-                </Button>
-              </li>
-            ))}
+                  <FileKindIcon name={file.filename} type={file.mediaType} />
+                  <span className="min-w-0 truncate">{file.filename}</span>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-6 shrink-0 rounded-full text-muted-foreground"
+                    aria-label={t("removeImage", { name: file.filename })}
+                    onClick={() => controller.attachments.remove(file.id)}
+                  >
+                    <X className="size-3" />
+                  </Button>
+                </li>
+              ),
+            )}
           </ul>
         )}
         {/* The text takes the full width, with its padding outside the scrolling
@@ -718,11 +795,11 @@ function ComposerInner({
             type="button"
             size="icon"
             variant="ghost"
-            aria-label={t("attachImages")}
-            title={t("attachImages")}
+            aria-label={t(saves ? "attachFiles" : "attachImages")}
+            title={t(saves ? "attachFiles" : "attachImages")}
             disabled={disabled}
             onClick={() =>
-              seesImages
+              saves || seesImages
                 ? controller.attachments.openFileDialog()
                 : cantSeeImages()
             }
@@ -733,7 +810,7 @@ function ComposerInner({
           <CameraButton
             disabled={disabled}
             onBlocked={cantSeeImages}
-            seesImages={seesImages}
+            allowed={saves || seesImages}
           />
           {controls}
           <div className="ml-auto flex items-center gap-1.5">
@@ -899,6 +976,140 @@ function ModelPicker({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/** What kind of file an attachment is, by its extension or else its type, as an icon and a color. */
+const FILE_KINDS: {
+  extensions: readonly string[];
+  type?: string;
+  icon: LucideIcon;
+  color: string;
+}[] = [
+  {
+    extensions: ["pdf"],
+    icon: FileText,
+    color: "text-agent-red",
+  },
+  {
+    extensions: ["doc", "docx", "odt", "rtf", "pages", "txt", "md"],
+    icon: FileText,
+    color: "text-agent-blue",
+  },
+  {
+    extensions: ["csv", "tsv", "xls", "xlsx", "ods", "numbers"],
+    icon: FileSpreadsheet,
+    color: "text-agent-green",
+  },
+  {
+    extensions: ["ppt", "pptx", "odp", "key"],
+    icon: Presentation,
+    color: "text-agent-orange",
+  },
+  {
+    extensions: ["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar"],
+    icon: FileArchive,
+    color: "text-agent-amber",
+  },
+  {
+    extensions: [
+      "json",
+      "js",
+      "mjs",
+      "ts",
+      "tsx",
+      "jsx",
+      "py",
+      "rb",
+      "go",
+      "rs",
+      "java",
+      "c",
+      "h",
+      "cpp",
+      "sh",
+      "sql",
+      "html",
+      "css",
+      "xml",
+      "yaml",
+      "yml",
+      "toml",
+      "ipynb",
+    ],
+    icon: FileCode2,
+    color: "text-agent-teal",
+  },
+  {
+    extensions: [],
+    type: "image/",
+    icon: FileImage,
+    color: "text-agent-indigo",
+  },
+  {
+    extensions: [],
+    type: "audio/",
+    icon: FileAudio,
+    color: "text-agent-pink",
+  },
+  {
+    extensions: [],
+    type: "video/",
+    icon: FileVideo,
+    color: "text-agent-violet",
+  },
+];
+
+function FileKindIcon({ name, type }: { name: string; type: string }) {
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  const kind =
+    FILE_KINDS.find((candidate) => candidate.extensions.includes(extension)) ??
+    FILE_KINDS.find(
+      (candidate) => candidate.type && type.startsWith(candidate.type),
+    );
+  const Icon = kind?.icon ?? FileIcon;
+  return (
+    <Icon
+      className={cn("size-4 shrink-0", kind?.color ?? "text-muted-foreground")}
+    />
+  );
+}
+
+/**
+ * Saves attachments to your files, under `UPLOADS`, by their own names: a
+ * name already there gets a number, as `cv (2).pdf`, so nothing is replaced.
+ * Gives each one's path.
+ */
+async function saveAttachments(
+  files: readonly PromptInputAttachment[],
+): Promise<string[]> {
+  const listed = await pim.files(UPLOADS).catch((error: unknown) => {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  });
+  const taken = new Set(listed?.entries.map((entry) => entry.name));
+  const paths = files.map((file) => {
+    // Characters that would end a Markdown link, or no name at all, give way.
+    const name =
+      file.filename.replace(/[\p{Cc}<>[\]\\]/gu, "_").replace(/^\.+$/, "") ||
+      "file";
+    const dot = name.lastIndexOf(".");
+    const [stem, extension] =
+      dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+    let free = name;
+    for (let n = 2; taken.has(free); n++) free = `${stem} (${n})${extension}`;
+    taken.add(free);
+    return `${UPLOADS}/${free}`;
+  });
+  await Promise.all(
+    files.map(async (file, index) =>
+      pim.uploadFile(
+        paths[index] as string,
+        await (await fetch(file.url)).blob(),
+      ),
+    ),
+  );
+  return paths;
 }
 
 /**

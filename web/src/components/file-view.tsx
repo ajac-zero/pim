@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
@@ -26,15 +26,9 @@ export function FileMissing({
   return (
     <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
       <p className="text-muted-foreground">{message ?? t("fileMissing")}</p>
-      {onClose ? (
+      {onClose && (
         <Button variant="outline" onClick={onClose}>
           {t("close")}
-        </Button>
-      ) : (
-        <Button asChild variant="outline">
-          <Link to="/" search={{ panel: "files" }}>
-            {t("allFiles")}
-          </Link>
         </Button>
       )}
     </main>
@@ -80,7 +74,7 @@ export function FileView({
       toast.success(t("fileDeleted", { name: baseName(path) }));
       void queryClient.invalidateQueries({ queryKey: ["files"] });
       if (onClose) onClose();
-      else void navigate({ to: "/", search: { panel: "files" } });
+      else void navigate({ to: "/" });
     },
     onError: (failure) => toast.error(failure.message),
   });

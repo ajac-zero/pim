@@ -36,7 +36,7 @@ const CHANGES: ReadonlySet<WorkspaceTool> = new Set(["write", "edit", "delete"])
 /** Running these again after an eviction does what the first run did; `edit` would apply its edits twice. */
 const REPLAY_SAFE: ReadonlySet<WorkspaceTool> = new Set(["read", "ls", "find", "grep", "write", "delete"]);
 
-const WHERE = `The person's files are under ${FILES_ROOT}, a folder on their computer; they see the same files under Files in the app, and can add their own there. Paths outside ${FILES_ROOT} are refused: use shell for the rest of the computer. To share a file in chat, use a Markdown link to its absolute path, such as [Download the report](${FILES_ROOT}/report.csv). Pim opens it in the file viewer; do not use sandbox: or file: URLs.`;
+const WHERE = `The person's files are under ${FILES_ROOT}, a folder on their computer; files they attach to a message are saved under ${FILES_ROOT}/uploads, and the message links each one by its path. Paths outside ${FILES_ROOT} are refused: use shell for the rest of the computer. To share a file in chat, use a Markdown link to its absolute path, such as [Download the report](${FILES_ROOT}/report.csv). Pim opens it in the file viewer; do not use sandbox: or file: URLs.`;
 
 export type FileServices = {
 	readonly computer: Computer;

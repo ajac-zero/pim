@@ -115,6 +115,7 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 
 1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their connectors. Attach it to the Worker and set `PIM_PUBLIC_URL` to it, both in the dashboard.
    For public app links, add a second hostname that isn't under the first one's cookies (another domain is best), route its `/p/*` and `/artifact-runtime/*` to the Worker, and set `PIM_CONTENT_ORIGIN` to it in the dashboard (see [apps](apps.md#public-links)).
+   For apps with a backend at addresses of their own, add a wildcard hostname under another domain (`*.apps.example.net`), route it to the Worker, and set `PIM_APPS_ORIGIN` to its base (`https://apps.example.net`; see [apps](apps.md#apps-with-a-backend)). Apps are served from every path at their own hostnames, `/` included, so the Worker must see requests before the static files do: set `run_worker_first` to `true` in `wrangler.jsonc`, and add `/hosted/*` to the list in `web/public/sw.js` if you keep a list.
 2. **OpenAI:** for people outside your household, confirm with OpenAI that they may use ChatGPT-plan sign-in through your Pim.
 3. **Data residency:** agents are created without a jurisdiction. Choosing one (for example `eu`) must happen before anyone joins, because an object can't move.
 4. **Policy:** `PIM_REGISTRATION`, the `PIM_LIMIT_*` variables and `PIM_MODELS` for what you're willing to pay for.

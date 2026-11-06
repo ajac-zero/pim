@@ -40,6 +40,8 @@ export type DeploymentSettings = {
 	readonly publicUrl: string | null;
 	/** `PIM_CONTENT_ORIGIN`: another address, routed to this Worker, that serves published apps' public links and nothing else; null turns links off. */
 	readonly contentOrigin: string | null;
+	/** `PIM_APPS_ORIGIN`: an address whose subdomains, routed to this Worker, are the addresses of apps with a backend, one each; null leaves them to their owner's own page. */
+	readonly appsOrigin: string | null;
 	/** `PIM_EMAIL_FROM`: the address Pim emails from; null sends no email. */
 	readonly emailFrom: string | null;
 };
@@ -134,6 +136,12 @@ export function readDeployment(env: object): Deployment {
 		if (content === publicUrl) throw new Error("must be another address than PIM_PUBLIC_URL");
 		return content;
 	});
+	// Each app with a backend gets a subdomain of it, an origin of its own: its page, its cookies and its storage are its own.
+	const appsOrigin = variable<string | null>("PIM_APPS_ORIGIN", null, (value) => {
+		const apps = origin(value);
+		if (apps === publicUrl || apps === contentOrigin) throw new Error("must be another address than PIM_PUBLIC_URL and PIM_CONTENT_ORIGIN");
+		return apps;
+	});
 	const emailFrom = variable<string | null>("PIM_EMAIL_FROM", null, (value) => {
 		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new Error("must be an email address, such as pim@example.com");
 		return value;
@@ -154,6 +162,7 @@ export function readDeployment(env: object): Deployment {
 			limits,
 			publicUrl,
 			contentOrigin,
+			appsOrigin,
 			emailFrom,
 		},
 		variables,

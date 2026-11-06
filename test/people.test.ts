@@ -896,6 +896,71 @@ describe("artifacts", () => {
 		expect((await new Browser().fetch(`/api/artifacts/${id}/versions/1/frame`)).status).toBe(401);
 	});
 
+	it("with a backend are opened at their own address by the people of the circles they're shared with, when their access says so, and only while they still are", async () => {
+		const ann = await person("hst-ann");
+		const ben = await person("hst-ben");
+		const cy = await person("hst-cy");
+		const id = crypto.randomUUID();
+		const label = `${ann.ownerId.slice(2)}${id.replaceAll("-", "")}`;
+		const space = () => env.Pim.getByName(ann.ownerId);
+		const setAccess = (access: string) =>
+			runInDurableObject(space(), async (instance: Pim, state) => {
+				if (!instance.artifacts.get(id)) {
+					await instance.artifacts.create({ id, title: "Club", kind: "hosted", content: JSON.stringify({ backend: { command: "x" } }), session: null });
+				}
+				state.storage.sql.exec("INSERT OR REPLACE INTO pim_hosted_apps (artifact, port, version, access) VALUES (?, 18000, 1, ?)", id, access);
+			});
+		const enter = (who: { browser: Browser }) => who.browser.fetch(`/hosted/enter?app=${label}&next=%2Fhome&go=1`, { redirect: "manual" });
+		/** The app's own address, with what the person traded their token for. */
+		const open = async (who: { browser: Browser }) => {
+			const entered = await enter(who);
+			if (entered.status !== 302) return { entered };
+			const traded = await exports.default.fetch(new Request(entered.headers.get("location")!, { redirect: "manual" }));
+			const cookie = traded.headers.get("set-cookie")!.split(";")[0]!;
+			return { entered, cookie, page: () => exports.default.fetch(new Request(`https://${label}.apps.pim.test/home`, { redirect: "manual", headers: { cookie } })) };
+		};
+
+		await setAccess("owner");
+		const club = (await ann.browser.json("/api/circles", { method: "POST", json: { name: "Club" } })).body;
+		await ann.browser.json(`/api/circles/${club.id}/members`, { method: "POST", json: { username: "hst-ben" } });
+		expect((await ann.browser.json(`/api/artifacts/${id}/circles`, { method: "PUT", json: { circles: [club.id] } })).status).toBe(200);
+
+		// Shared, but the app's access is its owner's alone: only they get in.
+		expect((await enter(ben)).status).toBe(403);
+		expect((await enter(ann)).status).toBe(302);
+
+		await setAccess("circles");
+		const entered = await open(ben);
+		expect(entered.entered.status).toBe(302);
+		expect(new URL(entered.entered.headers.get("location")!).searchParams.get("next")).toBe("/home");
+		// Someone outside the circle, and someone who isn't signed in, don't.
+		const outside = await enter(cy);
+		expect(outside.status).toBe(403);
+		expect(await outside.text()).toContain("hasn't shared this app with you");
+		expect((await new Browser().fetch(`/hosted/enter?app=${label}&go=1`, { redirect: "manual" })).status).toBe(401);
+		// What their cookie opens is the owner's backend, which has no computer to answer here.
+		const ok = await entered.page!();
+		expect(ok.status).toBe(404);
+		expect(await ok.text()).toContain("No computer");
+
+		// Each of these ends it at once, for a cookie already held: the app is no longer shared with them, or its access is the owner's again, or their circle is off, or they are out of it.
+		const away = async () => (await entered.page!()).status;
+		await ann.browser.json(`/api/artifacts/${id}/circles`, { method: "PUT", json: { circles: [] } });
+		expect(await away()).toBe(302);
+		await ann.browser.json(`/api/artifacts/${id}/circles`, { method: "PUT", json: { circles: [club.id] } });
+		expect(await away()).toBe(404);
+		await setAccess("owner");
+		expect(await away()).toBe(302);
+		await setAccess("circles");
+		await ann.browser.json(`/api/circles/${club.id}`, { method: "PUT", json: { enabled: false } });
+		expect(await away()).toBe(302);
+		await ann.browser.json(`/api/circles/${club.id}`, { method: "PUT", json: { enabled: true } });
+		expect(await away()).toBe(404);
+		await ann.browser.fetch(`/api/circles/${club.id}/members/${ben.ownerId}`, { method: "DELETE" });
+		expect(await away()).toBe(302);
+		expect((await enter(ben)).status).toBe(403);
+	});
+
 	it("are shown to the people of the circles they're shared with, from their own Pim, latest version only, with their own data apart", async () => {
 		const dee = await person("art-dee");
 		const eli = await person("art-eli");

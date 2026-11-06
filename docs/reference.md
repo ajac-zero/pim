@@ -113,6 +113,7 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 | --- | --- | --- |
 | `PIM_PUBLIC_URL` | none: required | The address people use, such as `https://pim.example.com`: passkeys, connectors' callbacks and the links Pim makes belong to it. Pim answers only there, sends the web app there from any other address, and answers nothing until it's set |
 | `PIM_CONTENT_ORIGIN` | unset | Another address, routed to this Worker, for public app links (see [docs/apps.md](apps.md#public-links)); unset turns links off. It must differ from `PIM_PUBLIC_URL` |
+| `PIM_APPS_ORIGIN` | unset | An address whose subdomains, routed to this Worker, are the addresses of [apps with a backend](apps.md#apps-with-a-backend), one each, such as `https://apps.example.net` (apps at `https://<label>.apps.example.net`); unset leaves them to their owner's own page, and only for the owner. It must differ from `PIM_PUBLIC_URL` and `PIM_CONTENT_ORIGIN`, and should be under another registrable domain than the Pim's, so an app can't set cookies that reach it |
 | `PIM_REGISTRATION` | `invite` | How members join once there is an admin: `invite` (links the admin makes), `open` or `closed`. Guests join through a [bot's link](#public-bots) whatever it says |
 | `PIM_MAX_ACCOUNTS` | unset | Accounts allowed in all; unset for no cap |
 | `PIM_REGISTRATIONS_PER_ADDRESS` | `3` | Accounts one IP address may make in a day |

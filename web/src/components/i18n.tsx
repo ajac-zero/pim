@@ -765,6 +765,14 @@ const translations = {
     backendLogs: "Logs",
     backendNoLogs: "Nothing printed yet.",
     backendRunFailed: "The backend didn't start",
+    backendOpen: "Open",
+    backendAccessOwner: "Only you",
+    backendAccessCircles: "Your circles",
+    backendAccessPublic: "Anyone with the link",
+    sharedBackendNote:
+      "This app runs on {host}'s computer, at an address of its own.",
+    sharedBackendNoAddress:
+      "This Pim has no address for apps like this one, so it can't be opened here.",
     artifactPreview: "Preview",
     artifactSource: "Source",
     artifactRestore: "Restore",
@@ -1926,6 +1934,14 @@ const translations = {
     backendLogs: "Registros",
     backendNoLogs: "Aún no ha impreso nada.",
     backendRunFailed: "El backend no arrancó",
+    backendOpen: "Abrir",
+    backendAccessOwner: "Solo tú",
+    backendAccessCircles: "Tus círculos",
+    backendAccessPublic: "Cualquiera con el enlace",
+    sharedBackendNote:
+      "Esta app se ejecuta en la computadora de {host}, en una dirección propia.",
+    sharedBackendNoAddress:
+      "Esta instancia de Pim no tiene dirección para apps como esta, así que no se puede abrir aquí.",
     artifactPreview: "Vista previa",
     artifactSource: "Código",
     artifactRestore: "Restaurar",

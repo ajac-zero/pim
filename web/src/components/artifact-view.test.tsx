@@ -135,6 +135,8 @@ it("shows how an app's backend is doing, and offers to run the latest version on
     version: 3,
     status: { state: "running", restarts: 2, since: 1 },
     computer: "online",
+    access: "owner",
+    address: null,
   });
   expect(running).toContain("Running Version 3 · Restarts: 2");
   expect(running).toContain("Stop");
@@ -145,12 +147,16 @@ it("shows how an app's backend is doing, and offers to run the latest version on
     version: 2,
     status: { state: "running", restarts: 0, since: 1 },
     computer: "online",
+    access: "owner",
+    address: null,
   });
   expect(older).toContain("Run version 3");
   const stopped = await renderBackendApp({
     version: 3,
     status: { state: "stopped", restarts: 0, since: 1 },
     computer: "online",
+    access: "owner",
+    address: null,
   });
   expect(stopped).toContain("Stopped Version 3");
   expect(stopped).toContain("Run version 3");
@@ -161,8 +167,22 @@ it("shows how an app's backend is doing, and offers to run the latest version on
     version: 3,
     status: null,
     computer: "offline",
+    access: "owner",
+    address: null,
   });
   expect(offline).toContain("Your computer is offline");
   expect(offline).not.toContain("Run version");
   expect(offline).not.toContain("Share");
+
+  // Where the app has an address of its own, it can be opened there, and says who may.
+  const shared = await renderBackendApp({
+    version: 3,
+    status: { state: "running", restarts: 0, since: 1 },
+    computer: "online",
+    access: "circles",
+    address: "https://abc.apps.example.com/",
+  });
+  expect(shared).toContain("Open");
+  expect(shared).toContain("Your circles");
+  expect(running).not.toContain("Your circles");
 });

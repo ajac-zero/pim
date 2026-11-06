@@ -3,11 +3,11 @@ import { HttpError } from "./http";
 /**
  * The manifest of an app with a backend: `pim.app.json`, the main file of a
  * `hosted` app (see ./hosted.ts). It says how to run the app on the person's
- * computer, and nothing else yet: a field that does nothing is refused, so
+ * computer, and who may open it. A field that does nothing is refused, so
  * nobody believes it does.
  *
  * ```json
- * { "backend": { "command": "node server.js", "install": "npm ci" } }
+ * { "backend": { "command": "node server.js", "install": "npm ci" }, "access": "circles" }
  * ```
  */
 export const MANIFEST_FILE = "pim.app.json";
@@ -20,7 +20,16 @@ export type Backend = {
 	readonly install?: string;
 };
 
-export type Manifest = { readonly backend: Backend };
+/**
+ * Who may open the app at its own address (see ./hosted.ts): `owner`, the
+ * default, only its owner; `circles`, also the people in the circles it is
+ * shared with, who sign in to Pim first; `public`, anyone with the address,
+ * signed in or not. The last two need the deployment's apps origin.
+ */
+export const ACCESS_LEVELS = ["owner", "circles", "public"] as const;
+export type Access = (typeof ACCESS_LEVELS)[number];
+
+export type Manifest = { readonly backend: Backend; readonly access: Access };
 
 const MAX_COMMAND_LENGTH = 1_000;
 
@@ -33,10 +42,10 @@ export function parseManifest(text: string): Manifest {
 		throw new HttpError(400, `${MANIFEST_FILE} must be JSON.`);
 	}
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new HttpError(400, `${MANIFEST_FILE} must be a JSON object.`);
-	const { backend, ...rest } = parsed as Record<string, unknown>;
+	const { backend, access, ...rest } = parsed as Record<string, unknown>;
 	const unknown = Object.keys(rest);
 	if (unknown.length > 0) {
-		throw new HttpError(400, `${MANIFEST_FILE} has no ${unknown.map((key) => `"${key}"`).join(" or ")} yet: only "backend" is supported, and the app is for its owner alone.`);
+		throw new HttpError(400, `${MANIFEST_FILE} has no ${unknown.map((key) => `"${key}"`).join(" or ")} yet: only "backend" and "access" are supported.`);
 	}
 	if (typeof backend !== "object" || backend === null || Array.isArray(backend)) {
 		throw new HttpError(400, `${MANIFEST_FILE} needs a "backend": { "command": "…" }.`);
@@ -51,5 +60,11 @@ export function parseManifest(text: string): Manifest {
 			throw new HttpError(400, `"backend".${name} must be a shell command of at most ${MAX_COMMAND_LENGTH} characters.`);
 		}
 	}
-	return { backend: { command: command as string, ...(install === undefined ? {} : { install: install as string }) } };
+	if (access !== undefined && !ACCESS_LEVELS.includes(access as Access)) {
+		throw new HttpError(400, `"access" must be one of ${ACCESS_LEVELS.map((level) => `"${level}"`).join(", ")}: who may open the app. The default is "owner".`);
+	}
+	return {
+		backend: { command: command as string, ...(install === undefined ? {} : { install: install as string }) },
+		access: (access as Access | undefined) ?? "owner",
+	};
 }

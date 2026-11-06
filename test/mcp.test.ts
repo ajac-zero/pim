@@ -382,7 +382,7 @@ describe("connected apps (MCP)", () => {
 
 	it("gives a chat only the apps its agent lists, and lets the model connect only those", async () => {
 		const weather = "https://weather.example.test/mcp";
-		const books = (await post("/agents", { name: "Books", blueprint: "test.ledger/budget" })).body;
+		const books = (await post("/agents", { name: "Books", apps: ["test.ledger/weather"] })).body;
 		const budget = (await post("/sessions", { agent: books.id })).body.id;
 
 		// The default agent doesn't list Weather: the model can't connect it from there.
@@ -398,7 +398,7 @@ describe("connected apps (MCP)", () => {
 		expect(refused).toContain("This agent doesn't work with Weather; its apps are Calendar, Notes.");
 		expect((await api("/mcp")).body.servers.map((server: { id: string }) => server.id)).toEqual(["calendar"]);
 
-		// The Budget agent's definition lists it: connecting it needs no approval, as its agent already chose it.
+		// The Books agent lists it: connecting it needs no approval, as its agent already chose it.
 		let connected = "";
 		let system = "";
 		faux.setResponses([
@@ -417,7 +417,7 @@ describe("connected apps (MCP)", () => {
 		const servers = (await api("/mcp")).body.servers;
 		expect(servers.find((server: { id: string }) => server.id === "weather")).toMatchObject({ url: weather, agents: ["Books"] });
 
-		// Its tools reach the Budget chat, and no other.
+		// Its tools reach the Books chat, and no other.
 		const tools: Record<string, string[]> = {};
 		const record = (key: string) => (context: { messages: Message[] }) => {
 			tools[key] = offered(context.messages);

@@ -8,21 +8,17 @@ export { oauth2, ReconnectRequired } from "./native-apps";
 
 /**
  * Pim extensions: what a deployment adds to every person's agents, chosen in
- * `pim.config.ts`. An extension can bring blueprints, the definitions people's
- * agents build on, each with its own instructions and conversation starters; widgets, the cards an
+ * `pim.config.ts`. An extension can bring apps people connect; widgets, the cards an
  * agent shows with its messages; color themes for the web app; and an ability: tools,
  * prompt sections, hooks and background tasks, plus actions that ask the
- * person first. A person's space
- * builds on one extension's blueprint (its `blueprint`), and adds their own name and
- * instructions on top; its chats get the abilities that blueprint uses.
+ * person first. Every agent's chats get the abilities of every installed extension.
  *
  * Widgets are declarative: `load` runs in the person's space and returns
  * data of a known kind, which the web app draws with its own components. No
  * extension code runs in the browser.
  *
- * Pim's own blueprint is an extension too (`./assistant.ts`), its abilities
- * (goals, schedules, memory, artifacts) bring their widgets the same way, and
- * its color themes are one (`./themes`).
+ * Pim's own abilities (goals, schedules, memory, artifacts) bring their widgets
+ * the same way, and its color themes are an extension (`./themes`).
  */
 
 /** Text an extension shows people: one string, or one per language, with English always there. */
@@ -137,7 +133,7 @@ export function widgetMarkdown(widget: ShownWidget, locale = "en"): string {
 
 /**
  * An app people connect with their own accounts. It is named
- * `<extension>/<id>`, as blueprints and people's agents list it, and each
+ * `<extension>/<id>`, as people's agents list it, and each
  * person connects it once for all of their agents. It is a remote MCP
  * server, or the extension implements it: its sign-in and its tools.
  */
@@ -311,40 +307,15 @@ export function defineAppTool<T extends TSchema>(
 	return tool as unknown as AppTool;
 }
 
-export type BlueprintDefinition = {
-	/** Unique in its extension: the blueprint is named `<extension>/<id>`. */
-	readonly id: string;
-	/** What a person's new agent built on this blueprint is called, until they rename it. */
-	readonly name: string;
-	readonly description: string;
-	/** The model reads these in every chat with an agent built on this blueprint, before the person's own instructions. */
-	readonly instructions: string;
-	/**
-	 * Other extensions whose abilities its chats get, by id; its own
-	 * extension's always. Pim's own abilities (memory, goals, schedules,
-	 * artifacts, apps, the web) are every space's.
-	 */
-	readonly abilities?: readonly string[];
-	/**
-	 * Apps its chats work with, each `<extension>/<app>`. Each person connects
-	 * them with their own accounts; a chat gets the tools of the apps its agent
-	 * lists here or in the person's own agent, and of no other.
-	 */
-	readonly apps?: readonly string[];
-	/** Messages offered for starting a chat with it, until its chats give Pim better ones. */
-	readonly starters?: readonly Text[];
-};
-
 export type PimExtension = {
 	/** Lowercase letters, digits, dots and hyphens. Stored in people's agents: don't rename it. */
 	readonly id: string;
 	readonly name: string;
 	readonly description: string;
 	readonly widgets?: Readonly<Record<string, Widget>>;
-	readonly blueprints?: readonly BlueprintDefinition[];
 	/** Themes people can pick for the web app, in Settings → Appearance. See ../themes.ts. */
 	readonly themes?: readonly Theme[];
-	/** Apps people can connect, and blueprints and agents list as `<extension>/<app>`. */
+	/** Apps people can connect, and agents list as `<extension>/<app>`. */
 	readonly apps?: readonly AppDefinition[];
 	/** Built once in each person's space. Its tools and actions must be named apart from every other tool. */
 	readonly ability?: (context: AbilityContext) => Ability;
@@ -352,8 +323,6 @@ export type PimExtension = {
 
 export type PimConfig = {
 	readonly extensions: readonly PimExtension[];
-	/** The blueprint every new account's first agent builds on, and new agents by default: `<extension>/<blueprint>`, or null for none. */
-	readonly defaultBlueprint: string | null;
 	/** The theme people see until they pick another: a theme's id, Pim's own or an extension's. */
 	readonly defaultTheme: string;
 	/** The logo at the top of the web app's sidebar: an https or `data:` image URL, square, that works on light and dark. Without one, Pim's own mark. */
@@ -382,24 +351,17 @@ export const CUSTOM_APPS = "custom";
 
 /**
  * The extensions installed in this deployment, checked once: ids are unique
- * and well formed, every blueprint's abilities and apps are installed, and
- * the default blueprint exists. A mistake in `pim.config.ts` fails here, loudly.
+ * and well formed, and so are their apps. A mistake in `pim.config.ts` fails here, loudly.
  */
 export class PimExtensions {
 	readonly #extensions = new Map<string, PimExtension>();
-	readonly defaultBlueprint: string | null;
 
-	constructor(extensions: readonly PimExtension[], defaultBlueprint: string | null) {
+	constructor(extensions: readonly PimExtension[]) {
 		for (const extension of extensions) {
 			if (!ID.test(extension.id)) throw new Error(`Extension id ${JSON.stringify(extension.id)} must be lowercase letters, digits, dots and hyphens`);
 			if (extension.id === CUSTOM_APPS) throw new Error(`No extension may be called ${CUSTOM_APPS}: the admin's apps are`);
 			if (this.#extensions.has(extension.id)) throw new Error(`Two extensions are called ${extension.id}`);
 			this.#extensions.set(extension.id, extension);
-			const ids = new Set<string>();
-			for (const blueprint of extension.blueprints ?? []) {
-				if (!ID.test(blueprint.id) || ids.has(blueprint.id)) throw new Error(`${extension.id} has a missing, malformed or repeated blueprint id ${JSON.stringify(blueprint.id)}`);
-				ids.add(blueprint.id);
-			}
 			const apps = new Set<string>();
 			for (const app of extension.apps ?? []) {
 				const ref = `${extension.id}/${app.id}`;
@@ -417,39 +379,15 @@ export class PimExtensions {
 				apps.add(app.id);
 			}
 		}
-		for (const { ref, blueprint } of this.blueprints()) {
-			for (const id of blueprint.abilities ?? []) {
-				if (!this.#extensions.get(id)?.ability) throw new Error(`${ref} uses the ability of ${id}, which no installed extension brings`);
-			}
-			for (const app of blueprint.apps ?? []) {
-				if (!this.app(app)) throw new Error(`${ref} works with the app ${app}, which no installed extension brings`);
-			}
-		}
-		if (defaultBlueprint !== null && !this.blueprint(defaultBlueprint)) throw new Error(`The default blueprint ${defaultBlueprint} isn't in any installed extension`);
-		this.defaultBlueprint = defaultBlueprint;
 	}
 
 	list(): PimExtension[] {
 		return [...this.#extensions.values()];
 	}
 
-	/** Every extension's blueprints, each with its `<extension>/<blueprint>` name. */
-	blueprints(): { ref: string; blueprint: BlueprintDefinition }[] {
-		return this.list().flatMap((extension) => (extension.blueprints ?? []).map((blueprint) => ({ ref: `${extension.id}/${blueprint.id}`, blueprint })));
-	}
-
-	blueprint(ref: string): BlueprintDefinition | undefined {
-		const [extension, id] = split(ref);
-		return this.#extensions.get(extension)?.blueprints?.find((blueprint) => blueprint.id === id);
-	}
-
-	/** The extensions whose abilities the chats of an agent built on `ref` get: its own extension's, then the ones it names. */
-	abilitiesOf(ref: string | null): string[] {
-		if (ref === null) return [];
-		const blueprint = this.blueprint(ref);
-		if (!blueprint) return [];
-		const own = split(ref)[0];
-		return [...new Set([...(this.#extensions.get(own)?.ability ? [own] : []), ...(blueprint.abilities ?? [])])];
+	/** The extensions whose abilities every agent's chats get. */
+	withAbilities(): string[] {
+		return this.list().flatMap((extension) => (extension.ability ? [extension.id] : []));
 	}
 
 	/** Every extension's apps, each with its `<extension>/<app>` name. */

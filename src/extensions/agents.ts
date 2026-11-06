@@ -25,7 +25,6 @@ import { majordomoRole } from "../majordomo";
 import { DELEGATE, type Role, taskPreamble } from "../tasks";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";
 import type { DirectoryApp } from "./app-directory";
-import type { BlueprintDefinition } from "./define";
 import { type McpBridge, serverFor } from "./mcp";
 import type { NamedScope } from "./optmem/store";
 import { type PimServices, json, text } from "./services";
@@ -274,8 +273,6 @@ export function shareMemoryScopeAction(agents: Pick<AgentStore, "get" | "update"
 /** The person's agents, for a chat's agent to know them and make new ones. */
 export type AgentsHost = {
 	list(): readonly Agent[];
-	/** The blueprints a new agent can build on. */
-	blueprints(): readonly { ref: string; name: string; description: string }[];
 	/** The apps the person can connect. */
 	apps(): readonly DirectoryApp[];
 	/** Checked as the API checks a new agent; throws what it refuses. */
@@ -286,7 +283,6 @@ export type AgentsHost = {
 
 /** What the agent a person talks with knows of their other agents, and when to make one. */
 function agentsSection(self: Agent, host: AgentsHost): string {
-	const blueprints = host.blueprints();
 	return [
 		"The person's agents. Each has its own chats in the sidebar; they share apps, goals and schedules, and each remembers what its memory scopes hold.",
 		...host
@@ -298,19 +294,13 @@ function agentsSection(self: Agent, host: AgentsHost): string {
 		self.majordomo
 			? `Hand work to these with \`${DELEGATE}\`. When none of them is right for it, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then hand it the task. Each is in the sidebar too, with its own chats, for the person to talk with it directly.`
 			: `When the person wants ongoing help of the kind another of these is for, tell them to start a chat with it from the sidebar. When they want ongoing help none of these covers, such as a coding helper or a trip planner, make one with \`${CREATE_AGENT}\` without asking first, then tell them it's in the sidebar. Don't make one for a one-off question: answer it yourself.`,
-		...(blueprints.length > 1
-			? [
-					"A new agent can build on one of these blueprints, which gives it their habits and tools; give it as `blueprint`, or leave it out for the deployment's default:",
-					...blueprints.map((blueprint) => `- ${blueprint.ref}: ${blueprint.name}${blueprint.description ? `, ${blueprint.description}` : ""}`),
-				]
-			: []),
 	].join("\n");
 }
 
 /**
  * How every agent works, whatever it is for: how it talks to the person, and
  * the rules no agent's instructions change. Who it is and what it is good at
- * come in the `agent` section, from the blueprint it builds on and the person's own
+ * come in the `agent` section, from Pim's assistant and the person's own
  * instructions.
  */
 const PREAMBLE = `You are an AI agent working for one person. Who you are in this conversation, and how you work, is in the \`agent\` section.
@@ -329,13 +319,11 @@ Rules that always hold:
 
 /**
  * How every agent works, and the agent each chat talks as, or the agent at
- * work on a task (`roleOf` its session). An agent's instructions are those of the
- * blueprint it builds on (`blueprintOf`), then the person's own.
+ * work on a task (`roleOf` its session).
  */
 export function agentExtension(
 	services: PimServices,
 	roleOf: (session: string) => Role,
-	blueprintOf: (agent: Agent) => BlueprintDefinition | undefined,
 	agents: AgentsHost,
 ) {
 	const createAgent = defineTool({
@@ -354,7 +342,6 @@ export function agentExtension(
 					description: `Names of the person's other agents it hands parts of its work to with \`${DELEGATE}\`, such as a planner's researcher. Make those first.`,
 				}),
 			),
-			blueprint: Type.Optional(Type.String({ description: "The blueprint it builds on, such as pim.assistant/pim; the default blueprint if left out." })),
 			emoji: Type.Optional(Type.String({ description: "One emoji shown as its icon, such as 🏃 for a running coach." })),
 			color: Type.Optional(Type.Union(AGENT_COLORS.map((color) => Type.Literal(color)), { description: "The color behind its emoji." })),
 		}),
@@ -437,7 +424,7 @@ export function agentExtension(
 				return text(error instanceof Error ? error.message : String(error), true);
 			}
 			summary = await api.memo(MANAGE_APPS, summary, context);
-			if (summary === "") return text("That changes no editable apps. Apps inherited from the blueprint cannot be removed here. Use connect_app if an existing app needs connecting.", true);
+			if (summary === "") return text("That changes no editable apps. Use connect_app if an existing app needs connecting.", true);
 			return fileApproval(services, api, context, { action: MANAGE_APPS, tool: null, args: { agent: agent.id, add: changes.add, remove: changes.remove }, summary }, true);
 		},
 	});
@@ -472,7 +459,7 @@ export function agentExtension(
 			// Rendered at each request, so a chat follows its agent's edits from the next one.
 			section("agent", ({ conversationId }) => {
 				const { agent } = roleOf(String(conversationId));
-				return agentInstructions(agent, blueprintOf(agent), agent.majordomo ? majordomoRole(agent) : undefined);
+				return agentInstructions(agent, agent.majordomo ? majordomoRole(agent) : undefined);
 			}),
 			section("your_agents", ({ conversationId }) => {
 				const { agent, from } = roleOf(String(conversationId));

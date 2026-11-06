@@ -1,15 +1,13 @@
 import { type DirectoryApp, storedApps } from "./extensions/app-directory";
-import { ASSISTANT_BLUEPRINT } from "./extensions/assistant";
-import type { BlueprintDefinition } from "./extensions/define";
+import { ASSISTANT_INSTRUCTIONS } from "./extensions/assistant";
 import { PRIVATE_SCOPE } from "./extensions/optmem/store";
 import { HttpError } from "./http";
 import { SKILL_NAME } from "./skills";
 
 /**
  * The owner's agents: each with its own instructions, such as "Marathon
- * coach" or "Trip planner". Each builds on a blueprint an extension brings
- * (its `blueprint`, see ./extensions/define.ts), usually Pim's own
- * assistant, and adds the person's name and instructions on top. One of
+ * coach" or "Trip planner". Each works as Pim's assistant (see
+ * ./extensions/assistant.ts) and adds the person's name and instructions on top. One of
  * them is the majordomo: the agent the person comes to first, which knows
  * them best, hands work down to the others, and stands in for the person on
  * their approvals (see ./majordomo.ts). It talks in chats started without
@@ -51,8 +49,6 @@ export type Agent = {
 	readonly memoryScopes: readonly string[];
 	/** The model it runs on, by provider and id; null follows the space's own choice (Settings → Model), else the deployment's. */
 	readonly model: AgentModel | null;
-	/** The blueprint it builds on, as `<extension>/<blueprint>`; null for none. */
-	readonly blueprint: string | null;
 	/** The template it was made from. */
 	readonly source: { readonly template: string; readonly author: string } | null;
 	/** Its published template, if the owner published it. */
@@ -83,8 +79,6 @@ export type AgentInput = {
 	readonly contacts: readonly string[];
 	/** Left out, a new agent reads none of the named memory scopes and an edited one keeps those it reads. */
 	readonly memoryScopes?: readonly string[];
-	/** Left out, a new agent builds on the deployment's default blueprint and an edited one keeps its own. */
-	readonly blueprint?: string | null;
 	/** Left out, a new agent has the default look and an edited one keeps its own. */
 	readonly symbol?: string | null;
 	readonly color?: string | null;
@@ -123,7 +117,6 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
 	is_default INTEGER NOT NULL DEFAULT 0,
-	blueprint TEXT,
 	symbol TEXT,
 	color TEXT,
 	introduced INTEGER NOT NULL DEFAULT 0,
@@ -183,9 +176,6 @@ function renameStorage(sql: SqlStorage): void {
 	for (const table of ["pim_agent_icons", "pim_agent_sessions"]) {
 		if (names(`PRAGMA table_info(${table})`).has("persona")) sql.exec(`ALTER TABLE ${table} RENAME COLUMN persona TO agent`);
 	}
-	// Blueprints were called bases.
-	const agents = names("PRAGMA table_info(pim_agents)");
-	if (agents.has("base") && !agents.has("blueprint")) sql.exec("ALTER TABLE pim_agents RENAME COLUMN base TO blueprint");
 }
 
 const SELECT = "SELECT p.*, (SELECT updated_at FROM pim_agent_icons WHERE agent = p.id) AS icon FROM pim_agents p";
@@ -202,7 +192,6 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	memoryScope: String(row.memory_scope),
 	memoryScopes: JSON.parse(String(row.memory_scopes)) as string[],
 	model: row.model ? (JSON.parse(String(row.model)) as AgentModel) : null,
-	blueprint: row.blueprint === null ? null : String(row.blueprint),
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
 	published: row.published === null ? null : String(row.published),
 	icon: row.icon === null ? null : Number(row.icon),
@@ -249,21 +238,11 @@ export function agentInput(body: Record<string, unknown>, partial?: Agent): Agen
 		...(body.memoryScopes === undefined ? {} : { memoryScopes: memoryScopesInput(body.memoryScopes) }),
 		...(body.symbol === undefined ? {} : { symbol: symbolInput(body.symbol) }),
 		...(body.color === undefined ? {} : { color: colorInput(body.color) }),
-		...(body.blueprint === undefined ? {} : { blueprint: blueprintInput(body.blueprint) }),
 	};
 }
 
 /** What an extension brings, by name: `<extension>/<name>`. */
 const REF = /^[a-z0-9][a-z0-9.-]*\/[a-z0-9][a-z0-9.-]*$/;
-
-/** A blueprint as given: `<extension>/<blueprint>`, or null. Whether it is installed is the space's to check. */
-function blueprintInput(value: unknown): string | null {
-	if (value === null) return null;
-	if (typeof value !== "string" || !REF.test(value)) {
-		throw new HttpError(400, "blueprint must be an extension's blueprint, such as pim.assistant/pim, or null");
-	}
-	return value;
-}
 
 /** Skills as given: names of the person's skills. Whether each exists is the space's to check. */
 function skillsInput(value: unknown): string[] {
@@ -321,17 +300,16 @@ export function checkContacts(self: Agent | null, input: AgentInput, agents: rea
 
 /**
  * Who a chat's agent is and how it works: its name and `role`, such as the
- * majordomo's, then the instructions of the blueprint it builds on, then the
- * person's own, which win.
+ * majordomo's, then how Pim's assistant works, then the person's own, which win.
  */
-export function agentInstructions(agent: Agent, blueprint: BlueprintDefinition | undefined, role?: string): string {
+export function agentInstructions(agent: Agent, role?: string): string {
 	const as = agent.role.toLowerCase() === agent.name.toLowerCase() ? "" : `, the person's ${agent.role}`;
 	const identity = `In this conversation you are "${agent.name}"${as}${agent.description ? `: ${agent.description}` : "."}`;
 	const own =
 		agent.instructions === ""
 			? []
 			: [`Your instructions, which come before your general habits wherever the two differ:\n${agent.instructions}`];
-	return [identity, ...(role ? [role] : []), ...(blueprint ? [blueprint.instructions] : []), ...own].join("\n\n");
+	return [identity, ...(role ? [role] : []), ASSISTANT_INSTRUCTIONS, ...own].join("\n\n");
 }
 
 export class AgentStore {
@@ -352,8 +330,6 @@ export class AgentStore {
 		this.#sql.exec(SCHEMA);
 		const columns = this.#sql.exec("PRAGMA table_info(pim_agents)").toArray().map((row) => String(row.name));
 		if (!columns.includes("is_default")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0");
-		// Agents made before extensions all had the assistant's habits.
-		if (!columns.includes("blueprint")) this.#sql.exec(`ALTER TABLE pim_agents ADD COLUMN blueprint TEXT DEFAULT '${ASSISTANT_BLUEPRINT}'`);
 		if (!columns.includes("symbol")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN symbol TEXT");
 		if (!columns.includes("color")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN color TEXT");
 		// Accounts from before majordomos already have the agent they talk with: it becomes theirs as it is.
@@ -392,7 +368,7 @@ export class AgentStore {
 	/**
 	 * Agents once had teams: members with a name and instructions, which
 	 * worked with their agent's apps and answered only it. Each member becomes
-	 * an agent of its own, with its instructions and its agent's blueprint,
+	 * an agent of its own, with its instructions and its agent's
 	 * apps, skills and app tool permissions, and one of its agent's contacts;
 	 * its tasks, done and not, become the new agent's. A member's list of
 	 * tools has no counterpart and is left behind.
@@ -409,7 +385,7 @@ export class AgentStore {
 				const id = newAgentId();
 				const line = member.instructions.trim().split(/\r?\n/)[0] ?? "";
 				this.#sql.exec(
-					"INSERT INTO pim_agents (id, name, role, description, instructions, apps, skills, blueprint, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					"INSERT INTO pim_agents (id, name, role, description, instructions, apps, skills, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 					id,
 					name,
 					name,
@@ -417,7 +393,6 @@ export class AgentStore {
 					member.instructions,
 					row.apps,
 					row.skills,
-					row.blueprint,
 					row.color,
 					Date.now(),
 					Date.now(),
@@ -497,7 +472,7 @@ export class AgentStore {
 		const id = newAgentId();
 		const now = Date.now();
 		this.#sql.exec(
-			"INSERT INTO pim_agents (id, name, role, description, instructions, apps, skills, contacts, memory_scope, memory_scopes, copy_of, blueprint, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+			"INSERT INTO pim_agents (id, name, role, description, instructions, apps, skills, contacts, memory_scope, memory_scopes, copy_of, symbol, color, source, published, created_at, updated_at, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
 			id,
 			input.name,
 			isDefault ? MAJORDOMO_ROLE : (input.role ?? input.name),
@@ -509,7 +484,6 @@ export class AgentStore {
 			this.#memoryScope(id, copyOf, isDefault),
 			JSON.stringify(input.memoryScopes ?? []),
 			copyOf,
-			input.blueprint === undefined ? (this.#starter().blueprint ?? null) : input.blueprint,
 			input.symbol ?? null,
 			input.color ?? null,
 			source === null ? null : JSON.stringify(source),
@@ -536,7 +510,6 @@ export class AgentStore {
 			Date.now(),
 			id,
 		);
-		if (input.blueprint !== undefined) this.#sql.exec("UPDATE pim_agents SET blueprint = ? WHERE id = ?", input.blueprint, id);
 		if (input.symbol !== undefined) this.#sql.exec("UPDATE pim_agents SET symbol = ? WHERE id = ?", input.symbol, id);
 		if (input.color !== undefined) this.#sql.exec("UPDATE pim_agents SET color = ? WHERE id = ?", input.color, id);
 		if (input.memoryScopes !== undefined) this.#sql.exec("UPDATE pim_agents SET memory_scopes = ? WHERE id = ?", JSON.stringify(input.memoryScopes), id);

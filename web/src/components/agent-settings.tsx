@@ -18,7 +18,6 @@ import {
   MessageCircle,
   Pencil,
   Plus,
-  Puzzle,
   Search,
   Trash2,
   Users,
@@ -44,13 +43,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "~/components/ui/popover";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
 import { Switch } from "~/components/ui/switch";
 import {
   type Agent,
@@ -69,7 +61,6 @@ import {
   appDirectoryQuery,
   appsQuery,
   defaultAgentQuery,
-  extensionsQuery,
   majordomoQuery,
 } from "~/lib/queries";
 import { newChatSearch } from "~/lib/start-chat";
@@ -160,7 +151,6 @@ export function AgentSettings({
             <span className="truncate">{agent.name}</span>
           </h2>
           <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
-            <BuildsOn blueprint={agent.blueprint} />
             {agent.source && (
               <span>
                 {t("fromTemplateBy")}{" "}
@@ -343,22 +333,17 @@ function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
 }
 
 /**
- * The apps an agent works with: those of the blueprint it is based on, then
- * its own, which can be taken off. Apps are added from those already
+ * The apps an agent works with, which can be taken off. Apps are added from those already
  * connected, and connected in Apps; one listed but not connected yet
  * connects from here. A connected app's tools each have a switch: on, the
  * agent uses the tool without asking; off, it can't use it.
  */
 function AgentApps({ agent }: { agent: Agent }) {
   const { t } = useI18n();
-  const { data: extensions } = useQuery(extensionsQuery());
-  const blueprint = extensions?.extensions
-    .flatMap((extension) => extension.blueprints)
-    .find((candidate) => candidate.ref === agent.blueprint);
   const { data: directory = [] } = useQuery(appDirectoryQuery());
-  const apps = [
-    ...new Set([...(blueprint?.apps ?? []), ...agent.apps]),
-  ].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
+  const apps = agent.apps.flatMap(
+    (ref) => directory.find((app) => app.ref === ref) ?? [],
+  );
   const queryClient = useQueryClient();
   const { data: connected = [] } = useQuery(appsQuery());
   const { data: tools = [] } = useQuery(agentPermissionsQuery(agent.id));
@@ -454,7 +439,6 @@ function AgentApps({ agent }: { agent: Agent }) {
                         {t("connect")}
                       </Button>
                     )}
-                    {/* The blueprint's apps come with it: only the agent's own are taken off. */}
                     {agent.apps.includes(app.ref) && (
                       <Button
                         size="icon-sm"
@@ -731,74 +715,8 @@ function AgentToolRow({
   );
 }
 
-/** The name of the blueprint an agent is based on, from what the deployment installed. */
-function useBaseName(blueprint: string | null | undefined): string | null {
-  const { data } = useQuery(extensionsQuery());
-  if (!blueprint) return null;
-  const found = data?.extensions
-    .flatMap((extension) => extension.blueprints)
-    .find((candidate) => candidate.ref === blueprint);
-  return found?.name ?? blueprint;
-}
-
-function BuildsOn({ blueprint }: { blueprint: string | null }) {
-  const { t } = useI18n();
-  const name = useBaseName(blueprint);
-  return (
-    <span className="flex items-center gap-1">
-      <Puzzle className="size-3" />
-      {name ? t("basedOnName", { name }) : t("basedOnNothing")}
-    </span>
-  );
-}
-
-/** Which blueprint an agent is based on: its habits and abilities. */
-function BaseSelect({
-  value,
-  onChange,
-}: {
-  value: string | null | undefined;
-  onChange: (blueprint: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const { data } = useQuery(extensionsQuery());
-  if (!data) return null;
-  const chosen = value === undefined ? data.defaultBlueprint : value;
-  return (
-    <label className="block space-y-1">
-      <span className="font-medium text-sm">{t("basedOn")}</span>
-      <Select
-        value={chosen ?? NOTHING}
-        onValueChange={(next) => onChange(next === NOTHING ? null : next)}
-      >
-        <SelectTrigger className="w-full" aria-label={t("basedOn")}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {data.extensions.flatMap((extension) =>
-            extension.blueprints.map((blueprint) => (
-              <SelectItem key={blueprint.ref} value={blueprint.ref}>
-                {blueprint.name === extension.name
-                  ? blueprint.name
-                  : `${blueprint.name} · ${extension.name}`}
-              </SelectItem>
-            )),
-          )}
-          <SelectItem value={NOTHING}>{t("basedOnNothingOption")}</SelectItem>
-        </SelectContent>
-      </Select>
-      <span className="block text-muted-foreground text-xs">
-        {t("basedOnHint")}
-      </span>
-    </label>
-  );
-}
-
-/** The select's value for building on nothing: Radix needs a non-empty one. */
-const NOTHING = "-";
-
 /**
- * An agent's details: how it looks, its name, what it's for, its blueprint,
+ * An agent's details: how it looks, its name, what it's for,
  * instructions and contacts. Its apps are chosen on its page, where they save as
  * they change, so saving these leaves them as they are.
  */
@@ -832,19 +750,17 @@ function AgentForm({
     role: agent?.role ?? "",
     description: initial.description,
     instructions: initial.instructions,
-    blueprint: initial.blueprint,
     contacts: initial.contacts,
     memoryScopes: initial.memoryScopes ?? [],
   });
   const save = useMutation({
     mutationFn: async () => {
-      const { blueprint, role, ...rest } = value;
+      const { role, ...rest } = value;
       const input: Omit<AgentInput, "apps"> = {
         ...rest,
         ...(role?.trim() ? { role: role.trim() } : {}),
         symbol: look.symbol,
         color: look.color,
-        ...(blueprint === undefined ? {} : { blueprint }),
       };
       const saved = agent
         ? await pim.updateAgent(agent.id, input)
@@ -952,10 +868,6 @@ function AgentForm({
           maxLength={280}
         />
       </label>
-      <BaseSelect
-        value={value.blueprint}
-        onChange={(blueprint) => setValue({ ...value, blueprint })}
-      />
       <label className="block space-y-1">
         <span className="font-medium text-sm">{t("agentInstructions")}</span>
         <textarea

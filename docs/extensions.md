@@ -1,21 +1,20 @@
 # Extensions
 
-An extension is what a deployment adds to everyone's spaces: blueprints for agents to build on, abilities (tools, prompt sections, background work, and actions that ask first), widgets their messages can show, and color themes for the web app. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
+An extension is what a deployment adds to everyone's spaces: apps people connect, abilities (tools, prompt sections, background work, and actions that ask first), widgets their messages can show, and color themes for the web app. Its admin chooses them in code, in [`pim.config.ts`](../pim.config.ts), and deploys; people choose among what's there. Nothing is loaded at runtime.
 
-Pim's own blueprint is an extension too, [`pim.assistant`](../src/extensions/assistant.ts), written with the same API. A deployment can leave it out, and a person can move their majordomo to another blueprint. So are Pim's own color themes, [`pim.themes`](../src/extensions/themes/index.ts), which every deployment has.
+Pim's own color themes are an extension too, [`pim.themes`](../src/extensions/themes/index.ts), which every deployment has.
 
-Pim is the platform; a space is one person's own part of it; an agent is what they create and chat with; a blueprint is what an extension defines in code for agents to build on; a template is an agent shared through the gallery.
+Pim is the platform; a space is one person's own part of it; an agent is what they create and chat with; a template is an agent shared through the gallery.
 
 ## Three layers
 
 | Layer | What it is | Where |
 | --- | --- | --- |
 | Core | How every space works: talking through `send_to_user`, approvals, honesty, time. No space's instructions change it | The `preamble` section in [`src/extensions/agents.ts`](../src/extensions/agents.ts) |
-| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, tasks, the web) are every space's; an extension's go only to the agents that use it | `src/extensions/`, and extensions' `ability` |
-| Blueprints | A name, instructions, the abilities it uses, the apps it works with and starters, defined by an extension in code; agents build on one | Extensions in `pim.config.ts` |
-| Agents | What a person talks with: a name and their own instructions and apps on top of a blueprint. Stored data, made in the app or by the agent | Your agents |
+| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, tasks, the web) are every space's; an extension's go to every agent | `src/extensions/`, and extensions' `ability` |
+| Agents | What a person talks with: a name and their own instructions and apps on top of how Pim's assistant works. Stored data, made in the app or by the agent | Your agents |
 
-A person's space stores the blueprint its agents build on as `blueprint`, such as `pim.assistant/pim`; the agent editor's **Based on blueprint** chooses it. At every request its chats get the core preamble, then an `agent` section with the agent's name, the blueprint's instructions, and the person's own instructions, which win. They also get the abilities the blueprint uses: its own extension's, and those it lists in `abilities`. Edits to the extension reach every agent built on it at the next deploy, and an agent that changes its blueprint gets the new abilities in its chats from their next message: they aren't copies. Published agents and the default agent template keep their blueprint; a copy whose blueprint this deployment doesn't have builds on the default blueprint.
+At every request an agent's chats get the core preamble, then an `agent` section with the agent's name, how Pim's assistant works ([`assistant.ts`](../src/extensions/assistant.ts)), and the person's own instructions, which win. They also get the abilities of every installed extension. Edits to an extension reach every agent at the next deploy: they aren't copies. An admin who needs a tool no app offers writes it as an ability, in code, in an extension of their own.
 
 ## Writing one
 
@@ -71,19 +70,6 @@ export const ledger = definePimExtension({
 	},
 	// Apps people can connect: remote MCP servers, named `ledger/<id>`.
 	apps: [{ id: "bank", name: "Bank", description: "Your accounts and transactions.", url: "https://mcp.bank.example/mcp" }],
-	blueprints: [
-		{
-			id: "budget",
-			name: "Budget",
-			description: "Keeps the books.",
-			instructions: "Answer every money question with a number first.",
-			// Abilities of other extensions it uses; its own extension's always.
-			abilities: [],
-			// Apps it works with, from any extension: each person connects them with their own accounts.
-			apps: ["ledger/bank"],
-			starters: [{ en: "How much did I spend?", es: "¿Cuánto gasté?" }],
-		},
-	],
 });
 ```
 
@@ -91,13 +77,12 @@ Then add it to `pim.config.ts`:
 
 ```ts
 export default definePimConfig({
-	extensions: [assistant, ledger],
-	defaultBlueprint: "pim.assistant/pim",
+	extensions: [ledger],
 	defaultTheme: "tokyo-night",
 });
 ```
 
-People then make agents built on it: Agents in the sidebar → New agent → Based on blueprint: Budget, or `POST /api/agents` with `{ "name": "Household", "blueprint": "ledger/budget" }`.
+Every agent's chats then have the ledger's tools and prompt sections, and a person can add its `ledger/bank` app to an agent on its page in Agents, or with `POST /api/agents` and `{ "name": "Household", "apps": ["ledger/bank"] }`.
 
 ## Abilities
 
@@ -107,26 +92,26 @@ People then make agents built on it: Agents in the sidebar → New agent → Bas
 - `timeZone`: the person's, as it is when read.
 - `notify(title, body)`: a notification in the app, pushed to their devices.
 
-It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected only in the chats of agents that use it, and in the conversations of tasks they work on.
+It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected in every agent's chats, and in the conversations of tasks they work on.
 
-- **Assigned actions run without a prompt.** Each `GatedAction` files an approval, which is approved immediately for an agent whose blueprint includes the ability, unless the person chose Ask or Off. Mark risky actions `explicitApproval: true`: every call waits for the person's decision, with no timeout or Always approve. Other requests follow the person's approval policy. Actions are listed in Settings → Permissions with Pim's own.
+- **Assigned actions run without a prompt.** Each `GatedAction` files an approval, which is approved immediately, unless the person chose Ask or Off. Mark risky actions `explicitApproval: true`: every call waits for the person's decision, with no timeout or Always approve. Other requests follow the person's approval policy. Actions are listed in Settings → Permissions with Pim's own.
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
 - **Code-level trust.** An ability runs in the person's agent, with what the context gives it and whatever its code can reach, such as `fetch`. Install only extensions you would merge into Pim itself.
 
-- **Checked when an agent starts.** Ids must be lowercase letters, digits, dots and hyphens, and unique. A blueprint's abilities and apps must be installed, and `defaultBlueprint` must exist. A mistake fails loudly, with the reason, as soon as anything uses extensions (a chat's prompt, the agents list). Run `pnpm test` after changing `pim.config.ts`: every test uses it.
+- **Checked when an agent starts.** Ids must be lowercase letters, digits, dots and hyphens, and unique. A mistake fails loudly, with the reason, as soon as anything uses extensions (a chat's prompt, the agents list). Run `pnpm test` after changing `pim.config.ts`: every test uses it.
 - **Text people read** is a string, or one per language with English always there. The app shows it in the person's language, and English stands in for a missing translation. Instructions are for the model, so they are one string.
 
 ## Apps
 
-An extension's `apps` are what people on the deployment can connect: remote MCP servers, each with an `id`, a `name`, a `description` and an https `url`, or apps the extension implements itself (see [below](#apps-without-an-mcp-server)). An app's optional `icon` is its logo, an https or `data:` square image URL, drawn as is on light and dark themes; without one it shows its initial. Each is named `<extension>/<id>`, and that name is what blueprints, agents and templates list, never the URL. Besides the extensions' apps, the admin can add their own in Apps (`custom/<id>`; no extension may be called `custom`), and each gets the icon URL they give, or else its site's, looked up when it's added; they can change it later. Together they are the directory, and nothing outside it can be connected.
+An extension's `apps` are what people on the deployment can connect: remote MCP servers, each with an `id`, a `name`, a `description` and an https `url`, or apps the extension implements itself (see [below](#apps-without-an-mcp-server)). An app's optional `icon` is its logo, an https or `data:` square image URL, drawn as is on light and dark themes; without one it shows its initial. Each is named `<extension>/<id>`, and that name is what agents and templates list, never the URL. Besides the extensions' apps, the admin can add their own in Apps (`custom/<id>`; no extension may be called `custom`), and each gets the icon URL they give, or else its site's, looked up when it's added; they can change it later. Together they are the directory, and nothing outside it can be connected.
 
-Each person connects an app once, with their own account, from Apps in the sidebar, an agent's page in Agents, or by asking an agent, whose `connect_app` connects only the apps that agent lists. Every agent of theirs that lists it then works with that one connection. A chat gets the tools and instructions of the connected apps its agent lists: the blueprint's `apps`, then the agent's own. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list, and the majordomo to another agent's, by name, as `find_app` finds them in the directory. Each request requires explicit chat approval, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not blueprint apps or shared connections. `update_agent` cannot change apps.
+Each person connects an app once, with their own account, from Apps in the sidebar, an agent's page in Agents, or by asking an agent, whose `connect_app` connects only the apps that agent lists. Every agent of theirs that lists it then works with that one connection. A chat gets the tools and instructions of the connected apps its agent lists. Apps connected for another agent stay out of it. With `manage_apps` enabled (Off / Ask in Tool permissions), an agent can request additions and removals to its own app list, and the majordomo to another agent's, by name, as `find_app` finds them in the directory. Each request requires explicit chat approval, even under the auto approval policy, and approval connects additions automatically. Removal affects only the agent's own list, not shared connections. `update_agent` cannot change apps.
 
 Each agent has a switch for each tool of its connected apps, on its page: on, the tool runs in its chats and tasks without asking; off, it isn't offered. Tools start on, except those marked `destructiveHint: true` (native app tools: `destructive: true`) and those of an app whose approval policy is `all`, which start off until the person switches them on. Circles keep their own permissions.
 
 Most MCP servers let Pim register itself when someone signs in. For one that doesn't, such as GitHub's, register an OAuth client with the service whose redirect URL is this Pim's `/mcp/callback`, and name the Worker's environment variables holding it in the app's `client`: `client: { id: "GITHUB_CLIENT_ID", secret: "GITHUB_CLIENT_SECRET" }`. Pim signs everyone in with that client, and offers the app only once they're set. [`popular-apps.ts`](../src/extensions/popular-apps.ts), the apps Pim brings, has one.
 
-A blueprint's apps must be installed: one that names an app no extension brings fails when extensions are checked. Don't rename an app's `id`: people's agents store it.
+Don't rename an app's `id`: people's agents store it.
 
 ### Apps without an MCP server
 
@@ -253,7 +238,7 @@ A widget that throws shows as failed, with the error logged; the message's other
 
 ### In chat
 
-The model reads a `widgets` section listing the ones the chat can show, each with its description: Pim's own, and those of the blueprint the agent builds on and the abilities that agent uses. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
+The model reads a `widgets` section listing the ones the chat can show, each with its description: Pim's own, and those of every installed extension. It names them in `send_to_user`'s `widgets`, up to four, instead of retyping what they show.
 
 - **Loaded once, when sent.** A message and its widgets always agree, as the person sees it later.
 - **The model sees what was shown.** The tool's result holds the widgets' content, which the app draws from, so the model knows what the person is looking at.

@@ -27,6 +27,7 @@ import { mentionsUser, useUserNames } from "~/components/chat/markdown";
 import { sentImages } from "~/components/chat/reply-blocks";
 import { MembersWorking, Speaker } from "~/components/chat/room";
 import {
+  ContinuedFrom,
   StartedFrom,
   TASK_POLL_MS,
   TaskCard,
@@ -217,6 +218,7 @@ export const Thread = memo(function Thread({
   host,
   room,
   startedBy,
+  continuedFrom,
   view,
   pending,
   composerHeight,
@@ -234,6 +236,7 @@ export const Thread = memo(function Thread({
   room?: Room | null;
   /** Who started the chat for a task, if another agent did. */
   startedBy?: StartedBy | null;
+  continuedFrom?: string | null;
   view: SessionView;
   /** A message sent but not yet in the transcript, shown right away. */
   pending: UserContent | null;
@@ -476,6 +479,7 @@ export const Thread = memo(function Thread({
         }}
       >
         {startedBy && <StartedFrom startedBy={startedBy} />}
+        {continuedFrom && <ContinuedFrom session={continuedFrom} />}
         {rows.map((row) => {
           if (row.kind === "sent" && row.sent.channel === "email") {
             return (

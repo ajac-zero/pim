@@ -461,6 +461,7 @@ export class PimStore {
 		if (!sessionColumns.includes("response_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN response_at INTEGER");
 		if (!sessionColumns.includes("read_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN read_at INTEGER");
 		if (!sessionColumns.includes("archived_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN archived_at INTEGER");
+		if (!sessionColumns.includes("continued_from")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN continued_from TEXT");
 		// Connectors were once called apps: what was chosen or waiting under a tool's old name is kept under its new one.
 		for (const [from, to] of RENAMED_TOOLS) {
 			this.#sql.exec("UPDATE pim_approvals SET action = ? WHERE action = ?", to, from);
@@ -813,6 +814,22 @@ export class PimStore {
 			now,
 			now,
 		);
+	}
+
+	/** Records that `id` carries on a chat `from` that grew too long to go on in. */
+	continueSession(id: string, from: string): void {
+		this.#sql.exec("UPDATE pim_sessions SET continued_from = ? WHERE id = ?", from, id);
+	}
+
+	/** The chat a session carries on, if it is a continuation. */
+	continuedFrom(id: string): string | null {
+		const [row] = this.#sql.exec("SELECT continued_from FROM pim_sessions WHERE id = ?", id).toArray();
+		return row?.continued_from == null ? null : String(row.continued_from);
+	}
+
+	/** Whether a chat already has a continuation. */
+	isContinued(id: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_sessions WHERE continued_from = ? LIMIT 1", id).toArray().length > 0;
 	}
 
 	/** A delivered reply is unread until a client acknowledges that reply, not a later one. */

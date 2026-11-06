@@ -403,6 +403,7 @@ const translations = {
     handedOutOneTo: "Handed a task to {agents}",
     startedBy: "Started by {agent}",
     startedFrom: "{agent} started this chat from",
+    continuedFrom: "This chat carries on",
     taskChatsDone: "{done} of {total} tasks done",
     hideTaskChats:
       "Hide the chats started from this one ({done} of {total} done)",
@@ -1550,6 +1551,7 @@ const translations = {
     handedOutOneTo: "Encargó una tarea a {agents}",
     startedBy: "Iniciado por {agent}",
     startedFrom: "{agent} inició este chat desde",
+    continuedFrom: "Este chat continúa",
     taskChatsDone: "{done} de {total} tareas hechas",
     hideTaskChats:
       "Ocultar los chats iniciados desde este ({done} de {total} hechas)",

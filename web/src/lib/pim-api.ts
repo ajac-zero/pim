@@ -234,7 +234,7 @@ export type Agent = {
   memoryScope: string;
   memoryScopes: string[];
   id: string;
-  /** What people call it, such as Ada. Agents may share a name. */
+  /** What people call it, such as Ada. Each agent has a name of its own. */
   name: string;
   /** What it is for, such as Researcher: each of your agents has its own. */
   role: string;

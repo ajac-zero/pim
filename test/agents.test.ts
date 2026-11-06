@@ -75,12 +75,15 @@ describe("the owner's agents", () => {
 		expect((await api("/agents")).body.agents).toEqual([expect.objectContaining({ id: mine.id, name: "Sam", majordomo: true })]);
 	});
 
-	it("lets agents share a name but not a role, and the name changes without the role", async () => {
+	it("gives each agent a name and a role of its own, and the name changes without the role", async () => {
 		const first = (await post("/agents", { name: "Ada", role: "Researcher" })).body;
 		expect(first).toMatchObject({ name: "Ada", role: "Researcher" });
-		// A second Ada is fine; a second researcher is not, whatever its case.
-		const second = await post("/agents", { name: "Ada", role: "Editor" });
-		expect(second).toMatchObject({ status: 201, body: { name: "Ada", role: "Editor" } });
+		// A second Ada is not fine, nor a second researcher, whatever the case.
+		expect((await post("/agents", { name: "ada", role: "Editor" })).status).toBe(409);
+		const second = await post("/agents", { name: "Grete", role: "Editor" });
+		expect(second).toMatchObject({ status: 201, body: { name: "Grete", role: "Editor" } });
+		expect((await api(`/agents/${second.body.id}`, { method: "PUT", body: JSON.stringify({ name: "ADA" }) })).status).toBe(409);
+		expect((await api(`/agents/${second.body.id}`, { method: "PUT", body: JSON.stringify({ description: "Edits" }) })).status).toBe(200);
 		expect((await post("/agents", { name: "Grace", role: " researcher " })).status).toBe(409);
 		expect((await api(`/agents/${second.body.id}`, { method: "PUT", body: JSON.stringify({ role: "RESEARCHER" }) })).status).toBe(409);
 		// Without a role, it is the name, as agents were before roles; renaming then leaves it.

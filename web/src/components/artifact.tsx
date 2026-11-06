@@ -102,6 +102,7 @@ export function ArtifactFrame({
   id,
   version,
   title,
+  hosted = false,
   maxHeight = 360,
   fill = false,
   className,
@@ -111,6 +112,11 @@ export function ArtifactFrame({
   id: string;
   version: number;
   title: string;
+  /**
+   * An app with a backend: its pages link and post to each other, which is not
+   * leaving, and it doesn't report a height.
+   */
+  hosted?: boolean;
   /** Whose it is, when it isn't yours: shared with you, or published. */
   from?: ArtifactFrom;
   /** The tallest it grows to its page's height; ignored when `fill`. */
@@ -123,7 +129,7 @@ export function ArtifactFrame({
 }) {
   const { t } = useI18n();
   const frame = useRef<HTMLIFrameElement>(null);
-  const [height, setHeight] = useState(160);
+  const [height, setHeight] = useState(hosted ? 480 : 160);
   const [left, setLeft] = useState(false);
   const [attempt, setAttempt] = useState(0);
   // Loads of the frame now shown; a new version or a retry starts again.
@@ -272,14 +278,14 @@ export function ArtifactFrame({
         ref={frame}
         title={title}
         src={artifactFrameUrl(id, version, from)}
-        sandbox="allow-scripts"
+        sandbox={hosted ? "allow-scripts allow-forms" : "allow-scripts"}
         referrerPolicy="no-referrer"
         loading={eager ? "eager" : "lazy"}
         onLoad={() => {
           // The first load is the app; another is the page navigating itself somewhere.
           if (loads.current.key !== key) loads.current = { key, count: 0 };
           loads.current.count += 1;
-          if (loads.current.count > 1) setLeft(true);
+          if (loads.current.count > 1 && !hosted) setLeft(true);
         }}
         className={cn(
           "block w-full rounded-lg border bg-white",
@@ -320,6 +326,7 @@ export function ArtifactPreview({
         id={id}
         version={version}
         title={title}
+        hosted={kind === "hosted"}
         fill={fill}
         maxHeight={maxHeight}
         eager={eager}
@@ -423,6 +430,7 @@ export const ARTIFACT_LANGUAGES = {
   svg: "xml",
   mermaid: "mermaid",
   jsx: "tsx",
+  hosted: "json",
 } as const satisfies Record<ArtifactKind, string>;
 
 /**

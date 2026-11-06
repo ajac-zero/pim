@@ -312,6 +312,23 @@ function serveAppPage(request: Request, pathname: string): Response {
 }
 
 /**
+ * An app's page and what it asks of its backend (`/hosted/<owner>/<id>/<token>/…`,
+ * see ./hosted.ts). The page runs in a sandbox and sends no cookies, so the
+ * token in the address is what lets a request in: the owner's space checks it,
+ * and the Worker doesn't know who is asking.
+ */
+async function serveHosted(request: Request, env: Env, pathname: string, address: string): Promise<Response> {
+	const match = /^\/hosted\/(o_[0-9a-z]{26})\/([0-9a-f-]{36})\/([^/]+)(\/.*)?$/.exec(pathname);
+	if (!match) return fail(404, "Not found");
+	if (await limited(env, "public", address)) return fail(429, "Too many requests. Slow down a little.");
+	const account = await resolveAccount(env, match[1]!);
+	if (!account) return fail(404, "Not found");
+	const refused = closed(account);
+	if (refused) return refused;
+	return toAgent(request, env, account.ownerId, `/hosted/${match[2]}/${match[3]}${match[4] ?? ""}`);
+}
+
+/**
  * An image a model provider fetches: `/images/<owner>/<id>?expires=…&signature=…`,
  * which the space checks and answers as `/public-images/<id>`.
  */
@@ -458,6 +475,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 
 	if (under(pathname, "/images")) return serveImage(request, env, pathname);
 	if (under(pathname, "/app-pages")) return serveAppPage(request, pathname);
+	if (under(pathname, "/hosted")) return serveHosted(request, env, pathname, address);
 
 	if (under(pathname, "/api/shared")) return withCors(await serveSharedChat(request, env, pathname, address));
 	if (under(pathname, "/api/bots")) return withCors(await servePublicBot(request, env, pathname, address));

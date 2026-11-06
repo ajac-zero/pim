@@ -112,7 +112,8 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 		description: `Make an app: a document or small interactive page (a chart, a game, a report) the user can open, keep, and get new versions of. Use it for anything the user will look at or use again, rather than pasting long HTML into the chat. content is its main file. ${HOW_IT_RUNS}`,
 		parameters: Type.Object({
 			title: Type.String({ minLength: 1, maxLength: 200 }),
-			kind: Type.Union(ARTIFACT_KINDS.map((kind) => Type.Literal(kind))),
+			// An app with a backend is deployed from a folder (app_deploy), not made from a main file.
+			kind: Type.Union(ARTIFACT_KINDS.filter((kind) => kind !== "hosted").map((kind) => Type.Literal(kind))),
 			content: Type.String({ description: "The main file: index.html, README.md, image.svg, diagram.mmd or App.jsx, by kind." }),
 			files: Type.Optional(Type.Array(FileInput, { maxItems: MAX_ARTIFACT_FILES, description: "Its other files, for an HTML or JSX artifact." })),
 		}),

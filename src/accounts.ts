@@ -601,6 +601,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (request.method === "POST") {
 					const artifact = await (await pim()).artifactToPublish(id);
 					if (!artifact) return fail(404, `No app ${id}`);
+					if (artifact.kind === "hosted") return fail(400, "An app with a backend is for its owner alone so far: it can't be published.");
 					const open = (await body()).public;
 					if (open !== undefined && typeof open !== "boolean") return fail(400, "public must be true or false");
 					if (open && contentOrigin(env) === null) return fail(400, "This Pim has no content origin for public links (PIM_CONTENT_ORIGIN).");

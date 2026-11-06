@@ -86,6 +86,7 @@ import {
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension } from "./extensions/artifacts";
+import { APP_DEPLOY, appDeployAction, hostedExtension } from "./extensions/hosted";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, BROWSER_UPLOAD, browserClickAction, browserExtension, browserTypeAction, browserUploadAction } from "./extensions/browser";
 import { DESKTOP_ACT, DESKTOP_EXTENSION, desktopAction, desktopExtension } from "./extensions/desktop";
@@ -164,6 +165,7 @@ import {
 import { describeSchedule, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
+import { HostedApps } from "./hosted";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
 import { FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
@@ -199,7 +201,7 @@ import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
-const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, BROWSER_CLICK, BROWSER_TYPE, BROWSER_UPLOAD, DESKTOP_ACT]);
+const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, APP_DEPLOY, BROWSER_CLICK, BROWSER_TYPE, BROWSER_UPLOAD, DESKTOP_ACT]);
 
 /**
  * Set by the Worker on every request it forwards: the owner it resolved,
@@ -533,6 +535,9 @@ export class Pim extends DurableAgent<Env> {
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
 	readonly #files: FileServices = { computer: this.computer, assertOpen: () => this.#assertOpen() };
+	/** The apps with a backend on that computer. */
+	readonly hosted = new HostedApps(this.ctx.storage.sql, { computer: this.computer, artifacts: this.artifacts, meta: this.store });
+	readonly #hostedServices = { computer: this.computer, artifacts: this.artifacts, hosted: this.hosted, assertOpen: () => this.#assertOpen() };
 	#legacyWorkspace: Workspace | undefined;
 	/** Files kept in the space before they moved to the computer, until they move there (see ./legacy-files.ts). */
 	readonly legacyFiles = new LegacyFiles({
@@ -702,6 +707,7 @@ export class Pim extends DurableAgent<Env> {
 		addCustomAppAction(this.agents, this.apps, (app) => this.#addCustomApp(app)),
 		fileDeleteAction(this.#files),
 		shellAction(this.computer),
+		appDeployAction(this.#hostedServices),
 		browserClickAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
 		browserTypeAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
 		browserUploadAction(
@@ -786,6 +792,7 @@ export class Pim extends DurableAgent<Env> {
 				}),
 			);
 			this.registry.install(filesExtension(this.#files));
+			this.registry.install(hostedExtension(this.#hostedServices));
 			this.#installImageGeneration();
 			this.#installBotTools();
 			this.#installBrowser(services);
@@ -4193,7 +4200,26 @@ export class Pim extends DurableAgent<Env> {
 	async onRequest(request: Request): Promise<Response> {
 		// Checked again here, not only in `fetch`: erasure may have begun while the request was on its way in.
 		if (this.#closed()) return Response.json({ error: "This space was erased" }, { status: 410 });
-		return dispatch(this.#routes, request, new URL(request.url).pathname);
+		const { pathname, search } = new URL(request.url);
+		if (pathname.startsWith("/hosted/")) return this.#hostedRequest(request, pathname, search);
+		return dispatch(this.#routes, request, pathname);
+	}
+
+	/**
+	 * A request for an app's backend, made by the page it loaded
+	 * (`/hosted/<id>/<token>/…`, see ./hosted.ts): the token is what lets it in,
+	 * since the page sends no cookies. The Worker hands these over without
+	 * knowing who asked.
+	 */
+	async #hostedRequest(request: Request, pathname: string, search: string): Promise<Response> {
+		const match = /^\/hosted\/([0-9a-f-]{36})\/([^/]+)(\/.*)?$/.exec(pathname);
+		const found = match ? this.artifacts.get(match[1]!) : undefined;
+		if (!match || !found || found.kind !== "hosted" || !(await this.hosted.allows(found.id, match[2]!))) {
+			return new Response("Open this app again from Pim.", { status: 404, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+		}
+		// A page's address with no trailing slash would make its relative addresses wrong.
+		if (match[3] === undefined) return Response.redirect(`${new URL(request.url).origin}/hosted/${this.name}/${found.id}/${match[2]}/${search}`, 308);
+		return this.hosted.relay(request, found.id, `${match[3]}${search}`, `/hosted/${this.name}/${found.id}/${match[2]}/`);
 	}
 
 	/** A task as the API shows it: who does it for whom, and how it went. */
@@ -4977,6 +5003,7 @@ export class Pim extends DurableAgent<Env> {
 				this.#artifactRequest(url, async () => {
 					this.#assertOpen();
 					const artifact = this.#artifact(id!);
+					await this.hosted.forget(artifact.id);
 					await this.artifacts.delete(artifact.id);
 					return noStore({ deleted: true });
 				}),
@@ -5044,6 +5071,11 @@ export class Pim extends DurableAgent<Env> {
 			({ id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const { artifact, found } = this.#artifactVersion(id!, version!);
+					// An app with a backend loads from its own address, whichever version is asked for: the one running.
+					if (artifact.kind === "hosted") {
+						if (this.hosted.version(artifact.id) === undefined) throw new HttpError(409, "This app's backend hasn't been run yet. Deploy it, and it opens here.");
+						return new Response(null, { status: 302, headers: { location: await this.hosted.address(this.name, artifact.id), "cache-control": "no-store, private" } });
+					}
 					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin);
 				}),
 		],
@@ -5074,6 +5106,7 @@ export class Pim extends DurableAgent<Env> {
 			({ id }, request, url) =>
 				this.#artifactRequest(url, async () => {
 					const artifact = this.#artifact(id!);
+					if (artifact.kind === "hosted") throw new HttpError(400, "An app with a backend is for its owner alone so far: it can't be shared.");
 					const { circles } = await readJson<{ circles: string[] }>(request);
 					if (!Array.isArray(circles)) throw new HttpError(400, "circles must be a list of circle ids");
 					for (const circle of circles) this.#circle(String(circle));
@@ -6129,6 +6162,7 @@ export class Pim extends DurableAgent<Env> {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
 		// Replaced in place, so chats begun before see the change, as they do an approval policy's.
 		this.registry.install(filesExtension(this.#files));
+		this.registry.install(hostedExtension(this.#hostedServices));
 		this.#installImageGeneration();
 		this.#reinstallApprovals();
 	}

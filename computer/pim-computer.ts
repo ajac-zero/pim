@@ -31,6 +31,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import type { ChildProcess } from "node:child_process";
 import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -80,6 +81,8 @@ export type Machine = {
 	readonly screen?: ScreenHost;
 	/** Cua Driver, for the agents to use its desktop's apps, or none where cua-spacesd doesn't run. */
 	readonly driver?: DriverHost;
+	/** The backends of the space's apps that run here, or none where nothing supervises them (tests give their own). */
+	readonly apps?: Apps;
 };
 
 /**
@@ -219,6 +222,7 @@ export class Link {
 			if (typeof args.tool !== "string") throw new CallError("tool must name one of Cua Driver's tools", "EINVAL");
 			return driver.call(args.tool, (args.arguments ?? {}) as Args);
 		}
+		if (op.startsWith("app_")) return appCall(this.#machine, op, args);
 		// The space times its round trip to here, for the Computer dialog.
 		if (op === "ping") return null;
 		if (op === "screen_open") return this.#openScreen(args.channel);
@@ -599,6 +603,359 @@ async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000 }: E
 			clearTimeout(timer);
 			resolve({ exitCode, signal, stdout: stdout.text(), stderr: stderr.text(), timedOut, truncated: stdout.dropped || stderr.dropped });
 		});
+	});
+}
+
+/** What an app's backend is started with. */
+export type AppSpec = {
+	readonly id: string;
+	/** The real path of the release folder, where the backend runs. */
+	readonly cwd: string;
+	readonly command: string;
+	readonly install?: string;
+	readonly port: number;
+	/** The real path of the folder the app keeps its data in. */
+	readonly data: string;
+	readonly env: Readonly<Record<string, string>>;
+	/** The real path of the root, as `$PIM_WORKSPACE`. */
+	readonly root: string;
+};
+
+export type AppState = "starting" | "running" | "crashed" | "failed" | "stopped";
+
+/** Timings of the supervisor, in milliseconds; tests shorten them. */
+export type AppsOptions = {
+	/** The wait before the first restart; each next one doubles it. */
+	backoffMs?: number;
+	/** The longest wait before a restart. */
+	maxBackoffMs?: number;
+	/** How long a run must last to count as a good one, which resets the restarts it's owed. */
+	stableMs?: number;
+	/** How long a backend has to start listening. */
+	readyMs?: number;
+	/** How often it's tried while it starts. */
+	pollMs?: number;
+	/** How long a stopped backend has to end before its process group is killed outright. */
+	killMs?: number;
+};
+
+type AppRun = { readonly pid: number | undefined; readonly child: ChildProcess; exited: boolean };
+
+type App = {
+	readonly spec: AppSpec;
+	state: AppState;
+	since: number;
+	restarts: number;
+	/** Restarts in a row after runs shorter than `stableMs`. */
+	failures: number;
+	startedAt: number;
+	run: AppRun | undefined;
+	timer: ReturnType<typeof setTimeout> | undefined;
+	log: Buffer;
+};
+
+const APP_LOG_BYTES = 256 * 1024;
+const APP_MAX_RESTARTS = 8;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Whether any process is left in a process group. */
+function groupAlive(pid: number): boolean {
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function killGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+	if (pid === undefined) return;
+	try {
+		process.kill(-pid, signal);
+	} catch {}
+}
+
+/**
+ * The backends of apps that run on this computer: started in a login shell
+ * of their own process group, restarted with growing waits when they die,
+ * and kept running when the space disconnects, since they belong to this
+ * process and not to a connection.
+ */
+export class Apps {
+	readonly #apps = new Map<string, App>();
+	readonly #options: Required<AppsOptions>;
+
+	constructor(options: AppsOptions = {}) {
+		this.#options = { backoffMs: 1_000, maxBackoffMs: 60_000, stableMs: 30_000, readyMs: 30_000, pollMs: 200, killMs: 5_000, ...options };
+	}
+
+	/** Installs and starts the app, stopping one of the same id first, and answers once it listens. */
+	async start(spec: AppSpec): Promise<{ state: "running"; pid: number | undefined }> {
+		await this.stop(spec.id);
+		if (spec.install) {
+			const result = await runCommand({ command: spec.install, timeoutMs: 300_000 }, spec.cwd, spec.root);
+			if (result.exitCode !== 0) {
+				const why = result.timedOut ? "took more than 5 minutes" : `failed${result.exitCode === null ? "" : ` with exit code ${result.exitCode}`}`;
+				throw new CallError(`The install command ${why}:\n${result.stdout}${result.stderr}`, "EINSTALL");
+			}
+		}
+		const app: App = { spec, state: "starting", since: Date.now(), restarts: 0, failures: 0, startedAt: Date.now(), run: undefined, timer: undefined, log: Buffer.alloc(0) };
+		this.#apps.set(spec.id, app);
+		try {
+			await this.#launch(app);
+		} catch (error) {
+			await this.#end(app.run);
+			if (app.state === "starting") {
+				app.run = undefined;
+				this.#set(app, "failed");
+			}
+			throw error;
+		}
+		return { state: "running", pid: app.run?.pid };
+	}
+
+	/** Ends the app's process group, and any restart it was owed. */
+	async stop(id: string): Promise<void> {
+		const app = this.#apps.get(id);
+		if (!app) return;
+		clearTimeout(app.timer);
+		app.timer = undefined;
+		const run = app.run;
+		app.run = undefined;
+		this.#set(app, "stopped");
+		await this.#end(run);
+	}
+
+	/** Ends every app, as this process does. */
+	async stopAll(): Promise<void> {
+		await Promise.all([...this.#apps.keys()].map((id) => this.stop(id)));
+	}
+
+	/** Kills every process group at once, for a process that is exiting and can't wait. */
+	killAll(): void {
+		for (const app of this.#apps.values()) {
+			clearTimeout(app.timer);
+			app.state = "stopped";
+			killGroup(app.run?.pid, "SIGKILL");
+		}
+	}
+
+	status(id?: string): { id: string; state: AppState; pid: number | null; restarts: number; since: number; port: number }[] {
+		const apps = id === undefined ? [...this.#apps.entries()] : this.#apps.has(id) ? [[id, this.#apps.get(id)!] as const] : [];
+		return apps.map(([id, app]) => ({ id, state: app.state, pid: app.run?.pid ?? null, restarts: app.restarts, since: app.since, port: app.spec.port }));
+	}
+
+	get(id: string): { state: AppState; port: number } | undefined {
+		const app = this.#apps.get(id);
+		return app && { state: app.state, port: app.spec.port };
+	}
+
+	logs(id: string, bytes: number): string | undefined {
+		return this.#apps.get(id)?.log.subarray(-bytes).toString("utf8");
+	}
+
+	#set(app: App, state: AppState): void {
+		app.state = state;
+		app.since = Date.now();
+	}
+
+	/** Starts the process and waits until it accepts connections; a failure says what it printed. */
+	async #launch(app: App): Promise<void> {
+		const { spawn } = await import("node:child_process");
+		const { spec } = app;
+		const shell = process.env.SHELL || "/bin/bash";
+		const env = { ...process.env, PIM_WORKSPACE: spec.root, ...spec.env, PORT: String(spec.port), PIM_APP_ID: spec.id, PIM_APP_DATA: spec.data };
+		const child = spawn(shell, ["-lc", spec.command], { cwd: spec.cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env });
+		const run: AppRun = { pid: child.pid, child, exited: false };
+		app.run = run;
+		app.startedAt = Date.now();
+		this.#set(app, "starting");
+		const add = (chunk: Buffer) => {
+			app.log = Buffer.concat([app.log, chunk]).subarray(-APP_LOG_BYTES);
+		};
+		child.stdout!.on("data", add);
+		child.stderr!.on("data", add);
+		const ended = () => {
+			if (run.exited) return;
+			run.exited = true;
+			// A backend that dies while it runs is restarted; one that dies as it starts is the start's to report.
+			if (app.run === run && app.state === "running") this.#crashed(app);
+		};
+		child.on("error", (error) => {
+			add(Buffer.from(`${error.message}\n`));
+			ended();
+		});
+		child.on("exit", ended);
+		const deadline = Date.now() + this.#options.readyMs;
+		while (!(await this.#listening(spec.port))) {
+			if (app.run !== run || app.state !== "starting") throw new CallError("The app was stopped as it started.", "ECANCELED");
+			const tail = () => app.log.subarray(-2_000).toString("utf8");
+			if (run.exited) {
+				await sleep(50);
+				throw new CallError(`The app exited as it started:\n${tail()}`, "ESTART");
+			}
+			if (Date.now() >= deadline) throw new CallError(`The app didn't listen on port ${spec.port} within ${this.#options.readyMs / 1000} s:\n${tail()}`, "ESTART");
+			await sleep(this.#options.pollMs);
+		}
+		if (app.run !== run || app.state !== "starting") throw new CallError("The app was stopped as it started.", "ECANCELED");
+		this.#set(app, "running");
+	}
+
+	async #listening(port: number): Promise<boolean> {
+		const net = await import("node:net");
+		return new Promise((resolve) => {
+			const socket = net.connect({ host: "127.0.0.1", port });
+			socket.setTimeout(1_000);
+			const done = (listening: boolean) => {
+				socket.destroy();
+				resolve(listening);
+			};
+			socket.on("connect", () => done(true));
+			socket.on("error", () => done(false));
+			socket.on("timeout", () => done(false));
+		});
+	}
+
+	/** Marks a backend that died on its own, and restarts it after a wait that doubles, or gives up. */
+	#crashed(app: App): void {
+		killGroup(app.run?.pid, "SIGKILL");
+		app.run = undefined;
+		if (Date.now() - app.startedAt >= this.#options.stableMs) app.failures = 0;
+		app.failures++;
+		if (app.failures > APP_MAX_RESTARTS) {
+			this.#set(app, "failed");
+			return;
+		}
+		this.#set(app, "crashed");
+		const wait = Math.min(this.#options.backoffMs * 2 ** (app.failures - 1), this.#options.maxBackoffMs);
+		app.timer = setTimeout(() => {
+			app.timer = undefined;
+			app.restarts++;
+			this.#launch(app).catch(async () => {
+				// One that stopped meanwhile has no one waiting for it; one that failed to start counts as a short run.
+				if (app.state !== "starting") return;
+				await this.#end(app.run);
+				this.#crashed(app);
+			});
+		}, wait);
+	}
+
+	/** Asks a process group to end, and kills what is left of it after `killMs`. */
+	async #end(run: AppRun | undefined): Promise<void> {
+		if (!run?.pid) return;
+		killGroup(run.pid, "SIGTERM");
+		for (const deadline = Date.now() + this.#options.killMs; groupAlive(run.pid) && Date.now() < deadline; ) await sleep(25);
+		killGroup(run.pid, "SIGKILL");
+	}
+}
+
+const APP_ID = /^[0-9a-f-]{8,64}$/i;
+const HOP_BY_HOP = new Set(["connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailer", "host"]);
+const MAX_APP_REQUEST = 1_048_576;
+const MAX_APP_RESPONSE = 4_194_304;
+
+/** The calls about apps: starting and stopping their backends, reading them, and relaying a request to one. */
+async function appCall(machine: Machine, op: string, args: Args): Promise<unknown> {
+	const apps = machine.apps;
+	if (!apps) throw new CallError("This computer doesn't run apps: update pim-computer.", "ENOSYS");
+	if (op === "app_status" && args.id === undefined ? false : typeof args.id !== "string" || !APP_ID.test(args.id)) {
+		throw new CallError("id must be an app's id", "EINVAL");
+	}
+	const id = args.id as string;
+	switch (op) {
+		case "app_start": {
+			const { port, command } = args;
+			if (typeof port !== "number" || !Number.isInteger(port) || port < 1024 || port > 65535) throw new CallError("port must be an integer from 1024 to 65535", "EINVAL");
+			if (typeof command !== "string" || command.trim() === "") throw new CallError("command must be a shell command", "EINVAL");
+			if (args.install !== undefined && (typeof args.install !== "string" || args.install.trim() === "")) throw new CallError("install must be a shell command", "EINVAL");
+			if (args.env !== undefined && (typeof args.env !== "object" || args.env === null || Array.isArray(args.env))) throw new CallError("env must be an object of strings", "EINVAL");
+			const env: Record<string, string> = {};
+			for (const [name, value] of Object.entries(args.env ?? {})) {
+				if (typeof value !== "string") throw new CallError(`env.${name} must be a string`, "EINVAL");
+				env[name] = value;
+			}
+			const cwd = await local(machine, args.dir);
+			if (!(await fs.stat(cwd).catch(() => null))?.isDirectory()) throw new CallError(`${String(args.dir)} is not a folder`, "ENOENT");
+			const data = await local(machine, args.data ?? `${WORKSPACE}/.pim/apps/${id}/data`);
+			await fs.mkdir(data, { recursive: true });
+			return await apps.start({ id, cwd, command, ...(args.install ? { install: args.install as string } : {}), port, data, env, root: machine.root });
+		}
+		case "app_stop":
+			await apps.stop(id);
+			return { state: "stopped" };
+		case "app_status":
+			return { apps: apps.status(args.id as string | undefined) };
+		case "app_logs": {
+			const bytes = args.bytes === undefined ? 16_000 : Math.min(Number(args.bytes), 64_000);
+			if (!(bytes >= 1)) throw new CallError("bytes must be a positive number", "EINVAL");
+			const text = apps.logs(id, Math.floor(bytes));
+			if (text === undefined) throw new CallError(`No app ${id} is known here.`, "ENOENT");
+			return { text };
+		}
+		case "app_http":
+			return relay(apps, id, args);
+		default:
+			throw new CallError(`This computer doesn't know the call ${op}. Update pim-computer.`, "ENOSYS");
+	}
+}
+
+/** Sends one request to a running app's backend on this computer's loopback, and answers with its response as it came. */
+async function relay(apps: Apps, id: string, args: Args): Promise<unknown> {
+	const app = apps.get(id);
+	if (!app) throw new CallError(`No app ${id} is known here.`, "ENOTRUNNING");
+	if (app.state !== "running") throw new CallError(`App ${id} is ${app.state}, not running.`, "ENOTRUNNING");
+	const { method, path: target, headers, body } = args;
+	if (typeof method !== "string" || !/^[A-Z]+$/.test(method)) throw new CallError("method must be an uppercase HTTP method", "EINVAL");
+	if (typeof target !== "string" || !target.startsWith("/") || target.length > 8_192 || /[\s\0]/.test(target)) throw new CallError("path must start with / and be at most 8 KB", "EINVAL");
+	if (!Array.isArray(headers) || headers.some((pair) => !Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || typeof pair[1] !== "string")) {
+		throw new CallError("headers must be an array of [name, value] pairs of strings", "EINVAL");
+	}
+	if (body !== undefined && typeof body !== "string") throw new CallError("body must be base64", "EINVAL");
+	if ((body?.length ?? 0) > Math.ceil(MAX_APP_REQUEST / 3) * 4) throw new CallError("body is more than 1 MiB", "EFBIG");
+	const payload = body === undefined ? undefined : Buffer.from(body, "base64");
+	if (payload && payload.length > MAX_APP_REQUEST) throw new CallError("body is more than 1 MiB", "EFBIG");
+	const sent: [string, string][] = [["host", `127.0.0.1:${app.port}`]];
+	for (const [name, value] of headers as [string, string][]) {
+		const lower = name.toLowerCase();
+		if (!HOP_BY_HOP.has(lower) && !lower.startsWith("proxy-")) sent.push([name, value]);
+	}
+	if (payload) sent.push(["content-length", String(payload.length)]);
+	const http = await import("node:http");
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => request.destroy(new CallError("The app didn't answer within 60 seconds.", "ETIMEDOUT")), 60_000);
+		const fail = (error: Error) => {
+			clearTimeout(timer);
+			const code = (error as { code?: string }).code;
+			if (error instanceof CallError) reject(error);
+			else if (code === "ECONNREFUSED") reject(new CallError(`App ${id} refused the connection on port ${app.port}: it should listen on 127.0.0.1.`, "ECONNREFUSED"));
+			else reject(new CallError(error.message, code === "ERR_INVALID_CHAR" || code === "ERR_INVALID_HTTP_TOKEN" ? "EINVAL" : code));
+		};
+		let request: import("node:http").ClientRequest;
+		try {
+			// No agent, so no connection outlives its request; headers go as the list gives them, so duplicates stay.
+			request = http.request({ host: "127.0.0.1", port: app.port, method, path: target, agent: false, setHost: false, headers: sent.flat() as unknown as Record<string, string> });
+		} catch (error) {
+			return fail(error as Error);
+		}
+		request.on("error", fail);
+		request.on("response", (response) => {
+			const chunks: Buffer[] = [];
+			let size = 0;
+			response.on("data", (chunk: Buffer) => {
+				size += chunk.length;
+				if (size > MAX_APP_RESPONSE) request.destroy(new CallError("The app's response is more than 4 MiB.", "EFBIG"));
+				else chunks.push(chunk);
+			});
+			response.on("error", fail);
+			response.on("aborted", () => fail(new CallError("The app closed the connection mid-response.", "ECONNRESET")));
+			response.on("end", () => {
+				clearTimeout(timer);
+				const pairs: [string, string][] = [];
+				for (let i = 0; i < response.rawHeaders.length; i += 2) pairs.push([response.rawHeaders[i]!, response.rawHeaders[i + 1]!]);
+				resolve({ status: response.statusCode, headers: pairs, body: Buffer.concat(chunks).toString("base64") });
+			});
+		});
+		request.end(payload);
 	});
 }
 
@@ -1428,12 +1785,19 @@ async function main(): Promise<void> {
 	const spacesd = values.spacesd ?? env.PIM_SPACESD_URL ?? "http://127.0.0.1:3211";
 	const screen = spacesdTokenFile ? spacesdScreen(spacesd, spacesdTokenFile) : undefined;
 	const driver = spacesdTokenFile ? spacesdDriver(spacesd, spacesdTokenFile) : undefined;
+	// Apps keep running when the connection to the space drops; they end with this process.
+	const apps = new Apps();
+	process.on("exit", () => apps.killAll());
+	for (const signal of ["SIGTERM", "SIGINT"] as const) {
+		process.on(signal, () => void apps.stopAll().finally(() => process.exit(0)));
+	}
 	const machine: Machine = {
 		root,
 		exec: (args, cwd) => runCommand(args, cwd, root),
 		...(browser ? { browser } : {}),
 		...(screen ? { screen } : {}),
 		...(driver ? { driver } : {}),
+		apps,
 	};
 	const hello = {
 		type: "hello",

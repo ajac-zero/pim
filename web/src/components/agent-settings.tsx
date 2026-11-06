@@ -313,7 +313,6 @@ function MajordomoPreferencesSection({ agent }: { agent: Agent }) {
           </Chip>
         ))}
         <WriteYourOwn
-          shape="pill"
           value={preferences.customTone}
           onChange={(customTone) =>
             change({

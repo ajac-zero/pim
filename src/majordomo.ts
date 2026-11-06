@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
-import { type Agent, agentInput } from "./agents";
+import type { Agent } from "./agents";
 import { text } from "./extensions/services";
 import { HttpError } from "./http";
 import { DELEGATE } from "./tasks";
@@ -75,7 +75,7 @@ export function reviewExtension(host: ReviewHost) {
 	});
 }
 
-/** How the majordomo talks, as the person chose when they named it: part of its instructions. */
+/** How the majordomo talks, as the person chose on its page: part of its instructions. */
 const TONES: Record<string, string> = {
 	warm: "Talk with them warmly, like a trusted friend who happens to be very capable.",
 	formal: "Talk with them formally and politely, like a seasoned butler.",
@@ -92,35 +92,18 @@ const INVOLVEMENT: Record<string, string> = {
 		"Take as much off their hands as you can: go ahead without checking in whenever you can tell what they want, and decide their agents' approval requests yourself unless they truly need to, such as when money is spent or someone else hears from them.",
 };
 
-/** What the person can say they'd like a hand with, as it remembers each. */
-const HELP_WITH: Record<string, string> = {
-	work: "work",
-	home: "home and family",
-	health: "health and fitness",
-	money: "money",
-	learning: "learning",
-	travel: "travel",
-};
-
-/** How many things in their own words they can add to what they'd like a hand with. */
-const MAX_OTHER_HELP = 6;
-
-/** The person naming their majordomo, as given through the API: its name and look, theirs, and a few optional choices. */
-export type MajordomoSetup = {
-	readonly name: string;
-	readonly symbol?: string | null;
-	readonly color?: string | null;
-	/** What the person is called, which it remembers. */
+/** How the person's first chat starts, as the app gives it. */
+export type MajordomoStart = {
+	/** What the person is called, when the account they joined with says it; it remembers. */
 	readonly yourName: string | null;
-	/** What they'd like a hand with, as `HELP_WITH` names it and in their own words, which it remembers. */
-	readonly helpWith: readonly string[];
-	/** Its instructions: how it talks and how much it handles on its own. */
-	readonly instructions: string;
 	/** The language of the person's app, such as `es`, for its introduction. */
 	readonly locale: string | null;
 	/** The title of the chat it opens, in that language. */
 	readonly title: string | null;
 };
+
+/** How long the person's name may be. */
+const MAX_YOUR_NAME = 80;
 
 const LOCALE = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 
@@ -138,29 +121,11 @@ function choice(value: unknown, field: string, choices: Record<string, string>):
 	return choices[value]!;
 }
 
-/** A majordomo's setup as given; checked, so nothing is applied when any of it is refused. */
-export function majordomoSetup(body: Record<string, unknown>): MajordomoSetup {
-	const { name, symbol, color } = agentInput({ name: body.name, symbol: body.symbol ?? null, color: body.color ?? null });
+/** How the first chat starts, as given; checked, so nothing is applied when any of it is refused. */
+export function majordomoStart(body: Record<string, unknown>): MajordomoStart {
 	const locale = body.locale ?? null;
 	if (locale !== null && (typeof locale !== "string" || !LOCALE.test(locale))) throw new HttpError(400, "locale must be a language tag, such as en or es");
-	const helpWith = body.helpWith ?? [];
-	if (!Array.isArray(helpWith) || helpWith.some((area) => typeof area !== "string" || !Object.hasOwn(HELP_WITH, area))) {
-		throw new HttpError(400, `helpWith must list some of ${Object.keys(HELP_WITH).join(", ")}`);
-	}
-	const instructions = preferenceLines(body);
-	const others = body.otherHelp ?? [];
-	if (!Array.isArray(others) || others.length > MAX_OTHER_HELP) throw new HttpError(400, `otherHelp must list at most ${MAX_OTHER_HELP} things`);
-	const otherHelp = [...new Set(others.map((other) => line(other, "otherHelp", 120)).filter((other) => other !== null))];
-	return {
-		name,
-		symbol,
-		color,
-		yourName: line(body.yourName, "yourName", 80),
-		helpWith: [...Object.keys(HELP_WITH).filter((area) => helpWith.includes(area)).map((area) => HELP_WITH[area]!), ...otherHelp],
-		instructions,
-		locale: locale as string | null,
-		title: line(body.title, "title", 100),
-	};
+	return { yourName: line(body.yourName, "yourName", MAX_YOUR_NAME), locale: locale as string | null, title: line(body.title, "title", 100) };
 }
 
 /** How the majordomo talks with the person and how much it handles on its own, as they chose: lines of its instructions. */
@@ -202,43 +167,29 @@ export function withPreferences(instructions: string, body: Record<string, unkno
 	return [preferenceLines(body), own.join("\n").trim()].filter((part) => part !== "").join("\n");
 }
 
-/** What it remembers from the setup, one memory each: their name for every agent, the rest for itself. */
-export function setupMemories(setup: MajordomoSetup): { text: string; everyone: boolean }[] {
-	const [last, ...rest] = [...setup.helpWith].reverse();
-	const areas = rest.length === 0 ? last : `${rest.reverse().join(", ")} and ${last}`;
-	return [
-		...(setup.yourName ? [{ text: `Their name is ${setup.yourName}.`, everyone: true }] : []),
-		...(areas ? [{ text: `They'd like a hand with ${areas}.`, everyone: false }] : []),
-	];
-}
-
 /**
- * What starts the majordomo's first chat with the person, right after they
- * name it: it introduces itself and asks them about themselves, so they
- * tell it what they like in their own words. Apps don't show the message;
+ * What starts the majordomo's first chat with the person, the first time
+ * they open Pim: it introduces itself, and they set it up by talking with
+ * it, naming it, before it gets to know them. Apps don't show the message;
  * its prefix is `INTRODUCTION` (see ./transcript.ts).
  */
-export function introduction(majordomo: Agent, setup: MajordomoSetup): string {
-	const known = setupMemories(setup);
-	const learn = [
-		...(setup.yourName ? [] : ["what to call them"]),
-		...(setup.helpWith.length > 0 ? ["more about the things they'd like a hand with"] : ["what they'd like a hand with"]),
-		"what they do",
-		"the people and routines in their life",
-		...(setup.instructions === "" ? ["how they'd like you to talk"] : []),
-	];
-	const opener =
-		setup.helpWith.length > 0 ? "about one of the things they'd like a hand with, the one that seems to matter most" : "about what keeps them busy these days";
+export function introduction(majordomo: Agent, start: MajordomoStart): string {
+	const named = start.yourName !== null;
 	return [
-		`${INTRODUCTION} The person just joined and named you ${majordomo.name}.${known.length > 0 ? ` ${known.map((memory) => memory.text).join(" ")}` : ""} This is your first conversation with them, and you start it.`,
-		...(setup.locale && !setup.locale.startsWith("en") ? [`Their app is in the language with the code "${setup.locale}": write to them in it.`] : []),
-		`Your first message, with send_to_user, is a few short sentences: greet them${setup.yourName ? " by name" : ""}, say who you are and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after what those agents need their approval for), and end with one light, open question ${opener}.`,
-		`How to get to know them, in that message and the ones after it:
+		`${INTRODUCTION} The person just joined.${named ? ` Their name is ${start.yourName}.` : ""} You are their majordomo, and this is your first conversation with them: you start it, and in it they set you up. Until they name you, you go by ${majordomo.name}.`,
+		...(start.locale && !start.locale.startsWith("en") ? [`Their app is in the language with the code "${start.locale}": write to them in it.`] : []),
+		`Your first message, with send_to_user, is a few short sentences: greet them${named ? " by name" : ""}, say you're their majordomo and what you're for (they can come to you for almost anything; you get to know them, set up agents for the bigger jobs, and look after what those agents need their approval for), and end with one question: ${named ? "what they'd like to call you" : "what you should call them"}.`,
+		`Setting you up, in the messages after it:
+${named ? "" : "- Once they've told you their name, note it in \`everyone\`, so all their agents know it, and ask what they'd like to call you.\n"}- They can give you any name, or leave it to you: then suggest one that suits them, or keep ${majordomo.name} if they like it.
+- When you have your name, take it with \`update_agent\`, with an emoji and a color that suit it. Don't ask about your look; they can change it on your page in Agents.
+- Then say in a sentence that it's done and they can come to you for anything, and ask one light, open question about what keeps them busy these days.
+- If they'd rather get something done first, help with that, and come back to your name when it fits.`,
+		`How to get to know them, from then on:
 - One question per message, never a list of them. Let them answer before you ask the next.
-- One topic at a time. Don't bring up everything you know about them at once: follow one thing while they're interested, and move to another when it has run its course. There's no hurry; the rest can come up over the coming days.
+- One topic at a time. Follow one thing while they're interested, and move to another when it has run its course. There's no hurry; the rest can come up over the coming days.
 - Keep your messages short and conversational, and respond to what they said before you ask anything more.
 - Let them lead: when they'd rather get something done, help with that instead.
 - Note what they tell you as it comes.
-Worth learning over time: ${learn.join(", ")}.`,
+Worth learning over time: what they do, what they'd like a hand with, the people and routines in their life, and how they'd like you to talk.`,
 	].join("\n\n");
 }

@@ -428,13 +428,13 @@ export class AgentStore {
 		return row ? agentOf(row, this.#directory) : this.#insert(this.#starter(), null, true);
 	}
 
-	/** Whether the person has named their majordomo yet, which they do when they first sign in. */
+	/** Whether the majordomo has opened the person's first chat yet, which it does when they first sign in. */
 	introduced(): boolean {
 		const [row] = this.#sql.exec("SELECT introduced FROM pim_agents WHERE id = ?", this.majordomo().id).toArray();
 		return Number(row?.introduced) === 1;
 	}
 
-	/** The person named their majordomo. */
+	/** The majordomo opened the person's first chat. */
 	introduce(): void {
 		this.#sql.exec("UPDATE pim_agents SET introduced = 1 WHERE is_default = 1");
 	}

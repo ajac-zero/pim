@@ -177,6 +177,23 @@ describe("the browser", () => {
 		expect(downloaded).toContain("Downloaded “recipe.txt” to /workspace/downloads/recipe.txt.");
 	});
 
+	it("types, clicks and hovers in a window the person minimized, which Chrome doesn't draw", async () => {
+		await setPermission("browser_click", "on");
+		await setPermission("browser_type", "on");
+		const page = await callTool("browser_open", { url: CONTROLS });
+		const { targetInfos } = await computer.browser.devtools("Target.getTargets");
+		const { targetId } = targetInfos.find((target: { url: string }) => target.url === CONTROLS);
+		const { windowId } = await computer.browser.devtools("Browser.getWindowForTarget", { targetId });
+		await computer.browser.devtools("Browser.setWindowBounds", { windowId, bounds: { windowState: "minimized" } });
+		expect(await callTool("browser_read", {})).toContain("# Ready");
+
+		expect(await callTool("browser_hover", { ref: refOf(page, "button", "Menu") })).toContain("# Menu open");
+		const form = await callTool("browser_open", { url: FORM });
+		const name = refOf(form, "textbox", "Name");
+		expect(await callTool("browser_type", { ref: name, text: "Ada" })).toContain(`[${name} textbox “Name” = “Ada”]`);
+		expect(await callTool("browser_click", { ref: refOf(form, "button", "Order") })).toContain("# Ordered for Ada");
+	});
+
 	it("refuses an element that isn't on the page, and never reuses a number for another", async () => {
 		const first = await callTool("browser_open", { url: FORM });
 		const order = refOf(first, "button", "Order");

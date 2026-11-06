@@ -292,15 +292,17 @@ export class PimBrowser {
 
 	/** Clicks the element with a reference and reads the page it leads to. */
 	async click(chat: string, ref: number): Promise<PageView> {
-		return this.#act(chat, ref, async (_page, element) => {
-			await element.click();
+		return this.#act(chat, ref, async (page, element) => {
+			const { x, y } = await pointAt(element);
+			await page.mouse.click(x, y);
 		});
 	}
 
 	/** Points at the element with a reference, as a mouse does, for what shows on hover (a menu), and reads the page. */
 	async hover(chat: string, ref: number): Promise<PageView> {
-		return this.#act(chat, ref, async (_page, element) => {
-			await element.hover();
+		return this.#act(chat, ref, async (page, element) => {
+			const { x, y } = await pointAt(element);
+			await page.mouse.move(x, y);
 		});
 	}
 
@@ -323,7 +325,8 @@ export class PimBrowser {
 				if (submit) await page.keyboard.press("Enter");
 				return;
 			}
-			await element.click({ count: 3 });
+			const { x, y } = await pointAt(element);
+			await page.mouse.click(x, y, { count: 3 });
 			await element.evaluate((el: unknown) => {
 				const field = el as { value?: unknown };
 				if (typeof field.value === "string") field.value = "";
@@ -348,7 +351,7 @@ export class PimBrowser {
 				await (element as ElementHandle<never>).uploadFile(...files);
 				return;
 			}
-			const [chooser] = await Promise.all([page.waitForFileChooser({ timeout: 10_000 }), element.click()]).catch(() => {
+			const [chooser] = await Promise.all([page.waitForFileChooser({ timeout: 10_000 }), pointAt(element).then(({ x, y }) => page.mouse.click(x, y))]).catch(() => {
 				throw new Error(`[${ref}] doesn't open a file picker. Upload to a file field, or to the button that opens one.`);
 			});
 			await chooser.accept([...files]);
@@ -856,6 +859,23 @@ function describeDialog(dialog: Dialog): string {
 async function pageOf(browser: Browser, id: string): Promise<Page | undefined> {
 	const target = browser.targets().find((candidate) => targetIdOf(candidate) === id && candidate.type() === "page");
 	return (await target?.page()) ?? undefined;
+}
+
+/**
+ * Scrolls an element into view, where it isn't all in view, and says where
+ * its middle is, to point the mouse at. Puppeteer's own click and hover ask
+ * an IntersectionObserver whether the element is in view, which answers only
+ * in a page being drawn: in a minimized window they waited until DevTools
+ * gave up, though the mouse and keys reach such a page as any other.
+ */
+async function pointAt(element: ElementHandle): Promise<{ x: number; y: number }> {
+	await element.evaluate((el: unknown) => {
+		const node = el as { getBoundingClientRect(): { top: number; left: number; bottom: number; right: number }; scrollIntoView(options: unknown): void };
+		const view = globalThis as unknown as { innerWidth: number; innerHeight: number };
+		const box = node.getBoundingClientRect();
+		if (box.top < 0 || box.left < 0 || box.bottom > view.innerHeight || box.right > view.innerWidth) node.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+	});
+	return element.clickablePoint();
 }
 
 /** Waits briefly for what an action set off (a navigation, a request) to finish. */

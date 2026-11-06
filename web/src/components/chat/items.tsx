@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AppIcon } from "~/components/app-icon";
+import { imageContent } from "~/components/chat/composer";
 import { Markdown } from "~/components/chat/markdown";
 import { ReplyImages } from "~/components/chat/reply-blocks";
 import { FileLink } from "~/components/file-link";
@@ -19,6 +20,7 @@ import {
   Contact,
   Copy,
   Folder,
+  GitFork,
   Globe,
   ImageIcon,
   Lightbulb,
@@ -27,6 +29,7 @@ import {
   type LucideIcon,
   Mail,
   Monitor,
+  Pencil,
   RotateCcw,
   Search,
   Shapes,
@@ -67,6 +70,7 @@ import {
   FILES_ROOT,
   fileContentUrl,
   pim,
+  type UserContent,
 } from "~/lib/pim-api";
 import type { PimNotice, WorkStep } from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
@@ -108,15 +112,18 @@ function MessageTime({ at, className }: { at: number; className?: string }) {
   );
 }
 
-/** A message's copy button, shown while the message is hovered or focused. */
-function CopyAction({
+/** A message's actions, copy and any others, shown while the message is hovered or focused. */
+function MessageActions({
   text,
   label,
   className,
+  children,
 }: {
+  /** What copy copies; nothing to copy, no copy button. */
   text: string;
   label: string;
   className: string;
+  children?: ReactNode;
 }) {
   const { copied, copy } = useCopy(text);
   return (
@@ -126,19 +133,104 @@ function CopyAction({
         className,
       )}
     >
-      <Action
-        size="icon"
-        className="size-7 text-muted-foreground"
-        onClick={copy}
-        aria-label={label}
-      >
-        {copied ? (
-          <Check className="size-3.5" />
-        ) : (
-          <Copy className="size-3.5" />
-        )}
-      </Action>
+      {text.length > 0 && (
+        <MessageAction label={label} onClick={copy}>
+          {copied ? (
+            <Check className="size-3.5" />
+          ) : (
+            <Copy className="size-3.5" />
+          )}
+        </MessageAction>
+      )}
+      {children}
     </Actions>
+  );
+}
+
+function MessageAction({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <Action
+      size="icon"
+      className="size-7 text-muted-foreground"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+    >
+      {children}
+    </Action>
+  );
+}
+
+/** A message of the person's, being edited in its place, to send again changed. */
+function MessageEditor({
+  text,
+  onSend,
+  onCancel,
+}: {
+  text: string;
+  onSend: (text: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  const [draft, setDraft] = useState(text);
+  const [sending, setSending] = useState(false);
+  const ready = draft.trim() !== "" && draft !== text && !sending;
+  const send = () => {
+    if (!ready) return;
+    setSending(true);
+    onSend(draft).finally(() => setSending(false));
+  };
+  return (
+    <form
+      className="flex w-full max-w-[88%] flex-col gap-2 rounded-2xl border bg-background px-4 pt-3 pb-2.5 transition-colors focus-within:border-ring/60 md:max-w-[80%]"
+      onSubmit={(event) => {
+        event.preventDefault();
+        send();
+      }}
+    >
+      <textarea
+        // biome-ignore lint/a11y/noAutofocus: the person just asked to edit this message.
+        autoFocus
+        aria-label={t("editMessage")}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onFocus={(event) =>
+          event.target.setSelectionRange(draft.length, draft.length)
+        }
+        onKeyDown={(event) => {
+          if (event.key === "Escape") onCancel();
+          if (
+            event.key === "Enter" &&
+            !event.shiftKey &&
+            !event.nativeEvent.isComposing
+          ) {
+            event.preventDefault();
+            send();
+          }
+        }}
+        className="field-sizing-content max-h-[50vh] min-h-6 w-full resize-none bg-transparent text-[15px] leading-relaxed outline-none"
+      />
+      <div className="flex justify-end gap-2">
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
+          {t("cancel")}
+        </Button>
+        <Button type="submit" size="sm" disabled={!ready}>
+          {sending && <Loader2 className="size-3.5 animate-spin" />}
+          {t("sendEdited")}
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -147,13 +239,18 @@ function CopyAction({
 export const UserMessage = memo(function UserMessage({
   item,
   at,
+  onEdit,
 }: {
   item: MessageItem;
   /** When it was sent, in ms. */
   at: number;
+  /** Sends the message again changed, in a fork of the chat up to it (by the message's id); without it, it can't be edited. */
+  onEdit?: (id: string, content: UserContent) => Promise<void>;
 }) {
   const { t } = useI18n();
+  const [editing, setEditing] = useState(false);
   const text = messageText(item);
+  const id = item.id;
   const images =
     typeof item.content === "string"
       ? []
@@ -183,19 +280,42 @@ export const UserMessage = memo(function UserMessage({
           ))}
         </div>
       )}
-      {text.length > 0 && (
-        <div className="min-w-0 max-w-[88%] md:max-w-[80%] rounded-2xl bg-bubble px-4 py-3 text-bubble-foreground">
-          <Markdown text={text} bubble />
-        </div>
+      {editing && onEdit && id ? (
+        <MessageEditor
+          text={text}
+          onCancel={() => setEditing(false)}
+          // The images go again with the new text, as Pim keeps them.
+          onSend={async (changed) =>
+            onEdit(id, [
+              { type: "text", text: changed },
+              ...(await Promise.all(images.map(imageContent))),
+            ])
+          }
+        />
+      ) : (
+        text.length > 0 && (
+          <div className="min-w-0 max-w-[88%] md:max-w-[80%] rounded-2xl bg-bubble px-4 py-3 text-bubble-foreground">
+            <Markdown text={text} bubble />
+          </div>
+        )
       )}
       {/* Under the message, like an agent's, mirrored to the right. */}
       <div className="-mt-0.5 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
-        {text.length > 0 && (
-          <CopyAction
+        {!editing && (
+          <MessageActions
             text={text}
             label={t("copyMessage")}
             className="group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100"
-          />
+          >
+            {onEdit && id && (
+              <MessageAction
+                label={t("editMessage")}
+                onClick={() => setEditing(true)}
+              >
+                <Pencil className="size-3.5" />
+              </MessageAction>
+            )}
+          </MessageActions>
         )}
         <MessageTime at={at} />
       </div>
@@ -215,8 +335,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   speaker,
   mention,
   pinned,
+  onFork,
 }: {
   item: MessageItem;
+  /** Opens a new chat with what was said through this message; without it, it can't be forked. */
+  onFork?: () => Promise<void>;
   /** Keeps its time and copy button showing, rather than only on hover: for the latest message of a chat. */
   pinned?: boolean;
   /** Who wrote it, in a group chat. */
@@ -234,6 +357,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   images?: Readonly<Record<string, string>> | null;
 }) {
   const { t } = useI18n();
+  const [forking, setForking] = useState(false);
   const text = messageText(item);
 
   // No bubble: an agent's message has the transcript's whole width for its
@@ -257,14 +381,31 @@ export const AssistantMessage = memo(function AssistantMessage({
               at={at}
               className={pinned ? "opacity-100" : undefined}
             />
-            <CopyAction
+            <MessageActions
               text={text}
               label={t("copyResponse")}
               className={cn(
                 "group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100",
                 pinned && "opacity-100",
               )}
-            />
+            >
+              {onFork && (
+                <MessageAction
+                  label={t("forkChat")}
+                  disabled={forking}
+                  onClick={() => {
+                    setForking(true);
+                    onFork().finally(() => setForking(false));
+                  }}
+                >
+                  {forking ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <GitFork className="size-3.5" />
+                  )}
+                </MessageAction>
+              )}
+            </MessageActions>
           </>
         )}
       </div>

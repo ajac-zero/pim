@@ -71,6 +71,7 @@ import {
   approvalsQuery,
   appsQuery,
 } from "~/lib/queries";
+import { useForkChat } from "~/lib/start-chat";
 
 /**
  * Tools whose answer names an app's version, shown as the app itself: one made, changed or shown again.
@@ -261,6 +262,7 @@ export const Thread = memo(function Thread({
     onError: (error) => toast.error(error.message),
   });
   const queryClient = useQueryClient();
+  const { fork, edit } = useForkChat(sessionId);
   const retryMember = useMutation({
     mutationFn: (agent: string) => pim.retryInRoom(sessionId, agent),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
@@ -382,6 +384,8 @@ export const Thread = memo(function Thread({
   const userNames = useUserNames();
   const mention = (key: string, text: string) =>
     !visit && mentionsUser(text, userNames) ? key : undefined;
+  // A chat with someone else's agent, or with other agents in it, isn't forked: a fork has only the chat's own agent.
+  const forkable = !visit && (room?.members.length ?? 0) === 0;
   const working = room?.members.filter((member) => member.busy) ?? [];
   let lastSpeaker: string | null = null;
   const speaker = (name: string, id?: string) => {
@@ -506,6 +510,12 @@ export const Thread = memo(function Thread({
                 mention={mention(row.key, row.sent.message)}
                 streaming={liveKeys.has(row.key)}
                 pinned={row.key === latestKey}
+                // Its key is its block's: the transcript entry's id, then the block's place in it.
+                onFork={
+                  forkable
+                    ? () => fork(row.key.split(":")[0] as string)
+                    : undefined
+                }
                 images={
                   outputs.has(row.call.call_id)
                     ? sentImages(outputs.get(row.call.call_id)?.output)
@@ -594,6 +604,7 @@ export const Thread = memo(function Thread({
                 key={entry.key}
                 item={item as MessageItem}
                 at={entry.at}
+                onEdit={forkable && !liveKeys.has(entry.key) ? edit : undefined}
               />
             );
           }

@@ -157,6 +157,7 @@ export const Footprints = themedIcon(
   ),
 );
 export const Gamepad2 = themedIcon(Lucide.Gamepad2, Pixel.Gamepad);
+export const GitFork = themedIcon(Lucide.GitFork, Pixel.GitBranch);
 export const Globe = themedIcon(Lucide.Globe, Pixel.Globe);
 export const GraduationCap = themedIcon(
   Lucide.GraduationCap,

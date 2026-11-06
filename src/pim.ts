@@ -7,6 +7,7 @@ import {
 	type AgentEventStream,
 	CompactionTask,
 	type ConversationId,
+	type EntryId,
 	type UserInput,
 	createRegistry,
 	defineExtension,
@@ -195,7 +196,7 @@ import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_ST
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
-import { projectEntries } from "./transcript";
+import { forkPoint, projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
@@ -391,6 +392,8 @@ const NO_WORKERS_AI = {
 const UTILITY_MODEL_KEY = "utility_model";
 /** `pim_meta` keys of the messages suggested under a chat (see `Pim.#suggestions`) start with this, then its session id. */
 const SUGGESTIONS_KEY = "suggestions:";
+/** The numbered title a fork starts with, by session, until the person's first message in it names it anew. */
+const FORK_KEY = "fork:";
 /** What the utility model reads to suggest prompts: the chat, and how much of it and of memory. */
 const SUGGESTION_CHAT_CHARS = 2_000;
 /** How much of a chat an agent reads with `read_chat`: its latest part. */
@@ -1775,9 +1778,17 @@ export class Pim extends DurableAgent<Env> {
 		const title = from === "user" && !this.visits.bySession(session) ? titleFrom(content) : undefined;
 		const named = (this.store.sessionInfo(session)?.title ?? null) !== null;
 		this.store.touchSession(session, title);
-		if (title !== undefined && !named) void this.keepAliveWhile(() => this.#nameSession(session, textOf(content), title));
+		const said = `Person: ${textOf(content).slice(0, 2_000)}`;
+		if (title !== undefined && !named) void this.keepAliveWhile(() => this.#nameSession(session, said, title));
+		// A fork's first message is where it leaves the chat it came from: it is named from what was said before, and that.
+		const forked = from === "user" ? this.store.meta(`${FORK_KEY}${session}`) : undefined;
 		let kept: string[] = [];
 		try {
+			if (forked !== undefined) {
+				this.store.deleteMeta(`${FORK_KEY}${session}`);
+				const before = conversationText(projectEntries(await this.harness.session(session).messages()), 6_000);
+				void this.keepAliveWhile(() => this.#nameSession(session, before === "" ? said : `${before}\n\n${said}`, forked));
+			}
 			await this.#selectAbilities(session);
 			// Images go to R2; the message keeps their URLs.
 			const stored = await this.images.keep(session, content);
@@ -1818,15 +1829,16 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Names a session from its first message with the utility model, in place
-	 * of `first`, the message's start. A rename meanwhile stays, and so does
-	 * `first` when there is no utility model or it fails.
+	 * Names a session with the utility model from `conversation`, its first
+	 * message or, for a fork, what was said up to its first, in place of
+	 * `current`, the title it has now. A rename meanwhile stays, and so does
+	 * `current` when there is no utility model or it fails.
 	 */
-	async #nameSession(session: string, message: string, first: string): Promise<void> {
+	async #nameSession(session: string, conversation: string, current: string): Promise<void> {
 		try {
 			if (!(await this.utilityModel())) return;
-			const title = clipTitle(await this.utility(NAME_CHAT, `Person: ${message.slice(0, 2_000)}`));
-			if (this.store.retitleSession(session, first, title)) this.broadcastMessage({ type: "sessions" });
+			const title = clipTitle(await this.utility(NAME_CHAT, conversation));
+			if (this.store.retitleSession(session, current, title)) this.broadcastMessage({ type: "sessions" });
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.title", owner: this.name, error: errorMessage(error) }));
 		}
@@ -1952,8 +1964,8 @@ export class Pim extends DurableAgent<Env> {
 		return JSON.parse(this.store.meta(SCHEDULED_CHATS_KEY) ?? "{}");
 	}
 
-	/** Starts a chat with `agent`, within the person's limit on chats. */
-	async #startChat(agent: Agent, title: string | undefined): Promise<string> {
+	/** Starts a chat with `agent`, within the person's limit on chats: a new one, or a fork of `session` that keeps what was said through entry `at`. */
+	async #startChat(agent: Agent, title: string | undefined, from?: { session: string; at: EntryId }): Promise<string> {
 		const { sessions } = this.limits();
 		if (sessions !== null) {
 			const hidden = this.#hiddenSessions();
@@ -1961,7 +1973,9 @@ export class Pim extends DurableAgent<Env> {
 			const open = (await this.harness.sessions.list()).filter((session) => !hidden.has(session.id) && !this.#tasks.of(session.id)?.chat).length;
 			if (open >= sessions) throw new HttpError(429, `You can have up to ${sessions} chats. Delete one first.`);
 		}
-		const { id } = await this.harness.sessions.create();
+		const id = from
+			? String((await (await this.harness.conversation(from.session)).fork(from.at, { ownership: { kind: "ownerless" } }, BACKGROUND_CONTEXT)).id)
+			: (await this.harness.sessions.create()).id;
 		await this.harness.session(id).setModel(this.agentModel(agent));
 		this.agents.setSession(id, agent.id);
 		this.store.touchSession(id, title);
@@ -4361,6 +4375,41 @@ export class Pim extends DurableAgent<Env> {
 		return new Set([...this.store.deletedSessions(), ...this.#tasks.conversations(), ...this.#rooms.conversations()]);
 	}
 
+	/**
+	 * A new fork's title: its chat's, numbered after the forks with that title
+	 * the person still has, as "Trip (fork #2)"; a fork of a fork counts with
+	 * the forks of the chat it came from. None for a chat without one.
+	 */
+	async #forkTitle(session: string): Promise<string | undefined> {
+		const title = this.store.sessionInfo(session)?.title;
+		if (!title) return undefined;
+		const base = title.replace(/ \(fork #\d+\)$/, "");
+		const hidden = this.#hiddenSessions();
+		const numbers = (await this.harness.sessions.list()).flatMap((info) => {
+			const other = hidden.has(info.id) ? null : this.store.sessionInfo(info.id)?.title;
+			const number = other?.startsWith(`${base} (fork #`) ? /^ \(fork #(\d+)\)$/.exec(other.slice(base.length))?.[1] : undefined;
+			return number === undefined ? [] : [Number(number)];
+		});
+		return `${base} (fork #${Math.max(0, ...numbers) + 1})`;
+	}
+
+	/**
+	 * Deletes the images sent in a deleted chat, and in the deleted chats it
+	 * was forked from, unless a fork still there shows them.
+	 */
+	async #deleteImages(session: string): Promise<void> {
+		const parents = new Map((await this.harness.sessions.list()).flatMap((info) => (info.parent === undefined ? [] : [[info.id, info.parent] as const])));
+		const deleted = this.store.deletedSessions();
+		const shown = new Set<string>();
+		for (const fork of parents.keys()) {
+			if (deleted.has(fork)) continue;
+			for (let parent = parents.get(fork); parent !== undefined && !shown.has(parent); parent = parents.get(parent)) shown.add(parent);
+		}
+		for (let chat: string | undefined = session; chat !== undefined; chat = parents.get(chat)) {
+			if (deleted.has(chat) && !shown.has(chat)) await this.images.deleteSession(chat);
+		}
+	}
+
 	/** The session a public id names (see `PimStore.publicId`), if it is one of the person's chats. */
 	async #session(id: string): Promise<string> {
 		const session = this.store.sessionOf(id);
@@ -4629,6 +4678,27 @@ export class Pim extends DurableAgent<Env> {
 				return { ...this.#sessionInfo(id), agent: this.#agentRef(id) };
 			},
 		],
+		// A new chat with what was said in this one: through an agent's message, or up to one of the person's, to send it again changed.
+		[
+			"POST",
+			"/sessions/:session/fork",
+			async ({ session }, request) => {
+				const id = await this.#session(session!);
+				const { at, before } = await readJson<{ at: string; before: string }>(request);
+				const message = before ?? at;
+				if (typeof message !== "string" || (at !== undefined && before !== undefined)) throw new HttpError(400, "Give either at or before: a message's id");
+				if (this.visits.bySession(id)) throw new HttpError(400, "A chat with someone else's agent can't be forked");
+				if (this.#rooms.seats(id).some((seat) => seat.conversation !== id)) throw new HttpError(400, "A group chat can't be forked");
+				const point = forkPoint(await this.harness.session(id).messages(), message, before !== undefined);
+				if (point === undefined) throw new HttpError(400, before !== undefined ? "before must be one of your messages in this chat" : "at must be one of the agent's messages in this chat");
+				const title = await this.#forkTitle(id);
+				const fork = await this.#startChat(this.agents.ofSession(id), title, point ? { session: id, at: point.id } : undefined);
+				// The person's next message in it names it anew, for where it went.
+				if (title !== undefined) this.store.setMeta(`${FORK_KEY}${fork}`, title);
+				this.broadcastMessage({ type: "sessions" });
+				return { ...this.#sessionInfo(fork), agent: this.#agentRef(fork) };
+			},
+		],
 		[
 			"POST",
 			"/sessions/:session/read",
@@ -4804,8 +4874,9 @@ export class Pim extends DurableAgent<Env> {
 				const id = await this.#session(session!);
 				this.store.deleteSession(id);
 				this.store.deleteMeta(`${SUGGESTIONS_KEY}${id}`);
+				this.store.deleteMeta(`${FORK_KEY}${id}`);
 				this.chatLinks.delete(id);
-				await this.images.deleteSession(id);
+				await this.#deleteImages(id);
 				const visit = this.visits.bySession(id);
 				if (visit) this.visits.setSession(visit.ownerId, null);
 				// Nothing keeps working in a chat the user can no longer see, nor in the tasks it handed out, nor do the other agents in it.

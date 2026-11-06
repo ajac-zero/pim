@@ -1221,6 +1221,12 @@ export const pim = {
       method: "POST",
       body: JSON.stringify(options),
     }),
+  /** A new chat with what was said in this one: through an agent's message (`at`), or up to one of yours (`before`). */
+  forkSession: (id: string, from: { at: string } | { before: string }) =>
+    call<Session>(`/sessions/${id}/fork`, {
+      method: "POST",
+      body: JSON.stringify(from),
+    }),
   readSession: (id: string, responseAt: number) =>
     call<Session>(`/sessions/${id}/read`, {
       method: "POST",

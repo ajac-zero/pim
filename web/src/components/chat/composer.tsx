@@ -988,7 +988,7 @@ async function saveAttachments(
  * A picked image as Pim takes it: as it is when it's small enough, else
  * shrunk to fit and sent as a JPEG.
  */
-async function imageContent(
+export async function imageContent(
   url: string,
 ): Promise<{ type: "image"; data: string; mimeType: string }> {
   const blob = await (await fetch(url)).blob();

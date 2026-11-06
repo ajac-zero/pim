@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
@@ -44,8 +44,8 @@ export function FileView({
   onClose,
 }: {
   path: string;
-  /** Files open together: their tabs take the place of this file's title. */
-  tabs?: { paths: string[]; onSelect: (path: string) => void };
+  /** The canvas's tabs, which take the place of this file's title. */
+  tabs?: ReactNode;
   onClose?: () => void;
 }) {
   const { t } = useI18n();
@@ -99,31 +99,7 @@ export function FileView({
       <header
         className={cn("flex items-center gap-2 border-b px-4", !tabs && "py-2")}
       >
-        {tabs ? (
-          <div
-            role="tablist"
-            className="flex min-w-0 flex-1 overflow-x-auto scrollbar-thin"
-          >
-            {tabs.paths.map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                role="tab"
-                aria-selected={tab === path}
-                title={tab}
-                onClick={() => tabs.onSelect(tab)}
-                className={cn(
-                  "h-12 max-w-48 shrink-0 truncate border-b-2 px-3 pt-0.5 text-sm",
-                  tab === path
-                    ? "border-foreground font-medium"
-                    : "border-transparent text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {baseName(tab)}
-              </button>
-            ))}
-          </div>
-        ) : (
+        {tabs ?? (
           <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
         )}
         {preview.kind === "pdf" && (

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useCanGoBack, useRouter } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   ARTIFACT_LANGUAGES,
@@ -73,6 +73,7 @@ export function ArtifactView({
   onVersion,
   onDeleted,
   onClose,
+  tabs,
 }: {
   artifactId: string;
   /** The version to show; the latest when unset. */
@@ -82,6 +83,8 @@ export function ArtifactView({
   onDeleted: () => void;
   /** Closes the canvas; set only in one. */
   onClose?: () => void;
+  /** The canvas's tabs, which take the place of the app's title. */
+  tabs?: ReactNode;
 }) {
   const { t, formatDate, formatNumber } = useI18n();
   const queryClient = useQueryClient();
@@ -254,9 +257,11 @@ export function ArtifactView({
               </Link>
             </Button>
           ))}
-        <h1 className="min-w-0 flex-1 truncate font-semibold">
-          {artifact.title}
-        </h1>
+        {tabs ?? (
+          <h1 className="min-w-0 flex-1 truncate font-semibold">
+            {artifact.title}
+          </h1>
+        )}
         {artifact.history.length > 1 && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

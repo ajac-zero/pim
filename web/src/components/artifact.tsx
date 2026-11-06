@@ -7,6 +7,7 @@ import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { ShieldAlert } from "~/components/icons";
 import { Button } from "~/components/ui/button";
+import { type CanvasSearch, openCanvasTab } from "~/lib/canvas";
 import {
   ApiError,
   ARTIFACT_KINDS,
@@ -466,7 +467,8 @@ export function ArtifactCard({
     void navigate({
       to: "/chat/$sessionId",
       params: { sessionId },
-      search: { artifact: reference.id, v: reference.version },
+      search: (previous: CanvasSearch) =>
+        openCanvasTab(previous, reference.id, reference.version),
     });
   }, [live, deleted, navigate, sessionId, reference.id, reference.version]);
   const body = (
@@ -496,7 +498,9 @@ export function ArtifactCard({
     <Link
       to="/chat/$sessionId"
       params={{ sessionId }}
-      search={{ artifact: reference.id, v: reference.version }}
+      search={(previous: CanvasSearch) =>
+        openCanvasTab(previous, reference.id, reference.version)
+      }
       aria-current={open || undefined}
       className={cn(className, "transition-colors hover:bg-muted/60")}
     >

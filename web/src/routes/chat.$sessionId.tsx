@@ -13,6 +13,7 @@ import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
 import { ActivityBox } from "~/components/chat/activity";
 import { ActivityToggle } from "~/components/chat/activity-toggle";
+import { CanvasTabs } from "~/components/chat/canvas-tabs";
 import { ChatLinkMenu } from "~/components/chat/chat-link";
 import { Composer } from "~/components/chat/composer";
 import {
@@ -30,7 +31,13 @@ import { ExternalLink, Loader2, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
-import { FILES_ROOT, pim, type UserContent } from "~/lib/pim-api";
+import {
+  type CanvasSearch,
+  closeCanvasTab,
+  isFilePath,
+  openCanvasTab,
+} from "~/lib/canvas";
+import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
 import { agentsQuery, sessionsQuery, suggestionsQuery } from "~/lib/queries";
 import { showTab, useTabs } from "~/lib/tabs";
@@ -40,17 +47,7 @@ import { cn } from "~/lib/utils";
 const CANVAS_WIDTH = { default: 56, min: 30, max: 75 };
 
 /** What the canvas beside the chat shows: an app version, a file, or one of the chat's tasks. */
-type ChatSearch = {
-  artifact?: string;
-  v?: number;
-  file?: string;
-  /** Every file open in the canvas, in the order opened; `file` is the one shown. */
-  files?: string[];
-  task?: string;
-};
-
-const isFilePath = (value: unknown): value is string =>
-  typeof value === "string" && value.startsWith(`${FILES_ROOT}/`);
+type ChatSearch = CanvasSearch & { task?: string };
 
 /** The strip, in pixels, an overlay scrollbar draws in at the thread's edge. */
 const OVERLAY_SCROLLBAR_ROOM = 12;
@@ -58,18 +55,24 @@ const OVERLAY_SCROLLBAR_ROOM = 12;
 export const Route = createFileRoute("/chat/$sessionId")({
   validateSearch: (search: Record<string, unknown>): ChatSearch => {
     const v = Number(search.v);
+    const artifact =
+      typeof search.artifact === "string" && search.artifact
+        ? search.artifact
+        : undefined;
+    // The canvas shows an app before a file, as it always has.
+    const shown =
+      artifact ?? (isFilePath(search.file) ? search.file : undefined);
     return {
-      ...(typeof search.artifact === "string" &&
-        search.artifact && { artifact: search.artifact }),
+      ...(artifact && { artifact }),
       ...(Number.isSafeInteger(v) && v > 0 && { v }),
-      ...(isFilePath(search.file) && {
-        file: search.file,
-        files: [
+      ...(isFilePath(search.file) && { file: search.file }),
+      ...(shown && {
+        tabs: [
           ...new Set([
-            ...(Array.isArray(search.files) ? search.files : []).filter(
-              isFilePath,
+            ...(Array.isArray(search.tabs) ? search.tabs : []).filter(
+              (tab) => typeof tab === "string" && tab,
             ),
-            search.file,
+            shown,
           ]),
         ],
       }),
@@ -109,7 +112,7 @@ function SessionNotFound() {
 function ChatPage() {
   const { t, locale } = useI18n();
   const { sessionId } = Route.useParams();
-  const { artifact, v, file, files = [], task } = Route.useSearch();
+  const { artifact, v, file, tabs = [], task } = Route.useSearch();
   const navigate = useNavigate();
   const page = useRef<HTMLElement>(null);
   const [canvasWidth, setCanvasWidth] = useStoredSize(
@@ -123,6 +126,16 @@ function ChatPage() {
       search,
       replace: true,
     });
+  // Files and apps open together share one strip of tabs, in place of a lone title.
+  const shown = artifact ?? file;
+  const strip =
+    shown && tabs.length > 1 ? (
+      <CanvasTabs
+        tabs={tabs}
+        active={shown}
+        onSelect={(tab) => showCanvas(openCanvasTab({ tabs }, tab))}
+      />
+    ) : undefined;
   const { data: sessions } = useQuery(sessionsQuery());
   const session = sessions?.find((candidate) => candidate.id === sessionId);
   const { data: agents } = useQuery(agentsQuery());
@@ -431,29 +444,23 @@ function ChatPage() {
               key={artifact}
               artifactId={artifact}
               version={v}
-              onVersion={(version) => showCanvas({ artifact, v: version })}
-              onDeleted={() => showCanvas({})}
-              onClose={() => showCanvas({})}
+              tabs={strip}
+              onVersion={(version) =>
+                showCanvas({
+                  artifact,
+                  v: version,
+                  ...(tabs.length > 1 && { tabs }),
+                })
+              }
+              onDeleted={() => showCanvas(closeCanvasTab(tabs, artifact))}
+              onClose={() => showCanvas(closeCanvasTab(tabs, artifact))}
             />
           ) : file ? (
             <FileView
               key={file}
               path={file}
-              tabs={
-                files.length > 1
-                  ? {
-                      paths: files,
-                      onSelect: (path) => showCanvas({ file: path, files }),
-                    }
-                  : undefined
-              }
-              onClose={() => {
-                // Closing a tab shows its neighbor; the last one closes the canvas.
-                const rest = files.filter((path) => path !== file);
-                const next =
-                  rest[Math.min(files.indexOf(file), rest.length - 1)];
-                showCanvas(next ? { file: next, files: rest } : {});
-              }}
+              tabs={strip}
+              onClose={() => showCanvas(closeCanvasTab(tabs, file))}
             />
           ) : (
             task && (

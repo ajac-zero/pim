@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { api, apiUrl, connectTestComputer, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse, url } from "./helpers";
+import { appLabel } from "../src/hosted";
 import { faux } from "./worker";
 
 /**
@@ -113,7 +114,15 @@ describe("apps with a backend", () => {
 
 		// The backend started from a copy of the version, on a port Pim chose, with a folder of its own for its data.
 		expect(started).toEqual([
-			{ id: made.id, dir: `/workspace/.pim/apps/${made.id}/v1`, command: "node server.js", install: "npm ci", port: 18_000, data: `/workspace/.pim/apps/${made.id}/data` },
+			{
+				id: made.id,
+				dir: `/workspace/.pim/apps/${made.id}/v1`,
+				command: "node server.js",
+				install: "npm ci",
+				port: 18_000,
+				data: `/workspace/.pim/apps/${made.id}/data`,
+				env: { PIM_APP_SECRET: expect.any(String) },
+			},
 		]);
 		const release = `${ROOT}/.pim/apps/${made.id}/v1`;
 		expect(await fs.readFile(`${release}/server.js`, "utf8")).toBe("// the backend");
@@ -187,7 +196,7 @@ describe("apps with a backend", () => {
 		expect(requests.length).toBe(before);
 	});
 
-	it("say so when the backend isn't running, and keep its pages out of what the person shares", async () => {
+	it("say so when the backend isn't running, and can't be published", async () => {
 		const [made] = (await api("/artifacts")).body.artifacts;
 		const address = (await raw(`/artifacts/${made.id}/versions/1/frame`)).headers.get("location")!;
 		backend = () => Object.assign(new Error("App x is stopped, not running."), { code: "ENOTRUNNING" });
@@ -197,7 +206,7 @@ describe("apps with a backend", () => {
 		backend = () => Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
 		expect((await page(address)).status).toBe(503);
 
-		expect((await raw(`/artifacts/${made.id}/circles`, { method: "PUT", body: JSON.stringify({ circles: [] }) })).status).toBe(400);
+		// It can be shared at its own address, but not published.
 		expect((await raw(`/artifacts/${made.id}/publish`, { method: "POST", body: JSON.stringify({}) })).status).toBe(400);
 	});
 
@@ -218,9 +227,9 @@ describe("apps with a backend", () => {
 	});
 
 	it("refuse a manifest that promises what isn't built, and a folder with none", async () => {
-		await writeFolder("bad", { "pim.app.json": JSON.stringify({ backend: { command: "x" }, access: "public" }), "a.js": "1" });
+		await writeFolder("bad", { "pim.app.json": JSON.stringify({ backend: { command: "x" }, env: { A: "1" } }), "a.js": "1" });
 		const count = (await api("/artifacts")).body.artifacts.length;
-		expect((await deploy({ path: "/workspace/bad" })).result).toContain(`has no "access" yet`);
+		expect((await deploy({ path: "/workspace/bad" })).result).toContain(`has no "env" yet`);
 		await writeFolder("none", { "a.js": "1" });
 		expect((await deploy({ path: "/workspace/none" })).result).toContain("has no pim.app.json");
 		expect((await deploy({ path: "/etc" })).result).toContain("not a folder under /workspace");
@@ -230,7 +239,7 @@ describe("apps with a backend", () => {
 	it("show the person how the backend is doing, and let them stop it or run a version, in their browser", async () => {
 		const [made] = (await api("/artifacts")).body.artifacts;
 		state = "running";
-		expect((await api(`/artifacts/${made.id}/backend`)).body).toEqual({ version: 2, status: { state: "running", restarts: 2, since: 1 }, computer: "online" });
+		expect((await api(`/artifacts/${made.id}/backend`)).body).toMatchObject({ version: 2, status: { state: "running", restarts: 2, since: 1 }, computer: "online", access: "owner" });
 		expect((await api(`/artifacts/${made.id}/backend/logs`)).body).toEqual({ text: "listening\n" });
 		// Another kind of app has no backend to ask about.
 		expect((await api(`/artifacts/${crypto.randomUUID()}/backend`)).status).toBe(404);
@@ -285,5 +294,117 @@ describe("apps with a backend", () => {
 		await deploy({ path: "/workspace/again", title: "Again" });
 		expect(started.at(-1)).toMatchObject({ port: 18_000 });
 		void env;
+	});
+});
+
+describe("apps with a backend at an address of their own", () => {
+	const hostOf = (id: string) => `${appLabel(OWNER, id)}.apps.pim.test`;
+	const at = (id: string, path: string, init: RequestInit = {}) => exports.default.fetch(new Request(`https://${hostOf(id)}${path}`, { redirect: "manual", ...init }));
+	const idOf = async (title: string) => (await api("/artifacts")).body.artifacts.find((app: { title: string }) => app.title === title).id as string;
+	const hmac = async (secret: string, payload: string) => {
+		const key = await crypto.subtle.importKey("raw", Uint8Array.from(atob(secret.replaceAll("-", "+").replaceAll("_", "/")), (char) => char.charCodeAt(0)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+		return btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload))))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+	};
+
+	it("let only their owner in by default, and only once they have signed in to Pim and traded for the app's cookie", async () => {
+		await writeFolder("own", { "pim.app.json": MANIFEST, "server.js": "1" });
+		await deploy({ path: "/workspace/own", title: "Own" });
+		const id = await idOf("Own");
+		const secret = started.at(-1)!.env.PIM_APP_SECRET as string;
+
+		// Nobody who isn't known gets the page: they are sent to sign in to Pim, which comes back with the page they asked for.
+		const first = await at(id, "/list?sort=up");
+		expect(first.status).toBe(302);
+		expect(first.headers.get("location")).toBe(`https://pim.test/hosted/enter?app=${appLabel(OWNER, id)}&next=%2Flist%3Fsort%3Dup`);
+		expect((await at(id, "/", { method: "POST", body: "x" })).status).toBe(401);
+		expect(requests.filter((request) => request.id === id)).toEqual([]);
+
+		// Pim's own page sends the browser on again before it looks for the session, which its Strict cookie only rides on from its own address.
+		const arriving = await exports.default.fetch(new Request(first.headers.get("location")!, { redirect: "manual" }));
+		expect(arriving.status).toBe(200);
+		expect(await arriving.text()).toContain("&#38;go=1");
+		const goes = first.headers.get("location")! + "&go=1";
+		const signedOut = await exports.default.fetch(new Request(goes, { redirect: "manual" }));
+		expect(signedOut.status).toBe(401);
+		expect(await signedOut.text()).toContain("Sign in to Pim");
+
+		const cookie = await signedIn();
+		const entered = await exports.default.fetch(new Request(goes, { redirect: "manual", headers: { cookie } }));
+		expect(entered.status).toBe(302);
+		const back = new URL(entered.headers.get("location")!);
+		expect(back.origin + back.pathname).toBe(`https://${hostOf(id)}/__pim/enter`);
+		expect(back.searchParams.get("next")).toBe("/list?sort=up");
+
+		// The token is traded for an HttpOnly cookie of the app's address alone, which sends the visitor on to where they were going.
+		const traded = await exports.default.fetch(new Request(back, { redirect: "manual" }));
+		expect(traded.status).toBe(302);
+		expect(traded.headers.get("location")).toBe("/list?sort=up");
+		const set = traded.headers.get("set-cookie")!;
+		expect(set).toMatch(/^__pim_app=[\w.-]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=43200; Secure$/);
+		const session = set.split(";")[0]!;
+		// Not any token, and not one for another app or traded again after a change.
+		expect((await at(id, `/__pim/enter?t=${back.searchParams.get("t")!.slice(0, -3)}xyz`)).status).toBe(400);
+		expect((await at(id, "/__pim/enter")).status).toBe(400);
+
+		// The page is the backend's own, at the root of an origin of its own: its cookies are its own, its headers are kept, and it is told who is asking, signed.
+		backend = () => ({
+			status: 200,
+			headers: [
+				["content-type", "text/html"],
+				["set-cookie", "theme=dark; Path=/; Domain=pim.test"],
+				["set-cookie", "__pim_app=forged; Path=/"],
+				["content-security-policy", "default-src 'self'"],
+				["strict-transport-security", "max-age=63072000; includeSubDomains"],
+			],
+			body: b64("<h1>Own</h1>"),
+		});
+		const page = await at(id, "/list?sort=up", { headers: { cookie: `${session}; theme=light`, authorization: "Bearer app-token", origin: `https://${hostOf(id)}` } });
+		expect(page.status).toBe(200);
+		expect(await page.text()).toBe("<h1>Own</h1>");
+		expect(page.headers.getSetCookie()).toEqual(["theme=dark; Path=/"]);
+		expect(page.headers.get("content-security-policy")).toBe("default-src 'self'");
+		expect(page.headers.get("strict-transport-security")).toBeNull();
+		const sent = requests.at(-1)!;
+		expect(sent).toMatchObject({ id, method: "GET", path: "/list?sort=up" });
+		expect(sent.headers).toContainEqual(["cookie", "theme=light"]);
+		expect(sent.headers).toContainEqual(["authorization", "Bearer app-token"]);
+		expect(sent.headers).toContainEqual(["x-forwarded-host", hostOf(id)]);
+		const header = (name: string) => sent.headers.find(([key]) => key === name)?.[1];
+		expect(header("x-pim-user-id")).toBe(OWNER);
+		expect(header("x-pim-user")).toEqual(expect.any(String));
+		// The backend can check who sent the headers with the secret it was started with, and a stranger can't make them.
+		expect(header("x-pim-signature")).toBe(await hmac(secret, `${OWNER}.${header("x-pim-time")}`));
+
+		// Anything a visitor sends of their own that says who they are is theirs to make up, and is dropped.
+		await at(id, "/", { headers: { cookie: session, "x-pim-user": "root", "x-pim-user-id": "someone" } });
+		expect(requests.at(-1)!.headers.filter(([name]) => name === "x-pim-user")).toHaveLength(1);
+		expect(requests.at(-1)!.headers.find(([name]) => name === "x-pim-user-id")?.[1]).toBe(OWNER);
+		// A changed cookie is no one.
+		expect((await at(id, "/", { headers: { cookie: `${session.slice(0, -2)}zz` } })).status).toBe(302);
+		// And an app that isn't there has no page.
+		expect((await at(crypto.randomUUID(), "/")).status).toBe(404);
+	});
+
+	it("are open to anyone, signed in or not, when the manifest and the person's approval say so", async () => {
+		await writeFolder("open", { "pim.app.json": JSON.stringify({ backend: { command: "node server.js" }, access: "public" }), "server.js": "1" });
+		// The manifest and what the person approves have to agree, so they are told who will be able to open it.
+		const before = (await api("/artifacts")).body.artifacts.length;
+		expect((await deploy({ path: "/workspace/open", title: "Open" })).result).toContain(`says access is "public", but this deploy asked for "owner"`);
+		expect((await api("/artifacts")).body.artifacts).toHaveLength(before);
+		const { approval } = await deploy({ path: "/workspace/open", title: "Open", access: "public" });
+		expect(approval.summary).toBe("Deploy /workspace/open as the app Open, and run its backend on your computer. Anyone with its address will be able to open it");
+
+		const id = await idOf("Open");
+		backend = () => ({ status: 200, headers: [["content-type", "text/plain"]], body: b64("hello") });
+		const page = await at(id, "/");
+		expect(page.status).toBe(200);
+		expect(await page.text()).toBe("hello");
+		// Nobody is named, since nobody signed in.
+		expect(requests.at(-1)!.headers.map(([name]) => name).filter((name) => name.startsWith("x-pim-"))).toEqual([]);
+	});
+
+	it("tell their owner where they are, and who may open them", async () => {
+		const id = await idOf("Open");
+		expect((await api(`/artifacts/${id}/backend`)).body).toMatchObject({ access: "public", address: `https://${hostOf(id)}/` });
 	});
 });

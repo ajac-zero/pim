@@ -599,6 +599,10 @@ export type ArtifactBackend = {
     since: number | null;
   } | null;
   computer: "none" | "offline" | "online";
+  /** Who may open it at its own address. */
+  access: "owner" | "circles" | "public";
+  /** That address, or null where this Pim has none for apps. */
+  address: string | null;
 };
 
 /** An app, as its latest version. */
@@ -646,6 +650,8 @@ export type ArtifactDetail = Artifact & {
 export type SharedArtifact = Omit<Artifact, "session"> & {
   /** Whose it is: their username. */
   host: string;
+  /** Where an app with a backend is opened, which isn't here; null for any other, or where there's no address for it. */
+  address?: string | null;
 };
 
 /** An app someone published for everyone on this Pim: a copy of one of its versions. */

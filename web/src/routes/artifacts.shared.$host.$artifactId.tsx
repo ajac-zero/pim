@@ -3,7 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useState } from "react";
 import { ArtifactPreview, ArtifactPrint } from "~/components/artifact";
 import { useI18n } from "~/components/i18n";
-import { ArrowLeft, Printer } from "~/components/icons";
+import { ArrowLeft, ExternalLink, Printer } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ApiError } from "~/lib/pim-api";
 import { sharedArtifactQuery } from "~/lib/queries";
@@ -55,29 +55,50 @@ function SharedArtifactPage() {
         <span className="text-muted-foreground text-sm">
           {t("sharedBy", { host })}
         </span>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="size-8"
-          aria-label={t("artifactPrint")}
-          title={t("artifactPrint")}
-          disabled={printing}
-          onClick={() => setPrinting(true)}
-        >
-          <Printer className="size-4" />
-        </Button>
+        {artifact.kind !== "hosted" && (
+          <Button
+            size="icon"
+            variant="ghost"
+            className="size-8"
+            aria-label={t("artifactPrint")}
+            title={t("artifactPrint")}
+            disabled={printing}
+            onClick={() => setPrinting(true)}
+          >
+            <Printer className="size-4" />
+          </Button>
+        )}
       </header>
       <div className="flex min-h-0 flex-1 flex-col gap-2 p-2 md:p-3">
-        <div className="min-h-0 flex-1">
-          <ArtifactPreview
-            id={artifact.id}
-            version={artifact.version}
-            kind={artifact.kind}
-            title={artifact.title}
-            from={{ host }}
-            fill
-          />
-        </div>
+        {artifact.kind === "hosted" ? (
+          // It runs on its owner's computer and isn't shown here: it is opened at its own address.
+          <div className="flex flex-col items-center gap-3 p-8 text-center">
+            <p className="text-muted-foreground">
+              {artifact.address
+                ? t("sharedBackendNote", { host })
+                : t("sharedBackendNoAddress")}
+            </p>
+            {artifact.address && (
+              <Button asChild>
+                <a href={artifact.address} target="_blank" rel="noreferrer">
+                  <ExternalLink className="size-4" />
+                  {t("backendOpen")}
+                </a>
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1">
+            <ArtifactPreview
+              id={artifact.id}
+              version={artifact.version}
+              kind={artifact.kind}
+              title={artifact.title}
+              from={{ host }}
+              fill
+            />
+          </div>
+        )}
         {printing && (
           <ArtifactPrint
             id={artifact.id}

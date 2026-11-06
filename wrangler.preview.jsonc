@@ -17,7 +17,8 @@
     "directory": "./web/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api", "/api/*", "/install.sh", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/hosted/*", "/__dev/*", "/p/*"]
+    // Every request goes to the Worker first, since an app with a backend serves any path at its own subdomain, `/` included.
+    "run_worker_first": true
   },
   // Pim needs an `AI` binding to start; chats use preview/worker.ts's stand-in model instead.
   // Connect a ChatGPT plan in Settings to chat with a real one.
@@ -47,6 +48,8 @@
   "vars": {
     "PIM_PUBLIC_URL": "http://localhost:8787",
     "PIM_CONTENT_ORIGIN": "http://127.0.0.1:8787",
+    // Apps with a backend are at <label>.apps.localhost, which Chrome sends to this machine.
+    "PIM_APPS_ORIGIN": "http://apps.localhost:8787",
     "PIM_REGISTRATION": "open",
     "PIM_REGISTRATIONS_PER_ADDRESS": "50",
     "PIM_MODELS": "preview-model",

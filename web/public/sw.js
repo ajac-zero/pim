@@ -7,7 +7,7 @@ const APP_CACHE = "pim-app-v1";
 /** Every page of the app is the same page; it's kept as this one. */
 const APP_PAGE = "/";
 /** What the Worker answers itself (`run_worker_first` in wrangler.jsonc and wrangler.preview.jsonc): never the app's page. */
-const WORKER_FIRST = ["/api", "/api/*", "/install.sh", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/__dev/*", "/p/*"];
+const WORKER_FIRST = ["/api", "/api/*", "/install.sh", "/auth/*", "/health", "/mcp", "/oauth/*", "/.well-known/*", "/authorize", "/mcp/callback/*", "/mcp/client/*", "/mcp/events/*", "/images/*", "/shared/*", "/app-pages/*", "/hosted/*", "/__dev/*", "/p/*"];
 
 const workerFirst = (path) =>
   WORKER_FIRST.some((rule) => (rule.endsWith("/*") ? path.startsWith(rule.slice(0, -1)) : path === rule));

@@ -31,6 +31,8 @@ export default defineConfig({
 								PIM_REGISTRATION: "open",
 								PIM_APPROVAL_POLICY: "auto",
 								PIM_CONTENT_ORIGIN: "https://content.pim.test",
+								// Apps with a backend at subdomains of it.
+								PIM_APPS_ORIGIN: "https://apps.pim.test",
 								TEST_BANK_CLIENT_ID: "bank-client",
 								TEST_BANK_CLIENT_SECRET: "bank-secret",
 								TEST_FORGE_CLIENT_ID: "forge-client",

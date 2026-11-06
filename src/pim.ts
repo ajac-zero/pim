@@ -165,7 +165,7 @@ import {
 import { describeSchedule, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
 import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
 import { webExtension } from "./extensions/web";
-import { HostedApps } from "./hosted";
+import { HostedApps, SESSION_COOKIE as HOSTED_SESSION_COOKIE } from "./hosted";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
 import { FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
@@ -536,7 +536,12 @@ export class Pim extends DurableAgent<Env> {
 	readonly files = new Files(this.computer);
 	readonly #files: FileServices = { computer: this.computer, assertOpen: () => this.#assertOpen() };
 	/** The apps with a backend on that computer. */
-	readonly hosted = new HostedApps(this.ctx.storage.sql, { computer: this.computer, artifacts: this.artifacts, meta: this.store });
+	readonly hosted = new HostedApps(this.ctx.storage.sql, {
+		computer: this.computer,
+		artifacts: this.artifacts,
+		meta: this.store,
+		appsOrigin: () => this.deployment().appsOrigin,
+	});
 	readonly #hostedServices = { computer: this.computer, artifacts: this.artifacts, hosted: this.hosted, assertOpen: () => this.#assertOpen() };
 	#legacyWorkspace: Workspace | undefined;
 	/** Files kept in the space before they moved to the computer, until they move there (see ./legacy-files.ts). */
@@ -2627,13 +2632,16 @@ export class Pim extends DurableAgent<Env> {
 	async guestArtifact(
 		guest: Guest,
 		id: string,
-	): Promise<{ ok: true; artifact: Omit<ArtifactSummary, "session">; files: ArtifactFile[] } | { ok: false; status: number; reason: string }> {
+	): Promise<
+		{ ok: true; artifact: Omit<ArtifactSummary, "session">; files: ArtifactFile[]; address: string | null } | { ok: false; status: number; reason: string }
+	> {
 		const found = this.#sharedArtifact(guest, id);
 		if (!found.ok) return found;
 		const { session: _session, ...artifact } = found.artifact;
 		// The guest's space reads the files from R2 itself, so they must be there.
 		const stored = await this.artifacts.stored(id, artifact.version);
-		return { ok: true, artifact, files: [...stored.files] };
+		// An app with a backend isn't shown in the guest's space: it is opened at its own address.
+		return { ok: true, artifact, files: [...stored.files], address: artifact.kind === "hosted" ? this.hosted.origin(this.name, id) : null };
 	}
 
 	/** A guest's call on what an app shared with them keeps for everyone using it (`window.pim.shared`). */
@@ -2668,7 +2676,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		const files = found.files as ArtifactFile[];
 		const load = () => readFiles(this.env.ARTIFACTS, share.ownerId, files);
-		return { share, me, host, artifact: found.artifact, files, load, key: `${share.ownerId}/${found.artifact.id}` };
+		return { share, me, host, artifact: found.artifact, address: found.address, files, load, key: `${share.ownerId}/${found.artifact.id}` };
 	}
 
 	/**
@@ -4202,6 +4210,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#closed()) return Response.json({ error: "This space was erased" }, { status: 410 });
 		const { pathname, search } = new URL(request.url);
 		if (pathname.startsWith("/hosted/")) return this.#hostedRequest(request, pathname, search);
+		if (pathname.startsWith("/hosted-origin/")) return this.#hostedOwnRequest(request, pathname, search);
 		return dispatch(this.#routes, request, pathname);
 	}
 
@@ -4219,7 +4228,62 @@ export class Pim extends DurableAgent<Env> {
 		}
 		// A page's address with no trailing slash would make its relative addresses wrong.
 		if (match[3] === undefined) return Response.redirect(`${new URL(request.url).origin}/hosted/${this.name}/${found.id}/${match[2]}/${search}`, 308);
-		return this.hosted.relay(request, found.id, `${match[3]}${search}`, `/hosted/${this.name}/${found.id}/${match[2]}/`);
+		return this.hosted.relay(request, found.id, `${match[3]}${search}`, { prefix: `/hosted/${this.name}/${found.id}/${match[2]}/` });
+	}
+
+	/**
+	 * A request for an app's backend at the app's own address
+	 * (`/hosted-origin/<id>/…`, which the Worker makes of it): the cookie there
+	 * says who is asking, and the app's access says whether they may, now.
+	 * Without one who may, a page gets `401` and the Worker sends it to sign
+	 * in to Pim.
+	 */
+	async #hostedOwnRequest(request: Request, pathname: string, search: string): Promise<Response> {
+		const match = /^\/hosted-origin\/([0-9a-f-]{36})(\/.*)$/.exec(pathname);
+		const found = match ? this.artifacts.get(match[1]!) : undefined;
+		if (!match || !found || found.kind !== "hosted" || this.hosted.version(found.id) === undefined) {
+			return new Response("This app isn't here.", { status: 404, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+		}
+		let visitor = null;
+		const cookie = (request.headers.get("cookie") ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${HOSTED_SESSION_COOKIE}=`));
+		if (cookie) {
+			const known = await this.hosted.visitor(found.id, cookie.slice(HOSTED_SESSION_COOKIE.length + 1));
+			if (known && this.#hostedMayOpen(found.id, known.id)) visitor = known;
+		}
+		if (!visitor && this.hosted.access(found.id) !== "public") return new Response(null, { status: 401, headers: { "x-pim-sign-in": "1", "cache-control": "no-store" } });
+		const url = new URL(request.url);
+		return this.hosted.relay(request, found.id, `${match[2]}${search}`, { own: { host: request.headers.get("host") ?? url.host, proto: url.protocol.slice(0, -1), visitor } });
+	}
+
+	/** Whether a person may open an app at its own address now: its owner always, others as the app's access says. */
+	#hostedMayOpen(id: string, person: string): boolean {
+		if (person === this.name) return true;
+		if (this.hosted.access(id) !== "circles") return false;
+		const access = this.#guestAccess({ ownerId: person, username: "" });
+		return access.ok && this.artifacts.circlesOf(id).includes(access.circle.id);
+	}
+
+	/**
+	 * A person signed in to Pim asks to open an app at its own address, which
+	 * the Worker has checked is them: they get a token for it, good for a
+	 * minute, to trade for the app's cookie there. Asked every time, so what
+	 * the app's access and circles say now decides.
+	 */
+	async hostedEnter(visitor: Guest, id: string): Promise<{ ok: true; token: string } | { ok: false; status: number; reason: string }> {
+		if (this.#closed()) return { ok: false, status: 410, reason: "This account was deleted." };
+		if (this.status() !== "active") return { ok: false, status: 403, reason: "This account is suspended." };
+		const app = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
+		if (!app || app.kind !== "hosted" || this.hosted.version(id) === undefined) return { ok: false, status: 404, reason: "This app isn't here." };
+		if (!this.#hostedMayOpen(id, visitor.ownerId)) {
+			return { ok: false, status: 403, reason: `${this.profile()?.username ?? "Its owner"} hasn't shared this app with you.` };
+		}
+		return { ok: true, token: await this.hosted.enterToken(id, { id: visitor.ownerId, name: visitor.username }) };
+	}
+
+	/** The cookie an app's own address keeps, for a token `hostedEnter` made; null for any other. */
+	async hostedSession(id: string, token: string): Promise<{ cookie: string; maxAge: number } | null> {
+		if (this.#closed() || this.status() !== "active") return null;
+		return this.hosted.session(id, token);
 	}
 
 	/** A task as the API shows it: who does it for whom, and how it went. */
@@ -5114,7 +5178,14 @@ export class Pim extends DurableAgent<Env> {
 			({ id }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const app = this.#hostedApp(id!);
-					return noStore({ version: this.hosted.version(app.id) ?? null, status: await this.hosted.status(app.id), computer: this.computer.status().state });
+					return noStore({
+						version: this.hosted.version(app.id) ?? null,
+						status: await this.hosted.status(app.id),
+						computer: this.computer.status().state,
+						access: this.hosted.access(app.id),
+						// Where the app is at an address of its own, when this Pim has one for apps.
+						address: this.hosted.origin(this.name, app.id),
+					});
 				}),
 		],
 		[
@@ -5162,7 +5233,9 @@ export class Pim extends DurableAgent<Env> {
 			({ id }, request, url) =>
 				this.#artifactRequest(url, async () => {
 					const artifact = this.#artifact(id!);
-					if (artifact.kind === "hosted") throw new HttpError(400, "An app with a backend is for its owner alone so far: it can't be shared.");
+					if (artifact.kind === "hosted" && this.deployment().appsOrigin === null) {
+						throw new HttpError(400, "An app with a backend is shared at an address of its own, which this Pim doesn't have: its admin sets PIM_APPS_ORIGIN.");
+					}
 					const { circles } = await readJson<{ circles: string[] }>(request);
 					if (!Array.isArray(circles)) throw new HttpError(400, "circles must be a list of circle ids");
 					for (const circle of circles) this.#circle(String(circle));
@@ -5196,8 +5269,8 @@ export class Pim extends DurableAgent<Env> {
 			"/shared-artifacts/:host/:id",
 			({ host, id }, _request, url) =>
 				this.#artifactRequest(url, async () => {
-					const { artifact } = await this.#othersArtifact(host!, id!);
-					return noStore({ ...artifact, host });
+					const { artifact, address } = await this.#othersArtifact(host!, id!);
+					return noStore({ ...artifact, host, address });
 				}),
 		],
 		[

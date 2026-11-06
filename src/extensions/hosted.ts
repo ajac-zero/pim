@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { MANIFEST_FILE, parseManifest } from "../app-manifest";
+import { ACCESS_LEVELS, MANIFEST_FILE, parseManifest } from "../app-manifest";
 import { type ArtifactStore, checkTitle, MAX_ARTIFACT_FILES } from "../artifacts";
 import type { Computer } from "../computer";
 import { FILES_ROOT, filesPath } from "../files";
@@ -26,7 +26,7 @@ export type HostedServices = {
 	assertOpen(): void;
 };
 
-const HOW = `An app with a backend is a folder in the person's files (${FILES_ROOT}/…) with a ${MANIFEST_FILE} at its root: {"backend": {"command": "node server.js", "install": "npm ci"}}. command starts the backend, from a copy of the folder, and it must listen on 127.0.0.1 at the port in $PORT; install runs first, in the same copy (a copy has no node_modules or .git, so install what it needs there). The app is its frontend and its backend in one folder: whatever the backend answers at / is the app's page, shown beside the chat. Use relative addresses in the page (fetch("api/items"), not fetch("/api/items")), because it isn't served from the root of an address. The page runs in a sandbox and can reach only its own backend. The backend keeps what it needs in $PIM_APP_DATA, a folder that stays across versions. The folder may hold up to ${MAX_ARTIFACT_FILES} files. Only the person can open it.`;
+const HOW = `An app with a backend is a folder in the person's files (${FILES_ROOT}/…) with a ${MANIFEST_FILE} at its root: {"backend": {"command": "node server.js", "install": "npm ci"}}. command starts the backend, from a copy of the folder, and it must listen on 127.0.0.1 at the port in $PORT; install runs first, in the same copy (a copy has no node_modules or .git, so install what it needs there). The app is its frontend and its backend in one folder: whatever the backend answers at / is the app's page, shown beside the chat. Use relative addresses in the page (fetch("api/items"), not fetch("/api/items")), because it isn't served from the root of an address. The page runs in a sandbox and can reach only its own backend. The backend keeps what it needs in $PIM_APP_DATA, a folder that stays across versions. The folder may hold up to ${MAX_ARTIFACT_FILES} files. Who may open it is the manifest's "access": "owner" (the default; only the person), "circles" (the people in the circles the person shares it with, who sign in to Pim) or "public" (anyone with the address, signed in or not); the last two work only where this Pim has an address for apps of their own, and the person is told what you give as access when they approve.`;
 
 /** Deploying: the folder becomes a version, and its backend runs on the computer, once the person approves. */
 export function appDeployAction(services: HostedServices): GatedAction {
@@ -38,12 +38,19 @@ export function appDeployAction(services: HostedServices): GatedAction {
 			path: Type.String({ minLength: 1, description: `The folder, under ${FILES_ROOT}.` }),
 			id: Type.Optional(Type.String({ description: "The app to deploy a new version of, from app_list." })),
 			title: Type.Optional(Type.String({ maxLength: 200, description: "A new app's name; the folder's name if left out." })),
+			access: Type.Optional(
+				Type.Union(
+					ACCESS_LEVELS.map((level) => Type.Literal(level)),
+					{ description: `Who may open the app, the same as the manifest's "access", which must agree: the person reads it when they approve. "owner" if left out.` },
+				),
+			),
 		}),
-		summarize: ({ path, id, title }) => {
+		summarize: ({ path, id, title, access }) => {
 			const known = id === undefined ? undefined : artifacts.get(id);
-			return known ? `Deploy ${path} as a new version of ${known.title}, and run its backend on your computer` : `Deploy ${path} as ${title ? `the app ${title}` : "an app"}, and run its backend on your computer`;
+			const who = access === "public" ? ". Anyone with its address will be able to open it" : access === "circles" ? ". The people in the circles you share it with will be able to open it" : "";
+			return `${known ? `Deploy ${path} as a new version of ${known.title}` : `Deploy ${path} as ${title ? `the app ${title}` : "an app"}`}, and run its backend on your computer${who}`;
 		},
-		async run({ path, id, title }, request) {
+		async run({ path, id, title, access }, request) {
 			services.assertOpen();
 			if (filesPath(path) === null) throw new Error(`${path} is not a folder under ${FILES_ROOT}.`);
 			const folder = path.replace(/\/+$/, "");
@@ -55,7 +62,10 @@ export function appDeployAction(services: HostedServices): GatedAction {
 			if (!manifest) throw new Error(`${folder} has no ${MANIFEST_FILE}. ${HOW}`);
 			files.delete(MANIFEST_FILE);
 			const content = new TextDecoder().decode(manifest);
-			parseManifest(content);
+			const wanted = parseManifest(content).access;
+			if (wanted !== (access ?? "owner")) {
+				throw new Error(`${MANIFEST_FILE} says access is "${wanted}", but this deploy asked for "${access ?? "owner"}". Give access: "${wanted}", so the person is told who will be able to open the app.`);
+			}
 			const put = Object.fromEntries(files);
 			let made: { artifact: string; version: number };
 			if (id !== undefined) {

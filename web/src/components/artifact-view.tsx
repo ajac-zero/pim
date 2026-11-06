@@ -101,6 +101,11 @@ export function ArtifactView({
     error,
     refetch,
   } = useQuery(artifactQuery(artifactId));
+  // An app with a backend can be shared only where it has an address of its own.
+  const { data: backend } = useQuery({
+    ...artifactBackendQuery(artifactId),
+    enabled: artifact?.kind === "hosted",
+  });
   const version = v ?? artifact?.version;
   const listed = artifact?.history.some((entry) => entry.version === version);
   // A version the cached history lacks may be one made since (the agent works on): ask once, for this app
@@ -328,7 +333,9 @@ export function ArtifactView({
                 );
               })}
             </div>
-            {artifact.kind !== "hosted" && <ShareMenu artifact={artifact} />}
+            {(artifact.kind !== "hosted" || !!backend?.address) && (
+              <ShareMenu artifact={artifact} />
+            )}
             {isLatest ? (
               <Button
                 size="sm"
@@ -573,6 +580,7 @@ export function ArtifactView({
  * on this Pim, in Discover. Shown once there's someone to share with.
  */
 function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
+  const hosted = artifact.kind === "hosted";
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data: account } = useQuery(accountQuery());
@@ -609,7 +617,8 @@ function ShareMenu({ artifact }: { artifact: ArtifactDetail }) {
     onError: (failure) => toast.error(failure.message),
   });
   // Alone on this Pim, there is nobody to publish for, unless it already is.
-  const canPublish = !!account && (!account.alone || !!publication);
+  // An app with a backend isn't published: it runs on its owner's computer.
+  const canPublish = !hosted && !!account && (!account.alone || !!publication);
   if (!circles?.length && !canPublish) return null;
   const shared = artifact.circles.filter((id) =>
     circles?.some((circle) => circle.id === id),
@@ -816,6 +825,17 @@ function BackendPanel({
               : ""}
           </span>
         )}
+        {backend.address && backend.version !== null && (
+          <span className="text-muted-foreground">
+            {t(
+              backend.access === "public"
+                ? "backendAccessPublic"
+                : backend.access === "circles"
+                  ? "backendAccessCircles"
+                  : "backendAccessOwner",
+            )}
+          </span>
+        )}
         <span className="flex-1" />
         <Button
           size="sm"
@@ -841,6 +861,19 @@ function BackendPanel({
               {t("backendStop")}
             </Button>
           )}
+        {backend.address && (
+          <Button
+            asChild
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1.5 px-2"
+          >
+            <a href={backend.address} target="_blank" rel="noreferrer">
+              <ExternalLink className="size-3.5" />
+              {t("backendOpen")}
+            </a>
+          </Button>
+        )}
         {!latestRuns && backend.computer === "online" && (
           <Button
             size="sm"

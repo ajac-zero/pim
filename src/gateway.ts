@@ -17,6 +17,7 @@ import {
 } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
+import { appAddress, appOfHost, appOfLabel, SESSION_COOKIE as APP_SESSION_COOKIE } from "./hosted";
 import { installScript } from "./install-script";
 import { BROWSER_LIVE_PATH } from "./browser";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
@@ -328,6 +329,97 @@ async function serveHosted(request: Request, env: Env, pathname: string, address
 	return toAgent(request, env, account.ownerId, `/hosted/${match[2]}/${match[3]}${match[4] ?? ""}`);
 }
 
+/** The host a request was made to. Under `wrangler dev` its URL says the host the server listens on, not the one asked for, so the header is read first. */
+const hostOf = (request: Request) => request.headers.get("host") ?? new URL(request.url).host;
+
+/** A path in an app, from where its visitor was: kept to one on the app's own address, never another site. */
+function pathInApp(next: string | null): string {
+	return next !== null && next.startsWith("/") && !next.startsWith("//") && !next.includes("\\") && !/[\u0000-\u001f]/.test(next) ? next : "/";
+}
+
+/**
+ * An app with a backend at its own address, `<label>.<apps origin>`
+ * (./hosted.ts): the owner's space serves its page, from its backend, once
+ * the visitor has the app's cookie. A visitor without it is sent to sign in to
+ * Pim, at `/hosted/enter`, which sends them back with a token that
+ * `/__pim/enter` here trades for the cookie, an HttpOnly one of this address
+ * alone.
+ */
+async function serveAppOrigin(request: Request, env: Env, target: { owner: string; id: string }, appsOrigin: string, address: string): Promise<Response> {
+	if (await limited(env, "public", address)) return fail(429, "Too many requests. Slow down a little.");
+	const account = await resolveAccount(env, target.owner);
+	if (!account) return fail(404, "This app isn't here.");
+	const refused = closed(account);
+	if (refused) return refused;
+	const url = new URL(request.url);
+	if (url.pathname === "/__pim/enter") {
+		const space = await getAgentByName(env.Pim, target.owner);
+		const done = request.method === "GET" && url.searchParams.has("t") ? await space.hostedSession(target.id, url.searchParams.get("t")!) : null;
+		if (!done) return fail(400, "This link has expired. Open the app again from Pim.");
+		return new Response(null, {
+			status: 302,
+			headers: {
+				location: pathInApp(url.searchParams.get("next")),
+				"cache-control": "no-store",
+				// Lax, not Strict: the visitor arrives here from Pim's address, which is another site.
+				"set-cookie": `${APP_SESSION_COOKIE}=${done.cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${done.maxAge}${appsOrigin.startsWith("https:") ? "; Secure" : ""}`,
+			},
+		});
+	}
+	const answer = await toAgent(request, env, target.owner, `/hosted-origin/${target.id}${url.pathname}`);
+	if (answer.status === 401 && answer.headers.get("x-pim-sign-in") === "1" && (request.method === "GET" || request.method === "HEAD")) {
+		const { publicUrl } = deploymentSettings(env);
+		const enter = new URL("/hosted/enter", publicUrl ?? appsOrigin);
+		enter.searchParams.set("app", hostOf(request).split(".")[0]!);
+		enter.searchParams.set("next", `${url.pathname}${url.search}`);
+		return new Response(null, { status: 302, headers: { location: enter.href, "cache-control": "no-store" } });
+	}
+	return answer;
+}
+
+const page = (body: string, status = 200, head = "") =>
+	new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Pim</title>${head}<body style="font:16px system-ui;margin:3rem auto;max-width:32rem;padding:0 1rem">${body}`, {
+		status,
+		headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'", "referrer-policy": "no-referrer" },
+	});
+
+const escaped = (text: string) => text.replace(/[&<>"]/g, (char) => `&#${char.charCodeAt(0)};`);
+
+/**
+ * Where a visitor of an app at its own address signs in to Pim, at
+ * `/hosted/enter?app=<label>&next=<path>`. Pim's session cookie is SameSite=Strict, so
+ * the visit from the app's address, another site, doesn't carry it: the first
+ * answer only sends the browser on to this address again (`go`), which Pim's own
+ * page does, and then it does. The space says whether the person may open the
+ * app now; if so, they are sent back with a token to trade for its cookie.
+ */
+async function serveHostedEnter(request: Request, env: Env, appsOrigin: string): Promise<Response> {
+	if (request.method !== "GET") return fail(405, "/hosted/enter takes GET");
+	const url = new URL(request.url);
+	const target = appOfLabel(url.searchParams.get("app") ?? "");
+	if (!target) return fail(404, "Not found");
+	const next = pathInApp(url.searchParams.get("next"));
+	if (!url.searchParams.has("go")) {
+		url.searchParams.set("go", "1");
+		return page(`<p>Opening the app…</p><p><a href="${escaped(url.href)}">Continue</a></p>`, 200, `<meta http-equiv="refresh" content="0;url=${escaped(url.href)}">`);
+	}
+	const claim = await sessionClaim(request, env);
+	const account = claim ? await resolveAccount(env, claim.owner) : null;
+	if (!account || !(await currentSession(request, env, siteFor(env, account)))) {
+		const { publicUrl } = deploymentSettings(env);
+		return page(`<h1>Sign in to Pim</h1><p>This app is for people signed in to Pim. <a href="${escaped(publicUrl ?? "/")}">Sign in</a>, then open the app again.</p>`, 401);
+	}
+	const refused = closed(account) ?? notForGuests(account);
+	if (refused) return refused;
+	const space = await getAgentByName(env.Pim, target.owner);
+	const entered = await space.hostedEnter({ ownerId: account.ownerId, username: account.username }, target.id);
+	if (!entered.ok) return page(`<h1>You can't open this app</h1><p>${escaped(entered.reason)}</p>`, entered.status);
+	const back = new URL("/__pim/enter", appAddress(appsOrigin, target.owner, target.id));
+	back.searchParams.set("t", entered.token);
+	back.searchParams.set("next", next);
+	return new Response(null, { status: 302, headers: { location: back.href, "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+}
+
 /**
  * An image a model provider fetches: `/images/<owner>/<id>?expires=…&signature=…`,
  * which the space checks and answers as `/public-images/<id>`.
@@ -419,6 +511,9 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 		if (await limited(env, "public", address)) return fail(429, "Too many requests. Slow down a little.");
 		return servePublicArtifact(request, env, pathname);
 	}
+	const { appsOrigin } = deploymentSettings(env);
+	const appTarget = appsOrigin === null ? null : appOfHost(appsOrigin, hostOf(request));
+	if (appsOrigin !== null && appTarget) return serveAppOrigin(request, env, appTarget, appsOrigin, address);
 	if (pathname === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 	// The app's look, which the page asking for an address needs too.
 	if (pathname === "/api/themes" || pathname === "/api/themes.css") return withCors(await serveThemes(request, pathname.slice("/api".length)));
@@ -475,6 +570,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 
 	if (under(pathname, "/images")) return serveImage(request, env, pathname);
 	if (under(pathname, "/app-pages")) return serveAppPage(request, pathname);
+	if (pathname === "/hosted/enter" && appsOrigin !== null) return serveHostedEnter(request, env, appsOrigin);
 	if (under(pathname, "/hosted")) return serveHosted(request, env, pathname, address);
 
 	if (under(pathname, "/api/shared")) return withCors(await serveSharedChat(request, env, pathname, address));

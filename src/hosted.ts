@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { MANIFEST_FILE, parseManifest } from "./app-manifest";
+import { type Access, MANIFEST_FILE, parseManifest } from "./app-manifest";
 import type { ArtifactStore } from "./artifacts";
 import type { Computer } from "./computer";
 import { HttpError } from "./http";
@@ -22,9 +22,20 @@ import { HttpError } from "./http";
  * app's does, and sends no cookies: it names the app and nothing else, so what
  * the page can do is reach its own backend, never Pim's API.
  *
- * Only the owner opens one so far. Responses are relayed whole, so there are
- * no WebSockets or streaming, and the page must use relative addresses,
- * since it isn't at the root of its own origin.
+ * Where the deployment has an apps origin (`PIM_APPS_ORIGIN`), an app also
+ * has an origin of its own, `https://<label>.<apps origin's host>/`, where
+ * its page is at the root, with cookies and storage of its own. Who may open
+ * it there is the manifest's `access`: the owner; the people in the circles it
+ * is shared with; or anyone. A visitor signs in to Pim first, which Pim's own
+ * address does (`/hosted/enter`, in the gateway): the space then makes a
+ * token for the app's address, which trades it for a cookie there, and the
+ * space checks the cookie, and that its person may still open the app, on
+ * every request. The backend is told who is asking in signed headers (see
+ * `identity`).
+ *
+ * Responses are relayed whole, so there are no WebSockets or streaming, and an
+ * app framed at its owner's address must use relative addresses, since it
+ * isn't at the root of an origin there.
  */
 
 /** Where the computer keeps an app's releases and data, under the person's files. */
@@ -35,6 +46,11 @@ const PORT_TO = 18_999;
 /** How long an address with a token opens the app. */
 export const TOKEN_MS = 12 * 60 * 60 * 1000;
 const KEY = "hosted_key";
+/** The cookie that says who a visitor of an app's own address is; the app never sees it. */
+export const SESSION_COOKIE = "__pim_app";
+/** How long a token to enter an app lives, and how long what it is traded for does. */
+const ENTER_MS = 60_000;
+const SESSION_MS = 12 * 60 * 60 * 1000;
 /** The most a request's body may be, and how long the backend may take to answer. */
 const MAX_REQUEST_BYTES = 1_048_576;
 const HTTP_CALL_MS = 65_000;
@@ -53,9 +69,43 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_hosted_apps (
 	artifact TEXT PRIMARY KEY,
 	port INTEGER NOT NULL UNIQUE,
-	version INTEGER NOT NULL
+	version INTEGER NOT NULL,
+	access TEXT NOT NULL DEFAULT 'owner'
 );
 `;
+
+/** Whoever asks to open an app: a person on this Pim, by their owner id. */
+export type Visitor = { readonly id: string; readonly name: string };
+
+/** The subdomain an app is at: its owner's id and its own, with nothing to separate them, which fit in a DNS label. */
+export const appLabel = (owner: string, id: string) => `${owner.slice(2)}${id.replaceAll("-", "")}`;
+
+/** The address of an app's own origin under the deployment's apps origin, with a trailing slash. */
+export function appAddress(appsOrigin: string, owner: string, id: string): string {
+	const url = new URL(appsOrigin);
+	return `${url.protocol}//${appLabel(owner, id)}.${url.host}/`;
+}
+
+/** The same for a subdomain's label alone. */
+export function appOfLabel(label: string): { owner: string; id: string } | null {
+	const found = /^([0-9a-z]{26})([0-9a-f]{8})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{4})([0-9a-f]{12})$/.exec(label.toLowerCase());
+	return found ? { owner: `o_${found[1]}`, id: found.slice(2).join("-") } : null;
+}
+
+/** Whose app a host is, when it is a subdomain of the apps origin that names one. */
+export function appOfHost(appsOrigin: string, host: string): { owner: string; id: string } | null {
+	const base = new URL(appsOrigin).host;
+	const lower = host.toLowerCase();
+	return lower.endsWith(`.${base}`) ? appOfLabel(lower.slice(0, -base.length - 1)) : null;
+}
+
+/** Whether two strings are the same, compared without stopping at the first difference: a signature is what a stranger would guess at. */
+function same(expected: string, given: string): boolean {
+	if (expected.length !== given.length) return false;
+	let different = 0;
+	for (let index = 0; index < expected.length; index++) different |= expected.charCodeAt(index) ^ given.charCodeAt(index);
+	return different === 0;
+}
 
 const base64url = (bytes: ArrayBuffer | Uint8Array) => Buffer.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).toString("base64url");
 
@@ -64,13 +114,30 @@ export class HostedApps {
 	readonly #computer: Computer;
 	readonly #artifacts: ArtifactStore;
 	readonly #meta: Meta;
+	readonly #appsOrigin: () => string | null;
 
-	constructor(sql: SqlStorage, options: { computer: Computer; artifacts: ArtifactStore; meta: Meta }) {
+	constructor(sql: SqlStorage, options: { computer: Computer; artifacts: ArtifactStore; meta: Meta; appsOrigin: () => string | null }) {
 		this.#sql = sql;
 		this.#computer = options.computer;
 		this.#artifacts = options.artifacts;
 		this.#meta = options.meta;
+		this.#appsOrigin = options.appsOrigin;
 		this.#sql.exec(SCHEMA);
+		// Apps run before they had a say in who opens them are for their owner alone.
+		const columns = this.#sql.exec("PRAGMA table_info(pim_hosted_apps)").toArray().map((row) => String(row.name));
+		if (!columns.includes("access")) this.#sql.exec("ALTER TABLE pim_hosted_apps ADD COLUMN access TEXT NOT NULL DEFAULT 'owner'");
+	}
+
+	/** Who may open the app at its own address, as the version run last says. */
+	access(id: string): Access {
+		const [row] = this.#sql.exec("SELECT access FROM pim_hosted_apps WHERE artifact = ?", id).toArray();
+		return (row?.access as Access | undefined) ?? "owner";
+	}
+
+	/** The address of the app's own origin, or null where the deployment has none. */
+	origin(owner: string, id: string): string | null {
+		const apps = this.#appsOrigin();
+		return apps === null ? null : appAddress(apps, owner, id);
 	}
 
 	/** The version whose backend was run last, or undefined for an app never run. */
@@ -131,15 +198,32 @@ export class HostedApps {
 		const files = await this.#artifacts.read(id, version);
 		const main = files.get(MANIFEST_FILE);
 		if (!main) throw new HttpError(404, `No version ${version} of app ${id}`);
-		const { backend } = parseManifest(new TextDecoder().decode(main.bytes));
+		const { backend, access } = parseManifest(new TextDecoder().decode(main.bytes));
+		if (access !== "owner" && this.#appsOrigin() === null) {
+			throw new HttpError(400, `"access": "${access}" needs an address of the app's own, which this Pim doesn't have: its admin sets PIM_APPS_ORIGIN. Only "owner" works here.`);
+		}
 		const port = this.#port(id);
 		const dir = await this.#release(id, version);
 		await this.#computer.call(
 			"app_start",
-			{ id, dir, command: backend.command, ...(backend.install ? { install: backend.install } : {}), port, data: `${APPS_ROOT}/${id}/data` },
+			{
+				id,
+				dir,
+				command: backend.command,
+				...(backend.install ? { install: backend.install } : {}),
+				port,
+				data: `${APPS_ROOT}/${id}/data`,
+				env: { PIM_APP_SECRET: await this.secret(id) },
+			},
 			START_CALL_MS,
 		);
-		this.#sql.exec("INSERT INTO pim_hosted_apps (artifact, port, version) VALUES (?, ?, ?) ON CONFLICT (artifact) DO UPDATE SET version = excluded.version", id, port, version);
+		this.#sql.exec(
+			"INSERT INTO pim_hosted_apps (artifact, port, version, access) VALUES (?, ?, ?, ?) ON CONFLICT (artifact) DO UPDATE SET version = excluded.version, access = excluded.access",
+			id,
+			port,
+			version,
+			access,
+		);
 	}
 
 	/** Stops the backend; the app keeps its versions and its data, and runs again when told to. */
@@ -181,9 +265,64 @@ export class HostedApps {
 		return key;
 	}
 
-	async #sign(payload: string): Promise<string> {
-		const key = await crypto.subtle.importKey("raw", Buffer.from(this.#key(), "base64url"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-		return base64url(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload)));
+	async #sign(payload: string, key = this.#key()): Promise<string> {
+		const imported = await crypto.subtle.importKey("raw", Buffer.from(key, "base64url"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+		return base64url(await crypto.subtle.sign("HMAC", imported, new TextEncoder().encode(payload)));
+	}
+
+	/** Claims signed with the space's key, to be read back by it: nobody else can make or change one. */
+	async #seal(claims: Record<string, unknown>): Promise<string> {
+		const body = base64url(new TextEncoder().encode(JSON.stringify(claims)));
+		return `${body}.${await this.#sign(body)}`;
+	}
+
+	async #open(token: string): Promise<Record<string, unknown> | null> {
+		const [body, signature] = token.split(".");
+		if (!body || !signature || !same(await this.#sign(body), signature)) return null;
+		try {
+			return JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Record<string, unknown>;
+		} catch {
+			return null;
+		}
+	}
+
+	/** What a visitor of the app's own address is told to enter with: good for a minute, for that app and that person. */
+	enterToken(id: string, visitor: Visitor, now = Date.now()): Promise<string> {
+		return this.#seal({ k: "enter", a: id, u: visitor.id, n: visitor.name, e: now + ENTER_MS });
+	}
+
+	/** Trades an entry token for the cookie the app's address keeps, or null for one that isn't good. */
+	async session(id: string, enter: string, now = Date.now()): Promise<{ cookie: string; maxAge: number } | null> {
+		const claims = await this.#open(enter);
+		if (!claims || claims.k !== "enter" || claims.a !== id || typeof claims.u !== "string" || typeof claims.n !== "string" || Number(claims.e) < now) return null;
+		return { cookie: await this.#seal({ k: "session", a: id, u: claims.u, n: claims.n, e: now + SESSION_MS }), maxAge: SESSION_MS / 1000 };
+	}
+
+	/** Who the app's cookie says is asking, if it is good: whether they may still open the app is for the space to say. */
+	async visitor(id: string, cookie: string, now = Date.now()): Promise<Visitor | null> {
+		const claims = await this.#open(cookie);
+		if (!claims || claims.k !== "session" || claims.a !== id || typeof claims.u !== "string" || typeof claims.n !== "string" || Number(claims.e) < now) return null;
+		return { id: claims.u, name: claims.n };
+	}
+
+	/**
+	 * What the app's backend checks the headers that say who is asking against
+	 * (`PIM_APP_SECRET`): its own, made from the space's key, so no other app's
+	 * backend can pass itself off as Pim to it.
+	 */
+	secret(id: string): Promise<string> {
+		return this.#sign(`app-secret:${id}`);
+	}
+
+	/** Who is asking, signed: `x-pim-signature` is the base64url HMAC-SHA256, keyed by `PIM_APP_SECRET`, of `<user id>.<time>`. */
+	async #identity(id: string, visitor: Visitor, now: number): Promise<[string, string][]> {
+		const time = String(now);
+		return [
+			["x-pim-user", visitor.name],
+			["x-pim-user-id", visitor.id],
+			["x-pim-time", time],
+			["x-pim-signature", await this.#sign(`${visitor.id}.${time}`, await this.secret(id))],
+		];
 	}
 
 	/** The path of the app's page, with a token that opens it for a while. */
@@ -199,31 +338,46 @@ export class HostedApps {
 		if (!expires || !signature || !/^[0-9a-z]{1,10}$/.test(expires)) return false;
 		const seconds = Number.parseInt(expires, 36);
 		if (seconds * 1000 < now) return false;
-		const expected = await this.#sign(`${id}.${seconds}`);
-		// Compared without stopping at the first difference: the signature is the one thing a stranger would guess at.
-		if (expected.length !== signature.length) return false;
-		let different = 0;
-		for (let index = 0; index < expected.length; index++) different |= expected.charCodeAt(index) ^ signature.charCodeAt(index);
-		return different === 0;
+		return same(await this.#sign(`${id}.${seconds}`), signature);
 	}
 
 	/**
-	 * Relays one request to the backend, which gets only what a page's own
-	 * request needs: none of Pim's cookies or credentials, though the page's
-	 * first load carries them. `path` is what follows the token, with its
-	 * query; `prefix` is the address up to it, for the backend to build links.
+	 * Relays one request to the backend. `path` is what follows the address,
+	 * with its query. Framed at its owner's address (`prefix`, the address up to
+	 * the path, for the backend to build links), the backend gets only what a
+	 * page's request needs, none of Pim's cookies or credentials, though the
+	 * page's first load carries them, and Pim's rules (see `ruled`) apply to
+	 * what it serves. At its own origin (`own`) it is a site of its own: it gets
+	 * its own cookies and headers, and the signed headers that say who is
+	 * asking, and serves what it likes, but for the cookie that is Pim's.
 	 */
-	async relay(request: Request, id: string, path: string, prefix: string): Promise<Response> {
+	async relay(
+		request: Request,
+		id: string,
+		path: string,
+		how: { prefix: string } | { own: { host: string; proto: string; visitor: Visitor | null } },
+	): Promise<Response> {
+		const own = "own" in how ? how.own : null;
 		if (request.headers.get("upgrade")) return plain(501, "WebSockets aren't relayed to an app's backend yet.");
-		if (request.method === "OPTIONS") return ruled(new Response(null, { status: 204 }), true);
+		if (!own && request.method === "OPTIONS") return ruled(new Response(null, { status: 204 }), true);
 		const body = request.body === null ? undefined : new Uint8Array(await request.arrayBuffer());
 		if (body && body.byteLength > MAX_REQUEST_BYTES) return plain(413, `A request to an app's backend is at most ${MAX_REQUEST_BYTES} bytes.`);
 		const headers: [string, string][] = [];
-		for (const name of FORWARDED) {
+		for (const name of own ? [...FORWARDED, "authorization", "origin", "referer"] : FORWARDED) {
 			const value = request.headers.get(name);
 			if (value !== null) headers.push([name, value]);
 		}
-		headers.push(["accept-encoding", "identity"], ["x-forwarded-prefix", prefix.replace(/\/$/, "")]);
+		headers.push(["accept-encoding", "identity"]);
+		if (own) {
+			// Its own cookies, not the one that says who the visitor is: the backend gets that as signed headers instead.
+			const cookies = (request.headers.get("cookie") ?? "")
+				.split(";")
+				.map((cookie) => cookie.trim())
+				.filter((cookie) => cookie !== "" && !cookie.startsWith(`${SESSION_COOKIE}=`));
+			if (cookies.length > 0) headers.push(["cookie", cookies.join("; ")]);
+			headers.push(["x-forwarded-host", own.host], ["x-forwarded-proto", own.proto]);
+			if (own.visitor) headers.push(...(await this.#identity(id, own.visitor, Date.now())));
+		} else headers.push(["x-forwarded-prefix", (how as { prefix: string }).prefix.replace(/\/$/, "")]);
 		let answer: { status: number; headers: [string, string][]; body: string };
 		try {
 			answer = await this.#computer.call(
@@ -241,35 +395,43 @@ export class HostedApps {
 		const out = new Headers();
 		for (const [name, value] of answer.headers) {
 			const lower = name.toLowerCase();
+			if (own) {
+				if (ALWAYS_DROPPED.has(lower)) continue;
+				// A cookie belongs to the app's own address alone: not to a parent domain, where it would reach other apps and Pim, and not the one Pim keeps there.
+				if (lower === "set-cookie") {
+					if (value.trimStart().toLowerCase().startsWith(`${SESSION_COOKIE}=`)) continue;
+					out.append(name, value.replace(/;\s*domain=[^;]*/gi, ""));
+				} else out.append(name, value);
+				continue;
+			}
 			if (DROPPED.has(lower)) continue;
 			// A redirect to a path on its own origin stays in the app's address.
+			const prefix = (how as { prefix: string }).prefix;
 			out.append(name, lower === "location" && value.startsWith("/") && !value.startsWith("//") ? `${prefix.replace(/\/$/, "")}${value}` : value);
 		}
 		const bytes = answer.status === 204 || answer.status === 304 ? null : Buffer.from(answer.body, "base64");
-		return ruled(new Response(bytes, { status: answer.status, headers: out }), true);
+		const response = new Response(bytes, { status: answer.status, headers: out });
+		return own ? response : ruled(response, true);
 	}
 }
 
 /** The headers of a page's request a backend gets; Pim's own cookies and credentials never go. */
 const FORWARDED = ["accept", "accept-language", "content-type", "if-none-match", "if-modified-since", "range", "user-agent", "x-requested-with"];
 
-/** What a backend's response may not set: cookies would land on Pim's own address, and the page's rules are Pim's. */
+/** What no backend's response sets, wherever it is served: what describes how Pim relayed the body, and what would bind the host's other sites. */
+const ALWAYS_DROPPED = new Set(["content-length", "content-encoding", "transfer-encoding", "connection", "keep-alive", "strict-transport-security", "clear-site-data"]);
+
+/** What a backend's response may not set when its page is framed at Pim's own address: cookies would land there, and the page's rules are Pim's. */
 const DROPPED = new Set([
+	...ALWAYS_DROPPED,
 	"set-cookie",
 	"set-cookie2",
 	"content-security-policy",
 	"content-security-policy-report-only",
 	"x-frame-options",
-	"strict-transport-security",
-	"content-length",
-	"content-encoding",
-	"transfer-encoding",
-	"connection",
-	"keep-alive",
 	"access-control-allow-origin",
 	"access-control-allow-credentials",
 	"cross-origin-resource-policy",
-	"clear-site-data",
 ]);
 
 function plain(status: number, message: string): Response {

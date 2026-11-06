@@ -248,7 +248,7 @@ describe("an app's backend on the computer", () => {
 	}, 30_000);
 
 	it("doubles its wait between restarts, up to a cap", async () => {
-		connect({ backoffMs: 300, maxBackoffMs: 400, pollMs: 20 });
+		connect({ backoffMs: 600, maxBackoffMs: 700, pollMs: 20 });
 		await start({ env: { DIE_AFTER: "50" } });
 		const times: number[] = [];
 		let last = 0;
@@ -263,9 +263,10 @@ describe("an app's backend on the computer", () => {
 			},
 			10_000,
 		);
-		// The gaps are the waits (300, then 400 as 600 is capped), plus the time the app lived.
-		expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(390);
-		expect(times[2]! - times[1]!).toBeLessThan(650);
+		// The gaps are the waits (600, then 700 as 1200 is capped), plus the time the app lived and whatever a slow machine adds.
+		expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(590);
+		expect(times[2]! - times[1]!).toBeGreaterThanOrEqual(690);
+		expect(times[2]! - times[1]!).toBeLessThan(1150);
 	}, 15_000);
 
 	it("stops the whole process group, children included, and then refuses requests", async () => {

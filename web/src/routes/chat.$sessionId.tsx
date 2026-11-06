@@ -302,6 +302,7 @@ function ChatPage() {
             <div
               ref={composerOverlayRef}
               style={{
+                left: 0,
                 right: `calc(${gutter * 2}px + var(--activity-inset, 0px))`,
               }}
               className="pointer-events-none absolute bottom-0 z-10 flex justify-center bg-background pb-2"

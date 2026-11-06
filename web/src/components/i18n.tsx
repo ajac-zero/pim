@@ -333,9 +333,6 @@ const translations = {
     denied: "Denied",
     deny: "Deny",
     details: "Details",
-    emptyChatHint:
-      "Ask anything, or have Pim remember, schedule, or watch something for you.",
-    emptyChatTitle: "What can I do for you?",
     english: "English",
     failed: "Failed",
     language: "Language",
@@ -1459,9 +1456,6 @@ const translations = {
     denied: "Denegado",
     deny: "Denegar",
     details: "Detalles",
-    emptyChatHint:
-      "Pregunta lo que quieras, o pide a Pim que recuerde, programe o vigile algo por ti.",
-    emptyChatTitle: "¿En qué puedo ayudarte?",
     english: "Inglés",
     failed: "Falló",
     language: "Idioma",

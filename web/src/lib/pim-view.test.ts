@@ -1151,6 +1151,9 @@ describe("noticeOf", () => {
       text: "[Approval a1] Approved: send the email\nResult: sent",
       approval: "a1",
     });
+    expect(noticeOf("[Connector event] github: issue opened")?.kind).toBe(
+      "event",
+    );
     expect(noticeOf("[App event] github: issue opened")?.kind).toBe("event");
     expect(noticeOf("Please check [Approval a1] for me")).toBeNull();
     expect(noticeOf("[Approval]")).toBeNull();

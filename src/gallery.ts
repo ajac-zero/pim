@@ -20,7 +20,7 @@ import type { ArtifactFile, ArtifactKind } from "./artifacts";
  * whoever makes it their own gets too.
  * Publishing again replaces it.
  *
- * People publish artifacts here too, the same way: a copy of one version,
+ * People publish apps here too, the same way: a copy of one version,
  * which anyone can open and use, with their own storage, model and tools,
  * or make their own. Publishing again replaces it with the latest version.
  *
@@ -120,13 +120,13 @@ export type PublishedAgent = Omit<Contacts, "bundle"> & {
 	readonly image: AgentIcon | null;
 };
 
-/** An artifact someone published: a copy of one of its versions. */
+/** An app someone published: a copy of one of its versions. */
 export type PublishedArtifact = {
 	readonly id: string;
 	/** The author's username. */
 	readonly author: string;
 	readonly authorName: string | null;
-	/** Which of the author's artifacts it is a copy of, and which version. */
+	/** Which of the author's apps it is a copy of, and which version. */
 	readonly artifactId: string;
 	readonly version: number;
 	readonly title: string;
@@ -140,7 +140,7 @@ export type PublishedArtifact = {
 	readonly public: boolean;
 };
 
-/** An artifact as its author publishes it. */
+/** An app as its author publishes it. */
 export type ArtifactToPublish = {
 	readonly id: string;
 	readonly version: number;
@@ -720,7 +720,7 @@ export class Gallery extends DurableObject<Env> {
 	}
 
 	/**
-	 * Publishes the latest version of one of the author's artifacts, or
+	 * Publishes the latest version of one of the author's apps, or
 	 * replaces what was published of it. `open` says whether anyone with its
 	 * link may see it too; left out, that stays as it was (no, at first).
 	 */
@@ -728,7 +728,7 @@ export class Gallery extends DurableObject<Env> {
 		const [known] = this.#sql("SELECT id, public FROM published_artifacts WHERE owner_id = ? AND artifact_id = ?", ownerId, artifact.id).toArray();
 		if (!known) {
 			const count = Number(this.#sql("SELECT COUNT(*) AS n FROM published_artifacts WHERE owner_id = ?", ownerId).one().n);
-			if (count >= MAX_PUBLISHED_ARTIFACTS) throw new HttpError(429, `You can publish up to ${MAX_PUBLISHED_ARTIFACTS} artifacts.`);
+			if (count >= MAX_PUBLISHED_ARTIFACTS) throw new HttpError(429, `You can publish up to ${MAX_PUBLISHED_ARTIFACTS} apps.`);
 		}
 		const id = known ? String(known.id) : `pa_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 		this.#sql(
@@ -752,12 +752,12 @@ export class Gallery extends DurableObject<Env> {
 		return this.publishedArtifact(id)!;
 	}
 
-	/** Takes one of the author's artifacts out of the gallery. False when it wasn't published. */
+	/** Takes one of the author's apps out of the gallery. False when it wasn't published. */
 	unpublishArtifact(ownerId: string, artifactId: string): boolean {
 		return this.#sql("DELETE FROM published_artifacts WHERE owner_id = ? AND artifact_id = ?", ownerId, artifactId).rowsWritten > 0;
 	}
 
-	/** What the author published of one of their artifacts, if they did. */
+	/** What the author published of one of their apps, if they did. */
 	publishedArtifactOf(ownerId: string, artifactId: string): PublishedArtifact | null {
 		const [row] = this.#sql(`${PUBLISHED_ARTIFACT} WHERE a.owner_id = ? AND a.artifact_id = ?`, ownerId, artifactId).toArray();
 		return row ? publishedArtifactOf(row) : null;
@@ -768,13 +768,13 @@ export class Gallery extends DurableObject<Env> {
 		return row ? publishedArtifactOf(row) : null;
 	}
 
-	/** A published artifact's files, and whose prefix in R2 they're under. */
+	/** A published app's files, and whose prefix in R2 they're under. */
 	publishedFiles(id: string): { owner: string; files: ArtifactFile[] } | null {
 		const [row] = this.#sql("SELECT owner_id, files FROM published_artifacts WHERE id = ?", id).toArray();
 		return row ? { owner: String(row.owner_id), files: JSON.parse(String(row.files)) as ArtifactFile[] } : null;
 	}
 
-	/** A published artifact anyone with its link may see, with its files; null for any other id. */
+	/** A published app anyone with its link may see, with its files; null for any other id. */
 	publicArtifact(id: string): { kind: ArtifactKind; title: string; owner: string; files: ArtifactFile[] } | null {
 		const [row] = this.#sql("SELECT kind, title, owner_id, files FROM published_artifacts WHERE id = ? AND public = 1", id).toArray();
 		return row
@@ -782,7 +782,7 @@ export class Gallery extends DurableObject<Env> {
 			: null;
 	}
 
-	/** Published artifacts, most used first; matching `query` in their title or author, or by one author. */
+	/** Published apps, most used first; matching `query` in their title or author, or by one author. */
 	publishedArtifacts(options: { query?: string; author?: string; limit?: number } = {}): PublishedArtifact[] {
 		const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
 		if (options.author) {
@@ -806,12 +806,12 @@ export class Gallery extends DurableObject<Env> {
 		return this.#sql(`${PUBLISHED_ARTIFACT} ORDER BY a.uses DESC, a.published_at DESC LIMIT ?`, limit).toArray().map(publishedArtifactOf);
 	}
 
-	/** Someone made a published artifact their own. */
+	/** Someone made a published app their own. */
 	artifactUsed(id: string): void {
 		this.#sql("UPDATE published_artifacts SET uses = uses + 1 WHERE id = ?", id);
 	}
 
-	/** The operator takes a published artifact down. */
+	/** The operator takes a published app down. */
 	removeArtifact(id: string): boolean {
 		return this.#sql("DELETE FROM published_artifacts WHERE id = ?", id).rowsWritten > 0;
 	}
@@ -928,7 +928,7 @@ export class Gallery extends DurableObject<Env> {
 		return cleared;
 	}
 
-	/** Forgets a person: their profile, everything they published (agents and artifacts) or shared (bots), and the agent everyone starts with if it was theirs. Run when their account is deleted. */
+	/** Forgets a person: their profile, everything they published (agents and apps) or shared (bots), and the agent everyone starts with if it was theirs. Run when their account is deleted. */
 	forgetOwner(ownerId: string): void {
 		this.#sql("DELETE FROM templates WHERE owner_id = ?", ownerId);
 		this.#sql("DELETE FROM published_artifacts WHERE owner_id = ?", ownerId);

@@ -326,7 +326,7 @@ describe("connected apps (MCP)", () => {
 	});
 
 	it("lets an artifact call a tool that runs without asking, once the person allows its version", async () => {
-		faux.setResponses([toolUse("artifact_create", { title: "My day", kind: "html", content: "<p>Day</p>" }), toolUse("send_to_user", { message: "Made." })]);
+		faux.setResponses([toolUse("app_create", { title: "My day", kind: "html", content: "<p>Day</p>" }), toolUse("send_to_user", { message: "Made." })]);
 		await say("Make a page for my day.");
 		const { id } = (await api("/artifacts")).body.artifacts.find((artifact: { title: string }) => artifact.title === "My day");
 		const bridge = (version: number, op: string, args: unknown) => post(`/artifacts/${id}/versions/${version}/bridge`, { op, args });
@@ -344,7 +344,7 @@ describe("connected apps (MCP)", () => {
 		expect(created).toHaveLength(before);
 
 		// A new version is new code: it asks again.
-		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>Day 2</p>" }), toolUse("send_to_user", { message: "Changed." })]);
+		faux.setResponses([toolUse("app_update", { id, base_version: 1, content: "<p>Day 2</p>" }), toolUse("send_to_user", { message: "Changed." })]);
 		await say("Change it.");
 		expect((await bridge(2, "tools.call", find)).body).toMatchObject({ needs: { capability: "tool:calendar_find_events" } });
 	});

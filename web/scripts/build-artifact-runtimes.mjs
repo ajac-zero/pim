@@ -1,7 +1,7 @@
 /**
- * Builds the scripts artifacts run on into dist/artifact-runtime/, after the
+ * Builds the scripts apps run on into dist/artifact-runtime/, after the
  * app's own build: Mermaid, which draws diagrams, and React, charts, icons
- * and Tailwind for JSX artifacts. Each is one classic script, because a
+ * and Tailwind for JSX apps. Each is one classic script, because a
  * sandboxed frame has an opaque origin and module scripts would need CORS.
  * The charts and icons use the React runtime's React, which they find in
  * `__pimModules`, so a page loads React once.

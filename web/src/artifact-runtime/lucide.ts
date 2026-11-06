@@ -1,4 +1,4 @@
-/** Icons for JSX artifacts: registers `lucide-react`, on the React runtime's React. */
+/** Icons for JSX apps: registers `lucide-react`, on the React runtime's React. */
 import * as Lucide from "lucide-react";
 
 const scope = globalThis as unknown as {

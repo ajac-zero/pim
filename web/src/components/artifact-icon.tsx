@@ -24,7 +24,7 @@ export function ArtifactIcon({
   return <Icon className={className} />;
 }
 
-/** What each kind is called, short, next to an artifact's name. */
+/** What each kind is called, short, next to an app's name. */
 export const ARTIFACT_KIND_NAMES: Record<ArtifactKind, string> = {
   html: "HTML",
   markdown: "Markdown",

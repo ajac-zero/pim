@@ -28,7 +28,7 @@ it("renders an artifact prefix by title while leaving the request editable, and 
     } as never);
     const html = render(`${reference}Add a lunch stop.`);
     expect(html).toContain("Weekend plan");
-    expect(html).toContain('aria-label="Remove artifact Weekend plan"');
+    expect(html).toContain('aria-label="Remove app Weekend plan"');
     expect(input(html)).toBe("Add a lunch stop.");
     expect(input(render("An ordinary draft."))).toBe("An ordinary draft.");
   } finally {

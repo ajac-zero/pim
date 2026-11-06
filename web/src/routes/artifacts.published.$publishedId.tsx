@@ -17,10 +17,10 @@ export const Route = createFileRoute("/artifacts/published/$publishedId")({
 const PUBLISHED = { published: true } as const;
 
 /**
- * An artifact someone published for everyone on this Pim, as the version
+ * An app someone published for everyone on this Pim, as the version
  * they published. It runs here as your own do: what it keeps for you stays
- * in your Pim, and the model and apps it asks for are yours. Making it your
- * own copies it into your artifacts, to change.
+ * in your Pim, and the model and connectors it asks for are yours. Making it your
+ * own copies it into your apps, to change.
  */
 function PublishedArtifactPage() {
   const { t, formatDate } = useI18n();

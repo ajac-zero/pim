@@ -39,7 +39,7 @@ import { cn } from "~/lib/utils";
 /** The canvas's width, as a percentage of the page beside the sidebar, which the person can drag. */
 const CANVAS_WIDTH = { default: 56, min: 30, max: 75 };
 
-/** What the canvas beside the chat shows: an artifact version, a file, or one of the chat's tasks. */
+/** What the canvas beside the chat shows: an app version, a file, or one of the chat's tasks. */
 type ChatSearch = {
   artifact?: string;
   v?: number;

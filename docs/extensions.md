@@ -11,8 +11,8 @@ Pim is the platform; a space is one person's own part of it; an agent is what th
 | Layer | What it is | Where |
 | --- | --- | --- |
 | Core | How every space works: talking through `send_to_user`, approvals, honesty, time. No space's instructions change it | The `preamble` section in [`src/extensions/agents.ts`](../src/extensions/agents.ts) |
-| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, artifacts, tasks, the web) are every space's; an extension's go to every agent | `src/extensions/`, and extensions' `ability` |
-| Agents | What a person talks with: a name and their own instructions and apps on top of how Pim's assistant works. Stored data, made in the app or by the agent | Your agents |
+| Abilities | Tools, prompt sections, hooks and background tasks, plus actions that ask first and widgets. Pim's own (goals, schedules, memory, apps, tasks, the web) are every space's; an extension's go to every agent | `src/extensions/`, and extensions' `ability` |
+| Agents | What a person talks with: a name and their own instructions and connectors on top of how Pim's assistant works. Stored data, made in the app or by the agent | Your agents |
 
 At every request an agent's chats get the core preamble, then an `agent` section with the agent's name, how Pim's assistant works ([`assistant.ts`](../src/extensions/assistant.ts)), and the person's own instructions, which win. They also get the abilities of every installed extension. Edits to an extension reach every agent at the next deploy: they aren't copies. An admin who needs a tool no app offers writes it as an ability, in code, in an extension of their own.
 
@@ -145,7 +145,7 @@ export const music = definePimExtension({
 					name: "now_playing",
 					description: "What's playing now.",
 					parameters: Type.Object({}),
-					// Read-only tools are the ones artifacts may call without the person switching anything on.
+					// Read-only tools are the ones apps may call without the person switching anything on.
 					readOnly: true,
 					async execute(_args, { credential }) {
 						const playing = await (await fetch("https://api.music.example/now", { headers: { authorization: `Bearer ${credential.accessToken}` } })).json();
@@ -224,7 +224,7 @@ A widget is data of a kind the web app knows how to draw. `load` runs in the per
 | `list` | `{ title, detail?, time?, link? }` | Rows. `time` is ISO 8601, shown in the person's language and time zone |
 | `progress` | `{ title, value, max, detail?, link? }` | A bar with `value/max`, and the detail under it |
 
-A `link` is `{ chat }` or `{ artifact }`: the item opens it. `{ artifact, chat }` opens the artifact beside that chat.
+A `link` is `{ chat }` or `{ artifact }`: the item opens it. `{ artifact, chat }` opens the app beside that chat. (`artifact` is still the key's name in the code.)
 
 `load` gets:
 
@@ -288,7 +288,7 @@ People pick a theme in Settings → General, under Appearance; previews show its
 - **Configuration and secrets** per extension, beyond a connector's `secrets`: read a deployment's keys with `import { env } from "cloudflare:workers"` for now; per-person settings have no form.
 - **Routes** for an extension's webhooks.
 - **Choosing Pim's own abilities per space**: memory, goals and the rest are every space's.
-- **Widget actions** beyond opening a chat or an artifact, and more kinds.
+- **Widget actions** beyond opening a chat or an app, and more kinds.
 - **Theme-specific shapes and spacing**, and translated theme names.
 - **Widgets with arguments** in chat, such as one goal, and interfaces the model composes itself from a catalog of components.
 - **Extensions people bring themselves**, sandboxed (see [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/)); the directory's MCP connectors are how people add tools today.

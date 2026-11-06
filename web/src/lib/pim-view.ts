@@ -750,7 +750,7 @@ export type WorkStep = {
 
 /** One row of the chat as the person reads it. */
 export type ThreadRow =
-  /** Something they said, a notice, or a user-facing approval or artifact. */
+  /** Something they said, a notice, or a user-facing approval or app. */
   | { kind: "entry"; key: string; entry: ThreadEntry }
   /** A message Pim sent them. */
   | {
@@ -804,7 +804,7 @@ function stepsOf(
 
 /**
  * Lays the thread out as the person reads it: what they said and what Pim sent
- * them. `shown` picks user-facing artifacts and the like, never raw tool calls.
+ * them. `shown` picks user-facing apps and the like, never raw tool calls.
  *
  * Only explicit send_to_user calls are presented as assistant text. Ordinary
  * assistant text, raw reasoning, tool arguments and results are private, even

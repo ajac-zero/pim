@@ -1,4 +1,4 @@
-/** Charts for JSX artifacts: registers `recharts`, on the React runtime's React. */
+/** Charts for JSX apps: registers `recharts`, on the React runtime's React. */
 import * as Recharts from "recharts";
 
 const scope = globalThis as unknown as {

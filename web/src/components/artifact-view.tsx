@@ -56,7 +56,7 @@ import { newChatSearch } from "~/lib/start-chat";
 import { cn, formatBytes } from "~/lib/utils";
 
 /**
- * An artifact with its versions: a preview or its source, the person's own
+ * An app with its versions: a preview or its source, the person's own
  * edits, sharing, and the rest in a menu. It fills its own page, or the
  * canvas beside the chat it was made in (`onClose`), where the chat's
  * composer takes the place of the button that starts a chat about changes.
@@ -95,8 +95,8 @@ export function ArtifactView({
   } = useQuery(artifactQuery(artifactId));
   const version = v ?? artifact?.version;
   const listed = artifact?.history.some((entry) => entry.version === version);
-  // A version the cached history lacks may be one made since (the agent works on): ask once, for this artifact
-  // and version, before calling it missing. An answer to an earlier artifact or version counts for nothing.
+  // A version the cached history lacks may be one made since (the agent works on): ask once, for this app
+  // and version, before calling it missing. An answer to an earlier app or version counts for nothing.
   const wanted = `${artifactId}:${version}`;
   const [askedFor, setAskedFor] = useState<string>();
   useEffect(() => {
@@ -113,13 +113,13 @@ export function ArtifactView({
     ...artifactVersionQuery(artifactId, version ?? 0, undefined, file),
     enabled: (view === "source" || draft !== null) && listed === true,
   });
-  // Another version, or another artifact, isn't the one being edited.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new version or artifact ends the edit
+  // Another version, or another app, isn't the one being edited.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new version or app ends the edit
   useEffect(() => {
     setDraft(null);
   }, [artifactId, version]);
-  // Another artifact starts at its main file.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new artifact shows its main file
+  // Another app starts at its main file.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new app shows its main file
   useEffect(() => {
     setFile(undefined);
   }, [artifactId]);
@@ -553,7 +553,7 @@ export function ArtifactView({
 }
 
 /**
- * Shares the artifact with your circles, whose people then find its latest
+ * Shares the app with your circles, whose people then find its latest
  * version under Shared with you, and publishes a version of it for everyone
  * on this Pim, in Discover. Shown once there's someone to share with.
  */

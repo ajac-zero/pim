@@ -675,7 +675,7 @@ function ComposerInner({
           </div>
         )}
         {/* An image is a small preview of itself; any other file is a chip,
-            as the artifact above is, with its kind and its name. */}
+            as the app above is, with its kind and its name. */}
         {files.length > 0 && (
           <ul className="flex flex-wrap items-center gap-2 px-4 pt-3">
             {files.map((file) =>

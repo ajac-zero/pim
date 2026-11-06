@@ -7,7 +7,7 @@ import { del, get, set } from "idb-keyval";
  * The lists the app's frame and first pages show, kept on this device (in
  * IndexedDB) so the app opens with them at once and refreshes them while it
  * draws, rather than waiting on Pim before it shows anything. Only these
- * lists are kept: no secrets, and nothing of files' or artifacts' contents.
+ * lists are kept: no secrets, and nothing of files' or apps' contents.
  * Signing out forgets them, with the rest of what was read (see `SignedIn`).
  */
 const SAVED = new Set(

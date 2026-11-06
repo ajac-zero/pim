@@ -102,7 +102,7 @@ export const artifactQuery = (id: string) =>
   queryOptions({
     queryKey: ["artifacts", id],
     queryFn: () => pim.artifact(id),
-    // A deleted artifact answers 404: that's the answer, not a failure to retry.
+    // A deleted app answers 404: that's the answer, not a failure to retry.
     retry: false,
   });
 
@@ -127,7 +127,7 @@ export const artifactVersionQuery = (
     retry: false,
   });
 
-/** Artifacts people published for everyone, matching `query` if given. */
+/** Apps people published for everyone, matching `query` if given. */
 export const publishedArtifactsQuery = (query = "") =>
   queryOptions({
     queryKey: ["published-artifacts", "list", query],
@@ -141,14 +141,14 @@ export const publishedArtifactQuery = (id: string) =>
     retry: false,
   });
 
-/** What you published of one of your artifacts, or null. */
+/** What you published of one of your apps, or null. */
 export const artifactPublicationQuery = (id: string) =>
   queryOptions({
     queryKey: ["artifacts", id, "publication"],
     queryFn: () => pim.artifactPublication(id),
   });
 
-/** Artifacts people shared with you, from their spaces. */
+/** Apps people shared with you, from their spaces. */
 export const sharedArtifactsQuery = () =>
   queryOptions({
     queryKey: ["shared-artifacts"],

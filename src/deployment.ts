@@ -38,7 +38,7 @@ export type DeploymentSettings = {
 	readonly limits: Limits;
 	/** `PIM_PUBLIC_URL`: the only address this Pim answers at; null, when unset or unreadable, and it answers nowhere. */
 	readonly publicUrl: string | null;
-	/** `PIM_CONTENT_ORIGIN`: another address, routed to this Worker, that serves published artifacts' public links and nothing else; null turns links off. */
+	/** `PIM_CONTENT_ORIGIN`: another address, routed to this Worker, that serves published apps' public links and nothing else; null turns links off. */
 	readonly contentOrigin: string | null;
 	/** `PIM_EMAIL_FROM`: the address Pim emails from; null sends no email. */
 	readonly emailFrom: string | null;

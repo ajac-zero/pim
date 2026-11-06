@@ -1,7 +1,7 @@
 /**
  * Files' bytes in R2, each stored once under its SHA-256, for a store in
  * the owner's Durable Object that lists them by hash in its own tables:
- * artifacts' versions (./artifacts.ts) and skills' (./skills.ts).
+ * apps' versions (./artifacts.ts) and skills' (./skills.ts).
  *
  * - **Writing stores first, then lists.** `store` puts a write's new files
  *   in R2, then runs its `commit`, which checks and lists them with nothing

@@ -1,6 +1,6 @@
 /**
- * The React runtime a JSX artifact runs on, inside its sandboxed frame. The
- * Worker compiles the artifact to a CommonJS function and calls `__pimMount`
+ * The React runtime a JSX app runs on, inside its sandboxed frame. The
+ * Worker compiles the app to a CommonJS function and calls `__pimMount`
  * with it; `require` gives it only the modules this runtime and the other
  * runtime files (charts, icons) registered. Nothing here can reach the app:
  * the frame has an opaque origin and no network.
@@ -42,7 +42,7 @@ function showError(error: unknown) {
     "style",
     "margin:16px;padding:12px 14px;border-radius:8px;background:#fef2f2;color:#991b1b;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap",
   );
-  box.textContent = `This artifact stopped with an error:\n${error instanceof Error ? error.message : String(error)}`;
+  box.textContent = `This app stopped with an error:\n${error instanceof Error ? error.message : String(error)}`;
   document.body.replaceChildren(box);
 }
 
@@ -68,7 +68,7 @@ scope.__pimMount = (factory) => {
     factory(require, module, module.exports);
     const App = module.exports.default;
     if (typeof App !== "function") {
-      throw new Error("The artifact must export a component as its default.");
+      throw new Error("The app must export a component as its default.");
     }
     const root = document.getElementById("root");
     if (!root) throw new Error("The page has no root element.");

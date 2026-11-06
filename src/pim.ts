@@ -428,7 +428,7 @@ const ANY_RESULT = { "~standard": { version: 1, vendor: "pim", validate: (value:
 const ARTIFACT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const VERSION = /^[1-9][0-9]{0,8}$/;
 
-/** An artifact API answer the browser must never keep: what it shows can be deleted, or the sign-in end. */
+/** An app API answer the browser must never keep: what it shows can be deleted, or the sign-in end. */
 /** Where the author's space keeps what one of their bots' tools made for one guest: images, so far. */
 const botFolder = (botId: string, guest: string) => `${FILES_ROOT}/bots/${botId}/${guest}`;
 
@@ -1853,7 +1853,7 @@ export class Pim extends DurableAgent<Env> {
 		return { ...result, text: replies.length > 0 ? replies.join("\n\n") : undefined, replies };
 	}
 
-	/** What this space holds: its database, and in R2 the images sent to it, its stored files, and its artifacts' and skills' files. */
+	/** What this space holds: its database, and in R2 the images sent to it, its stored files, and its apps' and skills' files. */
 	storedBytes(): number {
 		return this.ctx.storage.sql.databaseSize + this.images.bytes() + this.legacyFiles.storedBytes() + this.artifacts.fileBytes() + this.skills.fileBytes();
 	}
@@ -2595,19 +2595,19 @@ export class Pim extends DurableAgent<Env> {
 		};
 	}
 
-	/** An artifact shared with a guest's circle, or why they can't see it. */
+	/** An app shared with a guest's circle, or why they can't see it. */
 	#sharedArtifact(guest: Guest, id: string): { ok: true; artifact: ArtifactSummary } | { ok: false; status: number; reason: string } {
 		const access = this.#guestAccess(guest);
 		if (!access.ok) return { ok: false, status: 403, reason: access.reason };
 		const artifact = this.artifacts.get(id);
-		if (!artifact || !this.artifacts.circlesOf(id).includes(access.circle.id)) return { ok: false, status: 404, reason: `No artifact ${id}` };
+		if (!artifact || !this.artifacts.circlesOf(id).includes(access.circle.id)) return { ok: false, status: 404, reason: `No app ${id}` };
 		return { ok: true, artifact };
 	}
 
 	/**
-	 * The artifacts shared with a guest's circle, as their own space asks for
+	 * The apps shared with a guest's circle, as their own space asks for
 	 * them. Like a tool call, it's checked here every time: who they are,
-	 * that their circle is on, and that the artifact is shared with it.
+	 * that their circle is on, and that the app is shared with it.
 	 * Only the latest version is shared, and nothing of the chat it was made in.
 	 */
 	async guestArtifacts(guest: Guest): Promise<{ ok: true; artifacts: Omit<ArtifactSummary, "session">[] } | { ok: false; reason: string }> {
@@ -2616,7 +2616,7 @@ export class Pim extends DurableAgent<Env> {
 		return { ok: true, artifacts: this.artifacts.sharedWith(access.circle.id).map(({ session: _session, ...artifact }) => artifact) };
 	}
 
-	/** An artifact shared with a guest, as its latest version. */
+	/** An app shared with a guest, as its latest version. */
 	async guestArtifact(
 		guest: Guest,
 		id: string,
@@ -2629,7 +2629,7 @@ export class Pim extends DurableAgent<Env> {
 		return { ok: true, artifact, files: [...stored.files] };
 	}
 
-	/** A guest's call on what an artifact shared with them keeps for everyone using it (`window.pim.shared`). */
+	/** A guest's call on what an app shared with them keeps for everyone using it (`window.pim.shared`). */
 	async guestArtifactShared(
 		guest: Guest,
 		id: string,
@@ -2646,13 +2646,13 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * An artifact someone shared with this person, as their space answers for
+	 * An app someone shared with this person, as their space answers for
 	 * it now: its latest version, which `version` must still be.
 	 */
 	async #othersArtifact(username: string, id: string, version?: string) {
 		const share = this.visits.byUsername(username);
 		const me = this.#me();
-		if (!share || share.revoked || me === null) throw new HttpError(404, `${username} doesn't share artifacts with you`);
+		if (!share || share.revoked || me === null) throw new HttpError(404, `${username} doesn't share apps with you`);
 		const host = await this.#pimOf(share.ownerId);
 		const found = await host.guestArtifact(me, id);
 		if (!found.ok) throw new HttpError(found.status, found.reason);
@@ -3698,7 +3698,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.agents.get(id)) this.agents.setPublished(id, template);
 	}
 
-	/** The latest version of one of the owner's artifacts, for the Worker to publish to the gallery. */
+	/** The latest version of one of the owner's apps, for the Worker to publish to the gallery. */
 	async artifactToPublish(id: string): Promise<ArtifactToPublish | null> {
 		this.#assertOpen();
 		const artifact = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
@@ -3709,8 +3709,8 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * A bridge call from an artifact someone published, which the owner opened
-	 * from the gallery. Like an artifact shared with them, it keeps what it
+	 * A bridge call from an app someone published, which the owner opened
+	 * from the gallery. Like an app shared with them, it keeps what it
 	 * keeps for them here (under `gallery/<id>`), and uses their model and
 	 * tools once they allow its version. It keeps nothing for everyone.
 	 */
@@ -3720,7 +3720,7 @@ export class Pim extends DurableAgent<Env> {
 	): Promise<{ ok: true; answer: unknown } | { ok: false; status: number; reason: string }> {
 		try {
 			const shared = async () => {
-				throw new HttpError(400, "A published artifact keeps nothing for everyone: pim.shared works only in artifacts shared with circles.");
+				throw new HttpError(400, "A published app keeps nothing for everyone: pim.shared works only in apps shared with circles.");
 			};
 			return { ok: true, answer: await this.#artifactBridge(`gallery/${published.id}`, published.sha256, call.op, call.args, shared) };
 		} catch (error) {
@@ -3729,7 +3729,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Lets the owner's model or a tool be used by a published artifact's version they opened. */
+	/** Lets the owner's model or a tool be used by a published app's version they opened. */
 	async publishedArtifactGrant(
 		published: { id: string; sha256: string },
 		capability: unknown,
@@ -3742,7 +3742,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Makes a published artifact one of the owner's: a new artifact with copies of its files, theirs to change. */
+	/** Makes a published app one of the owner's: a new app with copies of its files, theirs to change. */
 	async adoptArtifact(published: { title: string; kind: ArtifactKind; owner: string; files: readonly ArtifactFile[] }): Promise<ArtifactSummary> {
 		this.#assertOpen();
 		const loaded = await readFiles(this.env.ARTIFACTS, published.owner, published.files);
@@ -4145,7 +4145,7 @@ export class Pim extends DurableAgent<Env> {
 		if ((await this.listSchedules()).some((schedule) => own.has(schedule.callback))) remaining.push("schedules");
 		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("connector connections");
 		if (await this.images.any()) remaining.push("images");
-		if (await this.artifacts.anyFiles()) remaining.push("artifact files");
+		if (await this.artifacts.anyFiles()) remaining.push("app files");
 		return remaining;
 	}
 
@@ -4270,7 +4270,7 @@ export class Pim extends DurableAgent<Env> {
 		return { ...this.#publicSession(notification), agent: agent ? { id: agent.id, icon: agent.icon, symbol: agent.symbol, color: agent.color } : null };
 	}
 
-	/** An artifact as it leaves the space. One made in a task's conversation that isn't a chat belongs to the chat the task began in, where the person can open it beside the chat. */
+	/** An app as it leaves the space. One made in a task's conversation that isn't a chat belongs to the chat the task began in, where the person can open it beside the chat. */
 	#publicArtifact<T extends { readonly session: string | null }>(artifact: T): T {
 		const session = artifact.session === null ? null : (this.#taskApart(artifact.session)?.root ?? artifact.session);
 		return this.#publicSession({ ...artifact, session });
@@ -4286,7 +4286,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Answers an artifact request. A token in the address is refused: the API
+	 * Answers an app request. A token in the address is refused: the API
 	 * takes one there only for WebSockets, and an address with a token in it
 	 * can be passed on, logged or kept in history.
 	 */
@@ -4319,14 +4319,14 @@ export class Pim extends DurableAgent<Env> {
 
 	#artifact(id: string) {
 		const artifact = ARTIFACT_ID.test(id) ? this.artifacts.get(id) : undefined;
-		if (!artifact) throw new HttpError(404, `No artifact ${id}`);
+		if (!artifact) throw new HttpError(404, `No app ${id}`);
 		return artifact;
 	}
 
 	/**
-	 * An app tool an artifact may call, by its pi name: one the owner lets
+	 * A connector tool an app may call, by its pi name: one the owner lets
 	 * run without asking. A tool that asks first can't be used from an
-	 * artifact, since nothing there could show the person what it's about to do.
+	 * app, since nothing there could show the person what it's about to do.
 	 */
 	#artifactTool(name: unknown) {
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
@@ -4335,7 +4335,7 @@ export class Pim extends DurableAgent<Env> {
 			if (!server || toolName(server.id, tool.name) !== name) continue;
 			if (server.state !== "ready") throw new HttpError(503, `${server.name} isn't connected right now.`);
 			if (appToolPermission(this.store, server, tool).permission !== "on") {
-				throw new HttpError(403, `${server.name}'s ${tool.name} asks you before it runs, or is off, so an artifact can't use it.`);
+				throw new HttpError(403, `${server.name}'s ${tool.name} asks you before it runs, or is off, so an app can't use it.`);
 			}
 			return { server, tool, label: `${server.name}: ${tool.annotations?.title ?? tool.name}` };
 		}
@@ -4343,13 +4343,13 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * One call an artifact made through the bridge, as the app relays it,
-	 * for the person this space is: on their own artifact, or one shared with
-	 * them, which this space knows by `key` (its own artifact's id, or
+	 * One call an app made through the bridge, as the web app relays it,
+	 * for the person this space is: on their own app, or one shared with
+	 * them, which this space knows by `key` (its own app's id, or
 	 * `<host>/<id>`). What it keeps for them (`storage`) and needs no
 	 * permission is kept here; the model and connector tools are theirs too, and
 	 * need their permission, given to this version (`needs` asks for it).
-	 * What everyone using it sees (`shared`) is the artifact owner's,
+	 * What everyone using it sees (`shared`) is the app owner's,
 	 * reached through `shared`.
 	 */
 	async #artifactBridge(
@@ -4389,7 +4389,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** A storage call (`storage.get`, `shared.set`, ...) on what an artifact keeps here, in a scope. */
+	/** A storage call (`storage.get`, `shared.set`, ...) on what an app keeps here, in a scope. */
 	#artifactData(key: string, scope: DataScope, op: string, args: Record<string, unknown>): unknown {
 		switch (op.slice(op.indexOf(".") + 1)) {
 			case "get":
@@ -4409,7 +4409,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Lets the person use `capability` from a version of an artifact, by the key this space knows it by. */
+	/** Lets the person use `capability` from a version of an app, by the key this space knows it by. */
 	#grantArtifact(key: string, sha: string, capability: unknown): string {
 		if (capability !== "model") {
 			if (typeof capability !== "string" || !capability.startsWith("tool:")) throw new HttpError(400, "capability must be model or tool:<name>");
@@ -4423,7 +4423,7 @@ export class Pim extends DurableAgent<Env> {
 	#artifactVersion(id: string, version: string) {
 		const artifact = this.#artifact(id);
 		const found = VERSION.test(version) ? this.artifacts.version(artifact.id, Number(version)) : undefined;
-		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		if (!found) throw new HttpError(404, `No version ${version} of app ${id}`);
 		return { artifact, found };
 	}
 
@@ -4958,7 +4958,7 @@ export class Pim extends DurableAgent<Env> {
 		],
 		["GET", "/usage", () => this.usageReport()],
 
-		// Artifacts: what the agent made, every version kept. Their bytes are never kept by the browser,
+		// Apps: what the agent made, every version kept. Their bytes are never kept by the browser,
 		// and HTML in them runs only sandboxed (see ./artifacts.ts).
 		["GET", "/artifacts", (_params, _request, url) => this.#artifactRequest(url, () => noStore({ artifacts: this.artifacts.list().map((artifact) => this.#publicArtifact(artifact)), bytes: this.artifacts.totalBytes() }))],
 		[
@@ -5082,7 +5082,7 @@ export class Pim extends DurableAgent<Env> {
 					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), circles: this.artifacts.circlesOf(artifact.id) });
 				}),
 		],
-		// Artifacts others shared with this person, from their spaces, which check each request.
+		// Apps others shared with this person, from their spaces, which check each request.
 		[
 			"GET",
 			"/shared-artifacts",
@@ -5096,7 +5096,7 @@ export class Pim extends DurableAgent<Env> {
 							const found = await (await this.#pimOf(share.ownerId)).guestArtifacts(me);
 							if (found.ok) shared.push(...found.artifacts.map((artifact) => ({ ...artifact, host: share.username })));
 						} catch (error) {
-							console.warn(`listing ${share.username}'s shared artifacts failed`, error);
+							console.warn(`listing ${share.username}'s shared apps failed`, error);
 						}
 					}
 					return noStore({ artifacts: shared.sort((a, b) => b.updatedAt - a.updatedAt) });

@@ -159,7 +159,7 @@ export function useNavigationState() {
   };
 }
 
-/** The panel the URL names: notifications, your chats, artifacts, skills or schedules. */
+/** The panel the URL names: notifications, your chats, apps, skills or schedules. */
 export function SidebarPanelContent({
   awaitingApproval,
   onNavigate,
@@ -183,7 +183,7 @@ export function SidebarPanelContent({
 
 /**
  * The sidebar on wider screens: a rail of icons beside a panel. The icons at
- * the top choose what the panel shows (notifications, your chats, artifacts,
+ * the top choose what the panel shows (notifications, your chats, apps,
  * skills or schedules) while the open chat stays where it is; those at
  * the bottom open dialogs over it. Choosing the panel that's already showing
  * collapses the sidebar to the rail, and choosing any panel brings it back.

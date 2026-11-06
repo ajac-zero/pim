@@ -10,7 +10,7 @@ import { spotifyExtension } from "./src/extensions/spotify";
  * their chats show, and abilities for every agent. Add an extension's import to the list and deploy;
  * take one out and nobody has it anymore. See docs/extensions.md.
  *
- * Pim's own abilities (goals, schedules, memory, artifacts) are always
+ * Pim's own abilities (goals, schedules, memory, apps) are always
  * installed, with their widgets, and so are Pim's own color themes: they
  * aren't listed here.
  */

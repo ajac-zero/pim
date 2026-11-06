@@ -16,7 +16,7 @@ export default defineConfig({
 			// The secrets of the test extension's bank connector, and the client registered for its Forge app.
 			// The OAuth clients of the test Google connectors and of Gmail and Drive, Drive's Picker's key and project, and the key that encrypts connectors' credentials.
 			// Spotify's client, so its sign-in is tested as the deployment offers it.
-			// A content origin, so public artifact links are on.
+			// A content origin, so public app links are on.
 			// Traces with their content, so the tests check what an operator who opts in would see.
 			// A local Chrome, which the tests' computers browse with (test/helpers.ts's `testBrowser`).
 			miniflare: {

@@ -15,7 +15,7 @@ import { HttpError } from "./http";
  *
  * Besides its instructions (its SKILL.md), a skill can have supporting
  * files: references, templates, or scripts to run on the person's computer,
- * by paths such as `references/guide.md`. As with artifacts' files, their
+ * by paths such as `references/guide.md`. As with apps' files, their
  * bytes are in R2 (the space's `BLOBS` bucket, at `<owner>/skills/<sha256>`),
  * each stored once however many versions and skills have it, and this
  * object keeps what each version lists (see ./file-store.ts). Versions from

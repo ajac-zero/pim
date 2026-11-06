@@ -199,7 +199,7 @@ html[data-resizing] iframe {
 }
 
 /*
- * Printing an artifact (and saving it as a PDF): the page prints only the
+ * Printing an app (and saving it as a PDF): the page prints only the
  * copy of it in `.print-area`, at its full height, and nothing of the app.
  */
 @media screen {

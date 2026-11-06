@@ -1,5 +1,5 @@
 /**
- * Artifacts: documents and small interactive pages the agent makes for its
+ * Apps: documents and small interactive pages the agent makes for its
  * owner, kept in the owner's own Durable Object with every version.
  *
  * - Versions are append-only. Editing, or restoring an older version, adds
@@ -8,15 +8,15 @@
  * - Every write names the version it was based on, and is refused (409)
  *   when that is no longer the latest: the agent and the person can't
  *   overwrite each other's change unseen.
- * - Sizes are bounded per version, per artifact (versions) and in total,
+ * - Sizes are bounded per version, per app (versions) and in total,
  *   counted from the stored versions themselves, before anything is written.
- * - A version is a set of files. Their bytes are in the artifacts' R2
+ * - A version is a set of files. Their bytes are in the apps' R2
  *   bucket, under the owner's name and their SHA-256, each stored once however many
- *   versions and artifacts have it; this object keeps what each version
+ *   versions and apps have it; this object keeps what each version
  *   lists. Versions from before files were in R2 keep their one file here,
  *   until someone else needs it (see `stored`).
  *
- * An HTML artifact runs, in the browser, only in a sandbox with an opaque
+ * An HTML app runs, in the browser, only in a sandbox with an opaque
  * origin (see `artifactHtmlHeaders`); this module only stores it.
  */
 
@@ -85,10 +85,10 @@ export type ArtifactVersionInfo = {
 
 export type ArtifactVersion = ArtifactVersionInfo & { readonly artifact: string; readonly files: readonly ArtifactFile[] };
 
-/** Whose data an artifact keeps: the person using it (`own`), or everyone using it (`shared`). */
+/** Whose data an app keeps: the person using it (`own`), or everyone using it (`shared`). */
 export type DataScope = "own" | "shared";
 
-/** The limits artifacts count against; null is none (the hard caps still apply). */
+/** The limits apps count against; null is none (the hard caps still apply). */
 export type ArtifactLimits = {
 	readonly artifacts: number | null;
 	readonly artifactVersions: number | null;
@@ -110,7 +110,7 @@ const MAX_PATH_LENGTH = 200;
 /** How many bytes of files an export carries inline; the rest are listed by hash. */
 const EXPORT_INLINE_BYTES = 32_000_000;
 /**
- * What one artifact, and all of them, may keep through the bridge, keys and
+ * What one app, and all of them, may keep through the bridge, keys and
  * values together, in UTF-8 bytes: an export holds it all in memory too.
  */
 export const MAX_ARTIFACT_DATA_BYTES = 1_000_000;
@@ -141,11 +141,11 @@ CREATE TABLE IF NOT EXISTS pim_artifact_versions (
 	created_at INTEGER NOT NULL,
 	PRIMARY KEY (artifact, version)
 );
--- Ids of deleted artifacts, and when: no title, content or hash. A replayed create of one must not bring it back.
--- Never pruned, since any id may still be replayed. One row (about 100 bytes) exists per artifact that was made and
+-- Ids of deleted apps, and when: no title, content or hash. A replayed create of one must not bring it back.
+-- Never pruned, since any id may still be replayed. One row (about 100 bytes) exists per app that was made and
 -- then deleted, and each is made by a model request: the daily request limit caps the rate, and the rows count
--- in the database size the storage quota refuses new artifacts against. (A deletion needs no room.)
--- What an artifact keeps through the bridge: text under keys, kept across its versions and deleted with it. Scope
+-- in the database size the storage quota refuses new apps against. (A deletion needs no room.)
+-- What an app keeps through the bridge: text under keys, kept across its versions and deleted with it. Scope
 -- \`own\` is what it keeps for the person using it (window.pim.storage); \`shared\`, what everyone using it sees.
 CREATE TABLE IF NOT EXISTS pim_artifact_data (
 	artifact TEXT NOT NULL,
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS pim_artifact_data (
 	updated_at INTEGER NOT NULL,
 	PRIMARY KEY (artifact, scope, key)
 );
--- What the person let one version of an artifact use through the bridge: the model, or an app's tool. A new
+-- What the person let one version of an app use through the bridge: the model, or a connector's tool. A new
 -- version, which is new code, asks again.
 CREATE TABLE IF NOT EXISTS pim_artifact_grants (
 	artifact TEXT NOT NULL,
@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS pim_artifact_grants (
 	granted_at INTEGER NOT NULL,
 	PRIMARY KEY (artifact, sha256, capability)
 );
--- The circles an artifact is shared with: their people see its latest version from their own space.
+-- The circles an app is shared with: their people see its latest version from their own space.
 CREATE TABLE IF NOT EXISTS pim_artifact_circles (
 	artifact TEXT NOT NULL,
 	circle TEXT NOT NULL,
@@ -304,7 +304,7 @@ export function checkKind(kind: unknown): ArtifactKind {
 	return kind as ArtifactKind;
 }
 
-/** An SVG artifact's markup: an `<svg>` element, after at most an XML declaration and comments. */
+/** An SVG app's markup: an `<svg>` element, after at most an XML declaration and comments. */
 const SVG_START = /^\s*(<\?xml[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
 
 /** The kinds whose main file can use files of their own: a page's scripts, styles and images, an app's modules. */
@@ -319,13 +319,13 @@ export function checkContent(kind: ArtifactKind, content: string): void {
 export function checkFiles(kind: ArtifactKind, files: LoadedFiles): void {
 	const entry = ENTRY_FILES[kind];
 	const main = files.get(entry);
-	if (!main) throw new HttpError(400, `A ${kind} artifact needs its main file, ${entry}.`);
+	if (!main) throw new HttpError(400, `A ${kind} app needs its main file, ${entry}.`);
 	if (files.size > 1 && !MULTI_FILE_KINDS.includes(kind)) {
-		throw new HttpError(400, `Only HTML and JSX artifacts can have files besides their main one; a ${kind} artifact is ${entry} alone.`);
+		throw new HttpError(400, `Only HTML and JSX apps can have files besides their main one; a ${kind} app is ${entry} alone.`);
 	}
 	const content = textOf(main.bytes);
-	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG artifact must be one <svg> element, starting with <svg.");
-	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid artifact needs a diagram.");
+	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG app must be one <svg> element, starting with <svg.");
+	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid app needs a diagram.");
 	if (kind === "jsx") compileJsxApp(files, entry);
 }
 
@@ -342,7 +342,7 @@ export function applyEdits(content: string, edits: readonly { find: string; repl
 	edits.forEach(({ find, replace }, index) => {
 		if (find === "") throw new HttpError(400, `Edit ${index + 1}: find must not be empty`);
 		const first = result.indexOf(find);
-		if (first === -1) throw new HttpError(400, `Edit ${index + 1}: its find text is not in the artifact. Read it again and copy the text exactly.`);
+		if (first === -1) throw new HttpError(400, `Edit ${index + 1}: its find text is not in the app. Read it again and copy the text exactly.`);
 		if (result.indexOf(find, first + 1) !== -1) {
 			throw new HttpError(400, `Edit ${index + 1}: its find text appears more than once. Include more of the surrounding text so it matches once.`);
 		}
@@ -387,7 +387,7 @@ export class ArtifactStore {
 		});
 	}
 
-	/** Every artifact, most recently changed first. */
+	/** Every app, most recently changed first. */
 	list(): ArtifactSummary[] {
 		return this.#sql
 			.exec(`${SUMMARY} ORDER BY a.updated_at DESC, a.rowid DESC`)
@@ -455,7 +455,7 @@ export class ArtifactStore {
 	/** A version's files with their bytes; only those at `paths`, if given. */
 	async read(id: string, version: number, paths?: readonly string[]): Promise<Map<string, { type: string; bytes: Uint8Array }>> {
 		const found = this.version(id, version);
-		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		if (!found) throw new HttpError(404, `No version ${version} of app ${id}`);
 		const wanted = paths ? found.files.filter((file) => paths.includes(file.path)) : found.files;
 		if (this.#inline(id, version)) {
 			const [row] = this.#sql.exec("SELECT content FROM pim_artifact_versions WHERE artifact = ? AND version = ?", id, version).toArray();
@@ -467,7 +467,7 @@ export class ArtifactStore {
 	/** One file of a version as text: its main file, unless `path` names another. */
 	async text(id: string, version: number, path?: string): Promise<string> {
 		const found = this.version(id, version);
-		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		if (!found) throw new HttpError(404, `No version ${version} of app ${id}`);
 		const wanted = path ?? ENTRY_FILES[this.get(id)!.kind];
 		if (!found.files.some((file) => file.path === wanted)) throw new HttpError(404, `Version ${version} has no file ${wanted}`);
 		return textOf((await this.read(id, version, [wanted])).get(wanted)!.bytes);
@@ -479,7 +479,7 @@ export class ArtifactStore {
 	 */
 	async stored(id: string, version: number): Promise<ArtifactVersion> {
 		const found = this.version(id, version);
-		if (!found) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		if (!found) throw new HttpError(404, `No version ${version} of app ${id}`);
 		if (!this.#inline(id, version)) return found;
 		const [row] = this.#sql.exec("SELECT content FROM pim_artifact_versions WHERE artifact = ? AND version = ?", id, version).toArray();
 		const file = found.files[0]!;
@@ -491,12 +491,12 @@ export class ArtifactStore {
 		return this.version(id, version)!;
 	}
 
-	/** Bytes all artifacts take: each distinct file once, and versions from before files as they are. */
+	/** Bytes all apps take: each distinct file once, and versions from before files as they are. */
 	totalBytes(): number {
 		return this.fileBytes() + Number(this.#sql.exec(`SELECT COALESCE(SUM(size), 0) AS total FROM pim_artifact_versions v WHERE ${INLINE}`).one().total);
 	}
 
-	/** Bytes artifacts keep in R2, outside this object's database. */
+	/** Bytes apps keep in R2, outside this object's database. */
 	fileBytes(): number {
 		return Number(this.#sql.exec("SELECT COALESCE(SUM(size), 0) AS total FROM (SELECT sha256, MAX(size) AS size FROM pim_artifact_files GROUP BY sha256)").one().total);
 	}
@@ -508,19 +508,19 @@ export class ArtifactStore {
 
 	/**
 	 * Refuses a version that would break a limit: its files' size, the
-	 * versions one artifact keeps, how many artifacts there are, and the
+	 * versions one app keeps, how many apps there are, and the
 	 * bytes its new files would add. `artifact` is null for a new one.
 	 */
 	#checkRoom(draft: Draft, artifact: string | null): void {
 		const limits = this.#limits();
 		const size = draft.files.reduce((total, file) => total + file.size, 0);
 		const perVersion = Math.min(MAX_ARTIFACT_BYTES, limits.artifactBytes ?? MAX_ARTIFACT_BYTES);
-		if (size > perVersion) throw new HttpError(413, `An artifact can be at most ${perVersion} bytes; this one is ${size}. Make it smaller.`);
-		if (draft.files.length > MAX_ARTIFACT_FILES) throw new HttpError(413, `An artifact can have at most ${MAX_ARTIFACT_FILES} files; this one has ${draft.files.length}.`);
+		if (size > perVersion) throw new HttpError(413, `An app can be at most ${perVersion} bytes; this one is ${size}. Make it smaller.`);
+		if (draft.files.length > MAX_ARTIFACT_FILES) throw new HttpError(413, `An app can have at most ${MAX_ARTIFACT_FILES} files; this one has ${draft.files.length}.`);
 		if (artifact === null) {
 			const count = Number(this.#sql.exec("SELECT COUNT(*) AS count FROM pim_artifacts").one().count);
 			if (limits.artifacts !== null && count >= limits.artifacts) {
-				throw new HttpError(429, `You can keep up to ${limits.artifacts} artifacts. Delete one first.`);
+				throw new HttpError(429, `You can keep up to ${limits.artifacts} apps. Delete one first.`);
 			}
 		} else if (limits.artifactVersions !== null) {
 			const count = Number(this.#sql.exec("SELECT COUNT(*) AS count FROM pim_artifact_versions WHERE artifact = ?", artifact).one().count);
@@ -538,7 +538,7 @@ export class ArtifactStore {
 		const total = Math.min(MAX_ARTIFACT_STORAGE_BYTES, limits.artifactStorageBytes ?? MAX_ARTIFACT_STORAGE_BYTES);
 		const used = this.totalBytes();
 		if (added > 0 && used + added > total) {
-			throw new HttpError(429, `Artifacts can take up to ${total} bytes in all; ${used} are used. Delete some first.`);
+			throw new HttpError(429, `Apps can take up to ${total} bytes in all; ${used} are used. Delete some first.`);
 		}
 		const room = this.#storageRoom();
 		if (room !== null && added > room) throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
@@ -548,7 +548,7 @@ export class ArtifactStore {
 	async #draft(kind: ArtifactKind, put: FileContents, base: readonly ArtifactFile[] = [], remove: readonly string[] = []): Promise<Draft> {
 		const files = new Map(base.map((file) => [file.path, file]));
 		for (const path of remove) {
-			if (path === ENTRY_FILES[kind]) throw new HttpError(400, `${path} is the artifact's main file, which it can't do without.`);
+			if (path === ENTRY_FILES[kind]) throw new HttpError(400, `${path} is the app's main file, which it can't do without.`);
 			if (!files.delete(checkPath(path))) throw new HttpError(400, `There is no file ${path} to delete.`);
 		}
 		const bytes = new Map<string, Uint8Array>();
@@ -558,7 +558,7 @@ export class ArtifactStore {
 			files.set(checkPath(path), { path, sha256: hash, size: data.byteLength, type: fileType(path) });
 			bytes.set(hash, data);
 		}
-		if (!files.has(ENTRY_FILES[kind])) throw new HttpError(400, `A ${kind} artifact needs its main file, ${ENTRY_FILES[kind]}.`);
+		if (!files.has(ENTRY_FILES[kind])) throw new HttpError(400, `A ${kind} app needs its main file, ${ENTRY_FILES[kind]}.`);
 		return { files: [...files.values()].sort((a, b) => (a.path < b.path ? -1 : 1)), bytes };
 	}
 
@@ -582,7 +582,7 @@ export class ArtifactStore {
 	}
 
 	/**
-	 * Makes an artifact with its first version: its main file's `content`,
+	 * Makes an app with its first version: its main file's `content`,
 	 * and any other `files`. Run again with the same id, it returns what the
 	 * first run made, or is refused (410) if that was deleted since.
 	 */
@@ -593,7 +593,7 @@ export class ArtifactStore {
 			const existing = this.version(input.id, 1);
 			if (existing) return existing;
 			if (this.#sql.exec("SELECT 1 FROM pim_artifact_deleted WHERE id = ?", input.id).toArray().length > 0) {
-				throw new HttpError(410, "This artifact was deleted, so this create, run again, made nothing. Make a new artifact if the user still wants it.");
+				throw new HttpError(410, "This app was deleted, so this create, run again, made nothing. Make a new app if the user still wants it.");
 			}
 			this.#checkRoom(draft, null);
 			return undefined;
@@ -643,7 +643,7 @@ export class ArtifactStore {
 		},
 	): Promise<{ version: ArtifactVersion; changed: boolean }> {
 		const summary = this.get(id);
-		if (!summary) throw new HttpError(404, `No artifact ${id}`);
+		if (!summary) throw new HttpError(404, `No app ${id}`);
 		const replayed = () => {
 			if (input.callId === undefined) return undefined;
 			const [made] = this.#sql.exec("SELECT version FROM pim_artifact_versions WHERE artifact = ? AND call_id = ?", id, input.callId).toArray();
@@ -660,7 +660,7 @@ export class ArtifactStore {
 			const again = replayed();
 			if (again) return again;
 			const current = this.get(id);
-			if (!current) throw new HttpError(404, `No artifact ${id}`);
+			if (!current) throw new HttpError(404, `No app ${id}`);
 			if (input.baseVersion !== current.version) {
 				throw new HttpError(409, `Version ${input.baseVersion} is not the latest: version ${current.version} is. Read it, then edit that.`);
 			}
@@ -689,12 +689,12 @@ export class ArtifactStore {
 
 	/** Restores `version` as a new latest version, if `baseVersion` is still the latest. */
 	async restore(id: string, version: number, baseVersion: number): Promise<ArtifactVersion> {
-		if (!this.version(id, version)) throw new HttpError(404, `No version ${version} of artifact ${id}`);
+		if (!this.version(id, version)) throw new HttpError(404, `No version ${version} of app ${id}`);
 		const old = await this.stored(id, version);
 		return (await this.append(id, { baseVersion, copy: old.files, source: "restore", restoredFrom: version })).version;
 	}
 
-	/** Deletes an artifact and every version of it, and then the files no other version has. */
+	/** Deletes an app and every version of it, and then the files no other version has. */
 	async delete(id: string): Promise<boolean> {
 		if (!this.get(id)) return false;
 		const hashes = this.#sql
@@ -713,7 +713,7 @@ export class ArtifactStore {
 		return true;
 	}
 
-	/** Deletes every file artifacts keep in R2, including any a lost write left unlisted. Run when the space is erased. */
+	/** Deletes every file apps keep in R2, including any a lost write left unlisted. Run when the space is erased. */
 	async deleteAllFiles(): Promise<void> {
 		let cursor: string | undefined;
 		do {
@@ -728,7 +728,7 @@ export class ArtifactStore {
 		return (await this.#bucket.list({ prefix: `${this.#owner()}/`, limit: 1 })).objects.length > 0;
 	}
 
-	/** A value the artifact kept, or null. */
+	/** A value the app kept, or null. */
 	dataGet(id: string, scope: DataScope, key: string): string | null {
 		const [row] = this.#sql
 			.exec("SELECT value FROM pim_artifact_data WHERE artifact = ? AND scope = ? AND key = ?", id, scope, checkKey(key))
@@ -736,7 +736,7 @@ export class ArtifactStore {
 		return row ? String(row.value) : null;
 	}
 
-	/** The keys the artifact kept, those starting with `prefix` if given, in order. */
+	/** The keys the app kept, those starting with `prefix` if given, in order. */
 	dataKeys(id: string, scope: DataScope, prefix = ""): string[] {
 		return this.#sql
 			.exec(
@@ -750,20 +750,20 @@ export class ArtifactStore {
 			.map((row) => String(row.key));
 	}
 
-	/** Keeps a value under a key for the artifact, within its room and the space's. */
+	/** Keeps a value under a key for the app, within its room and the space's. */
 	dataSet(id: string, scope: DataScope, key: string, value: string): void {
 		checkKey(key);
-		if (typeof value !== "string") throw new HttpError(400, "An artifact can keep only text: use JSON.stringify for anything else.");
+		if (typeof value !== "string") throw new HttpError(400, "An app can keep only text: use JSON.stringify for anything else.");
 		const size = utf8Bytes(key) + utf8Bytes(value);
 		const [old] = this.#sql.exec("SELECT size FROM pim_artifact_data WHERE artifact = ? AND scope = ? AND key = ?", id, scope, key).toArray();
 		const replaced = old ? Number(old.size) : 0;
 		const used = this.dataBytes(id, scope) - replaced;
 		if (used + size > MAX_ARTIFACT_DATA_BYTES) {
-			throw new HttpError(413, `An artifact can keep up to ${MAX_ARTIFACT_DATA_BYTES} bytes; this would make ${used + size}.`);
+			throw new HttpError(413, `An app can keep up to ${MAX_ARTIFACT_DATA_BYTES} bytes; this would make ${used + size}.`);
 		}
 		const all = Number(this.#sql.exec("SELECT COALESCE(SUM(size), 0) AS total FROM pim_artifact_data").one().total) - replaced;
 		if (all + size > MAX_ARTIFACT_DATA_TOTAL_BYTES) {
-			throw new HttpError(429, `Artifacts can keep up to ${MAX_ARTIFACT_DATA_TOTAL_BYTES} bytes in all; ${all} are used. Delete an artifact first.`);
+			throw new HttpError(429, `Apps can keep up to ${MAX_ARTIFACT_DATA_TOTAL_BYTES} bytes in all; ${all} are used. Delete an app first.`);
 		}
 		const room = this.#storageRoom();
 		if (room !== null && size > room) throw new HttpError(429, `Space storage quota exceeded: there is room for ${Math.max(0, room)} more bytes.`);
@@ -782,14 +782,14 @@ export class ArtifactStore {
 		this.#sql.exec("DELETE FROM pim_artifact_data WHERE artifact = ? AND scope = ? AND key = ?", id, scope, checkKey(key));
 	}
 
-	/** Bytes the artifact keeps through the bridge, in one scope. */
+	/** Bytes the app keeps through the bridge, in one scope. */
 	dataBytes(id: string, scope: DataScope): number {
 		return Number(
 			this.#sql.exec("SELECT COALESCE(SUM(size), 0) AS total FROM pim_artifact_data WHERE artifact = ? AND scope = ?", id, scope).one().total,
 		);
 	}
 
-	/** Everything the artifact keeps in a scope, by key. */
+	/** Everything the app keeps in a scope, by key. */
 	data(id: string, scope: DataScope): Record<string, string> {
 		return Object.fromEntries(
 			this.#sql
@@ -799,7 +799,7 @@ export class ArtifactStore {
 		);
 	}
 
-	/** The circles the artifact is shared with. */
+	/** The circles the app is shared with. */
 	circlesOf(id: string): string[] {
 		return this.#sql
 			.exec("SELECT circle FROM pim_artifact_circles WHERE artifact = ? ORDER BY circle", id)
@@ -807,13 +807,13 @@ export class ArtifactStore {
 			.map((row) => String(row.circle));
 	}
 
-	/** Shares the artifact with exactly these circles. */
+	/** Shares the app with exactly these circles. */
 	setCircles(id: string, circles: readonly string[]): void {
 		this.#sql.exec("DELETE FROM pim_artifact_circles WHERE artifact = ?", id);
 		for (const circle of new Set(circles)) this.#sql.exec("INSERT INTO pim_artifact_circles (artifact, circle) VALUES (?, ?)", id, circle);
 	}
 
-	/** The artifacts shared with a circle, most recently changed first. */
+	/** The apps shared with a circle, most recently changed first. */
 	sharedWith(circle: string): ArtifactSummary[] {
 		const ids = new Set(
 			this.#sql
@@ -830,7 +830,7 @@ export class ArtifactStore {
 	}
 
 	/**
-	 * What this person keeps for artifacts that aren't theirs: others' they
+	 * What this person keeps for apps that aren't theirs: others' they
 	 * use, shared or published, by the key the bridge kept it under.
 	 */
 	othersData(): { artifact: string; data: Record<string, string> }[] {
@@ -850,7 +850,7 @@ export class ArtifactStore {
 	}
 
 	/**
-	 * Every artifact with every version and the files each has, for the
+	 * Every app with every version and the files each has, for the
 	 * owner's export, and the files' contents by hash, once each: text as
 	 * text, anything else as base64. Past `EXPORT_INLINE_BYTES`, files are
 	 * listed without their contents, which the app still downloads.
@@ -889,7 +889,7 @@ export class ArtifactStore {
 }
 
 /**
- * Headers for any response that carries an artifact's bytes. HTML in it can
+ * Headers for any response that carries an app's bytes. HTML in it can
  * only ever run sandboxed, in an opaque origin: even opened directly in a tab,
  * it can't read this origin's cookies or storage, or call its API. The CSP
  * also keeps it from loading anything or connecting anywhere, except, with
@@ -903,7 +903,7 @@ export function artifactHeaders(origin: string, contentType: string, options: { 
 		"content-security-policy": [
 			"sandbox allow-scripts",
 			"default-src 'none'",
-			// A diagram or a JSX artifact also loads the scripts it runs on, Pim's own (see `RUNTIME_PATH`).
+			// A diagram or a JSX app also loads the scripts it runs on, Pim's own (see `RUNTIME_PATH`).
 			options.runtime ? `script-src 'unsafe-inline' ${origin}${RUNTIME_PATH}` : "script-src 'unsafe-inline'",
 			"style-src 'unsafe-inline'",
 			"img-src data: blob:",
@@ -924,13 +924,13 @@ export function artifactHeaders(origin: string, contentType: string, options: { 
 
 /**
  * Reports the page's height to the app that shows it, the one message an
- * artifact sends. Added after the artifact's own markup, so it can't change
+ * app sends. Added after the app's own markup, so it can't change
  * how the document is parsed.
  */
 export const RESIZE_SCRIPT = `<script>(()=>{let last=-1;const post=()=>{const h=Math.ceil(document.documentElement.scrollHeight);if(h!==last){last=h;parent.postMessage({type:"pim:artifact-height",height:h},"*")}};addEventListener("load",post);new ResizeObserver(post).observe(document.documentElement);post()})()</script>`;
 
 /**
- * Where the scripts that diagrams and JSX artifacts run on are served from:
+ * Where the scripts that diagrams and JSX apps run on are served from:
  * static files the web app's build makes (`web/scripts/build-artifact-runtimes.mjs`),
  * the same for everyone, which load nothing else.
  */
@@ -939,21 +939,21 @@ export const RUNTIME_PATH = "/artifact-runtime/";
 const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /**
- * The bridge an artifact reaches Pim through: `window.pim`, whose calls are
+ * The bridge an app reaches Pim through: `window.pim`, whose calls are
  * messages to the app that shows it, which asks Pim and the person (see
  * `ArtifactFrame` in the web app). It answers only messages from that app,
- * the frame's parent. Added before the artifact's own scripts, so they find it.
+ * the frame's parent. Added before the app's own scripts, so they find it.
  * A page open on its own, with no app around it, gets failed calls.
  *
  * In the app, it also keeps the page's moves within itself (a link to a
  * `#section`, `history.pushState`) out of the browser's history, which the
  * frame shares with the app: otherwise Back would undo them one by one
- * instead of leaving the artifact. A link the page handles itself is left alone.
+ * instead of leaving the app. A link the page handles itself is left alone.
  */
 export const BRIDGE_SCRIPT = `<script>(()=>{let next=0;const waiting=new Map();const alone=parent===window;if(!alone){const replace=history.replaceState.bind(history);history.pushState=(state,title,url)=>replace(state,title,url);addEventListener("click",(event)=>{const link=event.target instanceof Element?event.target.closest("a[href]"):null;if(event.defaultPrevented||!link||typeof link.href!=="string"||(link.target&&link.target!=="_self"))return;const [page,hash]=link.href.split("#");if(hash===undefined||page!==location.href.split("#")[0])return;event.preventDefault();location.replace(link.href)})}addEventListener("message",(event)=>{if(event.source!==parent)return;const data=event.data;if(!data||data.type!=="pim:reply"||!waiting.has(data.id))return;const [resolve,reject]=waiting.get(data.id);waiting.delete(data.id);if(data.error!==undefined)reject(new Error(String(data.error)));else resolve(data.value)});const call=(op,args)=>alone?Promise.reject(new Error("Pim isn't here: this page is open on its own.")):new Promise((resolve,reject)=>{const id=++next;waiting.set(id,[resolve,reject]);parent.postMessage({type:"pim:call",id,op,args},"*")});const store=(scope)=>Object.freeze({get:(key)=>call(scope+".get",{key}),set:(key,value)=>call(scope+".set",{key,value}),delete:(key)=>call(scope+".delete",{key}),list:(prefix)=>call(scope+".list",{prefix})});window.pim=Object.freeze({storage:store("storage"),shared:store("shared"),ask:(prompt)=>call("model.ask",{prompt}),tools:Object.freeze({call:(name,input)=>call("tools.call",{name,input})})})})()</script>`;
 
 /**
- * An HTML artifact with the bridge added first: after its doctype, so the
+ * An HTML app with the bridge added first: after its doctype, so the
  * page keeps standards mode, and before everything else of its own.
  */
 function withBridge(content: string): string {
@@ -967,7 +967,7 @@ const PAGE_HEAD =
 	BRIDGE_SCRIPT;
 
 /**
- * The page a framed version is shown as: an HTML artifact as it is; an SVG
+ * The page a framed version is shown as: an HTML app as it is; an SVG
  * one in a page that fits it to the frame; a Mermaid one as its source, in
  * text, which the Mermaid runtime draws; a JSX one compiled, after the React
  * runtime and the modules it imports. Each ends with the height script.
@@ -975,7 +975,7 @@ const PAGE_HEAD =
 export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string): Response {
 	const entry = ENTRY_FILES[kind];
 	const main = files.get(entry);
-	if (!main) throw new HttpError(404, `The artifact has no ${entry}`);
+	if (!main) throw new HttpError(404, `The app has no ${entry}`);
 	const content = textOf(main.bytes);
 	const html = (body: string, runtime = false) =>
 		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
@@ -999,13 +999,13 @@ export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string
 			);
 		}
 		default:
-			throw new HttpError(404, "This kind of artifact isn't shown in a frame");
+			throw new HttpError(404, "This kind of app isn't shown in a frame");
 	}
 }
 
 /**
  * The page a diagram in an agent's message is drawn in: framed and sandboxed
- * as artifacts are, with nothing of anyone's in it. The app that frames it
+ * as apps are, with nothing of anyone's in it. The app that frames it
  * posts it the diagram's Mermaid source and its light or dark mode, which
  * only the frame's parent may; the page draws it on a transparent
  * background, reports its height, and says if it can't (see the Mermaid
@@ -1024,7 +1024,7 @@ export function diagramPage(origin: string): Response {
 	return new Response(page, { headers });
 }
 
-/** What an attribute names, as one of the artifact's files, if it is one: relative to the main file, without a query or fragment. */
+/** What an attribute names, as one of the app's files, if it is one: relative to the main file, without a query or fragment. */
 function ownFile(files: LoadedFiles, reference: string | null) {
 	if (!reference || /^[a-z][a-z0-9+.-]*:|^\/\/|^#/i.test(reference.trim())) return undefined;
 	const path = resolvePath(ENTRY_FILES.html, reference.trim().split(/[?#]/)[0]!);

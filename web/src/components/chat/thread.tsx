@@ -71,8 +71,14 @@ import {
   appsQuery,
 } from "~/lib/queries";
 
-/** Tools whose answer names an artifact version, shown as the artifact itself: one made, changed or shown again. */
+/**
+ * Tools whose answer names an app's version, shown as the app itself: one made, changed or shown again.
+ * Chats from before artifacts became apps name them `artifact_*`.
+ */
 const ARTIFACT_TOOLS = new Set([
+  "app_create",
+  "app_update",
+  "app_show",
   "artifact_create",
   "artifact_update",
   "artifact_show",
@@ -273,7 +279,7 @@ export const Thread = memo(function Thread({
     return [...all, ...view.live];
   }, [view.entries, view.live, pending]);
 
-  // The entries the chat had when it was shown: an artifact made after them,
+  // The entries the chat had when it was shown: an app made after them,
   // while the person watches, opens in the canvas by itself. A chat shown as
   // it was left counts from its snapshot, which has what was made meanwhile.
   const shownWith = useRef<{ session: string; keys: Set<string> } | null>(null);
@@ -385,7 +391,7 @@ export const Thread = memo(function Thread({
   };
 
   /*
-   * Only user-facing approvals, tasks, artifacts and images are drawn from tool
+   * Only user-facing approvals, tasks, apps and images are drawn from tool
    * calls. An image a visit's agent made is in that space's files, which
    * this app can't open.
    */

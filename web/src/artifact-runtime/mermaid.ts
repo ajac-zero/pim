@@ -1,5 +1,5 @@
 /**
- * Draws Mermaid diagrams inside a sandboxed frame. A Mermaid artifact's page
+ * Draws Mermaid diagrams inside a sandboxed frame. A Mermaid app's page
  * has the diagram's source, as text, in `<pre class="mermaid">`; a diagram
  * in an agent's message is posted to its page by the app that shows it (see
  * `diagramPage` in src/artifacts.ts). Mermaid's strict security level keeps
@@ -30,7 +30,7 @@ function failed(error: unknown) {
 }
 
 const artifact = document.querySelector<HTMLElement>("pre.mermaid");
-// An artifact's frame is always white, like every artifact's.
+// An app's frame is always white, like every app's.
 if (artifact) draw(artifact, false, false).catch(failed);
 
 let observed = false;

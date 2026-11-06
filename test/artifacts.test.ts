@@ -46,7 +46,7 @@ async function callTool(name: string, args: Record<string, unknown>, session = R
 const PAGE = `<!doctype html><html><head><title>Tip</title><style>body{font:16px sans-serif}</style></head><body><h1>Tip calculator</h1><p id="total">0</p><script>document.getElementById("total").textContent = String(12 * 1.2);</script></body></html>`;
 
 async function makePage(content = PAGE, title = "Tip calculator") {
-	const result = await callTool("artifact_create", { title, kind: "html", content });
+	const result = await callTool("app_create", { title, kind: "html", content });
 	expect(result.isError).toBe(false);
 	return JSON.parse(result.text).artifact as { id: string; version: number; sha256: string; size: number };
 }
@@ -62,27 +62,27 @@ describe("artifacts", () => {
 		expect(version).toMatchObject({ content: PAGE, sha256: made.sha256, source: "agent", latest: 1 });
 
 		// Reading returns the source it was asked for.
-		const read = await callTool("artifact_read", { id: made.id });
+		const read = await callTool("app_read", { id: made.id });
 		expect(read.text).toContain(PAGE);
-		const part = await callTool("artifact_read", { id: made.id, offset: PAGE.length - 10 });
+		const part = await callTool("app_read", { id: made.id, offset: PAGE.length - 10 });
 		expect(part.text).toContain(PAGE.slice(-10));
 		expect(part.text).not.toContain("<!doctype");
 
 		// Found by words of its title, and shown again as the same reference, changing nothing.
 		await makePage("<p>Notes</p>", "Meeting notes");
-		const found = await callTool("artifact_list", { query: "CALCULATOR tip" });
+		const found = await callTool("app_list", { query: "CALCULATOR tip" });
 		expect(found.text).toContain(made.id);
 		expect(found.text).not.toContain("Meeting notes");
-		expect((await callTool("artifact_list", { query: "robot" })).text).toBe("No artifact's title has robot.");
-		const shown = await callTool("artifact_show", { id: made.id });
+		expect((await callTool("app_list", { query: "robot" })).text).toBe("No app's title has robot.");
+		const shown = await callTool("app_show", { id: made.id });
 		expect(JSON.parse(shown.text).artifact).toEqual({ ...made, title: "Tip calculator", kind: "html" });
 		expect((await api(`/artifacts/${made.id}`)).body).toMatchObject({ version: 1, history: [expect.anything()] });
-		expect((await callTool("artifact_show", { id: made.id, version: 2 })).isError).toBe(true);
+		expect((await callTool("app_show", { id: made.id, version: 2 })).isError).toBe(true);
 	});
 
 	it("are described to the model without promising they can't send data out", async () => {
 		const { tools } = (await api<{ tools: { name: string; description: string }[] }>("/")).body;
-		const create = tools.find((tool) => tool.name === "artifact_create")!;
+		const create = tools.find((tool) => tool.name === "app_create")!;
 		expect(create.description).not.toMatch(/no network/i);
 		expect(create.description).toContain("navigate itself away");
 	});
@@ -128,7 +128,7 @@ describe("artifacts", () => {
 		expect(await response.text()).toBe(PAGE);
 
 		// Markdown is never served as anything that runs, and isn't shown in a frame.
-		const notes = await callTool("artifact_create", { title: "Notes", kind: "markdown", content: "# Notes\n\n<script>alert(1)</script>" });
+		const notes = await callTool("app_create", { title: "Notes", kind: "markdown", content: "# Notes\n\n<script>alert(1)</script>" });
 		const id = JSON.parse(notes.text).artifact.id;
 		const markdown = await raw(`/artifacts/${id}/versions/1/download`);
 		expect(markdown.headers.get("content-type")).toBe("text/plain; charset=utf-8");
@@ -137,7 +137,7 @@ describe("artifacts", () => {
 	});
 
 	it("draw SVG and Mermaid in the same sandbox, loading only Pim's own runtime and only for diagrams", async () => {
-		const drawing = await callTool("artifact_create", { title: "Logo", kind: "svg", content: '<svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"/></svg>' });
+		const drawing = await callTool("app_create", { title: "Logo", kind: "svg", content: '<svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"/></svg>' });
 		const svg = JSON.parse(drawing.text).artifact.id;
 		const svgFrame = await raw(`/artifacts/${svg}/versions/1/frame`);
 		expect(svgFrame.headers.get("content-security-policy")).toContain("script-src 'unsafe-inline';");
@@ -146,7 +146,7 @@ describe("artifacts", () => {
 
 		// Diagram source is text in the page: markup in it is escaped, never parsed.
 		const source = 'flowchart LR\n  A["</pre><script>parent.x=1</script>"] --> B';
-		const diagram = await callTool("artifact_create", { title: "Flow", kind: "mermaid", content: source });
+		const diagram = await callTool("app_create", { title: "Flow", kind: "mermaid", content: source });
 		const mermaid = JSON.parse(diagram.text).artifact.id;
 		const mermaidFrame = await raw(`/artifacts/${mermaid}/versions/1/frame`);
 		const directives = mermaidFrame.headers.get("content-security-policy")!.split(";").map((directive) => directive.trim());
@@ -164,9 +164,9 @@ describe("artifacts", () => {
 		expect(await messageFrame.text()).toContain('<script src="https://pim.test/artifact-runtime/mermaid.js"></script>');
 
 		// Content its kind can't show is refused, to the model, before anything is kept.
-		const notSvg = await callTool("artifact_create", { title: "Bad", kind: "svg", content: "<div>hi</div>" });
+		const notSvg = await callTool("app_create", { title: "Bad", kind: "svg", content: "<div>hi</div>" });
 		expect(notSvg).toMatchObject({ isError: true, text: expect.stringContaining("<svg") });
-		const broken = await callTool("artifact_update", { id: svg, base_version: 1, content: "<p>no</p>" });
+		const broken = await callTool("app_update", { id: svg, base_version: 1, content: "<p>no</p>" });
 		expect(broken.isError).toBe(true);
 		expect((await api(`/artifacts/${svg}`)).body.version).toBe(1);
 	});
@@ -179,7 +179,7 @@ export default function App() {
 	const note = "</script><script>parent.x=1</script> <!-- <script>";
 	return <div className="p-4" onClick={() => setCount(count + 1)} title={note}>{count}<LineChart data={[]}><Line /></LineChart></div>;
 }`;
-		const made = await callTool("artifact_create", { title: "Counter", kind: "jsx", content: source });
+		const made = await callTool("app_create", { title: "Counter", kind: "jsx", content: source });
 		expect(made.isError).toBe(false);
 		const id = JSON.parse(made.text).artifact.id;
 		// The stored version is the source; the frame is what it compiles to.
@@ -200,7 +200,7 @@ export default function App() {
 			['import fs from "node:fs";\nexport default () => <div>{String(fs)}</div>', 'not "node:fs"'],
 			["export function App() { return <div /> }", "export its component as the default"],
 		] as const) {
-			const refused = await callTool("artifact_create", { title: "Bad", kind: "jsx", content });
+			const refused = await callTool("app_create", { title: "Bad", kind: "jsx", content });
 			expect(refused).toMatchObject({ isError: true, text: expect.stringContaining(error) });
 		}
 		expect((await api("/artifacts")).body.artifacts.filter((artifact: { kind: string }) => artifact.kind === "jsx")).toHaveLength(1);
@@ -213,7 +213,7 @@ export default function App() {
 		expect((await raw("/files/content?path=/workspace/dot.png", { method: "PUT", body: png })).status).toBeLessThan(300);
 		const page = `<!doctype html><html><head><link rel="stylesheet" href="./style.css"><link rel="stylesheet" href="https://example.com/x.css"></head>
 <body><img src="images/dot.png"><p id="out"></p><script type="application/json" id="data" src="data.json"></script><script src="app.js"></script><script src="missing.js"></script></body></html>`;
-		const made = await callTool("artifact_create", {
+		const made = await callTool("app_create", {
 			title: "Several",
 			kind: "html",
 			content: page,
@@ -236,24 +236,24 @@ export default function App() {
 		expect(html).toContain('+ "<\\/script>";</script>');
 		expect(html).toContain('<script src="missing.js"></script>');
 		// The model reads one file at a time, and the person downloads each.
-		const read = await callTool("artifact_read", { id, path: "app.js" });
+		const read = await callTool("app_read", { id, path: "app.js" });
 		expect(read.text).toContain("Its files: app.js");
-		expect((await callTool("artifact_read", { id, path: "images/dot.png" })).text).toContain("image/png file of 7 bytes");
+		expect((await callTool("app_read", { id, path: "images/dot.png" })).text).toContain("image/png file of 7 bytes");
 		expect((await api(`/artifacts/${id}/versions/1?path=data.json`)).body).toMatchObject({ path: "data.json", content: '{"name":"Ada"}' });
 		const download = await raw(`/artifacts/${id}/versions/1/download?path=images/dot.png`);
 		expect(download.headers.get("content-disposition")).toContain('-v1-dot.png"');
 		expect(new Uint8Array(await download.arrayBuffer())).toEqual(png);
 
 		// A change to one file keeps the others, and deleting one takes it out.
-		const edited = await callTool("artifact_update", { id, base_version: 1, path: "data.json", edits: [{ find: "Ada", replace: "Bo" }], delete_files: ["images/dot.png"] });
+		const edited = await callTool("app_update", { id, base_version: 1, path: "data.json", edits: [{ find: "Ada", replace: "Bo" }], delete_files: ["images/dot.png"] });
 		expect(JSON.parse(edited.text).artifact).toMatchObject({ version: 2, files: ["app.js", "data.json", "index.html", "style.css"] });
 		expect(await (await raw(`/artifacts/${id}/versions/2/frame`)).text()).toContain('{"name":"Bo"}');
-		expect((await callTool("artifact_update", { id, base_version: 2, delete_files: ["index.html"] })).text).toContain("main file");
-		expect((await callTool("artifact_create", { title: "Doc", kind: "markdown", content: "# Hi", files: [{ path: "a.md", content: "x" }] })).text).toContain("Only HTML and JSX");
-		expect((await callTool("artifact_create", { title: "Bad path", kind: "html", content: "<p>", files: [{ path: "../up.js", content: "x" }] })).isError).toBe(true);
+		expect((await callTool("app_update", { id, base_version: 2, delete_files: ["index.html"] })).text).toContain("main file");
+		expect((await callTool("app_create", { title: "Doc", kind: "markdown", content: "# Hi", files: [{ path: "a.md", content: "x" }] })).text).toContain("Only HTML and JSX");
+		expect((await callTool("app_create", { title: "Bad path", kind: "html", content: "<p>", files: [{ path: "../up.js", content: "x" }] })).isError).toBe(true);
 
 		// An app of modules: components, JSON, CSS and an image, compiled into one script.
-		const app = await callTool("artifact_create", {
+		const app = await callTool("app_create", {
 			title: "App",
 			kind: "jsx",
 			content: 'import Chart from "./components/Chart";\nimport rows from "./data.json";\nimport "./app.css";\nexport default function App() { return <Chart rows={rows} />; }',
@@ -271,8 +271,8 @@ export default function App() {
 		expect(appPage).toContain(`module.exports = ${JSON.stringify(dot)};`);
 		expect(appPage).toContain('{"./components/Chart":"components/Chart.tsx","./data.json":"data.json","./app.css":"app.css"}');
 		expect(appPage).not.toContain("rows: number[]");
-		const broken = await callTool("artifact_create", { title: "Broken", kind: "jsx", content: 'import Missing from "./Missing";\nexport default () => <Missing />;' });
-		expect(broken.text).toContain('imports "./Missing", which isn\'t one of the artifact\'s files');
+		const broken = await callTool("app_create", { title: "Broken", kind: "jsx", content: 'import Missing from "./Missing";\nexport default () => <Missing />;' });
+		expect(broken.text).toContain('imports "./Missing", which isn\'t one of the app\'s files');
 	});
 
 	it("keep their own data through the bridge, and ask the model only once the person allows the version", async () => {
@@ -292,7 +292,7 @@ export default function App() {
 		expect((await bridge("storage.set", { key: "big", value: "x".repeat(1_000_000) })).status).toBe(413);
 		await bridge("storage.delete", { key: "other" });
 		// Kept across versions, and in the export.
-		await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
+		await callTool("app_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
 		expect((await bridge("storage.get", { key: "tips" }, 2)).body).toEqual({ value: "[10,15]" });
 		const exported = JSON.parse(await (await raw("/export")).text());
 		expect(exported.artifacts.find((artifact: { id: string }) => artifact.id === made.id).data).toEqual({ "tip:last": "15", tips: "[10,15]" });
@@ -326,7 +326,7 @@ export default function App() {
 
 	it("get new versions only from the latest, with edits that match once", async () => {
 		const made = await makePage();
-		const edited = await callTool("artifact_update", {
+		const edited = await callTool("app_update", {
 			id: made.id,
 			base_version: 1,
 			edits: [{ find: "<h1>Tip calculator</h1>", replace: "<h1>Tips</h1>" }],
@@ -335,23 +335,23 @@ export default function App() {
 		expect((await api(`/artifacts/${made.id}/versions/2`)).body.content).toBe(PAGE.replace("<h1>Tip calculator</h1>", "<h1>Tips</h1>"));
 
 		// Based on version 1, which is no longer the latest: refused, and nothing is written.
-		const stale = await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Overwritten</p>" });
+		const stale = await callTool("app_update", { id: made.id, base_version: 1, content: "<p>Overwritten</p>" });
 		expect(stale).toMatchObject({ isError: true });
 		expect(stale.text).toContain("not the latest");
 		// A find text that isn't there, or is there twice, changes nothing.
-		const missing = await callTool("artifact_update", { id: made.id, base_version: 2, edits: [{ find: "<h2>", replace: "" }] });
+		const missing = await callTool("app_update", { id: made.id, base_version: 2, edits: [{ find: "<h2>", replace: "" }] });
 		expect(missing.isError).toBe(true);
-		const twice = await callTool("artifact_update", { id: made.id, base_version: 2, edits: [{ find: "body", replace: "main" }] });
+		const twice = await callTool("app_update", { id: made.id, base_version: 2, edits: [{ find: "body", replace: "main" }] });
 		expect(twice.text).toContain("more than once");
 		// The same content again makes no version.
-		const same = await callTool("artifact_update", { id: made.id, base_version: 2, content: (await api(`/artifacts/${made.id}/versions/2`)).body.content });
+		const same = await callTool("app_update", { id: made.id, base_version: 2, content: (await api(`/artifacts/${made.id}/versions/2`)).body.content });
 		expect(JSON.parse(same.text).artifact.version).toBe(2);
 		expect((await api(`/artifacts/${made.id}`)).body).toMatchObject({ version: 2, versions: 2 });
 	});
 
 	it("restore an older version as a new one, only from the latest", async () => {
 		const made = await makePage();
-		await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
+		await callTool("app_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
 		expect((await post(`/artifacts/${made.id}/restore`, { version: 1, baseVersion: 1 })).status).toBe(409);
 		const restored = await post(`/artifacts/${made.id}/restore`, { version: 1, baseVersion: 2 });
 		expect(restored.status).toBe(201);
@@ -372,16 +372,16 @@ export default function App() {
 		expect(saved.status).toBe(201);
 		expect(saved.body).toMatchObject({ version: 2, title: "My page", saved: 2, changed: true });
 		// The agent's base is now stale, and so is a second edit from version 1.
-		const stale = await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Agent</p>" });
+		const stale = await callTool("app_update", { id: made.id, base_version: 1, content: "<p>Agent</p>" });
 		expect(stale.text).toContain("not the latest");
 		expect((await post(`/artifacts/${made.id}/versions`, { baseVersion: 1, content: "<p>Late</p>" })).status).toBe(409);
 		// The same content again makes no version; content the kind can't show makes none either.
 		expect((await post(`/artifacts/${made.id}/versions`, { baseVersion: 2, content: "<p>Mine</p>" })).body).toMatchObject({ version: 2, changed: false });
-		const drawing = await callTool("artifact_create", { title: "Logo", kind: "svg", content: "<svg></svg>" });
+		const drawing = await callTool("app_create", { title: "Logo", kind: "svg", content: "<svg></svg>" });
 		const svg = JSON.parse(drawing.text).artifact.id;
 		expect((await post(`/artifacts/${svg}/versions`, { baseVersion: 1, content: "<div></div>" })).status).toBe(400);
 
-		const read = await callTool("artifact_read", { id: made.id });
+		const read = await callTool("app_read", { id: made.id });
 		expect(read.text).toContain('"My page" (html), version 2 of 2 (edited by the user)');
 		expect(read.text).toContain("<p>Mine</p>");
 		const { body } = await api(`/artifacts/${made.id}`);
@@ -390,7 +390,7 @@ export default function App() {
 
 	it("are deleted with every version, and are in the export until then", async () => {
 		const made = await makePage();
-		await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
+		await callTool("app_update", { id: made.id, base_version: 1, content: "<p>Second</p>" });
 		const exported = JSON.parse(await (await raw("/export")).text());
 		const mine = exported.artifacts.find((artifact: { id: string }) => artifact.id === made.id);
 		const contents = new Map(exported.artifactFiles.map((file: { sha256: string; content: string }) => [file.sha256, file.content]));
@@ -413,7 +413,7 @@ export default function App() {
 		);
 		expect(rows).toBe(0);
 		// The model can't find it either.
-		expect((await callTool("artifact_read", { id: made.id })).isError).toBe(true);
+		expect((await callTool("app_read", { id: made.id })).isError).toBe(true);
 	});
 
 	it("keep each file once in R2, free it when no version has it, and read versions from before files", async () => {
@@ -664,35 +664,35 @@ export default function App() {
 	it("stay within their limits, checked before anything is written", async () => {
 		// One version's size.
 		await setLimits({ artifactBytes: 100 });
-		const big = await callTool("artifact_create", { title: "Big", kind: "html", content: "x".repeat(101) });
+		const big = await callTool("app_create", { title: "Big", kind: "html", content: "x".repeat(101) });
 		expect(big.isError).toBe(true);
 		expect(big.text).toContain("at most 100 bytes");
 		// Bytes, not characters: 50 three-byte characters are 150 bytes.
-		expect((await callTool("artifact_create", { title: "Wide", kind: "markdown", content: "€".repeat(50) })).isError).toBe(true);
+		expect((await callTool("app_create", { title: "Wide", kind: "markdown", content: "€".repeat(50) })).isError).toBe(true);
 
 		// Versions of one artifact.
 		await setLimits({ artifactVersions: 2 });
 		const made = await makePage("<p>1</p>", "Counted");
-		await callTool("artifact_update", { id: made.id, base_version: 1, content: "<p>2</p>" });
-		const third = await callTool("artifact_update", { id: made.id, base_version: 2, content: "<p>3</p>" });
+		await callTool("app_update", { id: made.id, base_version: 1, content: "<p>2</p>" });
+		const third = await callTool("app_update", { id: made.id, base_version: 2, content: "<p>3</p>" });
 		expect(third.text).toContain("2 versions");
 		expect((await post(`/artifacts/${made.id}/restore`, { version: 1, baseVersion: 2 })).status).toBe(429);
 
 		// How many artifacts.
 		const count = (await api("/artifacts")).body.artifacts.length;
 		await setLimits({ artifacts: count });
-		expect((await callTool("artifact_create", { title: "One more", kind: "html", content: "<p>no</p>" })).isError).toBe(true);
+		expect((await callTool("app_create", { title: "One more", kind: "html", content: "<p>no</p>" })).isError).toBe(true);
 
 		// All of them together.
 		const used = (await api("/artifacts")).body.bytes as number;
 		await setLimits({ artifactStorageBytes: used + 10 });
-		expect((await callTool("artifact_create", { title: "Too much", kind: "html", content: "x".repeat(11) })).isError).toBe(true);
-		expect((await callTool("artifact_create", { title: "Just fits", kind: "html", content: "x".repeat(10) })).isError).toBe(false);
+		expect((await callTool("app_create", { title: "Too much", kind: "html", content: "x".repeat(11) })).isError).toBe(true);
+		expect((await callTool("app_create", { title: "Just fits", kind: "html", content: "x".repeat(10) })).isError).toBe(false);
 
 		// The whole space's storage: a write that would go over is refused before it's made, not after.
 		const size = await runInDurableObject(agent(), (_instance: Pim, state) => state.storage.sql.databaseSize);
 		await setLimits({ storageBytes: size + 20_000 });
-		const over = await callTool("artifact_create", { title: "Overflow", kind: "html", content: "y".repeat(40_000) });
+		const over = await callTool("app_create", { title: "Overflow", kind: "html", content: "y".repeat(40_000) });
 		expect(over.isError).toBe(true);
 		expect(over.text).toContain("storage quota");
 		expect((await api("/artifacts")).body.artifacts.some((artifact: { title: string }) => artifact.title === "Overflow")).toBe(false);

@@ -19,7 +19,7 @@ import {
 import { artifactQuery, artifactVersionQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
-/** The one message an artifact may send: its height. Anything else is ignored. */
+/** The one message an app may send: its height. Anything else is ignored. */
 const HEIGHT_MESSAGE = "pim:artifact-height";
 const MIN_HEIGHT = 80;
 /** At most this many height messages a second are taken; a page that sends more is left as it is. */
@@ -35,8 +35,8 @@ type Needs = { capability: string; label: string };
 type Asking = Needs & { answer: (allowed: boolean) => void };
 
 /**
- * The app's side of an artifact's bridge. The page's calls go to Pim as
- * this version's; what needs the person's permission (the model, an app's
+ * The web app's side of an app's bridge. The page's calls go to Pim as
+ * this version's; what needs the person's permission (the model, a connector's
  * tool) is asked here first, once per thing per version: Pim keeps the
  * answer when it's yes, and this frame remembers a no until it's reloaded.
  */
@@ -89,13 +89,13 @@ function useBridge(id: string, version: number, from?: ArtifactFrom) {
 }
 
 /**
- * An HTML artifact's version, in a sandboxed frame. The page it loads gets an
+ * An HTML app's version, in a sandboxed frame. The page it loads gets an
  * opaque origin from its own response (and from `sandbox`, again here): it
  * can't reach the web app's cookies, storage or API. The frame listens only to
  * this frame's window: for the page's height, and for calls through its
  * bridge, which it makes to Pim for the page (asking the person when they
  * must allow something) and answers. If the page navigates itself away, it's
- * taken down: that's how an artifact could send what it shows, or what
+ * taken down: that's how an app could send what it shows, or what
  * someone typed, elsewhere.
  */
 export function ArtifactFrame({
@@ -276,7 +276,7 @@ export function ArtifactFrame({
         referrerPolicy="no-referrer"
         loading={eager ? "eager" : "lazy"}
         onLoad={() => {
-          // The first load is the artifact; another is the page navigating itself somewhere.
+          // The first load is the app; another is the page navigating itself somewhere.
           if (loads.current.key !== key) loads.current = { key, count: 0 };
           loads.current.count += 1;
           if (loads.current.count > 1) setLeft(true);
@@ -293,7 +293,7 @@ export function ArtifactFrame({
   );
 }
 
-/** A version of an artifact, shown as it runs or draws in a frame, or as it reads (Markdown). */
+/** A version of an app, shown as it runs or draws in a frame, or as it reads (Markdown). */
 export function ArtifactPreview({
   id,
   version,
@@ -416,7 +416,7 @@ export function ArtifactPrint({
   );
 }
 
-/** The language an artifact's source is highlighted as. */
+/** The language an app's source is highlighted as. */
 export const ARTIFACT_LANGUAGES = {
   html: "html",
   markdown: "markdown",
@@ -426,9 +426,9 @@ export const ARTIFACT_LANGUAGES = {
 } as const satisfies Record<ArtifactKind, string>;
 
 /**
- * An artifact version the agent made in a chat, as a block that opens it in
+ * An app version the agent made in a chat, as a block that opens it in
  * the canvas beside the chat. The version stays the one this call made, so
- * a chat shows how the artifact changed. One made while the person watches
+ * a chat shows how the app changed. One made while the person watches
  * (`live`) opens by itself.
  */
 export function ArtifactCard({
@@ -497,7 +497,7 @@ export function ArtifactCard({
   );
 }
 
-/** The artifact an artifact tool's answer names, or null for any other answer (an error). */
+/** The app an app tool's answer names, or null for any other answer (an error). */
 export function artifactReference(output: unknown): ArtifactReference | null {
   if (typeof output !== "string") return null;
   try {

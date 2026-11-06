@@ -558,7 +558,7 @@ export type DeploymentSettings = {
   limits: Limits;
   /** Null: learned from requests. */
   publicUrl: string | null;
-  /** Null: no public artifact links. */
+  /** Null: no public app links. */
   contentOrigin: string | null;
   /** Null: no email. */
   emailFrom: string | null;
@@ -580,7 +580,7 @@ export const ARTIFACT_KINDS = [
 ] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
-/** An artifact, as its latest version. */
+/** An app, as its latest version. */
 export type Artifact = {
   id: string;
   title: string;
@@ -621,18 +621,18 @@ export type ArtifactDetail = Artifact & {
   circles: string[];
 };
 
-/** An artifact someone shared with you: its latest version, from their Pim. */
+/** An app someone shared with you: its latest version, from their Pim. */
 export type SharedArtifact = Omit<Artifact, "session"> & {
   /** Whose it is: their username. */
   host: string;
 };
 
-/** An artifact someone published for everyone on this Pim: a copy of one of its versions. */
+/** An app someone published for everyone on this Pim: a copy of one of its versions. */
 export type PublishedArtifact = {
   id: string;
   author: string;
   authorName: string | null;
-  /** Which of the author's artifacts it copies, and which version. */
+  /** Which of the author's apps it copies, and which version. */
   artifactId: string;
   version: number;
   title: string;
@@ -646,7 +646,7 @@ export type PublishedArtifact = {
   public: boolean;
 };
 
-/** What you published of one of your artifacts, with its public link if it has one, and whether it can. */
+/** What you published of one of your apps, with its public link if it has one, and whether it can. */
 export type ArtifactPublication = PublishedArtifact & {
   linkable: boolean;
   link: string | null;
@@ -707,7 +707,7 @@ export type SkillDetail = Skill & {
   history: SkillVersionInfo[];
 };
 
-/** What an artifact tool answers: a reference to the version it made, never its content. */
+/** What an app tool answers: a reference to the version it made, never its content. */
 export type ArtifactReference = {
   id: string;
   title: string;
@@ -717,10 +717,10 @@ export type ArtifactReference = {
   size: number;
 };
 
-/** Whose an artifact is, when it isn't yours: one `host` (their username) shares with you, or one published to everyone. */
+/** Whose an app is, when it isn't yours: one `host` (their username) shares with you, or one published to everyone. */
 export type ArtifactFrom = { host: string } | { published: true };
 
-/** Where an artifact is in the API. */
+/** Where an app is in the API. */
 const artifactRoot = (id: string, from?: ArtifactFrom) =>
   !from
     ? `/artifacts/${encodeURIComponent(id)}`
@@ -731,7 +731,7 @@ const artifactRoot = (id: string, from?: ArtifactFrom) =>
 const artifactPath = (id: string, version: number, from?: ArtifactFrom) =>
   `/api${artifactRoot(id, from)}/versions/${version}`;
 
-/** The sandboxed page a framed artifact's version is shown in. */
+/** The sandboxed page a framed app's version is shown in. */
 export const artifactFrameUrl = (
   id: string,
   version: number,
@@ -1669,7 +1669,7 @@ export const pim = {
     ).then((body) => body.artifacts),
   publishedArtifact: (id: string) =>
     call<PublishedArtifact>(artifactRoot(id, { published: true })),
-  /** What you published of one of your artifacts; null when you haven't. */
+  /** What you published of one of your apps; null when you haven't. */
   artifactPublication: (id: string) =>
     call<ArtifactPublication>(
       `/artifacts/${encodeURIComponent(id)}/publish`,
@@ -1687,7 +1687,7 @@ export const pim = {
     call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}/publish`, {
       method: "DELETE",
     }),
-  /** Makes a published artifact one of yours. */
+  /** Makes a published app one of yours. */
   adoptArtifact: (id: string) =>
     call<Artifact>(`${artifactRoot(id, { published: true })}/use`, {
       method: "POST",
@@ -1721,7 +1721,7 @@ export const pim = {
         }),
       },
     ),
-  /** One call an artifact made through its bridge: its answer, or what the person must allow first. */
+  /** One call an app made through its bridge: its answer, or what the person must allow first. */
   artifactBridge: (
     id: string,
     version: number,
@@ -1792,7 +1792,7 @@ export type SignInProviderSettings = {
 };
 
 export const admin = {
-  /** Takes a published artifact down, for everyone. */
+  /** Takes a published app down, for everyone. */
   removePublishedArtifact: (id: string) =>
     call<{ deleted: boolean }>(
       `/admin/published-artifacts/${encodeURIComponent(id)}`,

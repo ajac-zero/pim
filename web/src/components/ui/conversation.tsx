@@ -108,7 +108,7 @@ export const ConversationScrollButton = ({
   return (
     <div
       className={cn(
-        "pointer-events-none absolute left-[50%] z-20 flex translate-x-[-50%] gap-2",
+        "pointer-events-none absolute left-[50%] z-20 flex translate-x-[-50%]",
         bottomOffset === undefined && "bottom-4",
       )}
       style={bottomOffset === undefined ? undefined : { bottom: bottomOffset }}
@@ -116,12 +116,12 @@ export const ConversationScrollButton = ({
       {mention}
       <Button
         className={cn(
-          "size-8 rounded-full shadow-md transition-all duration-200 ease-out",
+          "h-8 shrink-0 overflow-hidden rounded-full shadow-md transition-all duration-200 ease-out",
+          // Collapses its width and margin while hidden, so a mention button
+          // beside it glides to the center instead of jumping.
           isAtBottom
-            ? "pointer-events-none translate-y-2 scale-90 opacity-0"
-            : "pointer-events-auto translate-y-0 scale-100 opacity-100",
-          // Out of the row while hidden, so a mention button alone is centered.
-          isAtBottom && "absolute",
+            ? "pointer-events-none ml-0 w-0 translate-y-2 scale-90 border-transparent opacity-0"
+            : "pointer-events-auto ml-2 first:ml-0 w-8 translate-y-0 scale-100 opacity-100",
           className,
         )}
         style={style}

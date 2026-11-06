@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
 import type { BundledLanguage } from "shiki";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { Download, Trash2, X } from "~/components/icons";
-import { PdfView } from "~/components/pdf-view";
+import { PdfView, PdfZoomControls } from "~/components/pdf-view";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import { baseName, parentOf, previewOf } from "~/lib/files";
@@ -50,6 +51,7 @@ export function FileView({
   const { t } = useI18n();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [zoom, setZoom] = useState(1);
   const preview = previewOf(baseName(path));
   const textual = ["markdown", "code", "text"].includes(preview.kind);
   // The folder's listing says whether the file is there, and its size.
@@ -124,6 +126,9 @@ export function FileView({
         ) : (
           <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
         )}
+        {preview.kind === "pdf" && (
+          <PdfZoomControls zoom={zoom} onZoom={setZoom} />
+        )}
         <Button asChild size="icon" variant="ghost" className="size-8 shrink-0">
           <a
             href={fileContentUrl(path, true)}
@@ -182,7 +187,7 @@ export function FileView({
           // biome-ignore lint/a11y/useMediaCaption: the person's own video, with no captions to give.
           <video src={url} controls className="max-h-full max-w-full" />
         ) : preview.kind === "pdf" ? (
-          <PdfView url={url} name={name} />
+          <PdfView url={url} name={name} zoom={zoom} onZoom={setZoom} />
         ) : !showText ? (
           <p className="m-auto text-muted-foreground text-sm">
             {t("noFilePreview")}

@@ -34,7 +34,7 @@ function line(answer: string, label: RegExp): string {
 /** A chat's title, from its first message or the conversation so far. */
 export const NAME_CHAT: UtilityTask = {
 	instructions:
-		"You name chats. Reply with only a title of 2 to 5 words for the conversation you are given, in its language. No quotes, no ending punctuation, nothing else.",
+		"You name chats. Reply with only a title of 2 to 5 words for the conversation you are given, in its language. When it has moved on from where it began, name what its latest messages are about. No quotes, no ending punctuation, nothing else.",
 	maxTokens: 32,
 	clean: (answer) => line(answer, /^title\s*:\s*/i),
 };

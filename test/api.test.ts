@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, apiUrl, connect, lastUserText, OWNER, post, ROOT, say, textOf, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, textOf, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -420,6 +420,73 @@ describe("conversation", () => {
 		expect((await post(path, { content: "hi", operationId: "op-1" })).body.accepted).toBe(false);
 		const { body } = await api(`/sessions/${created.id}/operations/op-1`);
 		expect(body).toMatchObject({ status: "done", text: "Later." });
+	});
+
+	it("forks a chat through an agent's message, or up to one of the person's to send it changed, keeping its images while a fork shows them", async () => {
+		const { body: chat } = await post("/sessions", { title: "Trip" });
+		faux.setResponses([toolUse("send_to_user", { message: "Where to?" }), toolUse("send_to_user", { message: "Lisbon it is." })]);
+		const plan = [
+			{ type: "text", text: "Plan a trip" },
+			{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+		];
+		expect((await post(`/sessions/${chat.id}/messages`, { content: plan, wait: true })).status).toBe(200);
+		await say("Lisbon", chat.id);
+		const messages = (await api(`/sessions/${chat.id}/messages`)).body.messages as TranscriptMessage[];
+		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "user", "assistant", "tool"]);
+		const image = (messages[0]!.parts.find((part) => part.type === "image") as StoredImage).url;
+
+		// Through the agent's first message: what it sent, with its tool's result, and nothing after.
+		const { body: fork } = await post(`/sessions/${chat.id}/fork`, { at: messages[1]!.id });
+		expect(fork).toMatchObject({ title: "Trip (fork #1)", agent: chat.agent });
+		expect(fork.id).not.toBe(chat.id);
+		const forked = (await api(`/sessions/${fork.id}/messages`)).body.messages as TranscriptMessage[];
+		expect(forked.map((message) => message.id)).toEqual(messages.slice(0, 3).map((message) => message.id));
+		const heard: string[][] = [];
+		faux.setResponses([
+			(context) => {
+				heard.push(context.messages.filter((message) => message.role === "user").map((message) => lastUserText([message])));
+				return toolUse("send_to_user", { message: "Porto, then." });
+			},
+		]);
+		// Its first message names it anew, from what was said before and that.
+		const named: string[] = [];
+		utility.setResponses([
+			({ messages }) => {
+				named.push(JSON.stringify(messages.at(-1)?.content));
+				return fauxAssistantMessage("Porto Trip");
+			},
+		]);
+		await say("Porto", fork.id);
+		expect(heard).toEqual([["Plan a trip", "Porto"]]);
+		await vi.waitFor(async () => expect((await api("/sessions")).body.sessions.find((s: { id: string }) => s.id === fork.id).title).toBe("Porto Trip"));
+		expect(named[0]).toContain("Assistant: Where to?");
+		expect(named[0]).toMatch(/Where to\?.*Person: Porto/);
+		expect(named[0]).not.toContain("Lisbon");
+		expect(await messagesOf(chat.id, "user")).toEqual(["Plan a trip", "Lisbon"]);
+
+		// Before the person's first message, to send it again changed: nothing of the chat is left.
+		const { body: edited } = await post(`/sessions/${chat.id}/fork`, { before: messages[0]!.id });
+		expect((await api(`/sessions/${edited.id}/messages`)).body.messages).toEqual([]);
+		// Before their second: the first exchange.
+		const { body: second } = await post(`/sessions/${chat.id}/fork`, { before: messages[3]!.id });
+		expect(await messagesOf(second.id, "user")).toEqual(["Plan a trip"]);
+		// Numbered after the forks still titled so: the first, renamed since, no longer counts.
+		expect([edited.title, second.title]).toEqual(["Trip (fork #1)", "Trip (fork #2)"]);
+		// A fork of a fork counts with its chat's forks.
+		const { body: again } = await post(`/sessions/${second.id}/fork`, { at: messages[1]!.id });
+		expect(again.title).toBe("Trip (fork #3)");
+
+
+		for (const body of [{ at: messages[0]!.id }, { before: messages[1]!.id }, { at: "999999" }, {}, { at: messages[1]!.id, before: messages[0]!.id }]) {
+			expect((await post(`/sessions/${chat.id}/fork`, body)).status).toBe(400);
+		}
+
+		// The image stays while a fork shows it, and goes with the last of them.
+		const served = async () => (await exports.default.fetch(url(image), { headers: { Authorization: `Bearer ${TOKEN}` } })).status;
+		await api(`/sessions/${chat.id}`, { method: "DELETE" });
+		expect(await served()).toBe(200);
+		for (const id of [fork.id, edited.id, second.id, again.id]) await api(`/sessions/${id}`, { method: "DELETE" });
+		expect(await served()).toBe(404);
 	});
 
 	it("keeps a message's images in R2 by URL, and gives the model their bytes on every turn", async () => {

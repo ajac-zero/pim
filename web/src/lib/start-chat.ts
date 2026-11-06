@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
@@ -46,6 +46,50 @@ export function useStartChat(agent: string | undefined) {
   };
 
   return { start, starting };
+}
+
+/**
+ * Forks a chat into a new one and opens it: `fork` through one of the
+ * agent's messages, keeping this chat as it is, or `edit` one of the
+ * person's, which goes again changed in a fork up to it. Either way this
+ * chat stays as it was, in the list, and Back returns to it.
+ */
+export function useForkChat(session: string) {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+
+  // Stable, so the messages that take these don't draw again with every change to the chat.
+  return useMemo(() => {
+    const open = async (
+      from: { at: string } | { before: string },
+      content?: UserContent,
+    ) => {
+      try {
+        const forked = await pim.forkSession(session, from);
+        queryClient.setQueryData(
+          sessionsQuery().queryKey,
+          (sessions) => sessions && [forked, ...sessions],
+        );
+        pimClient.open(forked.id);
+        await Promise.all([
+          content !== undefined && pimClient.send(content),
+          navigate({
+            to: "/chat/$sessionId",
+            params: { sessionId: forked.id },
+          }),
+        ]);
+        void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      } catch (error) {
+        toast.error((error as Error).message);
+      }
+    };
+
+    return {
+      fork: (message: string) => open({ at: message }),
+      edit: (message: string, content: UserContent) =>
+        open({ before: message }, content),
+    };
+  }, [session, queryClient, navigate]);
 }
 
 /**

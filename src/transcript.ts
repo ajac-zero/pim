@@ -104,6 +104,28 @@ function projectMessage(message: Message, id: string): TranscriptMessage | undef
 	}
 }
 
+/**
+ * The entry a fork of a transcript ends at, by a message's entry id: an
+ * agent's message with the results of the tools it called, so the fork asks
+ * nothing left unanswered, or, `before` a person's message, the entry just
+ * before it, so it can be sent again changed. Null when nothing comes before
+ * that message, and undefined when `id` names no such message.
+ */
+export function forkPoint(entries: readonly EntryRecord[], id: string, before: boolean): EntryRecord | null | undefined {
+	const index = entries.findIndex((entry) => String(entry.id) === id);
+	const message = entries[index]?.model?.[0];
+	if (before) return message?.role === "user" ? (entries[index - 1] ?? null) : undefined;
+	if (message?.role !== "assistant") return undefined;
+	const calls = new Set(message.content.flatMap((part) => (part.type === "toolCall" ? [part.id] : [])));
+	let end = index;
+	while (calls.size > 0) {
+		const result = entries[end + 1]?.model?.[0];
+		if (result?.role !== "toolResult" || !calls.delete(result.toolCallId)) break;
+		end++;
+	}
+	return entries[end];
+}
+
 export function projectEntries(entries: readonly EntryRecord[]): TranscriptMessage[] {
 	return entries.flatMap((entry) => {
 		if (entry.kind === "pi.reset") {

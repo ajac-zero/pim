@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { type ReactNode, type Ref, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
@@ -11,7 +11,6 @@ import {
   Check,
   CheckCheck,
   MoreHorizontal,
-  Plus,
   Repeat,
   ScrollText,
   Trash2,
@@ -27,14 +26,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
+import { type PimNotification, type PimSchedule, pim } from "~/lib/pim-api";
 import {
-  type Agent,
-  type PimNotification,
-  type PimSchedule,
-  pim,
-} from "~/lib/pim-api";
-import {
-  agentsQuery,
   artifactsQuery,
   notificationsQuery,
   schedulesQuery,
@@ -358,81 +351,6 @@ export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
             </ul>
           </li>
         )}
-      </PanelList>
-    </>
-  );
-}
-
-function AgentRow({
-  agent,
-  onNavigate,
-  large = false,
-}: {
-  agent: Agent;
-  onNavigate?: () => void;
-  large?: boolean;
-}) {
-  return (
-    <Link
-      to="/agents/$agentId/settings"
-      params={{ agentId: agent.id }}
-      onClick={onNavigate}
-      className={cn(ROW_CLASS, large && "py-2.5")}
-      activeProps={{ className: "bg-sidebar-accent" }}
-    >
-      <AgentIcon
-        agent={agent}
-        tile
-        className={cn("size-8 rounded-[10px]", large && "size-10 rounded-xl")}
-      />
-      <RowText
-        title={agent.name}
-        meta={
-          agent.role.toLowerCase() === agent.name.toLowerCase()
-            ? agent.description
-            : [agent.role, agent.description].filter(Boolean).join(" · ")
-        }
-      />
-    </Link>
-  );
-}
-
-/**
- * Your agents, each opening its settings in the main content, and a new one
- * from the header.
- */
-export function AgentsPanel({ onNavigate }: { onNavigate?: () => void }) {
-  const { t } = useI18n();
-  const navigate = useNavigate();
-  const { data: agents } = useQuery(agentsQuery());
-  // The majordomo stays pinned first, a little larger than the rest.
-  const majordomo = agents?.find((agent) => agent.majordomo);
-  return (
-    <>
-      <SidebarPanelHeader title={t("agents")}>
-        <SidebarPanelAction
-          label={t("newAgent")}
-          onClick={() => {
-            navigate({ to: "/agents/new" });
-            onNavigate?.();
-          }}
-        >
-          <Plus className="size-4.5" />
-        </SidebarPanelAction>
-      </SidebarPanelHeader>
-      <PanelList label={t("agents")} empty={false}>
-        {majordomo && (
-          <li className="mb-2 border-border border-b pb-2">
-            <AgentRow agent={majordomo} onNavigate={onNavigate} large />
-          </li>
-        )}
-        {agents
-          ?.filter((agent) => !agent.majordomo)
-          .map((agent) => (
-            <li key={agent.id}>
-              <AgentRow agent={agent} onNavigate={onNavigate} />
-            </li>
-          ))}
       </PanelList>
     </>
   );

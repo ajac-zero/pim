@@ -163,8 +163,8 @@ function TemplatePage() {
         <p className="mt-4 text-sm">
           {t("youHaveACopy")}{" "}
           <Link
-            to="/agents/$agentId/settings"
-            params={{ agentId: copy.id }}
+            to="."
+            search={(prev) => ({ ...prev, dialog: "agents", agent: copy.id })}
             className="underline underline-offset-2"
           >
             {copy.name}

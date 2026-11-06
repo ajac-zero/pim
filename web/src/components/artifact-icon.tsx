@@ -3,6 +3,7 @@ import {
   FileCode2,
   FileText,
   ImageIcon,
+  Server,
   Workflow,
 } from "~/components/icons";
 import type { ArtifactKind } from "~/lib/pim-api";
@@ -20,6 +21,7 @@ export function ArtifactIcon({
     svg: ImageIcon,
     mermaid: Workflow,
     jsx: Code,
+    hosted: Server,
   }[kind];
   return <Icon className={className} />;
 }
@@ -31,4 +33,5 @@ export const ARTIFACT_KIND_NAMES: Record<ArtifactKind, string> = {
   svg: "SVG",
   mermaid: "Mermaid",
   jsx: "React",
+  hosted: "Backend",
 };

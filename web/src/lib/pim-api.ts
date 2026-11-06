@@ -577,6 +577,7 @@ export const ARTIFACT_KINDS = [
   "svg",
   "mermaid",
   "jsx",
+  "hosted",
 ] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 

@@ -23,22 +23,31 @@
 import { Buffer } from "node:buffer";
 import { compileJsxApp, dataUrl, inlineCssUrls, inlineScript, resolvePath } from "./artifact-jsx";
 import { FileStore } from "./file-store";
+import { parseManifest } from "./app-manifest";
 import { HttpError } from "./http";
 
-export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid", "jsx"] as const;
+export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid", "jsx", "hosted"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
 /** The kinds the app shows in a sandboxed frame; Markdown it renders itself. */
 export const FRAMED_KINDS: readonly ArtifactKind[] = ["html", "svg", "mermaid", "jsx"];
 
 /** Each kind's file extension, for downloads. */
-const EXTENSIONS: Record<ArtifactKind, string> = { html: "html", markdown: "md", svg: "svg", mermaid: "mmd", jsx: "jsx" };
+const EXTENSIONS: Record<ArtifactKind, string> = { html: "html", markdown: "md", svg: "svg", mermaid: "mmd", jsx: "jsx", hosted: "json" };
 
 /** Who made a version: the agent, the person editing it, or the person restoring an older one. */
 export type ArtifactSource = "agent" | "person" | "restore";
 
 /** Each kind's main file, which every version has: the page, the document, the drawing, the diagram or the component. */
-export const ENTRY_FILES: Record<ArtifactKind, string> = { html: "index.html", markdown: "README.md", svg: "image.svg", mermaid: "diagram.mmd", jsx: "App.jsx" };
+export const ENTRY_FILES: Record<ArtifactKind, string> = {
+	html: "index.html",
+	markdown: "README.md",
+	svg: "image.svg",
+	mermaid: "diagram.mmd",
+	jsx: "App.jsx",
+	// An app with a backend on the person's computer: its main file is the manifest (see ./hosted.ts), and the rest is what runs there.
+	hosted: "pim.app.json",
+};
 
 /** One file of a version, as the version lists it. */
 export type ArtifactFile = {
@@ -308,7 +317,7 @@ export function checkKind(kind: unknown): ArtifactKind {
 const SVG_START = /^\s*(<\?xml[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
 
 /** The kinds whose main file can use files of their own: a page's scripts, styles and images, an app's modules. */
-export const MULTI_FILE_KINDS: readonly ArtifactKind[] = ["html", "jsx"];
+export const MULTI_FILE_KINDS: readonly ArtifactKind[] = ["html", "jsx", "hosted"];
 
 /** Refuses a main file its kind can't show, with what to fix, so a mistake reaches the one who made it. */
 export function checkContent(kind: ArtifactKind, content: string): void {
@@ -327,6 +336,7 @@ export function checkFiles(kind: ArtifactKind, files: LoadedFiles): void {
 	if (kind === "svg" && !SVG_START.test(content)) throw new HttpError(400, "An SVG app must be one <svg> element, starting with <svg.");
 	if (kind === "mermaid" && content.trim() === "") throw new HttpError(400, "A Mermaid app needs a diagram.");
 	if (kind === "jsx") compileJsxApp(files, entry);
+	if (kind === "hosted") parseManifest(content);
 }
 
 function checkKey(key: unknown): string {

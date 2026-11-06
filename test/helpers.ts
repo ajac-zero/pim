@@ -281,6 +281,8 @@ export async function connectTestComputer(
 	browser?: BrowserHost,
 	screen?: ScreenHost,
 	driver?: DriverHost,
+	/** Calls this computer answers itself rather than through `Link`: what the test can't run in workerd, such as an app's backend. */
+	calls: Record<string, (args: any) => unknown> = {},
 ) {
 	await fs.mkdir(root, { recursive: true });
 	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}), ...(screen ? { screen } : {}), ...(driver ? { driver } : {}) };
@@ -289,7 +291,17 @@ export async function connectTestComputer(
 	const socket = response.webSocket!;
 	const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
 	const link = new Link(machine, (message) => socket.send(message));
-	socket.addEventListener("message", (event) => link.receive(event.data as string));
+	socket.addEventListener("message", (event) => {
+		const message = JSON.parse(event.data as string) as { type?: string; id?: string; op?: string; args?: unknown };
+		const answer = message.type === "call" && message.op ? calls[message.op] : undefined;
+		if (!answer) return link.receive(event.data as string);
+		Promise.resolve()
+			.then(() => answer(message.args))
+			.then(
+				(result) => socket.send(JSON.stringify({ type: "reply", id: message.id, result })),
+				(error: { message: string; code?: string }) => socket.send(JSON.stringify({ type: "reply", id: message.id, error: { message: error.message, code: error.code } })),
+			);
+	});
 	socket.addEventListener("close", () => link.close());
 	socket.accept();
 	socket.send(

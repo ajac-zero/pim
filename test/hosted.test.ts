@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { api, apiUrl, connectTestComputer, OWNER, pendingApproval, post, say, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connectTestComputer, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse, url } from "./helpers";
 import { faux } from "./worker";
 
 /**
@@ -227,6 +227,32 @@ describe("apps with a backend", () => {
 		expect((await api("/artifacts")).body.artifacts).toHaveLength(count);
 	});
 
+	it("show the person how the backend is doing, and let them stop it or run a version, in their browser", async () => {
+		const [made] = (await api("/artifacts")).body.artifacts;
+		state = "running";
+		expect((await api(`/artifacts/${made.id}/backend`)).body).toEqual({ version: 2, status: { state: "running", restarts: 2, since: 1 }, computer: "online" });
+		expect((await api(`/artifacts/${made.id}/backend/logs`)).body).toEqual({ text: "listening\n" });
+		// Another kind of app has no backend to ask about.
+		expect((await api(`/artifacts/${crypto.randomUUID()}/backend`)).status).toBe(404);
+
+		// Stopping is the owner's, with a token too; running a version is the person's own choice, in their browser.
+		const before = started.length;
+		expect((await post(`/artifacts/${made.id}/backend/run`, { version: 1 })).status).toBe(403);
+		expect(started.length).toBe(before);
+		const cookie = await signedIn();
+		const asPerson = (path: string, body: unknown) =>
+			exports.default.fetch(new Request(apiUrl(path), { method: "POST", headers: { cookie, origin: "https://pim.test", "content-type": "application/json" }, body: JSON.stringify(body) }));
+		expect((await asPerson(`/artifacts/${made.id}/backend/run`, { version: 9 })).status).toBe(404);
+		const ran = await asPerson(`/artifacts/${made.id}/backend/run`, { version: 1 });
+		expect(ran.status).toBe(200);
+		expect(started.at(-1)).toMatchObject({ id: made.id, dir: `/workspace/.pim/apps/${made.id}/v1` });
+		expect((await api(`/artifacts/${made.id}/backend`)).body.version).toBe(1);
+		const stops = stopped.length;
+		expect((await post(`/artifacts/${made.id}/backend/stop`)).status).toBe(200);
+		expect(stopped.length).toBe(stops + 1);
+		expect((await asPerson(`/artifacts/${made.id}/backend/run`, { version: 2 })).status).toBe(200);
+	});
+
 	it("show how the backend is doing, stop it, and stop it when the app is deleted", async () => {
 		const [made] = (await api("/artifacts")).body.artifacts;
 		let said = "";
@@ -245,12 +271,13 @@ describe("apps with a backend", () => {
 		expect(await ask("app_logs")).toBe("running, restarted 2 times, version 2.\nlistening\n");
 		state = "crashed";
 		expect(await ask("app_logs")).toContain("crashed, restarted 2 times");
+		const stopsBefore = stopped.length;
 		await ask("app_stop");
-		expect(stopped).toEqual([made.id]);
+		expect(stopped.slice(stopsBefore)).toEqual([made.id]);
 
 		const address = (await raw(`/artifacts/${made.id}/versions/2/frame`)).headers.get("location")!;
 		expect((await raw(`/artifacts/${made.id}`, { method: "DELETE" })).status).toBe(200);
-		expect(stopped).toEqual([made.id, made.id]);
+		expect(stopped.slice(stopsBefore)).toEqual([made.id, made.id]);
 		expect((await page(address)).status).toBe(404);
 		expect((await raw(`/artifacts/${made.id}`)).status).toBe(404);
 		// Its port is free for the next app.

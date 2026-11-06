@@ -9,7 +9,8 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
 import { ArtifactView } from "~/components/artifact-view";
-import { artifactQuery } from "~/lib/queries";
+import type { ArtifactBackend } from "~/lib/pim-api";
+import { artifactBackendQuery, artifactQuery } from "~/lib/queries";
 
 it("offers a new-chat draft with the artifact reference instead of a change-request form", async () => {
   const client = new QueryClient();
@@ -74,4 +75,94 @@ it("offers a new-chat draft with the artifact reference instead of a change-requ
   expect(url.searchParams.get("prompt")).toBe("/artifacts/trip-plan\n\n");
   expect(html).not.toContain("<form");
   client.clear();
+});
+
+/** An app with a backend, shown with what its computer last said about it. */
+async function renderBackendApp(backend: ArtifactBackend) {
+  const client = new QueryClient();
+  client.setQueryData(artifactQuery("notes").queryKey, {
+    id: "notes",
+    title: "Notes",
+    kind: "hosted",
+    session: null,
+    version: 3,
+    versions: 3,
+    files: 2,
+    size: 10,
+    sha256: "abc",
+    createdAt: 0,
+    updatedAt: 0,
+    circles: [],
+    history: [
+      {
+        version: 3,
+        source: "agent",
+        createdAt: 0,
+        size: 10,
+        sha256: "abc",
+        restoredFrom: null,
+      },
+    ],
+  });
+  client.setQueryData(artifactBackendQuery("notes").queryKey, backend);
+  const root = createRootRoute({
+    component: () => (
+      <ArtifactView
+        artifactId="notes"
+        onVersion={() => {}}
+        onDeleted={() => {}}
+      />
+    ),
+  });
+  const router = createRouter({
+    routeTree: root.addChildren([
+      createRoute({ getParentRoute: () => root, path: "/" }),
+    ]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  client.clear();
+  return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+}
+
+it("shows how an app's backend is doing, and offers to run the latest version only when it isn't the one running", async () => {
+  const running = await renderBackendApp({
+    version: 3,
+    status: { state: "running", restarts: 2, since: 1 },
+    computer: "online",
+  });
+  expect(running).toContain("Running Version 3 · Restarts: 2");
+  expect(running).toContain("Stop");
+  expect(running).not.toContain("Run version");
+
+  // An older version running, or none running, can be replaced by the latest.
+  const older = await renderBackendApp({
+    version: 2,
+    status: { state: "running", restarts: 0, since: 1 },
+    computer: "online",
+  });
+  expect(older).toContain("Run version 3");
+  const stopped = await renderBackendApp({
+    version: 3,
+    status: { state: "stopped", restarts: 0, since: 1 },
+    computer: "online",
+  });
+  expect(stopped).toContain("Stopped Version 3");
+  expect(stopped).toContain("Run version 3");
+  expect(stopped).not.toMatch(/Stop(?!ped)/);
+
+  // With the computer away there is nothing to run it on, and sharing isn't offered for a backend.
+  const offline = await renderBackendApp({
+    version: 3,
+    status: null,
+    computer: "offline",
+  });
+  expect(offline).toContain("Your computer is offline");
+  expect(offline).not.toContain("Run version");
+  expect(offline).not.toContain("Share");
 });

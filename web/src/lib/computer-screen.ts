@@ -305,7 +305,11 @@ export class ComputerScreen {
       });
     } else if (message.type === "pim_clipboard_text") {
       if (typeof payload.text === "string" && payload.text)
-        void navigator.clipboard?.writeText(payload.text).catch(() => {});
+        void navigator.clipboard
+          ?.writeText(payload.text)
+          .catch((error) => console.warn("Copying from the computer:", error));
+      else if (payload.error)
+        console.warn("Copying from the computer:", payload.error);
     } else if (message.type === "hello") {
       this.#acks =
         Array.isArray(payload.capabilities) &&

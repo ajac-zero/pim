@@ -953,8 +953,21 @@ export function spacesdScreen(base: string, tokenFile: string): ScreenHost {
 			const token = (await fs.readFile(tokenFile, "utf8").catch(() => "")).trim();
 			if (!token) throw new CallError(`This computer doesn't stream its desktop: there's no cua-spacesd token at ${tokenFile}.`, "ENOSYS");
 			// GetClipboardResponse: its content (1), whose text is its first field.
-			const content = protoFields(await grpcWeb(base, token, "cua.env.v1.ComputerService/GetClipboard", [])).get(1);
-			return new TextDecoder().decode(content ? protoFields(content).get(1) : undefined);
+			let failure: unknown;
+			try {
+				const content = protoFields(await grpcWeb(base, token, "cua.env.v1.ComputerService/GetClipboard", [])).get(1);
+				const text = new TextDecoder().decode(content ? protoFields(content).get(1) : undefined);
+				if (text) return text;
+			} catch (error) {
+				failure = error;
+			}
+			// cua-spacesd reads the clipboard on Wayland only; an X11 desktop, such as Xfce, is read with the tools there.
+			for (const args of [["xclip", "-o", "-selection", "clipboard"], ["xsel", "-b", "-o"], ["wl-paste", "-n"]]) {
+				const read = await quietly(args[0]!, args.slice(1));
+				if (read.code === 0 && read.output) return read.output;
+			}
+			if (failure) throw failure;
+			return "";
 		},
 		async open(onMessage, onClose) {
 			let token: string;

@@ -19,6 +19,7 @@ import {
   isReplyBlock,
   ReplyBlock,
 } from "~/components/chat/reply-blocks";
+import { FileKindIcon } from "~/components/file-kind-icon";
 import { FileLink } from "~/components/file-link";
 import { useI18n } from "~/components/i18n";
 import {
@@ -690,7 +691,11 @@ export const Markdown = memo(function Markdown({
                 {children}
               </ArtifactLink>
             ) : (!safe || bubble) && fileOf(href) ? (
-              <FileLink path={fileOf(href) as string} className={tone.link}>
+              <FileLink
+                path={fileOf(href) as string}
+                className={cn(tone.link, "inline-flex items-center gap-1.5")}
+              >
+                <FileKindIcon name={fileOf(href) as string} type="" />
                 {children}
               </FileLink>
             ) : safe && !safeLink(href) ? (

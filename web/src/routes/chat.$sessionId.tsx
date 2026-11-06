@@ -44,8 +44,13 @@ type ChatSearch = {
   artifact?: string;
   v?: number;
   file?: string;
+  /** Every file open in the canvas, in the order opened; `file` is the one shown. */
+  files?: string[];
   task?: string;
 };
+
+const isFilePath = (value: unknown): value is string =>
+  typeof value === "string" && value.startsWith(`${FILES_ROOT}/`);
 
 /** The strip, in pixels, an overlay scrollbar draws in at the thread's edge. */
 const OVERLAY_SCROLLBAR_ROOM = 12;
@@ -57,8 +62,17 @@ export const Route = createFileRoute("/chat/$sessionId")({
       ...(typeof search.artifact === "string" &&
         search.artifact && { artifact: search.artifact }),
       ...(Number.isSafeInteger(v) && v > 0 && { v }),
-      ...(typeof search.file === "string" &&
-        search.file.startsWith(`${FILES_ROOT}/`) && { file: search.file }),
+      ...(isFilePath(search.file) && {
+        file: search.file,
+        files: [
+          ...new Set([
+            ...(Array.isArray(search.files) ? search.files : []).filter(
+              isFilePath,
+            ),
+            search.file,
+          ]),
+        ],
+      }),
       ...(typeof search.task === "string" &&
         search.task && { task: search.task }),
     };
@@ -95,7 +109,7 @@ function SessionNotFound() {
 function ChatPage() {
   const { t, locale } = useI18n();
   const { sessionId } = Route.useParams();
-  const { artifact, v, file, task } = Route.useSearch();
+  const { artifact, v, file, files = [], task } = Route.useSearch();
   const navigate = useNavigate();
   const page = useRef<HTMLElement>(null);
   const [canvasWidth, setCanvasWidth] = useStoredSize(
@@ -422,7 +436,25 @@ function ChatPage() {
               onClose={() => showCanvas({})}
             />
           ) : file ? (
-            <FileView key={file} path={file} onClose={() => showCanvas({})} />
+            <FileView
+              key={file}
+              path={file}
+              tabs={
+                files.length > 1
+                  ? {
+                      paths: files,
+                      onSelect: (path) => showCanvas({ file: path, files }),
+                    }
+                  : undefined
+              }
+              onClose={() => {
+                // Closing a tab shows its neighbor; the last one closes the canvas.
+                const rest = files.filter((path) => path !== file);
+                const next =
+                  rest[Math.min(files.indexOf(file), rest.length - 1)];
+                showCanvas(next ? { file: next, files: rest } : {});
+              }}
+            />
           ) : (
             task && (
               <TaskView

@@ -21,7 +21,10 @@ export function FileLink({
     <Link
       to="/chat/$sessionId"
       params={{ sessionId }}
-      search={{ file: path }}
+      search={(previous: { file?: string; files?: string[] }) => {
+        const files = [...new Set([...(previous.files ?? []), path])];
+        return files.length > 1 ? { file: path, files } : { file: path };
+      }}
       className={className}
       title={title}
     >

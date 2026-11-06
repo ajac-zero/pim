@@ -8,10 +8,10 @@ import { Download, Trash2, X } from "~/components/icons";
 import { PdfView } from "~/components/pdf-view";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
-import { baseName, displayPath, parentOf, previewOf } from "~/lib/files";
+import { baseName, parentOf, previewOf } from "~/lib/files";
 import { ApiError, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
 import { filesQuery } from "~/lib/queries";
-import { cn, formatBytes } from "~/lib/utils";
+import { cn } from "~/lib/utils";
 
 /** The largest text file the page shows; bigger ones are for downloading. */
 const MAX_TEXT_PREVIEW = 1_000_000;
@@ -39,12 +39,15 @@ export function FileMissing({
 /** One of your files, shown as well as the app can, to read or download. */
 export function FileView({
   path,
+  tabs,
   onClose,
 }: {
   path: string;
+  /** Files open together: their tabs take the place of this file's title. */
+  tabs?: { paths: string[]; onSelect: (path: string) => void };
   onClose?: () => void;
 }) {
-  const { t, formatNumber } = useI18n();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const preview = previewOf(baseName(path));
@@ -87,27 +90,48 @@ export function FileView({
   if (error || (listing.data && !entry))
     return <FileMissing onClose={onClose} />;
   const name = baseName(path);
-  const folder = displayPath(parentOf(path) ?? FILES_ROOT);
   const url = fileContentUrl(path);
 
   return (
     <main className="flex min-h-0 flex-1 flex-col">
-      <header className="flex items-center gap-2 border-b px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate font-semibold">{name}</h1>
-          <p className="truncate text-muted-foreground text-xs">
-            {[
-              folder || t("files"),
-              entry && formatBytes(entry.size, formatNumber),
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-        </div>
-        <Button asChild size="sm" variant="outline" className="h-8">
-          <a href={fileContentUrl(path, true)} download>
-            <Download className="size-3.5" />
-            {t("download")}
+      <header
+        className={cn("flex items-center gap-2 border-b px-4", !tabs && "py-2")}
+      >
+        {tabs ? (
+          <div
+            role="tablist"
+            className="flex min-w-0 flex-1 overflow-x-auto scrollbar-thin"
+          >
+            {tabs.paths.map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                aria-selected={tab === path}
+                title={tab}
+                onClick={() => tabs.onSelect(tab)}
+                className={cn(
+                  "h-12 max-w-48 shrink-0 truncate border-b-2 px-3 pt-0.5 text-sm",
+                  tab === path
+                    ? "border-foreground font-medium"
+                    : "border-transparent text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {baseName(tab)}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
+        )}
+        <Button asChild size="icon" variant="ghost" className="size-8 shrink-0">
+          <a
+            href={fileContentUrl(path, true)}
+            download
+            aria-label={t("download")}
+            title={t("download")}
+          >
+            <Download className="size-4" />
           </a>
         </Button>
         <Button

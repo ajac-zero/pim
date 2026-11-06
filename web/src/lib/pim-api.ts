@@ -30,6 +30,8 @@ export type Session = {
   room?: Room | null;
   /** Another of your agents started it to hand its agent a task: who, from which chat, and how the task is going. Null for chats you started. */
   startedBy?: StartedBy | null;
+  /** The chat it carries on, which grew too long to go on in: the sidebar lists it under that chat. Null for chats you started fresh. */
+  continuedFrom?: string | null;
 };
 
 export type StartedBy = {

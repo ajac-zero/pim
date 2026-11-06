@@ -294,6 +294,27 @@ export function StartedFrom({ startedBy }: { startedBy: StartedBy }) {
   );
 }
 
+/** Atop a chat that carries on one that grew too long: a link back to it. */
+export function ContinuedFrom({ session }: { session: string }) {
+  const { t } = useI18n();
+  const { data: sessions } = useQuery(sessionsQuery());
+  const from = sessions?.find((candidate) => candidate.id === session);
+  if (!from) return null;
+  return (
+    <p className="flex max-w-full items-center justify-center gap-1.5 px-3 text-[13px] text-muted-foreground">
+      <CornerDownRight className="size-3.5 shrink-0" />
+      <span className="shrink-0">{t("continuedFrom")}</span>
+      <Link
+        to="/chat/$sessionId"
+        params={{ sessionId: from.id }}
+        className="truncate text-foreground hover:underline"
+      >
+        {from.title ?? t("newChat")}
+      </Link>
+    </p>
+  );
+}
+
 /** A transcript link releases the bottom lock and moves focus to the other end of the task's history. */
 export function TaskJump({
   target,

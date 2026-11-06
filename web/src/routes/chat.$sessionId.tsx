@@ -308,6 +308,7 @@ function ChatPage() {
                 host={session?.agent}
                 room={session?.room}
                 startedBy={session?.startedBy}
+                continuedFrom={session?.continuedFrom}
                 view={view}
                 pending={pending}
                 composerHeight={composerHeight}

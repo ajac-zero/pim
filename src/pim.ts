@@ -5,12 +5,14 @@ import { createModels, type Models, type MutableModels } from "@earendil-works/p
 import type { SpanExporter } from "@opentelemetry/sdk-trace";
 import {
 	type AgentEventStream,
+	CompactionTask,
 	type ConversationId,
 	type UserInput,
 	createRegistry,
 	defineExtension,
 	type Extension,
 	Harness,
+	hook,
 	type HarnessSettings,
 	type ModelRef,
 	type TaskId,
@@ -197,6 +199,9 @@ import { projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
+
+/** The hook that carries a chat on in a new one when compaction would shorten it (`#continuationExtension`). */
+const CONTINUATION_EXTENSION = "pim.continuation";
 
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
@@ -751,6 +756,7 @@ export class Pim extends DurableAgent<Env> {
 			this.#migrateAlwaysApproved();
 			this.registry.install(this.telemetry.extension());
 			this.registry.install(this.#progress.extension());
+			this.registry.install(this.#continuationExtension());
 			this.registry.install(this.#agentExtension(services));
 			this.registry.install(this.#skillsExtension(services));
 			this.registry.install(goalsExtension(services));
@@ -3650,6 +3656,44 @@ export class Pim extends DurableAgent<Env> {
 		return { session: this.store.publicId(task.root), agent: { id: agent.id, name: agent.name }, task: task.id, state: task.state };
 	}
 
+	/** The chat a chat carries on, under its public id; null for one the person started fresh. */
+	#continuedFrom(session: string): string | null {
+		const from = this.store.continuedFrom(session);
+		return from === null ? null : this.store.publicId(from);
+	}
+
+	/**
+	 * Compaction would hide a long chat's early history in the chat itself. Instead the chat
+	 * stays as it is, and a fork of it, compacted, is the chat the conversation goes on in: it
+	 * opens with the summary, and the sidebar lists it under the chat it carries on. A chat is
+	 * continued once; a run that already overflowed is still compacted in place, to go on.
+	 */
+	#continuationExtension() {
+		return defineExtension({
+			name: CONTINUATION_EXTENSION,
+			hooks: [
+				hook(CompactionTask, {
+					beforeCompact: async ({ reason }, api) => {
+						const session = String(api.conversationId);
+						// Chats the person talks in alone; tasks', rooms' and visits' stay as they were.
+						if (reason === "manual" || this.#hiddenSessions().has(session) || this.visits.bySession(session) || this.#rooms.seats(session).length > 0) return undefined;
+						if (!this.store.isContinued(session)) {
+							const fork = await this.harness.sessions.fork(session);
+							this.agents.setSession(fork.id, this.agents.ofSession(session).id);
+							const abilities = this.agents.abilities(session);
+							if (abilities !== null) this.agents.setAbilities(fork.id, abilities);
+							this.store.touchSession(fork.id, this.store.sessionInfo(session)?.title ?? undefined);
+							this.store.continueSession(fork.id, session);
+							await (await this.harness.conversation(fork.id)).compact(undefined, BACKGROUND_CONTEXT);
+							this.broadcastMessage({ type: "sessions" });
+						}
+						return reason === "overflow" ? undefined : { decline: true as const };
+					},
+				}),
+			],
+		});
+	}
+
 	/** The agent a chat talks with; none in a visit, which talks with someone else's. */
 	#agentRef(session: string): { id: string; name: string } | null {
 		if (this.visits.bySession(session)) return null;
@@ -4566,6 +4610,7 @@ export class Pim extends DurableAgent<Env> {
 						agent: this.#agentRef(session.id),
 						room: this.#roomInfo(session.id, busy, heldErrors),
 						startedBy: this.#startedBy(session.id),
+						continuedFrom: this.#continuedFrom(session.id),
 					};
 				});
 				// Most recently active first; sessions never used last.

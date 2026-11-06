@@ -1,5 +1,7 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, type FauxResponseFactory, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { CompactionTask } from "@earendil-works/pi-durable";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
@@ -759,4 +761,37 @@ describe("conversation", () => {
 		const { received } = await connect("999");
 		await vi.waitFor(() => expect(received).toEqual([{ type: "error", message: "No session 999" }]));
 	});
+
+	it("carries a chat on in a new one when it needs compacting, and leaves the chat whole", async () => {
+		const { id } = (await post("/sessions", { title: "Long chat" })).body;
+		faux.setResponses([toolUse("send_to_user", { message: "One." })]);
+		await say("first question", id);
+		faux.setResponses([toolUse("send_to_user", { message: "Two." })]);
+		await say("second question", id);
+		const before = (await api(`/sessions/${id}/messages`)).body.messages.length;
+
+		faux.setResponses([fauxAssistantMessage("The user asked two questions.")]);
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const pi = await instance.harness.pi();
+			const session = Number(instance.store.sessionOf(id));
+			const conversation = (await pi.conversation(session as never, BACKGROUND_CONTEXT))!;
+			// A threshold compaction, which a chat nearing its model's limit starts.
+			const task = await conversation.commit(
+				(tx) => tx.createTask(CompactionTask, { reason: "threshold" }, { ownership: { kind: "conversation" }, conversationId: session as never, background: true }),
+				BACKGROUND_CONTEXT,
+			);
+			await pi.waitForTask(task, BACKGROUND_CONTEXT);
+		});
+
+		const continued = async () => (await api("/sessions")).body.sessions.find((session: { continuedFrom: string | null }) => session.continuedFrom === id);
+		await vi.waitFor(async () => expect(await continued()).toMatchObject({ title: "Long chat", agent: { name: expect.any(String) } }));
+		// The chat keeps all it said; the new one opens with the summary.
+		expect((await api(`/sessions/${id}/messages`)).body.messages).toHaveLength(before);
+		const next = (await continued()).id;
+		await vi.waitFor(async () => {
+			const { messages } = (await api(`/sessions/${next}/messages`)).body;
+			expect(textOf(messages[0])).toContain("The user asked two questions.");
+		});
+	});
+
 });

@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import {
   Fragment,
   memo,
+  type ReactNode,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -214,6 +215,7 @@ export const Thread = memo(function Thread({
   pending,
   composerHeight,
   composerCardHeight,
+  footer,
 }: {
   sessionId: string;
   /** Whether `view` is current, rather than the chat as it was last left. */
@@ -231,6 +233,8 @@ export const Thread = memo(function Thread({
   pending: UserContent | null;
   composerHeight?: number;
   composerCardHeight?: number;
+  /** Shown under the last message, such as suggested replies. */
+  footer?: ReactNode;
 }) {
   const { t } = useI18n();
 
@@ -440,6 +444,15 @@ export const Thread = memo(function Thread({
     working.length === 0 &&
     entries.every((entry) => entry.kind === "notice");
 
+  // With suggestions under it, the last message keeps its actions in view.
+  const lastRow = rows.at(-1);
+  const latestKey =
+    footer && lastRow
+      ? lastRow.kind === "sent" || lastRow.kind === "work"
+        ? lastRow.key
+        : lastRow.entry.key
+      : null;
+
   return (
     <Conversation
       className="scrollbar-thin"
@@ -482,6 +495,7 @@ export const Thread = memo(function Thread({
                 at={row.at}
                 mention={mention(row.key, row.sent.message)}
                 streaming={liveKeys.has(row.key)}
+                pinned={row.key === latestKey}
                 images={
                   outputs.has(row.call.call_id)
                     ? sentImages(outputs.get(row.call.call_id)?.output)
@@ -524,6 +538,7 @@ export const Thread = memo(function Thread({
                 }}
                 at={entry.at}
                 mention={mention(entry.key, entry.text)}
+                pinned={entry.key === latestKey}
                 images={postedImages(entry.text)}
               />
             );
@@ -672,6 +687,8 @@ export const Thread = memo(function Thread({
               onRetry={() => retryMember.mutate(member.id)}
             />
           ))}
+
+        {footer}
       </ConversationContent>
       {/* After the content, whose scroller its effects need. */}
       <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />

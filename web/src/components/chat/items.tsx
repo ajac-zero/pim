@@ -84,7 +84,7 @@ function useCopy(text: string) {
 }
 
 /** When a message was said: the time, with the date when it wasn't today. */
-function MessageTime({ at }: { at: number }) {
+function MessageTime({ at, className }: { at: number; className?: string }) {
   const { formatDate } = useI18n();
   const date = new Date(at);
   const now = new Date();
@@ -98,7 +98,10 @@ function MessageTime({ at }: { at: number }) {
     <time
       dateTime={date.toISOString()}
       title={formatDate(date, { dateStyle: "full", timeStyle: "short" })}
-      className="shrink-0 tabular-nums opacity-0 pointer-coarse:opacity-100 transition-opacity motion-reduce:transition-none group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100 group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100 group-has-focus-visible/notice:opacity-100 group-hover/notice:opacity-100 group-focus-visible/notice:opacity-100"
+      className={cn(
+        "shrink-0 tabular-nums opacity-0 pointer-coarse:opacity-100 transition-opacity motion-reduce:transition-none group-has-focus-visible/user:opacity-100 group-hover/user:opacity-100 group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100 group-has-focus-visible/notice:opacity-100 group-hover/notice:opacity-100 group-focus-visible/notice:opacity-100",
+        className,
+      )}
     >
       {formatDate(date, options)}
     </time>
@@ -211,8 +214,11 @@ export const AssistantMessage = memo(function AssistantMessage({
   images = {},
   speaker,
   mention,
+  pinned,
 }: {
   item: MessageItem;
+  /** Keeps its time and copy button showing, rather than only on hover: for the latest message of a chat. */
+  pinned?: boolean;
   /** Who wrote it, in a group chat. */
   speaker?: ReactNode;
   /** Set when the message mentions the person: what the chat's button to mentions finds it by. */
@@ -247,11 +253,17 @@ export const AssistantMessage = memo(function AssistantMessage({
       <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
         {!streaming && (
           <>
-            <MessageTime at={at} />
+            <MessageTime
+              at={at}
+              className={pinned ? "opacity-100" : undefined}
+            />
             <CopyAction
               text={text}
               label={t("copyResponse")}
-              className="group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100"
+              className={cn(
+                "group-has-focus-visible/assistant:opacity-100 group-hover/assistant:opacity-100",
+                pinned && "opacity-100",
+              )}
             />
           </>
         )}

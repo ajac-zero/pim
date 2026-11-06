@@ -190,7 +190,7 @@ function ItemLink({
   children: ReactNode;
 }) {
   const className = cn(ROW, link && "hover:bg-muted");
-  // An artifact with a chat opens beside it, in the canvas.
+  // An app with a chat opens beside it, in the canvas.
   if (link?.chat) {
     return (
       <Link

@@ -181,6 +181,13 @@ function watchOf(row: Row): AppWatch {
 /** How many widgets from tool results a chat keeps for its messages. */
 const KEPT_WIDGETS = 20;
 
+/** Tools renamed when the apps people connect became connectors: the old name, then the new. */
+const RENAMED_TOOLS = [
+	["manage_apps", "manage_connectors"],
+	["add_custom_app", "add_custom_connector"],
+	["watch_app_event", "watch_connector_event"],
+] as const;
+
 const ERASED_SCHEMA = "CREATE TABLE IF NOT EXISTS pim_erased (erased_at INTEGER NOT NULL)";
 
 const SCHEMA = `
@@ -413,12 +420,12 @@ export class PimStore {
 			pim_notifications: "notifications",
 			pim_emails: "emails sent",
 			pim_push_subscriptions: "push subscriptions",
-			pim_artifacts: "artifacts",
-			pim_artifact_versions: "artifact versions",
-			pim_artifact_deleted: "deleted artifact ids",
-			pim_artifact_data: "what artifacts keep",
-			pim_artifact_grants: "what artifacts may use",
-			pim_artifact_circles: "artifacts' circles",
+			pim_artifacts: "apps",
+			pim_artifact_versions: "app versions",
+			pim_artifact_deleted: "deleted app ids",
+			pim_artifact_data: "what apps keep",
+			pim_artifact_grants: "what apps may use",
+			pim_artifact_circles: "apps' circles",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(
@@ -454,6 +461,15 @@ export class PimStore {
 		if (!sessionColumns.includes("response_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN response_at INTEGER");
 		if (!sessionColumns.includes("read_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN read_at INTEGER");
 		if (!sessionColumns.includes("archived_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN archived_at INTEGER");
+		// Connectors were once called apps: what was chosen or waiting under a tool's old name is kept under its new one.
+		for (const [from, to] of RENAMED_TOOLS) {
+			this.#sql.exec("UPDATE pim_approvals SET action = ? WHERE action = ?", to, from);
+			this.#sql.exec("UPDATE pim_approvals SET tool = ? WHERE tool = ?", to, from);
+			this.#sql.exec("UPDATE OR IGNORE pim_always_approved SET tool = ? WHERE tool = ?", to, from);
+			this.#sql.exec("DELETE FROM pim_always_approved WHERE tool = ?", from);
+			this.#sql.exec("UPDATE OR IGNORE pim_tool_permissions SET tool = ? WHERE app = '' AND tool = ?", to, from);
+			this.#sql.exec("DELETE FROM pim_tool_permissions WHERE app = '' AND tool = ?", from);
+		}
 	}
 
 	// Goals

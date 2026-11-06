@@ -351,9 +351,9 @@ export function agentExtension(
 			const existing = agents.list().find((agent) => agent.role.toLowerCase() === (args.role ?? args.name).trim().toLowerCase());
 			if (existing) return json({ exists: true, agent: { id: existing.id, name: existing.name, description: existing.description } });
 			try {
-				const { emoji, contacts, ...rest } = args;
+				const { emoji, contacts, connectors, ...rest } = args;
 				const all = agents.list();
-				const agent = agents.create({ ...rest, symbol: emoji, contacts: agentIds(contacts ?? [], all) });
+				const agent = agents.create({ ...rest, apps: connectors, symbol: emoji, contacts: agentIds(contacts ?? [], all) });
 				const name = (id: string) => all.find((other) => other.id === id)?.name ?? id;
 				return json({
 					created: true,

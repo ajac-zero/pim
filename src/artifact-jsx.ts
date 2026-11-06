@@ -1,7 +1,7 @@
 /**
- * JSX artifacts: a React component the agent writes, compiled here to a
+ * JSX apps: a React component the agent writes, compiled here to a
  * CommonJS function that the React runtime (`web/src/artifact-runtime/`)
- * mounts in the artifact's sandboxed frame. Compiling when a version is
+ * mounts in the app's sandboxed frame. Compiling when a version is
  * written gives the agent the error to fix, and keeps to the modules the
  * runtime offers; compiling again when it's shown keeps the stored version
  * the source.
@@ -11,7 +11,7 @@ import { Buffer } from "node:buffer";
 import { transform } from "sucrase";
 import { HttpError } from "./http";
 
-/** The modules a JSX artifact may import, and the runtime file each comes from. */
+/** The modules a JSX app may import, and the runtime file each comes from. */
 const MODULES: Record<string, string> = {
 	react: "react",
 	"react-dom": "react",
@@ -42,10 +42,10 @@ export function compileJsx(source: string): CompiledJsx {
 	const runtimes = new Set(["react"]);
 	for (const [, , name] of code.matchAll(/\brequire\((['"])([^'"]+)\1\)/g)) {
 		const runtime = MODULES[name!];
-		if (!runtime) throw new HttpError(400, `A JSX artifact can import only ${JSX_MODULES.join(", ")}; not "${name}".`);
+		if (!runtime) throw new HttpError(400, `A JSX app can import only ${JSX_MODULES.join(", ")}; not "${name}".`);
 		runtimes.add(runtime);
 	}
-	if (!/\bexports\.\s*default\s*=/.test(code)) throw new HttpError(400, "A JSX artifact must export its component as the default: export default function App() { ... }");
+	if (!/\bexports\.\s*default\s*=/.test(code)) throw new HttpError(400, "A JSX app must export its component as the default: export default function App() { ... }");
 	return { code, runtimes: [...runtimes] };
 }
 
@@ -56,7 +56,7 @@ const CODE = /\.(jsx|tsx|js|ts|mjs)$/;
 /** The files an import of `./name` may mean, in the order they're tried. */
 const CANDIDATES = ["", ".jsx", ".tsx", ".js", ".ts", "/index.jsx", "/index.tsx", "/index.js", "/index.ts"];
 
-/** A path relative to another file's folder, or null when it leaves the artifact. */
+/** A path relative to another file's folder, or null when it leaves the app. */
 export function resolvePath(from: string, reference: string): string | null {
 	const parts = from.split("/").slice(0, -1);
 	for (const part of reference.split("/")) {
@@ -74,7 +74,7 @@ export function dataUrl(file: { type: string; bytes: Uint8Array }): string {
 	return `data:${file.type};base64,${Buffer.from(file.bytes).toString("base64")}`;
 }
 
-/** CSS with the `url(...)`s that name the artifact's own files made into `data:` URLs. */
+/** CSS with the `url(...)`s that name the app's own files made into `data:` URLs. */
 export function inlineCssUrls(css: string, from: string, files: AppFiles): string {
 	return css.replace(/url\(\s*(['"]?)([^'")]+?)\1\s*\)/g, (whole, _quote: string, reference: string) => {
 		if (/^[a-z][a-z0-9+.-]*:|^\/\/|^#/i.test(reference)) return whole;
@@ -128,19 +128,19 @@ export function compileJsxApp(files: AppFiles, entry: string): CompiledJsx {
 			if (name!.startsWith("./") || name!.startsWith("../")) {
 				const base = resolvePath(path, name!);
 				const found = base === null ? undefined : CANDIDATES.map((suffix) => base + suffix).find((candidate) => files.has(candidate));
-				if (!found) throw new HttpError(400, `${path} imports "${name}", which isn't one of the artifact's files.`);
+				if (!found) throw new HttpError(400, `${path} imports "${name}", which isn't one of the app's files.`);
 				imports[name!] = found;
 				visit(found);
 				continue;
 			}
 			const runtime = MODULES[name!];
-			if (!runtime) throw new HttpError(400, `A JSX artifact can import only ${JSX_MODULES.join(", ")} and its own files; not "${name}".`);
+			if (!runtime) throw new HttpError(400, `A JSX app can import only ${JSX_MODULES.join(", ")} and its own files; not "${name}".`);
 			runtimes.add(runtime);
 		}
 	};
 	visit(entry);
 	if (!/\bexports\.\s*default\s*=/.test(modules.get(entry)!.code)) {
-		throw new HttpError(400, "A JSX artifact must export its component as the default: export default function App() { ... }");
+		throw new HttpError(400, "A JSX app must export its component as the default: export default function App() { ... }");
 	}
 	// Each module runs once, when first imported, with a require that finds its imports among the others.
 	const table = [...modules].map(([path, module]) => `${JSON.stringify(path)}: [function (require, module, exports) {\n${module.code}\n}, ${JSON.stringify(module.imports)}]`);

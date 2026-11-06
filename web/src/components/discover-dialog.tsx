@@ -15,7 +15,7 @@ import {
   templatesQuery,
 } from "~/lib/queries";
 
-/** Agents and artifacts people published for anyone to use or make their own, as a dialog over whatever is open. */
+/** Agents and apps people published for anyone to use or make their own, as a dialog over whatever is open. */
 export function DiscoverDialog({
   open,
   onOpenChange,
@@ -127,7 +127,7 @@ function Templates() {
   );
 }
 
-/** A published artifact in a list: its title, what kind it is, who made it. */
+/** A published app in a list: its title, what kind it is, who made it. */
 function PublishedArtifactCard({ artifact }: { artifact: PublishedArtifact }) {
   const { t } = useI18n();
   return (

@@ -9,7 +9,7 @@ export const Route = createFileRoute("/artifacts/$artifactId")({
   component: ArtifactPage,
 });
 
-/** An artifact on a page of its own, opened from the Artifacts list or a direct link. */
+/** An app on a page of its own, opened from the Apps list or a direct link. */
 function ArtifactPage() {
   const { artifactId } = Route.useParams();
   const { v } = Route.useSearch();
@@ -24,7 +24,7 @@ function ArtifactPage() {
             to: "/artifacts/$artifactId",
             params: { artifactId },
             search: { v: version },
-            // Back leaves the artifact rather than stepping through its versions.
+            // Back leaves the app rather than stepping through its versions.
             replace: true,
           })
         }

@@ -749,7 +749,7 @@ const TOOL_STEPS: ReadonlyArray<[RegExp, TranslationKey, LucideIcon]> = [
   [/^fetch_url$/, "stepReadingPage", Globe],
   [/^http_request$/, "stepWebRequest", Globe],
   [/^browser_/, "stepUsingBrowser", Monitor],
-  [/^artifact_/, "stepArtifact", Shapes],
+  [/^(app|artifact)_/, "stepArtifact", Shapes],
   [/^generate_image$/, "stepImage", ImageIcon],
   [/^(note|recall|zoom|forget|optmem)$/, "stepMemory", Brain],
   [/_goals?$/, "stepGoals", ListChecks],

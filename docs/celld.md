@@ -155,9 +155,9 @@ Side jobs such as naming chats use a provider's model that answers in a JSON sch
 
 The first provider's first model is the default until someone chooses another. Only the custom-endpoint path has been exercised on celld, with a stand-in.
 
-## Public artifact links
+## Public app links
 
-Links are off until `PIM_CONTENT_ORIGIN` names a second hostname that shares no cookies with the app's (another registrable domain is best; see [artifacts](artifacts.md#public-links)). The Caddyfile's second site sends only its `/p/*` and `/artifact-runtime/*` to celld and answers everything else with 404, so nothing of the app, its API or its sign-in is served there.
+Links are off until `PIM_CONTENT_ORIGIN` names a second hostname that shares no cookies with the app's (another registrable domain is best; see [apps](apps.md#public-links)). The Caddyfile's second site sends only its `/p/*` and `/artifact-runtime/*` to celld and answers everything else with 404, so nothing of the app, its API or its sign-in is served there.
 
 ## The proxy
 

@@ -17,14 +17,14 @@ export { oauth2, ReconnectRequired } from "./native-apps";
  * data of a known kind, which the web app draws with its own components. No
  * extension code runs in the browser.
  *
- * Pim's own abilities (goals, schedules, memory, artifacts) bring their widgets
+ * Pim's own abilities (goals, schedules, memory, apps) bring their widgets
  * the same way, and its color themes are an extension (`./themes`).
  */
 
 /** Text an extension shows people: one string, or one per language, with English always there. */
 export type Text = string | { readonly en: string; readonly [locale: string]: string };
 
-/** Where a widget's item leads: one of the person's chats, or an artifact, beside the chat it names, if any. */
+/** Where a widget's item leads: one of the person's chats, or an app, beside the chat it names, if any. */
 export type WidgetLink = { readonly chat: string } | { readonly artifact: string; readonly chat?: string };
 
 export type ListItem = {

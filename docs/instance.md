@@ -36,7 +36,7 @@ People on the same Pim can share with each other: circles let others message you
   - Connectors' sign-ins return to `/mcp/callback/<owner>`, matched by the agent against the OAuth state; event webhooks go to `/mcp/events/<owner>/<watch>`, checked against the watch's signing secret.
   - The agent refuses any request whose forwarded owner isn't its own name (`pim.misrouted`).
 - **Usernames** are 3 to 32 lowercase letters, digits and single hyphens. A list of names is reserved. A username is never reused once its account is active, even after deletion, so nobody inherits what others knew by that name. A registration that never makes a passkey gives back its username, its place under `PIM_MAX_ACCOUNTS` and its invite: at once if setting it up fails, otherwise after a day. Whatever it made is erased by a cleanup job.
-- **One origin for everyone.** Only Pim's own app code runs on it. Artifacts are served with a CSP sandbox that gives them an opaque origin (see [artifacts.md](artifacts.md)), so they can't read anyone's cookies or call the API. Anything later that runs code people or their agents wrote must live on another domain.
+- **One origin for everyone.** Only Pim's own app code runs on it. Apps are served with a CSP sandbox that gives them an opaque origin (see [apps.md](apps.md)), so they can't read anyone's cookies or call the API. Anything later that runs code people or their agents wrote must live on another domain.
 
 ## Joining
 
@@ -98,7 +98,7 @@ The admin can't suspend or delete their own account from here; deleting it from 
 | `pim.default_agent_set` | The admin chose the agent everyone who joins gets (`agent`), or went back to none (`agent: null`) |
 | `pim.misrouted` | A request reached the wrong agent. This should never happen: investigate |
 
-**Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute in `wrangler.jsonc`) and `PIM_REGISTRATIONS_PER_ADDRESS`. Per person: `API_LIMITER` (600 requests a minute), the `PIM_LIMIT_*` variables (tokens, model requests, runs, chats, schedules, storage, artifacts), and `PIM_MODELS`, so only models you pay for can be chosen.
+**Abuse and limits.** Per address: `AUTH_LIMITER` (30 sign-in, recovery and registration attempts a minute in `wrangler.jsonc`) and `PIM_REGISTRATIONS_PER_ADDRESS`. Per person: `API_LIMITER` (600 requests a minute), the `PIM_LIMIT_*` variables (tokens, model requests, runs, chats, schedules, storage, apps), and `PIM_MODELS`, so only models you pay for can be chosen.
 
 **Deleting an account** makes it `deleting` in the Directory first, so it opens nothing at once (`410`), and queues a cleanup job there. The job wipes the agent (runs aborted, connector event subscriptions stopped, sockets closed, storage and alarms deleted, schedules and credentials with them), writes an erased mark into the empty storage, flushes it, and ends the agent's instance so nothing under way there can write afterwards. Every later instance finds the mark and refuses everything: requests (`410`), sockets, alarms and the Worker's own writes. That makes the agent itself the fence: a request a Worker authorized just before the deletion, or with an account it still had cached, can't write after it. The job then checks a fresh instance is marked and holds nothing, and wipes and checks the Auth object. Only then is the account `deleted`; a request that slipped in before the mark makes the check fail, and the retry wipes it.
 
@@ -113,8 +113,8 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 
 ## Before inviting people
 
-1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their apps. Attach it to the Worker and set `PIM_PUBLIC_URL` to it, both in the dashboard.
-   For public artifact links, add a second hostname that isn't under the first one's cookies (another domain is best), route its `/p/*` and `/artifact-runtime/*` to the Worker, and set `PIM_CONTENT_ORIGIN` to it in the dashboard (see [artifacts](artifacts.md#public-links)).
+1. **Domain.** Passkeys belong to the hostname, so pick the address people will use before anyone joins: moving later means everyone makes new passkeys and reconnects their connectors. Attach it to the Worker and set `PIM_PUBLIC_URL` to it, both in the dashboard.
+   For public app links, add a second hostname that isn't under the first one's cookies (another domain is best), route its `/p/*` and `/artifact-runtime/*` to the Worker, and set `PIM_CONTENT_ORIGIN` to it in the dashboard (see [apps](apps.md#public-links)).
 2. **OpenAI:** for people outside your household, confirm with OpenAI that they may use ChatGPT-plan sign-in through your Pim.
 3. **Data residency:** agents are created without a jurisdiction. Choosing one (for example `eu`) must happen before anyone joins, because an object can't move.
 4. **Policy:** `PIM_REGISTRATION`, the `PIM_LIMIT_*` variables and `PIM_MODELS` for what you're willing to pay for.
@@ -123,7 +123,7 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 
 ## Preview locally
 
-`pnpm preview` builds the web app and serves a Pim at <http://localhost:8787> from `wrangler.preview.jsonc` and [`preview/worker.ts`](../preview/worker.ts), with open registration. It rebuilds the web app when `web/src` changes and reloads the Worker when its code does. It runs `wrangler dev --local` with no remote bindings, so it stays on your machine and touches no Cloudflare account, even when `wrangler` is logged in. It is never deployed: there is no deploy script for it. Its state is kept in `.wrangler/state-preview`. Use `localhost`, not `127.0.0.1`: passkeys don't work on an IP address, and the preview serves `127.0.0.1` as its content origin, for public artifact links.
+`pnpm preview` builds the web app and serves a Pim at <http://localhost:8787> from `wrangler.preview.jsonc` and [`preview/worker.ts`](../preview/worker.ts), with open registration. It rebuilds the web app when `web/src` changes and reloads the Worker when its code does. It runs `wrangler dev --local` with no remote bindings, so it stays on your machine and touches no Cloudflare account, even when `wrangler` is logged in. It is never deployed: there is no deploy script for it. Its state is kept in `.wrangler/state-preview`. Use `localhost`, not `127.0.0.1`: passkeys don't work on an IP address, and the preview serves `127.0.0.1` as its content origin, for public app links.
 
 - **Signing in.** <http://localhost:8787/__dev/sign-in/ada> signs the browser in as `ada`, making the account if it's new (the first one is the admin), and `?returnTo=/settings` picks where it lands. It makes a passkey on the server, so it works in any browser and with `curl -c cookies`.
 - **Passkeys.** To try the passkey screens themselves: Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.

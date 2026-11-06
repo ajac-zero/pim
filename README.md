@@ -17,7 +17,7 @@ Pim is an open-source home for personal agents that you run yourself. Each perso
 
 Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on, plus **m** for **multi**:
 
-- **Multiplayer.** One Pim serves everyone you invite. Each person has a private space, can let others talk to their agents through circles, and publishes agents and artifacts for the others to find. The admin can also share an agent as a public bot: anyone with its link signs up as a guest and chats with it, within daily limits on messages and tool calls, using only the tools the admin switches on, which run as the admin.
+- **Multiplayer.** One Pim serves everyone you invite. Each person has a private space, can let others talk to their agents through circles, and publishes agents and apps for the others to find. The admin can also share an agent as a public bot: anyone with its link signs up as a guest and chats with it, within daily limits on messages and tool calls, using only the tools the admin switches on, which run as the admin.
 - **Multiagent.** You talk with your majordomo, which hands work to your other agents and tells you what came back. Any agent can hand work to its contacts, others of your agents, working at once. Every chat is a group chat: add an agent from its "In this chat" menu, or mention it as @Coach, and it joins, until you or the chat's agent take it out again.
 - **Multidevice.** Use it on desktop or phone, with push notifications. Agents work on a computer you connect, bots use the API, and Claude, ChatGPT and other MCP clients can talk with your majordomo.
 - **Multimodel.** Bring the models you want, hosted or local (see [Models](#models)).
@@ -34,11 +34,11 @@ Pim is [pi](https://github.com/earendil-works/pi), the agent harness it runs on,
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/artifact.png" alt="A chat with Coach beside the training plan, a small React app with a chart of weekly distances and this week's runs."><br><sub>Artifacts open beside the chat.</sub></td>
+    <td width="50%"><img src="docs/images/artifact.png" alt="A chat with Coach beside the training plan, a small React app with a chart of weekly distances and this week's runs."><br><sub>Apps open beside the chat.</sub></td>
     <td width="50%"><img src="docs/images/discover.png" alt="Discover, listing agents that Ada, Grace, Linus and Margaret published on the same Pim."><br><sub>Discover lists what people on your Pim published.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/mobile.png" alt="Two phone screens: Jeeves asking for approval before booking the hotel, and the training plan on its own page."><br><sub>On a phone: an approval, and an artifact.</sub></td>
+    <td width="50%"><img src="docs/images/mobile.png" alt="Two phone screens: Jeeves asking for approval before booking the hotel, and the training plan on its own page."><br><sub>On a phone: an approval, and an app.</sub></td>
     <td width="50%"></td>
   </tr>
 </table>
@@ -70,7 +70,7 @@ A Pim on Cloudflare can reach only servers on the public internet; one on your o
 
 - [How Pim works](docs/reference.md): deploying, the API, memory, models, connectors, agents and sharing
 - [Running a Pim for several people](docs/instance.md), and [on celld](docs/celld.md) (beta)
-- [Artifacts](docs/artifacts.md) and [extensions](docs/extensions.md)
+- [Apps](docs/apps.md) and [extensions](docs/extensions.md)
 
 To work on Pim, `pnpm check` runs the type checks, lint and tests, as CI does.
 

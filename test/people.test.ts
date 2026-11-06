@@ -871,7 +871,7 @@ describe("the account", () => {
 
 /** Has the person's space make an HTML artifact, as its model would, and returns its id. */
 async function makeArtifact(browser: Browser, content: string) {
-	faux.setResponses([toolUse("artifact_create", { title: "Page", kind: "html", content }), toolUse("send_to_user", { message: "Made it." })]);
+	faux.setResponses([toolUse("app_create", { title: "Page", kind: "html", content }), toolUse("send_to_user", { message: "Made it." })]);
 	expect((await browser.json(`/api/sessions/${await rootOf(browser)}/messages`, { method: "POST", json: { content: "Make a page", wait: true } })).status).toBe(200);
 	const { artifacts } = (await browser.json("/api/artifacts")).body as { artifacts: { id: string; title: string }[] };
 	return artifacts[0]!.id;
@@ -936,7 +936,7 @@ describe("artifacts", () => {
 		expect((await bridge(eli.browser, theirs(1), "model.ask", { prompt: "Hi" })).body).toEqual({ needs: { capability: "model", label: "model" } });
 
 		// A new version replaces the shared one.
-		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>List 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
+		faux.setResponses([toolUse("app_update", { id, base_version: 1, content: "<p>List 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
 		await dee.browser.json(`/api/sessions/${await rootOf(dee.browser)}/messages`, { method: "POST", json: { content: "Change it", wait: true } });
 		expect((await eli.browser.fetch(`${theirs(1)}/frame`)).status).toBe(404);
 		expect(await (await eli.browser.fetch(`${theirs(2)}/frame`)).text()).toContain("List 2");
@@ -980,7 +980,7 @@ describe("artifacts", () => {
 		expect((await hal.browser.json(`${root}/versions/1/grants`, { method: "POST", json: { capability: "model" } })).status).toBe(201);
 
 		// The author's next version isn't published until they publish again, which a new grant needs.
-		faux.setResponses([toolUse("artifact_update", { id, base_version: 1, content: "<p>Tip calculator 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
+		faux.setResponses([toolUse("app_update", { id, base_version: 1, content: "<p>Tip calculator 2</p>" }), toolUse("send_to_user", { message: "Done." })]);
 		await gus.browser.json(`/api/sessions/${await rootOf(gus.browser)}/messages`, { method: "POST", json: { content: "Change it", wait: true } });
 		expect(await (await hal.browser.fetch(`${root}/versions/1/frame`)).text()).not.toContain("Tip calculator 2");
 		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body).toMatchObject({ id: published.id, version: 2 });
@@ -1010,7 +1010,7 @@ describe("artifacts", () => {
 		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body.link).toBe(link);
 		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST", json: { public: false } })).body.link).toBeNull();
 		expect((await anonymous(link)).status).toBe(404);
-		faux.setResponses([toolUse("artifact_create", { title: "Notes", kind: "markdown", content: "# Notes" }), toolUse("send_to_user", { message: "Made it." })]);
+		faux.setResponses([toolUse("app_create", { title: "Notes", kind: "markdown", content: "# Notes" }), toolUse("send_to_user", { message: "Made it." })]);
 		await gus.browser.json(`/api/sessions/${await rootOf(gus.browser)}/messages`, { method: "POST", json: { content: "Make notes", wait: true } });
 		const notes = (await gus.browser.json("/api/artifacts")).body.artifacts[0].id;
 		expect((await gus.browser.json(`/api/artifacts/${notes}/publish`, { method: "POST", json: { public: true } })).status).toBe(400);
@@ -1066,7 +1066,7 @@ describe("artifacts", () => {
 		// A deleted artifact leaves its id behind, not in the export; erasing the account takes that too.
 		const gone = await makeArtifact(cy.browser, "<p>Cy's other page</p>");
 		expect((await cy.browser.json(`/api/artifacts/${gone}`, { method: "DELETE" })).body).toEqual({ deleted: true });
-		expect((await holdings(cy.ownerId)).remaining).toContain("deleted artifact ids");
+		expect((await holdings(cy.ownerId)).remaining).toContain("deleted app ids");
 		expect(JSON.stringify(JSON.parse(await (await cy.browser.fetch("/api/account/export")).text()).pim.artifacts)).not.toContain(gone);
 		// Deleted: gone, and the space holds nothing.
 		const before = new Map(cy.browser.cookies);
@@ -1540,7 +1540,7 @@ describe("erasure boundaries", () => {
 		faux.setResponses([
 			async () => {
 				await held.hold();
-				return toolUse("artifact_create", { title: "Late", kind: "html", content: "<p>Made during erasure</p>" });
+				return toolUse("app_create", { title: "Late", kind: "html", content: "<p>Made during erasure</p>" });
 			},
 		]);
 		await withAgentMethod(

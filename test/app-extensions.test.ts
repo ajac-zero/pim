@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { newSecret, signWebhook } from "../src/extensions/app-events";
-import type { Approval } from "../src/store";
+import { type Approval, PimStore } from "../src/store";
 import { api, apiUrl, lastUserText, OWNER, pendingApproval, post, ROOT as ROOT_SESSION, say, toolUse, url } from "./helpers";
 import { faux, type Pim } from "./worker";
 
@@ -329,6 +329,23 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		expect(approval).toMatchObject({ action: "http_request", status: "pending" });
 		await post(`/approvals/${approval.id}/deny`);
 		await api(`/sessions/${ROOT_SESSION}/operations/event:${watchId}:evt_gated`);
+	});
+
+	it("keeps what was chosen or waiting under a tool's old name, from before apps became connectors", async () => {
+		await runInDurableObject(env.Pim.getByName(OWNER), async (_instance: Pim, state) => {
+			const sql = state.storage.sql;
+			sql.exec("INSERT INTO pim_tool_permissions (audience, app, tool, permission, definition, updated_at) VALUES ('', '', 'watch_app_event', 'off', NULL, 1)");
+			sql.exec("INSERT INTO pim_always_approved (tool, created_at) VALUES ('add_custom_app', 1)");
+			sql.exec("INSERT INTO pim_approvals (id, session, action, args, summary, status, created_at, tool) VALUES ('old', 's', 'manage_apps', '{}', 'x', 'pending', 1, 'manage_apps')");
+			const store = new PimStore(sql);
+			expect(store.toolPermission("", "", "watch_connector_event")?.permission).toBe("off");
+			expect(store.toolPermission("", "", "watch_app_event")).toBeUndefined();
+			expect(sql.exec("SELECT tool FROM pim_always_approved").toArray()).toEqual([{ tool: "add_custom_connector" }]);
+			expect(sql.exec("SELECT action, tool FROM pim_approvals WHERE id = 'old'").toArray()).toEqual([{ action: "manage_connectors", tool: "manage_connectors" }]);
+			sql.exec("DELETE FROM pim_tool_permissions WHERE tool = 'watch_connector_event'");
+			sql.exec("DELETE FROM pim_always_approved");
+			sql.exec("DELETE FROM pim_approvals WHERE id = 'old'");
+		});
 	});
 
 	it("honors the tool's Off setting, and counts a leftover Ask as On", async () => {

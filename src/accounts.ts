@@ -50,7 +50,7 @@ function log(event: string, fields: Record<string, unknown>): void {
 
 const json = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers });
 const fail = (status: number, error: string) => json({ error }, status);
-/** An answer that carries an artifact or what it keeps, which no cache may keep. */
+/** An answer that carries an app or what it keeps, which no cache may keep. */
 const noStore = (value: unknown, status = 200) =>
 	Response.json(value, { status, headers: { "cache-control": "no-store, private", "x-content-type-options": "nosniff" } });
 
@@ -60,14 +60,14 @@ function registrationPolicy(env: Env): RegistrationPolicy {
 }
 
 /**
- * The origin public artifact links are served from, `PIM_CONTENT_ORIGIN`:
+ * The origin public app links are served from, `PIM_CONTENT_ORIGIN`:
  * another host, routed to this Worker, that serves nothing but published
- * artifacts' pages and their scripts, and has no session, cookie or API.
+ * apps' pages and their scripts, and has no session, cookie or API.
  * Null when it isn't set, and links are off.
  */
 export const contentOrigin = (env: Env) => deploymentSettings(env).contentOrigin;
 
-/** What an author sees of an artifact they published: also its public link, if it has one, and whether it can. */
+/** What an author sees of an app they published: also its public link, if it has one, and whether it can. */
 function publication(env: Env, published: PublishedArtifact) {
 	const content = contentOrigin(env);
 	const linkable = content !== null && FRAMED_KINDS.includes(published.kind);
@@ -76,7 +76,7 @@ function publication(env: Env, published: PublishedArtifact) {
 
 /**
  * A request to the content origin. It answers only `/p/<id>`, a published
- * artifact its author lets anyone with the link see, as the same sandboxed
+ * app its author lets anyone with the link see, as the same sandboxed
  * page Pim frames, whose bridge refuses every call (no space is there to
  * answer), and the runtime scripts such pages load. Nothing else.
  */
@@ -137,8 +137,8 @@ async function botCopy(env: Env, bot: Bot) {
 
 /**
  * What a guest may call in their own space: chatting with their bot, and
- * what chatting needs, such as approvals, artifacts, files and the bot's
- * apps. Not agents, models, sharing, publishing, memory or a computer.
+ * what chatting needs, such as approvals, apps, files and the bot's
+ * connectors. Not agents, models, sharing, publishing, memory or a computer.
  */
 const GUEST_ROUTES: readonly (readonly [methods: string, path: RegExp])[] = [
 	["GET", /^\/(|usage|bot|majordomo|model|profile|extensions|app-directory|browser|ws)$/],
@@ -544,7 +544,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				return undefined;
 			}
 
-			// Artifacts published to everyone: read from the gallery, run with the viewer's own space.
+			// Apps published to everyone: read from the gallery, run with the viewer's own space.
 			if (path === "/published-artifacts" || path.startsWith("/published-artifacts/") || /^\/artifacts\/[^/]+(\/publish)?$/.test(path)) {
 				if (new URL(request.url).searchParams.has("token")) return fail(400, "Send the API token in the Authorization header, not the address");
 			}
@@ -556,11 +556,11 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 			if (published) {
 				const [, id, use, version, part] = published;
 				const found = await gallery(env).publishedArtifact(decodeURIComponent(id!));
-				if (!found) return fail(404, "No such artifact. It may have been unpublished.");
+				if (!found) return fail(404, "No such app. It may have been unpublished.");
 				if (!use && !version && request.method === "GET") return noStore(found);
 				if (use && request.method === "POST") {
 					const stored = await gallery(env).publishedFiles(found.id);
-					if (stored === null) return fail(404, "No such artifact. It may have been unpublished.");
+					if (stored === null) return fail(404, "No such app. It may have been unpublished.");
 					const artifact = await (await pim()).adoptArtifact({ title: found.title, kind: found.kind, ...stored });
 					if (found.author !== account.username) await gallery(env).artifactUsed(found.id);
 					log("published_artifact_used", { owner: account.ownerId, artifact: found.id });
@@ -570,7 +570,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (Number(version) !== found.version) return fail(404, `Only version ${found.version} is published`);
 				if (request.method === "GET" && (!part || part === "frame")) {
 					const stored = await gallery(env).publishedFiles(found.id);
-					if (stored === null) return fail(404, "No such artifact. It may have been unpublished.");
+					if (stored === null) return fail(404, "No such app. It may have been unpublished.");
 					const files = await readFiles(env.ARTIFACTS, stored.owner, stored.files);
 					if (part === "frame") return framePage(found.kind, files, new URL(request.url).origin);
 					return noStore({ ...found, latest: found.version, files: stored.files, content: textOf(files.get(ENTRY_FILES[found.kind])!.bytes) });
@@ -600,7 +600,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				}
 				if (request.method === "POST") {
 					const artifact = await (await pim()).artifactToPublish(id);
-					if (!artifact) return fail(404, `No artifact ${id}`);
+					if (!artifact) return fail(404, `No app ${id}`);
 					const open = (await body()).public;
 					if (open !== undefined && typeof open !== "boolean") return fail(400, "public must be true or false");
 					if (open && contentOrigin(env) === null) return fail(400, "This Pim has no content origin for public links (PIM_CONTENT_ORIGIN).");
@@ -612,7 +612,7 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 				if (request.method === "DELETE") return noStore({ deleted: await gallery(env).unpublishArtifact(account.ownerId, id) });
 				return undefined;
 			}
-			// A deleted artifact leaves the gallery too; the owner's space deletes it after.
+			// A deleted app leaves the gallery too; the owner's space deletes it after.
 			const deletedArtifact = /^\/artifacts\/([^/]+)$/.exec(path);
 			if (deletedArtifact && request.method === "DELETE") await gallery(env).unpublishArtifact(account.ownerId, decodeURIComponent(deletedArtifact[1]!));
 
@@ -758,7 +758,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 			const publishedArtifact = /^\/admin\/published-artifacts\/([^/]+)$/.exec(path);
 			if (publishedArtifact && request.method === "DELETE") {
 				const removed = await gallery(env).removeArtifact(decodeURIComponent(publishedArtifact[1]!));
-				if (!removed) return fail(404, "No such artifact");
+				if (!removed) return fail(404, "No such app");
 				log("published_artifact_removed", { artifact: publishedArtifact[1], by: admin.ownerId });
 				return json({ deleted: true });
 			}

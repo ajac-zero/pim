@@ -548,7 +548,7 @@ function GuestChat({
   );
 }
 
-/** An artifact or file the chat opened, beside it, or over it on phones. */
+/** An app or file the chat opened, beside it, or over it on phones. */
 function GuestCanvas({
   sessionId,
   artifact,

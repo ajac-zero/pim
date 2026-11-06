@@ -273,12 +273,12 @@ function CardRow({
 /** The page diagrams are drawn in (see `diagramPage` in src/artifacts.ts). */
 const DIAGRAM_PAGE = "/api/diagram";
 const MAX_DIAGRAM_HEIGHT = 2000;
-/** At most this many height messages a second are taken, as for artifacts. */
+/** At most this many height messages a second are taken, as for apps. */
 const MAX_MESSAGES_PER_SECOND = 20;
 
 /**
  * A ```mermaid block, drawn in a sandboxed frame of its own as Mermaid
- * artifacts are, never in the app's page: the app posts the frame its source
+ * apps are, never in the app's page: the app posts the frame its source
  * once the message is whole. One Mermaid can't draw shows as its source.
  */
 export function Diagram({

@@ -200,7 +200,7 @@ function SignedIn({
     enabled: data?.signedIn === true && pushSupported(),
   });
   // An open socket would keep streaming after signing out. The sign-in screen takes the
-  // app's place, which unmounts every artifact frame; everything read of the space goes
+  // app's place, which unmounts every app frame; everything read of the space goes
   // too, with what this device kept of it (see `saved-queries.ts`).
   useEffect(() => {
     if (!signedOut) return;

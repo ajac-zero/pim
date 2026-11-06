@@ -68,7 +68,7 @@
 	import celld
 }
 
-# Public artifact links (PIM_CONTENT_ORIGIN), on a hostname that shares no cookies with the app's.
+# Public app links (PIM_CONTENT_ORIGIN), on a hostname that shares no cookies with the app's.
 # Only the published pages and their scripts: nothing of the app, its API or its sign-in. Without
 # PIM_CONTENT_ORIGIN, delete this block.
 {$PIM_CONTENT_HOST:pim-content.example.net} {

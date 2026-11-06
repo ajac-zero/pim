@@ -35,13 +35,13 @@ export type Limits = {
 	readonly schedules: number | null;
 	/** The space's database, in bytes. */
 	readonly storageBytes: number | null;
-	/** Artifacts kept. */
+	/** Apps kept. */
 	readonly artifacts: number | null;
-	/** Versions one artifact keeps. */
+	/** Versions one app keeps. */
 	readonly artifactVersions: number | null;
 	/** One version's size, in UTF-8 bytes (at most 1,000,000 whatever this says). */
 	readonly artifactBytes: number | null;
-	/** Every version of every artifact, in bytes (at most 10,000,000 whatever this says). */
+	/** Every version of every app, in bytes (at most 10,000,000 whatever this says). */
 	readonly artifactStorageBytes: number | null;
 };
 

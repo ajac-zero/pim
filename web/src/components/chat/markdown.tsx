@@ -44,12 +44,12 @@ const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const CHAT_MENTION = new RegExp(`(?:/chat/)?\\b(${UUID})\\b`, "gi");
 /** A link to a chat in this app. */
 const CHAT_HREF = new RegExp(`^(https?://[^/]+)?/chat/(${UUID})$`, "i");
-/** A link to an artifact in this app, perhaps to one of its versions. */
+/** A link to an app in this app, perhaps to one of its versions. */
 const ARTIFACT_HREF = new RegExp(
   `^(https?://[^/]+)?/artifacts/(${UUID})(?:\\?v=(\\d+))?$`,
   "i",
 );
-/** An artifact named by an address an agent made up, such as `artifact://<id>`, which browsers can't open. */
+/** An app named by an address an agent made up, such as `artifact://<id>`, which browsers can't open. */
 const ARTIFACT_SCHEME = new RegExp(`^artifacts?:(?://)?(${UUID})$`, "i");
 /** Link text that is only the chat's id or address, which its title reads better than. */
 const BARE_CHAT = new RegExp(`^(?:(?:https?://[^/\\s]+)?/chat/)?${UUID}$`, "i");
@@ -69,7 +69,7 @@ type MdastNode = {
 /**
  * Makes the chats a message names into links: an id, bare or in backticks,
  * and a `/chat/<id>` address. An id that turns out not to be a chat (an
- * artifact's or an approval's) is shown as text again by `ChatLink`.
+ * app's or an approval's) is shown as text again by `ChatLink`.
  * Workspace file links, including `sandbox:` addresses from older replies,
  * go to the file viewer before Markdown's sanitizer checks their protocol.
  */
@@ -186,7 +186,7 @@ function chatOf(href: string | undefined): string | undefined {
   return match[2]?.toLowerCase();
 }
 
-/** The artifact a link goes to, and which version, when it goes to one in this app. */
+/** The app a link goes to, and which version, when it goes to one in this app. */
 function artifactOf(
   href: string | undefined,
 ): { id: string; version?: number } | undefined {
@@ -214,8 +214,8 @@ function fileOf(href: string | undefined): string | undefined {
 }
 
 /**
- * An artifact an agent's message links to, opened in the canvas beside the
- * chat the message is in, like the artifact's own card; on its own page
+ * An app an agent's message links to, opened in the canvas beside the
+ * chat the message is in, like the app's own card; on its own page
  * where there's no chat around it.
  */
 function ArtifactLink({
@@ -597,7 +597,7 @@ export const Markdown = memo(function Markdown({
    */
   streaming?: boolean;
   /**
-   * For text kept and shown again, such as a Markdown artifact: raw HTML is
+   * For text kept and shown again, such as a Markdown app: raw HTML is
    * dropped, images are replaced by their alt text, so showing it loads
    * nothing from elsewhere, and links only go to web or mail addresses.
    */

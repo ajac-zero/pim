@@ -56,7 +56,7 @@ function textOf(content: string | readonly { type: string; text?: string }[]): s
 	return typeof content === "string" ? content : content.flatMap((part) => (part.type === "text" && part.text !== undefined ? [part.text] : [])).join("");
 }
 
-/** A widget without its rows' links, which go to the owner's own chats and artifacts. */
+/** A widget without its rows' links, which go to the owner's own chats and apps. */
 function unlinked(widget: ShownWidget): ShownWidget {
 	if ("failed" in widget) return widget;
 	return { ...widget, items: widget.items.map(({ link: _, ...item }) => item) } as ShownWidget;

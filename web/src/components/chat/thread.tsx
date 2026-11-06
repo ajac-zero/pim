@@ -675,6 +675,7 @@ export const Thread = memo(function Thread({
       </ConversationContent>
       {/* After the content, whose scroller its effects need. */}
       <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />
+      <FollowOwnMessage sent={pending !== null} />
 
       <ConversationScrollButton
         bottomOffset={
@@ -691,6 +692,15 @@ export const Thread = memo(function Thread({
     </Conversation>
   );
 });
+
+/** Sending a message goes to the bottom and follows the reply, even from further up the chat. */
+function FollowOwnMessage({ sent }: { sent: boolean }) {
+  const { scrollToBottom } = useStickToBottomContext();
+  useEffect(() => {
+    if (sent) scrollToBottom();
+  }, [sent, scrollToBottom]);
+  return null;
+}
 
 /** Remembers where a chat is scrolled to, and goes back there when the chat opens again. */
 function ScrollMemory({

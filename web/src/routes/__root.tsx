@@ -69,14 +69,16 @@ const DIALOGS = [
   "apps",
   "new-chat",
   "computer",
+  "agents",
 ] as const;
 type AppDialog = (typeof DIALOGS)[number];
 
 /**
- * Settings, Sharing, Discover, Apps, New chat and Computer open as dialogs
- * over any page, named in the URL so links and redirects can open them:
- * `?dialog=settings&tab=model`, or `?dialog=new-chat&agent=<id>&prompt=…`
- * for a chat with that agent, starting from that message.
+ * Settings, Sharing, Discover, Apps, New chat, Computer and Agents open as
+ * dialogs over any page, named in the URL so links and redirects can open
+ * them: `?dialog=settings&tab=model`, `?dialog=new-chat&agent=<id>&prompt=…`
+ * for a chat with that agent, starting from that message, or
+ * `?dialog=agents&agent=<id>` for that agent's settings.
  * What the sidebar shows is in the URL too (`?panel=artifacts`), and stays
  * as you move between chats.
  */
@@ -113,6 +115,11 @@ const AppsDialog = lazy(() =>
 const ComputerDialog = lazy(() =>
   import("~/components/computer-dialog").then((module) => ({
     default: module.ComputerDialog,
+  })),
+);
+const AgentsDialog = lazy(() =>
+  import("~/components/agents-dialog").then((module) => ({
+    default: module.AgentsDialog,
   })),
 );
 /** Only a guest's account chats through this, so only a guest loads it. */
@@ -552,6 +559,11 @@ function AppDialogs() {
           onOpenChange={close}
         />
         <ComputerDialog open={dialog === "computer"} onOpenChange={close} />
+        <AgentsDialog
+          open={dialog === "agents"}
+          agent={agent}
+          onOpenChange={close}
+        />
       </Suspense>
     </>
   );

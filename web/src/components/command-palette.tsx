@@ -18,6 +18,7 @@ import {
   CalendarClock,
   Check,
   Compass,
+  Contact,
   FileIcon,
   Lightbulb,
   MessagesSquare,
@@ -51,7 +52,6 @@ const PANELS: {
   icon: ReactNode;
 }[] = [
   { panel: "notifications", label: "notifications", icon: <Bell /> },
-  { panel: "agents", label: "agents", icon: <Users /> },
   { panel: "artifacts", label: "artifacts", icon: <FileIcon /> },
   { panel: "skills", label: "skills", icon: <Lightbulb /> },
   { panel: "schedules", label: "schedules", icon: <CalendarClock /> },
@@ -117,30 +117,46 @@ export function CommandPalette({
     };
   }, [hasDesktop, navigate]);
 
-  // ⌘K opens the palette, ⌘⇧O starts a chat and ⌘B hides or shows the sidebar
-  // (Ctrl instead of ⌘ away from a Mac).
+  // ⌘K opens the palette, ⌘⇧O starts a chat, ⌘⇧E shows or hides Agents (the
+  // open chat's agent first) and ⌘B hides or shows the sidebar (Ctrl instead
+  // of ⌘ away from a Mac).
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const key = event.key.toLowerCase();
       if (key === "k" && !event.shiftKey) setOpen((current) => !current);
       else if (key === "o" && event.shiftKey) newChat();
+      else if (key === "e" && event.shiftKey)
+        navigate({
+          to: ".",
+          search: ({ dialog, tab: _, agent: __, prompt: ___, ...rest }) =>
+            dialog === "agents" ? rest : { ...rest, dialog: "agents" },
+        });
       else if (key === "b" && !event.shiftKey) onToggleSidebar();
       else return;
       event.preventDefault();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [newChat, onToggleSidebar]);
+  }, [navigate, newChat, onToggleSidebar]);
 
   const run = (action: () => void) => () => {
     setOpen(false);
     action();
   };
   const openDialog = (
-    dialog: "settings" | "sharing" | "discover" | "apps" | "computer",
+    dialog:
+      | "settings"
+      | "sharing"
+      | "discover"
+      | "apps"
+      | "computer"
+      | "agents",
+    agent?: string,
   ) =>
-    run(() => navigate({ to: ".", search: (prev) => ({ ...prev, dialog }) }));
+    run(() =>
+      navigate({ to: ".", search: (prev) => ({ ...prev, dialog, agent }) }),
+    );
 
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -175,12 +191,16 @@ export function CommandPalette({
                 </Command.Item>
                 <Command.Item
                   className={ITEM}
-                  onSelect={run(() => navigate({ to: "/agents/new" }))}
+                  onSelect={openDialog("agents", "new")}
                 >
                   <Plus /> {t("newAgent")}
                 </Command.Item>
               </Command.Group>
               <Command.Group heading={t("commandGoTo")} className={GROUP}>
+                <Command.Item className={ITEM} onSelect={openDialog("agents")}>
+                  <Contact /> {t("agents")}
+                  <Shortcut keys="⇧E" />
+                </Command.Item>
                 {PANELS.map(({ panel, label, icon }) => (
                   <Command.Item
                     key={panel}

@@ -1,12 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
-import {
-  type FormEvent,
-  type ReactNode,
-  useEffect,
-  useId,
-  useState,
-} from "react";
+import { Link } from "@tanstack/react-router";
+import { type FormEvent, useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 import {
   AgentIcon,
@@ -88,45 +82,31 @@ const EMPTY: AgentInput = {
   contacts: [],
 };
 
-/** The frame of an agent's pages: a readable column of the main content. */
-function AgentPageFrame({ children }: { children: ReactNode }) {
-  return (
-    <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-4xl px-4 py-6 md:px-8">
-        {children}
-      </div>
-    </main>
-  );
-}
-
-/** Making an agent: once it exists, its page opens, where its apps are added. */
-export function NewAgentPage() {
+/** Making an agent: once it exists, `onCreated` shows its settings, where its apps are added. */
+export function NewAgent({ onCreated }: { onCreated: (agent: Agent) => void }) {
   const { t } = useI18n();
-  const navigate = useNavigate();
   return (
-    <AgentPageFrame>
-      <h1 className="mb-8 font-semibold text-xl">{t("newAgent")}</h1>
-      <AgentForm
-        onDone={(saved) =>
-          navigate({
-            to: "/agents/$agentId/settings",
-            params: { agentId: saved.id },
-          })
-        }
-      />
-    </AgentPageFrame>
+    <>
+      <h2 className="mb-8 pr-8 font-semibold text-xl">{t("newAgent")}</h2>
+      <AgentForm onDone={onCreated} />
+    </>
   );
 }
 
 /**
- * An agent's page: what it is and the actions on it, then how the majordomo
- * works with you, the apps it works with and their tools, and its details,
- * which save together.
+ * An agent's settings: what it is and the actions on it, then how the
+ * majordomo works with you, the apps it works with and their tools, and its
+ * details, which save together. `onDeleted` says where to go once it's gone.
  */
-export function AgentSettingsPage({ agent }: { agent: Agent }) {
+export function AgentSettings({
+  agent,
+  onDeleted,
+}: {
+  agent: Agent;
+  onDeleted: () => void;
+}) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const { data: account } = useQuery(accountQuery());
   const [confirming, setConfirming] = useState(false);
   const isAdmin = account?.role === "admin";
@@ -153,7 +133,7 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
     onSuccess: () => {
       refresh();
       queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      navigate({ to: "/" });
+      onDeleted();
     },
     onError: (error) => toast.error(error.message),
   });
@@ -171,13 +151,14 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
   });
 
   return (
-    <AgentPageFrame>
-      <header className="flex items-start gap-3">
+    <>
+      {/* Clear of the dialog's close button. */}
+      <header className="flex items-start gap-3 pr-8">
         <AgentIcon agent={agent} tile className="size-10 rounded-xl" />
         <div className="min-w-0 flex-1">
-          <h1 className="flex items-center gap-2 font-semibold text-xl">
+          <h2 className="flex items-center gap-2 font-semibold text-xl">
             <span className="truncate">{agent.name}</span>
-          </h1>
+          </h2>
           <p className="mt-1 flex flex-wrap gap-x-3 text-muted-foreground text-xs">
             <BuildsOn blueprint={agent.blueprint} />
             {agent.source && (
@@ -295,7 +276,7 @@ export function AgentSettingsPage({ agent }: { agent: Agent }) {
         {/* Saved, it starts again from what was saved. */}
         <AgentForm key={agent.updatedAt} agent={agent} />
       </section>
-    </AgentPageFrame>
+    </>
   );
 }
 

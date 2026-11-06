@@ -36,7 +36,6 @@ import { cn } from "~/lib/utils";
 
 /** The panels that live under More rather than in the bar. */
 const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
-  "agents",
   "skills",
   "schedules",
 ];
@@ -46,8 +45,8 @@ const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
  * along the bottom of every page, as the rail is beside every page. Chats, notifications and artifacts fill the screen with
  * their list (`list`), New chat opens over the page with the open chat's agent
  * (your majordomo anywhere else), and More opens
- * a sheet with the rest: agents, skills, schedules, the dialogs and your
- * profile.
+ * a sheet with the rest: skills, schedules, the dialogs (Agents among
+ * them) and your profile.
  */
 export function MobileNav({
   list,
@@ -231,14 +230,25 @@ function MoreSheet({
     </Link>
   );
   const dialogRow = (
-    dialog: "settings" | "sharing" | "discover" | "apps" | "computer",
+    dialog:
+      | "settings"
+      | "sharing"
+      | "discover"
+      | "apps"
+      | "computer"
+      | "agents",
     icon: ReactNode,
     label: string,
     count = 0,
   ) => (
     <Link
       to="."
-      search={(prev) => ({ ...prev, dialog, tab: undefined })}
+      search={(prev) => ({
+        ...prev,
+        dialog,
+        tab: undefined,
+        agent: undefined,
+      })}
       onClick={close}
       className={ROW_CLASS}
     >
@@ -286,7 +296,7 @@ function MoreSheet({
           </ProfilePopover>
         )}
         <div className="mx-3 my-1 h-px bg-border" />
-        {panelRow(
+        {dialogRow(
           "agents",
           <Contact className={ROW_ICON_CLASS} />,
           t("agents"),

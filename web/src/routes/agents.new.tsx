@@ -1,7 +1,12 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { NewAgentPage } from "~/components/agent-settings";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
-/** Making an agent, from + beside the sidebar's Agents. */
+/** Older links to making an agent now open Agents, ready to make one. */
 export const Route = createFileRoute("/agents/new")({
-  component: NewAgentPage,
+  loader: () => {
+    throw redirect({
+      to: "/",
+      search: { dialog: "agents", agent: "new" },
+      replace: true,
+    });
+  },
 });

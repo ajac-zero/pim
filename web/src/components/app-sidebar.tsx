@@ -45,7 +45,6 @@ import {
 } from "~/components/profile-popover";
 import { Shortcut } from "~/components/shortcut";
 import {
-  AgentsPanel,
   ArtifactsPanel,
   NotificationsPanel,
   SchedulesPanel,
@@ -121,7 +120,6 @@ export function useAwaitingApproval() {
 /** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=artifacts`). */
 export const SIDEBAR_PANELS = [
   "notifications",
-  "agents",
   "artifacts",
   "skills",
   "schedules",
@@ -158,7 +156,7 @@ export function useNavigationState() {
   };
 }
 
-/** The panel the URL names: notifications, your chats, your agents, artifacts, skills or schedules. */
+/** The panel the URL names: notifications, your chats, artifacts, skills or schedules. */
 export function SidebarPanelContent({
   awaitingApproval,
   onNavigate,
@@ -169,8 +167,6 @@ export function SidebarPanelContent({
   const { panel } = useSearch({ strict: false });
   return panel === "notifications" ? (
     <NotificationsPanel onNavigate={onNavigate} />
-  ) : panel === "agents" ? (
-    <AgentsPanel onNavigate={onNavigate} />
   ) : panel === "artifacts" ? (
     <ArtifactsPanel onNavigate={onNavigate} />
   ) : panel === "skills" ? (
@@ -184,7 +180,7 @@ export function SidebarPanelContent({
 
 /**
  * The sidebar on wider screens: a rail of icons beside a panel. The icons at
- * the top choose what the panel shows (notifications, your chats, your agents, artifacts,
+ * the top choose what the panel shows (notifications, your chats, artifacts,
  * skills or schedules) while the open chat stays where it is; those at
  * the bottom open dialogs over it. Choosing the panel that's already showing
  * collapses the sidebar to the rail, and choosing any panel brings it back.
@@ -237,12 +233,6 @@ export function AppSidebar({
           />
           <RailPanel
             {...railPanel}
-            panel="agents"
-            icon={<Contact className="size-4.5" />}
-            label={t("agents")}
-          />
-          <RailPanel
-            {...railPanel}
             panel="artifacts"
             icon={<Shapes className="size-4.5" />}
             label={t("artifacts")}
@@ -261,6 +251,11 @@ export function AppSidebar({
           />
           {/* Below, what opens over the chat instead of beside it. */}
           <div className="mt-auto" />
+          <RailDialogLink
+            dialog="agents"
+            icon={<Contact className="size-4.5" />}
+            label={t("agents")}
+          />
           {hasDesktop && (
             <RailDialogLink
               dialog="computer"
@@ -554,7 +549,7 @@ function RailDialogLink({
   dialog,
   ...props
 }: {
-  dialog: "settings" | "sharing" | "discover" | "apps" | "computer";
+  dialog: "settings" | "sharing" | "discover" | "apps" | "computer" | "agents";
   icon: ReactNode;
   label: string;
   count?: number;
@@ -564,7 +559,12 @@ function RailDialogLink({
       {(content) => (
         <Link
           to="."
-          search={(prev) => ({ ...prev, dialog, tab: undefined })}
+          search={(prev) => ({
+            ...prev,
+            dialog,
+            tab: undefined,
+            agent: undefined,
+          })}
           className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
           aria-label={props.label}
         >

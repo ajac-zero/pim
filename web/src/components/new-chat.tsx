@@ -95,6 +95,7 @@ export function NewChatDialog({
               placeholder={t("messageAgent", { name: agent.name })}
               promptSuggestions={suggestions}
               agent={agent}
+              uploads
               controls={
                 <AgentPicker
                   agent={agent}

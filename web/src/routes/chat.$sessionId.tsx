@@ -320,6 +320,7 @@ function ChatPage() {
                       : (session?.agent ?? undefined)
                   }
                   disabled={!ready}
+                  uploads={!!session && !session.visit}
                   disclaimer={
                     session?.visit ? (
                       <>

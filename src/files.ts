@@ -4,9 +4,10 @@ import { HttpError } from "./http";
 /**
  * The person's files: a folder on their computer (./computer.ts) that they
  * and their agents share, which agents and the app name `FILES_ROOT`. The
- * app shows it as Files, while a computer is connected; agents work with it
- * through the file tools and `shell`. The files are the computer's: the space
- * keeps no copy, and they stay there when the computer is removed.
+ * app opens its files from links in chat and saves what people attach to a
+ * message there; agents work with it through the file tools and `shell`. The
+ * files are the computer's: the space keeps no copy, and they stay there when
+ * the computer is removed.
  */
 export const FILES_ROOT = "/workspace";
 

@@ -433,14 +433,19 @@ describe("chats an agent names", () => {
     );
   }
 
-  it("opens workspace links in the file viewer, including sandbox addresses in older replies", async () => {
+  it("opens workspace links in the file viewer, including sandbox addresses in older replies and files a person attached", async () => {
     const text = [
       "[Tailored Rx Resume JSON](sandbox:/workspace/Anibal-Angulo-STLabs-Agent-Evaluation.json)",
       "[Changes and follow-up notes](sandbox:/workspace/Anibal-Angulo-STLabs-Tailoring-Notes.md)",
       "[Report](/workspace/reports/notes%20%23%201.md)",
+      "[my cv (2).pdf](</workspace/uploads/my cv (2).pdf>)",
     ].join("\n\n");
-    for (const streaming of [false, true]) {
-      const html = await render(text, "/", streaming);
+    for (const [streaming, bubble] of [
+      [false, false],
+      [true, false],
+      [false, true],
+    ]) {
+      const html = await render(text, "/", streaming, bubble);
       const hrefs = elements(html).flatMap((element) =>
         element.attributes.filter((a) => a.name === "href").map((a) => a.value),
       );
@@ -453,6 +458,7 @@ describe("chats an agent names", () => {
         ["/files", "/workspace/Anibal-Angulo-STLabs-Agent-Evaluation.json"],
         ["/files", "/workspace/Anibal-Angulo-STLabs-Tailoring-Notes.md"],
         ["/files", "/workspace/reports/notes # 1.md"],
+        ["/files", "/workspace/uploads/my cv (2).pdf"],
       ]);
       expect(html).not.toContain("[blocked]");
     }

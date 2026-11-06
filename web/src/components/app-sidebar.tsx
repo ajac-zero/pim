@@ -22,7 +22,6 @@ import {
   Contact,
   CornerDownRight,
   ExternalLink,
-  Folder,
   Loader2,
   MessagesSquare,
   Monitor,
@@ -48,7 +47,6 @@ import { Shortcut } from "~/components/shortcut";
 import {
   AgentsPanel,
   ArtifactsPanel,
-  FilesPanel,
   NotificationsPanel,
   SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
@@ -125,7 +123,6 @@ export const SIDEBAR_PANELS = [
   "notifications",
   "agents",
   "artifacts",
-  "files",
   "skills",
   "schedules",
 ] as const;
@@ -141,12 +138,10 @@ export function useNavigationState() {
   // Sharing, Discover and your profile are with the other people on this Pim.
   const { data: account } = useQuery(accountQuery());
   const { data: profile } = useQuery({ ...profileQuery(), enabled: !!account });
-  // Your files are on your computer: without one, there are none to show.
   const { data: computer } = useQuery(computerQuery());
   return {
     account,
     profile,
-    hasComputer: !!computer && computer.state !== "none",
     // The Computer dialog shows its desktop: the one this Pim keeps for you, or yours when it streams it.
     hasDesktop: !!computer && (computer.managed || !!computer.computer?.screen),
     // Alone on this Pim, there is nobody to share with or discover.
@@ -163,7 +158,7 @@ export function useNavigationState() {
   };
 }
 
-/** The panel the URL names: notifications, your chats, your agents, artifacts, files, skills or schedules. */
+/** The panel the URL names: notifications, your chats, your agents, artifacts, skills or schedules. */
 export function SidebarPanelContent({
   awaitingApproval,
   onNavigate,
@@ -178,8 +173,6 @@ export function SidebarPanelContent({
     <AgentsPanel onNavigate={onNavigate} />
   ) : panel === "artifacts" ? (
     <ArtifactsPanel onNavigate={onNavigate} />
-  ) : panel === "files" ? (
-    <FilesPanel onNavigate={onNavigate} />
   ) : panel === "skills" ? (
     <SkillsPanel onNavigate={onNavigate} />
   ) : panel === "schedules" ? (
@@ -192,7 +185,7 @@ export function SidebarPanelContent({
 /**
  * The sidebar on wider screens: a rail of icons beside a panel. The icons at
  * the top choose what the panel shows (notifications, your chats, your agents, artifacts,
- * files, skills or schedules) while the open chat stays where it is; those at
+ * skills or schedules) while the open chat stays where it is; those at
  * the bottom open dialogs over it. Choosing the panel that's already showing
  * collapses the sidebar to the rail, and choosing any panel brings it back.
  */
@@ -208,7 +201,6 @@ export function AppSidebar({
   const {
     account,
     profile,
-    hasComputer,
     hasDesktop,
     withOthers,
     awaitingApproval,
@@ -255,14 +247,6 @@ export function AppSidebar({
             icon={<Shapes className="size-4.5" />}
             label={t("artifacts")}
           />
-          {hasComputer && (
-            <RailPanel
-              {...railPanel}
-              panel="files"
-              icon={<Folder className="size-4.5" />}
-              label={t("files")}
-            />
-          )}
           <RailPanel
             {...railPanel}
             panel="skills"

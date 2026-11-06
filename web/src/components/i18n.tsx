@@ -344,6 +344,7 @@ const translations = {
     markRead: "Mark as read",
     messagePim: "Message Pim…",
     attachImages: "Attach images",
+    attachFiles: "Attach files",
     takePhoto: "Take a photo",
     voiceInput: "Dictate a message",
     stopVoiceInput: "Stop dictating",
@@ -357,6 +358,8 @@ const translations = {
     imagesOnly: "Only PNG, JPEG, WebP and GIF images can be attached.",
     imageTooLarge: "That image is too large.",
     tooManyImages: "A message can carry at most {count} images.",
+    fileTooLarge: "That file is too large: at most 25 MB.",
+    tooManyFiles: "A message can carry at most {count} files.",
     modelCantSeeImages:
       "{model} can't see images. Choose a model that can in Settings.",
     couldNotReadImage: "Couldn't read that image.",
@@ -658,25 +661,14 @@ const translations = {
       "None yet. Ask Pim for a page, a tool or a document, and it appears here.",
     allArtifacts: "All artifacts",
     files: "Files",
-    noFiles:
-      "None yet. Upload files here, or ask Pim to save something, and it appears here. Your agents read and write these too.",
-    emptyFolder: "This folder is empty.",
-    filesUploaded: "Files uploaded: {count}",
-    parentFolder: "back to the folder above",
-    folder: "Folder",
-    fileOptions: "Options for {name}",
-    deleteFile: "Delete",
-    confirmDeleteFile: "Confirm",
-    confirmDeleteFolder: "Delete it and everything in it",
     fileDeleted: "{name} deleted",
     fileMissing: "This file isn't there anymore.",
-    allFiles: "All files",
     computer: "Computer",
     settingsComputer: "Computer",
     computerDescription:
-      "Connect a computer of yours, such as a server, a VM or a box at home, and your agents run commands, browse and keep your files there. Files shows its folder.",
+      "Connect a computer of yours, such as a server, a VM or a box at home, and your agents run commands, browse and keep your files there.",
     computerDescriptionManaged:
-      "This Pim keeps a computer for you, running all the time. Your agents run commands, browse and keep your files there, and you can use it yourself from Computer: sign in to sites in its browser, or take over from an agent at any time. Files shows its folder.",
+      "This Pim keeps a computer for you, running all the time. Your agents run commands, browse and keep your files there, and you can use it yourself from Computer: sign in to sites in its browser, or take over from an agent at any time.",
     computerWaiting: "Waiting for its first connection",
     computerOnline: "Online",
     computerOffline: "Offline",
@@ -739,10 +731,6 @@ const translations = {
     newComputerToken: "New token",
     newComputerTokenConfirm:
       "Make a new token? The one the computer has now stops working.",
-    computerOfflineFiles:
-      "Your computer is offline, so your files can't be shown. Start pim-computer on it again.",
-    noComputerFiles:
-      "Your files live on your computer. Connect one, and your agents can keep files and run commands there.",
     browser: "Browser",
     activity: "Activity",
     browserPicture: "What the browser shows: {title}",
@@ -1482,6 +1470,7 @@ const translations = {
     markRead: "Marcar como leído",
     messagePim: "Escribe a Pim…",
     attachImages: "Adjuntar imágenes",
+    attachFiles: "Adjuntar archivos",
     takePhoto: "Tomar una foto",
     voiceInput: "Dictar un mensaje",
     stopVoiceInput: "Dejar de dictar",
@@ -1495,6 +1484,8 @@ const translations = {
     imagesOnly: "Solo se pueden adjuntar imágenes PNG, JPEG, WebP y GIF.",
     imageTooLarge: "Esa imagen es demasiado grande.",
     tooManyImages: "Un mensaje puede llevar como máximo {count} imágenes.",
+    fileTooLarge: "Ese archivo es demasiado grande: 25 MB como máximo.",
+    tooManyFiles: "Un mensaje puede llevar como máximo {count} archivos.",
     modelCantSeeImages:
       "{model} no puede ver imágenes. Elige uno que pueda en Configuración.",
     couldNotReadImage: "No se pudo leer esa imagen.",
@@ -1800,25 +1791,14 @@ const translations = {
       "Aún no hay ninguno. Pídele a Pim una página, una herramienta o un documento y aparecerá aquí.",
     allArtifacts: "Todos los artefactos",
     files: "Archivos",
-    noFiles:
-      "Aún nada. Sube archivos aquí, o pídele a Pim que guarde algo, y aparecerá aquí. Tus agentes también los leen y escriben.",
-    emptyFolder: "Esta carpeta está vacía.",
-    filesUploaded: "Archivos subidos: {count}",
-    parentFolder: "volver a la carpeta superior",
-    folder: "Carpeta",
-    fileOptions: "Opciones de {name}",
-    deleteFile: "Eliminar",
-    confirmDeleteFile: "Confirmar",
-    confirmDeleteFolder: "Eliminarla con todo lo que contiene",
     fileDeleted: "{name} eliminado",
     fileMissing: "Este archivo ya no está.",
-    allFiles: "Todos los archivos",
     computer: "Computadora",
     settingsComputer: "Computadora",
     computerDescription:
-      "Conecta una computadora tuya, como un servidor, una máquina virtual o un equipo en casa, y tus agentes ejecutarán comandos, navegarán y guardarán tus archivos allí. Archivos muestra su carpeta.",
+      "Conecta una computadora tuya, como un servidor, una máquina virtual o un equipo en casa, y tus agentes ejecutarán comandos, navegarán y guardarán tus archivos allí.",
     computerDescriptionManaged:
-      "Este Pim mantiene una computadora para ti, siempre encendida. Tus agentes ejecutan comandos, navegan y guardan tus archivos allí, y puedes usarla tú desde Computadora: inicia sesión en sitios en su navegador o toma el control de un agente cuando quieras. Archivos muestra su carpeta.",
+      "Este Pim mantiene una computadora para ti, siempre encendida. Tus agentes ejecutan comandos, navegan y guardan tus archivos allí, y puedes usarla tú desde Computadora: inicia sesión en sitios en su navegador o toma el control de un agente cuando quieras.",
     computerWaiting: "Esperando su primera conexión",
     computerOnline: "En línea",
     computerOffline: "Sin conexión",
@@ -1881,10 +1861,6 @@ const translations = {
     newComputerToken: "Nuevo token",
     newComputerTokenConfirm:
       "¿Crear un token nuevo? El que tiene la computadora ahora deja de funcionar.",
-    computerOfflineFiles:
-      "Tu computadora está sin conexión, así que no se pueden mostrar tus archivos. Vuelve a iniciar pim-computer en ella.",
-    noComputerFiles:
-      "Tus archivos viven en tu computadora. Conecta una, y tus agentes podrán guardar archivos y ejecutar comandos allí.",
     browser: "Navegador",
     activity: "Actividad",
     browserPicture: "Lo que muestra el navegador: {title}",

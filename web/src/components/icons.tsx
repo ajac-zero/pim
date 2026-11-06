@@ -135,8 +135,16 @@ export const ExternalLink = themedIcon(Lucide.ExternalLink, Pixel.ExternalLink);
 export const Eye = themedIcon(Lucide.Eye, Pixel.Eye);
 export const FileCode2 = themedIcon(Lucide.FileCode2, Pixel.Script);
 export const Workflow = themedIcon(Lucide.Workflow, Pixel.GitBranch);
+export const FileArchive = themedIcon(Lucide.FileArchive, Pixel.Archive);
+export const FileAudio = themedIcon(Lucide.FileAudio, Pixel.Music);
 export const FileIcon = themedIcon(Lucide.File, Pixel.File);
+export const FileImage = themedIcon(Lucide.FileImage, Pixel.Image);
+export const FileSpreadsheet = themedIcon(
+  Lucide.FileSpreadsheet,
+  Pixel.Grid3x3,
+);
 export const FileText = themedIcon(Lucide.FileText, Pixel.FileText);
+export const FileVideo = themedIcon(Lucide.FileVideo, Pixel.Video);
 export const Flower2 = themedIcon(
   Lucide.Flower2,
   pixelPath("M9 7V3h6v4h6v6h-6v4H9v-4H3V7h6Zm2 2h2v2h-2V9Zm1 8v6m0-2h6v-4h-4"),
@@ -190,6 +198,7 @@ export const Pause = themedIcon(Lucide.Pause, Pixel.Pause);
 export const PenLine = themedIcon(Lucide.PenLine, Pixel.Pencil);
 export const Pencil = themedIcon(Lucide.Pencil, Pixel.Pencil);
 export const Printer = themedIcon(Lucide.Printer, Pixel.Printer);
+export const Presentation = themedIcon(Lucide.Presentation, Pixel.Chart);
 export const Plane = themedIcon(
   Lucide.Plane,
   pixelPath(

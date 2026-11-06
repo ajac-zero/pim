@@ -680,7 +680,7 @@ export const Markdown = memo(function Markdown({
           a: ({ href, children }) =>
             href === MENTIONS_HREF ? (
               <Mentions text={textOf(children)} chip={tone.chip} />
-            ) : // A person may name their own chats too; untrusted text may not.
+            ) : // A person may name their own chats and files too; untrusted text may not.
             (!safe || bubble) && chatOf(href) ? (
               <ChatLink id={chatOf(href) as string} className={tone.link}>
                 {children}
@@ -689,7 +689,7 @@ export const Markdown = memo(function Markdown({
               <ArtifactLink {...(artifactOf(href) as { id: string })}>
                 {children}
               </ArtifactLink>
-            ) : !safe && fileOf(href) ? (
+            ) : (!safe || bubble) && fileOf(href) ? (
               <FileLink path={fileOf(href) as string} className={tone.link}>
                 {children}
               </FileLink>

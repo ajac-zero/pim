@@ -261,6 +261,9 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/sessions/:s/operations/:op` | `?timeout=ms` (max 60000) | The result once settled, or `{ status: "pending" }` |
 | POST | `/sessions/:s/retry` | | Asks the model again in a chat held after a model error; `409` when none is |
 | POST | `/sessions/:s/abort` | `{ operationId? }` | Withdraws one operation, or stops everything, in a group chat every agent at work in it |
+| POST | `/sessions/:s/queue/:id/steer` | | Has one of your messages queued behind the work join it after the agent's current step, rather than wait for the run to end. `:id` is the item's `id` in the `inbox` of the chat's `snapshot` and `inbox_update` events, which carry each queued message's `content`; Pim's own queued input isn't yours to change (`404`). `409` once the agent has the message |
+| PUT | `/sessions/:s/queue/:id` | `{ text }` | Rewrites a queued message's text, keeping its images; `409` once the agent has it |
+| DELETE | `/sessions/:s/queue/:id` | | Takes a queued message back before the agent reads it; `409` once the agent has it |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
 | PUT | `/sessions/:s/model` | `{ model }` | Changes one session's model: a Workers AI or AI Gateway id |
 | GET | `/settings` | | `{ timeZone, approvalPolicy, approvalTimeoutSeconds }`; `approvalTimeoutSeconds` is null when approvals wait however long |

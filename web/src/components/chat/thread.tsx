@@ -680,12 +680,6 @@ export const Thread = memo(function Thread({
           </div>
         )}
 
-        {view.queued > 0 && (
-          <div className="text-center text-muted-foreground text-[13px]">
-            {t("queuedMessages", { count: view.queued })}
-          </div>
-        )}
-
         {shownError && (
           <ModelErrorNotice
             error={shownError}

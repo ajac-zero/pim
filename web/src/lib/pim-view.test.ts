@@ -152,8 +152,18 @@ describe("snapshot", () => {
           { callId: "call-c", name: "web_fetch", status: "done" },
         ],
         inbox: [
-          { id: "s2", mode: "followUp" },
-          { id: "s3", mode: "steer" },
+          { id: 2, mode: "followUp", content: "And the weather?" },
+          {
+            id: 3,
+            mode: "steer",
+            content: [
+              { type: "text", text: "Only the top 3" },
+              { type: "image", mimeType: "image/png", url: "/api/images/i" },
+            ],
+          },
+          // Pim's own input and a written entry aren't the person's to change.
+          { id: 4, mode: "followUp", content: "[Task update] Done." },
+          { id: 5, mode: "write" },
         ],
       }),
     ]);
@@ -174,7 +184,10 @@ describe("snapshot", () => {
     expect(state.view.tools).toEqual([
       { callId: "call-b", name: "memory_note", output: "" },
     ]);
-    expect(state.view.queued).toBe(2);
+    expect(state.view.queue).toEqual([
+      { id: 2, text: "And the weather?", images: 0, steer: false },
+      { id: 3, text: "Only the top 3", images: 1, steer: true },
+    ]);
   });
 
   it("keeps the images the person sent, after their text, by URL once kept", () => {

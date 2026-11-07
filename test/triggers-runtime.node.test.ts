@@ -28,6 +28,8 @@ import {
 } from "../computer/triggers-runtime";
 
 const T0 = Date.UTC(2026, 10, 7);
+/** The longest id the protocol takes. */
+const ID_MAX = 160;
 const SECRET = "s3cr3t-observed-value";
 /** A frame read back as plain JSON. */
 type Frame = any;
@@ -1209,11 +1211,8 @@ describe("epochs, connections and generations", () => {
 		expect(h.adapters).toHaveLength(1);
 		expect(h.adapters[0]?.config?.generation).toBe(1);
 		expect(h.runtime.sources()).toMatchObject([{ epoch: 2, state: "installed" }]);
-		// Epoch 1 said only that it took the reconcile and that its observer, never started, was stopped.
-		expect(h.wire.frames.filter((frame) => frame.serverEpoch === 1).map((frame) => [frame.type, frame.adapter])).toEqual([
-			["reconciled", undefined],
-			["stopped", "not_started"],
-		]);
+		// Epoch 1 said only that it took the reconcile; once epoch 2 was asked for, nothing more of it went out.
+		expect(h.wire.frames.filter((frame) => frame.serverEpoch === 1).map((frame) => frame.type)).toEqual(["reconciled"]);
 	});
 
 	it("reports an observer that finished starting after its connection changed only once the new one is reconciled", async () => {
@@ -1316,5 +1315,96 @@ describe("continuity", () => {
 		h.allow(desired("t1", 1));
 		await h.reconcile([desired("t1", 1)], { revision: 3 });
 		expect(h.gaps("coverage_unknown")).toMatchObject([{ triggerId: "t1", to: T0 + 150_000 }]);
+	});
+});
+
+describe("review corrections, second round", () => {
+	it("sends nothing more of an old epoch once a new one is asked for, even while the change can't be written", async () => {
+		let failGaps = false;
+		const h = await open({ spool: { write: failingWrite((data) => failGaps && data.includes('"kind":"gap"')) } });
+		const adapter = await h.running(desired("t1", 1));
+		await adapter.emit(event(1));
+		await h.tick();
+		expect(h.wire.of("observation")).toHaveLength(1);
+		// A report queued under epoch 1 that the transport hasn't taken yet.
+		h.wire.open = false;
+		adapter.health({ status: "degraded", code: "slow_reader" });
+		await h.tick();
+		h.wire.clear();
+
+		failGaps = true;
+		await h.reconcile([desired("t1", 1)], { epoch: 2 });
+		h.wire.open = true;
+		// Well past when the unsettled epoch 1 observation would have been sent again.
+		await h.tick(30_000);
+		await h.tick(60_000);
+		await h.tick(120_000);
+		expect(h.wire.frames).toEqual([{ protocol: PROTOCOL, type: "error", code: "spool_unavailable" }]);
+		expect(h.spool.epoch).toBe(1);
+		expect(h.observations()).toHaveLength(1);
+
+		// The same reconcile again commits the change, and only epoch 2 is heard of.
+		failGaps = false;
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)], { epoch: 2 });
+		await h.tick(30_000);
+		expect(h.wire.frames.filter((frame) => frame.serverEpoch !== undefined && frame.serverEpoch !== 2)).toEqual([]);
+		expect(h.wire.of("observation")).toEqual([]);
+		// Sent again while unsettled, it is one gap, with one id.
+		const replaced = h.gaps("epoch_replaced");
+		expect(new Set(replaced.map((frame) => frame.eventId)).size).toBe(1);
+		expect(replaced[0]).toMatchObject({ serverEpoch: 2, reasons: { epoch_replaced: 1 } });
+		expect(h.observations()).toEqual([]);
+	});
+
+	it("refuses ids that aren't plain, bounded ASCII", async () => {
+		const h = await open();
+		for (const triggerId of ["t\u00e9", 't"1', "t\\1", "t".repeat(161)]) await h.reconcile([desired(triggerId, 1)]);
+		expect(h.wire.of("error").map((frame) => frame.code)).toEqual(["invalid", "invalid", "invalid", "invalid"]);
+		expect(h.adapters).toHaveLength(0);
+	});
+
+	it.each([HARD_LIMITS.frameBytes, 1_024])("keeps every frame within %i bytes, answering the largest reconcile in numbered parts", async (frameBytes) => {
+		const h = await open({ limits: { frameBytes } });
+		const longest = (prefix: string) => (prefix + "x".repeat(ID_MAX)).slice(0, ID_MAX);
+		const sources = Array.from({ length: HARD_LIMITS.sources }, (_, i) => {
+			const triggerId = longest(`t${i}-`);
+			return { ...desired(triggerId, Number.MAX_SAFE_INTEGER), sourceId: longest(`s${i}-`), revision: Number.MAX_SAFE_INTEGER };
+		});
+		h.allow(sources[0] as DesiredSource);
+		await h.reconcile(sources, { epoch: Number.MAX_SAFE_INTEGER, revision: Number.MAX_SAFE_INTEGER });
+		for (const adapter of h.adapters) adapter.health({ status: "degraded", code: `c${"x".repeat(63)}` });
+		await h.reconcile([], { epoch: Number.MAX_SAFE_INTEGER, revision: Number.MAX_SAFE_INTEGER - 1 });
+		await h.tick(1_000);
+
+		expect(h.wire.raw.every((frame) => Buffer.byteLength(frame) <= frameBytes)).toBe(true);
+		expect(h.logs.filter((event) => event.code === "control_too_large" || event.code === "control_dropped")).toEqual([]);
+		const parts = h.wire.of("reconciled");
+		expect(parts.length).toBeGreaterThan(1);
+		expect(parts.map((frame) => frame.part)).toEqual(parts.map((_, index) => index + 1));
+		expect(parts.every((frame) => frame.parts === parts.length && frame.desiredRevision === Number.MAX_SAFE_INTEGER)).toBe(true);
+		expect(parts.flatMap((frame) => frame.sources.map((source: Frame) => source.triggerId))).toEqual(sources.map((source) => source.triggerId));
+		expect(h.wire.of("installed")).toHaveLength(HARD_LIMITS.sources);
+		expect(h.wire.of("health").filter((frame) => frame.code.startsWith("cx"))).toHaveLength(HARD_LIMITS.sources);
+		expect(h.wire.of("gap").length).toBeGreaterThanOrEqual(HARD_LIMITS.sources);
+		// A refused, stale reconcile takes nothing back of the answer already given.
+		expect(h.wire.of("error").map((frame) => frame.code)).toEqual(["stale_reconcile"]);
+	});
+
+	it("gives up, with a gap, an entry written under a larger frame limit than now, never cutting it", async () => {
+		const h = await open();
+		const adapter = await h.running(desired("t1", 1));
+		h.runtime.detach("c1");
+		await adapter.emit(event(1, { body: "x".repeat(4_000) }));
+		await adapter.emit(event(2));
+		await h.runtime.close();
+		harness = new Harness({ limits: { frameBytes: 1_024 } }, h.clock);
+		await harness.start();
+		harness.allow(desired("t1", 1));
+		await harness.reconcile([desired("t1", 1)], { revision: 2 });
+		expect(harness.wire.of("observation").map((frame) => frame.data.n)).toEqual([2]);
+		expect(harness.gaps("too_large")).toMatchObject([{ reasons: { too_large: 1 } }]);
+		expect(harness.wire.raw.every((frame) => Buffer.byteLength(frame) <= 1_024)).toBe(true);
+		expect(harness.observations().map((entry) => (entry.kind === "observation" ? entry.data.n : null))).toEqual([2]);
 	});
 });

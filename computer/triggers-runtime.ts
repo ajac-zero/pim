@@ -132,10 +132,16 @@ type Envelope<T extends string> = { readonly protocol: typeof PROTOCOL; readonly
 export type RuntimeMessage =
 	| (Envelope<"hello"> & { readonly runtimeId: string; readonly connectionId: string; readonly lastEpoch: number | null; readonly pending: number })
 	| (Envelope<"error"> & { readonly code: string })
+	/**
+	 * The answer to a reconcile, in `parts` frames numbered from 1, each
+	 * within `frameBytes`. Only all of them together acknowledge it.
+	 */
 	| (Envelope<"reconciled"> & {
 			readonly serverEpoch: number;
 			readonly desiredRevision: number;
 			readonly leaseMs: number;
+			readonly part: number;
+			readonly parts: number;
 			readonly sources: readonly { readonly triggerId: string; readonly sourceId: string; readonly generation: number; readonly state: SourceState }[];
 	  })
 	| (Envelope<"installed"> & SourceRef & { readonly configHash: string })
@@ -203,11 +209,19 @@ function str(value: unknown, max: number, multiline = false): string {
 	return value;
 }
 
-function ident(value: unknown): string {
-	const id = str(value, 256);
-	if (/\s/.test(id)) throw new ProtocolError("invalid");
+/**
+ * An id in the protocol: printable ASCII other than `"` and `\`, so it
+ * takes as many bytes in a frame as it has characters, up to `max` (160, as
+ * the store's ids and source identities are well within; a grant reference
+ * takes up to 256, and never appears in what the runtime sends).
+ */
+function ident(value: unknown, max = ID_LENGTH): string {
+	const id = str(value, max);
+	if (!/^[\x21\x23-\x5b\x5d-\x7e]+$/.test(id)) throw new ProtocolError("invalid");
 	return id;
 }
+
+const ID_LENGTH = 160;
 
 function digestHex(value: unknown): string {
 	if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) throw new ProtocolError("invalid");
@@ -265,7 +279,7 @@ function readDesired(value: unknown): DesiredSource {
 		generation: int(given.generation, 0, Number.MAX_SAFE_INTEGER),
 		configHash: digestHex(given.configHash),
 		source: readSource(given.source),
-		grant: { grantRef: ident(grant.grantRef), scopeHash: digestHex(grant.scopeHash) },
+		grant: { grantRef: ident(grant.grantRef, 256), scopeHash: digestHex(grant.scopeHash) },
 		checkpoint: given.checkpoint === null ? null : readCheckpoint(given.checkpoint),
 	};
 }
@@ -308,7 +322,7 @@ export function parseServerMessage(frame: string, limits: { inboundBytes: number
 				sequence: int(result.sequence, 1, Number.MAX_SAFE_INTEGER),
 				eventId: ident(result.eventId),
 				result: result.result,
-				reason: result.reason === undefined || result.reason === null ? null : ident(result.reason),
+				reason: result.reason === undefined || result.reason === null ? null : ident(result.reason, 64),
 				retryAfterMs: result.retryAfterMs === undefined || result.retryAfterMs === null ? null : int(result.retryAfterMs, 0, HARD_LIMITS.spoolTtlMs),
 			};
 		});
@@ -859,7 +873,8 @@ function runtimeLimits(given: Partial<RuntimeLimits>): RuntimeLimits {
 	check("blockedRetryMs", 10, 600_000);
 	check("startTimeoutMs", 1, 600_000);
 	check("stopTimeoutMs", 1, 600_000);
-	check("control", 16, 65_536);
+	// Room for the most parts an answer to a reconcile can take, and more.
+	check("control", limits.sources + 16, 65_536);
 	return limits;
 }
 
@@ -1210,9 +1225,12 @@ export class TriggersRuntime {
 				return;
 			}
 		} else {
-			// A new epoch: every observer stops, and nothing of the old one is sent again. The new epoch, the
-			// gaps that count what the old one held, and taking that out are one commit; until it is durable,
-			// the epoch hasn't changed and nothing is reported as reconciled.
+			// A new epoch: from now on nothing of the old one goes out, neither an observation, sent again or
+			// not, nor a report still queued, whether or not the change below can be written. Every observer
+			// stops. The new epoch, the gaps that count what the old one held, and taking that out are one
+			// commit; until it is durable, the epoch hasn't changed and nothing is reported as reconciled.
+			this.#reconciled = false;
+			this.#control = this.#control.filter((held) => !("serverEpoch" in held));
 			for (const slot of this.#slots.values()) if (slot.run) this.#stop(slot.run, "epoch_replaced");
 			const stale = this.#spool.entries();
 			const seqs = stale.map((entry) => entry.seq);
@@ -1236,8 +1254,28 @@ export class TriggersRuntime {
 			if (slot.run) this.#stop(slot.run, "not_desired");
 			this.#prune(slot);
 		}
-		this.#push({ protocol: PROTOCOL, type: "reconciled", serverEpoch: message.serverEpoch, desiredRevision: message.desiredRevision, leaseMs: message.leaseMs, sources: results });
+		this.#answer(message, results);
 		this.#scheduleFlush(0);
+	}
+
+	/** Sends the answer to a reconcile in as many parts as `frameBytes` needs; an older answer still queued goes, since this one says where everything stands. */
+	#answer(message: ReconcileMessage, results: { triggerId: string; sourceId: string; generation: number; state: SourceState }[]): void {
+		this.#control = this.#control.filter((held) => held.type !== "reconciled");
+		const head = { protocol: PROTOCOL, type: "reconciled", serverEpoch: message.serverEpoch, desiredRevision: message.desiredRevision, leaseMs: message.leaseMs } as const;
+		const most = results.length + 1;
+		const overhead = Buffer.byteLength(JSON.stringify({ ...head, part: most, parts: most, sources: [] }));
+		const chunks: (typeof results)[] = [[]];
+		let size = overhead;
+		for (const result of results) {
+			const bytes = Buffer.byteLength(JSON.stringify(result)) + 1;
+			if ((chunks.at(-1) as typeof results).length > 0 && size + bytes > this.#limits.frameBytes) {
+				chunks.push([]);
+				size = overhead;
+			}
+			(chunks.at(-1) as typeof results).push(result);
+			size += bytes;
+		}
+		chunks.forEach((sources, index) => this.#push({ ...head, part: index + 1, parts: chunks.length, sources }));
 	}
 
 	/** Makes one trigger's observer match what the space wants, starting one only when what runs differs. */
@@ -1796,10 +1834,18 @@ export class TriggersRuntime {
 	#push(message: RuntimeMessage): void {
 		// Control isn't kept across connections: the next reconcile's answer says where each source stands.
 		if (!this.#transport || this.#closed) return;
+		// Every frame is within frameBytes; one that wouldn't be is never cut, and with the ids bounded, none is.
+		if (Buffer.byteLength(JSON.stringify(message)) > this.#limits.frameBytes) {
+			this.#log({ code: "control_too_large" });
+			return;
+		}
 		if (this.#control.length >= this.#limits.control) {
+			// Health first, then the oldest other report; never part of the latest answer to a reconcile.
 			const health = this.#control.findIndex((held) => held.type === "health");
-			this.#control.splice(health >= 0 ? health : 0, 1);
+			const index = health >= 0 ? health : this.#control.findIndex((held) => held.type !== "reconciled");
 			this.#log({ code: "control_dropped" });
+			if (index < 0) return;
+			this.#control.splice(index, 1);
 		}
 		this.#control.push(message);
 		this.#scheduleFlush(0);
@@ -1870,7 +1916,8 @@ export class TriggersRuntime {
 			try {
 				await this.#spool.compact();
 			} catch {
-				this.#log({ code: "spool_unavailable" });
+				// Still visible: `retiredBytes` stays above zero, and this is logged on every try.
+				this.#log({ code: "scrub_failed" });
 				this.#timer("scrub", this.#limits.blockedRetryMs, () => this.#scheduleScrub());
 			}
 		});
@@ -1905,6 +1952,7 @@ export class TriggersRuntime {
 		const epoch = this.#spool.epoch;
 		let sent = 0;
 		let next = Number.POSITIVE_INFINITY;
+		const oversized: SpoolEntry[] = [];
 		for (const entry of this.#spool.entries()) {
 			if (entry.epoch !== epoch || (entry.kind === "observation" && entry.recordedAt + this.#limits.ttlMs <= now)) continue;
 			let delivery = this.#delivery.get(entry.seq);
@@ -1921,7 +1969,13 @@ export class TriggersRuntime {
 				next = Math.min(next, now + this.#limits.flushIntervalMs);
 				break;
 			}
-			if (!transport.send(this.#frame(entry))) {
+			const frame = this.#frame(entry);
+			if (Buffer.byteLength(frame) > this.#limits.frameBytes) {
+				// Written under a larger frameBytes than now: never cut, it is given up as too large, with a gap.
+				oversized.push(entry);
+				continue;
+			}
+			if (!transport.send(frame)) {
 				next = now + this.#limits.blockedRetryMs;
 				break;
 			}
@@ -1930,6 +1984,11 @@ export class TriggersRuntime {
 			this.#transmitted.add(entry.seq);
 			sent++;
 			next = Math.min(next, now + this.#backoff(delivery.attempts));
+		}
+		if (oversized.length > 0 && epoch !== null) {
+			const seqs = oversized.map((entry) => entry.seq);
+			if (await this.#commitLosses(this.#lossesOf(oversized, epoch, "too_large"), seqs, { rewrite: true })) this.#settle(new Set(seqs), "lost");
+			else next = Math.min(next, now + this.#limits.blockedRetryMs);
 		}
 		if (next !== Number.POSITIVE_INFINITY) this.#scheduleFlush(next - now);
 	}

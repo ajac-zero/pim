@@ -46,6 +46,7 @@ import {
   SettingsDialog,
   type SettingsTab,
 } from "~/components/settings-dialog";
+import { NotificationIcon } from "~/components/sidebar-panels";
 import { SignIn } from "~/components/sign-in";
 import { ThemeProvider } from "~/components/theme";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
@@ -265,10 +266,8 @@ function usePimEvents() {
           return;
         }
         toast(notification.title, {
-          icon: notification.agent ? (
-            <AgentIcon agent={notification.agent} tile className="size-5" />
-          ) : (
-            <img src="/icon-192.png" alt="" className="size-5 rounded-sm" />
+          icon: (
+            <NotificationIcon notification={notification} className="size-8" />
           ),
           description: notification.body,
           action: {

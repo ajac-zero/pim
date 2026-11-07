@@ -44,8 +44,9 @@ describe("scheduled tasks", () => {
 		expect((await api("/notifications")).body.notifications).toEqual([
 			expect.objectContaining({
 				session: ROOT,
-				title: "Scheduled task ran: Flight check",
-				body: "Check whether the flight price dropped.",
+				kind: "scheduled",
+				title: "Flight check",
+				body: "",
 				readAt: null,
 			}),
 		]);
@@ -97,7 +98,7 @@ describe("scheduled tasks", () => {
 		expect(chats).toHaveLength(2);
 		chats.sort((a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt);
 		// Each run's notification links to the chat it started.
-		const ran = (await api("/notifications")).body.notifications.filter((notification: { title: string }) => notification.title === "Scheduled task ran: Daily plan");
+		const ran = (await api("/notifications")).body.notifications.filter((notification: { title: string }) => notification.title === "Daily plan");
 		expect(ran.map((notification: { session: string }) => notification.session).sort()).toEqual(chats.map((chat: { id: string }) => chat.id).sort());
 		for (const notification of ran) await post(`/notifications/${notification.id}/read`);
 		for (const [index, chat] of chats.entries()) {

@@ -112,7 +112,7 @@ export type ToolPermissionChoice = {
 export type Notification = {
 	readonly id: string;
 	/** `mention` when an agent tagged the person in a chat; every other notification is `general`. */
-	readonly kind: "general" | "mention";
+	readonly kind: "general" | "mention" | "scheduled";
 	readonly session: string | null;
 	readonly title: string;
 	readonly body: string;
@@ -362,7 +362,7 @@ function toolPermissionOf(row: Row): ToolPermissionChoice {
 function notificationOf(row: Row): Notification {
 	return {
 		id: String(row.id),
-		kind: row.kind === "mention" ? "mention" : "general",
+		kind: row.kind === "mention" || row.kind === "scheduled" ? row.kind : "general",
 		session: row.session === null ? null : String(row.session),
 		title: String(row.title),
 		body: String(row.body),

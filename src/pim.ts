@@ -1935,9 +1935,11 @@ export class Pim extends DurableAgent<Env> {
 		const title = payload.label ?? payload.instruction;
 		const notification = this.store.addNotification({
 			id: firing,
+			kind: "scheduled",
 			session: started ?? payload.session,
-			title: `Scheduled task ran: ${title.length > 80 ? `${title.slice(0, 79)}…` : title}`,
-			body: payload.label ? payload.instruction : "",
+			title: title.length > 80 ? `${title.slice(0, 79)}…` : title,
+			// The title names the task; the instruction can be pages long and lives in the chat.
+			body: "",
 		});
 		// The chat's own reply is pushed when it is ready; this one only tells open apps.
 		await this.deliverNotification(notification, { push: false });

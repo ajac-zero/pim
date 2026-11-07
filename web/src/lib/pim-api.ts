@@ -983,7 +983,7 @@ export type ToolPermissionInfo = {
 export type PimNotification = {
   id: string;
   /** `mention` when an agent tagged you in a chat. */
-  kind: "general" | "mention";
+  kind: "general" | "mention" | "scheduled";
   session: string | null;
   agent: Pick<Agent, "id" | "icon" | "symbol" | "color"> | null;
   title: string;

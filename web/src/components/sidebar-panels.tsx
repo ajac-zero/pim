@@ -226,6 +226,40 @@ export function NotificationsPanel({
   );
 }
 
+/** A notification's agent tile, or Pim's mark, with a small badge for what kind it is. */
+export function NotificationIcon({
+  notification,
+  className,
+}: {
+  notification: PimNotification;
+  className?: string;
+}) {
+  const Badge =
+    notification.kind === "mention"
+      ? AtSign
+      : notification.kind === "scheduled"
+        ? CalendarClock
+        : null;
+  return (
+    <span className="relative shrink-0">
+      {notification.agent ? (
+        <AgentIcon agent={notification.agent} tile className={className} />
+      ) : (
+        <img
+          src="/icon-192.png"
+          alt=""
+          className={cn("shrink-0 rounded-lg", className)}
+        />
+      )}
+      {Badge && (
+        <span className="-bottom-1 -right-1 absolute flex size-4 items-center justify-center rounded-full bg-link text-background ring-2 ring-background">
+          <Badge className="size-2.5" />
+        </span>
+      )}
+    </span>
+  );
+}
+
 function NotificationRow({
   notification,
   onSeen,
@@ -237,25 +271,9 @@ function NotificationRow({
 }) {
   const { formatDate } = useI18n();
   const unread = notification.readAt === null;
-  const mention = notification.kind === "mention";
   const content = (
     <>
-      <span className="relative shrink-0">
-        {notification.agent ? (
-          <AgentIcon agent={notification.agent} tile className="size-8" />
-        ) : (
-          <img
-            src="/icon-192.png"
-            alt=""
-            className="size-8 shrink-0 rounded-lg"
-          />
-        )}
-        {mention && (
-          <span className="-bottom-1 -right-1 absolute flex size-4 items-center justify-center rounded-full bg-link text-background ring-2 ring-background">
-            <AtSign className="size-2.5" />
-          </span>
-        )}
-      </span>
+      <NotificationIcon notification={notification} className="size-8" />
       <span className="min-w-0 flex-1">
         <span className="block truncate">{notification.title}</span>
 

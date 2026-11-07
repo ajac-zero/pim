@@ -13,6 +13,7 @@ import {
 import { FileKindIcon } from "~/components/file-kind-icon";
 import { useI18n } from "~/components/i18n";
 import {
+  AlertCircle,
   ArrowUp,
   Camera,
   Check,
@@ -432,13 +433,9 @@ function ComposerInner({
     );
   };
   const [preparing, setPreparing] = useState(false);
-  // Where each attachment is already saved, so a send that failed part way doesn't upload those again.
-  const savedPaths = useRef(new Map<string, string>());
-  // The attachment being uploaded now, and those saved, for the chips to show.
-  const [uploading, setUploading] = useState<string | null>(null);
-  const [uploaded, setUploaded] = useState<ReadonlySet<string>>(new Set());
-  const voice = useVoiceInput(text, controller.textInput.setInput);
   const files = controller.attachments.files;
+  const attached = useAttachmentUploads(files, saves);
+  const voice = useVoiceInput(text, controller.textInput.setInput);
   const hasText = text.trim().length > 0;
   const hasContent = hasText || files.length > 0;
   // The utility model rewrites the draft in place.
@@ -488,12 +485,7 @@ function ComposerInner({
             }),
           ),
         ),
-        saves
-          ? saveAttachments(message.files, savedPaths.current, (id, done) => {
-              setUploading(done ? null : id);
-              if (done) setUploaded((all) => new Set(all).add(id));
-            })
-          : [],
+        saves ? Promise.all(message.files.map(attached.save)) : [],
       ]);
       // Each saved file is linked by its path, which opens it in the chat and tells the agent where it is.
       const links = saved.map((path) => `[${baseName(path)}](<${path}>)`);
@@ -506,11 +498,12 @@ function ComposerInner({
             ]
           : typed,
       );
+      // The files are in the message now, so removing them from the composer mustn't delete them.
+      attached.release();
     } catch (error) {
       toast.error((error as Error).message);
       throw error;
     } finally {
-      setUploading(null);
       setPreparing(false);
     }
   };
@@ -698,9 +691,17 @@ function ComposerInner({
                     alt={file.filename}
                     className="size-8 rounded-lg border object-cover"
                   />
-                  {uploading === file.id && (
+                  {attached.state[file.id] === "uploading" && (
                     <span className="absolute inset-0 grid place-items-center rounded-lg bg-background/60">
                       <Loader2 className="size-3.5 animate-spin" />
+                    </span>
+                  )}
+                  {attached.state[file.id] === "failed" && (
+                    <span
+                      title={t("uploadFailed")}
+                      className="absolute inset-0 grid place-items-center rounded-lg bg-background/60 text-destructive"
+                    >
+                      <AlertCircle className="size-3.5" />
                     </span>
                   )}
                   <Button
@@ -722,22 +723,28 @@ function ComposerInner({
                 >
                   <FileKindIcon name={file.filename} type={file.mediaType} />
                   <span className="min-w-0 truncate">{file.filename}</span>
-                  {uploading === file.id ? (
-                    <Loader2 className="mx-1.5 size-3.5 shrink-0 animate-spin text-muted-foreground" />
-                  ) : preparing && uploaded.has(file.id) ? (
-                    <Check className="mx-1.5 size-3.5 shrink-0 text-muted-foreground" />
-                  ) : (
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      className="size-6 shrink-0 rounded-full text-muted-foreground"
-                      aria-label={t("removeImage", { name: file.filename })}
-                      onClick={() => controller.attachments.remove(file.id)}
-                    >
-                      <X className="size-3" />
-                    </Button>
+                  {attached.state[file.id] === "uploading" && (
+                    <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
                   )}
+                  {attached.state[file.id] === "saved" && (
+                    <Check className="size-3.5 shrink-0 text-muted-foreground" />
+                  )}
+                  {attached.state[file.id] === "failed" && (
+                    <AlertCircle
+                      aria-label={t("uploadFailed")}
+                      className="size-3.5 shrink-0 text-destructive"
+                    />
+                  )}
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-6 shrink-0 rounded-full text-muted-foreground"
+                    aria-label={t("removeImage", { name: file.filename })}
+                    onClick={() => controller.attachments.remove(file.id)}
+                  >
+                    <X className="size-3" />
+                  </Button>
                 </li>
               ),
             )}
@@ -970,51 +977,97 @@ function ModelPicker({
   );
 }
 
+type UploadState = "uploading" | "saved" | "failed";
+
 /**
- * Saves attachments to your files, under `UPLOADS`, by their own names: a
- * name already there gets a number, as `cv (2).pdf`, so nothing is replaced.
- * Gives each one's path. They go one at a time, since your computer takes
- * them over one connection and many at once leave most waiting until the
- * browser gives up. `saved` remembers the paths of those already uploaded,
- * so sending again after a failure continues where it stopped.
+ * Saves attachments to your files as they are attached, one at a time, since
+ * your computer takes them over one connection and many at once leave most
+ * waiting until the browser gives up. `state` is what the chips show; `save`
+ * gives an attachment's path, once it's saved: sending waits on it, and
+ * tries again for one that failed. Taking an attachment off deletes its file,
+ * unless `release` says the message has it.
  */
-async function saveAttachments(
+function useAttachmentUploads(
   files: readonly PromptInputAttachment[],
-  saved: Map<string, string>,
-  progress: (id: string, done: boolean) => void,
-): Promise<string[]> {
+  enabled: boolean,
+) {
+  const [state, setState] = useState<Record<string, UploadState>>({});
+  const jobs = useRef(new Map<string, Promise<string>>());
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const mark = (id: string, next: UploadState | null) =>
+    setState((all) => {
+      const { [id]: _, ...rest } = all;
+      return next ? { ...rest, [id]: next } : rest;
+    });
+
+  const save = (file: PromptInputAttachment): Promise<string> => {
+    let job = jobs.current.get(file.id);
+    if (!job) {
+      job = queue.current.then(async () => {
+        mark(file.id, "uploading");
+        try {
+          const path = await uploadAttachment(file);
+          mark(file.id, "saved");
+          return path;
+        } catch (error) {
+          jobs.current.delete(file.id);
+          mark(file.id, "failed");
+          throw new Error(`${file.filename}: ${(error as Error).message}`);
+        }
+      });
+      jobs.current.set(file.id, job);
+      queue.current = job.catch(() => undefined);
+    }
+    return job;
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `save` and `mark` only use refs and a state setter
+  useEffect(() => {
+    if (!enabled) return;
+    for (const file of files) {
+      if (!jobs.current.has(file.id)) save(file).catch(() => undefined);
+    }
+    for (const [id, job] of jobs.current) {
+      if (files.some((file) => file.id === id)) continue;
+      jobs.current.delete(id);
+      mark(id, null);
+      job.then((path) => pim.deleteFile(path)).catch(() => undefined);
+    }
+  }, [files, enabled]);
+
+  return {
+    state,
+    save,
+    release: () => {
+      jobs.current.clear();
+      setState({});
+    },
+  };
+}
+
+/**
+ * Saves one attachment to your files, under `UPLOADS`, by its own name: a
+ * name already there gets a number, as `cv (2).pdf`, so nothing is replaced.
+ * Gives its path.
+ */
+async function uploadAttachment(file: PromptInputAttachment): Promise<string> {
   const listed = await pim.files(UPLOADS).catch((error: unknown) => {
     if (error instanceof ApiError && error.status === 404) return null;
     throw error;
   });
   const taken = new Set(listed?.entries.map((entry) => entry.name));
-  const paths: string[] = [];
-  for (const file of files) {
-    let path = saved.get(file.id);
-    if (!path) {
-      // Characters that would end a Markdown link, or no name at all, give way.
-      const name =
-        file.filename.replace(/[\p{Cc}<>[\]\\]/gu, "_").replace(/^\.+$/, "") ||
-        "file";
-      const dot = name.lastIndexOf(".");
-      const [stem, extension] =
-        dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
-      let free = name;
-      for (let n = 2; taken.has(free); n++) free = `${stem} (${n})${extension}`;
-      taken.add(free);
-      path = `${UPLOADS}/${free}`;
-      progress(file.id, false);
-      try {
-        await pim.uploadFile(path, await (await fetch(file.url)).blob());
-      } catch (error) {
-        throw new Error(`${file.filename}: ${(error as Error).message}`);
-      }
-      saved.set(file.id, path);
-      progress(file.id, true);
-    }
-    paths.push(path);
-  }
-  return paths;
+  // Characters that would end a Markdown link, or no name at all, give way.
+  const name =
+    file.filename.replace(/[\p{Cc}<>[\]\\]/gu, "_").replace(/^\.+$/, "") ||
+    "file";
+  const dot = name.lastIndexOf(".");
+  const [stem, extension] =
+    dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  let free = name;
+  for (let n = 2; taken.has(free); n++) free = `${stem} (${n})${extension}`;
+  const path = `${UPLOADS}/${free}`;
+  await pim.uploadFile(path, await (await fetch(file.url)).blob());
+  return path;
 }
 
 /**

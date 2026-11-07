@@ -357,6 +357,7 @@ const translations = {
     modelCantSeeImages:
       "{model} can't see images. Choose a model that can in Settings.",
     couldNotReadImage: "Couldn't read that image.",
+    uploadFailed: "Couldn't save this file. Sending tries again.",
     seesImages: "Sees images",
     moreActions: "More actions",
     navigation: "Navigation",
@@ -1508,6 +1509,8 @@ const translations = {
     modelCantSeeImages:
       "{model} no puede ver imágenes. Elige uno que pueda en Configuración.",
     couldNotReadImage: "No se pudo leer esa imagen.",
+    uploadFailed:
+      "No se pudo guardar este archivo. Al enviar se intenta de nuevo.",
     seesImages: "Ve imágenes",
     moreActions: "Más acciones",
     navigation: "Navegación",

@@ -269,7 +269,10 @@ function parseDelivery(value: unknown, mode: ConditionMode | null): DeliveryPoli
 	}
 	const rawSamples = false;
 	if (mode !== "filter") {
-		if (given.maxPendingEvents !== undefined) throw new TriggerValidationError(`${path}.maxPendingEvents`, "applies only to sources of events; the rest hold one pending snapshot");
+		// Null is what a stored spec says for these sources, so it reads back as it was written.
+		if (given.maxPendingEvents !== undefined && given.maxPendingEvents !== null) {
+			throw new TriggerValidationError(`${path}.maxPendingEvents`, "applies only to sources of events; the rest hold one pending snapshot");
+		}
 		return { rawSamples, maxPendingEvents: null };
 	}
 	const maxPendingEvents = given.maxPendingEvents === undefined ? TRIGGER_DEFAULTS.maxPendingEvents : integer(given.maxPendingEvents, `${path}.maxPendingEvents`, 1, TRIGGER_DEFAULTS.maxPendingEventsLimit);

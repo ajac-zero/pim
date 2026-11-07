@@ -415,11 +415,15 @@ export class TriggerStore {
 	}
 
 	/**
-	 * Deletes a trigger: it stops, for good. Its undelivered occurrences are
-	 * cancelled, and a claim of one under way can no longer settle it; its
-	 * id, and anything its observers send later, are refused. Its revisions
-	 * and occurrences stay, as the record of what it did, until `eraseAll`.
-	 * Its source state and inbox, which only served taking in events, go.
+	 * Deletes a trigger: it stops, for good. Occurrences no attempt has
+	 * claimed are cancelled. One with an attempt under way may already have
+	 * been handed on, so it is not called cancelled: its outcome is unknown,
+	 * the attempt can no longer settle it, and `reconcile` records what
+	 * happened once that is known. Deleting asks for a stop; it doesn't undo
+	 * or cancel anything already handed on. Its id, and anything its
+	 * observers send later, are refused. Its revisions and occurrences stay,
+	 * as the record of what it did, until `eraseAll`. Its source state and
+	 * inbox, which only served taking in events, go.
 	 */
 	remove(input: { id: string; expectedRevision?: number }): { ok: true } | Refusal {
 		return this.#options.transaction((): { ok: true } | Refusal => {
@@ -430,8 +434,11 @@ export class TriggerStore {
 			const generation = current.trigger.generation + 1;
 			this.#sql.exec("UPDATE pim_triggers SET lifecycle = 'deleted', generation = ?, health = 'unknown', health_detail = NULL, updated_at = ? WHERE id = ?", generation, now, input.id);
 			this.#sql.exec("INSERT INTO pim_trigger_tombstones (trigger_id, generation, deleted_at) VALUES (?, ?, ?)", input.id, generation, now);
-			this.#sql.exec("UPDATE pim_trigger_occurrences SET status = 'cancelled', updated_at = ? WHERE trigger_id = ? AND status = 'pending'", now, input.id);
-			this.#sql.exec("UPDATE pim_trigger_outbox SET status = 'cancelled', lease_until = NULL, updated_at = ? WHERE trigger_id = ? AND status IN ('pending', 'leased')", now, input.id);
+			const unsettled = this.#sql.exec("SELECT id, status FROM pim_trigger_outbox WHERE trigger_id = ? AND status IN ('pending', 'leased')", input.id).toArray();
+			for (const item of unsettled) {
+				if (item.status === "pending") this.#settle(String(item.id), "cancelled", "cancelled", now);
+				else this.#settle(String(item.id), "outcome_unknown", "outcome_unknown", now);
+			}
 			this.#sql.exec("DELETE FROM pim_trigger_sources WHERE trigger_id = ?", input.id);
 			this.#sql.exec("DELETE FROM pim_trigger_inbox WHERE trigger_id = ?", input.id);
 			return { ok: true };
@@ -710,7 +717,12 @@ export class TriggerStore {
 		});
 	}
 
-	/** Settles an item whose outcome was unknown, once the deliverer has found out (such as from the operation id's record). */
+	/**
+	 * Settles an item whose outcome was unknown, once the deliverer has found
+	 * out (such as from the operation id's record). It works for a deleted
+	 * trigger's items too, and records only what happened: it never claims
+	 * anything or brings the trigger back.
+	 */
 	reconcile(input: { outboxId: string; outcome: "delivered" | "failed" }): { ok: boolean } {
 		return this.#options.transaction(() => {
 			const row = this.#sql.exec("SELECT trigger_id FROM pim_trigger_outbox WHERE id = ? AND status = 'outcome_unknown'", input.outboxId).toArray()[0];

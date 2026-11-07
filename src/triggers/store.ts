@@ -709,7 +709,8 @@ export class TriggerStore {
 			const time = trigger.spec.source;
 			if (time.kind !== "time") return { status: "wrong_source" };
 			const now = this.#options.now();
-			const after = Math.max(source.lastObservedAt ?? Number.NEGATIVE_INFINITY, (source.activeSince ?? now) - 1, TRIGGER_LIMITS.earliestAt);
+			// `after` is exclusive, so a firing at the very first supported instant counts from one millisecond before it.
+			const after = Math.max(source.lastObservedAt ?? Number.NEGATIVE_INFINITY, (source.activeSince ?? now) - 1, TRIGGER_LIMITS.earliestAt - 1);
 			let selection: ReturnType<typeof selectDueFiring>;
 			try {
 				selection = selectDueFiring(time, { now, after });
@@ -1086,7 +1087,8 @@ export class TriggerStore {
 
 /** A time source's first firing at or after `now`, if there is one within the search horizon and the supported range. */
 function nextFiring(source: TimeSource, now: number): number | null {
-	const first = previewFirings(source, { now: now - 1, count: 1 }).firings[0]?.at;
+	// A firing at `now` itself counts; asked so, rather than as the firings after `now - 1`, so `now` may be the first instant of 2000.
+	const first = isScheduledFiring(source, now) ? now : previewFirings(source, { now, count: 1 }).firings[0]?.at;
 	return first !== undefined && first <= TRIGGER_LIMITS.latestAt ? first : null;
 }
 

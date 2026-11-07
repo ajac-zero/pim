@@ -42,10 +42,18 @@ function deferred(): Deferred {
 	return { promise, resolve };
 }
 
+/** A promise that never settles: a host that never answers. */
+const never = () => new Promise<void>(() => {});
+const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+type Method = "preflight" | "findChat" | "createChat" | "lookupSubmission" | "submit" | "lookupRun";
+
 /**
  * A host with chats, a run budget and runs of its own, which keeps its own
- * record by idempotency key as `submitTo` does. Each method can be scripted
- * for its next calls; `log` records every call.
+ * record by idempotency key as `submitTo` does. `hooks` run at the start of
+ * each method's next calls, to hold or slow it; `script` sets what its next
+ * calls answer; `log` records every call; `maxActive` is the most runs it
+ * ever had accepted and not ended at once.
  */
 class FakeHost implements TriggerAgentHost {
 	agents = new Set(["agent-1"]);
@@ -58,20 +66,25 @@ class FakeHost implements TriggerAgentHost {
 	suspended = false;
 	/** Whether `createChat` gives the same chat for the same key. */
 	idempotentChats = true;
+	maxActive = 0;
 	log: string[] = [];
+	hooks: Partial<Record<Method, (() => Promise<void>)[]>> = {};
 	script: {
-		preflight?: (() => Promise<HostPreflight>)[];
 		findChat?: ChatLookup["status"][];
 		createChat?: ("throw_after_create" | "throw")[];
-		submit?: ("accept_then_throw" | "throw" | "uncertain" | "fail" | Deferred)[];
+		submit?: ("accept_then_throw" | "throw" | "uncertain" | "fail")[];
 		lookupSubmission?: ("unknown" | "absent" | "throw")[];
 	} = {};
 	#receipts = 0;
 
+	async #hook(method: Method): Promise<void> {
+		const hook = this.hooks[method]?.shift();
+		if (hook) await hook();
+	}
+
 	async preflight(input: { triggerId: string; operationId: string; agentId: string; destination: TriggerDestination; sourceKind: "time" }): Promise<HostPreflight> {
 		this.log.push(`preflight:${input.triggerId}`);
-		const scripted = this.script.preflight?.shift();
-		if (scripted) return scripted();
+		await this.#hook("preflight");
 		if (!this.agents.has(input.agentId)) return { ok: false, reason: "the agent was deleted", retryable: false };
 		if (input.destination.type === "existing_chat" && this.chats.get(input.destination.chatId)?.agent !== input.agentId) return { ok: false, reason: "the chat is gone", retryable: false };
 		if (this.suspended) return { ok: false, reason: "the space is suspended", retryable: true };
@@ -80,6 +93,7 @@ class FakeHost implements TriggerAgentHost {
 
 	async findChat(input: { operationId: string }): Promise<ChatLookup> {
 		this.log.push(`findChat:${input.operationId}`);
+		await this.#hook("findChat");
 		const scripted = this.script.findChat?.shift();
 		if (scripted === "unknown") return { status: "unknown" };
 		const found = [...this.chats].find(([, chat]) => chat.operationId === input.operationId);
@@ -88,6 +102,7 @@ class FakeHost implements TriggerAgentHost {
 
 	async createChat(input: { operationId: string; agentId: string; title: string }): Promise<ChatCreation> {
 		this.log.push(`createChat:${input.operationId}`);
+		await this.#hook("createChat");
 		const scripted = this.script.createChat?.shift();
 		if (scripted === "throw") throw new Error("connection reset");
 		if (!this.agents.has(input.agentId)) return { status: "denied", reason: "the agent was deleted" };
@@ -100,6 +115,7 @@ class FakeHost implements TriggerAgentHost {
 
 	async lookupSubmission(input: { operationId: string }): Promise<SubmissionLookup> {
 		this.log.push(`lookupSubmission:${input.operationId}`);
+		await this.#hook("lookupSubmission");
 		const scripted = this.script.lookupSubmission?.shift();
 		if (scripted === "throw") throw new Error("storage unavailable");
 		if (scripted === "unknown") return { status: "unknown" };
@@ -110,8 +126,8 @@ class FakeHost implements TriggerAgentHost {
 
 	async submit(input: { idempotencyKey: string; chatId: string; agentId: string; instruction: string; evidence: TimeEvidence }): Promise<SubmitResult> {
 		this.log.push(`submit:${input.idempotencyKey}`);
+		await this.#hook("submit");
 		const scripted = this.script.submit?.shift();
-		if (typeof scripted === "object") await scripted.promise;
 		if (scripted === "throw") throw new Error("connection reset before the request was sent");
 		if (scripted === "uncertain") return { status: "uncertain", reason: "timed out" };
 		if (scripted === "fail") return { status: "failed", reason: "the input was refused" };
@@ -130,16 +146,18 @@ class FakeHost implements TriggerAgentHost {
 		const receipt = `receipt-${++this.#receipts}`;
 		this.submissions.set(input.idempotencyKey, { receipt, chatId: input.chatId, instruction: input.instruction, evidence: input.evidence });
 		this.runs.set(receipt, "queued");
+		this.maxActive = Math.max(this.maxActive, [...this.runs.values()].filter((status) => status === "queued" || status === "running").length);
 		if (scripted === "accept_then_throw") throw new Error("connection reset after it was accepted");
 		return { status: "accepted", receipt };
 	}
 
 	async lookupRun(input: { operationId: string; receipt: string }): Promise<RunStatus> {
 		this.log.push(`lookupRun:${input.operationId}`);
+		await this.#hook("lookupRun");
 		return this.runs.get(input.receipt) ?? "unknown";
 	}
 
-	calls(kind: string): number {
+	calls(kind: Method): number {
 		return this.log.filter((entry) => entry.startsWith(`${kind}:`)).length;
 	}
 
@@ -149,20 +167,39 @@ class FakeHost implements TriggerAgentHost {
 	}
 }
 
+/** Deadlines for host calls that pass only when the test says: `expire` is every call's deadline passing at once. */
+class FakeTimers {
+	readonly #pending = new Set<() => void>();
+	sleep = (_ms: number, signal: AbortSignal): Promise<void> =>
+		new Promise((resolve) => {
+			const fire = () => {
+				this.#pending.delete(fire);
+				resolve();
+			};
+			this.#pending.add(fire);
+			signal.addEventListener("abort", fire);
+		});
+	expire(): void {
+		for (const fire of [...this.#pending]) fire();
+	}
+}
+
 type Context = {
 	store: TriggerStore;
 	coordinator: TriggerCoordinator;
 	host: FakeHost;
+	timers: FakeTimers;
 	clock: { now: number };
 	sql: SqlStorage;
 	/** A new store and coordinator on the same database and host, as after the Durable Object restarts; `crash` aborts every transaction before it commits. */
 	restart: (options?: Partial<TriggerCoordinatorOptions> & { crash?: boolean }) => { store: TriggerStore; coordinator: TriggerCoordinator };
 };
 
-async function withCoordinator(work: (context: Context) => Promise<void>, options: Partial<TriggerCoordinatorOptions> = {}): Promise<void> {
-	await runInDurableObject(env.Pim.getByName(`coordinator-${crypto.randomUUID()}`), async (_pim: Pim, state) => {
+async function withCoordinator<T>(work: (context: Context) => Promise<T>, options: Partial<TriggerCoordinatorOptions> = {}): Promise<T> {
+	return runInDurableObject(env.Pim.getByName(`coordinator-${crypto.randomUUID()}`), async (_pim: Pim, state) => {
 		const clock = { now: START };
 		const host = new FakeHost();
+		const timers = new FakeTimers();
 		const restart = (more: Partial<TriggerCoordinatorOptions> & { crash?: boolean } = {}) => {
 			const transaction = <T>(run: () => T): T =>
 				state.storage.transactionSync(() => {
@@ -172,11 +209,11 @@ async function withCoordinator(work: (context: Context) => Promise<void>, option
 				});
 			// No `authorize`: as in Pim, nothing that runs on the computer can be enabled.
 			const store = new TriggerStore(state.storage.sql, { transaction, now: () => clock.now });
-			const coordinator = new TriggerCoordinator(state.storage.sql, { store, host, transaction, now: () => clock.now, ...options, ...more });
+			const coordinator = new TriggerCoordinator(state.storage.sql, { store, host, transaction, now: () => clock.now, sleep: timers.sleep, ...options, ...more });
 			return { store, coordinator };
 		};
 		const { store, coordinator } = restart();
-		await work({ store, coordinator, host, clock, sql: state.storage.sql, restart });
+		return work({ store, coordinator, host, timers, clock, sql: state.storage.sql, restart });
 	});
 }
 
@@ -438,24 +475,23 @@ describe("time trigger coordinator", () => {
 	it("keeps what happened when a trigger is paused, edited or deleted during a handoff, and starts nothing new", async () => {
 		await withCoordinator(
 			async ({ store, coordinator, host, clock }) => {
-				const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 				create(store, "edit", hourly());
 				clock.now = START + HOUR;
 				const editGate = deferred();
-				host.script.submit = [editGate];
+				host.hooks.submit = [() => editGate.promise];
 				const running = coordinator.tick();
 				await settle();
 				expect(host.calls("submit")).toBe(1);
 				// While the host is answering, its instruction changes and it is paused.
 				expect(store.update({ id: "edit", expectedRevision: 1, spec: { ...hourly(), instruction: "Write the evening brief." } })).toMatchObject({ ok: true, trigger: { revision: 2 } });
 				expect(store.setLifecycle({ id: "edit", to: "paused" })).toMatchObject({ ok: true });
-				// Another tick, past the lease, neither claims it nor asks about it while the answer is awaited.
-				clock.now = START + HOUR + 6 * MINUTE;
+				// Another tick, while the answer is still within its deadline, neither claims it nor asks about it.
+				clock.now = START + HOUR + 20_000;
 				await coordinator.tick();
 				expect(host.calls("submit")).toBe(1);
 				expect(host.calls("lookupSubmission")).toBe(0);
-				// Nor does the alarm spin on what it is waiting for.
-				expect(coordinator.nextWakeAt()).toBeNull();
+				// Nor does the alarm spin on it: the next wake is when its answer is due.
+				expect(coordinator.nextWakeAt()).toBe(START + HOUR + 31_000);
 				editGate.resolve();
 				await running;
 				// Its submission is recorded as it happened, with the revision it was made under.
@@ -468,7 +504,7 @@ describe("time trigger coordinator", () => {
 				create(store, "gone", hourly());
 				clock.now = START + 2 * HOUR;
 				const goneGate = deferred();
-				host.script.submit = [goneGate];
+				host.hooks.submit = [() => goneGate.promise];
 				const deleting = coordinator.tick();
 				await settle();
 				expect(host.calls("submit")).toBe(2);
@@ -497,12 +533,7 @@ describe("time trigger coordinator", () => {
 			create(store, "brief", hourly());
 			clock.now = START + HOUR;
 			const gate = deferred();
-			host.script.preflight = [
-				async () => {
-					await gate.promise;
-					return { ok: true };
-				},
-			];
+			host.hooks.preflight = [() => gate.promise];
 			const running = coordinator.tick();
 			await new Promise((resolve) => setTimeout(resolve, 10));
 			store.update({ id: "brief", expectedRevision: 1, spec: { ...hourly(), instruction: "Write the evening brief." } });
@@ -517,6 +548,251 @@ describe("time trigger coordinator", () => {
 			expect(report.admitted).toEqual([]);
 			expect(report.handedOn).toHaveLength(1);
 			expect(host.submissions.get(store.outbox("brief")[0]!.operationId)).toMatchObject({ instruction: "Write my morning brief.", evidence: { revision: 1, scheduledFor: START + HOUR } });
+		});
+	});
+
+	it("never runs more than maxRunning, across concurrent ticks and a coordinator made again, while a handoff waits on the host", async () => {
+		await withCoordinator(
+			async ({ store, coordinator, host, clock, restart }) => {
+				const once = (at: number) => ({ ...base, source: { kind: "time", schedule: "once", at } });
+				create(store, "a", once(START + MINUTE));
+				create(store, "b", once(START + MINUTE));
+				clock.now = START + MINUTE;
+				const gate = deferred();
+				host.hooks.preflight = [() => gate.promise];
+				// The first tick reserves one handoff and waits on its preflight; the other occurrence can't take a compute slot.
+				const first = coordinator.tick();
+				await settle();
+				expect(host.calls("preflight")).toBe(1);
+				const waiting = store.outbox("a")[0]!;
+				expect(coordinator.run(waiting.operationId)).toMatchObject({ phase: "preparing", dispatchAttempt: 1, dispatchUntil: START + MINUTE + 5 * MINUTE });
+				// Another tick, and a coordinator made again after a restart, see the reservation in the database.
+				await coordinator.tick();
+				await restart().coordinator.tick();
+				expect(host.calls("preflight")).toBe(1);
+				gate.resolve();
+				expect((await first).handedOn).toEqual([waiting.operationId]);
+				// b waits while a's run holds the one slot, then goes.
+				await coordinator.tick();
+				expect(host.calls("submit")).toBe(1);
+				host.finishAll();
+				clock.now += 2 * MINUTE;
+				await coordinator.tick();
+				expect(host.calls("submit")).toBe(2);
+				expect(host.maxActive).toBe(1);
+			},
+			{ maxRunning: 1 },
+		);
+	});
+
+	it("checks compute again just before submitting, when a slow handoff's reservation ran out and another run took the slot", async () => {
+		await withCoordinator(
+			async ({ store, coordinator, host, clock }) => {
+				create(store, "a", hourly());
+				create(store, "b", hourly());
+				clock.now = START + HOUR;
+				const gate = deferred();
+				host.hooks.preflight = [() => gate.promise];
+				const slow = coordinator.tick();
+				await settle();
+				const a = store.outbox("a")[0]!;
+				// Past the reservation: b takes the free slot and runs.
+				clock.now = START + HOUR + 5 * MINUTE + 1;
+				expect((await coordinator.tick()).handedOn).toEqual([store.outbox("b")[0]!.operationId]);
+				// a's handoff wakes up and finds no compute free: it submits nothing and waits to try again.
+				gate.resolve();
+				const report = await slow;
+				expect(report.handedOn).toEqual([]);
+				expect(report.deferred).toEqual([a.operationId]);
+				expect(coordinator.run(a.operationId)).toMatchObject({ phase: "preparing", dispatchUntil: null, lastError: "no compute was free when it was to be submitted" });
+				expect(host.calls("submit")).toBe(1);
+				expect(host.maxActive).toBe(1);
+			},
+			{ maxRunning: 1 },
+		);
+	});
+
+	it("reserves at most maxRunning handoffs that make chats, however many ticks run", async () => {
+		await withCoordinator(
+			async ({ store, coordinator, host, clock, restart }) => {
+				for (const id of ["a", "b", "c"]) create(store, id, hourly({ destination: { type: "new_chat" } }));
+				clock.now = START + HOUR;
+				const gate = deferred();
+				host.hooks.createChat = [() => gate.promise, () => gate.promise, () => gate.promise];
+				const first = coordinator.tick();
+				const second = restart().coordinator.tick();
+				await settle();
+				expect(host.calls("createChat")).toBe(2);
+				gate.resolve();
+				await Promise.all([first, second]);
+				await coordinator.tick();
+				expect(host.calls("submit")).toBe(2);
+				expect(host.maxActive).toBe(2);
+				host.finishAll();
+				clock.now += MINUTE;
+				await coordinator.tick();
+				expect(host.calls("submit")).toBe(3);
+				expect(host.chats.size).toBe(4);
+			},
+			{ maxRunning: 2 },
+		);
+	});
+
+	it("waits a bounded time for the host, so one silent call holds up nothing else, and takes silence as not known", async () => {
+		await withCoordinator(
+			async ({ store, coordinator, host, timers, clock }) => {
+				// Handed on in this order: the silent one first.
+				create(store, "a-silent", hourly());
+				create(store, "lively", hourly());
+				clock.now = START + HOUR;
+				host.hooks.preflight = [never];
+				const tick = coordinator.tick();
+				await settle();
+				// The other trigger was handed on while the first's preflight had no answer.
+				expect(host.submissions.has(store.outbox("lively")[0]!.operationId)).toBe(true);
+				timers.expire();
+				const report = await tick;
+				const silent = store.outbox("a-silent")[0]!;
+				expect(report.deferred).toEqual([silent.operationId]);
+				expect(coordinator.run(silent.operationId)?.lastError).toBe("the host's check gave no answer: no answer within 30000 ms");
+
+				// A submission with no answer is not known: it isn't submitted again until the host is asked.
+				host.finishAll();
+				clock.now = START + 2 * HOUR;
+				host.hooks.submit = [never];
+				const submitting = coordinator.tick();
+				await settle();
+				timers.expire();
+				await submitting;
+				const unanswered = store.outbox("a-silent")[1]!;
+				expect(coordinator.run(unanswered.operationId)).toMatchObject({ phase: "submitting", lastError: "no answer within 30000 ms" });
+				const submits = host.calls("submit");
+				await coordinator.tick();
+				expect(host.calls("submit")).toBe(submits);
+				clock.now += 15 * MINUTE;
+				await coordinator.tick();
+				expect(host.calls("lookupSubmission")).toBe(1);
+
+				// A chat with no answer is looked up on the next try, never made blind.
+				create(store, "chatty", hourly({ destination: { type: "new_chat" } }));
+				clock.now = START + 3 * HOUR;
+				host.hooks.createChat = [never];
+				const making = coordinator.tick();
+				await settle();
+				timers.expire();
+				await making;
+				const chatty = store.outbox("chatty")[0]!;
+				expect(coordinator.run(chatty.operationId)).toMatchObject({ phase: "preparing", chatState: "creating", chatId: null });
+				clock.now += 15 * MINUTE;
+				await coordinator.tick();
+				expect(host.log.filter((entry) => entry.endsWith(chatty.operationId)).map((entry) => entry.split(":")[0])).toEqual(["createChat", "findChat", "createChat", "submit"]);
+			},
+			{ maxRunning: 4 },
+		);
+	});
+
+	it("asks about each run once at a time, and an answer older than a callback changes nothing", async () => {
+		await withCoordinator(async ({ store, coordinator, host, clock }) => {
+			create(store, "x", hourly());
+			create(store, "y", hourly());
+			clock.now = START + HOUR;
+			await coordinator.tick();
+			const [x, y] = ["x", "y"].map((id) => store.outbox(id)[0]!.operationId) as [string, string];
+			const gate = deferred();
+			host.hooks.lookupRun = [() => gate.promise, () => gate.promise];
+			host.runs.set("receipt-1", "running");
+			host.runs.set("receipt-2", "queued");
+			clock.now += MINUTE;
+			const asking = coordinator.tick();
+			await settle();
+			// A second tick doesn't ask about the same runs while their questions are out.
+			await coordinator.tick();
+			expect(host.calls("lookupRun")).toBe(2);
+			// The host says x ended, and y is running, before the older answers arrive.
+			expect(coordinator.runStatusChanged({ operationId: x, receipt: "receipt-1", status: "completed" })).toEqual({ ok: true });
+			expect(coordinator.runStatusChanged({ operationId: y, receipt: "receipt-2", status: "running" })).toEqual({ ok: true });
+			gate.resolve();
+			await asking;
+			expect(coordinator.run(x)?.phase).toBe("completed");
+			expect(coordinator.run(y)?.phase).toBe("running");
+		});
+	});
+
+	it("checks the deadline again after each wait on the host, and keeps what was submitted past it", async () => {
+		// One occurrence, admitted at START + 1 min with an hour to be handed on; the host's preflight or chat takes until `until`.
+		const handOff = (step: "preflight" | "createChat", until: number) =>
+			withCoordinator(
+				async ({ store, coordinator, host, clock }) => {
+					create(store, "t", { ...base, source: { kind: "time", schedule: "once", at: START + MINUTE }, destination: step === "createChat" ? { type: "new_chat" } : base.destination });
+					clock.now = START + MINUTE;
+					host.hooks[step] = [
+						async () => {
+							clock.now = until;
+						},
+					];
+					await coordinator.tick();
+					return { run: coordinator.run(store.outbox("t")[0]!.operationId)!, submitted: host.calls("submit"), item: store.outbox("t")[0]! };
+				},
+				{ deliveryTtlMs: HOUR },
+			);
+		const deadline = START + MINUTE + HOUR;
+		for (const step of ["preflight", "createChat"] as const) {
+			const exact = await handOff(step, deadline);
+			expect(exact.run.phase, step).toBe("accepted");
+			expect(exact.submitted).toBe(1);
+			const late = await handOff(step, deadline + 1);
+			expect(late.run, step).toMatchObject({ phase: "not_submitted", lastError: "the time to hand it on ran out" });
+			expect(late.run.chatState).toBe("pinned");
+			expect(late.submitted).toBe(0);
+			expect(late.item.status).toBe("failed");
+		}
+
+		// Submitted before its deadline with no answer, then found accepted after it: recorded as accepted, not cancelled.
+		await withCoordinator(
+			async ({ store, coordinator, host, clock }) => {
+				create(store, "kept", { ...base, source: { kind: "time", schedule: "once", at: START + MINUTE } });
+				clock.now = START + MINUTE;
+				host.script.submit = ["accept_then_throw"];
+				await coordinator.tick();
+				clock.now = START + MINUTE + 2 * HOUR;
+				await coordinator.tick();
+				expect(coordinator.run(store.outbox("kept")[0]!.operationId)).toMatchObject({ phase: "queued", receipt: "receipt-1" });
+				expect(store.outbox("kept")[0]?.status).toBe("done");
+			},
+			{ deliveryTtlMs: HOUR },
+		);
+	});
+
+	it("makes no chat and submits nothing once the trigger is paused or deleted during its preflight", async () => {
+		await withCoordinator(async ({ store, coordinator, host, clock }) => {
+			create(store, "paused", hourly({ destination: { type: "new_chat" } }));
+			create(store, "deleted", hourly({ destination: { type: "new_chat" } }));
+			create(store, "late", hourly({ destination: { type: "new_chat" } }));
+			clock.now = START + HOUR;
+			const preflight = deferred();
+			const chat = deferred();
+			host.hooks.preflight = [() => preflight.promise, () => preflight.promise, () => preflight.promise];
+			host.hooks.createChat = [() => chat.promise];
+			const tick = coordinator.tick();
+			await settle();
+			store.setLifecycle({ id: "paused", to: "paused" });
+			store.remove({ id: "deleted" });
+			// "late" is deleted only after its chat was asked for.
+			preflight.resolve();
+			await settle();
+			expect(host.log.filter((entry) => entry.startsWith("createChat:")).map((entry) => entry.split(":")[2])).toEqual(["late"]);
+			store.remove({ id: "late" });
+			chat.resolve();
+			await tick;
+			expect(host.calls("submit")).toBe(0);
+			expect(store.outbox("paused")[0]?.status).toBe("pending");
+			await coordinator.tick();
+			expect(coordinator.run(store.outbox("deleted")[0]!.operationId)).toMatchObject({ phase: "not_submitted", chatId: null });
+			// The chat made before the deletion is recorded as made, honestly, and nothing goes to it.
+			expect(coordinator.run(store.outbox("late")[0]!.operationId)).toMatchObject({ phase: "not_submitted", chatId: "chat-2", chatState: "pinned" });
+			expect(store.outbox("deleted")[0]?.status).toBe("failed");
+			expect(host.calls("createChat")).toBe(1);
+			expect(host.calls("submit")).toBe(0);
 		});
 	});
 

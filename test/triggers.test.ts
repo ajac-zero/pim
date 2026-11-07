@@ -2,8 +2,9 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Pim } from "../src/pim";
 import { type Condition, type ConditionState, evaluate, parseCondition } from "../src/triggers/condition";
-import { parseTriggerSpec } from "../src/triggers/spec";
+import { TRIGGER_LIMITS, type TimeSource, parseTriggerSpec } from "../src/triggers/spec";
 import { type AuthorizationRequest, type AuthorizationVerdict, TRIGGER_TABLES, TriggerStore, type TriggerStoreOptions } from "../src/triggers/store";
+import { selectDueFiring } from "../src/triggers/time";
 import { type JsonValue, TriggerValidationError } from "../src/triggers/validate";
 
 // Triggers are not wired into Pim yet (docs/triggers.md): these tests use their store on a Durable Object's database of its own.
@@ -942,6 +943,33 @@ describe("trigger store", () => {
 			clock.now = START + 7 * HOUR + 1;
 			expect(store.admitDueTime({ id: "rare", generation: 1 })).toMatchObject({ status: "missed", occurrence: { status: "missed", dueAt: START + 6 * HOUR }, older: { count: 1, first: START + 4 * HOUR } });
 			expect(store.outbox("rare").map((item) => item.status)).toEqual(["pending"]);
+		});
+	});
+
+	it("takes the first and last supported instants as firings, both included, when saved, enabled and admitted", async () => {
+		await withStore(({ store, clock }) => {
+			const first = TRIGGER_LIMITS.earliestAt;
+			const last = TRIGGER_LIMITS.latestAt;
+			const once = (at: number) => ({ ...base, source: { kind: "time", schedule: "once", at } });
+			clock.now = first;
+			created(store, once(first), "enabled", "first");
+			expect(store.admitDueTime({ id: "first", generation: 1 })).toMatchObject({ status: "admitted", occurrence: { dueAt: first } });
+			created(store, { ...base, source: { kind: "time", schedule: "interval", everyMs: MINUTE, anchorAt: first } }, "enabled", "grid");
+			expect(store.admitDueTime({ id: "grid", generation: 1 })).toMatchObject({ status: "admitted", occurrence: { dueAt: first }, nextWakeAt: first + MINUTE });
+			created(store, once(first), "draft", "draft");
+			expect(store.setLifecycle({ id: "draft", to: "enabled", expectedRevision: 1 })).toMatchObject({ ok: true });
+			// `after` is exclusive, so it may be one millisecond before 2000, and no earlier.
+			const source = parseTriggerSpec(once(first)).source as TimeSource;
+			expect(selectDueFiring(source, { now: first, after: first - 1 })).toMatchObject({ status: "due", scheduledFor: first });
+			expect(() => selectDueFiring(source, { now: first, after: first - 2 })).toThrow(TriggerValidationError);
+
+			clock.now = last - 1;
+			created(store, once(last), "enabled", "last");
+			clock.now = last;
+			created(store, once(last), "draft", "at-last");
+			expect(store.setLifecycle({ id: "at-last", to: "enabled", expectedRevision: 1 })).toMatchObject({ ok: true });
+			expect(store.admitDueTime({ id: "last", generation: 1 })).toMatchObject({ status: "admitted", occurrence: { dueAt: last } });
+			expect(store.admitDueTime({ id: "at-last", generation: 2 })).toMatchObject({ status: "admitted", occurrence: { dueAt: last } });
 		});
 	});
 

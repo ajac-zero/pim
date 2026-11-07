@@ -155,7 +155,7 @@ Each event the condition is true for is an occurrence; unknown or false ones are
 
 **Selecting a due firing.** `after` is the instant after which firings count: the trigger's watermark (`lastObservedAt`, the last firing it admitted), or before its first firing, the instant before its current enabled generation began (`activeSince`, below). Of the firings after `after` and at or before `now`, only the latest is selected, so an outage of days runs once. It is `due` when `now` is at most its deadline, which is its time plus the source's `catchUpMs` (or a one-time trigger's `maxLatenessMs`), inclusive, and `missed` after that. The deadline depends only on the firing, so retrying the delivery never moves it. The older firings are not listed: `older` gives how many there were and the first and last. A firing at or before `after` is never selected again, so a restart never replays one, and a clock that reads earlier than `after` selects nothing.
 
-**Bounds.** Instants given in (`now`, `after`, `at`) are whole milliseconds from 2000 to 2100, as a spec's are. A preview or a `next` may still name a later instant (from 2097, the next 29th of February is in 2104); nothing past 2100-01-01 is ever scheduled or admitted. A schedule whose next firing is past it is refused when saved, and one that reaches it while enabled stops there (`admitDueTime`'s `limit`, below). A cron search walks local calendar days, skipping months the expression leaves out, and resolves only the times of days that match, so its cost is bounded by days, never minutes. It looks at most 4,400 days (just over 12 years) forward or back. That finds every expression whose days may match either field, the 29th of February included (8 years apart around 2100, which is not a leap year), and a date on one day of the week (at most 11 years apart). A rarer expression, such as `0 0 29 2 */7` (the 29th of February on a Sunday, 28 years apart), has no firing within it: its preview is empty and `exhausted`. **A schedule whose preview has no firings should be refused when it is saved.** After an outage longer than the horizon, `older` counts only the firings within it and says so (`complete: false`). Counting them doesn't go through every firing: a day on one offset is counted whole. An interval's firings, and a one-time trigger's, are worked out, not searched for.
+**Bounds.** Instants given in (`now`, `at`) are whole milliseconds from 2000-01-01 to 2100-01-01, both included, as a spec's are; `after`, which is exclusive, may also be one millisecond before 2000, so a firing at the very first instant counts. A preview or a `next` may still name a later instant (from 2097, the next 29th of February is in 2104); nothing past 2100-01-01 is ever scheduled or admitted. A schedule whose next firing is past it is refused when saved, and one that reaches it while enabled stops there (`admitDueTime`'s `limit`, below). A cron search walks local calendar days, skipping months the expression leaves out, and resolves only the times of days that match, so its cost is bounded by days, never minutes. It looks at most 4,400 days (just over 12 years) forward or back. That finds every expression whose days may match either field, the 29th of February included (8 years apart around 2100, which is not a leap year), and a date on one day of the week (at most 11 years apart). A rarer expression, such as `0 0 29 2 */7` (the 29th of February on a Sunday, 28 years apart), has no firing within it: its preview is empty and `exhausted`. **A schedule whose preview has no firings is refused when it is saved** (the store does). After an outage longer than the horizon, `older` counts only the firings within it and says so (`complete: false`). Counting them doesn't go through every firing: a day on one offset is counted whole. An interval's firings, and a one-time trigger's, are worked out, not searched for.
 
 **Time zones** come from the runtime's `Intl` data, read as the Temporal polyfill reads them: the offset at an instant is what `Intl` shows there, and a local time is resolved by trying the offsets a day before and after it. That relies on a zone changing its offset at most once in any three days, which holds for every zone from 2000 to 2115 (the closest two changes, in America/Boa_Vista in 2000, are almost seven days apart). Offsets that aren't whole hours (Asia/Kathmandu's +05:45) and a half-hour change of daylight saving time (Australia/Lord_Howe) work as any other. The zone data is the runtime's, so a zone whose rules change takes effect when the runtime's data does.
 
@@ -212,10 +212,10 @@ Inputs are bounded: event ids up to 256 characters, cursors up to 1 KB, payloads
 
 1. **Admit.** Up to `batch.admissions` (16) time triggers whose wake has come, earliest first: `admitDueTime` for each.
 2. **Tidy.** Occurrences the store lost track of (`outcome_unknown`, from leases run out or a deletion while claimed) with no run here are adopted as possibly submitted, so the host is asked about them. Runs that never submitted, whose occurrence was superseded, cancelled, failed or deleted, are closed. Ended runs whose occurrence the store's history let go are pruned with it.
-3. **Reconcile.** Up to `batch.lookups` submissions whose outcome isn't known are looked up, then up to as many accepted runs are asked about.
-4. **Hand on.** Up to `batch.handoffs` (4) triggers, one occurrence each, while the space has compute free (`maxRunning`, 4). The trigger handed on to longest ago goes first, so a busy trigger can't starve the rest. A trigger whose run slot is taken, whose next occurrence isn't a time firing, or that is paused or deleted, is passed over.
+3. **Reconcile.** Up to `batch.lookups` submissions whose outcome isn't known are looked up, then up to as many accepted runs are asked about, all in parallel. Each run asked about is marked first, in a transaction, with a token and the answer's deadline, so no other tick, and no coordinator made again, asks about it meanwhile, and only that answer may settle it.
+4. **Hand on.** Up to `batch.handoffs` (4) triggers, one occurrence each, while the space has compute free (`maxRunning`, 4). The trigger handed on to longest ago goes first, so a busy trigger can't starve the rest. A trigger whose run slot is taken, whose handoff is already reserved, whose next occurrence isn't a time firing, or that is paused or deleted, is passed over. Each handoff is reserved before any waits on the host (below); then they go on in parallel.
 
-Every query is bounded by its batch; nothing lists all triggers and fans out.
+Every query is bounded by its batch; nothing lists all triggers and fans out. **Every question to the host has a deadline**, `callTimeoutMs` (30 seconds, at most a quarter of `leaseMs`), measured by an injectable `sleep`; the call's `signal` is aborted when it passes. No answer in time is "not known", exactly as a throw is: never a success, and never a refusal. A later answer is dropped. So one silent host call holds up nothing else for longer than its deadline, and a tick takes at most about six deadlines (a lookup, a run check, then a handoff's preflight, chat lookup, chat and submission).
 
 ### A run
 
@@ -223,7 +223,8 @@ Each occurrence is one **operation**, keyed by its outbox item's `operationId`, 
 
 | Phase | Means | Holds the trigger's slot | Holds compute |
 | --- | --- | --- | --- |
-| `preparing` | Claimed; nothing submitted. A deferred one waits here | No (the outbox's lease does) | No |
+| `preparing`, reserved | Claimed by a handoff that holds a reservation until `dispatchUntil`; nothing submitted | Yes | Yes |
+| `preparing` | Nothing submitted; deferred, or its handoff's reservation ran out | No | No |
 | `submitting` | The host was asked to submit; whether it accepted isn't known | Yes | Yes |
 | `accepted` | Accepted; how the run is doing isn't known yet | Yes | Yes |
 | `queued`, `running` | What the host said of the run | Yes | Yes |
@@ -231,11 +232,15 @@ Each occurrence is one **operation**, keyed by its outbox item's `operationId`, 
 | `completed`, `failed`, `cancelled` | What the host said the run ended as | No | No |
 | `not_submitted` | Known never handed on, and it won't be | No | No |
 
+**Reservations are durable.** A handoff takes its compute slot, its trigger's slot and its occurrence in one transaction: `#begin` counts the runs holding compute, claims the occurrence for this outbox attempt and records `dispatchAttempt` and `dispatchUntil` (the lease). Nothing about which runs are under way lives only in an instance's memory, so concurrent ticks, and a coordinator made again after a restart, count the same reservations. A reservation is given up when the handoff defers, ends, or submits (when the `submitting` phase holds the slot instead), and runs out by itself after a crash.
+
+**Each step with an effect outside is gated.** Before making a chat and before submitting, a transaction checks again that the run is still preparing under this attempt's claim (a later claim, a deletion or a tidy supersedes a stale continuation, which then does nothing), that its trigger isn't paused (its occurrence goes back to wait) or deleted, and that `deliverBy` hasn't passed (it is never submitted). Before submitting it also counts compute again, apart from itself: if its reservation ran out while it waited and another run took the slot, it doesn't submit, and tries again later. The gate records the step in the same transaction: `creating` before a chat is asked for, `submitting` before a submission. A step whose answer comes back after its trigger was paused or deleted records only what happened (the chat that was made) and goes no further.
+
 **One agent run per trigger.** A trigger's next occurrence isn't handed on while any of its runs holds the slot. Its time firings meanwhile coalesce in the store: a newer one supersedes a pending one, so only the latest waits. A claimed, submitting or running one is never superseded. The slot is freed only when the host says the run ended, by `lookupRun` or by `runStatusChanged`; a submission's acceptance never stands for its run's end.
 
 ### The host
 
-The host is injected (`TriggerAgentHost`). Each method may throw, and a throw is "not known", never success or refusal.
+The host is injected (`TriggerAgentHost`). Each method is given a `signal`, aborted at its deadline, and may throw; a throw or no answer in time is "not known", never success or refusal. A call aborted at its deadline may still take effect, which is why chats and submissions are keyed by the operation and looked up.
 
 | Method | Contract |
 | --- | --- |
@@ -252,7 +257,13 @@ The instruction is the pinned revision's. The **evidence** is fixed when the occ
 
 | Situation | What the coordinator does |
 | --- | --- |
-| Two ticks at once, or the alarm again | Admission is one transaction that moves the watermark; a claimed occurrence is leased, and this instance won't claim or ask about an operation it is waiting on. One occurrence, one submission |
+| Two ticks at once, the alarm again, or a coordinator made again | Admission is one transaction that moves the watermark; a handoff is reserved in the database before it waits on the host, and a question out about a run is marked there. One occurrence, one submission, one question at a time, and never more than `maxRunning` runs holding compute |
+| A handoff's reservation ran out while it waited, and another run took the compute | Its gate before submitting counts again and finds none free: nothing is submitted, and it tries again later |
+| The host doesn't answer | After `callTimeoutMs` it is "not known": a preflight is tried again later; a chat may have been made, so it is looked up next time; a submission may have been accepted, so it holds the slot until `lookupSubmission` says. Other handoffs and lookups go on meanwhile |
+| An answer about a run arrives after a callback, or after another answer settled it | Dropped: only the question whose token the run still holds may settle it, a callback withdraws that token, and an ended run never changes |
+| Paused or deleted while its preflight was out | No chat is made and nothing is submitted. Paused, its occurrence waits for the trigger to be enabled; deleted, it is closed as never submitted |
+| Deleted while its chat was being made | The chat is recorded as made, and nothing is submitted to it; if the answer never came, the run says a chat may have been made (`creating`) |
+| Its preflight or chat ends past `deliverBy` | Never submitted. One that ends exactly at it still is. Already submitting or accepted past it, it is kept and followed, never cancelled |
 | Crash before an admission commits | Nothing was written; the next tick admits the same firing, from the same boundary |
 | Crash after it commits | The watermark moved; nothing is admitted again |
 | The chat may have been made, but the answer was lost | It recorded `creating` before asking; on the retry it asks `findChat` and pins what it finds, and makes one only when the host says there is none. `unknown` defers it. Never a second chat |
@@ -266,6 +277,7 @@ The instruction is the pinned revision's. The **evidence** is fixed when the occ
 | An occurrence of another source | Never claimed; it stays pending |
 | A run waiting for approval | Holds its trigger's slot, but none of the space's compute |
 | A callback for an older receipt, or a run that ended | Changes nothing |
+| `lookupSubmission` keeps answering `unknown` | The run holds its trigger's slot, and is asked again every `retryMs`, for as long as it takes: conservative by design. Showing that it needs attention is integration's |
 
 ## Turning it on later
 
@@ -286,6 +298,7 @@ These are conditions for later tranches to meet before they are accepted, not wo
 - Expiry moves a trigger on: a process watch past `expiresAt` ends its trigger, rather than only refusing its exit.
 - A deleted trigger's history is collected 30 days after its deletion.
 - A written contract for source context: what of an event or observation a run may see, and how it reaches the run without the store keeping it. Until then, the coordinator hands on nothing but time firings.
+- A trigger whose source changed from events to time, with an event occurrence still pending ahead of its time firings, is blocked behind it: the coordinator never hands the event on, and the store hands on in order. Today its health is only what the change left (`unknown`); it must say so explicitly, as a configuration status, before such a change is offered.
 - The real host meets the contract above: an idempotent submission per operation, one reservation per operation, a chat keyed by operation, and run status from the run, never from the submission.
 - With raw samples off, nothing observed reaches a chat, a diagnostic or a dedup record.
 - Consent for a recurring script says truthfully that it runs as the person's own OS user, with that user's access.

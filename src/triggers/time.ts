@@ -135,7 +135,8 @@ export function previewFirings(source: TimeSource, input: { now: number; count?:
 export function selectDueFiring(source: TimeSource, input: { now: number; after: number }): DueSelection {
 	const schedule = scheduleOf(source);
 	const now = instant(input.now, "now");
-	const after = instant(input.after, "after");
+	// Exclusive, so it may be one millisecond before the first supported instant, for a firing at that instant to count.
+	const after = integer(input.after, "after", TRIGGER_LIMITS.earliestAt - 1, TRIGGER_LIMITS.latestAt);
 	const next = schedule.after(now, 1)[0] ?? null;
 	// Only a cron expression's firings are searched for; the others' are worked out, however far back.
 	const from = source.schedule === "cron" ? Math.max(after, now - LOOKBACK_MS) : after;

@@ -1470,6 +1470,22 @@ export const pim = {
       `/sessions/${session}/room/members/${agent}/retry`,
       { method: "POST" },
     ).then((body) => body.room),
+  /** Has a message queued behind the work join it after the agent's current step. */
+  steerQueued: (session: string, id: number) =>
+    call<{ id: number }>(`/sessions/${session}/queue/${id}/steer`, {
+      method: "POST",
+    }),
+  /** Rewrites a queued message's text, keeping its images. */
+  editQueued: (session: string, id: number, text: string) =>
+    call<{ id: number }>(`/sessions/${session}/queue/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    }),
+  /** Takes a queued message back before the agent reads it. */
+  cancelQueued: (session: string, id: number) =>
+    call<{ id: number }>(`/sessions/${session}/queue/${id}`, {
+      method: "DELETE",
+    }),
   abort: (session: string) =>
     call<{ aborted: boolean }>(`/sessions/${session}/abort`, {
       method: "POST",

@@ -19,6 +19,7 @@ import {
 import type { AgentTask, ApprovalStatus } from "~/lib/pim-api";
 import {
   DELIVERY_REMINDER,
+  fromPerson,
   INTRODUCTION,
   NOTICE_PREFIXES,
   ROOM_POST,
@@ -149,8 +150,8 @@ export type SessionView = {
   live: readonly ThreadEntry[];
   running: boolean;
   tools: readonly RunningTool[];
-  /** Messages queued behind the running work. */
-  queued: number;
+  /** The person's messages queued behind the running work, oldest first. */
+  queue: readonly QueuedMessage[];
   /** A failed model request to be asked again: at `at`, or, at 0, when the person says so. */
   retry: { at: number; problem: ModelProblem; code?: string } | null;
   error: ViewError | null;
@@ -242,7 +243,7 @@ export const EMPTY_VIEW: SessionView = {
   live: [],
   running: false,
   tools: [],
-  queued: 0,
+  queue: [],
   retry: null,
   error: null,
   lines: {},
@@ -270,6 +271,33 @@ export function noticeOf(text: string): PimNotice | null {
     }
   }
   return null;
+}
+
+/** One of the person's messages waiting for the agent to finish what it's doing. */
+export type QueuedMessage = {
+  /** Its id in pi's inbox, which the API's `/sessions/:s/queue/:id` takes. */
+  id: number;
+  text: string;
+  images: number;
+  /** Steered: it joins the running work after the agent's current step. */
+  steer: boolean;
+};
+
+type InboxItem = Extract<AgentEvent, { type: "inbox_update" }>["items"][number];
+
+/** The person's own inputs in pi's inbox; what Pim queues for itself, such as tasks' answers, isn't theirs to change. */
+function queueOf(items: readonly InboxItem[]): QueuedMessage[] {
+  return items.flatMap((item) => {
+    if (item.mode === "write") return [];
+    const content = item.content as UserMessage["content"];
+    const text = textOf(content);
+    if (!fromPerson(text)) return [];
+    const images =
+      typeof content === "string"
+        ? 0
+        : content.filter((part) => part.type === "image").length;
+    return [{ id: item.id, text, images, steer: item.mode === "steer" }];
+  });
 }
 
 /** What the person sent, as an item: its text, then its images. */
@@ -574,7 +602,7 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
               name: slot.name,
               output: slot.output ?? "",
             })),
-          queued: event.inbox.length,
+          queue: queueOf(event.inbox),
           retry: event.generation?.retry
             ? {
                 at: event.generation.retry.at,
@@ -649,7 +677,7 @@ export function reduce(state: StreamState, event: AgentEvent): StreamState {
       };
     }
     case "inbox_update":
-      return { ...state, view: { ...view, queued: event.items.length } };
+      return { ...state, view: { ...view, queue: queueOf(event.items) } };
     case "auto_retry_start":
       return {
         ...state,

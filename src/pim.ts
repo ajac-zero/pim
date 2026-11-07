@@ -15,6 +15,7 @@ import {
 	Harness,
 	hook,
 	type HarnessSettings,
+	InboxDoc,
 	type ModelRef,
 	type TaskId,
 	ROOT_CONVERSATION_ID,
@@ -196,7 +197,7 @@ import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_ST
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
-import { forkPoint, projectEntries } from "./transcript";
+import { forkPoint, fromPerson, projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
@@ -3366,6 +3367,39 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * Changes one of the person's messages queued behind the work in a chat,
+	 * before the agent reads it: `steer` has it join the running work after
+	 * the agent's current step, rather than wait for the run to end; `text`
+	 * rewrites it, keeping its images; `cancel` takes it back. Only the chat's
+	 * own agent's queue changes: in a group chat, the other agents keep what they heard.
+	 */
+	async #changeQueued(session: string, id: number, change: "steer" | "cancel" | { readonly text: string }): Promise<void> {
+		const conversation = await this.harness.conversation(session);
+		const outcome = await conversation.commit(async (tx) => {
+			const items = (await tx.doc(InboxDoc, conversation.id)).items;
+			const index = items.findIndex((item) => item.id === id);
+			const item = items[index];
+			if (!item) return "gone";
+			if (item.mode === "write" || !fromPerson(textOf(item.content as UserInput))) return "not_yours";
+			if (change === "steer") {
+				item.mode = "steer";
+			} else if (change === "cancel") {
+				tx.settleSubmission(item.id, { status: "unanswered", reason: "aborted" });
+				items.splice(index, 1);
+			} else {
+				const content = item.content as UserInput;
+				const images = typeof content === "string" ? [] : content.filter((part) => part.type !== "text");
+				if (change.text.trim() === "" && images.length === 0) return "empty";
+				item.content = (images.length === 0 ? change.text : [...(change.text.trim() === "" ? [] : [{ type: "text", text: change.text }]), ...images]) as typeof item.content;
+			}
+			return "changed";
+		}, BACKGROUND_CONTEXT);
+		if (outcome === "gone") throw new HttpError(409, "The agent has this message already");
+		if (outcome === "not_yours") throw new HttpError(404, "No such message of yours is queued");
+		if (outcome === "empty") throw new HttpError(400, "A message needs text or an image");
+	}
+
+	/**
 	 * Brings an agent into a chat, which becomes a room if it wasn't one. It
 	 * gets a seat: a conversation of its own, as a chat with it is, which
 	 * starts with nothing of what was said before (it reads that with
@@ -5057,6 +5091,33 @@ export class Pim extends DurableAgent<Env> {
 					for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) others = (await this.harness.session(seat.conversation).abort()) || others;
 				}
 				return { aborted: (await this.harness.session(id).abort(operationId)) || others };
+			},
+		],
+		// The person's messages queued behind the work in a chat, by their `id` in pi's inbox, before the agent reads them.
+		[
+			"POST",
+			"/sessions/:session/queue/:id/steer",
+			async ({ session, id }) => {
+				await this.#changeQueued(await this.#session(session!), Number(id), "steer");
+				return { id: Number(id) };
+			},
+		],
+		[
+			"PUT",
+			"/sessions/:session/queue/:id",
+			async ({ session, id }, request) => {
+				const { text } = await readJson<{ text: string }>(request);
+				if (typeof text !== "string") throw new HttpError(400, "text must be a string");
+				await this.#changeQueued(await this.#session(session!), Number(id), { text });
+				return { id: Number(id) };
+			},
+		],
+		[
+			"DELETE",
+			"/sessions/:session/queue/:id",
+			async ({ session, id }) => {
+				await this.#changeQueued(await this.#session(session!), Number(id), "cancel");
+				return { id: Number(id) };
 			},
 		],
 		[

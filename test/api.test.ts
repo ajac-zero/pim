@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, textOf, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, textOf, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -420,6 +420,60 @@ describe("conversation", () => {
 		expect((await post(path, { content: "hi", operationId: "op-1" })).body.accepted).toBe(false);
 		const { body } = await api(`/sessions/${created.id}/operations/op-1`);
 		expect(body).toMatchObject({ status: "done", text: "Later." });
+	});
+
+	it("shows the messages queued behind the work, and steers, edits or cancels one before the agent reads it", async () => {
+		const { body: created } = await post("/sessions");
+		const { socket, received } = await connect(created.id);
+		await vi.waitFor(() => expect(received.some((message) => message.type === "events")).toBe(true));
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => (release = resolve));
+		const read: string[][] = [];
+		const reads = (context: Parameters<FauxResponseFactory>[0]) =>
+			read.push(context.messages.filter((message) => message.role === "user").map((message) => lastUserText([message])));
+		faux.setResponses([
+			async (context) => {
+				reads(context);
+				await held;
+				return toolUse("current_time", {});
+			},
+			(context) => {
+				reads(context);
+				return toolUse("send_to_user", { message: "Steered." });
+			},
+			(context) => {
+				reads(context);
+				return toolUse("send_to_user", { message: "Edited." });
+			},
+		]);
+		const path = `/sessions/${created.id}/messages`;
+		await post(path, { content: "Start" });
+		await vi.waitFor(() => expect(read).toHaveLength(1));
+		for (const content of ["Never mind", "Steer this", "Edit this"]) await post(path, { content });
+
+		// Each queued message comes with what it says.
+		const inbox = () => received.flatMap((message) => (message.type === "events" ? message.events : [])).findLast((event) => event.type === "inbox_update")?.items ?? [];
+		await vi.waitFor(() => expect(inbox()).toHaveLength(3));
+		const [never, steer, edit] = inbox();
+		expect([never, steer, edit]).toMatchObject([
+			{ mode: "followUp", content: "Never mind" },
+			{ mode: "followUp", content: "Steer this" },
+			{ mode: "followUp", content: "Edit this" },
+		]);
+		const queue = `/sessions/${created.id}/queue`;
+		expect((await api(`${queue}/${never.id}`, { method: "DELETE" })).status).toBe(200);
+		expect((await post(`${queue}/${steer.id}/steer`)).status).toBe(200);
+		expect((await api(`${queue}/${edit.id}`, { method: "PUT", body: JSON.stringify({ text: "Edited it" }) })).status).toBe(200);
+		expect((await api(`${queue}/${edit.id}`, { method: "PUT", body: JSON.stringify({ text: " " }) })).status).toBe(400);
+		await vi.waitFor(() => expect(inbox()).toEqual([{ ...steer, mode: "steer" }, { ...edit, content: "Edited it" }]));
+
+		release();
+		await settled(created.id);
+		// The steered message joined the run after its tool call; the edited one waited for the run to end; the canceled one never came.
+		expect(read).toEqual([["Start"], ["Start", "Steer this"], ["Start", "Steer this", "Edited it"]]);
+		// A message the agent has already can't change.
+		expect((await post(`${queue}/${edit.id}/steer`)).status).toBe(409);
+		socket.close();
 	});
 
 	it("forks a chat through an agent's message, or up to one of the person's to send it changed, keeping its images while a fork shows them", async () => {

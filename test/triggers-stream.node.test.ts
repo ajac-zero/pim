@@ -6,7 +6,6 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChildExit } from "../computer/triggers-adapters/poll";
 import {
-	type EndCoverage,
 	NodeStreamLauncher,
 	STREAM_LIMITS,
 	StreamAdapter,
@@ -21,6 +20,7 @@ import {
 	type DesiredSource,
 	type Emit,
 	type EmitResult,
+	type EndCoverage,
 	HARD_LIMITS,
 	ObservationSpool,
 	type Observed,
@@ -565,7 +565,7 @@ describe("stream lifecycle", () => {
 		expect(stuck.launcher.last.signals).toEqual(["SIGTERM", "SIGKILL"]);
 	});
 
-	it("records where coverage ended through the proposed capability, once everything before the end is emitted", async () => {
+	it("says where coverage ended through the runtime's endCoverage, once everything before the end is emitted", async () => {
 		const ends: { at: number; code: string }[] = [];
 		const answers: Awaited<ReturnType<EndCoverage>>[] = ["unavailable", "recorded"];
 		const endCoverage: EndCoverage = async (end) => {
@@ -601,6 +601,48 @@ describe("stream lifecycle", () => {
 		fenced.launcher.last.exit({ code: 1 });
 		await fenced.clock.advance(600_000);
 		expect(fenced.sink.codes()).toEqual(["stream_failed"]);
+	});
+
+	it("asks one end at a time, tries again while not installed, and drops a late answer after stop", async () => {
+		// Not installed yet, then refused as invalid: nothing more is asked, and health keeps saying it.
+		const answers: Awaited<ReturnType<EndCoverage>>[] = ["not_started", "invalid"];
+		let calls = 0;
+		const refused = await startStream({}, async () => {
+			calls++;
+			return answers.shift() ?? "recorded";
+		});
+		await refused.clock.advance(0);
+		refused.launcher.last.exit();
+		await refused.clock.advance(0);
+		expect(calls).toBe(1);
+		await refused.clock.advance(1_000);
+		expect(calls).toBe(2);
+		await refused.clock.advance(600_000);
+		expect(calls).toBe(2);
+		expect(new Set(refused.sink.codes())).toEqual(new Set(["stream_ended"]));
+		expect(refused.sink.reports.length).toBeGreaterThan(10);
+
+		// An answer held across pause, resume and stop: asked once, and what comes after stop changes nothing.
+		let answer: (result: Awaited<ReturnType<EndCoverage>>) => void = () => {};
+		let asked = 0;
+		const { clock, launcher, sink, adapter } = await startStream({}, () => {
+			asked++;
+			return new Promise((resolve) => (answer = resolve));
+		});
+		await clock.advance(0);
+		launcher.last.exit({ code: 2 });
+		await clock.advance(0);
+		adapter.pause();
+		adapter.resume();
+		await clock.advance(5_000);
+		expect(asked).toBe(1);
+		const reports = sink.reports.length;
+		await adapter.stop("lease_expired");
+		answer("recorded");
+		await clock.advance(600_000);
+		expect(asked).toBe(1);
+		expect(sink.reports).toHaveLength(reports);
+		expect(clock.pending).toBe(0);
 	});
 });
 
@@ -722,11 +764,11 @@ describe("stream on real children", () => {
 
 describe("stream in the runtime", () => {
 	type Frame = Record<string, any>;
-	const desired = (source: ComputerSource): DesiredSource => ({
+	const desired = (source: ComputerSource, generation = 1): DesiredSource => ({
 		triggerId: "s",
 		sourceId: "s#1",
 		revision: 1,
-		generation: 1,
+		generation,
 		configHash: sourceConfigHash(source),
 		source,
 		grant: { grantRef: "approval-1", scopeHash: "a".repeat(64) },
@@ -782,8 +824,8 @@ describe("stream in the runtime", () => {
 			await rt.receive(connection, JSON.stringify({ protocol: PROTOCOL, connectionId: connection, serverEpoch: 1, ...message }));
 			await clock.advance(0);
 		};
-		const reconcile = (rt: TriggersRuntime, connection: string) =>
-			send(rt, connection, { type: "reconcile", binding: { space: "space-1", runtimeId: "rt-1" }, desiredRevision: 1, leaseMs: 120_000, sources: [desired(streamSource())] });
+		const reconcile = (rt: TriggersRuntime, connection: string, generation = 1, revision = 1) =>
+			send(rt, connection, { type: "reconcile", binding: { space: "space-1", runtimeId: "rt-1" }, desiredRevision: revision, leaseMs: 120_000, sources: [desired(streamSource(), generation)] });
 		const ack = (rt: TriggersRuntime, connection: string, entries: Frame[]) =>
 			send(rt, connection, { type: "ack", durable: true, results: entries.map((frame) => ({ sequence: frame.sequence, eventId: frame.eventId, result: "accepted" })) });
 		const of = (type: string) => frames.filter((frame) => frame.type === type);
@@ -883,5 +925,110 @@ describe("stream in the runtime", () => {
 		const gaps = [...new Map(h.of("gap").map((frame) => [frame.eventId, frame.reasons])).values()];
 		expect(gaps).toEqual([{ coverage_unknown: 1 }, { overflow: 1 }]);
 		await h.close(rt);
+	});
+
+	/** Each frame once, by event id, in sequence order. */
+	const unique = (frames: Frame[]) => [...new Map(frames.map((frame) => [frame.eventId, frame])).values()].sort((a, b) => a.sequence - b.sequence);
+
+	it("makes a stream's end durable after its last event, and never runs the same generation's command again", async () => {
+		const h = await runtime();
+		const rt = await h.open("c1");
+		await h.reconcile(rt, "c1");
+		await h.clock.advance(2_000);
+		h.launcher.last.print('{"n":0}\n{"n":1}\n');
+		await h.clock.advance(10);
+		const endedAt = h.clock.now();
+		h.launcher.last.exit({ code: 3 });
+		await h.clock.advance(1_000);
+		const sent = unique([...h.of("observation"), ...h.of("gap")]);
+		expect(sent.map((frame) => (frame.type === "gap" ? Object.keys(frame.reasons)[0] : frame.data.n))).toEqual(["coverage_unknown", 0, 1, "interrupted"]);
+		expect(sent.at(-1)).toMatchObject({ from: endedAt, generation: 1 });
+		expect(h.of("stopped")).toMatchObject([{ reason: "ended" }]);
+		expect(h.of("health").map((frame) => frame.code)).toContain("stream_failed");
+
+		// The same generation again, on this runtime and after a restart: ended, and the command isn't run.
+		await h.reconcile(rt, "c1", 1, 2);
+		expect(h.of("reconciled").at(-1)?.sources).toMatchObject([{ state: "ended" }]);
+		await h.close(rt);
+		const again = await h.open("c2");
+		await h.reconcile(again, "c2");
+		await h.clock.advance(60_000);
+		expect(h.of("reconciled").at(-1)?.sources).toMatchObject([{ state: "ended" }]);
+		expect(h.launcher.children).toHaveLength(1);
+		// A new generation is the space asking again: the command runs anew.
+		await h.reconcile(again, "c2", 2, 2);
+		expect(h.launcher.children).toHaveLength(2);
+		await h.close(again);
+	});
+
+	it("records an end that came before installation once it is installed, after the events printed before it", async () => {
+		const h = await runtime();
+		const rt = await h.open("c1");
+		let release = () => {};
+		h.gate.held = new Promise<void>((resolve) => (release = resolve));
+		const idle = h.clock.idle;
+		h.clock.idle = async () => {};
+		const receiving = rt.receive(
+			"c1",
+			JSON.stringify({ protocol: PROTOCOL, type: "reconcile", binding: { space: "space-1", runtimeId: "rt-1" }, connectionId: "c1", serverEpoch: 1, desiredRevision: 1, leaseMs: 120_000, sources: [desired(streamSource())] }),
+		);
+		for (let tries = 0; tries < 400 && h.launcher.children.length === 0; tries++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			await h.clock.advance(0);
+		}
+		h.launcher.last.print('{"n":0}\n');
+		h.launcher.last.exit();
+		await h.clock.advance(0);
+		expect(h.of("installed")).toEqual([]);
+		h.gate.held = null;
+		release();
+		h.clock.idle = idle;
+		await receiving;
+		await h.clock.advance(3_000);
+		const sent = unique([...h.of("observation"), ...h.of("gap")]);
+		expect(sent.map((frame) => (frame.type === "gap" ? Object.keys(frame.reasons)[0] : frame.data.n))).toEqual(["coverage_unknown", 0, "interrupted"]);
+		// Coverage is counted as broken from the installation at the latest: the gap before it already covers what came first.
+		expect(sent[2]?.from).toBe(sent[0]?.to);
+		expect(h.of("reconciled").at(-1)?.sources).toMatchObject([{ state: "starting" }]);
+		await h.reconcile(rt, "c1", 1, 2);
+		expect(h.of("reconciled").at(-1)?.sources).toMatchObject([{ state: "ended" }]);
+		await h.close(rt);
+	});
+
+	it("waits for an event held by backpressure before closing coverage, and counts coverage from the pause if stopped first", async () => {
+		const h = await runtime({ maxEntries: 8 });
+		const rt = await h.open("c1");
+		await h.reconcile(rt, "c1");
+		await h.clock.advance(2_000);
+		const pausedAt = h.clock.now();
+		h.launcher.last.print(Array.from({ length: 8 }, (_, n) => `{"n":${n}}\n`).join(""));
+		h.launcher.last.exit();
+		await h.clock.advance(30_000);
+		// Ended, and said so, but its coverage isn't closed while an event it read before the end waits.
+		expect(h.of("health").map((frame) => frame.code)).toEqual(expect.arrayContaining(["backpressure", "stream_ended"]));
+		expect(unique(h.of("gap")).map((frame) => frame.reasons)).toEqual([{ coverage_unknown: 1 }, { overflow: 1 }]);
+		await h.ack(rt, "c1", [...unique(h.of("gap")), ...unique(h.of("observation"))]);
+		await h.clock.advance(2_000);
+		const sent = unique([...h.of("observation"), ...h.of("gap")]);
+		expect(sent.filter((frame) => frame.type === "observation").map((frame) => frame.data.n)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+		expect(sent.at(-1)).toMatchObject({ type: "gap", reasons: { interrupted: 1 }, from: pausedAt });
+		await h.close(rt);
+
+		// The same, never resumed: the lease ends it, and the next generation's gap starts at the pause, not at the stop.
+		await fs.rm(path.join(dir, "spool"), { recursive: true });
+		const stuck = await runtime({ maxEntries: 8 });
+		const rt2 = await stuck.open("c1");
+		await stuck.reconcile(rt2, "c1");
+		await stuck.clock.advance(2_000);
+		const pause = stuck.clock.now();
+		stuck.launcher.last.print(Array.from({ length: 8 }, (_, n) => `{"n":${n}}\n`).join(""));
+		stuck.launcher.last.exit();
+		await stuck.clock.advance(150_000);
+		expect(stuck.of("stopped")).toMatchObject([{ reason: "lease_expired" }]);
+		await stuck.ack(rt2, "c1", [...unique(stuck.of("gap")), ...unique(stuck.of("observation"))]);
+		await stuck.reconcile(rt2, "c1", 2, 2);
+		await stuck.clock.advance(2_000);
+		expect(unique(stuck.of("gap")).filter((frame) => "interrupted" in frame.reasons)).toMatchObject([{ generation: 2, from: pause }]);
+		await stuck.close(rt2);
 	});
 });

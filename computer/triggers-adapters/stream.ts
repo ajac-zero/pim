@@ -25,7 +25,20 @@ import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
-import { type AdapterConfig, type AdapterHealth, type ComputerSource, DEFAULT_LIMITS, type Emit, type EmitResult, type ObserverAdapter, type Observed, type RuntimeClock, type StopReason } from "../triggers-runtime.ts";
+import {
+	type AdapterConfig,
+	type AdapterHealth,
+	type ComputerSource,
+	DEFAULT_LIMITS,
+	type Emit,
+	type EmitResult,
+	type EndCoverage,
+	type EndCoverageResult,
+	type ObserverAdapter,
+	type Observed,
+	type RuntimeClock,
+	type StopReason,
+} from "../triggers-runtime.ts";
 import { type ChildExit, POLL_LEADER, POLL_LIMITS, STOP_SLACK_MS, pollEnvironment, readPollOutput, systemClock } from "./poll.ts";
 
 /**
@@ -71,21 +84,6 @@ export interface StreamChild {
 export interface StreamLauncher {
 	launch(request: { readonly command: string; readonly cwd: string | null }, events: StreamChildEvents): StreamChild;
 }
-
-/**
- * PROPOSED, and not provided by the runtime: a way for an adapter to make
- * the end of its own coverage durable. Once the stream has ended and
- * everything it read before the end has been emitted, the adapter calls it
- * once with when coverage ended and why. The runtime would record a durable
- * `interrupted` gap for the observer's source from `at`, and count the break
- * from `at` rather than from when it later stops the observer. `stopped`
- * means the observer is fenced; `unavailable`, that nothing was recorded and
- * the adapter may try again. Today the runtime's `AdapterConfig` has no such
- * field, so an adapter it starts has none, and the end of a stream is told
- * only by health. See docs/triggers-stream.md.
- */
-export type EndCoverage = (end: { readonly at: number; readonly code: string }) => Promise<"recorded" | "stopped" | "unavailable">;
-export type StreamAdapterConfig = AdapterConfig & { readonly endCoverage?: EndCoverage };
 
 export type StreamAdapterOptions = {
 	readonly launcher: StreamLauncher;
@@ -191,7 +189,8 @@ export class StreamAdapter implements ObserverAdapter {
 	#retryWait: number;
 	/** When coverage ended, and why: set once. */
 	#ended: { readonly at: number; readonly code: string } | null = null;
-	#coverage: "open" | "recording" | "waiting" | "recorded" = "open";
+	/** Where recording the end stands: `refused` when the runtime called it invalid, after which only health tells of it. */
+	#coverage: "open" | "recording" | "waiting" | "recorded" | "refused" = "open";
 	#reassertWait = 1_000;
 	/** Set once cleanup is unknown: that code stays the last thing reported. */
 	#sticky = false;
@@ -215,7 +214,7 @@ export class StreamAdapter implements ObserverAdapter {
 		this.#done = new Promise<void>((resolve) => (this.#finish = resolve));
 	}
 
-	async start(config: StreamAdapterConfig, emit: Emit, health: (report: AdapterHealth) => void): Promise<void> {
+	async start(config: AdapterConfig, emit: Emit, health: (report: AdapterHealth) => void): Promise<void> {
 		this.#source = checkStreamSource(config.source);
 		this.#emit = emit;
 		this.#health = health;
@@ -405,7 +404,7 @@ export class StreamAdapter implements ObserverAdapter {
 		const wait = this.#reassertWait;
 		this.#reassertWait = Math.min(STREAM_REASSERT_MS, wait * 2);
 		this.#later(wait, () => {
-			// Once the end is durable, through the proposed `endCoverage`, health need not carry it.
+			// Once the runtime has the end durably (`endCoverage`), it says `ended` on every reconcile, and health need not repeat it.
 			if (this.#coverage === "recorded") return;
 			if (this.#last) this.#health?.({ status: "error", code: this.#last });
 			this.#reassert();
@@ -549,7 +548,7 @@ export class StreamAdapter implements ObserverAdapter {
 		const endCoverage = this.#endCoverage;
 		if (!ended || !endCoverage || this.#coverage !== "open") return;
 		this.#coverage = "recording";
-		let result: Awaited<ReturnType<EndCoverage>>;
+		let result: EndCoverageResult;
 		try {
 			result = await endCoverage({ at: ended.at, code: ended.code });
 		} catch {
@@ -561,6 +560,10 @@ export class StreamAdapter implements ObserverAdapter {
 			return;
 		}
 		if (result === "stopped") return this.#fence();
+		if (result === "invalid") {
+			this.#coverage = "refused";
+			return;
+		}
 		this.#coverage = "waiting";
 		const wait = this.#retryWait;
 		this.#retryWait = Math.min(this.#maxRetryMs, wait * 2);

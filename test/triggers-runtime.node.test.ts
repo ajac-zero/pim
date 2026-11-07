@@ -14,6 +14,7 @@ import {
 	type DesiredSource,
 	type Emit,
 	HARD_LIMITS,
+	MAX_END_RECORDS,
 	ObservationSpool,
 	type ObserverAdapter,
 	PROTOCOL,
@@ -1406,5 +1407,277 @@ describe("review corrections, second round", () => {
 		expect(harness.gaps("too_large")).toMatchObject([{ reasons: { too_large: 1 } }]);
 		expect(harness.wire.raw.every((frame) => Buffer.byteLength(frame) <= 1_024)).toBe(true);
 		expect(harness.observations().map((entry) => (entry.kind === "observation" ? entry.data.n : null))).toEqual([2]);
+	});
+});
+
+describe("observers that end", () => {
+	const end = (adapter: FakeAdapter, at: number, code = "stream_ended") => (adapter.config?.endCoverage as NonNullable<AdapterConfig["endCoverage"]>)({ at, code });
+	/** Holds every write of an end record until released. */
+	function heldEnds(): { write: SpoolOptions["write"]; hold: () => void; release: () => void } {
+		let gate: Deferred | null = null;
+		return {
+			write: async (handle, data) => {
+				if (gate && data.includes('"ends"')) await gate.promise;
+				let offset = 0;
+				while (offset < data.length) offset += (await handle.write(data, offset, data.length - offset)).bytesWritten;
+				await handle.datasync();
+			},
+			hold: () => {
+				gate = deferred();
+			},
+			release: () => {
+				gate?.resolve();
+				gate = null;
+			},
+		};
+	}
+	const settle = async () => {
+		for (let round = 0; round < 20; round++) await new Promise((resolve) => setImmediate(resolve));
+	};
+
+	it("records an end in one line with a gap of its own, after everything it emitted, and stops the observer", async () => {
+		const h = await open();
+		const adapter = await h.running(desired("t1", 1));
+		await h.tick(10_000);
+		await adapter.emit(event(9_000));
+		await adapter.emit(event(9_500));
+		expect(await end(adapter, -1)).toBe("invalid");
+		expect(await (adapter.config?.endCoverage as any)({ at: T0 + 5_000, code: "Not a code" })).toBe("invalid");
+		expect(await (adapter.config?.endCoverage as any)({ at: T0 + 5_000, code: "stream_ended", extra: 1 })).toBe("invalid");
+		expect(await end(adapter, T0 + 9_800)).toBe("recorded");
+		await h.tick();
+
+		const sent = h.wire.frames.filter((frame) => frame.type === "observation" || frame.type === "gap");
+		expect(sent.map((frame) => frame.type)).toEqual(["observation", "observation", "gap"]);
+		expect(sent[2]).toMatchObject({ triggerId: "t1", generation: 1, reasons: { interrupted: 1 }, from: T0 + 9_800, to: T0 + 10_000 });
+		expect(h.wire.of("health").map((frame) => frame.code)).toEqual(["stream_ended"]);
+		expect(h.wire.of("stopped")).toMatchObject([{ triggerId: "t1", reason: "ended" }]);
+		expect(adapter.stops).toEqual(["ended"]);
+		expect(h.spool.end("t1")).toMatchObject({ triggerId: "t1", sourceId: "t1#1", generation: 1, at: T0 + 9_800, code: "stream_ended" });
+		// The gap and the record are one commit: one line holds both.
+		const lines = (await h.journal()).split("\n").filter((line) => line.includes('"ends"'));
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain('"interrupted":1');
+		expect(await adapter.emit(event(9_900))).toEqual({ ok: false, reason: "stopped" });
+		// An answer the adapter lost: asking again is safe, and records nothing more.
+		expect(await end(adapter, T0 + 9_900)).toBe("stopped");
+		await h.tick();
+		expect(h.gaps("interrupted")).toHaveLength(1);
+		expect(h.spool.end("t1")?.at).toBe(T0 + 9_800);
+	});
+
+	it("never runs an ended generation again: on reconcile, after the lease, in a new epoch and after a restart", async () => {
+		const h = await open();
+		const adapter = await h.running(desired("t1", 1));
+		await h.tick(1_000);
+		expect(await end(adapter, T0 + 500)).toBe("recorded");
+		const states = () => h.wire.of("reconciled").at(-1).sources.map((source: Frame) => source.state);
+
+		await h.reconcile([desired("t1", 1)], { revision: 2 });
+		expect(states()).toEqual(["ended"]);
+		expect(h.wire.of("health").at(-1)).toMatchObject({ triggerId: "t1", status: "error", code: "stream_ended" });
+		h.runtime.detach("c1");
+		await h.tick(120_000);
+		h.attach("c2");
+		await h.reconcile([desired("t1", 1)], { revision: 3 });
+		expect(states()).toEqual(["ended"]);
+		h.attach("c3");
+		await h.reconcile([desired("t1", 1)], { epoch: 2 });
+		expect(states()).toEqual(["ended"]);
+		await h.restart();
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)], { epoch: 2, revision: 2 });
+		expect(states()).toEqual(["ended"]);
+		// Nothing started, so nothing says coverage resumed.
+		expect(h.adapters).toEqual([]);
+		expect(h.gaps("coverage_unknown")).toEqual([]);
+
+		// A new generation starts again, and its gap, with the old end record's removal in the same line, starts at the end.
+		h.allow(desired("t1", 2));
+		const before = h.adapters.length;
+		await h.reconcile([desired("t1", 2)], { epoch: 2, revision: 3 });
+		expect(h.adapters.length).toBe(before + 1);
+		expect(states()).toEqual(["starting"]);
+		expect(h.spool.end("t1")).toBeUndefined();
+		expect(h.gaps("coverage_unknown")).toMatchObject([{ generation: 2 }]);
+		await h.restart();
+		expect(h.spool.end("t1")).toBeUndefined();
+	});
+
+	it("counts the next generation's break from the end, not from when the observer was stopped", async () => {
+		const h = await open();
+		const adapter = await h.running(desired("t1", 1));
+		await h.tick(1_000);
+		expect(await end(adapter, T0 + 400)).toBe("recorded");
+		await h.tick(60_000);
+		h.allow(desired("t1", 2));
+		await h.reconcile([desired("t1", 2)], { revision: 2 });
+		const gaps = [...new Map(h.gaps("interrupted").map((gap) => [gap.eventId, gap])).values()];
+		expect(gaps.map((gap) => [gap.generation, gap.from, gap.to])).toEqual([
+			[1, T0 + 400, T0 + 1_000],
+			[2, T0 + 400, T0 + 61_000],
+		]);
+	});
+
+	it("can't end before it is installed, and bounds an end to its installation", async () => {
+		const h = await open();
+		const start = deferred();
+		h.plans.push({ start });
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)]);
+		const adapter = h.adapter("t1", 1);
+		expect(await end(adapter, T0)).toBe("not_started");
+		expect(h.spool.end("t1")).toBeUndefined();
+		await h.tick(1_000);
+		start.resolve();
+		await h.tick();
+		expect(await end(adapter, T0 - 60_000)).toBe("recorded");
+		expect(h.spool.end("t1")?.at).toBe(T0 + 1_000);
+	});
+
+	it("keeps an end's gap apart from an unsent coverage gap, so neither window takes in what was observed between", async () => {
+		const h = await open();
+		h.wire.open = false;
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)]);
+		const adapter = h.adapter("t1", 1);
+		await h.tick(1_000);
+		await adapter.emit(event(500));
+		await h.tick(1_000);
+		expect(await end(adapter, T0 + 1_500)).toBe("recorded");
+		const held = h.spool.entries().map((entry) => (entry.kind === "gap" ? [Object.keys(entry.reasons).join(","), entry.from, entry.to] : ["observation", entry.occurredAt]));
+		expect(held).toEqual([
+			["coverage_unknown", T0, T0],
+			["observation", T0 + 500],
+			["interrupted", T0 + 1_500, T0 + 2_000],
+		]);
+	});
+
+	it("changes nothing when the end can't be written, takes a retry, and a restart before one runs it again, saying coverage is unknown", async () => {
+		let fail = true;
+		const h = await open({ spool: { write: failingWrite((data) => fail && data.includes('"ends"')) } });
+		const adapter = await h.running(desired("t1", 1));
+		await h.tick(1_000);
+		expect(await end(adapter, T0 + 500)).toBe("unavailable");
+		await h.tick();
+		expect(h.spool.end("t1")).toBeUndefined();
+		expect(h.gaps("interrupted")).toEqual([]);
+		expect(h.runtime.sources()).toMatchObject([{ triggerId: "t1", state: "installed" }]);
+		expect(await adapter.emit(event(600))).toMatchObject({ ok: true });
+		expect(await end(adapter, T0 + 700)).toBe("unavailable");
+		fail = false;
+		expect(await end(adapter, T0 + 700)).toBe("recorded");
+		expect(h.spool.end("t1")?.at).toBe(T0 + 700);
+
+		// Never written, never known: after a restart the space's reconcile runs it again, after a gap that says coverage is unknown.
+		fail = true;
+		await h.reconcile([desired("t1", 2)], { revision: 2 });
+		h.allow(desired("t1", 2));
+		await h.reconcile([desired("t1", 2)], { revision: 3 });
+		const second = h.adapter("t1", 2);
+		await h.tick(1_000);
+		expect(await end(second, T0 + 1_500)).toBe("unavailable");
+		await h.restart();
+		h.allow(desired("t1", 2));
+		await h.reconcile([desired("t1", 2)], { revision: 4 });
+		expect(h.adapters).toHaveLength(1);
+		expect(h.wire.of("reconciled").at(-1).sources).toMatchObject([{ state: "starting" }]);
+		expect(h.gaps("coverage_unknown")).toMatchObject([{ generation: 2 }]);
+	});
+
+	it("gives callers one answer at a time, and fences an answer once the observer is stopped or its epoch replaced", async () => {
+		const ends = heldEnds();
+		const h = await open({ spool: { write: ends.write } });
+		const adapter = await h.running(desired("t1", 1));
+		await h.tick(1_000);
+
+		// A repeat while one is outstanding is the same answer, not another write.
+		ends.hold();
+		const first = end(adapter, T0 + 500);
+		const again = end(adapter, T0 + 900);
+		expect(again).toBe(first);
+		await settle();
+		// A new epoch asked for while the end is being written waits for it; the end, written under the old epoch, is counted in the new one.
+		h.attach("c2");
+		const replacing = h.runtime.receive(
+			"c2",
+			JSON.stringify({ protocol: PROTOCOL, type: "reconcile", binding: { space: "space-1", runtimeId: "rt-1" }, connectionId: "c2", serverEpoch: 2, desiredRevision: 1, leaseMs: 120_000, sources: [desired("t1", 1)] }),
+		);
+		ends.release();
+		expect(await first).toBe("recorded");
+		await replacing;
+		await h.tick();
+		expect(h.spool.epoch).toBe(2);
+		expect(h.wire.of("reconciled").at(-1).sources).toMatchObject([{ state: "ended" }]);
+		expect(h.gaps("interrupted")).toMatchObject([{ serverEpoch: 2, generation: 1, from: T0 + 500 }]);
+		expect(h.adapters).toHaveLength(1);
+
+		// Asked after its epoch was replaced, an observer's end records nothing.
+		h.allow(desired("t2", 1));
+		await h.reconcile([desired("t1", 1), desired("t2", 1)], { epoch: 2, revision: 2 });
+		const other = h.adapter("t2", 1);
+		await h.reconcile([desired("t1", 1), desired("t2", 1)], { epoch: 3 });
+		expect(await end(other, T0 + 1_000)).toBe("stopped");
+		expect(h.spool.end("t2")).toBeUndefined();
+
+		// Stopped while its end was being written: the answer is `stopped`, and the end, durable, still holds after a restart.
+		const third = h.adapters.at(-1) as FakeAdapter;
+		expect(third.config?.triggerId).toBe("t2");
+		await h.tick(1_000);
+		ends.hold();
+		const late = end(third, T0 + 1_500);
+		await settle();
+		const closing = h.runtime.close();
+		ends.release();
+		expect(await late).toBe("stopped");
+		await closing;
+		h.adapters = [];
+		await h.start();
+		expect(h.spool.end("t2")).toMatchObject({ generation: 1, at: T0 + 1_500 });
+		h.allow(desired("t2", 1));
+		await h.reconcile([desired("t1", 1), desired("t2", 1)], { epoch: 3, revision: 2 });
+		expect(h.wire.of("reconciled").at(-1).sources.map((source: Frame) => source.state)).toEqual(["ended", "ended"]);
+		expect(h.adapters).toEqual([]);
+	});
+
+	it("counts a paused observer's coverage as broken from the pause when it stops before resuming", async () => {
+		const h = await open({ spool: { maxBytes: 4_096, reserveBytes: 1_024 } });
+		const adapter = await h.running(desired("t1", 1));
+		await h.tick(1_000);
+		let n = 0;
+		while ((await adapter.emit(event(n, { body: "x".repeat(200) }))).ok) n++;
+		expect(adapter.pauses).toBe(1);
+		await h.tick(30_000);
+		h.allow(desired("t1", 2));
+		await h.reconcile([desired("t1", 2)], { revision: 2 });
+		expect(h.gaps("interrupted")).toMatchObject([{ generation: 2, from: T0 + 1_000, to: T0 + 31_000 }]);
+	});
+
+	it("keeps end records bounded, private and readable as old journals are", async () => {
+		const spool = await ObservationSpool.open(path.join(dir, "bounded"));
+		await spool.commit([], [], { epoch: 1 });
+		const record = (n: number) => ({ triggerId: `t${n}`, sourceId: `t${n}#1`, generation: 1, configHash: "b".repeat(64), at: T0, code: "stream_ended", recordedAt: T0 });
+		const all = Array.from({ length: MAX_END_RECORDS }, (_, n) => record(n));
+		await spool.commit([], [], { ends: all });
+		await expect(spool.commit([], [], { ends: [record(MAX_END_RECORDS)] })).rejects.toThrow("full");
+		await spool.commit([], [], { ends: [record(MAX_END_RECORDS)], unend: ["t0"] });
+		expect(spool.ends()).toHaveLength(MAX_END_RECORDS);
+		const text = await fs.readFile(path.join(dir, "bounded", SPOOL_FILE), "utf8");
+		expect(text).not.toContain(SECRET);
+		await spool.close();
+		const reopened = await ObservationSpool.open(path.join(dir, "bounded"));
+		expect(reopened.end("t0")).toBeUndefined();
+		expect(reopened.end(`t${MAX_END_RECORDS}`)).toMatchObject({ generation: 1 });
+		expect(reopened.recovery.corrupt).toBe(0);
+		await reopened.close();
+
+		// A line whose end record isn't exactly one is corrupt, as any line that doesn't read is.
+		const bad = JSON.stringify({ t: "txn", ends: [{ ...record(1), command: "rm -rf ~" }] });
+		const { createHash } = await import("node:crypto");
+		await fs.appendFile(path.join(dir, "bounded", SPOOL_FILE), `${createHash("sha256").update(bad).digest("hex").slice(0, 16)} ${bad}\n`);
+		const corrupt = await ObservationSpool.open(path.join(dir, "bounded"));
+		expect(corrupt.recovery.corrupt).toBe(1);
+		expect(corrupt.ends()).toHaveLength(MAX_END_RECORDS);
+		await corrupt.close();
 	});
 });

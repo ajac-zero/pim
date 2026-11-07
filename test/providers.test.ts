@@ -132,6 +132,23 @@ describe("A person's own model providers", () => {
 		for (let n = 0; n < 3; n++) expect(JSON.stringify(input)).toContain(`Answer ${n}`);
 	});
 
+	it("sends a Claude endpoint no thinking in a tool round that another provider's answer started", async () => {
+		const provider = await prepareProvider({ name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set());
+		const models = createModels();
+		models.setProvider(piProvider("own:proxy", provider));
+		const model = { ...models.getModel("own:proxy", "claude-sonnet-5-5")!, id: "claude-sonnet-4-5" };
+		const call = { type: "toolCall" as const, id: "call_1|fc_1", name: "lookup", arguments: {} };
+		const result = { role: "toolResult" as const, toolCallId: call.id, toolName: "lookup", content: [{ type: "text" as const, text: "found" }], isError: false, timestamp: 1 };
+		const chatgpt = { ...fauxAssistantMessage([{ type: "thinking", thinking: "", thinkingSignature: "{}" }, call], { stopReason: "toolUse" }), provider: "openai", api: "openai-codex-responses" as const, model: "gpt-5" };
+		const failed = { ...fauxAssistantMessage([], { stopReason: "error", errorMessage: "usage limit" }), provider: "openai", api: "openai-codex-responses" as const, model: "gpt-5" };
+		const user = { role: "user" as const, content: "Look it up", timestamp: 1 };
+		await models.completeSimple(model, { messages: [user, chatgpt, result, failed] }, { reasoning: "low" });
+		expect(calls.at(-1)!.body.thinking).toEqual({ type: "disabled" });
+		// Once the person says something new, it thinks again.
+		await models.completeSimple(model, { messages: [user, chatgpt, result, { ...user, content: "Thanks" }] }, { reasoning: "low" });
+		expect(calls.at(-1)!.body.thinking.type).toBe("enabled");
+	});
+
 	it.each(BUILTINS)("connects %s with a key and chosen models, and delivers messages through its native API (%s)", async (builtin, id, endpoint, header) => {
 		const catalog = await api("/providers/built-in");
 		expect(catalog.status).toBe(200);

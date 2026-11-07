@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdapterConfig,
 	type AdapterHealth,
+	type AuthorizationCheck,
 	type AuthorizationRequest,
-	type AuthorizationVerdict,
 	type Checkpoint,
 	type ComputerSource,
 	type DesiredSource,
@@ -20,6 +20,7 @@ import {
 	type RuntimeLimits,
 	type RuntimeLogEvent,
 	SPOOL_FILE,
+	type SpoolEntry,
 	type SpoolOptions,
 	type StopReason,
 	TriggersRuntime,
@@ -141,7 +142,7 @@ class FakeAdapter implements ObserverAdapter {
 }
 
 type Plan = { start?: Deferred; stop?: Deferred; fail?: Error };
-type HarnessOptions = { spool?: SpoolOptions; limits?: Partial<RuntimeLimits>; authorize?: "grants" | "none" | ((request: AuthorizationRequest) => AuthorizationVerdict) };
+type HarnessOptions = { spool?: SpoolOptions; limits?: Partial<RuntimeLimits>; authorize?: "grants" | "none" | AuthorizationCheck };
 
 const GRANT = { grantRef: "approval-1", scopeHash: "a".repeat(64) };
 
@@ -283,7 +284,18 @@ class Harness {
 		await this.reconcile([source], options);
 		const adapter = this.adapter(source.triggerId, source.generation);
 		expect(this.runtime.sources().find((held) => held.triggerId === source.triggerId)?.state).toBe("installed");
+		// Every start records a coverage gap first; settling it leaves the spool to what the test observes.
+		await this.ackAll(options.epoch);
+		this.wire.clear();
 		return adapter;
+	}
+
+	observations(): SpoolEntry[] {
+		return this.spool.entries().filter((entry) => entry.kind === "observation");
+	}
+
+	gaps(reason: string): Frame[] {
+		return this.wire.of("gap").filter((frame) => reason in frame.reasons);
 	}
 
 	async journal(): Promise<string> {
@@ -439,7 +451,10 @@ describe("observer lifecycle", () => {
 		await h.tick();
 		expect(await adapter.emit(event(2))).toMatchObject({ ok: true, duplicate: false });
 		await h.tick();
-		expect(h.wire.frames.map((frame) => frame.type)).toEqual(["hello", "reconciled", "installed", "health", "observation"]);
+		// Control goes first; the coverage gap, durable before the observer was installed, is sent before what it observes.
+		expect(h.wire.frames.map((frame) => frame.type)).toEqual(["hello", "reconciled", "installed", "health", "gap", "observation"]);
+		expect(h.wire.of("gap")[0]).toMatchObject({ triggerId: "t1", generation: 1, reasons: { coverage_unknown: 1 } });
+		expect(h.wire.of("gap")[0].sequence).toBeLessThan(h.wire.of("observation")[0].sequence);
 		expect(h.wire.of("installed")[0]).toEqual({ protocol: PROTOCOL, type: "installed", serverEpoch: 1, triggerId: "t1", sourceId: "t1#1", generation: 1, configHash: source.configHash });
 		expect(h.wire.of("health")[0]).toMatchObject({ status: "ok", code: "listening" });
 	});
@@ -514,7 +529,7 @@ describe("observer lifecycle", () => {
 		one.health({ status: "error", code: "late" });
 		await h.tick();
 		expect(h.wire.frames.slice(before).filter((frame) => frame.generation === 1 && frame.type !== "stopped")).toEqual([]);
-		expect(h.spool.count).toBe(0);
+		expect(h.observations()).toEqual([]);
 	});
 
 	it("stops promptly when a source is paused or deleted, claiming only that its adapter's stop returned", async () => {
@@ -567,6 +582,7 @@ describe("observer lifecycle", () => {
 		h.allow(one);
 		h.allow(two);
 		await h.reconcile([one, two]);
+		await h.ackAll();
 		await h.adapter("t1", 1).emit(event(1));
 		await h.tick();
 		const sent = h.wire.of("observation")[0];
@@ -594,7 +610,8 @@ describe("delivery", () => {
 		await adapter.emit(event(2));
 		await h.tick();
 		const first = h.wire.of("observation");
-		expect(first.map((frame) => frame.sequence)).toEqual([1, 2]);
+		expect(first).toHaveLength(2);
+		expect(first[1].sequence).toBe(first[0].sequence + 1);
 
 		h.runtime.detach("c1");
 		h.attach("c2");
@@ -604,7 +621,7 @@ describe("delivery", () => {
 		expect(h.wire.of("observation")).toEqual(first);
 		expect(h.adapters).toHaveLength(1);
 
-		await h.ack([{ sequence: 1, eventId: first[0].eventId }]);
+		await h.ack([{ sequence: first[0].sequence, eventId: first[0].eventId }]);
 		h.wire.clear();
 		await h.tick(30_000);
 		expect(h.wire.of("observation")).toEqual([first[1]]);
@@ -677,7 +694,7 @@ describe("delivery", () => {
 		await h.reconcile([next], { epoch: 2 });
 		expect(adapter.stops).toEqual(["epoch_replaced"]);
 		expect(h.wire.of("observation")).toEqual([]);
-		expect(h.wire.of("gap")).toMatchObject([{ serverEpoch: 2, triggerId: "t1", sourceId: "t1#1", generation: 1, reasons: { epoch_replaced: 3 }, from: T0 + 1, to: T0 + 3 }]);
+		expect(h.gaps("epoch_replaced")).toMatchObject([{ serverEpoch: 2, triggerId: "t1", sourceId: "t1#1", generation: 1, reasons: { epoch_replaced: 3 }, from: T0 + 1, to: T0 + 3 }]);
 		expect(h.spool.entries().every((entry) => entry.epoch === 2)).toBe(true);
 		expect(h.adapters).toHaveLength(2);
 		expect(h.adapters[1]?.stops).toEqual([]);
@@ -699,7 +716,9 @@ describe("delivery", () => {
 		await h.tick(50);
 		expect(h.wire.of("observation")).toHaveLength(6);
 		await h.tick(100);
-		expect(h.wire.of("observation").map((frame) => frame.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+		const sequences = h.wire.of("observation").map((frame) => frame.sequence);
+		expect(sequences).toHaveLength(10);
+		expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
 
 		h.wire.open = false;
 		h.wire.clear();
@@ -708,7 +727,7 @@ describe("delivery", () => {
 		expect(h.clock.pending).toBeLessThanOrEqual(4);
 		h.wire.open = true;
 		await h.tick(1);
-		expect(h.wire.of("observation").map((frame) => frame.sequence)).toEqual([11]);
+		expect(h.wire.of("observation").map((frame) => frame.data.n)).toEqual([11]);
 	});
 });
 
@@ -758,7 +777,7 @@ describe("the spool", () => {
 
 		await h.start();
 		expect(h.spool.recovery).toEqual({ torn: true, corrupt: 0 });
-		expect(h.spool.entries().map((entry) => (entry.kind === "observation" ? entry.data.n : null))).toEqual([1, 2]);
+		expect(h.observations().map((entry) => (entry.kind === "observation" ? entry.data.n : null))).toEqual([1, 2]);
 		const text = await h.journal();
 		expect(text.endsWith("\n")).toBe(true);
 		expect(text.length).toBe(whole.length);
@@ -792,7 +811,7 @@ describe("the spool", () => {
 		await h.start();
 		expect(h.spool.recovery).toEqual({ torn: false, corrupt: 0 });
 		expect(h.spool.entries().map((entry) => entry.seq)).toEqual(before);
-		expect(h.spool.entries().map((entry) => (entry.kind === "observation" ? entry.data.n : null))).toEqual([1, 3]);
+		expect(h.observations().map((entry) => (entry.kind === "observation" ? entry.data.n : null))).toEqual([1, 3]);
 		expect(JSON.stringify([h.wire.raw, h.logs])).not.toContain(SECRET);
 	});
 
@@ -803,15 +822,18 @@ describe("the spool", () => {
 		await h.runtime.close();
 		const file = path.join(dir, "spool", SPOOL_FILE);
 		const lines = (await fs.readFile(file, "utf8")).split("\n");
-		lines[2] = (lines[2] as string).replace('"n":2', '"n":7');
+		const target = lines.findIndex((line) => line.includes('"n":2'));
+		lines[target] = (lines[target] as string).replace('"n":2', '"n":7');
 		await fs.writeFile(file, lines.join("\n"));
 
 		await h.start();
 		expect(h.spool.recovery).toEqual({ torn: false, corrupt: 1 });
 		expect(h.spool.entries().map((entry) => (entry.kind === "observation" ? entry.data.n : entry.kind))).toEqual([1, 3, "gap"]);
+		// Recorded, the corrupt line goes from the file; until then it would be counted again.
+		expect(await h.journal()).not.toContain('"n":7');
 		h.allow(desired("t1", 1));
 		await h.reconcile([desired("t1", 1)], { revision: 2 });
-		expect(h.wire.of("gap")).toMatchObject([{ triggerId: null, sourceId: null, reasons: { corrupt: 1 } }]);
+		expect(h.gaps("corrupt")).toMatchObject([{ triggerId: null, sourceId: null, reasons: { corrupt: 1 } }]);
 		expect(h.wire.of("observation").map((frame) => frame.data.n)).toEqual([1, 3]);
 	});
 
@@ -830,7 +852,7 @@ describe("the spool", () => {
 
 		await h.runtime.close();
 		await h.start();
-		const gap = h.spool.entries().find((entry) => entry.kind === "gap");
+		const gap = h.spool.entries().find((entry) => entry.kind === "gap" && "overflow" in entry.reasons);
 		expect(gap).toMatchObject({ sourceId: "t1#1", generation: 1, reasons: { overflow: 20 - accepted }, from: T0 + accepted, to: T0 + 19 });
 		expect(h.spool.count).toBe(accepted + 1);
 	});
@@ -848,7 +870,7 @@ describe("the spool", () => {
 		expect(sent.map((frame) => frame.type)).toEqual([...Array(n).fill("observation"), "gap"]);
 		await h.ackAll();
 		expect(adapter.resumes).toBe(1);
-		expect(h.wire.of("health").map((frame) => frame.code)).toEqual(["listening", "backpressure", "resumed"]);
+		expect(h.wire.of("health").map((frame) => frame.code)).toEqual(["backpressure", "resumed"]);
 		expect(await adapter.emit(event(100))).toMatchObject({ ok: true });
 		expect(h.spool.count).toBe(1);
 	});
@@ -914,7 +936,7 @@ describe("the spool", () => {
 		expect(await adapter.emit(event(1, { body: "x".repeat(2_000) }))).toEqual({ ok: false, reason: "too_large" });
 		await h.tick();
 		expect(h.wire.of("observation")).toEqual([]);
-		expect(h.wire.of("gap")).toMatchObject([{ reasons: { too_large: 1 } }]);
+		expect(h.gaps("too_large")).toMatchObject([{ reasons: { too_large: 1 } }]);
 		expect(h.wire.raw.every((frame) => Buffer.byteLength(frame) <= 1_024)).toBe(true);
 	});
 
@@ -944,7 +966,7 @@ describe("what is kept and logged", () => {
 
 			expect(JSON.stringify(h.logs)).not.toContain(SECRET);
 			expect(h.wire.raw.filter((frame) => !frame.includes('"type":"observation"')).join("\n")).not.toContain(SECRET);
-			expect(h.wire.of("health").map((frame) => frame.code)).toEqual(["listening", "slow_reader"]);
+			expect(h.wire.of("health").map((frame) => frame.code)).toEqual(["slow_reader"]);
 			expect(h.logs).toContainEqual({ code: "adapter_health_invalid", triggerId: "t1", generation: 1 });
 			const journal = await h.journal();
 			expect(journal).not.toContain("tail -F");
@@ -953,5 +975,346 @@ describe("what is kept and logged", () => {
 		} finally {
 			for (const spy of spies) spy.mockRestore();
 		}
+	});
+});
+
+/** Writes as the spool does, unless `fail` says to refuse this write, as a full disk would. */
+function failingWrite(fail: (data: Buffer) => boolean): SpoolOptions["write"] {
+	return async (handle, data) => {
+		if (fail(data)) throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+		let offset = 0;
+		while (offset < data.length) offset += (await handle.write(data, offset, data.length - offset)).bytesWritten;
+		await handle.datasync();
+	};
+}
+
+describe("copies and freezes what it is given", () => {
+	it("keeps an observation as it was when emitted, however the adapter changes its objects", async () => {
+		const h = await open();
+		const adapter = await h.running(desired("t1", 1));
+		const data = { value: "ORIGINAL", nested: { list: [1, 2] } };
+		const checkpoint = { position: 1, cursor: "c1" };
+		const result = adapter.emit({ occurredAt: T0, data, checkpoint });
+		data.value = "MUTATED_BEFORE_WRITE";
+		data.nested.list.push(3);
+		checkpoint.position = 99;
+		expect(await result).toMatchObject({ ok: true });
+		data.value = "MUTATED_AFTER_DURABLE";
+		checkpoint.cursor = "changed";
+		await h.tick();
+		expect(h.wire.of("observation")).toMatchObject([{ data: { value: "ORIGINAL", nested: { list: [1, 2] } }, checkpoint: { position: 1, cursor: "c1" } }]);
+
+		// What the spool hands out can't be changed either.
+		const [entry] = h.observations() as Frame[];
+		expect(() => {
+			entry.data.value = "MUTATED_ENTRY";
+		}).toThrow(TypeError);
+		expect(() => {
+			entry.checkpoint.position = 7;
+		}).toThrow(TypeError);
+		expect(() => {
+			entry.data.nested.list.push(4);
+		}).toThrow(TypeError);
+
+		// Nor what adapters and the grant check are given.
+		expect(() => {
+			(adapter.config?.source as Frame).command = "rm -rf ~";
+		}).toThrow(TypeError);
+		expect(() => {
+			(h.checks[0]?.grant as Frame).grantRef = "other";
+		}).toThrow(TypeError);
+
+		// A getter, which could say one thing to the check and another to the write, is refused.
+		const sly = {
+			get value() {
+				return "x";
+			},
+		};
+		expect(await adapter.emit({ occurredAt: T0, data: sly as never })).toEqual({ ok: false, reason: "invalid" });
+
+		h.runtime.detach("c1");
+		await h.runtime.close();
+		await h.start();
+		expect(h.observations()).toMatchObject([{ data: { value: "ORIGINAL", nested: { list: [1, 2] } }, checkpoint: { position: 1, cursor: "c1" } }]);
+		expect(await h.journal()).not.toContain("MUTATED");
+	});
+});
+
+describe("losses are durable before what they stand for goes", () => {
+	it("advances an epoch only in the commit that records its gaps, and tries again after a failure", async () => {
+		let failGaps = false;
+		const h = await open({ spool: { write: failingWrite((data) => failGaps && data.includes('"kind":"gap"')) } });
+		const adapter = await h.running(desired("t1", 1));
+		h.runtime.detach("c1");
+		for (const n of [1, 2, 3]) await adapter.emit(event(n));
+		h.attach("c2");
+		failGaps = true;
+		await h.reconcile([desired("t1", 1)], { epoch: 2 });
+		expect(h.wire.of("error").map((frame) => frame.code)).toEqual(["spool_unavailable"]);
+		expect(h.wire.of("reconciled")).toEqual([]);
+		expect(h.wire.of("observation")).toEqual([]);
+		expect(h.spool.epoch).toBe(1);
+		expect(h.observations()).toHaveLength(3);
+		expect(adapter.stops).toEqual(["epoch_replaced"]);
+
+		// A crash now leaves the old epoch whole: nothing half-replaced.
+		await h.restart();
+		expect(h.spool.epoch).toBe(1);
+		expect(h.observations()).toHaveLength(3);
+
+		failGaps = false;
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)], { epoch: 2 });
+		expect(h.wire.of("reconciled")).toHaveLength(1);
+		expect(h.spool.epoch).toBe(2);
+		expect(h.observations()).toEqual([]);
+		expect(h.gaps("epoch_replaced")).toMatchObject([{ serverEpoch: 2, reasons: { epoch_replaced: 3 } }]);
+		expect(h.wire.of("observation")).toEqual([]);
+	});
+
+	it("holds expired observations, never sending them, until their gap is durable", async () => {
+		let failGaps = false;
+		const h = await open({ limits: { ttlMs: 1_000, blockedRetryMs: 500 }, spool: { write: failingWrite((data) => failGaps && data.includes('"kind":"gap"')) } });
+		const adapter = await h.running(desired("t1", 1));
+		h.runtime.detach("c1");
+		for (const n of [1, 2]) await adapter.emit(event(n));
+		failGaps = true;
+		await h.tick(1_000);
+		expect(h.observations()).toHaveLength(2);
+		h.attach("c2");
+		await h.reconcile([desired("t1", 1)], { revision: 2 });
+		expect(h.wire.of("observation")).toEqual([]);
+		expect(h.gaps("expired")).toEqual([]);
+
+		failGaps = false;
+		await h.tick(500);
+		expect(h.observations()).toEqual([]);
+		expect(h.gaps("expired")).toMatchObject([{ reasons: { expired: 2 }, from: T0 + 1, to: T0 + 2 }]);
+		expect(h.wire.of("observation")).toEqual([]);
+	});
+
+	it("keeps a refusal's count until the spool has room for its gap, and never drops it", async () => {
+		const h = await open({ spool: { maxEntries: 4, reserveEntries: 0 }, limits: { blockedRetryMs: 500 } });
+		const adapter = await h.running(desired("t1", 1));
+		h.runtime.detach("c1");
+		for (const n of [1, 2, 3, 4]) expect(await adapter.emit(event(n))).toMatchObject({ ok: true });
+		expect(await adapter.emit(event(5))).toEqual({ ok: false, reason: "backpressure" });
+		expect(await adapter.emit(event(6))).toEqual({ ok: false, reason: "backpressure" });
+		expect(h.spool.entries().filter((entry) => entry.kind === "gap")).toEqual([]);
+		expect(h.logs).toContainEqual({ code: "loss_unrecorded" });
+
+		h.attach("c2");
+		await h.reconcile([desired("t1", 1)], { revision: 2 });
+		await h.ackAll();
+		await h.tick(500);
+		expect(h.gaps("overflow")).toMatchObject([{ reasons: { overflow: 2 }, from: T0 + 5, to: T0 + 6 }]);
+	});
+});
+
+describe("the journal", () => {
+	it("applies a commit whole or not at all, wherever a crash cuts it", async () => {
+		const spool = await ObservationSpool.open(path.join(dir, "whole"));
+		const observation = (seq: number, n: number): SpoolEntry => ({
+			kind: "observation",
+			seq,
+			eventId: `e${seq}`,
+			epoch: 1,
+			recordedAt: T0,
+			triggerId: "t1",
+			sourceId: "t1#1",
+			revision: 1,
+			generation: 1,
+			occurredAt: T0 + n,
+			data: { n },
+			checkpoint: null,
+			coalesced: null,
+		});
+		await spool.commit([observation(spool.allocate(), 1), observation(spool.allocate(), 2)], [], { epoch: 1 });
+		const file = path.join(dir, "whole", SPOOL_FILE);
+		const before = await fs.readFile(file);
+		const gap: SpoolEntry = { kind: "gap", seq: spool.allocate(), eventId: "g", epoch: 1, recordedAt: T0, triggerId: "t1", sourceId: "t1#1", generation: 1, reasons: { overflow: 1 }, from: T0, to: T0 };
+		await spool.commit([observation(spool.allocate(), 3), gap], [1, 2]);
+		await spool.close();
+		const after = await fs.readFile(file);
+		const line = after.subarray(before.length);
+		expect(after.subarray(0, before.length).equals(before)).toBe(true);
+		expect(line.toString().split("\n")).toHaveLength(2);
+
+		// Every boundary inside the commit, between its records, and just short of its end.
+		const text = line.toString();
+		const cuts = new Set([1, 17, Math.floor(line.length / 2), line.length - 1]);
+		for (const marker of ['{"kind"', '"del"', "]"]) for (let at = text.indexOf(marker); at !== -1; at = text.indexOf(marker, at + 1)) cuts.add(Buffer.byteLength(text.slice(0, at)));
+		expect(cuts.size).toBeGreaterThan(6);
+		for (const cut of cuts) {
+			const copy = path.join(dir, `cut-${cut}`);
+			await fs.mkdir(copy, { mode: 0o700 });
+			await fs.writeFile(path.join(copy, SPOOL_FILE), Buffer.concat([before, line.subarray(0, cut)]), { mode: 0o600 });
+			const reopened = await ObservationSpool.open(copy);
+			expect(reopened.recovery).toEqual({ torn: true, corrupt: 0 });
+			expect(reopened.entries().map((entry) => entry.seq)).toEqual([1, 2]);
+			await reopened.close();
+		}
+		const whole = await ObservationSpool.open(path.join(dir, "whole"));
+		expect(whole.entries().map((entry) => entry.seq)).toEqual([3, 4]);
+		await whole.close();
+	});
+
+	it("takes what the space settled, or what expired, out of the file within scrubAfterMs", async () => {
+		const h = await open({ limits: { scrubAfterMs: 5_000, ttlMs: 60_000 } });
+		const adapter = await h.running(desired("t1", 1));
+		await adapter.emit(event(1, { line: "PAYLOAD-SETTLED" }));
+		await h.tick();
+		await h.ackAll();
+		expect(h.observations()).toEqual([]);
+		expect(await h.journal()).toContain("PAYLOAD-SETTLED");
+		await h.tick(5_000);
+		expect(await h.journal()).not.toContain("PAYLOAD-SETTLED");
+
+		h.runtime.detach("c1");
+		await adapter.emit(event(2, { line: "PAYLOAD-EXPIRED" }));
+		await h.tick(59_999);
+		expect(await h.journal()).toContain("PAYLOAD-EXPIRED");
+		await h.tick(1);
+		expect(await h.journal()).not.toContain("PAYLOAD-EXPIRED");
+	});
+});
+
+describe("epochs, connections and generations", () => {
+	it("labels an old epoch's observer with its own epoch, and reports nothing of it once replaced", async () => {
+		const h = await open();
+		const stop = deferred();
+		h.plans.push({ stop });
+		await h.running(desired("t1", 1));
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)], { epoch: 2 });
+		expect(h.adapters).toHaveLength(1);
+		stop.resolve();
+		await h.tick();
+		expect(h.adapters).toHaveLength(2);
+		expect(h.wire.of("stopped")).toEqual([]);
+		expect(h.wire.of("installed")).toMatchObject([{ serverEpoch: 2, generation: 1 }]);
+		expect(h.wire.frames.filter((frame) => frame.serverEpoch === 1)).toEqual([]);
+		expect(h.runtime.sources()).toMatchObject([{ epoch: 2, state: "installed" }]);
+	});
+
+	it("starts nothing for an epoch replaced while its grant was being checked", async () => {
+		const gates: Deferred[] = [];
+		const h = await open({ authorize: () => (gates.length > 0 ? (gates.shift() as Deferred).promise.then(() => ({ ok: true }) as const) : { ok: true }) });
+		const slow = deferred();
+		gates.push(slow);
+		await h.reconcile([desired("t1", 1)]);
+		await h.reconcile([desired("t1", 1)], { epoch: 2 });
+		slow.resolve();
+		await h.tick();
+		expect(h.adapters).toHaveLength(1);
+		expect(h.adapters[0]?.config?.generation).toBe(1);
+		expect(h.runtime.sources()).toMatchObject([{ epoch: 2, state: "installed" }]);
+		// Epoch 1 said only that it took the reconcile and that its observer, never started, was stopped.
+		expect(h.wire.frames.filter((frame) => frame.serverEpoch === 1).map((frame) => [frame.type, frame.adapter])).toEqual([
+			["reconciled", undefined],
+			["stopped", "not_started"],
+		]);
+	});
+
+	it("reports an observer that finished starting after its connection changed only once the new one is reconciled", async () => {
+		const h = await open();
+		const start = deferred();
+		h.plans.push({ start });
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)]);
+		h.runtime.detach("c1");
+		h.attach("c2");
+		start.resolve();
+		await h.tick();
+		expect(h.wire.frames.map((frame) => frame.type)).toEqual(["hello"]);
+		await h.reconcile([desired("t1", 1)], { revision: 2 });
+		expect(h.wire.of("reconciled")[0].sources).toMatchObject([{ state: "running" }]);
+		expect(h.gaps("coverage_unknown")).toHaveLength(1);
+	});
+
+	it("refuses a repeated revision that says something else, and a generation whose source changed", async () => {
+		const h = await open();
+		const adapter = await h.running(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)], { leaseMs: 60_000 });
+		await h.reconcile([desired("t1", 1)]);
+		expect(h.wire.of("error").map((frame) => frame.code)).toEqual(["divergent_reconcile"]);
+		expect(adapter.stops).toEqual([]);
+
+		const changed = desired("t1", 1, streamSource("tail -F /etc/shadow"));
+		h.allow(changed);
+		await h.reconcile([changed], { revision: 2 });
+		expect(h.wire.of("reconciled").at(-1).sources).toMatchObject([{ state: "invalid" }]);
+		expect(h.wire.of("health").at(-1)).toMatchObject({ status: "error", code: "generation_mismatch" });
+		expect(adapter.stops).toEqual(["invalid"]);
+		expect(h.adapters).toHaveLength(1);
+	});
+});
+
+describe("bounds on what it keeps", () => {
+	it("keeps checkpoint state bounded behind an unsettled entry, and commits nothing past a loss", async () => {
+		const h = await open({ limits: { frameBytes: 1_024 } });
+		const adapter = await h.running(desired("t1", 1));
+		await adapter.emit({ ...event(0), checkpoint: { position: 0, cursor: null } });
+		await h.tick();
+		const [head] = h.wire.of("observation");
+		await h.ack([{ sequence: head.sequence, eventId: head.eventId, result: "deferred", retryAfterMs: 600_000 }]);
+		for (let n = 1; n <= 50; n++) {
+			await adapter.emit({ ...event(n), checkpoint: { position: n, cursor: null } });
+			await h.tick();
+			const sent = h.wire.of("observation").at(-1);
+			await h.ack([{ sequence: sent.sequence, eventId: sent.eventId }]);
+			expect(h.runtime.sources()[0]?.outstanding).toBeLessThanOrEqual(2);
+		}
+		expect(adapter.commits).toEqual([]);
+		await h.ack([{ sequence: head.sequence, eventId: head.eventId }]);
+		expect(adapter.commits).toEqual([{ position: 50, cursor: null }]);
+		expect(h.runtime.sources()[0]).toMatchObject({ outstanding: 0, barrier: false });
+
+		// A refusal is a loss in this observer's coverage: it commits nothing after it, and keeps nothing to.
+		expect(await adapter.emit(event(51, { body: "x".repeat(2_000) }))).toEqual({ ok: false, reason: "too_large" });
+		for (let n = 52; n <= 60; n++) await adapter.emit({ ...event(n), checkpoint: { position: n, cursor: null } });
+		await h.tick();
+		await h.ackAll();
+		expect(adapter.commits).toEqual([{ position: 50, cursor: null }]);
+		expect(h.runtime.sources()[0]).toMatchObject({ outstanding: 0, barrier: true });
+	});
+
+	it("forgets triggers no reconcile wants once their observers have stopped", async () => {
+		const h = await open();
+		for (let i = 0; i < 30; i++) {
+			const source = desired(`t${i}`, 1, streamSource(`tail -F /var/log/${i}.log`));
+			h.allow(source);
+			await h.reconcile([source], { revision: i + 1 });
+			expect(h.runtime.slotCount).toBe(1);
+		}
+		await h.reconcile([], { revision: 31 });
+		expect(h.runtime.slotCount).toBe(0);
+	});
+});
+
+describe("continuity", () => {
+	it("records the time no observer ran, durably, before anything the next one sees, even when the stop was never reported", async () => {
+		const h = await open();
+		const first = await h.running(desired("t1", 1));
+		h.runtime.detach("c1");
+		await h.tick(120_000);
+		expect(first.stops).toEqual(["lease_expired"]);
+		h.attach("c2");
+		await h.tick(30_000);
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)], { revision: 2 });
+		expect(h.wire.of("stopped")).toEqual([]);
+		const second = h.adapters[1] as FakeAdapter;
+		await second.emit(event(1));
+		await h.tick();
+		const [gap] = h.gaps("interrupted");
+		expect(gap).toMatchObject({ triggerId: "t1", generation: 1, reasons: { interrupted: 1 }, from: T0 + 120_000, to: T0 + 150_000 });
+		expect(gap.sequence).toBeLessThan(h.wire.of("observation")[0].sequence);
+
+		// After a restart nothing is known of before, and the gap says so.
+		await h.restart();
+		h.allow(desired("t1", 1));
+		await h.reconcile([desired("t1", 1)], { revision: 3 });
+		expect(h.gaps("coverage_unknown")).toMatchObject([{ triggerId: "t1", to: T0 + 150_000 }]);
 	});
 });

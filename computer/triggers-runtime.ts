@@ -43,6 +43,8 @@ export const HARD_LIMITS = {
 	spoolEntries: 100_000,
 	/** The longest an observation waits in the spool before it is given up, with a gap. */
 	spoolTtlMs: 24 * 60 * 60_000,
+	/** The longest an entry's bytes may stay in the journal file after it has left the spool. */
+	scrubAfterMs: 600_000,
 	sources: 256,
 } as const;
 
@@ -64,7 +66,9 @@ export type DesiredSource = {
 	readonly triggerId: string;
 	/** The store's source identity, `<triggerId>#<revision>`. */
 	readonly sourceId: string;
+	/** The revision the source was set in, the suffix of `sourceId`. */
 	readonly revision: number;
+	/** Fixes `sourceId`, `revision` and `configHash`: the same generation with others is refused. Only its grant may change. */
 	readonly generation: number;
 	/** `sourceConfigHash(source)`, which the runtime checks. */
 	readonly configHash: string;
@@ -80,7 +84,7 @@ export type ReconcileMessage = {
 	readonly binding: Binding;
 	readonly connectionId: string;
 	readonly serverEpoch: number;
-	/** Orders reconciles within an epoch; an older one is refused, the same one again only renews. */
+	/** Orders reconciles within an epoch; an older one is refused, and the same one again, which only renews, must say the same. */
 	readonly desiredRevision: number;
 	/** How long this reconcile holds, from when the runtime takes it in. */
 	readonly leaseMs: number;
@@ -112,8 +116,14 @@ export type AckMessage = {
 export type ServerMessage = ReconcileMessage | AckMessage;
 
 export type SourceState = "starting" | "running" | "stale" | "invalid";
-export type StopReason = "not_desired" | "reconfigured" | "consent_changed" | "revoked" | "invalid" | "lease_expired" | "epoch_replaced" | "start_failed" | "shutdown";
-export type GapReason = "overflow" | "too_large" | "expired" | "epoch_replaced" | "corrupt";
+export type StopReason = "not_desired" | "reconfigured" | "consent_changed" | "revoked" | "invalid" | "lease_expired" | "epoch_replaced" | "start_failed" | "spool_unavailable" | "shutdown";
+/**
+ * Why a gap was recorded. `interrupted`: no observer of the source ran from
+ * `from` to `to`. `coverage_unknown`: an observer started at `to`, and what
+ * came before, since this runtime started, isn't known. The rest count
+ * observations that were seen but will never be sent.
+ */
+export type GapReason = "overflow" | "too_large" | "expired" | "epoch_replaced" | "corrupt" | "interrupted" | "coverage_unknown";
 export type GapCounts = { readonly [reason in GapReason]?: number };
 /** A snapshot that stands for `count` snapshots taken from `from` to `to`, itself included; the others were never sent. */
 export type Coalesced = { readonly count: number; readonly from: number; readonly to: number };
@@ -277,7 +287,7 @@ export function parseServerMessage(frame: string, limits: { inboundBytes: number
 		if (!Array.isArray(given.sources) || given.sources.length > limits.sources) throw new ProtocolError("invalid");
 		const sources = given.sources.map(readDesired);
 		if (new Set(sources.map((source) => source.triggerId)).size !== sources.length) throw new ProtocolError("invalid");
-		return {
+		return deepFreeze({
 			protocol: PROTOCOL,
 			type,
 			binding: { space: ident(binding.space), runtimeId: ident(binding.runtimeId) },
@@ -286,7 +296,7 @@ export function parseServerMessage(frame: string, limits: { inboundBytes: number
 			desiredRevision: int(given.desiredRevision, 0, Number.MAX_SAFE_INTEGER),
 			leaseMs: int(given.leaseMs, 1, limits.leaseMs),
 			sources,
-		};
+		});
 	}
 	if (type === "ack") {
 		const given = fields(value, ["protocol", "type", "connectionId", "serverEpoch", "durable", "results"]);
@@ -302,9 +312,18 @@ export function parseServerMessage(frame: string, limits: { inboundBytes: number
 				retryAfterMs: result.retryAfterMs === undefined || result.retryAfterMs === null ? null : int(result.retryAfterMs, 0, HARD_LIMITS.spoolTtlMs),
 			};
 		});
-		return { protocol: PROTOCOL, type, connectionId: ident(given.connectionId), serverEpoch: int(given.serverEpoch, 1, Number.MAX_SAFE_INTEGER), durable: true, results };
+		return deepFreeze({ protocol: PROTOCOL, type, connectionId: ident(given.connectionId), serverEpoch: int(given.serverEpoch, 1, Number.MAX_SAFE_INTEGER), durable: true, results });
 	}
 	throw new ProtocolError("invalid");
+}
+
+/** Freezes a value built here, and everything in it, so nothing handed out can change what the runtime holds. */
+function deepFreeze<T>(value: T): T {
+	if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+		for (const item of Object.values(value)) deepFreeze(item);
+		Object.freeze(value);
+	}
+	return value;
 }
 
 function canonical(value: unknown): string {
@@ -359,7 +378,11 @@ export type GapEntry = EntryBase & {
 };
 export type SpoolEntry = ObservationEntry | GapEntry;
 
-type JournalRecord = { readonly t: "meta"; readonly epoch: number | null; readonly nextSeq: number } | { readonly t: "put"; readonly entry: SpoolEntry } | { readonly t: "del"; readonly seqs: readonly number[] };
+/**
+ * One line of the journal: everything one commit changes. A line is read
+ * back whole, with its digest, or not at all, so a commit is too.
+ */
+type Txn = { readonly t: "txn"; readonly meta?: { readonly epoch: number | null; readonly nextSeq: number }; readonly put?: readonly SpoolEntry[]; readonly del?: readonly number[] };
 
 export type SpoolOptions = {
 	/** The most bytes the journal may take; at most `HARD_LIMITS.spoolBytes`, which is the default. */
@@ -382,7 +405,7 @@ export class SpoolError extends Error {
 }
 
 export const SPOOL_FILE = "journal";
-/** What the journal's first record, which says the epoch and the next sequence, may take. */
+/** What the journal's first line, which says the epoch and the next sequence, may take. */
 const META_BYTES = 256;
 
 async function writeAll(handle: fs.FileHandle, data: Buffer): Promise<void> {
@@ -391,23 +414,29 @@ async function writeAll(handle: fs.FileHandle, data: Buffer): Promise<void> {
 	await handle.datasync();
 }
 
-function encode(record: JournalRecord): Buffer {
-	const json = JSON.stringify(record);
+function encode(txn: Txn): Buffer {
+	const json = JSON.stringify(txn);
 	return Buffer.from(`${sha256(json).slice(0, 16)} ${json}\n`);
 }
 
-function decode(line: string): JournalRecord | null {
-	const space = line.indexOf(" ");
-	if (space !== 16) return null;
+function entryBytes(entry: SpoolEntry): number {
+	return encode({ t: "txn", put: [entry] }).length;
+}
+
+function decode(line: string): Txn | null {
+	if (line.length < 18 || line[16] !== " ") return null;
 	const json = line.slice(17);
 	if (sha256(json).slice(0, 16) !== line.slice(0, 16)) return null;
 	try {
-		const record = JSON.parse(json) as JournalRecord;
-		if (record.t === "meta" && (record.epoch === null || Number.isSafeInteger(record.epoch)) && Number.isSafeInteger(record.nextSeq)) return record;
-		if (record.t === "del" && Array.isArray(record.seqs) && record.seqs.every((seq) => Number.isSafeInteger(seq))) return record;
-		if (record.t === "put" && Number.isSafeInteger(record.entry?.seq) && Number.isSafeInteger(record.entry.epoch) && (record.entry.kind === "observation" || record.entry.kind === "gap")) return record;
-	} catch {}
-	return null;
+		const txn = JSON.parse(json) as Txn;
+		if (txn?.t !== "txn") return null;
+		if (txn.meta !== undefined && !((txn.meta.epoch === null || Number.isSafeInteger(txn.meta.epoch)) && Number.isSafeInteger(txn.meta.nextSeq))) return null;
+		if (txn.del !== undefined && !(Array.isArray(txn.del) && txn.del.every((seq) => Number.isSafeInteger(seq)))) return null;
+		if (txn.put !== undefined && !(Array.isArray(txn.put) && txn.put.every((entry) => Number.isSafeInteger(entry?.seq) && Number.isSafeInteger(entry.epoch) && (entry.kind === "observation" || entry.kind === "gap")))) return null;
+		return deepFreeze(txn);
+	} catch {
+		return null;
+	}
 }
 
 /** Checks a path is ours and not a link, and takes away any access others have to it. */
@@ -422,19 +451,23 @@ async function makePrivate(target: string, kind: "directory" | "file"): Promise<
  * The runtime's transport spool: a journal of observations and gaps not yet
  * durably taken by the space, in one file in a directory only its user can
  * read. It is not history and not a log: an entry leaves it once the space
- * has settled it or its time is up. Until then it holds what an observer saw,
- * which can be sensitive, as plain JSON on the person's disk.
+ * has settled it, its time is up, or its epoch is replaced. Until then it
+ * holds what an observer saw, which can be sensitive, as plain JSON.
  *
- * Each record is a line with a digest of its JSON. Every write is synced
- * before it counts. A line cut short by a crash, or whose digest doesn't
- * match, is never read as a record; opening rewrites the journal without
- * them, through a temporary file renamed over it. The journal never grows
- * past `maxBytes`: before it would, it is rewritten with only what is live.
+ * Each commit is one line with a digest of its JSON, synced before it
+ * counts, so recovery applies a commit whole or not at all. A line cut short
+ * by a crash is cut off; a line whose digest doesn't match is skipped and
+ * counted, and stays until the runtime has recorded the loss and rewritten
+ * the journal. Removing an entry appends a line, so the entry's bytes stay in
+ * the file until a rewrite (`compact`): `retiredBytes` says how many there
+ * are. The journal never grows past `maxBytes`: before it would, it is
+ * rewritten with only what is live, through a temporary file renamed over it.
+ * Entries handed out are frozen.
  */
 export class ObservationSpool {
 	readonly directory: string;
 	readonly limits: { readonly maxBytes: number; readonly maxEntries: number; readonly reserveBytes: number; readonly reserveEntries: number };
-	/** What opening found: a record cut short at the end, and records that failed their digest. */
+	/** What opening found: a line cut short at the end, and lines that failed their digest. */
 	readonly recovery = { torn: false, corrupt: 0 };
 	readonly #file: string;
 	readonly #write: (handle: fs.FileHandle, data: Buffer) => Promise<void>;
@@ -445,6 +478,7 @@ export class ObservationSpool {
 	#handle: fs.FileHandle | null = null;
 	#fileBytes = 0;
 	#liveBytes = 0;
+	#retiredBytes = 0;
 	#broken = false;
 	#closed = false;
 
@@ -481,13 +515,24 @@ export class ObservationSpool {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
-		if (content) spool.#recover(content);
-		// The journal is always rewritten on opening, so what follows starts from whole, checked records only.
-		await spool.#rewrite(spool.#entries);
+		const whole = content ? spool.#recover(content) : 0;
+		if (spool.recovery.corrupt === 0) {
+			// Rewritten on opening, so what follows starts from checked lines only, and nothing retired before is kept.
+			await spool.#rewrite(spool.#entries, spool.#epoch);
+		} else {
+			// Kept as it is, past a cut-off end, so the corrupt lines count again until the loss is recorded and the journal rewritten.
+			const handle = await fs.open(spool.#file, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
+			await handle.truncate(whole);
+			await handle.datasync();
+			spool.#handle = handle;
+			spool.#fileBytes = whole;
+			spool.#retiredBytes = Math.max(1, whole - spool.#liveBytes);
+		}
 		return spool;
 	}
 
-	#recover(content: Buffer): void {
+	/** Applies every whole, checked line; returns where the last whole line ends. */
+	#recover(content: Buffer): number {
 		let offset = 0;
 		while (offset < content.length) {
 			const end = content.indexOf(0x0a, offset);
@@ -495,24 +540,27 @@ export class ObservationSpool {
 				this.recovery.torn = true;
 				break;
 			}
-			const record = decode(content.subarray(offset, end).toString("utf8"));
+			const txn = decode(content.subarray(offset, end).toString("utf8"));
 			offset = end + 1;
-			if (!record) {
+			if (!txn) {
 				this.recovery.corrupt++;
 				continue;
 			}
-			if (record.t === "meta") {
-				this.#epoch = record.epoch;
-				this.#nextSeq = Math.max(this.#nextSeq, record.nextSeq);
-			} else if (record.t === "put") {
-				this.#entries.set(record.entry.seq, { entry: record.entry, bytes: encode(record).length });
-				this.#nextSeq = Math.max(this.#nextSeq, record.entry.seq + 1);
-			} else {
-				for (const seq of record.seqs) this.#entries.delete(seq);
+			if (txn.meta) {
+				this.#epoch = txn.meta.epoch;
+				this.#nextSeq = Math.max(this.#nextSeq, txn.meta.nextSeq);
+			}
+			for (const seq of txn.del ?? []) this.#entries.delete(seq);
+			for (const entry of txn.put ?? []) {
+				this.#entries.set(entry.seq, { entry, bytes: entryBytes(entry) });
+				this.#nextSeq = Math.max(this.#nextSeq, entry.seq + 1);
 			}
 		}
 		this.#entries = new Map([...this.#entries].sort(([a], [b]) => a - b));
+		// Entries are written only under the epoch then current, so a lost first line can't leave it unknown.
+		for (const { entry } of this.#entries.values()) if (this.#epoch === null || entry.epoch > this.#epoch) this.#epoch = entry.epoch;
 		this.#index();
+		return offset;
 	}
 
 	#index(): void {
@@ -528,6 +576,10 @@ export class ObservationSpool {
 	}
 	get bytes(): number {
 		return this.#liveBytes + META_BYTES;
+	}
+	/** Bytes in the file of entries that have left, which only a rewrite takes out. */
+	get retiredBytes(): number {
+		return this.#retiredBytes;
 	}
 	/** The entries in sequence order. */
 	entries(): SpoolEntry[] {
@@ -558,7 +610,7 @@ export class ObservationSpool {
 		}
 		for (const entry of puts) {
 			const held = gone.has(entry.seq) ? undefined : this.#entries.get(entry.seq);
-			bytes += encode({ t: "put", entry }).length - (held?.bytes ?? 0);
+			bytes += entryBytes(entry) - (held?.bytes ?? 0);
 			if (!held) count++;
 		}
 		return { bytes: bytes + META_BYTES, count };
@@ -571,25 +623,35 @@ export class ObservationSpool {
 		return after.bytes + (reserve ? 0 : reserveBytes) <= maxBytes && after.count + (reserve ? 0 : reserveEntries) <= maxEntries;
 	}
 
-	/** Puts entries (an entry with a sequence already held replaces it) and removes others, durably, before it returns. */
-	async commit(puts: readonly SpoolEntry[], removes: readonly number[]): Promise<void> {
+	/**
+	 * Puts entries (one with a sequence already held replaces it), removes
+	 * others, and sets the epoch if given, all in one line, durably, before it
+	 * returns; or changes nothing and throws. `rewrite` writes the whole
+	 * journal instead, so nothing removed stays in the file.
+	 */
+	async commit(puts: readonly SpoolEntry[], removes: readonly number[], options: { epoch?: number; rewrite?: boolean } = {}): Promise<void> {
 		if (this.#closed || this.#broken || !this.#handle) throw new SpoolError("unavailable");
 		const after = this.#project(puts, removes);
 		if (after.bytes > this.limits.maxBytes || after.count > this.limits.maxEntries) throw new SpoolError("full");
-		const records: JournalRecord[] = puts.map((entry) => ({ t: "put", entry }));
-		if (removes.length > 0) records.push({ t: "del", seqs: [...removes] });
-		const data = Buffer.concat(records.map(encode));
-		if (this.#fileBytes + data.length > this.limits.maxBytes) {
+		puts = puts.map(deepFreeze);
+		const epoch = options.epoch ?? this.#epoch;
+		const data = encode({
+			t: "txn",
+			...(options.epoch === undefined ? {} : { meta: { epoch, nextSeq: this.#nextSeq } }),
+			...(puts.length > 0 ? { put: puts } : {}),
+			...(removes.length > 0 ? { del: removes } : {}),
+		});
+		if (options.rewrite || this.#fileBytes + data.length > this.limits.maxBytes) {
 			const next = new Map(this.#entries);
 			for (const seq of removes) next.delete(seq);
-			for (const entry of puts) next.set(entry.seq, { entry, bytes: encode({ t: "put", entry }).length });
-			await this.#rewrite(new Map([...next].sort(([a], [b]) => a - b)));
+			for (const entry of puts) next.set(entry.seq, { entry, bytes: entryBytes(entry) });
+			await this.#rewrite(new Map([...next].sort(([a], [b]) => a - b)), epoch);
 			return;
 		}
 		try {
 			await this.#write(this.#handle, data);
 		} catch {
-			// Cut back to the last whole record, so what follows isn't written after half of one.
+			// Cut back to the last whole line, so what follows isn't written after half of one.
 			try {
 				await this.#handle.truncate(this.#fileBytes);
 				await this.#handle.datasync();
@@ -599,37 +661,35 @@ export class ObservationSpool {
 			throw new SpoolError("unavailable");
 		}
 		this.#fileBytes += data.length;
+		this.#epoch = epoch;
 		for (const seq of removes) {
 			const held = this.#entries.get(seq);
 			if (held) {
 				this.#entries.delete(seq);
 				this.#events.delete(held.entry.eventId);
 				this.#liveBytes -= held.bytes;
+				this.#retiredBytes += held.bytes;
 			}
 		}
 		for (const entry of puts) {
-			const bytes = encode({ t: "put", entry }).length;
-			this.#liveBytes += bytes - (this.#entries.get(entry.seq)?.bytes ?? 0);
+			const bytes = entryBytes(entry);
+			const held = this.#entries.get(entry.seq);
+			if (held) this.#retiredBytes += held.bytes;
+			this.#liveBytes += bytes - (held?.bytes ?? 0);
 			this.#entries.set(entry.seq, { entry, bytes });
 			this.#events.set(entry.eventId, entry.seq);
 		}
 	}
 
-	async setEpoch(epoch: number): Promise<void> {
-		const previous = this.#epoch;
-		this.#epoch = epoch;
-		try {
-			await this.#rewrite(this.#entries);
-		} catch (error) {
-			this.#epoch = previous;
-			throw error;
-		}
+	/** Rewrites the journal with only what is live, so nothing that left stays in the file. */
+	async compact(): Promise<void> {
+		await this.#rewrite(this.#entries, this.#epoch);
 	}
 
 	/** Writes `entries` as the whole journal: a temporary file, synced, renamed over the journal. */
-	async #rewrite(entries: Map<number, { entry: SpoolEntry; bytes: number }>): Promise<void> {
+	async #rewrite(entries: Map<number, { entry: SpoolEntry; bytes: number }>, epoch: number | null): Promise<void> {
 		if (this.#closed) throw new SpoolError("unavailable");
-		const data = Buffer.concat([encode({ t: "meta", epoch: this.#epoch, nextSeq: this.#nextSeq }), ...[...entries.values()].map(({ entry }) => encode({ t: "put", entry }))]);
+		const data = Buffer.concat([encode({ t: "txn", meta: { epoch, nextSeq: this.#nextSeq } }), ...[...entries.values()].map(({ entry }) => encode({ t: "txn", put: [entry] }))]);
 		if (data.length > this.limits.maxBytes) throw new SpoolError("full");
 		const temporary = `${this.#file}.tmp`;
 		try {
@@ -655,7 +715,9 @@ export class ObservationSpool {
 		await this.#handle?.close().catch(() => undefined);
 		this.#handle = await fs.open(this.#file, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);
 		this.#fileBytes = data.length;
+		this.#retiredBytes = 0;
 		this.#broken = false;
+		this.#epoch = epoch;
 		this.#entries = entries;
 		this.#index();
 	}
@@ -700,7 +762,11 @@ export type AdapterConfig = {
 	/** Aborted when the runtime stops this adapter. */
 	readonly signal: AbortSignal;
 };
-/** What an adapter observed. `key`, when it has one, makes the event id stable across re-reads, so the space takes it once. */
+/**
+ * What an adapter observed. The runtime copies it when `emit` is called, so
+ * changing it afterwards changes nothing. `key`, when it has one, makes the
+ * event id stable across re-reads, so the space takes it once.
+ */
 export type Observed = { readonly occurredAt: number; readonly data: JsonObject; readonly checkpoint?: Checkpoint | null; readonly key?: string | null };
 /**
  * Whether the runtime has durably spooled an observation. When it hasn't,
@@ -739,13 +805,15 @@ export type RuntimeLimits = {
 	readonly inboundBytes: number;
 	readonly sources: number;
 	readonly ttlMs: number;
+	/** How soon after entries leave the spool the journal is rewritten without them. */
+	readonly scrubAfterMs: number;
 	/** Frames of observations sent in one flush. */
 	readonly batch: number;
 	readonly flushIntervalMs: number;
 	/** How long an unsettled entry waits before it is sent again, doubling up to `maxResendMs`. */
 	readonly resendAfterMs: number;
 	readonly maxResendMs: number;
-	/** How long to wait when the transport takes nothing. */
+	/** How long to wait when the transport takes nothing, or the spool can't be written. */
 	readonly blockedRetryMs: number;
 	readonly startTimeoutMs: number;
 	readonly stopTimeoutMs: number;
@@ -760,6 +828,7 @@ export const DEFAULT_LIMITS: RuntimeLimits = {
 	inboundBytes: 1_048_576,
 	sources: HARD_LIMITS.sources,
 	ttlMs: HARD_LIMITS.spoolTtlMs,
+	scrubAfterMs: 60_000,
 	batch: 32,
 	flushIntervalMs: 10,
 	resendAfterMs: 30_000,
@@ -782,6 +851,7 @@ function runtimeLimits(given: Partial<RuntimeLimits>): RuntimeLimits {
 	check("inboundBytes", 1_024, HARD_LIMITS.inboundBytes);
 	check("sources", 1, HARD_LIMITS.sources);
 	check("ttlMs", 1_000, HARD_LIMITS.spoolTtlMs);
+	check("scrubAfterMs", 1, HARD_LIMITS.scrubAfterMs);
 	check("batch", 1, 1_024);
 	check("flushIntervalMs", 1, 60_000);
 	check("resendAfterMs", 100, HARD_LIMITS.spoolTtlMs);
@@ -803,10 +873,11 @@ export type TriggersRuntimeOptions = {
 	readonly limits?: Partial<RuntimeLimits>;
 };
 
-type Outstanding = { readonly seq: number; readonly checkpoint: Checkpoint | null; settled: "acked" | "lost" | null };
 type Run = {
 	readonly token: number;
 	readonly desired: DesiredSource;
+	/** The epoch it was started in; everything it reports is labelled with it, and dropped once that epoch is replaced. */
+	readonly epoch: number;
 	readonly abort: AbortController;
 	adapter: ObserverAdapter | null;
 	state: "validating" | "starting" | "installed" | "stopping" | "stopped";
@@ -815,11 +886,29 @@ type Run = {
 	paused: boolean;
 	/** Settles when its stop has returned, failed or timed out. */
 	stopped: Promise<void>;
-	/** What it emitted that the space hasn't settled, in order, for `commit`. */
-	outstanding: Outstanding[];
+	/**
+	 * What it emitted that the space hasn't settled, in order, with settled
+	 * stretches between them merged into one item, so it holds at most about
+	 * twice its entries in the spool.
+	 */
+	pending: { seq: number; checkpoint: Checkpoint | null; settled: boolean }[];
+	/** Set at its first loss or refusal: from then on it commits no checkpoint, and only a new observer, from the space's checkpoint, does. */
+	barrier: boolean;
 };
-type Slot = { run: Run | null; chain: Promise<void>; generation: number };
+type Slot = {
+	run: Run | null;
+	chain: Promise<void>;
+	/** What the trigger's latest generation is; the same generation with another source is refused. */
+	identity: { readonly generation: number; readonly sourceId: string; readonly revision: number; readonly configHash: string } | null;
+	/** Whether the latest reconcile wants it. A slot not wanted goes once its observer has stopped. */
+	wanted: boolean;
+	/** When its last installed observer stopped: the start of a break in coverage not yet recorded. */
+	coveredUntil: number | null;
+};
+type TimerName = "lease" | "flush" | "expiry" | "scrub" | "losses";
 type Delivery = { sentAt: number | null; attempts: number; notBefore: number };
+type LossTarget = { readonly epoch: number; readonly triggerId: string | null; readonly sourceId: string | null; readonly generation: number | null };
+type Loss = { readonly target: LossTarget; readonly reasons: GapCounts; readonly from: number; readonly to: number };
 
 const SYSTEM_CLOCK: RuntimeClock = {
 	now: () => Date.now(),
@@ -830,39 +919,78 @@ const SYSTEM_CLOCK: RuntimeClock = {
 	},
 };
 
-function readObserved(value: unknown): Required<Observed> | null {
+/** The most values one observation's data may hold, so copying it is bounded before its size is known. */
+const MAX_DATA_VALUES = 16_384;
+
+/**
+ * Copies what an adapter emitted into frozen plain JSON, reading each field
+ * once: a getter, a symbol-keyed or inherited property, a non-plain object, a
+ * number that isn't finite, or too much nesting is refused. Nothing the
+ * adapter keeps can change the copy.
+ */
+function snapshotObserved(value: unknown): Required<Observed> | null {
 	try {
 		const given = fields(value, ["occurredAt", "data", "checkpoint", "key"]);
-		if (!isJsonObject(given.data, 0)) return null;
-		return {
-			occurredAt: int(given.occurredAt, 0, Number.MAX_SAFE_INTEGER),
-			data: given.data,
-			checkpoint: given.checkpoint === undefined || given.checkpoint === null ? null : readCheckpoint(given.checkpoint),
-			key: given.key === undefined || given.key === null ? null : str(given.key, 256),
-		};
+		const occurredAt = int(given.occurredAt, 0, Number.MAX_SAFE_INTEGER);
+		const checkpointValue = given.checkpoint;
+		const keyValue = given.key;
+		const budget = { values: 0 };
+		const data = copyJson(given.data, 0, budget);
+		if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+		return Object.freeze({
+			occurredAt,
+			data: data as JsonObject,
+			checkpoint: checkpointValue === undefined || checkpointValue === null ? null : Object.freeze(readCheckpoint(copyJson(checkpointValue, 0, budget))),
+			key: keyValue === undefined || keyValue === null ? null : str(keyValue, 256),
+		});
 	} catch {
 		return null;
 	}
 }
 
-function isJsonObject(value: unknown, depth: number): value is JsonObject {
-	if (typeof value !== "object" || value === null || Array.isArray(value) || depth > 8) return false;
+function copyJson(value: unknown, depth: number, budget: { values: number }): JsonValue {
+	if (++budget.values > MAX_DATA_VALUES || depth > 8) throw new ProtocolError("invalid");
+	if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new ProtocolError("invalid");
+		return value;
+	}
+	if (typeof value !== "object") throw new ProtocolError("invalid");
 	const prototype = Object.getPrototypeOf(value);
-	if (prototype !== Object.prototype && prototype !== null) return false;
-	return Object.values(value).every((item) => isJsonValue(item, depth + 1));
-}
-
-function isJsonValue(value: unknown, depth: number): boolean {
-	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-	if (typeof value === "number") return Number.isFinite(value);
-	if (Array.isArray(value)) return depth <= 8 && value.every((item) => isJsonValue(item, depth + 1));
-	return isJsonObject(value, depth);
+	if (Array.isArray(value)) {
+		if (prototype !== Array.prototype) throw new ProtocolError("invalid");
+		const length = value.length;
+		const copy: JsonValue[] = [];
+		for (let index = 0; index < length; index++) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, index);
+			if (!descriptor || !("value" in descriptor)) throw new ProtocolError("invalid");
+			copy.push(copyJson(descriptor.value, depth + 1, budget));
+		}
+		return Object.freeze(copy) as JsonValue[];
+	}
+	if (prototype !== Object.prototype && prototype !== null) throw new ProtocolError("invalid");
+	if (Object.getOwnPropertySymbols(value).length > 0) throw new ProtocolError("invalid");
+	const copy: JsonObject = {};
+	for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+		if (!("value" in descriptor) || !descriptor.enumerable) throw new ProtocolError("invalid");
+		Object.defineProperty(copy, key, { value: copyJson(descriptor.value, depth + 1, budget), enumerable: true, writable: false, configurable: false });
+	}
+	return Object.freeze(copy);
 }
 
 function addCounts(a: GapCounts, b: GapCounts): GapCounts {
 	const sum: { [reason in GapReason]?: number } = { ...a };
 	for (const [reason, count] of Object.entries(b) as [GapReason, number][]) sum[reason] = (sum[reason] ?? 0) + count;
 	return sum;
+}
+
+/** Coverage gaps (`interrupted`, `coverage_unknown`) carry a time window of their own, so they merge only with each other. */
+function family(reasons: GapCounts): "coverage" | "loss" {
+	return "interrupted" in reasons || "coverage_unknown" in reasons ? "coverage" : "loss";
+}
+
+function lossKey(target: LossTarget, reasons: GapCounts): string {
+	return `${target.epoch}\n${target.sourceId}\n${target.generation}\n${family(reasons)}`;
 }
 
 const refused = (reason: Extract<EmitResult, { ok: false }>["reason"]): EmitResult => ({ ok: false, reason });
@@ -885,27 +1013,33 @@ export class TriggersRuntime {
 
 	#transport: Transport | null = null;
 	#connectionId: string | null = null;
-	/** Whether the current connection has had a reconcile, which observations wait for. */
+	/** Whether the current connection has had a reconcile, which observations and observers' reports wait for. */
 	#reconciled = false;
 	#desiredRevision = -1;
+	/** The digest of the reconcile last taken at `#desiredRevision`, which the same revision again must match. */
+	#appliedDigest: string | null = null;
 	#leaseExpiresAt: number | null = null;
-	#leaseCancel: (() => void) | null = null;
-	#flushCancel: (() => void) | null = null;
-	#flushAt = Number.POSITIVE_INFINITY;
-	#expiryCancel: (() => void) | null = null;
-	#expiryAt = Number.POSITIVE_INFINITY;
+	readonly #timers: { [name in TimerName]: { cancel: (() => void) | null; at: number } } = {
+		lease: { cancel: null, at: Number.POSITIVE_INFINITY },
+		flush: { cancel: null, at: Number.POSITIVE_INFINITY },
+		expiry: { cancel: null, at: Number.POSITIVE_INFINITY },
+		scrub: { cancel: null, at: Number.POSITIVE_INFINITY },
+		losses: { cancel: null, at: Number.POSITIVE_INFINITY },
+	};
 	readonly #slots = new Map<string, Slot>();
 	#control: RuntimeMessage[] = [];
 	readonly #delivery = new Map<number, Delivery>();
 	/** Sequences sent at least once since this runtime started: these are never coalesced or merged into. */
 	readonly #transmitted = new Set<number>();
+	/** Losses seen but not yet durable as gaps, one per source, generation and epoch; written with the next commit that can be. */
+	readonly #losses = new Map<string, Loss>();
 	#queue: Promise<void> = Promise.resolve();
 	#pending = 0;
 	#tokens = 0;
 	#closed = false;
 
 	constructor(options: TriggersRuntimeOptions) {
-		this.#binding = { space: ident(options.binding.space), runtimeId: ident(options.binding.runtimeId) };
+		this.#binding = deepFreeze({ space: ident(options.binding.space), runtimeId: ident(options.binding.runtimeId) });
 		this.#spool = options.spool;
 		this.#adapters = options.adapters;
 		this.#authorize = options.authorize ?? (() => ({ ok: false, reason: "no authorization check is configured" }));
@@ -935,18 +1069,8 @@ export class TriggersRuntime {
 		this.#connectionId = null;
 		this.#reconciled = false;
 		this.#control = [];
-		this.#flushCancel?.();
-		this.#flushCancel = null;
-		this.#flushAt = Number.POSITIVE_INFINITY;
+		this.#cancel("flush");
 		this.#resetDelivery();
-	}
-
-	/** A new connection sends everything unsettled again, with its backoff started over. */
-	#resetDelivery(): void {
-		for (const delivery of this.#delivery.values()) {
-			delivery.sentAt = null;
-			delivery.attempts = 0;
-		}
 	}
 
 	/** Takes one frame from the space, on the connection it came in on. */
@@ -972,13 +1096,18 @@ export class TriggersRuntime {
 	}
 
 	/** Each trigger's current observer, for the host's status and the tests. */
-	sources(): { triggerId: string; sourceId: string; generation: number; state: Run["state"]; paused: boolean }[] {
-		return [...this.#slots]
-			.filter(([, slot]) => slot.run !== null)
-			.map(([triggerId, slot]) => {
-				const run = slot.run as Run;
-				return { triggerId, sourceId: run.desired.sourceId, generation: run.desired.generation, state: run.state, paused: run.paused };
-			});
+	sources(): { triggerId: string; sourceId: string; generation: number; epoch: number; state: Run["state"]; paused: boolean; outstanding: number; barrier: boolean }[] {
+		const listed = [];
+		for (const [triggerId, slot] of this.#slots) {
+			const run = slot.run;
+			if (run) listed.push({ triggerId, sourceId: run.desired.sourceId, generation: run.desired.generation, epoch: run.epoch, state: run.state, paused: run.paused, outstanding: run.pending.length, barrier: run.barrier });
+		}
+		return listed;
+	}
+
+	/** How many triggers the runtime keeps state for; at most the latest desired set and observers still stopping. */
+	get slotCount(): number {
+		return this.#slots.size;
 	}
 
 	/** Resolves once the queue has nothing left to do: for shutting down, and for tests. */
@@ -990,16 +1119,17 @@ export class TriggersRuntime {
 		} while (this.#pending > 0);
 	}
 
-	/** Stops every observer, waits for their stops (each bounded by `stopTimeoutMs`), and closes the spool. */
+	/** Stops every observer, waits for their stops (each bounded by `stopTimeoutMs`), takes retired bytes out of the journal, and closes the spool. */
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		const runs = [...this.#slots.values()].map((slot) => slot.run).filter((run): run is Run => run !== null);
 		for (const run of runs) this.#stop(run, "shutdown");
 		this.#closed = true;
 		this.#transport = null;
-		for (const cancel of [this.#leaseCancel, this.#flushCancel, this.#expiryCancel]) cancel?.();
+		for (const name of Object.keys(this.#timers) as (TimerName)[]) this.#cancel(name);
 		await Promise.all(runs.map((run) => run.stopped));
 		await this.idle();
+		if (this.#spool.retiredBytes > 0) await this.#spool.compact().catch(() => this.#log({ code: "spool_unavailable" }));
 		await this.#spool.close();
 	}
 
@@ -1018,16 +1148,42 @@ export class TriggersRuntime {
 		return result;
 	}
 
+	#timer(name: TimerName, delay: number, task: () => Promise<void> | void): void {
+		const timer = this.#timers[name];
+		const at = this.#clock.now() + Math.max(0, delay);
+		if (this.#closed || (timer.cancel && timer.at <= at)) return;
+		timer.cancel?.();
+		timer.at = at;
+		timer.cancel = this.#clock.setTimer(Math.max(0, delay), () => {
+			timer.cancel = null;
+			timer.at = Number.POSITIVE_INFINITY;
+			void this.#enqueue(task).catch(() => undefined);
+		});
+	}
+
+	#cancel(name: TimerName): void {
+		const timer = this.#timers[name];
+		timer.cancel?.();
+		timer.cancel = null;
+		timer.at = Number.POSITIVE_INFINITY;
+	}
+
 	async #afterOpen(): Promise<void> {
 		const epoch = this.#spool.epoch;
-		if (epoch !== null) {
-			await this.#discardBefore(epoch);
-			if (this.#spool.recovery.corrupt > 0) {
-				this.#log({ code: "spool_corrupt", count: this.#spool.recovery.corrupt });
-				const now = this.#clock.now();
-				await this.#recordGap({ epoch, triggerId: null, sourceId: null, generation: null }, { corrupt: this.#spool.recovery.corrupt }, now, now);
-			}
+		const corrupt = this.#spool.recovery.corrupt;
+		if (corrupt > 0) this.#log({ code: "spool_corrupt", count: corrupt });
+		if (epoch === null) {
+			// Nothing was ever written under an epoch, so nothing observed was lost; the corrupt lines just go.
+			if (corrupt > 0) await this.#spool.compact().catch(() => this.#log({ code: "spool_unavailable" }));
+			return;
 		}
+		const now = this.#clock.now();
+		if (corrupt > 0) this.#noteLoss({ epoch, triggerId: null, sourceId: null, generation: null }, { corrupt }, now, now);
+		const stale = this.#spool.entries().filter((entry) => entry.epoch < epoch);
+		if (stale.length === 0 && corrupt === 0) return this.#sweepExpired();
+		// One commit records the losses and takes out what they stand for; the journal is rewritten, so the corrupt lines go only then.
+		const written = await this.#commitLosses(this.#lossesOf(stale, epoch, "epoch_replaced"), stale.map((entry) => entry.seq), { rewrite: true });
+		if (written) this.#settle(new Set(stale.map((entry) => entry.seq)), "lost");
 		await this.#sweepExpired();
 	}
 
@@ -1042,29 +1198,44 @@ export class TriggersRuntime {
 			this.#push({ protocol: PROTOCOL, type: "error", code: "stale_epoch" });
 			return;
 		}
-		if (epoch === null || message.serverEpoch > epoch) {
-			// A new epoch: nothing of the old one is sent again, and every observer starts over under the new one.
+		const digest = sha256(canonical({ sources: message.sources, leaseMs: message.leaseMs }));
+		if (epoch === message.serverEpoch) {
+			if (message.desiredRevision < this.#desiredRevision) {
+				this.#push({ protocol: PROTOCOL, type: "error", code: "stale_reconcile" });
+				return;
+			}
+			if (message.desiredRevision === this.#desiredRevision && digest !== this.#appliedDigest) {
+				this.#log({ code: "divergent_reconcile" });
+				this.#push({ protocol: PROTOCOL, type: "error", code: "divergent_reconcile" });
+				return;
+			}
+		} else {
+			// A new epoch: every observer stops, and nothing of the old one is sent again. The new epoch, the
+			// gaps that count what the old one held, and taking that out are one commit; until it is durable,
+			// the epoch hasn't changed and nothing is reported as reconciled.
 			for (const slot of this.#slots.values()) if (slot.run) this.#stop(slot.run, "epoch_replaced");
-			try {
-				await this.#spool.setEpoch(message.serverEpoch);
-			} catch {
-				this.#log({ code: "spool_unavailable" });
+			const stale = this.#spool.entries();
+			const seqs = stale.map((entry) => entry.seq);
+			if (!(await this.#commitLosses(this.#lossesOf(stale, message.serverEpoch, "epoch_replaced"), seqs, { epoch: message.serverEpoch, rewrite: true }))) {
 				this.#push({ protocol: PROTOCOL, type: "error", code: "spool_unavailable" });
 				return;
 			}
+			this.#settle(new Set(seqs), "lost");
 			this.#desiredRevision = -1;
-			await this.#discardBefore(message.serverEpoch);
-		} else if (message.desiredRevision < this.#desiredRevision) {
-			this.#push({ protocol: PROTOCOL, type: "error", code: "stale_reconcile" });
-			return;
+			this.#appliedDigest = null;
 		}
 		this.#desiredRevision = message.desiredRevision;
+		this.#appliedDigest = digest;
 		this.#reconciled = true;
 		this.#renewLease(message.leaseMs);
+		for (const slot of this.#slots.values()) slot.wanted = false;
 		const results: { triggerId: string; sourceId: string; generation: number; state: SourceState }[] = [];
 		for (const desired of message.sources) results.push({ triggerId: desired.triggerId, sourceId: desired.sourceId, generation: desired.generation, state: this.#want(desired) });
-		const named = new Set(message.sources.map((desired) => desired.triggerId));
-		for (const [triggerId, slot] of this.#slots) if (!named.has(triggerId) && slot.run) this.#stop(slot.run, "not_desired");
+		for (const slot of [...this.#slots.values()]) {
+			if (slot.wanted) continue;
+			if (slot.run) this.#stop(slot.run, "not_desired");
+			this.#prune(slot);
+		}
 		this.#push({ protocol: PROTOCOL, type: "reconciled", serverEpoch: message.serverEpoch, desiredRevision: message.desiredRevision, leaseMs: message.leaseMs, sources: results });
 		this.#scheduleFlush(0);
 	}
@@ -1073,23 +1244,33 @@ export class TriggersRuntime {
 	#want(desired: DesiredSource): SourceState {
 		let slot = this.#slots.get(desired.triggerId);
 		if (!slot) {
-			slot = { run: null, chain: Promise.resolve(), generation: -1 };
+			slot = { run: null, chain: Promise.resolve(), identity: null, wanted: true, coveredUntil: null };
 			this.#slots.set(desired.triggerId, slot);
 		}
+		slot.wanted = true;
 		const run = slot.run;
-		if (desired.configHash !== sourceConfigHash(desired.source)) {
+		const refuse = (code: string): SourceState => {
 			if (run) this.#stop(run, "invalid");
-			this.#push({ ...this.#ref(desired), protocol: PROTOCOL, type: "health", status: "error", code: "config_hash_mismatch" });
+			this.#push({ protocol: PROTOCOL, type: "health", serverEpoch: this.#spool.epoch ?? 0, triggerId: desired.triggerId, sourceId: desired.sourceId, generation: desired.generation, status: "error", code });
 			return "invalid";
+		};
+		if (desired.configHash !== sourceConfigHash(desired.source)) return refuse("config_hash_mismatch");
+		const identity = slot.identity;
+		if (identity && desired.generation < identity.generation) return "stale";
+		if (identity && desired.generation === identity.generation && (identity.sourceId !== desired.sourceId || identity.revision !== desired.revision || identity.configHash !== desired.configHash)) {
+			return refuse("generation_mismatch");
 		}
-		if (desired.generation < slot.generation) return "stale";
+		slot.identity = { generation: desired.generation, sourceId: desired.sourceId, revision: desired.revision, configHash: desired.configHash };
 		if (run && !run.fenced) {
-			const same = run.desired.sourceId === desired.sourceId && run.desired.generation === desired.generation && run.desired.configHash === desired.configHash;
-			if (same && run.desired.grant.grantRef === desired.grant.grantRef && run.desired.grant.scopeHash === desired.grant.scopeHash) {
-				this.#recheck(run);
-				return run.state === "installed" ? "running" : "starting";
+			if (run.desired.generation === desired.generation) {
+				if (run.desired.grant.grantRef === desired.grant.grantRef && run.desired.grant.scopeHash === desired.grant.scopeHash) {
+					this.#recheck(run);
+					return run.state === "installed" ? "running" : "starting";
+				}
+				this.#stop(run, "consent_changed");
+			} else {
+				this.#stop(run, "reconfigured");
 			}
-			this.#stop(run, same ? "consent_changed" : "reconfigured");
 		}
 		this.#launch(slot, desired);
 		return "starting";
@@ -1097,44 +1278,60 @@ export class TriggersRuntime {
 
 	#launch(slot: Slot, desired: DesiredSource): void {
 		const previous = slot.run;
-		const run: Run = { token: ++this.#tokens, desired, abort: new AbortController(), adapter: null, state: "validating", fenced: false, paused: false, stopped: Promise.resolve(), outstanding: [] };
+		const run: Run = {
+			token: ++this.#tokens,
+			desired,
+			epoch: this.#spool.epoch as number,
+			abort: new AbortController(),
+			adapter: null,
+			state: "validating",
+			fenced: false,
+			paused: false,
+			stopped: Promise.resolve(),
+			pending: [],
+			barrier: false,
+		};
 		slot.run = run;
-		slot.generation = Math.max(slot.generation, desired.generation);
 		// One observer per trigger at a time: this one starts only once the one before it has stopped.
 		slot.chain = Promise.all([slot.chain, previous?.stopped])
 			.then(() => this.#begin(run))
 			.catch(() => this.#log({ code: "internal_error", triggerId: desired.triggerId, generation: desired.generation }));
 	}
 
+	/** Whether a run is still its trigger's observer in the current epoch; checked again after everything it waits for. */
+	#current(run: Run): boolean {
+		return !run.fenced && run.epoch === this.#spool.epoch && this.#slots.get(run.desired.triggerId)?.run === run;
+	}
+
 	async #begin(run: Run): Promise<void> {
-		if (run.fenced) return;
-		if (!(await this.#authorized(run.desired))) {
-			if (run.fenced) return;
+		if (!this.#current(run)) return;
+		const allowed = await this.#authorized(run.desired);
+		if (!this.#current(run)) return;
+		if (!allowed) {
 			run.fenced = true;
 			run.state = "stopped";
-			this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "health", status: "error", code: "auth_denied" });
+			this.#report(run, { status: "error", code: "auth_denied" });
 			return;
 		}
-		if (run.fenced) return;
 		let adapter: ObserverAdapter;
 		try {
 			adapter = this.#adapters(run.desired.source);
 		} catch {
 			run.fenced = true;
 			run.state = "stopped";
-			this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "health", status: "error", code: "unsupported" });
+			this.#report(run, { status: "error", code: "unsupported" });
 			return;
 		}
 		run.adapter = adapter;
 		run.state = "starting";
-		const config: AdapterConfig = {
+		const config: AdapterConfig = Object.freeze({
 			triggerId: run.desired.triggerId,
 			sourceId: run.desired.sourceId,
 			generation: run.desired.generation,
 			source: run.desired.source,
 			resume: run.desired.checkpoint,
 			signal: run.abort.signal,
-		};
+		});
 		let outcome: "returned" | "timed_out" | "failed";
 		try {
 			outcome = await this.#bounded(
@@ -1151,30 +1348,51 @@ export class TriggersRuntime {
 			outcome = "failed";
 		}
 		// A run stopped while it started has already been asked to stop, and is never reported as installed.
-		if (run.fenced) return;
+		if (!this.#current(run)) return;
 		if (outcome !== "returned") {
 			this.#log({ code: "adapter_start_failed", triggerId: run.desired.triggerId, generation: run.desired.generation });
-			this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "health", status: "error", code: outcome === "timed_out" ? "start_timed_out" : "start_failed" });
+			this.#report(run, { status: "error", code: outcome === "timed_out" ? "start_timed_out" : "start_failed" });
 			this.#stop(run, "start_failed");
 			return;
 		}
+		// The space hears of the break in coverage, durably, before anything this observer sees.
+		const written = await this.#enqueue(async () => {
+			if (!this.#current(run)) return false;
+			const slot = this.#slots.get(run.desired.triggerId) as Slot;
+			const now = this.#clock.now();
+			const loss: Loss =
+				slot.coveredUntil === null
+					? { target: this.#target(run), reasons: { coverage_unknown: 1 }, from: now, to: now }
+					: { target: this.#target(run), reasons: { interrupted: 1 }, from: slot.coveredUntil, to: now };
+			if (!(await this.#commitLosses([loss], []))) return false;
+			slot.coveredUntil = null;
+			return true;
+		}).catch(() => false);
+		if (!this.#current(run)) return;
+		if (!written) {
+			this.#report(run, { status: "error", code: "spool_unavailable" });
+			this.#stop(run, "spool_unavailable");
+			return;
+		}
 		run.state = "installed";
-		this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "installed", configHash: run.desired.configHash });
-		this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "health", status: "ok", code: "listening" });
+		this.#pushFor(run, { ...this.#ref(run), protocol: PROTOCOL, type: "installed", configHash: run.desired.configHash });
+		this.#report(run, { status: "ok", code: "listening" });
 	}
 
 	async #authorized(desired: DesiredSource): Promise<boolean> {
 		try {
-			const verdict = await this.#authorize({
-				binding: this.#binding,
-				triggerId: desired.triggerId,
-				sourceId: desired.sourceId,
-				generation: desired.generation,
-				configHash: desired.configHash,
-				source: desired.source,
-				grant: desired.grant,
-				now: this.#clock.now(),
-			});
+			const verdict = await this.#authorize(
+				Object.freeze({
+					binding: this.#binding,
+					triggerId: desired.triggerId,
+					sourceId: desired.sourceId,
+					generation: desired.generation,
+					configHash: desired.configHash,
+					source: desired.source,
+					grant: desired.grant,
+					now: this.#clock.now(),
+				}),
+			);
 			return typeof verdict === "object" && verdict !== null && verdict.ok === true;
 		} catch {
 			return false;
@@ -1185,8 +1403,8 @@ export class TriggersRuntime {
 	#recheck(run: Run): void {
 		void this.#authorized(run.desired).then((ok) =>
 			this.#enqueue(() => {
-				if (ok || run.fenced) return;
-				this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "health", status: "error", code: "auth_denied" });
+				if (ok || !this.#current(run)) return;
+				this.#report(run, { status: "error", code: "auth_denied" });
 				this.#stop(run, "revoked");
 			}),
 		);
@@ -1197,10 +1415,13 @@ export class TriggersRuntime {
 		if (run.fenced) return;
 		run.fenced = true;
 		run.abort.abort();
+		const slot = this.#slots.get(run.desired.triggerId);
+		if (slot?.run === run && run.state === "installed") slot.coveredUntil = this.#clock.now();
 		const adapter = run.adapter;
 		if (!adapter) {
 			run.state = "stopped";
-			this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "stopped", reason, adapter: "not_started" });
+			this.#pushFor(run, { ...this.#ref(run), protocol: PROTOCOL, type: "stopped", reason, adapter: "not_started" });
+			if (slot) this.#prune(slot);
 			return;
 		}
 		run.state = "stopping";
@@ -1212,8 +1433,16 @@ export class TriggersRuntime {
 			.then((outcome) => {
 				run.state = "stopped";
 				if (outcome !== "returned") this.#log({ code: `adapter_stop_${outcome}`, triggerId: run.desired.triggerId, generation: run.desired.generation });
-				this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "stopped", reason, adapter: outcome });
+				this.#pushFor(run, { ...this.#ref(run), protocol: PROTOCOL, type: "stopped", reason, adapter: outcome });
+				const current = this.#slots.get(run.desired.triggerId);
+				if (current) this.#prune(current);
 			});
+	}
+
+	/** Forgets a trigger no reconcile wants, once its observer has stopped. Its generation and coverage go with it. */
+	#prune(slot: Slot): void {
+		if (slot.wanted || (slot.run && slot.run.state !== "stopped")) return;
+		for (const [triggerId, held] of this.#slots) if (held === slot) this.#slots.delete(triggerId);
 	}
 
 	#bounded(work: Promise<unknown>, ms: number): Promise<"returned" | "timed_out"> {
@@ -1234,11 +1463,8 @@ export class TriggersRuntime {
 
 	#renewLease(ms: number): void {
 		this.#leaseExpiresAt = this.#clock.now() + ms;
-		this.#leaseCancel?.();
-		this.#leaseCancel = this.#clock.setTimer(ms, () => {
-			this.#leaseCancel = null;
-			void this.#enqueue(() => this.#expireLease()).catch(() => undefined);
-		});
+		this.#cancel("lease");
+		this.#timer("lease", ms, () => this.#expireLease());
 	}
 
 	#expireLease(): void {
@@ -1248,24 +1474,43 @@ export class TriggersRuntime {
 		for (const slot of this.#slots.values()) if (slot.run) this.#stop(slot.run, "lease_expired");
 	}
 
-	#ref(desired: DesiredSource): SourceRef {
-		return { serverEpoch: this.#spool.epoch ?? 0, triggerId: desired.triggerId, sourceId: desired.sourceId, generation: desired.generation };
+	#ref(run: Run): SourceRef {
+		return { serverEpoch: run.epoch, triggerId: run.desired.triggerId, sourceId: run.desired.sourceId, generation: run.desired.generation };
+	}
+
+	#target(run: Run): LossTarget {
+		return { epoch: run.epoch, triggerId: run.desired.triggerId, sourceId: run.desired.sourceId, generation: run.desired.generation };
+	}
+
+	/**
+	 * Control from or about a run goes only to a connection the space has
+	 * reconciled on, and only while the run's epoch is current: the next
+	 * reconcile's answer, and the gaps in the spool, cover what is dropped.
+	 */
+	#pushFor(run: Run, message: RuntimeMessage): void {
+		if (!this.#reconciled || run.epoch !== this.#spool.epoch) return;
+		this.#push(message);
+	}
+
+	#report(run: Run, health: AdapterHealth): void {
+		this.#pushFor(run, { ...this.#ref(run), protocol: PROTOCOL, type: "health", status: health.status, code: health.code });
 	}
 
 	#health(run: Run, report: unknown): void {
-		if (run.fenced || run.state !== "installed") return;
+		if (!this.#current(run) || run.state !== "installed") return;
 		const given = report as AdapterHealth;
 		if (typeof given !== "object" || given === null || !["ok", "degraded", "error"].includes(given.status) || typeof given.code !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(given.code)) {
 			this.#log({ code: "adapter_health_invalid", triggerId: run.desired.triggerId, generation: run.desired.generation });
 			return;
 		}
-		this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "health", status: given.status, code: given.code });
+		this.#report(run, { status: given.status, code: given.code });
 	}
 
-	#emit(run: Run, observed: Observed): Promise<EmitResult> {
+	#emit(run: Run, observed: unknown): Promise<EmitResult> {
 		if (run.fenced) return Promise.resolve(refused("stopped"));
 		if (run.state !== "installed") return Promise.resolve(refused("not_started"));
-		const given = readObserved(observed);
+		// Copied now, before anything waits, so what the adapter does with its object afterwards changes nothing.
+		const given = snapshotObserved(observed);
 		if (!given) return Promise.resolve(refused("invalid"));
 		return this.#enqueue(() => this.#accept(run, given)).catch(() => refused("spool_unavailable"));
 	}
@@ -1273,17 +1518,15 @@ export class TriggersRuntime {
 	async #accept(run: Run, observed: Required<Observed>): Promise<EmitResult> {
 		const now = this.#clock.now();
 		if (this.#leaseExpiresAt !== null && now >= this.#leaseExpiresAt) this.#expireLease();
-		const epoch = this.#spool.epoch;
-		if (run.fenced || epoch === null) return refused("stopped");
+		if (!this.#current(run)) return refused("stopped");
 		const desired = run.desired;
-		const target = { epoch, triggerId: desired.triggerId, sourceId: desired.sourceId, generation: desired.generation };
 		const eventId = observed.key === null ? `r_${randomUUID()}` : `k_${sha256(`${desired.sourceId}\n${observed.key}`).slice(0, 40)}`;
 		if (observed.key !== null && this.#spool.findEvent(eventId)) return { ok: true, eventId, duplicate: true };
 		let entry: ObservationEntry = {
 			kind: "observation",
 			seq: this.#spool.allocate(),
 			eventId,
-			epoch,
+			epoch: run.epoch,
 			recordedAt: now,
 			triggerId: desired.triggerId,
 			sourceId: desired.sourceId,
@@ -1295,21 +1538,27 @@ export class TriggersRuntime {
 			coalesced: null,
 		};
 		if (Buffer.byteLength(JSON.stringify(entry.data)) > this.#limits.dataBytes || Buffer.byteLength(this.#frame(entry)) > this.#limits.frameBytes) {
-			await this.#recordGap(target, { too_large: 1 }, observed.occurredAt, observed.occurredAt);
-			return refused("too_large");
+			return this.#refuse(run, "too_large", { too_large: 1 }, observed.occurredAt);
 		}
-		if (run.paused) {
-			await this.#recordGap(target, { overflow: 1 }, observed.occurredAt, observed.occurredAt);
-			return refused("backpressure");
-		}
+		if (run.paused) return this.#refuse(run, "backpressure", { overflow: 1 }, observed.occurredAt);
 		let removes: number[] = [];
 		if (!this.#spool.fits([entry], [], false)) {
 			// A state's snapshots not yet sent may give way to a newer one, which says how many it stands for. Events never do.
 			const unsent =
 				desired.source.kind === "poll"
-					? this.#spool.entries().filter((held): held is ObservationEntry => held.kind === "observation" && held.sourceId === desired.sourceId && held.generation === desired.generation && held.epoch === epoch && !this.#transmitted.has(held.seq))
+					? this.#spool.entries().filter((held): held is ObservationEntry => held.kind === "observation" && held.sourceId === desired.sourceId && held.generation === desired.generation && held.epoch === run.epoch && !this.#transmitted.has(held.seq))
 					: [];
-			const coalesced = unsent.length === 0 ? entry : { ...entry, coalesced: { count: 1 + unsent.reduce((sum, held) => sum + (held.coalesced?.count ?? 1), 0), from: Math.min(...unsent.map((held) => held.coalesced?.from ?? held.occurredAt), entry.occurredAt), to: entry.occurredAt } };
+			const coalesced: ObservationEntry =
+				unsent.length === 0
+					? entry
+					: {
+							...entry,
+							coalesced: {
+								count: 1 + unsent.reduce((sum, held) => sum + (held.coalesced?.count ?? 1), 0),
+								from: Math.min(...unsent.map((held) => held.coalesced?.from ?? held.occurredAt), entry.occurredAt),
+								to: entry.occurredAt,
+							},
+						};
 			if (unsent.length > 0 && this.#spool.fits([coalesced], unsent.map((held) => held.seq), false) && Buffer.byteLength(this.#frame(coalesced)) <= this.#limits.frameBytes) {
 				entry = coalesced;
 				removes = unsent.map((held) => held.seq);
@@ -1318,106 +1567,138 @@ export class TriggersRuntime {
 				try {
 					run.adapter?.pause?.();
 				} catch {}
-				await this.#recordGap(target, { overflow: 1 }, observed.occurredAt, observed.occurredAt);
-				this.#push({ ...this.#ref(desired), protocol: PROTOCOL, type: "health", status: "degraded", code: "backpressure" });
-				return refused("backpressure");
+				this.#report(run, { status: "degraded", code: "backpressure" });
+				return this.#refuse(run, "backpressure", { overflow: 1 }, observed.occurredAt);
 			}
 		}
 		try {
 			await this.#spool.commit([entry], removes);
 		} catch {
 			this.#log({ code: "spool_unavailable", triggerId: desired.triggerId, generation: desired.generation });
-			this.#push({ ...this.#ref(desired), protocol: PROTOCOL, type: "health", status: "error", code: "spool_unavailable" });
+			this.#report(run, { status: "error", code: "spool_unavailable" });
+			this.#setBarrier(run);
 			return refused("spool_unavailable");
 		}
 		if (removes.length > 0) {
 			const gone = new Set(removes);
 			for (const seq of removes) this.#delivery.delete(seq);
-			run.outstanding = run.outstanding.filter((item) => !gone.has(item.seq));
+			run.pending = run.pending.filter((item) => !gone.has(item.seq));
+			this.#scheduleScrub();
 		}
-		run.outstanding.push({ seq: entry.seq, checkpoint: entry.checkpoint, settled: null });
+		if (!run.barrier) run.pending.push({ seq: entry.seq, checkpoint: entry.checkpoint, settled: false });
 		this.#delivery.set(entry.seq, { sentAt: null, attempts: 0, notBefore: 0 });
 		this.#scheduleFlush(0);
 		this.#scheduleExpiry();
 		return { ok: true, eventId, duplicate: false };
 	}
 
-	/**
-	 * Records a loss as a gap entry, which is sent and acknowledged as
-	 * observations are. Losses of one source and generation merge into one
-	 * entry until it has been sent, so gaps stay bounded. False when even the
-	 * reserve is full.
-	 */
-	async #recordGap(target: { epoch: number; triggerId: string | null; sourceId: string | null; generation: number | null }, reasons: GapCounts, from: number, to: number): Promise<boolean> {
-		const open = this.#spool
-			.entries()
-			.find((held): held is GapEntry => held.kind === "gap" && held.epoch === target.epoch && held.sourceId === target.sourceId && held.generation === target.generation && !this.#transmitted.has(held.seq));
-		const entry: GapEntry = open
-			? { ...open, reasons: addCounts(open.reasons, reasons), from: Math.min(open.from, from), to: Math.max(open.to, to) }
-			: { kind: "gap", seq: this.#spool.allocate(), eventId: `g_${randomUUID()}`, recordedAt: this.#clock.now(), ...target, reasons, from, to };
-		try {
-			if (!this.#spool.fits([entry], [], true)) throw new SpoolError("full");
-			await this.#spool.commit([entry], []);
-		} catch {
-			this.#log({ code: "gap_unrecorded", triggerId: target.triggerId ?? undefined });
-			return false;
-		}
-		if (!open) this.#delivery.set(entry.seq, { sentAt: null, attempts: 0, notBefore: 0 });
-		this.#scheduleFlush(0);
-		return true;
+	/** Refuses an emission: the run commits nothing more, and the refusal is counted in a gap, durably as soon as the spool can take it. */
+	async #refuse(run: Run, reason: "too_large" | "backpressure", reasons: GapCounts, at: number): Promise<EmitResult> {
+		this.#setBarrier(run);
+		this.#noteLoss(this.#target(run), reasons, at, at);
+		if (!(await this.#commitLosses([], []))) this.#report(run, { status: "error", code: "loss_unrecorded" });
+		return refused(reason);
 	}
 
-	/** Takes out what an older epoch left, recording how much as gaps in this one. */
-	async #discardBefore(epoch: number): Promise<void> {
-		const stale = this.#spool.entries().filter((entry) => entry.epoch < epoch);
-		if (stale.length === 0) return;
-		await this.#gapsFor(stale, epoch, "epoch_replaced");
-		await this.#remove(stale.map((entry) => entry.seq), "lost");
+	#setBarrier(run: Run): void {
+		run.barrier = true;
+		run.pending = [];
 	}
 
-	/** Gives up observations held longer than `ttlMs`: they are never sent, and a gap says so. */
-	async #sweepExpired(): Promise<void> {
-		const now = this.#clock.now();
-		const epoch = this.#spool.epoch;
-		const expired = this.#spool.entries().filter((entry) => entry.kind === "observation" && entry.recordedAt + this.#limits.ttlMs <= now);
-		if (expired.length > 0 && epoch !== null) {
-			this.#log({ code: "spool_expired", count: expired.length });
-			await this.#gapsFor(expired, epoch, "expired");
-			await this.#remove(
-				expired.map((entry) => entry.seq),
-				"lost",
-			);
-		}
-		this.#scheduleExpiry();
+	#noteLoss(target: LossTarget, reasons: GapCounts, from: number, to: number): void {
+		const key = lossKey(target, reasons);
+		const held = this.#losses.get(key);
+		this.#losses.set(key, held ? { target, reasons: addCounts(held.reasons, reasons), from: Math.min(held.from, from), to: Math.max(held.to, to) } : { target, reasons, from, to });
 	}
 
-	async #gapsFor(entries: readonly SpoolEntry[], epoch: number, reason: GapReason): Promise<void> {
-		const groups = new Map<string, { target: { epoch: number; triggerId: string | null; sourceId: string | null; generation: number | null }; reasons: GapCounts; from: number; to: number }>();
+	/** Counts what `entries` held, one loss per source and generation, under `epoch`; a gap among them adds its own counts. */
+	#lossesOf(entries: readonly SpoolEntry[], epoch: number, reason: GapReason): Loss[] {
+		const groups = new Map<string, { target: LossTarget; reasons: GapCounts; from: number; to: number }>();
 		for (const entry of entries) {
-			const key = `${entry.sourceId}\n${entry.generation}`;
-			const group = groups.get(key) ?? { target: { epoch, triggerId: entry.triggerId, sourceId: entry.sourceId, generation: entry.generation }, reasons: {}, from: Number.POSITIVE_INFINITY, to: Number.NEGATIVE_INFINITY };
+			const target: LossTarget = { epoch, triggerId: entry.triggerId, sourceId: entry.sourceId, generation: entry.generation };
+			const key = lossKey(target, entry.kind === "gap" ? entry.reasons : { [reason]: 1 });
+			const group = groups.get(key) ?? { target, reasons: {}, from: Number.POSITIVE_INFINITY, to: Number.NEGATIVE_INFINITY };
 			group.reasons = addCounts(group.reasons, entry.kind === "gap" ? entry.reasons : { [reason]: 1 });
 			group.from = Math.min(group.from, entry.kind === "gap" ? entry.from : entry.occurredAt);
 			group.to = Math.max(group.to, entry.kind === "gap" ? entry.to : entry.occurredAt);
 			groups.set(key, group);
 		}
-		// Gaps are written before the entries go, so a crash in between can count a loss twice, never not at all.
-		for (const group of groups.values()) await this.#recordGap(group.target, group.reasons, group.from, group.to);
+		return [...groups.values()];
 	}
 
-	async #remove(seqs: readonly number[], settled: "acked" | "lost"): Promise<void> {
-		try {
-			await this.#spool.commit([], seqs);
-		} catch {
-			this.#log({ code: "spool_unavailable" });
-			return;
+	/**
+	 * Writes, in one commit: every loss not yet durable and `extra` as gap
+	 * entries (merged into a gap of the same source not yet sent), the removal
+	 * of `removes`, and the new epoch if given. Either all of it is durable or
+	 * none of it is: on failure the entries stay, the epoch stays, `extra` is
+	 * not kept (its entries still stand for it), and losses not yet durable
+	 * wait for the next try.
+	 */
+	async #commitLosses(extra: readonly Loss[], removes: readonly number[], options: { epoch?: number; rewrite?: boolean } = {}): Promise<boolean> {
+		const epoch = options.epoch ?? this.#spool.epoch;
+		if (epoch === null) return false;
+		const removing = new Set(removes);
+		const merged = new Map<string, Loss>();
+		for (const loss of [...this.#losses.values(), ...extra]) {
+			// A loss of an epoch being replaced is counted in the new one; nothing is sent under the old.
+			const target = loss.target.epoch < epoch ? { ...loss.target, epoch } : loss.target;
+			const key = lossKey(target, loss.reasons);
+			const held = merged.get(key);
+			merged.set(key, held ? { target, reasons: addCounts(held.reasons, loss.reasons), from: Math.min(held.from, loss.from), to: Math.max(held.to, loss.to) } : { ...loss, target });
 		}
-		for (const seq of seqs) {
+		const gaps: GapEntry[] = [];
+		const now = this.#clock.now();
+		for (const loss of merged.values()) {
+			const open = this.#spool
+				.entries()
+				.find(
+					(held): held is GapEntry =>
+						held.kind === "gap" &&
+						lossKey(held, held.reasons) === lossKey(loss.target, loss.reasons) &&
+						!this.#transmitted.has(held.seq) &&
+						!removing.has(held.seq),
+				);
+			gaps.push(
+				open
+					? { ...open, reasons: addCounts(open.reasons, loss.reasons), from: Math.min(open.from, loss.from), to: Math.max(open.to, loss.to) }
+					: { kind: "gap", seq: this.#spool.allocate(), eventId: `g_${randomUUID()}`, recordedAt: now, ...loss.target, reasons: loss.reasons, from: loss.from, to: loss.to },
+			);
+		}
+		if (gaps.length === 0 && removes.length === 0 && options.epoch === undefined && !options.rewrite) return true;
+		try {
+			if (!this.#spool.fits(gaps, removes, true)) throw new SpoolError("full");
+			await this.#spool.commit(gaps, removes, options);
+		} catch {
+			this.#log({ code: "loss_unrecorded" });
+			if (this.#losses.size > 0) this.#timer("losses", this.#limits.blockedRetryMs, () => this.#commitLosses([], []).then(() => undefined));
+			return false;
+		}
+		this.#losses.clear();
+		for (const gap of gaps) if (!this.#delivery.has(gap.seq)) this.#delivery.set(gap.seq, { sentAt: null, attempts: 0, notBefore: 0 });
+		for (const seq of removes) {
 			this.#delivery.delete(seq);
 			this.#transmitted.delete(seq);
 		}
-		this.#settle(new Set(seqs), settled);
-		this.#maybeResume();
+		this.#scheduleScrub();
+		this.#scheduleFlush(0);
+		return true;
+	}
+
+	/** Gives up observations held longer than `ttlMs`: they are never sent, and a gap says so, in the same commit that rewrites them out of the journal. */
+	async #sweepExpired(): Promise<void> {
+		if (this.#losses.size > 0) await this.#commitLosses([], []);
+		const now = this.#clock.now();
+		const epoch = this.#spool.epoch;
+		const expired = this.#spool.entries().filter((entry) => entry.kind === "observation" && entry.recordedAt + this.#limits.ttlMs <= now);
+		if (expired.length > 0 && epoch !== null) {
+			const seqs = expired.map((entry) => entry.seq);
+			if (await this.#commitLosses(this.#lossesOf(expired, epoch, "expired"), seqs, { rewrite: true })) {
+				this.#log({ code: "spool_expired", count: expired.length });
+				this.#settle(new Set(seqs), "lost");
+				this.#maybeResume();
+			}
+		}
+		this.#scheduleExpiry();
 	}
 
 	async #acknowledged(message: AckMessage): Promise<void> {
@@ -1441,24 +1722,56 @@ export class TriggersRuntime {
 			if (result.result === "rejected") this.#log({ code: "observation_rejected", triggerId: entry.triggerId ?? undefined });
 			settled.add(entry.seq);
 		}
-		if (settled.size > 0) await this.#remove([...settled], "acked");
+		if (settled.size > 0) {
+			try {
+				await this.#spool.commit([], [...settled]);
+			} catch {
+				// Still held, so it is sent again, and the space answers duplicate.
+				this.#log({ code: "spool_unavailable" });
+				return;
+			}
+			for (const seq of settled) {
+				this.#delivery.delete(seq);
+				this.#transmitted.delete(seq);
+			}
+			this.#settle(settled, "acked");
+			this.#maybeResume();
+			this.#scheduleScrub();
+		}
 		this.#scheduleFlush(0);
 	}
 
-	/** Moves each observer's committed checkpoint over what the space has settled, in order; a loss is never passed. */
-	#settle(seqs: ReadonlySet<number>, settled: "acked" | "lost"): void {
+	/**
+	 * Moves each observer's committed checkpoint over what the space has
+	 * settled, in order. A loss sets the observer's barrier instead: it never
+	 * commits past a gap, and keeps nothing more to do so.
+	 */
+	#settle(seqs: ReadonlySet<number>, how: "acked" | "lost"): void {
 		for (const slot of this.#slots.values()) {
 			const run = slot.run;
-			if (!run) continue;
-			for (const item of run.outstanding) if (seqs.has(item.seq)) item.settled = settled;
-			let checkpoint: Checkpoint | null = null;
-			while (run.outstanding[0]?.settled === "acked") {
-				const item = run.outstanding.shift() as Outstanding;
-				if (item.checkpoint) checkpoint = item.checkpoint;
+			if (!run || run.barrier || !run.pending.some((item) => seqs.has(item.seq))) continue;
+			if (how === "lost") {
+				this.#setBarrier(run);
+				continue;
 			}
-			if (checkpoint && !run.fenced && run.state === "installed") {
+			const merged: Run["pending"] = [];
+			for (const item of run.pending) {
+				const settled = item.settled || seqs.has(item.seq);
+				const last = merged.at(-1);
+				if (settled && last?.settled) {
+					last.seq = item.seq;
+					if (item.checkpoint) last.checkpoint = item.checkpoint;
+				} else {
+					merged.push({ seq: item.seq, checkpoint: item.checkpoint, settled });
+				}
+			}
+			run.pending = merged;
+			const head = run.pending[0];
+			if (!head?.settled) continue;
+			run.pending.shift();
+			if (head.checkpoint && this.#current(run) && run.state === "installed") {
 				try {
-					run.adapter?.commit?.(checkpoint);
+					run.adapter?.commit?.(head.checkpoint);
 				} catch {
 					this.#log({ code: "adapter_commit_failed", triggerId: run.desired.triggerId, generation: run.desired.generation });
 				}
@@ -1471,12 +1784,12 @@ export class TriggersRuntime {
 		if (this.#spool.bytes > maxBytes / 2 || this.#spool.count > maxEntries / 2) return;
 		for (const slot of this.#slots.values()) {
 			const run = slot.run;
-			if (!run || !run.paused || run.fenced) continue;
+			if (!run || !run.paused || !this.#current(run)) continue;
 			run.paused = false;
 			try {
 				run.adapter?.resume?.();
 			} catch {}
-			this.#push({ ...this.#ref(run.desired), protocol: PROTOCOL, type: "health", status: "ok", code: "resumed" });
+			this.#report(run, { status: "ok", code: "resumed" });
 		}
 	}
 
@@ -1526,32 +1839,40 @@ export class TriggersRuntime {
 		return JSON.stringify(message);
 	}
 
+	/** A new connection sends everything unsettled again, with its backoff started over. */
+	#resetDelivery(): void {
+		for (const delivery of this.#delivery.values()) {
+			delivery.sentAt = null;
+			delivery.attempts = 0;
+		}
+	}
+
 	#scheduleFlush(delay: number): void {
-		if (!this.#transport || this.#closed) return;
-		const at = this.#clock.now() + Math.max(0, delay);
-		if (this.#flushCancel && this.#flushAt <= at) return;
-		this.#flushCancel?.();
-		this.#flushAt = at;
-		this.#flushCancel = this.#clock.setTimer(Math.max(0, delay), () => {
-			this.#flushCancel = null;
-			this.#flushAt = Number.POSITIVE_INFINITY;
-			void this.#enqueue(() => this.#flush()).catch(() => undefined);
-		});
+		if (!this.#transport) return;
+		this.#timer("flush", delay, () => this.#flush());
 	}
 
 	#scheduleExpiry(): void {
-		if (this.#closed) return;
 		let oldest = Number.POSITIVE_INFINITY;
 		for (const entry of this.#spool.entries()) if (entry.kind === "observation") oldest = Math.min(oldest, entry.recordedAt);
 		if (oldest === Number.POSITIVE_INFINITY) return;
+		const now = this.#clock.now();
 		const at = oldest + this.#limits.ttlMs;
-		if (this.#expiryCancel && this.#expiryAt <= at) return;
-		this.#expiryCancel?.();
-		this.#expiryAt = at;
-		this.#expiryCancel = this.#clock.setTimer(Math.max(0, at - this.#clock.now()), () => {
-			this.#expiryCancel = null;
-			this.#expiryAt = Number.POSITIVE_INFINITY;
-			void this.#enqueue(() => this.#sweepExpired()).catch(() => undefined);
+		// Something already past its time is only here because a sweep couldn't write; try again shortly.
+		this.#timer("expiry", at <= now ? this.#limits.blockedRetryMs : at - now, () => this.#sweepExpired());
+	}
+
+	/** Rewrites the journal within `scrubAfterMs` of entries leaving it, so what they held doesn't stay in the file. */
+	#scheduleScrub(): void {
+		if (this.#spool.retiredBytes === 0) return;
+		this.#timer("scrub", this.#limits.scrubAfterMs, async () => {
+			if (this.#spool.retiredBytes === 0) return;
+			try {
+				await this.#spool.compact();
+			} catch {
+				this.#log({ code: "spool_unavailable" });
+				this.#timer("scrub", this.#limits.blockedRetryMs, () => this.#scheduleScrub());
+			}
 		});
 	}
 
@@ -1564,6 +1885,8 @@ export class TriggersRuntime {
 	 * Sends control first, then a bounded batch of what is due, in sequence
 	 * order. It always ends by setting a timer for a later instant, or none:
 	 * it never loops, and a transport that takes nothing waits `blockedRetryMs`.
+	 * An observation past its time to live is never sent, even while the sweep
+	 * that records it as lost can't be written.
 	 */
 	async #flush(): Promise<void> {
 		const transport = this.#transport;
@@ -1583,7 +1906,7 @@ export class TriggersRuntime {
 		let sent = 0;
 		let next = Number.POSITIVE_INFINITY;
 		for (const entry of this.#spool.entries()) {
-			if (entry.epoch !== epoch) continue;
+			if (entry.epoch !== epoch || (entry.kind === "observation" && entry.recordedAt + this.#limits.ttlMs <= now)) continue;
 			let delivery = this.#delivery.get(entry.seq);
 			if (!delivery) {
 				delivery = { sentAt: null, attempts: 0, notBefore: 0 };

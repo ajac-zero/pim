@@ -359,6 +359,52 @@ describe("an agent's contacts", () => {
 		expect(update).toMatch(/^\[Task update\] Writer answered/);
 		expect(update).toContain("Day 1: Alfama.");
 	});
+
+	it("tells the agent that asked when an event wakes the agent of a finished task and it answers, and not when it stays quiet", async () => {
+		const agent = await planner("Asker");
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		const updates: string[] = [];
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "Researcher", task: "Watch the fares." }] }),
+				() => toolUse("send_to_user", { message: "Researcher is watching." }),
+				(context) => {
+					updates.push(lastUserText(context.messages));
+					return toolUse("send_to_user", { message: "Noted." });
+				},
+			],
+			Researcher: [() => answer("Fares are flat.")],
+		});
+		await say("Watch the fares.", session);
+		await settled(session);
+		expect(updates).toEqual([expect.stringContaining("Fares are flat.")]);
+		const [task] = await tasksOf(session);
+		const wake = (instruction: string) =>
+			runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+				await pim.submitTo(pim.store.sessionOf(task!.session!)!, instruction, { operationId: crypto.randomUUID() }, "pim");
+			});
+
+		scripts({
+			lead: [
+				(context) => {
+					updates.push(lastUserText(context.messages));
+					return toolUse("send_to_user", { message: "Noted again." });
+				},
+			],
+			Researcher: [() => answer("Fares dropped 20%.")],
+		});
+		await wake("[Connector event] Fares changed.");
+		await settled(session);
+		expect(updates[1]).toContain("Fares dropped 20%.");
+		expect(await updatesIn(session)).toHaveLength(2);
+
+		// Woken again with nothing to say, it tells no one.
+		scripts({ Researcher: [() => fauxAssistantMessage("Nothing new.")] });
+		await wake("[Connector event] Fares unchanged.");
+		await settled(task!.session!);
+		expect(await updatesIn(session)).toHaveLength(2);
+		expect((await tasksOf(session))[0]).toMatchObject({ state: "completed", result: "(It gave no answer.)" });
+	});
 });
 
 describe("the majordomo", () => {

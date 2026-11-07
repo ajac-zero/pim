@@ -36,6 +36,7 @@ import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { TriggersHost, TriggersHostOptions } from "./triggers-host.ts";
 
 export const VERSION = "0.1.0";
 
@@ -1713,6 +1714,30 @@ install takes the same options, which the service then runs with, and --desktop,
 session rather than at login or boot. The browser keeps its profile, with what you sign in to there, in
 ~/.pim-computer/browser.`;
 
+/**
+ * The variable that runs triggers' observers here (./triggers-host.ts), for
+ * internal review only. Nothing sets it: `install` gives its service only the
+ * variables it names, and only `internal` turns it on.
+ */
+export const TRIGGERS_GATE = "PIM_COMPUTER_TRIGGERS";
+
+/**
+ * The triggers host, when the gate is on and its module is beside this file;
+ * otherwise null, with nothing of triggers loaded, made or listened for. The
+ * Pim's install and update download this file alone, so an installed
+ * computer has no triggers whatever its environment says.
+ */
+export async function loadTriggers(env: Record<string, string | undefined>, options: TriggersHostOptions): Promise<TriggersHost | null> {
+	if (env[TRIGGERS_GATE] !== "internal") return null;
+	try {
+		const { startTriggers } = await import("./triggers-host.ts");
+		return await startTriggers(options);
+	} catch {
+		options.log("Triggers are on, but their runtime couldn't start here, so this computer runs no triggers.");
+		return null;
+	}
+}
+
 async function main(): Promise<void> {
 	const { parseArgs } = await import("node:util");
 	const os = await import("node:os");
@@ -1785,11 +1810,14 @@ async function main(): Promise<void> {
 	const spacesd = values.spacesd ?? env.PIM_SPACESD_URL ?? "http://127.0.0.1:3211";
 	const screen = spacesdTokenFile ? spacesdScreen(spacesd, spacesdTokenFile) : undefined;
 	const driver = spacesdTokenFile ? spacesdDriver(spacesd, spacesdTokenFile) : undefined;
+	// Off unless the gate is on; then triggers' observers, like apps, outlast a dropped connection until the space's lease ends, and end with this process.
+	const triggers = await loadTriggers(env, { token: token!, stateDir: path.join(os.homedir(), ".pim-computer"), root, log });
 	// Apps keep running when the connection to the space drops; they end with this process.
 	const apps = new Apps();
 	process.on("exit", () => apps.killAll());
+	if (triggers) process.on("exit", () => triggers.killOwned());
 	for (const signal of ["SIGTERM", "SIGINT"] as const) {
-		process.on(signal, () => void apps.stopAll().finally(() => process.exit(0)));
+		process.on(signal, () => void (triggers ? Promise.allSettled([apps.stopAll(), triggers.close()]) : apps.stopAll()).finally(() => process.exit(0)));
 	}
 	const machine: Machine = {
 		root,
@@ -1835,18 +1863,23 @@ async function main(): Promise<void> {
 			socket.send(JSON.stringify(hello));
 			// The space answers "ping" without waking; it keeps the connection through proxies and NATs.
 			ping = setInterval(() => socket.send("ping"), 30_000);
+			triggers?.attach(socket);
 		});
 		socket.addEventListener("message", (event) => {
 			if (typeof event.data !== "string" || event.data === "pong") return;
+			if (triggers?.receive(socket, event.data)) return;
 			logRun(event.data);
 			link.receive(event.data);
 		});
 		socket.addEventListener("close", (event) => {
 			clearInterval(ping);
 			link.close();
+			triggers?.detach(socket);
 			if (event.code === REPLACED) {
 				log("Another computer connected with this token, so this one stops.");
-				process.exit(1);
+				if (!triggers) process.exit(1);
+				void triggers.close().finally(() => process.exit(1));
+				return;
 			}
 			// A token Pim doesn't know is refused before the connection opens, which looks the same as being offline.
 			log(`${ping ? "Disconnected" : "Couldn't connect"}${event.reason ? ` (${event.reason})` : ""}; trying again in ${wait / 1000} s.`);

@@ -3,8 +3,9 @@
  * invocation at a time, and emits what it prints, one bounded JSON object,
  * as a state observation. Its contract is in docs/triggers-adapters.md.
  *
- * Inert. Nothing imports this module into pim-computer or its service; only
- * tests construct it.
+ * Behind a gate. Only the triggers host (../triggers-host.ts) uses it,
+ * which pim-computer loads only when `PIM_COMPUTER_TRIGGERS` is `internal`,
+ * which nothing sets.
  *
  * The command runs as the user who runs pim-computer, with that user's
  * access. The runtime's host checks the grant before this adapter is ever

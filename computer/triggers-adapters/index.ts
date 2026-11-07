@@ -7,8 +7,9 @@
  * able to build a `StreamAdapter`, and the runtime does that only after the
  * host's source-bound grant check passes; building one launches nothing.
  *
- * Inert. Nothing imports this module: pim-computer doesn't construct a
- * runtime, and no service registers these adapters. See
+ * Behind a gate. Only the triggers host (../triggers-host.ts) configures
+ * it, which pim-computer loads only when `PIM_COMPUTER_TRIGGERS` is
+ * `internal`, which nothing sets; no service registers these adapters. See
  * docs/triggers-adapters.md.
  */
 

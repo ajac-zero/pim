@@ -149,6 +149,20 @@ describe("A person's own model providers", () => {
 		expect(calls.at(-1)!.body.thinking.type).toBe("enabled");
 	});
 
+	it("keeps a system update ahead of an answer on a Claude endpoint when another provider's answer was only reasoning", async () => {
+		const provider = await prepareProvider({ name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set());
+		const models = createModels();
+		models.setProvider(piProvider("own:proxy", provider));
+		const model = models.getModel("own:proxy", "claude-sonnet-5-5")!;
+		const reasoning = { ...fauxAssistantMessage([{ type: "thinking", thinking: "", thinkingSignature: "{}" }]), provider: "openai", api: "openai-codex-responses" as const, model: "gpt-5" };
+		const update = { role: "system" as const, content: "The tools changed.", timestamp: 1 };
+		const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
+		await models.completeSimple(model, { messages: [{ ...update, content: "Be helpful." }, user("Hi"), update, reasoning, user("Again")] });
+		const roles = calls.at(-1)!.body.messages.map((message: { role: string }) => message.role);
+		// Claude takes a system message only before an assistant message or at the end.
+		expect(roles.every((role: string, index: number) => role !== "system" || roles[index + 1] === undefined || roles[index + 1] === "assistant" || roles[index + 1] === "system")).toBe(true);
+	});
+
 	it.each(BUILTINS)("connects %s with a key and chosen models, and delivers messages through its native API (%s)", async (builtin, id, endpoint, header) => {
 		const catalog = await api("/providers/built-in");
 		expect(catalog.status).toBe(200);

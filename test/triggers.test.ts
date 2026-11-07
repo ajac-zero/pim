@@ -52,6 +52,21 @@ const pollSpec = (over: Record<string, unknown> = {}) => ({
 
 const eventSpec = (over: Record<string, unknown> = {}) => ({ ...base, source: { kind: "connector_event", connectorId: "flights", event: "price.changed" }, ...over });
 
+/** A spec of each kind of source, as a caller would write it, with no ids or authorization for the store to object to. */
+function everySource(): Record<string, unknown>[] {
+	const exists = { when: { op: "exists", path: ["a"] } };
+	return [
+		{ ...base, source: { kind: "time", schedule: "once", at: START + HOUR } },
+		{ ...base, source: { kind: "time", schedule: "cron", expression: "0 9 * * 1-5", timeZone: "Europe/Lisbon" } },
+		{ ...base, source: { kind: "time", schedule: "interval", everyMs: HOUR, anchorAt: START } },
+		eventSpec({ condition: exists }),
+		pollSpec({ condition: { when: { op: "stable_for", ms: MINUTE, of: { op: "compare", path: ["up"], cmp: "eq", value: false } } } }),
+		{ ...base, source: { kind: "stream", command: "./tail.sh", cwd: "/var/log" }, authorizationRef: "approval-1" },
+		{ ...base, source: { kind: "process", handle: "proc-1", expiresAt: START + HOUR }, condition: exists, authorizationRef: "approval-1" },
+		{ ...base, source: { kind: "file", path: "/home/ada/inbox", events: ["created", "deleted"], recursive: true }, destination: { type: "new_chat" }, authorizationRef: "approval-1" },
+	];
+}
+
 function count(sql: SqlStorage, table: string): number {
 	return Number(sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n);
 }
@@ -88,6 +103,17 @@ describe("trigger specs", () => {
 			source: { recursive: false },
 			destination: { type: "new_chat" },
 		});
+	});
+
+	it("reads a spec it wrote back as the same spec, for every source", () => {
+		for (const spec of everySource()) {
+			const canonical = parseTriggerSpec(spec);
+			// As read, and as stored: the JSON the store keeps for a revision.
+			expect(parseTriggerSpec(canonical), JSON.stringify(spec.source)).toEqual(canonical);
+			expect(parseTriggerSpec(JSON.parse(JSON.stringify(canonical))), JSON.stringify(spec.source)).toEqual(canonical);
+		}
+		// Null is the stored form for a source that holds one snapshot; a number is still refused.
+		expect(() => parseTriggerSpec({ ...base, source: { kind: "time", schedule: "once", at: START }, delivery: { maxPendingEvents: 1 } })).toThrow(TriggerValidationError);
 	});
 
 	it("refuses unknown fields, unsupported forms and anything out of bounds, naming the field", () => {
@@ -314,6 +340,22 @@ describe("trigger store", () => {
 		});
 	});
 
+	it("takes a stored spec back unchanged, and an edit of it as a new revision, for every source", async () => {
+		await withStore(({ store }) => {
+			for (const spec of everySource()) {
+				for (const lifecycle of ["draft", "enabled"] as const) {
+					const trigger = created(store, spec, lifecycle);
+					const stored = store.get(trigger.id)!.spec;
+					expect(store.update({ id: trigger.id, expectedRevision: 1, spec: stored }), JSON.stringify(stored.source)).toMatchObject({ ok: true, trigger: { revision: 1, generation: trigger.generation } });
+					expect(store.update({ id: trigger.id, expectedRevision: 1, spec: { ...stored, label: "Edited" } }), JSON.stringify(stored.source)).toMatchObject({
+						ok: true,
+						trigger: { revision: 2, generation: trigger.generation, spec: { ...stored, label: "Edited" } },
+					});
+				}
+			}
+		});
+	});
+
 	it("enables a computer source only when the host accepts its grant for exactly that source", async () => {
 		await withStore(({ make, clock }) => {
 			// The host's grants: each for one source, until it expires.
@@ -454,27 +496,35 @@ describe("trigger store", () => {
 		});
 	});
 
-	it("deletes a trigger by stopping it and cancelling what it hadn't handed on, keeping its record until the space is erased", async () => {
+	it("deletes a trigger by stopping it, cancelling only what no attempt claimed, and keeping its record until the space is erased", async () => {
 		await withStore(({ store, clock, sql }) => {
 			created(store, eventSpec({ instruction: "First" }), "enabled", "flights");
 			for (const eventId of ["a", "b", "c"]) store.admit({ id: "flights", generation: 1, eventId, observedAt: START, payload: {} });
 			const done = store.claim({ leaseMs: MINUTE })!;
 			store.complete({ outboxId: done.item.id, attempt: done.attempt });
+			// `b` is under way: its deliverer's submission was accepted, and it is deleted before the deliverer records that.
 			const underWay = store.claim({ leaseMs: MINUTE })!;
 			store.update({ id: "flights", expectedRevision: 1, spec: eventSpec({ instruction: "Second" }) });
 			clock.now += 1_000;
 			expect(store.remove({ id: "flights", expectedRevision: 1 })).toMatchObject({ ok: false, reason: "revision_mismatch" });
 			expect(store.remove({ id: "flights", expectedRevision: 2 })).toEqual({ ok: true });
-			// The attempt under way can't settle it, and nothing more is claimed.
+			// Only `c`, which nothing had claimed, is cancelled. Whether `b` was handed on is unknown, not cancelled.
+			expect(store.occurrences("flights").map((occurrence) => occurrence.status)).toEqual(["delivered", "outcome_unknown", "cancelled"]);
+			expect(store.outbox("flights").map((item) => item.status)).toEqual(["done", "outcome_unknown", "cancelled"]);
+			// The attempt can't settle it as if the trigger were alive, and nothing more is claimed or taken in.
 			expect(store.complete({ outboxId: underWay.item.id, attempt: underWay.attempt })).toEqual({ ok: false });
 			expect(store.fail({ outboxId: underWay.item.id, attempt: underWay.attempt, retryAt: clock.now, error: "x" })).toMatchObject({ ok: false });
+			expect(store.claim({ leaseMs: MINUTE })).toBeUndefined();
+			expect(store.admit({ id: "flights", generation: store.get("flights")!.generation, eventId: "d", observedAt: clock.now, payload: {} })).toEqual({ status: "deleted" });
+			// What happened is recorded once known, without claiming anything or bringing the trigger back.
+			expect(store.reconcile({ outboxId: store.outbox("flights")[2]!.id, outcome: "delivered" })).toEqual({ ok: false });
+			expect(store.reconcile({ outboxId: underWay.item.id, outcome: "delivered" })).toEqual({ ok: true });
+			expect(store.occurrences("flights").map((occurrence) => occurrence.status)).toEqual(["delivered", "delivered", "cancelled"]);
 			expect(store.claim({ leaseMs: MINUTE })).toBeUndefined();
 			// What it did stays: its revisions, its occurrences and how each ended.
 			expect(store.get("flights")).toMatchObject({ lifecycle: "deleted", revision: 2, spec: { instruction: "Second" } });
 			expect(store.list()).toEqual([]);
 			expect(store.revision("flights", 1)?.instruction).toBe("First");
-			expect(store.occurrences("flights").map((occurrence) => occurrence.status)).toEqual(["delivered", "cancelled", "cancelled"]);
-			expect(store.outbox("flights").map((item) => item.status)).toEqual(["done", "cancelled", "cancelled"]);
 			expect([count(sql, "pim_trigger_sources"), count(sql, "pim_trigger_inbox"), count(sql, "pim_trigger_tombstones")]).toEqual([0, 0, 1]);
 			// Erasing the space is what removes it all.
 			created(store, eventSpec(), "enabled", "trains");

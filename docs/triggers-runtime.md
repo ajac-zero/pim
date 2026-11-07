@@ -1,6 +1,6 @@
 # The triggers runtime on the computer
 
-> **Not active.** This is a review-only foundation. Nothing imports [`computer/triggers-runtime.ts`](../computer/triggers-runtime.ts): pim-computer doesn't run it, no service or install script starts it, no route or Durable Object sends it a message, and it has no real observers. Its only adapters are the fakes in `test/triggers-runtime.node.test.ts`. Running real polls, streams, process watches and file watches, and carrying its messages over pim-computer's connection, are later changes.
+> **Not active.** This is a review-only foundation. Nothing imports [`computer/triggers-runtime.ts`](../computer/triggers-runtime.ts): pim-computer doesn't run it, no service or install script starts it, no route or Durable Object sends it a message, and nothing registers an observer with it. Concrete `poll` and `process` adapters exist, review-only and unregistered too ([triggers-adapters.md](triggers-adapters.md)); `stream` and `file` have only the fakes in `test/triggers-runtime.node.test.ts`. Running any observer in pim-computer, and carrying its messages over pim-computer's connection, are later changes.
 
 Triggers (see [triggers.md](triggers.md)) keep the space's Durable Object as the authority: it stores each trigger, decides which computer sources run, and admits what they observe. This runtime is the other end, on the person's computer. It runs the computer sources (`poll`, `stream`, `process`, `file`) the space wants, and only those; fences anything a stopped or replaced observer still emits; and holds observations in a bounded spool on disk until the space has durably taken them.
 
@@ -9,7 +9,7 @@ Triggers (see [triggers.md](triggers.md)) keep the space's Durable Object as the
 | `parseServerMessage`, `sourceConfigHash` | The `triggers.v1` protocol: messages from the space, read from untrusted JSON; the digest a source's configuration is consented to under |
 | `ObservationSpool` | The transport spool: a journal of observations and gaps not yet settled by the space |
 | `TriggersRuntime` | Reconciles observers with what the space wants, under a lease, with grants checked by the host |
-| `ObserverAdapter` | What a real observer will implement; only fakes exist |
+| `ObserverAdapter` | What an observer implements: `poll` and `process` in [triggers-adapters.md](triggers-adapters.md), registered nowhere; fakes for the rest |
 
 The runtime consumes `PollSource`, `StreamSource`, `ProcessSource` and `FileSource` from [`src/triggers/spec.ts`](../src/triggers/spec.ts) as types only, so the file stays loadable in Node alone, as pim-computer is. It changes nothing in `src/triggers/`.
 
@@ -186,4 +186,4 @@ None of these are made here; they are for whoever owns those modules to accept o
 
 ## Not done here
 
-The real adapters (running polls and streams, watching processes and files), carrying these frames over pim-computer's connection, the space's side of the protocol, starting the runtime as part of pim-computer, choosing where its spool lives, and the host's real grant check. Each is its own change, and this file is the contract they meet.
+Registering adapters, real `stream` and `file` observers, carrying these frames over pim-computer's connection, the space's side of the protocol, starting the runtime as part of pim-computer, choosing where its spool lives, and the host's real grant check. Each is its own change, and this file is the contract they meet.

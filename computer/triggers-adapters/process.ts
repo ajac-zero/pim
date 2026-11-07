@@ -66,6 +66,8 @@ export type ProcessAdapterOptions = {
 	readonly provider: ManagedProcessProvider;
 	readonly clock?: RuntimeClock;
 	readonly checkMs?: number;
+	/** The longest one answer from the provider is waited for. */
+	readonly ioTimeoutMs?: number;
 	/** The first wait before a completion the runtime couldn't take yet is tried again; it doubles up to `maxRetryMs`. */
 	readonly retryMs?: number;
 	readonly maxRetryMs?: number;
@@ -102,6 +104,7 @@ export class ProcessWatchAdapter implements ObserverAdapter {
 	readonly #checkMs: number;
 	readonly #retryMs: number;
 	readonly #maxRetryMs: number;
+	readonly #ioTimeoutMs: number;
 	#emit: Emit | null = null;
 	#health: ((report: AdapterHealth) => void) | null = null;
 	#handle = "";
@@ -116,6 +119,8 @@ export class ProcessWatchAdapter implements ObserverAdapter {
 	#emitting = false;
 	#retryWait: number;
 	#failing: string | null = null;
+	/** The provider's answer still awaited, if any. */
+	#asking: Promise<unknown> | null = null;
 
 	constructor(options: ProcessAdapterOptions) {
 		this.#provider = options.provider;
@@ -127,6 +132,7 @@ export class ProcessWatchAdapter implements ObserverAdapter {
 		this.#checkMs = bounded("checkMs", options.checkMs ?? PROCESS_WATCH.checkMs, 10, 60_000);
 		this.#retryMs = bounded("retryMs", options.retryMs ?? 1_000, 10, 60_000);
 		this.#maxRetryMs = bounded("maxRetryMs", options.maxRetryMs ?? 30_000, this.#retryMs, 600_000);
+		this.#ioTimeoutMs = bounded("ioTimeoutMs", options.ioTimeoutMs ?? 5_000, 10, 60_000);
 		this.#retryWait = this.#retryMs;
 	}
 
@@ -148,7 +154,7 @@ export class ProcessWatchAdapter implements ObserverAdapter {
 		if (config.signal.aborted) return this.#fence();
 		config.signal.addEventListener("abort", () => this.#fence(), { once: true });
 		// The first check runs once `start` has returned, never inside it.
-		this.#later(0, () => this.#check());
+		this.#later(0, () => void this.#check());
 	}
 
 	async stop(_reason: StopReason): Promise<void> {
@@ -180,45 +186,114 @@ export class ProcessWatchAdapter implements ObserverAdapter {
 		});
 	}
 
-	async #check(): Promise<void> {
-		if (this.#settled) return;
-		const intent = this.#intent as LaunchIntent;
-		const now = this.#clock.now();
-		const final = now >= this.#expiresAt;
+	/** Whether the watch's time is up, now; asked again after everything it waits for. */
+	#expired(): boolean {
+		return this.#clock.now() >= this.#expiresAt;
+	}
+
+	#next(): void {
+		this.#later(Math.min(this.#checkMs, Math.max(0, this.#expiresAt - this.#clock.now())), () => void this.#check());
+	}
+
+	/**
+	 * Asks the provider one thing, within `ioTimeoutMs`. One question at a
+	 * time: while an earlier one, even one given up on, hasn't answered, no
+	 * other is asked, and this one counts as failed.
+	 */
+	async #ask<T>(question: () => Promise<T>): Promise<{ readonly ok: true; readonly value: T } | { readonly ok: false }> {
+		if (this.#asking) return { ok: false };
+		const asked = Promise.resolve().then(question);
+		this.#asking = asked;
+		asked
+			.catch(() => undefined)
+			.finally(() => {
+				if (this.#asking === asked) this.#asking = null;
+			});
+		let cancel = () => {};
+		const timedOut = new Promise<{ ok: false }>((resolve) => (cancel = this.#clock.setTimer(this.#ioTimeoutMs, () => resolve({ ok: false }))));
 		try {
-			let record = await this.#provider.read(this.#handle);
-			if (this.#settled) return;
-			if (!record && !final) return this.#finish("error", "process_record_lost");
-			if (record?.receipt) return this.#fromReceipt(record);
-			if (final) return this.#finish("degraded", "process_watch_expired");
-			const liveness = await this.#provider.liveness(intent.supervisor);
-			if (this.#settled) return;
-			if (liveness === "running") {
-				this.#clear();
-				return this.#later(Math.min(this.#checkMs, Math.max(0, this.#expiresAt - now)), () => this.#check());
-			}
-			// The supervisor is gone. Its receipt, written before it exited, may have landed since the first read.
-			record = await this.#provider.read(this.#handle);
-			if (this.#settled) return;
-			if (record?.receipt) return this.#fromReceipt(record);
-			if (!record) return this.#finish("error", "process_record_lost");
-			this.#complete({ outcome: "unknown", exitCode: null, signal: null }, this.#clock.now());
+			return await Promise.race([asked.then((value) => ({ ok: true as const, value })), timedOut]);
 		} catch {
-			if (this.#settled) return;
-			if (final) return this.#finish("degraded", "process_watch_expired");
-			this.#report("degraded", "process_read_failed");
-			this.#later(Math.min(this.#checkMs, Math.max(0, this.#expiresAt - now)), () => this.#check());
+			return { ok: false };
+		} finally {
+			cancel();
 		}
 	}
 
-	#fromReceipt(record: ManagedRecord): void {
+	/** Whether a record read now is still the pinned intent's; if not, the watch ends here. */
+	#holds(record: ManagedRecord | null): record is ManagedRecord {
 		const intent = this.#intent as LaunchIntent;
-		const receipt = record.receipt as CompletionReceipt;
-		if (record.intent.handle !== intent.handle || !sameIdentity(record.intent.supervisor, intent.supervisor) || !receiptMatches(intent, receipt)) {
-			return this.#finish("error", "process_identity_mismatch");
+		if (record === null) {
+			this.#finish("error", "process_record_lost");
+			return false;
 		}
+		if (record.intent.handle !== intent.handle || record.intent.launchedAt !== intent.launchedAt || !sameIdentity(record.intent.supervisor, intent.supervisor)) {
+			this.#finish("error", "process_identity_mismatch");
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * One check. Expiry is asked again after every answer from the provider:
+	 * once the watch's time is up, only a receipt that matches, and ended by
+	 * then, can complete it, never an outcome inferred as unknown.
+	 */
+	async #check(): Promise<void> {
+		if (this.#settled) return;
+		const readAt = this.#clock.now();
+		const read = await this.#ask(() => this.#provider.read(this.#handle));
+		if (this.#settled) return;
+		if (!read.ok) return this.#unreadable();
+		if (!this.#holds(read.value)) return;
+		if (read.value.receipt) return this.#fromReceipt(read.value);
+		// A read begun at or after expiry is the final one; one begun before gets a final read of its own.
+		if (this.#expired()) return readAt >= this.#expiresAt ? this.#expire() : this.#finalRead();
+		const liveness = await this.#ask(() => this.#provider.liveness((this.#intent as LaunchIntent).supervisor));
+		if (this.#settled) return;
+		if (this.#expired()) return this.#finalRead();
+		if (!liveness.ok) return this.#unreadable();
+		if (liveness.value === "running") {
+			this.#clear();
+			return this.#next();
+		}
+		// The supervisor is gone. Its receipt, written before it exited, may have landed since the first read.
+		const againAt = this.#clock.now();
+		const again = await this.#ask(() => this.#provider.read(this.#handle));
+		if (this.#settled) return;
+		if (!again.ok) return this.#unreadable();
+		if (!this.#holds(again.value)) return;
+		if (again.value.receipt) return this.#fromReceipt(again.value);
+		if (this.#expired()) return againAt >= this.#expiresAt ? this.#expire() : this.#finalRead();
+		this.#complete({ outcome: "unknown", exitCode: null, signal: null }, this.#clock.now());
+	}
+
+	/** The one read after expiry: a receipt that ended in time completes the watch; nothing else does. */
+	async #finalRead(): Promise<void> {
+		const read = await this.#ask(() => this.#provider.read(this.#handle));
+		if (this.#settled) return;
+		if (read.ok) {
+			if (!this.#holds(read.value)) return;
+			if (read.value.receipt) return this.#fromReceipt(read.value);
+		}
+		this.#expire();
+	}
+
+	#unreadable(): void {
+		if (this.#expired()) return void this.#finalRead();
+		this.#report("degraded", "process_read_failed");
+		this.#next();
+	}
+
+	#expire(): void {
+		this.#finish("degraded", "process_watch_expired");
+	}
+
+	#fromReceipt(record: ManagedRecord): void {
+		const receipt = record.receipt as CompletionReceipt;
+		if (!receiptMatches(this.#intent as LaunchIntent, receipt)) return this.#finish("error", "process_identity_mismatch");
 		// An end after the watch's time is not reported: the watch had expired by then.
-		if (receipt.endedAt > this.#expiresAt) return this.#finish("degraded", "process_watch_expired");
+		if (receipt.endedAt > this.#expiresAt) return this.#expire();
 		const outcome = receipt.signal === null ? "exited" : "signalled";
 		this.#complete({ outcome, exitCode: receipt.exitCode, signal: receipt.signal }, receipt.endedAt);
 	}

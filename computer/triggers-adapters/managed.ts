@@ -46,9 +46,7 @@ export class ManagedRecordError extends Error {
 export async function checkStateDir(dir: string): Promise<string> {
 	if (!path.isAbsolute(dir)) throw new ManagedRecordError("state_dir_not_absolute");
 	const stat = await fs.lstat(dir);
-	if (!stat.isDirectory()) throw new ManagedRecordError("state_dir_unsafe");
-	if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new ManagedRecordError("state_dir_unsafe");
-	if ((stat.mode & 0o077) !== 0) throw new ManagedRecordError("state_dir_unsafe");
+	if (!stat.isDirectory() || !ownAndPrivate(stat)) throw new ManagedRecordError("state_dir_unsafe");
 	return dir;
 }
 
@@ -57,19 +55,29 @@ function handleDir(stateDir: string, handle: string): string {
 	return path.join(stateDir, handle);
 }
 
-/** Reads one record file: a regular file of this user's, not a link, that only this user may write, of at most 4 KiB. Null when it isn't there. */
+/** Whether a folder or file is this user's own and closed to everyone else. */
+function ownAndPrivate(stat: { uid: number; mode: number }): boolean {
+	return (stat.mode & 0o077) === 0 && (typeof process.getuid !== "function" || stat.uid === process.getuid());
+}
+
+/**
+ * Reads one record file: a regular file, not a link, this user's own and
+ * closed to everyone else (as `writeOnce` makes it, `0600`), of at most
+ * 4 KiB. Null when it isn't there. A record that is anything else is
+ * refused, not narrowed: something other than its supervisor made it so.
+ */
 async function readRecordFile(file: string): Promise<unknown> {
 	let handle: fs.FileHandle;
 	try {
-		handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+		handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-		throw new ManagedRecordError("record_unreadable");
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") return null;
+		throw new ManagedRecordError(code === "ELOOP" ? "record_unsafe" : "record_unreadable");
 	}
 	try {
 		const stat = await handle.stat();
-		if (!stat.isFile() || stat.size > RECORD_BYTES || (stat.mode & 0o022) !== 0) throw new ManagedRecordError("record_unsafe");
-		if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new ManagedRecordError("record_unsafe");
+		if (!stat.isFile() || stat.size > RECORD_BYTES || !ownAndPrivate(stat)) throw new ManagedRecordError("record_unsafe");
 		const buffer = Buffer.alloc(RECORD_BYTES + 1);
 		const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
 		if (bytesRead > RECORD_BYTES) throw new ManagedRecordError("record_unsafe");
@@ -123,7 +131,7 @@ export async function readManagedRecord(stateDir: string, handle: string): Promi
 	const dir = handleDir(stateDir, handle);
 	try {
 		const stat = await fs.lstat(dir);
-		if (!stat.isDirectory() || (typeof process.getuid === "function" && stat.uid !== process.getuid())) throw new ManagedRecordError("record_unsafe");
+		if (!stat.isDirectory() || !ownAndPrivate(stat)) throw new ManagedRecordError("record_unsafe");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 		throw error;

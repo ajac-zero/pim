@@ -220,7 +220,15 @@ export const google = definePimExtension({ id: "test.google", name: "Test Google
 	googleApp({ id: "unset", name: "Unset", description: "Never configured.", client: { id: "TEST_UNSET_CLIENT_ID", secret: "TEST_UNSET_CLIENT_SECRET" }, scopes: [GOOGLE_SCOPES.driveFile], tools: [] }),
 ] });
 
+/** How far tests have moved the triggers' clock on from the time (test/triggers-host.test.ts). */
+export const triggerClock = { offset: 0 };
+
 export class Pim extends RealPim {
+	/** The triggers' clock, which tests move on to make triggers due without waiting. */
+	protected override triggerClock(): number {
+		return Date.now() + triggerClock.offset;
+	}
+
 	/** The deployment's extensions, and the tests' own. */
 	protected override pimConfig(): PimConfig {
 		const config = super.pimConfig();

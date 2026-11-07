@@ -5,6 +5,7 @@ import {
 	type ChatCreation,
 	type ChatLookup,
 	type HostPreflight,
+	MAX_RECEIPT_LENGTH,
 	type RunStatus,
 	type SubmissionLookup,
 	type SubmitResult,
@@ -12,12 +13,13 @@ import {
 	type TriggerAgentHost,
 	TriggerCoordinator,
 	type TriggerCoordinatorOptions,
+	UNKNOWN_ATTENTION,
 } from "../src/triggers/coordinator";
 import type { TriggerDestination } from "../src/triggers/spec";
 import { TriggerStore } from "../src/triggers/store";
 import { TriggerValidationError } from "../src/triggers/validate";
 
-// Triggers are not wired into Pim (docs/triggers.md). These tests build the store and the coordinator on a Durable Object's database of their own,
+// These tests build the store and the coordinator on a Durable Object's database of their own (Pim's own engine is tested in test/triggers-host.test.ts),
 // with a fake clock and a fake host; no model, chat or run of Pim's is touched.
 
 // Vite reads every file this names as text when it builds the test; see the last test.
@@ -982,13 +984,48 @@ describe("time trigger coordinator", () => {
 		});
 	});
 
-	it("adds no wiring: nothing outside src/triggers uses it", () => {
+	it("keeps a receipt whole or not at all, and says when the host keeps not knowing, without taking that as an answer", async () => {
+		await withCoordinator(async ({ store, coordinator, host, clock }) => {
+			create(store, "brief", hourly());
+			clock.now = START + HOUR;
+			const long = `receipt-${"x".repeat(MAX_RECEIPT_LENGTH)}`;
+			host.submit = async () => ({ status: "accepted", receipt: long });
+			await coordinator.tick();
+			const [item] = store.outbox("brief");
+			const operationId = item!.operationId;
+			// Accepted with a receipt too long to keep: never cut short, so the submission stays unknown and holds the slot.
+			expect(coordinator.run(operationId)).toMatchObject({ phase: "submitting", receipt: null, lastError: expect.stringContaining(`longer than ${MAX_RECEIPT_LENGTH} characters`) });
+			let answer: SubmissionLookup = { status: "accepted", receipt: long };
+			host.lookupSubmission = async () => answer;
+			for (let asked = 1; asked <= UNKNOWN_ATTENTION; asked++) {
+				clock.now += 15 * MINUTE;
+				if (asked === 2) answer = { status: "unknown" };
+				await coordinator.tick();
+				expect(coordinator.run(operationId)).toMatchObject({ phase: "submitting", receipt: null, unknownAnswers: asked });
+				if (asked < UNKNOWN_ATTENTION) expect(store.get("brief")?.healthDetail).toBeNull();
+			}
+			// After answers of "not known" in a row, the trigger says what it waits on; the next firing waits behind it.
+			expect(store.get("brief")).toMatchObject({ health: "unknown", healthDetail: expect.stringContaining(`after ${UNKNOWN_ATTENTION} questions about operation ${operationId}`) });
+			clock.now = START + 2 * HOUR + MINUTE;
+			await coordinator.tick();
+			expect(coordinator.runs("brief")).toHaveLength(1);
+			// A known answer settles it, and the trigger is healthy again.
+			answer = { status: "accepted", receipt: "receipt-ok" };
+			host.runs.set("receipt-ok", "running");
+			clock.now += 15 * MINUTE;
+			await coordinator.tick();
+			expect(coordinator.run(operationId)).toMatchObject({ phase: "running", receipt: "receipt-ok", unknownAnswers: 0 });
+			expect(store.get("brief")).toMatchObject({ health: "healthy", healthDetail: null });
+		});
+	});
+
+	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), and into what a space holds; the preview and the web app don't use it", () => {
 		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
 		expect(Object.keys(files)).toContain("../src/pim.ts");
 		const users = Object.entries(files)
 			.filter(([path]) => !path.startsWith("../src/triggers/"))
 			.filter(([, source]) => /triggers\/|TriggerCoordinator|TriggerStore|pim_trigger/.test(source))
 			.map(([path]) => path);
-		expect(users).toEqual([]);
+		expect(users).toEqual(["../src/pim.ts", "../src/store.ts"]);
 	});
 });

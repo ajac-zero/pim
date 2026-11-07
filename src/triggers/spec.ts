@@ -3,7 +3,7 @@
  * a time, on a connector's event, or when something it watches on the
  * person's computer changes. Triggers will replace schedules
  * (../extensions/schedule.ts) and connector watches (../extensions/app-events.ts);
- * for now nothing in Pim uses this module. See docs/triggers.md.
+ * for now only Pim's gated engine for time triggers uses this module (./engine.ts). See docs/triggers.md.
  *
  * A trigger's spec is what the person or agent configured, kept as
  * immutable revisions (./store.ts). Its lifecycle, health and generation

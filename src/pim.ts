@@ -7,6 +7,7 @@ import {
 	type AgentEventStream,
 	CompactionTask,
 	type ConversationId,
+	type ConversationInit,
 	type EntryId,
 	type UserInput,
 	createRegistry,
@@ -192,6 +193,8 @@ import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, c
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
+import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine } from "./triggers/engine";
+import { TriggerChatDoc, type TriggerSpace } from "./triggers/host";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
@@ -365,6 +368,9 @@ export type OwnerStatus = "active" | "suspended";
 
 /** What registration tells a space about its owner when it provisions it. */
 export type OwnerProfile = { readonly ownerId: string; readonly username: string };
+
+/** How `submitTo` keeps one key for an operation across retries: `exact` uses the key as given, and `keep` is told the key before the input is submitted. */
+export type StableOperation = { readonly exact: boolean; keep(operationId: string): void };
 
 /** A guest's bot: its id in the gallery, their copy of it, and when the sharing their copy follows was made. */
 /**
@@ -1738,6 +1744,8 @@ export class Pim extends DurableAgent<Env> {
 			}
 		}
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
+		// A tick cut short leaves no wake: the next is set again, where triggers are on.
+		if (this.triggerEngine()) void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error));
 		// A Sprite Pim started before it kept computers with a host is out of reach: the space has no computer until it gets another.
 		const sprite = this.computer.forgetSprite();
 		if (sprite) console.warn(JSON.stringify({ event: "pim.sprite_forgotten", owner: this.name, sprite }));
@@ -1749,13 +1757,20 @@ export class Pim extends DurableAgent<Env> {
 	 * (from the user, a schedule or a connector) counts against the daily limit;
 	 * an approval's outcome, or tasks' answers, continue work already
 	 * counted, so they do not.
+	 *
+	 * `stable` is for a caller that must keep one key for an operation
+	 * across retries, as a trigger's handoff does (./triggers/host.ts): it is
+	 * told the key the input goes in under before anything is submitted, and
+	 * with `exact` the key it recorded is used as it is, never rewritten.
 	 */
 	async submitTo(
 		session: string,
 		content: UserInput,
-		options: { operationId?: string; whenBusy?: "followUp" | "steer" },
+		options: { operationId?: string; whenBusy?: "followUp" | "steer"; stable?: StableOperation },
 		from: "user" | "pim" | "approval" | "task",
 	): Promise<PiReceipt> {
+		const { stable, ...given } = options;
+		if (stable && given.operationId === undefined) throw new Error("A stable operation needs its operation id");
 		this.#assertOpen();
 		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
 		// Checked and counted before the first await, so concurrent submissions can't all pass the same check.
@@ -1771,10 +1786,13 @@ export class Pim extends DurableAgent<Env> {
 		}
 		// An event waking the agent of a finished task puts the task back to work, so that its answer reaches the agent that asked.
 		const finished = from === "pim" ? this.#tasks.of(session) : undefined;
-		const waking = finished?.chat && finished.requester !== null && finished.kind !== "review" && TERMINAL_STATES.has(finished.state) ? finished : undefined;
-		if (waking) options = { ...options, operationId: `${WAKE}${options.operationId ?? crypto.randomUUID()}` };
+		// A key given exactly keeps its form: it wakes the task only if it was recorded as a wake, so a retry after the task reopened, or finished, goes in under the same key.
+		const mayWake = !stable?.exact || given.operationId!.startsWith(WAKE);
+		const waking = finished?.chat && finished.requester !== null && finished.kind !== "review" && TERMINAL_STATES.has(finished.state) && mayWake ? finished : undefined;
+		options = waking && !stable?.exact ? { ...given, operationId: `${WAKE}${given.operationId ?? crypto.randomUUID()}` } : given;
 		let receipt: PiReceipt;
 		try {
+			stable?.keep(options.operationId!);
 			// A visit goes on only as its host allows now: what it may use is asked anew before each turn.
 			const visit = this.visits.bySession(session);
 			if (visit) await this.#refreshVisit(visit.ownerId);
@@ -1978,8 +1996,119 @@ export class Pim extends DurableAgent<Env> {
 		return JSON.parse(this.store.meta(SCHEDULED_CHATS_KEY) ?? "{}");
 	}
 
-	/** Starts a chat with `agent`, within the person's limit on chats: a new one, or a fork of `session` that keeps what was said through entry `at`. */
-	async #startChat(agent: Agent, title: string | undefined, from?: { session: string; at: EntryId }): Promise<string> {
+	// Triggers (docs/triggers.md), built only where turned on.
+
+	#triggerEngine: TriggerEngine | undefined;
+	/** Changes to the trigger wake, one after another. */
+	#triggerWake: Promise<void> = Promise.resolve();
+
+	/**
+	 * This space's time triggers, when the deployment allows them and the
+	 * space was opted in (`enableTriggerEngine`); null otherwise, and then
+	 * nothing of them exists: no table, no wake. Internal: no route, tool or
+	 * setting reaches it.
+	 */
+	triggerEngine(): TriggerEngine | null {
+		if (this.#closed() || !engineAllowed(this.env) || this.store.meta(ENGINE_KEY) !== "on") return null;
+		this.#triggerEngine ??= new TriggerEngine(this.ctx.storage.sql, {
+			transaction: (work) => this.ctx.storage.transactionSync(work),
+			now: () => this.triggerClock(),
+			space: this.#triggerSpace(),
+		});
+		return this.#triggerEngine;
+	}
+
+	/** Internal: opts this space in to time triggers, where the deployment allows it; false where it doesn't. */
+	async enableTriggerEngine(): Promise<boolean> {
+		this.#assertOpen();
+		if (!engineAllowed(this.env)) return false;
+		this.store.setMeta(ENGINE_KEY, "on");
+		await this.wakeTriggers();
+		return true;
+	}
+
+	/** The triggers' clock. */
+	protected triggerClock(): number {
+		return Date.now();
+	}
+
+	/** Fired by the trigger wake: one tick of the coordinator, then the wake for its next. */
+	async runTriggerTick(): Promise<void> {
+		try {
+			await this.triggerEngine()?.coordinator.tick();
+		} finally {
+			await this.wakeTriggers();
+		}
+	}
+
+	/**
+	 * Keeps the space's one trigger wake, a schedule like Pim's others, at
+	 * when the coordinator next has work, at least a second on; with no work,
+	 * or no engine, there is none.
+	 */
+	wakeTriggers(): Promise<void> {
+		const next = this.#triggerWake.then(async () => {
+			const wake = this.triggerEngine()?.coordinator.nextWakeAt() ?? null;
+			const at = wake === null ? null : Math.ceil((Date.now() + Math.max(1_000, wake - this.triggerClock())) / 1000);
+			const wakes = (await this.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK);
+			if (at !== null && wakes.length === 1 && wakes[0]!.time === at) return;
+			for (const schedule of wakes) await this.cancelSchedule(schedule.id);
+			if (at !== null) await this.schedule(new Date(at * 1000), TRIGGER_TICK_CALLBACK);
+		});
+		this.#triggerWake = next.catch(() => undefined);
+		return next;
+	}
+
+	/** What the triggers' host may do in this space: what anything else that starts a run does, through `submitTo`. */
+	#triggerSpace(): TriggerSpace {
+		const conversation = (chatId: string) => (/^[1-9]\d*$/.test(chatId) ? (Number(chatId) as ConversationId) : null);
+		return {
+			state: () => (this.#closed() ? "closed" : this.status()),
+			agentExists: (agentId) => this.agents.get(agentId) !== undefined,
+			chatAgent: (chatId) => this.agents.ofSession(chatId).id,
+			chatOpen: async (chatId) => {
+				const id = conversation(chatId);
+				// Not a deleted chat, another agent's seat in a group chat, an old task's conversation, or a visit to another space.
+				if (id === null || this.#hiddenSessions().has(chatId) || this.visits.bySession(chatId)) return false;
+				return (await (await this.harness.pi()).conversation(id, BACKGROUND_CONTEXT)) !== undefined;
+			},
+			startChat: async (agentId, title, init) => {
+				const agent = this.agents.get(agentId);
+				if (!agent) throw new Error("The agent was deleted");
+				const id = await this.#startChat(agent, clipTitle(title), undefined, init);
+				this.broadcastMessage({ type: "sessions" });
+				return id;
+			},
+			adoptChat: async (chatId, agentId, title) => {
+				const agent = this.agents.get(agentId);
+				if (!agent) throw new Error("The agent was deleted");
+				await this.harness.session(chatId).setModel(this.agentModel(agent));
+				this.agents.setSession(chatId, agent.id);
+				// A chat deleted since stays deleted.
+				if (!this.store.deletedSessions().has(chatId)) this.store.touchSession(chatId, clipTitle(title));
+				this.broadcastMessage({ type: "sessions" });
+			},
+			chatOrigin: async (chatId) => {
+				const id = conversation(chatId);
+				if (id === null) return null;
+				const origin = await (await this.harness.pi()).snapshot(TriggerChatDoc, id, BACKGROUND_CONTEXT);
+				return origin?.operationId || null;
+			},
+			submit: (chatId, content, operation) => this.submitTo(chatId, content, operation, "pim"),
+			submission: async (chatId, key) => {
+				const record = await (await this.harness.storage()).submissionByRequest((await this.harness.conversation(chatId)).id, key, BACKGROUND_CONTEXT);
+				return record?.type === "input" ? { status: record.status, ...(record.reason === undefined ? {} : { reason: record.reason }) } : undefined;
+			},
+			approvalPending: (chatId, since) => this.store.approvals("pending").some((approval) => approval.session === chatId && approval.createdAt >= since),
+		};
+	}
+
+	/**
+	 * Starts a chat with `agent`, within the person's limit on chats: a new
+	 * one, or a fork of `session` that keeps what was said through entry `at`.
+	 * `init` runs in the commit that makes a new one, as pi makes it.
+	 */
+	async #startChat(agent: Agent, title: string | undefined, from?: { session: string; at: EntryId }, init?: ConversationInit): Promise<string> {
 		const { sessions } = this.limits();
 		if (sessions !== null) {
 			const hidden = this.#hiddenSessions();
@@ -1989,7 +2118,9 @@ export class Pim extends DurableAgent<Env> {
 		}
 		const id = from
 			? String((await (await this.harness.conversation(from.session)).fork(from.at, { ownership: { kind: "ownerless" } }, BACKGROUND_CONTEXT)).id)
-			: (await this.harness.sessions.create()).id;
+			: init
+				? String((await (await this.harness.pi()).createConversation({ ownership: { kind: "ownerless" }, agent: this.harness.agentDefaults(), init }, BACKGROUND_CONTEXT)).id)
+				: (await this.harness.sessions.create()).id;
 		await this.harness.session(id).setModel(this.agentModel(agent));
 		this.agents.setSession(id, agent.id);
 		this.store.touchSession(id, title);
@@ -4214,6 +4345,7 @@ export class Pim extends DurableAgent<Env> {
 			notifications: this.store.notifications({ unread: false }).map((notification) => this.#publicSession(notification)),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
+			...(this.triggerEngine() ? { triggers: this.triggerEngine()!.export() } : {}),
 			...(await this.artifacts.export().then(({ artifacts, files }) => ({ artifacts: artifacts.map((artifact) => this.#publicSession(artifact)), artifactFiles: files }))),
 			othersArtifactData: this.artifacts.othersData(),
 			// Files the space still keeps; those on the person's computer are theirs already.

@@ -3,7 +3,7 @@ import { type CronSource, type IntervalSource, type OnceSource, type TimeSource,
 import { type Preview, TIME_LIMITS, describeInstant, isScheduledFiring, previewFirings, resolveLocalTime, selectDueFiring } from "../src/triggers/time";
 import { TriggerValidationError } from "../src/triggers/validate";
 
-// Triggers are not wired into Pim yet (docs/triggers.md). Expected instants were worked out apart from this code, with Temporal and by hand.
+// The time computation alone (docs/triggers.md). Expected instants were worked out apart from this code, with Temporal and by hand.
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;

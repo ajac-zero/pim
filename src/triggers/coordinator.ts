@@ -3,9 +3,9 @@
  * are due (./store.ts, with ./time.ts), and hands each admitted occurrence
  * to the owning agent through a host it is given, keeping one agent run per
  * trigger at a time and at most `maxRunning` runs holding compute in the
- * space. Nothing in Pim constructs it: there is no alarm, tool, route or real
- * host behind it yet, and only tests make one with a fake host. See
- * docs/triggers.md.
+ * space. Pim constructs it, with its real host (./host.ts) and a wake, only
+ * where time triggers are turned on (./engine.ts), which no deployment does
+ * yet; there is no tool or route for it. See docs/triggers.md.
  *
  * Handing on is not atomic with the world outside this database, so the
  * coordinator never pretends it is. Each occurrence is one operation with
@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS pim_trigger_runs (
 	check_at INTEGER,
 	check_token TEXT,
 	deferrals INTEGER NOT NULL,
+	unknown_answers INTEGER NOT NULL DEFAULT 0,
 	last_error TEXT,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
@@ -74,6 +75,11 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 
 /** The coordinator's tables, beside the store's (`TRIGGER_TABLES`), for erasing a space. */
 export const COORDINATOR_TABLES = ["pim_trigger_runs"] as const;
+
+/** The longest receipt the coordinator keeps. A longer one is not cut short: the submission it names stays unknown, and says why. */
+export const MAX_RECEIPT_LENGTH = 256;
+/** Answers of "not known" in a row about one run, after which its trigger's health says it waits on it. */
+export const UNKNOWN_ATTENTION = 3;
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -142,6 +148,8 @@ export type TriggerRun = {
 	/** The question out about it, if any: only that question's answer may settle it. */
 	readonly checkToken: string | null;
 	readonly deferrals: number;
+	/** Answers of "not known" in a row about its submission or its run; any known answer starts it again. */
+	readonly unknownAnswers: number;
 	readonly lastError: string | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
@@ -186,9 +194,8 @@ export type RunStatus = (typeof RUN_STATUSES)[number];
 type Call = { readonly signal: AbortSignal };
 
 /**
- * What the coordinator needs of the space, injected. Pim has no
- * implementation yet: the real one, over `submitTo`, is the next reviewed
- * integration. Each method may throw, or not answer by `callTimeoutMs`;
+ * What the coordinator needs of the space, injected: Pim's is
+ * `PimTriggerHost` (./host.ts), over `submitTo`. Each method may throw, or not answer by `callTimeoutMs`;
  * either is taken as "not known", never as a success or a refusal. A call
  * whose signal is aborted may still take effect, which is why a chat and a
  * submission are keyed by the operation and looked up.
@@ -500,15 +507,16 @@ export class TriggerCoordinator {
 					const now = this.#now();
 					const current = this.run(run.operationId);
 					if (current?.phase !== "submitting" || current.checkToken !== token) return;
-					if (answer.status === "accepted") {
+					if (answer.status === "accepted" && validReceipt(answer.receipt)) {
 						this.#accepted(current, answer.receipt, now);
 						report.reconciled.push(run.operationId);
 						return;
 					}
-					if (answer.status === "unknown") {
-						this.#sql.exec("UPDATE pim_trigger_runs SET check_token = NULL, check_at = ?, updated_at = ? WHERE operation_id = ?", now + this.#retryMs, now, run.operationId);
+					if (answer.status !== "absent") {
+						this.#notKnown(current, answer.status === "accepted" ? RECEIPT_TOO_LONG : "whether it was submitted isn't known", now + this.#retryMs, now);
 						return;
 					}
+					this.#known(current);
 					const item = this.#store.outboxItem(run.outboxId);
 					if (item?.status === "leased") {
 						this.#sql.exec(
@@ -561,11 +569,15 @@ export class TriggerCoordinator {
 		if (!run || run.receipt !== receipt || !(ACTIVE_PHASES as readonly string[]).includes(run.phase)) return false;
 		if (token !== null && run.checkToken !== token) return false;
 		const now = this.#now();
+		if (status === "unknown") {
+			this.#notKnown(run, "how its run is doing isn't known", now + this.#runCheckMs, now);
+			return true;
+		}
+		this.#known(run);
 		if (status === "completed" || status === "failed" || status === "cancelled") {
 			this.#end(operationId, status, null, now);
 		} else {
-			const phase = status === "unknown" ? run.phase : status;
-			this.#sql.exec("UPDATE pim_trigger_runs SET phase = ?, check_token = NULL, check_at = ?, updated_at = ? WHERE operation_id = ?", phase, now + this.#runCheckMs, now, operationId);
+			this.#sql.exec("UPDATE pim_trigger_runs SET phase = ?, check_token = NULL, check_at = ?, updated_at = ? WHERE operation_id = ?", status, now + this.#runCheckMs, now, operationId);
 		}
 		return true;
 	}
@@ -681,6 +693,7 @@ export class TriggerCoordinator {
 		switch (result.status) {
 			case "accepted":
 			case "duplicate":
+				if (!validReceipt(result.receipt)) return this.#uncertain(operationId, attempt, RECEIPT_TOO_LONG);
 				this.#transaction(() => {
 					const current = this.run(operationId);
 					if (current) this.#accepted(current, result.receipt, this.#now());
@@ -693,20 +706,55 @@ export class TriggerCoordinator {
 				return this.#defer(operationId, attempt, result.reason, { health: null }, report);
 			case "failed":
 				return this.#notSubmitted(operationId, attempt, result.reason, null, report);
-			case "uncertain": {
-				// Not known either way: it holds the slot until `lookupSubmission` says.
-				const now = this.#now();
-				this.#sql.exec(
-					"UPDATE pim_trigger_runs SET last_error = ?, check_token = NULL, check_at = ?, updated_at = ? WHERE operation_id = ? AND phase = 'submitting' AND dispatch_attempt = ?",
-					clip(result.reason),
-					now + this.#retryMs,
-					now,
-					operationId,
-					attempt,
-				);
-				return;
-			}
+			case "uncertain":
+				return this.#uncertain(operationId, attempt, result.reason);
 		}
+	}
+
+	/** A submission not known either way: it holds the slot until `lookupSubmission` says. */
+	#uncertain(operationId: string, attempt: number, reason: string): void {
+		const now = this.#now();
+		this.#sql.exec(
+			"UPDATE pim_trigger_runs SET last_error = ?, check_token = NULL, check_at = ?, updated_at = ? WHERE operation_id = ? AND phase = 'submitting' AND dispatch_attempt = ?",
+			clip(reason),
+			now + this.#retryMs,
+			now,
+			operationId,
+			attempt,
+		);
+	}
+
+	/**
+	 * Records an answer of "not known" about a run, to ask again at `checkAt`.
+	 * After `UNKNOWN_ATTENTION` of them in a row its trigger's health says,
+	 * as `unknown`, that it waits on this run: it is never taken as an
+	 * answer either way.
+	 */
+	#notKnown(run: TriggerRun, reason: string, checkAt: number, now: number): void {
+		const answers = run.unknownAnswers + 1;
+		// What went wrong before is kept; only a receipt it can't keep is a new error.
+		this.#sql.exec(
+			"UPDATE pim_trigger_runs SET unknown_answers = ?, last_error = ?, check_token = NULL, check_at = ?, updated_at = ? WHERE operation_id = ?",
+			answers,
+			reason === RECEIPT_TOO_LONG ? reason : run.lastError,
+			checkAt,
+			now,
+			run.operationId,
+		);
+		if (answers !== UNKNOWN_ATTENTION) return;
+		const trigger = this.#store.get(run.triggerId);
+		if (trigger && trigger.lifecycle !== "deleted") {
+			this.#store.setHealth({ id: trigger.id, generation: trigger.generation, health: "unknown", detail: clip(`${reason} after ${answers} questions about operation ${run.operationId}; the trigger waits on it`, 500) });
+		}
+	}
+
+	/** Records that the host answered what it knows about a run, and clears the health a run of unknown answers set. */
+	#known(run: TriggerRun): void {
+		if (run.unknownAnswers === 0) return;
+		this.#sql.exec("UPDATE pim_trigger_runs SET unknown_answers = 0 WHERE operation_id = ?", run.operationId);
+		if (run.unknownAnswers < UNKNOWN_ATTENTION) return;
+		const trigger = this.#store.get(run.triggerId);
+		if (trigger?.health === "unknown" && trigger.lifecycle !== "deleted") this.#store.setHealth({ id: trigger.id, generation: trigger.generation, health: "healthy" });
 	}
 
 	/**
@@ -803,9 +851,10 @@ export class TriggerCoordinator {
 	/** Records an accepted submission and delivers its occurrence, however the store holds it now (claimed, or unknown after a deletion). */
 	#accepted(run: TriggerRun, receipt: string, now: number): void {
 		if (run.phase !== "preparing" && run.phase !== "submitting") return;
+		this.#known(run);
 		this.#sql.exec(
 			"UPDATE pim_trigger_runs SET phase = 'accepted', receipt = ?, accepted_at = ?, check_token = NULL, check_at = ?, dispatch_until = NULL, last_error = NULL, updated_at = ? WHERE operation_id = ?",
-			clip(receipt),
+			receipt,
 			now,
 			now,
 			now,
@@ -977,10 +1026,18 @@ function runOf(row: Row): TriggerRun {
 		checkAt: nullable(row.check_at),
 		checkToken: row.check_token === null || row.check_token === undefined ? null : String(row.check_token),
 		deferrals: Number(row.deferrals),
+		unknownAnswers: Number(row.unknown_answers ?? 0),
 		lastError: row.last_error === null ? null : String(row.last_error),
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 	};
+}
+
+const RECEIPT_TOO_LONG = `the host's receipt is longer than ${MAX_RECEIPT_LENGTH} characters, so the run it names can't be followed`;
+
+/** A receipt the coordinator keeps whole: at most `MAX_RECEIPT_LENGTH` characters, never cut short. */
+function validReceipt(receipt: string): boolean {
+	return typeof receipt === "string" && receipt.length > 0 && receipt.length <= MAX_RECEIPT_LENGTH;
 }
 
 function nullable(value: SqlStorageValue | undefined): number | null {

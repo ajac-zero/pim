@@ -7,7 +7,7 @@ import { type AuthorizationRequest, type AuthorizationVerdict, TRIGGER_TABLES, T
 import { selectDueFiring } from "../src/triggers/time";
 import { type JsonValue, TriggerValidationError } from "../src/triggers/validate";
 
-// Triggers are not wired into Pim yet (docs/triggers.md): these tests use their store on a Durable Object's database of its own.
+// These tests use the store on a Durable Object's database of its own; Pim's own engine, behind its gate, is tested in test/triggers-host.test.ts.
 
 const START = 1_800_000_000_000;
 const MINUTE = 60_000;

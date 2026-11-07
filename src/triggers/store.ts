@@ -6,8 +6,9 @@
  * one row does it in one transaction (`options.transaction`), so a crash
  * leaves all of a step or none of it.
  *
- * Nothing in Pim constructs this store yet: its tables exist only where a
- * test makes one. See docs/triggers.md for the contract and what is left.
+ * Pim constructs this store only where time triggers are turned on
+ * (./engine.ts), which no deployment does yet: elsewhere its tables don't
+ * exist. See docs/triggers.md for the contract and what is left.
  *
  * What it guarantees is about this database only. An occurrence's outbox
  * item keeps one `operationId` through every attempt, so a deliverer that

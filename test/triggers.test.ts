@@ -145,8 +145,8 @@ describe("trigger specs", () => {
 describe("trigger conditions", () => {
 	const edge = (when: unknown, staleAfterMs?: number): Condition => parseCondition({ when, ...(staleAfterMs ? { staleAfterMs } : {}) }, "edge");
 
-	/** Evaluates `condition` on observations a minute apart and returns what each fired, and the truth of each. */
-	function series(condition: Condition, observations: (JsonValue | { gap: JsonValue })[]) {
+	/** Evaluates `condition` on observations a minute apart and returns, for each, `fire` or its truth, and the edge state after it. */
+	function evaluated(condition: Condition, observations: (JsonValue | { gap: JsonValue })[]) {
 		let state: ConditionState | null = null;
 		return observations.map((observation, index) => {
 			const gap = typeof observation === "object" && observation !== null && !Array.isArray(observation) && "gap" in observation;
@@ -154,8 +154,12 @@ describe("trigger conditions", () => {
 			const at = START + index * MINUTE;
 			const result = evaluate(condition, "edge", state, { value, observedAt: at, gap }, at);
 			state = result.state;
-			return result.fire ? "fire" : result.truth;
+			return { outcome: result.fire ? "fire" : result.truth, edge: result.state.edge };
 		});
+	}
+
+	function series(condition: Condition, observations: (JsonValue | { gap: JsonValue })[]) {
+		return evaluated(condition, observations).map((step) => step.outcome);
 	}
 
 	function truth(when: unknown, value: JsonValue) {
@@ -191,20 +195,42 @@ describe("trigger conditions", () => {
 		expect(truth({ op: "any", of: [missing, unknown] }, value)).toBe("unknown");
 	});
 
-	it("fires on false to true only, stays quiet when already true, and never rearms on unknown", () => {
+	it("fires on a true only after a known false with nothing unknown between", () => {
 		const low = edge({ op: "compare", path: ["price"], cmp: "lt", value: 500 });
-		expect(series(low, [{ price: 400 }, { price: 400 }, { price: 600 }, { price: 400 }, { price: 400 }])).toEqual(["true", "true", "false", "fire", "true"]);
-		// Unknown neither arms nor disarms: true, unknown, true is one condition that held throughout.
-		expect(series(low, [{ price: 600 }, { price: 400 }, {}, { price: 400 }])).toEqual(["false", "fire", "unknown", "true"]);
-		// Armed by false, it stays armed through unknown and a gap.
-		expect(series(low, [{ price: 600 }, {}, { gap: { price: 400 } }])).toEqual(["false", "unknown", "fire"]);
-		// Before any known result there is no baseline: the first known one sets it.
-		expect(series(low, [{}, {}, { price: 400 }, { price: 600 }, { price: 300 }])).toEqual(["unknown", "unknown", "true", "false", "fire"]);
+		const T = { price: 400 };
+		const F = { price: 600 };
+		const U = {};
+		// Each row: observations, then what each did and the edge state after it.
+		const table: [JsonValue[], string[], string[]][] = [
+			[[T, T], ["true", "true"], ["waiting_for_false", "waiting_for_false"]],
+			[[F, T], ["false", "fire"], ["armed", "waiting_for_false"]],
+			[[T, U, T], ["true", "unknown", "true"], ["waiting_for_false", "unknown", "waiting_for_false"]],
+			[[F, U, T], ["false", "unknown", "true"], ["armed", "unknown", "waiting_for_false"]],
+			[[U, F, T], ["unknown", "false", "fire"], ["unknown", "armed", "waiting_for_false"]],
+			[[F, T, T, F, T], ["false", "fire", "true", "false", "fire"], ["armed", "waiting_for_false", "waiting_for_false", "armed", "waiting_for_false"]],
+		];
+		for (const [observations, outcomes, edges] of table) {
+			const steps = evaluated(low, observations);
+			expect(steps.map((step) => step.outcome), JSON.stringify(observations)).toEqual(outcomes);
+			expect(steps.map((step) => step.edge), JSON.stringify(observations)).toEqual(edges);
+		}
+		// A gap breaks continuity as unknown does: a false after it is needed before a true fires.
+		expect(series(low, [F, { gap: T }, T])).toEqual(["false", "true", "true"]);
+		expect(series(low, [F, { gap: F }, T])).toEqual(["false", "false", "fire"]);
 	});
 
 	it("fires on each change it sees, and starts comparing again after a gap", () => {
 		const status = edge({ op: "changed", path: ["status"] });
-		expect(series(status, [{ status: "a" }, { status: "b" }, { status: "c" }, { status: "c" }, {}, { status: "d" }])).toEqual(["false", "fire", "fire", "false", "unknown", "fire"]);
+		// A missing value breaks continuity: the next one is a new baseline, not a change.
+		expect(series(status, [{ status: "a" }, { status: "b" }, { status: "c" }, { status: "c" }, {}, { status: "d" }, { status: "e" }])).toEqual([
+			"false",
+			"fire",
+			"fire",
+			"false",
+			"unknown",
+			"false",
+			"fire",
+		]);
 		expect(series(status, [{ status: "a" }, { gap: { status: "b" } }, { status: "b" }, { status: "c" }])).toEqual(["false", "false", "false", "fire"]);
 		// A change under `not` is not news of a change.
 		const unchanged = edge({ op: "any", of: [{ op: "not", of: { op: "changed", path: ["status"] } }, { op: "exists", path: ["alarm"] }] });
@@ -216,6 +242,10 @@ describe("trigger conditions", () => {
 		expect(series(down, [{ up: true }, { up: false }, { up: false }, { up: false }, { up: false }])).toEqual(["false", "false", "false", "fire", "true"]);
 		expect(series(down, [{ up: true }, { up: false }, {}, { up: false }, { up: false }, { up: false }])).toEqual(["false", "false", "unknown", "false", "false", "fire"]);
 		expect(series(down, [{ up: true }, { up: false }, { up: false }, { gap: { up: false } }, { up: false }, { up: false }])).toEqual(["false", "false", "false", "false", "false", "fire"]);
+		// An unknown result of the whole condition breaks it too, even where `stable_for` itself saw only truth.
+		const quietlyDown = edge({ op: "all", of: [down.when, { op: "compare", path: ["load"], cmp: "lt", value: 5 }] });
+		const down1 = { up: false, load: 1 };
+		expect(series(quietlyDown, [{ up: true, load: 1 }, down1, down1, { up: false }, down1, down1, down1])).toEqual(["false", "false", "false", "unknown", "false", "false", "fire"]);
 	});
 
 	it("keeps a hysteresis band from flapping", () => {
@@ -236,8 +266,10 @@ describe("trigger conditions", () => {
 		const low = edge({ op: "compare", path: ["price"], cmp: "lt", value: 500 }, 5 * MINUTE);
 		const armed = evaluate(low, "edge", null, { value: { price: 600 }, observedAt: START, gap: false }, START);
 		const late = evaluate(low, "edge", armed.state, { value: { price: 400 }, observedAt: START + MINUTE, gap: false }, START + 7 * MINUTE);
-		expect(late).toMatchObject({ truth: "unknown", fire: false, stale: true });
-		expect(late.state).toEqual(armed.state);
+		expect(late).toMatchObject({ truth: "unknown", fire: false, stale: true, state: { edge: "unknown" } });
+		// It broke continuity, so a fresh true after it waits for a false.
+		const fresh = evaluate(low, "edge", late.state, { value: { price: 400 }, observedAt: START + 7 * MINUTE, gap: false }, START + 7 * MINUTE);
+		expect(fresh).toMatchObject({ fire: false, state: { edge: "waiting_for_false" } });
 	});
 
 	it("evaluates every operand, so state is kept even where the result was already decided", () => {
@@ -381,7 +413,7 @@ describe("trigger store", () => {
 		await withStore(({ store }) => {
 			created(store, pollSpec(), "enabled", "price");
 			store.admit({ id: "price", generation: 1, eventId: "obs-1", observedAt: START, payload: { price: 600 }, checkpoint: { position: 1, cursor: null } });
-			expect(store.sourceState("price")).toMatchObject({ identity: "price#1", position: 1, conditionState: { armed: true } });
+			expect(store.sourceState("price")).toMatchObject({ identity: "price#1", position: 1, conditionState: { edge: "armed" } });
 			// A new condition alone keeps the source, and forgets what the old condition remembered.
 			store.update({ id: "price", expectedRevision: 1, spec: pollSpec({ condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 450 } } }) });
 			expect(store.sourceState("price")).toMatchObject({ identity: "price#1", position: 1, conditionState: null });

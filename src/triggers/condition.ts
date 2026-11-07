@@ -160,10 +160,20 @@ export type NodeState =
 	| { readonly op: "hysteresis"; readonly latched: boolean | null };
 
 /**
- * All a condition remembers: `armed` is null until a first known result
- * sets the baseline, true after a false result, false after a true one.
+ * Where an edge condition stands:
+ *
+ * - `unknown`: no known result since it started or since its continuity
+ *   last broke (an unknown result, a gap or a stale observation).
+ * - `armed`: its last result was a known false, with no break since, so a
+ *   true fires.
+ * - `waiting_for_false`: its last result was true, with no break since; it
+ *   fires again only after a known false.
  */
-export type ConditionState = { readonly version: 1; readonly armed: boolean | null; readonly nodes: readonly NodeState[] };
+export const EDGE_STATES = ["unknown", "armed", "waiting_for_false"] as const;
+export type EdgeState = (typeof EDGE_STATES)[number];
+
+/** All a condition remembers. */
+export type ConditionState = { readonly version: 1; readonly edge: EdgeState; readonly nodes: readonly NodeState[] };
 
 /** The state of a condition that has seen nothing yet. */
 export function initialState(condition: Condition): ConditionState {
@@ -176,7 +186,7 @@ export function initialState(condition: Condition): ConditionState {
 		if (expr.op === "not" || expr.op === "stable_for") visit(expr.of);
 	};
 	visit(condition.when);
-	return { version: 1, armed: null, nodes };
+	return { version: 1, edge: "unknown", nodes };
 }
 
 /** A stored state if it fits `condition`, else the initial one: state from another condition is never reused. */
@@ -185,7 +195,7 @@ export function stateFor(condition: Condition, stored: unknown): ConditionState 
 	if (typeof stored !== "object" || stored === null) return initial;
 	const given = stored as Partial<ConditionState>;
 	if (given.version !== 1 || !Array.isArray(given.nodes) || given.nodes.length !== initial.nodes.length) return initial;
-	if (!(given.armed === null || typeof given.armed === "boolean")) return initial;
+	if (!EDGE_STATES.includes(given.edge as EdgeState)) return initial;
 	if (given.nodes.some((node, index) => node?.op !== initial.nodes[index]?.op)) return initial;
 	return given as ConditionState;
 }
@@ -210,19 +220,27 @@ export type Evaluation = {
 
 /**
  * Evaluates `condition` on one observation. In `filter` mode it is fired
- * when the condition is true, and the state is untouched. In `edge` mode:
+ * when the condition is true, and the state is untouched. In `edge` mode
+ * a true result fires only when it follows a known false with nothing
+ * unknown in between:
  *
- * - The first known result is the baseline and fires nothing, even when it
- *   is true: a condition that already holds is not news.
- * - A false result arms the condition; a true result while armed fires it
- *   and disarms it. `unknown` neither arms nor disarms.
- * - A `changed` that is true outside any `not` fires as well, armed or not:
- *   each change seen between two observations is its own occurrence.
- * - A gap (`observation.gap`) resets what the stateful operators remember,
- *   so continuity (`stable_for`), the value `changed` compares with and a
- *   hysteresis band start again; the armed state stays.
- * - A stale observation is not evaluated: the result is `unknown` and the
- *   state is unchanged. The caller should treat it as a gap.
+ * - A false result arms the condition. A true result while armed fires it;
+ *   any true result leaves it waiting for a known false.
+ * - So a condition that is already true when it starts, or after a break,
+ *   fires nothing until it has been seen false: true, true and
+ *   false, unknown, true are both silent.
+ * - A break in continuity starts the condition over: an `unknown` result,
+ *   a gap (`observation.gap`), or a stale observation (older than
+ *   `staleAfterMs`, which is not evaluated at all). The edge goes back to
+ *   `unknown`, and every stateful operator forgets what it remembered:
+ *   `stable_for` counts again, and `changed` and `hysteresis` start again.
+ * - A `changed` that is true outside any `not` also fires while the
+ *   condition waits for a false, but never from `unknown`: each change seen
+ *   between two observations with no break between them is its own
+ *   occurrence.
+ *
+ * Evaluating is the only thing that changes this state. A run the person
+ * starts by hand is not an observation and must leave it alone.
  */
 export function evaluate(condition: Condition, mode: ConditionMode, stored: ConditionState | null, observation: Observation, now: number): Evaluation {
 	const prior = stored === null ? initialState(condition) : stateFor(condition, stored);
@@ -231,19 +249,16 @@ export function evaluate(condition: Condition, mode: ConditionMode, stored: Cond
 		return { truth, fire: truth === "true", stale: false, state: prior };
 	}
 	if (condition.staleAfterMs !== null && now - observation.observedAt > condition.staleAfterMs) {
-		return { truth: "unknown", fire: false, stale: true, state: prior };
+		return { truth: "unknown", fire: false, stale: true, state: initialState(condition) };
 	}
-	const nodes = (observation.gap ? initialState(condition) : prior).nodes.slice();
+	const start = observation.gap ? initialState(condition) : prior;
+	const nodes = start.nodes.slice();
 	const seen = { pulse: false };
 	const truth = evaluateExpr(condition.when, observation, nodes, seen);
-	let armed = prior.armed;
-	let fire = false;
-	if (truth === "false") armed = true;
-	if (truth === "true") {
-		fire = armed === true || seen.pulse;
-		armed = false;
-	}
-	return { truth, fire, stale: false, state: { version: 1, armed, nodes } };
+	if (truth === "unknown") return { truth, fire: false, stale: false, state: initialState(condition) };
+	if (truth === "false") return { truth, fire: false, stale: false, state: { version: 1, edge: "armed", nodes } };
+	const fire = start.edge === "armed" || (start.edge === "waiting_for_false" && seen.pulse);
+	return { truth, fire, stale: false, state: { version: 1, edge: "waiting_for_false", nodes } };
 }
 
 /**
@@ -277,7 +292,11 @@ function evaluateExpr(expr: Expr, observation: Observation, nodes: NodeState[], 
 				const state = nodes[index] as Extract<NodeState, { op: "changed" }>;
 				const found = lookup(observation.value, node.path);
 				const current = typeof found === "string" ? (found.length <= CONDITION_LIMITS.maxChangedLength ? found : undefined) : typeof found === "number" || typeof found === "boolean" ? found : undefined;
-				if (current === undefined) return "unknown";
+				// A value it can't compare breaks continuity: the next one is a new baseline, not a change.
+				if (current === undefined) {
+					nodes[index] = { op: "changed", last: null };
+					return "unknown";
+				}
 				nodes[index] = { op: "changed", last: current };
 				if (state.last === null || state.last === current) return "false";
 				if (positive) seen.pulse = true;
@@ -299,8 +318,11 @@ function evaluateExpr(expr: Expr, observation: Observation, nodes: NodeState[], 
 				const index = next++;
 				const state = nodes[index] as Extract<NodeState, { op: "hysteresis" }>;
 				const found = lookup(observation.value, node.path);
-				// A value that isn't a number says nothing about the band: unknown, and the latch is kept.
-				if (typeof found !== "number") return "unknown";
+				// A value that isn't a number breaks continuity: the band starts again.
+				if (typeof found !== "number") {
+					nodes[index] = { op: "hysteresis", latched: null };
+					return "unknown";
+				}
 				let latched = state.latched;
 				const entered = node.direction === "rising" ? found >= node.enter : found <= node.enter;
 				const exited = node.direction === "rising" ? found <= node.exit : found >= node.exit;

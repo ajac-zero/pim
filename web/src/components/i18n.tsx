@@ -390,7 +390,19 @@ const translations = {
       "Your other agents this one hands tasks to. Each works in a conversation of its own and answers this agent, never you.",
     majordomoContacts: "Your majordomo hands tasks to all of your agents.",
     noContacts: "Make another agent to give this one someone to hand tasks to.",
-    handTasksTo: "Hand tasks to {name}",
+    noContactsYet: "Hands tasks to nobody yet",
+    addContacts: "Add contacts",
+    seeNetwork: "See network",
+    network: "Network",
+    networkIntro:
+      "Who hands tasks to whom among your agents. Your majordomo, in the middle, hands tasks to all of them.",
+    networkHint:
+      "Choose an agent to bring out its lines. Draw a line from one agent to another, and the first hands tasks to the second. Click a line to take it away.",
+    networkChosenHint:
+      "Draw a line from {name} to another agent, or use + on it, and {name} hands it tasks. × or clicking a line takes one away.",
+    handTasks: "Have {from} hand tasks to {to}",
+    stopHandingTasks: "Stop {from} handing tasks to {to}",
+    removeContact: "{from} hands tasks to {to}. Click to take the line away.",
     comesWith: "Comes with",
     comesWithHint:
       "Agents it hands tasks to. Making it your own gives you a copy of each.",
@@ -1543,7 +1555,20 @@ const translations = {
       "Tus otros agentes a los que este les pasa tareas. Cada uno trabaja en una conversación propia y le responde a este agente, nunca a ti.",
     majordomoContacts: "Tu mayordomo les pasa tareas a todos tus agentes.",
     noContacts: "Crea otro agente para que este tenga a quién pasarle tareas.",
-    handTasksTo: "Pasarle tareas a {name}",
+    noContactsYet: "Todavía no le pasa tareas a nadie",
+    addContacts: "Agregar contactos",
+    seeNetwork: "Ver red",
+    network: "Red",
+    networkIntro:
+      "Quién le pasa tareas a quién entre tus agentes. Tu mayordomo, en el centro, les pasa tareas a todos.",
+    networkHint:
+      "Elige un agente para destacar sus líneas. Traza una línea de un agente a otro y el primero le pasará tareas al segundo. Haz clic en una línea para quitarla.",
+    networkChosenHint:
+      "Traza una línea de {name} a otro agente, o usa el + en él, y {name} le pasará tareas. La × o un clic en una línea la quita.",
+    handTasks: "Que {from} le pase tareas a {to}",
+    stopHandingTasks: "Que {from} deje de pasarle tareas a {to}",
+    removeContact:
+      "{from} le pasa tareas a {to}. Haz clic para quitar la línea.",
     comesWith: "Incluye",
     comesWithHint:
       "Agentes a los que les pasa tareas. Al hacerlo tuyo, recibes una copia de cada uno.",

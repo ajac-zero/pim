@@ -151,6 +151,12 @@ A disabled button keeps its shape and turns muted with muted text. A destructive
 
 Rows with an icon tile, a name, a one-line muted description, and a secondary pill action on the right. Name each section with a muted label.
 
+### Network
+
+Agents opens with Network at the top of its list: one map of every agent and who hands tasks to whom. The majordomo's tile sits in the middle, a size larger, with faint dashed spokes to every agent; the others sit on rings around it, with their names on the canvas's tone below their tiles. A contact is a line bowed to one side with an arrowhead at the agent handed the tasks, so two agents that hand each other tasks show two lines. Choosing an agent rings it in the focus color, darkens its lines, greys out the agents it has no line to or from, and puts a small round + or × on each other agent to add or take off that contact. Clicking the map's background chooses none. Dragging from one agent to another draws a dashed line in the focus color, red when letting go there would take a line away. Hovering a line turns it red, and clicking it takes it away. New lines draw themselves from the agent that hands tasks out.
+
+An agent's page lists its contacts as rows with a × to take one off, with Add contacts beside the section's label, which opens Network with that agent chosen.
+
 ### Modals
 
 A modal is a centered background surface with an 18px radius, a soft shadow, and the dimming scrim. On narrow screens, large modals (Settings, Connectors, Sharing, Discover) fill the screen, and small ones, such as an agent's settings, rise from the bottom as sheets with rounded top corners. It has a title, muted body copy, and actions at the bottom: the secondary button on the left and the primary on the right. Close with a bare `×` in the top right.

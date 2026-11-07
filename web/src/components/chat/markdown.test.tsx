@@ -381,6 +381,48 @@ describe("an agent's Markdown", () => {
   });
 });
 
+describe("a note's drawings", () => {
+  const drawing =
+    '<svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"/></svg>';
+  const text = [
+    HOSTILE,
+    "",
+    "```mermaid\nflowchart LR\n  A --> B\n```",
+    "",
+    `\`\`\`svg\n${drawing}\n\`\`\``,
+    "",
+    '```svg\n<img src="https://evil.example/x.png" onerror="alert(1)">\n```',
+  ].join("\n");
+  const found = elements(
+    renderToStaticMarkup(<Markdown text={text} untrusted drawings />),
+  );
+  const attribute = (element: (typeof found)[number], name: string) =>
+    element.attributes.find((a) => a.name === name)?.value;
+
+  it("draws a diagram in a sandboxed frame and a drawing as an image of itself, and nothing else", () => {
+    const frames = found.filter((element) => element.tag === "iframe");
+    expect(
+      frames.map((frame) => [
+        attribute(frame, "src"),
+        attribute(frame, "sandbox"),
+      ]),
+    ).toEqual([["/api/diagram", "allow-scripts"]]);
+    // The one image is the drawing, with its namespace, from its own source: it loads nothing.
+    const images = found.filter((element) => element.tag === "img");
+    expect(images.map((image) => attribute(image, "src"))).toEqual([
+      `data:image/svg+xml;charset=utf-8,${encodeURIComponent(drawing.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"'))}`,
+    ]);
+  });
+
+  it("shows a block that isn't an <svg> element as code", () => {
+    expect(
+      found.some((element) =>
+        element.attributes.some((a) => a.value.includes("evil.example/x.png")),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("chats an agent names", () => {
   const chat = "7af6a6ec-9d58-489a-b2be-512eda1cb34b";
   // An artifact's id, say: no chat of the person's.

@@ -1397,6 +1397,9 @@ export const pim = {
     }),
   apps: () =>
     call<{ servers: ConnectedApp[] }>("/mcp").then((body) => body.servers),
+  /** The apps Pim brings that the admin left on. */
+  builtinApps: () =>
+    call<{ apps: BuiltinApp[] }>("/builtin-apps").then((body) => body.apps),
   /** The connectors you can connect. */
   appDirectory: () =>
     call<{ apps: DirectoryApp[] }>("/app-directory").then((body) => body.apps),
@@ -1788,6 +1791,17 @@ export const pim = {
       `${artifactRoot(id, from)}/versions/${version}/grants`,
       { method: "POST", body: JSON.stringify({ capability }) },
     ),
+  renameArtifact: (id: string, title: string) =>
+    call<Artifact>(`/artifacts/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ title }),
+    }),
+  /** Starts an empty note, to write in with your agents. */
+  createNote: (title: string) =>
+    call<Artifact>("/notes", {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    }),
   deleteArtifact: (id: string) =>
     call<{ deleted: boolean }>(`/artifacts/${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -1836,7 +1850,21 @@ export type SignInProviderSettings = {
   callbackUrl: string;
 };
 
+/** One of the apps Pim brings, such as Notes. */
+export type BuiltinApp = { id: string; name: string; description: string };
+
 export const admin = {
+  /** Pim's built-in apps, and which the admin left on for everyone. */
+  builtinApps: () =>
+    call<{ apps: (BuiltinApp & { enabled: boolean })[] }>(
+      "/admin/builtin-apps",
+    ).then((body) => body.apps),
+  /** Turns one of Pim's built-in apps on or off for everyone. */
+  setBuiltinApp: (id: string, enabled: boolean) =>
+    call<{ apps: (BuiltinApp & { enabled: boolean })[] }>(
+      `/admin/builtin-apps/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ).then((body) => body.apps),
   /** Takes a published app down, for everyone. */
   removePublishedArtifact: (id: string) =>
     call<{ deleted: boolean }>(

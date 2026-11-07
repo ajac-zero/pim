@@ -1,4 +1,5 @@
 import { getAgentByName } from "agents";
+import { BUILTIN_APPS } from "./builtin-apps";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "./auth/oauth";
 import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE, type Sites, userHandle } from "./auth";
 import type { ApiExtension } from "./gateway";
@@ -703,6 +704,12 @@ export function socialApi(env: Env, account: Account, request: Request): ApiExte
 	};
 }
 
+/** Each of Pim's built-in apps, and whether the admin left it on. */
+async function builtinApps(env: Env) {
+	const off = new Set(await gallery(env).disabledBuiltinApps());
+	return BUILTIN_APPS.map((app) => ({ ...app, enabled: !off.has(app.id) }));
+}
+
 /**
  * `/api/admin/*`: the admin's view of everyone, and which sign-in providers
  * are on, with a signed-in browser only. An API token can't run the instance.
@@ -792,6 +799,17 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				if (!(await gallery(env).removeCustomApp(decodeURIComponent(customApp[1]!)))) return fail(404, "No such connector");
 				log("app_removed", { app: customApp[1], by: admin.ownerId });
 				return json({ deleted: true });
+			}
+			// The apps Pim brings (./builtin-apps.ts), which the admin turns on or off for everyone. People's spaces read which are off from the gallery.
+			if (route === "GET /builtin-apps") return json({ apps: await builtinApps(env) });
+			const builtinApp = /^\/admin\/builtin-apps\/([^/]+)$/.exec(path);
+			if (builtinApp && request.method === "PUT") {
+				const id = decodeURIComponent(builtinApp[1]!);
+				const { enabled } = await body();
+				if (typeof enabled !== "boolean") return fail(400, "enabled must be true or false");
+				if (!(await gallery(env).setBuiltinApp(id, enabled))) return fail(404, "No such app");
+				log(enabled ? "builtin_app_enabled" : "builtin_app_disabled", { app: id, by: admin.ownerId });
+				return json({ apps: await builtinApps(env) });
 			}
 			// Model providers for everyone (./providers.ts). People's spaces read them from the gallery.
 			const sharedProvider = /^\/admin\/providers\/([^/]+)$/.exec(path);

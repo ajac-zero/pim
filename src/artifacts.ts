@@ -656,8 +656,8 @@ export class ArtifactStore {
 		if (!summary) throw new HttpError(404, `No app ${id}`);
 		const replayed = () => {
 			if (input.callId === undefined) return undefined;
-			const [made] = this.#sql.exec("SELECT version FROM pim_artifact_versions WHERE artifact = ? AND call_id = ?", id, input.callId).toArray();
-			return made ? { version: this.version(id, Number(made.version))!, changed: true } : undefined;
+			const made = this.byCall(id, input.callId);
+			return made ? { version: made, changed: true } : undefined;
 		};
 		const early = replayed();
 		if (early) return early;
@@ -695,6 +695,19 @@ export class ArtifactStore {
 			this.#sql.exec("UPDATE pim_artifacts SET head = ?, title = ?, updated_at = ? WHERE id = ?", next, input.title ?? current.title, now, id);
 			return { version: this.version(id, next)!, changed: true };
 		});
+	}
+
+	/** The version a tool call made, so a replayed call finds it instead of making another. */
+	byCall(id: string, callId: string): ArtifactVersion | undefined {
+		const [made] = this.#sql.exec("SELECT version FROM pim_artifact_versions WHERE artifact = ? AND call_id = ?", id, callId).toArray();
+		return made ? this.version(id, Number(made.version)) : undefined;
+	}
+
+	/** Renames an app, making no version. */
+	rename(id: string, title: string): ArtifactSummary {
+		if (!this.get(id)) throw new HttpError(404, `No app ${id}`);
+		this.#sql.exec("UPDATE pim_artifacts SET title = ?, updated_at = ? WHERE id = ?", checkTitle(title), Date.now(), id);
+		return this.get(id)!;
 	}
 
 	/** Restores `version` as a new latest version, if `baseVersion` is still the latest. */

@@ -4,6 +4,7 @@ import type { AppCatalog, AppSkill } from "./app-catalog";
 import type { McpBridge, McpResourceContent } from "./mcp";
 import type { Files } from "../files";
 import type { SkillStore } from "../skills";
+import type { BuiltinSkill } from "./notes";
 import { isTextType } from "../artifacts";
 import { HttpError } from "../http";
 import { text } from "./services";
@@ -16,7 +17,9 @@ import { text } from "./services";
  * origin is stated wherever it enters the model's context.
  *
  * Without a connector, `read_skill` and `read_skill_file` read one of the
- * person's own skills instead (see ../skills.ts), from `own`.
+ * person's own skills instead (see ../skills.ts), from `own`. With `app`,
+ * `read_skill` reads a skill one of Pim's built-in apps brings, such as
+ * Notes' (see ./notes.ts).
  *
  * `read_skill_file` with `save_to` copies the file to the person's files
  * instead of reading it out, so a script or a template, text or not, can
@@ -83,7 +86,13 @@ function clip(value: string): string {
 	return value.length > MAX_SKILL_CHARS ? `${value.slice(0, MAX_SKILL_CHARS)}\n[... ${value.length - MAX_SKILL_CHARS} more characters]` : value;
 }
 
-export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: Pick<SkillStore, "get" | "read">, files: Pick<Files, "write">) {
+export function skillTools(
+	bridge: McpBridge,
+	catalog: AppCatalog,
+	own: Pick<SkillStore, "get" | "read">,
+	files: Pick<Files, "write">,
+	builtin: readonly BuiltinSkill[] = [],
+) {
 	const app = (name: string) => {
 		const wanted = name.toLowerCase();
 		return bridge.servers().find((server) => server.id === wanted || server.name.toLowerCase() === wanted);
@@ -111,13 +120,19 @@ export function skillTools(bridge: McpBridge, catalog: AppCatalog, own: Pick<Ski
 	const readSkill = defineTool({
 		name: "read_skill",
 		description:
-			"Load a skill's instructions before doing the work it describes: one of your skills (listed under your_skills), by its name alone, or one a connected connector offers (listed under the connector), with the connector's name.",
+			"Load a skill's instructions before doing the work it describes: one of your skills (listed under your_skills), by its name alone, one a connected connector offers (listed under the connector), with the connector's name, or one a built-in app of Pim's brings, such as Notes, with the app's name.",
 		parameters: Type.Object({
 			connector: Type.Optional(Type.String({ description: "The connector that offers it; leave out for one of your skills." })),
+			app: Type.Optional(Type.String({ description: "The built-in app that brings it, such as notes." })),
 			skill: Type.String(),
 		}),
 		replay: "safe",
-		async execute({ connector: appName, skill: skillName }) {
+		async execute({ connector: appName, app: builtinApp, skill: skillName }) {
+			if (builtinApp !== undefined) {
+				const skill = builtin.find((candidate) => candidate.app === builtinApp.toLowerCase() && candidate.name === skillName);
+				if (!skill) return text(`Pim's built-in app ${builtinApp} brings no skill named ${skillName}.`, true);
+				return text([`Skill "${skill.name}" of Pim's built-in app ${skill.app}.`, `Description: ${skill.description}`, "", skill.instructions].join("\n"));
+			}
 			if (appName === undefined) {
 				const skill = own.get(skillName);
 				if (!skill) return text(`There is no skill named ${skillName} of the person's. A connector's skill needs its connector.`, true);

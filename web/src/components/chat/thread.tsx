@@ -74,13 +74,16 @@ import {
 import { useForkChat } from "~/lib/start-chat";
 
 /**
- * Tools whose answer names an app's version, shown as the app itself: one made, changed or shown again.
+ * Tools whose answer names an app's or a note's version, shown as the app itself: one made, changed or shown again.
  * Chats from before artifacts became apps name them `artifact_*`.
  */
 const ARTIFACT_TOOLS = new Set([
   "app_create",
   "app_update",
   "app_show",
+  "note_create",
+  "note_edit",
+  "note_show",
   "artifact_create",
   "artifact_update",
   "artifact_show",

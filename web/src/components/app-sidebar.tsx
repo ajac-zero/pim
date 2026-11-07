@@ -22,6 +22,7 @@ import {
   Contact,
   CornerDownRight,
   ExternalLink,
+  FileText,
   Loader2,
   MessagesSquare,
   Monitor,
@@ -46,10 +47,12 @@ import {
 import { Shortcut } from "~/components/shortcut";
 import {
   ArtifactsPanel,
+  NotesPanel,
   NotificationsPanel,
   SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
   SkillsPanel,
+  useNotesOn,
 } from "~/components/sidebar-panels";
 import { Button } from "~/components/ui/button";
 import {
@@ -120,6 +123,7 @@ export function useAwaitingApproval() {
 /** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=artifacts`). */
 export const SIDEBAR_PANELS = [
   "notifications",
+  "notes",
   "artifacts",
   "skills",
   "schedules",
@@ -168,9 +172,12 @@ export function SidebarPanelContent({
   onNavigate?: () => void;
 }) {
   const { panel } = useSearch({ strict: false });
+  const notesOn = useNotesOn();
   return panel === "notifications" ? (
     <NotificationsPanel onNavigate={onNavigate} />
-  ) : panel === "artifacts" ? (
+  ) : panel === "notes" && notesOn ? (
+    <NotesPanel onNavigate={onNavigate} />
+  ) : panel === "artifacts" || panel === "notes" ? (
     <ArtifactsPanel onNavigate={onNavigate} />
   ) : panel === "skills" ? (
     <SkillsPanel onNavigate={onNavigate} />
@@ -197,6 +204,7 @@ export function AppSidebar({
 }) {
   const { t } = useI18n();
   const { panel } = useSearch({ strict: false });
+  const notesOn = useNotesOn();
   const {
     account,
     profile,
@@ -234,6 +242,14 @@ export function AppSidebar({
             label={t("chats")}
             count={panel || collapsed ? awaitingApproval.size : 0}
           />
+          {notesOn && (
+            <RailPanel
+              {...railPanel}
+              panel="notes"
+              icon={<FileText className="size-4.5" />}
+              label={t("notes")}
+            />
+          )}
           <RailPanel
             {...railPanel}
             panel="artifacts"

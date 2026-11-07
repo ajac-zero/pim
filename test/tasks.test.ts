@@ -436,7 +436,7 @@ describe("the majordomo", () => {
 			Scout: [
 				(context) => {
 					scoutSaw = { prompt: systemPrompt(context.messages), tools: tools(context), message: lastUserText(context.messages) };
-					return toolUse("app_create", { title: "Lisbon by month", kind: "markdown", content: "# May" });
+					return toolUse("note_create", { title: "Lisbon by month", content: "# May" });
 				},
 				() => answer("May: mild and before the crowds."),
 			],

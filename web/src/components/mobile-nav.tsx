@@ -17,6 +17,7 @@ import {
   CalendarClock,
   Compass,
   Contact,
+  FileText,
   MessagesSquare,
   Monitor,
   MoreHorizontal,
@@ -30,12 +31,14 @@ import {
   ProfilePopover,
   ProfilePopoverTrigger,
 } from "~/components/profile-popover";
+import { useNotesOn } from "~/components/sidebar-panels";
 import { Button } from "~/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "~/components/ui/sheet";
 import { cn } from "~/lib/utils";
 
 /** The panels that live under More rather than in the bar. */
 const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
+  "notes",
   "skills",
   "schedules",
 ];
@@ -214,6 +217,7 @@ function MoreSheet({
   onHideList: () => void;
 }) {
   const { t } = useI18n();
+  const notesOn = useNotesOn();
   const close = () => onOpenChange(false);
   const panelRow = (panel: SidebarPanel, icon: ReactNode, label: string) => (
     <Link
@@ -301,6 +305,12 @@ function MoreSheet({
           <Contact className={ROW_ICON_CLASS} />,
           t("agents"),
         )}
+        {notesOn &&
+          panelRow(
+            "notes",
+            <FileText className={ROW_ICON_CLASS} />,
+            t("notes"),
+          )}
         {panelRow(
           "skills",
           <ScrollText className={ROW_ICON_CLASS} />,

@@ -90,6 +90,8 @@ import {
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension } from "./extensions/artifacts";
+import { NOTES_SKILL, notesExtension } from "./extensions/notes";
+import { BUILTIN_APPS } from "./builtin-apps";
 import { APP_DEPLOY, appDeployAction, hostedExtension } from "./extensions/hosted";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, BROWSER_UPLOAD, browserClickAction, browserExtension, browserTypeAction, browserUploadAction } from "./extensions/browser";
@@ -174,6 +176,7 @@ import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADE
 import { machineName } from "./computer-host";
 import { FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
+import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "./notes";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
 import { type DeploymentSettings, deploymentSettings } from "./deployment";
 import { dispatch, HttpError, readJson, type Route } from "./http";
@@ -428,6 +431,8 @@ const CUSTOM_APPS_KEY = "custom_apps";
 const OWNER_ADMIN_KEY = "owner_admin";
 /** How long what the admin shares through the gallery (connectors and model providers) is used before it's read again. */
 const CUSTOM_APPS_TTL_MS = 60_000;
+/** The built-in apps (./builtin-apps.ts) the admin turned off, as last read from the gallery with their connectors. */
+const DISABLED_BUILTIN_APPS_KEY = "disabled_builtin_apps";
 /** The person's own model providers (./providers.ts), keys included. */
 const OWN_PROVIDERS_KEY = "own_providers";
 /** The admin's model providers, as last read from the gallery. */
@@ -454,6 +459,8 @@ const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "aband
 
 /** A socket's chat, or for an app showing the computer's desktop, the channel its stream comes on. */
 type SocketState = { readonly session: string; readonly channel?: number };
+/** A socket editing a note: which one. */
+type NoteSocketState = { readonly note: string };
 
 function clipTitle(text: string): string {
 	const line = text.trim().split(/\r?\n/)[0]!.trim();
@@ -539,6 +546,10 @@ export class Pim extends DurableAgent<Env> {
 		owner: () => this.name,
 		storageRoom: () => this.#storageRoom(),
 	});
+	/** Notes: the live text of Markdown apps, which the person and the agent write in together (see ./notes.ts). */
+	readonly notes = new NoteStore(this.ctx.storage.sql, this.artifacts, (note) =>
+		[...this.getConnections<NoteSocketState>(NOTE_TAG)].filter((connection) => connection.state?.note === note).map((connection) => this.#notePeer(connection)),
+	);
 	/** The person's computer, which their agents use, if they have one (see ./computer.ts). */
 	readonly computer: Computer = new Computer({
 		meta: this.store,
@@ -811,6 +822,7 @@ export class Pim extends DurableAgent<Env> {
 					readFile: (path) => this.files.bytes(path),
 				}),
 			);
+			this.#installNotes();
 			this.registry.install(filesExtension(this.#files));
 			this.registry.install(hostedExtension(this.#hostedServices));
 			this.#installImageGeneration();
@@ -1007,7 +1019,7 @@ export class Pim extends DurableAgent<Env> {
 	#appExtras(services: PimServices) {
 		return {
 			catalog: this.catalog,
-			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files), ...eventTools(
+			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files, this.#builtinOn("notes") ? [NOTES_SKILL] : []), ...eventTools(
 					this.apps,
 					this.catalog,
 					this.appEvents,
@@ -1091,9 +1103,19 @@ export class Pim extends DurableAgent<Env> {
 		try {
 			const gallery = this.env.Gallery.getByName("gallery");
 			// The directory failing to answer leaves what it said before.
-			const [apps, providers, admin] = await Promise.all([gallery.customApps(), gallery.sharedProviders(), this.#ownerIsAdmin().catch(() => null)]);
+			const [apps, providers, admin, off] = await Promise.all([
+				gallery.customApps(),
+				gallery.sharedProviders(),
+				this.#ownerIsAdmin().catch(() => null),
+				gallery.disabledBuiltinApps(),
+			]);
 			const custom = JSON.stringify(apps);
 			if (custom !== this.store.meta(CUSTOM_APPS_KEY)) this.store.setMeta(CUSTOM_APPS_KEY, custom);
+			const disabled = JSON.stringify(off);
+			if (disabled !== (this.store.meta(DISABLED_BUILTIN_APPS_KEY) ?? "[]")) {
+				this.store.setMeta(DISABLED_BUILTIN_APPS_KEY, disabled);
+				this.#builtinAppsChanged();
+			}
 			if (admin !== null && (admin ? "1" : "0") !== this.store.meta(OWNER_ADMIN_KEY)) {
 				this.store.setMeta(OWNER_ADMIN_KEY, admin ? "1" : "0");
 				this.#reinstallApprovals();
@@ -1106,6 +1128,31 @@ export class Pim extends DurableAgent<Env> {
 		} catch (error) {
 			console.warn("reading the admin's connectors and providers failed", error);
 		}
+	}
+
+	/** Whether the admin left one of Pim's built-in apps on, as this space last read it. */
+	#builtinOn(id: string): boolean {
+		return !(JSON.parse(this.store.meta(DISABLED_BUILTIN_APPS_KEY) ?? "[]") as string[]).includes(id);
+	}
+
+	/** Notes' tools and prompt section, or nothing in their place while the admin has Notes off. */
+	#installNotes(): void {
+		this.registry.install(
+			this.#builtinOn("notes")
+				? notesExtension({ artifacts: this.artifacts, notes: this.notes, assertOpen: () => this.#assertOpen() })
+				: defineExtension({ name: "pim.notes" }),
+		);
+	}
+
+	/**
+	 * The admin turned a built-in app on or off: its tools, prompt section and
+	 * skill come or go from the next request, in chats begun before too. The
+	 * person's notes stay theirs to open, change and export either way.
+	 */
+	#builtinAppsChanged(): void {
+		if (!this.registry.snapshot().extension("pim.approvals")) return;
+		this.#installNotes();
+		this.#installApps();
 	}
 
 	/** Whether this space's owner runs this Pim, as the directory says now. */
@@ -4235,6 +4282,8 @@ export class Pim extends DurableAgent<Env> {
 	 * and push keys stay behind. JSON text, ready to download.
 	 */
 	async exportData(): Promise<string> {
+		// What the person wrote in a note since its last version is part of it.
+		await this.notes.checkpointAll();
 		const deleted = this.store.deletedSessions();
 		const sessions = [];
 		for (const session of await this.harness.sessions.list()) {
@@ -5293,8 +5342,36 @@ export class Pim extends DurableAgent<Env> {
 					this.#assertOpen();
 					const artifact = this.#artifact(id!);
 					await this.hosted.forget(artifact.id);
+					this.notes.forget(artifact.id);
 					await this.artifacts.delete(artifact.id);
 					return noStore({ deleted: true });
+				}),
+		],
+		[
+			"PUT",
+			"/artifacts/:id",
+			({ id }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const artifact = this.#artifact(id!);
+					const { title } = await readJson<{ title: unknown }>(request);
+					if (typeof title !== "string") throw new HttpError(400, "title must be a string");
+					this.#assertOpen();
+					return noStore(this.#publicArtifact(this.artifacts.rename(artifact.id, title)));
+				}),
+		],
+		// A note the person starts themselves, empty, to write in with their agents.
+		[
+			"POST",
+			"/notes",
+			(_params, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const { title } = await readJson<{ title: unknown }>(request);
+					if (typeof title !== "string") throw new HttpError(400, "title must be a string");
+					this.#assertOpen();
+					if (!this.#builtinOn("notes")) throw new HttpError(403, "Notes is off on this Pim.");
+					const id = crypto.randomUUID();
+					await this.artifacts.create({ id, title: checkTitle(title), kind: "markdown", content: "", session: null });
+					return noStore(this.#publicArtifact(this.artifacts.get(id)!), 201);
 				}),
 		],
 		[
@@ -5316,12 +5393,12 @@ export class Pim extends DurableAgent<Env> {
 					}
 					const name = title === undefined ? undefined : checkTitle(title);
 					this.#assertOpen();
-					const { version, changed } = await this.artifacts.append(artifact.id, {
-						baseVersion: baseVersion!,
-						files: { [file]: content },
-						source: "person",
-						...(name !== undefined ? { title: name } : {}),
-					});
+					const change = { baseVersion: baseVersion!, source: "person", ...(name !== undefined ? { title: name } : {}) } as const;
+					// A note's whole new text goes into its live text too, where the person's editors see it.
+					const { version, changed } =
+						artifact.kind === "markdown"
+							? await this.notes.write(artifact.id, { ...change, content })
+							: await this.artifacts.append(artifact.id, { ...change, files: { [file]: content } });
 					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), saved: version.version, changed }, changed ? 201 : 200);
 				}),
 		],
@@ -5336,7 +5413,10 @@ export class Pim extends DurableAgent<Env> {
 						throw new HttpError(400, "version and baseVersion must be version numbers");
 					}
 					this.#assertOpen();
-					const restored = await this.artifacts.restore(artifact.id, version!, baseVersion!);
+					const restored =
+						artifact.kind === "markdown"
+							? await this.notes.restore(artifact.id, version!, baseVersion!)
+							: await this.artifacts.restore(artifact.id, version!, baseVersion!);
 					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), restored: restored.version }, 201);
 				}),
 		],
@@ -6309,6 +6389,15 @@ export class Pim extends DurableAgent<Env> {
 		],
 		["POST", "/visits/:username", async ({ username }) => ({ session: this.store.publicId(await this.startVisit(username!)) })],
 
+		// The apps Pim brings that the admin left on.
+		[
+			"GET",
+			"/builtin-apps",
+			async () => {
+				await this.#refreshCustomApps(true);
+				return { apps: BUILTIN_APPS.filter((app) => this.#builtinOn(app.id)) };
+			},
+		],
 		// The connectors people can connect, and the person's connections to them.
 		[
 			"GET",
@@ -6865,6 +6954,7 @@ export class Pim extends DurableAgent<Env> {
 	override getConnectionTags(_connection: Connection, ctx: ConnectionContext): string[] {
 		const { pathname } = new URL(ctx.request.url);
 		if (pathname === COMPUTER_SCREEN_PATH) return [SCREEN_TAG];
+		if (pathname === NOTE_LIVE_PATH) return [NOTE_TAG];
 		return pathname === COMPUTER_PATH ? [COMPUTER_TAG] : pathname === BROWSER_LIVE_PATH ? [BROWSER_TAG] : [];
 	}
 
@@ -6878,6 +6968,46 @@ export class Pim extends DurableAgent<Env> {
 
 	#isScreenViewer(connection: Connection): boolean {
 		return connection.tags.includes(SCREEN_TAG);
+	}
+
+	#isNoteEditor(connection: Connection): boolean {
+		return connection.tags.includes(NOTE_TAG);
+	}
+
+	/** A socket editing a note, as the notes see it. */
+	#notePeer(connection: Connection): NotePeer {
+		return {
+			id: connection.id,
+			send: (data) => {
+				if (connection.readyState !== WebSocket.OPEN) return;
+				try {
+					connection.send(data);
+				} catch {
+					// Closed between the check and the send.
+				}
+			},
+			close: (code, reason) => connection.close(code, reason),
+		};
+	}
+
+	/** An editor opens a note (`?note=`, kept as the socket's state) and syncs with its live text. */
+	async #openNote(connection: Connection<NoteSocketState>, request: Request): Promise<void> {
+		const note = new URL(request.url).searchParams.get("note") ?? "";
+		try {
+			if (this.artifacts.get(note)?.kind !== "markdown") throw new HttpError(404, `No note ${note}`);
+			connection.setState({ note });
+			await this.notes.joined(note, this.#notePeer(connection));
+		} catch (error) {
+			connection.close(4004, errorMessage(error).slice(0, 120));
+		}
+	}
+
+	/** An editor went: the note keeps what was written, once the last one has. */
+	async #closeNote(connection: Connection<NoteSocketState>): Promise<void> {
+		const note = connection.state?.note;
+		if (!note) return;
+		const remaining = [...this.getConnections<NoteSocketState>(NOTE_TAG)].filter((other) => other.id !== connection.id && other.state?.note === note).length;
+		await this.notes.left(note, connection.id, remaining);
 	}
 
 	/**
@@ -6988,6 +7118,10 @@ export class Pim extends DurableAgent<Env> {
 			await this.#viewScreen(connection);
 			return;
 		}
+		if (this.#isNoteEditor(connection)) {
+			await this.#openNote(connection as unknown as Connection<NoteSocketState>, ctx.request);
+			return;
+		}
 		const requested = new URL(ctx.request.url).searchParams.get("session");
 		let session: string;
 		try {
@@ -7004,6 +7138,17 @@ export class Pim extends DurableAgent<Env> {
 
 	async onMessage(connection: Connection<SocketState>, raw: WSMessage): Promise<void> {
 		if (this.#isComputer(connection)) return this.#computerSaid(raw);
+		if (this.#isNoteEditor(connection)) {
+			const note = (connection.state as unknown as Partial<NoteSocketState> | undefined)?.note;
+			if (!note || typeof raw === "string") return;
+			const bytes = raw instanceof ArrayBuffer ? new Uint8Array(raw) : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+			try {
+				await this.notes.receive(note, this.#notePeer(connection), bytes);
+			} catch (error) {
+				connection.close(4004, errorMessage(error).slice(0, 120));
+			}
+			return;
+		}
 		if (typeof raw !== "string") return;
 		if (this.#isScreenViewer(connection)) {
 			if (raw.startsWith(SCREEN_PING)) return this.#screenPing(connection, raw);
@@ -7045,6 +7190,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected();
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
+		if (this.#isNoteEditor(connection)) return this.#closeNote(connection as Connection<NoteSocketState>);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
@@ -7053,6 +7199,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected();
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
+		if (this.#isNoteEditor(connection)) return this.#closeNote(connection as Connection<NoteSocketState>);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
@@ -7201,11 +7348,13 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Tells every open app; the computer's connection, and those taking the browser over or showing the desktop, speak other protocols. */
+	/** Tells every open app; the computer's connection, and those taking the browser over, showing the desktop or editing a note, speak other protocols. */
 	broadcastMessage(message: ServerMessage): void {
 		this.broadcast(
 			JSON.stringify(message),
-			[...this.getConnections(COMPUTER_TAG), ...this.getConnections(BROWSER_TAG), ...this.getConnections(SCREEN_TAG)].map((connection) => connection.id),
+			[...this.getConnections(COMPUTER_TAG), ...this.getConnections(BROWSER_TAG), ...this.getConnections(SCREEN_TAG), ...this.getConnections(NOTE_TAG)].map(
+				(connection) => connection.id,
+			),
 		);
 	}
 }

@@ -20,6 +20,7 @@ import { readSync } from "./computer-host";
 import { appAddress, appOfHost, appOfLabel, SESSION_COOKIE as APP_SESSION_COOKIE } from "./hosted";
 import { installScript } from "./install-script";
 import { BROWSER_LIVE_PATH } from "./browser";
+import { NOTE_LIVE_PATH } from "./notes";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
@@ -614,7 +615,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	}
 	// The space accepts sockets on any path; keep them on one.
 	const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH || path === COMPUTER_SCREEN_PATH)) {
+	if (upgrade !== (path === "/ws" || path === BROWSER_LIVE_PATH || path === COMPUTER_SCREEN_PATH || path === NOTE_LIVE_PATH)) {
 		return withCors(fail(upgrade ? 404 : 426, upgrade ? "WebSockets connect at /api/ws" : "/api/ws expects a WebSocket upgrade"));
 	}
 	// The desktop takes input as if at the computer itself: only the person, signed in in their browser, uses it.

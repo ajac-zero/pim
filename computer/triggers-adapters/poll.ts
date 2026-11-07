@@ -60,7 +60,11 @@ export type ChildExit = {
 	readonly code: number | null;
 	readonly signal: string | null;
 	readonly failed: boolean;
-	/** Whether everything left in the child's group is known to have been killed with it; false means it may still run. */
+	/**
+	 * Whether the child's group was sent SIGKILL while it was provably its own:
+	 * by its leader after reporting the command's status, or by `signal`.
+	 * False means what was left of it may still run.
+	 */
 	readonly cleaned: boolean;
 };
 export type ChildEvents = {
@@ -349,7 +353,11 @@ export class PollAdapter implements ObserverAdapter {
 		run.finish();
 		if (this.#fenced) return;
 		const at = this.#clock.now();
-		if (!result.cleaned) this.#report("degraded", "poll_cleanup_unknown");
+		if (!result.cleaned) {
+			// What is left of its group may still run, and can't be signalled safely: this adapter starts nothing more, emits nothing more, and says only this.
+			this.#report("error", "poll_cleanup_unknown");
+			return this.#fence();
+		}
 		if (run.ended === "timeout") return this.#report("degraded", "poll_timeout");
 		if (run.ended === "too_large") return this.#report("degraded", "poll_output_too_large");
 		if (result.failed) return this.#report("error", "poll_spawn_failed");
@@ -439,7 +447,7 @@ export type NodeChildLauncherOptions = {
  * The leader of every poll's process group, run by `/bin/sh` with the shell
  * and the command as `$1` and `$2`. It runs the command as its child, so in
  * its group, and stays alive until it has reported the command's exit
- * status on fd 3 and killed its own group, itself last. While it lives, the
+ * status on fd 3 and then killed its own group, itself last. While it lives, the
  * group's id is its own process id, so `kill -9 0` can reach no one else's
  * group. It catches SIGTERM, SIGINT and SIGHUP only to outlive the command
  * and clean up after it; a caught signal is reset to its default in the
@@ -463,9 +471,8 @@ export const POLL_LEADER = [
  * group's, so no other process can have either; and Node reaps a child and
  * records its exit in the same step of its event loop, so `exitCode` and
  * `signalCode` both still null means not yet reaped. Once the leader is
- * reaped this launcher never signals its group again, whatever is left.
- * What is left can only be a process the leader's own `kill -9 0` missed,
- * which is one that left the group.
+ * reaped this launcher never signals its group again, whatever is left,
+ * and says in `cleaned` whether it can vouch that the group was killed.
  */
 export class NodeChildLauncher implements ChildLauncher {
 	readonly #defaultCwd: string;
@@ -515,8 +522,8 @@ export class NodeChildLauncher implements ChildLauncher {
 		/** The command's own exit, when the leader lived to report it; otherwise how the leader ended. */
 		const exited = (code: number | null, signal: NodeJS.Signals | null): ChildExit => {
 			const told = /^([0-9]{1,3})\n$/.exec(status);
-			if (told && Number(told[1]) <= 255) return { code: Number(told[1]), signal: null, failed: false, cleaned: true };
-			// The leader ended before it could clean up, by something else's signal: what is left of its group can't be signalled safely, and is said to be unknown.
+			// The status proves how the command ended. Cleanup counts as done only when the leader then ended by SIGKILL, as its own `kill -9 0` ends it, or when this launcher's SIGKILL reached the whole group; otherwise it is unknown.
+			if (told && Number(told[1]) <= 255) return { code: Number(told[1]), signal: null, failed: false, cleaned: signal === "SIGKILL" || killed };
 			return { code, signal, failed: false, cleaned: killed };
 		};
 		child.stdout?.on("data", (chunk: Buffer) => {

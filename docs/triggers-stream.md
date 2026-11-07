@@ -1,6 +1,6 @@
 # The stream observer on the computer
 
-> **Not active.** This is a review-only tranche. Nothing imports [`computer/triggers-adapters/stream.ts`](../computer/triggers-adapters/stream.ts) but its test: `observerAdapters` ([`index.ts`](../computer/triggers-adapters/index.ts)) doesn't offer it, so the runtime still reports a `stream` source as `unsupported`, pim-computer constructs no runtime, and no service or install script registers anything. The runtime's side of a stream's end (`endCoverage`, end records, the `ended` state) is in `computer/triggers-runtime.ts`, also unregistered and unused by anything that runs.
+> **Not active.** This is a review-only tranche. Nothing imports [`computer/triggers-adapters/stream.ts`](../computer/triggers-adapters/stream.ts) but `observerAdapters` and tests, and nothing imports that: `observerAdapters` ([`index.ts`](../computer/triggers-adapters/index.ts)) offers it, as it does `poll` and `process`, when given stream options (`launcher`, limits, clock) and refuses a `stream` source as `unsupported` when not given them. Nothing passes them: pim-computer constructs no runtime, and no service or install script registers anything. The runtime's side of a stream's end (`endCoverage`, end records, the `ended` state) is in `computer/triggers-runtime.ts`, also unregistered and unused by anything that runs.
 
 A `stream` source (`{ kind: "stream", command, cwd }`, unchanged from `triggers.v1`) is a shell command on the person's computer that keeps running and prints one JSON object per line, each an event. `StreamAdapter` is its `ObserverAdapter`; `NodeStreamLauncher` starts its command.
 
@@ -134,7 +134,7 @@ The runtime's own tests of ending, in `test/triggers-runtime.node.test.ts` ("obs
 
 ## Not done here
 
-- Offering `StreamAdapter` from `observerAdapters` (index.ts), registering it in pim-computer, the host's real grant check, and carrying `triggers.v1` over pim-computer's connection.
+- Constructing `observerAdapters` with stream options in pim-computer (a launcher, a real `NodeStreamLauncher` among them), the host's real grant check, which stays as it is: the runtime asks it for the exact source before the factory is called, so a denied source never gets an adapter, and carrying `triggers.v1` over pim-computer's connection.
 - The space's side of `ended` and the end gap: mapping them onto the store (`recordGap`, `setHealth`) and offering the person a new generation.
 - Factoring `NodeChildLauncher` and `NodeStreamLauncher` into one launcher in `poll.ts`; this module imports the poll's leader, environment and output reader rather than editing it.
 - Resumable streams with source-given ids and cursors.

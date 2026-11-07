@@ -1,15 +1,15 @@
 # Trigger observers on the computer
 
-> **Not active.** This is a review-only tranche. Nothing imports [`computer/triggers-adapters/`](../computer/triggers-adapters/): pim-computer doesn't construct the triggers runtime, no service or install script registers these adapters, and no message from a space reaches them. Only `test/triggers-adapters.node.test.ts` constructs them. **Pim has no managed launcher yet**, so in production no process handle resolves and every process watch would fail to start.
+> **Not active.** This is a review-only tranche. Nothing but tests imports [`computer/triggers-adapters/`](../computer/triggers-adapters/): pim-computer doesn't construct the triggers runtime, no service or install script registers these adapters, and no message from a space reaches them. Only `test/triggers-adapters.node.test.ts` constructs them. **Pim has no managed launcher yet**, so in production no process handle resolves and every process watch would fail to start.
 
-The triggers runtime ([triggers-runtime.md](triggers-runtime.md)) runs the computer sources a space wants through `ObserverAdapter`s. This tranche adds two concrete ones, for the two sources that need no long-lived stream: `poll` and `process`. `stream` and `file` have none yet; `observerAdapters` refuses them, and the runtime reports `unsupported`.
+The triggers runtime ([triggers-runtime.md](triggers-runtime.md)) runs the computer sources a space wants through `ObserverAdapter`s. This tranche adds two concrete ones, for the two sources that need no long-lived stream: `poll` and `process`. `stream` has its own ([triggers-stream.md](triggers-stream.md)), which `observerAdapters` offers when given stream options, the same as `poll` and `process`. `file` has none: `observerAdapters` refuses it, and so a `stream` source when no stream options are given, and the runtime reports `unsupported`.
 
 | Module | What it is |
 | --- | --- |
 | `poll.ts` | `PollAdapter`, which runs a poll's command on its cadence; `NodeChildLauncher`, which starts that command in a process group of its own; `readPollOutput`, which reads what it printed |
 | `process.ts` | `ProcessWatchAdapter`, which reports one managed process's completion; the `ManagedProcessProvider` contract it reads through |
 | `managed.ts` | The durable records behind a handle (launch intent and completion receipt), `FileProcessProvider` over them and Linux's `/proc`, and `superviseManaged`, a supervisor that writes them around one job |
-| `index.ts` | `observerAdapters`, the `AdapterFactory` a host would give the runtime |
+| `index.ts` | `observerAdapters`, the `AdapterFactory` a host would give the runtime; it offers `poll`, `process` and `stream` each only when its options are given |
 
 Neither adapter changes the runtime or its protocol: the source shapes are `triggers.v1`'s as they are (`poll`: `command`, `cwd`, `intervalMs`, `deadlineMs`; `process`: `handle`, `expiresAt`).
 
@@ -103,12 +103,12 @@ The runtime drops an adapter's health until the observer is installed, by design
 - A fake clock, launcher and provider for timing (anchored cadence, jitter, late wakes), one child at a time, deadlines and the SIGTERM, SIGKILL, unreaped sequence, output bounds, retained and refused emissions, pause and resume, stop and abort races, `stop`'s bound against the runtime's, start's refusals, receipts and changed intents against the pinned intent, unknown outcomes, slow reads and liveness checks across expiry, a provider that never answers, answers after stop or abort, and read failures.
 - Tiny real children through `NodeChildLauncher`, with its signals watched: exit statuses through the leader, leftovers killed by the leader's own `kill -9 0` with no signal from the launcher, nothing sent once a leader is reaped, a leader killed from outside reported as `cleaned: false` with its leftover not signalled, and an adapter that then polls, emits and reports nothing more through many intervals, pause and resume, and stop, the environment kept to its list, a group killed at the deadline and on stop while a bystander process lives on, stderr kept out of reports and the console.
 - Real records in a temporary state folder: `superviseManaged` around Node jobs that exit 0, exit 2 and are signalled, a supervisor killed before its receipt (unknown), a stopped watch leaving its job running and a later watch taking its receipt, reused process ids and another boot, records written once, and folders and records that are open to others, links, a FIFO or too large refused.
-- The real runtime with these adapters: a denied grant makes no adapter, `stream` and `file` are `unsupported`, each observer is `installed` with its coverage gap before its first observation, and a completion read again after a restart is the same event.
+- The real runtime with these adapters: a denied grant makes no adapter, `file`, and a `stream` with no stream options, are `unsupported`, each observer is `installed` with its coverage gap before its first observation, and a completion read again after a restart is the same event.
 
 ## Not done here
 
 - Registering these adapters in pim-computer, the host's real grant check, and carrying `triggers.v1` over pim-computer's connection.
 - A production managed launcher: the tool that starts jobs under handles, its approvals, detaching jobs from pim-computer, where the state folder lives, and retiring old records (they hold identities and exit statuses only).
-- `stream` and `file` observers.
+- A `file` observer, and constructing `observerAdapters` with a stream launcher in pim-computer.
 - Process watches on macOS and Windows.
 - Following a poll's command out of its process group.

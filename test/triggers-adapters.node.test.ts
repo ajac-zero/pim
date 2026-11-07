@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observerAdapters } from "../computer/triggers-adapters/index";
+import { StreamAdapter, type StreamLauncher } from "../computer/triggers-adapters/stream";
 import { FileProcessProvider, LinuxProcessProbe, readManagedRecord, writeCompletionReceipt, writeLaunchIntent } from "../computer/triggers-adapters/managed";
 import { type ChildEvents, type ChildExit, NodeChildLauncher, type OwnedChild, POLL_LIMITS, PollAdapter, type PollAdapterOptions, readPollOutput } from "../computer/triggers-adapters/poll";
 import { type CompletionReceipt, type LaunchIntent, type Liveness, type ManagedProcessProvider, type ManagedRecord, PROCESS_WATCH, type ProcessIdentity, ProcessWatchAdapter } from "../computer/triggers-adapters/process";
@@ -1261,5 +1262,63 @@ describe("adapters in the runtime", () => {
 		expect(resent.map((frame) => frame.eventId)).toEqual([completion.eventId]);
 		expect(h.made).toEqual(["poll", "process", "process"]);
 		await again.close();
+	});
+});
+
+describe("observerAdapters registration of stream", () => {
+	const stream: ComputerSource = { kind: "stream", command: "tail -F log", cwd: null };
+	const launched: string[] = [];
+	const launcher: StreamLauncher = {
+		launch: (request) => {
+			launched.push(request.command);
+			throw new Error("must not launch");
+		},
+	};
+
+	it("offers a StreamAdapter for a stream source only when stream options are given, launching nothing", () => {
+		expect(observerAdapters({ stream: { launcher } })(stream)).toBeInstanceOf(StreamAdapter);
+		expect(launched).toEqual([]);
+		expect(() => observerAdapters({})(stream)).toThrow("unsupported");
+		expect(() => observerAdapters({ poll: { launcher: { launch: () => { throw new Error("no"); } } }, process: { provider: new FileProcessProvider(dir) } })(stream)).toThrow("unsupported");
+	});
+
+	it("still refuses other kinds, and builds nothing until the factory is called", () => {
+		const factory = observerAdapters({ stream: { launcher } });
+		expect(() => factory({ kind: "file", path: "/tmp/x", events: ["created"], recursive: false })).toThrow("unsupported");
+		expect(() => factory({ kind: "poll", command: "true", cwd: null, intervalMs: 60_000, deadlineMs: 1_000 })).toThrow("unsupported");
+		expect(() => factory({ kind: "process", handle: HANDLE, expiresAt: T0 + 1000 })).toThrow("unsupported");
+	});
+
+	it("is built by the runtime only after its grant check allows, and a bad option fails at the factory", async () => {
+		const made: string[] = [];
+		const factory = observerAdapters({ stream: { launcher } });
+		const clock = new FakeClock();
+		const run = async (allowed: boolean) => {
+			await fs.rm(path.join(dir, "spool"), { recursive: true, force: true });
+			const rt = new TriggersRuntime({
+				binding: { space: "space-1", runtimeId: "rt-1" },
+				spool: await ObservationSpool.open(path.join(dir, "spool")),
+				adapters: (source) => {
+					made.push(source.kind);
+					return factory(source);
+				},
+				authorize: () => (allowed ? { ok: true } : { ok: false, reason: "no grant" }),
+				clock,
+			});
+			clock.idle = () => rt.idle();
+			rt.attach({ send: () => true }, "c1");
+			await rt.receive(
+				"c1",
+				JSON.stringify({ protocol: PROTOCOL, type: "reconcile", binding: { space: "space-1", runtimeId: "rt-1" }, connectionId: "c1", serverEpoch: 1, desiredRevision: 1, leaseMs: 120_000, sources: [{ triggerId: "t1", sourceId: "t1#1", revision: 1, generation: 1, configHash: sourceConfigHash(stream), source: stream, grant: { grantRef: "approval-1", scopeHash: "a".repeat(64) }, checkpoint: null }] }),
+			);
+			await clock.advance(0);
+			await rt.close();
+		};
+		await run(false);
+		expect(made).toEqual([]);
+		expect(launched).toEqual([]);
+		await run(true);
+		expect(made).toEqual(["stream"]);
+		expect(() => observerAdapters({ stream: { launcher, graceMs: 5_000, reapMs: 5_000 } })(stream)).toThrow(RangeError);
 	});
 });

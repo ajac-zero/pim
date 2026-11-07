@@ -9,6 +9,7 @@ import {
 } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
 import { BotShareButton } from "~/components/bot-share";
+import { useSaveContacts } from "~/components/contact-map";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -21,6 +22,7 @@ import {
   Search,
   Trash2,
   Users,
+  Workflow,
   X,
 } from "~/components/icons";
 import {
@@ -86,15 +88,18 @@ export function NewAgent({ onCreated }: { onCreated: (agent: Agent) => void }) {
 
 /**
  * An agent's settings: what it is and the actions on it, then how the
- * majordomo works with you, the connectors it works with and their tools, and its
- * details, which save together. `onDeleted` says where to go once it's gone.
+ * majordomo works with you, the connectors it works with and their tools, its
+ * contacts, and its details, which save together. `onDeleted` says where to go once it's gone.
  */
 export function AgentSettings({
   agent,
   onDeleted,
+  onShowNetwork,
 }: {
   agent: Agent;
   onDeleted: () => void;
+  /** Opens the network of your agents, with this one chosen, or none for the majordomo. */
+  onShowNetwork: (agent: string | null) => void;
 }) {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -259,6 +264,7 @@ export function AgentSettings({
       {agent.majordomo && <MajordomoPreferencesSection agent={agent} />}
       <AgentApps agent={agent} />
       <AgentSkills agent={agent} />
+      <AgentContacts agent={agent} onShowNetwork={onShowNetwork} />
       <section className="mt-8" aria-label={t("agentDetails")}>
         <h2 className="mb-3 text-[13px] text-muted-foreground">
           {t("agentDetails")}
@@ -715,8 +721,92 @@ function AgentToolRow({
 }
 
 /**
- * An agent's details: how it looks, its name, what it's for,
- * instructions and contacts. Its connectors are chosen on its page, where they save as
+ * The agents an agent hands tasks to, each of which can be taken off. They are
+ * added in the network of your agents, where Add contacts goes with this agent
+ * chosen. Your majordomo hands tasks to all of them, so it has no list.
+ */
+function AgentContacts({
+  agent,
+  onShowNetwork,
+}: {
+  agent: Agent;
+  onShowNetwork: (agent: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const { data: agents = [] } = useQuery(agentsQuery());
+  const save = useSaveContacts();
+  const contacts = agent.contacts.flatMap(
+    (id) => agents.find((other) => other.id === id) ?? [],
+  );
+  return (
+    <section className="mt-8 space-y-2" aria-label={t("contacts")}>
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-[13px] text-muted-foreground">{t("contacts")}</h2>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => onShowNetwork(agent.majordomo ? null : agent.id)}
+        >
+          {agent.majordomo ? <Workflow /> : <Plus />}
+          {t(agent.majordomo ? "seeNetwork" : "addContacts")}
+        </Button>
+      </div>
+      <p className="text-muted-foreground text-xs">
+        {agent.majordomo ? t("majordomoContacts") : t("contactsHint")}
+      </p>
+      {!agent.majordomo &&
+        (contacts.length === 0 ? (
+          <p className="text-muted-foreground text-sm">{t("noContactsYet")}</p>
+        ) : (
+          <ul className="divide-y overflow-hidden rounded-xl border">
+            {contacts.map((contact) => (
+              <li
+                key={contact.id}
+                className="flex items-center gap-3 px-3 py-2.5 text-sm"
+              >
+                <AgentIcon agent={contact} tile className="size-8 rounded-lg" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate">{contact.name}</span>
+                  {contact.description && (
+                    <span className="block truncate text-muted-foreground text-xs">
+                      {contact.description}
+                    </span>
+                  )}
+                </span>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  className="text-muted-foreground"
+                  aria-label={t("stopHandingTasks", {
+                    from: agent.name,
+                    to: contact.name,
+                  })}
+                  title={t("stopHandingTasks", {
+                    from: agent.name,
+                    to: contact.name,
+                  })}
+                  onClick={() =>
+                    save.mutate({
+                      from: agent.id,
+                      contacts: agent.contacts.filter(
+                        (id) => id !== contact.id,
+                      ),
+                    })
+                  }
+                >
+                  <X />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ))}
+    </section>
+  );
+}
+
+/**
+ * An agent's details: how it looks, its name, what it's for and
+ * instructions. Its connectors and contacts are chosen on its page, where they save as
  * they change, so saving these leaves them as they are.
  */
 function AgentForm({
@@ -744,18 +834,17 @@ function AgentForm({
     setPreview(url);
     return () => URL.revokeObjectURL(url);
   }, [look.image]);
-  const [value, setValue] = useState<Omit<AgentInput, "apps">>({
+  const [value, setValue] = useState<Omit<AgentInput, "apps" | "contacts">>({
     name: initial.name,
     role: agent?.role ?? "",
     description: initial.description,
     instructions: initial.instructions,
-    contacts: initial.contacts,
     memoryScopes: initial.memoryScopes ?? [],
   });
   const save = useMutation({
     mutationFn: async () => {
       const { role, ...rest } = value;
-      const input: Omit<AgentInput, "apps"> = {
+      const input: Omit<AgentInput, "apps" | "contacts"> = {
         ...rest,
         ...(role?.trim() ? { role: role.trim() } : {}),
         symbol: look.symbol,
@@ -763,7 +852,7 @@ function AgentForm({
       };
       const saved = agent
         ? await pim.updateAgent(agent.id, input)
-        : await pim.createAgent({ ...input, apps: [] });
+        : await pim.createAgent({ ...input, apps: [], contacts: [] });
       // An uploaded image shows in place of the symbol, so it is sent, or taken away, once the agent exists.
       if (look.image instanceof Blob)
         await pim.setAgentIcon(saved.id, look.image);
@@ -880,11 +969,6 @@ function AgentForm({
           className="w-full rounded-md border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
         />
       </label>
-      <ContactsField
-        agent={agent}
-        value={value.contacts}
-        onChange={(contacts) => setValue({ ...value, contacts })}
-      />
       {agent && (
         <AgentMemoryField
           agent={agent}
@@ -898,66 +982,5 @@ function AgentForm({
         </Button>
       </div>
     </form>
-  );
-}
-
-/**
- * The agents an agent hands tasks to: any of your others but your majordomo,
- * each switched on or off. Your majordomo hands tasks to all of them.
- */
-function ContactsField({
-  agent,
-  value,
-  onChange,
-}: {
-  agent?: Agent;
-  value: string[];
-  onChange: (contacts: string[]) => void;
-}) {
-  const { t } = useI18n();
-  const { data: agents } = useQuery(agentsQuery());
-  const others =
-    agents?.filter((other) => !other.majordomo && other.id !== agent?.id) ?? [];
-  return (
-    <fieldset className="space-y-2">
-      <legend className="font-medium text-sm">{t("contacts")}</legend>
-      <p className="text-muted-foreground text-xs">
-        {agent?.majordomo ? t("majordomoContacts") : t("contactsHint")}
-      </p>
-      {!agent?.majordomo &&
-        (others.length === 0 ? (
-          <p className="text-muted-foreground text-xs">{t("noContacts")}</p>
-        ) : (
-          <ul className="divide-y rounded-xl border">
-            {others.map((other) => (
-              <li
-                key={other.id}
-                className="flex items-center gap-3 px-3 py-2.5 text-sm"
-              >
-                <AgentIcon agent={other} tile className="size-8 rounded-lg" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate">{other.name}</span>
-                  {other.description && (
-                    <span className="block truncate text-muted-foreground text-xs">
-                      {other.description}
-                    </span>
-                  )}
-                </span>
-                <Switch
-                  checked={value.includes(other.id)}
-                  onCheckedChange={(checked) =>
-                    onChange(
-                      checked
-                        ? [...value, other.id]
-                        : value.filter((id) => id !== other.id),
-                    )
-                  }
-                  aria-label={t("handTasksTo", { name: other.name })}
-                />
-              </li>
-            ))}
-          </ul>
-        ))}
-    </fieldset>
   );
 }

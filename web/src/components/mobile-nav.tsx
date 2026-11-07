@@ -17,7 +17,6 @@ import {
   CalendarClock,
   Compass,
   Contact,
-  FileText,
   MessagesSquare,
   Monitor,
   MoreHorizontal,
@@ -31,14 +30,14 @@ import {
   ProfilePopover,
   ProfilePopoverTrigger,
 } from "~/components/profile-popover";
-import { useNotesOn } from "~/components/sidebar-panels";
 import { Button } from "~/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "~/components/ui/sheet";
 import { cn } from "~/lib/utils";
 
+const noop = () => {};
+
 /** The panels that live under More rather than in the bar. */
 const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
-  "notes",
   "skills",
   "schedules",
 ];
@@ -106,9 +105,9 @@ export function MobileNav({
       </Button>
       <NavItem
         to="."
-        search={(prev) => ({ ...prev, panel: "artifacts" })}
-        onClick={onShowList}
-        active={showing("artifacts")}
+        search={(prev) => ({ ...prev, dialog: "artifacts" })}
+        onClick={noop}
+        active={false}
         icon={<Shapes className="size-5" />}
         label={t("artifacts")}
       />
@@ -217,7 +216,6 @@ function MoreSheet({
   onHideList: () => void;
 }) {
   const { t } = useI18n();
-  const notesOn = useNotesOn();
   const close = () => onOpenChange(false);
   const panelRow = (panel: SidebarPanel, icon: ReactNode, label: string) => (
     <Link
@@ -239,6 +237,7 @@ function MoreSheet({
       | "sharing"
       | "discover"
       | "apps"
+      | "artifacts"
       | "computer"
       | "agents",
     icon: ReactNode,
@@ -305,12 +304,6 @@ function MoreSheet({
           <Contact className={ROW_ICON_CLASS} />,
           t("agents"),
         )}
-        {notesOn &&
-          panelRow(
-            "notes",
-            <FileText className={ROW_ICON_CLASS} />,
-            t("notes"),
-          )}
         {panelRow(
           "skills",
           <ScrollText className={ROW_ICON_CLASS} />,

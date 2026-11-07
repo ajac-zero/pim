@@ -8,93 +8,9 @@ import {
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
-import {
-  ArtifactsPanel,
-  NotesPanel,
-  NotificationsPanel,
-} from "~/components/sidebar-panels";
+import { NotificationsPanel } from "~/components/sidebar-panels";
 import { TooltipProvider } from "~/components/ui/tooltip";
-import {
-  artifactsQuery,
-  builtinAppsQuery,
-  notificationsQuery,
-  sessionsQuery,
-  sharedArtifactsQuery,
-} from "~/lib/queries";
-
-it.each([
-  // Apps lists Notes, Pim's own, which opens its panel, then everything else; notes are in that panel.
-  ["Apps", ArtifactsPanel, true, ["/?panel=notes", "/artifacts/trip-plan?v=3"]],
-  ["Notes", NotesPanel, true, ["/artifacts/packing?v=2"]],
-  // With Notes off for everyone, the notes the person has are among their apps.
-  [
-    "Apps with Notes off",
-    ArtifactsPanel,
-    false,
-    ["/artifacts/trip-plan?v=3", "/artifacts/packing?v=2"],
-  ],
-] as const)(
-  "%s opens its apps on their own page even when their originating chat exists",
-  async (_name, Panel, notesOn, links) => {
-    const client = new QueryClient();
-    client.setQueryData(
-      builtinAppsQuery().queryKey,
-      notesOn ? [{ id: "notes", name: "Notes", description: "" }] : [],
-    );
-    client.setQueryData(sessionsQuery().queryKey, [
-      { id: "origin-chat", title: "The originating chat" },
-    ] as never);
-    client.setQueryData(artifactsQuery().queryKey, {
-      artifacts: [
-        {
-          id: "trip-plan",
-          title: "Trip plan",
-          kind: "html",
-          session: "origin-chat",
-          version: 3,
-          updatedAt: 0,
-        },
-        {
-          id: "packing",
-          title: "Packing",
-          kind: "markdown",
-          session: "origin-chat",
-          version: 2,
-          updatedAt: 0,
-        },
-      ],
-      bytes: 0,
-    } as never);
-    client.setQueryData(sharedArtifactsQuery().queryKey, []);
-    const root = createRootRoute({
-      component: () => (
-        <TooltipProvider>
-          <Panel />
-        </TooltipProvider>
-      ),
-    });
-    const router = createRouter({
-      routeTree: root.addChildren([
-        createRoute({ getParentRoute: () => root, path: "/" }),
-        createRoute({
-          getParentRoute: () => root,
-          path: "/artifacts/$artifactId",
-        }),
-        createRoute({ getParentRoute: () => root, path: "/chat/$sessionId" }),
-      ]),
-      history: createMemoryHistory({ initialEntries: ["/"] }),
-    });
-    await router.load();
-    const html = renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <RouterProvider router={router} />
-      </QueryClientProvider>,
-    );
-    const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map(([, href]) => href);
-    expect(hrefs).toEqual(links);
-    client.clear();
-  },
-);
+import { notificationsQuery } from "~/lib/queries";
 
 it("shows only unseen notification titles, without their body previews", async () => {
   const client = new QueryClient();

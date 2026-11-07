@@ -19,7 +19,6 @@ import {
   Check,
   Compass,
   Contact,
-  FileText,
   Lightbulb,
   MessagesSquare,
   Monitor,
@@ -35,7 +34,6 @@ import {
   Users,
 } from "~/components/icons";
 import { Shortcut } from "~/components/shortcut";
-import { useNotesOn } from "~/components/sidebar-panels";
 import { useTheme } from "~/components/theme";
 import {
   accountQuery,
@@ -54,8 +52,6 @@ const PANELS: {
   icon: ReactNode;
 }[] = [
   { panel: "notifications", label: "notifications", icon: <Bell /> },
-  { panel: "notes", label: "notes", icon: <FileText /> },
-  { panel: "artifacts", label: "artifacts", icon: <Shapes /> },
   { panel: "skills", label: "skills", icon: <Lightbulb /> },
   { panel: "schedules", label: "schedules", icon: <CalendarClock /> },
 ];
@@ -80,7 +76,6 @@ export function CommandPalette({
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: agents } = useQuery(agentsQuery());
   const { data: account } = useQuery(accountQuery());
-  const notesOn = useNotesOn();
   const { data } = useQuery(artifactsQuery());
   const artifacts = data?.artifacts;
   const { data: schedules } = useQuery(schedulesQuery());
@@ -154,6 +149,7 @@ export function CommandPalette({
       | "sharing"
       | "discover"
       | "apps"
+      | "artifacts"
       | "computer"
       | "agents",
     agent?: string,
@@ -205,22 +201,20 @@ export function CommandPalette({
                   <Contact /> {t("agents")}
                   <Shortcut keys="⇧E" />
                 </Command.Item>
-                {PANELS.filter(({ panel }) => panel !== "notes" || notesOn).map(
-                  ({ panel, label, icon }) => (
-                    <Command.Item
-                      key={panel}
-                      className={ITEM}
-                      onSelect={run(() =>
-                        navigate({
-                          to: ".",
-                          search: (prev) => ({ ...prev, panel }),
-                        }),
-                      )}
-                    >
-                      {icon} {t(label)}
-                    </Command.Item>
-                  ),
-                )}
+                {PANELS.map(({ panel, label, icon }) => (
+                  <Command.Item
+                    key={panel}
+                    className={ITEM}
+                    onSelect={run(() =>
+                      navigate({
+                        to: ".",
+                        search: (prev) => ({ ...prev, panel }),
+                      }),
+                    )}
+                  >
+                    {icon} {t(label)}
+                  </Command.Item>
+                ))}
                 {account && !account.alone && (
                   <Command.Item
                     className={ITEM}
@@ -238,6 +232,12 @@ export function CommandPalette({
                     <Shortcut keys="⇧D" />
                   </Command.Item>
                 )}
+                <Command.Item
+                  className={ITEM}
+                  onSelect={openDialog("artifacts")}
+                >
+                  <Shapes /> {t("artifacts")}
+                </Command.Item>
                 <Command.Item className={ITEM} onSelect={openDialog("apps")}>
                   <Blocks /> {t("connectedApps")}
                 </Command.Item>

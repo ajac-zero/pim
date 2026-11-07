@@ -5460,7 +5460,7 @@ export class Pim extends DurableAgent<Env> {
 						if (this.hosted.version(artifact.id) === undefined) throw new HttpError(409, "This app's backend hasn't been run yet. Deploy it, and it opens here.");
 						return new Response(null, { status: 302, headers: { location: await this.hosted.address(this.name, artifact.id), "cache-control": "no-store, private" } });
 					}
-					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin);
+					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin, { thumbnail: url.searchParams.has("thumbnail") });
 				}),
 		],
 		[
@@ -5602,7 +5602,7 @@ export class Pim extends DurableAgent<Env> {
 			({ host, id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const { artifact, load } = await this.#othersArtifact(host!, id!, version!);
-					return framePage(artifact.kind, await load(), url.origin);
+					return framePage(artifact.kind, await load(), url.origin, { thumbnail: url.searchParams.has("thumbnail") });
 				}),
 		],
 		[

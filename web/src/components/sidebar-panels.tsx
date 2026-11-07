@@ -1,9 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { type ReactNode, type Ref, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
 import { ApprovalBlock } from "~/components/chat/items";
 import { useI18n } from "~/components/i18n";
 import {
@@ -11,11 +10,9 @@ import {
   CalendarClock,
   Check,
   CheckCheck,
-  FileText,
   MoreHorizontal,
   Repeat,
   ScrollText,
-  SquarePen,
   Trash2,
 } from "~/components/icons";
 import {
@@ -29,20 +26,13 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import {
-  type ArtifactKind,
-  type PimNotification,
-  type PimSchedule,
-  pim,
-} from "~/lib/pim-api";
+import { type PimNotification, type PimSchedule, pim } from "~/lib/pim-api";
 import {
   approvalsQuery,
-  artifactsQuery,
   builtinAppsQuery,
   notificationsQuery,
   schedulesQuery,
   sessionsQuery,
-  sharedArtifactsQuery,
   skillsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -330,184 +320,6 @@ function NotificationRow({
 export function useNotesOn() {
   const { data } = useQuery(builtinAppsQuery());
   return data?.some((app) => app.id === "notes") ?? true;
-}
-
-/**
- * Pim's built-in apps, then the pages and tools your agents made, most
- * recently changed first. With Notes off, the notes you have are among them.
- */
-export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
-  const { t } = useI18n();
-  const notesOn = useNotesOn();
-  return (
-    <>
-      <SidebarPanelHeader title={t("artifacts")} />
-      <ArtifactList
-        show={notesOn ? "apps" : "all"}
-        onNavigate={onNavigate}
-        builtIn={
-          notesOn && (
-            <li className="pb-3">
-              <SectionLabel>{t("builtInApps")}</SectionLabel>
-              <ul className="space-y-px" aria-label={t("builtInApps")}>
-                <li>
-                  {/* Notes keeps its own list, in its own panel. */}
-                  <Link
-                    to="."
-                    search={(prev) => ({ ...prev, panel: "notes" })}
-                    className={ROW_CLASS}
-                  >
-                    <FileText className={ROW_ICON_CLASS} />
-                    <RowText title={t("notes")} meta={t("notesDescription")} />
-                  </Link>
-                </li>
-              </ul>
-            </li>
-          )
-        }
-      />
-    </>
-  );
-}
-
-function SectionLabel({ children }: { children: ReactNode }) {
-  return (
-    <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-      {children}
-    </div>
-  );
-}
-
-/** Notes, which you write in with your agents, most recently changed first, and a button that starts one. */
-export function NotesPanel({ onNavigate }: { onNavigate?: () => void }) {
-  const { t } = useI18n();
-  const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  const create = useMutation({
-    mutationFn: () => pim.createNote(t("untitledNote")),
-    onSuccess: async (note) => {
-      await queryClient.invalidateQueries({ queryKey: ["artifacts"] });
-      onNavigate?.();
-      await navigate({
-        to: "/artifacts/$artifactId",
-        params: { artifactId: note.id },
-        search: { v: note.version },
-      });
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  return (
-    <>
-      <SidebarPanelHeader title={t("notes")}>
-        <SidebarPanelAction
-          label={t("newNote")}
-          onClick={() => create.mutate()}
-          disabled={create.isPending}
-        >
-          <SquarePen className="size-4.5" />
-        </SidebarPanelAction>
-      </SidebarPanelHeader>
-      <ArtifactList show="notes" onNavigate={onNavigate} />
-    </>
-  );
-}
-
-/** Your apps and those shared with you, after Pim's own apps: the notes, everything else, or all of them. */
-function ArtifactList({
-  show,
-  onNavigate,
-  builtIn,
-}: {
-  show: "notes" | "apps" | "all";
-  onNavigate?: () => void;
-  /** Pim's built-in apps, listed first, with yours under a label of their own. */
-  builtIn?: ReactNode;
-}) {
-  const { t, formatDate } = useI18n();
-  const { data } = useQuery(artifactsQuery());
-  const { data: shared } = useQuery(sharedArtifactsQuery());
-  const notes = show === "notes";
-  const wanted = (kind: ArtifactKind) =>
-    show === "all" || (kind === "markdown") === notes;
-  const own = data?.artifacts.filter((artifact) => wanted(artifact.kind));
-  const others = shared?.filter((artifact) => wanted(artifact.kind));
-  const label = t(notes ? "notes" : "artifacts");
-  const empty =
-    own?.length === 0 &&
-    !others?.length &&
-    t(notes ? "noNotes" : "noArtifacts");
-  return (
-    <PanelList label={label} empty={!builtIn && empty}>
-      {builtIn}
-      {builtIn && (
-        <li>
-          <SectionLabel>{t("yourApps")}</SectionLabel>
-          {empty && (
-            <p className="px-2 py-1 text-muted-foreground text-xs">{empty}</p>
-          )}
-        </li>
-      )}
-      {own?.map((artifact) => {
-        const date = formatDate(new Date(artifact.updatedAt), {
-          dateStyle: "medium",
-        });
-        return (
-          <li key={artifact.id}>
-            <Link
-              to="/artifacts/$artifactId"
-              params={{ artifactId: artifact.id }}
-              search={{ v: artifact.version }}
-              onClick={onNavigate}
-              className={ROW_CLASS}
-              activeOptions={{ includeSearch: false }}
-              activeProps={{ className: "bg-sidebar-accent" }}
-            >
-              <ArtifactIcon kind={artifact.kind} className={ROW_ICON_CLASS} />
-              <RowText
-                title={artifact.title}
-                meta={
-                  notes
-                    ? date
-                    : `${ARTIFACT_KIND_NAMES[artifact.kind]} · ${date}`
-                }
-              />
-            </Link>
-          </li>
-        );
-      })}
-      {others && others.length > 0 && (
-        <li className="pt-3">
-          <SectionLabel>{t("sharedWithYou")}</SectionLabel>
-          <ul className="space-y-px" aria-label={t("sharedWithYou")}>
-            {others.map((artifact) => (
-              <li key={`${artifact.host}/${artifact.id}`}>
-                <Link
-                  to="/artifacts/shared/$host/$artifactId"
-                  params={{ host: artifact.host, artifactId: artifact.id }}
-                  onClick={onNavigate}
-                  className={ROW_CLASS}
-                  activeProps={{ className: "bg-sidebar-accent" }}
-                >
-                  <ArtifactIcon
-                    kind={artifact.kind}
-                    className={ROW_ICON_CLASS}
-                  />
-                  <RowText
-                    title={artifact.title}
-                    meta={
-                      notes
-                        ? t("sharedBy", { host: artifact.host })
-                        : `${ARTIFACT_KIND_NAMES[artifact.kind]} · ${t("sharedBy", { host: artifact.host })}`
-                    }
-                  />
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </li>
-      )}
-    </PanelList>
-  );
 }
 
 /** How your agents do work that comes up again, by name; each opens the skill. */

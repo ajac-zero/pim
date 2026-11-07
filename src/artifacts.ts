@@ -994,14 +994,18 @@ const PAGE_HEAD =
  * one in a page that fits it to the frame; a Mermaid one as its source, in
  * text, which the Mermaid runtime draws; a JSX one compiled, after the React
  * runtime and the modules it imports. Each ends with the height script.
+ * With `thumbnail`, it ends with the script that takes a picture of the page
+ * and sends it to the app that shows it (see `web/src/artifact-runtime/thumbnail.ts`).
  */
-export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string): Response {
+export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string, options: { thumbnail?: boolean } = {}): Response {
 	const entry = ENTRY_FILES[kind];
 	const main = files.get(entry);
 	if (!main) throw new HttpError(404, `The app has no ${entry}`);
 	const content = textOf(main.bytes);
 	const html = (body: string, runtime = false) =>
-		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
+		new Response(body + RESIZE_SCRIPT + (options.thumbnail ? `<script src="${origin}${RUNTIME_PATH}thumbnail.js"></script>` : ""), {
+			headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime: runtime || options.thumbnail }),
+		});
 	switch (kind) {
 		case "html":
 			return inlineOwnFiles(html(withBridge(content)), files);

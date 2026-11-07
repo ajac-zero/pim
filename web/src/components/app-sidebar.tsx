@@ -22,7 +22,6 @@ import {
   Contact,
   CornerDownRight,
   ExternalLink,
-  FileText,
   History,
   Loader2,
   MessagesSquare,
@@ -47,13 +46,10 @@ import {
 } from "~/components/profile-popover";
 import { Shortcut } from "~/components/shortcut";
 import {
-  ArtifactsPanel,
-  NotesPanel,
   NotificationsPanel,
   SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
   SkillsPanel,
-  useNotesOn,
 } from "~/components/sidebar-panels";
 import { Button } from "~/components/ui/button";
 import {
@@ -121,14 +117,8 @@ export function useAwaitingApproval() {
   );
 }
 
-/** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=artifacts`). */
-export const SIDEBAR_PANELS = [
-  "notifications",
-  "notes",
-  "artifacts",
-  "skills",
-  "schedules",
-] as const;
+/** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=skills`). */
+export const SIDEBAR_PANELS = ["notifications", "skills", "schedules"] as const;
 export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
 
 /**
@@ -173,13 +163,8 @@ export function SidebarPanelContent({
   onNavigate?: () => void;
 }) {
   const { panel } = useSearch({ strict: false });
-  const notesOn = useNotesOn();
   return panel === "notifications" ? (
     <NotificationsPanel onNavigate={onNavigate} />
-  ) : panel === "notes" && notesOn ? (
-    <NotesPanel onNavigate={onNavigate} />
-  ) : panel === "artifacts" || panel === "notes" ? (
-    <ArtifactsPanel onNavigate={onNavigate} />
   ) : panel === "skills" ? (
     <SkillsPanel onNavigate={onNavigate} />
   ) : panel === "schedules" ? (
@@ -205,7 +190,6 @@ export function AppSidebar({
 }) {
   const { t } = useI18n();
   const { panel } = useSearch({ strict: false });
-  const notesOn = useNotesOn();
   const {
     account,
     profile,
@@ -243,17 +227,8 @@ export function AppSidebar({
             label={t("chats")}
             count={panel || collapsed ? awaitingApproval.size : 0}
           />
-          {notesOn && (
-            <RailPanel
-              {...railPanel}
-              panel="notes"
-              icon={<FileText className="size-4.5" />}
-              label={t("notes")}
-            />
-          )}
-          <RailPanel
-            {...railPanel}
-            panel="artifacts"
+          <RailDialogLink
+            dialog="artifacts"
             icon={<Shapes className="size-4.5" />}
             label={t("artifacts")}
           />
@@ -572,7 +547,14 @@ function RailDialogLink({
   dialog,
   ...props
 }: {
-  dialog: "settings" | "sharing" | "discover" | "apps" | "computer" | "agents";
+  dialog:
+    | "settings"
+    | "sharing"
+    | "discover"
+    | "apps"
+    | "artifacts"
+    | "computer"
+    | "agents";
   icon: ReactNode;
   label: string;
   count?: number;

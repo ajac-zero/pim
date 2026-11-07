@@ -156,6 +156,12 @@ describe("artifacts", () => {
 		expect(await svgFrame.text()).toMatch(/^<!doctype html>.*<body><svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"\/><\/svg><\/body><\/html><script>/);
 		expect((await raw(`/artifacts/${svg}/versions/1/download`)).headers.get("content-disposition")).toMatch(/-v1\.svg"/);
 
+		// Asked for a thumbnail, the page also loads the script that takes its picture, which its sandbox then allows to load; asked for nothing, it doesn't.
+		expect(await (await raw(`/artifacts/${svg}/versions/1/frame`)).text()).not.toContain("thumbnail.js");
+		const thumbFrame = await raw(`/artifacts/${svg}/versions/1/frame?thumbnail`);
+		expect(thumbFrame.headers.get("content-security-policy")).toContain("script-src 'unsafe-inline' https://pim.test/artifact-runtime/");
+		expect(await thumbFrame.text()).toContain('<script src="https://pim.test/artifact-runtime/thumbnail.js"></script>');
+
 		// Diagram source is text in the page: markup in it is escaped, never parsed.
 		const source = 'flowchart LR\n  A["</pre><script>parent.x=1</script>"] --> B';
 		const mermaid = await legacyApp("mermaid", "Flow", source);

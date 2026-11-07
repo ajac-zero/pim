@@ -19,6 +19,8 @@ The runtime consumes `PollSource`, `StreamSource`, `ProcessSource` and `FileSour
 
 **One connection at a time.** The host attaches a transport with a `connectionId` it got from its handshake with the space. Every message from the space names that connection; a message for another connection, or arriving on one that was detached, is refused or ignored.
 
+**Nothing given in can change later.** What an adapter emits is copied into frozen plain JSON the moment `emit` is called, before anything waits: each field is read once, and a getter, a symbol or non-enumerable property, a non-plain object, a number that isn't finite, more than 8 levels or more than 16,384 values is refused (`invalid`). So what is checked, sized, written and sent is the same thing, whatever the adapter does with its own objects afterwards. Messages from the space are frozen as they are read, so the source and grant an adapter or the host's check is given can't be changed either, and the spool hands out only frozen entries.
+
 **Grants are consent, not a sandbox.** Observers run as the user who runs pim-computer, with that user's access. A grant says the person consented to one source's exact configuration; it confines nothing. A custom script in a poll or a stream can do anything that user can, and nothing here says otherwise.
 
 **Default deny.** Before an observer starts, and again on every reconcile that keeps it, the runtime asks the host's `authorize` check with the binding, trigger, source identity, generation, `configHash`, the source and the grant. Only a verdict of exactly `{ ok: true }` allows it; any other value, a throw, or no check configured denies it. A grant is an opaque reference and a digest of its scope (`grantRef`, `scopeHash`), never a credential, and nothing copies a credential into the protocol or the spool.
@@ -33,10 +35,10 @@ Every frame is one JSON object with `protocol: "triggers.v1"` and a `type`. Fram
 
 | Type | Fields | Means |
 | --- | --- | --- |
-| `reconcile` | `binding`, `connectionId`, `serverEpoch` (≥ 1), `desiredRevision`, `leaseMs` (1 to 120,000), `sources` (up to 256) | The whole set of computer sources the space wants running now, and a lease on it |
+| `reconcile` | `binding`, `connectionId`, `serverEpoch` (≥ 1), `desiredRevision`, `leaseMs` (1 to 120,000), `sources` (up to 256) | The whole set of computer sources the space wants running now, and a lease on it. The same `desiredRevision` again must say exactly the same (`divergent_reconcile` otherwise) |
 | `ack` | `connectionId`, `serverEpoch`, `durable: true`, `results` (up to 1,024) | What the space did with observations and gaps, sent only after its own write is durable |
 
-Each desired source is `{ triggerId, sourceId, revision, generation, configHash, source, grant: { grantRef, scopeHash }, checkpoint }`. `sourceId` is the store's source identity (`<triggerId>#<revision>`), `generation` the trigger's generation, and `checkpoint` (`{ position, cursor }` or null) what the space has durably taken, for a new observer to resume from. Each trigger appears at most once.
+Each desired source is `{ triggerId, sourceId, revision, generation, configHash, source, grant: { grantRef, scopeHash }, checkpoint }`. `sourceId` is the store's source identity (`<triggerId>#<revision>`), `revision` the revision the source was set in (its suffix), `generation` the trigger's generation, and `checkpoint` (`{ position, cursor }` or null) what the space has durably taken, for a new observer to resume from. Each trigger appears at most once. **A generation fixes its source:** the same trigger and generation with another `sourceId`, `revision` or `configHash` is refused (`invalid`, health `generation_mismatch`) and stops its observer; only the grant may change within a generation.
 
 Each ack result is `{ sequence, eventId, result, reason, retryAfterMs }`:
 
@@ -56,15 +58,17 @@ A result whose `eventId` doesn't match the entry at that sequence, one for an en
 | `hello` | `runtimeId`, `connectionId`, `lastEpoch`, `pending` | On attaching a connection |
 | `reconciled` | `serverEpoch`, `desiredRevision`, `leaseMs`, `sources[]` of `{ triggerId, sourceId, generation, state }` | After each reconcile it took. `state` is `starting`, `running`, `stale` or `invalid` |
 | `installed` | `serverEpoch`, `triggerId`, `sourceId`, `generation`, `configHash` | When an observer's `start` has returned. Always before its first observation and its `listening` health |
-| `health` | the same, `status` (`ok`, `degraded`, `error`), `code` | `listening`, `resumed`, `backpressure`, `auth_denied`, `start_failed`, `start_timed_out`, `unsupported`, `config_hash_mismatch`, `spool_unavailable`, or an adapter's own code. Codes only, never text |
+| `health` | the same, `status` (`ok`, `degraded`, `error`), `code` | `listening`, `resumed`, `backpressure`, `auth_denied`, `start_failed`, `start_timed_out`, `unsupported`, `config_hash_mismatch`, `generation_mismatch`, `spool_unavailable`, `loss_unrecorded`, or an adapter's own code. Codes only, never text |
 | `stopped` | the same, `reason`, `adapter` | When this generation's own adapter was asked to stop. `adapter` is `returned`, `timed_out`, `failed` or `not_started`. **It never says a process or anything the adapter started was cancelled or undone** |
 | `observation` | `serverEpoch`, `eventId`, `triggerId`, `sourceId`, `revision`, `generation`, `sequence`, `occurredAt`, `data`, `checkpoint`, `coalesced` | Each spooled observation, until settled |
-| `gap` | `serverEpoch`, `eventId`, `triggerId`, `sourceId`, `generation`, `sequence`, `reasons`, `from`, `to` | Each recorded loss, until settled. A null source is the whole spool's |
-| `error` | `code` | A frame from the space refused: `invalid`, `unsupported_protocol`, `too_large`, `binding_mismatch`, `wrong_connection`, `stale_epoch`, `stale_reconcile`, `spool_unavailable` |
+| `gap` | `serverEpoch`, `eventId`, `triggerId`, `sourceId`, `generation`, `sequence`, `reasons`, `from`, `to` | Each recorded break or loss, until settled. A null source is the whole spool's |
+| `error` | `code` | A frame from the space refused: `invalid`, `unsupported_protocol`, `too_large`, `binding_mismatch`, `wrong_connection`, `stale_epoch`, `stale_reconcile`, `divergent_reconcile`, `spool_unavailable` |
+
+A gap's `reasons` count why: `interrupted` (no observer of the source ran from `from` to `to`), `coverage_unknown` (an observer started at `to`, and nothing is known of before, as after a restart), and, for observations seen but never to be sent, `overflow`, `too_large`, `expired`, `epoch_replaced` and `corrupt`. Coverage gaps merge only with each other, and the rest with each other, one of each per source, generation and epoch until sent, so each keeps a time range that means one thing.
 
 `sequence` is the runtime's own, increasing and never reused; observations and gaps share it, and each keeps its `eventId` and `sequence` through every retransmission and restart. An `eventId` is random, or, when the adapter gives a stable `key` (such as a file's inode and change counter), a digest of the source identity and the key, so a re-read event is a `duplicate` at the space.
 
-Control frames (`hello`, `reconciled`, `installed`, `health`, `stopped`, `error`) go before observations in every flush and are not kept across connections: after a reconnect, the next `reconciled` says where every source stands. At most `control` (1,024) are held; past that the oldest health goes first.
+Control frames (`hello`, `reconciled`, `installed`, `health`, `stopped`, `error`) go before observations in every flush and are not kept across connections: after a reconnect, the next `reconciled` says where every source stands, and the durable gaps say what coverage was lost. At most `control` (1,024) are held; past that the oldest health goes first. **What an observer reports is labelled with the epoch it started in**, and goes only to a connection the space has reconciled on while that epoch is current: an observer of a replaced epoch that finishes stopping, or finishes starting, reports nothing, rather than something that could be read as the new epoch's.
 
 ## Lifecycle
 
@@ -74,34 +78,42 @@ Control frames (`hello`, `reconciled`, `installed`, `health`, `stopped`, `error`
 
 **One observer per trigger, fenced by generation.** A trigger has at most one observer at a time. Stopping one fences it at once: from that moment its `emit` returns `stopped`, its health is ignored, its `AbortSignal` fires, and its `stop` is called, even if its `start` hasn't returned. The next generation's `start` waits until the old `stop` has returned, failed, or timed out (`stopTimeoutMs`, 10 s). A `start` that returns after its observer was stopped reports nothing. The runtime only ever calls `stop` on the adapter it made for that generation; it never finds or stops anything by name.
 
-**Installation before listening.** An observer is `installed` once its `start` has returned; until then its emissions are refused (`not_started`). A `start` that throws, or doesn't return within `startTimeoutMs` (30 s), is reported as health `start_failed` or `start_timed_out`, never as installed, and its adapter is stopped.
+**Installation before listening.** An observer is `installed` once its `start` has returned and its coverage gap is durable (below); until then its emissions are refused (`not_started`). A `start` that throws, or doesn't return within `startTimeoutMs` (30 s), is reported as health `start_failed` or `start_timed_out`, never as installed, and its adapter is stopped. Its grant is checked before it starts, and whether it is still its trigger's observer in the current epoch is checked again after the check, after `start`, and after the gap is written.
 
-**Epochs.** `serverEpoch` names the space's current session with this computer. The same epoch on a new connection resumes it: everything unsettled is sent again, unchanged. A higher epoch replaces it: every observer is stopped (`epoch_replaced`), every spooled entry from an older epoch is taken out without being sent, and one gap per source in the new epoch counts them (`epoch_replaced`). Observations are never replayed into a new epoch. A lower epoch is refused (`stale_epoch`).
+**Coverage is reported, not inferred.** Every observer, before it is installed, durably records a gap for its source: `interrupted` from when the trigger's previous observer stopped (by lease, revocation, reconfiguration, epoch or anything else) to now, or `coverage_unknown` when this runtime knows of no previous one, as after a restart. Its sequence is lower than anything the new observer emits, and it is sent no later, so the space learns of the break before the first observation after it, even if the `stopped` frame was lost while disconnected. A gap that can't be written stops the observer (`spool_unavailable`) and is tried again on the next start.
+
+**Epochs.** `serverEpoch` names the space's current session with this computer. The same epoch on a new connection resumes it: everything unsettled is sent again, unchanged. A higher epoch replaces it: every observer is stopped (`epoch_replaced`), and then **one commit** sets the new epoch, takes out every older entry unsent, and writes the gaps that count them in the new epoch (`epoch_replaced`, with an old gap's own counts carried over). If that commit can't be written, nothing of it happened: the epoch, and the old entries, stay as they were, nothing is reported as reconciled (`error` `spool_unavailable`), and the next reconcile tries again. Observations are never replayed into a new epoch. A lower epoch is refused (`stale_epoch`).
 
 **Restarts.** Nothing on disk starts an observer. After a restart the runtime sends `hello` and waits; the spool's entries are sent only after the space reconciles on that connection in their epoch, and an observer starts only if that reconcile still wants it and the host's check still allows it. It resumes from the space's checkpoint in the reconcile, not from anything local, and old commands are never re-run on the strength of a file.
 
-**Checkpoints.** An observation can carry a checkpoint. The adapter's `commit(checkpoint)` is called only when the space has settled (`accepted`, `duplicate` or `rejected`) every earlier observation of that observer, so it never passes one still unsettled, deferred or lost. A loss (expiry, epoch replacement) is never passed: what follows it doesn't move the checkpoint for that observer's run.
+**Checkpoints.** An observation can carry a checkpoint. The adapter's `commit(checkpoint)` is called only when the space has settled (`accepted`, `duplicate` or `rejected`) every earlier observation of that observer, so it never passes one still unsettled or deferred. What an observer is waiting on is kept as a list of its unsettled entries, with each settled stretch between them merged into one item, so it holds at most about twice its entries in the spool. **A loss is a barrier:** once an observer has an entry expire or discarded, or has an emission refused (`backpressure`, `too_large`, `spool_unavailable`), it commits nothing more and keeps nothing to; only a new observer, starting from the checkpoint the space gives in a reconcile, moves on.
+
+**What it keeps is bounded.** Per trigger, the runtime keeps one observer, its generation's identity and when its coverage last stopped, only while the latest reconcile wants the trigger or its observer is still stopping; a trigger left out is forgotten once its observer has stopped. A trigger forgotten and wanted again starts with `coverage_unknown`.
 
 ## The spool
 
-**What it is.** A journal in one file, `journal`, in a directory the host names. Each record is one line: 16 hex digits of the SHA-256 of its JSON, a space, and the JSON. Records put, replace and remove entries. Every write is synced (`datasync`) before it counts, and an observation is written, with its `eventId` and `sequence`, before it is ever sent.
+**What it is.** A journal in one file, `journal`, in a directory the host names. **Each commit is one line:** 16 hex digits of the SHA-256 of its JSON, a space, and the JSON, which puts, replaces and removes entries and may set the epoch. A line is applied whole or not at all, so a commit that does several things (a coalesced snapshot replacing older ones, gaps written with the removal of what they count, a new epoch) is never half-applied. Every write is synced (`datasync`) before it counts, and an observation is written, with its `eventId` and `sequence`, before it is ever sent.
 
-**Retention is transport only.** The spool is not history, not a log, and not a raw sample: raw samples stay off (see triggers.md). An entry leaves when the space settles it, when its time to live runs out, or when its epoch is replaced. Until then it holds what an observer saw, which can be sensitive, as plain JSON on the person's disk, for at most 24 hours. The directory is made `0700` and the journal `0600`, wider modes found are narrowed, a symlinked or foreign-owned path is refused (`unsafe_path`), and files are opened with `O_NOFOLLOW`. That keeps other users of the machine out; it is not isolation from the user pim-computer runs as, or anything that user runs. Source configurations, commands and grants are never written to the spool.
+**Retention is transport only.** The spool is not history, not a log, and not a raw sample: raw samples stay off (see triggers.md). An entry leaves when the space settles it, when its time to live runs out, or when its epoch is replaced. Until then it holds what an observer saw, which can be sensitive, as plain JSON on the person's disk, for at most 24 hours.
+
+**Leaving the spool, leaving the file.** Removing an entry appends a line, so its bytes stay in the file until the journal is rewritten. The runtime rewrites it (a new file, synced and renamed over the old) within `scrubAfterMs` of an entry leaving: 60 seconds by default, at most 10 minutes. Expiry and epoch replacement rewrite it in the same commit, so what expired is out of the file when it expires. Closing the runtime and opening the spool rewrite it too. That is as far as it goes: the old file's blocks are freed, not overwritten, and a journaling or copy-on-write filesystem, an SSD, swap, snapshots or backups may keep copies the runtime can't reach. There is no secure erase. The directory is made `0700` and the journal `0600`, wider modes found are narrowed, a symlinked or foreign-owned path is refused (`unsafe_path`), and files are opened with `O_NOFOLLOW`. That keeps other users of the machine out; it is not isolation from the user pim-computer runs as, or anything that user runs. Source configurations, commands and grants are never written to the spool.
 
 **Bounds.** At most 32 MiB and 24 hours (`maxBytes`, `ttlMs`), configurable lower, never higher; at most 100,000 entries. The journal never grows past `maxBytes`: before an append would, it is rewritten with only what is live, through `journal.tmp`, synced and renamed over it. Part of it (`reserveBytes`, `reserveEntries`) is kept for gaps, which observations can't use. An observation's data is at most 16 KiB as JSON, what the space's store takes, and its frame at most 64 KiB; a larger one is refused (`too_large`), never cut, and counted in a gap.
 
-**Crashes and corruption.** Opening reads every whole line whose digest matches. A last line cut short by a crash is dropped (`recovery.torn`), and so is any line whose digest doesn't match (`recovery.corrupt`); the journal is then rewritten from what was read. A write that fails part-way, such as on a full disk (`ENOSPC`), is cut back to the last whole record before anything else is written, and the emission is refused (`spool_unavailable`). Corrupt records are counted in a gap with no source, sent in the spool's epoch.
+**Crashes and corruption.** Opening reads every whole line whose digest matches. A last line cut short by a crash is cut off (`recovery.torn`), and a line whose digest doesn't match is skipped (`recovery.corrupt`). A write that fails part-way, such as on a full disk (`ENOSPC`), is cut back to the last whole line before anything else is written, and the emission is refused (`spool_unavailable`). Corrupt lines are counted in a gap with no source, sent in the spool's epoch; they stay in the file, and are counted again on every opening, until that gap is durable, in the commit that rewrites them out.
+
+**Losses are durable before what they stand for goes.** Expired and discarded entries leave only in the same commit as the gaps that count them. If it can't be written, they stay, and an expired observation is still never sent; the sweep tries again after `blockedRetryMs`. A refused emission's count is kept in memory, one per source, until a commit can take its gap, and is tried again with every commit and after `blockedRetryMs` (health `loss_unrecorded` meanwhile). Such a count is lost if the process dies first; the refused events themselves were never accepted, so the adapter, told so, still has them.
 
 **Overflow.** Nothing is dropped silently and no cursor moves past what wasn't kept:
 
-- **Events** (`stream`, `process`, `file`): when the spool is full, the emission is refused with `backpressure`, the adapter's `pause` is called once, health goes `degraded`/`backpressure`, and a gap counts every refused emission (`overflow`, with the first and last `occurredAt`). The adapter must not move its own cursor past a refused event. Once the space has settled enough that the spool is at most half full, `resume` is called and health goes `ok`/`resumed`. The gap is sent in sequence, after what was kept before it.
+- **Events** (`stream`, `process`, `file`): when the spool is full, the emission is refused with `backpressure`, the adapter's `pause` is called once, health goes `degraded`/`backpressure`, and a gap counts every refused emission (`overflow`, with the first and last `occurredAt`). The adapter must not move its own cursor past a refused event, and the runtime never commits past it (the barrier above). Once the space has settled enough that the spool is at most half full, `resume` is called and health goes `ok`/`resumed`. The gap is sent in sequence, after what was kept before it.
 - **States** (`poll`): when the spool is full, the source's snapshots not yet sent may be folded into the newest one, which says so: `coalesced: { count, from, to }` is how many snapshots it stands for and over what time. A snapshot already sent is never folded or changed. If there is nothing left to fold, a state is refused as an event is.
 
 **Time to live.** An observation held longer than `ttlMs` is taken out unsent, and a gap counts it (`expired`, with its time range). Nothing is fabricated in its place, and it is never sent later. Gaps themselves don't expire: they hold counts and times, nothing observed, and they merge, one per source, generation and epoch, until sent.
 
 **Sending.** Each flush sends control first, then at most `batch` (32) due entries in sequence order. An unsettled entry is sent again after `resendAfterMs` (30 s), doubling up to `maxResendMs` (5 min); a new connection starts the backoff over. A transport that takes nothing waits `blockedRetryMs` (1 s). A flush always ends by setting a timer for a later instant, or none, so it never loops, and the runtime never reconnects on its own: that is the host's.
 
-**Logging.** The runtime's `log` gets codes and counts only (`lease_expired`, `spool_expired`, `ack_unknown`, `adapter_stop_timed_out`, ...), never what was observed, a command, a grant or an error's text. It writes nothing to the console.
+**Logging.** The runtime's `log` gets codes and counts only (`lease_expired`, `spool_expired`, `loss_unrecorded`, `ack_unknown`, `adapter_stop_timed_out`, ...), never what was observed, a command, a grant or an error's text. It writes nothing to the console. A log line is never how a loss is accounted for: that is always a gap.
 
 ## What fails, and what happens
 
@@ -114,6 +126,8 @@ Control frames (`hello`, `reconciled`, `installed`, `health`, `stopped`, `error`
 | `configHash` not the source's | Starts nothing, stops any observer of that trigger | `reconciled` `invalid`, `health` `config_hash_mismatch` |
 | Grant revoked between reconciles | Stops the observer (`revoked`) | `health` `auth_denied`, `stopped` |
 | Grant or scope changed, same generation | Stops (`consent_changed`), checks the new grant | `stopped`, then `installed` or `auth_denied` |
+| Same generation, different source | Refuses it, stops the observer (`invalid`) | `reconciled` `invalid`, `health` `generation_mismatch` |
+| Same `desiredRevision`, different content | Refuses it; nothing changes, the lease isn't renewed | `error` `divergent_reconcile` |
 | Source changed (new generation) | Fences and stops the old (`reconfigured`), starts the new after its stop | `stopped`, `installed` |
 | Older generation offered | Nothing | `reconciled` `stale` |
 | `start` throws or times out | Stops that adapter | `health` `start_failed` / `start_timed_out`, `stopped`, never `installed` |
@@ -122,19 +136,26 @@ Control frames (`hello`, `reconciled`, `installed`, `health`, `stopped`, `error`
 | Emission after stop, or before installation | Refused; nothing written | Nothing |
 | Paused, ended or deleted | Stops the observer (`not_desired`); spooled entries are still sent | `stopped`, then `rejected` acks for what it won't take |
 | Disconnected | Keeps observing and spooling until the lease ends | Retransmission on reconnect |
-| Lease runs out | Stops every observer (`lease_expired`) | Nothing until it reconnects and reconciles |
+| Lease runs out | Stops every observer (`lease_expired`) | Nothing until it reconnects and reconciles; then a durable `gap` (`interrupted`, from the stop to the restart) before any new observation |
 | Reconnect, same epoch | Sends everything unsettled again, same ids and sequences | Duplicates are `duplicate` |
-| New epoch | Stops everything, drops older-epoch entries unsent | One `gap` (`epoch_replaced`) per source |
+| New epoch | Stops everything; in one commit sets the epoch, drops older-epoch entries unsent and records them | One `gap` (`epoch_replaced`) per source |
+| New epoch, commit fails | Keeps the old epoch and its entries, unsent | `error` `spool_unavailable`, no `reconciled`; the next reconcile tries again |
+| Old epoch's observer stops or starts late | Reports nothing of it | Nothing |
+| Observer finishes starting on a connection not yet reconciled | Reports nothing until the reconcile | `reconciled` `running` |
 | Older epoch | Refuses it | `error` `stale_epoch` |
-| Restart | Starts nothing; waits for a reconcile | `hello` with `lastEpoch` and `pending` |
+| Restart | Starts nothing; waits for a reconcile | `hello` with `lastEpoch` and `pending`; each observer started after it records `coverage_unknown` |
 | Ack out of order, duplicated, mismatched or for another epoch | Settles only exact matches in this epoch; checkpoints commit in order | Nothing |
 | `deferred` ack | Keeps the entry, sends it again later | The same observation again |
-| Crash part-way through a write | The cut line is dropped on opening | Nothing; the emission was never `ok` |
+| Crash part-way through a write | The cut line is dropped on opening, so its whole commit is | Nothing; the emission was never `ok` |
+| Adapter changes its object after `emit` | Nothing: the runtime copied it when `emit` was called | The observation as emitted |
 | Write fails (disk full) | Cuts back to the last whole record; refuses the emission | `health` `spool_unavailable` |
-| Corrupt record | Skipped on opening | `gap` with no source, `corrupt` |
+| Corrupt line | Skipped on opening; rewritten out once its gap is durable | `gap` with no source, `corrupt` |
 | Spool full, events | Refuses with `backpressure`, pauses the adapter | `health` `backpressure`, a `gap` (`overflow`) |
 | Spool full, states | Folds unsent snapshots into the newest | `observation` with `coalesced` |
-| Older than `ttlMs` | Takes it out unsent | `gap` (`expired`) |
+| Older than `ttlMs` | Takes it out unsent, in the commit that records it and rewrites the file | `gap` (`expired`) |
+| Older than `ttlMs`, commit fails | Keeps it, never sends it, tries again | `gap` (`expired`) once it can be written |
+| Spool full, even for a gap | Refuses the emission; keeps the count in memory | `health` `loss_unrecorded`, then the `gap` once there is room |
+| Entries settled | Rewrites the file without them within `scrubAfterMs` | Nothing |
 | Data over 16 KiB or frame over 64 KiB | Refuses it, never cuts it | `gap` (`too_large`) |
 | Transport takes nothing | Waits `blockedRetryMs` | Nothing until it does |
 
@@ -143,7 +164,7 @@ Control frames (`hello`, `reconciled`, `installed`, `health`, `stopped`, `error`
 When this is turned on, the space's side maps the protocol onto `TriggerStore` (`src/triggers/store.ts`) as it is, without changing it:
 
 - An `observation` is `admit({ id: triggerId, generation, eventId, observedAt: occurredAt, payload: data, checkpoint })`. `accepted` acks `accepted`; `duplicate` acks `duplicate`; `backpressure` and `inbox_full` ack `deferred`; `not_found`, `deleted`, `stale_generation`, `not_enabled`, `wrong_source`, `out_of_order`, `too_old`, `expired` and a `TriggerValidationError` ack `rejected`. The ack is sent after `transactionSync` returns, so it is durable.
-- A `gap` is `recordGap({ id: triggerId, generation })`, then acked. A gap with no source marks every computer trigger of the space. A `coalesced` observation should be admitted with `gap: true`, since what it stands for was never seen.
+- A `gap` is `recordGap({ id: triggerId, generation })`, then acked, whatever its reasons, coverage gaps included. A gap with no source marks every computer trigger of the space. A `coalesced` observation should be admitted with `gap: true`, since what it stands for was never seen.
 - `installed`, `health` and `stopped` map to `setHealth` (`healthy`, `configuration_error`, `auth_required`, ...), which carries codes only.
 - `reconcile` is built from enabled computer triggers: `sourceId` from `sourceState(id).identity`, `checkpoint` from its `position` and `cursor`, `configHash` from `sourceConfigHash`.
 

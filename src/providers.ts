@@ -329,8 +329,21 @@ function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>
 	return (model, context, options) => lazyStream(model, async () => {
 		const known = (await knownModels()).get(model.id);
 		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : model;
-		return stream(catalogued, context, withoutThinkingMidToolRound(context, options));
+		return stream(catalogued, withoutEmptyAnswers(context), withoutThinkingMidToolRound(context, options));
 	});
+}
+
+/**
+ * Another provider's answer that is only encrypted reasoning says nothing once sent to Claude, so the request drops it.
+ * Left in, it comes out as an empty turn, and the system message pi-ai holds back for the next answer lands before a
+ * user message instead, which Claude refuses: "role 'system' must precede an 'assistant' message or end the array".
+ */
+function withoutEmptyAnswers<C extends { messages: Context["messages"] }>(context: C): C {
+	const says = (message: Context["messages"][number]) =>
+		message.role !== "assistant" ||
+		message.api === "anthropic-messages" ||
+		message.content.some((block) => block.type === "toolCall" || (block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : "").trim() !== "");
+	return context.messages.every(says) ? context : { ...context, messages: context.messages.filter(says) };
 }
 
 /**

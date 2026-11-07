@@ -34,7 +34,7 @@ import { defineDoc } from "@earendil-works/pi-durable";
 import type { PiReceipt } from "agents/harness/pi";
 import { HttpError } from "../http";
 import type { StableOperation } from "../pim";
-import type { ChatCreation, ChatLookup, HostPreflight, RunStatus, SubmissionLookup, SubmitResult, TimeEvidence, TriggerAgentHost } from "./coordinator";
+import type { ChatCreation, ChatLookup, HandedSource, HostPreflight, RunStatus, SubmissionLookup, SubmitResult, TriggerAgentHost, TriggerEvidence } from "./coordinator";
 import type { TriggerDestination } from "./spec";
 
 /** In the commit that makes a trigger's chat: the operation it was made for. A fork starts without it. */
@@ -117,7 +117,7 @@ export type HostOperation = Row;
 /** Questions to the host while it is making the operation's chat or submitting it here: their answers aren't known yet. */
 const BUSY = "another handoff of this operation is under way here";
 
-export class PimTriggerHost implements TriggerAgentHost {
+export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 	readonly #sql: SqlStorage;
 	readonly #space: TriggerSpace;
 	readonly #now: () => number;
@@ -156,7 +156,7 @@ export class PimTriggerHost implements TriggerAgentHost {
 		for (const table of HOST_TABLES) this.#sql.exec(`DELETE FROM ${table}`);
 	}
 
-	async preflight(input: { triggerId: string; operationId: string; agentId: string; destination: TriggerDestination; sourceKind: "time" }): Promise<HostPreflight> {
+	async preflight(input: { triggerId: string; operationId: string; agentId: string; destination: TriggerDestination; sourceKind: HandedSource }): Promise<HostPreflight> {
 		const state = this.#space.state();
 		if (state === "closed") return { ok: false, reason: "the space was erased", retryable: false };
 		if (state === "suspended") return { ok: false, reason: "the space is suspended", retryable: true };
@@ -227,7 +227,7 @@ export class PimTriggerHost implements TriggerAgentHost {
 		}
 	}
 
-	async submit(input: { idempotencyKey: string; chatId: string; agentId: string; instruction: string; evidence: TimeEvidence }): Promise<SubmitResult> {
+	async submit(input: { idempotencyKey: string; chatId: string; agentId: string; instruction: string; evidence: TriggerEvidence }): Promise<SubmitResult> {
 		const operationId = input.idempotencyKey;
 		if (this.#busy.has(operationId)) return { status: "uncertain", reason: BUSY };
 		return this.#exclusive(operationId, async (): Promise<SubmitResult> => {
@@ -363,8 +363,15 @@ async function receiptOf(chatId: string, key: string): Promise<string> {
 	return `pim-trigger:${btoa(String.fromCharCode(...digest)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
 }
 
-/** What the agent reads when a time trigger fires: its instruction, and only when it was due. */
-export function firingText(instruction: string, evidence: TimeEvidence): string {
+/**
+ * What the agent reads when a trigger fires: its instruction, and only when
+ * it was due, or which connector's event it was, by name, id and time. An
+ * event's contents are never kept, so they are never here.
+ */
+export function firingText(instruction: string, evidence: TriggerEvidence): string {
+	if (evidence.kind === "connector_event") {
+		return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(On ${evidence.event} from ${evidence.connectorId} at ${new Date(evidence.observedAt).toISOString()}, event ${evidence.eventId}. What the event carried isn't kept or passed on.)`;
+	}
 	const missed = evidence.older && evidence.older.count > 0 ? ` ${evidence.older.count} earlier ${evidence.older.count === 1 ? "firing" : "firings"} were missed and won't run.` : "";
 	const zone = evidence.schedule.schedule === "cron" ? ` (${evidence.schedule.timeZone})` : "";
 	return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(Due at ${new Date(evidence.scheduledFor).toISOString()}${zone}.${missed})`;

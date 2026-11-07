@@ -25,8 +25,13 @@
  * again. Answers that come back after another has settled the same thing,
  * or after their own deadline, change nothing.
  *
- * Only time sources are handed on. An occurrence of any other source, which
- * the store can admit, stays pending: the context it would carry, and the
+ * Time firings are handed on. A connector's event (`connector_event`, which
+ * ./connector.ts admits) is handed on through the same outbox, runs and
+ * steps only where the coordinator is made with `connectorEvents`, which
+ * nothing in Pim does yet, and only while its trigger is still at the
+ * revision it was taken in under. Its run is told the event's name, id and
+ * time, never what it carried, which the store doesn't keep. An occurrence
+ * of any other source stays pending: the context it would carry, and the
  * grant it would need, have no contract yet.
  */
 
@@ -172,6 +177,37 @@ export type TimeEvidence = {
 	readonly older: OlderFirings | null;
 };
 
+/**
+ * What a run is told of a connector's event that started it: which event,
+ * when, and which fields its condition found, as the occurrence keeps them.
+ * Never what the event carried: the store doesn't keep it, so nothing can
+ * pass it on. The agent may ask the connector about the event by its id,
+ * through its tools, whose actions go through approvals as any run's do.
+ */
+export type EventEvidence = {
+	readonly kind: "connector_event";
+	readonly triggerId: string;
+	readonly revision: number;
+	readonly label: string;
+	readonly connectorId: string;
+	readonly event: string;
+	/** The provider's id for the event, as its occurrence is keyed. */
+	readonly eventId: string;
+	/** The event's own time. */
+	readonly observedAt: number;
+	readonly admittedAt: number;
+	/** `event`: the trigger fires on every such event; `condition`: its condition held. */
+	readonly reason: "event" | "condition";
+	/** Which fields the condition read were there: their paths, never their values. */
+	readonly fields: readonly { readonly path: readonly string[]; readonly present: boolean }[];
+};
+
+/** What a run is told of why it started. */
+export type TriggerEvidence = TimeEvidence | EventEvidence;
+
+/** The sources whose occurrences the coordinator hands on. */
+export type HandedSource = TriggerEvidence["kind"];
+
 export type HostPreflight = { readonly ok: true } | { readonly ok: false; readonly reason: string; readonly retryable: boolean };
 export type ChatLookup = { readonly status: "found"; readonly chatId: string } | { readonly status: "absent" } | { readonly status: "unknown" };
 export type ChatCreation = { readonly status: "created"; readonly chatId: string } | { readonly status: "denied"; readonly reason: string };
@@ -199,8 +235,12 @@ type Call = { readonly signal: AbortSignal };
  * either is taken as "not known", never as a success or a refusal. A call
  * whose signal is aborted may still take effect, which is why a chat and a
  * submission are keyed by the operation and looked up.
+ *
+ * `E` is the evidence it takes: a host for time firings alone takes
+ * `TimeEvidence`; one given connector events (`connectorEvents`) must take
+ * `TriggerEvidence`, as Pim's does.
  */
-export interface TriggerAgentHost {
+export interface TriggerAgentHost<E extends TriggerEvidence = TimeEvidence> {
 	/**
 	 * Before each new handoff, whether it may go ahead: the agent still
 	 * exists, an existing chat is still that agent's, and the space is
@@ -208,7 +248,7 @@ export interface TriggerAgentHost {
 	 * must never substitute another agent or chat. It grants nothing: the
 	 * run's actions still go through approvals.
 	 */
-	preflight(input: Call & { readonly triggerId: string; readonly operationId: string; readonly agentId: string; readonly destination: TriggerDestination; readonly sourceKind: "time" }): Promise<HostPreflight>;
+	preflight(input: Call & { readonly triggerId: string; readonly operationId: string; readonly agentId: string; readonly destination: TriggerDestination; readonly sourceKind: E["kind"] }): Promise<HostPreflight>;
 	/** The chat made for `operationId`, if one was. */
 	findChat(input: Call & { readonly operationId: string }): Promise<ChatLookup>;
 	/** Makes a chat with `agentId` keyed by `operationId`: asked again with the same key, it gives the same chat. */
@@ -216,7 +256,7 @@ export interface TriggerAgentHost {
 	/** Whether a submission with this key was accepted. `absent` must mean it wasn't, and that a submission under the key may still be made. */
 	lookupSubmission(input: Call & { readonly operationId: string }): Promise<SubmissionLookup>;
 	/** Submits the instruction to the chat, at most once per `idempotencyKey`, reserving the run budget only for a new acceptance. */
-	submit(input: Call & { readonly idempotencyKey: string; readonly chatId: string; readonly agentId: string; readonly instruction: string; readonly evidence: TimeEvidence }): Promise<SubmitResult>;
+	submit(input: Call & { readonly idempotencyKey: string; readonly chatId: string; readonly agentId: string; readonly instruction: string; readonly evidence: E }): Promise<SubmitResult>;
 	/** How the run a receipt names is doing. */
 	lookupRun(input: Call & { readonly operationId: string; readonly receipt: string }): Promise<RunStatus>;
 }
@@ -232,7 +272,8 @@ export type CoordinatorBatch = {
 
 export type TriggerCoordinatorOptions = {
 	readonly store: TriggerStore;
-	readonly host: TriggerAgentHost;
+	/** With `connectorEvents`, a host that takes their evidence too (`TriggerAgentHost<TriggerEvidence>`). */
+	readonly host: TriggerAgentHost | TriggerAgentHost<TriggerEvidence>;
 	/** The database's transactions, as the store is given (`transactionSync`); they nest. */
 	readonly transaction: <T>(work: () => T) => T;
 	readonly now: () => number;
@@ -250,6 +291,8 @@ export type TriggerCoordinatorOptions = {
 	readonly runCheckMs?: number;
 	/** Runs of the space's triggers that may hold compute at once (4). */
 	readonly maxRunning?: number;
+	/** Whether connector events' occurrences are handed on, as time firings are (false: they stay pending). Nothing in Pim sets it yet. */
+	readonly connectorEvents?: boolean;
 	readonly batch?: Partial<CoordinatorBatch>;
 };
 
@@ -287,7 +330,7 @@ function timer(ms: number, signal: AbortSignal): Promise<void> {
 export class TriggerCoordinator {
 	readonly #sql: SqlStorage;
 	readonly #store: TriggerStore;
-	readonly #host: TriggerAgentHost;
+	readonly #host: TriggerAgentHost<TriggerEvidence>;
 	readonly #transaction: <T>(work: () => T) => T;
 	readonly #now: () => number;
 	readonly #sleep: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -297,7 +340,11 @@ export class TriggerCoordinator {
 	readonly #retryMs: number;
 	readonly #runCheckMs: number;
 	readonly #maxRunning: number;
+	readonly #connectorEvents: boolean;
 	readonly #batch: CoordinatorBatch;
+	/** The occurrences this coordinator hands on (see `candidates`), as a SQL condition on `c`, an occurrence, and `v`, its revision. */
+	readonly #handed: string;
+	readonly #candidates: string;
 
 	constructor(sql: SqlStorage, options: TriggerCoordinatorOptions) {
 		this.#sql = sql;
@@ -312,6 +359,9 @@ export class TriggerCoordinator {
 		this.#retryMs = integer(options.retryMs ?? 15 * MINUTE, "retryMs", SECOND, 24 * HOUR);
 		this.#runCheckMs = integer(options.runCheckMs ?? MINUTE, "runCheckMs", SECOND, HOUR);
 		this.#maxRunning = integer(options.maxRunning ?? 4, "maxRunning", 1, 64);
+		this.#connectorEvents = options.connectorEvents === true;
+		this.#handed = this.#connectorEvents ? `(${TIME_FIRING} OR ${CONNECTOR_EVENT})` : TIME_FIRING;
+		this.#candidates = candidates(this.#handed);
 		const batch = { ...DEFAULT_BATCH, ...options.batch };
 		this.#batch = {
 			admissions: integer(batch.admissions, "batch.admissions", 1, 256),
@@ -385,7 +435,7 @@ export class TriggerCoordinator {
 		times.push(nullable(this.#sql.exec("SELECT MIN(dispatch_until) AS at FROM pim_trigger_runs WHERE phase = 'preparing' AND dispatch_until > ?", now).one().at));
 		if (this.#adoptable(1).length > 0 || this.#closable(1).length > 0) times.push(now);
 		if (this.#computeHeld(now, null) < this.#maxRunning) {
-			times.push(nullable(this.#sql.exec(`SELECT MIN(CASE o.status WHEN 'pending' THEN o.available_at ELSE o.lease_until END) AS at ${CANDIDATES}`, now).one().at));
+			times.push(nullable(this.#sql.exec(`SELECT MIN(CASE o.status WHEN 'pending' THEN o.available_at ELSE o.lease_until END) AS at ${this.#candidates}`, now).one().at));
 		}
 		const known = times.filter((time): time is number => time !== null);
 		// Work already due is due now.
@@ -405,7 +455,7 @@ export class TriggerCoordinator {
 	// Settling what is known
 
 	/**
-	 * Adopts time occurrences whose outcome the store lost track of (leases
+	 * Adopts occurrences it hands on whose outcome the store lost track of (leases
 	 * run out too often, or a deletion while one was claimed) with no run
 	 * here, as possibly submitted, so the host is asked; and closes runs that
 	 * never submitted whose occurrence was superseded, cancelled, failed or
@@ -455,7 +505,8 @@ export class TriggerCoordinator {
 		return this.#sql
 			.exec(
 				`SELECT o.id, o.operation_id, o.trigger_id, o.occurrence_id, c.revision, c.due_at, c.created_at FROM pim_trigger_outbox o JOIN pim_trigger_occurrences c ON c.id = o.occurrence_id
-				WHERE o.status = 'outcome_unknown' AND c.occurrence_key LIKE 'time:%' AND NOT EXISTS (SELECT 1 FROM pim_trigger_runs r WHERE r.operation_id = o.operation_id)
+				JOIN pim_trigger_revisions v ON v.trigger_id = c.trigger_id AND v.revision = c.revision
+				WHERE o.status = 'outcome_unknown' AND ${this.#handed} AND NOT EXISTS (SELECT 1 FROM pim_trigger_runs r WHERE r.operation_id = o.operation_id)
 				ORDER BY o.updated_at, o.seq LIMIT ?`,
 				limit,
 			)
@@ -605,7 +656,7 @@ export class TriggerCoordinator {
 		// Compute is taken, or not, by each handoff's own transaction (`#begin`), never from a count made here.
 		const triggers = this.#sql
 			.exec(
-				`SELECT o.trigger_id ${CANDIDATES} AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'leased' AND o.lease_until <= ?))
+				`SELECT o.trigger_id ${this.#candidates} AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'leased' AND o.lease_until <= ?))
 				ORDER BY (SELECT MAX(r.last_dispatch_at) FROM pim_trigger_runs r WHERE r.trigger_id = o.trigger_id), o.available_at, o.seq LIMIT ?`,
 				now,
 				now,
@@ -631,8 +682,9 @@ export class TriggerCoordinator {
 				if (this.#computeHeld(now, null) >= this.#maxRunning) return null;
 				const delivery = this.#store.claim({ leaseMs: this.#leaseMs, triggerId });
 				if (!delivery) return null;
-				// Only time firings are handed on; anything else is left as it was.
-				if (delivery.spec.source.kind !== "time" || delivery.occurrence.evidence.reason !== "time") throw new Rollback();
+				// Only what this coordinator hands on is claimed; anything else is left as it was.
+				const kind = handedSource(delivery);
+				if (kind === null || (kind === "connector_event" && !this.#connectorEvents)) throw new Rollback();
 				const operationId = delivery.item.operationId;
 				const existing = this.run(operationId);
 				if (existing && existing.phase !== "preparing") throw new Rollback();
@@ -679,7 +731,7 @@ export class TriggerCoordinator {
 		if (!this.#gate(operationId, attempt, "preflight", report)) return;
 		// Checked again before every new handoff; an accepted run is never checked again here.
 		const preflight = await this.#call(
-			(signal) => this.#host.preflight({ triggerId: run.triggerId, operationId, agentId: run.agentId, destination: delivery.spec.destination, sourceKind: "time", signal }),
+			(signal) => this.#host.preflight({ triggerId: run.triggerId, operationId, agentId: run.agentId, destination: delivery.spec.destination, sourceKind: handedSource(delivery)!, signal }),
 			(reason): HostPreflight => ({ ok: false, reason: `the host's check gave no answer: ${reason}`, retryable: true }),
 		);
 		if (!preflight.ok) {
@@ -788,6 +840,10 @@ export class TriggerCoordinator {
 				this.#sql.exec("UPDATE pim_trigger_runs SET dispatch_until = NULL, last_error = ?, updated_at = ? WHERE operation_id = ?", "paused before it was handed on", now, operationId);
 				return false;
 			}
+			if (this.#edited(run.triggerId, run.revision) && this.#store.occurrence(run.occurrenceId)?.key.startsWith("event:")) {
+				this.#notSubmitted(operationId, attempt, EDITED, null, report);
+				return false;
+			}
 			if (now > run.deliverBy) {
 				this.#notSubmitted(operationId, attempt, "the time to hand it on ran out", null, report);
 				return false;
@@ -868,6 +924,17 @@ export class TriggerCoordinator {
 		else if (item?.status === "outcome_unknown") this.#store.reconcile({ outboxId: item.id, outcome: "delivered" });
 		const trigger = this.#store.get(run.triggerId);
 		if (trigger?.health === "budget_blocked") this.#store.setHealth({ id: trigger.id, generation: trigger.generation, health: "healthy" });
+	}
+
+	/**
+	 * Whether the trigger is no longer at `revision`: edited since, which a
+	 * change of its source or condition always is. A connector's event is
+	 * handed on only at the revision it was taken in under; a time firing
+	 * keeps its revision's snapshot whatever the trigger became.
+	 */
+	#edited(triggerId: string, revision: number): boolean {
+		const trigger = this.#store.get(triggerId);
+		return trigger !== undefined && trigger.revision !== revision;
 	}
 
 	/** Whether `attempt` is still the one that may settle the run: preparing under its claim, or submitting from it. */
@@ -969,24 +1036,58 @@ export class TriggerCoordinator {
 	}
 }
 
+/** A time firing, as a SQL condition on `c`, its occurrence. */
+const TIME_FIRING = "c.occurrence_key LIKE 'time:%'";
+/** A connector's event: an event occurrence (`c`) of a revision (`v`) whose source is a connector's event. Other sources' events are keyed alike. */
+const CONNECTOR_EVENT = "(c.occurrence_key LIKE 'event:%' AND json_extract(v.spec, '$.source.kind') = 'connector_event')";
+
 /**
  * The occurrences a trigger could hand on next, given the clock's reading:
- * the head of each trigger's outbox, when it is a time firing of an enabled
- * or ended trigger whose slot is free, with no handoff of it reserved. Read
- * from the store's tables, in the same database.
+ * the head of each trigger's outbox, when it is an occurrence this
+ * coordinator hands on (`handed`) of an enabled or ended trigger whose slot
+ * is free, with no handoff of it reserved. Read from the store's tables, in
+ * the same database.
  */
-const CANDIDATES = `FROM pim_trigger_outbox o
+function candidates(handed: string): string {
+	return `FROM pim_trigger_outbox o
 	JOIN pim_triggers t ON t.id = o.trigger_id
 	JOIN pim_trigger_occurrences c ON c.id = o.occurrence_id
+	JOIN pim_trigger_revisions v ON v.trigger_id = c.trigger_id AND v.revision = c.revision
 	WHERE t.lifecycle IN ('enabled', 'ended')
 	AND o.seq = (SELECT MIN(h.seq) FROM pim_trigger_outbox h WHERE h.trigger_id = o.trigger_id AND h.status IN ('pending', 'leased'))
-	AND c.occurrence_key LIKE 'time:%'
+	AND ${handed}
 	AND NOT EXISTS (SELECT 1 FROM pim_trigger_runs r WHERE r.trigger_id = o.trigger_id AND (r.phase IN (${inList(SLOT_PHASES)}) OR (r.phase = 'preparing' AND r.dispatch_until > ?)))`;
+}
 
-function evidenceOf(delivery: Delivery): TimeEvidence {
-	const source = delivery.spec.source as TimeSource;
+/** The source a claimed occurrence is handed on as: a time firing, a connector's event, or null for anything else. */
+function handedSource(delivery: Delivery): HandedSource | null {
+	const source = delivery.spec.source.kind;
+	const reason = delivery.occurrence.evidence.reason;
+	if (source === "time" && reason === "time") return "time";
+	if (source === "connector_event" && reason !== "time" && delivery.occurrence.key.startsWith("event:")) return "connector_event";
+	return null;
+}
+
+function evidenceOf(delivery: Delivery): TriggerEvidence {
 	const evidence = delivery.occurrence.evidence;
-	if (evidence.reason !== "time") throw new TriggerValidationError("occurrence", "is not a time firing");
+	const spec = delivery.spec;
+	if (spec.source.kind === "connector_event" && evidence.reason !== "time") {
+		return {
+			kind: "connector_event",
+			triggerId: delivery.item.triggerId,
+			revision: delivery.occurrence.revision,
+			label: spec.label,
+			connectorId: spec.source.connectorId,
+			event: spec.source.event,
+			eventId: eventIdOf(delivery.occurrence.key, delivery.item.triggerId),
+			observedAt: evidence.observedAt,
+			admittedAt: delivery.occurrence.createdAt,
+			reason: evidence.reason,
+			fields: evidence.fields.map((field) => ({ path: [...field.path], present: field.present })),
+		};
+	}
+	const source = spec.source as TimeSource;
+	if (evidence.reason !== "time") throw new TriggerValidationError("occurrence", "is not a time firing or a connector's event");
 	return {
 		kind: "time",
 		triggerId: delivery.item.triggerId,
@@ -1002,6 +1103,14 @@ function evidenceOf(delivery: Delivery): TimeEvidence {
 					: { schedule: "interval", everyMs: source.everyMs, anchorAt: source.anchorAt },
 		older: evidence.older ?? null,
 	};
+}
+
+/** The provider's event id in an event occurrence's key, `event:<trigger>#<source revision>:<eventId>` (./store.ts). */
+function eventIdOf(key: string, triggerId: string): string {
+	const prefix = `event:${triggerId}#`;
+	const revision = key.startsWith(prefix) ? /^\d+:/.exec(key.slice(prefix.length)) : null;
+	if (!revision) throw new TriggerValidationError("occurrence", "is not keyed as an event of its trigger");
+	return key.slice(prefix.length + revision[0].length);
 }
 
 function runOf(row: Row): TriggerRun {
@@ -1035,6 +1144,8 @@ function runOf(row: Row): TriggerRun {
 		updatedAt: Number(row.updated_at),
 	};
 }
+
+const EDITED = "its trigger was edited after its event was taken in, so it is never handed on";
 
 const RECEIPT_TOO_LONG = `the host's receipt is longer than ${MAX_RECEIPT_LENGTH} characters, so the run it names can't be followed`;
 

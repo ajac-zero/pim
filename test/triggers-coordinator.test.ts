@@ -1019,6 +1019,95 @@ describe("time trigger coordinator", () => {
 		});
 	});
 
+	it("adds the column runs now keep to a table made by the coordinator before it, keeping every run, receipt and claim as it was", async () => {
+		await runInDurableObject(env.Pim.getByName(`upgrade-${crypto.randomUUID()}`), async (_pim: Pim, state) => {
+			const sql = state.storage.sql;
+			// pim_trigger_runs exactly as bd9ee3b made it.
+			sql.exec(`
+CREATE TABLE IF NOT EXISTS pim_trigger_runs (
+	operation_id TEXT PRIMARY KEY,
+	trigger_id TEXT NOT NULL,
+	outbox_id TEXT NOT NULL UNIQUE,
+	occurrence_id TEXT NOT NULL,
+	revision INTEGER NOT NULL,
+	agent_id TEXT NOT NULL,
+	chat_id TEXT,
+	chat_state TEXT NOT NULL,
+	phase TEXT NOT NULL,
+	receipt TEXT,
+	scheduled_for INTEGER NOT NULL,
+	admitted_at INTEGER NOT NULL,
+	deliver_by INTEGER NOT NULL,
+	dispatch_attempt INTEGER,
+	dispatch_until INTEGER,
+	first_dispatch_at INTEGER,
+	last_dispatch_at INTEGER,
+	submitted_at INTEGER,
+	accepted_at INTEGER,
+	ended_at INTEGER,
+	check_at INTEGER,
+	check_token TEXT,
+	deferrals INTEGER NOT NULL,
+	last_error TEXT,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pim_trigger_runs_by_trigger ON pim_trigger_runs (trigger_id, phase);
+CREATE INDEX IF NOT EXISTS pim_trigger_runs_by_check ON pim_trigger_runs (phase, check_at);
+CREATE TRIGGER IF NOT EXISTS pim_trigger_runs_pinned BEFORE UPDATE OF operation_id, trigger_id, outbox_id, occurrence_id, revision, agent_id, scheduled_for, admitted_at, deliver_by ON pim_trigger_runs
+BEGIN SELECT RAISE(ABORT, 'a run keeps its operation, revision, agent and deadlines'); END;
+CREATE TRIGGER IF NOT EXISTS pim_trigger_runs_chat_pinned BEFORE UPDATE OF chat_id ON pim_trigger_runs WHEN OLD.chat_id IS NOT NULL AND NEW.chat_id IS NOT OLD.chat_id
+BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
+`);
+			const insert = (operationId: string, phase: string, receipt: string | null, attempt: number) =>
+				sql.exec(
+					`INSERT INTO pim_trigger_runs (operation_id, trigger_id, outbox_id, occurrence_id, revision, agent_id, chat_id, chat_state, phase, receipt, scheduled_for, admitted_at, deliver_by, dispatch_attempt, dispatch_until, first_dispatch_at, last_dispatch_at, submitted_at, accepted_at, check_at, deferrals, last_error, created_at, updated_at)
+					VALUES (?, 'brief', ?, ?, 2, 'agent-1', 'chat-1', 'pinned', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 'connection reset', ?, ?)`,
+					operationId,
+					`outbox-${operationId}`,
+					`occurrence-${operationId}`,
+					phase,
+					receipt,
+					START,
+					START,
+					START + DAY,
+					attempt,
+					START,
+					START,
+					START,
+					receipt === null ? null : START,
+					START,
+					START,
+					START,
+				);
+			insert("op-submitting", "submitting", null, 3);
+			insert("op-accepted", "accepted", "receipt-7", 2);
+			const before = sql.exec("SELECT * FROM pim_trigger_runs ORDER BY operation_id").toArray();
+			const clock = { now: START };
+			const host = new FakeHost();
+			host.script.lookupSubmission = ["unknown"];
+			host.runs.set("receipt-7", "running");
+			const transaction = <T>(run: () => T): T => state.storage.transactionSync(run);
+			const store = new TriggerStore(sql, { transaction, now: () => clock.now });
+			const make = () => new TriggerCoordinator(sql, { store, host, transaction, now: () => clock.now });
+			const coordinator = make();
+			// Made again, it adds nothing more.
+			make();
+			const columns = sql
+				.exec("PRAGMA table_info(pim_trigger_runs)")
+				.toArray()
+				.map((row) => String(row.name));
+			expect(columns.filter((name) => name === "unknown_answers")).toHaveLength(1);
+			expect(sql.exec("SELECT * FROM pim_trigger_runs ORDER BY operation_id").toArray()).toEqual(before.map((row) => ({ ...row, unknown_answers: 0 })));
+			expect(coordinator.run("op-submitting")).toMatchObject({ phase: "submitting", dispatchAttempt: 3, receipt: null, revision: 2, unknownAnswers: 0 });
+			// The pinned columns are still pinned, and the runs go on: an unknown answer is counted, and a known one recorded.
+			expect(() => sql.exec("UPDATE pim_trigger_runs SET revision = 3 WHERE operation_id = 'op-accepted'")).toThrow(/keeps its operation, revision/);
+			await coordinator.tick();
+			expect(coordinator.run("op-submitting")).toMatchObject({ phase: "submitting", unknownAnswers: 1, lastError: "connection reset" });
+			expect(coordinator.run("op-accepted")).toMatchObject({ phase: "running", receipt: "receipt-7", dispatchAttempt: 2, unknownAnswers: 0 });
+		});
+	});
+
 	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), and into what a space holds; the preview and the web app don't use it", () => {
 		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
 		expect(Object.keys(files)).toContain("../src/pim.ts");

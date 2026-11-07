@@ -5,6 +5,8 @@
  * unless the deployment allows it (`PIM_TRIGGERS_ENGINE` set to
  * `internal`, which no deployment sets) and the space was opted in, which
  * only internal code does: there is no route, tool or setting for it.
+ * Turning it off again keeps everything it recorded, which the person's
+ * export holds either way (`triggerHistory`).
  */
 
 import { COORDINATOR_TABLES, TriggerCoordinator } from "./coordinator";
@@ -39,14 +41,33 @@ export type TriggerEngineOptions = {
 	readonly space: TriggerSpace;
 };
 
+/**
+ * Every row of the engine's tables that exist, as stored, for the person's
+ * export: whether the engine is on now or not, since turning it off keeps
+ * what it recorded. Read only: it makes no table, and builds nothing. Null
+ * when the space has none of the tables.
+ */
+export function triggerHistory(sql: SqlStorage): Record<string, Record<string, SqlStorageValue>[]> | null {
+	const existing = new Set(
+		sql
+			.exec("SELECT name FROM sqlite_master WHERE type = 'table'")
+			.toArray()
+			.map((row) => String(row.name)),
+	);
+	const tables = ENGINE_TABLES.filter((table) => existing.has(table));
+	if (tables.length === 0) return null;
+	return Object.fromEntries(tables.map((table) => [table, sql.exec(`SELECT * FROM ${table} ORDER BY rowid`).toArray()]));
+}
+
 export class TriggerEngine {
 	readonly store: TriggerStore;
 	readonly coordinator: TriggerCoordinator;
 	readonly host: PimTriggerHost;
-	readonly #sql: SqlStorage;
+	/** What the host may do in the space. */
+	readonly space: TriggerSpace;
 
 	constructor(sql: SqlStorage, options: TriggerEngineOptions) {
-		this.#sql = sql;
+		this.space = options.space;
 		// No `authorize`: no computer source can be enabled until grants are checked here.
 		this.store = new TriggerStore(sql, { transaction: options.transaction, now: options.now });
 		this.host = new PimTriggerHost(sql, options.space);
@@ -57,19 +78,6 @@ export class TriggerEngine {
 			now: options.now,
 			maxRunning: ENGINE_MAX_RUNNING,
 		});
-	}
-
-	/** Every trigger, deleted ones included, with its spec, occurrences and runs, for the person's export: times and outcomes, nothing observed. */
-	export() {
-		const ids = this.#sql
-			.exec("SELECT id FROM pim_triggers ORDER BY created_at, id")
-			.toArray()
-			.map((row) => String(row.id));
-		return ids.map((id) => ({
-			...this.store.get(id)!,
-			occurrences: this.store.occurrences(id),
-			runs: this.coordinator.runs(id).map((run) => ({ ...run, handoff: this.host.operation(run.operationId) ?? null })),
-		}));
 	}
 
 	/** Erases everything the engine recorded, for erasing the space. */

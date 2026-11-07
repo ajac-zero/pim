@@ -319,6 +319,9 @@ export class TriggerCoordinator {
 			lookups: integer(batch.lookups, "batch.lookups", 1, 256),
 		};
 		this.#sql.exec(SCHEMA);
+		// A table made before runs counted their unknown answers gets the column, at 0; nothing else in it changes.
+		const columns = new Set(this.#sql.exec("PRAGMA table_info(pim_trigger_runs)").toArray().map((row) => String(row.name)));
+		if (!columns.has("unknown_answers")) this.#sql.exec("ALTER TABLE pim_trigger_runs ADD COLUMN unknown_answers INTEGER NOT NULL DEFAULT 0");
 	}
 
 	/**

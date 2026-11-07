@@ -19,8 +19,10 @@
  *   uses that key exactly. A finished task's chat is woken under `wake:` and
  *   its key keeps that form, whatever the task's state on a retry.
  * - What became of a submission and its run is read from pi's own record of
- *   the key (`submissionByRequest`), never assumed: no record is "not
- *   known", not an answer either way.
+ *   the key (`submissionByRequest`), never assumed. No recorded key, or no
+ *   record of the recorded key, means it was never submitted (`absent`); a
+ *   record that can't be read is "not known". A run with no record is "not
+ *   known" too, never ended.
  *
  * Questions about an operation while this instance is still making its chat
  * or submitting it are answered "not known", so a coordinator that stopped

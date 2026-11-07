@@ -68,34 +68,32 @@ export function groupByAge(sessions: readonly Session[], now = Date.now()) {
 
 /**
  * Chats your agents started for tasks, and chats that carry on a longer
- * one, under the chat they were started from or carry on: the chats with none above them in the list, in its order, and for
- * each, every chat started from it or from one under it, oldest first. A
- * chat whose starting chat isn't in the list, such as one deleted or left
- * out by a search, stands on its own.
+ * one, under the chat they were started from or carry on, however deep the
+ * chain goes: the chats with none above them in the list, in its order, and
+ * for each chat the ones directly under it, oldest first. A chat whose
+ * starting chat isn't in the list, such as one deleted or left out by a
+ * search, stands on its own.
  */
 export function nestChats(list: readonly Session[]) {
   const byId = new Map(list.map((session) => [session.id, session]));
-  const above = (session: Session) =>
-    session.startedBy?.session ?? session.continuedFrom ?? "";
-  const topOf = (session: Session) => {
-    let top = session;
-    const seen = new Set([session.id]);
-    for (
-      let parent = byId.get(above(session));
-      parent && !seen.has(parent.id);
-      parent = byId.get(above(parent))
-    ) {
-      seen.add(parent.id);
-      top = parent;
-    }
-    return top;
-  };
+  const parentOf = new Map<string, Session>();
   const top: Session[] = [];
   const children = new Map<string, Session[]>();
   for (const session of list) {
-    const above = topOf(session);
-    if (above === session) top.push(session);
-    else children.set(above.id, [...(children.get(above.id) ?? []), session]);
+    const parent = byId.get(
+      session.startedBy?.session ?? session.continuedFrom ?? "",
+    );
+    // A link that would close a loop is left out, so every chat is shown.
+    let loops = false;
+    for (let up = parent; up && !loops; up = parentOf.get(up.id)) {
+      loops = up === session;
+    }
+    if (!parent || loops) {
+      top.push(session);
+      continue;
+    }
+    parentOf.set(session.id, parent);
+    children.set(parent.id, [...(children.get(parent.id) ?? []), session]);
   }
   for (const under of children.values()) {
     under.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));

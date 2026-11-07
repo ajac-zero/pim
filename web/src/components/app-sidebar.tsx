@@ -6,7 +6,7 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
@@ -602,7 +602,7 @@ function DatedChats({
           <ChatTree
             key={session.id}
             session={session}
-            under={children.get(session.id) ?? []}
+            tree={children}
             activeId={activeId}
             awaitingApproval={awaitingApproval}
             onNavigate={onNavigate}
@@ -614,54 +614,55 @@ function DatedChats({
 }
 
 /**
- * A chat with the chats your agents started from it for tasks below it, as
- * Amp shows threads started by other threads. The chat's row counts how
- * many of their tasks are done and folds them away; the one open stays in
- * view.
+ * A chat with the chats your agents started from it for tasks below it, and
+ * those started from them, as Amp shows threads started by other threads.
+ * The top chat's row counts how many of their tasks are done and folds them
+ * all away; the one open stays in view.
  */
 function ChatTree({
   session,
-  under,
+  tree,
   activeId,
   awaitingApproval,
   onNavigate,
 }: {
   session: Session;
-  under: Session[];
+  tree: ReadonlyMap<string, Session[]>;
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
 }) {
   const [open, setOpen] = useState(true);
+  const below = (chat: Session): Session[] =>
+    (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
+  const under = below(session);
   const expanded = open || under.some((chat) => chat.id === activeId);
-  const row = (chat: Session, nested: boolean) => (
-    <SessionRow
-      key={chat.id}
-      session={chat}
-      nested={nested}
-      active={chat.id === activeId}
-      awaitingApproval={awaitingApproval.has(chat.id)}
-      onNavigate={onNavigate}
-      tasks={
-        !nested && under.length > 0
-          ? {
-              done: under.filter((child) =>
-                DONE_STATES.has(child.startedBy?.state ?? "completed"),
-              ).length,
-              total: under.length,
-              expanded,
-              toggle: () => setOpen(!expanded),
-            }
-          : undefined
-      }
-    />
+  const row = (chat: Session, depth: number): ReactNode => (
+    <Fragment key={chat.id}>
+      <SessionRow
+        session={chat}
+        depth={depth}
+        active={chat.id === activeId}
+        awaitingApproval={awaitingApproval.has(chat.id)}
+        onNavigate={onNavigate}
+        tasks={
+          depth === 0 && under.length > 0
+            ? {
+                done: under.filter((child) =>
+                  DONE_STATES.has(child.startedBy?.state ?? "completed"),
+                ).length,
+                total: under.length,
+                expanded,
+                toggle: () => setOpen(!expanded),
+              }
+            : undefined
+        }
+      />
+      {(depth > 0 || expanded) &&
+        tree.get(chat.id)?.map((child) => row(child, depth + 1))}
+    </Fragment>
   );
-  return (
-    <>
-      {row(session, false)}
-      {expanded && under.map((chat) => row(chat, true))}
-    </>
-  );
+  return row(session, 0);
 }
 
 const DONE_STATES = new Set(["completed", "failed", "canceled"]);
@@ -717,7 +718,7 @@ function FoldedChats({
             <ChatTree
               key={session.id}
               session={session}
-              under={nested.children.get(session.id) ?? []}
+              tree={nested.children}
               activeId={activeId}
               awaitingApproval={awaitingApproval}
               onNavigate={onNavigate}
@@ -764,15 +765,15 @@ function SessionRow({
   active,
   awaitingApproval,
   onNavigate,
-  nested = false,
+  depth = 0,
   tasks,
 }: {
   session: Session;
   active: boolean;
   awaitingApproval: boolean;
   onNavigate?: () => void;
-  /** Shown under the chat it was started from. */
-  nested?: boolean;
+  /** How many chats it is below: shown under the chat it was started from, and indented by up to four steps. */
+  depth?: number;
   /** The chats started from this one: how many of their tasks are done, and whether they show. */
   tasks?: {
     done: number;
@@ -918,7 +919,10 @@ function SessionRow({
   );
 
   return (
-    <li className="group/row relative">
+    <li
+      className="group/row relative"
+      style={{ paddingLeft: `${Math.min(depth, 4) * 0.75}rem` }}
+    >
       <Link
         to="/chat/$sessionId"
         params={{ sessionId: session.id }}
@@ -936,7 +940,7 @@ function SessionRow({
         onMouseEnter={scrollTitleIntoView}
         onFocus={scrollTitleIntoView}
       >
-        {nested && (
+        {depth > 0 && (
           <CornerDownRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground/70" />
         )}
         {session.visit ? (

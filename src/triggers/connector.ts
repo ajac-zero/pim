@@ -56,10 +56,10 @@ export type ConnectorStatus = "connected" | "disconnected" | "removed";
 
 /**
  * One provider subscription bound to one trigger: what the callback's key
- * resolves to in the space that owns it. The host records it when the
- * connector grants a subscription (deferred, see `RenewalDecision`), for
- * the trigger's generation and source revision at the time, so a pause,
- * an edit or a deletion leaves it stale rather than moving it along.
+ * resolves to in the space that owns it. The subscription manager
+ * (./subscriptions.ts) records it for the trigger's generation and source
+ * revision at the time, so a pause, an edit or a deletion leaves it stale
+ * rather than moving it along.
  */
 export type ConnectorSubscription = {
 	/** The callback's own key, the last segment of its URL. A watch's id can be one (see docs/triggers.md). */
@@ -543,7 +543,7 @@ export function eventTime(value: unknown): number | null {
 	return local - sign * (zoneHours * 60 + zoneMinutes) * 60_000;
 }
 
-// Keeping the subscription: the contract, not an implementation
+// Keeping the subscription: the contract, which ./subscriptions.ts keeps
 
 /** Renew this long before a grant runs out, as app-events.ts does. */
 export const RENEW_MARGIN_MS = 5 * 60_000;
@@ -580,7 +580,8 @@ export type RenewalInput = {
  * `events/unsubscribe` are idempotent over (principal, callback URL, event,
  * arguments), so a request whose outcome is unknown is settled by asking
  * the same thing again, never by a new subscription with a new URL or
- * secret. Nothing performs these yet.
+ * secret. The subscription manager (./subscriptions.ts), itself unwired,
+ * performs them.
  */
 export type RenewalDecision =
 	| { readonly action: "wait"; readonly until: number }

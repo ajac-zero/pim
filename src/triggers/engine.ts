@@ -12,6 +12,7 @@
 import { COORDINATOR_TABLES, TriggerCoordinator } from "./coordinator";
 import { HOST_TABLES, PimTriggerHost, type TriggerSpace } from "./host";
 import { TRIGGER_TABLES, TriggerStore } from "./store";
+import { SUBSCRIPTION_PRIVATE_COLUMNS, SUBSCRIPTION_TABLES } from "./subscriptions";
 
 /** The method of `Pim` its trigger wake calls. */
 export const TRIGGER_TICK_CALLBACK = "runTriggerTick";
@@ -44,8 +45,10 @@ export type TriggerEngineOptions = {
 /**
  * Every row of the engine's tables that exist, as stored, for the person's
  * export: whether the engine is on now or not, since turning it off keeps
- * what it recorded. Read only: it makes no table, and builds nothing. Null
- * when the space has none of the tables.
+ * what it recorded. Connector subscriptions' bindings (./subscriptions.ts),
+ * which nothing in Pim makes yet, are in it too when their table exists,
+ * without their callback key or secret. Read only: it makes no table, and
+ * builds nothing. Null when the space has none of the tables.
  */
 export function triggerHistory(sql: SqlStorage): Record<string, Record<string, SqlStorageValue>[]> | null {
 	const existing = new Set(
@@ -54,9 +57,15 @@ export function triggerHistory(sql: SqlStorage): Record<string, Record<string, S
 			.toArray()
 			.map((row) => String(row.name)),
 	);
-	const tables = ENGINE_TABLES.filter((table) => existing.has(table));
+	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES].filter((table) => existing.has(table));
 	if (tables.length === 0) return null;
-	return Object.fromEntries(tables.map((table) => [table, sql.exec(`SELECT * FROM ${table} ORDER BY rowid`).toArray()]));
+	return Object.fromEntries(
+		tables.map((table) => {
+			const rows = sql.exec(`SELECT * FROM ${table} ORDER BY rowid`).toArray();
+			if (!(SUBSCRIPTION_TABLES as readonly string[]).includes(table)) return [table, rows];
+			return [table, rows.map((row) => Object.fromEntries(Object.entries(row).filter(([column]) => !(SUBSCRIPTION_PRIVATE_COLUMNS as readonly string[]).includes(column))))];
+		}),
+	);
 }
 
 export class TriggerEngine {

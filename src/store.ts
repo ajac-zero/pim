@@ -436,6 +436,7 @@ export class PimStore {
 			pim_trigger_tombstones: "deleted trigger ids",
 			pim_trigger_runs: "triggers' runs",
 			pim_trigger_host_operations: "triggers' chats and submissions",
+			pim_trigger_subscriptions: "triggers' connector subscriptions",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(

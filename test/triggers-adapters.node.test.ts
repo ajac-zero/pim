@@ -600,17 +600,37 @@ describe("poll on real children", () => {
 		}
 	});
 
-	it("reports cleanup it can't vouch for as unknown", async () => {
+	it("stops for good when it can't vouch for its last child's cleanup", async () => {
 		const { clock, launcher, sink, adapter } = await startPoll();
 		await clock.advance(0);
-		launcher.last.finish('{"n":1}', { code: null, signal: "SIGKILL", cleaned: false });
+		const first = launcher.last;
+		first.finish('{"n":1}', { code: null, signal: "SIGKILL", cleaned: false });
 		await clock.advance(0);
-		expect(sink.reports).toEqual([
-			{ status: "degraded", code: "poll_cleanup_unknown" },
-			{ status: "degraded", code: "poll_failed" },
-		]);
+		// Its group's members may still run: no further child, no emission, and nothing reported after this.
+		expect(sink.reports).toEqual([{ status: "error", code: "poll_cleanup_unknown" }]);
+		await clock.advance(600_000);
+		adapter.pause();
+		await clock.advance(120_000);
+		adapter.resume();
+		await clock.advance(600_000);
+		first.events.stdout(Buffer.from('{"late":true}'));
+		first.events.exit({ code: 0, signal: null, failed: false, cleaned: true });
+		await clock.advance(60_000);
+		expect(launcher.children).toHaveLength(1);
 		expect(sink.emits).toEqual([]);
+		expect(sink.reports).toEqual([{ status: "error", code: "poll_cleanup_unknown" }]);
+		expect(clock.pending).toBe(0);
 		await adapter.stop("shutdown");
+		expect(first.signals).toEqual([]);
+		expect(clock.pending).toBe(0);
+
+		// The same after a child it was ending: the timeout isn't reported over it either.
+		const ended = await startPoll(pollSource({ deadlineMs: 1_000 }));
+		await ended.clock.advance(1_000);
+		ended.launcher.last.finish("", { code: null, signal: "SIGKILL", cleaned: false });
+		await ended.clock.advance(600_000);
+		expect(ended.sink.reports).toEqual([{ status: "error", code: "poll_cleanup_unknown" }]);
+		expect(ended.launcher.children).toHaveLength(1);
 	});
 
 	it("keeps stderr out of what it reports, and out of the console", async () => {

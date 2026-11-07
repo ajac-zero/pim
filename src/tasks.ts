@@ -373,6 +373,17 @@ export class TaskStore {
 		this.#sql.exec(`UPDATE pim_tasks SET delivered = ${DELIVERY.given} WHERE batch = ? AND state IN ('completed', 'failed', 'canceled')`, batch);
 	}
 
+	/** Whether a call of a conversation's is suspended, waiting for the answers of tasks it handed out. */
+	isWaiting(conversation: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_tasks WHERE requester = ? AND waits = 1 LIMIT 1", conversation).toArray().length > 0;
+	}
+
+	/** Hands the tasks a conversation did, and those it handed out with their answers, over to the chat that carries it on. */
+	carryOn(from: string, to: string): void {
+		this.#sql.exec("UPDATE pim_tasks SET requester = ? WHERE requester = ?", to, from);
+		this.#sql.exec("UPDATE pim_tasks SET conversation = ? WHERE conversation = ?", to, from);
+	}
+
 	/** The conversations of tasks that aren't chats of the person's: reviews, and tasks from before tasks were chats. */
 	conversations(): Set<string> {
 		return new Set(this.#sql.exec("SELECT conversation FROM pim_tasks WHERE chat = 0").toArray().map((row) => String(row.conversation)));

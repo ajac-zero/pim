@@ -695,7 +695,8 @@ export class Pim extends DurableAgent<Env> {
 		publicUrl: () => this.deployment().publicUrl ?? undefined,
 		owner: () => this.name,
 		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
-		submit: async (session, content, operationId) => {
+		submit: async (watched, content, operationId) => {
+			const session = await this.#carriedOn(watched);
 			await this.submitTo(session, content, { operationId }, "pim");
 			// A member's own conversation isn't the one the person reads, so the chat is told too.
 			const seat = this.#rooms.of(session);
@@ -1928,10 +1929,12 @@ export class Pim extends DurableAgent<Env> {
 		// The same firing retried is one submission and one notification.
 		const firing = `schedule:${schedule.id}:${schedule.time}`;
 		let started: string | null = null;
+		let target = payload.session;
 		try {
 			if (payload.newChat) started = await this.#scheduledChat(payload, schedule);
+			target = started ?? (await this.#carriedOn(payload.session));
 			await this.submitTo(
-				started ?? payload.session,
+				target,
 				`[Scheduled task${label} ${schedule.id}] ${payload.instruction}`,
 				{ operationId: firing },
 				"pim",
@@ -1948,7 +1951,7 @@ export class Pim extends DurableAgent<Env> {
 		const notification = this.store.addNotification({
 			id: firing,
 			kind: "scheduled",
-			session: started ?? payload.session,
+			session: target,
 			title: title.length > 80 ? `${title.slice(0, 79)}…` : title,
 			// The title names the task; the instruction can be pages long and lives in the chat.
 			body: "",
@@ -3027,7 +3030,8 @@ export class Pim extends DurableAgent<Env> {
 		for (const [position, { to, task, continues }] of given.entries()) {
 			let record = this.#tasks.at(batch, position);
 			if (!record) {
-				const conversation = continues?.conversation ?? (await this.#taskConversation(to));
+				// A chat that grew too long carries on in a new one, so a follow-up goes on there: the old chat is full.
+				const conversation = continues ? await this.#carriedOn(continues.conversation) : await this.#taskConversation(to);
 				record = this.#tasks.start({
 					kind: "agent",
 					conversation,
@@ -3142,6 +3146,24 @@ export class Pim extends DurableAgent<Env> {
 		await this.#giveUpdate(requester, batch, operation);
 	}
 
+	/**
+	 * Where what is sent to a chat goes: a chat that grew too long is carried on in a new one,
+	 * which then hears the answers to the tasks the chat handed out, its schedules and its events,
+	 * and which a task's follow-ups go to, since the old chat is full. The tasks the chat did or
+	 * handed out move over, so the new chat is the one recorded for them, only once the old chat
+	 * is at rest: nothing at work for it, no call waiting in it for answers, and no task of its
+	 * own under way. Until then the old chat is the one that is still going on.
+	 */
+	async #carriedOn(session: string): Promise<string> {
+		for (let next = this.store.continuation(session); next !== null; next = this.store.continuation(session)) {
+			if (this.#tasks.isWaiting(session) || this.#taskUnderway(session) || (await this.harness.session(session).busy())) return session;
+			if (this.#tasks.byRequester(session).some((task) => task.state === "working" || task.state === "auth-required")) return session;
+			this.#tasks.carryOn(session, next);
+			session = next;
+		}
+		return session;
+	}
+
 	/** Submits an update `#deliver` marked as being given; again after a restart, which gives it once. */
 	async #giveUpdate(requester: string, batch: string, operation: string): Promise<void> {
 		const tasks = this.#tasks.inBatch(batch);
@@ -3151,7 +3173,7 @@ export class Pim extends DurableAgent<Env> {
 			tasks.filter((task) => task.state === "auth-required").map(by),
 		);
 		try {
-			await this.submitTo(requester, text, { operationId: operation, whenBusy: "followUp" }, "task");
+			await this.submitTo(await this.#carriedOn(requester), text, { operationId: operation, whenBusy: "followUp" }, "task");
 		} catch (error) {
 			console.warn(`giving ${operation} failed`, error);
 			return;
@@ -3684,7 +3706,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Who started a chat to hand its agent a task, from which chat, and how the task is going; null for a chat the person started. */
 	#startedBy(session: string): { session: string; agent: { id: string; name: string }; task: string; state: Task["state"] } | null {
-		const task = this.#tasks.of(session);
+		const continuation = this.store.continuation(session);
+		const task = this.#tasks.of(session) ?? (continuation === null ? undefined : this.#tasks.of(continuation));
 		if (!task?.chat || task.requester === null) return null;
 		const agent = this.#roleOf(task.requester).agent;
 		return { session: this.store.publicId(task.root), agent: { id: agent.id, name: agent.name }, task: task.id, state: task.state };

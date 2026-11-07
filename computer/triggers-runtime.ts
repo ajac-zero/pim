@@ -115,8 +115,20 @@ export type AckMessage = {
 };
 export type ServerMessage = ReconcileMessage | AckMessage;
 
-export type SourceState = "starting" | "running" | "stale" | "invalid";
-export type StopReason = "not_desired" | "reconfigured" | "consent_changed" | "revoked" | "invalid" | "lease_expired" | "epoch_replaced" | "start_failed" | "spool_unavailable" | "shutdown";
+/** `ended`: this generation's observer ended for good and its end is durable; nothing runs it again but a new generation. */
+export type SourceState = "starting" | "running" | "ended" | "stale" | "invalid";
+export type StopReason =
+	| "not_desired"
+	| "reconfigured"
+	| "consent_changed"
+	| "revoked"
+	| "invalid"
+	| "lease_expired"
+	| "epoch_replaced"
+	| "start_failed"
+	| "spool_unavailable"
+	| "shutdown"
+	| "ended";
 /**
  * Why a gap was recorded. `interrupted`: no observer of the source ran from
  * `from` to `to`. `coverage_unknown`: an observer started at `to`, and what
@@ -391,12 +403,63 @@ export type GapEntry = EntryBase & {
 	readonly to: number;
 };
 export type SpoolEntry = ObservationEntry | GapEntry;
+/**
+ * That one generation's observer of a trigger ended for good, when, and why:
+ * written with the gap that says so, kept across restarts and epochs so the
+ * same generation is never run again, and replaced or removed only when a
+ * newer generation of the trigger starts. It holds ids, a digest, times and
+ * a code: nothing observed, no command and no grant.
+ */
+export type EndRecord = {
+	readonly triggerId: string;
+	readonly sourceId: string;
+	readonly generation: number;
+	readonly configHash: string;
+	readonly at: number;
+	readonly code: string;
+	readonly recordedAt: number;
+};
+/** The most end records the journal keeps; past that, the oldest of a trigger no longer wanted goes. */
+export const MAX_END_RECORDS = 1_024;
 
 /**
  * One line of the journal: everything one commit changes. A line is read
- * back whole, with its digest, or not at all, so a commit is too.
+ * back whole, with its digest, or not at all, so a commit is too. `ends` and
+ * `unend` put and remove end records by trigger; a journal written before
+ * they existed has none, and is read as it was.
  */
-type Txn = { readonly t: "txn"; readonly meta?: { readonly epoch: number | null; readonly nextSeq: number }; readonly put?: readonly SpoolEntry[]; readonly del?: readonly number[] };
+type Txn = {
+	readonly t: "txn";
+	readonly meta?: { readonly epoch: number | null; readonly nextSeq: number };
+	readonly put?: readonly SpoolEntry[];
+	readonly del?: readonly number[];
+	readonly ends?: readonly EndRecord[];
+	readonly unend?: readonly string[];
+};
+
+const HEALTH_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** Whether a value read back from the journal is an end record, exactly. */
+function isEndRecord(value: unknown): value is EndRecord {
+	try {
+		const given = fields(value, ["triggerId", "sourceId", "generation", "configHash", "at", "code", "recordedAt"]);
+		ident(given.triggerId);
+		ident(given.sourceId);
+		int(given.generation, 0, Number.MAX_SAFE_INTEGER);
+		digestHex(given.configHash);
+		int(given.at, 0, Number.MAX_SAFE_INTEGER);
+		int(given.recordedAt, 0, Number.MAX_SAFE_INTEGER);
+		return typeof given.code === "string" && HEALTH_CODE.test(given.code);
+	} catch {
+		return false;
+	}
+}
+
+function endBytes(ends: ReadonlyMap<string, EndRecord>): number {
+	let bytes = 0;
+	for (const record of ends.values()) bytes += encode({ t: "txn", ends: [record] }).length;
+	return bytes;
+}
 
 export type SpoolOptions = {
 	/** The most bytes the journal may take; at most `HARD_LIMITS.spoolBytes`, which is the default. */
@@ -447,6 +510,8 @@ function decode(line: string): Txn | null {
 		if (txn.meta !== undefined && !((txn.meta.epoch === null || Number.isSafeInteger(txn.meta.epoch)) && Number.isSafeInteger(txn.meta.nextSeq))) return null;
 		if (txn.del !== undefined && !(Array.isArray(txn.del) && txn.del.every((seq) => Number.isSafeInteger(seq)))) return null;
 		if (txn.put !== undefined && !(Array.isArray(txn.put) && txn.put.every((entry) => Number.isSafeInteger(entry?.seq) && Number.isSafeInteger(entry.epoch) && (entry.kind === "observation" || entry.kind === "gap")))) return null;
+		if (txn.ends !== undefined && !(Array.isArray(txn.ends) && txn.ends.every(isEndRecord))) return null;
+		if (txn.unend !== undefined && !(Array.isArray(txn.unend) && txn.unend.every((triggerId) => typeof triggerId === "string"))) return null;
 		return deepFreeze(txn);
 	} catch {
 		return null;
@@ -487,6 +552,8 @@ export class ObservationSpool {
 	readonly #write: (handle: fs.FileHandle, data: Buffer) => Promise<void>;
 	#entries = new Map<number, { entry: SpoolEntry; bytes: number }>();
 	#events = new Map<string, number>();
+	#ends = new Map<string, EndRecord>();
+	#endBytes = 0;
 	#epoch: number | null = null;
 	#nextSeq = 1;
 	#handle: fs.FileHandle | null = null;
@@ -569,6 +636,8 @@ export class ObservationSpool {
 				this.#entries.set(entry.seq, { entry, bytes: entryBytes(entry) });
 				this.#nextSeq = Math.max(this.#nextSeq, entry.seq + 1);
 			}
+			for (const triggerId of txn.unend ?? []) this.#ends.delete(triggerId);
+			for (const record of txn.ends ?? []) this.#ends.set(record.triggerId, record);
 		}
 		this.#entries = new Map([...this.#entries].sort(([a], [b]) => a - b));
 		// Entries are written only under the epoch then current, so a lost first line can't leave it unknown.
@@ -580,6 +649,7 @@ export class ObservationSpool {
 	#index(): void {
 		this.#events = new Map([...this.#entries.values()].map(({ entry }) => [entry.eventId, entry.seq]));
 		this.#liveBytes = [...this.#entries.values()].reduce((sum, { bytes }) => sum + bytes, 0);
+		this.#endBytes = endBytes(this.#ends);
 	}
 
 	get epoch(): number | null {
@@ -589,7 +659,7 @@ export class ObservationSpool {
 		return this.#entries.size;
 	}
 	get bytes(): number {
-		return this.#liveBytes + META_BYTES;
+		return this.#liveBytes + this.#endBytes + META_BYTES;
 	}
 	/** Bytes in the file of entries that have left, which only a rewrite takes out. */
 	get retiredBytes(): number {
@@ -601,6 +671,13 @@ export class ObservationSpool {
 	}
 	get(seq: number): SpoolEntry | undefined {
 		return this.#entries.get(seq)?.entry;
+	}
+	/** The end record of a trigger, if one is kept. */
+	end(triggerId: string): EndRecord | undefined {
+		return this.#ends.get(triggerId);
+	}
+	ends(): EndRecord[] {
+		return [...this.#ends.values()];
 	}
 	findEvent(eventId: string): SpoolEntry | undefined {
 		const seq = this.#events.get(eventId);
@@ -627,7 +704,7 @@ export class ObservationSpool {
 			bytes += entryBytes(entry) - (held?.bytes ?? 0);
 			if (!held) count++;
 		}
-		return { bytes: bytes + META_BYTES, count };
+		return { bytes: bytes + this.#endBytes + META_BYTES, count };
 	}
 
 	/** Whether the spool would hold these changes; only gaps may use the reserve. */
@@ -641,12 +718,23 @@ export class ObservationSpool {
 	 * Puts entries (one with a sequence already held replaces it), removes
 	 * others, and sets the epoch if given, all in one line, durably, before it
 	 * returns; or changes nothing and throws. `rewrite` writes the whole
-	 * journal instead, so nothing removed stays in the file.
+	 * journal instead, so nothing removed stays in the file. `unend` removes
+	 * end records by trigger and `ends` puts them, in the same line.
 	 */
-	async commit(puts: readonly SpoolEntry[], removes: readonly number[], options: { epoch?: number; rewrite?: boolean } = {}): Promise<void> {
+	async commit(
+		puts: readonly SpoolEntry[],
+		removes: readonly number[],
+		options: { epoch?: number; rewrite?: boolean; ends?: readonly EndRecord[]; unend?: readonly string[] } = {},
+	): Promise<void> {
 		if (this.#closed || this.#broken || !this.#handle) throw new SpoolError("unavailable");
+		const ends = (options.ends ?? []).map(deepFreeze);
+		const unend = options.unend ?? [];
+		const nextEnds = new Map(this.#ends);
+		for (const triggerId of unend) nextEnds.delete(triggerId);
+		for (const record of ends) nextEnds.set(record.triggerId, record);
 		const after = this.#project(puts, removes);
-		if (after.bytes > this.limits.maxBytes || after.count > this.limits.maxEntries) throw new SpoolError("full");
+		const bytes = after.bytes - this.#endBytes + endBytes(nextEnds);
+		if (bytes > this.limits.maxBytes || after.count > this.limits.maxEntries || nextEnds.size > MAX_END_RECORDS) throw new SpoolError("full");
 		puts = puts.map(deepFreeze);
 		const epoch = options.epoch ?? this.#epoch;
 		const data = encode({
@@ -654,12 +742,14 @@ export class ObservationSpool {
 			...(options.epoch === undefined ? {} : { meta: { epoch, nextSeq: this.#nextSeq } }),
 			...(puts.length > 0 ? { put: puts } : {}),
 			...(removes.length > 0 ? { del: removes } : {}),
+			...(unend.length > 0 ? { unend } : {}),
+			...(ends.length > 0 ? { ends } : {}),
 		});
 		if (options.rewrite || this.#fileBytes + data.length > this.limits.maxBytes) {
 			const next = new Map(this.#entries);
 			for (const seq of removes) next.delete(seq);
 			for (const entry of puts) next.set(entry.seq, { entry, bytes: entryBytes(entry) });
-			await this.#rewrite(new Map([...next].sort(([a], [b]) => a - b)), epoch);
+			await this.#rewrite(new Map([...next].sort(([a], [b]) => a - b)), epoch, nextEnds);
 			return;
 		}
 		try {
@@ -693,6 +783,8 @@ export class ObservationSpool {
 			this.#entries.set(entry.seq, { entry, bytes });
 			this.#events.set(entry.eventId, entry.seq);
 		}
+		this.#ends = nextEnds;
+		this.#endBytes = endBytes(nextEnds);
 	}
 
 	/** Rewrites the journal with only what is live, so nothing that left stays in the file. */
@@ -701,9 +793,13 @@ export class ObservationSpool {
 	}
 
 	/** Writes `entries` as the whole journal: a temporary file, synced, renamed over the journal. */
-	async #rewrite(entries: Map<number, { entry: SpoolEntry; bytes: number }>, epoch: number | null): Promise<void> {
+	async #rewrite(entries: Map<number, { entry: SpoolEntry; bytes: number }>, epoch: number | null, ends: Map<string, EndRecord> = this.#ends): Promise<void> {
 		if (this.#closed) throw new SpoolError("unavailable");
-		const data = Buffer.concat([encode({ t: "txn", meta: { epoch, nextSeq: this.#nextSeq } }), ...[...entries.values()].map(({ entry }) => encode({ t: "txn", put: [entry] }))]);
+		const data = Buffer.concat([
+			encode({ t: "txn", meta: { epoch, nextSeq: this.#nextSeq } }),
+			...[...ends.values()].map((record) => encode({ t: "txn", ends: [record] })),
+			...[...entries.values()].map(({ entry }) => encode({ t: "txn", put: [entry] })),
+		]);
 		if (data.length > this.limits.maxBytes) throw new SpoolError("full");
 		const temporary = `${this.#file}.tmp`;
 		try {
@@ -733,6 +829,7 @@ export class ObservationSpool {
 		this.#broken = false;
 		this.#epoch = epoch;
 		this.#entries = entries;
+		this.#ends = ends;
 		this.#index();
 	}
 
@@ -775,7 +872,24 @@ export type AdapterConfig = {
 	readonly resume: Checkpoint | null;
 	/** Aborted when the runtime stops this adapter. */
 	readonly signal: AbortSignal;
+	/**
+	 * Says this observer's coverage ended for good at `at`, for `code`. The
+	 * runtime always gives it; it is optional only so an adapter can be
+	 * started without a runtime.
+	 */
+	readonly endCoverage?: EndCoverage;
 };
+/** When an observer's coverage ended, by its own clock reading, and why, as a health code. */
+export type CoverageEnd = { readonly at: number; readonly code: string };
+/**
+ * `recorded`: the end, its gap and the generation's end record are durable,
+ * and the observer is stopped. `stopped`: the observer is fenced, by this or
+ * anything else. `not_started`: it isn't installed yet; nothing was
+ * recorded, try again. `unavailable`: nothing was recorded, try again.
+ * `invalid`: not a `CoverageEnd`; nothing was recorded.
+ */
+export type EndCoverageResult = "recorded" | "stopped" | "not_started" | "unavailable" | "invalid";
+export type EndCoverage = (end: CoverageEnd) => Promise<EndCoverageResult>;
 /**
  * What an adapter observed. The runtime copies it when `emit` is called, so
  * changing it afterwards changes nothing. `key`, when it has one, makes the
@@ -909,6 +1023,12 @@ type Run = {
 	pending: { seq: number; checkpoint: Checkpoint | null; settled: boolean }[];
 	/** Set at its first loss or refusal: from then on it commits no checkpoint, and only a new observer, from the space's checkpoint, does. */
 	barrier: boolean;
+	/** When it was installed. */
+	installedAt: number | null;
+	/** When the runtime paused it, until it resumes it: nothing it saw since has been taken. */
+	pausedAt: number | null;
+	/** Its end being recorded: a repeated call while one is outstanding gets the same answer, so callers can't pile up. */
+	ending: Promise<EndCoverageResult> | null;
 };
 type Slot = {
 	run: Run | null;
@@ -923,7 +1043,8 @@ type Slot = {
 type TimerName = "lease" | "flush" | "expiry" | "scrub" | "losses";
 type Delivery = { sentAt: number | null; attempts: number; notBefore: number };
 type LossTarget = { readonly epoch: number; readonly triggerId: string | null; readonly sourceId: string | null; readonly generation: number | null };
-type Loss = { readonly target: LossTarget; readonly reasons: GapCounts; readonly from: number; readonly to: number };
+/** `apart`: written as a gap of its own, never merged into another, so its window keeps its meaning. */
+type Loss = { readonly target: LossTarget; readonly reasons: GapCounts; readonly from: number; readonly to: number; readonly apart?: boolean };
 
 const SYSTEM_CLOCK: RuntimeClock = {
 	now: () => Date.now(),
@@ -1299,6 +1420,12 @@ export class TriggersRuntime {
 			return refuse("generation_mismatch");
 		}
 		slot.identity = { generation: desired.generation, sourceId: desired.sourceId, revision: desired.revision, configHash: desired.configHash };
+		const ended = this.#spool.end(desired.triggerId);
+		if (ended && ended.generation === desired.generation && ended.sourceId === desired.sourceId && ended.configHash === desired.configHash) {
+			// This generation ended for good, durably: nothing runs it again, however often it is asked for, until a new generation.
+			this.#push({ protocol: PROTOCOL, type: "health", serverEpoch: this.#spool.epoch ?? 0, triggerId: desired.triggerId, sourceId: desired.sourceId, generation: desired.generation, status: "error", code: ended.code });
+			return "ended";
+		}
 		if (run && !run.fenced) {
 			if (run.desired.generation === desired.generation) {
 				if (run.desired.grant.grantRef === desired.grant.grantRef && run.desired.grant.scopeHash === desired.grant.scopeHash) {
@@ -1328,6 +1455,9 @@ export class TriggersRuntime {
 			stopped: Promise.resolve(),
 			pending: [],
 			barrier: false,
+			installedAt: null,
+			pausedAt: null,
+			ending: null,
 		};
 		slot.run = run;
 		// One observer per trigger at a time: this one starts only once the one before it has stopped.
@@ -1369,6 +1499,7 @@ export class TriggersRuntime {
 			source: run.desired.source,
 			resume: run.desired.checkpoint,
 			signal: run.abort.signal,
+			endCoverage: (end: CoverageEnd) => this.#endCoverage(run, end),
 		});
 		let outcome: "returned" | "timed_out" | "failed";
 		try {
@@ -1402,7 +1533,9 @@ export class TriggersRuntime {
 				slot.coveredUntil === null
 					? { target: this.#target(run), reasons: { coverage_unknown: 1 }, from: now, to: now }
 					: { target: this.#target(run), reasons: { interrupted: 1 }, from: slot.coveredUntil, to: now };
-			if (!(await this.#commitLosses([loss], []))) return false;
+			// An older generation's end record goes with the gap that starts the newer one.
+			const ended = this.#spool.end(run.desired.triggerId);
+			if (!(await this.#commitLosses([loss], [], ended ? { unend: [ended.triggerId] } : {}))) return false;
 			slot.coveredUntil = null;
 			return true;
 		}).catch(() => false);
@@ -1413,6 +1546,7 @@ export class TriggersRuntime {
 			return;
 		}
 		run.state = "installed";
+		run.installedAt = this.#clock.now();
 		this.#pushFor(run, { ...this.#ref(run), protocol: PROTOCOL, type: "installed", configHash: run.desired.configHash });
 		this.#report(run, { status: "ok", code: "listening" });
 	}
@@ -1454,7 +1588,8 @@ export class TriggersRuntime {
 		run.fenced = true;
 		run.abort.abort();
 		const slot = this.#slots.get(run.desired.triggerId);
-		if (slot?.run === run && run.state === "installed") slot.coveredUntil = this.#clock.now();
+		// Coverage ends now, or when the runtime paused it if it never resumed: nothing it saw since was taken.
+		if (slot?.run === run && run.state === "installed") slot.coveredUntil = run.pausedAt ?? this.#clock.now();
 		const adapter = run.adapter;
 		if (!adapter) {
 			run.state = "stopped";
@@ -1537,11 +1672,78 @@ export class TriggersRuntime {
 	#health(run: Run, report: unknown): void {
 		if (!this.#current(run) || run.state !== "installed") return;
 		const given = report as AdapterHealth;
-		if (typeof given !== "object" || given === null || !["ok", "degraded", "error"].includes(given.status) || typeof given.code !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(given.code)) {
+		if (typeof given !== "object" || given === null || !["ok", "degraded", "error"].includes(given.status) || typeof given.code !== "string" || !HEALTH_CODE.test(given.code)) {
 			this.#log({ code: "adapter_health_invalid", triggerId: run.desired.triggerId, generation: run.desired.generation });
 			return;
 		}
 		this.#report(run, { status: given.status, code: given.code });
+	}
+
+	/**
+	 * An observer says its coverage ended for good. One call at a time per
+	 * observer: a repeat while one is outstanding gets the same answer. What
+	 * it is given is read now, before anything waits; the work runs in the
+	 * queue, so nothing else changes the observer, the epoch or the spool
+	 * while it does.
+	 */
+	#endCoverage(run: Run, end: unknown): Promise<EndCoverageResult> {
+		if (run.fenced) return Promise.resolve("stopped");
+		if (run.ending) return run.ending;
+		let given: CoverageEnd;
+		try {
+			const read = fields(end, ["at", "code"]);
+			const code = read.code;
+			if (typeof code !== "string" || !HEALTH_CODE.test(code)) return Promise.resolve("invalid");
+			given = { at: int(read.at, 0, Number.MAX_SAFE_INTEGER), code };
+		} catch {
+			return Promise.resolve("invalid");
+		}
+		const ending: Promise<EndCoverageResult> = this.#enqueue(() => this.#recordEnd(run, given))
+			.catch((): EndCoverageResult => "unavailable")
+			.finally(() => {
+				if (run.ending === ending) run.ending = null;
+			});
+		run.ending = ending;
+		return ending;
+	}
+
+	/**
+	 * Records an end in one commit: a gap of its own, `interrupted` from the
+	 * end to now, and the generation's end record, which replaces any other of
+	 * the trigger's. The end is the adapter's, bounded to when the observer
+	 * was installed and now. Only once that is durable is the observer
+	 * stopped and the trigger's coverage counted as broken from the end; if
+	 * it can't be written, nothing changes and the adapter may try again.
+	 */
+	async #recordEnd(run: Run, given: CoverageEnd): Promise<EndCoverageResult> {
+		if (!this.#current(run)) return "stopped";
+		if (run.state !== "installed" || run.installedAt === null) return "not_started";
+		const now = this.#clock.now();
+		const at = Math.min(Math.max(given.at, run.installedAt), now);
+		const { triggerId, sourceId, generation, configHash } = run.desired;
+		const record: EndRecord = { triggerId, sourceId, generation, configHash, at, code: given.code, recordedAt: now };
+		const loss: Loss = { target: this.#target(run), reasons: { interrupted: 1 }, from: at, to: now, apart: true };
+		if (!(await this.#commitLosses([loss], [], { ends: [record], unend: this.#evictEnd(triggerId) }))) {
+			this.#log({ code: "end_unrecorded", triggerId, generation });
+			return "unavailable";
+		}
+		this.#log({ code: "observer_ended", triggerId, generation });
+		// Durable now. Whatever fenced the observer meanwhile, the next generation's gap starts at the end.
+		const current = this.#current(run);
+		if (current) this.#report(run, { status: "error", code: given.code });
+		this.#stop(run, "ended");
+		const slot = this.#slots.get(triggerId);
+		if (slot?.run === run) slot.coveredUntil = at;
+		return current ? "recorded" : "stopped";
+	}
+
+	/** Which end record goes to make room for another trigger's: the oldest of a trigger no longer kept, else the oldest. */
+	#evictEnd(triggerId: string): string[] {
+		const ends = this.#spool.ends();
+		if (this.#spool.end(triggerId) || ends.length < MAX_END_RECORDS) return [];
+		const oldest = (records: EndRecord[]) => records.sort((a, b) => a.recordedAt - b.recordedAt)[0];
+		const victim = oldest(ends.filter((record) => !this.#slots.has(record.triggerId))) ?? oldest(ends);
+		return victim ? [victim.triggerId] : [];
 	}
 
 	#emit(run: Run, observed: unknown): Promise<EmitResult> {
@@ -1602,6 +1804,7 @@ export class TriggersRuntime {
 				removes = unsent.map((held) => held.seq);
 			} else {
 				run.paused = true;
+				run.pausedAt ??= now;
 				try {
 					run.adapter?.pause?.();
 				} catch {}
@@ -1672,37 +1875,43 @@ export class TriggersRuntime {
 	 * not kept (its entries still stand for it), and losses not yet durable
 	 * wait for the next try.
 	 */
-	async #commitLosses(extra: readonly Loss[], removes: readonly number[], options: { epoch?: number; rewrite?: boolean } = {}): Promise<boolean> {
+	async #commitLosses(
+		extra: readonly Loss[],
+		removes: readonly number[],
+		options: { epoch?: number; rewrite?: boolean; ends?: readonly EndRecord[]; unend?: readonly string[] } = {},
+	): Promise<boolean> {
 		const epoch = options.epoch ?? this.#spool.epoch;
 		if (epoch === null) return false;
 		const removing = new Set(removes);
 		const merged = new Map<string, Loss>();
-		for (const loss of [...this.#losses.values(), ...extra]) {
+		for (const [index, loss] of [...this.#losses.values(), ...extra].entries()) {
 			// A loss of an epoch being replaced is counted in the new one; nothing is sent under the old.
 			const target = loss.target.epoch < epoch ? { ...loss.target, epoch } : loss.target;
-			const key = lossKey(target, loss.reasons);
+			const key = loss.apart ? `apart\n${index}` : lossKey(target, loss.reasons);
 			const held = merged.get(key);
 			merged.set(key, held ? { target, reasons: addCounts(held.reasons, loss.reasons), from: Math.min(held.from, loss.from), to: Math.max(held.to, loss.to) } : { ...loss, target });
 		}
 		const gaps: GapEntry[] = [];
 		const now = this.#clock.now();
 		for (const loss of merged.values()) {
-			const open = this.#spool
-				.entries()
-				.find(
-					(held): held is GapEntry =>
-						held.kind === "gap" &&
-						lossKey(held, held.reasons) === lossKey(loss.target, loss.reasons) &&
-						!this.#transmitted.has(held.seq) &&
-						!removing.has(held.seq),
-				);
+			const open = loss.apart
+				? undefined
+				: this.#spool
+						.entries()
+						.find(
+							(held): held is GapEntry =>
+								held.kind === "gap" &&
+								lossKey(held, held.reasons) === lossKey(loss.target, loss.reasons) &&
+								!this.#transmitted.has(held.seq) &&
+								!removing.has(held.seq),
+						);
 			gaps.push(
 				open
 					? { ...open, reasons: addCounts(open.reasons, loss.reasons), from: Math.min(open.from, loss.from), to: Math.max(open.to, loss.to) }
 					: { kind: "gap", seq: this.#spool.allocate(), eventId: `g_${randomUUID()}`, recordedAt: now, ...loss.target, reasons: loss.reasons, from: loss.from, to: loss.to },
 			);
 		}
-		if (gaps.length === 0 && removes.length === 0 && options.epoch === undefined && !options.rewrite) return true;
+		if (gaps.length === 0 && removes.length === 0 && options.epoch === undefined && !options.rewrite && !options.ends?.length && !options.unend?.length) return true;
 		try {
 			if (!this.#spool.fits(gaps, removes, true)) throw new SpoolError("full");
 			await this.#spool.commit(gaps, removes, options);
@@ -1824,6 +2033,7 @@ export class TriggersRuntime {
 			const run = slot.run;
 			if (!run || !run.paused || !this.#current(run)) continue;
 			run.paused = false;
+			run.pausedAt = null;
 			try {
 				run.adapter?.resume?.();
 			} catch {}

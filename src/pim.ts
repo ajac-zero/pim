@@ -193,7 +193,7 @@ import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, c
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
-import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine } from "./triggers/engine";
+import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
 import { TriggerChatDoc, type TriggerSpace } from "./triggers/host";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
@@ -2025,6 +2025,17 @@ export class Pim extends DurableAgent<Env> {
 		this.store.setMeta(ENGINE_KEY, "on");
 		await this.wakeTriggers();
 		return true;
+	}
+
+	/**
+	 * Internal: turns the space's triggers off. Nothing is handed on and no
+	 * wake is kept until they are on again; everything they recorded stays,
+	 * and runs already going go on.
+	 */
+	async disableTriggerEngine(): Promise<void> {
+		this.store.deleteMeta(ENGINE_KEY);
+		this.#triggerEngine = undefined;
+		await this.wakeTriggers();
 	}
 
 	/** The triggers' clock. */
@@ -4310,6 +4321,7 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async exportData(): Promise<string> {
 		const deleted = this.store.deletedSessions();
+		const triggers = triggerHistory(this.ctx.storage.sql);
 		const sessions = [];
 		for (const session of await this.harness.sessions.list()) {
 			if (deleted.has(session.id)) continue;
@@ -4345,7 +4357,8 @@ export class Pim extends DurableAgent<Env> {
 			notifications: this.store.notifications({ unread: false }).map((notification) => this.#publicSession(notification)),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
 			watches: this.appEvents.list(),
-			...(this.triggerEngine() ? { triggers: this.triggerEngine()!.export() } : {}),
+			// Whatever triggers recorded, read as it is, whether they are on now or not.
+			...(triggers ? { triggers } : {}),
 			...(await this.artifacts.export().then(({ artifacts, files }) => ({ artifacts: artifacts.map((artifact) => this.#publicSession(artifact)), artifactFiles: files }))),
 			othersArtifactData: this.artifacts.othersData(),
 			// Files the space still keeps; those on the person's computer are theirs already.

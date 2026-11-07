@@ -289,11 +289,15 @@ The instruction is the pinned revision's. The **evidence** is fixed when the occ
 - **The deployment allows it**: `PIM_TRIGGERS_ENGINE` is `internal`. It is not in `wrangler.jsonc`, `wrangler.preview.jsonc` or the deployment settings, so no deployment, and not the preview, sets it; only the tests do (`vitest.config.ts`).
 - **The space was opted in**, by `Pim.enableTriggerEngine()`, which records it in the space's meta. Only tests call it: no route, tool, setting or Worker code does.
 
-Anywhere else `triggerEngine()` is null, and nothing of triggers exists: no `pim_trigger` table, no wake, and the wake's callback, if one were left, does nothing but clear itself.
+Anywhere else `triggerEngine()` is null. Nothing is built, admitted or handed on, no table is made and no wake is kept, and the wake's callback, if one were left, does nothing but clear itself. In a space never opted in, nothing of triggers exists.
+
+**Turning it off keeps everything.** `Pim.disableTriggerEngine()` (internal, as enabling is) takes the space's opt-in back and clears the wake; taking the gate off the deployment does the same for every space. Either way what triggers recorded stays, runs already going go on, and the export and `remainingData` still show it all. On again, the engine is built over the same tables, as it left them: nothing is made again or lost, and a firing that came while it was off is admitted as any late firing is (within `catchUpMs`, or recorded as missed).
 
 **The wake.** Where the engine is on, the space keeps one schedule, like Pim's own (`runTriggerTick`, `TRIGGER_TICK_CALLBACK`), at the coordinator's `nextWakeAt`, at least a second on, and none when it has nothing waiting. `runTriggerTick` ticks once, then sets the wake again; changes to the wake go one after another, so ticks that run together leave one. Starting the Durable Object sets it again, in case a tick was cut short. The schedules people make, the watches' renewals and Pim's other alarms are untouched, and `schedule_task`'s list doesn't show it. Pim's engine lets at most **2** runs of a space's triggers hold compute at once (`ENGINE_MAX_RUNNING`), below the coordinator's ceiling of 4.
 
-**What a space holds.** The engine's tables (`ENGINE_TABLES`) are in `PimStore.remainingData` while they hold rows, in the export (`triggers`: each trigger, deleted ones too, with its occurrences and its runs, each with the host's record of its chat and submission), and erasing the space removes them with everything else.
+**What a space holds.** The engine's tables (`ENGINE_TABLES`) are in `PimStore.remainingData` while they hold rows, and in the export as `triggers`: every row of each of them that exists, as stored (`triggerHistory`), read without building the engine or making a table, whether triggers are on or not. Erasing the space removes them with everything else.
+
+**Tables made before.** The coordinator adds a column it needs to a `pim_trigger_runs` made by an earlier version (`unknown_answers`, at 0), once, keeping every run as it was. Nothing else is migrated: schedules and watches stay as they are.
 
 ### The host
 

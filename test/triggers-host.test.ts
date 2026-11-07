@@ -4,9 +4,10 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pim } from "../src/pim";
 import { TaskStore } from "../src/tasks";
-import type { TriggerRun } from "../src/triggers/coordinator";
-import { ENGINE_TABLES, engineAllowed, TRIGGER_TICK_CALLBACK, type TriggerEngine } from "../src/triggers/engine";
-import { TriggerChatDoc } from "../src/triggers/host";
+import { TriggerCoordinator, type TriggerRun } from "../src/triggers/coordinator";
+import { ENGINE_KEY, ENGINE_TABLES, ENGINE_VARIABLE, engineAllowed, TRIGGER_TICK_CALLBACK, type TriggerEngine, triggerHistory } from "../src/triggers/engine";
+import { PimTriggerHost, TriggerChatDoc, type TriggerSpace } from "../src/triggers/host";
+import { TriggerStore } from "../src/triggers/store";
 import { api, lastUserText, messagesOf, OWNER, pendingApproval, post, ROOT, settled, toolUse } from "./helpers";
 import { faux, triggerClock } from "./worker";
 
@@ -22,6 +23,25 @@ const inSpace = <T>(work: (pim: Pim) => T | Promise<T>) => runInDurableObject(sp
 const engineOf = (pim: Pim): TriggerEngine => pim.triggerEngine()!;
 /** The space's database, which tests read and write directly to stand for a crash at a given point. */
 const sqlOf = (pim: Pim) => (pim as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+
+/**
+ * Runs `work` in a space whose deployment doesn't set the gate, as no
+ * deployment does: the variable is taken off that space's own env, as
+ * Workers gives it, for the time `work` takes.
+ */
+async function gateOff<T>(stub: ReturnType<typeof space>, work: (pim: Pim) => Promise<T>): Promise<T> {
+	return runInDurableObject(stub, async (pim: Pim) => {
+		const own = (pim as unknown as { env: Record<string, unknown> }).env;
+		const set = own[ENGINE_VARIABLE];
+		delete own[ENGINE_VARIABLE];
+		try {
+			expect(engineAllowed(own)).toBe(false);
+			return await work(pim);
+		} finally {
+			own[ENGINE_VARIABLE] = set;
+		}
+	});
+}
 
 /** The triggers' clock, which the tests move on; everything else in the space keeps the time. */
 const clock = () => Date.now() + triggerClock.offset;
@@ -144,8 +164,63 @@ describe("time triggers in Pim", () => {
 		expect(await inSpace((pim) => engineOf(pim).store.get("once")?.lifecycle)).toBe("ended");
 		expect(await wakes()).toEqual([]);
 		expect(await inSpace((pim) => pim.remainingData())).toEqual(expect.arrayContaining(["triggers", "trigger history", "triggers' runs", "triggers' chats and submissions"]));
-		const exported = JSON.parse(await inSpace((pim) => pim.exportData()));
-		expect(exported.triggers.find((trigger: { id: string }) => trigger.id === "once")).toMatchObject({ lifecycle: "ended", runs: [{ phase: "completed", handoff: { chatId: chat } }] });
+		const { triggers } = JSON.parse(await inSpace((pim) => pim.exportData()));
+		expect(triggers.pim_triggers).toContainEqual(expect.objectContaining({ id: "once", lifecycle: "ended" }));
+		expect(triggers.pim_trigger_runs).toContainEqual(expect.objectContaining({ trigger_id: "once", phase: "completed", receipt: started.receipt }));
+		expect(triggers.pim_trigger_host_operations).toContainEqual(expect.objectContaining({ operation_id: started.operationId, chat_id: chat, receipt: started.receipt }));
+	});
+
+	it("keeps everything triggers recorded while they are off, hands nothing on, and goes on where it was when they are on again", async () => {
+		const agent = await majordomo();
+		const anchor = clock() + MINUTE;
+		await create("resumed", { ...base(agent), source: interval(anchor) });
+		moveTo(anchor + SECOND);
+		faux.setResponses([toolUse("send_to_user", { message: "First." })]);
+		await tick();
+		const first = await run("resumed");
+		await settled(await publicId(first.chatId!));
+		moveTo(clock() + 2 * MINUTE);
+		await tick();
+		expect(await run("resumed")).toMatchObject({ phase: "completed" });
+		const history = await inSpace((pim) => triggerHistory(sqlOf(pim)));
+		const tables = await triggerTables();
+		const exported = async () => JSON.parse(await inSpace((pim) => pim.exportData())).triggers;
+		expect(await exported()).toEqual(JSON.parse(JSON.stringify(history)));
+
+		// Off for the space: past its next firing, nothing is admitted or handed on, no wake is kept, and nothing is lost or made.
+		await inSpace((pim) => pim.disableTriggerEngine());
+		expect(await inSpace((pim) => pim.triggerEngine())).toBeNull();
+		expect(await wakes()).toEqual([]);
+		moveTo(anchor + HOUR + SECOND);
+		await tick();
+		expect(await inSpace((pim) => triggerHistory(sqlOf(pim)))).toEqual(history);
+		expect(await triggerTables()).toEqual(tables);
+		expect(await wakes()).toEqual([]);
+		expect(await exported()).toEqual(JSON.parse(JSON.stringify(history)));
+		expect(await inSpace((pim) => pim.remainingData())).toEqual(expect.arrayContaining(["triggers", "trigger revisions", "triggers' sources", "trigger history", "triggers' runs"]));
+
+		// Opted in, in a deployment that doesn't allow triggers: the same.
+		await gateOff(space(), async (pim) => {
+			expect(await pim.enableTriggerEngine()).toBe(false);
+			pim.store.setMeta(ENGINE_KEY, "on");
+			expect(pim.triggerEngine()).toBeNull();
+			await pim.runTriggerTick();
+			expect(triggerHistory(sqlOf(pim))).toEqual(history);
+			expect((await pim.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK)).toEqual([]);
+			expect(JSON.parse(await pim.exportData()).triggers).toEqual(JSON.parse(JSON.stringify(history)));
+		});
+
+		// On again: what it had is as it was, and the firing it passed while off, still within its hour, goes on.
+		expect(await inSpace((pim) => triggerHistory(sqlOf(pim)))).toEqual(history);
+		expect(await runs("resumed")).toEqual([expect.objectContaining({ operationId: first.operationId, receipt: first.receipt, phase: "completed" })]);
+		expect(await inSpace((pim) => engineOf(pim).store.get("resumed"))).toMatchObject({ revision: 1, lifecycle: "enabled" });
+		await inSpace((pim) => pim.wakeTriggers());
+		expect(await wakes()).toHaveLength(1);
+		faux.setResponses([toolUse("send_to_user", { message: "Second." })]);
+		await tick();
+		const [, second] = await runs("resumed");
+		expect(second).toMatchObject({ phase: "accepted", scheduledFor: anchor + HOUR });
+		await settled(await publicId(second!.chatId!));
 	});
 
 	it("keeps to two runs at once however many ticks run together, and hands the rest on as runs end", async () => {
@@ -301,7 +376,11 @@ describe("time triggers in Pim", () => {
 });
 
 describe("the triggers' host in Pim", () => {
-	beforeAll(() => inSpace((pim) => pim.enableTriggerEngine()));
+	beforeAll(async () => {
+		// Back to the time, past the dates the tests before went to: nothing of theirs is left to fire.
+		triggerClock.offset = 0;
+		await inSpace((pim) => pim.enableTriggerEngine());
+	});
 	afterEach(cleanUp);
 
 	const host = <T>(work: (engine: TriggerEngine, pim: Pim) => T | Promise<T>) => inSpace((pim) => work(engineOf(pim), pim));
@@ -468,6 +547,244 @@ describe("the triggers' host in Pim", () => {
 		expect(await state(task)).toBe("completed");
 		await settled(shown);
 		expect(await runsToday()).toBe(before + 2);
+	});
+});
+
+describe("the triggers' host, cut short", () => {
+	beforeAll(async () => {
+		// Back to the time, past the dates the tests before went to: nothing of theirs is left to fire.
+		triggerClock.offset = 0;
+		await inSpace((pim) => pim.enableTriggerEngine());
+	});
+	afterEach(cleanUp);
+
+	type StartChat = TriggerSpace["startChat"];
+	type Submit = TriggerSpace["submit"];
+
+	/**
+	 * Pim's own host and coordinator over the space's tables, built by the
+	 * test so it can build them again as after a restart, with the space's
+	 * real `startChat` and `submit` cut short where a test says, its own
+	 * clock, and deadlines that pass only when it says. The engine is off
+	 * meanwhile, so its own wake hands nothing on.
+	 */
+	async function rigged(pim: Pim) {
+		const real = engineOf(pim).space;
+		await pim.disableTriggerEngine();
+		const faults: { startChat: StartChat[]; submit: Submit[] } = { startChat: [], submit: [] };
+		const calls = { startChat: 0, submit: 0 };
+		const space: TriggerSpace = {
+			...real,
+			startChat: (...args) => {
+				calls.startChat++;
+				return (faults.startChat.shift() ?? real.startChat)(...args);
+			},
+			submit: (...args) => {
+				calls.submit++;
+				return (faults.submit.shift() ?? real.submit)(...args);
+			},
+		};
+		const time = { now: clock() };
+		const deadlines = new Set<() => void>();
+		const sleep = (_ms: number, signal: AbortSignal) =>
+			new Promise<void>((resolve) => {
+				const fire = () => {
+					deadlines.delete(fire);
+					resolve();
+				};
+				deadlines.add(fire);
+				signal.addEventListener("abort", fire);
+			});
+		const sql = sqlOf(pim);
+		const transaction = <T>(work: () => T): T => (pim as unknown as { ctx: DurableObjectState }).ctx.storage.transactionSync(work);
+		const build = () => {
+			const store = new TriggerStore(sql, { transaction, now: () => time.now });
+			const host = new PimTriggerHost(sql, space);
+			return { store, host, coordinator: new TriggerCoordinator(sql, { store, host, transaction, now: () => time.now, sleep, maxRunning: 2 }) };
+		};
+		return {
+			real,
+			faults,
+			calls,
+			time,
+			build,
+			/** Every question to the host still out passes its deadline. */
+			expire: () => {
+				for (const fire of [...deadlines]) fire();
+			},
+			conversations: () => Number(sql.exec("SELECT COUNT(*) AS n FROM pi_conversations").one().n),
+			submissions: (chat: string, key: string) => Number(sql.exec("SELECT COUNT(*) AS n FROM pi_submissions WHERE conversation_id = ? AND request_id = ?", Number(chat), JSON.stringify(key)).one().n),
+		};
+	}
+
+	const completed = (host: PimTriggerHost, run: TriggerRun) =>
+		vi.waitFor(async () => expect(await host.lookupRun({ operationId: run.operationId, receipt: run.receipt! })).toBe("completed"), { timeout: 10_000 });
+
+	it("makes one chat and one run when cut short inside the commit that makes the chat, after pi wrote it, and after pi took the input, and a host made again finds them", async () => {
+		const agent = await majordomo();
+		const before = await runsToday();
+		faux.setResponses([toolUse("send_to_user", { message: "Brief." })]);
+		await inSpace(async (pim) => {
+			const rig = await rigged(pim);
+			try {
+				const made = rig.conversations();
+				const first = rig.build();
+				const anchor = rig.time.now + MINUTE;
+				expect(first.store.create({ id: "cut", spec: { ...base(agent), source: interval(anchor, 24 * HOUR) }, lifecycle: "enabled" })).toMatchObject({ ok: true });
+				rig.time.now = anchor + SECOND;
+
+				// Cut inside the commit that makes the chat, once its id is recorded: pi writes nothing, and the id is pi's to give again.
+				rig.faults.startChat.push((agentId, title, init) =>
+					rig.real.startChat(agentId, title, async (tx, id) => {
+						await init(tx, id);
+						throw new Error("cut before pi wrote the chat");
+					}),
+				);
+				await first.coordinator.tick();
+				const [run] = first.coordinator.runs("cut");
+				const operationId = run!.operationId;
+				expect(run).toMatchObject({ phase: "preparing", chatState: "creating", chatId: null });
+				expect(first.host.operation(operationId)?.chatId).not.toBeNull();
+				expect(rig.conversations()).toBe(made);
+
+				// pi wrote the chat, and the answer was lost before it was tied to its agent.
+				rig.faults.startChat.push(async (...args) => {
+					await rig.real.startChat(...args);
+					throw new Error("answer lost after pi wrote the chat");
+				});
+				rig.time.now += 15 * MINUTE;
+				await first.coordinator.tick();
+				expect(rig.conversations()).toBe(made + 1);
+				expect(first.coordinator.run(operationId)).toMatchObject({ phase: "preparing", chatState: "creating", chatId: null });
+
+				// pi took the input, and the answer was lost before the host recorded its receipt.
+				rig.faults.submit.push(async (...args) => {
+					await rig.real.submit(...args);
+					throw new Error("answer lost after pi took the input");
+				});
+				rig.time.now += 15 * MINUTE;
+				await first.coordinator.tick();
+				const submitting = first.coordinator.run(operationId)!;
+				expect(submitting).toMatchObject({ phase: "submitting", chatState: "pinned", receipt: null, lastError: "answer lost after pi took the input" });
+				expect(first.host.operation(operationId)).toMatchObject({ chatId: submitting.chatId, chatReady: true, submissionKey: operationId, receipt: null });
+
+				// As after a restart: a host and a coordinator made again, from what is recorded, find the chat and the submission.
+				const again = rig.build();
+				rig.time.now += 15 * MINUTE;
+				await again.coordinator.tick();
+				const accepted = again.coordinator.run(operationId)!;
+				expect(accepted).toMatchObject({ chatId: submitting.chatId, receipt: expect.stringMatching(/^pim-trigger:[\w-]{43}$/) });
+				expect(["accepted", "running", "completed"]).toContain(accepted.phase);
+				expect(rig.calls).toEqual({ startChat: 2, submit: 1 });
+				expect(rig.conversations()).toBe(made + 1);
+				expect(rig.submissions(submitting.chatId!, operationId)).toBe(1);
+				expect(pim.agents.ofSession(submitting.chatId!).id).toBe(agent);
+				await completed(again.host, accepted);
+			} finally {
+				await pim.enableTriggerEngine();
+			}
+		});
+		expect(await runsToday()).toBe(before + 1);
+	});
+
+	it("waits out a chat and a submission that answer after their deadline, without making another or submitting again", async () => {
+		const agent = await majordomo();
+		const before = await runsToday();
+		faux.setResponses([toolUse("send_to_user", { message: "Late brief." })]);
+		await inSpace(async (pim) => {
+			const rig = await rigged(pim);
+			try {
+				const made = rig.conversations();
+				const { store, host, coordinator } = rig.build();
+				const gates = { chat: false, submit: false };
+				const held = { chat: false, submit: false };
+				const hold = async (step: "chat" | "submit") => {
+					held[step] = true;
+					while (!gates[step]) await new Promise((resolve) => setTimeout(resolve, 10));
+				};
+				rig.faults.startChat.push(async (...args) => {
+					await hold("chat");
+					return rig.real.startChat(...args);
+				});
+				rig.faults.submit.push(async (...args) => {
+					await hold("submit");
+					return rig.real.submit(...args);
+				});
+				/** A tick whose question held at `step` passes its deadline. */
+				const tickPast = async (step: "chat" | "submit") => {
+					const ticking = coordinator.tick();
+					await vi.waitFor(() => expect(held[step]).toBe(true));
+					rig.expire();
+					await ticking;
+				};
+				const anchor = rig.time.now + MINUTE;
+				expect(store.create({ id: "late", spec: { ...base(agent), source: interval(anchor, 24 * HOUR) }, lifecycle: "enabled" })).toMatchObject({ ok: true });
+				rig.time.now = anchor + SECOND;
+
+				await tickPast("chat");
+				const operationId = coordinator.runs("late")[0]!.operationId;
+				expect(coordinator.run(operationId)).toMatchObject({ phase: "preparing", chatState: "creating", lastError: expect.stringContaining("no answer within") });
+				// Asked again while it is still being made: not known, so no other is made.
+				rig.time.now += 15 * MINUTE;
+				await coordinator.tick();
+				expect(coordinator.run(operationId)).toMatchObject({ chatState: "creating", lastError: "whether its chat was made isn't known yet" });
+				expect(rig.calls.startChat).toBe(1);
+				gates.chat = true;
+				await vi.waitFor(() => expect(host.operation(operationId)?.chatReady).toBe(true));
+
+				rig.time.now += 15 * MINUTE;
+				await tickPast("submit");
+				expect(coordinator.run(operationId)).toMatchObject({ phase: "submitting", chatState: "pinned", receipt: null });
+				// Asked about while it is still being submitted: not known, so it isn't submitted again.
+				rig.time.now += 15 * MINUTE;
+				await coordinator.tick();
+				expect(coordinator.run(operationId)).toMatchObject({ phase: "submitting", unknownAnswers: 1 });
+				expect(rig.calls.submit).toBe(1);
+				gates.submit = true;
+				await vi.waitFor(async () => expect((await host.lookupSubmission({ operationId })).status).toBe("accepted"));
+
+				rig.time.now += 15 * MINUTE;
+				await coordinator.tick();
+				const accepted = coordinator.run(operationId)!;
+				expect(["accepted", "running", "completed"]).toContain(accepted.phase);
+				expect(rig.calls).toEqual({ startChat: 1, submit: 1 });
+				expect(rig.conversations()).toBe(made + 1);
+				expect(rig.submissions(accepted.chatId!, operationId)).toBe(1);
+				await completed(host, accepted);
+			} finally {
+				await pim.enableTriggerEngine();
+			}
+		});
+		expect(await runsToday()).toBe(before + 1);
+	});
+});
+
+describe("a deployment that doesn't allow triggers", () => {
+	it("doesn't set the gate in either Worker's configuration", () => {
+		const configs = import.meta.glob(["../wrangler.jsonc", "../wrangler.preview.jsonc"], { query: "?raw", import: "default", eager: true });
+		expect(Object.keys(configs).sort()).toEqual(["../wrangler.jsonc", "../wrangler.preview.jsonc"]);
+		for (const source of Object.values(configs)) expect(source).not.toContain(ENGINE_VARIABLE);
+	});
+
+	it("gives a space opted in before no table, wake or handoff, and nothing of triggers to export or hold", async () => {
+		const ownerId = `gated-${crypto.randomUUID()}`;
+		await (await getAgentByName(env.Pim, ownerId)).provision({ ownerId, username: "gated" });
+		await gateOff(env.Pim.getByName(ownerId), async (pim) => {
+			pim.store.setMeta(ENGINE_KEY, "on");
+			expect(await pim.enableTriggerEngine()).toBe(false);
+			expect(pim.triggerEngine()).toBeNull();
+			await pim.runTriggerTick();
+			await pim.wakeTriggers();
+			expect(
+				sqlOf(pim)
+					.exec("SELECT name FROM sqlite_master WHERE name LIKE 'pim_trigger%'")
+					.toArray(),
+			).toEqual([]);
+			expect((await pim.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK)).toEqual([]);
+			expect(triggerHistory(sqlOf(pim))).toBeNull();
+			expect(JSON.parse(await pim.exportData())).not.toHaveProperty("triggers");
+			expect((await pim.remainingData()).filter((kind) => kind.includes("trigger"))).toEqual([]);
+		});
 	});
 });
 

@@ -36,6 +36,11 @@ import { type Agent, agentCalled, agentLabel } from "./agents";
  * task by one working, directly or not, on a task it handed out, and a chain
  * of tasks ends `MAX_TASK_DEPTH` deep.
  *
+ * A finished task's agent may be woken again, by a schedule or a connector's
+ * event. That puts the task back to work: what it sends then is its answer
+ * to the agent that asked, which hears it as it heard the first. An agent
+ * that sends nothing when woken is not reported.
+ *
  * A review, the majordomo deciding another agent's approval request for the
  * person (see ./majordomo.ts), is a task too, which Pim gives and waits for
  * itself; no chat shows it.
@@ -294,6 +299,16 @@ export class TaskStore {
 		);
 	}
 
+	/** Puts a finished task back to work on a new input, as when an event wakes its agent: its next answer is told to its requester again. */
+	reopen(id: string, operation: string): void {
+		this.#sql.exec(
+			`UPDATE pim_tasks SET state = 'working', result = NULL, operation = ?, update_op = NULL, delivered = ${DELIVERY.none}, waits = 0, updated_at = ? WHERE id = ?`,
+			operation,
+			Date.now(),
+			id,
+		);
+	}
+
 	/** The latest input given to a task's conversation. */
 	setOperation(id: string, operation: string): void {
 		this.#sql.exec("UPDATE pim_tasks SET operation = ? WHERE id = ?", operation, id);
@@ -401,7 +416,7 @@ export const fromAgent = (name: string) => `[From ${name}]`;
 
 /** What an agent reads in a chat another agent started to hand it a task. */
 function startedBySection(from: string): string {
-	return `${from} started this chat to hand you a task: their messages here start with "${fromAgent(from)}". Do it with your tools, then send your answer with send_to_user. What you send while working on it goes back to ${from}, so make your last message complete and self-contained, with what you found or did and anything left open. The person sees this chat too, and may talk with you here themselves: answer them as in any chat.`;
+	return `${from} started this chat to hand you a task: their messages here start with "${fromAgent(from)}". Do it with your tools, then send your answer with send_to_user. What you send while working on it goes back to ${from}, so make your last message complete and self-contained, with what you found or did and anything left open. When a schedule or an event wakes you here later, what you send goes back to ${from} as well: send something only if ${from} needs to know, and otherwise end your turn without sending anything. The person sees this chat too, and may talk with you here themselves: answer them as in any chat.`;
 }
 
 /** What an agent reads before its own instructions, in a task's conversation from before tasks were chats, in place of the habits of talking to the person. */

@@ -1,8 +1,10 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { CompactionTask } from "@earendil-works/pi-durable";
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { DELIVERY_REMINDER } from "../src/transcript";
-import { api, connect, lastUserText, OWNER, post, ROOT, say, toolUse, widgetsShown } from "./helpers";
+import { api, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, toolUse, widgetsShown } from "./helpers";
 import { faux, outbox, type Pim } from "./worker";
 
 describe("scheduled tasks", () => {
@@ -172,6 +174,37 @@ describe("scheduled tasks", () => {
 		expect(results).toContain("exactly one of delay_seconds, at, or cron");
 		expect(results).toContain("is in the past");
 		expect((await api("/schedules")).body.schedules).toEqual([]);
+	});
+
+	it("hands work to the chat that carries on the chat that scheduled it, once that chat grew too long", async () => {
+		const { id } = (await post("/sessions", {})).body;
+		faux.setResponses([toolUse("schedule_task", { instruction: "Check in.", delay_seconds: 3600 }), toolUse("send_to_user", { message: "Will do." })]);
+		await say("Remind me.", id);
+		faux.setResponses([fauxAssistantMessage("The person asked for a reminder.")]);
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const pi = await instance.harness.pi();
+			const conversation = Number(instance.store.sessionOf(id));
+			const compaction = await (await pi.conversation(conversation as never, BACKGROUND_CONTEXT))!.commit(
+				(tx) => tx.createTask(CompactionTask, { reason: "threshold" }, { ownership: { kind: "conversation" }, conversationId: conversation as never, background: true }),
+				BACKGROUND_CONTEXT,
+			);
+			await pi.waitForTask(compaction, BACKGROUND_CONTEXT);
+		});
+		const carried = async () => (await api("/sessions")).body.sessions.find((chat: { continuedFrom: string | null }) => chat.continuedFrom === id)?.id;
+		await vi.waitFor(async () => expect(await carried()).toBeDefined());
+		const next = await carried();
+
+		faux.setResponses([fauxAssistantMessage("Hello again.")]);
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const due = (await instance.listSchedules()).find((schedule) => (schedule.payload as { session: string }).session === instance.store.sessionOf(id));
+			await instance.runScheduledTask(due!.payload as never, due as never);
+		});
+		await vi.waitFor(async () => expect((await messagesOf(next, "user")).some((text) => text.includes("Check in."))).toBe(true));
+		expect((await messagesOf(id, "user")).some((text) => text.includes("Check in."))).toBe(false);
+		const note = (await api("/notifications")).body.notifications.find((note: { session: string }) => note.session === next);
+		expect(note).toBeDefined();
+		await post(`/notifications/${note.id}/read`);
+		for (const schedule of (await api("/schedules")).body.schedules) await api(`/schedules/${schedule.id}`, { method: "DELETE" });
 	});
 });
 

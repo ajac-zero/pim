@@ -18,7 +18,8 @@
  */
 
 import { type Condition, type ConditionState, type Truth, evaluate, lookup, referencedPaths } from "./condition";
-import { type TriggerHealth, type TriggerLifecycle, type TriggerSpec, TRIGGER_HEALTHS, TRIGGER_LIMITS, conditionMode, parseTriggerSpec, runsOnComputer } from "./spec";
+import { type TimeSource, type TriggerHealth, type TriggerLifecycle, type TriggerSpec, TRIGGER_HEALTHS, TRIGGER_LIMITS, conditionMode, parseTriggerSpec, runsOnComputer } from "./spec";
+import { type OlderFirings, isScheduledFiring, previewFirings, selectDueFiring } from "./time";
 import { type JsonValue, TriggerValidationError, integer, json, oneOf, opaqueId, text } from "./validate";
 
 const SCHEMA = `
@@ -49,8 +50,11 @@ CREATE TABLE IF NOT EXISTS pim_trigger_sources (
 	last_observed_at INTEGER,
 	gap_pending INTEGER NOT NULL,
 	condition_state TEXT,
+	active_since INTEGER,
+	next_wake_at INTEGER,
 	updated_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS pim_trigger_sources_by_wake ON pim_trigger_sources (next_wake_at);
 CREATE TABLE IF NOT EXISTS pim_trigger_inbox (
 	source TEXT NOT NULL,
 	event_id TEXT NOT NULL,
@@ -166,6 +170,16 @@ export type SourceState = {
 	/** The next observation follows a gap, so a condition's continuity starts again. */
 	readonly gapPending: boolean;
 	readonly conditionState: ConditionState | null;
+	/**
+	 * When the current enabled generation began: the trigger was created
+	 * enabled, enabled again, or its source changed while enabled. Null while
+	 * it isn't enabled. A time source's firings count from this instant on
+	 * until it has admitted one, and it never moves on a restart: only a
+	 * deliberate enabling or a new source moves it.
+	 */
+	readonly activeSince: number | null;
+	/** For an enabled time source: when its scheduler should look at it next; null when nothing is scheduled (see `admitDueTime`). */
+	readonly nextWakeAt: number | null;
 };
 
 /** `outcome_unknown`: its leases ran out too often to tell whether it was handed on; `reconcile` settles it. */
@@ -190,7 +204,7 @@ export type Occurrence = {
 
 /** What an occurrence keeps of what caused it. Values and bodies are never kept. */
 export type Evidence =
-	| { readonly reason: "time"; readonly scheduledFor: number }
+	| { readonly reason: "time"; readonly scheduledFor: number; readonly older?: OlderFirings }
 	| { readonly reason: "event" | "condition"; readonly truth: Truth; readonly observedAt: number; readonly fields: readonly { readonly path: readonly string[]; readonly present: boolean }[] };
 
 export type OutboxStatus = "pending" | "leased" | "done" | "failed" | "superseded" | "cancelled" | "outcome_unknown";
@@ -223,7 +237,17 @@ export type AuthorizationVerdict = { readonly ok: true } | { readonly ok: false;
 
 export type Refusal = {
 	readonly ok: false;
-	readonly reason: "not_found" | "deleted" | "exists" | "revision_mismatch" | "invalid_transition" | "authorization_required" | "authorization_denied" | "immutable_field";
+	readonly reason:
+		| "not_found"
+		| "deleted"
+		| "exists"
+		| "revision_mismatch"
+		| "invalid_transition"
+		| "authorization_required"
+		| "authorization_denied"
+		| "immutable_field"
+		/** Enabling a time trigger that has no firing left from now within the supported range, such as a one-time trigger whose time has passed. */
+		| "schedule_exhausted";
 	/** Why an authorization was denied, as the host's check said. */
 	readonly detail?: string;
 	readonly current?: Trigger;
@@ -246,7 +270,9 @@ export type AdmissionRefusal = {
 		| "backpressure"
 		| "inbox_full"
 		| "not_due"
-		| "schedule_mismatch";
+		| "schedule_mismatch"
+		/** A firing from before the trigger's current enabled generation began (`activeSince`): while it was paused, or before it was enabled or its source set. */
+		| "before_enabled";
 };
 
 export type Admitted = {
@@ -261,6 +287,30 @@ export type Admitted = {
 };
 
 export type Admission = Admitted | AdmissionRefusal;
+
+/**
+ * What one look at a time trigger's schedule did (`admitDueTime`): it
+ * admitted its latest due firing, recorded it as missed, or found none due.
+ * `older` summarizes the firings before it that won't run. `nextWakeAt` is
+ * when to look again, or null when nothing is scheduled; `limit` says why
+ * when the trigger is still enabled and something stopped it, rather than
+ * pretending a later alarm will handle it:
+ *
+ * - `past_supported_range`: its next firing is after 2100-01-01, past what
+ *   time.ts takes in.
+ * - `beyond_horizon`: no firing within the 12-year search horizon.
+ * - `unsupported_clock`: the clock itself reads outside 2000 to 2100.
+ */
+export type TimeTick =
+	| AdmissionRefusal
+	| {
+			readonly status: "admitted" | "missed" | "idle";
+			readonly occurrence: Occurrence | null;
+			readonly superseded: readonly string[];
+			readonly older: OlderFirings | null;
+			readonly nextWakeAt: number | null;
+			readonly limit: "past_supported_range" | "beyond_horizon" | "unsupported_clock" | null;
+	  };
 
 export type TriggerStoreOptions = {
 	/** Runs `work` as one transaction of the database: all its writes, or none when it throws (a Durable Object's `transactionSync`). */
@@ -334,13 +384,21 @@ export class TriggerStore {
 			if (existing) return { ok: false, reason: existing.lifecycle === "deleted" ? "deleted" : "exists" };
 			const now = this.#options.now();
 			this.#checkWatch(spec, now);
+			this.#checkSchedule(spec, now);
 			if (lifecycle === "enabled") {
 				const denied = this.#authorization(id, spec, now);
 				if (denied) return denied;
 			}
 			this.#sql.exec("INSERT INTO pim_triggers (id, revision, lifecycle, health, health_detail, generation, created_at, updated_at) VALUES (?, 1, ?, 'unknown', NULL, 1, ?, ?)", id, lifecycle, now, now);
 			this.#sql.exec("INSERT INTO pim_trigger_revisions (trigger_id, revision, spec, created_at) VALUES (?, 1, ?, ?)", id, JSON.stringify(spec), now);
-			this.#sql.exec("INSERT INTO pim_trigger_sources (trigger_id, source_revision, gap_pending, updated_at) VALUES (?, 1, 0, ?)", id, now);
+			const enabled = lifecycle === "enabled";
+			this.#sql.exec(
+				"INSERT INTO pim_trigger_sources (trigger_id, source_revision, gap_pending, active_since, next_wake_at, updated_at) VALUES (?, 1, 0, ?, ?, ?)",
+				id,
+				enabled ? now : null,
+				enabled && spec.source.kind === "time" ? now : null,
+				now,
+			);
 			return { ok: true, trigger: this.get(id)! };
 		});
 	}
@@ -368,7 +426,10 @@ export class TriggerStore {
 			const now = this.#options.now();
 			const sourceChanged = JSON.stringify(spec.source) !== JSON.stringify(before.source);
 			const conditionChanged = JSON.stringify(spec.condition) !== JSON.stringify(before.condition);
-			if (sourceChanged) this.#checkWatch(spec, now);
+			if (sourceChanged) {
+				this.#checkWatch(spec, now);
+				this.#checkSchedule(spec, now);
+			}
 			// A grant covers the source it was given for, not whatever the source becomes: a new command, path or interval needs a new one.
 			if (sourceChanged && runsOnComputer(spec.source) && spec.authorizationRef !== null && spec.authorizationRef === before.authorizationRef) {
 				return { ok: false, reason: "authorization_required", current: trigger };
@@ -407,6 +468,8 @@ export class TriggerStore {
 			if (input.to === "enabled") {
 				const denied = this.#authorization(input.id, trigger.spec, now);
 				if (denied) return { ...denied, current: trigger };
+				// Enabling counts firings from now on, so one with none left would wait for nothing.
+				if (trigger.spec.source.kind === "time" && nextFiring(trigger.spec.source, now) === null) return { ok: false, reason: "schedule_exhausted", current: trigger };
 			}
 			this.#sql.exec("UPDATE pim_triggers SET lifecycle = ?, updated_at = ? WHERE id = ?", input.to, now, input.id);
 			this.#nextGeneration(input.id, now, null);
@@ -480,6 +543,8 @@ export class TriggerStore {
 			lastObservedAt: row.last_observed_at === null ? null : Number(row.last_observed_at),
 			gapPending: Number(row.gap_pending) === 1,
 			conditionState: row.condition_state === null ? null : (JSON.parse(String(row.condition_state)) as ConditionState),
+			activeSince: row.active_since === null ? null : Number(row.active_since),
+			nextWakeAt: row.next_wake_at === null ? null : Number(row.next_wake_at),
 		};
 	}
 
@@ -590,12 +655,17 @@ export class TriggerStore {
 
 	/**
 	 * Takes in a time trigger's firing for `scheduledFor`, as its scheduler of
-	 * `generation` computed it. A firing later than the source allows is
-	 * recorded as `missed`, with nothing to hand on. A one-time trigger ends
-	 * with its firing, run or missed. A recurring trigger refuses a firing no
-	 * later than one it already took (`out_of_order`), so only its latest due
-	 * firing runs; the scheduler, not this store, works out which instants a
-	 * cron expression names in its time zone.
+	 * `generation` computed it. The firing must be one of the source's
+	 * (`isScheduledFiring` in ./time.ts: a cron expression's in its time
+	 * zone, a one-time trigger's `at`, an interval's grid), or it is refused
+	 * (`schedule_mismatch`), so no arbitrary instant can be admitted. One from
+	 * before the current enabled generation began is refused
+	 * (`before_enabled`), so a paused interval is never replayed. A firing
+	 * later than the source allows is recorded as `missed`, with nothing to
+	 * hand on. A one-time trigger ends with its firing, run or missed. A
+	 * recurring trigger refuses a firing no later than one it already took
+	 * (`out_of_order`), so only its latest due firing runs. `admitDueTime`
+	 * works out which firing that is.
 	 */
 	admitTimeFiring(input: { id: string; generation: number; scheduledFor: number }): Admission {
 		const scheduledFor = integer(input.scheduledFor, "scheduledFor", 0, Number.MAX_SAFE_INTEGER);
@@ -605,24 +675,78 @@ export class TriggerStore {
 			const { trigger, source } = guard;
 			const time = trigger.spec.source;
 			if (time.kind !== "time") return { status: "wrong_source" };
-			if (time.schedule === "once" && scheduledFor !== time.at) return { status: "schedule_mismatch" };
-			if (time.schedule === "interval" && (scheduledFor < time.anchorAt || (scheduledFor - time.anchorAt) % time.everyMs !== 0)) return { status: "schedule_mismatch" };
+			if (scheduledFor < TRIGGER_LIMITS.earliestAt || scheduledFor > TRIGGER_LIMITS.latestAt || !isScheduledFiring(time, scheduledFor)) return { status: "schedule_mismatch" };
 			const now = this.#options.now();
 			if (scheduledFor > now) return { status: "not_due" };
 			const key = `time:${scheduledFor}`;
 			if (this.#sql.exec("SELECT 1 FROM pim_trigger_occurrences WHERE trigger_id = ? AND occurrence_key = ?", input.id, key).toArray().length > 0) return { status: "duplicate" };
 			if (source.lastObservedAt !== null && scheduledFor <= source.lastObservedAt) return { status: "out_of_order" };
-			const late = now - scheduledFor > (time.schedule === "once" ? time.maxLatenessMs : time.catchUpMs);
-			const superseded = late ? [] : this.#supersede(input.id, now);
-			const occurrence = this.#occur(trigger, key, late ? "missed" : "pending", { reason: "time", scheduledFor }, scheduledFor, now);
-			this.#sql.exec("UPDATE pim_trigger_sources SET last_observed_at = ?, updated_at = ? WHERE trigger_id = ?", scheduledFor, now, input.id);
-			if (time.schedule === "once") {
-				this.#sql.exec("UPDATE pim_triggers SET lifecycle = 'ended', updated_at = ? WHERE id = ?", now, input.id);
-				this.#nextGeneration(input.id, now, null);
-			}
-			this.#prune(input.id, now);
+			if (source.activeSince !== null && scheduledFor < source.activeSince) return { status: "before_enabled" };
+			const { occurrence, superseded } = this.#admitTime(trigger, time, scheduledFor, null, now);
 			return { status: "accepted", truth: "true", stale: false, occurrence, superseded };
 		});
+	}
+
+	/**
+	 * Looks at an enabled time trigger's schedule now, for its scheduler of
+	 * `generation`, and in one transaction admits what is due and sets when
+	 * to look next (`nextWakeAt`). Firings count after the trigger's
+	 * watermark (the last firing it admitted) or, before its first, from
+	 * when its current enabled generation began (`activeSince`), never from
+	 * when this is called, so a restart neither replays nor loses a firing.
+	 * Of the firings due since, only the latest is admitted, as `due` when it
+	 * is at most its lateness late, inclusive, measured now, or as `missed`;
+	 * the older ones are summarized in its evidence, never listed. Calling
+	 * it again, before the next firing, admits nothing. A schedule that runs
+	 * past what time.ts takes in stops with a `limit` and a
+	 * `configuration_error` health, and schedules no wake.
+	 */
+	admitDueTime(input: { id: string; generation: number }): TimeTick {
+		return this.#options.transaction((): TimeTick => {
+			const guard = this.#guard(input.id, input.generation);
+			if ("status" in guard) return guard;
+			const { trigger, source } = guard;
+			const time = trigger.spec.source;
+			if (time.kind !== "time") return { status: "wrong_source" };
+			const now = this.#options.now();
+			const after = Math.max(source.lastObservedAt ?? Number.NEGATIVE_INFINITY, (source.activeSince ?? now) - 1, TRIGGER_LIMITS.earliestAt);
+			let selection: ReturnType<typeof selectDueFiring>;
+			try {
+				selection = selectDueFiring(time, { now, after });
+			} catch (error) {
+				if (!(error instanceof TriggerValidationError)) throw error;
+				return { status: "idle", occurrence: null, superseded: [], older: null, ...this.#stopSchedule(trigger, "unsupported_clock", `the clock reads outside the supported range (2000 to 2100): ${error.message}`, now) };
+			}
+			let admitted: { occurrence: Occurrence | null; superseded: string[] } | null = null;
+			if (selection.status !== "none") admitted = this.#admitTime(trigger, time, selection.scheduledFor, selection.older, now);
+			const older = selection.status === "none" ? null : selection.older;
+			const status = selection.status === "none" ? "idle" : selection.status === "due" ? "admitted" : "missed";
+			const base = { status, occurrence: admitted?.occurrence ?? null, superseded: admitted?.superseded ?? [], older } as const;
+			// A one-time trigger has ended with its firing; its generation's end cleared the wake.
+			if (this.get(input.id)!.lifecycle !== "enabled") return { ...base, nextWakeAt: null, limit: null };
+			if (selection.next === null) return { ...base, ...this.#stopSchedule(trigger, "beyond_horizon", "no further firing within the 12-year search horizon", now) };
+			if (selection.next > TRIGGER_LIMITS.latestAt) return { ...base, ...this.#stopSchedule(trigger, "past_supported_range", "the next firing is after 2100-01-01, past the supported range", now) };
+			this.#sql.exec("UPDATE pim_trigger_sources SET next_wake_at = ?, updated_at = ? WHERE trigger_id = ?", selection.next, now, input.id);
+			return { ...base, nextWakeAt: selection.next, limit: null };
+		});
+	}
+
+	/** Enabled time triggers whose wake has come, earliest first, at most `limit`: what a scheduler looks at in one bounded pass. */
+	dueTimeTriggers(input: { now: number; limit: number }): { id: string; generation: number; nextWakeAt: number }[] {
+		return this.#sql
+			.exec(
+				"SELECT s.trigger_id, s.next_wake_at, t.generation FROM pim_trigger_sources s JOIN pim_triggers t ON t.id = s.trigger_id WHERE s.next_wake_at IS NOT NULL AND s.next_wake_at <= ? AND t.lifecycle = 'enabled' ORDER BY s.next_wake_at, s.trigger_id LIMIT ?",
+				input.now,
+				input.limit,
+			)
+			.toArray()
+			.map((row) => ({ id: String(row.trigger_id), generation: Number(row.generation), nextWakeAt: Number(row.next_wake_at) }));
+	}
+
+	/** The earliest wake of any enabled time trigger, or null. */
+	nextTimeWake(): number | null {
+		const row = this.#sql.exec("SELECT MIN(s.next_wake_at) AS at FROM pim_trigger_sources s JOIN pim_triggers t ON t.id = s.trigger_id WHERE t.lifecycle = 'enabled'").one();
+		return row.at === null ? null : Number(row.at);
 	}
 
 	// Occurrences and the outbox
@@ -635,6 +759,18 @@ export class TriggerStore {
 		return this.#sql.exec("SELECT * FROM pim_trigger_outbox WHERE trigger_id = ? ORDER BY seq", id).toArray().map(outboxOf);
 	}
 
+	/** One occurrence, or undefined once its history is pruned. */
+	occurrence(id: string): Occurrence | undefined {
+		const row = this.#sql.exec("SELECT * FROM pim_trigger_occurrences WHERE id = ?", id).toArray()[0];
+		return row ? occurrenceOf(row) : undefined;
+	}
+
+	/** One outbox item, or undefined once its history is pruned. */
+	outboxItem(id: string): OutboxItem | undefined {
+		const row = this.#sql.exec("SELECT * FROM pim_trigger_outbox WHERE id = ?", id).toArray()[0];
+		return row ? outboxOf(row) : undefined;
+	}
+
 	/**
 	 * Claims the next attempt at handing on an occurrence, for `leaseMs`: the
 	 * oldest unsettled item of a trigger that is enabled or ended, when it is
@@ -643,9 +779,14 @@ export class TriggerStore {
 	 * on its occurrences in order. Each claim is a new attempt with the same
 	 * operation id. An item whose leases ran out `maxAttempts` times is not
 	 * tried again: its outcome is unknown until `reconcile` settles it.
+	 *
+	 * With `triggerId`, only that trigger's next item is claimed: how a
+	 * coordinator that keeps agent runs apart (./coordinator.ts) claims for
+	 * the triggers it chose, and never for one whose run is still going.
 	 */
-	claim(input: { leaseMs: number }): Delivery | undefined {
+	claim(input: { leaseMs: number; triggerId?: string }): Delivery | undefined {
 		const leaseMs = integer(input.leaseMs, "leaseMs", 1_000, ADMISSION_LIMITS.maxLeaseMs);
+		const only = input.triggerId === undefined ? [] : [opaqueId(input.triggerId, "triggerId")];
 		return this.#options.transaction(() => {
 			const now = this.#options.now();
 			for (;;) {
@@ -655,9 +796,11 @@ export class TriggerStore {
 						WHERE t.lifecycle IN ('enabled', 'ended')
 						AND o.seq = (SELECT MIN(h.seq) FROM pim_trigger_outbox h WHERE h.trigger_id = o.trigger_id AND h.status IN ('pending', 'leased'))
 						AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'leased' AND o.lease_until <= ?))
+						${only.length > 0 ? "AND o.trigger_id = ?" : ""}
 						ORDER BY o.available_at, o.seq LIMIT 1`,
 						now,
 						now,
+						...only,
 					)
 					.toArray()[0];
 				if (!row) return undefined;
@@ -766,6 +909,18 @@ export class TriggerStore {
 		return verdict.ok ? null : { ok: false, reason: "authorization_denied", detail: verdict.reason };
 	}
 
+	/**
+	 * A time source must fire again, from now, within the search horizon and
+	 * the supported range (to 2100-01-01): a schedule that never would, such
+	 * as a one-time trigger whose time has passed or a cron expression whose
+	 * next day is past 2100, is refused when it is saved, not left to wait.
+	 */
+	#checkSchedule(spec: TriggerSpec, now: number): void {
+		if (spec.source.kind !== "time") return;
+		const next = nextFiring(spec.source, now);
+		if (next === null) throw new TriggerValidationError("spec.source", "has no firing from now within the supported range (to 2100-01-01) and the 12-year search horizon");
+	}
+
 	/** A process is watched for a bounded time from now. */
 	#checkWatch(spec: TriggerSpec, now: number): void {
 		if (spec.source.kind !== "process") return;
@@ -781,6 +936,15 @@ export class TriggerStore {
 	 */
 	#nextGeneration(id: string, now: number, sourceRevision: number | null): void {
 		this.#sql.exec("UPDATE pim_triggers SET generation = generation + 1, health = 'unknown', health_detail = NULL, updated_at = ? WHERE id = ?", now, id);
+		// An enabled generation starts its boundary now; a time source is looked at right away, and pausing or ending clears its wake.
+		const trigger = this.get(id)!;
+		const enabled = trigger.lifecycle === "enabled";
+		this.#sql.exec(
+			"UPDATE pim_trigger_sources SET active_since = ?, next_wake_at = ? WHERE trigger_id = ?",
+			enabled ? now : null,
+			enabled && trigger.spec.source.kind === "time" ? now : null,
+			id,
+		);
 		if (sourceRevision === null) {
 			this.#sql.exec("UPDATE pim_trigger_sources SET gap_pending = 0, condition_state = NULL, updated_at = ? WHERE trigger_id = ?", now, id);
 		} else {
@@ -801,6 +965,38 @@ export class TriggerStore {
 		if (trigger.generation !== generation) return { status: "stale_generation" };
 		if (trigger.lifecycle !== "enabled") return { status: "not_enabled" };
 		return { trigger, source: this.sourceState(id)! };
+	}
+
+	/**
+	 * Admits a time firing the caller has checked: due, or missed when it is
+	 * later than the source's lateness now. A firing already admitted (a
+	 * source set again at the very instant of one) only moves the watermark.
+	 */
+	#admitTime(trigger: Trigger, time: TimeSource, scheduledFor: number, older: OlderFirings | null, now: number): { occurrence: Occurrence | null; superseded: string[] } {
+		const key = `time:${scheduledFor}`;
+		const known = this.#sql.exec("SELECT 1 FROM pim_trigger_occurrences WHERE trigger_id = ? AND occurrence_key = ?", trigger.id, key).toArray().length > 0;
+		let occurrence: Occurrence | null = null;
+		let superseded: string[] = [];
+		if (!known) {
+			const late = now - scheduledFor > (time.schedule === "once" ? time.maxLatenessMs : time.catchUpMs);
+			superseded = late ? [] : this.#supersede(trigger.id, now);
+			const evidence: Evidence = older === null ? { reason: "time", scheduledFor } : { reason: "time", scheduledFor, older };
+			occurrence = this.#occur(trigger, key, late ? "missed" : "pending", evidence, scheduledFor, now);
+		}
+		this.#sql.exec("UPDATE pim_trigger_sources SET last_observed_at = MAX(COALESCE(last_observed_at, ?), ?), updated_at = ? WHERE trigger_id = ?", scheduledFor, scheduledFor, now, trigger.id);
+		if (time.schedule === "once") {
+			this.#sql.exec("UPDATE pim_triggers SET lifecycle = 'ended', updated_at = ? WHERE id = ?", now, trigger.id);
+			this.#nextGeneration(trigger.id, now, null);
+		}
+		this.#prune(trigger.id, now);
+		return { occurrence, superseded };
+	}
+
+	/** Stops scheduling an enabled time trigger that ran into a limit, and says why in its health. */
+	#stopSchedule(trigger: Trigger, limit: "past_supported_range" | "beyond_horizon" | "unsupported_clock", detail: string, now: number): { nextWakeAt: null; limit: typeof limit } {
+		this.#sql.exec("UPDATE pim_trigger_sources SET next_wake_at = NULL, updated_at = ? WHERE trigger_id = ?", now, trigger.id);
+		this.#sql.exec("UPDATE pim_triggers SET health = 'configuration_error', health_detail = ?, updated_at = ? WHERE id = ?", detail, now, trigger.id);
+		return { nextWakeAt: null, limit };
 	}
 
 	#occur(trigger: Trigger, key: string, status: "pending" | "missed", evidence: Evidence, dueAt: number, now: number): Occurrence {
@@ -886,6 +1082,12 @@ export class TriggerStore {
 			this.#sql.exec("DELETE FROM pim_trigger_occurrences WHERE id = ?", occurrence);
 		}
 	}
+}
+
+/** A time source's first firing at or after `now`, if there is one within the search horizon and the supported range. */
+function nextFiring(source: TimeSource, now: number): number | null {
+	const first = previewFirings(source, { now: now - 1, count: 1 }).firings[0]?.at;
+	return first !== undefined && first <= TRIGGER_LIMITS.latestAt ? first : null;
 }
 
 /** A source's identity for taking in events: the trigger, and the revision its source was set in. */

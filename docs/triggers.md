@@ -1,10 +1,10 @@
 # Triggers
 
-> **Not active.** This is a review-only foundation. Nothing in Pim imports `src/triggers/`: no tool, route, prompt, UI, computer call or schedule uses it, and no space's database has its tables. Schedules (`schedule_task`) and connector watches (`watch_connector_event`) work exactly as before. Turning triggers on, and moving schedules and watches to them, are later changes.
+> **Not active.** This is a review-only foundation. Nothing in Pim imports `src/triggers/`: no tool, route, prompt, UI, alarm, computer call or schedule uses it, and no space's database has its tables. The coordinator is built only by tests, with a fake host: there is no real host behind it yet, so nothing it does reaches a chat or an agent. Schedules (`schedule_task`), connector watches (`watch_connector_event`) and Pim's own alarms work exactly as before. Turning triggers on, and moving schedules and watches to them, are later changes.
 
 A trigger is work an agent does when something happens: at a time, on a connector's event, or when something it watches on the person's computer changes. Triggers are meant to replace schedules and watches with one thing people see and manage. Each space's Durable Object stays the authority for its triggers; the person's computer runs the observations (polls, streams, process exits, files), and Pim keeps the record and decides what is an occurrence.
 
-The code is in four modules, with tests in `test/triggers.test.ts` and `test/triggers-time.test.ts`:
+The code is in five modules, with tests in `test/triggers.test.ts`, `test/triggers-time.test.ts` and `test/triggers-coordinator.test.ts`:
 
 | Module | What it is |
 | --- | --- |
@@ -12,6 +12,7 @@ The code is in four modules, with tests in `test/triggers.test.ts` and `test/tri
 | [`src/triggers/condition.ts`](../src/triggers/condition.ts) | Conditions: a restricted expression, its bounded state, and a pure evaluator |
 | [`src/triggers/store.ts`](../src/triggers/store.ts) | `TriggerStore`: the tables and the transactions that change them |
 | [`src/triggers/time.ts`](../src/triggers/time.ts) | When a time source fires: one pure computation for checking, previewing and selecting the due firing |
+| [`src/triggers/coordinator.ts`](../src/triggers/coordinator.ts) | `TriggerCoordinator`: admits due time firings and hands each to its agent through an injected host, one agent run per trigger at a time |
 
 ## What a trigger is
 
@@ -58,7 +59,7 @@ Reading a spec refuses unknown fields, unknown source kinds and operators, forms
 
 ## Defaults for when triggers are turned on
 
-These are decided now, so integration doesn't have to guess. The store enforces the lateness rules; computing due times is the scheduler's job, which isn't built yet.
+These are decided now, so integration doesn't have to guess. The store enforces the lateness rules and, with `admitDueTime`, works out which time firing is due; the coordinator (below) looks at time triggers when they are due.
 
 - **One-time** triggers run up to `maxLatenessMs` (1 h) late; later than that, the firing is recorded as `missed` and nothing runs. Either way the trigger ends.
 - **Recurring** triggers run their latest due firing if it is at most `catchUpMs` (1 h) late, and record older ones as missed. The store refuses a firing that is no later than one it already took.
@@ -66,7 +67,7 @@ These are decided now, so integration doesn't have to guess. The store enforces 
 - **Migrated schedules** keep their cron in `UTC`, unchanged.
 - **Polls** run every 5 minutes by default, at most once a minute, and each poll has 30 seconds.
 - A state goes **stale** after two intervals unless the condition sets `staleAfterMs`.
-- **Handing on**: one attempt at a time per trigger. A state, or a time trigger, holds one pending snapshot. Events queue, up to 20 by default (`maxPendingEvents`, up to 100).
+- **Handing on**: one attempt at a time per trigger, and, for time triggers, one agent run at a time (the coordinator). A state, or a time trigger, holds one pending snapshot. Events queue, up to 20 by default (`maxPendingEvents`, up to 100).
 - **Raw samples** are off, and turning them on is refused until it is built. An occurrence keeps why it fired, its truth, when, and which fields the condition read were present, never their values or an event's body.
 - **Replay**: event ids are remembered for 7 days, the shortest the store accepts.
 - **Moving schedules and watches** to triggers is deferred. Their data and behavior stay as they are.
@@ -152,9 +153,9 @@ Each event the condition is true for is an occurrence; unknown or false ones are
 
 **Each local time fires at most once.** A cron expression is read in its own time zone, fixed when it is saved; migrated schedules will keep `UTC`. A local time it names that clocks skip that day is skipped, never moved to another time: a preview lists it as skipped, apart from the firings, and no firing is made for it. A local time that happens twice fires at its first instant only. The second instant is never a firing, so a preview, or a restart, that begins between the two shows the next day's.
 
-**Selecting a due firing.** `after` is the instant after which firings count: the trigger's watermark (`lastObservedAt`, the last firing it admitted), or before its first firing, the instant before it was enabled. Of the firings after `after` and at or before `now`, only the latest is selected, so an outage of days runs once. It is `due` when `now` is at most its deadline, which is its time plus the source's `catchUpMs` (or a one-time trigger's `maxLatenessMs`), inclusive, and `missed` after that. The deadline depends only on the firing, so retrying the delivery never moves it. The older firings are not listed: `older` gives how many there were and the first and last. A firing at or before `after` is never selected again, so a restart never replays one, and a clock that reads earlier than `after` selects nothing.
+**Selecting a due firing.** `after` is the instant after which firings count: the trigger's watermark (`lastObservedAt`, the last firing it admitted), or before its first firing, the instant before its current enabled generation began (`activeSince`, below). Of the firings after `after` and at or before `now`, only the latest is selected, so an outage of days runs once. It is `due` when `now` is at most its deadline, which is its time plus the source's `catchUpMs` (or a one-time trigger's `maxLatenessMs`), inclusive, and `missed` after that. The deadline depends only on the firing, so retrying the delivery never moves it. The older firings are not listed: `older` gives how many there were and the first and last. A firing at or before `after` is never selected again, so a restart never replays one, and a clock that reads earlier than `after` selects nothing.
 
-**Bounds.** Instants given in (`now`, `after`, `at`) are whole milliseconds from 2000 to 2100, as a spec's are. A cron search walks local calendar days, skipping months the expression leaves out, and resolves only the times of days that match, so its cost is bounded by days, never minutes. It looks at most 4,400 days (just over 12 years) forward or back. That finds every expression whose days may match either field, the 29th of February included (8 years apart around 2100, which is not a leap year), and a date on one day of the week (at most 11 years apart). A rarer expression, such as `0 0 29 2 */7` (the 29th of February on a Sunday, 28 years apart), has no firing within it: its preview is empty and `exhausted`. **A schedule whose preview has no firings should be refused when it is saved.** After an outage longer than the horizon, `older` counts only the firings within it and says so (`complete: false`). Counting them doesn't go through every firing: a day on one offset is counted whole. An interval's firings, and a one-time trigger's, are worked out, not searched for.
+**Bounds.** Instants given in (`now`, `after`, `at`) are whole milliseconds from 2000 to 2100, as a spec's are. A preview or a `next` may still name a later instant (from 2097, the next 29th of February is in 2104); nothing past 2100-01-01 is ever scheduled or admitted. A schedule whose next firing is past it is refused when saved, and one that reaches it while enabled stops there (`admitDueTime`'s `limit`, below). A cron search walks local calendar days, skipping months the expression leaves out, and resolves only the times of days that match, so its cost is bounded by days, never minutes. It looks at most 4,400 days (just over 12 years) forward or back. That finds every expression whose days may match either field, the 29th of February included (8 years apart around 2100, which is not a leap year), and a date on one day of the week (at most 11 years apart). A rarer expression, such as `0 0 29 2 */7` (the 29th of February on a Sunday, 28 years apart), has no firing within it: its preview is empty and `exhausted`. **A schedule whose preview has no firings should be refused when it is saved.** After an outage longer than the horizon, `older` counts only the firings within it and says so (`complete: false`). Counting them doesn't go through every firing: a day on one offset is counted whole. An interval's firings, and a one-time trigger's, are worked out, not searched for.
 
 **Time zones** come from the runtime's `Intl` data, read as the Temporal polyfill reads them: the offset at an instant is what `Intl` shows there, and a local time is resolved by trying the offsets a day before and after it. That relies on a zone changing its offset at most once in any three days, which holds for every zone from 2000 to 2115 (the closest two changes, in America/Boa_Vista in 2000, are almost seven days apart). Offsets that aren't whole hours (Asia/Kathmandu's +05:45) and a half-hour change of daylight saving time (Australia/Lord_Howe) work as any other. The zone data is the runtime's, so a zone whose rules change takes effect when the runtime's data does.
 
@@ -168,7 +169,7 @@ Each event the condition is true for is an occurrence; unknown or false ones are
 | --- | --- |
 | `pim_triggers` | Current revision, lifecycle, health, generation. A deleted trigger keeps its row, as `deleted` |
 | `pim_trigger_revisions` | Each revision's spec. A SQLite trigger refuses any update |
-| `pim_trigger_sources` | The source's revision, checkpoint (`position`, `cursor`), last observation time, pending gap, condition state |
+| `pim_trigger_sources` | The source's revision, checkpoint (`position`, `cursor`), last observation time, pending gap, condition state, when its enabled generation began (`active_since`), and a time source's next wake (`next_wake_at`) |
 | `pim_trigger_inbox` | Each event id taken in within the replay horizon, unique by (source identity, event id), with what came of it but not its data |
 | `pim_trigger_occurrences` | Occurrences, unique by (trigger, occurrence key), with their evidence. A SQLite trigger keeps each one's revision and evidence fixed |
 | `pim_trigger_outbox` | One item per occurrence (unique), with a stable unique `operationId` |
@@ -176,8 +177,9 @@ Each event the condition is true for is an occurrence; unknown or false ones are
 
 Every method that writes does all its writes in one transaction. A refusal writes nothing, so the source may send the same thing again.
 
-- **Revisions** (`create`, `update`). `update` takes `expectedRevision` and is refused on a mismatch (compare-and-swap). The same spec again changes nothing. A new source or a new condition starts a new generation, so an observation made under the old ones is refused (`stale_generation`) rather than judged by the new condition, and the condition starts over. A new source also gets a new source identity and no checkpoint. A new label, instruction, destination or delivery is only a new revision. An ended trigger can't be edited.
-- **Lifecycle** (`setLifecycle`). Draft or paused to enabled; enabled to paused; anything but ended to ended. Every change starts a new generation, and a break (above). **Enabling must name the revision it means**, and checks a computer source's grant again; pausing and ending are always safe and may leave it out. A paused trigger keeps its undelivered occurrences until it is enabled again. An ended one still hands on what it already took in.
+- **Revisions** (`create`, `update`). `update` takes `expectedRevision` and is refused on a mismatch (compare-and-swap). The same spec again changes nothing. A time source with no firing from now on, within the search horizon and before 2100, is refused when it is saved (`TriggerValidationError` on `spec.source`), such as a one-time trigger whose time has passed; a stored revision is never checked again, and nothing about today's schedules changes. A new source or a new condition starts a new generation, so an observation made under the old ones is refused (`stale_generation`) rather than judged by the new condition, and the condition starts over. A new source also gets a new source identity and no checkpoint. A new label, instruction, destination or delivery is only a new revision. An ended trigger can't be edited.
+- **Lifecycle** (`setLifecycle`). Draft or paused to enabled; enabled to paused; anything but ended to ended. Every change starts a new generation, and a break (above). **Enabling must name the revision it means**, and checks a computer source's grant again; pausing and ending are always safe and may leave it out. Enabling a time trigger with no firing left is refused (`schedule_exhausted`). A paused trigger keeps its undelivered occurrences until it is enabled again. An ended one still hands on what it already took in.
+- **The enable boundary** (`activeSince`). Each generation that starts enabled (created enabled, enabled again, or its source changed while enabled) records its instant, in the same transaction; pausing or ending clears it. A time source's firings count from it until one is admitted, then from the watermark. It is never set from a restart's clock, so a crash neither loses the firings since it was enabled nor replays the ones from before. Enabling again starts a fresh one, so the hours a trigger was paused are never replayed. A new label or instruction keeps it.
 - **Deleting** (`remove`). The trigger stops for good: a new generation, nothing more is claimed, and its id and anything its observers send are refused. Occurrences no attempt had claimed are `cancelled`. **Deleting asks for a stop; it is not proof that anything was cancelled or undone.** An occurrence with an attempt under way may already have been handed on, and a run it started may go on, so it becomes `outcome_unknown`, not cancelled. That attempt can no longer `complete` or `fail` it; `reconcile` records it as delivered or failed once that is known, without claiming anything or bringing the trigger back. **What it did is kept:** its row (as `deleted`), its revisions, its occurrences with their evidence, and its outbox items with how each ended. Its source state and inbox, which only served taking in events, go. **`eraseAll`** is separate: it removes every trigger of the space and everything they recorded, tombstones included, for erasing the space.
 - **Admission** (`admit`, `admitTimeFiring`). An observer passes the generation it was started for. Both methods first check, in order, that the trigger exists (`not_found`), isn't deleted (`deleted`), is at that generation (`stale_generation`), is enabled (`not_enabled`), and has the right kind of source (`wrong_source`). Then, in one transaction, the store writes the inbox entry, advances the checkpoint, updates the condition state, and writes the occurrence with its outbox item when the condition fires.
   - The **source identity** is the trigger's id and the revision its source was set in (`<id>#<revision>`). An event id is taken once per identity (`duplicate`), and a new source may reuse old ids. Occurrence keys carry the identity too: `event:<identity>:<eventId>`, and `time:<scheduledFor>`.
@@ -186,8 +188,9 @@ Every method that writes does all its writes in one transaction. A refusal write
   - A state **no newer** than the last observation is refused (`out_of_order`). Events are taken in any order.
   - **Events are bounded, not merged.** Past `maxPendingEvents` undelivered occurrences, an event is refused (`backpressure`) and its source retries; no event is dropped or coalesced silently. A new snapshot of a state, or a time firing, supersedes an older undelivered one, which is marked `superseded`. An attempt already under way is left to finish.
   - A process's exit ends its trigger, and one after `expiresAt` is refused (`expired`).
-  - A one-time firing must be at `at`, and an interval firing on its grid, or it is refused (`schedule_mismatch`). A firing before its time is `not_due`.
-- **Handing on** (`claim`, `complete`, `fail`, `reconcile`). `claim` leases the next attempt: at the oldest unsettled item of an enabled or ended trigger, when no older item of that trigger is unsettled. So each trigger has **one attempt at a time**, in order. That is not one run at a time: once a submission is accepted, the run it starts may still be going when the next occurrence is handed on, and keeping runs apart is the job of the coordinator that will call the store. Each claim is a new attempt with the **same operation id**.
+  - A time firing must be one of the source's (`isScheduledFiring`: a one-time trigger's `at`, an interval's grid, or a cron expression's instant in its time zone), or it is refused (`schedule_mismatch`), so no arbitrary instant is admitted. One before `activeSince` is refused (`before_enabled`). A firing before its time is `not_due`.
+  - **`admitDueTime`** looks at an enabled time trigger now, in one transaction: it selects the due firing with `selectDueFiring` from `max(watermark, activeSince − 1)`, admits it as due or missed (lateness measured at admission, inclusive), writes the summary of older firings into the occurrence's evidence (`older`: count, first, last, complete), and sets `next_wake_at` to the next firing. Called again before that, it admits nothing. A one-time trigger ends with its firing. When the next firing is past 2100 (`past_supported_range`), none is found within the horizon (`beyond_horizon`), or the clock itself reads outside 2000 to 2100 (`unsupported_clock`), no wake is set and the health becomes `configuration_error` with the reason; the lifecycle is the person's and stays as it is. `dueTimeTriggers({ now, limit })` lists the triggers whose wake has come, earliest first, and `nextTimeWake()` the earliest wake.
+- **Handing on** (`claim`, `complete`, `fail`, `reconcile`). `claim` leases the next attempt: at the oldest unsettled item of an enabled or ended trigger, when no older item of that trigger is unsettled. With `triggerId`, it claims only that trigger's next item, which is how the coordinator claims only for triggers whose run slot is free. So each trigger has **one attempt at a time**, in order. That is not one run at a time: once a submission is accepted, the run it starts may still be going when the next occurrence is handed on, and keeping runs apart is the coordinator's job (below). Each claim is a new attempt with the **same operation id**.
   - `complete` means the submission was accepted, not that the agent's run finished or succeeded.
   - `fail` means the attempt is known not to have handed the occurrence on. It retries from `retryAt`, and fails for good after 5 attempts or with no `retryAt`.
   - `complete` and `fail` take the attempt, and do nothing once a later claim or a deletion has superseded it.
@@ -201,28 +204,88 @@ Every method that writes does all its writes in one transaction. A refusal write
 
 Inputs are bounded: event ids up to 256 characters, cursors up to 1 KB, payloads up to 16 KB and 8 levels as JSON, observation times no more than 5 minutes ahead of the clock, leases up to 1 hour, errors up to 1,000 characters.
 
+## The coordinator
+
+`new TriggerCoordinator(sql, { store, host, transaction, now, ... })` admits time firings and hands them to the owning agent. It makes one table, `pim_trigger_runs` (`COORDINATOR_TABLES`), beside the store's in the same database, and reads the store's outbox and occurrences there to choose what to hand on. Only the tests construct one, with a fake clock and a fake host. **There is no real host yet**: the adapter over `submitTo` is the next reviewed integration, and until then nothing reaches a chat, an agent or the run limit.
+
+`tick()` is one bounded pass, safe to run at any time, twice at once, or after a crash. It returns what it did and `nextWakeAt`, when the host's alarm should next fire (no alarm is registered here).
+
+1. **Admit.** Up to `batch.admissions` (16) time triggers whose wake has come, earliest first: `admitDueTime` for each.
+2. **Tidy.** Occurrences the store lost track of (`outcome_unknown`, from leases run out or a deletion while claimed) with no run here are adopted as possibly submitted, so the host is asked about them. Runs that never submitted, whose occurrence was superseded, cancelled, failed or deleted, are closed. Ended runs whose occurrence the store's history let go are pruned with it.
+3. **Reconcile.** Up to `batch.lookups` submissions whose outcome isn't known are looked up, then up to as many accepted runs are asked about.
+4. **Hand on.** Up to `batch.handoffs` (4) triggers, one occurrence each, while the space has compute free (`maxRunning`, 4). The trigger handed on to longest ago goes first, so a busy trigger can't starve the rest. A trigger whose run slot is taken, whose next occurrence isn't a time firing, or that is paused or deleted, is passed over.
+
+Every query is bounded by its batch; nothing lists all triggers and fans out.
+
+### A run
+
+Each occurrence is one **operation**, keyed by its outbox item's `operationId`, the same for every attempt. Its run record keeps, fixed from its first claim (a SQLite trigger refuses changing them): the trigger, the occurrence, its spec **revision**, the owning **agent**, `scheduledFor`, `admittedAt` (when the firing was admitted) and `deliverBy` (`admittedAt` plus `deliveryTtlMs`, 24 hours). The **chat** is pinned before anything is submitted, and a pinned chat never changes. It also keeps when it was first and last dispatched, submitted, accepted and ended, the host's receipt, deferrals and the last error.
+
+| Phase | Means | Holds the trigger's slot | Holds compute |
+| --- | --- | --- | --- |
+| `preparing` | Claimed; nothing submitted. A deferred one waits here | No (the outbox's lease does) | No |
+| `submitting` | The host was asked to submit; whether it accepted isn't known | Yes | Yes |
+| `accepted` | Accepted; how the run is doing isn't known yet | Yes | Yes |
+| `queued`, `running` | What the host said of the run | Yes | Yes |
+| `waiting_approval` | The run waits for the person's approval | Yes | **No** |
+| `completed`, `failed`, `cancelled` | What the host said the run ended as | No | No |
+| `not_submitted` | Known never handed on, and it won't be | No | No |
+
+**One agent run per trigger.** A trigger's next occurrence isn't handed on while any of its runs holds the slot. Its time firings meanwhile coalesce in the store: a newer one supersedes a pending one, so only the latest waits. A claimed, submitting or running one is never superseded. The slot is freed only when the host says the run ended, by `lookupRun` or by `runStatusChanged`; a submission's acceptance never stands for its run's end.
+
+### The host
+
+The host is injected (`TriggerAgentHost`). Each method may throw, and a throw is "not known", never success or refusal.
+
+| Method | Contract |
+| --- | --- |
+| `preflight({ triggerId, operationId, agentId, destination, sourceKind })` | Before each new handoff: the agent exists, an existing chat is still that agent's, the space is active. A refusal that isn't `retryable` ends the operation. It never substitutes another agent or chat, and it grants nothing: the run's actions still go through approvals |
+| `findChat({ operationId })` | The chat made for the operation: `found`, `absent` or `unknown` |
+| `createChat({ operationId, agentId, title })` | Makes a chat keyed by the operation: `created` or `denied` |
+| `lookupSubmission({ operationId })` | `accepted` with its receipt, `absent` (wasn't accepted; may still be submitted under the key), or `unknown` |
+| `submit({ idempotencyKey, chatId, agentId, instruction, evidence })` | At most one acceptance per key, reserving the run budget only for a new one. `accepted`, `duplicate` (accepted before; its reservation given back), `budget_blocked` (nothing reserved), `suspended`, `failed` (definitively not accepted), or `uncertain` |
+| `lookupRun({ operationId, receipt })` | `queued`, `running`, `waiting_approval`, `completed`, `failed`, `cancelled` or `unknown` |
+
+The instruction is the pinned revision's. The **evidence** is fixed when the occurrence is handed on and holds only the firing's times and the schedule: `{ kind: "time", triggerId, revision, label, scheduledFor, admittedAt, schedule, older }`. A time source observes nothing, so there is nothing else to leave out. A trigger's instruction is not an approval of anything the run does.
+
+### What happens when
+
+| Situation | What the coordinator does |
+| --- | --- |
+| Two ticks at once, or the alarm again | Admission is one transaction that moves the watermark; a claimed occurrence is leased, and this instance won't claim or ask about an operation it is waiting on. One occurrence, one submission |
+| Crash before an admission commits | Nothing was written; the next tick admits the same firing, from the same boundary |
+| Crash after it commits | The watermark moved; nothing is admitted again |
+| The chat may have been made, but the answer was lost | It recorded `creating` before asking; on the retry it asks `findChat` and pins what it finds, and makes one only when the host says there is none. `unknown` defers it. Never a second chat |
+| Crash, or a throw, after `submit` | The run was `submitting` before the host was called. It holds the slot, and nothing is submitted again until `lookupSubmission` answers: `accepted` records the receipt and delivers the occurrence; `absent` submits again under the same key; `unknown` asks again after `retryMs` |
+| A lookup missed an acceptance | The resubmission is a `duplicate`: the host gives back its reservation, and the receipt is the first one's |
+| `budget_blocked` or `suspended` | Known not submitted: deferred to `retryMs` (15 minutes) or the host's `retryAt`, with the same key and chat. `budget_blocked` health until a later acceptance. Out of attempts (5) or past `deliverBy`, it is `not_submitted`. The source's lateness never cancels it: a firing admitted in time is handed on even hours later |
+| `failed`, or a preflight refusal that isn't retryable | `not_submitted`; a deleted agent or chat sets `configuration_error` health with the reason. Never another agent or chat |
+| Paused before its submission | The occurrence goes back to pending, kept for when the trigger is enabled again, and is handed on then with its own revision |
+| Paused, edited or deleted after its submission began | What happened is recorded as it happened, with the revision it was made under. A deleted trigger's occurrence is reconciled as delivered or failed, and its run is followed; nothing new is admitted or handed on for it, and its runs and occurrences stay as its history. Deleting asks for a stop; it cancels nothing already handed on |
+| Leases run out, or deleted while claimed (`outcome_unknown`) | Adopted and looked up: delivered, failed, or still unknown and asked again later |
+| An occurrence of another source | Never claimed; it stays pending |
+| A run waiting for approval | Holds its trigger's slot, but none of the space's compute |
+| A callback for an older receipt, or a run that ended | Changes nothing |
+
 ## Turning it on later
 
 What is left, roughly in order. Each step is its own change:
 
-1. **Construct the store in `Pim`.** Pass `ctx.storage.sql`, `transactionSync`, `Date.now`, and an `authorize` that looks the reference up among the space's approvals and checks it is current and was given for exactly this source. Add the tables in `TRIGGER_TABLES` to `PimStore.remainingData`, and call `eraseAll` when the space is erased.
-2. **A deliverer and a run coordinator.** On the Durable Object's alarm, `claim` attempts. Hand each one to `submitTo(chat, message, { operationId: item.operationId }, "pim")`, starting a chat for `new_chat` destinations as `runScheduledTask` does, then `complete`, `fail`, or later `reconcile`. A `429` from the run limit maps to `budget_blocked` health. Use the spec returned with the claim, not the current one. Keeping one run per trigger at a time, and the event content a run needs without the store keeping it, are this step's to decide.
-3. **A scheduler for time sources.** On the alarm, for each enabled time trigger, call `selectDueFiring` with the clock and the source's watermark (`lastObservedAt`, or the instant before the trigger was enabled), pass a `due` or `missed` firing's `scheduledFor` to `admitTimeFiring`, which records a missed one as missed, and set the alarm to the earliest `next`. Admission stays the store's: it refuses a firing it already took and one no later than the watermark. Make `admitTimeFiring` check a cron firing with `isScheduledFiring`, as it checks one-time and interval firings now. Refuse a schedule whose `previewFirings` has no firings when it is saved, and show that preview, skipped times included, when it is made.
-4. **Connector events.** Route webhook deliveries, verified as `app-events.ts` verifies them, to `admit` with the event's id. Subscriptions stay with the connector code.
+1. **Construct the store and the coordinator in `Pim`.** Pass `ctx.storage.sql`, `transactionSync`, `Date.now`, and an `authorize` that looks the reference up among the space's approvals and checks it is current and was given for exactly this source. Add the tables in `TRIGGER_TABLES` and `COORDINATOR_TABLES` to `PimStore.remainingData`, and call both `eraseAll`s when the space is erased. Run `tick` from the Durable Object's alarm, alongside the alarms Pim keeps already, and set the alarm to its `nextWakeAt`.
+2. **A real host.** `submit` over `submitTo(chat, message, { operationId }, "pim")`, which already reserves the run once per operation and gives a duplicate's back; `lookupSubmission` over the harness's `submissionByRequest`; `createChat` and `findChat` keyed by the operation, as `#scheduledChat` keys a firing; `lookupRun` and `runStatusChanged` from the run's status, with waiting for an approval as its own status; `preflight` that refuses, rather than replaces, a deleted agent or chat (today's schedules fall back to the chat's agent; triggers must not). How a time firing reads in the chat, and the notification, are this step's. On `main` since this foundation's base, `submitTo` from `pim` into a finished task's chat rewrites the operation id to `wake:<id>`, depending on the task's state at that moment, so a retry after the task reopened would go in under another key; the real host must keep one key per operation (and look it up in the form it was submitted under) before it can claim the idempotency this contract needs.
+3. **Tools, routes and UI for time triggers**: showing `previewFirings`, skipped times included, when one is made, and the refusals when it is saved.
+4. **Connector events.** Route webhook deliveries, verified as `app-events.ts` verifies them, to `admit` with the event's id, and a written contract for what of an event a run may see before the coordinator hands event occurrences on. Subscriptions stay with the connector code.
 5. **Computer observers.** Messages over pim-computer's connection, carrying the generation they were started for. Health comes from the connection (`waiting_computer`, `reconnecting`), and `recordGap` from reconnects.
-6. **Tools, routes and UI**, with approvals filling `authorizationRef` for computer sources.
-7. **Moving schedules and watches**, behind a migration that keeps their behavior.
+6. **Moving schedules and watches**, behind a migration that keeps their behavior.
 
-Not done here: the scheduler that calls `src/triggers/time.ts` and sets alarms, `admitTimeFiring` checking that a cron firing falls on its expression, any observer, deliverer, coordinator, tool, route or UI, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers.
+Not done here: a real host, the alarm, any observer, tool, route or UI, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers. The coordinator hands on time firings only; it doesn't cancel or stop a run (deleting or pausing a trigger doesn't stop one already going), and a chat it made for an operation that was never submitted is left for the host to clean up.
 
 These are conditions for later tranches to meet before they are accepted, not work done here:
 
 - A grant is checked again before ongoing execution and admission, so a revoked grant stops a computer source that is already running, not only its next enabling.
 - Expiry moves a trigger on: a process watch past `expiresAt` ends its trigger, rather than only refusing its exit.
 - A deleted trigger's history is collected 30 days after its deletion.
-- A written contract for source context: what of an event or observation a run may see, and how it reaches the run without the store keeping it.
-- A coordinator that keeps agent runs apart, separate from the outbox, which only guarantees one attempt at a time.
-- The scheduler, the preview and the save-time check all use `src/triggers/time.ts`, so what previews a schedule is what dispatches it.
-- A firing is admitted up to and including its due time plus 1 hour, and retries don't move that deadline.
+- A written contract for source context: what of an event or observation a run may see, and how it reaches the run without the store keeping it. Until then, the coordinator hands on nothing but time firings.
+- The real host meets the contract above: an idempotent submission per operation, one reservation per operation, a chat keyed by operation, and run status from the run, never from the submission.
 - With raw samples off, nothing observed reaches a chat, a diagnostic or a dedup record.
 - Consent for a recurring script says truthfully that it runs as the person's own OS user, with that user's access.

@@ -204,6 +204,9 @@ import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, 
 /** The hook that carries a chat on in a new one when compaction would shorten it (`#continuationExtension`). */
 const CONTINUATION_EXTENSION = "pim.continuation";
 
+/** Starts the operation id of an input that wakes the agent of a finished task. */
+const WAKE = "wake:";
+
 const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
 
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
@@ -1766,6 +1769,10 @@ export class Pim extends DurableAgent<Env> {
 			}
 			run = reserved.reservation;
 		}
+		// An event waking the agent of a finished task puts the task back to work, so that its answer reaches the agent that asked.
+		const finished = from === "pim" ? this.#tasks.of(session) : undefined;
+		const waking = finished?.chat && finished.requester !== null && finished.kind !== "review" && TERMINAL_STATES.has(finished.state) ? finished : undefined;
+		if (waking) options = { ...options, operationId: `${WAKE}${options.operationId ?? crypto.randomUUID()}` };
 		let receipt: PiReceipt;
 		try {
 			// A visit goes on only as its host allows now: what it may use is asked anew before each turn.
@@ -1800,6 +1807,11 @@ export class Pim extends DurableAgent<Env> {
 			throw error;
 		}
 		if (receipt.accepted && from === "user") this.store.setMeta(awaitingKey(session), "1");
+		if (receipt.accepted && waking) {
+			this.#tasks.reopen(waking.id, receipt.operationId);
+			this.#watchTask(session, receipt.operationId);
+			this.#tasksChanged(waking.root);
+		}
 		// A retried submission (the same operation id) is not accepted again: one run, not two, and its images once.
 		if (!receipt.accepted) {
 			if (run !== undefined) this.usage.releaseRun(run);
@@ -3088,6 +3100,11 @@ export class Pim extends DurableAgent<Env> {
 		const answer = done ? said?.trim() || "(It gave no answer.)" : `It didn't finish: ${result.reason ?? "unanswered"}.`;
 		if (!this.#tasks.finish(task.id, done ? "completed" : "failed", answer)) return;
 		this.#tasksChanged(task.root);
+		// Woken by an event with nothing to say: nothing to tell the agent that asked.
+		if (done && !said?.trim() && task.operation.startsWith(WAKE)) {
+			this.#tasks.drop(task.batch);
+			return;
+		}
 		await this.#deliver(task.batch);
 	}
 
@@ -3116,7 +3133,8 @@ export class Pim extends DurableAgent<Env> {
 		}
 		const done = this.#tasks.unanswered(batch);
 		if (done.length === 0) return;
-		const operation = `task-update:${done.map((task) => task.id).join(",")}`;
+		// A task woken again and answered anew is told again, as another update.
+		const operation = `task-update:${done.map((task) => `${task.id}@${task.updatedAt}`).join(",")}`;
 		this.#tasks.giving(
 			done.map((task) => task.id),
 			operation,

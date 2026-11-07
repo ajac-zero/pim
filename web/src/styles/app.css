@@ -163,7 +163,23 @@
     will-change: transform, opacity;
   }
 
+  /* A contact's line draws itself from the agent that hands tasks to the other. */
+  @keyframes contact-line-draw {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  .contact-line {
+    stroke-dasharray: 1;
+    animation: contact-line-draw 200ms ease-out both;
+  }
+
   @media (prefers-reduced-motion: reduce) {
+    .contact-line,
     .a2ui-surface-enter {
       animation: none;
     }

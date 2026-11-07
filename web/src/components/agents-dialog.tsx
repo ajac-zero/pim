@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Dialog } from "radix-ui";
+import { useState } from "react";
 import { AgentIcon } from "~/components/agent-icon";
 import { AgentSettings, NewAgent } from "~/components/agent-settings";
+import { ContactMap } from "~/components/contact-map";
 import { useI18n } from "~/components/i18n";
-import { Plus, X } from "~/components/icons";
+import { Plus, Workflow, X } from "~/components/icons";
 import type { Agent } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -13,8 +15,9 @@ import { cn } from "~/lib/utils";
  * Your agents, as a dialog over whatever is open, so changing one never
  * leaves the chat: the list down the side, the majordomo first, and the
  * chosen agent's settings beside it. It shows the agent asked for
- * (`?dialog=agents&agent=<id>`, or `agent=new` to make one), or the open
- * chat's agent, or the majordomo.
+ * (`?dialog=agents&agent=<id>`, `agent=new` to make one, or `agent=network`
+ * for the network of who hands tasks to whom), or the open chat's agent, or
+ * the majordomo.
  */
 export function AgentsDialog({
   open,
@@ -33,17 +36,31 @@ export function AgentsDialog({
   const chatAgent = sessions?.find((session) => session.id === sessionId)?.agent
     ?.id;
   const making = asked === "new";
-  const agent = making
-    ? undefined
-    : (agents?.find((choice) => choice.id === asked) ??
-      agents?.find((choice) => choice.id === chatAgent) ??
-      agents?.find((choice) => choice.majordomo));
-  const choose = (id?: string) =>
+  const networking = asked === "network";
+  // The agent chosen in the network, which an agent's Add contacts chooses.
+  const [chosen, setChosen] = useState<string | null>(null);
+  const agent =
+    making || networking
+      ? undefined
+      : (agents?.find((choice) => choice.id === asked) ??
+        agents?.find((choice) => choice.id === chatAgent) ??
+        agents?.find((choice) => choice.majordomo));
+  const choose = (id?: string) => {
+    if (id === "network") setChosen(null);
     navigate({
       to: ".",
       search: (prev) => ({ ...prev, agent: id }),
       replace: true,
     });
+  };
+  const showNetwork = (id: string | null) => {
+    navigate({
+      to: ".",
+      search: (prev) => ({ ...prev, agent: "network" }),
+      replace: true,
+    });
+    setChosen(id);
+  };
   const majordomo = agents?.find((choice) => choice.majordomo);
   const others = agents?.filter((choice) => !choice.majordomo) ?? [];
 
@@ -78,6 +95,16 @@ export function AgentsDialog({
                 <Plus className="size-4.5" />
               </button>
             </div>
+            <button
+              type="button"
+              aria-current={networking ? "page" : undefined}
+              onClick={() => choose("network")}
+              className={cn(CHOICE_CLASS, networking && SELECTED)}
+            >
+              <Workflow className="size-8 shrink-0 rounded-[10px] bg-background p-2 text-muted-foreground" />
+              {t("network")}
+            </button>
+            <div className="mx-3 my-1 hidden h-px shrink-0 bg-border sm:block" />
             {majordomo && (
               <AgentChoice
                 agent={majordomo}
@@ -110,6 +137,14 @@ export function AgentsDialog({
           <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 scrollbar-thin sm:px-8">
             {making ? (
               <NewAgent onCreated={(created) => choose(created.id)} />
+            ) : networking ? (
+              <>
+                <h2 className="pr-8 font-semibold text-xl">{t("network")}</h2>
+                <p className="mt-1 mb-6 text-muted-foreground text-sm">
+                  {t("networkIntro")}
+                </p>
+                <ContactMap selected={chosen} onSelect={setChosen} />
+              </>
             ) : (
               agent && (
                 // Keyed so another agent's settings start afresh.
@@ -117,6 +152,7 @@ export function AgentsDialog({
                   key={agent.id}
                   agent={agent}
                   onDeleted={() => choose(undefined)}
+                  onShowNetwork={showNetwork}
                 />
               )
             )}

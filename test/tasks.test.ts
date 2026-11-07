@@ -411,6 +411,39 @@ describe("an agent's contacts", () => {
 describe("the majordomo", () => {
 	const majordomo = async () => ((await api("/agents")).body.agents as { id: string; name: string; majordomo: boolean }[]).find((agent) => agent.majordomo)!;
 
+	it("archives the chats of tasks it handed out once they are done, and no other chat", async () => {
+		await post("/agents", { name: "Camper", instructions: "Find gear." });
+		const asker = (await post<{ id: string }>("/sessions", {})).body.id;
+		const other = (await post<{ id: string }>("/sessions", {})).body.id;
+		const results: string[] = [];
+		const result = (context: Context) => results.push(toolResult(context.messages));
+		let taskId = "";
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "camper", task: "Find a tent." }] }),
+				() => toolUse("send_to_user", { message: "Asked." }),
+				(context) => {
+					taskId = lastUserText(context.messages).match(/finished task (\S+):/)![1]!;
+					return toolUse("archive_task_chats", { tasks: [taskId, "nope"] });
+				},
+				(context) => {
+					result(context);
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			],
+			Camper: [() => answer("The blue one.")],
+		});
+		await say("Find me a tent.", asker);
+		await settled();
+		const archived = async (id: string) => (await api<{ sessions: { id: string; archived: boolean }[] }>("/sessions")).body.sessions.find((chat) => chat.id === id)?.archived;
+		const [task] = await tasksOf(asker);
+		expect(results[0]).toContain(`Archived the chat of task ${taskId}.`);
+		expect(results[0]).toContain("No task nope you handed out.");
+		expect(await archived(task!.session!)).toBe(true);
+		expect(await archived(asker)).toBe(false);
+		expect(await archived(other)).toBe(false);
+	});
+
 	it("hands tasks to the person's other agents, each in a chat of its own under the chat that asked, and only it can", async () => {
 		const self = await majordomo();
 		await api(`/agents/${self.id}`, { method: "PUT", body: JSON.stringify({ name: "Alfred" }) });

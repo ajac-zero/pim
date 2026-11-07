@@ -793,6 +793,10 @@ export class Pim extends DurableAgent<Env> {
 					roleOf: (session) => this.#roleOf(session),
 					delegates: (session) => this.#delegates(session),
 					start: (requester, batch, tasks, options) => this.#startTasks(requester, batch, tasks, options),
+					archive: (conversation) => {
+						this.store.archiveSession(conversation);
+						this.broadcastMessage({ type: "sessions" });
+					},
 					tasks: this.#tasks,
 				}),
 			);

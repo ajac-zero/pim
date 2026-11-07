@@ -1,6 +1,6 @@
 # Trigger observers on the computer
 
-> **Not active.** This is a review-only tranche. Nothing but tests imports [`computer/triggers-adapters/`](../computer/triggers-adapters/): pim-computer doesn't construct the triggers runtime, no service or install script registers these adapters, and no message from a space reaches them. Only `test/triggers-adapters.node.test.ts` constructs them. **Pim has no managed launcher yet**, so in production no process handle resolves and every process watch would fail to start.
+> **Behind a gate, and not active.** Only pim-computer's triggers host ([`computer/triggers-host.ts`](../computer/triggers-host.ts)) constructs these adapters, and pim-computer loads it only when `PIM_COMPUTER_TRIGGERS` is `internal`, which nothing sets; no service or install script registers them, and nothing in Pim sends a reconcile yet ([triggers-runtime.md](triggers-runtime.md#over-pim-computers-connection)). **Pim has no managed launcher yet**, so no process handle resolves and every process watch fails to start.
 
 The triggers runtime ([triggers-runtime.md](triggers-runtime.md)) runs the computer sources a space wants through `ObserverAdapter`s. This tranche adds two concrete ones, for the two sources that need no long-lived stream: `poll` and `process`. `stream` has its own ([triggers-stream.md](triggers-stream.md)), which `observerAdapters` offers when given stream options, the same as `poll` and `process`. `file` has none: `observerAdapters` refuses it, and so a `stream` source when no stream options are given, and the runtime reports `unsupported`.
 
@@ -107,8 +107,8 @@ The runtime drops an adapter's health until the observer is installed, by design
 
 ## Not done here
 
-- Registering these adapters in pim-computer, the host's real grant check, and carrying `triggers.v1` over pim-computer's connection.
+- The space's side of `triggers.v1` (pim-computer's side, with the host's grant check, is behind a gate: [triggers-runtime.md](triggers-runtime.md#over-pim-computers-connection)).
 - A production managed launcher: the tool that starts jobs under handles, its approvals, detaching jobs from pim-computer, where the state folder lives, and retiring old records (they hold identities and exit statuses only).
-- A `file` observer, and constructing `observerAdapters` with a stream launcher in pim-computer.
+- A `file` observer.
 - Process watches on macOS and Windows.
 - Following a poll's command out of its process group.

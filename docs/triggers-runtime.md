@@ -1,6 +1,6 @@
 # The triggers runtime on the computer
 
-> **Not active.** This is a review-only foundation. Nothing imports [`computer/triggers-runtime.ts`](../computer/triggers-runtime.ts): pim-computer doesn't run it, no service or install script starts it, no route or Durable Object sends it a message, and nothing registers an observer with it. Concrete `poll` and `process` adapters exist, review-only and unregistered too ([triggers-adapters.md](triggers-adapters.md)), and a `stream` adapter ([triggers-stream.md](triggers-stream.md)) that `observerAdapters` doesn't offer; `file` has only the fakes in `test/triggers-runtime.node.test.ts`. Running any observer in pim-computer, and carrying its messages over pim-computer's connection, are later changes.
+> **Behind a gate, and not active.** pim-computer runs this runtime only when `PIM_COMPUTER_TRIGGERS` is `internal`, which nothing sets: no install script, service or deployment, and an installed computer can't, since the Pim's install and update download `pim-computer.ts` alone ([Over pim-computer's connection](#over-pim-computers-connection)). Behind the gate it carries `triggers.v1` over pim-computer's own connection, with `poll`, `stream` and `process` observers ([triggers-adapters.md](triggers-adapters.md), [triggers-stream.md](triggers-stream.md)) and the host's grant check. **Nothing in Pim speaks it yet**: no route or Durable Object sends it a frame, so even with the gate on nothing runs. What the space must do is [below](#what-the-space-must-do).
 
 Triggers (see [triggers.md](triggers.md)) keep the space's Durable Object as the authority: it stores each trigger, decides which computer sources run, and admits what they observe. This runtime is the other end, on the person's computer. It runs the computer sources (`poll`, `stream`, `process`, `file`) the space wants, and only those; fences anything a stopped or replaced observer still emits; and holds observations in a bounded spool on disk until the space has durably taken them.
 
@@ -15,7 +15,7 @@ The runtime consumes `PollSource`, `StreamSource`, `ProcessSource` and `FileSour
 
 ## Authority
 
-**One owner, from configuration.** A runtime is constructed with one `binding`, `{ space, runtimeId }`, from the computer's own configuration (later, the token pim-computer connects with). A reconcile carries a binding too, but only to be checked: one that differs is refused (`binding_mismatch`) and changes nothing. Observations carry no space at all; the space a message belongs to is the connection it came in on. Nothing an adapter emits can set an envelope field: what it observed is nested under `data`, and a `data.sourceId` or `data.spaceId` is just data.
+**One owner, from configuration.** A runtime is constructed with one `binding`, `{ space, runtimeId }`, from the computer's own configuration: in pim-computer, the token it connects with ([Binding](#over-pim-computers-connection)). A reconcile carries a binding too, but only to be checked: one that differs is refused (`binding_mismatch`) and changes nothing. Observations carry no space at all; the space a message belongs to is the connection it came in on. Nothing an adapter emits can set an envelope field: what it observed is nested under `data`, and a `data.sourceId` or `data.spaceId` is just data.
 
 **One connection at a time.** The host attaches a transport with a `connectionId` it got from its handshake with the space. Every message from the space names that connection; a message for another connection, or arriving on one that was detached, is refused or ignored.
 
@@ -182,6 +182,54 @@ One call per observer is outstanding at a time: a repeat while one is waits on t
 | Data over 16 KiB or frame over 64 KiB | Refuses it, never cuts it | `gap` (`too_large`) |
 | Transport takes nothing | Waits `blockedRetryMs` | Nothing until it does |
 
+## Over pim-computer's connection
+
+[`computer/triggers-host.ts`](../computer/triggers-host.ts) builds the runtime inside pim-computer and carries its frames over the WebSocket pim-computer's token opened (`/api/computer/connect`). pim-computer's part is `loadTriggers` and a few calls in `main`.
+
+**The gate.** `PIM_COMPUTER_TRIGGERS=internal`, exactly; any other value, or none, is off. Nothing sets it: `install` gives its service only the variables it names, the loop service drops every `PIM_` variable, and the Pim's install script and `update` download `pim-computer.ts` alone, so an installed computer has no `triggers-host.ts` to load and runs no triggers whatever its environment says (it logs that their runtime couldn't start). **Off, pim-computer behaves exactly as before**: it imports only Node's own modules as values and loads the host with `import()` only behind the gate, so it makes no file or folder, adds no process or socket listener, starts no timer, and sends and reads exactly what it did; a triggers message from the space goes to the `Link`, which ignores its type, as it does today.
+
+**The envelope.** Each frame is one text message, both ways: `{"type":"triggers","frame":`, the frame exactly as written, and `}`. Nothing is escaped, re-encoded or cut, so a message from the computer is at most `frameBytes` + 28 bytes (65,564), and a frame from the space over `inboundBytes` (1 MiB) is refused whole (`error` `too_large`). pim-computer takes every message that starts with that prefix as triggers, whatever follows, and never gives it to the `Link` or its log of commands; the runtime's strict parser reads what is between the prefix and the last character, so a malformed envelope is answered `error` `invalid`. Its `type` is one neither end acts on today: Pim's `Computer.receive` and pim-computer's `Link.receive` both drop it. The frames can't go bare: the runtime's `hello` has `type: "hello"`, which Pim would take for pim-computer's own and overwrite what it knows of the computer with.
+
+**Connections.** Each socket that opens is a new runtime connection. After pim-computer's own `hello`, the host attaches the socket under a random UUID as its `connectionId`, and the runtime sends its `hello` with it; the space names it in everything it sends on that socket. A frame that comes on a socket that has closed is dropped, and one naming another id is refused (`wrong_connection`). While the socket holds more than 1 MiB unsent, the transport takes nothing and the runtime waits `blockedRetryMs`.
+
+**Binding.** From the token, `pimc_<owner>_<secret>`: `space` is `<owner>` (`o_` and 26 characters, as `computerTokenOwner` in `src/computer.ts` reads it), and `runtimeId` is `rt_` and the first 32 hex digits of SHA-256 of `triggers.v1/runtime`, a newline, and the token's own SHA-256 in lower-case hex. The space keeps that digest of the token (`digestHex`), so it can compute the id without the token, and a new token is a new runtime, with a spool of its own. A token of another form runs no triggers.
+
+**The grant check.** `exactSourceGrant` allows a source only when its kind is `poll`, `stream` or `process`, the request's binding is this computer's, `configHash` is `sourceConfigHash` of the source as given, and `grant.scopeHash` is exactly `grantScopeHash`:
+
+```text
+scopeHash = hex(SHA-256("triggers.v1/grant\n" + JSON.stringify({ configHash, grantRef, runtimeId, sourceId, space, triggerId })))
+```
+
+six strings, keys in that sorted order, no whitespace. A grant therefore names one source's exact configuration, for one trigger, on one computer, under one approval: a changed command, `cwd`, interval, deadline or handle (another `configHash`), another trigger or source identity, another computer, or another approval's reference is refused (`health` `auth_denied`), and no adapter is made and nothing launched. The generation is left out, so pausing and enabling a trigger, which make new generations of the same source, keep its grant. A `file` source is refused whatever its grant: nothing here observes it. The runtime asks before every start and on every reconcile, so a grant changed to one that doesn't name its source stops the observer (`consent_changed`).
+
+**Where it keeps things.** In pim-computer's folder, `~/.pim-computer`: `triggers/` (made `0700`; a link or another user's folder is refused, and triggers stay off), the spool in `triggers/<runtimeId>/` ([The spool](#the-spool)), and `triggers/managed/`, the state folder process watches read. Nothing writes that one yet, so every process watch fails to start (`start_failed`).
+
+**Observers.** `observerAdapters` with `poll` (`NodeChildLauncher`), `stream` (`NodeStreamLauncher`) and `process` (`FileProcessProvider`), each within the runtime's `stopTimeoutMs`. A poll or stream whose source names no `cwd` runs in pim-computer's root (`--root`, `~/pim`), with only the environment `pollEnvironment` keeps, so the token is never in it. Its command runs as the user who runs pim-computer, as `shell` calls do; the grant is consent, not a sandbox. The host tracks every child its launchers start until it exits.
+
+**Stopping.**
+
+- **The socket closes**: the runtime is detached. Observers keep running and spooling until the space's last lease runs out (at most 120 s), as apps keep running across a dropped connection; then each is stopped, its process group with it. A new socket starts nothing until the space reconciles on it.
+- **SIGTERM or SIGINT**: `close` stops every observer and waits for their stops (each bounded: 4.1 s by default), takes retired bytes out of the journal and closes the spool, alongside the apps' stop; then pim-computer exits.
+- **Replaced by another computer** (close code 4409): the same, then it exits 1.
+- **Any exit** (`process.exit`, an uncaught error): SIGKILL, synchronously, to each tracked child's group that is still provably its own (its leader unreaped).
+
+Nothing is signalled but a group these launchers started, and only while its leader is unreaped. A SIGKILL or SIGHUP of pim-computer (it catches neither) leaves a stream's command running under its leader; containing that would need cgroups or a parent-death signal, and isn't done.
+
+**Tests.** `test/triggers-transport.node.test.ts`, in Node: the gate off for every value but `internal`, with no file, listener or timer made, pim-computer still importing only Node's modules, and a `Link` ignoring a triggers message; then on, through a fake socket, the real runtime and spool and fake launchers on a fake clock: the binding, a frame round trip for a stream and a poll, refused connections and epochs, grants allowed and refused (forged, another computer's, another trigger's, a changed source, a changed grant, a `file`), nothing launched before a grant or after a restart until the space reconciles, observers stopped when the lease runs out after the socket closes, the spool replayed with the same ids after a restart from its private folder with no command, grant or token in it, bounded frames both ways and a full socket waited out; and real children, a stream's process group ended at the lease after the connection drops and at exit, with a bystander process untouched.
+
+### What the space must do
+
+Nothing in Pim does this yet; `src/` is unchanged by the computer's side. For anything to run, the space's side of the computer connection must:
+
+1. **Route the envelope.** Take each text message from the computer that starts with `{"type":"triggers","frame":` before any other handling (in particular before `hello`), never as a call, a reply or the computer's `hello`, and read the frame between the prefix and the last `}` as a runtime frame (the tables above). Send frames the same way, each within the runtime's `inboundBytes` (1 MiB unless the host sets less), on the socket they are for.
+2. **Wait for the runtime's `hello`.** A computer speaks `triggers.v1` on a socket only once it has sent a triggers `hello` there. Check its `runtimeId` against the id computed from the stored token digest (Binding, above) and ignore the computer's triggers if it differs. Send nothing of triggers on a socket before its `hello`; an older pim-computer never sends one.
+3. **Echo the connection.** Put that `hello`'s `connectionId` in every `reconcile` and `ack` sent on that socket, and on no other.
+4. **Keep the epoch.** Keep `serverEpoch` durable per runtime id. Reuse it after a reconnect while the space's record of what it has taken is intact; otherwise move to a higher one, always above the `hello`'s `lastEpoch` (a lower one is refused `stale_epoch`). Observations are never replayed into a new epoch; their loss arrives as `epoch_replaced` gaps.
+5. **Reconcile and renew.** Send `reconcile` with `binding: { space: <owner>, runtimeId }`, a `desiredRevision` that only grows within an epoch (the same one again only renews, and must say exactly the same), `leaseMs` of at most 120,000, and every enabled computer trigger as a desired source ([Meeting the store](#meeting-the-store)). Send it again well within the lease while connected (every third of it, say): when the lease runs out the runtime stops everything. A source left out is stopped.
+6. **Grant exactly.** Give each desired source `grantRef`, the approval's id (printable ASCII but `"` and `\`, at most 256 characters), and `scopeHash` computed as above, and only for an approval that is current and was given for exactly this source on this computer; `TriggerStore`'s `authorize` should check the same (proposed change 3 below). When a grant is revoked, leave the source out, or change its grant, in the next reconcile.
+7. **Ack durably.** Ack each `observation` and `gap` only after its own write is durable, with its exact `sequence` and `eventId` ([Meeting the store](#meeting-the-store)); a retransmission carries the same ids and should be answered `duplicate`.
+8. **Read status as status.** Take `reconciled` (all its parts), `installed`, `health`, `stopped` and `error` as codes for the triggers' health, never as observations; with no socket connected, the triggers are `waiting_computer`, and `reconnecting` from a new socket until its first complete `reconciled`.
+
 ## Meeting the store
 
 When this is turned on, the space's side maps the protocol onto `TriggerStore` (`src/triggers/store.ts`) as it is, without changing it:
@@ -198,9 +246,9 @@ The spool's time to live (24 hours at most) is well inside the store's replay ho
 None of these are made here; they are for whoever owns those modules to accept or refuse.
 
 1. **Export the source reader.** `src/triggers/spec.ts` reads a source in `parseSource`, which isn't exported, so the runtime checks a source's shape on its own (`readSource`) and relies on the space having checked its bounds. Exporting `parseSource`, or a `parseComputerSource`, would let both ends read one way, if the runtime may import it as a value.
-2. **One digest of a source.** The space has to compute the same `configHash` as `sourceConfigHash` here (SHA-256 of `"triggers.v1/source\n"` and the source as JSON with sorted keys), and the host's check, and the approval that fills `authorizationRef`, should key consent on it. Putting that function beside the spec would keep the two from drifting.
+2. **One digest of a source.** The space has to compute the same `configHash` as `sourceConfigHash` here (SHA-256 of `"triggers.v1/source\n"` and the source as JSON with sorted keys), and the host's check, and the approval that fills `authorizationRef`, should key consent on it. The same goes for `grantScopeHash` (`computer/triggers-host.ts`), which the approval that gives a grant must compute. Putting both beside the spec would keep the ends from drifting.
 3. **Name the generation the grant was checked for.** The store's `AuthorizationRequest` has no `configHash` or scope digest; adding them would let the approval and this runtime's check agree on exactly what was consented to.
 
 ## Not done here
 
-Registering adapters, real `stream` and `file` observers, carrying these frames over pim-computer's connection, the space's side of the protocol, starting the runtime as part of pim-computer, choosing where its spool lives, and the host's real grant check. Each is its own change, and this file is the contract they meet.
+The space's side of the protocol ([What the space must do](#what-the-space-must-do)) and of the store's grants (proposed changes above), a way to turn the gate on for real (an install option, a Pim setting), a managed launcher for process watches, `file` observers, containing a stream's command after a SIGKILL of pim-computer, and process watches beyond Linux. Each is its own change, and this file is the contract they meet.

@@ -6,11 +6,11 @@
  * protocol it speaks, `triggers.v1`, and its lifecycle are in
  * docs/triggers-runtime.md.
  *
- * Inert. Nothing imports this module: pim-computer doesn't run it, no service
- * starts it, and no message reaches it. It has no observers of its own
- * either. Running a poll, a stream, a process watch or a file watch is an
- * adapter's job (`ObserverAdapter`), and the only adapters so far are the
- * tests' fakes.
+ * Behind a gate. Only pim-computer's triggers host (./triggers-host.ts)
+ * runs it, which pim-computer loads only when `PIM_COMPUTER_TRIGGERS` is
+ * `internal`, which nothing sets; no service starts it. It has no observers
+ * of its own: running a poll, a stream or a process watch is an adapter's
+ * job (`ObserverAdapter`, ./triggers-adapters/).
  *
  * The space stays the authority. Which sources run, under which generation
  * and grant, comes only from the space's `reconcile`; nothing on disk starts

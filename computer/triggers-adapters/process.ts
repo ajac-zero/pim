@@ -3,10 +3,11 @@
  * named by the handle it was launched under, from the durable receipt its
  * supervisor wrote. Its contract is in docs/triggers-adapters.md.
  *
- * Inert. Nothing imports this module into pim-computer or its service; only
- * tests construct it. Pim has no managed launcher yet: nothing in
- * pim-computer starts a process under a handle, so in production no handle
- * resolves and every watch fails to start.
+ * Behind a gate. Only the triggers host (../triggers-host.ts) uses it,
+ * which pim-computer loads only when `PIM_COMPUTER_TRIGGERS` is `internal`,
+ * which nothing sets. Pim has no managed launcher yet: nothing in
+ * pim-computer starts a process under a handle, so no handle resolves and
+ * every watch fails to start.
  *
  * It observes and nothing more. It never starts a process, never signals
  * one, and never looks a process up by name or by process id alone: a

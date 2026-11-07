@@ -3,9 +3,10 @@
  * it keeps running, and emits each line it prints, one bounded JSON object,
  * as an event. Its contract is in docs/triggers-stream.md.
  *
- * Inert. Nothing imports this module into pim-computer or its service, and
- * `observerAdapters` (./index.ts) doesn't offer it, so the runtime still
- * reports a stream source as `unsupported`; only tests construct it.
+ * Behind a gate. `observerAdapters` (./index.ts) offers it when given stream
+ * options, and only the triggers host (../triggers-host.ts) gives them,
+ * which pim-computer loads only when `PIM_COMPUTER_TRIGGERS` is `internal`,
+ * which nothing sets.
  *
  * The command runs as the user who runs pim-computer, with that user's
  * access. The runtime's host checks the grant before this adapter is ever

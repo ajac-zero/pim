@@ -95,16 +95,36 @@ Every expression is `true`, `false` or `unknown`.
 
 ### Edge conditions (polls and processes)
 
-A state becomes an occurrence when the condition goes from false to true:
+A state becomes an occurrence when the condition is true right after a known false, with nothing unknown between them. The condition's state says where it stands:
 
-- **The baseline is silent.** The first known result fires nothing, even when it is true. A price already below $500 when the trigger starts is not news. Unknown results before it set no baseline.
-- A false result **arms** the condition. A true result while armed **fires** and disarms.
-- **Unknown never rearms**, and never disarms. True, unknown, true is one stretch of truth. False, unknown, true fires.
-- A true `changed`, outside any `not`, fires even when the condition is disarmed, because each change seen between two observations is its own occurrence.
-- `stable_for` counts from the first observation seen true, so it can't say the condition was true longer than seen. False or unknown starts the count again.
-- `hysteresis` starts unknown inside its band and keeps its latch while the value is in the band or isn't a number. A rising band needs `exit` below `enter`; a falling band needs it above.
+| Edge state | Means | A true result |
+| --- | --- | --- |
+| `unknown` | No known result since it started, or since continuity last broke | Is silent, and the state becomes `waiting_for_false` |
+| `armed` | The last result was a known false, with no break since | Fires |
+| `waiting_for_false` | The last result was true, with no break since | Is silent, unless a `changed` fired it (below) |
 
-**Freshness and gaps are explicit.** An observation older than `staleAfterMs` when it is taken in is not evidence: its result is unknown, nothing it says is remembered, and it counts as a gap. A **gap** comes from an observation flagged `gap`, from `recordGap` (such as while the computer was away), or from a stale observation. It resets what the stateful operators remember, so `stable_for` continuity, the value `changed` compares with, and a hysteresis latch all start again. The armed state stays.
+A false result always sets `armed`, and a true result always sets `waiting_for_false`.
+
+- **Initial false arms. Initial true waits silently for a known false.** A price already below $500 when the trigger starts is not news.
+- **A break in continuity starts the condition over.** A break is an `unknown` result, a gap, or a stale observation. The edge goes back to `unknown`, so false, unknown, true is silent, and so is true, unknown, true. After a break, the condition must be seen false before a true fires.
+- **Durations restart after a break.** Every stateful operator forgets what it remembered: `stable_for` counts again, `changed` takes its next value as a new baseline, and `hysteresis` starts its band again. The same happens when the operator's own input is unknown (a missing value for `changed` or `hysteresis`, an unknown operand for `stable_for`), even where the whole condition is still known.
+- **Changes are their own occurrences.** A true `changed`, outside any `not`, also fires from `waiting_for_false`, so back-to-back changes each fire. It never fires from `unknown`.
+- `stable_for` counts from the first observation seen true, so it can't say the condition was true longer than seen. False also starts the count again.
+- `hysteresis` is unknown inside its band until the value has entered or left it. A rising band needs `exit` below `enter`; a falling band needs it above.
+
+| Results | Fires |
+| --- | --- |
+| true, true | Nothing |
+| false, true | The true |
+| true, unknown, true | Nothing |
+| false, unknown, true | Nothing |
+| unknown, false, true | The true |
+| false, gap: true, true | Nothing |
+| false, gap: false, true | The last true |
+
+**Freshness and gaps are explicit.** An observation older than `staleAfterMs` when it is taken in is not evidence. It isn't evaluated, its result is unknown, and it breaks continuity. A **gap** is a break too. It comes from an observation flagged `gap`, from `recordGap` (such as while the computer was away), or from a stale observation.
+
+**Only observations change the condition's state.** A run the person starts by hand isn't built yet. When it is, it must make an occurrence without evaluating the condition or touching its state: it neither arms the condition, nor disarms it, nor restarts a duration.
 
 ### Filter conditions (events)
 

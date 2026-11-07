@@ -12,6 +12,7 @@
  * one `true` makes `any` true, whatever the unknowns.
  */
 
+import { createHash } from "node:crypto";
 import { type JsonValue, TriggerValidationError, finite, integer, oneOf, record, text } from "./validate";
 
 export type Scalar = number | string | boolean;
@@ -39,10 +40,10 @@ const STATEFUL = new Set<Expr["op"]>(["changed", "stable_for", "hysteresis"]);
 
 /**
  * How a condition turns observations into occurrences. `edge`, for sources
- * that report a state (polls, processes): an occurrence when the condition
- * goes from false to true. `filter`, for sources that report events
- * (connector events, streams, files): an occurrence for each event the
- * condition is true for.
+ * that report a state (polls): an occurrence when the condition goes from
+ * false to true. `filter`, for sources that report events (connector
+ * events, streams, files, a process's exit): an occurrence for each event
+ * the condition is true for.
  */
 export type ConditionMode = "edge" | "filter";
 
@@ -62,7 +63,7 @@ export const CONDITION_LIMITS = {
 	maxPathSegments: 8,
 	maxSegmentLength: 64,
 	maxStringLength: 256,
-	/** The longest text `changed` keeps to compare with; a longer value is `unknown`. */
+	/** The longest text `changed` compares; a longer value is `unknown`. */
 	maxChangedLength: 1_024,
 	minDurationMs: 1_000,
 	maxDurationMs: 7 * 24 * 3_600_000,
@@ -153,9 +154,13 @@ function fieldPath(value: unknown, path: string): FieldPath {
 	});
 }
 
-/** What a stateful operator remembers between observations, in the order the operators appear (depth first). */
+/**
+ * What a stateful operator remembers between observations, in the order the
+ * operators appear (depth first). `changed` keeps a digest of the last value
+ * (see `digestOf`), never the value itself.
+ */
 export type NodeState =
-	| { readonly op: "changed"; readonly last: Scalar | null }
+	| { readonly op: "changed"; readonly digest: string | null }
 	| { readonly op: "stable_for"; readonly since: number | null }
 	| { readonly op: "hysteresis"; readonly latched: boolean | null };
 
@@ -179,7 +184,7 @@ export type ConditionState = { readonly version: 1; readonly edge: EdgeState; re
 export function initialState(condition: Condition): ConditionState {
 	const nodes: NodeState[] = [];
 	const visit = (expr: Expr): void => {
-		if (expr.op === "changed") nodes.push({ op: "changed", last: null });
+		if (expr.op === "changed") nodes.push({ op: "changed", digest: null });
 		if (expr.op === "stable_for") nodes.push({ op: "stable_for", since: null });
 		if (expr.op === "hysteresis") nodes.push({ op: "hysteresis", latched: null });
 		if (expr.op === "all" || expr.op === "any") expr.of.forEach(visit);
@@ -294,11 +299,12 @@ function evaluateExpr(expr: Expr, observation: Observation, nodes: NodeState[], 
 				const current = typeof found === "string" ? (found.length <= CONDITION_LIMITS.maxChangedLength ? found : undefined) : typeof found === "number" || typeof found === "boolean" ? found : undefined;
 				// A value it can't compare breaks continuity: the next one is a new baseline, not a change.
 				if (current === undefined) {
-					nodes[index] = { op: "changed", last: null };
+					nodes[index] = { op: "changed", digest: null };
 					return "unknown";
 				}
-				nodes[index] = { op: "changed", last: current };
-				if (state.last === null || state.last === current) return "false";
+				const digest = digestOf(current);
+				nodes[index] = { op: "changed", digest };
+				if (state.digest === null || state.digest === digest) return "false";
 				if (positive) seen.pulse = true;
 				return "true";
 			}
@@ -363,6 +369,16 @@ export function lookup(value: JsonValue, path: FieldPath): JsonValue | undefined
 		current = current[segment];
 	}
 	return current;
+}
+
+/**
+ * What `changed` remembers of a value: a SHA-256 digest of its type and
+ * value, so the condition's stored state never holds what was observed. A
+ * value with few possibilities (a status of "up" or "down") can still be
+ * guessed from its digest by trying each.
+ */
+export function digestOf(value: Scalar): string {
+	return createHash("sha256").update(JSON.stringify([typeof value, value])).digest("hex").slice(0, 32);
 }
 
 /** The paths a condition reads, each once, in the order they appear. */

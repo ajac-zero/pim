@@ -3,13 +3,15 @@ import { describe, expect, it } from "vitest";
 import type { Pim } from "../src/pim";
 import { type Condition, type ConditionState, evaluate, parseCondition } from "../src/triggers/condition";
 import { parseTriggerSpec } from "../src/triggers/spec";
-import { TriggerStore, type TriggerStoreOptions } from "../src/triggers/store";
+import { type AuthorizationRequest, type AuthorizationVerdict, TRIGGER_TABLES, TriggerStore, type TriggerStoreOptions } from "../src/triggers/store";
 import { type JsonValue, TriggerValidationError } from "../src/triggers/validate";
 
 // Triggers are not wired into Pim yet (docs/triggers.md): these tests use their store on a Durable Object's database of its own.
 
 const START = 1_800_000_000_000;
 const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
 
 type Clock = { now: number };
 
@@ -28,9 +30,14 @@ async function withStore(work: (context: Context) => void): Promise<void> {
 	await runInDurableObject(env.Pim.getByName(`triggers-${crypto.randomUUID()}`), (_pim: Pim, state) => {
 		const clock = { now: START };
 		const transaction = <T>(run: () => T): T => state.storage.transactionSync(run);
-		const make = (options: Partial<TriggerStoreOptions> = {}) => new TriggerStore(state.storage.sql, { transaction, now: () => clock.now, ...options });
+		const make = (options: Partial<TriggerStoreOptions> = {}) => new TriggerStore(state.storage.sql, { transaction, now: () => clock.now, authorize: anyApproval, ...options });
 		work({ store: make(), clock, sql: state.storage.sql, make, transaction });
 	});
+}
+
+/** A host that takes any `approval-…` reference, for tests that aren't about checking grants. */
+function anyApproval(request: AuthorizationRequest): AuthorizationVerdict {
+	return request.authorizationRef.startsWith("approval-") ? { ok: true } : { ok: false, reason: "unknown grant" };
 }
 
 const base = { version: 1, owningAgentId: "agent-1", originChatId: "chat-1", label: "Watch", instruction: "Tell me what changed.", destination: { type: "existing_chat", chatId: "chat-1" } };
@@ -74,7 +81,9 @@ describe("trigger specs", () => {
 		expect(event.source).toEqual({ kind: "connector_event", connectorId: "flights", event: "price.changed", arguments: {} });
 		expect(event.delivery).toEqual({ rawSamples: false, maxPendingEvents: 20 });
 		expect(parseTriggerSpec({ ...base, source: { kind: "stream", command: "tail -F log | jq -c .", cwd: "/var/log" } }).source).toMatchObject({ cwd: "/var/log" });
-		expect(parseTriggerSpec({ ...base, source: { kind: "process", name: "make" }, condition: { when: { op: "compare", path: ["running"], cmp: "eq", value: false } } }).source).toEqual({ kind: "process", name: "make", intervalMs: 300_000 });
+		const process = parseTriggerSpec({ ...base, source: { kind: "process", handle: "proc-7", expiresAt: START + HOUR }, condition: { when: { op: "compare", path: ["exitCode"], cmp: "ne", value: 0 } } });
+		expect(process.source).toEqual({ kind: "process", handle: "proc-7", expiresAt: START + HOUR });
+		expect(process.delivery).toEqual({ rawSamples: false, maxPendingEvents: 20 });
 		expect(parseTriggerSpec({ ...base, source: { kind: "file", path: "/home/ada/inbox", events: ["created"] }, destination: { type: "new_chat" } })).toMatchObject({
 			source: { recursive: false },
 			destination: { type: "new_chat" },
@@ -101,6 +110,7 @@ describe("trigger specs", () => {
 			[pollSpec({ condition: null }), "spec.condition"],
 			[pollSpec({ delivery: { maxPendingEvents: 5 } }), "spec.delivery.maxPendingEvents"],
 			[eventSpec({ delivery: { rawSamples: true } }), "spec.delivery.rawSamples"],
+			[pollSpec({ delivery: { rawSamples: true } }), "spec.delivery.rawSamples"],
 			[eventSpec({ delivery: { maxPendingEvents: 101 } }), "spec.delivery.maxPendingEvents"],
 			[{ ...base, source: { kind: "time", schedule: "once", at: START }, condition: { when: { op: "exists", path: ["a"] } } }, "spec.condition"],
 			[eventSpec({ condition: { when: { op: "changed", path: ["price"] } } }), "spec.condition.when.op"],
@@ -108,7 +118,12 @@ describe("trigger specs", () => {
 			[eventSpec({ source: { kind: "connector_event", connectorId: "flights", event: "x", arguments: { a: "x".repeat(5_000) } } }), "spec.source.arguments"],
 			[{ ...base, source: { kind: "file", path: "/home/ada/../root", events: ["created"] } }, "spec.source.path"],
 			[{ ...base, source: { kind: "file", path: "/home/ada", events: ["created", "created"] } }, "spec.source.events"],
-			[{ ...base, source: { kind: "process", name: "/usr/bin/make" }, condition: { when: { op: "exists", path: ["running"] } } }, "spec.source.name"],
+			// A process by name can't say which run of it finished: only a handle to one instance, watched for a bounded time.
+			[{ ...base, source: { kind: "process", name: "make" } }, "spec.source"],
+			[{ ...base, source: { kind: "process", handle: "proc-7" } }, "spec.source.expiresAt"],
+			[{ ...base, source: { kind: "process", expiresAt: START } }, "spec.source.handle"],
+			[{ ...base, source: { kind: "process", handle: "proc 7", expiresAt: START } }, "spec.source.handle"],
+			[{ ...base, source: { kind: "poll", command: "./a.sh", expiresAt: START }, condition: { when: { op: "exists", path: ["a"] } } }, "spec.source"],
 			[{ ...eventSpec(), label: "x".repeat(121) }, "spec.label"],
 			[{ ...eventSpec(), instruction: "ring\u0007" }, "spec.instruction"],
 			[{ ...eventSpec(), destination: { type: "existing_chat" } }, "spec.destination.chatId"],
@@ -282,19 +297,16 @@ describe("trigger conditions", () => {
 describe("trigger store", () => {
 	it("keeps each revision as it was, and changes a trigger only at the revision it expects", async () => {
 		await withStore(({ store, clock, sql }) => {
-			const trigger = created(store, pollSpec(), "draft", "price");
-			expect(trigger).toMatchObject({ id: "price", revision: 1, lifecycle: "draft", health: "unknown", generation: 1 });
+			expect(created(store, pollSpec(), "draft", "price")).toMatchObject({ id: "price", revision: 1, lifecycle: "draft", health: "unknown", generation: 1 });
 			clock.now += 1_000;
 			expect(store.update({ id: "price", expectedRevision: 2, spec: pollSpec({ label: "Lower" }) })).toMatchObject({ ok: false, reason: "revision_mismatch" });
 			expect(count(sql, "pim_trigger_revisions")).toBe(1);
-			const second = store.update({ id: "price", expectedRevision: 1, spec: pollSpec({ label: "Lower" }) });
-			expect(second).toMatchObject({ ok: true, trigger: { revision: 2, generation: 1, spec: { label: "Lower" } } });
+			// A new label alone is a new revision, not a new generation.
+			expect(store.update({ id: "price", expectedRevision: 1, spec: pollSpec({ label: "Lower" }) })).toMatchObject({ ok: true, trigger: { revision: 2, generation: 1, spec: { label: "Lower" } } });
 			expect(store.revision("price", 1)?.label).toBe("Watch");
-			// The same spec again is no new revision.
 			expect(store.update({ id: "price", expectedRevision: 2, spec: pollSpec({ label: "Lower" }) })).toMatchObject({ ok: true, trigger: { revision: 2 } });
 			expect(store.update({ id: "price", expectedRevision: 2, spec: pollSpec({ owningAgentId: "agent-2" }) })).toMatchObject({ ok: false, reason: "immutable_field" });
 			expect(store.update({ id: "price", expectedRevision: 2, spec: pollSpec({ originChatId: "chat-2" }) })).toMatchObject({ ok: false, reason: "immutable_field" });
-			// Revisions can't be rewritten, even by hand.
 			expect(() => sql.exec("UPDATE pim_trigger_revisions SET spec = '{}' WHERE trigger_id = 'price'")).toThrow(/immutable/);
 			expect(store.revision("price", 1)?.label).toBe("Watch");
 			expect(store.update({ id: "missing", expectedRevision: 1, spec: pollSpec() })).toMatchObject({ ok: false, reason: "not_found" });
@@ -302,18 +314,49 @@ describe("trigger store", () => {
 		});
 	});
 
-	it("enables a computer source only with an authorization, and asks for a new one when its source changes", async () => {
-		await withStore(({ store }) => {
+	it("enables a computer source only when the host accepts its grant for exactly that source", async () => {
+		await withStore(({ make, clock }) => {
+			// The host's grants: each for one source, until it expires.
+			const priceSource = parseTriggerSpec(pollSpec()).source;
+			const grants: Record<string, { source: unknown; expiresAt: number }> = {
+				"grant-price": { source: priceSource, expiresAt: START + DAY },
+				"grant-expired": { source: priceSource, expiresAt: START - 1 },
+				"grant-other": { source: parseTriggerSpec(pollSpec({ source: { kind: "poll", command: "./other.sh" } })).source, expiresAt: START + DAY },
+				"grant-hourly": { source: parseTriggerSpec(pollSpec({ source: { kind: "poll", command: "./price.sh", intervalMs: HOUR } })).source, expiresAt: START + DAY },
+			};
+			const checked: string[] = [];
+			const store = make({
+				authorize: ({ spec, authorizationRef, now }) => {
+					checked.push(authorizationRef);
+					const grant = grants[authorizationRef];
+					if (!grant) return { ok: false, reason: "no such grant" };
+					if (now >= grant.expiresAt) return { ok: false, reason: "expired" };
+					if (JSON.stringify(grant.source) !== JSON.stringify(spec.source)) return { ok: false, reason: "granted for another source" };
+					return { ok: true };
+				},
+			});
 			expect(store.create({ spec: pollSpec({ authorizationRef: null }), lifecycle: "enabled" })).toMatchObject({ ok: false, reason: "authorization_required" });
-			const draft = created(store, pollSpec({ authorizationRef: null }), "draft");
-			expect(store.setLifecycle({ id: draft.id, to: "enabled", expectedRevision: 1 })).toMatchObject({ ok: false, reason: "authorization_required" });
-			const trigger = created(store, pollSpec(), "enabled");
-			const otherCommand = pollSpec({ source: { kind: "poll", command: "./other.sh" } });
-			expect(store.update({ id: trigger.id, expectedRevision: 1, spec: otherCommand })).toMatchObject({ ok: false, reason: "authorization_required" });
-			expect(store.update({ id: trigger.id, expectedRevision: 1, spec: { ...otherCommand, authorizationRef: null } })).toMatchObject({ ok: false, reason: "authorization_required" });
-			expect(store.update({ id: trigger.id, expectedRevision: 1, spec: { ...otherCommand, authorizationRef: "approval-2" } })).toMatchObject({ ok: true, trigger: { revision: 2, generation: 2 } });
-			// A connector's events are not the computer's: they need no authorization here.
+			expect(store.create({ spec: pollSpec({ authorizationRef: "grant-made-up" }), lifecycle: "enabled" })).toMatchObject({ ok: false, reason: "authorization_denied", detail: "no such grant" });
+			expect(store.create({ spec: pollSpec({ authorizationRef: "grant-expired" }), lifecycle: "enabled" })).toMatchObject({ ok: false, reason: "authorization_denied", detail: "expired" });
+			expect(store.create({ spec: pollSpec({ authorizationRef: "grant-other" }), lifecycle: "enabled" })).toMatchObject({ ok: false, reason: "authorization_denied", detail: "granted for another source" });
+			const trigger = created(store, pollSpec({ authorizationRef: "grant-price" }), "enabled");
+			// A new interval is a new source: the old grant no longer counts, and a new one must be accepted.
+			const hourly = pollSpec({ source: { kind: "poll", command: "./price.sh", intervalMs: HOUR } });
+			expect(store.update({ id: trigger.id, expectedRevision: 1, spec: { ...hourly, authorizationRef: "grant-price" } })).toMatchObject({ ok: false, reason: "authorization_required" });
+			expect(store.update({ id: trigger.id, expectedRevision: 1, spec: { ...hourly, authorizationRef: null } })).toMatchObject({ ok: false, reason: "authorization_required" });
+			expect(store.update({ id: trigger.id, expectedRevision: 1, spec: { ...hourly, authorizationRef: "grant-other" } })).toMatchObject({ ok: false, reason: "authorization_denied" });
+			expect(store.update({ id: trigger.id, expectedRevision: 1, spec: { ...hourly, authorizationRef: "grant-hourly" } })).toMatchObject({ ok: true, trigger: { revision: 2 } });
+			// Enabling again checks the grant again: one that expired meanwhile is refused.
+			store.setLifecycle({ id: trigger.id, to: "paused" });
+			clock.now = START + DAY;
+			expect(store.setLifecycle({ id: trigger.id, to: "enabled", expectedRevision: 2 })).toMatchObject({ ok: false, reason: "authorization_denied", detail: "expired" });
+			// A connector's events don't run on the computer: the host isn't asked.
+			const asked = checked.length;
 			expect(store.create({ spec: eventSpec(), lifecycle: "enabled" })).toMatchObject({ ok: true });
+			expect(checked.length).toBe(asked);
+			// With no check configured, no reference is taken on trust.
+			const unchecked = make({ authorize: undefined });
+			expect(unchecked.create({ spec: pollSpec({ authorizationRef: "approval-1" }), lifecycle: "enabled" })).toMatchObject({ ok: false, reason: "authorization_denied" });
 		});
 	});
 
@@ -321,11 +364,11 @@ describe("trigger store", () => {
 		await withStore(({ store, clock, sql, make, transaction }) => {
 			created(store, eventSpec(), "enabled", "flights");
 			const first = store.admit({ id: "flights", generation: 1, eventId: "evt-1", observedAt: START, payload: { price: 450 } });
-			expect(first).toMatchObject({ status: "accepted", truth: "true", occurrence: { key: "event:evt-1", revision: 1, status: "pending", evidence: { price: 450 } } });
+			expect(first).toMatchObject({ status: "accepted", truth: "true", occurrence: { key: "event:flights#1:evt-1", revision: 1, status: "pending", evidence: { reason: "event", truth: "true", observedAt: START, fields: [] } } });
 			expect(store.admit({ id: "flights", generation: 1, eventId: "evt-1", observedAt: START, payload: { price: 450 } })).toEqual({ status: "duplicate" });
 			expect([count(sql, "pim_trigger_inbox"), count(sql, "pim_trigger_occurrences"), count(sql, "pim_trigger_outbox")]).toEqual([1, 1, 1]);
 
-			// The outbox item's id is the second id an admission makes: failing there must undo the inbox entry, checkpoint and occurrence.
+			// The outbox item's id is the second id an admission makes: failing there must undo the occurrence before it.
 			let ids = 0;
 			const failing = make({
 				newId: () => {
@@ -335,9 +378,8 @@ describe("trigger store", () => {
 				},
 			});
 			clock.now += 1_000;
-			expect(() => failing.admit({ id: "flights", generation: 1, eventId: "evt-2", observedAt: clock.now, payload: {}, checkpoint: { position: 2, cursor: "c2" } })).toThrow("disk full");
-			expect([count(sql, "pim_trigger_inbox"), count(sql, "pim_trigger_occurrences"), count(sql, "pim_trigger_outbox")]).toEqual([1, 1, 1]);
-			expect(store.sourceState("flights")).toMatchObject({ position: null, cursor: null, lastObservedAt: START });
+			const second = { id: "flights", generation: 1, eventId: "evt-2", observedAt: clock.now, payload: {}, checkpoint: { position: 2, cursor: "c2" } };
+			expect(() => failing.admit(second)).toThrow("disk full");
 			// A crash after all of an admission's writes, before its transaction commits, keeps none of them.
 			const crashing = make({
 				transaction: (work) =>
@@ -346,13 +388,13 @@ describe("trigger store", () => {
 						throw new Error("crash before commit");
 					}),
 			});
-			expect(() => crashing.admit({ id: "flights", generation: 1, eventId: "evt-2", observedAt: clock.now, payload: {}, checkpoint: { position: 2, cursor: "c2" } })).toThrow("crash before commit");
+			expect(() => crashing.admit(second)).toThrow("crash before commit");
 			expect(() => crashing.claim({ leaseMs: MINUTE })).toThrow("crash before commit");
 			expect([count(sql, "pim_trigger_inbox"), count(sql, "pim_trigger_occurrences"), count(sql, "pim_trigger_outbox")]).toEqual([1, 1, 1]);
 			expect(store.sourceState("flights")).toMatchObject({ position: null, cursor: null, lastObservedAt: START });
 			expect(store.outbox("flights")).toMatchObject([{ status: "pending", attempts: 0 }]);
 			// So the source's retry is taken in whole.
-			expect(store.admit({ id: "flights", generation: 1, eventId: "evt-2", observedAt: clock.now, payload: {}, checkpoint: { position: 2, cursor: "c2" } })).toMatchObject({ status: "accepted" });
+			expect(store.admit(second)).toMatchObject({ status: "accepted" });
 			expect(store.sourceState("flights")).toMatchObject({ position: 2, cursor: "c2", identity: "flights#1" });
 			expect(() => store.admit({ id: "flights", generation: 1, eventId: "x".repeat(257), observedAt: START, payload: {} })).toThrow(TriggerValidationError);
 			expect(() => store.admit({ id: "flights", generation: 1, eventId: "evt-3", observedAt: clock.now + 10 * MINUTE, payload: {} })).toThrow(TriggerValidationError);
@@ -360,8 +402,35 @@ describe("trigger store", () => {
 		});
 	});
 
-	it("refuses observations from a stale generation, a paused trigger or a deleted one", async () => {
+	it("keeps no observed value or event body, only why an occurrence fired and which fields it found", async () => {
 		await withStore(({ store, clock, sql }) => {
+			const secret = "RAW_SECRET";
+			created(store, eventSpec({ condition: { when: { op: "compare", path: ["kind"], cmp: "eq", value: "invoice" } } }), "enabled", "mail");
+			expect(store.admit({ id: "mail", generation: 1, eventId: "m1", observedAt: START, payload: { kind: "invoice", body: `${secret} body`, from: `${secret}@example.test` } })).toMatchObject({
+				occurrence: { evidence: { reason: "condition", truth: "true", observedAt: START, fields: [{ path: ["kind"], present: true }] } },
+			});
+			// Filtered out, and a duplicate: neither leaves the body anywhere.
+			store.admit({ id: "mail", generation: 1, eventId: "m2", observedAt: START, payload: { kind: "note", body: secret } });
+			store.admit({ id: "mail", generation: 1, eventId: "m1", observedAt: START, payload: { kind: "invoice", body: secret } });
+			const state = pollSpec({ condition: { when: { op: "any", of: [{ op: "changed", path: ["token"] }, { op: "compare", path: ["price"], cmp: "lt", value: 500 }] } } });
+			created(store, state, "enabled", "price");
+			for (const [index, payload] of [{ token: `${secret}-1`, price: 600 }, { token: `${secret}-2`, price: 600 }, { token: `${secret}-2`, price: 400, note: secret }].entries()) {
+				clock.now = START + (index + 1) * MINUTE;
+				store.admit({ id: "price", generation: 1, eventId: `p${index}`, observedAt: clock.now, payload });
+			}
+			expect(store.occurrences("price")).toHaveLength(1);
+			const delivery = store.claim({ leaseMs: MINUTE })!;
+			store.fail({ outboxId: delivery.item.id, attempt: delivery.attempt, retryAt: clock.now, error: "busy" });
+			// What `changed` remembers is a digest of the last value, not the value.
+			expect(store.sourceState("price")?.conditionState?.nodes).toEqual([{ op: "changed", digest: expect.stringMatching(/^[0-9a-f]{32}$/) }]);
+			const everything = TRIGGER_TABLES.map((table) => JSON.stringify(sql.exec(`SELECT * FROM ${table}`).toArray())).join("\n");
+			expect(everything).toContain("invoice");
+			expect(everything).not.toContain(secret);
+		});
+	});
+
+	it("refuses observations from a stale generation, a paused trigger or a deleted one", async () => {
+		await withStore(({ store, clock }) => {
 			created(store, eventSpec(), "enabled", "flights");
 			const admit = (generation: number, eventId: string) => store.admit({ id: "flights", generation, eventId, observedAt: clock.now, payload: {} });
 			expect(admit(1, "a")).toMatchObject({ status: "accepted" });
@@ -374,17 +443,43 @@ describe("trigger store", () => {
 			expect(admit(2, "b")).toEqual({ status: "stale_generation" });
 			expect(admit(3, "b")).toMatchObject({ status: "accepted" });
 			expect(store.setHealth({ id: "flights", generation: 3, health: "healthy" })).toEqual({ ok: true });
-			const delivery = store.claim({ leaseMs: MINUTE })!;
 			expect(store.remove({ id: "flights" })).toEqual({ ok: true });
 			expect(admit(3, "c")).toEqual({ status: "deleted" });
 			expect(admit(4, "c")).toEqual({ status: "deleted" });
-			expect(store.complete({ outboxId: delivery.item.id, attempt: delivery.attempt })).toEqual({ ok: false });
+			expect(store.setHealth({ id: "flights", generation: 4, health: "healthy" })).toEqual({ ok: false });
+			expect(store.recordGap({ id: "flights", generation: 4 })).toEqual({ ok: false });
 			expect(store.create({ id: "flights", spec: eventSpec() })).toMatchObject({ ok: false, reason: "deleted" });
 			expect(store.setLifecycle({ id: "flights", to: "enabled", expectedRevision: 1 })).toMatchObject({ ok: false, reason: "deleted" });
-			// Nothing of it is left but the tombstone.
-			expect(["pim_triggers", "pim_trigger_revisions", "pim_trigger_sources", "pim_trigger_inbox", "pim_trigger_occurrences", "pim_trigger_outbox"].map((table) => count(sql, table))).toEqual([0, 0, 0, 0, 0, 0]);
-			expect(count(sql, "pim_trigger_tombstones")).toBe(1);
-			expect(store.setLifecycle({ id: "flights", to: "paused" })).toMatchObject({ ok: false, reason: "deleted" });
+			expect(store.update({ id: "flights", expectedRevision: 1, spec: eventSpec({ label: "Again" }) })).toMatchObject({ ok: false, reason: "deleted" });
+		});
+	});
+
+	it("deletes a trigger by stopping it and cancelling what it hadn't handed on, keeping its record until the space is erased", async () => {
+		await withStore(({ store, clock, sql }) => {
+			created(store, eventSpec({ instruction: "First" }), "enabled", "flights");
+			for (const eventId of ["a", "b", "c"]) store.admit({ id: "flights", generation: 1, eventId, observedAt: START, payload: {} });
+			const done = store.claim({ leaseMs: MINUTE })!;
+			store.complete({ outboxId: done.item.id, attempt: done.attempt });
+			const underWay = store.claim({ leaseMs: MINUTE })!;
+			store.update({ id: "flights", expectedRevision: 1, spec: eventSpec({ instruction: "Second" }) });
+			clock.now += 1_000;
+			expect(store.remove({ id: "flights", expectedRevision: 1 })).toMatchObject({ ok: false, reason: "revision_mismatch" });
+			expect(store.remove({ id: "flights", expectedRevision: 2 })).toEqual({ ok: true });
+			// The attempt under way can't settle it, and nothing more is claimed.
+			expect(store.complete({ outboxId: underWay.item.id, attempt: underWay.attempt })).toEqual({ ok: false });
+			expect(store.fail({ outboxId: underWay.item.id, attempt: underWay.attempt, retryAt: clock.now, error: "x" })).toMatchObject({ ok: false });
+			expect(store.claim({ leaseMs: MINUTE })).toBeUndefined();
+			// What it did stays: its revisions, its occurrences and how each ended.
+			expect(store.get("flights")).toMatchObject({ lifecycle: "deleted", revision: 2, spec: { instruction: "Second" } });
+			expect(store.list()).toEqual([]);
+			expect(store.revision("flights", 1)?.instruction).toBe("First");
+			expect(store.occurrences("flights").map((occurrence) => occurrence.status)).toEqual(["delivered", "cancelled", "cancelled"]);
+			expect(store.outbox("flights").map((item) => item.status)).toEqual(["done", "cancelled", "cancelled"]);
+			expect([count(sql, "pim_trigger_sources"), count(sql, "pim_trigger_inbox"), count(sql, "pim_trigger_tombstones")]).toEqual([0, 0, 1]);
+			// Erasing the space is what removes it all.
+			created(store, eventSpec(), "enabled", "trains");
+			store.eraseAll();
+			expect(TRIGGER_TABLES.map((table) => count(sql, table))).toEqual([0, 0, 0, 0, 0, 0, 0]);
 		});
 	});
 
@@ -394,35 +489,122 @@ describe("trigger store", () => {
 			const poll = (eventId: string, observedAt: number, price: number, position: number) =>
 				store.admit({ id: "price", generation: 1, eventId, observedAt, payload: { price }, checkpoint: { position, cursor: `p${position}` } });
 			expect(poll("p-2", START - 2_000, 600, 2)).toMatchObject({ status: "accepted", truth: "false" });
-			// An older state arriving late must not decide anything.
 			expect(poll("p-1", START - 3_000, 400, 1)).toEqual({ status: "out_of_order" });
 			expect(poll("p-2b", START - 2_000, 400, 3)).toEqual({ status: "out_of_order" });
 			expect(store.sourceState("price")).toMatchObject({ position: 2, cursor: "p2", lastObservedAt: START - 2_000 });
-			expect(poll("p-3", START - 1_000, 400, 3)).toMatchObject({ status: "accepted", truth: "true", occurrence: { key: "event:p-3" } });
+			expect(poll("p-3", START - 1_000, 400, 3)).toMatchObject({ status: "accepted", truth: "true", occurrence: { key: "event:price#1:p-3" } });
 
 			created(store, eventSpec(), "enabled", "flights");
 			const event = (eventId: string, observedAt: number, position: number) => store.admit({ id: "flights", generation: 1, eventId, observedAt, payload: {}, checkpoint: { position, cursor: `c${position}` } });
 			expect(event("e5", START, 5)).toMatchObject({ status: "accepted" });
-			expect(event("e3", START - 5_000, 3)).toMatchObject({ status: "accepted", occurrence: { key: "event:e3" } });
+			expect(event("e3", START - 5_000, 3)).toMatchObject({ status: "accepted", occurrence: { key: "event:flights#1:e3" } });
 			expect(store.sourceState("flights")).toMatchObject({ position: 5, cursor: "c5", lastObservedAt: START });
 			expect(event("e3", START - 5_000, 3)).toEqual({ status: "duplicate" });
 		});
 	});
 
-	it("starts a changed source over: new identity, checkpoint, condition state and generation", async () => {
-		await withStore(({ store }) => {
+	it("takes an event id again from a changed source, which starts with a new identity and checkpoint", async () => {
+		await withStore(({ store, sql, make, transaction }) => {
+			created(store, eventSpec(), "enabled", "flights");
+			const fired = store.admit({ id: "flights", generation: 1, eventId: "1", observedAt: START, payload: {}, checkpoint: { position: 7, cursor: "c7" } });
+			expect(fired).toMatchObject({ status: "accepted", occurrence: { key: "event:flights#1:1" } });
+			expect(store.update({ id: "flights", expectedRevision: 1, spec: eventSpec({ source: { kind: "connector_event", connectorId: "flights", event: "price.dropped" } }) })).toMatchObject({
+				ok: true,
+				trigger: { revision: 2, generation: 2 },
+			});
+			expect(store.sourceState("flights")).toMatchObject({ identity: "flights#2", position: null, cursor: null });
+			expect(store.admit({ id: "flights", generation: 1, eventId: "1", observedAt: START, payload: {} })).toEqual({ status: "stale_generation" });
+			const again = { id: "flights", generation: 2, eventId: "1", observedAt: START, payload: {}, checkpoint: { position: 1, cursor: "n1" } };
+			const crashing = make({
+				transaction: (work) =>
+					transaction(() => {
+						work();
+						throw new Error("crash before commit");
+					}),
+			});
+			expect(() => crashing.admit(again)).toThrow("crash before commit");
+			expect([count(sql, "pim_trigger_inbox"), count(sql, "pim_trigger_occurrences")]).toEqual([1, 1]);
+			expect(store.admit(again)).toMatchObject({ status: "accepted", occurrence: { key: "event:flights#2:1", revision: 2 } });
+			expect(store.sourceState("flights")).toMatchObject({ position: 1, cursor: "n1" });
+			expect(store.admit(again)).toEqual({ status: "duplicate" });
+			expect(store.occurrences("flights").map((occurrence) => occurrence.key)).toEqual(["event:flights#1:1", "event:flights#2:1"]);
+		});
+	});
+
+	it("fences out observations made under an older condition or source, and starts the condition over", async () => {
+		await withStore(({ store, clock }) => {
 			created(store, pollSpec(), "enabled", "price");
-			store.admit({ id: "price", generation: 1, eventId: "obs-1", observedAt: START, payload: { price: 600 }, checkpoint: { position: 1, cursor: null } });
-			expect(store.sourceState("price")).toMatchObject({ identity: "price#1", position: 1, conditionState: { edge: "armed" } });
-			// A new condition alone keeps the source, and forgets what the old condition remembered.
+			const poll = (generation: number, price: number) => {
+				clock.now += MINUTE;
+				return store.admit({ id: "price", generation, eventId: `o${clock.now}`, observedAt: clock.now, payload: { price } });
+			};
+			expect(poll(1, 600)).toMatchObject({ status: "accepted", truth: "false" });
+			expect(store.sourceState("price")).toMatchObject({ conditionState: { edge: "armed" } });
+			// An observer made its observation under `lt 500`; the condition becomes `lt 450` before it arrives.
 			store.update({ id: "price", expectedRevision: 1, spec: pollSpec({ condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 450 } } }) });
-			expect(store.sourceState("price")).toMatchObject({ identity: "price#1", position: 1, conditionState: null });
-			expect(store.get("price")?.generation).toBe(1);
-			store.update({ id: "price", expectedRevision: 2, spec: pollSpec({ source: { kind: "poll", command: "./other.sh" }, authorizationRef: "approval-2" }) });
-			expect(store.sourceState("price")).toMatchObject({ identity: "price#3", position: null, lastObservedAt: null, conditionState: null });
-			expect(store.admit({ id: "price", generation: 1, eventId: "obs-2", observedAt: START + 1, payload: { price: 400 } })).toEqual({ status: "stale_generation" });
-			// The new source's observer may reuse an event id the old one used.
-			expect(store.admit({ id: "price", generation: 2, eventId: "obs-1", observedAt: START + 1, payload: { price: 400 } })).toMatchObject({ status: "accepted" });
+			expect(store.get("price")).toMatchObject({ revision: 2, generation: 2 });
+			expect(store.sourceState("price")).toMatchObject({ identity: "price#1", conditionState: null });
+			expect(poll(1, 470)).toEqual({ status: "stale_generation" });
+			// Under the new condition, a true is a baseline: it fires only after a known false.
+			expect(poll(2, 400)).toMatchObject({ status: "accepted", truth: "true", occurrence: null });
+			expect(poll(2, 460)).toMatchObject({ truth: "false" });
+			// The source changes as a condition edit is being admitted: the edit's generation is fenced out too.
+			store.update({ id: "price", expectedRevision: 2, spec: pollSpec({ source: { kind: "poll", command: "./other.sh" }, authorizationRef: "approval-2", condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 450 } } }) });
+			expect(store.get("price")).toMatchObject({ revision: 3, generation: 3 });
+			expect(poll(2, 400)).toEqual({ status: "stale_generation" });
+			expect(poll(3, 400)).toMatchObject({ truth: "true", occurrence: null });
+			// A change of label or instruction leaves observers and the condition as they were.
+			store.update({ id: "price", expectedRevision: 3, spec: pollSpec({ label: "Renamed", source: { kind: "poll", command: "./other.sh" }, authorizationRef: "approval-2", condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 450 } } }) });
+			expect(store.get("price")).toMatchObject({ revision: 4, generation: 3 });
+			expect(poll(3, 460)).toMatchObject({ truth: "false" });
+			expect(poll(3, 400)).toMatchObject({ occurrence: { revision: 4 } });
+		});
+	});
+
+	it("treats a pause as a break: enabled again, a trigger needs a known false before a true fires", async () => {
+		await withStore(({ store, clock }) => {
+			created(store, pollSpec(), "enabled", "price");
+			const stable = { when: { op: "stable_for", ms: 2 * MINUTE, of: { op: "compare", path: ["up"], cmp: "eq", value: false } } };
+			created(store, pollSpec({ source: { kind: "poll", command: "./up.sh", intervalMs: MINUTE }, condition: stable }), "enabled", "site");
+			const observe = (id: string, payload: JsonValue) => {
+				const trigger = store.get(id)!;
+				return store.admit({ id, generation: trigger.generation, eventId: `${id}-${clock.now}`, observedAt: clock.now, payload });
+			};
+			const outcome = (id: string, payload: JsonValue) => {
+				const result = observe(id, payload);
+				return result.status !== "accepted" ? result.status : result.occurrence ? "fire" : result.truth;
+			};
+			const pauseAndResume = (id: string) => {
+				store.setLifecycle({ id, to: "paused" });
+				store.setLifecycle({ id, to: "enabled", expectedRevision: 1 });
+			};
+			const steps: string[] = [];
+			const tick = (id: string, payload: JsonValue) => {
+				clock.now += MINUTE;
+				steps.push(outcome(id, payload));
+			};
+			// false, pause, true: silent. Then false, true: fires.
+			tick("price", { price: 600 });
+			pauseAndResume("price");
+			expect(store.sourceState("price")).toMatchObject({ conditionState: null, gapPending: false });
+			tick("price", { price: 400 });
+			tick("price", { price: 600 });
+			tick("price", { price: 400 });
+			expect(steps).toEqual(["false", "true", "false", "fire"]);
+			// A recorded gap pending at the pause is taken up by the fresh start, not carried over.
+			store.recordGap({ id: "price", generation: store.get("price")!.generation });
+			pauseAndResume("price");
+			expect(store.sourceState("price")?.gapPending).toBe(false);
+			// stable_for counts again after a resume: down at 1 and 2 minutes, paused, then it needs 2 more minutes seen down.
+			steps.length = 0;
+			tick("site", { up: true });
+			tick("site", { up: false });
+			tick("site", { up: false });
+			pauseAndResume("site");
+			tick("site", { up: false });
+			tick("site", { up: false });
+			tick("site", { up: false });
+			expect(steps).toEqual(["false", "false", "false", "false", "false", "fire"]);
 		});
 	});
 
@@ -434,14 +616,14 @@ describe("trigger store", () => {
 			store.admit({ id: "flights", generation: 1, eventId: "b", observedAt: START, payload: {} });
 			expect(store.occurrences("flights").map((occurrence) => occurrence.revision)).toEqual([1, 2]);
 			const first = store.claim({ leaseMs: MINUTE })!;
-			expect(first).toMatchObject({ occurrence: { key: "event:a", revision: 1 }, spec: { instruction: "First instruction" } });
+			expect(first).toMatchObject({ occurrence: { key: "event:flights#1:a", revision: 1 }, spec: { instruction: "First instruction" } });
 			expect(() => sql.exec("UPDATE pim_trigger_occurrences SET revision = 2 WHERE trigger_id = 'flights'")).toThrow(/keeps its revision/);
 			store.complete({ outboxId: first.item.id, attempt: first.attempt });
-			expect(store.claim({ leaseMs: MINUTE })).toMatchObject({ occurrence: { key: "event:b", revision: 2 }, spec: { instruction: "Second instruction" } });
+			expect(store.claim({ leaseMs: MINUTE })).toMatchObject({ occurrence: { key: "event:flights#1:b", revision: 2 }, spec: { instruction: "Second instruction" } });
 		});
 	});
 
-	it("retries a delivery under the same operation id, and only the latest attempt settles it", async () => {
+	it("retries under the same operation id, lets only the latest attempt settle, and stops at an unknown outcome", async () => {
 		await withStore(({ store, clock }) => {
 			created(store, eventSpec(), "enabled", "flights");
 			store.admit({ id: "flights", generation: 1, eventId: "a", observedAt: START, payload: {} });
@@ -452,7 +634,6 @@ describe("trigger store", () => {
 			clock.now += 10_000;
 			const second = store.claim({ leaseMs: MINUTE })!;
 			expect(second).toMatchObject({ attempt: 2, item: { operationId: first.item.operationId, lastError: "busy" } });
-			// A lease that runs out is claimed again, as a new attempt with the same operation id.
 			clock.now += MINUTE;
 			const third = store.claim({ leaseMs: MINUTE })!;
 			expect(third).toMatchObject({ attempt: 3, item: { operationId: first.item.operationId } });
@@ -461,74 +642,83 @@ describe("trigger store", () => {
 			expect(store.occurrences("flights")[0]?.status).toBe("delivered");
 			expect(store.claim({ leaseMs: MINUTE })).toBeUndefined();
 
-			// Attempts run out.
+			// Failures known not to have handed it on use up the attempts, and it fails.
 			store.admit({ id: "flights", generation: 1, eventId: "b", observedAt: START, payload: {} });
 			for (let attempt = 1; attempt <= 5; attempt += 1) {
 				const delivery = store.claim({ leaseMs: MINUTE })!;
 				expect(delivery.attempt).toBe(attempt);
 				expect(store.fail({ outboxId: delivery.item.id, attempt, retryAt: clock.now, error: "down" })).toEqual({ ok: true, retrying: attempt < 5 });
 			}
-			expect(store.claim({ leaseMs: MINUTE })).toBeUndefined();
 			expect(store.occurrences("flights")[1]?.status).toBe("failed");
+
+			// Leases that run out say nothing of whether it was handed on: after five, its outcome is unknown, and it isn't tried again.
+			store.admit({ id: "flights", generation: 1, eventId: "c", observedAt: START, payload: {} });
+			store.admit({ id: "flights", generation: 1, eventId: "d", observedAt: START, payload: {} });
+			const attempts: number[] = [];
+			for (let claims = 0; claims < 5; claims += 1) {
+				attempts.push(store.claim({ leaseMs: MINUTE })!.attempt);
+				clock.now += MINUTE;
+			}
+			expect(attempts).toEqual([1, 2, 3, 4, 5]);
+			// The next claim settles `c` as unknown and moves on to `d`.
+			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe("event:flights#1:d");
+			const unknown = store.outbox("flights")[2]!;
+			expect(unknown).toMatchObject({ status: "outcome_unknown", attempts: 5 });
+			expect(store.occurrences("flights")[2]?.status).toBe("outcome_unknown");
+			expect(store.reconcile({ outboxId: store.outbox("flights")[3]!.id, outcome: "delivered" })).toEqual({ ok: false });
+			expect(store.reconcile({ outboxId: unknown.id, outcome: "delivered" })).toEqual({ ok: true });
+			expect(store.occurrences("flights")[2]?.status).toBe("delivered");
+			expect(store.reconcile({ outboxId: unknown.id, outcome: "failed" })).toEqual({ ok: false });
 		});
 	});
 
-	it("runs one delivery per trigger at a time, in order, and holds back events past its bound", async () => {
+	it("hands on one occurrence per trigger at a time, in order, and holds back events past its bound", async () => {
 		await withStore(({ store }) => {
 			created(store, eventSpec({ delivery: { maxPendingEvents: 2 } }), "enabled", "flights");
 			created(store, eventSpec(), "enabled", "trains");
-			const admit = (id: string, eventId: string) => store.admit({ id, generation: 1, eventId, observedAt: START, payload: { eventId } });
+			const admit = (id: string, eventId: string) => store.admit({ id, generation: store.get(id)!.generation, eventId, observedAt: START, payload: { eventId } });
 			expect(admit("flights", "a")).toMatchObject({ status: "accepted" });
 			expect(admit("flights", "b")).toMatchObject({ status: "accepted" });
 			expect(admit("flights", "c")).toEqual({ status: "backpressure" });
 			expect(store.outbox("flights")).toHaveLength(2);
 			const first = store.claim({ leaseMs: MINUTE })!;
-			expect(first.occurrence.key).toBe("event:a");
-			// With `a` under way, `b` waits; another trigger's delivery doesn't.
+			expect(first.occurrence.key).toBe("event:flights#1:a");
 			expect(store.claim({ leaseMs: MINUTE })).toBeUndefined();
 			admit("trains", "t");
-			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe("event:t");
-			// The delivery under way is not pending, so there is room for `c` now.
+			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe("event:trains#1:t");
 			expect(admit("flights", "c")).toMatchObject({ status: "accepted" });
 			store.complete({ outboxId: first.item.id, attempt: first.attempt });
 			const second = store.claim({ leaseMs: MINUTE })!;
-			expect(second.occurrence.key).toBe("event:b");
+			expect(second.occurrence.key).toBe("event:flights#1:b");
 			store.complete({ outboxId: second.item.id, attempt: second.attempt });
-			// Paused, its deliveries wait; enabled again, they go on.
+			// Paused, its occurrences wait; enabled again, they go on.
 			store.setLifecycle({ id: "flights", to: "paused" });
 			expect(store.claim({ leaseMs: MINUTE })).toBeUndefined();
 			store.setLifecycle({ id: "flights", to: "enabled", expectedRevision: 1 });
-			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe("event:c");
+			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe("event:flights#1:c");
 			expect(store.occurrences("flights").map((occurrence) => occurrence.status)).toEqual(["delivered", "delivered", "pending"]);
 		});
 	});
 
 	it("keeps one pending snapshot of a state, superseding an older undelivered one", async () => {
 		await withStore(({ store, clock }) => {
-			created(store, pollSpec({ delivery: { rawSamples: false } }), "enabled", "price");
-			let at = START;
+			created(store, pollSpec(), "enabled", "price");
 			const poll = (price: number) => {
-				at += MINUTE;
-				clock.now = at;
-				return store.admit({ id: "price", generation: 1, eventId: `obs-${at}`, observedAt: at, payload: { price, note: "not kept" } });
+				clock.now += MINUTE;
+				return store.admit({ id: "price", generation: 1, eventId: `obs-${clock.now}`, observedAt: clock.now, payload: { price } });
 			};
 			poll(600);
 			const first = poll(400);
-			expect(first).toMatchObject({ status: "accepted", occurrence: { evidence: { observedAt: at, fields: [{ path: ["price"], value: 400 }] } } });
+			expect(first).toMatchObject({ status: "accepted", occurrence: { evidence: { reason: "condition", truth: "true", observedAt: clock.now, fields: [{ path: ["price"], present: true }] } } });
 			poll(600);
 			const second = poll(300);
 			expect(second).toMatchObject({ status: "accepted", superseded: [first.status === "accepted" ? first.occurrence?.id : ""] });
 			expect(store.occurrences("price").map((occurrence) => occurrence.status)).toEqual(["superseded", "pending"]);
-			// A delivery under way is left to finish.
 			const delivery = store.claim({ leaseMs: MINUTE })!;
 			poll(600);
 			expect(poll(200)).toMatchObject({ status: "accepted", superseded: [] });
 			expect(store.occurrences("price").map((occurrence) => occurrence.status)).toEqual(["superseded", "pending", "pending"]);
 			expect(delivery.occurrence.status).toBe("pending");
-
-			created(store, pollSpec({ delivery: { rawSamples: true } }), "enabled", "raw");
-			store.admit({ id: "raw", generation: 1, eventId: "1", observedAt: at, payload: { price: 600 } });
-			expect(store.admit({ id: "raw", generation: 1, eventId: "2", observedAt: at + 1, payload: { price: 400, note: "kept" } })).toMatchObject({ occurrence: { evidence: { price: 400, note: "kept" } } });
 		});
 	});
 
@@ -544,15 +734,71 @@ describe("trigger store", () => {
 			poll(MINUTE, false);
 			store.recordGap({ id: "site", generation: 1 });
 			expect(store.sourceState("site")?.gapPending).toBe(true);
-			// Two minutes after it first went down, but the gap means it was seen down only from now.
 			expect(poll(3 * MINUTE, false)).toMatchObject({ truth: "false", occurrence: null });
 			expect(store.sourceState("site")?.gapPending).toBe(false);
-			expect(poll(5 * MINUTE, false)).toMatchObject({ truth: "true", occurrence: { key: `event:o${5 * MINUTE}` } });
-			// An observation that arrives after twice the interval is stale: no evidence, and a gap.
+			expect(poll(5 * MINUTE, false)).toMatchObject({ truth: "true", occurrence: { key: `event:site#1:o${5 * MINUTE}` } });
 			clock.now = START + 9 * MINUTE;
 			expect(store.admit({ id: "site", generation: 1, eventId: "late", observedAt: START + 6 * MINUTE, payload: { up: true } })).toMatchObject({ truth: "unknown", stale: true, occurrence: null });
 			expect(store.sourceState("site")?.gapPending).toBe(true);
 			expect(store.recordGap({ id: "site", generation: 0 })).toEqual({ ok: false });
+		});
+	});
+
+	it("remembers event ids for the whole replay horizon, refusing older events and more ids than it can hold", async () => {
+		await withStore(({ make, clock, sql }) => {
+			expect(() => make({ retention: { dedupHorizonMs: DAY } })).toThrow(TriggerValidationError);
+			const store = make({ retention: { inboxCap: 3, occurrences: 1 } });
+			const filtered = eventSpec({ condition: { when: { op: "compare", path: ["kind"], cmp: "eq", value: "invoice" } } });
+			created(store, filtered, "enabled", "mail");
+			const admit = (eventId: string, observedAt: number, kind = "invoice") => store.admit({ id: "mail", generation: 1, eventId, observedAt, payload: { kind } });
+			for (const eventId of ["a", "b"]) {
+				expect(admit(eventId, START)).toMatchObject({ status: "accepted" });
+				const delivery = store.claim({ leaseMs: MINUTE })!;
+				store.complete({ outboxId: delivery.item.id, attempt: delivery.attempt });
+			}
+			// A filtered event's id is remembered too.
+			expect(admit("note", START, "note")).toMatchObject({ status: "accepted", occurrence: null });
+			// Full: a new id is refused, without forgetting an old one, and writes nothing.
+			expect(admit("c", START)).toEqual({ status: "inbox_full" });
+			expect(count(sql, "pim_trigger_inbox")).toBe(3);
+			// Six days on, every id is still a duplicate, filtered or not; settled occurrences within the horizon are all kept.
+			clock.now = START + 6 * DAY;
+			expect(admit("a", START)).toEqual({ status: "duplicate" });
+			expect(admit("note", START, "invoice")).toEqual({ status: "duplicate" });
+			expect(admit("c", START)).toEqual({ status: "inbox_full" });
+			expect(store.occurrences("mail")).toHaveLength(2);
+			// Past the horizon, the ids are forgotten, and an event that old is refused rather than taken again.
+			clock.now = START + 7 * DAY + 6 * MINUTE;
+			expect(admit("a", START)).toEqual({ status: "too_old" });
+			expect(admit("c", clock.now)).toMatchObject({ status: "accepted" });
+			expect(sql.exec("SELECT event_id FROM pim_trigger_inbox ORDER BY rowid").toArray().map((row) => row.event_id)).toEqual(["c"]);
+			// Old settled occurrences beyond the history kept go; the pending one stays.
+			expect(store.occurrences("mail").map((occurrence) => [occurrence.key, occurrence.status])).toEqual([
+				["event:mail#1:b", "delivered"],
+				["event:mail#1:c", "pending"],
+			]);
+		});
+	});
+
+	it("watches one process instance until it exits or the watch expires", async () => {
+		await withStore(({ store, clock }) => {
+			expect(() => store.create({ spec: { ...base, source: { kind: "process", handle: "proc-1", expiresAt: START - 1 } } })).toThrow(TriggerValidationError);
+			expect(() => store.create({ spec: { ...base, source: { kind: "process", handle: "proc-1", expiresAt: START + 8 * DAY } } })).toThrow(TriggerValidationError);
+			const failed = { ...base, source: { kind: "process", handle: "proc-1", expiresAt: START + HOUR }, condition: { when: { op: "compare", path: ["exitCode"], cmp: "ne", value: 0 } }, authorizationRef: "approval-1" };
+			expect(store.create({ spec: { ...failed, authorizationRef: null }, lifecycle: "enabled" })).toMatchObject({ ok: false, reason: "authorization_required" });
+			created(store, failed, "enabled", "build");
+			expect(store.admit({ id: "build", generation: 1, eventId: "exit", observedAt: START, payload: { exitCode: 2, signal: null } })).toMatchObject({ status: "accepted", occurrence: { key: "event:build#1:exit" } });
+			// It exits once: the trigger ends, and still hands on its occurrence.
+			expect(store.get("build")).toMatchObject({ lifecycle: "ended", generation: 2 });
+			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe("event:build#1:exit");
+
+			created(store, { ...failed, source: { kind: "process", handle: "proc-2", expiresAt: START + HOUR } }, "enabled", "clean");
+			expect(store.admit({ id: "clean", generation: 1, eventId: "exit", observedAt: START, payload: { exitCode: 0, signal: null } })).toMatchObject({ status: "accepted", occurrence: null });
+			expect(store.get("clean")?.lifecycle).toBe("ended");
+
+			created(store, { ...failed, source: { kind: "process", handle: "proc-3", expiresAt: START + HOUR } }, "enabled", "late");
+			clock.now = START + HOUR + 1;
+			expect(store.admit({ id: "late", generation: 1, eventId: "exit", observedAt: clock.now, payload: { exitCode: 1, signal: null } })).toEqual({ status: "expired" });
 		});
 	});
 
@@ -563,10 +809,12 @@ describe("trigger store", () => {
 			expect(store.admitTimeFiring({ id: "remind", generation: 1, scheduledFor: START })).toEqual({ status: "schedule_mismatch" });
 			expect(store.admit({ id: "remind", generation: 1, eventId: "x", observedAt: START, payload: {} })).toEqual({ status: "wrong_source" });
 			clock.now = START + 2 * MINUTE;
-			expect(store.admitTimeFiring({ id: "remind", generation: 1, scheduledFor: START + MINUTE })).toMatchObject({ status: "accepted", occurrence: { key: `time:${START + MINUTE}`, status: "pending" } });
+			expect(store.admitTimeFiring({ id: "remind", generation: 1, scheduledFor: START + MINUTE })).toMatchObject({
+				status: "accepted",
+				occurrence: { key: `time:${START + MINUTE}`, status: "pending", evidence: { reason: "time", scheduledFor: START + MINUTE } },
+			});
 			expect(store.get("remind")).toMatchObject({ lifecycle: "ended", generation: 2 });
 			expect(store.admitTimeFiring({ id: "remind", generation: 2, scheduledFor: START + MINUTE })).toEqual({ status: "not_enabled" });
-			// Ended, it still delivers what it took in.
 			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe(`time:${START + MINUTE}`);
 
 			created(store, { ...base, source: { kind: "time", schedule: "once", at: START } }, "enabled", "late");
@@ -581,20 +829,4 @@ describe("trigger store", () => {
 			expect(store.admitTimeFiring({ id: "every", generation: 1, scheduledFor: START + 50 * MINUTE })).toEqual({ status: "out_of_order" });
 		});
 	});
-
-	it("keeps a bounded inbox and history per trigger", async () => {
-		await withStore(({ sql, make }) => {
-			const store = make({ retention: { inbox: 3, occurrences: 2 } });
-			created(store, eventSpec(), "enabled", "flights");
-			for (const eventId of ["a", "b", "c", "d", "e"]) {
-				store.admit({ id: "flights", generation: 1, eventId, observedAt: START, payload: {} });
-				const delivery = store.claim({ leaseMs: MINUTE })!;
-				store.complete({ outboxId: delivery.item.id, attempt: delivery.attempt });
-			}
-			expect(sql.exec("SELECT event_id FROM pim_trigger_inbox ORDER BY rowid").toArray().map((row) => row.event_id)).toEqual(["c", "d", "e"]);
-			expect(store.occurrences("flights").map((occurrence) => occurrence.key)).toEqual(["event:d", "event:e"]);
-			expect(count(sql, "pim_trigger_outbox")).toBe(2);
-		});
-	});
 });
-

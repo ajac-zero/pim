@@ -280,7 +280,7 @@ function parseDelivery(value: unknown, mode: ConditionMode | null): DeliveryPoli
 }
 
 /** An IANA zone name (`Europe/Lisbon`) or `UTC`; offsets such as `+01:00` are refused, since they ignore daylight saving time. */
-function parseTimeZone(value: unknown, path: string): string {
+export function parseTimeZone(value: unknown, path: string): string {
 	const zone = text(value, path, TRIGGER_LIMITS.timeZoneLength);
 	if (zone !== "UTC" && !/^[A-Za-z][A-Za-z_]*(\/[A-Za-z0-9_+-]+){1,2}$/.test(zone)) throw new TriggerValidationError(path, "must be an IANA time zone such as Europe/Lisbon, or UTC");
 	try {
@@ -309,16 +309,40 @@ const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
  * at, and so is an expression that names no date that exists.
  */
 export function parseCron(value: unknown, path: string): string {
+	return cronFields(value, path).expression;
+}
+
+/**
+ * A cron expression's fields, read as `parseCron` reads them, for computing
+ * its times (./time.ts). Day of week 7 is Sunday, as 0 is.
+ *
+ * Days follow Vixie cron: a day field is restricted unless it starts with
+ * `*`, alone or with a step. When both day fields are restricted, a day
+ * matches either one; otherwise it must match both.
+ */
+export type CronFields = {
+	readonly expression: string;
+	readonly minutes: ReadonlySet<number>;
+	readonly hours: ReadonlySet<number>;
+	readonly days: ReadonlySet<number>;
+	readonly months: ReadonlySet<number>;
+	/** 0 to 6, Sunday first. */
+	readonly weekdays: ReadonlySet<number>;
+	/** True when either day field starts with `*`, so a day must match both. */
+	readonly daysAndWeekdays: boolean;
+};
+
+export function cronFields(value: unknown, path: string): CronFields {
 	const expression = text(value, path, TRIGGER_LIMITS.cronLength);
 	const fields = expression.trim().split(/\s+/);
 	if (fields.length !== 5) throw new TriggerValidationError(path, "must have five fields: minute, hour, day of month, month, day of week");
-	const sets = fields.map((field, index) => cronField(field, CRON_FIELDS[index]!, path));
-	const [, , days, months] = sets as [Set<number>, Set<number>, Set<number>, Set<number>, Set<number>];
-	// With a restricted day of week, cron fires on either match, so only a day of month alone can name nothing.
-	if (fields[4] === "*" && fields[2] !== "*" && ![...months].some((month) => [...days].some((day) => day <= MONTH_DAYS[month - 1]!))) {
+	const [minutes, hours, days, months, weekdays] = fields.map((field, index) => cronField(field, CRON_FIELDS[index]!, path)) as [Set<number>, Set<number>, Set<number>, Set<number>, Set<number>];
+	const daysAndWeekdays = fields[2]!.startsWith("*") || fields[4]!.startsWith("*");
+	// When a day must match both fields, a day of month that no month has names nothing; when either may match, a day of week always names something.
+	if (daysAndWeekdays && ![...months].some((month) => [...days].some((day) => day <= MONTH_DAYS[month - 1]!))) {
 		throw new TriggerValidationError(path, "names no day that exists in its months");
 	}
-	return fields.join(" ");
+	return { expression: fields.join(" "), minutes, hours, days, months, weekdays: new Set([...weekdays].map((day) => day % 7)), daysAndWeekdays };
 }
 
 function cronField(field: string, bounds: (typeof CRON_FIELDS)[number], path: string): Set<number> {

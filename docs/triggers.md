@@ -4,13 +4,14 @@
 
 A trigger is work an agent does when something happens: at a time, on a connector's event, or when something it watches on the person's computer changes. Triggers are meant to replace schedules and watches with one thing people see and manage. Each space's Durable Object stays the authority for its triggers; the person's computer runs the observations (polls, streams, process exits, files), and Pim keeps the record and decides what is an occurrence.
 
-The code is in three modules, with tests in `test/triggers.test.ts`:
+The code is in four modules, with tests in `test/triggers.test.ts` and `test/triggers-time.test.ts`:
 
 | Module | What it is |
 | --- | --- |
 | [`src/triggers/spec.ts`](../src/triggers/spec.ts) | The spec: the typed, versioned definition, read from untrusted JSON with its defaults written in |
 | [`src/triggers/condition.ts`](../src/triggers/condition.ts) | Conditions: a restricted expression, its bounded state, and a pure evaluator |
 | [`src/triggers/store.ts`](../src/triggers/store.ts) | `TriggerStore`: the tables and the transactions that change them |
+| [`src/triggers/time.ts`](../src/triggers/time.ts) | When a time source fires: one pure computation for checking, previewing and selecting the due firing |
 
 ## What a trigger is
 
@@ -53,7 +54,7 @@ Reading a spec refuses unknown fields, unknown source kinds and operators, forms
 
 **A process is one instance.** A `process` source names the `handle` pim-computer gave a process it started, and fires on that process's exit. It takes one event, then the trigger ends. It is watched until `expiresAt` at the latest, which must be in the future and no more than 7 days ahead when the source is set; after that, its exit is refused (`expired`). Matching processes by name is not supported, because a name can't tell one run from the next. The other computer sources have no expiry in this version: they run until paused, ended or deleted, and the spec refuses an `expiresAt` for them.
 
-**Cron** takes `*`, numbers, ranges `a-b`, steps `/n` and lists. Names (`MON`), `?`, `L`, `W`, `#`, a seconds field and macros such as `@daily` are refused, as is an expression that names no day that exists, such as `0 0 31 2 *`. Time zones are IANA names or `UTC`; offsets such as `+01:00` are refused, because they ignore daylight saving time.
+**Cron** takes `*`, numbers, ranges `a-b`, steps `/n` and lists. Day of week 0 and 7 are both Sunday. Names (`MON`), `?`, `L`, `W`, `#`, a seconds field and macros such as `@daily` are refused, as is an expression that names no day that exists, such as `0 0 31 2 *` or `0 0 31 2 */2`. The day fields work as in Vixie cron: a day field is restricted unless it starts with `*` (alone or with a step). When both are restricted, a day matches either one, so `0 9 13 * 5` is every Friday and every 13th; otherwise a day must match both, so `0 9 */2 * 5` is the Fridays that fall on odd days. Time zones are IANA names or `UTC`; offsets such as `+01:00` are refused, because they ignore daylight saving time.
 
 ## Defaults for when triggers are turned on
 
@@ -61,7 +62,7 @@ These are decided now, so integration doesn't have to guess. The store enforces 
 
 - **One-time** triggers run up to `maxLatenessMs` (1 h) late; later than that, the firing is recorded as `missed` and nothing runs. Either way the trigger ends.
 - **Recurring** triggers run their latest due firing if it is at most `catchUpMs` (1 h) late, and record older ones as missed. The store refuses a firing that is no later than one it already took.
-- **New local cron**, in the person's time zone: a time that doesn't exist on a daylight-saving day (it falls in the skipped hour) is skipped, and a time that happens twice (in the repeated hour) runs once, at its first instant. The scheduler applies this.
+- **New local cron**, in the person's time zone: a time that doesn't exist on a daylight-saving day (it falls in the skipped hour) is skipped, and a time that happens twice (in the repeated hour) runs once, at its first instant. `src/triggers/time.ts` computes this (below).
 - **Migrated schedules** keep their cron in `UTC`, unchanged.
 - **Polls** run every 5 minutes by default, at most once a minute, and each poll has 30 seconds.
 - A state goes **stale** after two intervals unless the condition sets `staleAfterMs`.
@@ -137,6 +138,28 @@ A false result always sets `armed`, and a true result always sets `waiting_for_f
 
 Each event the condition is true for is an occurrence; unknown or false ones are not. Stateful operators and `staleAfterMs` are refused, because an event is never a baseline and never stale. Without a condition, every event is an occurrence.
 
+## Time
+
+[`src/triggers/time.ts`](../src/triggers/time.ts) works out when a time source fires. It is pure: it is given the clock's reading and the trigger's watermark, and reads nothing but the runtime's time zone data. The same computation serves checking a schedule when it is saved, showing its next firings, and choosing which firing is due, so what a person is shown is what runs.
+
+| Function | What it gives |
+| --- | --- |
+| `previewFirings(source, { now, count?, timeZone? })` | The next `count` firings after `now` (3 by default, at most 10), each with its instant, local date and time, zone and UTC offset; the local times skipped before the last of them, listed up to 5 and all counted; and whether it ran out |
+| `selectDueFiring(source, { now, after })` | The firing to admit now, `due` or `missed`, with its deadline and a summary of older ones; or `none`. Both give the next firing after `now` |
+| `isScheduledFiring(source, at)` | Whether an instant is one of the source's firings |
+| `resolveLocalTime(local, timeZone)` | A local date and time for a one-time trigger: `unique`, `ambiguous` (both instants) or `nonexistent` (with a suggestion) |
+| `describeInstant(at, timeZone)` | An instant as read in a zone |
+
+**Each local time fires at most once.** A cron expression is read in its own time zone, fixed when it is saved; migrated schedules will keep `UTC`. A local time it names that clocks skip that day is skipped, never moved to another time: a preview lists it as skipped, apart from the firings, and no firing is made for it. A local time that happens twice fires at its first instant only. The second instant is never a firing, so a preview, or a restart, that begins between the two shows the next day's.
+
+**Selecting a due firing.** `after` is the instant after which firings count: the trigger's watermark (`lastObservedAt`, the last firing it admitted), or before its first firing, the instant before it was enabled. Of the firings after `after` and at or before `now`, only the latest is selected, so an outage of days runs once. It is `due` when `now` is at most its deadline, which is its time plus the source's `catchUpMs` (or a one-time trigger's `maxLatenessMs`), inclusive, and `missed` after that. The deadline depends only on the firing, so retrying the delivery never moves it. The older firings are not listed: `older` gives how many there were and the first and last. A firing at or before `after` is never selected again, so a restart never replays one, and a clock that reads earlier than `after` selects nothing.
+
+**Bounds.** Instants given in (`now`, `after`, `at`) are whole milliseconds from 2000 to 2100, as a spec's are. A cron search walks local calendar days, skipping months the expression leaves out, and resolves only the times of days that match, so its cost is bounded by days, never minutes. It looks at most 4,400 days (just over 12 years) forward or back. That finds every expression whose days may match either field, the 29th of February included (8 years apart around 2100, which is not a leap year), and a date on one day of the week (at most 11 years apart). A rarer expression, such as `0 0 29 2 */7` (the 29th of February on a Sunday, 28 years apart), has no firing within it: its preview is empty and `exhausted`. **A schedule whose preview has no firings should be refused when it is saved.** After an outage longer than the horizon, `older` counts only the firings within it and says so (`complete: false`). Counting them doesn't go through every firing: a day on one offset is counted whole. An interval's firings, and a one-time trigger's, are worked out, not searched for.
+
+**Time zones** come from the runtime's `Intl` data, read as the Temporal polyfill reads them: the offset at an instant is what `Intl` shows there, and a local time is resolved by trying the offsets a day before and after it. That relies on a zone changing its offset at most once in any three days, which holds for every zone from 2000 to 2115 (the closest two changes, in America/Boa_Vista in 2000, are almost seven days apart). Offsets that aren't whole hours (Asia/Kathmandu's +05:45) and a half-hour change of daylight saving time (Australia/Lord_Howe) work as any other. The zone data is the runtime's, so a zone whose rules change takes effect when the runtime's data does.
+
+**A local time for a one-time trigger** is the caller's to choose. `resolveLocalTime` applies no cron rule: an ambiguous time returns both instants, and a nonexistent one returns a suggestion (the time moved later by the length of the skip, as clocks read it: 02:30 suggests 03:30). A tool that sets a reminder must ask which, rather than take the first instant or skip the reminder. The spec's `at` stays an instant.
+
 ## The store
 
 `new TriggerStore(sql, { transaction, now, authorize?, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, and `authorize` is the host's check of grants. Only the tests construct one; `PimStore` and the `Pim` constructor are unchanged.
@@ -184,13 +207,13 @@ What is left, roughly in order. Each step is its own change:
 
 1. **Construct the store in `Pim`.** Pass `ctx.storage.sql`, `transactionSync`, `Date.now`, and an `authorize` that looks the reference up among the space's approvals and checks it is current and was given for exactly this source. Add the tables in `TRIGGER_TABLES` to `PimStore.remainingData`, and call `eraseAll` when the space is erased.
 2. **A deliverer and a run coordinator.** On the Durable Object's alarm, `claim` attempts. Hand each one to `submitTo(chat, message, { operationId: item.operationId }, "pim")`, starting a chat for `new_chat` destinations as `runScheduledTask` does, then `complete`, `fail`, or later `reconcile`. A `429` from the run limit maps to `budget_blocked` health. Use the spec returned with the claim, not the current one. Keeping one run per trigger at a time, and the event content a run needs without the store keeping it, are this step's to decide.
-3. **A scheduler for time sources.** Compute due instants (cron in its time zone, with the DST rule above), call `admitTimeFiring`, and set the next alarm.
+3. **A scheduler for time sources.** On the alarm, for each enabled time trigger, call `selectDueFiring` with the clock and the source's watermark (`lastObservedAt`, or the instant before the trigger was enabled), pass a `due` or `missed` firing's `scheduledFor` to `admitTimeFiring`, which records a missed one as missed, and set the alarm to the earliest `next`. Admission stays the store's: it refuses a firing it already took and one no later than the watermark. Make `admitTimeFiring` check a cron firing with `isScheduledFiring`, as it checks one-time and interval firings now. Refuse a schedule whose `previewFirings` has no firings when it is saved, and show that preview, skipped times included, when it is made.
 4. **Connector events.** Route webhook deliveries, verified as `app-events.ts` verifies them, to `admit` with the event's id. Subscriptions stay with the connector code.
 5. **Computer observers.** Messages over pim-computer's connection, carrying the generation they were started for. Health comes from the connection (`waiting_computer`, `reconnecting`), and `recordGap` from reconnects.
 6. **Tools, routes and UI**, with approvals filling `authorizationRef` for computer sources.
 7. **Moving schedules and watches**, behind a migration that keeps their behavior.
 
-Not done here: the scheduler and cron evaluation, checking that a cron firing falls on its expression, any observer, deliverer, coordinator, tool, route or UI, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers.
+Not done here: the scheduler that calls `src/triggers/time.ts` and sets alarms, `admitTimeFiring` checking that a cron firing falls on its expression, any observer, deliverer, coordinator, tool, route or UI, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers.
 
 These are conditions for later tranches to meet before they are accepted, not work done here:
 
@@ -199,7 +222,7 @@ These are conditions for later tranches to meet before they are accepted, not wo
 - A deleted trigger's history is collected 30 days after its deletion.
 - A written contract for source context: what of an event or observation a run may see, and how it reaches the run without the store keeping it.
 - A coordinator that keeps agent runs apart, separate from the outbox, which only guarantees one attempt at a time.
-- One computation of DST-adjusted times, shared by what previews a schedule and what dispatches it.
+- The scheduler, the preview and the save-time check all use `src/triggers/time.ts`, so what previews a schedule is what dispatches it.
 - A firing is admitted up to and including its due time plus 1 hour, and retries don't move that deadline.
 - With raw samples off, nothing observed reaches a chat, a diagnostic or a dedup record.
 - Consent for a recurring script says truthfully that it runs as the person's own OS user, with that user's access.

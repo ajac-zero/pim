@@ -18,8 +18,12 @@ const Toaster = ({ ...props }: ToasterProps) => {
       }}
       toastOptions={{
         classNames: {
-          toast: "!rounded-2xl !border-border !bg-background !text-foreground !text-sm !shadow-lg",
-          actionButton: "!rounded-full !bg-primary !px-3 !text-primary-foreground",
+          toast: "!gap-3 !rounded-2xl !border-border !bg-background !p-3 !pl-4 !text-foreground !text-sm !shadow-lg",
+          icon: "!m-0 !size-8 !shrink-0 [&>*]:!size-8",
+          content: "!min-w-0 !flex-1",
+          title: "!line-clamp-2 !font-medium !leading-snug",
+          description: "!line-clamp-2",
+          actionButton: "!m-0 !h-8 !shrink-0 !rounded-full !bg-primary !px-4 !text-primary-foreground",
         },
       }}
       style={
@@ -27,6 +31,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
           "--normal-bg": "var(--popover)",
           "--normal-text": "var(--popover-foreground)",
           "--normal-border": "var(--border)",
+          "--width": "26rem",
           fontFamily: "var(--theme-font-ui)",
         } as React.CSSProperties
       }

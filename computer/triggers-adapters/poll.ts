@@ -18,7 +18,8 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import type { AdapterConfig, AdapterHealth, ComputerSource, Emit, JsonObject, ObserverAdapter, Observed, RuntimeClock, StopReason } from "../triggers-runtime.ts";
+import type { Readable } from "node:stream";
+import { type AdapterConfig, type AdapterHealth, type ComputerSource, DEFAULT_LIMITS, type Emit, type JsonObject, type ObserverAdapter, type Observed, type RuntimeClock, type StopReason } from "../triggers-runtime.ts";
 
 /**
  * The bounds a poll is run with. The timing bounds are the space's own
@@ -43,6 +44,9 @@ export const POLL_LIMITS = {
 	maxJitterMs: 30_000,
 } as const;
 
+/** What `stop` may take beyond the grace and the wait to be reaped. */
+export const STOP_SLACK_MS = 100;
+
 /** The system's clock, for when no clock is given. */
 export const systemClock: RuntimeClock = {
 	now: () => Date.now(),
@@ -52,7 +56,13 @@ export const systemClock: RuntimeClock = {
 	},
 };
 
-export type ChildExit = { readonly code: number | null; readonly signal: string | null; readonly failed: boolean };
+export type ChildExit = {
+	readonly code: number | null;
+	readonly signal: string | null;
+	readonly failed: boolean;
+	/** Whether everything left in the child's group is known to have been killed with it; false means it may still run. */
+	readonly cleaned: boolean;
+};
 export type ChildEvents = {
 	stdout(chunk: Uint8Array): void;
 	stderr(chunk: Uint8Array): void;
@@ -82,6 +92,11 @@ export type PollAdapterOptions = {
 	readonly graceMs?: number;
 	/** How long a child has after SIGKILL to be reaped before the adapter says so and polls no more. */
 	readonly reapMs?: number;
+	/**
+	 * The runtime's `stopTimeoutMs` (10 s unless set). `stop` returns within
+	 * `graceMs + reapMs + STOP_SLACK_MS`, which must be less than this.
+	 */
+	readonly stopTimeoutMs?: number;
 	/** The first wait before an emission the runtime couldn't take yet is tried again; it doubles up to `maxRetryMs`. */
 	readonly retryMs?: number;
 	readonly maxRetryMs?: number;
@@ -111,8 +126,9 @@ export function checkPollSource(source: ComputerSource): PollSource {
 export type PollOutput = { readonly ok: true; readonly data: JsonObject } | { readonly ok: false; readonly code: "poll_invalid_output" | "poll_output_too_large" };
 
 /**
- * Reads what a poll printed: UTF-8, one JSON object and nothing else, at
- * most 8 levels below it and 16,384 values, and at most 16 KiB as JSON.
+ * Reads what a poll printed: UTF-8, one JSON object and nothing else, with
+ * finite numbers only, at most 8 levels below it and 16,384 values, and at
+ * most 16 KiB as JSON.
  * It is only ever parsed as JSON, never run or interpreted otherwise.
  */
 export function readPollOutput(bytes: Uint8Array): PollOutput {
@@ -126,6 +142,8 @@ export function readPollOutput(bytes: Uint8Array): PollOutput {
 	const budget = { values: 0 };
 	const fits = (item: unknown, depth: number): boolean => {
 		if (++budget.values > POLL_LIMITS.dataValues || depth > POLL_LIMITS.dataDepth) return false;
+		// `JSON.parse` reads an exponent too large as Infinity, which JSON can't carry: refused, never rounded to null.
+		if (typeof item === "number") return Number.isFinite(item);
 		if (typeof item !== "object" || item === null) return true;
 		return Object.values(item).every((child) => fits(child, depth + 1));
 	};
@@ -197,6 +215,8 @@ export class PollAdapter implements ObserverAdapter {
 		this.#jitterRatio = bounded("jitterRatio", options.jitterRatio ?? 0.1, 0, 0.5);
 		this.#graceMs = bounded("graceMs", options.graceMs ?? 2_000, 10, 5_000);
 		this.#reapMs = bounded("reapMs", options.reapMs ?? 2_000, 10, 5_000);
+		const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_LIMITS.stopTimeoutMs;
+		if (this.#graceMs + this.#reapMs + STOP_SLACK_MS >= stopTimeoutMs) throw new RangeError(`graceMs + reapMs + ${STOP_SLACK_MS} must be less than stopTimeoutMs (${stopTimeoutMs})`);
 		this.#retryMs = bounded("retryMs", options.retryMs ?? 1_000, 10, 60_000);
 		this.#maxRetryMs = bounded("maxRetryMs", options.maxRetryMs ?? 30_000, this.#retryMs, 600_000);
 		this.#retryWait = this.#retryMs;
@@ -216,9 +236,9 @@ export class PollAdapter implements ObserverAdapter {
 		this.#fence();
 		const run = this.#run;
 		if (!run) return;
-		// Bounded: SIGTERM, the grace, SIGKILL and the wait to be reaped, and a little over.
+		// Bounded: SIGTERM, the grace, SIGKILL and the wait to be reaped, and a little over, within the runtime's own bound.
 		let cancel = () => {};
-		await Promise.race([run.done, new Promise<void>((resolve) => (cancel = this.#clock.setTimer(this.#graceMs + this.#reapMs + 100, resolve)))]);
+		await Promise.race([run.done, new Promise<void>((resolve) => (cancel = this.#clock.setTimer(this.#graceMs + this.#reapMs + STOP_SLACK_MS, resolve)))]);
 		cancel();
 		run.child?.release();
 	}
@@ -329,6 +349,7 @@ export class PollAdapter implements ObserverAdapter {
 		run.finish();
 		if (this.#fenced) return;
 		const at = this.#clock.now();
+		if (!result.cleaned) this.#report("degraded", "poll_cleanup_unknown");
 		if (run.ended === "timeout") return this.#report("degraded", "poll_timeout");
 		if (run.ended === "too_large") return this.#report("degraded", "poll_output_too_large");
 		if (result.failed) return this.#report("error", "poll_spawn_failed");
@@ -404,30 +425,54 @@ export const POLL_ENVIRONMENT = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LA
 export type NodeChildLauncherOptions = {
 	/** The working folder of a poll whose source names none. */
 	readonly defaultCwd: string;
-	/** The shell that runs a command with `-c`; `/bin/sh` unless set. */
+	/** The shell that runs a command with `-c`, under the leader; `/bin/sh` unless set. */
 	readonly shell?: string;
 	/** The whole environment a poll gets; `POLL_ENVIRONMENT` of this process's unless set. */
 	readonly env?: Readonly<Record<string, string>>;
 	/** How long after the leader exits its output may still be read. */
 	readonly drainMs?: number;
+	/** Sends a signal; `process.kill` unless set. Tests watch it. */
+	readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
 };
 
 /**
- * Runs a command with `shell -c` in a process group of its own, with stdin
- * closed. It signals that group only while the group's leader, its own
- * child, hasn't been reaped: until then the leader's process id is taken,
- * and so is the group's, so no other process can have it. Node reaps a
- * child and records its exit in the same step of its event loop, so
- * `exitCode` and `signalCode` both still null means not yet reaped. When the
- * leader exits, whatever is left in its group is killed at once, since a
- * poll is over when its command is, and the group's id is never signalled
- * again after that.
+ * The leader of every poll's process group, run by `/bin/sh` with the shell
+ * and the command as `$1` and `$2`. It runs the command as its child, so in
+ * its group, and stays alive until it has reported the command's exit
+ * status on fd 3 and killed its own group, itself last. While it lives, the
+ * group's id is its own process id, so `kill -9 0` can reach no one else's
+ * group. It catches SIGTERM, SIGINT and SIGHUP only to outlive the command
+ * and clean up after it; a caught signal is reset to its default in the
+ * command, which therefore still gets them.
+ */
+export const POLL_LEADER = [
+	"trap ':' TERM INT HUP",
+	'"$1" -c "$2" 3>&-',
+	"status=$?",
+	"trap '' PIPE",
+	"printf '%s\\n' \"$status\" >&3 2>/dev/null",
+	"kill -9 0",
+].join("\n");
+
+/**
+ * Runs a command under `POLL_LEADER`, in a process group of its own, with
+ * stdin closed. Two things signal that group, and both only while it is
+ * provably this launcher's: the leader itself, before it exits (above), and
+ * `signal`, only while the leader, this launcher's own child, is unreaped.
+ * Until a child is reaped its process id stays taken, and with it the
+ * group's, so no other process can have either; and Node reaps a child and
+ * records its exit in the same step of its event loop, so `exitCode` and
+ * `signalCode` both still null means not yet reaped. Once the leader is
+ * reaped this launcher never signals its group again, whatever is left.
+ * What is left can only be a process the leader's own `kill -9 0` missed,
+ * which is one that left the group.
  */
 export class NodeChildLauncher implements ChildLauncher {
 	readonly #defaultCwd: string;
 	readonly #shell: string;
 	readonly #env: Readonly<Record<string, string>>;
 	readonly #drainMs: number;
+	readonly #kill: (pid: number, signal: NodeJS.Signals) => void;
 
 	constructor(options: NodeChildLauncherOptions) {
 		if (!options.defaultCwd.startsWith("/")) throw new RangeError("defaultCwd must be an absolute path");
@@ -435,11 +480,22 @@ export class NodeChildLauncher implements ChildLauncher {
 		this.#shell = options.shell ?? "/bin/sh";
 		this.#env = options.env ?? pollEnvironment(process.env);
 		this.#drainMs = options.drainMs ?? 250;
+		this.#kill = options.kill ?? ((pid, signal) => process.kill(pid, signal));
 	}
 
 	launch(request: { readonly command: string; readonly cwd: string | null }, events: ChildEvents): OwnedChild {
-		const child = spawn(this.#shell, ["-c", request.command], { cwd: request.cwd ?? this.#defaultCwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...this.#env }, windowsHide: true });
+		const child = spawn("/bin/sh", ["-c", POLL_LEADER, "pim-poll", this.#shell, request.command], {
+			cwd: request.cwd ?? this.#defaultCwd,
+			detached: true,
+			stdio: ["ignore", "pipe", "pipe", "pipe"],
+			env: { ...this.#env },
+			windowsHide: true,
+		});
 		const pid = child.pid;
+		const statusPipe = child.stdio[3] as Readable | null;
+		let status = "";
+		/** Set once SIGKILL reached the whole group while its leader was still this launcher's. */
+		let killed = false;
 		let released = false;
 		let reported = false;
 		let drain: ReturnType<typeof setTimeout> | undefined;
@@ -447,6 +503,7 @@ export class NodeChildLauncher implements ChildLauncher {
 			released = true;
 			child.stdout?.destroy();
 			child.stderr?.destroy();
+			statusPipe?.destroy();
 		};
 		const finish = (result: ChildExit) => {
 			if (reported) return;
@@ -455,28 +512,42 @@ export class NodeChildLauncher implements ChildLauncher {
 			release();
 			events.exit(result);
 		};
+		/** The command's own exit, when the leader lived to report it; otherwise how the leader ended. */
+		const exited = (code: number | null, signal: NodeJS.Signals | null): ChildExit => {
+			const told = /^([0-9]{1,3})\n$/.exec(status);
+			if (told && Number(told[1]) <= 255) return { code: Number(told[1]), signal: null, failed: false, cleaned: true };
+			// The leader ended before it could clean up, by something else's signal: what is left of its group can't be signalled safely, and is said to be unknown.
+			return { code, signal, failed: false, cleaned: killed };
+		};
 		child.stdout?.on("data", (chunk: Buffer) => {
 			if (!released) events.stdout(chunk);
 		});
 		child.stderr?.on("data", (chunk: Buffer) => {
 			if (!released) events.stderr(chunk);
 		});
-		child.stdout?.on("error", () => {});
-		child.stderr?.on("error", () => {});
+		statusPipe?.on("data", (chunk: Buffer) => {
+			if (status.length < 8) status += chunk.toString("latin1").slice(0, 8);
+		});
+		for (const stream of [child.stdout, child.stderr, statusPipe]) stream?.on("error", () => {});
 		child.on("error", () => {
 			// Only a child that never started gets here without an exit: nothing of it runs.
-			if (pid === undefined) finish({ code: null, signal: null, failed: true });
+			if (pid === undefined) finish({ code: null, signal: null, failed: true, cleaned: true });
 		});
 		child.on("exit", (code, signal) => {
-			// What is left of its group goes with it. The group's id is still reserved while any member lives.
-			if (pid !== undefined) killGroup(pid, "SIGKILL");
-			drain = setTimeout(() => finish({ code, signal, failed: false }), this.#drainMs);
-			child.once("close", () => finish({ code, signal, failed: false }));
+			// Reaped: its group is never signalled from here again.
+			drain = setTimeout(() => finish(exited(code, signal)), this.#drainMs);
+			child.once("close", () => finish(exited(code, signal)));
 		});
 		return {
 			signal: (name) => {
 				if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return false;
-				return killGroup(pid, name);
+				try {
+					this.#kill(-pid, name);
+					if (name === "SIGKILL") killed = true;
+					return true;
+				} catch {
+					return false;
+				}
 			},
 			release,
 		};
@@ -493,11 +564,3 @@ export function pollEnvironment(env: NodeJS.ProcessEnv): Record<string, string> 
 	return kept;
 }
 
-function killGroup(pid: number, signal: NodeJS.Signals): boolean {
-	try {
-		process.kill(-pid, signal);
-		return true;
-	} catch {
-		return false;
-	}
-}

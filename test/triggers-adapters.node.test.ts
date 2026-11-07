@@ -105,7 +105,7 @@ class FakeChild implements OwnedChild {
 	finish(stdout: string | Uint8Array = "", result: Partial<ChildExit> = {}): void {
 		if (stdout.length > 0) this.events.stdout(typeof stdout === "string" ? Buffer.from(stdout) : stdout);
 		this.exited = true;
-		this.events.exit({ code: 0, signal: null, failed: false, ...result });
+		this.events.exit({ code: 0, signal: null, failed: false, cleaned: true, ...result });
 	}
 }
 
@@ -285,6 +285,11 @@ describe("poll output and its child", () => {
 			expect(ok(refused)).toEqual({ ok: false, code: "poll_invalid_output" });
 		}
 		expect(readPollOutput(Uint8Array.from([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]))).toEqual({ ok: false, code: "poll_invalid_output" });
+		// An exponent too large parses as Infinity, which JSON would turn into null: refused, at any depth.
+		for (const refused of ['{"value":1e999}', '{"value":-1e999}', '{"a":[{"b":[1,2,-1e400]}]}', `{"v":${"9".repeat(400)}}`]) {
+			expect(ok(refused)).toEqual({ ok: false, code: "poll_invalid_output" });
+		}
+		expect(ok('{"small":1e-999,"big":1.7976931348623157e308}')).toEqual({ ok: true, data: { small: 0, big: 1.7976931348623157e308 } });
 	});
 
 	it("ends a child that prints too much, keeps nothing of stderr, and never reports what was printed", async () => {
@@ -432,6 +437,16 @@ describe("poll stop", () => {
 		expect(early.clock.pending).toBe(0);
 	});
 
+	it("keeps its stop within the runtime's stop bound", () => {
+		const clock = new FakeClock();
+		const launcher = new FakeLauncher(clock);
+		expect(() => new PollAdapter({ launcher, graceMs: 5_000, reapMs: 4_899 })).not.toThrow();
+		expect(() => new PollAdapter({ launcher, graceMs: 5_000, reapMs: 4_900 })).toThrow(RangeError);
+		expect(() => new PollAdapter({ launcher, graceMs: 450, reapMs: 449, stopTimeoutMs: 1_000 })).not.toThrow();
+		expect(() => new PollAdapter({ launcher, graceMs: 450, reapMs: 450, stopTimeoutMs: 1_000 })).toThrow(RangeError);
+		expect(() => new PollAdapter({ launcher, stopTimeoutMs: 4_100 })).toThrow(RangeError);
+	});
+
 	it("drops what an emission in flight returns once stopped, and retries nothing", async () => {
 		const { clock, launcher, sink, adapter } = await startPoll();
 		let answer!: (result: EmitResult) => void;
@@ -531,6 +546,73 @@ describe("poll on real children", () => {
 		}
 	});
 
+	it("never signals a group once its leader is reaped; the leader cleans up its own group first", async () => {
+		const kills: [number, string][] = [];
+		const launcher = new NodeChildLauncher({ defaultCwd: dir, kill: (pid, signal) => void kills.push([pid, signal]) });
+		const run = (command: string) =>
+			new Promise<{ result: ChildExit; child: OwnedChild }>((resolve) => {
+				const child: OwnedChild = launcher.launch({ command, cwd: null }, { stdout: () => {}, stderr: () => {}, exit: (result) => resolve({ result, child }) });
+			});
+		const cases: [string, Partial<ChildExit>][] = [
+			["exit 0", { code: 0, signal: null }],
+			["exit 3", { code: 3, signal: null }],
+			["kill -TERM $$", { code: 143, signal: null }],
+			["sleep 20 & echo $! > owned.pid; exit 0", { code: 0, signal: null }],
+		];
+		for (const [command, expected] of cases) {
+			const { result, child } = await run(command);
+			expect(result).toMatchObject(expected);
+			// Its leader is reaped: whatever pid its group had may be anyone's now, and nothing is sent to it.
+			expect(child.signal("SIGKILL")).toBe(false);
+			expect(child.signal("SIGTERM")).toBe(false);
+		}
+		expect(kills).toEqual([]);
+		// The leftover in its group went with the leader's own `kill -9 0`.
+		expect(await gone(await pidFrom(path.join(dir, "owned.pid")))).toBe(true);
+
+		// Before reaping, a signal goes to its own group, by the leader's id; a group already gone is reported as not signalled.
+		const throwing = new NodeChildLauncher({
+			defaultCwd: dir,
+			kill: (pid, signal) => {
+				kills.push([pid, signal]);
+				throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+			},
+		});
+		let done = () => {};
+		const exited = new Promise<void>((resolve) => (done = resolve));
+		const live = throwing.launch({ command: "sleep 1", cwd: null }, { stdout: () => {}, stderr: () => {}, exit: () => done() });
+		expect(live.signal("SIGTERM")).toBe(false);
+		expect(kills).toHaveLength(1);
+		expect(kills[0]?.[0]).toBeLessThan(0);
+		await exited;
+		expect(live.signal("SIGKILL")).toBe(false);
+		expect(kills).toHaveLength(1);
+
+		// A leader killed from outside before it cleaned up: its leftover is not signalled from here, and the exit says cleanup is unknown.
+		const { result } = await run("sleep 20 & echo $! > orphan.pid; kill -9 $PPID");
+		const orphan = await pidFrom(path.join(dir, "orphan.pid"));
+		try {
+			expect(result).toMatchObject({ code: null, signal: "SIGKILL", cleaned: false });
+			expect(kills).toHaveLength(1);
+			process.kill(orphan, 0);
+		} finally {
+			process.kill(orphan, "SIGKILL");
+		}
+	});
+
+	it("reports cleanup it can't vouch for as unknown", async () => {
+		const { clock, launcher, sink, adapter } = await startPoll();
+		await clock.advance(0);
+		launcher.last.finish('{"n":1}', { code: null, signal: "SIGKILL", cleaned: false });
+		await clock.advance(0);
+		expect(sink.reports).toEqual([
+			{ status: "degraded", code: "poll_cleanup_unknown" },
+			{ status: "degraded", code: "poll_failed" },
+		]);
+		expect(sink.emits).toEqual([]);
+		await adapter.stop("shutdown");
+	});
+
 	it("keeps stderr out of what it reports, and out of the console", async () => {
 		const log = [vi.spyOn(console, "log"), vi.spyOn(console, "error"), vi.spyOn(console, "warn")];
 		try {
@@ -555,10 +637,15 @@ class FakeProvider implements ManagedProcessProvider {
 	liveness_: Liveness = "running";
 	/** What the next read returns instead, once. */
 	next: (ManagedRecord | null | Error)[] = [];
+	/** Promises the next reads, and the next liveness checks, wait on before they answer. */
+	holdReads: Promise<unknown>[] = [];
+	holdChecks: Promise<unknown>[] = [];
 	reads = 0;
 	checks = 0;
 	async read(handle: string): Promise<ManagedRecord | null> {
 		this.reads++;
+		const hold = this.holdReads.shift();
+		if (hold) await hold;
 		const next = this.next.shift();
 		if (next instanceof Error) throw next;
 		if (next !== undefined) return next;
@@ -566,6 +653,8 @@ class FakeProvider implements ManagedProcessProvider {
 	}
 	async liveness(_identity: ProcessIdentity): Promise<Liveness> {
 		this.checks++;
+		const hold = this.holdChecks.shift();
+		if (hold) await hold;
 		return this.liveness_;
 	}
 	set(record: ManagedRecord): void {
@@ -689,6 +778,125 @@ describe("process watch", () => {
 		await clock.advance(1_000);
 		expect(sink.emits).toEqual([]);
 		expect(sink.reports).toEqual([{ status: "error", code: "process_identity_mismatch" }]);
+		// So is one that changes with no receipt yet, whatever its supervisor's liveness, and the watch reads no more.
+		for (const changed of [intent({ supervisor: { ...SUPERVISOR, startTime: "1" } }), intent({ launchedAt: T0 }), intent({ supervisor: { ...SUPERVISOR, bootId: BOOT.replace("1", "9") } })]) {
+			for (const liveness of ["running", "exited"] as const) {
+				const watched = new FakeProvider();
+				watched.set({ intent: intent(), receipt: null });
+				watched.liveness_ = liveness;
+				const w = await startWatch(watched);
+				watched.set({ intent: changed, receipt: null });
+				await w.clock.advance(60_000);
+				expect(w.sink.emits).toEqual([]);
+				expect(w.sink.reports).toEqual([{ status: "error", code: "process_identity_mismatch" }]);
+				expect(watched.reads).toBe(2);
+				expect(watched.checks).toBe(0);
+			}
+		}
+	});
+
+	it("never infers an outcome once its time is up, however long the provider took to answer", async () => {
+		type Gate = { promise: Promise<void>; open: () => void };
+		const gate = (): Gate => {
+			let open = () => {};
+			const promise = new Promise<void>((resolve) => (open = resolve));
+			return { promise, open };
+		};
+		const scenario = async (hold: "read" | "liveness" | "reread", answer: { liveness?: Liveness; receipt?: CompletionReceipt | null; final?: CompletionReceipt | null }) => {
+			const provider = new FakeProvider();
+			provider.set({ intent: intent(), receipt: null });
+			provider.liveness_ = answer.liveness ?? "exited";
+			const g = gate();
+			const watch = await startWatch(provider, processSource({ expiresAt: T0 + 1_500 }));
+			if (hold === "read") provider.holdReads.push(g.promise);
+			else if (hold === "reread") provider.holdReads.push(Promise.resolve(), g.promise);
+			else provider.holdChecks.push(g.promise);
+			await watch.clock.advance(0);
+			// The answer comes only after the watch's time is up.
+			await watch.clock.advance(2_000);
+			if (answer.receipt !== undefined) provider.set({ intent: intent(), receipt: answer.receipt });
+			if (answer.final !== undefined) provider.next = [{ intent: intent(), receipt: answer.final }];
+			const before = provider.reads;
+			g.open();
+			await watch.clock.advance(0);
+			return { ...watch, provider, finalReads: provider.reads - before };
+		};
+		// The supervisor is found gone after expiry: one final read, and no receipt in it means expired, not unknown.
+		const gone = await scenario("liveness", { liveness: "exited" });
+		expect(gone.sink.emits).toEqual([]);
+		expect(gone.sink.reports).toEqual([{ status: "degraded", code: "process_watch_expired" }]);
+		expect(gone.finalReads).toBe(1);
+		const reads = gone.provider.reads;
+		await gone.clock.advance(600_000);
+		expect(gone.provider.reads).toBe(reads);
+		expect(gone.clock.pending).toBe(0);
+		// Running when it was asked makes no difference.
+		const running = await scenario("liveness", { liveness: "running" });
+		expect(running.sink.emits).toEqual([]);
+		expect(running.sink.reports).toEqual([{ status: "degraded", code: "process_watch_expired" }]);
+		// The final read finds a receipt from before expiry: that completes it, with its own end.
+		const timely = await scenario("liveness", { final: receipt({ endedAt: T0 + 1_499 }) });
+		expect(timely.sink.emits.map((emitted) => [emitted.occurredAt, emitted.data.outcome])).toEqual([[T0 + 1_499, "exited"]]);
+		const tooLate = await scenario("liveness", { final: receipt({ endedAt: T0 + 1_501 }) });
+		expect(tooLate.sink.emits).toEqual([]);
+		expect(tooLate.sink.reports).toEqual([{ status: "degraded", code: "process_watch_expired" }]);
+		// A slow read that crossed expiry with nothing in it gets a final read; one with a timely receipt needs none.
+		const slowRead = await scenario("read", {});
+		expect(slowRead.sink.emits).toEqual([]);
+		expect(slowRead.sink.reports).toEqual([{ status: "degraded", code: "process_watch_expired" }]);
+		expect(slowRead.provider.checks).toBe(0);
+		expect(slowRead.finalReads).toBe(1);
+		// The supervisor was found gone in time, but the read after it answered only after expiry: still expired, not unknown.
+		const slowReread = await scenario("reread", { liveness: "exited" });
+		expect(slowReread.sink.emits).toEqual([]);
+		expect(slowReread.sink.reports).toEqual([{ status: "degraded", code: "process_watch_expired" }]);
+		expect(slowReread.finalReads).toBe(1);
+		const slowReceipt = await scenario("read", { receipt: receipt({ endedAt: T0 + 1_000 }) });
+		expect(slowReceipt.sink.emits.map((emitted) => emitted.occurredAt)).toEqual([T0 + 1_000]);
+		expect(slowReceipt.finalReads).toBe(0);
+	});
+
+	it("gives up on a provider that doesn't answer, asks it nothing more meanwhile, and still expires", async () => {
+		const provider = new FakeProvider();
+		provider.set({ intent: intent(), receipt: null });
+		const clock = new FakeClock();
+		const sink = new Sink();
+		const adapter = new ProcessWatchAdapter({ provider, clock, checkMs: 1_000, ioTimeoutMs: 500 });
+		await adapter.start(adapterConfig(processSource({ expiresAt: T0 + 3_000 })), sink.emit, sink.health);
+		provider.holdReads.push(new Promise(() => {}));
+		await clock.advance(500);
+		expect(sink.reports).toEqual([{ status: "degraded", code: "process_read_failed" }]);
+		await clock.advance(2_500);
+		// The hung read is the only one ever asked.
+		expect(provider.reads).toBe(2);
+		expect(sink.emits).toEqual([]);
+		expect(sink.reports).toEqual([
+			{ status: "degraded", code: "process_read_failed" },
+			{ status: "degraded", code: "process_watch_expired" },
+		]);
+		await clock.advance(600_000);
+		expect(provider.reads).toBe(2);
+		expect(clock.pending).toBe(0);
+	});
+
+	it("reports nothing of an answer that comes after stop or abort", async () => {
+		for (const end of ["stop", "abort"] as const) {
+			const provider = new FakeProvider();
+			provider.set({ intent: intent(), receipt: null });
+			provider.liveness_ = "exited";
+			let open = () => {};
+			provider.holdChecks.push(new Promise<void>((resolve) => (open = resolve)));
+			const watch = await startWatch(provider);
+			await watch.clock.advance(0);
+			if (end === "stop") await watch.adapter.stop("not_desired");
+			else watch.abort.abort();
+			open();
+			await watch.clock.advance(600_000);
+			expect(watch.sink.emits).toEqual([]);
+			expect(watch.sink.reports).toEqual([]);
+			expect(provider.reads).toBe(2);
+			expect(watch.clock.pending).toBe(0);
+		}
 	});
 
 	it("expires without a completion, and takes only an end from before its expiry", async () => {
@@ -850,6 +1058,64 @@ describe.runIf(process.platform === "linux")("managed records on a real computer
 		expect(await exited).toBe(0);
 		const later = await watch(handle);
 		expect(later.sink.emits.map((emitted) => emitted.data)).toEqual([{ handle, outcome: "exited", exitCode: 0, signal: null }]);
+	});
+
+	it("reads only private records of this user's, through no link, and only a few KiB of each", async () => {
+		const probe = new LinuxProcessProbe();
+		const identity = (await probe.read(process.pid))?.identity as ProcessIdentity;
+		const handle = crypto.randomUUID();
+		await writeLaunchIntent(stateDir, { version: 1, handle, supervisor: identity, launchedAt: Date.now() });
+		await writeCompletionReceipt(stateDir, { version: 1, handle, supervisor: identity, exitCode: 0, signal: null, endedAt: Date.now() });
+		const folder = path.join(stateDir, handle);
+		const receiptFile = path.join(folder, "receipt.json");
+		expect((await readManagedRecord(stateDir, handle))?.receipt?.exitCode).toBe(0);
+		const refused = async (change: () => Promise<void>, undo: () => Promise<void>) => {
+			await change();
+			await expect(readManagedRecord(stateDir, handle)).rejects.toMatchObject({ code: "record_unsafe" });
+			await undo();
+			expect((await readManagedRecord(stateDir, handle))?.receipt?.exitCode).toBe(0);
+		};
+		for (const mode of [0o755, 0o750, 0o701]) await refused(() => fs.chmod(folder, mode), () => fs.chmod(folder, 0o700));
+		for (const mode of [0o644, 0o640, 0o604, 0o620]) await refused(() => fs.chmod(receiptFile, mode), () => fs.chmod(receiptFile, 0o600));
+		const kept = await fs.readFile(receiptFile);
+		const elsewhere = path.join(dir, "elsewhere.json");
+		await fs.writeFile(elsewhere, kept, { mode: 0o600 });
+		await refused(
+			async () => {
+				await fs.rm(receiptFile);
+				await fs.symlink(elsewhere, receiptFile);
+			},
+			async () => {
+				await fs.rm(receiptFile);
+				await fs.writeFile(receiptFile, kept, { mode: 0o600 });
+			},
+		);
+		await refused(
+			() => fs.writeFile(receiptFile, Buffer.alloc(4_097, 0x20), { mode: 0o600 }),
+			() => fs.writeFile(receiptFile, kept, { mode: 0o600 }),
+		);
+		await refused(
+			async () => {
+				await fs.rm(receiptFile);
+				await new Promise<void>((resolve, reject) => spawn("mkfifo", ["-m", "600", receiptFile]).once("exit", (code) => (code === 0 ? resolve() : reject(new Error("mkfifo")))));
+			},
+			async () => {
+				await fs.rm(receiptFile);
+				await fs.writeFile(receiptFile, kept, { mode: 0o600 });
+			},
+		);
+		// A handle's folder that is a link to one elsewhere is refused too.
+		const moved = path.join(dir, "moved");
+		await refused(
+			async () => {
+				await fs.rename(folder, moved);
+				await fs.symlink(moved, folder);
+			},
+			async () => {
+				await fs.rm(folder);
+				await fs.rename(moved, folder);
+			},
+		);
 	});
 
 	it("tells a reused process id and another boot from the supervisor, and writes each record once", async () => {

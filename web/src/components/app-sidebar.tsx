@@ -889,6 +889,34 @@ function SessionRow({
     );
   }
 
+  // The state sits on the icon's top right corner, opposite who started the chat. Working takes priority: one mark shows at a time.
+  const stateMark = session.busy ? (
+    <Loader2
+      className="size-2.5 animate-spin text-primary motion-reduce:animate-none"
+      role="img"
+      aria-label={t("working")}
+    />
+  ) : session.held ? (
+    <AlertCircle
+      className="size-2.5 text-destructive"
+      role="img"
+      aria-label={t("waitingToTryAgain")}
+    />
+  ) : awaitingApproval ? (
+    <AwaitingApprovalMark className="ml-0 size-2.5" />
+  ) : session.unread ? (
+    <span
+      className="size-1.5 rounded-full bg-link"
+      role="img"
+      aria-label={t("unreadResponse")}
+    />
+  ) : null;
+  const stateBadge = stateMark && (
+    <span className="-top-0.5 -right-1 absolute flex size-2.5 items-center justify-center">
+      {stateMark}
+    </span>
+  );
+
   return (
     <li className="group/row relative">
       <Link
@@ -913,10 +941,11 @@ function SessionRow({
         )}
         {session.visit ? (
           <span
-            className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-[10px] text-primary uppercase"
+            className="relative flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/10 font-medium text-[10px] text-primary uppercase"
             title={`@${session.visit.username}`}
           >
             {session.visit.username.slice(0, 1)}
+            {stateBadge}
           </span>
         ) : (
           chatAgents.length > 0 && (
@@ -961,6 +990,7 @@ function SessionRow({
                   +{chatAgents.length - 4}
                 </span>
               )}
+              {stateBadge}
             </span>
           )
         )}
@@ -980,31 +1010,6 @@ function SessionRow({
             </span>
           </span>
         </span>
-        {/* Working takes priority: one dot shows at a time. */}
-        {session.unread && !session.busy && (
-          <span
-            className="order-first size-1.5 shrink-0 rounded-full bg-link"
-            role="img"
-            aria-label={t("unreadResponse")}
-          />
-        )}
-        {session.busy && (
-          <Loader2
-            className="order-first size-3 shrink-0 animate-spin text-primary motion-reduce:animate-none"
-            role="img"
-            aria-label={t("working")}
-          />
-        )}
-        {session.held && (
-          <AlertCircle
-            className="order-first size-3 shrink-0 text-destructive"
-            role="img"
-            aria-label={t("waitingToTryAgain")}
-          />
-        )}
-        {awaitingApproval && (
-          <AwaitingApprovalMark className="order-first ml-0" />
-        )}
       </Link>
       {tasks && (
         <button

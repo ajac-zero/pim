@@ -1,4 +1,4 @@
-import type { Api, Model, Provider, StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, Provider, StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
@@ -329,8 +329,26 @@ function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>
 	return (model, context, options) => lazyStream(model, async () => {
 		const known = (await knownModels()).get(model.id);
 		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : model;
-		return stream(catalogued, context, options);
+		return stream(catalogued, context, withoutThinkingMidToolRound(context, options));
 	});
+}
+
+/**
+ * Claude refuses a request that has thinking on when the tool round it continues was started by an answer with no
+ * thinking of its own, which is what another provider's answer is once sent on: a chat that switches provider after
+ * a failed model, then Tries again, would stop with a 400. That one request goes without thinking instead.
+ */
+function withoutThinkingMidToolRound<T extends StreamOptions>(context: Context, options: T | undefined): T | undefined {
+	if (!options) return options;
+	const messages = context.messages.filter((message) => message.role === "toolResult" || (message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") || message.role === "user");
+	let last = messages.length - 1;
+	while (last >= 0 && messages[last]?.role === "toolResult") last--;
+	const starter = messages[last];
+	if (last === messages.length - 1 || starter?.role !== "assistant") return options;
+	const thinks = starter.content.some((block) => block.type === "thinking" && (block.redacted || !!block.thinkingSignature) && starter.api === "anthropic-messages");
+	if (thinks) return options;
+	const { reasoning: _reasoning, thinkingEnabled: _thinkingEnabled, ...rest } = options as T & { reasoning?: unknown; thinkingEnabled?: unknown };
+	return rest as T;
 }
 
 /**

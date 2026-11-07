@@ -720,5 +720,5 @@ To add tools every agent gets, apps, or widgets, write an extension and list it 
 - Computers that Pim starts for people who don't bring one.
 - Extensions beyond MCP: full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.
-- Triggers, which will replace schedules and watches. A review-only foundation, with a coordinator for time triggers that only tests construct, is in `src/triggers/`; nothing uses it yet ([triggers.md](triggers.md)).
+- Triggers, which will replace schedules and watches. A review-only foundation is in `src/triggers/`, with an engine for time triggers that Pim builds only in a space opted in where the deployment allows it, which none does; nothing people use reaches it yet ([triggers.md](triggers.md)).
 - Semantic recall. `recall` is a regular expression over the log, so it finds words, not meanings.

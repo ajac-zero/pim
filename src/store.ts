@@ -426,6 +426,16 @@ export class PimStore {
 			pim_artifact_data: "what apps keep",
 			pim_artifact_grants: "what apps may use",
 			pim_artifact_circles: "apps' circles",
+			// Made only where triggers are turned on (./triggers/engine.ts).
+			pim_triggers: "triggers",
+			pim_trigger_revisions: "trigger revisions",
+			pim_trigger_sources: "triggers' sources",
+			pim_trigger_inbox: "triggers' event ids",
+			pim_trigger_occurrences: "trigger history",
+			pim_trigger_outbox: "triggers' handoffs",
+			pim_trigger_tombstones: "deleted trigger ids",
+			pim_trigger_runs: "triggers' runs",
+			pim_trigger_host_operations: "triggers' chats and submissions",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(

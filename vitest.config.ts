@@ -22,6 +22,7 @@ export default defineConfig({
 						// A content origin, so public app links are on.
 						// Traces with their content, so the tests check what an operator who opts in would see.
 						// A local Chrome, which the tests' computers browse with (test/helpers.ts's `testBrowser`).
+						// Time triggers' engine allowed, for the spaces tests opt in.
 						miniflare: {
 							browserRendering: { binding: "BROWSER" },
 							bindings: {
@@ -51,6 +52,7 @@ export default defineConfig({
 								SPOTIFY_CLIENT_ID: "spotify-client",
 								SPOTIFY_CLIENT_SECRET: "spotify-secret",
 								OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "true",
+								PIM_TRIGGERS_ENGINE: "internal",
 							},
 						},
 					}),

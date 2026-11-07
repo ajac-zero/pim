@@ -1,10 +1,10 @@
 # Triggers
 
-> **Not active.** This is a review-only foundation. Nothing in Pim imports `src/triggers/`: no tool, route, prompt, UI, alarm, computer call or schedule uses it, and no space's database has its tables. The coordinator is built only by tests, with a fake host: there is no real host behind it yet, so nothing it does reaches a chat or an agent. Schedules (`schedule_task`), connector watches (`watch_connector_event`) and Pim's own alarms work exactly as before. Turning triggers on, and moving schedules and watches to them, are later changes.
+> **Not active.** This is a review-only foundation. Pim builds the engine for time triggers (the store, the coordinator and its real host, and a wake) only in a space opted in where the deployment allows it, and no deployment does: the gate is a variable no deployment sets, and only tests opt a space in (below). No tool, route, prompt, UI, setting or computer call reaches it, and no space's database has its tables unless it was opted in. Schedules (`schedule_task`), connector watches (`watch_connector_event`) and Pim's own alarms work exactly as before. Turning triggers on for people, and moving schedules and watches to them, are later changes.
 
 A trigger is work an agent does when something happens: at a time, on a connector's event, or when something it watches on the person's computer changes. Triggers are meant to replace schedules and watches with one thing people see and manage. Each space's Durable Object stays the authority for its triggers; the person's computer runs the observations (polls, streams, process exits, files), and Pim keeps the record and decides what is an occurrence.
 
-The code is in five modules, with tests in `test/triggers.test.ts`, `test/triggers-time.test.ts` and `test/triggers-coordinator.test.ts`:
+The code is in seven modules, with tests in `test/triggers.test.ts`, `test/triggers-time.test.ts`, `test/triggers-coordinator.test.ts` and, for Pim's engine and host, `test/triggers-host.test.ts`:
 
 | Module | What it is |
 | --- | --- |
@@ -13,6 +13,8 @@ The code is in five modules, with tests in `test/triggers.test.ts`, `test/trigge
 | [`src/triggers/store.ts`](../src/triggers/store.ts) | `TriggerStore`: the tables and the transactions that change them |
 | [`src/triggers/time.ts`](../src/triggers/time.ts) | When a time source fires: one pure computation for checking, previewing and selecting the due firing |
 | [`src/triggers/coordinator.ts`](../src/triggers/coordinator.ts) | `TriggerCoordinator`: admits due time firings and hands each to its agent through an injected host, one agent run per trigger at a time |
+| [`src/triggers/host.ts`](../src/triggers/host.ts) | `PimTriggerHost`: the host in Pim, which makes chats and submits through `submitTo`, keyed by operation |
+| [`src/triggers/engine.ts`](../src/triggers/engine.ts) | `TriggerEngine`: the three built together for one space, and the gate |
 
 ## What a trigger is
 
@@ -163,7 +165,7 @@ Each event the condition is true for is an occurrence; unknown or false ones are
 
 ## The store
 
-`new TriggerStore(sql, { transaction, now, authorize?, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, and `authorize` is the host's check of grants. Only the tests construct one; `PimStore` and the `Pim` constructor are unchanged.
+`new TriggerStore(sql, { transaction, now, authorize?, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, and `authorize` is the host's check of grants. Pim constructs one only in a space opted in (below), with no `authorize`, so no computer source can be enabled there.
 
 | Table | Holds |
 | --- | --- |
@@ -206,9 +208,9 @@ Inputs are bounded: event ids up to 256 characters, cursors up to 1 KB, payloads
 
 ## The coordinator
 
-`new TriggerCoordinator(sql, { store, host, transaction, now, ... })` admits time firings and hands them to the owning agent. It makes one table, `pim_trigger_runs` (`COORDINATOR_TABLES`), beside the store's in the same database, and reads the store's outbox and occurrences there to choose what to hand on. Only the tests construct one, with a fake clock and a fake host. **There is no real host yet**: the adapter over `submitTo` is the next reviewed integration, and until then nothing reaches a chat, an agent or the run limit.
+`new TriggerCoordinator(sql, { store, host, transaction, now, ... })` admits time firings and hands them to the owning agent. It makes one table, `pim_trigger_runs` (`COORDINATOR_TABLES`), beside the store's in the same database, and reads the store's outbox and occurrences there to choose what to hand on. The coordinator's own tests construct one with a fake clock and a fake host; Pim constructs one with its real host (below) only in a space opted in.
 
-`tick()` is one bounded pass, safe to run at any time, twice at once, or after a crash. It returns what it did and `nextWakeAt`, when the host's alarm should next fire (no alarm is registered here).
+`tick()` is one bounded pass, safe to run at any time, twice at once, or after a crash. It returns what it did and `nextWakeAt`, when the host's alarm should next fire (the coordinator registers none; Pim's engine keeps one wake, below).
 
 1. **Admit.** Up to `batch.admissions` (16) time triggers whose wake has come, earliest first: `admitDueTime` for each.
 2. **Tidy.** Occurrences the store lost track of (`outcome_unknown`, from leases run out or a deletion while claimed) with no run here are adopted as possibly submitted, so the host is asked about them. Runs that never submitted, whose occurrence was superseded, cancelled, failed or deleted, are closed. Ended runs whose occurrence the store's history let go are pruned with it.
@@ -277,20 +279,63 @@ The instruction is the pinned revision's. The **evidence** is fixed when the occ
 | An occurrence of another source | Never claimed; it stays pending |
 | A run waiting for approval | Holds its trigger's slot, but none of the space's compute |
 | A callback for an older receipt, or a run that ended | Changes nothing |
-| `lookupSubmission` keeps answering `unknown` | The run holds its trigger's slot, and is asked again every `retryMs`, for as long as it takes: conservative by design. Showing that it needs attention is integration's |
+| `lookupSubmission` or `lookupRun` keeps answering `unknown` | The run holds its trigger's slot, and is asked again every `retryMs` (a run, every `runCheckMs`), for as long as it takes: conservative by design, and never taken as an answer either way. After `UNKNOWN_ATTENTION` (3) such answers in a row, the trigger's health is `unknown` with a detail naming the operation it waits on; a known answer clears it (`healthy`). The run counts them (`unknownAnswers`) |
+| The host's receipt is longer than `MAX_RECEIPT_LENGTH` (256) | It is never cut short: the submission stays `submitting`, holding the slot, with the error recorded, and is looked up again; nothing is taken as accepted under a receipt the coordinator can't keep whole |
+
+## In Pim, behind a gate
+
+`TriggerEngine` (`src/triggers/engine.ts`) is the store, the coordinator and `PimTriggerHost` built together on one space's database. `Pim.triggerEngine()` builds it, and with it its tables, only when both hold:
+
+- **The deployment allows it**: `PIM_TRIGGERS_ENGINE` is `internal`. It is not in `wrangler.jsonc`, `wrangler.preview.jsonc` or the deployment settings, so no deployment, and not the preview, sets it; only the tests do (`vitest.config.ts`).
+- **The space was opted in**, by `Pim.enableTriggerEngine()`, which records it in the space's meta. Only tests call it: no route, tool, setting or Worker code does.
+
+Anywhere else `triggerEngine()` is null, and nothing of triggers exists: no `pim_trigger` table, no wake, and the wake's callback, if one were left, does nothing but clear itself.
+
+**The wake.** Where the engine is on, the space keeps one schedule, like Pim's own (`runTriggerTick`, `TRIGGER_TICK_CALLBACK`), at the coordinator's `nextWakeAt`, at least a second on, and none when it has nothing waiting. `runTriggerTick` ticks once, then sets the wake again; changes to the wake go one after another, so ticks that run together leave one. Starting the Durable Object sets it again, in case a tick was cut short. The schedules people make, the watches' renewals and Pim's other alarms are untouched, and `schedule_task`'s list doesn't show it. Pim's engine lets at most **2** runs of a space's triggers hold compute at once (`ENGINE_MAX_RUNNING`), below the coordinator's ceiling of 4.
+
+**What a space holds.** The engine's tables (`ENGINE_TABLES`) are in `PimStore.remainingData` while they hold rows, in the export (`triggers`: each trigger, deleted ones too, with its occurrences and its runs, each with the host's record of its chat and submission), and erasing the space removes them with everything else.
+
+### The host
+
+`PimTriggerHost` does what anything else that starts a run does, through `submitTo(chat, text, …, "pim")`: the run counts once against the run limit (a duplicate's reservation is given back), a suspended space refuses it, and every action of the run still goes through approvals as in any chat. A trigger's instruction is not an approval of anything.
+
+It keeps one record per operation (`pim_trigger_host_operations`, `HOST_TABLES`), and writes what it is about to do there **before** doing it:
+
+| Step | Recorded first | How a lookup knows |
+| --- | --- | --- |
+| A new chat (`createChat`) | The operation, then the chat's id as pi stages the commit that makes it | The chat is made in one pi commit with a document naming the operation (`TriggerChatDoc`). A recorded chat counts only once that document names the operation, so an id pi never wrote, or gave another chat after a crash, is forgotten, and the chat is made then. A chat pi wrote but whose making was cut short is tied to its agent and title when found |
+| A submission (`submit`) | Its key, which `submitTo` tells the host (`stable.keep`) before it submits | pi's own record of the key in that chat (`submissionByRequest`): there, it was accepted; not there, it wasn't, and it may be submitted again under exactly that key |
+| The receipt | When first known accepted | A digest of the chat and the key (`pim-trigger:` and 43 characters): the same for every answer about one submission, never cut short |
+
+**One key per operation.** On `main`, `submitTo` from `pim` into a finished task's chat rewrites the operation id to `wake:<id>`, depending on the task's state when it is called, so a retry after the task reopened would go in under another key. `submitTo` takes `stable` for this: its `keep` is told the key the input goes in under, after that decision and before anything is submitted, and with `exact` a retry uses the recorded key as it is, never rewritten. A recorded `wake:` key wakes the task if it is finished again; a key recorded unwoken never wakes it. Every other caller of `submitTo` passes no `stable` and works as before.
+
+**Lookups are authoritative or unknown.** While this instance is making the operation's chat or submitting it, questions about it are "not known", and a second submission is `uncertain`; a lookup that can't read pi's record is "not known". Absent means the key was never recorded or pi has no record of it.
+
+| Method | In Pim |
+| --- | --- |
+| `preflight` | The space is erased: refused. Suspended: refused, to try again. The agent was deleted: refused. An existing chat must be one of the space's own chats, there and not deleted (not a group chat's seat, an old task's conversation or a visit), and with the trigger's agent as Pim says (`ofSession`): refused otherwise, never another chat or agent |
+| `findChat`, `createChat` | Above. The person's limit on chats refuses a new one (`denied`) |
+| `lookupSubmission`, `submit` | Above. The run limit is `budget_blocked`, with nothing reserved or recorded; a suspended space is `suspended`; a deleted chat or agent is `failed`; a failure after the key was recorded is `uncertain` |
+| `lookupRun` | pi's record of the key: `queued`; `placed` is `running`, or `waiting_approval` while an approval filed in the chat since the key was recorded waits for its decision; `done` is `completed`; `unanswered` is `cancelled` when aborted, `failed` otherwise; no record, or another receipt, is `unknown` |
+
+**What the run reads**: `[Trigger "<label>" <id>] <instruction>`, then when it was due (the cron's time zone, if it has one) and how many earlier firings were missed. Nothing else: a time source observes nothing.
+
+**Stopping.** Pausing or deleting a trigger stops its next handoff, never a run already going: a run waiting for an approval keeps waiting for the person, and its approval is theirs to decide. Suspending the space aborts its runs, as it does every run, and defers handoffs until it is restored (or their `deliverBy`). A deleted chat or agent ends each later firing as `not_submitted` with `configuration_error`; nothing goes to the majordomo or another chat instead. Deleting a chat aborts its runs, as it always has.
+
+**Cross-agent triggers**: a trigger is handed on only to its owning agent. Who may make a trigger for another agent (the majordomo only, as with schedules) is for the tools that make triggers, a later step.
 
 ## Turning it on later
 
 What is left, roughly in order. Each step is its own change:
 
-1. **Construct the store and the coordinator in `Pim`.** Pass `ctx.storage.sql`, `transactionSync`, `Date.now`, and an `authorize` that looks the reference up among the space's approvals and checks it is current and was given for exactly this source. Add the tables in `TRIGGER_TABLES` and `COORDINATOR_TABLES` to `PimStore.remainingData`, and call both `eraseAll`s when the space is erased. Run `tick` from the Durable Object's alarm, alongside the alarms Pim keeps already, and set the alarm to its `nextWakeAt`.
-2. **A real host.** `submit` over `submitTo(chat, message, { operationId }, "pim")`, which already reserves the run once per operation and gives a duplicate's back; `lookupSubmission` over the harness's `submissionByRequest`; `createChat` and `findChat` keyed by the operation, as `#scheduledChat` keys a firing; `lookupRun` and `runStatusChanged` from the run's status, with waiting for an approval as its own status; `preflight` that refuses, rather than replaces, a deleted agent or chat (today's schedules fall back to the chat's agent; triggers must not). How a time firing reads in the chat, and the notification, are this step's. On `main` since this foundation's base, `submitTo` from `pim` into a finished task's chat rewrites the operation id to `wake:<id>`, depending on the task's state at that moment, so a retry after the task reopened would go in under another key; the real host must keep one key per operation (and look it up in the form it was submitted under) before it can claim the idempotency this contract needs.
+1. **Done behind the gate: the engine in `Pim`, and its wake** (below). Still to do before any space is opted in for real: an `authorize` that looks a reference up among the space's approvals and checks it is current and was given for exactly this source (none is passed, so no computer source can be enabled), and the decision to set the gate in a deployment.
+2. **Done behind the gate: the real host** (below). Left for this step: a notification when a trigger starts a chat, and a bridge that tells the coordinator when a run ends (`runStatusChanged`) rather than its asking every `runCheckMs`.
 3. **Tools, routes and UI for time triggers**: showing `previewFirings`, skipped times included, when one is made, and the refusals when it is saved.
 4. **Connector events.** Route webhook deliveries, verified as `app-events.ts` verifies them, to `admit` with the event's id, and a written contract for what of an event a run may see before the coordinator hands event occurrences on. Subscriptions stay with the connector code.
 5. **Computer observers.** Messages over pim-computer's connection, carrying the generation they were started for. Health comes from the connection (`waiting_computer`, `reconnecting`), and `recordGap` from reconnects.
 6. **Moving schedules and watches**, behind a migration that keeps their behavior.
 
-Not done here: a real host, the alarm, any observer, tool, route or UI, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers. The coordinator hands on time firings only; it doesn't cancel or stop a run (deleting or pausing a trigger doesn't stop one already going), and a chat it made for an operation that was never submitted is left for the host to clean up.
+Not done here: setting the gate in any deployment, any observer, tool, route or UI, a notification for a trigger's chat, a run-status bridge, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers. The coordinator hands on time firings only; it doesn't cancel or stop a run (deleting or pausing a trigger doesn't stop one already going), and a chat it made for an operation that was never submitted is left for the host to clean up.
 
 These are conditions for later tranches to meet before they are accepted, not work done here:
 
@@ -299,6 +344,5 @@ These are conditions for later tranches to meet before they are accepted, not wo
 - A deleted trigger's history is collected 30 days after its deletion.
 - A written contract for source context: what of an event or observation a run may see, and how it reaches the run without the store keeping it. Until then, the coordinator hands on nothing but time firings.
 - A trigger whose source changed from events to time, with an event occurrence still pending ahead of its time firings, is blocked behind it: the coordinator never hands the event on, and the store hands on in order. Today its health is only what the change left (`unknown`); it must say so explicitly, as a configuration status, before such a change is offered.
-- The real host meets the contract above: an idempotent submission per operation, one reservation per operation, a chat keyed by operation, and run status from the run, never from the submission.
 - With raw samples off, nothing observed reaches a chat, a diagnostic or a dedup record.
 - Consent for a recurring script says truthfully that it runs as the person's own OS user, with that user's access.

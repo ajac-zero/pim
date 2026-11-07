@@ -867,16 +867,94 @@ describe("trigger store", () => {
 			expect(store.admitTimeFiring({ id: "remind", generation: 2, scheduledFor: START + MINUTE })).toEqual({ status: "not_enabled" });
 			expect(store.claim({ leaseMs: MINUTE })?.occurrence.key).toBe(`time:${START + MINUTE}`);
 
-			created(store, { ...base, source: { kind: "time", schedule: "once", at: START } }, "enabled", "late");
-			clock.now = START + 61 * MINUTE;
-			expect(store.admitTimeFiring({ id: "late", generation: 1, scheduledFor: START })).toMatchObject({ status: "accepted", occurrence: { status: "missed" } });
+			// A one-time trigger whose time has passed is refused when it is saved, not left to wait for nothing.
+			expect(() => store.create({ spec: { ...base, source: { kind: "time", schedule: "once", at: START } }, lifecycle: "enabled" })).toThrow(TriggerValidationError);
+			created(store, { ...base, source: { kind: "time", schedule: "once", at: START + 3 * MINUTE } }, "enabled", "late");
+			created(store, { ...base, source: { kind: "time", schedule: "interval", everyMs: 10 * MINUTE, anchorAt: START } }, "enabled", "every");
+			clock.now = START + 64 * MINUTE;
+			expect(store.admitTimeFiring({ id: "late", generation: 1, scheduledFor: START + 3 * MINUTE })).toMatchObject({ status: "accepted", occurrence: { status: "missed" } });
 			expect(store.outbox("late")).toEqual([]);
 
-			created(store, { ...base, source: { kind: "time", schedule: "interval", everyMs: 10 * MINUTE, anchorAt: START } }, "enabled", "every");
 			expect(store.admitTimeFiring({ id: "every", generation: 1, scheduledFor: START + 5 * MINUTE })).toEqual({ status: "schedule_mismatch" });
 			expect(store.admitTimeFiring({ id: "every", generation: 1, scheduledFor: START + 60 * MINUTE })).toMatchObject({ status: "accepted", occurrence: { status: "pending" } });
 			expect(store.admitTimeFiring({ id: "every", generation: 1, scheduledFor: START + 60 * MINUTE })).toEqual({ status: "duplicate" });
 			expect(store.admitTimeFiring({ id: "every", generation: 1, scheduledFor: START + 50 * MINUTE })).toEqual({ status: "out_of_order" });
+		});
+	});
+
+	it("admits only the instants a schedule names, and none from before its current enabling", async () => {
+		await withStore(({ store, clock, make }) => {
+			// 09:00 in New York on weekdays; START is a Friday, 03:00 there.
+			created(store, { ...base, source: { kind: "time", schedule: "cron", expression: "0 9 * * 1-5", timeZone: "America/New_York" } }, "enabled", "cron");
+			expect(store.sourceState("cron")).toMatchObject({ activeSince: START, nextWakeAt: START });
+			clock.now = START + 7 * HOUR;
+			// 09:00 UTC and 09:01 New York are not firings; 09:00 New York (14:00 UTC) is.
+			expect(store.admitTimeFiring({ id: "cron", generation: 1, scheduledFor: START + HOUR })).toEqual({ status: "schedule_mismatch" });
+			expect(store.admitTimeFiring({ id: "cron", generation: 1, scheduledFor: START + 6 * HOUR + MINUTE })).toEqual({ status: "schedule_mismatch" });
+			expect(store.admitTimeFiring({ id: "cron", generation: 1, scheduledFor: START + 6 * HOUR })).toMatchObject({ status: "accepted", occurrence: { status: "pending" } });
+			// Thursday's 09:00 came before it was enabled.
+			created(store, { ...base, source: { kind: "time", schedule: "cron", expression: "0 9 * * 1-5", timeZone: "America/New_York" } }, "enabled", "late");
+			expect(store.admitTimeFiring({ id: "late", generation: 1, scheduledFor: START - 18 * HOUR })).toEqual({ status: "before_enabled" });
+
+			// The boundary is durable: another store on the database, as after a restart, reads the same one.
+			expect(make().sourceState("late")?.activeSince).toBe(START + 7 * HOUR);
+			// A new label keeps it; pausing clears it and the wake; enabling again, or a new source while enabled, starts it afresh.
+			clock.now = START + 8 * HOUR;
+			const spec = store.get("late")!.spec;
+			store.update({ id: "late", expectedRevision: 1, spec: { ...spec, label: "Later" } });
+			expect(store.sourceState("late")).toMatchObject({ activeSince: START + 7 * HOUR, nextWakeAt: START + 7 * HOUR });
+			store.setLifecycle({ id: "late", to: "paused" });
+			expect(store.sourceState("late")).toMatchObject({ activeSince: null, nextWakeAt: null });
+			clock.now = START + 9 * HOUR;
+			store.setLifecycle({ id: "late", to: "enabled", expectedRevision: 2 });
+			expect(store.sourceState("late")).toMatchObject({ activeSince: START + 9 * HOUR, nextWakeAt: START + 9 * HOUR });
+			clock.now = START + 10 * HOUR;
+			store.update({ id: "late", expectedRevision: 2, spec: { ...spec, label: "Later", source: { kind: "time", schedule: "cron", expression: "0 10 * * 1-5", timeZone: "America/New_York" } } });
+			expect(store.sourceState("late")).toMatchObject({ activeSince: START + 10 * HOUR, nextWakeAt: START + 10 * HOUR, lastObservedAt: null });
+			// A source that would never fire again is refused, and the trigger is left as it was: from 2033, the next 29th of February on a Sunday is in 2060, past the horizon.
+			clock.now = Date.parse("2033-01-01T00:00:00Z");
+			expect(() => store.update({ id: "late", expectedRevision: 3, spec: { ...spec, source: { kind: "time", schedule: "cron", expression: "0 0 29 2 */7", timeZone: "UTC" } } })).toThrow(TriggerValidationError);
+			expect(store.get("late")?.revision).toBe(3);
+		});
+	});
+
+	it("admits a time trigger's latest due firing once, with a count of the older ones, and sets its next wake", async () => {
+		await withStore(({ store, clock }) => {
+			created(store, { ...base, source: { kind: "time", schedule: "interval", everyMs: 10 * MINUTE, anchorAt: START + 10 * MINUTE } }, "enabled", "every");
+			// Down for five firings: the latest runs, 5 minutes late; four are counted, not listed or run.
+			clock.now = START + 55 * MINUTE;
+			const tick = store.admitDueTime({ id: "every", generation: 1 });
+			expect(tick).toMatchObject({ status: "admitted", older: { count: 4, first: START + 10 * MINUTE, last: START + 40 * MINUTE, complete: true }, nextWakeAt: START + 60 * MINUTE, limit: null });
+			expect(store.occurrences("every")).toMatchObject([{ key: `time:${START + 50 * MINUTE}`, evidence: { reason: "time", scheduledFor: START + 50 * MINUTE, older: { count: 4 } } }]);
+			expect(store.admitDueTime({ id: "every", generation: 1 })).toMatchObject({ status: "idle", occurrence: null, nextWakeAt: START + 60 * MINUTE });
+			expect(store.dueTimeTriggers({ now: clock.now, limit: 10 })).toEqual([]);
+			expect(store.dueTimeTriggers({ now: START + 60 * MINUTE, limit: 10 })).toEqual([{ id: "every", generation: 1, nextWakeAt: START + 60 * MINUTE }]);
+			// Measured when it is admitted: an hour late, inclusive, still runs; a millisecond more is missed.
+			clock.now = START + 60 * MINUTE + HOUR;
+			expect(store.admitDueTime({ id: "every", generation: 1 })).toMatchObject({ status: "admitted", occurrence: { dueAt: START + 120 * MINUTE }, older: { count: 6 } });
+			expect(store.outbox("every").map((item) => item.status)).toEqual(["superseded", "pending"]);
+			expect(store.admitDueTime({ id: "every", generation: 2 })).toEqual({ status: "stale_generation" });
+
+			// Every two hours, down from 3:00 to 7:00 and a millisecond: 6:00 is past its hour, and recorded as missed; it supersedes nothing.
+			clock.now = START + 2 * HOUR;
+			created(store, { ...base, source: { kind: "time", schedule: "interval", everyMs: 2 * HOUR, anchorAt: START + 2 * HOUR } }, "enabled", "rare");
+			expect(store.admitDueTime({ id: "rare", generation: 1 })).toMatchObject({ status: "admitted", occurrence: { dueAt: START + 2 * HOUR } });
+			clock.now = START + 7 * HOUR + 1;
+			expect(store.admitDueTime({ id: "rare", generation: 1 })).toMatchObject({ status: "missed", occurrence: { status: "missed", dueAt: START + 6 * HOUR }, older: { count: 1, first: START + 4 * HOUR } });
+			expect(store.outbox("rare").map((item) => item.status)).toEqual(["pending"]);
+		});
+	});
+
+	it("claims only the named trigger's next item when asked to", async () => {
+		await withStore(({ store }) => {
+			created(store, eventSpec(), "enabled", "flights");
+			created(store, eventSpec(), "enabled", "trains");
+			store.admit({ id: "flights", generation: 1, eventId: "a", observedAt: START, payload: {} });
+			store.admit({ id: "trains", generation: 1, eventId: "b", observedAt: START, payload: {} });
+			expect(store.claim({ leaseMs: MINUTE, triggerId: "trains" })?.item.triggerId).toBe("trains");
+			expect(store.claim({ leaseMs: MINUTE, triggerId: "trains" })).toBeUndefined();
+			expect(store.claim({ leaseMs: MINUTE, triggerId: "nobody" })).toBeUndefined();
+			expect(store.claim({ leaseMs: MINUTE })?.item.triggerId).toBe("flights");
 		});
 	});
 });

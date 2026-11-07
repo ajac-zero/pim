@@ -2,7 +2,7 @@
 
 > **Not active.** This is a review-only foundation. Nothing in Pim imports `src/triggers/`: no tool, route, prompt, UI, computer call or schedule uses it, and no space's database has its tables. Schedules (`schedule_task`) and connector watches (`watch_connector_event`) work exactly as before. Turning triggers on, and moving schedules and watches to them, are later changes.
 
-A trigger is work an agent does when something happens: at a time, on a connector's event, or when something it watches on the person's computer changes. Triggers are meant to replace schedules and watches with one thing people see and manage. Each space's Durable Object stays the authority for its triggers; the person's computer runs the observations (polls, streams, processes, files), and Pim keeps the record and decides what is an occurrence.
+A trigger is work an agent does when something happens: at a time, on a connector's event, or when something it watches on the person's computer changes. Triggers are meant to replace schedules and watches with one thing people see and manage. Each space's Durable Object stays the authority for its triggers; the person's computer runs the observations (polls, streams, process exits, files), and Pim keeps the record and decides what is an occurrence.
 
 The code is in three modules, with tests in `test/triggers.test.ts`:
 
@@ -22,14 +22,14 @@ A trigger has an opaque `id`, and a **spec** that is kept as immutable numbered 
 - `source`: what it watches (below).
 - `condition`: optional for events, required for states, refused for time.
 - `destination`: `{ "type": "existing_chat", "chatId" }` or `{ "type": "new_chat" }` (a new chat with the owning agent each time). Continuing one trigger conversation is the intended default: integration makes that chat once and names it here.
-- `delivery`: `rawSamples` and `maxPendingEvents` (below).
-- `authorizationRef`: the approval or grant that lets the source run, such as an approval's id, or null.
+- `delivery`: `maxPendingEvents` (below), and `rawSamples`, which must be false: keeping what a source observed isn't supported yet.
+- `authorizationRef`: the grant that lets a computer source run, such as an approval's id, or null. The store never takes it on trust (below).
 
 Beside the spec, and not part of any revision:
 
-- **Lifecycle**, what the person wants: `draft`, `enabled`, `paused`, `ended`, or `deleted` (a tombstone).
+- **Lifecycle**, what the person wants: `draft`, `enabled`, `paused`, `ended`, or `deleted` (stopped for good, with its record kept).
 - **Health**, how the source is doing: `unknown`, `healthy`, `waiting_computer`, `reconnecting`, `gap`, `auth_required`, `budget_blocked` or `configuration_error`. Health never changes the lifecycle.
-- **Generation**, which run of the source's observers is current.
+- **Generation**, which run of the source's observers is current. It goes up with every lifecycle change and every change of source or condition.
 - Each **occurrence**'s own state, and its delivery's (below).
 
 **The space is never a field.** A trigger belongs to the space whose Durable Object stores it. Nothing in a spec, an event or an observation names an owner, so nothing an event carries can move a trigger to another space.
@@ -46,10 +46,12 @@ Reading a spec refuses unknown fields, unknown source kinds and operators, forms
 | `connector_event` | `connectorId`, `event`, `arguments` (JSON, up to 4 KB) | filter |
 | `poll` | `command`, `cwd`, `intervalMs` (1 min to 1 day, default 5 min), `deadlineMs` (1 to 30 s, default 30 s) | edge |
 | `stream` | `command`, `cwd`: each line it prints is an event | filter |
-| `process` | `name` (not a path), `intervalMs` (as a poll's): observes `{ running, count }` | edge |
+| `process` | `handle`, `expiresAt` (ms, at most 7 days ahead): the exit of one process instance, `{ exitCode, signal }` | filter |
 | `file` | `path` (absolute), `events` (`created`, `modified`, `deleted`), `recursive` | filter |
 
-**Computer sources are not sandboxed.** `poll`, `stream`, `process` and `file` run on the person's computer as the user who runs pim-computer, with that user's access, not inside `/workspace`. A trigger with one of them can be enabled only with an `authorizationRef`. When its source changes, the old reference no longer counts: the update must carry a new one, or none, and with none the trigger can't be enabled.
+**Computer sources are not sandboxed.** `poll`, `stream`, `process` and `file` run on the person's computer as the user who runs pim-computer, with that user's access, not inside `/workspace`. **A reference is not a grant.** The store asks the host's `authorize` check, which it is given, whether `authorizationRef` names a real grant, still current, for exactly this source. With no check configured it denies every computer source, and a non-null reference alone never enables one. The check runs when such a trigger is created enabled, enabled again, or changed while enabled. When its source changes in any way, including its interval, the old reference no longer counts: the update must carry a new one, or none, and with none the trigger can't be enabled. A connector's events and time sources don't run on the computer and aren't checked.
+
+**A process is one instance.** A `process` source names the `handle` pim-computer gave a process it started, and fires on that process's exit. It takes one event, then the trigger ends. It is watched until `expiresAt` at the latest, which must be in the future and no more than 7 days ahead when the source is set; after that, its exit is refused (`expired`). Matching processes by name is not supported, because a name can't tell one run from the next. The other computer sources have no expiry in this version: they run until paused, ended or deleted, and the spec refuses an `expiresAt` for them.
 
 **Cron** takes `*`, numbers, ranges `a-b`, steps `/n` and lists. Names (`MON`), `?`, `L`, `W`, `#`, a seconds field and macros such as `@daily` are refused, as is an expression that names no day that exists, such as `0 0 31 2 *`. Time zones are IANA names or `UTC`; offsets such as `+01:00` are refused, because they ignore daylight saving time.
 
@@ -63,8 +65,9 @@ These are decided now, so integration doesn't have to guess. The store enforces 
 - **Migrated schedules** keep their cron in `UTC`, unchanged.
 - **Polls** run every 5 minutes by default, at most once a minute, and each poll has 30 seconds.
 - A state goes **stale** after two intervals unless the condition sets `staleAfterMs`.
-- **Delivery**: one run at a time per trigger. A state, or a time trigger, holds one pending snapshot. Events queue, up to 20 by default (`maxPendingEvents`, up to 100).
-- **Raw samples** are off: an occurrence of a state keeps only the fields its condition read, and when.
+- **Handing on**: one attempt at a time per trigger. A state, or a time trigger, holds one pending snapshot. Events queue, up to 20 by default (`maxPendingEvents`, up to 100).
+- **Raw samples** are off, and turning them on is refused until it is built. An occurrence keeps why it fired, its truth, when, and which fields the condition read were present, never their values or an event's body.
+- **Replay**: event ids are remembered for 7 days, the shortest the store accepts.
 - **Moving schedules and watches** to triggers is deferred. Their data and behavior stay as they are.
 
 ## Conditions
@@ -93,7 +96,7 @@ Every expression is `true`, `false` or `unknown`.
 - `all` is false if any operand is false, otherwise unknown if any is unknown. `any` is true if any operand is true, otherwise unknown if any is unknown.
 - Every operand is evaluated, with no short-circuiting, so each stateful operator sees every observation.
 
-### Edge conditions (polls and processes)
+### Edge conditions (polls)
 
 A state becomes an occurrence when the condition is true right after a known false, with nothing unknown between them. The condition's state says where it stands:
 
@@ -124,41 +127,54 @@ A false result always sets `armed`, and a true result always sets `waiting_for_f
 
 **Freshness and gaps are explicit.** An observation older than `staleAfterMs` when it is taken in is not evidence. It isn't evaluated, its result is unknown, and it breaks continuity. A **gap** is a break too. It comes from an observation flagged `gap`, from `recordGap` (such as while the computer was away), or from a stale observation.
 
+**Pausing and editing are breaks.** Every new generation starts the condition over, as a gap does: pausing and enabling again, ending, and changing the source or the condition. So a trigger enabled again fires only on a true after a known false it sees from then on, and `stable_for` counts again from then.
+
+**`changed` keeps a digest, not the value.** What it remembers is a SHA-256 digest of the last value's type and value, so the stored state holds nothing observed. A value with few possibilities, such as a status of "up" or "down", can still be guessed from its digest by trying each.
+
 **Only observations change the condition's state.** A run the person starts by hand isn't built yet. When it is, it must make an occurrence without evaluating the condition or touching its state: it neither arms the condition, nor disarms it, nor restarts a duration.
 
-### Filter conditions (events)
+### Filter conditions (events and process exits)
 
 Each event the condition is true for is an occurrence; unknown or false ones are not. Stateful operators and `staleAfterMs` are refused, because an event is never a baseline and never stale. Without a condition, every event is an occurrence.
 
 ## The store
 
-`new TriggerStore(sql, { transaction, now, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, and `now` is the clock. Only the tests construct one; `PimStore` and the `Pim` constructor are unchanged.
+`new TriggerStore(sql, { transaction, now, authorize?, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, and `authorize` is the host's check of grants. Only the tests construct one; `PimStore` and the `Pim` constructor are unchanged.
 
 | Table | Holds |
 | --- | --- |
-| `pim_triggers` | Current revision, lifecycle, health, generation |
+| `pim_triggers` | Current revision, lifecycle, health, generation. A deleted trigger keeps its row, as `deleted` |
 | `pim_trigger_revisions` | Each revision's spec. A SQLite trigger refuses any update |
 | `pim_trigger_sources` | The source's revision, checkpoint (`position`, `cursor`), last observation time, pending gap, condition state |
-| `pim_trigger_inbox` | Each event taken in, unique by (source identity, event id), with what came of it but not its data |
-| `pim_trigger_occurrences` | Occurrences, unique by (trigger, occurrence key). A SQLite trigger keeps each one's revision and evidence fixed |
-| `pim_trigger_outbox` | One delivery per occurrence (unique), with a stable unique `operationId` |
-| `pim_trigger_tombstones` | Deleted triggers' ids |
+| `pim_trigger_inbox` | Each event id taken in within the replay horizon, unique by (source identity, event id), with what came of it but not its data |
+| `pim_trigger_occurrences` | Occurrences, unique by (trigger, occurrence key), with their evidence. A SQLite trigger keeps each one's revision and evidence fixed |
+| `pim_trigger_outbox` | One item per occurrence (unique), with a stable unique `operationId` |
+| `pim_trigger_tombstones` | When each trigger was deleted |
 
 Every method that writes does all its writes in one transaction. A refusal writes nothing, so the source may send the same thing again.
 
-- **Revisions** (`create`, `update`). `update` takes `expectedRevision` and is refused on a mismatch (compare-and-swap). The same spec again changes nothing. A new source starts a new generation and a new source identity, and clears the checkpoint and condition state. A new condition alone clears only the condition state. An ended trigger can't be edited.
-- **Lifecycle** (`setLifecycle`, `remove`). Draft or paused to enabled; enabled to paused; anything but ended to ended. Every change starts a new generation. **Enabling must name the revision it means**; pausing, ending and deleting are always safe and may leave it out. A paused trigger keeps its undelivered occurrences until it is enabled again. An ended one still delivers what it already took in. `remove` deletes everything the trigger recorded and leaves a tombstone, so its id is never reused, and anything sent for it later is refused.
-- **Admission** (`admit`, `admitTimeFiring`). An observer passes the generation it was started for. Both methods first check, in order, that the trigger isn't deleted (`deleted`), exists (`not_found`), is at that generation (`stale_generation`), is enabled (`not_enabled`), and has the right kind of source (`wrong_source`). An event id already taken in is a `duplicate`. Then, in one transaction, the store writes the inbox entry, advances the checkpoint, updates the condition state, and writes the occurrence with its outbox item when the condition fires.
-  - The **source identity** is the trigger's id and the revision its source was set in (`<id>#<revision>`). An event id is taken once per identity, and a new source may reuse old ids.
+- **Revisions** (`create`, `update`). `update` takes `expectedRevision` and is refused on a mismatch (compare-and-swap). The same spec again changes nothing. A new source or a new condition starts a new generation, so an observation made under the old ones is refused (`stale_generation`) rather than judged by the new condition, and the condition starts over. A new source also gets a new source identity and no checkpoint. A new label, instruction, destination or delivery is only a new revision. An ended trigger can't be edited.
+- **Lifecycle** (`setLifecycle`). Draft or paused to enabled; enabled to paused; anything but ended to ended. Every change starts a new generation, and a break (above). **Enabling must name the revision it means**, and checks a computer source's grant again; pausing and ending are always safe and may leave it out. A paused trigger keeps its undelivered occurrences until it is enabled again. An ended one still hands on what it already took in.
+- **Deleting** (`remove`). The trigger stops for good: a new generation, its undelivered occurrences and any attempt under way are `cancelled`, an attempt under way can no longer settle, nothing more is claimed, and its id and anything its observers send are refused. **What it did is kept:** its row (as `deleted`), its revisions, its occurrences with their evidence, and its outbox items with how each ended. Its source state and inbox, which only served taking in events, go. **`eraseAll`** is separate: it removes every trigger of the space and everything they recorded, tombstones included, for erasing the space.
+- **Admission** (`admit`, `admitTimeFiring`). An observer passes the generation it was started for. Both methods first check, in order, that the trigger exists (`not_found`), isn't deleted (`deleted`), is at that generation (`stale_generation`), is enabled (`not_enabled`), and has the right kind of source (`wrong_source`). Then, in one transaction, the store writes the inbox entry, advances the checkpoint, updates the condition state, and writes the occurrence with its outbox item when the condition fires.
+  - The **source identity** is the trigger's id and the revision its source was set in (`<id>#<revision>`). An event id is taken once per identity (`duplicate`), and a new source may reuse old ids. Occurrence keys carry the identity too: `event:<identity>:<eventId>`, and `time:<scheduledFor>`.
+  - **Replay horizon.** Event ids, filtered ones included, are remembered for the horizon (7 days by default, and no less), plus 5 minutes for clocks ahead. An event or observation from before the horizon is refused (`too_old`), because whether it was taken in before can no longer be told. So `observedAt` must be the event's own time, the same on every delivery of it. Within the horizon a trigger remembers at most `inboxCap` ids (20,000 by default, room for a poll a minute twice over); past that, admissions are refused (`inbox_full`) until old ids expire, and no id within the horizon is forgotten to make room.
   - The **checkpoint** moves only to a higher `position`.
   - A state **no newer** than the last observation is refused (`out_of_order`). Events are taken in any order.
-  - **Events are bounded, not merged.** Past `maxPendingEvents` undelivered occurrences, an event is refused (`backpressure`) and its source retries; no event is dropped or coalesced silently. A new snapshot of a state, or a time firing, supersedes an older undelivered one, which is marked `superseded`. A delivery already under way is left to finish.
-  - Occurrence keys are `event:<eventId>` and `time:<scheduledFor>`. A one-time firing must be at `at`, and an interval firing on its grid, or it is refused (`schedule_mismatch`). A firing before its time is `not_due`.
-- **Delivery** (`claim`, `complete`, `fail`). `claim` leases the next delivery: the oldest undelivered item of an enabled or ended trigger, when no older item of that trigger is waiting. So each trigger has **one run at a time, in order**. Each claim is a new attempt with the **same operation id**, and an expired lease is claimed again. `complete` and `fail` take the attempt and do nothing if a later claim, or a deletion, superseded it. `fail` retries from `retryAt`, up to 5 attempts.
+  - **Events are bounded, not merged.** Past `maxPendingEvents` undelivered occurrences, an event is refused (`backpressure`) and its source retries; no event is dropped or coalesced silently. A new snapshot of a state, or a time firing, supersedes an older undelivered one, which is marked `superseded`. An attempt already under way is left to finish.
+  - A process's exit ends its trigger, and one after `expiresAt` is refused (`expired`).
+  - A one-time firing must be at `at`, and an interval firing on its grid, or it is refused (`schedule_mismatch`). A firing before its time is `not_due`.
+- **Handing on** (`claim`, `complete`, `fail`, `reconcile`). `claim` leases the next attempt: at the oldest unsettled item of an enabled or ended trigger, when no older item of that trigger is unsettled. So each trigger has **one attempt at a time**, in order. That is not one run at a time: once a submission is accepted, the run it starts may still be going when the next occurrence is handed on, and keeping runs apart is the job of the coordinator that will call the store. Each claim is a new attempt with the **same operation id**.
+  - `complete` means the submission was accepted, not that the agent's run finished or succeeded.
+  - `fail` means the attempt is known not to have handed the occurrence on. It retries from `retryAt`, and fails for good after 5 attempts or with no `retryAt`.
+  - `complete` and `fail` take the attempt, and do nothing once a later claim or a deletion has superseded it.
+  - A lease that runs out says nothing of whether the submission happened, so the item is claimed again. After 5 attempts it isn't claimed again: its outcome is `outcome_unknown`, the next item goes on, and `reconcile` settles it as delivered or failed once the deliverer has found out, such as from the operation id's record.
 - **Revision snapshots.** An occurrence records the revision it happened under, and `claim` returns the spec of that revision, so an edit after the event doesn't change what the run is told.
-- **Retention.** Each trigger keeps its newest 1,000 inbox entries and 200 finished occurrences. An event id older than that could be taken again.
+- **History.** Within the horizon every occurrence is kept. Of settled occurrences from before it, each trigger keeps its newest 200 (`retention.occurrences`). Unsettled ones, `outcome_unknown` included, are always kept.
 
-**No exactly-once outside.** The store's guarantees are about this database. A deliverer that passes `operationId` to `submitTo` (which takes an operation id) makes a retried delivery one run. Anything outside Pim (a connector, a command on the computer) may still see a request twice.
+**No exactly-once outside.** The store's guarantees are about this database. A deliverer that passes `operationId` to `submitTo` (which takes an operation id) makes a retried submission one run. Anything outside Pim (a connector, a command on the computer) may still see a request twice.
+
+**Nothing observed is kept.** Inbox entries keep an event's id and what came of it, occurrences keep the evidence above, and condition state keeps digests, flags and times. The errors and health details a deliverer or observer records (`fail`, `setHealth`) are theirs to keep free of what was observed.
 
 Inputs are bounded: event ids up to 256 characters, cursors up to 1 KB, payloads up to 16 KB and 8 levels as JSON, observation times no more than 5 minutes ahead of the clock, leases up to 1 hour, errors up to 1,000 characters.
 
@@ -166,12 +182,19 @@ Inputs are bounded: event ids up to 256 characters, cursors up to 1 KB, payloads
 
 What is left, roughly in order. Each step is its own change:
 
-1. **Construct the store in `Pim`.** Pass `ctx.storage.sql`, `transactionSync` and `Date.now`. Add the tables in `TRIGGER_TABLES` to `PimStore.remainingData` and to erasing a space.
-2. **A deliverer.** On the Durable Object's alarm, `claim` deliveries. Hand each one to `submitTo(chat, message, { operationId: item.operationId }, "pim")`, starting a chat for `new_chat` destinations as `runScheduledTask` does, then `complete` or `fail`. A `429` from the run limit maps to `budget_blocked` health. Use the spec returned with the claim, not the current one.
+1. **Construct the store in `Pim`.** Pass `ctx.storage.sql`, `transactionSync`, `Date.now`, and an `authorize` that looks the reference up among the space's approvals and checks it is current and was given for exactly this source. Add the tables in `TRIGGER_TABLES` to `PimStore.remainingData`, and call `eraseAll` when the space is erased.
+2. **A deliverer and a run coordinator.** On the Durable Object's alarm, `claim` attempts. Hand each one to `submitTo(chat, message, { operationId: item.operationId }, "pim")`, starting a chat for `new_chat` destinations as `runScheduledTask` does, then `complete`, `fail`, or later `reconcile`. A `429` from the run limit maps to `budget_blocked` health. Use the spec returned with the claim, not the current one. Keeping one run per trigger at a time, and the event content a run needs without the store keeping it, are this step's to decide.
 3. **A scheduler for time sources.** Compute due instants (cron in its time zone, with the DST rule above), call `admitTimeFiring`, and set the next alarm.
 4. **Connector events.** Route webhook deliveries, verified as `app-events.ts` verifies them, to `admit` with the event's id. Subscriptions stay with the connector code.
 5. **Computer observers.** Messages over pim-computer's connection, carrying the generation they were started for. Health comes from the connection (`waiting_computer`, `reconnecting`), and `recordGap` from reconnects.
 6. **Tools, routes and UI**, with approvals filling `authorizationRef` for computer sources.
 7. **Moving schedules and watches**, behind a migration that keeps their behavior.
 
-Not done here: the scheduler and cron evaluation, checking that a cron firing falls on its expression, any observer, delivery, tool, route or UI, the migration, and quotas across a space's triggers.
+Not done here: the scheduler and cron evaluation, checking that a cron firing falls on its expression, any observer, deliverer, coordinator, tool, route or UI, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers.
+
+These are conditions for later tranches to meet before they are accepted, not work done here:
+
+- One computation of DST-adjusted times, shared by what previews a schedule and what dispatches it.
+- A firing is admitted up to and including its due time plus 1 hour, and retries don't move that deadline.
+- With raw samples off, nothing observed reaches a chat, a diagnostic or a dedup record.
+- Consent for a recurring script says truthfully that it runs as the person's own OS user, with that user's access.

@@ -51,7 +51,8 @@ export const TRIGGER_LIMITS = {
 	instructionLength: 10_000,
 	commandLength: 4_000,
 	nameLength: 128,
-	processNameLength: 256,
+	/** The longest a process watch may run: a process's exit is watched for at most this long. */
+	maxProcessWatchMs: 7 * 24 * 60 * 60_000,
 	cronLength: 128,
 	timeZoneLength: 64,
 	authorizationRefLength: 256,
@@ -82,8 +83,14 @@ export type ConnectorEventSource = { readonly kind: "connector_event"; readonly 
 export type PollSource = { readonly kind: "poll"; readonly command: string; readonly cwd: string | null; readonly intervalMs: number; readonly deadlineMs: number };
 /** A shell command on the person's computer that keeps running; each line it prints, as a JSON object, is an event. */
 export type StreamSource = { readonly kind: "stream"; readonly command: string; readonly cwd: string | null };
-/** Whether processes named `name` run on the person's computer, checked every `intervalMs`: `{ running, count }`. */
-export type ProcessSource = { readonly kind: "process"; readonly name: string; readonly intervalMs: number };
+/**
+ * The exit of one process instance on the person's computer, named by the
+ * `handle` pim-computer gave it when it started the process: one event,
+ * `{ exitCode, signal }`, after which the trigger ends. Watched until
+ * `expiresAt` at the latest. Matching processes by name, which can't tell
+ * one run from the next, is not supported.
+ */
+export type ProcessSource = { readonly kind: "process"; readonly handle: string; readonly expiresAt: number };
 export const FILE_EVENTS = ["created", "modified", "deleted"] as const;
 /** Changes to a file, or a folder's files, on the person's computer. */
 export type FileSource = { readonly kind: "file"; readonly path: string; readonly events: readonly (typeof FILE_EVENTS)[number][]; readonly recursive: boolean };
@@ -96,8 +103,12 @@ export type SourceKind = TriggerSource["kind"];
 export type TriggerDestination = { readonly type: "existing_chat"; readonly chatId: string } | { readonly type: "new_chat" };
 
 export type DeliveryPolicy = {
-	/** Keep the whole observation with an occurrence, not only the fields the condition read. Sources that report a state only. */
-	readonly rawSamples: boolean;
+	/**
+	 * Keeping what was observed with an occurrence. Not supported yet, so
+	 * always false: an occurrence keeps why it fired, when, and which fields
+	 * the condition found, never their values or an event's body.
+	 */
+	readonly rawSamples: false;
 	/** For sources of events: how many undelivered occurrences it holds. Null for the rest, which hold one pending snapshot. */
 	readonly maxPendingEvents: number | null;
 };
@@ -116,8 +127,9 @@ export type TriggerSpec = {
 	readonly delivery: DeliveryPolicy;
 	/**
 	 * The approval or grant that lets this source run, such as an approval's
-	 * id. Sources that run on the person's computer need one to be enabled,
-	 * and a new one when their source changes.
+	 * id. Sources that run on the person's computer need one, which the
+	 * host's check accepts (./store.ts), to be enabled, and a new one when
+	 * their source changes. The reference alone proves nothing.
 	 */
 	readonly authorizationRef: string | null;
 };
@@ -130,7 +142,7 @@ export function runsOnComputer(source: TriggerSource): boolean {
 /** How the source's observations become occurrences; null for time, which takes no condition. */
 export function conditionMode(source: TriggerSource): ConditionMode | null {
 	if (source.kind === "time") return null;
-	return source.kind === "poll" || source.kind === "process" ? "edge" : "filter";
+	return source.kind === "poll" ? "edge" : "filter";
 }
 
 /** Reads a spec, filling in the defaults; throws a `TriggerValidationError` naming the first field that is wrong. */
@@ -144,7 +156,7 @@ export function parseTriggerSpec(value: unknown): TriggerSpec {
 		if (mode === null) throw new TriggerValidationError("spec.condition", "a time source takes no condition");
 		condition = parseCondition(given.condition, mode, "spec.condition");
 		// A state checked every interval goes stale after two of them unless the spec says otherwise.
-		if (mode === "edge" && condition.staleAfterMs === null && (source.kind === "poll" || source.kind === "process")) {
+		if (mode === "edge" && condition.staleAfterMs === null && source.kind === "poll") {
 			condition = { ...condition, staleAfterMs: 2 * source.intervalMs };
 		}
 	}
@@ -167,7 +179,7 @@ export function parseTriggerSpec(value: unknown): TriggerSpec {
 
 function parseSource(value: unknown): TriggerSource {
 	const path = "spec.source";
-	const kind = oneOf((record(value, path, ["kind", "schedule", "at", "maxLatenessMs", "expression", "timeZone", "catchUpMs", "everyMs", "anchorAt", "connectorId", "event", "arguments", "command", "cwd", "intervalMs", "deadlineMs", "name", "path", "events", "recursive"]) as { kind?: unknown }).kind, `${path}.kind`, SOURCE_KINDS);
+	const kind = oneOf((record(value, path, ["kind", "schedule", "at", "maxLatenessMs", "expression", "timeZone", "catchUpMs", "everyMs", "anchorAt", "connectorId", "event", "arguments", "command", "cwd", "intervalMs", "deadlineMs", "handle", "expiresAt", "path", "events", "recursive"]) as { kind?: unknown }).kind, `${path}.kind`, SOURCE_KINDS);
 	const at = (field: string) => `${path}.${field}`;
 	switch (kind) {
 		case "time": {
@@ -216,11 +228,12 @@ function parseSource(value: unknown): TriggerSource {
 			return { kind, command: text(given.command, at("command"), TRIGGER_LIMITS.commandLength, { multiline: true }), cwd: optionalPath(given.cwd, at("cwd")) };
 		}
 		case "process": {
-			const given = record(value, path, ["kind", "name", "intervalMs"]);
-			const name = text(given.name, at("name"), TRIGGER_LIMITS.processNameLength);
-			if (name.includes("/")) throw new TriggerValidationError(at("name"), "is a process name, not a path");
-			const intervalMs = given.intervalMs === undefined ? TRIGGER_DEFAULTS.pollIntervalMs : integer(given.intervalMs, at("intervalMs"), TRIGGER_DEFAULTS.pollMinIntervalMs, TRIGGER_DEFAULTS.pollMaxIntervalMs);
-			return { kind, name, intervalMs };
+			const given = record(value, path, ["kind", "handle", "expiresAt"]);
+			return {
+				kind,
+				handle: opaqueId(given.handle, at("handle")),
+				expiresAt: integer(given.expiresAt, at("expiresAt"), TRIGGER_LIMITS.earliestAt, TRIGGER_LIMITS.latestAt),
+			};
 		}
 		case "file": {
 			const given = record(value, path, ["kind", "path", "events", "recursive"]);
@@ -251,8 +264,10 @@ function parseDestination(value: unknown): TriggerDestination {
 function parseDelivery(value: unknown, mode: ConditionMode | null): DeliveryPolicy {
 	const path = "spec.delivery";
 	const given = value === undefined ? {} : record(value, path, ["rawSamples", "maxPendingEvents"]);
-	const rawSamples = given.rawSamples === undefined ? false : flag(given.rawSamples, `${path}.rawSamples`);
-	if (rawSamples && mode !== "edge") throw new TriggerValidationError(`${path}.rawSamples`, "applies only to sources that report a state; an event is always kept whole");
+	if (given.rawSamples !== undefined && flag(given.rawSamples, `${path}.rawSamples`)) {
+		throw new TriggerValidationError(`${path}.rawSamples`, "keeping what was observed is not supported yet");
+	}
+	const rawSamples = false;
 	if (mode !== "filter") {
 		if (given.maxPendingEvents !== undefined) throw new TriggerValidationError(`${path}.maxPendingEvents`, "applies only to sources of events; the rest hold one pending snapshot");
 		return { rawSamples, maxPendingEvents: null };

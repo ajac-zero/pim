@@ -166,7 +166,7 @@ Each event the condition is true for is an occurrence; unknown or false ones are
 
 ## The store
 
-`new TriggerStore(sql, { transaction, now, authorize?, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, and `authorize` is the host's check of grants. Pim constructs one only in a space opted in (below), with no `authorize`, so no computer source can be enabled there.
+`new TriggerStore(sql, { transaction, now, authorize?, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, and `authorize` is the host's check of grants. Pim constructs one only in a space opted in (below), with no `authorize` unless computer triggers' own gate is on (below), so no computer source can be enabled there.
 
 | Table | Holds |
 | --- | --- |
@@ -300,6 +300,8 @@ Anywhere else `triggerEngine()` is null. Nothing is built, admitted or handed on
 
 **What a space holds.** The engine's tables (`ENGINE_TABLES`) are in `PimStore.remainingData` while they hold rows, and in the export as `triggers`: every row of each of them that exists, as stored (`triggerHistory`), read without building the engine or making a table, whether triggers are on or not. The subscription manager's table, which nothing in Pim makes yet, is there too when it exists, without its callback keys and secrets. Erasing the space removes them with everything else.
 
+**Computer sources, behind a second gate.** `src/triggers/computer.ts` is the space's side of `triggers.v1`, which pim-computer's triggers runtime speaks over the computer's connection: it checks the runtime against the stored token's digest, keeps its epoch and desired revision with the runtime durably, reconciles the enabled computer triggers that have a current grant with a lease it renews, takes observations in with `admit` and gaps with `recordGap`, acknowledging each only once its transaction has returned, and reads everything else the runtime says as health. Grants (`ComputerGrants`) are records made only from an approval the person themselves gave for exactly one source of one trigger on one computer, and checked again at every reconcile and admission, so a revoked grant stops admission at once. `Pim` builds it only when `PIM_TRIGGERS_COMPUTER` is `internal`, which nothing sets, in a space whose engine is on, and only then gives the engine's store an `authorize`. Its tables (`COMPUTER_TABLES`) are in the export and `remainingData` when they exist. The details, and what is not wired (nothing files the approvals, records grants or refreshes the computer when a trigger changes; nothing hands a computer occurrence on; the connection's state is in memory), are in [triggers-runtime.md](triggers-runtime.md), "In Pim, behind its gate".
+
 **Tables made before.** The coordinator adds a column it needs to a `pim_trigger_runs` made by an earlier version (`unknown_answers`, at 0), once, keeping every run as it was. Nothing else is migrated: schedules and watches stay as they are.
 
 ### The host
@@ -430,18 +432,18 @@ A pause, an edit of the source or condition, or a deletion all start a new gener
 
 What is left, roughly in order. Each step is its own change:
 
-1. **Done behind the gate: the engine in `Pim`, and its wake** (below). Still to do before any space is opted in for real: an `authorize` that looks a reference up among the space's approvals and checks it is current and was given for exactly this source (none is passed, so no computer source can be enabled), and the decision to set the gate in a deployment.
+1. **Done behind the gate: the engine in `Pim`, and its wake** (below). An `authorize` that looks a reference up among the space's grants, made only from the person's own approvals of exactly that source, is done behind computer triggers' own gate (above); without it none is passed, so no computer source can be enabled. Still to do: the decision to set either gate in a deployment.
 2. **Done behind the gate: the real host** (below). Left for this step: a notification when a trigger starts a chat, and a bridge that tells the coordinator when a run ends (`runStatusChanged`) rather than its asking every `runCheckMs`.
 3. **Tools, routes and UI for time triggers**: showing `previewFirings`, skipped times included, when one is made, and the refusals when it is saved.
 4. **Connector events.** Done, unwired: the ingress adapter, the renewal contract, the subscription manager that records bindings, intents and grants (above), and handing events on through the coordinator with `connectorEvents`. Left: a real provider over the MCP bridge, a route, a wake for the manager, a cursor kept with a gap, and turning the manager and `connectorEvents` on in Pim's engine.
-5. **Computer observers.** Messages over pim-computer's connection, carrying the generation they were started for. Health comes from the connection (`waiting_computer`, `reconnecting`), and `recordGap` from reconnects.
+5. **Computer observers.** Done behind two gates, unwired: pim-computer's runtime and observers (triggers-runtime.md) and the space's side (above), with health from the connection (`waiting_computer`, `reconnecting`) and `recordGap` from the runtime's gaps. Left: approvals that grant a source and the tool or UI that asks for them, refreshing the computer when a trigger or grant changes, handing computer occurrences on with a contract for what of an observation a run sees, and keeping the connection's state across the Durable Object's eviction.
 6. **Moving schedules and watches**, behind a migration that keeps their behavior.
 
 Not done here: setting the gate in any deployment, any observer, tool, route or UI, a notification for a trigger's chat, a run-status bridge, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers. The coordinator hands on time firings, and connector events only when made with `connectorEvents`, which nothing in Pim does; it doesn't cancel or stop a run (deleting or pausing a trigger doesn't stop one already going), and a chat it made for an operation that was never submitted is left for the host to clean up.
 
 These are conditions for later tranches to meet before they are accepted, not work done here:
 
-- A grant is checked again before ongoing execution and admission, so a revoked grant stops a computer source that is already running, not only its next enabling.
+- A grant is checked again before ongoing execution and admission, so a revoked grant stops a computer source that is already running, not only its next enabling. Met behind computer triggers' gate: every reconcile and admission checks it; a revoked grant's observations are refused at once and its observer stops at the next reconcile.
 - Expiry moves a trigger on: a process watch past `expiresAt` ends its trigger, rather than only refusing its exit.
 - A deleted trigger's history is collected 30 days after its deletion.
 - A written contract for source context: what of an event or observation a run may see, and how it reaches the run without the store keeping it. For connector events it is written (the event's name, id, time and which fields were there; never what it carried; see "Handing events on"). For observations on the computer, there is none yet, and the coordinator hands none on.

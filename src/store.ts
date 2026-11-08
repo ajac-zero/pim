@@ -437,6 +437,8 @@ export class PimStore {
 			pim_trigger_runs: "triggers' runs",
 			pim_trigger_host_operations: "triggers' chats and submissions",
 			pim_trigger_subscriptions: "triggers' connector subscriptions",
+			pim_trigger_computer_runtimes: "triggers' sessions with the computer",
+			pim_trigger_computer_grants: "triggers' grants on the computer",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(

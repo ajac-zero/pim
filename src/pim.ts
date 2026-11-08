@@ -193,6 +193,7 @@ import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, c
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
+import { ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
 import { TriggerChatDoc, type TriggerSpace } from "./triggers/host";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
@@ -2014,8 +2015,44 @@ export class Pim extends DurableAgent<Env> {
 			transaction: (work) => this.ctx.storage.transactionSync(work),
 			now: () => this.triggerClock(),
 			space: this.#triggerSpace(),
+			// Computer sources' grants are checked only where computer triggers are on, which no deployment is.
+			...(computerTriggersAllowed(this.env) ? { authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())) } : {}),
 		});
 		return this.#triggerEngine;
+	}
+
+	#computerGrantsKept: ComputerGrants | undefined;
+	#computerTriggersKept: ComputerTriggers | undefined;
+
+	/** The grants of computer sources, only where computer triggers are on. */
+	#computerGrants(): ComputerGrants {
+		this.#computerGrantsKept ??= new ComputerGrants(this.ctx.storage.sql, { approval: (id) => this.store.approval(id), space: this.name, now: () => this.triggerClock() });
+		return this.#computerGrantsKept;
+	}
+
+	/**
+	 * Triggers on the person's computer (./triggers/computer.ts), when the
+	 * deployment's gate for them (`PIM_TRIGGERS_COMPUTER`), which nothing
+	 * sets, is `internal` and the space's trigger engine is on; null
+	 * otherwise, and then nothing of them exists.
+	 */
+	#computerTriggers(): ComputerTriggers | null {
+		if (!computerTriggersAllowed(this.env)) return null;
+		const engine = this.triggerEngine();
+		if (!engine) return null;
+		this.#computerTriggersKept ??= new ComputerTriggers(this.ctx.storage.sql, {
+			store: engine.store,
+			grants: this.#computerGrants(),
+			transaction: (work) => this.ctx.storage.transactionSync(work),
+			now: () => this.triggerClock(),
+			space: this.name,
+			tokenDigest: () => this.computer.tokenDigest(),
+			setTimer: (ms, run) => {
+				const timer = setTimeout(run, ms);
+				return () => clearTimeout(timer);
+			},
+		});
+		return this.#computerTriggersKept;
 	}
 
 	/** Internal: opts this space in to time triggers, where the deployment allows it; false where it doesn't. */
@@ -2035,6 +2072,8 @@ export class Pim extends DurableAgent<Env> {
 	async disableTriggerEngine(): Promise<void> {
 		this.store.deleteMeta(ENGINE_KEY);
 		this.#triggerEngine = undefined;
+		this.#computerTriggersKept?.stop();
+		this.#computerTriggersKept = undefined;
 		await this.wakeTriggers();
 	}
 
@@ -7064,7 +7103,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onMessage(connection: Connection<SocketState>, raw: WSMessage): Promise<void> {
-		if (this.#isComputer(connection)) return this.#computerSaid(raw);
+		if (this.#isComputer(connection)) return this.#computerSaid(raw, connection);
 		if (typeof raw !== "string") return;
 		if (this.#isScreenViewer(connection)) {
 			if (raw.startsWith(SCREEN_PING)) return this.#screenPing(connection, raw);
@@ -7103,7 +7142,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onClose(connection: Connection): Promise<void> {
-		if (this.#isComputer(connection)) return this.#computerDisconnected();
+		if (this.#isComputer(connection)) return this.#computerDisconnected(connection);
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
 		this.#watchRequests.delete(connection.id);
@@ -7111,7 +7150,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onError(connection: Connection): Promise<void> {
-		if (this.#isComputer(connection)) return this.#computerDisconnected();
+		if (this.#isComputer(connection)) return this.#computerDisconnected(connection);
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
 		this.#watchRequests.delete(connection.id);
@@ -7125,7 +7164,15 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** A message from the computer: what it is, when it has just connected, an answer, or what a stream of its desktop says. */
-	#computerSaid(raw: string | ArrayBuffer | ArrayBufferView): void {
+	#computerSaid(raw: string | ArrayBuffer | ArrayBufferView, connection: Connection): void {
+		// Triggers' frames, where computer triggers are on, before anything else reads the message; elsewhere they go on as before, to be ignored.
+		if (typeof raw === "string" && raw.startsWith(TRIGGERS_ENVELOPE)) {
+			const triggers = this.#computerTriggers();
+			if (triggers) {
+				triggers.receive(connection, raw);
+				return;
+			}
+		}
 		const message = typeof raw === "string" || raw instanceof ArrayBuffer ? raw : (raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer);
 		const hello = typeof message === "string" && message.startsWith('{"type":"hello"');
 		const desktop = hello && this.computer.desktop();
@@ -7154,7 +7201,8 @@ export class Pim extends DurableAgent<Env> {
 		});
 	}
 
-	#computerDisconnected(): void {
+	#computerDisconnected(connection: Connection): void {
+		this.#computerTriggersKept?.closed(connection);
 		this.computer.disconnected();
 		this.#closeScreens();
 		this.broadcastMessage({ type: "computer" });

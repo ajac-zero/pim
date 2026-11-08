@@ -226,6 +226,11 @@ export class Computer {
 		this.#failPending();
 	}
 
+	/** The digest of the paired computer's token, as kept; null with none paired. Triggers on the computer name its runtime by it. */
+	tokenDigest(): string | null {
+		return this.#meta.meta(TOKEN_KEY) ?? null;
+	}
+
 	async checkToken(token: string | null): Promise<boolean> {
 		const known = this.#meta.meta(TOKEN_KEY);
 		return token !== null && known !== undefined && (await digestHex(token)) === known;

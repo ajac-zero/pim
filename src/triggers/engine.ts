@@ -9,6 +9,7 @@
  * export holds either way (`triggerHistory`).
  */
 
+import { API_TABLES } from "./api";
 import { COMPUTER_TABLES } from "./computer";
 import { COORDINATOR_TABLES, TriggerCoordinator } from "./coordinator";
 import { HOST_TABLES, PimTriggerHost, type TriggerSpace } from "./host";
@@ -61,7 +62,8 @@ export type TriggerEngineOptions = {
  * without their callback key or secret, and so are computer triggers' epochs
  * and grants (./computer.ts), which only a gate nothing sets makes, and
  * the records of schedules and watches moved to shadow triggers
- * (./migration.ts), which hold no secret. Read only: it makes no table, and
+ * (./migration.ts), which hold no secret, and the API's creation keys
+ * (./api.ts), which are digests. Read only: it makes no table, and
  * builds nothing. Null when the space has none of the tables.
  */
 export function triggerHistory(sql: SqlStorage): Record<string, Record<string, SqlStorageValue>[]> | null {
@@ -71,7 +73,7 @@ export function triggerHistory(sql: SqlStorage): Record<string, Record<string, S
 			.toArray()
 			.map((row) => String(row.name)),
 	);
-	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES, ...COMPUTER_TABLES, ...MIGRATION_TABLES].filter((table) => existing.has(table));
+	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES, ...COMPUTER_TABLES, ...MIGRATION_TABLES, ...API_TABLES].filter((table) => existing.has(table));
 	if (tables.length === 0) return null;
 	return Object.fromEntries(
 		tables.map((table) => {

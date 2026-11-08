@@ -440,6 +440,7 @@ export class PimStore {
 			pim_trigger_computer_runtimes: "triggers' sessions with the computer",
 			pim_trigger_computer_grants: "triggers' grants on the computer",
 			pim_trigger_migrations: "schedules and watches moved to triggers",
+			pim_trigger_api_creations: "triggers' creation keys",
 			pi_entries: "conversations",
 		};
 		const existing = new Set(

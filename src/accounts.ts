@@ -139,7 +139,8 @@ async function botCopy(env: Env, bot: Bot) {
 /**
  * What a guest may call in their own space: chatting with their bot, and
  * what chatting needs, such as approvals, apps, files and the bot's
- * connectors. Not agents, models, sharing, publishing, memory or a computer.
+ * connectors. Not agents, models, sharing, publishing, memory, a computer
+ * or triggers (`/triggers`, `/trigger-runs`), which a guest's space never has.
  */
 const GUEST_ROUTES: readonly (readonly [methods: string, path: RegExp])[] = [
 	["GET", /^\/(|usage|bot|majordomo|model|profile|extensions|app-directory|browser|ws)$/],

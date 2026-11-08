@@ -193,11 +193,13 @@ import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, c
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
-import { ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
+import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAnswer, TriggerApi, TriggerApiError, triggerBody } from "./triggers/api";
+import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
 import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
 import { type ApplyOutcome, type LegacySchedule, type MigrationPlan, migrationAllowed, migrationRecords, planMigration, type RollbackOutcome, TriggerMigration } from "./triggers/migration";
 import { TriggerChatDoc, type TriggerSpace } from "./triggers/host";
+import { TRIGGERS_EXTENSION, triggersExtension } from "./triggers/tools";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
@@ -815,6 +817,7 @@ export class Pim extends DurableAgent<Env> {
 			);
 			this.registry.install(approvalsExtension(services, this.#offeredActions()));
 			this.#installComputerGrants(services);
+			this.#installTriggerTools();
 			this.registry.install(webExtension);
 			this.registry.install(
 				artifactsExtension({
@@ -1193,11 +1196,12 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Extensions only some conversations select: connectors, by the agents that list
-	 * them; reviews', by the majordomo's reviews; and the computer triggers' grant
-	 * tool, by chats while computer triggers are on.
+	 * them; reviews', by the majordomo's reviews; the computer triggers' grant
+	 * tool, by chats while computer triggers are on; and triggers' tools, by
+	 * chats while the space's triggers are on.
 	 */
 	#perPim(name: string): boolean {
-		return name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION || name === COMPUTER_GRANT_EXTENSION;
+		return name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION || name === COMPUTER_GRANT_EXTENSION || name === TRIGGERS_EXTENSION;
 	}
 
 	/** pi's run policy, shared by every session. */
@@ -2106,6 +2110,8 @@ export class Pim extends DurableAgent<Env> {
 		this.#assertOpen();
 		if (!engineAllowed(this.env)) return false;
 		this.store.setMeta(ENGINE_KEY, "on");
+		// Once pi's registry is set up; before, setting it up installs them.
+		if (this.registry.snapshot().extension("pim.approvals")) this.#installTriggerTools();
 		await this.wakeTriggers();
 		return true;
 	}
@@ -2120,6 +2126,7 @@ export class Pim extends DurableAgent<Env> {
 		this.#triggerEngine = undefined;
 		this.#computerTriggersKept?.stop();
 		this.#computerTriggersKept = undefined;
+		this.#installTriggerTools();
 		await this.wakeTriggers();
 	}
 
@@ -2182,6 +2189,137 @@ export class Pim extends DurableAgent<Env> {
 		if (!engine || migrationRecords(this.ctx.storage.sql).length === 0) return null;
 		return this.#triggerMigration(engine).rollback();
 	}
+
+	#triggerApiKept: TriggerApi | undefined;
+
+	/**
+	 * Triggers' API (./triggers/api.ts), where the space's triggers are on and
+	 * it isn't a guest's space; null otherwise, and then no route or tool of
+	 * it exists.
+	 */
+	#triggerApi(): TriggerApi | null {
+		const engine = this.triggerEngine();
+		if (!engine || this.guestBot()) return null;
+		if (this.#triggerApiKept?.engine !== engine) {
+			this.#triggerApiKept = new TriggerApi(this.ctx.storage.sql, {
+				engine,
+				transaction: (work) => this.ctx.storage.transactionSync(work),
+				now: () => this.triggerClock(),
+				host: {
+					agentExists: (id) => this.agents.get(id) !== undefined,
+					majordomoId: () => this.agents.majordomo().id,
+					chatAgent: (chat) => this.agents.findOfSession(chat)?.id ?? null,
+					chatOpen: (chat) => this.#triggerSpace().chatOpen(chat),
+					publicChat: (chat) => this.store.publicId(chat),
+					chatOf: (id) => this.store.sessionOf(id) ?? null,
+					connectors: (agentId) => {
+						const servers = this.apps.servers();
+						const agent = agentId === null ? undefined : this.agents.get(agentId);
+						const offered = agentId === null ? servers : agent ? this.#appsOf(agent).flatMap((app) => serverFor(servers, app) ?? []) : [];
+						return offered.map((server) => ({ connectorId: server.id, name: server.name, events: this.catalog.events(server.id).map((event) => event.name) }));
+					},
+					computer: () => ({ triggers: computerTriggersAllowed(this.env), paired: this.computer.paired() }),
+					grant: (trigger) => {
+						if (!computerTriggersAllowed(this.env)) return "unavailable";
+						const ref = trigger.spec.authorizationRef;
+						if (ref !== null && this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest()))({ triggerId: trigger.id, spec: trigger.spec, authorizationRef: ref, now: this.triggerClock() }).ok) return "current";
+						const asked = this.store.approvals("pending").some((approval) => approval.action === COMPUTER_GRANT_ACTION && (approval.args as { triggerId?: unknown }).triggerId === trigger.id);
+						return asked ? "pending_approval" : ref === null ? "missing" : "not_current";
+					},
+				},
+			});
+		}
+		return this.#triggerApiKept;
+	}
+
+	/** Agents' tools for triggers, installed only while the API exists; chats select them (`#selectAbilities`). */
+	#installTriggerTools(): void {
+		if (this.#triggerApi()) this.registry.install(triggersExtension({ api: () => this.#triggerApi(), roleOf: (session) => this.#roleOf(session) }));
+		else if (this.registry.snapshot().extension(TRIGGERS_EXTENSION)) this.registry.uninstall({ name: TRIGGERS_EXTENSION });
+	}
+
+	/** Answers a triggers' route: the API's value, or its refusal with its code; nothing else of an error. */
+	async #triggersAnswer(work: (api: TriggerApi) => Promise<TriggerAnswer> | TriggerAnswer): Promise<Response> {
+		const api = this.#triggerApi();
+		if (!api) return Response.json({ error: "Not found" }, { status: 404 });
+		const headers: Record<string, string> = { "cache-control": "no-store" };
+		try {
+			const { status = 200, body, revision } = await work(api);
+			if (revision !== undefined) headers.etag = `"${revision}"`;
+			return Response.json(body, { status, headers });
+		} catch (error) {
+			if (error instanceof TriggerApiError) return Response.json(error.body(), { status: error.status, headers });
+			console.error("a triggers request failed", error instanceof Error ? error.name : typeof error);
+			return Response.json({ error: "Something went wrong", code: "internal" }, { status: 500, headers });
+		}
+	}
+
+	/** Triggers' HTTP API (docs/triggers.md, "The API"), as the person: reached only where `#triggerApi` exists. */
+	readonly #triggerRoutes: readonly Route[] = [
+		["GET", "/triggers", (_params, _request, url) => this.#triggersAnswer((api) => ({ body: api.list(PERSON, queryOf(url, ["lifecycle", "agentId", "sourceKind", "cursor", "limit"])) }))],
+		[
+			"POST",
+			"/triggers",
+			(_params, request) =>
+				this.#triggersAnswer(async (api) => {
+					const key = idempotencyKey(request);
+					const made = await api.create(PERSON, await triggerBody(request), key);
+					return { status: made.replayed ? 200 : 201, body: made.trigger, revision: made.trigger.revision };
+				}),
+		],
+		[
+			"GET",
+			"/triggers/:id",
+			({ id }) =>
+				this.#triggersAnswer((api) => {
+					const trigger = api.get(PERSON, id);
+					return { body: trigger, revision: trigger.revision };
+				}),
+		],
+		[
+			"PATCH",
+			"/triggers/:id",
+			({ id }, request) =>
+				this.#triggersAnswer(async (api) => {
+					const expected = ifMatch(request);
+					const trigger = await api.update(PERSON, id, expected, await triggerBody(request));
+					return { body: trigger, revision: trigger.revision };
+				}),
+		],
+		["DELETE", "/triggers/:id", ({ id }, request) => this.#triggersAnswer((api) => ({ body: api.remove(PERSON, id, ifMatch(request)) }))],
+		[
+			"POST",
+			"/triggers/:id/pause",
+			({ id }, request) =>
+				this.#triggersAnswer((api) => {
+					const trigger = api.pause(PERSON, id, ifMatch(request));
+					return { body: trigger, revision: trigger.revision };
+				}),
+		],
+		[
+			"POST",
+			"/triggers/:id/resume",
+			({ id }, request) =>
+				this.#triggersAnswer((api) => {
+					const trigger = api.resume(PERSON, id, ifMatch(request));
+					return { body: trigger, revision: trigger.revision };
+				}),
+		],
+		[
+			"POST",
+			"/triggers/:id/test",
+			({ id }, request) =>
+				this.#triggersAnswer(async (api) => {
+					const given = await triggerBody(request);
+					if (typeof given === "object" && given !== null && ("id" in given || "trigger" in given)) {
+						throw new TriggerApiError(400, "invalid_request", "request: the trigger is the one in the path", { field: "request" });
+					}
+					return { body: await api.test(PERSON, typeof given === "object" && given !== null && !Array.isArray(given) ? { ...given, id } : given) };
+				}),
+		],
+		["GET", "/triggers/:id/runs", ({ id }, _request, url) => this.#triggersAnswer((api) => ({ body: api.runs(PERSON, id, queryOf(url, ["cursor", "limit"])) }))],
+		["GET", "/trigger-runs/:run", ({ run }) => this.#triggersAnswer((api) => ({ body: api.run(PERSON, run) }))],
+	];
 
 	/** The triggers' clock. */
 	protected triggerClock(): number {
@@ -3865,15 +4003,20 @@ export class Pim extends DurableAgent<Env> {
 		const agent = this.agents.ofSession(session);
 		// Connectors last: their tools come and go, and pi only appends cheaply at the end.
 		const grants = this.registry.snapshot().extension(COMPUTER_GRANT_EXTENSION) ? [COMPUTER_GRANT_EXTENSION] : [];
-		const wanted = [...this.#appExtensionsOf(agent), ...grants];
+		// Triggers' tools last of all, only while the space's triggers are on: elsewhere the selection is as it was without them.
+		const triggers = this.registry.snapshot().extension(TRIGGERS_EXTENSION) && this.#triggerApi() ? [TRIGGERS_EXTENSION] : [];
+		const wanted = [...this.#appExtensionsOf(agent), ...grants, ...triggers];
 		const off = [...this.#switchedOff(agent)];
 		const key = [...wanted, ...off.map((name) => `-${name}`)].join(" ");
 		if ((this.agents.abilities(session) ?? "") === key) return;
 		const snapshot = this.registry.snapshot();
 		const add = wanted.flatMap((name) => snapshot.extension(name) ?? []);
 		const remove = snapshot.tools().flatMap(({ tool }) => (off.includes(tool.name) ? [tool] : []));
+		// Installed but not for this chat, such as in a guest's space: taken out if it was ever added.
+		const drop = triggers.length === 0 ? snapshot.extension(TRIGGERS_EXTENSION) : undefined;
+		const extensions = add.length > 0 || drop ? { ...(add.length > 0 ? { add } : {}), ...(drop ? { remove: [drop] } : {}) } : null;
 		await (await this.harness.conversation(session)).configure(
-			{ extensions: add.length > 0 ? { add } : null, tools: remove.length > 0 ? { remove } : null },
+			{ extensions, tools: remove.length > 0 ? { remove } : null },
 			BACKGROUND_CONTEXT,
 		);
 		this.agents.setAbilities(session, key);
@@ -4582,6 +4725,8 @@ export class Pim extends DurableAgent<Env> {
 		const { pathname, search } = new URL(request.url);
 		if (pathname.startsWith("/hosted/")) return this.#hostedRequest(request, pathname, search);
 		if (pathname.startsWith("/hosted-origin/")) return this.#hostedOwnRequest(request, pathname, search);
+		// Triggers' routes exist only where the space's triggers are on; elsewhere they are any unknown path's 404.
+		if (TRIGGER_PATHS.test(pathname) && this.#triggerApi()) return dispatch(this.#triggerRoutes, request, pathname);
 		return dispatch(this.#routes, request, pathname);
 	}
 

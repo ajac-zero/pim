@@ -2259,6 +2259,8 @@ export class Pim extends DurableAgent<Env> {
 				if (!triggers || !engine) throw new Error(off);
 				const said = recordGrant(engine.store, this.#computerGrants(), approvalId);
 				triggers.refresh();
+				// A trigger pointed at its grant may have work due now, which only the wake hands on.
+				void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error));
 				return said;
 			},
 		};
@@ -2536,6 +2538,8 @@ export class Pim extends DurableAgent<Env> {
 				engine,
 				transaction: (work) => this.ctx.storage.transactionSync(work),
 				now: () => this.triggerClock(),
+				// The wake is the only thing that ticks the coordinator: a trigger made or changed, through a route or a tool, is due by it.
+				changed: () => this.wakeTriggers(),
 				host: {
 					agentExists: (id) => this.agents.get(id) !== undefined,
 					majordomoId: () => this.agents.majordomo().id,
@@ -2617,13 +2621,13 @@ export class Pim extends DurableAgent<Env> {
 					return { body: trigger, revision: trigger.revision };
 				}),
 		],
-		["DELETE", "/triggers/:id", ({ id }, request) => this.#triggersAnswer((api) => ({ body: api.remove(PERSON, id, ifMatch(request)) }))],
+		["DELETE", "/triggers/:id", ({ id }, request) => this.#triggersAnswer(async (api) => ({ body: await api.remove(PERSON, id, ifMatch(request)) }))],
 		[
 			"POST",
 			"/triggers/:id/pause",
 			({ id }, request) =>
-				this.#triggersAnswer((api) => {
-					const trigger = api.pause(PERSON, id, ifMatch(request));
+				this.#triggersAnswer(async (api) => {
+					const trigger = await api.pause(PERSON, id, ifMatch(request));
 					return { body: trigger, revision: trigger.revision };
 				}),
 		],
@@ -2631,8 +2635,8 @@ export class Pim extends DurableAgent<Env> {
 			"POST",
 			"/triggers/:id/resume",
 			({ id }, request) =>
-				this.#triggersAnswer((api) => {
-					const trigger = api.resume(PERSON, id, ifMatch(request));
+				this.#triggersAnswer(async (api) => {
+					const trigger = await api.resume(PERSON, id, ifMatch(request));
 					return { body: trigger, revision: trigger.revision };
 				}),
 		],

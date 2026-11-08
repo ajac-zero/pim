@@ -6,7 +6,7 @@ import {
   useSearch,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
 import { useI18n } from "~/components/i18n";
@@ -638,8 +638,9 @@ function DatedChats({
 /**
  * A chat with the chats your agents started from it for tasks below it, and
  * those started from them, as Amp shows threads started by other threads.
- * The top chat's row counts how many of their tasks are done and folds them
- * all away; the one open stays in view.
+ * Every chat with tasks below it counts how many of them are done and folds
+ * them away. The first level starts open and deeper ones start folded; the
+ * one open stays in view.
  */
 function ChatTree({
   session,
@@ -647,28 +648,30 @@ function ChatTree({
   activeId,
   awaitingApproval,
   onNavigate,
+  depth = 0,
 }: {
   session: Session;
   tree: ReadonlyMap<string, Session[]>;
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
+  depth?: number;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(depth === 0);
   const below = (chat: Session): Session[] =>
     (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
   const under = below(session);
   const expanded = open || under.some((chat) => chat.id === activeId);
-  const row = (chat: Session, depth: number): ReactNode => (
-    <Fragment key={chat.id}>
+  return (
+    <>
       <SessionRow
-        session={chat}
+        session={session}
         depth={depth}
-        active={chat.id === activeId}
-        awaitingApproval={awaitingApproval.has(chat.id)}
+        active={session.id === activeId}
+        awaitingApproval={awaitingApproval.has(session.id)}
         onNavigate={onNavigate}
         tasks={
-          depth === 0 && under.length > 0
+          under.length > 0
             ? {
                 done: under.filter((child) =>
                   DONE_STATES.has(child.startedBy?.state ?? "completed"),
@@ -680,11 +683,22 @@ function ChatTree({
             : undefined
         }
       />
-      {(depth > 0 || expanded) &&
-        tree.get(chat.id)?.map((child) => row(child, depth + 1))}
-    </Fragment>
+      {expanded &&
+        tree
+          .get(session.id)
+          ?.map((child) => (
+            <ChatTree
+              key={child.id}
+              session={child}
+              tree={tree}
+              activeId={activeId}
+              awaitingApproval={awaitingApproval}
+              onNavigate={onNavigate}
+              depth={depth + 1}
+            />
+          ))}
+    </>
   );
-  return row(session, 0);
 }
 
 const DONE_STATES = new Set(["completed", "failed", "canceled"]);
@@ -965,7 +979,7 @@ function SessionRow({
         onFocus={scrollTitleIntoView}
       >
         {depth > 0 && (
-          <CornerDownRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground/70" />
+          <CornerDownRight className="-ml-1 mr-[2px] size-3.5 shrink-0 text-muted-foreground/70" />
         )}
         {session.visit ? (
           <span

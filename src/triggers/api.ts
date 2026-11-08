@@ -95,6 +95,12 @@ export type TriggerApiOptions = {
 	readonly transaction: <T>(work: () => T) => T;
 	readonly now: () => number;
 	readonly host: TriggerApiHost;
+	/**
+	 * Told after every change the API made, through either path, so the
+	 * space's trigger wake is set for what is due now. Awaited before the
+	 * change answers; a failure is logged and never fails the change.
+	 */
+	readonly changed: () => Promise<void>;
 };
 
 export type TriggerErrorCode =
@@ -316,7 +322,7 @@ export class TriggerApi {
 		const lifecycle = enabled ? "enabled" : "draft";
 		const digest = sha256(canonical({ spec, lifecycle }));
 		const keyed = key === null ? null : sha256(`${actor.kind === "agent" ? `agent:${actor.agentId}` : "person"}\n${key}`);
-		return this.#options.transaction(() => {
+		const made = this.#options.transaction(() => {
 			if (keyed !== null) {
 				this.#sql.exec(SCHEMA);
 				const [prior] = this.#sql.exec("SELECT trigger_id, digest FROM pim_trigger_api_creations WHERE key = ?", keyed).toArray();
@@ -330,6 +336,9 @@ export class TriggerApi {
 			if (keyed !== null) this.#sql.exec("INSERT INTO pim_trigger_api_creations (key, trigger_id, digest, created_at) VALUES (?, ?, ?, ?)", keyed, made.trigger.id, digest, this.#options.now());
 			return { trigger: this.#view(made.trigger), replayed: false };
 		});
+		// A replay too: the wake its first time set may have failed.
+		await this.#changed();
+		return made;
 	}
 
 	/** Changes a trigger's spec, only while it is still at `expectedRevision`. Absent fields stay as they are; `condition: null` takes it off. */
@@ -362,34 +371,47 @@ export class TriggerApi {
 		if (trigger.lifecycle === "enabled") this.#checkWired(spec);
 		const changed = attempt(() => this.#store.update({ id: trigger.id, expectedRevision: expected, spec }), input);
 		if (!changed.ok) throw refusal(changed);
+		await this.#changed();
 		return this.#view(changed.trigger);
 	}
 
 	/** Pauses an enabled trigger; with `expectedRevision`, only at that revision. */
-	pause(actor: TriggerActor, id: unknown, expectedRevision?: unknown) {
+	async pause(actor: TriggerActor, id: unknown, expectedRevision?: unknown) {
 		const trigger = this.#changeable(actor, id);
 		const changed = this.#store.setLifecycle({ id: trigger.id, to: "paused", ...(expectedRevision === undefined ? {} : { expectedRevision: revisionOf(expectedRevision) }) });
 		if (!changed.ok) throw refusal(changed);
+		await this.#changed();
 		return this.#view(changed.trigger);
 	}
 
 	/** Enables a draft or paused trigger at exactly `expectedRevision`, which it must name. */
-	resume(actor: TriggerActor, id: unknown, expectedRevision: unknown) {
+	async resume(actor: TriggerActor, id: unknown, expectedRevision: unknown) {
 		const trigger = this.#changeable(actor, id);
 		const expected = revisionOf(expectedRevision);
 		if (trigger.revision !== expected) throw conflict(trigger);
 		this.#checkWired(trigger.spec);
 		const changed = this.#store.setLifecycle({ id: trigger.id, to: "enabled", expectedRevision: expected });
 		if (!changed.ok) throw refusal(changed);
+		await this.#changed();
 		return this.#view(changed.trigger);
 	}
 
 	/** Deletes a trigger for good, keeping its history; with `expectedRevision`, only at that revision. A stop asked for, not proof anything was cancelled. */
-	remove(actor: TriggerActor, id: unknown, expectedRevision?: unknown) {
+	async remove(actor: TriggerActor, id: unknown, expectedRevision?: unknown) {
 		const trigger = this.#changeable(actor, id);
 		const removed = this.#store.remove({ id: trigger.id, ...(expectedRevision === undefined ? {} : { expectedRevision: revisionOf(expectedRevision) }) });
 		if (!removed.ok) throw refusal(removed);
+		await this.#changed();
 		return { deleted: true, trigger: this.#view(this.#store.get(trigger.id)!) };
+	}
+
+	/** Tells the space of a change made, so its wake is set for what is due now; a failure is logged and the change still answers. */
+	async #changed(): Promise<void> {
+		try {
+			await this.#options.changed();
+		} catch (error) {
+			console.warn("setting the trigger wake failed", error);
+		}
 	}
 
 	/**

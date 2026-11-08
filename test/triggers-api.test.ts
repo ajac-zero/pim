@@ -7,7 +7,7 @@ import { guestRequest } from "../src/accounts";
 import type { Pim } from "../src/pim";
 import { API_TABLES } from "../src/triggers/api";
 import { COMPUTER_TRIGGERS_VARIABLE } from "../src/triggers/computer";
-import { ENGINE_KEY } from "../src/triggers/engine";
+import { ENGINE_KEY, TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
 import { MIGRATION_VARIABLE } from "../src/triggers/migration";
 import { TRIGGER_TOOLS, TRIGGERS_EXTENSION } from "../src/triggers/tools";
 import { apiUrl, messagesOf, OWNER, post, ROOT, say, settled, TOKEN, toolUse } from "./helpers";
@@ -383,6 +383,98 @@ describe("triggers' API where triggers are on", () => {
 		expect((await call(`/triggers/${id}`)).body.lifecycle).toBe("ended");
 		expect(await messagesOf(handed.chatId, "user")).toEqual([expect.stringContaining("Remind me.")]);
 		triggerClock.offset = 0;
+	});
+
+	it("sets the space's wake after every change through the routes and the tools, and the wake runs a new trigger at its time", async () => {
+		triggerClock.offset = 0;
+		const wakes = () => inSpace(async (pim) => (await pim.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK));
+		// A space the wake was lost from, as a change that never set it left it.
+		const loseWakes = () =>
+			inSpace(async (pim) => {
+				for (const schedule of await pim.listSchedules()) if (schedule.callback === TRIGGER_TICK_CALLBACK) await pim.cancelSchedule(schedule.id);
+			});
+		/** The one wake, which must come by `due`. */
+		const wakeBy = async (due: number) => {
+			const [wake, ...more] = await wakes();
+			expect(more).toEqual([]);
+			expect(wake).toBeDefined();
+			expect(wake!.time * SECOND).toBeLessThanOrEqual(due);
+			return wake!;
+		};
+		const once = (at: number) => ({ kind: "time", schedule: "once", at });
+		const first = Math.ceil((clock() + 3 * MINUTE) / SECOND) * SECOND;
+		const second = first + MINUTE;
+		await loseWakes();
+
+		// Made through the route and through the tool, each sets the wake for its time.
+		const made = await call("/triggers", { method: "POST", body: { label: "Call mum", instruction: "Remind me to call mum.", source: once(first), enabled: true } });
+		expect(made).toMatchObject({ status: 201, body: { lifecycle: "enabled", schedule: { nextFiringAt: first } } });
+		const viaRoute = made.body.id as string;
+		await wakeBy(first);
+		await loseWakes();
+		const tooled = await tool("create_trigger", { label: "Stand up", instruction: "Remind me to stand up.", source: once(second), newChat: true, enabled: true });
+		expect(tooled.body.trigger).toMatchObject({ lifecycle: "enabled", schedule: { nextFiringAt: second } });
+		const viaTool = tooled.body.trigger.id as string;
+		await wakeBy(second);
+
+		// Paused, nothing is due, and the wake goes.
+		expect((await call(`/triggers/${viaRoute}/pause`, { method: "POST" })).status).toBe(200);
+		expect((await tool("pause_trigger", { id: viaTool })).body).toMatchObject({ lifecycle: "paused" });
+		expect(await wakes()).toEqual([]);
+
+		// Resumed and edited, each sets it again.
+		expect((await call(`/triggers/${viaRoute}/resume`, { method: "POST", headers: { "if-match": '"1"' } })).status).toBe(200);
+		await wakeBy(first);
+		await loseWakes();
+		expect((await tool("resume_trigger", { id: viaTool, expectedRevision: 1 })).body).toMatchObject({ lifecycle: "enabled" });
+		await wakeBy(second);
+		const sooner = first - MINUTE;
+		await loseWakes();
+		expect(await call(`/triggers/${viaRoute}`, { method: "PATCH", body: { source: once(sooner) }, headers: { "if-match": '"1"' } })).toMatchObject({ status: 200, body: { schedule: { nextFiringAt: sooner } } });
+		await wakeBy(sooner);
+		await loseWakes();
+		expect((await tool("update_trigger", { id: viaTool, expectedRevision: 1, source: once(sooner) })).body).toMatchObject({ revision: 2, schedule: { nextFiringAt: sooner } });
+		await wakeBy(sooner);
+
+		// Deleted, nothing is due, and the wake goes.
+		expect((await call(`/triggers/${viaRoute}`, { method: "DELETE" })).status).toBe(200);
+		await wakeBy(sooner);
+		expect((await tool("delete_trigger", { id: viaTool })).body).toMatchObject({ deleted: true });
+		expect(await wakes()).toEqual([]);
+
+		// A trigger an agent made runs at its time from the wake its making set, and nothing else.
+		const at = Math.ceil((clock() + 3 * MINUTE) / SECOND) * SECOND;
+		const reminder = (await tool("create_trigger", { label: "Tea", instruction: "Remind me the tea is ready.", source: once(at), newChat: true, enabled: true })).body.trigger.id as string;
+		moveTo(at + SECOND);
+		faux.setResponses([toolUse("send_to_user", { message: "Your tea is ready." })]);
+		let handed: any;
+		for (let woken = 0; woken < 3 && !handed; woken++) {
+			const wake = await wakeBy(at);
+			await inSpace((pim) => (pim as unknown as Record<string, () => Promise<void>>)[wake.callback]!());
+			[handed] = (await call(`/triggers/${reminder}/runs`)).body.runs;
+		}
+		expect(handed).toMatchObject({ evidence: { reason: "time", scheduledFor: at }, chatId: expect.any(String) });
+		await settled(handed.chatId);
+		expect(await messagesOf(handed.chatId, "user")).toEqual([expect.stringContaining("Remind me the tea is ready.")]);
+		await vi.waitFor(
+			async () => {
+				moveTo(clock() + 2 * MINUTE);
+				await inSpace((pim) => pim.runTriggerTick());
+				expect((await call(`/trigger-runs/${handed.id}`)).body).toMatchObject({ state: "completed" });
+			},
+			{ timeout: 10_000, interval: 200 },
+		);
+		triggerClock.offset = 0;
+
+		// A wake that can't be set doesn't fail the change.
+		await inSpace((pim) => {
+			vi.spyOn(pim, "wakeTriggers").mockRejectedValueOnce(new Error("storage is down"));
+		});
+		const unwoken = await call("/triggers", { method: "POST", body: { label: "Later", instruction: "Later.", source: once(clock() + HOUR), enabled: true } });
+		expect(unwoken).toMatchObject({ status: 201, body: { lifecycle: "enabled" } });
+		expect(await inSpace((pim) => vi.mocked(pim.wakeTriggers).mock.settledResults.map((result) => result.type))).toEqual(["rejected"]);
+		await inSpace((pim) => vi.mocked(pim.wakeTriggers).mockRestore());
+		await call(`/triggers/${unwoken.body.id}`, { method: "DELETE" });
 	});
 
 	it("tests without writing anything, starting any turn or running anything, and never repeats a sample's values", async () => {

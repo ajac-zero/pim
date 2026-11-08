@@ -1,6 +1,6 @@
 // pim-computer's triggers host, in Node: how pim-computer gets and loads it, and runs nothing without it; and over a fake socket, with fake launchers on a fake clock for the protocol and the grants, the real runtime and spool in a temporary folder, and a few tiny real children for what only a real process group shows. Nothing here opens a socket or reaches the network.
 import { type ChildProcess, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -516,30 +516,51 @@ describe("triggers in pim-computer", () => {
 });
 
 describe("triggers in pim-computer, on real children", () => {
-	/** Whether the process runs: a zombie, which is gone but not yet reaped by whoever inherited it, doesn't. */
-	const alive = (pid: number) => {
+	/** A process as /proc has it: its state (`Z` for a zombie, which is gone but not yet reaped by whoever inherited it), its parent and its group; null once it is gone. */
+	const stat = (pid: number) => {
 		try {
-			process.kill(pid, 0);
-			const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-			return stat[stat.lastIndexOf(")") + 2] !== "Z";
+			const text = readFileSync(`/proc/${pid}/stat`, "utf8");
+			const [state, parent, group] = text.slice(text.lastIndexOf(")") + 2).split(" ");
+			return { state: state as string, parent: Number(parent), group: Number(group) };
 		} catch {
-			return false;
+			return null;
 		}
 	};
-	async function until(done: () => boolean | Promise<boolean>, ms = 30_000): Promise<void> {
-		for (const start = Date.now(); Date.now() - start < ms; ) {
+	/** Whether the process runs: a zombie doesn't. */
+	const alive = (pid: number) => {
+		const found = stat(pid);
+		return found !== null && found.state !== "Z";
+	};
+	/** The processes still running in a process group. */
+	const members = (group: number) =>
+		readdirSync("/proc")
+			.filter((name) => /^\d+$/.test(name))
+			.map(Number)
+			.filter((pid) => stat(pid)?.group === group && alive(pid));
+	const show = (pid: number) => {
+		const found = stat(pid);
+		return found ? `${pid} ${found.state} (parent ${found.parent}, group ${found.group})` : `${pid} gone`;
+	};
+	/** Waits for `done`; when it doesn't come, says what was awaited, for how long, and where things stood. */
+	async function until(what: string, done: () => boolean | Promise<boolean>, state: () => string, ms = 30_000): Promise<void> {
+		const start = Date.now();
+		while (Date.now() - start < ms) {
 			if (await done()) return;
 			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
-		throw new Error("timed out");
+		throw new Error(`timed out after ${Date.now() - start} ms waiting for ${what}; ${state()}`);
 	}
-	async function pidFrom(file: string): Promise<number> {
+	async function pidFrom(file: string, state: () => string): Promise<number> {
 		let pid = 0;
-		await until(async () => {
-			const text = await fs.readFile(file, "utf8").catch(() => "");
-			pid = /^\d+\n$/.test(text) ? Number(text) : 0;
-			return pid > 0;
-		});
+		await until(
+			`a pid in ${path.basename(file)}`,
+			async () => {
+				const text = await fs.readFile(file, "utf8").catch(() => "");
+				pid = /^\d+\n$/.test(text) ? Number(text) : 0;
+				return pid > 0;
+			},
+			state,
+		);
 		return pid;
 	}
 
@@ -547,32 +568,55 @@ describe("triggers in pim-computer, on real children", () => {
 		let bystander: ChildProcess | undefined;
 		const host = await loadTriggers({ token: TOKEN, stateDir, root: dir, log: () => {} });
 		if (!host) throw new Error("no host");
+		// What the failure message describes: the streams' commands and their groups.
+		const pids: number[] = [];
+		const groups: number[] = [];
+		const state = () =>
+			[
+				`processes: ${[bystander?.pid, ...pids].filter((pid) => pid !== undefined).map(show).join(", ") || "none"}`,
+				...groups.map((group) => `group ${group} runs [${members(group).map(show).join(", ")}]`),
+				`host owns ${host.owned}`,
+				`sources ${JSON.stringify(host.sources().map((source) => [source.triggerId, source.generation, source.state]))}`,
+			].join("; ");
 		try {
-			bystander = spawn("sleep", ["30"], { stdio: "ignore" });
+			// Every process here outlives any wait, so one that times out shows what still runs.
+			bystander = spawn("sleep", ["300"], { stdio: "ignore" });
 			const pidFile = path.join(dir, "pid");
-			const source: ComputerSource = { kind: "stream", command: `echo $$ > ${pidFile}; exec sleep 30`, cwd: null };
+			const source: ComputerSource = { kind: "stream", command: `echo $$ > ${pidFile}; exec sleep 300`, cwd: null };
 			const socket = new FakeSocket();
 			host.attach(socket);
-			await until(() => socket.sent.length > 0);
+			await until("the runtime's hello", () => socket.sent.length > 0, state);
 			const send = (message: Record<string, unknown>) =>
 				host.receive(socket, envelope({ protocol: PROTOCOL, type: "reconcile", binding: BINDING, connectionId: socket.connectionId, serverEpoch: 1, sources: [desired("s", source)], ...message }));
 			send({ desiredRevision: 1, leaseMs: 1_500 });
-			const pid = await pidFrom(pidFile);
+			const pid = await pidFrom(pidFile, state);
+			pids.push(pid);
+			// The command runs in a process group of its own, not this one's nor the bystander's.
+			const first = stat(pid);
+			expect(first, state()).not.toBeNull();
+			const group = first!.group;
+			groups.push(group);
+			expect([stat(process.pid)!.group, stat(bystander.pid!)!.group]).not.toContain(group);
 			expect(host.owned).toBe(1);
 			host.detach(socket);
-			await until(() => !alive(pid));
-			await until(() => host.owned === 0);
+			await until(`the lease to end and stop the stream's group ${group}`, () => members(group).length === 0, state);
+			await until("the host to own no child", () => host.owned === 0, state);
 
 			await fs.rm(pidFile);
 			const next = new FakeSocket();
 			host.attach(next);
-			await until(() => next.sent.length > 0);
+			await until("the runtime's hello on the new connection", () => next.sent.length > 0, state);
 			expect(host.receive(next, envelope({ protocol: PROTOCOL, type: "reconcile", binding: BINDING, connectionId: next.connectionId, serverEpoch: 1, desiredRevision: 2, leaseMs: 120_000, sources: [desired("s", source)] }))).toBe(true);
-			const again = await pidFrom(pidFile);
+			const again = await pidFrom(pidFile, state);
+			pids.push(again);
 			expect(again).not.toBe(pid);
+			const second = stat(again);
+			expect(second, state()).not.toBeNull();
+			const groupAgain = second!.group;
+			groups.push(groupAgain);
 			// pim-computer's `exit`: SIGKILL, at once, to the group still its own.
 			host.killOwned();
-			await until(() => !alive(again));
+			await until(`SIGKILL to end the stream's group ${groupAgain}`, () => members(groupAgain).length === 0, state);
 			expect(alive(bystander.pid!)).toBe(true);
 			await host.close();
 			expect(host.owned).toBe(0);

@@ -1778,6 +1778,8 @@ export const pim = {
     call<{ approvals: Approval[] }>(
       `/approvals${status ? `?status=${status}` : ""}`,
     ).then((body) => body.approvals),
+  approval: (id: string) =>
+    call<Approval>(`/approvals/${encodeURIComponent(id)}`),
   decide: (id: string, decision: "approve" | "deny", always = false) =>
     call<Approval>(`/approvals/${id}/${decision}`, {
       method: "POST",

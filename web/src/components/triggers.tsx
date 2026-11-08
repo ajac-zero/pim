@@ -13,6 +13,7 @@ import { EmptyState, Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import {
   type Agent,
+  type Approval,
   pim,
   type Session,
   TRIGGER_HEALTHS,
@@ -27,6 +28,7 @@ import {
 } from "~/lib/pim-api";
 import {
   agentsQuery,
+  approvalsQuery,
   sessionsQuery,
   triggerQuery,
   triggerRunsQuery,
@@ -35,6 +37,8 @@ import {
 } from "~/lib/queries";
 import {
   conditionText,
+  decideGrant,
+  type GrantStanding,
   HEALTH_PROBLEMS,
   HEALTH_TEXT,
   LIFECYCLE_TEXT,
@@ -665,6 +669,20 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
           </Row>
           <Row label={t("triggerGrant")}>
             {t(GRANT_TEXT[trigger.grant.state])}
+            {trigger.grant.required &&
+              trigger.grant.state !== "unavailable" && (
+                <Link
+                  to="/triggers/$triggerId/grant"
+                  params={{ triggerId: trigger.id }}
+                  className="mt-1 block text-link text-sm underline-offset-2 hover:underline"
+                >
+                  {t(
+                    trigger.grant.state === "pending_approval"
+                      ? "triggerGrantReview"
+                      : "triggerGrantSee",
+                  )}
+                </Link>
+              )}
           </Row>
         </dl>
         {runsCommands(trigger.source.kind) && (
@@ -1082,5 +1100,282 @@ export function RunRow({ run }: { run: TriggerRun }) {
         )}
       </div>
     </li>
+  );
+}
+
+type Decided = Exclude<
+  GrantStanding,
+  { kind: "not_required" | "off" | "none" }
+>;
+
+const STANDING_TEXT: Record<Decided["kind"], [TranslationKey, Tone]> = {
+  pending: ["triggerGrantStandingPending", "active"],
+  approved: ["triggerGrantStandingApproved", "done"],
+  declined: ["triggerGrantStandingDeclined", "muted"],
+  expired: ["triggerGrantStandingExpired", "muted"],
+  outdated: ["triggerGrantStandingOutdated", "problem"],
+};
+
+function standingNote(standing: Decided): TranslationKey | null {
+  if (standing.kind === "outdated") {
+    return standing.reason === "changed"
+      ? "triggerGrantOutdatedChanged"
+      : "triggerGrantOutdatedEnded";
+  }
+  if (standing.kind === "expired") {
+    return standing.reason === "timeout"
+      ? "triggerGrantExpiredTimeout"
+      : "triggerGrantExpiredSource";
+  }
+  return null;
+}
+
+/**
+ * A request to let a trigger's source run on the person's computer: what
+ * Pim asks in its own words, exactly what a grant would cover, and the
+ * decision. Only a request for the source the trigger has now, still in
+ * time, can be approved; any other still waiting can only be declined.
+ * `currentHash` is `sourceConfigHash` of the trigger's source.
+ */
+export function GrantReview({
+  trigger,
+  standing,
+  currentHash,
+}: {
+  trigger: Trigger;
+  standing: GrantStanding;
+  currentHash: string;
+}) {
+  const { t, date } = useFormats();
+  const queryClient = useQueryClient();
+  const [status, setStatus] = useState("");
+  const [failure, setFailure] = useState<string | null>(null);
+  const said = useRef<HTMLParagraphElement>(null);
+  const decide = useMutation({
+    mutationFn: ({
+      id,
+      decision,
+    }: {
+      id: string;
+      decision: "approve" | "deny";
+    }) => decideGrant(id, decision),
+    onMutate: ({ decision }) => {
+      setFailure(null);
+      setStatus(
+        t(
+          decision === "approve"
+            ? "triggerGrantApproving"
+            : "triggerGrantDeclining",
+        ),
+      );
+    },
+    onSuccess: ({ approval, already }) => {
+      queryClient.setQueryData<Approval[]>(
+        approvalsQuery().queryKey,
+        (approvals) =>
+          approvals?.map((candidate) =>
+            candidate.id === approval.id ? approval : candidate,
+          ),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: triggerQuery(trigger.id).queryKey,
+      });
+      void queryClient.invalidateQueries({ queryKey: ["triggers", "list"] });
+      setStatus(
+        t(
+          already
+            ? "triggerGrantAlready"
+            : approval.status === "approved"
+              ? "triggerGrantApprovedNow"
+              : "triggerGrantDeclinedNow",
+        ),
+      );
+      // The buttons are gone: the outcome takes the focus, so it is read.
+      said.current?.focus();
+    },
+    onError: (error) => {
+      setStatus("");
+      setFailure(error.message);
+    },
+  });
+  const header = (
+    <>
+      <Link
+        to="/triggers/$triggerId"
+        params={{ triggerId: trigger.id }}
+        className="inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground"
+      >
+        <ArrowLeft className="size-4" />
+        {t("triggerGrantBack", { label: trigger.label })}
+      </Link>
+      <h1 className="mt-6 break-words font-semibold text-xl">
+        {t("triggerGrantTitle", { label: trigger.label })}
+      </h1>
+    </>
+  );
+  if (!("approval" in standing)) {
+    return (
+      <>
+        {header}
+        <p className="mt-4 text-[15px]">
+          {standing.kind === "not_required"
+            ? t("triggerGrantNotRequiredHere")
+            : standing.kind === "off"
+              ? t("triggerGrantOffHere")
+              : t(GRANT_TEXT[trigger.grant.state])}
+        </p>
+        {standing.kind === "none" && (
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            {t("triggerGrantNoneWaiting")}
+          </p>
+        )}
+      </>
+    );
+  }
+  const { approval, scope } = standing;
+  const [standingKey, tone] = STANDING_TEXT[standing.kind];
+  const note = standingNote(standing);
+  const exact = scope.configHash === currentHash;
+  const waiting = approval.status === "pending";
+  const approvable = standing.kind === "pending";
+  return (
+    <>
+      {header}
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <Pill tone={tone} of={t("triggerGrantRequest")}>
+          {t(standingKey)}
+        </Pill>
+      </div>
+      {note && (
+        <p role="note" className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm">
+          {t(note)}
+        </p>
+      )}
+      <Section title={t("triggerGrantAsked")}>
+        {/* Pim's own words for the request, which name the command, how often, and as whom. */}
+        <p className="whitespace-pre-wrap break-words text-[15px]">
+          {approval.summary}
+        </p>
+        {runsCommands(trigger.source.kind) && (
+          <div className="mt-3">
+            <ComputerDisclosure />
+          </div>
+        )}
+      </Section>
+      <Section title={t("triggerGrantScope")}>
+        <dl className="divide-y divide-border">
+          <Row label={t("triggerGrantScopeTrigger")}>
+            {trigger.label}
+            <span className="block text-[13px] text-muted-foreground">
+              {t("triggerGrantOnlyTrigger")}
+            </span>
+          </Row>
+          <Row label={t("triggerSource")}>
+            {exact ? (
+              <>
+                <SourceText source={trigger.source} />
+                <span className="block text-[13px] text-muted-foreground">
+                  {t("triggerGrantSourceExact")}
+                </span>
+              </>
+            ) : (
+              <span className="text-muted-foreground">
+                {t("triggerGrantSourceChanged")}
+              </span>
+            )}
+          </Row>
+          <Row label={t("triggerGrantScopeComputer")}>
+            {t("triggerGrantComputerOnly")}
+            <code className="mt-1 block break-all font-mono text-[13px] text-muted-foreground">
+              {scope.runtimeId}
+            </code>
+          </Row>
+          <Row label={t("triggerGrantAskedAt")}>{date(approval.createdAt)}</Row>
+          {waiting && approval.expiresAt !== null && (
+            <Row label={t("triggerGrantExpiresAt")}>
+              {date(approval.expiresAt)}
+            </Row>
+          )}
+          {approval.decidedAt !== null && (
+            <Row label={t("triggerGrantDecidedAt")}>
+              {date(approval.decidedAt)}
+            </Row>
+          )}
+          {standing.kind === "approved" && (
+            <Row label={t("triggerGrant")}>
+              {t(GRANT_TEXT[trigger.grant.state])}
+            </Row>
+          )}
+          {standing.kind === "approved" && approval.result && (
+            <Row label={t("triggerGrantRecorded")}>
+              <span className="whitespace-pre-wrap">{approval.result}</span>
+            </Row>
+          )}
+        </dl>
+        {standing.kind === "declined" && (
+          <p className="mt-3 text-sm">
+            {t("triggerGrantDeclinedNote")}
+            {approval.note && (
+              <span className="block text-muted-foreground">
+                “{approval.note}”
+              </span>
+            )}
+          </p>
+        )}
+      </Section>
+      {waiting && (
+        <Section title={t("triggerActions")}>
+          {approvable && (
+            <p className="mb-3 text-[13px] text-muted-foreground">
+              {t("triggerGrantLimits")}
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {approvable && (
+              <Button
+                type="button"
+                disabled={decide.isPending}
+                onClick={() =>
+                  decide.mutate({ id: approval.id, decision: "approve" })
+                }
+              >
+                {t("triggerGrantApprove")}
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={decide.isPending}
+              onClick={() =>
+                decide.mutate({ id: approval.id, decision: "deny" })
+              }
+            >
+              {t("triggerGrantDecline")}
+            </Button>
+          </div>
+        </Section>
+      )}
+      <p
+        ref={said}
+        tabIndex={-1}
+        role="status"
+        aria-live="polite"
+        className="mt-3 text-sm outline-none empty:hidden"
+      >
+        {status}
+      </p>
+      {failure && (
+        <div
+          role="alert"
+          className="mt-3 flex flex-col gap-1 rounded-xl bg-destructive/10 px-4 py-3 text-sm"
+        >
+          <p className="flex items-start gap-2 text-destructive">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+            {t("triggerGrantDecideFailed")}
+          </p>
+          <p className="text-muted-foreground">{failure}</p>
+        </div>
+      )}
+    </>
   );
 }

@@ -1,4 +1,4 @@
-import type { Trigger, TriggerRun } from "~/lib/pim-api";
+import type { Approval, Trigger, TriggerRun } from "~/lib/pim-api";
 
 /*
  * Answers of the triggers' API for tests only, shaped as docs/triggers.md
@@ -122,6 +122,36 @@ export function runFixture(overrides: Partial<TriggerRun> = {}): TriggerRun {
     unknownAnswers: 0,
     createdAt: Date.UTC(2026, 10, 6, 9, 0),
     updatedAt: Date.UTC(2026, 10, 6, 9, 1),
+    ...overrides,
+  };
+}
+
+/** A grant request for the poll above, as `trigger_computer_source` files it; override any field. */
+export function grantApprovalFixture(
+  overrides: Partial<Approval> = {},
+): Approval {
+  return {
+    id: "apr_grant",
+    session: "chat_build",
+    action: "trigger_computer_source",
+    tool: null,
+    args: {
+      space: "ada",
+      runtimeId: "rt_laptop",
+      triggerId: "trg_build",
+      sourceId: "src_1",
+      configHash: "hash_now",
+    },
+    summary:
+      'Let the trigger "Build watcher" run `make check` in /home/ada/project on your computer every 5 minutes. It runs as your own user on the computer, with everything that user can reach, until you revoke it or the trigger stops.',
+    status: "pending",
+    note: null,
+    result: null,
+    createdAt: Date.UTC(2026, 10, 7, 12, 0),
+    decidedAt: null,
+    callId: "call_1",
+    expiresAt: null,
+    decidedBy: null,
     ...overrides,
   };
 }

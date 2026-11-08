@@ -14,6 +14,7 @@ import {
   SourceFields,
   TriggerEditor,
   TriggerReview,
+  TriggerSummary,
 } from "~/components/trigger-editor";
 import {
   ConfirmAction,
@@ -43,6 +44,7 @@ import {
   emptyForm,
   grantStanding,
   MAX_PAGES,
+  type TriggerForm,
   triggerProblem,
 } from "~/lib/triggers";
 import {
@@ -838,6 +840,64 @@ describe("the editor", () => {
     );
     expect(mail).toContain("can be saved only as drafts");
     expect(mail).not.toContain("SECRET");
+  });
+
+  it("summarises when, do and observe above the fields, and follows the form", async () => {
+    const client = clientWith();
+    setList(client, [page([])]);
+    const html = await render(() => <TriggerEditor />, client);
+    const text = textOf(html);
+    expect(text).toContain("What this trigger will do");
+    expect(text).toContain("your instruction, not written yet.");
+    expect(text.indexOf("What this trigger will do")).toBeLessThan(
+      text.indexOf("Instruction"),
+    );
+    const summary = async (form: TriggerForm, chat: string | null) =>
+      textOf(
+        await render(() => (
+          <TriggerSummary input={null} form={form} agent="Ada" chat={chat} />
+        )),
+      );
+    const form = {
+      ...emptyForm("p_ada"),
+      instruction: "Summarise the inbox",
+      kind: "poll" as const,
+      destination: "existing_chat" as const,
+    };
+    const changed = await summary(form, "Inbox");
+    expect(changed).toContain("WhenCommand, checked");
+    expect(changed).toContain("DoAda: Summarise the inbox");
+    expect(changed).toContain("ObserveThe result shows in Inbox.");
+    expect(await summary({ ...form, instruction: "  " }, null)).toContain(
+      "The result shows in A new chat each time.",
+    );
+  });
+
+  it("puts the actions in a sticky bar above the navigation on narrow screens only", async () => {
+    const client = clientWith();
+    setList(client, [page([])]);
+    const html = await render(() => <TriggerEditor />, client);
+    const bar = /<div class="([^"]*max-md:sticky[^"]*)"/.exec(html)?.[1] ?? "";
+    expect(bar).toContain("max-md:bottom-0");
+    expect(bar).toContain(
+      "max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))]",
+    );
+    expect(bar).not.toMatch(/(^| )sticky/);
+  });
+
+  it("says an edit affects future runs only, and a new trigger doesn't", async () => {
+    const client = clientWith();
+    setList(client, [page([])]);
+    const edit = textOf(
+      await render(
+        () => <TriggerEditor trigger={pollFixture()} onDone={() => {}} />,
+        client,
+      ),
+    );
+    expect(edit).toContain("Changes apply to future runs only.");
+    expect(textOf(await render(() => <TriggerEditor />, client))).not.toContain(
+      "future runs only",
+    );
   });
 
   it("opens an edit with the trigger's own values", async () => {

@@ -87,6 +87,9 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 /** The coordinator's tables, beside the store's (`TRIGGER_TABLES`), for erasing a space. */
 export const COORDINATOR_TABLES = ["pim_trigger_runs"] as const;
 
+/** How long after admission an occurrence may still be submitted, unless a coordinator is made with another `deliveryTtlMs` (Pim's isn't). */
+export const DELIVERY_TTL_MS = 24 * 60 * 60_000;
+
 /** The longest receipt the coordinator keeps. A longer one is not cut short: the submission it names stays unknown, and says why. */
 export const MAX_RECEIPT_LENGTH = 256;
 /** Answers of "not known" in a row about one run, after which its trigger's health says it waits on it. */
@@ -388,7 +391,7 @@ export class TriggerCoordinator {
 		this.#sleep = options.sleep ?? timer;
 		this.#leaseMs = integer(options.leaseMs ?? 5 * MINUTE, "leaseMs", 4 * SECOND, HOUR);
 		this.#callTimeoutMs = integer(options.callTimeoutMs ?? 30 * SECOND, "callTimeoutMs", 100, Math.floor(this.#leaseMs / 4));
-		this.#deliveryTtlMs = integer(options.deliveryTtlMs ?? 24 * HOUR, "deliveryTtlMs", MINUTE, 7 * 24 * HOUR);
+		this.#deliveryTtlMs = integer(options.deliveryTtlMs ?? DELIVERY_TTL_MS, "deliveryTtlMs", MINUTE, 7 * 24 * HOUR);
 		this.#retryMs = integer(options.retryMs ?? 15 * MINUTE, "retryMs", SECOND, 24 * HOUR);
 		this.#runCheckMs = integer(options.runCheckMs ?? MINUTE, "runCheckMs", SECOND, HOUR);
 		this.#maxRunning = integer(options.maxRunning ?? 4, "maxRunning", 1, 64);

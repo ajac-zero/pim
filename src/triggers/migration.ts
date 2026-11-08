@@ -455,6 +455,13 @@ export function migrationRecords(sql: SqlStorage): MigrationRecord[] {
 	return sql.exec("SELECT * FROM pim_trigger_migrations ORDER BY legacy_kind, legacy_id").toArray().map(recordOf);
 }
 
+/** The record of the item trigger `id` shadows, if it is one; read without making the table. */
+export function migrationRecordOf(sql: SqlStorage, id: string): MigrationRecord | null {
+	if (!hasTable(sql)) return null;
+	const [row] = sql.exec("SELECT * FROM pim_trigger_migrations WHERE trigger_id = ?", id).toArray();
+	return row ? recordOf(row) : null;
+}
+
 /**
  * Whether a schedule or watch still delivers the work of trigger `id`, so
  * enabling the trigger would deliver it twice: the store's

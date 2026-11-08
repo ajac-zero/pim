@@ -161,6 +161,12 @@ describe("times in a trigger's own zone", () => {
       await render(() => <TriggerDetail trigger={trigger} />, client),
     );
     expect(detail).toContain("Nov 9, 8:00 AM New York time (1:00 PM UTC)");
+    // UTC is the secondary clock: smaller and muted, after the primary one.
+    expect(
+      await render(() => <TriggerDetail trigger={trigger} />, client),
+    ).toContain(
+      'New York time<span class="text-[0.85em] text-muted-foreground"> (1:00 PM UTC)</span>',
+    );
   });
 
   it("names the UTC day when it differs, and keeps the plain display without a zone", async () => {
@@ -259,13 +265,26 @@ describe("the list", () => {
     expect(text).not.toMatch(/Missed \d|Missed [A-Z][a-z]{2} /);
   });
 
-  it("fades the right edge of the scrolling filter row on narrow screens only", async () => {
+  it("fades the right edge of the scrolling filter row with an overlay on narrow screens only", async () => {
     const client = clientWith();
     setList(client, [page([pollFixture()])]);
     const html = await render(TriggersPage, client);
-    const row = /<fieldset class="([^"]*)"/.exec(html)?.[1] ?? "";
-    expect(row).toContain("max-md:[mask-image:linear-gradient(to_right");
-    expect(row).not.toMatch(/(^| )(md:)?\[mask-image/);
+    // A gradient over a wrapper: a mask on the scrolling fieldset never showed.
+    const fade = /<div[^>]*data-testid="filters-fade"[^>]*class="([^"]*)"/.exec(
+      html,
+    )?.[1];
+    expect(fade).toContain("bg-linear-to-r");
+    expect(fade).toContain("to-background");
+    expect(fade).toContain("md:hidden");
+    expect(html).not.toContain("mask-image");
+  });
+
+  it("tells the empty state to ask in chat or use New trigger", async () => {
+    const client = clientWith();
+    setList(client, [page([])]);
+    expect(textOf(await render(TriggersPage, client))).toContain(
+      "Ask an agent in chat, or use New trigger.",
+    );
   });
 
   it("shows no health chip for a trigger that isn't on, and says what an on one lacks", async () => {
@@ -508,6 +527,9 @@ describe("a trigger's page", () => {
       "Runs the latest firing up to 1 hour late; older ones are recorded as missed",
     );
     expect(text).toContain("Not kept");
+    expect(text).toContain(
+      "Hand-off window1 dayHow long Pim keeps trying to deliver a firing.",
+    );
   });
 
   it("shows one Next run row, and Pim looks next at only when it differs", async () => {

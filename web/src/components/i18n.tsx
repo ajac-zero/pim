@@ -1229,7 +1229,7 @@ const translations = {
     triggersNone: "No triggers yet",
     triggersNoneMatch: "No triggers match these filters",
     triggersNoneHint:
-      "Ask an agent in chat to set one up. For example, copy one of these:",
+      "Ask an agent in chat, or use New trigger. For example, copy one of these:",
     triggerExample1: "Every weekday at 9am, summarize my calendar",
     triggerExample2: "When a new email arrives from my manager, tell me",
     triggerExample3: "Every Friday at 4pm, draft my weekly update",
@@ -1296,6 +1296,8 @@ const translations = {
     triggerLastEvent: "Last occurrence",
     triggerNoEventYet: "None yet",
     triggerZonedTime: "{local} {place} time ({utc})",
+    triggerZonedPrimary: "{local} {place} time",
+    triggerZonedUtc: " ({utc})",
     triggerResult: "Result",
     triggerResultKnown: "Last run {date}: {state}",
     triggerResultUnknown: "Ran {date}, outcome unknown",
@@ -1401,6 +1403,8 @@ const translations = {
     triggerAtOnce: "At once",
     triggerRunsAtOnce: "{count} run at a time",
     triggerDeliveryTtl: "Hand-off window",
+    triggerDeliveryTtlHint:
+      "How long Pim keeps trying to deliver a firing. After that it is not delivered",
     triggerReplay: "Repeats ignored for",
     triggerStale: "Stale after",
     triggerSamples: "Observed values",
@@ -2862,7 +2866,7 @@ const translations = {
     triggersNone: "Aún no hay disparadores",
     triggersNoneMatch: "Ningún disparador coincide con estos filtros",
     triggersNoneHint:
-      "Pide a un agente en el chat que configure uno. Por ejemplo, copia uno de estos:",
+      "Pide a un agente en el chat que configure uno, o usa Nuevo disparador. Por ejemplo, copia uno de estos:",
     triggerExample1: "Cada día laborable a las 9, resume mi calendario",
     triggerExample2: "Cuando llegue un correo nuevo de mi jefe, avísame",
     triggerExample3: "Cada viernes a las 16:00, redacta mi resumen semanal",
@@ -2931,6 +2935,8 @@ const translations = {
     triggerLastEvent: "Última ocurrencia",
     triggerNoEventYet: "Ninguna aún",
     triggerZonedTime: "{local}, hora de {place} ({utc})",
+    triggerZonedPrimary: "{local}, hora de {place}",
+    triggerZonedUtc: " ({utc})",
     triggerResult: "Resultado",
     triggerResultKnown: "Última ejecución el {date}: {state}",
     triggerResultUnknown: "Se ejecutó el {date}, resultado desconocido",
@@ -3037,6 +3043,8 @@ const translations = {
     triggerAtOnce: "A la vez",
     triggerRunsAtOnce: "{count} ejecución a la vez",
     triggerDeliveryTtl: "Plazo de entrega",
+    triggerDeliveryTtlHint:
+      "Cuánto tiempo sigue Pim intentando entregar un disparo. Pasado ese plazo ya no se entrega",
     triggerReplay: "Repeticiones ignoradas durante",
     triggerStale: "Obsoleto tras",
     triggerSamples: "Valores observados",

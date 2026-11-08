@@ -184,9 +184,9 @@ function useFormats() {
    * A time in the trigger's own zone, named by its place, with UTC after it:
    * "Nov 9, 8:00 AM Lisbon time (7:00 AM UTC)". Without a zone, the plain date.
    */
-  const zoned = (at: number, timeZone?: string) => {
+  const zonedParts = (at: number, timeZone?: string) => {
     if (!timeZone || timeZone === "UTC" || timeZone === "Etc/UTC") {
-      return date(at, timeZone);
+      return { plain: date(at, timeZone), zone: null };
     }
     const when = new Date(at);
     const day: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
@@ -217,31 +217,62 @@ function useFormats() {
         timeZoneName: "short",
       });
       const place = (timeZone.split("/").pop() ?? timeZone).replace(/_/g, " ");
-      return t("triggerZonedTime", { local, place, utc });
+      return { plain: null, zone: { local, place, utc } };
     } catch {
-      return date(at);
+      return { plain: date(at), zone: null };
     }
   };
+  const zoned = (at: number, timeZone?: string) => {
+    const parts = zonedParts(at, timeZone);
+    return parts.zone ? t("triggerZonedTime", parts.zone) : parts.plain;
+  };
+  /** The same time as markup: the zone's time first, UTC after it in smaller, muted text. */
+  const zonedNode = (at: number, timeZone?: string): ReactNode => {
+    const parts = zonedParts(at, timeZone);
+    if (!parts.zone) return parts.plain;
+    return (
+      <>
+        {t("triggerZonedPrimary", parts.zone)}
+        <span className="text-[0.85em] text-muted-foreground">
+          {t("triggerZonedUtc", parts.zone)}
+        </span>
+      </>
+    );
+  };
+  /** A sentence with `{date}` in it, whose time is the markup above. */
+  const sentence = (
+    key: TranslationKey,
+    params: Record<string, string | number>,
+    at: number,
+    timeZone?: string,
+  ): ReactNode => {
+    const [before, after = ""] = t(key, { ...params, date: "\u0000" }).split(
+      "\u0000",
+    );
+    return (
+      <>
+        {before}
+        {zonedNode(at, timeZone)}
+        {after}
+      </>
+    );
+  };
   const duration = (ms: number) => durationText(ms, locale);
-  return { t, date, zoned, duration };
+  return { t, date, zoned, zonedNode, sentence, duration };
 }
 
 /** When a trigger acts next, in words, with a date only where Pim gave one. */
 export function NextText({ trigger }: { trigger: Trigger }) {
-  const { t, zoned, duration } = useFormats();
+  const { t, sentence, duration } = useFormats();
   const next = nextLine(trigger);
-  return (
-    <>
-      {t(next.key, {
-        ...(next.at === undefined
-          ? {}
-          : { date: zoned(next.at, triggerZone(trigger)) }),
-        ...(next.minutes === undefined ? {} : { minutes: next.minutes }),
-        ...(next.everyMs === undefined
-          ? {}
-          : { duration: duration(next.everyMs) }),
-      })}
-    </>
+  const params = {
+    ...(next.minutes === undefined ? {} : { minutes: next.minutes }),
+    ...(next.everyMs === undefined ? {} : { duration: duration(next.everyMs) }),
+  };
+  return next.at === undefined ? (
+    <>{t(next.key, params)}</>
+  ) : (
+    <>{sentence(next.key, params, next.at, triggerZone(trigger))}</>
   );
 }
 
@@ -298,10 +329,10 @@ export function Unavailable() {
 
 /** The visible focus ring of a link, as buttons and fields have. */
 const LINK_RING =
-  "rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50";
+  "rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
 const FIELD_CLASS =
-  "h-10 w-full rounded-xl border bg-background px-3 text-[15px] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20";
+  "h-10 w-full rounded-xl border bg-background px-3 text-[15px] outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring";
 
 function FilterSelect<T extends string>({
   label,
@@ -385,45 +416,53 @@ export function TriggersPage() {
           </Link>
         </Button>
       </div>
-      <fieldset className="-mx-1 mb-4 flex min-w-0 gap-3 overflow-x-auto px-1 pb-1 md:mx-0 md:grid md:grid-cols-4 md:overflow-visible md:px-0 max-md:pr-8 max-md:[mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)]">
-        <legend className="sr-only">{t("triggerFilters")}</legend>
-        <FilterSelect
-          label={t("triggerLifecycle")}
-          value={lifecycle}
-          onChange={setLifecycle}
-          options={TRIGGER_LIFECYCLES.map((value) => ({
-            value,
-            label: t(LIFECYCLE_TEXT[value]),
-          }))}
+      <div className="relative mb-4">
+        <fieldset className="-mx-1 flex min-w-0 gap-3 overflow-x-auto px-1 pb-1 md:mx-0 md:grid md:grid-cols-4 md:overflow-visible md:px-0 max-md:pr-12">
+          <legend className="sr-only">{t("triggerFilters")}</legend>
+          <FilterSelect
+            label={t("triggerLifecycle")}
+            value={lifecycle}
+            onChange={setLifecycle}
+            options={TRIGGER_LIFECYCLES.map((value) => ({
+              value,
+              label: t(LIFECYCLE_TEXT[value]),
+            }))}
+          />
+          <FilterSelect
+            label={t("triggerSource")}
+            value={sourceKind}
+            onChange={setSourceKind}
+            options={TRIGGER_SOURCE_KINDS.map((value) => ({
+              value,
+              label: t(SOURCE_TEXT[value]),
+            }))}
+          />
+          <FilterSelect
+            label={t("triggerAgent")}
+            value={agentId}
+            onChange={setAgentId}
+            options={(agents ?? []).map((agent) => ({
+              value: agent.id,
+              label: agent.name,
+            }))}
+          />
+          <FilterSelect
+            label={t("triggerHealth")}
+            value={health}
+            onChange={setHealth}
+            options={TRIGGER_HEALTHS.map((value) => ({
+              value,
+              label: t(HEALTH_TEXT[value]),
+            }))}
+          />
+        </fieldset>
+        {/* The fade is a gradient laid over a wrapper, not a mask on the scrolling fieldset: a mask there never showed. */}
+        <div
+          aria-hidden="true"
+          data-testid="filters-fade"
+          className="pointer-events-none absolute inset-y-0 right-0 w-12 bg-linear-to-r from-transparent to-background md:hidden"
         />
-        <FilterSelect
-          label={t("triggerSource")}
-          value={sourceKind}
-          onChange={setSourceKind}
-          options={TRIGGER_SOURCE_KINDS.map((value) => ({
-            value,
-            label: t(SOURCE_TEXT[value]),
-          }))}
-        />
-        <FilterSelect
-          label={t("triggerAgent")}
-          value={agentId}
-          onChange={setAgentId}
-          options={(agents ?? []).map((agent) => ({
-            value: agent.id,
-            label: agent.name,
-          }))}
-        />
-        <FilterSelect
-          label={t("triggerHealth")}
-          value={health}
-          onChange={setHealth}
-          options={TRIGGER_HEALTHS.map((value) => ({
-            value,
-            label: t(HEALTH_TEXT[value]),
-          }))}
-        />
-      </fieldset>
+      </div>
       {filtered && (
         <div className="mb-4 flex items-center gap-3 text-[13px] text-muted-foreground">
           <span>
@@ -891,7 +930,7 @@ export function ComputerSourceDisclosure({ trigger }: { trigger: Trigger }) {
 }
 
 export function TriggerDetail({ trigger }: { trigger: Trigger }) {
-  const { t, zoned, duration } = useFormats();
+  const { t, zonedNode, sentence, duration } = useFormats();
   const { data: agents } = useQuery(agentsQuery());
   const { data: sessions } = useQuery(sessionsQuery());
   const runs = useInfiniteQuery(triggerRunsQuery(trigger.id));
@@ -944,14 +983,13 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
           {trigger.lifecycle === "ended" ? (
             <Row label={t("triggerResult")}>
               {latestRun ? (
-                t(
+                sentence(
                   latestRun.outcomeKnown
                     ? "triggerResultKnown"
                     : "triggerResultUnknown",
-                  {
-                    date: zoned(latestRun.endedAt ?? latestRun.dueAt, zone),
-                    state: t(RUN_TEXT[latestRun.state].key),
-                  },
+                  { state: t(RUN_TEXT[latestRun.state].key) },
+                  latestRun.endedAt ?? latestRun.dueAt,
+                  zone,
                 )
               ) : (
                 <span className="text-muted-foreground">
@@ -962,7 +1000,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
           ) : (
             <Row label={t("triggerNext")}>
               {next.key === "triggerNextAt" && next.at !== undefined ? (
-                zoned(next.at, zone)
+                zonedNode(next.at, zone)
               ) : (
                 <NextText trigger={trigger} />
               )}
@@ -971,7 +1009,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
           {trigger.schedule?.nextCheckAt != null &&
             trigger.schedule.nextCheckAt !== next.at && (
               <Row label={t("triggerNextCheck")}>
-                {zoned(trigger.schedule.nextCheckAt, zone)}
+                {zonedNode(trigger.schedule.nextCheckAt, zone)}
               </Row>
             )}
           {observesSource(trigger.source.kind) && (
@@ -987,7 +1025,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
                 {runs.isPending ? t("loading") : t("triggerNoEventYet")}
               </span>
             ) : (
-              zoned(lastEvent, zone)
+              zonedNode(lastEvent, zone)
             )}
           </Row>
         </dl>
@@ -1086,6 +1124,9 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
           </Row>
           <Row label={t("triggerDeliveryTtl")}>
             {duration(policies.deliveryTtlMs)}
+            <span className="block text-[13px] text-muted-foreground">
+              {t("triggerDeliveryTtlHint")}
+            </span>
           </Row>
           {policies.replayHorizonMs !== null && (
             <Row label={t("triggerReplay")}>
@@ -1491,14 +1532,16 @@ export function RunRow({
   run: TriggerRun;
   timeZone?: string;
 }) {
-  const { t, zoned } = useFormats();
+  const { t, zoned, zonedNode } = useFormats();
   const { key, tone } = RUN_TEXT[run.state];
   const when = zoned(run.dueAt, timeZone);
   return (
     <li className="flex flex-col gap-1 py-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0">
         <p className="text-[15px]">
-          <time dateTime={new Date(run.dueAt).toISOString()}>{when}</time>
+          <time dateTime={new Date(run.dueAt).toISOString()}>
+            {zonedNode(run.dueAt, timeZone)}
+          </time>
         </p>
         <p className="text-[13px] text-muted-foreground">
           {run.state === "completed"

@@ -2674,6 +2674,8 @@ export class Pim extends DurableAgent<Env> {
 				if (id === null || this.#hiddenSessions().has(chatId) || this.visits.bySession(chatId)) return false;
 				return (await (await this.harness.pi()).conversation(id, BACKGROUND_CONTEXT)) !== undefined;
 			},
+			carriedOn: (chatId) => this.#carriedOn(chatId),
+			continuation: (chatId) => this.store.continuation(chatId),
 			startChat: async (agentId, title, init) => {
 				const agent = this.agents.get(agentId);
 				if (!agent) throw new Error("The agent was deleted");
@@ -3878,7 +3880,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Where what is sent to a chat goes: a chat that grew too long is carried on in a new one,
-	 * which then hears the answers to the tasks the chat handed out, its schedules and its events,
+	 * which then hears the answers to the tasks the chat handed out, its schedules, triggers and events,
 	 * and which a task's follow-ups go to, since the old chat is full. The tasks the chat did or
 	 * handed out move over, so the new chat is the one recorded for them, only once the old chat
 	 * is at rest: nothing at work for it, no call waiting in it for answers, and no task of its

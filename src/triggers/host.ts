@@ -18,6 +18,10 @@
  *   tells this host before it submits (`StableOperation`), and every retry
  *   uses that key exactly. A finished task's chat is woken under `wake:` and
  *   its key keeps that form, whatever the task's state on a retry.
+ * - A firing for an existing chat that was carried on in a new one goes to
+ *   the chat it carries on in, through any chain of them, as a schedule's
+ *   does (`carriedOn`). The chat is recorded with the key, so every retry
+ *   goes where the first submission went, whatever has been continued since.
  * - What became of a submission and its run is read from pi's own record of
  *   the key (`submissionByRequest`), never assumed. No recorded key, or no
  *   record of the recorded key, means it was never submitted (`absent`); a
@@ -91,6 +95,10 @@ export interface TriggerSpace {
 	chatAgent(chatId: string): string;
 	/** Whether the chat is one of the space's own, there and not deleted. */
 	chatOpen(chatId: string): Promise<boolean>;
+	/** The chat a chat's firings go to now: its continuation, or the last of a chain of them, once the chat carried on is at rest (`Pim#carriedOn`); the chat itself otherwise. */
+	carriedOn(chatId: string): Promise<string>;
+	/** The chat that carries a chat on, once it has one. */
+	continuation(chatId: string): string | null;
 	/** Makes a chat with the agent, within the person's limit on chats; `init` runs in the commit that makes it. */
 	startChat(agentId: string, title: string, init: ConversationInit): Promise<string>;
 	/** Ties a chat made by `startChat` to its agent and title, again, for a chat whose making was cut short after pi wrote it. */
@@ -186,7 +194,9 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 		if (state === "suspended") return { ok: false, reason: "the space is suspended", retryable: true };
 		if (!this.#space.agentExists(input.agentId)) return { ok: false, reason: "the trigger's agent was deleted", retryable: false };
 		if (input.destination.type === "existing_chat") {
-			const refusal = await this.#chatRefusal(input.destination.chatId, input.agentId);
+			// The chat itself, and the last chat it was carried on in, which is where its firings go once the chats before it are at rest.
+			const chain = this.#chain(input.destination.chatId);
+			const refusal = (await this.#chatRefusal(input.destination.chatId, input.agentId)) ?? (await this.#chatRefusal(chain.at(-1)!, input.agentId));
 			if (refusal) return { ok: false, reason: refusal, retryable: false };
 		}
 		return { ok: true };
@@ -264,13 +274,16 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 					await this.#delivered(input.evidence, row.submissionChat, row.submissionKey);
 					return { status: "duplicate", receipt: await this.#accept(row) };
 				}
-				if (row.submissionChat !== input.chatId) return { status: "failed", reason: "the operation was keyed for another chat" };
+				if (!this.#chain(input.chatId).includes(row.submissionChat)) return { status: "failed", reason: "the operation was keyed for another chat" };
 			}
 			const state = this.#space.state();
 			if (state === "closed") return { status: "failed", reason: "the space was erased" };
 			if (state === "suspended") return { status: "suspended", reason: "the space is suspended" };
 			if (!this.#space.agentExists(input.agentId)) return { status: "failed", reason: "the trigger's agent was deleted" };
-			const refusal = await this.#chatRefusal(input.chatId, input.agentId);
+			// A chat carried on in a new one hears its firings there, as it hears its schedules and events; a key once recorded keeps the chat it was recorded with.
+			const chatId = row?.submissionKey && row.submissionChat ? row.submissionChat : await this.#space.carriedOn(input.chatId);
+			// The chat it goes to is checked, so a deleted continuation ends the firing; nothing falls back to the chat it carries on.
+			const refusal = await this.#chatRefusal(chatId, input.agentId);
 			if (refusal) return { status: "failed", reason: refusal };
 			const now = this.#now();
 			this.#sql.exec(
@@ -289,7 +302,7 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 					this.#sql.exec(
 						"UPDATE pim_trigger_host_operations SET submission_key = ?, submission_chat = ?, keyed_at = COALESCE(keyed_at, ?), updated_at = ? WHERE operation_id = ? AND submission_key IS NULL",
 						key,
-						input.chatId,
+						chatId,
 						this.#now(),
 						this.#now(),
 						operationId,
@@ -301,7 +314,7 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 			const text = firingText(input.instruction, input.evidence, this.#takeover?.contents(input.evidence) ?? null);
 			let receipt: PiReceipt;
 			try {
-				receipt = await this.#space.submit(input.chatId, text, { operationId: key, stable });
+				receipt = await this.#space.submit(chatId, text, { operationId: key, stable });
 			} catch (error) {
 				// Once its key was recorded, a failure may have come after pi took it.
 				if (kept || !(error instanceof HttpError)) return { status: "uncertain", reason: errorText(error) };
@@ -312,7 +325,7 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 			}
 			const keyed = this.operation(operationId)!;
 			if (keyed.submissionKey !== receipt.operationId) return { status: "uncertain", reason: "pi took the input under another key than the one recorded" };
-			await this.#delivered(input.evidence, input.chatId, keyed.submissionKey);
+			await this.#delivered(input.evidence, chatId, keyed.submissionKey);
 			return { status: receipt.accepted ? "accepted" : "duplicate", receipt: await this.#accept(keyed) };
 		});
 	}
@@ -354,6 +367,13 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 		if (!(await this.#space.chatOpen(chatId))) return "the trigger's chat was deleted";
 		if (this.#space.chatAgent(chatId) !== agentId) return "the trigger's chat is no longer with its agent";
 		return null;
+	}
+
+	/** The chat, then each chat that carries on the one before, in order. */
+	#chain(chatId: string): string[] {
+		const chain: string[] = [];
+		for (let chat: string | null = chatId; chat !== null && !chain.includes(chat); chat = this.#space.continuation(chat)) chain.push(chat);
+		return chain;
 	}
 
 	/**

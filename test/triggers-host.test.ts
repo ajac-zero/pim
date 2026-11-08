@@ -307,6 +307,63 @@ describe("time triggers in Pim", () => {
 		expect(await chats()).toBe(before);
 	});
 
+	it("hands a firing for a chat carried on to the chat it carries on in, through a chain, and never to a deleted one", async () => {
+		const planner = (await post("/agents", { name: "Planner", instructions: "Plan." })).body;
+		const shown: string[] = [];
+		for (let i = 0; i < 3; i++) shown.push((await post("/sessions", { agent: planner.id })).body.id as string);
+		const [first, second, third] = await inSpace((pim) => shown.map((id) => pim.store.sessionOf(id)!));
+		// As the continuation hook records it, when a chat grows too long.
+		const carry = (from: string, to: string) => inSpace((pim) => pim.store.continueSession(to, from));
+		const delivered = async (operationId: string) => (await inSpace((pim) => engineOf(pim).host.operation(operationId)))?.submissionChat;
+		const anchor = clock() + MINUTE;
+		await create("carried", { ...base(planner.id), destination: { type: "existing_chat", chatId: first! }, source: interval(anchor) });
+		const fire = async (at: number, message: string) => {
+			moveTo(at + SECOND);
+			faux.setResponses([toolUse("send_to_user", { message })]);
+			await tick();
+			const fired = (await runs("carried")).at(-1)!;
+			// The run keeps the trigger's own chat; where it went is the host's record.
+			expect(fired).toMatchObject({ phase: "accepted", chatId: first, scheduledFor: at });
+			return fired;
+		};
+		const finish = async (chat: string) => {
+			await settled(await publicId(chat));
+			moveTo(clock() + 2 * MINUTE);
+			await tick();
+			expect((await runs("carried")).at(-1)).toMatchObject({ phase: "completed" });
+		};
+
+		// Carried on once: the firing goes to the continuation, and nothing to the chat it carries on.
+		await carry(first!, second!);
+		const once = await fire(anchor, "In the new chat.");
+		expect(await delivered(once.operationId)).toBe(second);
+		expect(await submissionsIn(second!, once.operationId)).toEqual([once.operationId]);
+		expect(await submissionsIn(first!, "carried")).toEqual([]);
+		await finish(second!);
+		expect((await messagesOf(shown[1]!, "user")).at(-1)).toContain(`[Trigger "Morning brief" carried] Write my morning brief.`);
+		expect(await messagesOf(shown[0]!, "user")).toEqual([]);
+
+		// Carried on again: the last of the chain hears it.
+		await carry(second!, third!);
+		const twice = await fire(anchor + HOUR, "In the newest chat.");
+		expect(await delivered(twice.operationId)).toBe(third);
+		expect(await submissionsIn(third!, twice.operationId)).toEqual([twice.operationId]);
+		expect(await submissionsIn(second!, twice.operationId)).toEqual([]);
+		expect(await submissionsIn(first!, "carried")).toEqual([]);
+		await finish(third!);
+
+		// The continuation deleted: the firing ends, and goes to no chat earlier in the chain.
+		expect((await api(`/sessions/${shown[2]}`, { method: "DELETE" })).status).toBe(200);
+		moveTo(anchor + 2 * HOUR + SECOND);
+		await tick();
+		const gone = (await runs("carried")).at(-1)!;
+		expect(gone).toMatchObject({ phase: "not_submitted", chatId: first, scheduledFor: anchor + 2 * HOUR, lastError: "the trigger's chat was deleted" });
+		expect(await delivered(gone.operationId)).toBeUndefined();
+		expect(await submissionsIn(first!, "carried")).toEqual([]);
+		expect(await submissionsIn(second!, "carried")).toEqual([once.operationId]);
+		expect(await inSpace((pim) => engineOf(pim).store.get("carried"))).toMatchObject({ lifecycle: "enabled", health: "configuration_error", healthDetail: "the trigger's chat was deleted" });
+	});
+
 	it("hands nothing on while the space is suspended, and goes on once it is restored", async () => {
 		const agent = await majordomo();
 		const anchor = clock() + MINUTE;
@@ -547,6 +604,45 @@ describe("the triggers' host in Pim", () => {
 		expect(await state(task)).toBe("completed");
 		await settled(shown);
 		expect(await runsToday()).toBe(before + 2);
+	});
+
+	it("submits again to the chat a key was recorded with, even once that chat is carried on, and never to a chat outside the run's", async () => {
+		const agent = await majordomo();
+		const shown: string[] = [];
+		for (let i = 0; i < 4; i++) shown.push((await post("/sessions", { agent })).body.id as string);
+		const [pinned, carried, later, stranger] = await inSpace((pim) => shown.map((id) => pim.store.sessionOf(id)!));
+		const submit = (operationId: string, chatId: string) =>
+			host((engine) => engine.host.submit({ idempotencyKey: operationId, chatId, agentId: agent, instruction: "Check the fares.", evidence: evidence("t") }));
+		const keyed = (operationId: string, chat: string) =>
+			host((engine, pim) =>
+				sqlOf(pim).exec(
+					"INSERT INTO pim_trigger_host_operations (operation_id, agent_id, submission_chat, submission_key, keyed_at, created_at, updated_at) VALUES (?, ?, ?, ?, 0, 0, 0)",
+					operationId,
+					agent,
+					chat,
+					operationId,
+				),
+			);
+		await inSpace((pim) => pim.store.continueSession(carried!, pinned!));
+
+		// Keyed for the continuation, and lost before pi took it; carried on again since: it still goes where it was keyed.
+		await keyed("op-carried", carried!);
+		await inSpace((pim) => pim.store.continueSession(later!, carried!));
+		faux.setResponses([toolUse("send_to_user", { message: "Fares are flat." })]);
+		expect(await submit("op-carried", pinned!)).toMatchObject({ status: "accepted" });
+		expect(await submissionsIn(carried!, "op-carried")).toEqual(["op-carried"]);
+		expect(await submissionsIn(later!, "op-carried")).toEqual([]);
+		expect(await submissionsIn(pinned!, "op-carried")).toEqual([]);
+		await settled(shown[1]);
+
+		// A key recorded for a chat that neither is the run's nor carries it on is refused, and nothing goes in.
+		await keyed("op-astray", stranger!);
+		expect(await submit("op-astray", pinned!)).toEqual({ status: "failed", reason: "the operation was keyed for another chat" });
+		expect(await submissionsIn(stranger!, "op-astray")).toEqual([]);
+
+		// A chat that was never there is refused as a deleted one is, with nothing recorded.
+		expect(await submit("op-missing", "999999")).toEqual({ status: "failed", reason: "the trigger's chat was deleted" });
+		expect(await host((engine) => engine.host.operation("op-missing"))).toBeUndefined();
 	});
 });
 

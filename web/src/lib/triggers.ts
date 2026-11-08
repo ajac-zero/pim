@@ -220,7 +220,9 @@ export type NextLine = { key: TranslationKey; at?: number; minutes?: number };
 
 export function nextLine(trigger: Trigger): NextLine {
   if (trigger.lifecycle === "deleted") return { key: "triggerNextDeleted" };
-  if (trigger.lifecycle === "ended") return { key: "triggerNextEnded" };
+  if (trigger.lifecycle === "ended") {
+    return { key: "triggerNextEnded", at: trigger.updatedAt };
+  }
   if (trigger.migration && !trigger.migration.enableable) {
     return {
       key:
@@ -232,6 +234,8 @@ export function nextLine(trigger: Trigger): NextLine {
   const source = trigger.source;
   if (source.kind === "time") {
     const at = trigger.schedule?.nextFiringAt ?? null;
+    // A paused trigger shows no time: it resumes at the next scheduled one.
+    if (trigger.lifecycle === "paused") return { key: "triggerNextPaused" };
     if (at === null) return { key: "triggerNextNone" };
     return {
       key:

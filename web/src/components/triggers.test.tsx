@@ -117,8 +117,26 @@ describe("the list", () => {
     expect(text).toContain("State: On");
     expect(text).toContain("Health: Waiting for computer");
     expect(text).toContain("Waiting for your computer");
-    expect(text).toMatch(/Would next fire at Nov 9, 2026/);
+    expect(text).toMatch(/Not on yet\. First run would be Nov 9, 2026/);
     expect(text).toContain("Command, checked · Ada");
+  });
+
+  it("words paused and ended rows, with no time for paused", async () => {
+    const client = clientWith();
+    const at = Date.UTC(2026, 10, 9, 9);
+    const schedule = { nextFiringAt: at, nextCheckAt: at };
+    setList(client, [
+      page([
+        triggerFixture({ id: "t_paused", lifecycle: "paused", schedule }),
+        triggerFixture({ id: "t_ended", lifecycle: "ended" }),
+      ]),
+    ]);
+    const text = textOf(await render(TriggersPage, client));
+    expect(text).toContain(
+      "Paused. Will resume at the next scheduled time when turned on.",
+    );
+    expect(text).toContain("Ended.");
+    expect(text).not.toMatch(/Missed \d|Missed [A-Z][a-z]{2} /);
   });
 
   it("labels every filter, including health, source and agent", async () => {

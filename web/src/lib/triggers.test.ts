@@ -210,6 +210,14 @@ describe("what a trigger does next", () => {
     });
     expect(
       nextLine(
+        triggerFixture({
+          lifecycle: "paused",
+          schedule: { nextFiringAt: at, nextCheckAt: at },
+        }),
+      ),
+    ).toEqual({ key: "triggerNextPaused" });
+    expect(
+      nextLine(
         triggerFixture({ schedule: { nextFiringAt: null, nextCheckAt: null } }),
       ),
     ).toEqual({ key: "triggerNextNone" });

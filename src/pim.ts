@@ -196,6 +196,7 @@ import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHA
 import { ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
 import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
+import { type ApplyOutcome, type LegacySchedule, type MigrationPlan, migrationAllowed, migrationRecords, planMigration, type RollbackOutcome, TriggerMigration } from "./triggers/migration";
 import { TriggerChatDoc, type TriggerSpace } from "./triggers/host";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
@@ -2120,6 +2121,66 @@ export class Pim extends DurableAgent<Env> {
 		this.#computerTriggersKept?.stop();
 		this.#computerTriggersKept = undefined;
 		await this.wakeTriggers();
+	}
+
+	/**
+	 * Internal: what moving this space's schedules and watches to triggers
+	 * would do, item by item (./triggers/migration.ts). Writes nothing and
+	 * makes no table, wherever it runs; no secret is in it.
+	 */
+	async previewTriggerMigration(): Promise<MigrationPlan> {
+		const schedules = (await this.services().listSchedules()) as LegacySchedule[];
+		const watches = this.store.watches();
+		// The chats a trigger would deliver to, checked as its host's preflight checks them, before the pure mapping reads them.
+		const chats = new Set([...schedules.filter((schedule) => schedule.payload.newChat !== true).map((schedule) => schedule.payload.session), ...watches.map((watch) => watch.session)]);
+		const space = this.#triggerSpace();
+		const open = new Set<string>();
+		for (const chat of chats) if (await space.chatOpen(chat)) open.add(chat);
+		return planMigration(
+			{ schedules, watches, records: migrationRecords(this.ctx.storage.sql) },
+			{
+				now: this.triggerClock(),
+				owner: this.name,
+				publicUrl: this.deployment().publicUrl ?? null,
+				agentExists: (id) => this.agents.get(id) !== undefined,
+				// Read only: a space whose majordomo was never made doesn't get one from a preview.
+				chatAgent: (chat) => this.agents.findOfSession(chat)?.id ?? null,
+				chatOpen: (chat) => open.has(chat),
+			},
+		);
+	}
+
+	/** The migration's records and steps over the engine's store; made only where the engine is on. */
+	#triggerMigration(engine: TriggerEngine): TriggerMigration {
+		return new TriggerMigration(this.ctx.storage.sql, { store: engine.store, transaction: (work) => this.ctx.storage.transactionSync(work), now: () => this.triggerClock() });
+	}
+
+	/**
+	 * Internal: makes a draft trigger, the shadow, for each schedule and
+	 * watch that maps to one, owned by the schedule or watch, which keeps
+	 * delivering as before. Idempotent and resumable. Null where the
+	 * deployment's gate (`PIM_TRIGGERS_MIGRATION`, which nothing sets) is off
+	 * or the engine isn't on; no route, tool or setting calls it.
+	 */
+	async applyTriggerMigration(): Promise<ApplyOutcome[] | null> {
+		this.#assertOpen();
+		if (!migrationAllowed(this.env) || !this.triggerEngine()) return null;
+		const plan = await this.previewTriggerMigration();
+		// Read again after the plan's awaits, so it applies with the engine as it is now.
+		const engine = this.triggerEngine();
+		return engine ? this.#triggerMigration(engine).apply(plan) : null;
+	}
+
+	/**
+	 * Internal: deletes the shadows and leaves every item with its schedule
+	 * or watch. Works wherever the engine is on and something was applied,
+	 * even once the gate is taken off, so a migration can always be undone;
+	 * null otherwise.
+	 */
+	rollbackTriggerMigration(): RollbackOutcome[] | null {
+		const engine = this.triggerEngine();
+		if (!engine || migrationRecords(this.ctx.storage.sql).length === 0) return null;
+		return this.#triggerMigration(engine).rollback();
 	}
 
 	/** The triggers' clock. */

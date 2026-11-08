@@ -248,7 +248,9 @@ export type Refusal = {
 		| "authorization_denied"
 		| "immutable_field"
 		/** Enabling a time trigger that has no firing left from now within the supported range, such as a one-time trigger whose time has passed. */
-		| "schedule_exhausted";
+		| "schedule_exhausted"
+		/** Enabling a trigger whose work a schedule or watch still delivers (`ownedElsewhere`), which would deliver it twice. */
+		| "owned_elsewhere";
 	/** Why an authorization was denied, as the host's check said. */
 	readonly detail?: string;
 	readonly current?: Trigger;
@@ -323,6 +325,13 @@ export type TriggerStoreOptions = {
 	readonly retention?: Partial<Retention>;
 	/** Told, once its transaction has returned, of each trigger made, edited, enabled, paused, ended or deleted, such as to tell the computer what it should run now. */
 	readonly changed?: (id: string) => void;
+	/**
+	 * Whether something else still delivers this trigger's work, such as the
+	 * schedule or watch it was migrated from (./migration.ts): such a trigger
+	 * is never enabled, so only one of them fires. Read in the transaction
+	 * that would enable it.
+	 */
+	readonly ownedElsewhere?: (id: string) => boolean;
 };
 
 type Row = Record<string, SqlStorageValue>;
@@ -389,6 +398,7 @@ export class TriggerStore {
 			this.#checkWatch(spec, now);
 			this.#checkSchedule(spec, now);
 			if (lifecycle === "enabled") {
+				if (this.#options.ownedElsewhere?.(id)) return { ok: false, reason: "owned_elsewhere" };
 				const denied = this.#authorization(id, spec, now);
 				if (denied) return denied;
 			}
@@ -469,6 +479,7 @@ export class TriggerStore {
 			if (!TRANSITIONS[input.to].includes(trigger.lifecycle)) return { ok: false, reason: "invalid_transition", current: trigger };
 			const now = this.#options.now();
 			if (input.to === "enabled") {
+				if (this.#options.ownedElsewhere?.(input.id)) return { ok: false, reason: "owned_elsewhere", current: trigger };
 				const denied = this.#authorization(input.id, trigger.spec, now);
 				if (denied) return { ...denied, current: trigger };
 				// Enabling counts firings from now on, so one with none left would wait for nothing.

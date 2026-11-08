@@ -570,6 +570,13 @@ export class AgentStore {
 		this.#sql.exec("INSERT INTO pim_agent_sessions (session, agent) VALUES (?, ?) ON CONFLICT (session) DO UPDATE SET agent = excluded.agent", session, agent);
 	}
 
+	/** The agent of a session as `ofSession` says, read only: undefined where that would make the majordomo. */
+	findOfSession(session: string): Agent | undefined {
+		const [row] = this.#sql.exec(`${SELECT} JOIN pim_agent_sessions s ON p.id = s.agent WHERE s.session = ?`, session).toArray();
+		const [found] = row ? [row] : this.#sql.exec(`${SELECT} WHERE p.is_default = 1`).toArray();
+		return found ? agentOf(found, this.#directory) : undefined;
+	}
+
 	/** The agent a chat was started with, or the majordomo for a chat tied to none. */
 	ofSession(session: string): Agent {
 		const [row] = this.#sql

@@ -12,6 +12,7 @@
 import { COMPUTER_TABLES } from "./computer";
 import { COORDINATOR_TABLES, TriggerCoordinator } from "./coordinator";
 import { HOST_TABLES, PimTriggerHost, type TriggerSpace } from "./host";
+import { MIGRATION_TABLES, ownedByLegacy } from "./migration";
 import { type AuthorizationRequest, type AuthorizationVerdict, TRIGGER_TABLES, TriggerStore } from "./store";
 import { SUBSCRIPTION_PRIVATE_COLUMNS, SUBSCRIPTION_TABLES } from "./subscriptions";
 
@@ -58,7 +59,9 @@ export type TriggerEngineOptions = {
  * what it recorded. Connector subscriptions' bindings (./subscriptions.ts),
  * which nothing in Pim makes yet, are in it too when their table exists,
  * without their callback key or secret, and so are computer triggers' epochs
- * and grants (./computer.ts), which only a gate nothing sets makes. Read only: it makes no table, and
+ * and grants (./computer.ts), which only a gate nothing sets makes, and
+ * the records of schedules and watches moved to shadow triggers
+ * (./migration.ts), which hold no secret. Read only: it makes no table, and
  * builds nothing. Null when the space has none of the tables.
  */
 export function triggerHistory(sql: SqlStorage): Record<string, Record<string, SqlStorageValue>[]> | null {
@@ -68,7 +71,7 @@ export function triggerHistory(sql: SqlStorage): Record<string, Record<string, S
 			.toArray()
 			.map((row) => String(row.name)),
 	);
-	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES, ...COMPUTER_TABLES].filter((table) => existing.has(table));
+	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES, ...COMPUTER_TABLES, ...MIGRATION_TABLES].filter((table) => existing.has(table));
 	if (tables.length === 0) return null;
 	return Object.fromEntries(
 		tables.map((table) => {
@@ -90,7 +93,14 @@ export class TriggerEngine {
 		this.space = options.space;
 		// No `authorize` but where computer triggers are on: elsewhere no computer source can be enabled, and none's occurrence is handed on.
 		const computer = options.authorize ? { authorize: options.authorize } : {};
-		this.store = new TriggerStore(sql, { transaction: options.transaction, now: options.now, ...computer, ...(options.changed ? { changed: options.changed } : {}) });
+		// A trigger made from a schedule or watch that still delivers its work is never enabled (./migration.ts).
+		this.store = new TriggerStore(sql, {
+			transaction: options.transaction,
+			now: options.now,
+			ownedElsewhere: (id) => ownedByLegacy(sql, id),
+			...computer,
+			...(options.changed ? { changed: options.changed } : {}),
+		});
 		this.host = new PimTriggerHost(sql, options.space);
 		this.coordinator = new TriggerCoordinator(sql, {
 			store: this.store,

@@ -156,8 +156,17 @@ export function HealthPill({ trigger }: { trigger: Trigger }) {
 
 function useFormats() {
   const { t, formatDate, formatNumber } = useI18n();
-  const date = (at: number) =>
-    formatDate(new Date(at), { dateStyle: "medium", timeStyle: "short" });
+  // The zone is always written out, so an exact time never depends on hovering.
+  const date = (at: number, timeZone?: string) =>
+    formatDate(new Date(at), {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+      ...(timeZone ? { timeZone } : {}),
+    });
   const duration = (ms: number) => {
     const units = [
       ["day", 86_400_000],
@@ -241,6 +250,10 @@ export function Unavailable() {
     </main>
   );
 }
+
+/** The visible focus ring of a link, as buttons and fields have. */
+const LINK_RING =
+  "rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50";
 
 const FIELD_CLASS =
   "h-10 w-full rounded-xl border bg-background px-3 text-[15px] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20";
@@ -360,11 +373,15 @@ export function TriggersPage() {
         </p>
       )}
       <p role="status" aria-live="polite" className="sr-only">
-        {list.isPending
-          ? t("triggersLoading")
-          : list.data
-            ? t("triggersShown", { count: shown.length })
-            : ""}
+        {problem
+          ? t(PROBLEM_TEXT[problem.code])
+          : list.isPending
+            ? t("triggersLoading")
+            : list.data
+              ? t(filtered ? "triggersShownFiltered" : "triggersShown", {
+                  count: shown.length,
+                })
+              : ""}
       </p>
       {problem ? (
         <ProblemNotice problem={problem} />
@@ -423,11 +440,14 @@ export function TriggerRow({
         <Link
           to="/triggers/$triggerId"
           params={{ triggerId: trigger.id }}
-          className="block truncate text-[15px] underline-offset-2 hover:underline focus-visible:underline"
+          className={cn(
+            "block truncate text-[15px] underline-offset-2 hover:underline focus-visible:underline",
+            LINK_RING,
+          )}
         >
           {trigger.label}
         </Link>
-        <p className="mt-0.5 text-[13px] text-muted-foreground">
+        <p className="mt-0.5 break-words text-[13px] text-muted-foreground">
           {t(SOURCE_TEXT[trigger.source.kind])} · {agent}
         </p>
         <p className="mt-0.5 text-[13px] text-muted-foreground">
@@ -447,7 +467,10 @@ export function BackLink() {
   return (
     <Link
       to="/triggers"
-      className="inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground"
+      className={cn(
+        "inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground",
+        LINK_RING,
+      )}
     >
       <ArrowLeft className="size-4" />
       {t("allTriggers")}
@@ -727,7 +750,10 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
               <Link
                 to="/chat/$sessionId"
                 params={{ sessionId: trigger.destination.chatId }}
-                className="text-link underline-offset-2 hover:underline"
+                className={cn(
+                  "text-link underline-offset-2 hover:underline",
+                  LINK_RING,
+                )}
               >
                 {chatTitle(trigger.destination.chatId)}
               </Link>
@@ -740,7 +766,10 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
               <Link
                 to="/chat/$sessionId"
                 params={{ sessionId: trigger.origin.chatId }}
-                className="text-link underline-offset-2 hover:underline"
+                className={cn(
+                  "text-link underline-offset-2 hover:underline",
+                  LINK_RING,
+                )}
               >
                 {chatTitle(trigger.origin.chatId)}
               </Link>
@@ -1134,7 +1163,7 @@ export function TestResult({ result }: { result: TriggerDryRun }) {
             {result.firings.map((firing) => (
               <li key={firing.at}>
                 <time dateTime={new Date(firing.at).toISOString()}>
-                  {date(firing.at)}
+                  {date(firing.at, firing.timeZone)}
                 </time>{" "}
                 <span className="text-muted-foreground">
                   ({firing.timeZone})
@@ -1227,7 +1256,10 @@ export function RunRow({ run }: { run: TriggerRun }) {
           <Link
             to="/chat/$sessionId"
             params={{ sessionId: run.chatId }}
-            className="text-link text-sm underline-offset-2 hover:underline"
+            className={cn(
+              "text-link text-sm underline-offset-2 hover:underline",
+              LINK_RING,
+            )}
             aria-label={t("triggerRunChatFor", { date: when })}
           >
             {t("openChat")}
@@ -1338,7 +1370,10 @@ export function GrantReview({
       <Link
         to="/triggers/$triggerId"
         params={{ triggerId: trigger.id }}
-        className="inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground"
+        className={cn(
+          "inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground",
+          LINK_RING,
+        )}
       >
         <ArrowLeft className="size-4" />
         {t("triggerGrantBack", { label: trigger.label })}

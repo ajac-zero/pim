@@ -688,7 +688,7 @@ describe("a trigger's page", () => {
     );
   });
 
-  it("marks a shadow as its schedule's, and offers nothing that would change it", async () => {
+  it("marks a shadow as its schedule's, and offers only deleting it, which cancels the schedule too", async () => {
     const shadow = triggerFixture({
       migration: {
         kind: "schedule",
@@ -716,16 +716,30 @@ describe("a trigger's page", () => {
       )),
     );
     expect(actions).toContain("Test");
-    for (const action of ["Turn on", "Edit", "Pause", "Delete"]) {
+    expect(actions).toContain("Delete");
+    for (const action of ["Turn on", "Edit", "Pause"]) {
       expect(actions).not.toContain(action);
     }
+    const confirm = textOf(
+      await render(() => (
+        <ConfirmAction
+          trigger={shadow}
+          action="delete"
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      )),
+    );
+    expect(confirm).toContain(
+      "Delete this trigger and cancel the schedule it came from?",
+    );
   });
 
-  it("marks a shadow that took its schedule over as running it, still changed only through the migration", async () => {
+  it("marks a shadow that took its watch over as running it, which only deleting it with the watch changes", async () => {
     const takenOver = triggerFixture({
       lifecycle: "enabled",
       migration: {
-        kind: "schedule",
+        kind: "watch",
         legacyId: "s1",
         owner: "trigger",
         phase: "shadow",
@@ -738,7 +752,7 @@ describe("a trigger's page", () => {
     const detail = textOf(
       await render(() => <TriggerDetail trigger={takenOver} />, client),
     );
-    expect(detail).toContain("Took over its schedule");
+    expect(detail).toContain("Took over its connector watch");
     expect(detail).not.toContain("Runs through its schedule, not as a trigger");
     const actions = textOf(
       await render(() => (
@@ -749,9 +763,23 @@ describe("a trigger's page", () => {
         />
       )),
     );
-    for (const action of ["Edit", "Pause", "Delete"]) {
+    expect(actions).toContain("Delete");
+    for (const action of ["Edit", "Pause"]) {
       expect(actions).not.toContain(action);
     }
+    const confirm = textOf(
+      await render(() => (
+        <ConfirmAction
+          trigger={takenOver}
+          action="delete"
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      )),
+    );
+    expect(confirm).toContain(
+      "Delete this trigger and stop the connector watch it came from?",
+    );
   });
 
   it("offers what each lifecycle allows", async () => {

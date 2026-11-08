@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { type Condition, type ConditionState, evaluate, lookup, referencedPaths } from "./condition";
 import { DELIVERY_TTL_MS, type RunPhase, type TriggerRun } from "./coordinator";
 import type { TriggerEngine } from "./engine";
-import { migrationRecordOf } from "./migration";
+import { type MigrationRecord, migrationRecordOf } from "./migration";
 import { conditionMode, parseTriggerSpec, runsOnComputer, SOURCE_KINDS, type SourceKind, TRIGGER_LIFECYCLES, type TriggerLifecycle, type TriggerSpec } from "./spec";
 import { ADMISSION_LIMITS, DEFAULT_RETENTION, type Evidence, type Occurrence, type Refusal, type Trigger } from "./store";
 import { previewFirings, TIME_LIMITS } from "./time";
@@ -101,6 +101,13 @@ export type TriggerApiOptions = {
 	 * change answers; a failure is logged and never fails the change.
 	 */
 	readonly changed: () => Promise<void>;
+	/**
+	 * Ends the schedule or watch a trigger was made from (./migration.ts),
+	 * and the trigger with it: what deleting such a trigger does, since the
+	 * person is stopping that work wherever they see it. Without it, such a
+	 * trigger can't be deleted through the API.
+	 */
+	readonly endMigrated?: (record: MigrationRecord) => Promise<void>;
 };
 
 export type TriggerErrorCode =
@@ -396,11 +403,23 @@ export class TriggerApi {
 		return this.#view(changed.trigger);
 	}
 
-	/** Deletes a trigger for good, keeping its history; with `expectedRevision`, only at that revision. A stop asked for, not proof anything was cancelled. */
+	/**
+	 * Deletes a trigger for good, keeping its history; with
+	 * `expectedRevision`, only at that revision. A trigger made from a
+	 * schedule or watch ends that schedule or watch with it, whichever of
+	 * the two delivers it (`endMigrated`). A stop asked for, not proof
+	 * anything was cancelled.
+	 */
 	async remove(actor: TriggerActor, id: unknown, expectedRevision?: unknown) {
-		const trigger = this.#changeable(actor, id);
-		const removed = this.#store.remove({ id: trigger.id, ...(expectedRevision === undefined ? {} : { expectedRevision: revisionOf(expectedRevision) }) });
-		if (!removed.ok) throw refusal(removed);
+		const trigger = this.#changeable(actor, id, { migrated: this.#options.endMigrated !== undefined });
+		const record = migrationRecordOf(this.#sql, trigger.id);
+		if (record?.phase === "shadow" && this.#options.endMigrated) {
+			if (expectedRevision !== undefined && revisionOf(expectedRevision) !== trigger.revision) throw conflict(trigger);
+			await this.#options.endMigrated(record);
+		} else {
+			const removed = this.#store.remove({ id: trigger.id, ...(expectedRevision === undefined ? {} : { expectedRevision: revisionOf(expectedRevision) }) });
+			if (!removed.ok) throw refusal(removed);
+		}
 		await this.#changed();
 		return { deleted: true, trigger: this.#view(this.#store.get(trigger.id)!) };
 	}
@@ -488,16 +507,22 @@ export class TriggerApi {
 		return trigger;
 	}
 
-	/** A trigger the actor may change: not deleted, and not a shadow, which only the migration changes, whichever side owns it. */
-	#changeable(actor: TriggerActor, id: unknown): Trigger {
+	/**
+	 * A trigger the actor may change: not deleted, and not a shadow, which
+	 * only the migration changes, whichever side owns it; with `migrated`, a
+	 * shadow too, for deleting it with its schedule or watch.
+	 */
+	#changeable(actor: TriggerActor, id: unknown, options: { readonly migrated?: boolean } = {}): Trigger {
 		const trigger = this.#visible(actor, id);
 		if (trigger.lifecycle === "deleted") throw new TriggerApiError(409, "trigger_deleted", "The trigger was deleted");
 		const record = migrationRecordOf(this.#sql, trigger.id);
-		if (record?.phase === "shadow") {
+		if (record?.phase === "shadow" && options.migrated !== true) {
 			throw new TriggerApiError(
 				409,
 				"owned_elsewhere",
-				record.owner === "trigger" ? "This trigger took over a schedule or watch; it changes only by cutting the migration back or rolling it back" : "A schedule or watch still delivers this trigger's work; it changes only by rolling the migration back",
+				record.owner === "trigger"
+					? "This trigger took over a schedule or watch: it can't be changed or paused, only deleted, which ends that schedule or watch too"
+					: "A schedule or watch still delivers this trigger's work: it can't be changed or turned on, only deleted, which ends that schedule or watch too",
 			);
 		}
 		return trigger;

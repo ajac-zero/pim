@@ -43,6 +43,8 @@ export type AppEventsHost = {
 	scheduleRefresh(watchId: string, at: Date): Promise<void>;
 	submit(session: string, content: string, operationId: string): Promise<void>;
 	notify(title: string, body: string): Promise<void>;
+	/** Told before a watch is stopped, so whatever delivers in its place stops with it; a throw keeps the watch. */
+	stopping?(watchId: string): void;
 };
 
 function base64(bytes: Uint8Array): string {
@@ -164,6 +166,7 @@ export class AppEvents {
 	async stop(id: string): Promise<boolean> {
 		const watch = this.#host.store.watch(id);
 		if (!watch) return false;
+		this.#host.stopping?.(id);
 		this.#host.store.deleteWatch(id);
 		if (watch.status !== "ended") {
 			await this.#host.bridge

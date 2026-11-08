@@ -207,7 +207,6 @@ import {
 	adoptedSubscription,
 	type CutbackOutcome,
 	type CutoverOutcome,
-	cutoverAllowed,
 	firingOwner,
 	LegacyEventData,
 	type LegacyKind,
@@ -215,8 +214,11 @@ import {
 	legacyEventContents,
 	legacyEventOperationId,
 	legacyFiringOperationId,
+	MIGRATION_ITEMS_PER_START,
+	type MigrateOutcome,
 	type MigrationPlan,
-	migrationAllowed,
+	type MigrationRecord,
+	migrationCounts,
 	migrationRecordOf,
 	migrationRecordOfItem,
 	migrationRecords,
@@ -758,6 +760,8 @@ export class Pim extends DurableAgent<Env> {
 			const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
 			await this.deliverNotification(notification);
 		},
+		// A trigger made from the watch ends with it, whoever stops it.
+		stopping: (id) => this.#retireMigrated("watch", id),
 	});
 	/** What decides who writes which skill, read as it is at each check (./extensions/skills.ts). */
 	readonly #skillWriters: SkillWriters = { agents: this.agents, store: this.store, skills: this.skills, roleOf: (session) => this.#roleOf(session) };
@@ -1800,6 +1804,8 @@ export class Pim extends DurableAgent<Env> {
 			cancelSchedule: async (id) => {
 				const schedule = await this.getScheduleById(id);
 				if (schedule?.callback !== SCHEDULED_TASK_CALLBACK) return false;
+				// A trigger made from it ends first, so a failure leaves both as they were.
+				this.#retireMigrated("schedule", id);
 				return this.cancelSchedule(id);
 			},
 			notify: (notification) => this.deliverNotification(notification),
@@ -2157,8 +2163,8 @@ export class Pim extends DurableAgent<Env> {
 			// Computer sources' grants are checked against the computer paired now, so with none no grant is current; their occurrences are handed on, and the computer told of changes.
 			authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())),
 			changed: () => this.#computerTriggers()?.refresh(),
-			// Connector events are handed on, and a trigger that took over a schedule or watch delivers as it did, only where a watch may be or has been cut over (./triggers/migration.ts).
-			...(cutoverAllowed(this.env) || migrationRecords(this.ctx.storage.sql).some((record) => record.kind === "watch" && record.owner === "trigger") ? { connectorEvents: true } : {}),
+			// Connector events are handed on, which reach the engine only through a watch cut over to its trigger, and a trigger that took over a schedule or watch delivers as it did (./triggers/migration.ts).
+			connectorEvents: true,
 			takeover: this.#triggerTakeover(),
 		});
 		return this.#triggerEngine;
@@ -2312,12 +2318,19 @@ export class Pim extends DurableAgent<Env> {
 	 * Turns triggers on in a person's own space, as it starts and as they
 	 * register; a guest's space, or one not yet provisioned, is left without
 	 * them. Idempotent: a space that has them, as one the deployment's old
-	 * allowlist opted in does, keeps them and everything they recorded. It
-	 * never throws, so a failure can't keep the space from starting: the
-	 * space is left without triggers, as it was, the failure is logged, and
-	 * the next start tries again.
+	 * allowlist opted in does, keeps them and everything they recorded.
+	 * Wherever they are on, the space's schedules and watches then move to
+	 * them as far as is safe (`runTriggerMigration`). It never throws, so a
+	 * failure can't keep the space from starting: the space is left as it
+	 * was, the failure is logged, and the next start tries again.
 	 */
 	async ensureTriggerEngine(): Promise<void> {
+		await this.#turnTriggersOn();
+		await this.runTriggerMigration();
+	}
+
+	/** Turns triggers on where `ensureTriggerEngine` says, leaving the space without them, as it was, if that fails. */
+	async #turnTriggersOn(): Promise<void> {
 		try {
 			if (this.#closed() || this.store.meta(ENGINE_KEY) === "on" || this.profile() === null || this.guestBot() !== null) return;
 			await this.enableTriggerEngine();
@@ -2336,8 +2349,9 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Internal: what moving this space's schedules and watches to triggers
-	 * would do, item by item (./triggers/migration.ts). Writes nothing and
-	 * makes no table, wherever it runs; no secret is in it.
+	 * would do, item by item (./triggers/migration.ts), which the automatic
+	 * migration plans by. Writes nothing and makes no table, wherever it
+	 * runs; no secret is in it.
 	 */
 	async previewTriggerMigration(): Promise<MigrationPlan> {
 		const schedules = (await this.services().listSchedules()) as LegacySchedule[];
@@ -2357,7 +2371,7 @@ export class Pim extends DurableAgent<Env> {
 				// Read only: a space whose majordomo was never made doesn't get one from a preview.
 				chatAgent: (chat) => this.agents.findOfSession(chat)?.id ?? null,
 				chatOpen: (chat) => open.has(chat),
-				// What a watch's deliveries did against the ingress adapter's rules, from the receipts Pim's events route keeps where cutover is allowed.
+				// What a watch's deliveries did against the ingress adapter's rules, from the receipts Pim's events route keeps.
 				strictDeliveries: (watchId) => strictVerdict(this.ctx.storage.sql, watchId),
 			},
 		);
@@ -2378,40 +2392,61 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * Moves this space's schedules and watches to triggers as far as is safe
+	 * (`TriggerMigration.migrate`, ./triggers/migration.ts), wherever its
+	 * engine is on: `ensureTriggerEngine` runs it as the space starts and as
+	 * the person registers. At most `MIGRATION_ITEMS_PER_START` items are
+	 * changed a run; the rest wait for the next. Logs one line of counts by
+	 * outcome and reason (`pim.triggers_migration`), never an id, a field or
+	 * a secret. It never throws: a failure is logged, every item is left
+	 * delivered by exactly one side, and the next start goes on from there.
+	 * Null where the engine is off or the run failed.
+	 */
+	async runTriggerMigration(): Promise<MigrateOutcome[] | null> {
+		try {
+			if (this.#closed() || !this.triggerEngine()) return null;
+			const plan = await this.previewTriggerMigration();
+			// Read again after the plan's awaits, so it runs with the engine as it is now.
+			const engine = this.triggerEngine();
+			// A space with nothing to move gets none of the migration's tables.
+			if (!engine || (plan.items.length === 0 && plan.orphans.length === 0)) return [];
+			const outcomes = this.#triggerMigration(engine).migrate(plan, { limit: MIGRATION_ITEMS_PER_START });
+			console.log(JSON.stringify({ event: "pim.triggers_migration", owner: this.name, ...migrationCounts(outcomes) }));
+			// A cut-over trigger's firings are the coordinator's work now.
+			if (outcomes.some((outcome) => outcome.owner === "trigger" && outcome.outcome === "cut_over")) await this.wakeTriggers();
+			return outcomes;
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.triggers_migration_failed", owner: this.name, error: String(error) }));
+			return null;
+		}
+	}
+
+	/**
 	 * Internal: hands each shadowed item (or only `which`) to its trigger,
 	 * which delivers it from now on; its schedule or watch skips what the
 	 * trigger owns (./triggers/migration.ts). An item with a blocker unmet
-	 * stays with its schedule or watch and is reported. Null where the
-	 * deployment's gate (`PIM_TRIGGERS_CUTOVER`, which nothing sets) is off
-	 * or the engine isn't on; no route, tool or setting calls it.
+	 * stays with its schedule or watch and is reported. Unlike the automatic
+	 * migration, it also cuts over an item given back before. Null where the
+	 * engine isn't on; no route, tool or setting calls it.
 	 */
 	async cutoverTriggerMigration(which?: readonly { readonly kind: LegacyKind; readonly legacyId: string }[]): Promise<CutoverOutcome[] | null> {
 		this.#assertOpen();
-		if (!cutoverAllowed(this.env) || !this.triggerEngine()) return null;
+		if (!this.triggerEngine()) return null;
 		const plan = await this.previewTriggerMigration();
 		const engine = this.triggerEngine();
 		if (!engine) return null;
-		// A watch's events are handed on only by a coordinator made to (`connectorEvents`), which this instance's was unless it was built before the gate was set.
-		const wanted = plan.items.filter((item) => !which || which.some((one) => one.kind === item.kind && one.legacyId === item.legacyId));
-		const refused = engine.connectorEvents ? [] : wanted.filter((item) => item.kind === "watch");
-		const outcomes = this.#triggerMigration(engine).cutover(
-			plan,
-			wanted.filter((item) => !refused.includes(item)).map((item) => ({ kind: item.kind, legacyId: item.legacyId })),
-		);
+		const outcomes = this.#triggerMigration(engine).cutover(plan, which);
 		// A cut-over trigger's firings are the coordinator's work now.
 		await this.wakeTriggers();
-		return [
-			...outcomes,
-			...refused.map((item): CutoverOutcome => ({ kind: item.kind, legacyId: item.legacyId, triggerId: item.status === "migratable" ? item.triggerId : (item.record?.triggerId ?? ""), outcome: "refused", reason: "this instance's coordinator doesn't hand connector events on; it does once made again" })),
-		];
+		return outcomes;
 	}
 
 	/**
 	 * Internal: gives each cut-over item (or only `which`) back to its
-	 * schedule or watch. Refused for an item whose trigger has a firing
+	 * schedule or watch, for good: the automatic migration leaves an item
+	 * given back with it. Refused for an item whose trigger has a firing
 	 * admitted and not handed on, which it still delivers, unless `force`.
-	 * Works wherever the engine is on, even once the gate is taken off, so a
-	 * cutover can always be undone; null otherwise.
+	 * Null where the engine is off or nothing was ever moved.
 	 */
 	cutbackTriggerMigration(which?: readonly { readonly kind: LegacyKind; readonly legacyId: string }[], options: { readonly force?: boolean } = {}): CutbackOutcome[] | null {
 		const engine = this.triggerEngine();
@@ -2422,13 +2457,12 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Internal: makes a draft trigger, the shadow, for each schedule and
 	 * watch that maps to one, owned by the schedule or watch, which keeps
-	 * delivering as before. Idempotent and resumable. Null where the
-	 * deployment's gate (`PIM_TRIGGERS_MIGRATION`, which nothing sets) is off
-	 * or the engine isn't on; no route, tool or setting calls it.
+	 * delivering as before. Idempotent and resumable. Null where the engine
+	 * isn't on; no route, tool or setting calls it.
 	 */
 	async applyTriggerMigration(): Promise<ApplyOutcome[] | null> {
 		this.#assertOpen();
-		if (!migrationAllowed(this.env) || !this.triggerEngine()) return null;
+		if (!this.triggerEngine()) return null;
 		const plan = await this.previewTriggerMigration();
 		// Read again after the plan's awaits, so it applies with the engine as it is now.
 		const engine = this.triggerEngine();
@@ -2436,15 +2470,55 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Internal: deletes the shadows and leaves every item with its schedule
-	 * or watch. Works wherever the engine is on and something was applied,
-	 * even once the gate is taken off, so a migration can always be undone;
-	 * null otherwise.
+	 * Internal: deletes the shadows and leaves every item (or only `which`)
+	 * with its schedule or watch, for good: the automatic migration leaves
+	 * an item rolled back with it. Null where the engine is off or nothing
+	 * was ever moved.
 	 */
 	rollbackTriggerMigration(which?: readonly { readonly kind: LegacyKind; readonly legacyId: string }[], options: { readonly force?: boolean } = {}): RollbackOutcome[] | null {
 		const engine = this.triggerEngine();
 		if (!engine || migrationRecords(this.ctx.storage.sql).length === 0) return null;
 		return this.#triggerMigration(engine).rollback(which, options);
+	}
+
+	/**
+	 * Ends the trigger made from a schedule or watch as that schedule is
+	 * cancelled or the watch stopped, by whatever path, so nothing delivers
+	 * its work after: its shadow is deleted and its record says rolled back,
+	 * by force, since stopping it means every firing not yet handed on too
+	 * (a run already submitted goes on, as a schedule's does). Nothing where
+	 * no trigger was made from it, or the space's triggers are off, which
+	 * gave every item back already.
+	 */
+	#retireMigrated(kind: LegacyKind, legacyId: string): void {
+		const engine = this.triggerEngine();
+		if (!engine || migrationRecordOfItem(this.ctx.storage.sql, kind, legacyId)?.phase !== "shadow") return;
+		this.#triggerMigration(engine).rollback([{ kind, legacyId }], { force: true });
+	}
+
+	/**
+	 * Ends the schedule or watch a trigger was made from, and with it the
+	 * trigger (`#retireMigrated`): what deleting such a trigger means, since
+	 * the person is stopping that work wherever they see it. One already
+	 * gone leaves only its trigger to end.
+	 */
+	async #endMigrated(record: MigrationRecord): Promise<void> {
+		const ended = record.kind === "schedule" ? await this.services().cancelSchedule(record.legacyId) : await this.appEvents.stop(record.legacyId);
+		if (!ended) this.#retireMigrated(record.kind, record.legacyId);
+	}
+
+	/**
+	 * Gives back to its schedule or watch each item a trigger owned by
+	 * `agentId` delivers, as that agent is deleted: the trigger could no
+	 * longer run it, where the schedule or watch goes on with the chat's
+	 * agent, as it always did. By force, as turning triggers off gives them
+	 * back; the cutback stands.
+	 */
+	#handBackFrom(agentId: string): void {
+		const engine = this.triggerEngine();
+		if (!engine) return;
+		const owned = migrationRecords(this.ctx.storage.sql).filter((record) => record.phase === "shadow" && record.owner === "trigger" && engine.store.get(record.triggerId)?.spec.owningAgentId === agentId);
+		if (owned.length > 0) this.#triggerMigration(engine).cutback(owned, { force: true });
 	}
 
 	/**
@@ -2455,28 +2529,35 @@ export class Pim extends DurableAgent<Env> {
 	 * and provider subscription, and what the adapter won't take, a control
 	 * message, or anything it refuses or can't take now, goes to the watch's
 	 * receiver instead, so exactly one of them delivers it. Every delivery
-	 * to a shadowed watch is checked against the adapter's rules where
-	 * cutover is allowed, and the verdict recorded, which is what makes the
-	 * watch eligible for cutover; the response is the receiver's either way.
+	 * to a watch still its own, shadowed or not yet, is checked against the
+	 * adapter's rules where the space's triggers are on, and the verdict
+	 * recorded, which is what makes the watch eligible for cutover; the
+	 * response is the receiver's either way.
 	 */
 	async #receiveWatchEvent(watchId: string, request: Request): Promise<Response> {
 		const sql = this.ctx.storage.sql;
+		const watch = this.store.watch(watchId);
+		const engine = watch && watch.status !== "ended" ? this.triggerEngine() : null;
+		// A watch gone or ended, or any watch where the space's triggers are off, is its receiver's alone, as ever.
+		if (!watch || !engine) return this.appEvents.receive(watchId, request);
 		const record = migrationRecordOfItem(sql, "watch", watchId);
-		const watch = record?.phase === "shadow" ? this.store.watch(watchId) : undefined;
-		if (!record || record.phase !== "shadow" || !watch || watch.status === "ended") return this.appEvents.receive(watchId, request);
-		const engine = this.triggerEngine();
-		const trigger = engine?.store.get(record.triggerId);
-		const source = engine?.store.sourceState(record.triggerId);
-		if (record.owner !== "trigger" || !engine || !trigger || !source) {
-			if (!cutoverAllowed(this.env)) return this.appEvents.receive(watchId, request);
-			// Owned by the watch: delivered by it, and its shape checked beside, so a cutover knows whether what the connector sends would pass.
+		const taken = record?.phase === "shadow" && record.owner === "trigger" ? record : null;
+		const trigger = taken ? engine.store.get(taken.triggerId) : undefined;
+		const source = taken ? engine.store.sourceState(taken.triggerId) : undefined;
+		if (!trigger || !source) {
+			// Owned by the watch: delivered by it, and its shape checked beside, so the migration knows whether what the connector sends would pass.
 			const text = await request.text();
 			const response = await this.appEvents.receive(watchId, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
 			if (response.ok) {
 				// Only events count, either way: a verification passing says nothing of what the connector's events look like.
-				const shape = strictShape(request.headers, text, { providerSubscriptionId: watch.remoteId, event: watch.event });
-				if (!shape.ok) recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_fail", ref: shape.reason, at: this.triggerClock() });
-				else if (shape.type === "event") recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_pass", ref: shape.eventId ?? "", at: this.triggerClock() });
+				try {
+					const shape = strictShape(request.headers, text, { providerSubscriptionId: watch.remoteId, event: watch.event });
+					if (!shape.ok) recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_fail", ref: shape.reason, at: this.triggerClock() });
+					else if (shape.type === "event") recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_pass", ref: shape.eventId ?? "", at: this.triggerClock() });
+				} catch (error) {
+					// The watch delivered it either way: a check that couldn't be recorded leaves the watch waiting for its next delivery.
+					console.warn(JSON.stringify({ event: "pim.triggers_strict_check_failed", owner: this.name, error: String(error) }));
+				}
 			}
 			return response;
 		}
@@ -2536,6 +2617,7 @@ export class Pim extends DurableAgent<Env> {
 				now: () => this.triggerClock(),
 				// The wake is the only thing that ticks the coordinator: a trigger made or changed, through a route or a tool, is due by it.
 				changed: () => this.wakeTriggers(),
+				endMigrated: (record) => this.#endMigrated(record),
 				host: {
 					agentExists: (id) => this.agents.get(id) !== undefined,
 					majordomoId: () => this.agents.majordomo().id,
@@ -7062,6 +7144,8 @@ export class Pim extends DurableAgent<Env> {
 				this.#agent(id!);
 				// Its tasks stop with it: no other agent takes them over. It leaves the contacts of the agents that had it.
 				for (const task of this.#tasks.open()) if (task.agent === id) await this.#cancelTask(task, "Its agent was deleted.");
+				// Schedules and watches its triggers took over go on as they always did, with their chats' agents.
+				this.#handBackFrom(id!);
 				this.agents.delete(id!);
 				this.store.clearAudience(agentAudience(id!));
 				return { deleted: true };

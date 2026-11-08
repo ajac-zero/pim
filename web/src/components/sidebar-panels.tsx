@@ -408,6 +408,8 @@ function ScheduleRow({
     onSuccess: () => {
       toast.success(t("scheduleCancelled"));
       queryClient.invalidateQueries({ queryKey: ["schedules"] });
+      // A trigger that took the schedule over ends with it.
+      queryClient.invalidateQueries({ queryKey: ["triggers", "list"] });
     },
     onError: (error) => toast.error(error.message),
   });

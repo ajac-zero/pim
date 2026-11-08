@@ -538,23 +538,16 @@ describe("connector events handed on by the coordinator", () => {
 	});
 });
 
-const sqlOf = (pim: Pim) => (pim as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
-
-describe("connector events in Pim, handed on by a coordinator made with them", () => {
+describe("connector events in Pim, handed on by its own engine", () => {
 	const inSpace = <T>(work: (pim: Pim) => T | Promise<T>) => runInDurableObject(env.Pim.getByName(OWNER), work);
-	/** One tick of a coordinator made with connector events over the engine's own store and Pim's host, on the triggers' clock. */
-	const dispatch = () =>
-		inSpace((pim) => {
-			const engine = pim.triggerEngine()!;
-			const transaction = <T>(work: () => T): T => (pim as unknown as { ctx: DurableObjectState }).ctx.storage.transactionSync(work);
-			return new TriggerCoordinator(sqlOf(pim), { store: engine.store, host: engine.host, transaction, now: () => Date.now() + triggerClock.offset, connectorEvents: true }).tick();
-		});
+	/** One tick of Pim's own coordinator, which hands connector events on, with Pim's host on the triggers' clock. */
+	const dispatch = () => inSpace((pim) => pim.triggerEngine()!.coordinator.tick());
 
 	beforeAll(() => {
 		triggerClock.offset = 0;
 	});
 
-	it("is left pending by Pim's own engine, and goes through Pim's runs as the trigger's agent, where its actions still wait for approval", async () => {
+	it("goes through Pim's runs as the trigger's agent, where its actions still wait for approval", async () => {
 		await inSpace((pim) => pim.enableTriggerEngine());
 		const agent = await inSpace((pim) => pim.agents.majordomo().id);
 		expect((await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) })).status).toBe(200);
@@ -566,8 +559,6 @@ describe("connector events in Pim, handed on by a coordinator made with them", (
 				expect(store.create({ id: "fares", spec, lifecycle: "enabled" })).toMatchObject({ ok: true });
 				expect(store.admit({ id: "fares", generation: 1, eventId: "evt_1", observedAt, payload: { price: 481.37, note: SECRET } })).toMatchObject({ status: "accepted" });
 			});
-			// Pim's own engine hands no event on.
-			await inSpace((pim) => pim.runTriggerTick());
 			expect(await inSpace((pim) => pim.triggerEngine()!.store.outbox("fares"))).toMatchObject([{ status: "pending", attempts: 0 }]);
 
 			faux.setResponses([toolUse("http_request", { method: "POST", url: "https://hooks.example.test/fares" }), toolUse("send_to_user", { message: "I didn't post it." })]);

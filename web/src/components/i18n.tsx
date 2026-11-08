@@ -1413,13 +1413,13 @@ const translations = {
     triggerSamples: "Observed values",
     triggerSamplesOff: "Not kept",
     triggerOwnedBySchedule:
-      "Owned by its schedule, which still runs this work. This is a copy kept for moving to triggers later: it can't be turned on, changed or deleted here.",
+      "Owned by its schedule, which still runs this work: this copy can't be turned on or changed here, and deleting it cancels the schedule too.",
     triggerOwnedByWatch:
-      "Owned by its connector watch, which still runs this work. This is a copy kept for moving to triggers later: it can't be turned on, changed or deleted here.",
+      "Owned by its connector watch, which still runs this work: this copy can't be turned on or changed here, and deleting it stops the watch too.",
     triggerTookOverSchedule:
-      "Took over its schedule, which now skips what this trigger runs. It changes only by moving it back: it can't be changed, paused or deleted here.",
+      "Took over its schedule, which now skips what this trigger runs. It can't be changed or paused here, and deleting it cancels the schedule too.",
     triggerTookOverWatch:
-      "Took over its connector watch, whose events now come here. It changes only by moving it back: it can't be changed, paused or deleted here.",
+      "Took over its connector watch, whose events now come here. It can't be changed or paused here, and deleting it stops the watch too.",
     triggerOnceAt: "Once, at {date}",
     triggerCronIn: "On the schedule {expression}, in {timeZone}",
     triggerCronEveryMinute: "Every minute",
@@ -1481,6 +1481,10 @@ const translations = {
       "Pause this trigger? It stops firing; a run already going goes on.",
     triggerConfirmDelete:
       "Delete this trigger for good? It stops firing and its history stays. A run already going goes on.",
+    triggerConfirmDeleteSchedule:
+      "Delete this trigger and cancel the schedule it came from? Neither runs again, and the history stays. A run already going goes on.",
+    triggerConfirmDeleteWatch:
+      "Delete this trigger and stop the connector watch it came from? Its events no longer come in, and the history stays. A run already going goes on.",
     triggerPausedNow: "Paused.",
     triggerResumedNow: "Turned on.",
     triggerDeletedNow: "Trigger deleted.",
@@ -3072,13 +3076,13 @@ const translations = {
     triggerSamples: "Valores observados",
     triggerSamplesOff: "No se guardan",
     triggerOwnedBySchedule:
-      "Pertenece a su programación, que sigue ejecutando este trabajo. Es una copia guardada para pasar a disparadores más adelante: aquí no se puede activar, cambiar ni eliminar.",
+      "Pertenece a su programación, que sigue ejecutando este trabajo: esta copia no se puede activar ni cambiar aquí, y al eliminarla también se cancela la programación.",
     triggerOwnedByWatch:
-      "Pertenece a su vigilancia de conector, que sigue ejecutando este trabajo. Es una copia guardada para pasar a disparadores más adelante: aquí no se puede activar, cambiar ni eliminar.",
+      "Pertenece a su vigilancia de conector, que sigue ejecutando este trabajo: esta copia no se puede activar ni cambiar aquí, y al eliminarla también se detiene la vigilancia.",
     triggerTookOverSchedule:
-      "Tomó el relevo de su programación, que ahora omite lo que ejecuta este disparador. Solo cambia al devolverlo: aquí no se puede cambiar, pausar ni eliminar.",
+      "Tomó el relevo de su programación, que ahora omite lo que ejecuta este disparador. Aquí no se puede cambiar ni pausar, y al eliminarlo también se cancela la programación.",
     triggerTookOverWatch:
-      "Tomó el relevo de su vigilancia de conector, cuyos eventos ahora llegan aquí. Solo cambia al devolverlo: aquí no se puede cambiar, pausar ni eliminar.",
+      "Tomó el relevo de su vigilancia de conector, cuyos eventos ahora llegan aquí. Aquí no se puede cambiar ni pausar, y al eliminarlo también se detiene la vigilancia.",
     triggerOnceAt: "Una vez, el {date}",
     triggerCronIn: "Según la programación {expression}, en {timeZone}",
     triggerCronEveryMinute: "Cada minuto",
@@ -3141,6 +3145,10 @@ const translations = {
       "¿Pausar este disparador? Deja de dispararse; una ejecución en curso continúa.",
     triggerConfirmDelete:
       "¿Eliminar este disparador para siempre? Deja de dispararse y su historial se conserva. Una ejecución en curso continúa.",
+    triggerConfirmDeleteSchedule:
+      "¿Eliminar este disparador y cancelar la programación de la que viene? Ninguno vuelve a ejecutarse y el historial se conserva. Una ejecución en curso continúa.",
+    triggerConfirmDeleteWatch:
+      "¿Eliminar este disparador y detener la vigilancia de conector de la que viene? Sus eventos dejan de llegar y el historial se conserva. Una ejecución en curso continúa.",
     triggerPausedNow: "En pausa.",
     triggerResumedNow: "Activado.",
     triggerDeletedNow: "Disparador eliminado.",

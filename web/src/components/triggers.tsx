@@ -1237,6 +1237,10 @@ export function TriggerActions({
       );
       setStatus(done);
       if (action === "delete") {
+        // Its schedule, if it was made from one, is cancelled with it.
+        if (trigger.migration) {
+          void queryClient.invalidateQueries({ queryKey: ["schedules"] });
+        }
         toast.success(done);
         void navigate({ to: "/triggers" });
       }
@@ -1262,7 +1266,7 @@ export function TriggerActions({
       setProblem(triggerProblem(error));
     },
   });
-  // A shadow changes only through the migration, whichever side owns it: the API refuses anything else.
+  // A shadow changes only through the migration, whichever side owns it: the API refuses anything else but deleting it, which ends its schedule or watch too.
   const locked = trigger.migration?.phase === "shadow";
   const gone = trigger.lifecycle === "deleted";
   const canEdit = !locked && !gone && trigger.lifecycle !== "ended";
@@ -1308,7 +1312,7 @@ export function TriggerActions({
             {t("triggerPause")}
           </Button>
         )}
-        {!locked && !gone && (
+        {!gone && (
           <Button
             type="button"
             variant="destructive"
@@ -1384,9 +1388,20 @@ export function ConfirmAction({
       : computer.isError
         ? t("triggerComputerCheckFailed")
         : t("triggerComputerChecking");
+  // Deleting a trigger made from a schedule or watch ends that too, and says so first.
+  const from =
+    action === "delete" && trigger.migration?.phase === "shadow"
+      ? trigger.migration.kind
+      : null;
   return (
     <Confirm
-      text={t(CONFIRM_TEXT[action][0])}
+      text={t(
+        from === "schedule"
+          ? "triggerConfirmDeleteSchedule"
+          : from === "watch"
+            ? "triggerConfirmDeleteWatch"
+            : CONFIRM_TEXT[action][0],
+      )}
       action={t(CONFIRM_TEXT[action][1])}
       destructive={action === "delete"}
       pending={pending}

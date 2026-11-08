@@ -3807,7 +3807,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Compaction would hide a long chat's early history in the chat itself. Instead the chat
 	 * stays as it is, and a fork of it, compacted, is the chat the conversation goes on in: it
-	 * opens with the summary, and the sidebar lists it under the chat it carries on. A chat is
+	 * opens with the summary, and the sidebar lists it in the place of the chat it carries on, which is archived. A chat is
 	 * continued once; a run that already overflowed is still compacted in place, to go on.
 	 */
 	#continuationExtension() {
@@ -4784,7 +4784,8 @@ export class Pim extends DurableAgent<Env> {
 						responseAt: info?.responseAt ?? null,
 						unread,
 						// A chat still working, or with a reply not yet read, stays in the list however old it is.
-						archived: info?.archivedAt != null || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
+						// A chat that has been carried on is archived: the chat that carries it on has taken its place.
+						archived: info?.archivedAt != null || this.store.isContinued(session.id) || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: this.#agentRef(session.id),
 						room: this.#roomInfo(session.id, busy, heldErrors),

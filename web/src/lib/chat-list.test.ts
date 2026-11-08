@@ -107,6 +107,28 @@ describe("nestChats", () => {
     expect(ids(top)).toEqual(["b"]);
     expect(ids(children.get("b") ?? [])).toEqual(["a"]);
   });
+  it("puts the chats an old chat started under the chat that carries it on, which is listed apart", () => {
+    const old = chat("trip", 70, { archived: true, createdAt: 1 });
+    const second = chat("trip, continued", 80, { continuedFrom: "trip" });
+    const third = chat("trip, continued twice", 95, {
+      continuedFrom: "trip, continued",
+    });
+    const task = chat("task", 90, started("trip", 3));
+    const open = [third, task, chat("solo", 50)];
+    const { top, children } = nestChats(open, [...open, second, old]);
+    expect(ids(top)).toEqual(["trip, continued twice", "solo"]);
+    expect(ids(children.get("trip, continued twice") ?? [])).toEqual(["task"]);
+    // The old chat stands on its own in its own list.
+    expect(ids(nestChats([old], [...open, second, old]).top)).toEqual(["trip"]);
+  });
+  it("keeps a chat under the one it carries on when both are listed", () => {
+    const { top, children } = nestChats([
+      chat("new", 2, { continuedFrom: "old" }),
+      chat("old", 1),
+    ]);
+    expect(ids(top)).toEqual(["old"]);
+    expect(ids(children.get("old") ?? [])).toEqual(["new"]);
+  });
 });
 
 describe("isInactive", () => {

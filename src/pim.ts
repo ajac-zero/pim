@@ -3707,8 +3707,8 @@ export class Pim extends DurableAgent<Env> {
 	 * The messages offered under a chat. Once the chat has something said in
 	 * it, the utility model writes them from that chat and what Pim remembers,
 	 * and writes them again only when either has changed since, so a chat nobody
-	 * continues costs nothing. Until then, and when the model can't, Pim's own
-	 * starters.
+	 * continues costs nothing. Until then, Pim's own starters; when the model
+	 * can't, none, since starters rarely fit a chat already under way.
 	 */
 	async #suggestions(agent: Agent, session: string, locale: string): Promise<string[]> {
 		const starters = ASSISTANT_STARTERS.map((starter) => localize(starter, locale));
@@ -3748,7 +3748,7 @@ export class Pim extends DurableAgent<Env> {
 			return await writing.promise;
 		} catch (error) {
 			if (!(error instanceof HttpError)) console.warn("prompt suggestions failed", error);
-			return cached?.items ?? starters;
+			return cached?.items ?? [];
 		}
 	}
 

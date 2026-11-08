@@ -321,6 +321,8 @@ export type TriggerStoreOptions = {
 	/** The host's check of a computer source's grant. Without one, no computer source can be enabled. */
 	readonly authorize?: (request: AuthorizationRequest) => AuthorizationVerdict;
 	readonly retention?: Partial<Retention>;
+	/** Told, once its transaction has returned, of each trigger made, edited, enabled, paused, ended or deleted, such as to tell the computer what it should run now. */
+	readonly changed?: (id: string) => void;
 };
 
 type Row = Record<string, SqlStorageValue>;
@@ -380,7 +382,7 @@ export class TriggerStore {
 		const spec = parseTriggerSpec(input.spec);
 		const id = input.id === undefined ? this.#id() : opaqueId(input.id, "id");
 		const lifecycle = input.lifecycle ?? "draft";
-		return this.#options.transaction((): Changed | Refusal => {
+		return this.#told(id, this.#options.transaction((): Changed | Refusal => {
 			const existing = this.get(id);
 			if (existing) return { ok: false, reason: existing.lifecycle === "deleted" ? "deleted" : "exists" };
 			const now = this.#options.now();
@@ -401,7 +403,7 @@ export class TriggerStore {
 				now,
 			);
 			return { ok: true, trigger: this.get(id)! };
-		});
+		}));
 	}
 
 	/**
@@ -415,7 +417,7 @@ export class TriggerStore {
 	 */
 	update(input: { id: string; expectedRevision: number; spec: unknown }): Changed | Refusal {
 		const spec = parseTriggerSpec(input.spec);
-		return this.#options.transaction((): Changed | Refusal => {
+		return this.#told(input.id, this.#options.transaction((): Changed | Refusal => {
 			const current = this.#live(input.id);
 			if (!current.ok) return current;
 			const trigger = current.trigger;
@@ -444,7 +446,7 @@ export class TriggerStore {
 			this.#sql.exec("UPDATE pim_triggers SET revision = ?, updated_at = ? WHERE id = ?", revision, now, input.id);
 			if (sourceChanged || conditionChanged) this.#nextGeneration(input.id, now, sourceChanged ? revision : null);
 			return { ok: true, trigger: this.get(input.id)! };
-		});
+		}));
 	}
 
 	/**
@@ -459,7 +461,7 @@ export class TriggerStore {
 	 * an ended one still hands on what it already took in.
 	 */
 	setLifecycle(input: { id: string; to: "enabled"; expectedRevision: number } | { id: string; to: "paused" | "ended"; expectedRevision?: number }): Changed | Refusal {
-		return this.#options.transaction((): Changed | Refusal => {
+		return this.#told(input.id, this.#options.transaction((): Changed | Refusal => {
 			const current = this.#live(input.id);
 			if (!current.ok) return current;
 			const trigger = current.trigger;
@@ -475,7 +477,7 @@ export class TriggerStore {
 			this.#sql.exec("UPDATE pim_triggers SET lifecycle = ?, updated_at = ? WHERE id = ?", input.to, now, input.id);
 			this.#nextGeneration(input.id, now, null);
 			return { ok: true, trigger: this.get(input.id)! };
-		});
+		}));
 	}
 
 	/**
@@ -490,7 +492,7 @@ export class TriggerStore {
 	 * inbox, which only served taking in events, go.
 	 */
 	remove(input: { id: string; expectedRevision?: number }): { ok: true } | Refusal {
-		return this.#options.transaction((): { ok: true } | Refusal => {
+		return this.#told(input.id, this.#options.transaction((): { ok: true } | Refusal => {
 			const current = this.#live(input.id);
 			if (!current.ok) return current;
 			if (input.expectedRevision !== undefined && current.trigger.revision !== input.expectedRevision) return { ok: false, reason: "revision_mismatch", current: current.trigger };
@@ -506,7 +508,13 @@ export class TriggerStore {
 			this.#sql.exec("DELETE FROM pim_trigger_sources WHERE trigger_id = ?", input.id);
 			this.#sql.exec("DELETE FROM pim_trigger_inbox WHERE trigger_id = ?", input.id);
 			return { ok: true };
-		});
+		}));
+	}
+
+	/** Tells `changed` of a change that was made, after its transaction has returned. */
+	#told<T extends { readonly ok: boolean }>(id: string, result: T): T {
+		if (result.ok) this.#options.changed?.(id);
+		return result;
 	}
 
 	/** Erases every trigger of the space and everything they recorded, tombstones included: for erasing the space, not for deleting one trigger. */
@@ -592,7 +600,8 @@ export class TriggerStore {
 						position: integer(input.checkpoint.position, "checkpoint.position", 0, Number.MAX_SAFE_INTEGER),
 						cursor: input.checkpoint.cursor === null ? null : text(input.checkpoint.cursor, "checkpoint.cursor", ADMISSION_LIMITS.cursorLength),
 					};
-		return this.#options.transaction((): Admission => {
+		let ended = false;
+		const admission = this.#options.transaction((): Admission => {
 			const guard = this.#guard(input.id, input.generation);
 			if ("status" in guard) return guard;
 			const { trigger, source } = guard;
@@ -648,10 +657,14 @@ export class TriggerStore {
 			if (spec.source.kind === "process") {
 				this.#sql.exec("UPDATE pim_triggers SET lifecycle = 'ended', updated_at = ? WHERE id = ?", now, input.id);
 				this.#nextGeneration(input.id, now, null);
+				ended = true;
 			}
 			this.#prune(input.id, now);
 			return { status: "accepted", truth, stale: evaluation?.stale ?? false, occurrence, superseded };
 		});
+		// A process's exit ended its trigger.
+		if (ended) this.#options.changed?.(input.id);
+		return admission;
 	}
 
 	/**

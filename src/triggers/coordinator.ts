@@ -30,13 +30,19 @@
  * steps only where the coordinator is made with `connectorEvents`, which
  * nothing in Pim does yet, and only while its trigger is still at the
  * revision it was taken in under. Its run is told the event's name, id and
- * time, never what it carried, which the store doesn't keep. An occurrence
- * of any other source stays pending: the context it would carry, and the
- * grant it would need, have no contract yet.
+ * time, never what it carried, which the store doesn't keep. What an
+ * observer on the person's computer saw (`poll`, `stream` and `process`,
+ * which ./computer.ts admits) is handed on the same way only where the
+ * coordinator is made with `computerEvents`, which Pim does only behind
+ * computer triggers' gate, only at the revision it was taken in under, and
+ * only while the grant that revision names is still current, as `authorize`
+ * says at each step: its run is told the source's kind and the event's id
+ * and time, never what was seen. An occurrence of any other source stays
+ * pending.
  */
 
 import type { TimeSource, TriggerDestination } from "./spec";
-import type { Delivery, TriggerStore } from "./store";
+import type { AuthorizationRequest, AuthorizationVerdict, Delivery, TriggerStore } from "./store";
 import type { OlderFirings } from "./time";
 import { TriggerValidationError, integer, oneOf } from "./validate";
 
@@ -202,8 +208,29 @@ export type EventEvidence = {
 	readonly fields: readonly { readonly path: readonly string[]; readonly present: boolean }[];
 };
 
+/**
+ * What a run is told of what an observer on the person's computer saw:
+ * which kind of source, the event's id and time, and which fields its
+ * condition found, as the occurrence keeps them. Never what was seen, nor
+ * the command or path that saw it.
+ */
+export type ComputerEvidence = {
+	readonly kind: "computer_event";
+	readonly triggerId: string;
+	readonly revision: number;
+	readonly label: string;
+	readonly source: "poll" | "stream" | "process";
+	/** The runtime's id for what was seen, as its occurrence is keyed. */
+	readonly eventId: string;
+	/** When it was seen, on the computer. */
+	readonly observedAt: number;
+	readonly admittedAt: number;
+	readonly reason: "event" | "condition";
+	readonly fields: readonly { readonly path: readonly string[]; readonly present: boolean }[];
+};
+
 /** What a run is told of why it started. */
-export type TriggerEvidence = TimeEvidence | EventEvidence;
+export type TriggerEvidence = TimeEvidence | EventEvidence | ComputerEvidence;
 
 /** The sources whose occurrences the coordinator hands on. */
 export type HandedSource = TriggerEvidence["kind"];
@@ -293,6 +320,10 @@ export type TriggerCoordinatorOptions = {
 	readonly maxRunning?: number;
 	/** Whether connector events' occurrences are handed on, as time firings are (false: they stay pending). Nothing in Pim sets it yet. */
 	readonly connectorEvents?: boolean;
+	/** Whether what observers on the computer saw (`poll`, `stream`, `process`) is handed on (false: it stays pending). Pim sets it only behind computer triggers' gate. */
+	readonly computerEvents?: boolean;
+	/** The check that a computer source's grant is still current, asked at every step of handing its occurrence on; without one, none is handed on. */
+	readonly authorize?: (request: AuthorizationRequest) => AuthorizationVerdict;
 	readonly batch?: Partial<CoordinatorBatch>;
 };
 
@@ -341,6 +372,8 @@ export class TriggerCoordinator {
 	readonly #runCheckMs: number;
 	readonly #maxRunning: number;
 	readonly #connectorEvents: boolean;
+	readonly #computerEvents: boolean;
+	readonly #authorize: ((request: AuthorizationRequest) => AuthorizationVerdict) | null;
 	readonly #batch: CoordinatorBatch;
 	/** The occurrences this coordinator hands on (see `candidates`), as a SQL condition on `c`, an occurrence, and `v`, its revision. */
 	readonly #handed: string;
@@ -360,7 +393,9 @@ export class TriggerCoordinator {
 		this.#runCheckMs = integer(options.runCheckMs ?? MINUTE, "runCheckMs", SECOND, HOUR);
 		this.#maxRunning = integer(options.maxRunning ?? 4, "maxRunning", 1, 64);
 		this.#connectorEvents = options.connectorEvents === true;
-		this.#handed = this.#connectorEvents ? `(${TIME_FIRING} OR ${CONNECTOR_EVENT})` : TIME_FIRING;
+		this.#computerEvents = options.computerEvents === true;
+		this.#authorize = options.authorize ?? null;
+		this.#handed = `(${[TIME_FIRING, ...(this.#connectorEvents ? [CONNECTOR_EVENT] : []), ...(this.#computerEvents ? [COMPUTER_EVENT] : [])].join(" OR ")})`;
 		this.#candidates = candidates(this.#handed);
 		const batch = { ...DEFAULT_BATCH, ...options.batch };
 		this.#batch = {
@@ -684,7 +719,7 @@ export class TriggerCoordinator {
 				if (!delivery) return null;
 				// Only what this coordinator hands on is claimed; anything else is left as it was.
 				const kind = handedSource(delivery);
-				if (kind === null || (kind === "connector_event" && !this.#connectorEvents)) throw new Rollback();
+				if (kind === null || (kind === "connector_event" && !this.#connectorEvents) || (kind === "computer_event" && !this.#computerEvents)) throw new Rollback();
 				const operationId = delivery.item.operationId;
 				const existing = this.run(operationId);
 				if (existing && existing.phase !== "preparing") throw new Rollback();
@@ -844,6 +879,11 @@ export class TriggerCoordinator {
 				this.#notSubmitted(operationId, attempt, EDITED, null, report);
 				return false;
 			}
+			const revoked = this.#revoked(run, now);
+			if (revoked !== null) {
+				this.#notSubmitted(operationId, attempt, revoked, "auth_required", report);
+				return false;
+			}
 			if (now > run.deliverBy) {
 				this.#notSubmitted(operationId, attempt, "the time to hand it on ran out", null, report);
 				return false;
@@ -937,6 +977,14 @@ export class TriggerCoordinator {
 		return trigger !== undefined && trigger.revision !== revision;
 	}
 
+	/** Why a computer source's occurrence may no longer be handed on: the grant its revision names isn't current. Null for one that may, and for any other source. */
+	#revoked(run: TriggerRun, now: number): string | null {
+		const spec = this.#store.revision(run.triggerId, run.revision);
+		if (!spec || !COMPUTER_SOURCES.has(spec.source.kind)) return null;
+		const verdict = spec.authorizationRef === null || this.#authorize === null ? null : this.#authorize({ triggerId: run.triggerId, spec, authorizationRef: spec.authorizationRef, now });
+		return verdict?.ok ? null : `its grant to run on the computer is no longer current${verdict ? `: ${verdict.reason}` : ""}`;
+	}
+
 	/** Whether `attempt` is still the one that may settle the run: preparing under its claim, or submitting from it. */
 	#holds(run: TriggerRun | undefined, attempt: number): run is TriggerRun {
 		return run !== undefined && (run.phase === "preparing" || run.phase === "submitting") && run.dispatchAttempt === attempt;
@@ -986,7 +1034,7 @@ export class TriggerCoordinator {
 	}
 
 	/** Ends an operation that is known never to have been handed on, and won't be. */
-	#notSubmitted(operationId: string, attempt: number, reason: string, health: "configuration_error" | null, report: TickReport): void {
+	#notSubmitted(operationId: string, attempt: number, reason: string, health: "configuration_error" | "auth_required" | null, report: TickReport): void {
 		this.#transaction(() => {
 			const now = this.#now();
 			const current = this.run(operationId);
@@ -1040,6 +1088,10 @@ export class TriggerCoordinator {
 const TIME_FIRING = "c.occurrence_key LIKE 'time:%'";
 /** A connector's event: an event occurrence (`c`) of a revision (`v`) whose source is a connector's event. Other sources' events are keyed alike. */
 const CONNECTOR_EVENT = "(c.occurrence_key LIKE 'event:%' AND json_extract(v.spec, '$.source.kind') = 'connector_event')";
+/** What an observer on the computer saw: an event occurrence of a revision whose source is a poll, a stream or a process. */
+const COMPUTER_EVENT = "(c.occurrence_key LIKE 'event:%' AND json_extract(v.spec, '$.source.kind') IN ('poll', 'stream', 'process'))";
+/** The computer sources whose occurrences are handed on. A file source has no observer yet. */
+const COMPUTER_SOURCES: ReadonlySet<string> = new Set(["poll", "stream", "process"]);
 
 /**
  * The occurrences a trigger could hand on next, given the clock's reading:
@@ -1065,6 +1117,7 @@ function handedSource(delivery: Delivery): HandedSource | null {
 	const reason = delivery.occurrence.evidence.reason;
 	if (source === "time" && reason === "time") return "time";
 	if (source === "connector_event" && reason !== "time" && delivery.occurrence.key.startsWith("event:")) return "connector_event";
+	if (COMPUTER_SOURCES.has(source) && reason !== "time" && delivery.occurrence.key.startsWith("event:")) return "computer_event";
 	return null;
 }
 
@@ -1086,8 +1139,22 @@ function evidenceOf(delivery: Delivery): TriggerEvidence {
 			fields: evidence.fields.map((field) => ({ path: [...field.path], present: field.present })),
 		};
 	}
+	if ((spec.source.kind === "poll" || spec.source.kind === "stream" || spec.source.kind === "process") && evidence.reason !== "time") {
+		return {
+			kind: "computer_event",
+			triggerId: delivery.item.triggerId,
+			revision: delivery.occurrence.revision,
+			label: spec.label,
+			source: spec.source.kind,
+			eventId: eventIdOf(delivery.occurrence.key, delivery.item.triggerId),
+			observedAt: evidence.observedAt,
+			admittedAt: delivery.occurrence.createdAt,
+			reason: evidence.reason,
+			fields: evidence.fields.map((field) => ({ path: [...field.path], present: field.present })),
+		};
+	}
 	const source = spec.source as TimeSource;
-	if (evidence.reason !== "time") throw new TriggerValidationError("occurrence", "is not a time firing or a connector's event");
+	if (evidence.reason !== "time") throw new TriggerValidationError("occurrence", "is not a time firing, a connector's event or what the computer saw");
 	return {
 		kind: "time",
 		triggerId: delivery.item.triggerId,

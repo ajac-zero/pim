@@ -194,6 +194,7 @@ import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessag
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
 import { ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
+import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
 import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
 import { TriggerChatDoc, type TriggerSpace } from "./triggers/host";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
@@ -760,7 +761,11 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Every action an approval can be for: Pim's own, and the extensions'. */
 	get actions(): readonly GatedAction[] {
-		return [...this.#ownActions, ...[...this.abilities.values()].flatMap((ability) => ability.actions ?? [])];
+		return [
+			...this.#ownActions,
+			...[...this.abilities.values()].flatMap((ability) => ability.actions ?? []),
+			...(computerTriggersAllowed(this.env) ? [this.#computerGrantAction] : []),
+		];
 	}
 
 	readonly harness = new PiHarness({
@@ -808,6 +813,7 @@ export class Pim extends DurableAgent<Env> {
 				reviewExtension({ majordomo: () => this.agents.majordomo(), decide: (conversation, decision, note) => this.#reviewDecision(conversation, decision, note) }),
 			);
 			this.registry.install(approvalsExtension(services, this.#offeredActions()));
+			this.#installComputerGrants(services);
 			this.registry.install(webExtension);
 			this.registry.install(
 				artifactsExtension({
@@ -2015,8 +2021,10 @@ export class Pim extends DurableAgent<Env> {
 			transaction: (work) => this.ctx.storage.transactionSync(work),
 			now: () => this.triggerClock(),
 			space: this.#triggerSpace(),
-			// Computer sources' grants are checked only where computer triggers are on, which no deployment is.
-			...(computerTriggersAllowed(this.env) ? { authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())) } : {}),
+			// Computer sources' grants are checked, their occurrences handed on, and the computer told of changes only where computer triggers are on, which no deployment is.
+			...(computerTriggersAllowed(this.env)
+				? { authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())), changed: () => this.#computerTriggers()?.refresh() }
+				: {}),
 		});
 		return this.#triggerEngine;
 	}
@@ -2047,12 +2055,48 @@ export class Pim extends DurableAgent<Env> {
 			now: () => this.triggerClock(),
 			space: this.name,
 			tokenDigest: () => this.computer.tokenDigest(),
-			setTimer: (ms, run) => {
-				const timer = setTimeout(run, ms);
-				return () => clearTimeout(timer);
-			},
+			socket: (id) => [...this.getConnections(COMPUTER_TAG)].find((connection) => connection.id === id && connection.readyState === WebSocket.OPEN),
+			// Renewals and handoffs go by the triggers' wake, an alarm, which outlasts the Durable Object's eviction.
+			wake: () => void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error)),
 		});
 		return this.#computerTriggersKept;
+	}
+
+	/** What asking for and recording a computer source's grant may do in this space. */
+	#computerGrantHost(): ComputerGrantHost {
+		const off = "Triggers on the computer are off in this space.";
+		return {
+			request: (triggerId) => {
+				const triggers = this.#computerTriggers();
+				const engine = this.triggerEngine();
+				return triggers && engine ? grantRequest(engine.store, this.name, triggers.runtimeId(), triggerId) : { refused: off };
+			},
+			granted: (approvalId) => {
+				const triggers = this.#computerTriggers();
+				const engine = this.triggerEngine();
+				if (!triggers || !engine) throw new Error(off);
+				const said = recordGrant(engine.store, this.#computerGrants(), approvalId);
+				triggers.refresh();
+				return said;
+			},
+		};
+	}
+
+	/** The action an approved grant runs, which Pim knows of only where computer triggers are on. */
+	readonly #computerGrantAction = computerGrantAction(() => (this.#computerTriggers() ? this.#computerGrantHost() : null));
+
+	/**
+	 * Internal: revokes a grant of a computer source, for good. What its
+	 * source observes is refused from now on, its observer stops at once,
+	 * and an occurrence not yet handed on never is. False where there was no
+	 * such grant, or computer triggers are off.
+	 */
+	revokeComputerGrant(grantRef: string): boolean {
+		const triggers = this.#computerTriggers();
+		if (!triggers) return false;
+		const revoked = this.#computerGrants().revoke(grantRef);
+		triggers.refresh();
+		return revoked;
 	}
 
 	/** Internal: opts this space in to time triggers, where the deployment allows it; false where it doesn't. */
@@ -2085,6 +2129,7 @@ export class Pim extends DurableAgent<Env> {
 	/** Fired by the trigger wake: one tick of the coordinator, then the wake for its next. */
 	async runTriggerTick(): Promise<void> {
 		try {
+			this.#computerTriggers()?.renew();
 			await this.triggerEngine()?.coordinator.tick();
 		} finally {
 			await this.wakeTriggers();
@@ -2098,7 +2143,9 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	wakeTriggers(): Promise<void> {
 		const next = this.#triggerWake.then(async () => {
-			const wake = this.triggerEngine()?.coordinator.nextWakeAt() ?? null;
+			// The coordinator's next work, or renewing the computer's lease on its triggers, whichever comes first.
+			const due = [this.triggerEngine()?.coordinator.nextWakeAt() ?? null, this.#computerTriggers()?.renewAt() ?? null].filter((at) => at !== null);
+			const wake = due.length === 0 ? null : Math.min(...due);
 			const at = wake === null ? null : Math.ceil((Date.now() + Math.max(1_000, wake - this.triggerClock())) / 1000);
 			const wakes = (await this.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK);
 			if (at !== null && wakes.length === 1 && wakes[0]!.time === at) return;
@@ -2429,7 +2476,7 @@ export class Pim extends DurableAgent<Env> {
 			let result: string;
 			try {
 				result = action
-					? await this.keepAliveWhile(() => action.run(approval.args as never, { session: approval.session }))
+					? await this.keepAliveWhile(() => action.run(approval.args as never, { session: approval.session, approval: approval.id }))
 					: `The action ${approval.action} is no longer available.`;
 			} catch (error) {
 				result = `The action failed: ${errorMessage(error)}`;
@@ -6596,6 +6643,16 @@ export class Pim extends DurableAgent<Env> {
 		return skillsExtension(services, this.#skillWriters, this.skills, this.files, this.computer.paired());
 	}
 
+	/**
+	 * The tool that asks the person to grant a trigger's source on their
+	 * computer, only where computer triggers are on. Elsewhere its extension
+	 * is there with no tools, as the desktop's is, so chats made meanwhile
+	 * have its place and get the tool once the gate is on.
+	 */
+	#installComputerGrants(services: PimServices): void {
+		this.registry.install(computerTriggersAllowed(this.env) ? computerGrantExtension(services, this.#computerGrantHost()) : defineExtension({ name: COMPUTER_GRANT_EXTENSION, tools: [] }));
+	}
+
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */
 	#reinstallApprovals(): void {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
@@ -6603,6 +6660,7 @@ export class Pim extends DurableAgent<Env> {
 		this.registry.install(this.#agentExtension(services));
 		this.registry.install(this.#skillsExtension(services));
 		this.registry.install(approvalsExtension(services, this.#offeredActions()));
+		this.#installComputerGrants(services);
 		this.#installBrowser(services);
 		this.#installDesktop();
 		this.#installAbilities(services);
@@ -7202,7 +7260,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	#computerDisconnected(connection: Connection): void {
-		this.#computerTriggersKept?.closed(connection);
+		this.#computerTriggers()?.closed(connection);
 		this.computer.disconnected();
 		this.#closeScreens();
 		this.broadcastMessage({ type: "computer" });

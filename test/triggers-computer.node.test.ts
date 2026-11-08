@@ -23,7 +23,10 @@ import {
 	sourceConfigHash,
 	TRIGGERS_ENVELOPE,
 } from "../src/triggers/computer";
+import { type ChatCreation, type ChatLookup, type HostPreflight, type RunStatus, type SubmissionLookup, type SubmitResult, type TriggerAgentHost, TriggerCoordinator, type TriggerEvidence } from "../src/triggers/coordinator";
 import { triggerHistory } from "../src/triggers/engine";
+import { grantRequest, recordGrant } from "../src/triggers/grant-action";
+import { firingText } from "../src/triggers/host";
 import { TriggerStore } from "../src/triggers/store";
 
 const T0 = Date.UTC(2026, 10, 7);
@@ -156,15 +159,26 @@ type Space = {
 	readonly pim: PimStore;
 	readonly store: TriggerStore;
 	readonly grants: ComputerGrants;
-	readonly triggers: ComputerTriggers;
+	triggers: ComputerTriggers;
 	/** The digest of the paired computer's token, as the space keeps it. */
 	digest: string | null;
 	/** Makes every transaction fail before it writes, as a full disk would. */
 	failWrites: boolean;
+	/** The database's transactions, as the stores are given them. */
+	readonly transaction: <T>(work: () => T) => T;
+	/** The computer's sockets that are open, by id, as the space finds them after an eviction. */
+	readonly sockets: Map<string, { readonly id: string; send(message: string): void }>;
+	/** Forgets everything in memory, as when the Durable Object is evicted: what is kept, the open sockets and the wake stay. */
+	evict(): void;
 	close(): void;
 };
 
-/** `renewals`, when given, lets the space set its renewal timer only while it is on, as if a lost timer came back. */
+/**
+ * The space's wake stands for Pim's: one alarm, set whenever the computer's
+ * triggers say when to renew, which renews them when it fires, whatever
+ * instance is current then. `renewals`, when given, lets the wake be set only
+ * while it is on, as if an alarm were lost and came back.
+ */
 function openSpace(file: string, clock: FakeClock, options: { reconcileBytes?: number; renewals?: { on: boolean } } = {}): Space {
 	const db = new DatabaseSync(file);
 	db.exec("PRAGMA synchronous = FULL");
@@ -189,18 +203,48 @@ function openSpace(file: string, clock: FakeClock, options: { reconcileBytes?: n
 	};
 	const pim = new PimStore(sql);
 	const grants = new ComputerGrants(sql, { approval: (id) => pim.approval(id), space: OWNER, now: clock.now });
-	const store = new TriggerStore(sql, { transaction, now: clock.now, authorize: grants.authorize(() => runtimeIdOf(space.digest)) });
-	const triggers = new ComputerTriggers(sql, {
+	const store = new TriggerStore(sql, { transaction, now: clock.now, authorize: grants.authorize(() => runtimeIdOf(space.digest)), changed: () => space.triggers.refresh() });
+	const sockets = new Map<string, { readonly id: string; send(message: string): void }>();
+	let alarm: (() => void) | null = null;
+	const wake = () => {
+		alarm?.();
+		alarm = null;
+		const at = space.triggers.renewAt();
+		if (at === null || (options.renewals && !options.renewals.on)) return;
+		alarm = clock.setTimer(Math.max(0, at - clock.now()), () => {
+			alarm = null;
+			if (!options.renewals || options.renewals.on) space.triggers.renew();
+		});
+	};
+	const make = () =>
+		new ComputerTriggers(sql, {
+			store,
+			grants,
+			transaction,
+			now: clock.now,
+			space: OWNER,
+			tokenDigest: () => space.digest,
+			socket: (id) => sockets.get(id),
+			wake,
+			...(options.reconcileBytes ? { reconcileBytes: options.reconcileBytes } : {}),
+		});
+	return Object.assign(space, {
+		file,
+		sql,
+		pim,
 		store,
 		grants,
+		triggers: make(),
 		transaction,
-		now: clock.now,
-		space: OWNER,
-		tokenDigest: () => space.digest,
-		setTimer: (ms, run) => (options.renewals && !options.renewals.on ? () => {} : clock.setTimer(ms, run)),
-		...(options.reconcileBytes ? { reconcileBytes: options.reconcileBytes } : {}),
+		digest: DIGEST,
+		failWrites: false,
+		sockets,
+		evict: () => Object.assign(space, { triggers: make() }),
+		close: () => {
+			alarm?.();
+			db.close();
+		},
 	});
-	return Object.assign(space, { file, sql, pim, store, grants, triggers, digest: DIGEST, failWrites: false, close: () => db.close() });
 }
 
 type Computer = { host: TriggersHost; stream: FakeStreamLauncher; logs: string[] };
@@ -305,12 +349,14 @@ class Wire {
 		this.open = false;
 		this.computerSocket.readyState = 3;
 		this.computer.host.detach(this.computerSocket);
+		this.space.sockets.delete(this.spaceSocket.id);
 		this.space.triggers.closed(this.spaceSocket);
 	}
 }
 
 async function connect(space: Space, computer: Computer, clock: FakeClock): Promise<Wire> {
 	const wire = new Wire(space, computer);
+	space.sockets.set(wire.spaceSocket.id, wire.spaceSocket);
 	computer.host.attach(wire.computerSocket);
 	await clock.advance(0);
 	return wire;
@@ -784,6 +830,226 @@ describe("computer triggers, end to end", () => {
 		await clock.advance(120_000);
 		const journal = await fs.readFile(path.join(dir, "computer", "triggers", BINDING.runtimeId, SPOOL_FILE), "utf8");
 		for (const secret of ["observed-secret-value", "tail-the-log", authorizationRef, TOKEN, DIGEST]) expect(journal).not.toContain(secret);
+		await closeComputer(computer, clock);
+		space.close();
+	});
+});
+
+/** The agent's side of a handoff, as Pim's host is: every check passes, chats are made on asking, and every submission is accepted and recorded. */
+class FakeAgentHost implements TriggerAgentHost<TriggerEvidence> {
+	readonly submissions: { chatId: string; instruction: string; evidence: TriggerEvidence }[] = [];
+	readonly chats = new Map<string, string>();
+	/** Runs while a chat is being made: between the handoff's first checks and its submission. */
+	whileMakingChat: () => void = () => {};
+	async preflight(): Promise<HostPreflight> {
+		return { ok: true };
+	}
+	async findChat(input: { operationId: string }): Promise<ChatLookup> {
+		const chatId = this.chats.get(input.operationId);
+		return chatId ? { status: "found", chatId } : { status: "absent" };
+	}
+	async createChat(input: { operationId: string }): Promise<ChatCreation> {
+		this.whileMakingChat();
+		const chatId = `chat-for-${input.operationId}`;
+		this.chats.set(input.operationId, chatId);
+		return { status: "created", chatId };
+	}
+	async lookupSubmission(): Promise<SubmissionLookup> {
+		return { status: "absent" };
+	}
+	async submit(input: { chatId: string; instruction: string; evidence: TriggerEvidence }): Promise<SubmitResult> {
+		this.submissions.push({ chatId: input.chatId, instruction: input.instruction, evidence: input.evidence });
+		return { status: "accepted", receipt: `receipt-${this.submissions.length}` };
+	}
+	async lookupRun(): Promise<RunStatus> {
+		return "running";
+	}
+}
+
+/** A coordinator over the space's store, made as Pim's engine makes it behind computer triggers' gate, or, with `computerEvents` false, as it is without. */
+function coordinatorOf(space: Space, clock: FakeClock, host: FakeAgentHost, computerEvents = true): TriggerCoordinator {
+	const sleep = (_ms: number, signal: AbortSignal) => new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
+	return new TriggerCoordinator(space.sql, {
+		store: space.store,
+		host,
+		transaction: space.transaction,
+		now: clock.now,
+		sleep,
+		...(computerEvents ? { computerEvents: true, authorize: space.grants.authorize(() => runtimeIdOf(space.digest)) } : {}),
+	});
+}
+
+describe("computer triggers, wired", () => {
+	it("asks for a grant of exactly the trigger's source, records only the person's own approval, and tells the computer once the trigger changes", async () => {
+		const clock = new FakeClock();
+		const space = openSpace(path.join(dir, "space.sqlite"), clock);
+		const computer = await openComputer(clock);
+		const source = stream("tail -F /var/log/syslog");
+		expect(space.store.create({ id: "watch", spec: { ...base, source } })).toMatchObject({ ok: true, trigger: { lifecycle: "draft", revision: 1 } });
+		const wire = await connect(space, computer, clock);
+		expect(wire.to("reconcile").at(-1)!.sources).toEqual([]);
+
+		const asked = grantRequest(space.store, OWNER, runtimeIdOf(space.digest), "watch");
+		expect(asked).toEqual({ scope: scopeOf("watch", 1, source), summary: expect.stringContaining("`tail -F /var/log/syslog`") });
+		expect((asked as { summary: string }).summary).toContain("runs as your own user on the computer, with everything that user can reach");
+		const { scope } = asked as { scope: ReturnType<typeof scopeOf> };
+
+		// Decided by a timeout, or denied: nothing is granted, and the trigger stays as it was.
+		for (const id of [approve(space, scope, "timeout"), approve(space, scope, "user", "denied")]) expect(recordGrant(space.store, space.grants, id)).toMatch(/^Nothing was granted/);
+		expect(space.store.get("watch")).toMatchObject({ revision: 1, spec: { authorizationRef: null } });
+
+		// Approved by the person: recorded, and the trigger points at it, so it can be enabled; enabling it tells the computer, unasked.
+		const approval = approve(space, scope);
+		expect(recordGrant(space.store, space.grants, approval)).toMatch(/^Granted: .* once it is enabled\./);
+		expect(space.store.get("watch")).toMatchObject({ revision: 2, spec: { authorizationRef: approval } });
+		expect(space.grants.current(approval)).toEqual(scope);
+		expect(space.store.setLifecycle({ id: "watch", to: "enabled", expectedRevision: 2 })).toMatchObject({ ok: true });
+		await clock.advance(0);
+		expect(wire.to("reconcile").at(-1)!.sources).toEqual([expect.objectContaining({ triggerId: "watch", sourceId: "watch#1", grant: expect.objectContaining({ grantRef: approval }) })]);
+		expect(computer.stream.children.map((child) => child.request.command)).toEqual(["tail -F /var/log/syslog"]);
+
+		// Asked, then changed before the person answered: the grant covers nothing the trigger runs, and it isn't pointed at it.
+		expect(space.store.create({ id: "other", spec: { ...base, source: stream("tail -F a.log") } })).toMatchObject({ ok: true });
+		const before = (grantRequest(space.store, OWNER, runtimeIdOf(space.digest), "other") as { scope: ReturnType<typeof scopeOf> }).scope;
+		expect(space.store.update({ id: "other", expectedRevision: 1, spec: { ...base, source: stream("tail -F b.log") } })).toMatchObject({ ok: true });
+		expect(recordGrant(space.store, space.grants, approve(space, before))).toMatch(/has changed or gone since/);
+		expect(space.store.get("other")).toMatchObject({ spec: { authorizationRef: null } });
+
+		// What can't be granted says why.
+		expect(space.store.create({ id: "files", spec: { ...base, source: { kind: "file", path: "/home/ada/inbox", events: ["created"] } } })).toMatchObject({ ok: true });
+		expect(space.store.create({ id: "clock", spec: { ...base, source: { kind: "time", schedule: "once", at: T0 + 3_600_000 } } })).toMatchObject({ ok: true });
+		expect(grantRequest(space.store, OWNER, BINDING.runtimeId, "files")).toEqual({ refused: expect.stringContaining("watches files") });
+		expect(grantRequest(space.store, OWNER, BINDING.runtimeId, "clock")).toEqual({ refused: expect.stringContaining("doesn't run on the computer") });
+		expect(grantRequest(space.store, OWNER, BINDING.runtimeId, "nothing")).toEqual({ refused: "There is no trigger nothing." });
+		expect(grantRequest(space.store, OWNER, null, "watch")).toEqual({ refused: expect.stringContaining("No computer is paired") });
+		await closeComputer(computer, clock);
+		space.close();
+	});
+
+	it("hands what the computer saw to the trigger's agent, told the source's kind and the event's id, never what was seen", async () => {
+		const clock = new FakeClock();
+		const space = openSpace(path.join(dir, "space.sqlite"), clock);
+		const computer = await openComputer(clock);
+		watch(space, "watch", "tail-the-log");
+		const wire = await connect(space, computer, clock);
+		computer.stream.last.print('{"secret":"observed-secret-value"}\n');
+		await clock.advance(0);
+		const [observation] = wire.from("observation");
+
+		// As Pim's engine is with computer triggers' gate off: it stays pending.
+		const host = new FakeAgentHost();
+		await coordinatorOf(space, clock, host, false).tick();
+		expect(host.submissions).toEqual([]);
+		expect(space.store.outbox("watch").map((item) => item.status)).toEqual(["pending"]);
+
+		const report = await coordinatorOf(space, clock, host).tick();
+		expect(report.handedOn).toHaveLength(1);
+		expect(host.submissions).toEqual([
+			{
+				chatId: "chat-1",
+				instruction: base.instruction,
+				evidence: { kind: "computer_event", triggerId: "watch", revision: 1, label: "Watch", source: "stream", eventId: observation!.eventId, observedAt: observation!.occurredAt, admittedAt: T0, reason: "event", fields: [] },
+			},
+		]);
+		expect(space.store.outbox("watch").map((item) => item.status)).toEqual(["done"]);
+		const told = firingText(base.instruction, host.submissions[0]!.evidence);
+		expect(told).toContain(`event ${observation!.eventId}`);
+		expect(told).toContain("its stream on the person's computer");
+		// Nothing the observer saw is in what the agent is told, the space's export or the link it keeps with the computer.
+		for (const kept of [JSON.stringify(host.submissions), told, JSON.stringify(triggerHistory(space.sql))]) {
+			expect(kept).not.toContain("observed-secret-value");
+			expect(kept).not.toContain("tail-the-log --");
+		}
+		expect(triggerHistory(space.sql)!.pim_trigger_computer_links).toEqual([
+			{ socket_id: wire.spaceSocket.id, runtime_id: BINDING.runtimeId, connection_id: wire.from("hello")[0]!.connectionId, server_epoch: 1, sent: "[]", lease_until: T0 + 120_000, renew_at: T0 + 40_000, updated_at: T0 },
+		]);
+		await closeComputer(computer, clock);
+		space.close();
+	});
+
+	it("ends an event whose trigger was edited before it was handed on, and one whose grant was revoked during its handoff", async () => {
+		const clock = new FakeClock();
+		const space = openSpace(path.join(dir, "space.sqlite"), clock);
+		const computer = await openComputer(clock);
+		const { authorizationRef, source } = watch(space, "watch", "tail-the-log", { destination: { type: "new_chat" } });
+		const wire = await connect(space, computer, clock);
+		const host = new FakeAgentHost();
+		const coordinator = coordinatorOf(space, clock, host);
+
+		computer.stream.last.print('{"n":1}\n');
+		await clock.advance(0);
+		expect(space.store.update({ id: "watch", expectedRevision: 1, spec: { ...base, label: "Watch the log", source, authorizationRef, destination: { type: "new_chat" } } })).toMatchObject({ ok: true });
+		const edited = await coordinator.tick();
+		expect(edited.notSubmitted).toHaveLength(1);
+		expect(host.submissions).toEqual([]);
+
+		computer.stream.last.print('{"n":2}\n');
+		await clock.advance(0);
+		expect(wire.acks().filter((ack) => ack.type === "observation").map((ack) => ack.result)).toEqual(["accepted", "accepted"]);
+		host.whileMakingChat = () => space.grants.revoke(authorizationRef);
+		const revoked = await coordinator.tick();
+		expect(host.chats.size).toBe(1);
+		expect(revoked.notSubmitted).toHaveLength(1);
+		expect(host.submissions).toEqual([]);
+		expect(coordinator.runs("watch").map((run) => [run.phase, run.lastError])).toContainEqual(["not_submitted", expect.stringContaining("its grant to run on the computer is no longer current")]);
+		expect(space.store.get("watch")).toMatchObject({ health: "auth_required" });
+		expect(space.store.outbox("watch").map((item) => item.status)).toEqual(["failed", "failed"]);
+		await closeComputer(computer, clock);
+		space.close();
+	});
+
+	it("renews the lease from its wake across an eviction, and when the wake came too late, takes the break as a gap", async () => {
+		const clock = new FakeClock();
+		const renewals = { on: true };
+		const space = openSpace(path.join(dir, "space.sqlite"), clock, { renewals });
+		const computer = await openComputer(clock);
+		watch(space, "watch", "tail-the-log");
+		const wire = await connect(space, computer, clock);
+		const hello = wire.from("hello")[0]!;
+
+		// Evicted at 10 s: its wake at 40 s renews from what was kept, on the same socket and connection, and nothing stops.
+		await clock.advance(10_000);
+		space.evict();
+		await clock.advance(35_000);
+		expect(wire.to("reconcile").map((frame) => [frame.connectionId, frame.serverEpoch, frame.desiredRevision])).toEqual([
+			[hello.connectionId, 1, 1],
+			[hello.connectionId, 1, 1],
+		]);
+		expect(wire.from("stopped")).toEqual([]);
+		expect(computer.stream.last.signals).toEqual([]);
+		space.evict();
+		computer.stream.last.print('{"after":"eviction"}\n');
+		await clock.advance(0);
+		expect(wire.acks().at(-1)).toMatchObject({ data: { after: "eviction" }, result: "accepted" });
+
+		// Evicted with its wake lost past the lease: the computer stops the observer when the lease it had runs out.
+		renewals.on = false;
+		space.evict();
+		await clock.advance(200_000);
+		expect(computer.stream.last.signals).toEqual(["SIGTERM"]);
+		expect(space.store.get("watch")).toMatchObject({ health: "healthy" });
+		// The wake, late, as when the space starts again: it says it is reconnecting, renews, and the observer starts again after a gap the space takes.
+		renewals.on = true;
+		space.evict();
+		space.triggers.renew();
+		expect(space.store.get("watch")).toMatchObject({ health: "reconnecting" });
+		await clock.advance(0);
+		expect(computer.stream.children).toHaveLength(2);
+		const gap = wire.from("gap").at(-1)!;
+		expect(gap.reasons).toEqual({ interrupted: 1 });
+		expect(wire.acks().at(-1)).toMatchObject({ type: "gap", result: "accepted" });
+		expect(space.store.sourceState("watch")!.gapPending).toBe(true);
+		expect(space.store.get("watch")).toMatchObject({ health: "healthy" });
+
+		// A link kept for a socket that closed while it was evicted is forgotten at the next wake, and its triggers wait for the computer.
+		space.sockets.clear();
+		space.evict();
+		const sent = wire.toComputer.length;
+		space.triggers.renew();
+		expect(wire.toComputer).toHaveLength(sent);
+		expect(space.triggers.renewAt()).toBeNull();
+		expect(space.sql.exec("SELECT COUNT(*) AS n FROM pim_trigger_computer_links").one().n).toBe(0);
+		expect(space.store.get("watch")).toMatchObject({ health: "waiting_computer" });
 		await closeComputer(computer, clock);
 		space.close();
 	});

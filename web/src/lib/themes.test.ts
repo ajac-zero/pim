@@ -27,6 +27,24 @@ const recolored = themes.flatMap((theme) =>
 function luminance(color: string): number {
   const neutral = /^oklch\(([\d.]+) 0 0\)$/.exec(color);
   if (neutral) return Number(neutral[1]) ** 3;
+  const chromatic = /^oklch\(([\d.]+) ([\d.]+) ([\d.]+)\)$/.exec(color);
+  if (chromatic) {
+    const [lightness, chroma, hue] = chromatic.slice(1).map(Number) as [
+      number,
+      number,
+      number,
+    ];
+    const a = chroma * Math.cos((hue * Math.PI) / 180);
+    const b = chroma * Math.sin((hue * Math.PI) / 180);
+    const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+    const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+    const n = (lightness - 0.0894841775 * a - 1.291485548 * b) ** 3;
+    return (
+      0.2126 * (4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * n) +
+      0.7152 * (-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * n) +
+      0.0722 * (-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * n)
+    );
+  }
   expect(color).toMatch(/^#[\da-f]{6}$/i);
   return [0.2126, 0.7152, 0.0722].reduce((sum, weight, index) => {
     const channel =
@@ -78,6 +96,23 @@ describe("status chips", () => {
       ).toBeGreaterThanOrEqual(4.5);
     }
   });
+});
+
+// Rows, filters and buttons draw their focus ring in the `ring` color at full
+// strength, so it must stand out from the page by the 3:1 non-text minimum.
+describe("focus ring", () => {
+  it.each(themes)(
+    "$name's ring stands out from the page in both modes",
+    (theme) => {
+      for (const mode of ["light", "dark"] as const) {
+        const colors = theme[mode];
+        expect(
+          contrast(colors.ring, colors.background),
+          `${mode} ring`,
+        ).toBeGreaterThanOrEqual(3);
+      }
+    },
+  );
 });
 
 describe("recolored code themes", () => {

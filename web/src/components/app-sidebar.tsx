@@ -956,6 +956,18 @@ function SessionRow({
     </span>
   );
 
+  // Top left of the icon, clear of the state mark at the top right.
+  const continuedBadge = session.continuedFrom && (
+    <span
+      className="-top-0.5 -left-1 absolute flex text-muted-foreground"
+      role="img"
+      aria-label={t("continuedMark")}
+      title={t("continuedMark")}
+    >
+      <History className="size-2.5" />
+    </span>
+  );
+
   return (
     <li
       className="group/row relative"
@@ -987,6 +999,7 @@ function SessionRow({
             title={`@${session.visit.username}`}
           >
             {session.visit.username.slice(0, 1)}
+            {continuedBadge}
             {stateBadge}
           </span>
         ) : (
@@ -1032,19 +1045,10 @@ function SessionRow({
                   +{chatAgents.length - 4}
                 </span>
               )}
+              {continuedBadge}
               {stateBadge}
             </span>
           )
-        )}
-        {session.continuedFrom && (
-          <span
-            className="-mr-0.5 flex shrink-0"
-            role="img"
-            aria-label={t("continuedMark")}
-            title={t("continuedMark")}
-          >
-            <History className="size-3.5 text-muted-foreground/70" />
-          </span>
         )}
         <span className="min-w-0 flex-1">
           {/* A long title fills the row and is cut off with an ellipsis. While the row shows its options button, it slides to reveal its end. */}

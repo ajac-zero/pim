@@ -249,6 +249,14 @@ export const runsOnComputer = (kind: TriggerSourceKind) =>
 export const runsCommands = (kind: TriggerSourceKind) =>
   kind === "poll" || kind === "stream" || kind === "process";
 
+/** The zone a trigger keeps its own time in, when its source names one. */
+export function triggerZone(trigger: Trigger): string | undefined {
+  const { source } = trigger;
+  return "timeZone" in source && typeof source.timeZone === "string"
+    ? source.timeZone
+    : undefined;
+}
+
 /**
  * What to say of when a trigger acts next. A date only where Pim gave one;
  * otherwise what it is honestly doing (listening, checking, waiting for the

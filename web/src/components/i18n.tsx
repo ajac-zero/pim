@@ -1258,10 +1258,13 @@ const translations = {
     triggerSourceProcess: "Process exit",
     triggerSourceFile: "File changes",
     triggerNextAt: "Next at {date}",
-    triggerWouldFireAt: "Would next fire at {date} once on",
+    triggerWouldFireAt: "Not on yet. First run would be {date}.",
+    triggerNextPaused:
+      "Paused. Will resume at the next scheduled time when turned on.",
+    triggerMissedAt: "Missed {time}",
     triggerNextNone: "No time left to fire",
     triggerNextDeleted: "Deleted: it won't fire",
-    triggerNextEnded: "Ended: it won't fire again",
+    triggerNextEnded: "Ended {date}.",
     triggerNextLegacySchedule: "Runs through its schedule, not as a trigger",
     triggerNextLegacyWatch:
       "Runs through its connector watch, not as a trigger",
@@ -2753,10 +2756,14 @@ const translations = {
     triggerSourceProcess: "Fin de un proceso",
     triggerSourceFile: "Cambios en archivos",
     triggerNextAt: "Próximo: {date}",
-    triggerWouldFireAt: "Se dispararía el {date} una vez activo",
+    triggerWouldFireAt:
+      "Aún no está activo. La primera ejecución sería el {date}.",
+    triggerNextPaused:
+      "En pausa. Se reanudará a la próxima hora programada al activarlo.",
+    triggerMissedAt: "Perdido: {time}",
     triggerNextNone: "No le queda ninguna hora para dispararse",
     triggerNextDeleted: "Eliminado: no se disparará",
-    triggerNextEnded: "Terminado: no se volverá a disparar",
+    triggerNextEnded: "Terminado: {date}.",
     triggerNextLegacySchedule: "Lo ejecuta su programación, no como disparador",
     triggerNextLegacyWatch:
       "Lo ejecuta su vigilancia de conector, no como disparador",

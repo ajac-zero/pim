@@ -469,7 +469,7 @@ describe("the majordomo", () => {
 			Scout: [
 				(context) => {
 					scoutSaw = { prompt: systemPrompt(context.messages), tools: tools(context), message: lastUserText(context.messages) };
-					return toolUse("note_create", { title: "Lisbon by month", content: "# May" });
+					return toolUse("note_create", { title: "Lisbon by month", content: `# May\n${"Mild and quiet. ".repeat(200)}` });
 				},
 				() => answer("May: mild and before the crowds."),
 			],
@@ -494,6 +494,11 @@ describe("the majordomo", () => {
 		// It is a chat of its own, and the person's chat has only what they said and the update.
 		expect(await chats()).toEqual([...before, task!.session].sort());
 		expect(await messagesOf(ROOT, "user")).toEqual(expect.arrayContaining(["When should I go to Lisbon?", results[0]]));
+		// What Scout's requests cost is on the bill of the chat that asked, and on its own.
+		const outputOf = async (chat: string) => (await api<{ models: { output: number }[] }>(`/sessions/${chat}/cost`)).body.models.reduce((sum, row) => sum + row.output, 0);
+		const scoutOutput = await outputOf(task!.session!);
+		expect(scoutOutput).toBeGreaterThan(0);
+		expect(await outputOf(ROOT)).toBeGreaterThan(scoutOutput);
 		// What Scout made belongs to its chat, so it opens beside that chat.
 		const made = (await api<{ artifacts: { title: string; session: string | null }[] }>("/artifacts")).body.artifacts;
 		expect(made.find((artifact) => artifact.title === "Lisbon by month")?.session).toBe(task!.session);

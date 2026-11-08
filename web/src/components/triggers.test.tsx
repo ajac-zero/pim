@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSidebar } from "~/components/app-sidebar";
 import {
   SourceFields,
@@ -125,6 +125,104 @@ const textOf = (html: string) =>
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, "&");
 
+/** A cron trigger in New York, firing at 8:00 AM there on Nov 9, when it is 1:00 PM UTC. */
+const newYork = (overrides: Partial<Trigger> = {}) =>
+  triggerFixture({
+    lifecycle: "enabled",
+    source: {
+      kind: "time",
+      schedule: "cron",
+      expression: "0 8 * * *",
+      timeZone: "America/New_York",
+      catchUpMs: 0,
+    },
+    schedule: { nextFiringAt: Date.UTC(2026, 10, 9, 13), nextCheckAt: null },
+    ...overrides,
+  });
+
+// Dates leave out the current year, so the clock is fixed to the fixtures' own.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.UTC(2026, 10, 8, 12));
+});
+afterEach(() => vi.useRealTimers());
+
+describe("times in a trigger's own zone", () => {
+  it("shows the zone's time first with UTC after it, on the row and the page", async () => {
+    const client = clientWith();
+    const trigger = newYork();
+    setList(client, [page([trigger])]);
+    setRuns(client, trigger.id, []);
+    const expected = "Next at Nov 9, 8:00 AM New York time (1:00 PM UTC)";
+    expect(textOf(await render(TriggersPage, client))).toContain(expected);
+    const detail = textOf(
+      await render(() => <TriggerDetail trigger={trigger} />, client),
+    );
+    expect(detail).toContain("Nov 9, 8:00 AM New York time (1:00 PM UTC)");
+  });
+
+  it("names the UTC day when it differs, and keeps the plain display without a zone", async () => {
+    const client = clientWith();
+    setList(client, [
+      page([
+        newYork({
+          schedule: {
+            nextFiringAt: Date.UTC(2026, 10, 10, 2),
+            nextCheckAt: null,
+          },
+        }),
+        pollFixture({ lifecycle: "enabled", health: "healthy" }),
+      ]),
+    ]);
+    const text = textOf(await render(TriggersPage, client));
+    expect(text).toContain(
+      "Nov 9, 9:00 PM New York time (Nov 10, 2:00 AM UTC)",
+    );
+    expect(text).not.toMatch(/Checking every 5 min.*time \(/);
+  });
+
+  it("puts the when line under the title, with the agent after it, smaller", async () => {
+    const client = clientWith();
+    setList(client, [page([newYork()])]);
+    const html = await render(TriggersPage, client);
+    const at = (needle: string) => html.indexOf(needle);
+    expect(at("Morning brief")).toBeLessThan(at("Next at Nov 9"));
+    expect(at("Next at Nov 9")).toBeLessThan(at("Ada · Time"));
+    expect(html).toMatch(/text-\[12px\][^>]*>Ada · Time/);
+  });
+});
+
+describe("an ended trigger's result", () => {
+  it("says from the latest run, never claiming an outcome Pim doesn't know", async () => {
+    const trigger = triggerFixture({ lifecycle: "ended" });
+    const client = clientWith();
+    setRuns(client, trigger.id, [
+      runFixture({
+        state: "outcome_unknown",
+        outcomeKnown: false,
+        endedAt: Date.UTC(2026, 10, 8, 17, 7),
+      }),
+    ]);
+    const text = textOf(
+      await render(() => <TriggerDetail trigger={trigger} />, client),
+    );
+    expect(text).toContain("Ran Nov 8, 5:07 PM");
+    expect(text).toContain("UTC), outcome unknown");
+    expect(text).not.toContain("Next run");
+  });
+
+  it("says when it ended without running, and keeps the list row at Ended.", async () => {
+    const trigger = triggerFixture({ lifecycle: "ended" });
+    const client = clientWith();
+    setRuns(client, trigger.id, []);
+    expect(
+      textOf(await render(() => <TriggerDetail trigger={trigger} />, client)),
+    ).toContain("Ended without running");
+    setList(client, [page([trigger])]);
+    expect(textOf(await render(TriggersPage, client))).toContain("Ended.");
+  });
+});
+
 describe("the list", () => {
   it("shows lifecycle and health apart, each named, and no date it wasn't given", async () => {
     const client = clientWith();
@@ -135,8 +233,10 @@ describe("the list", () => {
     expect(text).toContain("State: On");
     expect(text).toContain("Health: Waiting for computer");
     expect(text).toContain("Waiting for your computer");
-    expect(text).toMatch(/Not on yet\. First run would be Nov 9, 2026/);
-    expect(text).toContain("Command, checked · Ada");
+    expect(text).toMatch(
+      /Not on yet\. First run would be Nov 9, 9:00 AM Lisbon time \(9:00 AM UTC\)/,
+    );
+    expect(text).toContain("Ada · Command, checked");
   });
 
   it("words paused and ended rows, with no time for paused", async () => {
@@ -201,7 +301,7 @@ describe("the list", () => {
     const row = /<li[\s\S]*?<\/li>/.exec(html)?.[0] ?? "";
     expect(row.match(/<a /g)).toHaveLength(1);
     expect(row).toMatch(/<a [^>]*focus-visible:ring[^>]*>Weekly review<\/a>/);
-    expect(textOf(row)).toMatch(/Nov 9, 2026.*(UTC|GMT)/);
+    expect(textOf(row)).toMatch(/Nov 9, 9:00 AM Lisbon time \(9:00 AM UTC\)/);
   });
 
   it("announces loading, the filtered count and errors in a polite live region", async () => {
@@ -358,7 +458,7 @@ describe("a trigger's page", () => {
     expect(text).toContain("Here, by you");
     expect(text).toContain("Not reported by Pim yet");
     expect(text).toContain("Last occurrence");
-    expect(text).toMatch(/Nov 6, 2026/);
+    expect(text).toMatch(/Nov 6, 9:00 AM Lisbon time/);
     expect(text).toContain(
       "Runs the latest firing up to 1 hour late; older ones are recorded as missed",
     );
@@ -744,7 +844,7 @@ describe("runs", () => {
     expect(text).toContain("Run: Handed to the agent");
     expect(text).not.toMatch(/succe/i);
     expect(linkTo(html, "/chat/chat_brief")).toContain(
-      'aria-label="Open the chat of the run at Nov 6, 2026',
+      'aria-label="Open the chat of the run at Nov 6, 9:00 AM Lisbon time',
     );
     // Only the runs pinned to a chat link one.
     expect(html.match(/href="\/chat\//g)).toHaveLength(2);

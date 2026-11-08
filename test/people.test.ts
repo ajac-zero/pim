@@ -462,8 +462,13 @@ describe("isolation between people", () => {
 		}
 	});
 
-	it("slows down guessing from one address", async () => {
+	it("slows down guessing from one address", { timeout: 60_000 }, async () => {
 		await person("lars");
+		// AUTH_LIMITER counts in windows aligned to the wall clock, and the Worker's clock can't be faked,
+		// so start early in a window: 31 requests on a slow runner must not cross into the next one.
+		const windowMs = 60_000;
+		const left = windowMs - (Date.now() % windowMs);
+		if (left < 20_000) await new Promise((resolve) => setTimeout(resolve, left + 50));
 		const guesser = new Browser();
 		const statuses: number[] = [];
 		for (let attempt = 0; attempt < 31; attempt++) {

@@ -17,6 +17,7 @@ import {
 import { Switch } from "~/components/ui/switch";
 import {
   admin as adminApi,
+  type ModelOverride,
   type ModelProvider,
   type ModelSettings,
   type ProviderInput,
@@ -200,6 +201,46 @@ function CustomProvider({
   );
 }
 
+const PRICES = ["input", "output", "cacheRead", "cacheWrite"] as const;
+
+/** A custom endpoint's model settings as the form edits them: text, so a field can be empty. */
+type Limits = { contextWindow: string } & Record<
+  (typeof PRICES)[number],
+  string
+>;
+
+const limitsOf = (override?: ModelOverride): Limits => ({
+  contextWindow: override?.contextWindow?.toString() ?? "",
+  input: override?.cost?.input.toString() ?? "",
+  output: override?.cost?.output.toString() ?? "",
+  cacheRead: override?.cost?.cacheRead.toString() ?? "",
+  cacheWrite: override?.cost?.cacheWrite.toString() ?? "",
+});
+
+/** The settings a person filled in; a model with none goes back to what the server says. */
+function overridesOf(limits: Record<string, Limits>) {
+  const overrides: Record<string, ModelOverride> = {};
+  for (const [id, entry] of Object.entries(limits)) {
+    const priced = PRICES.some((field) => entry[field].trim());
+    const override: ModelOverride = {
+      ...(entry.contextWindow.trim() && {
+        contextWindow: Number(entry.contextWindow),
+      }),
+      ...(priced && {
+        cost: {
+          input: Number(entry.input) || 0,
+          output: Number(entry.output) || 0,
+          cacheRead: Number(entry.cacheRead) || 0,
+          cacheWrite: Number(entry.cacheWrite) || 0,
+        },
+      }),
+    };
+    if (override.contextWindow !== undefined || override.cost)
+      overrides[id] = override;
+  }
+  return overrides;
+}
+
 /**
  * Adds a provider, or changes `provider`. Saving reads its models from the
  * server again. A key left empty stays as it was.
@@ -224,6 +265,14 @@ function ProviderForm({
   const [structured, setStructured] = useState(
     provider?.structuredOutput ?? false,
   );
+  const [limits, setLimits] = useState<Record<string, Limits>>(() =>
+    Object.fromEntries(
+      (provider?.models ?? []).map((model) => [
+        model.id,
+        limitsOf(provider?.overrides?.[model.id]),
+      ]),
+    ),
+  );
   const [protocol, setProtocol] = useState<NonNullable<ProviderInput["api"]>>(
     provider?.api ?? "openai-completions",
   );
@@ -241,6 +290,20 @@ function ProviderForm({
     queryFn: pim.builtinProviders,
   });
   const builtin = kind !== "custom";
+  // The models to set: the ones named above, else the ones the server listed when it was last read.
+  const named = models
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  const limitRows =
+    named.length > 0
+      ? named.map((id) => ({
+          id,
+          contextWindow:
+            provider?.models.find((model) => model.id === id)?.contextWindow ??
+            128_000,
+        }))
+      : (provider?.models ?? []);
   const preset = catalog?.providers.find((entry) => entry.id === kind);
   const canSave = builtin
     ? !!preset && selected.length > 0 && (!!key.trim() || !!provider?.hasKey)
@@ -260,6 +323,7 @@ function ProviderForm({
                 .filter(Boolean),
               structuredOutput: structured,
               api: protocol,
+              overrides: overridesOf(limits),
             }),
         ...(key.trim() ? { key: key.trim() } : removeKey ? { key: "" } : {}),
       };
@@ -496,6 +560,68 @@ function ProviderForm({
             {t("providerModelsHint")}
           </span>
         </label>
+      )}
+      {!builtin && (
+        <fieldset className="space-y-2">
+          <legend className="text-[13px] text-muted-foreground">
+            {t("providerLimits")}
+          </legend>
+          <div className="max-h-64 space-y-3 overflow-y-auto rounded-xl bg-muted/30 p-3">
+            {limitRows.length === 0 && (
+              <p className="text-muted-foreground text-sm">
+                {t("providerLimitsNone")}
+              </p>
+            )}
+            {limitRows.map((model) => {
+              const entry = limits[model.id] ?? limitsOf();
+              const set = (field: keyof Limits, value: string) =>
+                setLimits({
+                  ...limits,
+                  [model.id]: { ...entry, [field]: value },
+                });
+              const inputs = [
+                ["contextWindow", t("providerContextWindow"), "1"],
+                ["input", t("providerPriceInput"), "any"],
+                ["output", t("providerPriceOutput"), "any"],
+                ["cacheRead", t("providerPriceCacheRead"), "any"],
+                ["cacheWrite", t("providerPriceCacheWrite"), "any"],
+              ] as const;
+              return (
+                <div key={model.id} className="space-y-1">
+                  <span className="block truncate font-mono text-xs">
+                    {model.id}
+                  </span>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                    {inputs.map(([field, label, step]) => (
+                      <label key={field} className="block space-y-0.5">
+                        <span className="text-muted-foreground text-xs">
+                          {label}
+                        </span>
+                        <Input
+                          type="number"
+                          min={0}
+                          step={step}
+                          inputMode="decimal"
+                          value={entry[field]}
+                          onChange={(event) => set(field, event.target.value)}
+                          placeholder={
+                            field === "contextWindow"
+                              ? model.contextWindow.toString()
+                              : "0"
+                          }
+                          className="h-8 text-xs"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-muted-foreground text-xs">
+            {t("providerLimitsHint")}
+          </p>
+        </fieldset>
       )}
       {!builtin && (
         <label className="flex items-center justify-between gap-3 text-sm">

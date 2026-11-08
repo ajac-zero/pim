@@ -2,12 +2,13 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { CompactionTask } from "@earendil-works/pi-durable";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
 import { api, lastUserText, messagesOf, OWNER, pendingApproval, post, ROOT, say, scripts, settled, speaker, systemPrompt, TOKEN, toolUse, url } from "./helpers";
-import { type Pim, spans } from "./worker";
+import { faux, type Pim, spans } from "./worker";
 
 type Context = Parameters<FauxResponseFactory>[0];
 
@@ -410,6 +411,39 @@ describe("an agent's contacts", () => {
 describe("the majordomo", () => {
 	const majordomo = async () => ((await api("/agents")).body.agents as { id: string; name: string; majordomo: boolean }[]).find((agent) => agent.majordomo)!;
 
+	it("archives the chats of tasks it handed out once they are done, and no other chat", async () => {
+		await post("/agents", { name: "Camper", instructions: "Find gear." });
+		const asker = (await post<{ id: string }>("/sessions", {})).body.id;
+		const other = (await post<{ id: string }>("/sessions", {})).body.id;
+		const results: string[] = [];
+		const result = (context: Context) => results.push(toolResult(context.messages));
+		let taskId = "";
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "camper", task: "Find a tent." }] }),
+				() => toolUse("send_to_user", { message: "Asked." }),
+				(context) => {
+					taskId = lastUserText(context.messages).match(/finished task (\S+):/)![1]!;
+					return toolUse("archive_task_chats", { tasks: [taskId, "nope"] });
+				},
+				(context) => {
+					result(context);
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			],
+			Camper: [() => answer("The blue one.")],
+		});
+		await say("Find me a tent.", asker);
+		await settled();
+		const archived = async (id: string) => (await api<{ sessions: { id: string; archived: boolean }[] }>("/sessions")).body.sessions.find((chat) => chat.id === id)?.archived;
+		const [task] = await tasksOf(asker);
+		expect(results[0]).toContain(`Archived the chat of task ${taskId}.`);
+		expect(results[0]).toContain("No task nope you handed out.");
+		expect(await archived(task!.session!)).toBe(true);
+		expect(await archived(asker)).toBe(false);
+		expect(await archived(other)).toBe(false);
+	});
+
 	it("hands tasks to the person's other agents, each in a chat of its own under the chat that asked, and only it can", async () => {
 		const self = await majordomo();
 		await api(`/agents/${self.id}`, { method: "PUT", body: JSON.stringify({ name: "Alfred" }) });
@@ -435,7 +469,7 @@ describe("the majordomo", () => {
 			Scout: [
 				(context) => {
 					scoutSaw = { prompt: systemPrompt(context.messages), tools: tools(context), message: lastUserText(context.messages) };
-					return toolUse("app_create", { title: "Lisbon by month", kind: "markdown", content: "# May" });
+					return toolUse("note_create", { title: "Lisbon by month", content: `# May\n${"Mild and quiet. ".repeat(200)}` });
 				},
 				() => answer("May: mild and before the crowds."),
 			],
@@ -460,9 +494,29 @@ describe("the majordomo", () => {
 		// It is a chat of its own, and the person's chat has only what they said and the update.
 		expect(await chats()).toEqual([...before, task!.session].sort());
 		expect(await messagesOf(ROOT, "user")).toEqual(expect.arrayContaining(["When should I go to Lisbon?", results[0]]));
+		// What Scout's requests cost is on the bill of the chat that asked, and on its own.
+		const outputOf = async (chat: string) => (await api<{ models: { output: number }[] }>(`/sessions/${chat}/cost`)).body.models.reduce((sum, row) => sum + row.output, 0);
+		const scoutOutput = await outputOf(task!.session!);
+		expect(scoutOutput).toBeGreaterThan(0);
+		expect(await outputOf(ROOT)).toBeGreaterThan(scoutOutput);
 		// What Scout made belongs to its chat, so it opens beside that chat.
 		const made = (await api<{ artifacts: { title: string; session: string | null }[] }>("/artifacts")).body.artifacts;
 		expect(made.find((artifact) => artifact.title === "Lisbon by month")?.session).toBe(task!.session);
+
+		// Scout's chat grows too long and is carried on in a new chat, which the follow-up goes to: the chat it was in is full.
+		faux.setResponses([fauxAssistantMessage("Scout was asked about the best month.")]);
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const pi = await instance.harness.pi();
+			const conversation = Number(instance.store.sessionOf(task!.session!));
+			const compaction = await (await pi.conversation(conversation as never, BACKGROUND_CONTEXT))!.commit(
+				(tx) => tx.createTask(CompactionTask, { reason: "threshold" }, { ownership: { kind: "conversation" }, conversationId: conversation as never, background: true }),
+				BACKGROUND_CONTEXT,
+			);
+			await pi.waitForTask(compaction, BACKGROUND_CONTEXT);
+		});
+		const carried = async () => (await api<{ sessions: { id: string; continuedFrom: string | null }[] }>("/sessions")).body.sessions.find((chat) => chat.continuedFrom === task!.session)?.id;
+		await vi.waitFor(async () => expect(await carried()).toBeDefined());
+		const next = (await carried())!;
 
 		// It follows up in the task's chat, only on a task it handed out, and only to agents that exist.
 		scripts({
@@ -492,10 +546,39 @@ describe("the majordomo", () => {
 		expect(results[3]).toContain("Scout finished task");
 		expect(results[3]).toContain("October.");
 		const [first, second] = await tasksOf(ROOT);
-		expect(second!.session).toBe(task!.session);
-		expect(await messagesOf(task!.session!, "user")).toEqual(["[From Alfred]\nFind the best month to visit Lisbon.", "[From Alfred]\nAnd in autumn?"]);
+		expect(second!.session).toBe(next);
+		expect(await messagesOf(next, "user")).toContain("[From Alfred]\nAnd in autumn?");
+		expect(await messagesOf(task!.session!, "user")).toEqual(["[From Alfred]\nFind the best month to visit Lisbon."]);
 		expect(first!.id).toBe(task!.id);
-		expect(await chats()).toEqual([...before, task!.session].sort());
+		// The first task is recorded on the new chat as well, and the chat it was in still shows who started it.
+		expect(first!.session).toBe(next);
+		expect((await listed()).find((chat) => chat.id === task!.session)?.startedBy).toMatchObject({ session: ROOT, task: second!.id });
+		expect(await chats()).toEqual([...before, task!.session, next].sort());
+
+		// The chat that asked grows too long as well, and is carried on in a new chat: the answers to what it hands out go there, not to the full one.
+		const asker = (await post<{ id: string }>("/sessions", {})).body.id;
+		scripts({ lead: [() => toolUse("send_to_user", { message: "Hello." })] });
+		await say("Hello", asker);
+		faux.setResponses([fauxAssistantMessage("The person said hello.")]);
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const pi = await instance.harness.pi();
+			const conversation = Number(instance.store.sessionOf(asker));
+			const compaction = await (await pi.conversation(conversation as never, BACKGROUND_CONTEXT))!.commit(
+				(tx) => tx.createTask(CompactionTask, { reason: "threshold" }, { ownership: { kind: "conversation" }, conversationId: conversation as never, background: true }),
+				BACKGROUND_CONTEXT,
+			);
+			await pi.waitForTask(compaction, BACKGROUND_CONTEXT);
+		});
+		const alfredNext = async () => (await api<{ sessions: { id: string; continuedFrom: string | null }[] }>("/sessions")).body.sessions.find((chat) => chat.continuedFrom === asker)?.id;
+		await vi.waitFor(async () => expect(await alfredNext()).toBeDefined());
+		scripts({
+			lead: [() => toolUse("delegate", { tasks: [{ to: "Scout", task: "And in winter?" }] }), () => toolUse("send_to_user", { message: "Asking about winter." }), () => toolUse("send_to_user", { message: "February." })],
+			Scout: [() => answer("February.")],
+		});
+		await say("And winter?", asker);
+		await settled();
+		await vi.waitFor(async () => expect((await updatesIn((await alfredNext())!))[0]).toContain("February."));
+		expect(await updatesIn(asker)).toEqual([]);
 
 		// Another agent's chats don't offer it the person's other agents.
 		const own = (await post("/sessions", { agent: scout.id })).body.id;

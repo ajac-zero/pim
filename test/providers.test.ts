@@ -132,6 +132,37 @@ describe("A person's own model providers", () => {
 		for (let n = 0; n < 3; n++) expect(JSON.stringify(input)).toContain(`Answer ${n}`);
 	});
 
+	it("sends a Claude endpoint no thinking in a tool round that another provider's answer started", async () => {
+		const provider = await prepareProvider({ name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set());
+		const models = createModels();
+		models.setProvider(piProvider("own:proxy", provider));
+		const model = { ...models.getModel("own:proxy", "claude-sonnet-5-5")!, id: "claude-sonnet-4-5" };
+		const call = { type: "toolCall" as const, id: "call_1|fc_1", name: "lookup", arguments: {} };
+		const result = { role: "toolResult" as const, toolCallId: call.id, toolName: "lookup", content: [{ type: "text" as const, text: "found" }], isError: false, timestamp: 1 };
+		const chatgpt = { ...fauxAssistantMessage([{ type: "thinking", thinking: "", thinkingSignature: "{}" }, call], { stopReason: "toolUse" }), provider: "openai", api: "openai-codex-responses" as const, model: "gpt-5" };
+		const failed = { ...fauxAssistantMessage([], { stopReason: "error", errorMessage: "usage limit" }), provider: "openai", api: "openai-codex-responses" as const, model: "gpt-5" };
+		const user = { role: "user" as const, content: "Look it up", timestamp: 1 };
+		await models.completeSimple(model, { messages: [user, chatgpt, result, failed] }, { reasoning: "low" });
+		expect(calls.at(-1)!.body.thinking).toEqual({ type: "disabled" });
+		// Once the person says something new, it thinks again.
+		await models.completeSimple(model, { messages: [user, chatgpt, result, { ...user, content: "Thanks" }] }, { reasoning: "low" });
+		expect(calls.at(-1)!.body.thinking.type).toBe("enabled");
+	});
+
+	it("keeps a system update ahead of an answer on a Claude endpoint when another provider's answer was only reasoning", async () => {
+		const provider = await prepareProvider({ name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set());
+		const models = createModels();
+		models.setProvider(piProvider("own:proxy", provider));
+		const model = models.getModel("own:proxy", "claude-sonnet-5-5")!;
+		const reasoning = { ...fauxAssistantMessage([{ type: "thinking", thinking: "", thinkingSignature: "{}" }]), provider: "openai", api: "openai-codex-responses" as const, model: "gpt-5" };
+		const update = { role: "system" as const, content: "The tools changed.", timestamp: 1 };
+		const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
+		await models.completeSimple(model, { messages: [{ ...update, content: "Be helpful." }, user("Hi"), update, reasoning, user("Again")] });
+		const roles = calls.at(-1)!.body.messages.map((message: { role: string }) => message.role);
+		// Claude takes a system message only before an assistant message or at the end.
+		expect(roles.every((role: string, index: number) => role !== "system" || roles[index + 1] === undefined || roles[index + 1] === "assistant" || roles[index + 1] === "system")).toBe(true);
+	});
+
 	it.each(BUILTINS)("connects %s with a key and chosen models, and delivers messages through its native API (%s)", async (builtin, id, endpoint, header) => {
 		const catalog = await api("/providers/built-in");
 		expect(catalog.status).toBe(200);
@@ -289,6 +320,28 @@ describe("A person's own model providers", () => {
 		// Saving again keeps the API it speaks.
 		expect((await put("/providers/proxy", { name: "Proxy 2" })).body.provider).toMatchObject({ api: "anthropic-messages" });
 		await api("/providers/proxy", { method: "DELETE" });
+	});
+
+	it("takes a custom endpoint's real context window and prices, and keeps them when its models are read again", async () => {
+		await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" });
+		const overrides = { "vision-model": { contextWindow: 200_000, cost: { input: 3, output: 15 } } };
+		const saved = (await put("/providers/home-server", { overrides })).body.provider;
+		expect(saved.models.find((model: { id: string }) => model.id === "vision-model")).toMatchObject({ contextWindow: 200_000, maxTokens: 8_192, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } });
+		// What the server says about the others stays; saving again keeps the settings.
+		expect(saved.models.find((model: { id: string }) => model.id === "served-model")).toMatchObject({ contextWindow: 4_096 });
+		expect((await put("/providers/home-server", { name: "Home" })).body.provider.overrides).toEqual({ "vision-model": { contextWindow: 200_000, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } } });
+
+		// A chat's cost is its tokens at that price: 10 in and 3 out, per million.
+		await put("/model", { provider: "own:home-server", id: "vision-model" });
+		const session = (await post("/sessions", { title: "Priced" })).body.id;
+		await say("Hello?", session);
+		expect((await api(`/sessions/${session}/cost`)).body.total).toBeCloseTo((10 * 3 + 3 * 15) / 1e6, 10);
+
+		expect((await put("/providers/home-server", { overrides: { "vision-model": { contextWindow: 0 } } })).status).toBe(400);
+		expect((await put("/providers/home-server", { overrides: { "vision-model": { cost: { input: -1 } } } })).status).toBe(400);
+		// An empty set takes them away.
+		expect((await put("/providers/home-server", { overrides: {} })).body.provider.models[1]).toMatchObject({ contextWindow: 32_768 });
+		await api("/providers/home-server", { method: "DELETE" });
 	});
 
 	it("offers a provider's models for side jobs only when it answers in a JSON schema", async () => {

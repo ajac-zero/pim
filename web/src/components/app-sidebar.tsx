@@ -22,6 +22,7 @@ import {
   Contact,
   CornerDownRight,
   ExternalLink,
+  History,
   Loader2,
   MessagesSquare,
   Monitor,
@@ -46,7 +47,6 @@ import {
 } from "~/components/profile-popover";
 import { Shortcut } from "~/components/shortcut";
 import {
-  ArtifactsPanel,
   NotificationsPanel,
   SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
@@ -119,13 +119,8 @@ export function useAwaitingApproval() {
   );
 }
 
-/** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=artifacts`). */
-export const SIDEBAR_PANELS = [
-  "notifications",
-  "artifacts",
-  "skills",
-  "schedules",
-] as const;
+/** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=skills`). */
+export const SIDEBAR_PANELS = ["notifications", "skills", "schedules"] as const;
 export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
 
 /**
@@ -174,8 +169,6 @@ export function SidebarPanelContent({
   const { panel } = useSearch({ strict: false });
   return panel === "notifications" ? (
     <NotificationsPanel onNavigate={onNavigate} />
-  ) : panel === "artifacts" ? (
-    <ArtifactsPanel onNavigate={onNavigate} />
   ) : panel === "skills" ? (
     <SkillsPanel onNavigate={onNavigate} />
   ) : panel === "schedules" ? (
@@ -239,9 +232,8 @@ export function AppSidebar({
             label={t("chats")}
             count={panel || collapsed ? awaitingApproval.size : 0}
           />
-          <RailPanel
-            {...railPanel}
-            panel="artifacts"
+          <RailDialogLink
+            dialog="artifacts"
             icon={<Shapes className="size-4.5" />}
             label={t("artifacts")}
           />
@@ -423,6 +415,7 @@ function ChatsPanel({
         ) : (
           <DatedChats
             list={open}
+            all={current}
             activeId={activeId}
             awaitingApproval={awaitingApproval}
             onNavigate={onNavigate}
@@ -432,6 +425,7 @@ function ChatsPanel({
           <FoldedChats
             label={t("inactive")}
             list={inactive}
+            all={current}
             activeId={activeId}
             searching={!!search}
             awaitingApproval={awaitingApproval}
@@ -442,6 +436,7 @@ function ChatsPanel({
           <FoldedChats
             label={t("archived")}
             list={archived}
+            all={current}
             activeId={activeId}
             searching={!!search}
             awaitingApproval={awaitingApproval}
@@ -571,7 +566,14 @@ function RailDialogLink({
   dialog,
   ...props
 }: {
-  dialog: "settings" | "sharing" | "discover" | "apps" | "computer" | "agents";
+  dialog:
+    | "settings"
+    | "sharing"
+    | "discover"
+    | "apps"
+    | "artifacts"
+    | "computer"
+    | "agents";
   icon: ReactNode;
   label: string;
   count?: number;
@@ -600,17 +602,19 @@ function RailDialogLink({
 /** Chats under dividers for today, yesterday, last week and the last 14 days. */
 function DatedChats({
   list,
+  all,
   activeId,
   awaitingApproval,
   onNavigate,
 }: {
   list: Session[];
+  all: Session[];
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
 }) {
   const { t } = useI18n();
-  const { top, children } = nestChats(list);
+  const { top, children } = nestChats(list, all);
   return groupByAge(top).map(({ age, sessions }) => (
     <div key={age}>
       <div className="px-2 pt-2 pb-1 text-muted-foreground/70 text-xs">
@@ -621,7 +625,7 @@ function DatedChats({
           <ChatTree
             key={session.id}
             session={session}
-            under={children.get(session.id) ?? []}
+            tree={children}
             activeId={activeId}
             awaitingApproval={awaitingApproval}
             onNavigate={onNavigate}
@@ -633,52 +637,67 @@ function DatedChats({
 }
 
 /**
- * A chat with the chats your agents started from it for tasks below it, as
- * Amp shows threads started by other threads. The chat's row counts how
- * many of their tasks are done and folds them away; the one open stays in
- * view.
+ * A chat with the chats your agents started from it for tasks below it, and
+ * those started from them, as Amp shows threads started by other threads.
+ * Every chat with tasks below it counts how many of them are done and folds
+ * them away. The first level starts open and deeper ones start folded; the
+ * one open stays in view.
  */
 function ChatTree({
   session,
-  under,
+  tree,
   activeId,
   awaitingApproval,
   onNavigate,
+  depth = 0,
 }: {
   session: Session;
-  under: Session[];
+  tree: ReadonlyMap<string, Session[]>;
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
+  depth?: number;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(depth === 0);
+  const below = (chat: Session): Session[] =>
+    (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
+  const under = below(session);
   const expanded = open || under.some((chat) => chat.id === activeId);
-  const row = (chat: Session, nested: boolean) => (
-    <SessionRow
-      key={chat.id}
-      session={chat}
-      nested={nested}
-      active={chat.id === activeId}
-      awaitingApproval={awaitingApproval.has(chat.id)}
-      onNavigate={onNavigate}
-      tasks={
-        !nested && under.length > 0
-          ? {
-              done: under.filter((child) =>
-                DONE_STATES.has(child.startedBy?.state ?? "completed"),
-              ).length,
-              total: under.length,
-              expanded,
-              toggle: () => setOpen(!expanded),
-            }
-          : undefined
-      }
-    />
-  );
   return (
     <>
-      {row(session, false)}
-      {expanded && under.map((chat) => row(chat, true))}
+      <SessionRow
+        session={session}
+        depth={depth}
+        active={session.id === activeId}
+        awaitingApproval={awaitingApproval.has(session.id)}
+        onNavigate={onNavigate}
+        tasks={
+          under.length > 0
+            ? {
+                done: under.filter((child) =>
+                  DONE_STATES.has(child.startedBy?.state ?? "completed"),
+                ).length,
+                total: under.length,
+                expanded,
+                toggle: () => setOpen(!expanded),
+              }
+            : undefined
+        }
+      />
+      {expanded &&
+        tree
+          .get(session.id)
+          ?.map((child) => (
+            <ChatTree
+              key={child.id}
+              session={child}
+              tree={tree}
+              activeId={activeId}
+              awaitingApproval={awaitingApproval}
+              onNavigate={onNavigate}
+              depth={depth + 1}
+            />
+          ))}
     </>
   );
 }
@@ -692,6 +711,7 @@ const DONE_STATES = new Set(["completed", "failed", "canceled"]);
 function FoldedChats({
   label,
   list,
+  all,
   activeId,
   searching,
   awaitingApproval,
@@ -699,6 +719,7 @@ function FoldedChats({
 }: {
   label: string;
   list: Session[];
+  all: Session[];
   activeId?: string;
   searching: boolean;
   awaitingApproval: ReadonlySet<string>;
@@ -712,7 +733,7 @@ function FoldedChats({
     if (holdsActive) setOpen(true);
   }
   const expanded = open || searching;
-  const nested = nestChats(list);
+  const nested = nestChats(list, all);
   return (
     <section className="mb-3" aria-label={label}>
       <button
@@ -736,7 +757,7 @@ function FoldedChats({
             <ChatTree
               key={session.id}
               session={session}
-              under={nested.children.get(session.id) ?? []}
+              tree={nested.children}
               activeId={activeId}
               awaitingApproval={awaitingApproval}
               onNavigate={onNavigate}
@@ -783,15 +804,15 @@ function SessionRow({
   active,
   awaitingApproval,
   onNavigate,
-  nested = false,
+  depth = 0,
   tasks,
 }: {
   session: Session;
   active: boolean;
   awaitingApproval: boolean;
   onNavigate?: () => void;
-  /** Shown under the chat it was started from. */
-  nested?: boolean;
+  /** How many chats it is below: shown under the chat it was started from, and indented by up to four steps. */
+  depth?: number;
   /** The chats started from this one: how many of their tasks are done, and whether they show. */
   tasks?: {
     done: number;
@@ -936,8 +957,23 @@ function SessionRow({
     </span>
   );
 
+  // Top left of the icon, clear of the state mark at the top right.
+  const continuedBadge = session.continuedFrom && (
+    <span
+      className="-top-0.5 -left-1 absolute flex text-muted-foreground"
+      role="img"
+      aria-label={t("continuedMark")}
+      title={t("continuedMark")}
+    >
+      <History className="size-2.5" />
+    </span>
+  );
+
   return (
-    <li className="group/row relative">
+    <li
+      className="group/row relative"
+      style={{ paddingLeft: `${Math.min(depth, 4) * 0.75}rem` }}
+    >
       <Link
         to="/chat/$sessionId"
         params={{ sessionId: session.id }}
@@ -955,8 +991,8 @@ function SessionRow({
         onMouseEnter={scrollTitleIntoView}
         onFocus={scrollTitleIntoView}
       >
-        {nested && (
-          <CornerDownRight className="-mr-0.5 size-3.5 shrink-0 text-muted-foreground/70" />
+        {depth > 0 && (
+          <CornerDownRight className="-ml-1 mr-[2px] size-3.5 shrink-0 text-muted-foreground/70" />
         )}
         {session.visit ? (
           <span
@@ -964,6 +1000,7 @@ function SessionRow({
             title={`@${session.visit.username}`}
           >
             {session.visit.username.slice(0, 1)}
+            {continuedBadge}
             {stateBadge}
           </span>
         ) : (
@@ -1009,6 +1046,7 @@ function SessionRow({
                   +{chatAgents.length - 4}
                 </span>
               )}
+              {continuedBadge}
               {stateBadge}
             </span>
           )

@@ -1,4 +1,4 @@
-import type { Api, Model, Provider, StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, Provider, StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
@@ -24,6 +24,12 @@ import { HttpError } from "./http";
  * that id, and otherwise from defaults that suit a text-only model.
  */
 
+/** A model's price in dollars per million tokens, as pi-ai takes it. */
+export type ModelCost = { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number };
+
+/** What the person set for a custom endpoint's model where the server can't say: its real context window and its price. */
+export type ModelOverride = { readonly contextWindow?: number; readonly cost?: ModelCost };
+
 /** A model on a provider, with what Pim needs to know about it. */
 export type ProviderModel = {
 	readonly id: string;
@@ -32,6 +38,8 @@ export type ProviderModel = {
 	readonly maxTokens: number;
 	readonly images: boolean;
 	readonly reasoning: boolean;
+	/** What the person says it costs, in dollars per million tokens; absent for a model with no price, which is free. */
+	readonly cost?: ModelCost;
 	/** A built-in model's full native definition as JSON, also safe to pass over Durable Object RPC. */
 	readonly native?: string;
 };
@@ -51,13 +59,15 @@ export type CustomProvider = {
 	readonly structuredOutput?: boolean;
 	/** The API a custom endpoint speaks when it isn't OpenAI's chat completions; absent means chat completions. */
 	readonly api?: "anthropic-messages";
+	/** A custom endpoint's models' settings by model id; they stay when its models are read again. */
+	readonly overrides?: Readonly<Record<string, ModelOverride>>;
 };
 
 /** A provider as the API shows it: never its key. */
 export type ProviderInfo = Omit<CustomProvider, "key"> & { readonly hasKey: boolean };
 
 /** What adding or changing a provider gives; a missing field keeps what it was. */
-export type ProviderInput = { readonly builtin?: unknown; readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown; readonly structuredOutput?: unknown; readonly api?: unknown };
+export type ProviderInput = { readonly builtin?: unknown; readonly name?: unknown; readonly url?: unknown; readonly key?: unknown; readonly models?: unknown; readonly structuredOutput?: unknown; readonly api?: unknown; readonly overrides?: unknown };
 
 /** Known services need a key, not an address. Model definitions come from pi-ai. */
 const BUILTIN_PROVIDERS = [
@@ -126,14 +136,14 @@ function knownModels(): Promise<Map<string, Model<Api>>> {
  * A model as a server listed it (OpenRouter, vLLM and llama.cpp say more than
  * most), or as pi-ai knows it, or with defaults.
  */
-function describe(id: string, listed: Record<string, unknown> | undefined, known: Model<Api> | undefined): ProviderModel {
+function describe(id: string, listed: Record<string, unknown> | undefined, known: Model<Api> | undefined, override?: ModelOverride): ProviderModel {
 	const architecture = isObject(listed?.architecture) ? listed.architecture : undefined;
 	const modalities = Array.isArray(architecture?.input_modalities) ? architecture.input_modalities : undefined;
 	const parameters = Array.isArray(listed?.supported_parameters) ? listed.supported_parameters : undefined;
 	const top = isObject(listed?.top_provider) ? listed.top_provider : undefined;
 	const meta = isObject(listed?.meta) ? listed.meta : undefined;
 	// OpenRouter's context_length, vLLM's max_model_len, and llama.cpp's n_ctx, the context it serves the model with.
-	const contextWindow = count(listed?.context_length) ?? count(listed?.max_model_len) ?? count(meta?.n_ctx) ?? known?.contextWindow ?? DEFAULTS.contextWindow;
+	const contextWindow = override?.contextWindow ?? count(listed?.context_length) ?? count(listed?.max_model_len) ?? count(meta?.n_ctx) ?? known?.contextWindow ?? DEFAULTS.contextWindow;
 	const maxTokens = count(top?.max_completion_tokens) ?? known?.maxTokens ?? DEFAULTS.maxTokens;
 	return {
 		id,
@@ -142,6 +152,7 @@ function describe(id: string, listed: Record<string, unknown> | undefined, known
 		maxTokens: Math.min(maxTokens, contextWindow),
 		images: modalities ? modalities.includes("image") : (known?.input.includes("image") ?? false),
 		reasoning: parameters ? parameters.includes("reasoning") : (known?.reasoning ?? false),
+		...(override?.cost && { cost: override.cost }),
 	};
 }
 
@@ -169,6 +180,29 @@ function text(value: unknown, field: string, max: number): string | undefined {
 	const trimmed = value.trim();
 	if (trimmed.length > max) throw new HttpError(400, `${field} must be at most ${max} characters`);
 	return trimmed;
+}
+
+/** Reads the settings the person gave their models: a context window, and prices that are never negative. */
+function readOverrides(value: unknown): Record<string, ModelOverride> {
+	if (!isObject(value)) throw new HttpError(400, "overrides must be an object of settings by model id");
+	const overrides: Record<string, ModelOverride> = {};
+	for (const [id, entry] of Object.entries(value)) {
+		if (!MODEL_ID.test(id) || !isObject(entry)) throw new HttpError(400, "overrides must be an object of settings by model id");
+		const { contextWindow, cost } = entry;
+		if (contextWindow !== undefined && !count(contextWindow)) throw new HttpError(400, `${id}'s contextWindow must be a whole number of tokens`);
+		let price: ModelCost | undefined;
+		if (cost !== undefined) {
+			if (!isObject(cost)) throw new HttpError(400, `${id}'s cost must be an object`);
+			const dollars = (field: keyof ModelCost): number => {
+				const value = cost[field] ?? 0;
+				if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new HttpError(400, `${id}'s cost ${field} must be a price in dollars per million tokens`);
+				return value;
+			};
+			price = { input: dollars("input"), output: dollars("output"), cacheRead: dollars("cacheRead"), cacheWrite: dollars("cacheWrite") };
+		}
+		if (contextWindow !== undefined || price) overrides[id] = { ...(contextWindow !== undefined && { contextWindow: contextWindow as number }), ...(price && { cost: price }) };
+	}
+	return overrides;
 }
 
 /**
@@ -204,6 +238,7 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 	if (input.structuredOutput !== undefined && typeof input.structuredOutput !== "boolean") throw new HttpError(400, "structuredOutput must be true or false");
 	if (input.api !== undefined && input.api !== "openai-completions" && input.api !== "anthropic-messages") throw new HttpError(400, "api must be openai-completions or anthropic-messages");
 	if (preset && input.api !== undefined) throw new HttpError(400, "A built-in provider's API cannot be changed");
+	if (preset && input.overrides !== undefined) throw new HttpError(400, "A built-in provider's models cannot be given other limits or prices");
 	if (preset) {
 		const { getBuiltinModels } = await import("./provider-catalog");
 		const catalog = getBuiltinModels(preset.id) as Model<Api>[];
@@ -236,13 +271,17 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		if (missing) throw new HttpError(400, `${url} doesn't list a model ${missing}`);
 	}
 	const known = await knownModels();
+	const given = input.overrides === undefined ? (existing?.overrides ?? {}) : readOverrides(input.overrides);
 	const models = (chosen ?? listed!.map((entry) => entry.id as string)).map((id) =>
 		describe(
 			id,
 			listed?.find((entry) => entry.id === id),
 			known.get(id),
+			given[id],
 		),
 	);
+	const overrides: Record<string, ModelOverride> = {};
+	for (const { id } of models) if (given[id]) overrides[id] = given[id];
 
 	let id = existing?.id;
 	if (!id) {
@@ -251,7 +290,7 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 		for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
 	}
 	const structuredOutput = input.structuredOutput === undefined ? existing?.structuredOutput === true : input.structuredOutput;
-	return { id, name, url, key, chosen, models, structuredOutput, ...(api && { api }) };
+	return { id, name, url, key, chosen, models, structuredOutput, ...(api && { api }), ...(Object.keys(overrides).length > 0 && { overrides }) };
 }
 
 export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo {
@@ -274,7 +313,7 @@ export function providerModel(catalogId: string, provider: CustomProvider, model
 		reasoning: model.reasoning,
 		contextWindow: model.contextWindow,
 		maxTokens: model.maxTokens,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		...(provider.api ? {} : { compat: { supportsDeveloperRole: false } }),
 	} as Model<Api>;
 }
@@ -329,8 +368,39 @@ function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>
 	return (model, context, options) => lazyStream(model, async () => {
 		const known = (await knownModels()).get(model.id);
 		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : model;
-		return stream(catalogued, context, options);
+		return stream(catalogued, withoutEmptyAnswers(context), withoutThinkingMidToolRound(context, options));
 	});
+}
+
+/**
+ * Another provider's answer that is only encrypted reasoning says nothing once sent to Claude, so the request drops it.
+ * Left in, it comes out as an empty turn, and the system message pi-ai holds back for the next answer lands before a
+ * user message instead, which Claude refuses: "role 'system' must precede an 'assistant' message or end the array".
+ */
+function withoutEmptyAnswers<C extends { messages: Context["messages"] }>(context: C): C {
+	const says = (message: Context["messages"][number]) =>
+		message.role !== "assistant" ||
+		message.api === "anthropic-messages" ||
+		message.content.some((block) => block.type === "toolCall" || (block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : "").trim() !== "");
+	return context.messages.every(says) ? context : { ...context, messages: context.messages.filter(says) };
+}
+
+/**
+ * Claude refuses a request that has thinking on when the tool round it continues was started by an answer with no
+ * thinking of its own, which is what another provider's answer is once sent on: a chat that switches provider after
+ * a failed model, then Tries again, would stop with a 400. That one request goes without thinking instead.
+ */
+function withoutThinkingMidToolRound<T extends StreamOptions>(context: Context, options: T | undefined): T | undefined {
+	if (!options) return options;
+	const messages = context.messages.filter((message) => message.role === "toolResult" || (message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") || message.role === "user");
+	let last = messages.length - 1;
+	while (last >= 0 && messages[last]?.role === "toolResult") last--;
+	const starter = messages[last];
+	if (last === messages.length - 1 || starter?.role !== "assistant") return options;
+	const thinks = starter.content.some((block) => block.type === "thinking" && (block.redacted || !!block.thinkingSignature) && starter.api === "anthropic-messages");
+	if (thinks) return options;
+	const { reasoning: _reasoning, thinkingEnabled: _thinkingEnabled, ...rest } = options as T & { reasoning?: unknown; thinkingEnabled?: unknown };
+	return rest as T;
 }
 
 /**

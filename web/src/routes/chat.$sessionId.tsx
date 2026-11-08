@@ -20,6 +20,7 @@ import {
   CopyChatId,
   CopyConversation,
 } from "~/components/chat/copy-conversation";
+import { QueuedMessages } from "~/components/chat/queued-messages";
 import { RoomMenu } from "~/components/chat/room";
 import { SessionCostMenu } from "~/components/chat/session-cost";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
@@ -359,6 +360,7 @@ function ChatPage() {
                 ref={composerCardRef}
                 className="pointer-events-auto relative w-full max-w-4xl px-4"
               >
+                <QueuedMessages sessionId={sessionId} queue={view.queue} />
                 <Composer
                   key={sessionId}
                   fill={fill}

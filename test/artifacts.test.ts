@@ -1,11 +1,15 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vitest";
+import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as sync from "y-protocols/sync";
+import * as Y from "yjs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { BRIDGE_SCRIPT, MAX_ARTIFACT_STORAGE_BYTES } from "../src/artifacts";
 import type { Limits } from "../src/usage";
-import { api, apiUrl, connect, OWNER, pairTestComputer, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connect, OWNER, pairTestComputer, post, ROOT, say, systemPrompt, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -42,6 +46,14 @@ async function callTool(name: string, args: Record<string, unknown>, session = R
 	await say(`Please use ${name}`, session);
 	return result;
 }
+
+/** An app of a kind agents made before notes took documents, drawings and diagrams, as the space still keeps them. */
+const legacyApp = (kind: "svg" | "mermaid", title: string, content: string) =>
+	runInDurableObject(agent(), async (instance: Pim) => {
+		const id = crypto.randomUUID();
+		await instance.artifacts.create({ id, title, kind, content, session: null });
+		return id;
+	});
 
 const PAGE = `<!doctype html><html><head><title>Tip</title><style>body{font:16px sans-serif}</style></head><body><h1>Tip calculator</h1><p id="total">0</p><script>document.getElementById("total").textContent = String(12 * 1.2);</script></body></html>`;
 
@@ -128,7 +140,7 @@ describe("artifacts", () => {
 		expect(await response.text()).toBe(PAGE);
 
 		// Markdown is never served as anything that runs, and isn't shown in a frame.
-		const notes = await callTool("app_create", { title: "Notes", kind: "markdown", content: "# Notes\n\n<script>alert(1)</script>" });
+		const notes = await callTool("note_create", { title: "Notes", content: "# Notes\n\n<script>alert(1)</script>" });
 		const id = JSON.parse(notes.text).artifact.id;
 		const markdown = await raw(`/artifacts/${id}/versions/1/download`);
 		expect(markdown.headers.get("content-type")).toBe("text/plain; charset=utf-8");
@@ -137,17 +149,22 @@ describe("artifacts", () => {
 	});
 
 	it("draw SVG and Mermaid in the same sandbox, loading only Pim's own runtime and only for diagrams", async () => {
-		const drawing = await callTool("app_create", { title: "Logo", kind: "svg", content: '<svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"/></svg>' });
-		const svg = JSON.parse(drawing.text).artifact.id;
+		// Agents draw in notes now; drawings and diagrams made as apps before are still shown.
+		const svg = await legacyApp("svg", "Logo", '<svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"/></svg>');
 		const svgFrame = await raw(`/artifacts/${svg}/versions/1/frame`);
 		expect(svgFrame.headers.get("content-security-policy")).toContain("script-src 'unsafe-inline';");
 		expect(await svgFrame.text()).toMatch(/^<!doctype html>.*<body><svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"\/><\/svg><\/body><\/html><script>/);
 		expect((await raw(`/artifacts/${svg}/versions/1/download`)).headers.get("content-disposition")).toMatch(/-v1\.svg"/);
 
+		// Asked for a thumbnail, the page also loads the script that takes its picture, which its sandbox then allows to load; asked for nothing, it doesn't.
+		expect(await (await raw(`/artifacts/${svg}/versions/1/frame`)).text()).not.toContain("thumbnail.js");
+		const thumbFrame = await raw(`/artifacts/${svg}/versions/1/frame?thumbnail`);
+		expect(thumbFrame.headers.get("content-security-policy")).toContain("script-src 'unsafe-inline' https://pim.test/artifact-runtime/");
+		expect(await thumbFrame.text()).toContain('<script src="https://pim.test/artifact-runtime/thumbnail.js"></script>');
+
 		// Diagram source is text in the page: markup in it is escaped, never parsed.
 		const source = 'flowchart LR\n  A["</pre><script>parent.x=1</script>"] --> B';
-		const diagram = await callTool("app_create", { title: "Flow", kind: "mermaid", content: source });
-		const mermaid = JSON.parse(diagram.text).artifact.id;
+		const mermaid = await legacyApp("mermaid", "Flow", source);
 		const mermaidFrame = await raw(`/artifacts/${mermaid}/versions/1/frame`);
 		const directives = mermaidFrame.headers.get("content-security-policy")!.split(";").map((directive) => directive.trim());
 		expect(directives).toEqual(expect.arrayContaining(["sandbox allow-scripts", "default-src 'none'", "connect-src 'none'", "script-src 'unsafe-inline' https://pim.test/artifact-runtime/"]));
@@ -163,9 +180,8 @@ describe("artifacts", () => {
 		expect(messageFrame.headers.get("content-security-policy")!.split(";").map((directive) => directive.trim())).toEqual(directives);
 		expect(await messageFrame.text()).toContain('<script src="https://pim.test/artifact-runtime/mermaid.js"></script>');
 
-		// Content its kind can't show is refused, to the model, before anything is kept.
-		const notSvg = await callTool("app_create", { title: "Bad", kind: "svg", content: "<div>hi</div>" });
-		expect(notSvg).toMatchObject({ isError: true, text: expect.stringContaining("<svg") });
+		// The model makes no new ones, and content their kind can't show is refused before anything is kept.
+		expect((await callTool("app_create", { title: "Bad", kind: "svg", content: "<svg></svg>" })).isError).toBe(true);
 		const broken = await callTool("app_update", { id: svg, base_version: 1, content: "<p>no</p>" });
 		expect(broken.isError).toBe(true);
 		expect((await api(`/artifacts/${svg}`)).body.version).toBe(1);
@@ -249,7 +265,6 @@ export default function App() {
 		expect(JSON.parse(edited.text).artifact).toMatchObject({ version: 2, files: ["app.js", "data.json", "index.html", "style.css"] });
 		expect(await (await raw(`/artifacts/${id}/versions/2/frame`)).text()).toContain('{"name":"Bo"}');
 		expect((await callTool("app_update", { id, base_version: 2, delete_files: ["index.html"] })).text).toContain("main file");
-		expect((await callTool("app_create", { title: "Doc", kind: "markdown", content: "# Hi", files: [{ path: "a.md", content: "x" }] })).text).toContain("Only HTML and JSX");
 		expect((await callTool("app_create", { title: "Bad path", kind: "html", content: "<p>", files: [{ path: "../up.js", content: "x" }] })).isError).toBe(true);
 
 		// An app of modules: components, JSON, CSS and an image, compiled into one script.
@@ -377,8 +392,7 @@ export default function App() {
 		expect((await post(`/artifacts/${made.id}/versions`, { baseVersion: 1, content: "<p>Late</p>" })).status).toBe(409);
 		// The same content again makes no version; content the kind can't show makes none either.
 		expect((await post(`/artifacts/${made.id}/versions`, { baseVersion: 2, content: "<p>Mine</p>" })).body).toMatchObject({ version: 2, changed: false });
-		const drawing = await callTool("app_create", { title: "Logo", kind: "svg", content: "<svg></svg>" });
-		const svg = JSON.parse(drawing.text).artifact.id;
+		const svg = await legacyApp("svg", "Logo", "<svg></svg>");
 		expect((await post(`/artifacts/${svg}/versions`, { baseVersion: 1, content: "<div></div>" })).status).toBe(400);
 
 		const read = await callTool("app_read", { id: made.id });
@@ -668,7 +682,7 @@ export default function App() {
 		expect(big.isError).toBe(true);
 		expect(big.text).toContain("at most 100 bytes");
 		// Bytes, not characters: 50 three-byte characters are 150 bytes.
-		expect((await callTool("app_create", { title: "Wide", kind: "markdown", content: "€".repeat(50) })).isError).toBe(true);
+		expect((await callTool("note_create", { title: "Wide", content: "€".repeat(50) })).isError).toBe(true);
 
 		// Versions of one artifact.
 		await setLimits({ artifactVersions: 2 });
@@ -696,5 +710,166 @@ export default function App() {
 		expect(over.isError).toBe(true);
 		expect(over.text).toContain("storage quota");
 		expect((await api("/artifacts")).body.artifacts.some((artifact: { title: string }) => artifact.title === "Overflow")).toBe(false);
+	});
+});
+
+/** An editor of a note: a Yjs document synced over the note's socket, as the web app's editor is. */
+async function openNote(id: string, doc = new Y.Doc()) {
+	const response = await exports.default.fetch(
+		new Request(apiUrl(`/notes/live?note=${id}`), { headers: { Upgrade: "websocket", Authorization: `Bearer ${TOKEN}` } }),
+	);
+	const socket = response.webSocket!;
+	socket.binaryType = "arraybuffer";
+	const notices: { type: string; version?: number }[] = [];
+	const closed = new Promise<number>((resolve) => socket.addEventListener("close", (event) => resolve(event.code)));
+	const send = (write: (encoder: encoding.Encoder) => void) => {
+		const encoder = encoding.createEncoder();
+		write(encoder);
+		socket.send(encoding.toUint8Array(encoder));
+	};
+	socket.addEventListener("message", (event) => {
+		if (typeof event.data === "string") {
+			notices.push(JSON.parse(event.data));
+			return;
+		}
+		const decoder = decoding.createDecoder(new Uint8Array(event.data as ArrayBuffer));
+		if (decoding.readVarUint(decoder) !== 0) return;
+		const encoder = encoding.createEncoder();
+		encoding.writeVarUint(encoder, 0);
+		sync.readSyncMessage(decoder, encoder, doc, "server");
+		if (encoding.length(encoder) > 1) socket.send(encoding.toUint8Array(encoder));
+	});
+	socket.accept();
+	const onUpdate = (update: Uint8Array, origin: unknown) => {
+		if (origin !== "server") send((encoder) => (encoding.writeVarUint(encoder, 0), sync.writeUpdate(encoder, update)));
+	};
+	doc.on("update", onUpdate);
+	send((encoder) => (encoding.writeVarUint(encoder, 0), sync.writeSyncStep1(encoder, doc)));
+	const text = doc.getText("markdown");
+	return {
+		doc,
+		text,
+		notices,
+		closed,
+		/** Types at the end, as the person would. */
+		type: (typed: string) => text.insert(text.length, typed),
+		pause: () => send((encoder) => encoding.writeVarUint(encoder, 2)),
+		close: () => {
+			doc.off("update", onUpdate);
+			socket.close(1000);
+		},
+	};
+}
+
+describe("notes", () => {
+	it("are Pim's built-in app, whose skill every agent is told of and can load", async () => {
+		let prompt = "";
+		let loaded = { text: "", isError: false };
+		faux.setResponses([
+			(context) => {
+				prompt = systemPrompt(context.messages);
+				return toolUse("read_skill", { app: "notes", skill: "notes" });
+			},
+			(context) => {
+				loaded = lastToolResult(context.messages);
+				return toolUse("send_to_user", { message: "Ready." });
+			},
+		]);
+		await say("Start a note for my trip");
+		expect(prompt).toContain("Notes is one of Pim's built-in apps");
+		expect(prompt).toContain("read_skill (app notes, skill notes)");
+		expect(loaded.isError).toBe(false);
+		expect(loaded.text).toContain("```mermaid");
+		expect(loaded.text).toContain("note_edit");
+	});
+
+	it("are written by the person and the agent together, live, each change kept as a version of whoever made it", async () => {
+		const { status, body: note } = await post("/notes", { title: "Groceries" });
+		expect(status).toBe(201);
+		expect(note).toMatchObject({ kind: "markdown", version: 1, session: null });
+		const first = await openNote(note.id);
+		const second = await openNote(note.id);
+
+		// What one editor types reaches the other.
+		first.type("# Groceries\n- milk\n");
+		await vi.waitFor(() => expect(second.text.toString()).toBe("# Groceries\n- milk\n"));
+
+		// The agent reads what the person wrote, which becomes a version of theirs.
+		const read = await callTool("note_read", { id: note.id });
+		expect(read.text).toContain("version 2 of 2 (the person's)");
+		expect(read.text).toContain("# Groceries\n- milk\n");
+
+		// The person keeps typing while the agent changes another line: neither loses anything.
+		second.type("- eggs\n");
+		await vi.waitFor(() => expect(first.text.toString()).toContain("- eggs"));
+		const edited = await callTool("note_edit", { id: note.id, base_version: 2, edits: [{ find: "- milk", replace: "- oat milk" }] });
+		expect(edited.isError).toBe(false);
+		let expected = "# Groceries\n- oat milk\n- eggs\n";
+		await vi.waitFor(() => expect([first.text.toString(), second.text.toString()]).toEqual([expected, expected]));
+		const { body: history } = await api(`/artifacts/${note.id}`);
+		expect(history.history.map((entry: { version: number; source: string }) => [entry.version, entry.source])).toEqual([
+			[4, "agent"],
+			[3, "person"],
+			[2, "person"],
+			[1, "agent"],
+		]);
+		expect((await api(`/artifacts/${note.id}/versions/4`)).body.content).toBe(expected);
+		expect((await api(`/artifacts/${note.id}/versions/3`)).body.content).toBe("# Groceries\n- milk\n- eggs\n");
+		await vi.waitFor(() => expect(first.notices).toContainEqual({ type: "version", version: 4 }));
+
+		// A whole new text must be based on the latest version, so it can't erase what the person wrote unseen.
+		const stale = await callTool("note_edit", { id: note.id, base_version: 2, content: "# Gone" });
+		expect(stale).toMatchObject({ isError: true, text: expect.stringContaining("not the latest") });
+		expect(first.text.toString()).toBe(expected);
+
+		// Appending goes on a line of its own at the end, after what the person typed meanwhile.
+		second.type("- tea");
+		await vi.waitFor(() => expect(first.text.toString()).toBe(`${expected}- tea`));
+		expect((await callTool("note_edit", { id: note.id, base_version: 4, append: "- rice" })).isError).toBe(false);
+		await vi.waitFor(() => expect(first.text.toString()).toBe(`${expected}- tea\n- rice`));
+		expected = `${expected}- tea\n- rice`;
+
+		// A note isn't an app: the app tools send the agent to the note tools, and list only apps.
+		expect(await callTool("app_update", { id: note.id, base_version: 6, content: "x" })).toMatchObject({ isError: true, text: expect.stringContaining("note_edit") });
+		expect((await callTool("app_list", { query: "Groceries" })).text).toBe("No app's title has groceries.");
+		expect((await callTool("note_list", { query: "groceries" })).text).toContain(note.id);
+
+		// A pause keeps what was written since as a version of the person's; nothing new, no version.
+		first.type("\n- bread");
+		first.pause();
+		await vi.waitFor(async () => expect((await api(`/artifacts/${note.id}`)).body.version).toBe(7));
+		first.pause();
+		second.close();
+		first.close();
+		await first.closed;
+		const { body: after } = await api(`/artifacts/${note.id}`);
+		expect(after.history.slice(0, 3).map((entry: { source: string }) => entry.source)).toEqual(["person", "agent", "person"]);
+		expect((await api(`/artifacts/${note.id}/versions/7`)).body.content).toBe(`${expected}\n- bread`);
+	});
+
+	it("keep what was typed when the last editor closes, sync again with an editor that kept its document, and follow restores", async () => {
+		const { body: note } = await post("/notes", { title: "Plan" });
+		const editor = await openNote(note.id);
+		editor.type("Day one");
+		await vi.waitFor(async () => expect((await callTool("note_read", { id: note.id })).text).toContain("Day one"));
+		editor.type(", then day two");
+		editor.close();
+		await vi.waitFor(async () => expect((await api(`/artifacts/${note.id}/versions/3`)).body).toMatchObject({ content: "Day one, then day two", source: "person" }));
+
+		// An editor coming back with the document it had sees the text once, not twice.
+		const back = await openNote(note.id, editor.doc);
+		const other = await openNote(note.id);
+		await vi.waitFor(() => expect(other.text.toString()).toBe("Day one, then day two"));
+		expect(back.text.toString()).toBe("Day one, then day two");
+
+		// Restoring an older version through the API changes what open editors show.
+		const { status, body: restored } = await post(`/artifacts/${note.id}/restore`, { version: 1, baseVersion: 3 });
+		expect([status, restored.restored]).toEqual([201, 4]);
+		await vi.waitFor(() => expect([back.text.toString(), other.text.toString()]).toEqual(["", ""]));
+
+		// Deleting the note closes its editors.
+		expect((await api(`/artifacts/${note.id}`, { method: "DELETE" })).status).toBe(200);
+		expect(await back.closed).toBe(4004);
+		expect((await openNote(note.id)).closed).resolves.toBe(4004);
 	});
 });

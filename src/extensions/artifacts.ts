@@ -1,7 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import {
-	ARTIFACT_KINDS,
 	type ArtifactKind,
 	type ArtifactStore,
 	type ArtifactVersion,
@@ -29,6 +28,11 @@ export type ArtifactServices = {
 	readFile(path: string): Promise<Uint8Array>;
 };
 
+/** The kinds the agent makes apps of; an app with a backend is deployed (./hosted.ts), and documents are notes (./notes.ts). */
+const CREATED_KINDS: readonly ArtifactKind[] = ["html", "jsx"];
+
+const NOTE_NOT_APP = "That's a note, not an app: read and change it with note_read and note_edit, and show it with note_show.";
+
 /** How much of an app one read returns, so a large one doesn't fill the context at once. */
 const READ_CHARS = 60_000;
 
@@ -38,10 +42,7 @@ const HOW_IT_RUNS =
 	"That doesn't stop it sending data out: it can still navigate itself away, so treat what it contains, and what the user types into it, as possibly visible to others. " +
 	"Don't put passwords, codes or personal details in an app unless the user asks. " +
 	"Images must be inline (data: URLs or SVG) or files of its own. It shows in the chat and on a full screen, including on phones, so make it responsive. " +
-	"Markdown apps are documents; images and raw HTML in them aren't rendered. " +
-	"An svg app is one <svg> element, for a drawing, a logo or an illustration. " +
-	"A mermaid app is Mermaid source (flowchart, sequenceDiagram, gantt, mindmap, and so on), for a diagram, drawn for the user; don't wrap it in a code fence. " +
-	"Any app but Markdown can use window.pim, whose calls return promises and can fail: " +
+	"Any app can use window.pim, whose calls return promises and can fail: " +
 	"pim.storage.get(key), .set(key, text), .delete(key) and .list(prefix) keep text that stays across visits and new versions (up to 1 MB; JSON.stringify anything else); " +
 	"pim.shared has the same calls, for text everyone the user shares the app with sees and changes (a family list, scores); it's the user's own when nobody else uses it; " +
 	"pim.ask(prompt) answers with text from Pim's model, which has no tools and sees only the prompt; " +
@@ -109,12 +110,13 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 
 	const create = defineTool({
 		name: "app_create",
-		description: `Make an app: a document or small interactive page (a chart, a game, a report) the user can open, keep, and get new versions of. Use it for anything the user will look at or use again, rather than pasting long HTML into the chat. content is its main file. ${HOW_IT_RUNS}`,
+		description: `Make an app: a small interactive page or React app (a calculator, a chart, a game, a dashboard) the user can open, use, and get new versions of. Use it for anything the user will use again, rather than pasting long HTML into the chat. For a document, a list, a drawing or a diagram, write a note instead (note_create). content is its main file. ${HOW_IT_RUNS}`,
 		parameters: Type.Object({
 			title: Type.String({ minLength: 1, maxLength: 200 }),
-			// An app with a backend is deployed from a folder (app_deploy), not made from a main file.
-			kind: Type.Union(ARTIFACT_KINDS.filter((kind) => kind !== "hosted").map((kind) => Type.Literal(kind))),
-			content: Type.String({ description: "The main file: index.html, README.md, image.svg, diagram.mmd or App.jsx, by kind." }),
+			// An app with a backend is deployed from a folder (app_deploy), not made from a main file. Documents, drawings and
+			// diagrams are notes (./notes.ts); apps of those kinds made before stay, and can still be changed.
+			kind: Type.Union(CREATED_KINDS.map((kind) => Type.Literal(kind))),
+			content: Type.String({ description: "The main file: index.html or App.jsx, by kind." }),
 			files: Type.Optional(Type.Array(FileInput, { maxItems: MAX_ARTIFACT_FILES, description: "Its other files, for an HTML or JSX artifact." })),
 		}),
 		replay: "safe",
@@ -123,6 +125,7 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 			try {
 				assertOpen();
 				const name = checkTitle(title);
+				if (!CREATED_KINDS.includes(kind)) throw new HttpError(400, `Apps are html or jsx. For a document, a drawing or a diagram, write a note with note_create.`);
 				const others = await contentsOf(files);
 				if (ENTRY_FILES[checkKind(kind)] in others) throw new HttpError(400, `${ENTRY_FILES[kind]} is the main file: give it as content.`);
 				await check(kind, { ...others, [ENTRY_FILES[kind]]: content });
@@ -161,6 +164,7 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 				const latest = artifacts.version(id);
 				if (!latest) throw new HttpError(404, `No app ${id}. List the apps to find it.`);
 				const kind = artifacts.get(id)!.kind;
+				if (kind === "markdown") throw new HttpError(400, NOTE_NOT_APP);
 				const target = path === undefined ? ENTRY_FILES[kind] : checkPath(path);
 				const put: Record<string, string | Uint8Array> = await contentsOf(files);
 				// Edits apply to the version they were based on, which must be the latest; append checks that again.
@@ -203,6 +207,7 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 		}),
 		replay: "safe",
 		async execute({ id, version, path, offset = 0 }) {
+			if (artifacts.get(id)?.kind === "markdown") return text(NOTE_NOT_APP, true);
 			const found = artifacts.version(id, version);
 			if (!found) return text(version === undefined ? `No app ${id}.` : `No version ${version} of app ${id}.`, true);
 			const summary = artifacts.get(id)!;
@@ -234,6 +239,7 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 		}),
 		replay: "safe",
 		async execute({ id, version }) {
+			if (artifacts.get(id)?.kind === "markdown") return text(NOTE_NOT_APP, true);
 			const found = artifacts.version(id, version);
 			if (!found) return text(version === undefined ? `No app ${id}.` : `No version ${version} of app ${id}.`, true);
 			const summary = artifacts.get(id)!;
@@ -243,14 +249,14 @@ export function artifactsExtension({ artifacts, assertOpen, readFile }: Artifact
 
 	const list = defineTool({
 		name: "app_list",
-		description: "List the user's apps, made in any chat: id, title, kind, latest version and size, most recently changed first. Give query to find ones by title.",
+		description: "List the user's apps, made in any chat: id, title, kind, latest version and size, most recently changed first. Give query to find ones by title. Notes aren't apps: note_list lists them.",
 		parameters: Type.Object({
 			query: Type.Optional(Type.String({ description: "Words the title has, in any case and order." })),
 		}),
 		replay: "safe",
 		async execute({ query }) {
 			const words = (query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-			const all = artifacts.list().filter((artifact) => words.every((word) => artifact.title.toLowerCase().includes(word)));
+			const all = artifacts.list().filter((artifact) => artifact.kind !== "markdown" && words.every((word) => artifact.title.toLowerCase().includes(word)));
 			if (all.length === 0) return text(words.length > 0 ? `No app's title has ${words.join(" and ")}.` : "No apps yet.");
 			return text(
 				all

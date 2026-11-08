@@ -1,6 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useCanGoBack, useRouter } from "@tanstack/react-router";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import {
   ARTIFACT_LANGUAGES,
@@ -61,6 +68,13 @@ import {
 import { newChatSearch } from "~/lib/start-chat";
 import { cn, formatBytes } from "~/lib/utils";
 
+// The note editor brings CodeMirror and Yjs, loaded only when a note opens.
+const NoteEditor = lazy(() =>
+  import("~/components/note-editor").then((module) => ({
+    default: module.NoteEditor,
+  })),
+);
+
 /**
  * An app with its versions: a preview or its source, the person's own
  * edits, sharing, and the rest in a menu. It fills its own page, or the
@@ -91,6 +105,8 @@ export function ArtifactView({
   const router = useRouter();
   const canGoBack = useCanGoBack();
   const [view, setView] = useState<"preview" | "source">("preview");
+  // A live note is written, or previewed with its drawings drawn.
+  const [noteView, setNoteView] = useState<"write" | "preview">("write");
   // Counts the times the backend was started or stopped, so the preview loads its page again.
   const [reload, setReload] = useState(0);
   // The source being edited, from the latest version; null when not editing.
@@ -110,13 +126,20 @@ export function ArtifactView({
     enabled: artifact?.kind === "hosted",
   });
   const version = v ?? artifact?.version;
+  // A note on its latest version is its live text, which the person and the agent write in together; a version
+  // newer than the cached history is one just made, which the editor already shows.
+  const live =
+    artifact?.kind === "markdown" &&
+    version !== undefined &&
+    version >= artifact.version;
+  const { data: account } = useQuery({ ...accountQuery(), enabled: live });
   const listed = artifact?.history.some((entry) => entry.version === version);
   // A version the cached history lacks may be one made since (the agent works on): ask once, for this app
   // and version, before calling it missing. An answer to an earlier app or version counts for nothing.
   const wanted = `${artifactId}:${version}`;
   const [askedFor, setAskedFor] = useState<string>();
   useEffect(() => {
-    if (listed !== false || askedFor === wanted) return;
+    if (listed !== false || askedFor === wanted || live) return;
     let current = true;
     void refetch().finally(() => {
       if (current) setAskedFor(wanted);
@@ -124,10 +147,10 @@ export function ArtifactView({
     return () => {
       current = false;
     };
-  }, [listed, askedFor, wanted, refetch]);
+  }, [listed, askedFor, wanted, refetch, live]);
   const source = useQuery({
     ...artifactVersionQuery(artifactId, version ?? 0, undefined, file),
-    enabled: (view === "source" || draft !== null) && listed === true,
+    enabled: (view === "source" || draft !== null) && listed === true && !live,
   });
   // Another version, or another app, isn't the one being edited.
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new version or app ends the edit
@@ -212,7 +235,7 @@ export function ArtifactView({
   }
   if (!artifact || version === undefined) return null;
   const current = artifact.history.find((entry) => entry.version === version);
-  if (!current) {
+  if (!current && !live) {
     if (askedFor !== wanted) return null;
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
@@ -225,7 +248,7 @@ export function ArtifactView({
       </div>
     );
   }
-  const isLatest = version === artifact.version;
+  const isLatest = version >= artifact.version;
   // The file the source view shows, with the version's files.
   const shown = source.data;
   const shownFile = shown?.files.find((entry) => entry.path === shown.path);
@@ -257,11 +280,14 @@ export function ArtifactView({
               </Link>
             </Button>
           ))}
-        {tabs ?? (
-          <h1 className="min-w-0 flex-1 truncate font-semibold">
-            {artifact.title}
-          </h1>
-        )}
+        {tabs ??
+          (artifact.kind === "markdown" ? (
+            <NoteTitle key={artifact.title} artifact={artifact} />
+          ) : (
+            <h1 className="min-w-0 flex-1 truncate font-semibold">
+              {artifact.title}
+            </h1>
+          ))}
         {artifact.history.length > 1 && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -313,35 +339,29 @@ export function ArtifactView({
         )}
         {draft === null ? (
           <>
-            <div className="flex rounded-full border p-0.5 text-sm">
-              {(["preview", "source"] as const).map((mode) => {
-                const label = t(
-                  mode === "preview" ? "artifactPreview" : "artifactSource",
-                );
-                const Icon = mode === "preview" ? Eye : Code;
-                return (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={view === mode}
-                    aria-label={label}
-                    title={label}
-                    onClick={() => setView(mode)}
-                    className={cn(
-                      "flex items-center rounded-full px-2.5 py-1 @2xl:px-3 @2xl:py-0.5",
-                      view === mode && "bg-accent font-medium",
-                    )}
-                  >
-                    <Icon className="size-3.5 @2xl:hidden" />
-                    <span className="hidden @2xl:inline">{label}</span>
-                  </button>
-                );
-              })}
-            </div>
+            {live ? (
+              <ModeSwitch
+                value={noteView}
+                onChange={setNoteView}
+                modes={[
+                  { mode: "write", label: t("noteWrite"), icon: Pencil },
+                  { mode: "preview", label: t("artifactPreview"), icon: Eye },
+                ]}
+              />
+            ) : (
+              <ModeSwitch
+                value={view}
+                onChange={setView}
+                modes={[
+                  { mode: "preview", label: t("artifactPreview"), icon: Eye },
+                  { mode: "source", label: t("artifactSource"), icon: Code },
+                ]}
+              />
+            )}
             {(artifact.kind !== "hosted" || !!backend?.address) && (
               <ShareMenu artifact={artifact} />
             )}
-            {isLatest ? (
+            {live ? null : isLatest ? (
               <Button
                 size="sm"
                 variant="outline"
@@ -421,9 +441,11 @@ export function ArtifactView({
                   >
                     <Download />
                     {t("download")}
-                    <span className="ml-auto pl-4 text-muted-foreground text-xs">
-                      {formatBytes(current.size, formatNumber)}
-                    </span>
+                    {current && (
+                      <span className="ml-auto pl-4 text-muted-foreground text-xs">
+                        {formatBytes(current.size, formatNumber)}
+                      </span>
+                    )}
                   </a>
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -525,7 +547,20 @@ export function ArtifactView({
               ))}
             </select>
           )}
-        {draft !== null ? (
+        {live ? (
+          <Suspense fallback={null}>
+            <NoteEditor
+              key={artifactId}
+              noteId={artifactId}
+              name={account?.username ?? ""}
+              preview={noteView === "preview"}
+              onVersion={(made) => {
+                void queryClient.invalidateQueries({ queryKey: ["artifacts"] });
+                onVersion(made);
+              }}
+            />
+          </Suspense>
+        ) : draft !== null ? (
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
@@ -576,6 +611,79 @@ export function ArtifactView({
         )}
       </div>
     </div>
+  );
+}
+
+/** Two ways to show the app, as a pill of buttons: labelled on wide screens, icons on narrow ones. */
+function ModeSwitch<Mode extends string>({
+  value,
+  onChange,
+  modes,
+}: {
+  value: Mode;
+  onChange: (mode: Mode) => void;
+  modes: { mode: Mode; label: string; icon: typeof Eye }[];
+}) {
+  return (
+    <div className="flex rounded-full border p-0.5 text-sm">
+      {modes.map(({ mode, label, icon: Icon }) => (
+        <button
+          key={mode}
+          type="button"
+          aria-pressed={value === mode}
+          aria-label={label}
+          title={label}
+          onClick={() => onChange(mode)}
+          className={cn(
+            "flex items-center rounded-full px-2.5 py-1 @2xl:px-3 @2xl:py-0.5",
+            value === mode && "bg-accent font-medium",
+          )}
+        >
+          <Icon className="size-3.5 @2xl:hidden" />
+          <span className="hidden @2xl:inline">{label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A note's title, which its owner renames where it stands. */
+function NoteTitle({ artifact }: { artifact: ArtifactDetail }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const [title, setTitle] = useState(artifact.title);
+  const rename = useMutation({
+    mutationFn: (next: string) => pim.renameArtifact(artifact.id, next),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["artifacts"] }),
+    onError: (failure) => {
+      toast.error(failure.message);
+      setTitle(artifact.title);
+    },
+  });
+  const commit = () => {
+    const next = title.trim();
+    if (next === "" || next === artifact.title) setTitle(artifact.title);
+    else rename.mutate(next);
+  };
+  return (
+    <input
+      value={title}
+      onChange={(event) => setTitle(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          setTitle(artifact.title);
+          // The old title is back before the blur saves it.
+          requestAnimationFrame(() =>
+            (event.target as HTMLInputElement).blur(),
+          );
+        }
+      }}
+      maxLength={200}
+      aria-label={t("noteTitle")}
+      className="-mx-1.5 h-8 min-w-0 flex-1 truncate rounded-md bg-transparent px-1.5 font-semibold outline-none hover:bg-muted focus-visible:bg-muted"
+    />
   );
 }
 

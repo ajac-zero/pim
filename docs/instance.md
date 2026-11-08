@@ -53,7 +53,7 @@ People on the same Pim can share with each other: circles let others message you
 
 ## Running it
 
-How the Pim runs for everyone is its variables, set in the Cloudflare dashboard (see [Deploy](reference.md#deploy)); Settings → Deployment shows the admin each one and any Pim can't read. The admin manages people in Settings → Members: invite someone, make a setup link, suspend or restore an account, delete one. The same tab shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](reference.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
+How the Pim runs for everyone is its variables, set in the Cloudflare dashboard (see [Deploy](reference.md#deploy)); Settings → Deployment shows the admin each one and any Pim can't read, and its Apps group is where the admin chooses which of Pim's built-in apps, such as [Notes](apps.md#notes), everyone gets. The admin manages people in Settings → Members: invite someone, make a setup link, suspend or restore an account, delete one. The same tab shows which of Google, GitHub and a custom OpenID Connect provider the deployment's `PIM_<PROVIDER>_*` secrets turn on, and how to set one up (see [Deploy](reference.md#deploy)). The same is in the API, under `/api/admin`, for the admin signed in to the app; an API token can't run the instance:
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
@@ -70,6 +70,8 @@ How the Pim runs for everyone is its variables, set in the Cloudflare dashboard 
 | DELETE | `/api/admin/templates/:id` | | Takes a published agent out of Discover |
 | POST | `/api/admin/apps` | `{ name, description?, url }` | Adds a connector everyone can connect: a remote MCP server, named `custom/<id>` after its name (`201` with `{ app }`) |
 | DELETE | `/api/admin/apps/:id` | | Takes it out of the directory. People's connections to it stay until they disconnect them |
+| GET | `/api/admin/builtin-apps` | | Pim's built-in apps, and which are on for everyone |
+| PUT | `/api/admin/builtin-apps/:id` | `{ enabled }` | Turns one on or off for everyone; people's spaces see it within a minute |
 | POST | `/api/admin/providers` | `{ name, url, key?, models? }` | Adds a model provider everyone can use: a server that speaks OpenAI's chat completions (`201` with `{ provider }`, never the key). See [Model providers](reference.md#model-providers) |
 | PUT, DELETE | `/api/admin/providers/:id` | PUT: `{ name?, url?, key?, models? }` | Changes it and reads its models again, or takes it away from everyone |
 | GET, PUT, DELETE | `/api/admin/default-agent` | PUT: `{ agent }`, one of the admin's agents | The agent everyone who joins gets a copy of besides their majordomo (`{ agent }`, null for none). PUT copies the admin's agent as it is now; choosing again replaces it. DELETE goes back to none |

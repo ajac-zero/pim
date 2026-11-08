@@ -74,13 +74,16 @@ import {
 import { useForkChat } from "~/lib/start-chat";
 
 /**
- * Tools whose answer names an app's version, shown as the app itself: one made, changed or shown again.
+ * Tools whose answer names an app's or a note's version, shown as the app itself: one made, changed or shown again.
  * Chats from before artifacts became apps name them `artifact_*`.
  */
 const ARTIFACT_TOOLS = new Set([
   "app_create",
   "app_update",
   "app_show",
+  "note_create",
+  "note_edit",
+  "note_show",
   "artifact_create",
   "artifact_update",
   "artifact_show",
@@ -677,12 +680,6 @@ export const Thread = memo(function Thread({
           <div className="flex items-center justify-center gap-2 text-muted-foreground text-[13px]">
             <Clock className="size-4 shrink-0" />
             {t("retryingAfterError")}
-          </div>
-        )}
-
-        {view.queued > 0 && (
-          <div className="text-center text-muted-foreground text-[13px]">
-            {t("queuedMessages", { count: view.queued })}
           </div>
         )}
 

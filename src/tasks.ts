@@ -373,6 +373,17 @@ export class TaskStore {
 		this.#sql.exec(`UPDATE pim_tasks SET delivered = ${DELIVERY.given} WHERE batch = ? AND state IN ('completed', 'failed', 'canceled')`, batch);
 	}
 
+	/** Whether a call of a conversation's is suspended, waiting for the answers of tasks it handed out. */
+	isWaiting(conversation: string): boolean {
+		return this.#sql.exec("SELECT 1 FROM pim_tasks WHERE requester = ? AND waits = 1 LIMIT 1", conversation).toArray().length > 0;
+	}
+
+	/** Hands the tasks a conversation did, and those it handed out with their answers, over to the chat that carries it on. */
+	carryOn(from: string, to: string): void {
+		this.#sql.exec("UPDATE pim_tasks SET requester = ? WHERE requester = ?", to, from);
+		this.#sql.exec("UPDATE pim_tasks SET conversation = ? WHERE conversation = ?", to, from);
+	}
+
 	/** The conversations of tasks that aren't chats of the person's: reviews, and tasks from before tasks were chats. */
 	conversations(): Set<string> {
 		return new Set(this.#sql.exec("SELECT conversation FROM pim_tasks WHERE chat = 0").toArray().map((row) => String(row.conversation)));
@@ -399,11 +410,14 @@ export type TasksHost = {
 	 * answers, and the space wakes it once all of them are done.
 	 */
 	start(requester: string, batch: string, tasks: { to: Agent; task: string; continues: Task | null }[], options: { call: string; waits: boolean }): Promise<Task[]>;
+	/** Archives the chat a task runs in, as the person's Archive does by hand. */
+	archive(conversation: string): void;
 	readonly tasks: TaskStore;
 };
 
 export const TASKS_EXTENSION = "pim.tasks";
 export const DELEGATE = "delegate";
+export const ARCHIVE_TASK_CHATS = "archive_task_chats";
 /** How a message giving tasks' answers starts. */
 export const TASK_UPDATE = "[Task update]";
 /** The most tasks one `delegate` call hands out. */
@@ -435,7 +449,7 @@ function delegatesSection(self: Agent, delegates: Agent[]): string {
 		`Hand tasks to others with \`${DELEGATE}\`: each works on its own, at the same time as the others, in a chat of its own that the person sees under this one and can join. Hand one agent several tasks at once when the work splits into parts it can do side by side.`,
 		self.majordomo ? "The person's other agents:" : "Your contacts, the person's agents you hand tasks to:",
 		...delegates.map((agent) => `- ${agentLabel(agent)}${agent.description ? `: ${agent.description}` : ""}`),
-		`A task's agent knows only its own instructions and the task: give it everything it needs. \`${DELEGATE}\` returns at once with the tasks' ids. Don't wait for them, check on them or do their work yourself: say what you handed out if it helps, then end your turn. Their answers arrive later in this conversation, all those you handed out together in one message starting with "${TASK_UPDATE}"; then carry on with them. To follow up on a task, hand out another that \`continues\` it.`,
+		`A task's agent knows only its own instructions and the task: give it everything it needs. \`${DELEGATE}\` returns at once with the tasks' ids. Don't wait for them, check on them or do their work yourself: say what you handed out if it helps, then end your turn. Their answers arrive later in this conversation, all those you handed out together in one message starting with "${TASK_UPDATE}"; then carry on with them. To follow up on a task, hand out another that \`continues\` it. Once you have what you need from a finished task, archive its chat with \`${ARCHIVE_TASK_CHATS}\` so the person's chat list holds only what is still current; a follow-up that continues it brings its chat back.`,
 		`When you can't go on without the answers, such as when the person asked something only they can tell you and expects the reply now, set \`wait\`: the call returns their answers once they are done, and you carry on from there. Meanwhile you can do nothing else, and the person's messages wait too, so don't wait for long work the person needn't watch.`,
 	].join("\n");
 }
@@ -510,6 +524,26 @@ export function tasksExtension(host: TasksHost) {
 		},
 	});
 
+	const archive = defineTool({
+		name: ARCHIVE_TASK_CHATS,
+		description: `Archive the chats of tasks you handed out that are done and whose answers you have used, so the person's chat list isn't full of chats that served their purpose. Nothing is deleted: the chat moves to Archived, and a follow-up that continues the task, or anything said in the chat, lists it again.`,
+		parameters: Type.Object({
+			tasks: Type.Array(Type.String({ description: "The id of a task you handed out." }), { minItems: 1, maxItems: MAX_TASKS * 4 }),
+		}),
+		replay: "safe",
+		async execute({ tasks }, api) {
+			const session = String(api.conversationId);
+			const lines = tasks.map((id) => {
+				const task = host.tasks.get(id.trim());
+				if (!task || task.requester !== session || !task.chat) return `No task ${id} you handed out.`;
+				if (!TERMINAL_STATES.has(task.state)) return `Task ${task.id} is still going: archive its chat once its answer has come.`;
+				host.archive(task.conversation);
+				return `Archived the chat of task ${task.id}.`;
+			});
+			return text(lines.join("\n"));
+		},
+	});
+
 	return defineExtension({
 		name: TASKS_EXTENSION,
 		sections: [
@@ -522,7 +556,7 @@ export function tasksExtension(host: TasksHost) {
 				return delegates.length === 0 ? undefined : delegatesSection(host.roleOf(String(conversationId)).agent, delegates);
 			}),
 		],
-		tools: [delegate],
+		tools: [delegate, archive],
 	});
 }
 

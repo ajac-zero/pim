@@ -1,0 +1,68 @@
+# sandbox-manager + docker-socket-proxy + egress-proxy.
+# The Docker socket is mounted ONLY into docker-socket-proxy, which allows just the API
+# groups the manager needs. Session containers and networks are created by the manager at
+# runtime; the egress-proxy is attached to each session's internal network.
+#
+#   MANAGER_TOKEN=... PROXY_ADMIN_TOKEN=... ALLOWED_IMAGES=registry/img@sha256:... docker compose up -d --build
+
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1 # create, start, inspect, remove, list, wait; exec is a sub-route
+      EXEC: 1
+      VOLUMES: 1
+      NETWORKS: 1 # create, remove, connect/disconnect the egress-proxy
+      IMAGES: 1 # inspect and pull
+      INFO: 1 # the runsc check reads /info
+      POST: 1 # the default is read-only
+      # Everything else stays at the image default of 0: BUILD, SWARM, SECRETS, PLUGINS,
+      # SERVICES, TASKS, NODES, CONFIGS, SYSTEM, AUTH, COMMIT, DISTRIBUTION, EVENTS...
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [control]
+
+  sandbox-manager:
+    build: .
+    image: pim-sandbox-manager
+    restart: unless-stopped
+    depends_on: [docker-socket-proxy, egress-proxy]
+    environment:
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      MANAGER_TOKEN: ${MANAGER_TOKEN:?set MANAGER_TOKEN}
+      PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set PROXY_ADMIN_TOKEN}
+      ALLOWED_IMAGES: ${ALLOWED_IMAGES:?set ALLOWED_IMAGES (comma separated, digest-pinned in prod)}
+      PROBE_IMAGE: ${PROBE_IMAGE:-busybox:1.36}
+      EGRESS_PROXY_CONTAINER: egress-proxy
+      EGRESS_PROXY_URL: http://egress-proxy:3128
+      EGRESS_PROXY_ADMIN_URL: http://egress-proxy:3129
+      MIN_FREE_PCT: ${MIN_FREE_PCT:-15}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-4}
+      IDLE_MIN: ${IDLE_MIN:-30}
+      # statfs() runs inside this container, so it needs a directory on the SAME filesystem as
+      # Docker's data-root (not data-root itself: that would expose every layer). With a
+      # dedicated data disk for Docker, set DOCKER_ROOT_HOST to a directory on that disk.
+      DOCKER_ROOT: /docker-root
+      WORKSPACE_TMPFS: ${WORKSPACE_TMPFS:-0}
+    volumes:
+      - ${DOCKER_ROOT_HOST:-/var/lib/pim-sandbox}:/docker-root:ro
+    ports:
+      - "127.0.0.1:${MANAGER_PORT:-8080}:8080"
+    networks: [control, api]
+
+  egress-proxy:
+    build: .
+    image: pim-sandbox-manager
+    container_name: egress-proxy # the manager connects it to every session network by this name
+    restart: unless-stopped
+    command: ["node", "src/proxy-main.js"]
+    environment:
+      PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set PROXY_ADMIN_TOKEN}
+    networks: [control, outbound]
+
+networks:
+  api: {} # only so the manager's port can be published on localhost; replace with your Pim network
+  control:
+    internal: true # manager <-> socket proxy <-> proxy admin; no route out
+  outbound: {} # the only network with a route to the internet

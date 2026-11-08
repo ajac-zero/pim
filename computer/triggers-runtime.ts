@@ -1640,7 +1640,13 @@ export class TriggersRuntime {
 	}
 
 	#expireLease(): void {
-		if (this.#leaseExpiresAt === null || this.#clock.now() < this.#leaseExpiresAt) return;
+		if (this.#leaseExpiresAt === null) return;
+		// A timer may run before `now()` has reached its time: Node's run on libuv's monotonic clock, which can be up to a millisecond behind `Date.now()`. The lease isn't over yet, so its timer is set again for what is left.
+		const left = this.#leaseExpiresAt - this.#clock.now();
+		if (left > 0) {
+			this.#timer("lease", left, () => this.#expireLease());
+			return;
+		}
 		this.#leaseExpiresAt = null;
 		this.#log({ code: "lease_expired" });
 		for (const slot of this.#slots.values()) if (slot.run) this.#stop(slot.run, "lease_expired");

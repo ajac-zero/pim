@@ -1387,7 +1387,15 @@ const translations = {
     triggerFrequencyFile: "Each time {path} changes",
     triggerFrequencyConnector: "Each time {connector} sends {event}",
     triggerApprovalPolicy: "Approval policy",
-    triggerAsksBeforeExternal: "Asks before external actions",
+    triggerAsksBeforeExternal: "Asks you before external actions",
+    triggerApprovesAfterTimeout:
+      "Approves by itself if you don't answer in 30 seconds",
+    triggerMajordomoMayApprove: "Your majordomo can approve on your behalf",
+    triggerAlwaysApproveNote:
+      "Tools you set to Always approve run without asking",
+    triggerPairComputerFirst: "Pair a computer first",
+    triggerComputerChecking: "Checking for your computer…",
+    triggerComputerCheckFailed: "Couldn't check your computer",
     triggerUnderstandComputerAccess:
       "I understand this script has my computer user's access",
     triggerPolicies: "How it runs",
@@ -3023,7 +3031,15 @@ const translations = {
     triggerFrequencyFile: "Cada vez que cambia {path}",
     triggerFrequencyConnector: "Cada vez que {connector} envía {event}",
     triggerApprovalPolicy: "Política de aprobación",
-    triggerAsksBeforeExternal: "Pregunta antes de acciones externas",
+    triggerAsksBeforeExternal: "Te pregunta antes de acciones externas",
+    triggerApprovesAfterTimeout:
+      "Aprueba por sí mismo si no respondes en 30 segundos",
+    triggerMajordomoMayApprove: "Tu mayordomo puede aprobar en tu nombre",
+    triggerAlwaysApproveNote:
+      "Las herramientas en Aprobar siempre se ejecutan sin preguntar",
+    triggerPairComputerFirst: "Primero vincula una computadora",
+    triggerComputerChecking: "Buscando tu computadora…",
+    triggerComputerCheckFailed: "No se pudo comprobar tu computadora",
     triggerUnderstandComputerAccess:
       "Entiendo que este script tiene el acceso de mi usuario de la computadora",
     triggerPolicies: "Cómo se ejecuta",

@@ -877,13 +877,18 @@ export function ComputerSourceDisclosure({ trigger }: { trigger: Trigger }) {
         {policy &&
           fact(
             t("triggerApprovalPolicy"),
-            t(
-              policy === "explicit"
-                ? "triggerAsksBeforeExternal"
-                : policy === "auto"
-                  ? "approvalAuto"
-                  : "approvalMajordomo",
-            ),
+            <>
+              {t(
+                policy === "explicit"
+                  ? "triggerAsksBeforeExternal"
+                  : policy === "auto"
+                    ? "triggerApprovesAfterTimeout"
+                    : "triggerMajordomoMayApprove",
+              )}
+              <span className="block text-[13px] text-muted-foreground">
+                {t("triggerAlwaysApproveNote")}
+              </span>
+            </>,
           )}
       </dl>
     </div>
@@ -1291,6 +1296,17 @@ export function ConfirmAction({
 }) {
   const { t } = useI18n();
   const consent = action === "resume" && runsOnComputer(trigger.source.kind);
+  const computer = useQuery({ ...computerQuery(), enabled: consent });
+  // Turning it on needs a computer to run on, so never claim one before the status says so.
+  const blocked = !consent
+    ? undefined
+    : computer.data
+      ? computer.data.state === "none"
+        ? t("triggerPairComputerFirst")
+        : undefined
+      : computer.isError
+        ? t("triggerComputerCheckFailed")
+        : t("triggerComputerChecking");
   return (
     <Confirm
       text={t(CONFIRM_TEXT[action][0])}
@@ -1301,6 +1317,7 @@ export function ConfirmAction({
       onCancel={onCancel}
       extra={consent ? <ComputerSourceDisclosure trigger={trigger} /> : null}
       acknowledge={consent ? t("triggerUnderstandComputerAccess") : undefined}
+      blocked={blocked}
     />
   );
 }
@@ -1317,6 +1334,7 @@ export function Confirm({
   pending,
   extra,
   acknowledge,
+  blocked,
   onConfirm,
   onCancel,
 }: {
@@ -1326,6 +1344,8 @@ export function Confirm({
   pending?: boolean;
   extra?: ReactNode;
   acknowledge?: string;
+  /** Why the action can't be taken now, shown beside it. */
+  blocked?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -1366,11 +1386,23 @@ export function Confirm({
         <Button
           type="button"
           variant={destructive ? "destructive" : "default"}
-          disabled={pending || (acknowledge !== undefined && !acknowledged)}
+          disabled={
+            pending ||
+            blocked !== undefined ||
+            (acknowledge !== undefined && !acknowledged)
+          }
           onClick={onConfirm}
         >
           {action}
         </Button>
+        {blocked && (
+          <p
+            role="status"
+            className="basis-full text-right text-sm text-muted-foreground"
+          >
+            {blocked}
+          </p>
+        )}
       </div>
     </div>
   );

@@ -16,6 +16,7 @@ import {
   TriggerReview,
 } from "~/components/trigger-editor";
 import {
+  GrantReview,
   ProblemNotice,
   RunHistory,
   TestResult,
@@ -30,9 +31,15 @@ import {
   triggersAvailableQuery,
   triggersQuery,
 } from "~/lib/queries";
-import { emptyForm, MAX_PAGES, triggerProblem } from "~/lib/triggers";
+import {
+  emptyForm,
+  grantStanding,
+  MAX_PAGES,
+  triggerProblem,
+} from "~/lib/triggers";
 import {
   connectorFixture,
+  grantApprovalFixture,
   pollFixture,
   runFixture,
   triggerFixture,
@@ -80,6 +87,7 @@ async function render(Component: () => ReactNode, client = clientWith()) {
         "/triggers",
         "/triggers/new",
         "/triggers/$triggerId",
+        "/triggers/$triggerId/grant",
         "/chat/$sessionId",
       ].map((path) => createRoute({ getParentRoute: () => root, path })),
     ),
@@ -286,6 +294,43 @@ describe("a trigger's page", () => {
     expect(text).toContain("Waiting for your approval");
     expect(text).toContain("status ≠ 0");
     expect(text).toContain("None yet");
+  });
+
+  it("links a computer source's grant to its request, and nothing else's", async () => {
+    const client = clientWith();
+    setRuns(client, "trg_build", []);
+    setRuns(client, "trg_morning", []);
+    const pending = await render(
+      () => <TriggerDetail trigger={pollFixture()} />,
+      client,
+    );
+    expect(linkTo(pending, "/triggers/trg_build/grant")).toBeDefined();
+    expect(textOf(pending)).toContain("Review the request");
+    const granted = await render(
+      () => (
+        <TriggerDetail
+          trigger={pollFixture({ grant: { required: true, state: "current" } })}
+        />
+      ),
+      client,
+    );
+    expect(textOf(granted)).toContain("Grant requests");
+    const off = await render(
+      () => (
+        <TriggerDetail
+          trigger={pollFixture({
+            grant: { required: true, state: "unavailable" },
+          })}
+        />
+      ),
+      client,
+    );
+    expect(off).not.toContain("/grant");
+    const time = await render(
+      () => <TriggerDetail trigger={triggerFixture()} />,
+      client,
+    );
+    expect(time).not.toContain("/grant");
   });
 
   it("never shows a connector's arguments", async () => {
@@ -603,5 +648,130 @@ describe("the editor", () => {
     expect(html).toContain('value="make check"');
     // A poll stays offered when editing one, whatever Pim offers new triggers.
     expect(textOf(html)).toContain("Command, checked");
+  });
+});
+
+describe("a grant request's page", () => {
+  const now = Date.UTC(2026, 10, 8, 12, 0);
+  const review = (
+    trigger: Trigger,
+    approvals = [grantApprovalFixture()],
+    currentHash = "hash_now",
+  ) =>
+    render(() => (
+      <GrantReview
+        trigger={trigger}
+        standing={grantStanding(trigger, approvals, currentHash, now)}
+        currentHash={currentHash}
+      />
+    ));
+  const buttons = (html: string) =>
+    [...html.matchAll(/<button[^>]*>(.*?)<\/button>/g)].map(([, inner]) =>
+      textOf(inner ?? ""),
+    );
+
+  it("asks in Pim's words, shows exactly what it covers, and offers approve and decline", async () => {
+    const html = await review(pollFixture());
+    const text = textOf(html);
+    expect(text).toContain("Computer access for Build watcher");
+    expect(text).toContain("Request: Waiting for your decision");
+    expect(text).toContain(
+      'Let the trigger "Build watcher" run `make check` in /home/ada/project on your computer every 5 minutes.',
+    );
+    expect(text).toContain("They aren't sandboxed.");
+    expect(text).toContain("This trigger only");
+    expect(text).toContain("make check");
+    expect(text).toContain("Exactly this configuration");
+    expect(text).toContain("rt_laptop");
+    expect(text).toContain("Approving doesn't turn the trigger on");
+    expect(buttons(html)).toEqual(["Approve", "Decline"]);
+    expect(linkTo(html, "/triggers/trg_build")).toBeDefined();
+  });
+
+  it("offers only to decline a request for a source the trigger no longer has, and doesn't show today's source as the one asked", async () => {
+    const html = await review(pollFixture(), undefined, "hash_after_edit");
+    const text = textOf(html);
+    expect(text).toContain("Request: Out of date");
+    expect(text).toContain(
+      "The trigger's source changed after its agent asked",
+    );
+    expect(text).toContain("The source as it was when its agent asked");
+    expect(text).not.toContain("Exactly this configuration");
+    expect(buttons(html)).toEqual(["Decline"]);
+  });
+
+  it("says an expired request granted nothing, and offers to approve nothing", async () => {
+    const lapsed = await review(pollFixture(), [
+      grantApprovalFixture({ expiresAt: now - 1 }),
+    ]);
+    expect(textOf(lapsed)).toContain("Request: Expired");
+    expect(textOf(lapsed)).toContain("This request expired before you decided");
+    expect(buttons(lapsed)).toEqual(["Decline"]);
+    const timedOut = await review(pollFixture(), [
+      grantApprovalFixture({
+        status: "denied",
+        decidedBy: "timeout",
+        decidedAt: now - 1,
+      }),
+    ]);
+    expect(textOf(timedOut)).toContain("Request: Expired");
+    expect(buttons(timedOut)).toEqual([]);
+  });
+
+  it("shows an approved request with where the grant stands now and what Pim recorded, and no buttons", async () => {
+    const html = await review(
+      pollFixture({ grant: { required: true, state: "current" } }),
+      [
+        grantApprovalFixture({
+          status: "approved",
+          decidedBy: "user",
+          decidedAt: now - 60_000,
+          result:
+            'Granted: the trigger "Build watcher" may run its source on the person\'s computer.',
+        }),
+      ],
+    );
+    const text = textOf(html);
+    expect(text).toContain("Request: Approved");
+    expect(text).toContain("Granted for exactly this source");
+    expect(text).toContain('Granted: the trigger "Build watcher" may run');
+    expect(text).toContain("Decided");
+    expect(buttons(html)).toEqual([]);
+  });
+
+  it("shows a declined request as granting nothing, with the note it was given", async () => {
+    const html = await review(pollFixture(), [
+      grantApprovalFixture({
+        status: "denied",
+        decidedBy: "user",
+        decidedAt: now - 1,
+        note: "Its chat stopped before the decision, so nothing ran.",
+      }),
+    ]);
+    expect(textOf(html)).toContain("Request: Declined");
+    expect(textOf(html)).toContain("Declined: this request granted nothing.");
+    expect(textOf(html)).toContain("Its chat stopped before the decision");
+    expect(buttons(html)).toEqual([]);
+  });
+
+  it("says when there is nothing to decide", async () => {
+    const none = textOf(
+      await review(
+        pollFixture({ grant: { required: true, state: "missing" } }),
+        [],
+      ),
+    );
+    expect(none).toContain("Not granted. Ask its agent in chat");
+    expect(none).toContain("No request from its agent is waiting.");
+    expect(
+      textOf(
+        await review(
+          pollFixture({ grant: { required: true, state: "unavailable" } }),
+        ),
+      ),
+    ).toContain("Triggers on your computer are off in this space");
+    const time = await review(triggerFixture());
+    expect(textOf(time)).toContain("it needs no grant");
+    expect(buttons(time)).toEqual([]);
   });
 });

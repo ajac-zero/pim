@@ -1,21 +1,26 @@
+import { createHash } from "node:crypto";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, pim } from "~/lib/pim-api";
+import { ApiError, type Approval, pim, type Trigger } from "~/lib/pim-api";
 import { triggersQuery } from "~/lib/queries";
 import {
   changeOf,
+  decideGrant,
   emptyForm,
   formOf,
+  grantStanding,
   inputOf,
   nextLine,
   offeredKinds,
   PROBLEM_TEXT,
+  sourceConfigHash,
   TRIGGER_ERROR_CODES,
   triggerProblem,
   triggersAvailable,
 } from "~/lib/triggers";
 import {
   connectorFixture,
+  grantApprovalFixture,
   pollFixture,
   triggerFixture,
 } from "~/test/trigger-fixtures";
@@ -364,5 +369,156 @@ describe("the editor's form", () => {
     const mailRead = inputOf(mailForm);
     if (!("input" in mailRead)) throw new Error("form refused");
     expect(changeOf(mail, mailForm, mailRead.input)).toEqual({});
+  });
+});
+
+describe("a grant request", () => {
+  const now = Date.UTC(2026, 10, 8, 12, 0);
+  const poll = pollFixture();
+  const request = (overrides: Partial<Approval> = {}, args = {}) =>
+    grantApprovalFixture({
+      ...overrides,
+      args: { ...(grantApprovalFixture().args as object), ...args },
+    });
+  const standing = (approvals: Approval[], trigger: Trigger = poll) =>
+    grantStanding(trigger, approvals, "hash_now", now);
+
+  it("digests a source exactly as Pim does, whatever the order of its fields", async () => {
+    // Pim's digest (src/triggers/computer.ts): SHA-256 of the protocol's prefix and the source with its keys sorted.
+    const expected = (canonical: string) =>
+      createHash("sha256")
+        .update(`triggers.v1/source\n${canonical}`)
+        .digest("hex");
+    expect(
+      await sourceConfigHash({
+        kind: "poll",
+        intervalMs: 300_000,
+        command: "make check",
+        deadlineMs: 30_000,
+        cwd: "/home/ada/project",
+      }),
+    ).toBe(
+      expected(
+        '{"command":"make check","cwd":"/home/ada/project","deadlineMs":30000,"intervalMs":300000,"kind":"poll"}',
+      ),
+    );
+    expect(
+      await sourceConfigHash({
+        kind: "stream",
+        command: 'tail -f "a b"',
+        cwd: null,
+      }),
+    ).toBe(
+      expected('{"command":"tail -f \\"a b\\"","cwd":null,"kind":"stream"}'),
+    );
+  });
+
+  it("is the newest one waiting, approvable only for the source the trigger has now", () => {
+    const older = request({ id: "apr_old", createdAt: now - 3_000 });
+    const newer = request({ id: "apr_new", createdAt: now - 2_000 });
+    const decidedLater = request({
+      id: "apr_done",
+      createdAt: now - 1_000,
+      status: "denied",
+      decidedBy: "user",
+      decidedAt: now - 500,
+    });
+    const shown = standing([older, decidedLater, newer]);
+    expect(shown.kind).toBe("pending");
+    expect("approval" in shown && shown.approval.id).toBe("apr_new");
+
+    const changed = grantStanding(poll, [newer], "hash_before_edit", now);
+    expect(changed).toMatchObject({ kind: "outdated", reason: "changed" });
+    expect(
+      standing([newer], pollFixture({ lifecycle: "ended" })),
+    ).toMatchObject({ kind: "outdated", reason: "ended" });
+  });
+
+  it("expires at its deadline, not a moment before", () => {
+    expect(standing([request({ expiresAt: now + 1 })]).kind).toBe("pending");
+    expect(standing([request({ expiresAt: now })])).toMatchObject({
+      kind: "expired",
+      reason: "timeout",
+    });
+    expect(
+      standing([
+        request({ status: "denied", decidedBy: "timeout", decidedAt: now - 1 }),
+      ]),
+    ).toMatchObject({ kind: "expired", reason: "timeout" });
+    const watch = pollFixture({
+      source: { kind: "process", handle: "pid:42", expiresAt: now },
+    });
+    expect(standing([request()], watch)).toMatchObject({
+      kind: "expired",
+      reason: "source",
+    });
+  });
+
+  it("shows the newest decision once none is waiting", () => {
+    const approved = request({
+      status: "approved",
+      decidedBy: "user",
+      decidedAt: now - 10,
+      createdAt: now - 20,
+    });
+    const declined = request({
+      id: "apr_no",
+      status: "denied",
+      decidedBy: "user",
+      decidedAt: now - 1,
+      createdAt: now - 5,
+    });
+    expect(standing([approved]).kind).toBe("approved");
+    expect(standing([approved, declined]).kind).toBe("declined");
+  });
+
+  it("finds nothing in another trigger's request, another action, or a malformed scope", () => {
+    expect(
+      standing([
+        request({}, { triggerId: "trg_other" }),
+        request({ action: "shell" }),
+        request({}, { configHash: 7 }),
+      ]).kind,
+    ).toBe("none");
+  });
+
+  it("needs nothing for a trigger off the computer, and decides nothing while computer triggers are off", () => {
+    expect(standing([request()], triggerFixture()).kind).toBe("not_required");
+    expect(
+      standing(
+        [request()],
+        pollFixture({ grant: { required: true, state: "unavailable" } }),
+      ).kind,
+    ).toBe("off");
+  });
+
+  it("is decided once: a request someone already decided answers as it stands", async () => {
+    const approved = request({ status: "approved", decidedBy: "user" });
+    let asked = answer({ status: 200, body: approved });
+    expect(await decideGrant("apr_grant", "approve")).toEqual({
+      approval: approved,
+      already: false,
+    });
+    expect(asked[0]?.url).toBe("/api/approvals/apr_grant/approve");
+    expect(asked[0]?.init.method).toBe("POST");
+
+    const denied = request({ status: "denied", decidedBy: "user" });
+    asked = answer(
+      { status: 409, body: { error: "Approval apr_grant is already denied" } },
+      { status: 200, body: denied },
+    );
+    expect(await decideGrant("apr_grant", "approve")).toEqual({
+      approval: denied,
+      already: true,
+    });
+    expect(asked.map(({ url }) => url)).toEqual([
+      "/api/approvals/apr_grant/approve",
+      "/api/approvals/apr_grant",
+    ]);
+
+    answer({ status: 403, body: { error: "This capability is turned off" } });
+    await expect(decideGrant("apr_grant", "approve")).rejects.toThrow(
+      "This capability is turned off",
+    );
   });
 });

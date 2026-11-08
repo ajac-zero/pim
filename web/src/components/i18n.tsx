@@ -1306,6 +1306,57 @@ const translations = {
     triggerGrantNotCurrent:
       "No longer current: the source changed since you granted it",
     triggerGrantUnavailable: "Triggers on your computer are off",
+    triggerGrantReview: "Review the request",
+    triggerGrantSee: "Grant requests",
+    triggerGrantTitle: "Computer access for {label}",
+    triggerGrantBack: "Back to {label}",
+    triggerGrantLoading: "Loading the request…",
+    triggerGrantRequest: "Request",
+    triggerGrantStandingPending: "Waiting for your decision",
+    triggerGrantStandingApproved: "Approved",
+    triggerGrantStandingDeclined: "Declined",
+    triggerGrantStandingExpired: "Expired",
+    triggerGrantStandingOutdated: "Out of date",
+    triggerGrantAsked: "What you're asked to allow",
+    triggerGrantScope: "What it covers",
+    triggerGrantScopeTrigger: "Trigger",
+    triggerGrantOnlyTrigger: "This trigger only",
+    triggerGrantSourceExact:
+      "Exactly this configuration. Any change to it needs a new grant.",
+    triggerGrantSourceChanged:
+      "The source as it was when its agent asked, which isn't what the trigger has now.",
+    triggerGrantScopeComputer: "Computer",
+    triggerGrantComputerOnly:
+      "Only the computer that was paired when its agent asked",
+    triggerGrantAskedAt: "Asked",
+    triggerGrantDecidedAt: "Decided",
+    triggerGrantExpiresAt: "Expires",
+    triggerGrantLimits:
+      "Approving doesn't turn the trigger on. To stop it later, pause or delete the trigger, or change its source. Revoking a grant on its own isn't in the app yet.",
+    triggerGrantApprove: "Approve",
+    triggerGrantDecline: "Decline",
+    triggerGrantApproving: "Approving…",
+    triggerGrantDeclining: "Declining…",
+    triggerGrantApprovedNow: "Approved.",
+    triggerGrantDeclinedNow: "Declined.",
+    triggerGrantAlready:
+      "Someone already decided this request. This is how it stands.",
+    triggerGrantDecideFailed: "Your decision wasn't recorded.",
+    triggerGrantOutdatedChanged:
+      "The trigger's source changed after its agent asked, so approving this would grant nothing the trigger runs now. Decline it, and ask its agent in chat to ask again.",
+    triggerGrantOutdatedEnded:
+      "This trigger has ended or was deleted, so there's nothing left to grant.",
+    triggerGrantExpiredTimeout:
+      "This request expired before you decided, so nothing was granted. Ask its agent in chat to ask again.",
+    triggerGrantExpiredSource:
+      "The process watch this request covers has expired, so there's nothing left to grant.",
+    triggerGrantRecorded: "What Pim recorded",
+    triggerGrantDeclinedNote: "Declined: this request granted nothing.",
+    triggerGrantNoneWaiting: "No request from its agent is waiting.",
+    triggerGrantNotRequiredHere:
+      "This trigger doesn't run on your computer, so it needs no grant.",
+    triggerGrantOffHere:
+      "Triggers on your computer are off in this space, so grant requests can't be decided here.",
     triggerComputerAccess:
       "Commands run on your computer as the user who runs pim-computer, with all of that user's access to your files and accounts. They aren't sandboxed.",
     triggerPolicies: "How it runs",
@@ -2806,6 +2857,57 @@ const translations = {
       "Ya no vale: el origen cambió desde que lo concediste",
     triggerGrantUnavailable:
       "Los disparadores en tu computadora están desactivados",
+    triggerGrantReview: "Revisar la solicitud",
+    triggerGrantSee: "Solicitudes de permiso",
+    triggerGrantTitle: "Acceso a la computadora para {label}",
+    triggerGrantBack: "Volver a {label}",
+    triggerGrantLoading: "Cargando la solicitud…",
+    triggerGrantRequest: "Solicitud",
+    triggerGrantStandingPending: "Esperando tu decisión",
+    triggerGrantStandingApproved: "Aprobada",
+    triggerGrantStandingDeclined: "Rechazada",
+    triggerGrantStandingExpired: "Caducada",
+    triggerGrantStandingOutdated: "Desactualizada",
+    triggerGrantAsked: "Lo que se te pide permitir",
+    triggerGrantScope: "Lo que abarca",
+    triggerGrantScopeTrigger: "Disparador",
+    triggerGrantOnlyTrigger: "Solo este disparador",
+    triggerGrantSourceExact:
+      "Exactamente esta configuración. Cualquier cambio necesita un permiso nuevo.",
+    triggerGrantSourceChanged:
+      "El origen tal como era cuando su agente lo pidió, que no es el que tiene ahora el disparador.",
+    triggerGrantScopeComputer: "Computadora",
+    triggerGrantComputerOnly:
+      "Solo la computadora que estaba vinculada cuando su agente lo pidió",
+    triggerGrantAskedAt: "Pedido",
+    triggerGrantDecidedAt: "Decidido",
+    triggerGrantExpiresAt: "Caduca",
+    triggerGrantLimits:
+      "Aprobar no activa el disparador. Para detenerlo después, pausa o elimina el disparador, o cambia su origen. Revocar solo un permiso aún no está en la app.",
+    triggerGrantApprove: "Aprobar",
+    triggerGrantDecline: "Rechazar",
+    triggerGrantApproving: "Aprobando…",
+    triggerGrantDeclining: "Rechazando…",
+    triggerGrantApprovedNow: "Aprobada.",
+    triggerGrantDeclinedNow: "Rechazada.",
+    triggerGrantAlready:
+      "Alguien ya decidió esta solicitud. Así es como quedó.",
+    triggerGrantDecideFailed: "Tu decisión no se registró.",
+    triggerGrantOutdatedChanged:
+      "El origen del disparador cambió después de que su agente lo pidiera, así que aprobarla no concedería nada de lo que ejecuta ahora. Recházala y pide a su agente en el chat que lo pida de nuevo.",
+    triggerGrantOutdatedEnded:
+      "Este disparador terminó o fue eliminado, así que ya no queda nada que conceder.",
+    triggerGrantExpiredTimeout:
+      "Esta solicitud caducó antes de que decidieras, así que no se concedió nada. Pide a su agente en el chat que lo pida de nuevo.",
+    triggerGrantExpiredSource:
+      "La vigilancia del proceso que abarca esta solicitud caducó, así que ya no queda nada que conceder.",
+    triggerGrantRecorded: "Lo que registró Pim",
+    triggerGrantDeclinedNote: "Rechazada: esta solicitud no concedió nada.",
+    triggerGrantNoneWaiting: "No hay ninguna solicitud de su agente esperando.",
+    triggerGrantNotRequiredHere:
+      "Este disparador no se ejecuta en tu computadora, así que no necesita permiso.",
+    triggerGrantOffHere:
+      "Los disparadores en tu computadora están desactivados en este espacio, así que aquí no se pueden decidir solicitudes de permiso.",
     triggerComputerAccess:
       "Los comandos se ejecutan en tu computadora como el usuario que ejecuta pim-computer, con todo el acceso de ese usuario a tus archivos y cuentas. No están aislados.",
     triggerPolicies: "Cómo se ejecuta",

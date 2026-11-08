@@ -1715,25 +1715,67 @@ session rather than at login or boot. The browser keeps its profile, with what y
 ~/.pim-computer/browser.`;
 
 /**
- * The variable that runs triggers' observers here (./triggers-host.ts), for
- * internal review only. Nothing sets it: `install` gives its service only the
- * variables it names, and only `internal` turns it on.
+ * The triggers runtime's modules (./triggers-host.ts and what it imports),
+ * which the Pim serves beside this file (web/vite.config.ts). The Pim's
+ * install and update download this file alone, so an installed computer
+ * gets these from the Pim as it starts (`loadTriggers`).
  */
-export const TRIGGERS_GATE = "PIM_COMPUTER_TRIGGERS";
+export const TRIGGERS_MODULES = [
+	"triggers-host.ts",
+	"triggers-runtime.ts",
+	"triggers-adapters/index.ts",
+	"triggers-adapters/managed.ts",
+	"triggers-adapters/poll.ts",
+	"triggers-adapters/process.ts",
+	"triggers-adapters/stream.ts",
+] as const;
 
 /**
- * The triggers host, when the gate is on and its module is beside this file;
- * otherwise null, with nothing of triggers loaded, made or listened for. The
- * Pim's install and update download this file alone, so an installed
- * computer has no triggers whatever its environment says.
+ * Where the triggers runtime's modules are: beside this file, as in Pim's
+ * own source; or else the Pim's newest copy, which this gets into
+ * `stateDir/triggers-runtime` each time it starts, all of them or none, and
+ * the copy from before when it can't. Null with neither.
  */
-export async function loadTriggers(env: Record<string, string | undefined>, options: TriggersHostOptions): Promise<TriggersHost | null> {
-	if (env[TRIGGERS_GATE] !== "internal") return null;
+async function triggersModules(url: string | undefined, stateDir: string, log: (line: string) => void): Promise<string | null> {
+	const { fileURLToPath } = await import("node:url");
+	const exists = (folder: string) => fs.access(path.join(folder, "triggers-host.ts")).then(() => true, () => false);
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	if (await exists(here)) return here;
+	const folder = path.join(stateDir, "triggers-runtime");
+	if (url) {
+		const next = `${folder}.next`;
+		try {
+			await fs.rm(next, { recursive: true, force: true });
+			for (const file of TRIGGERS_MODULES) {
+				const response = await fetch(`${url.replace(/\/+$/, "")}/${file}`, { signal: AbortSignal.timeout(30_000) });
+				// A Pim without the file answers with its app's page.
+				if (!response.ok || response.headers.get("content-type")?.startsWith("text/html")) throw new Error(`${file}: ${response.status}`);
+				await fs.mkdir(path.dirname(path.join(next, file)), { recursive: true, mode: 0o700 });
+				await fs.writeFile(path.join(next, file), Buffer.from(await response.arrayBuffer()), { mode: 0o600 });
+			}
+			await fs.rm(folder, { recursive: true, force: true });
+			await fs.rename(next, folder);
+		} catch (error) {
+			await fs.rm(next, { recursive: true, force: true }).catch(() => {});
+			log(`Couldn't get the triggers runtime from your Pim (${(error as Error).message}), so this uses the copy from before, if there is one.`);
+		}
+	}
+	return (await exists(folder)) ? folder : null;
+}
+
+/**
+ * The triggers host (./triggers-host.ts), from the runtime's modules
+ * (`triggersModules`); null, with nothing of triggers made or listened
+ * for, when they can't be had or the host can't start here.
+ */
+export async function loadTriggers(options: TriggersHostOptions & { readonly url?: string }): Promise<TriggersHost | null> {
 	try {
-		const { startTriggers } = await import("./triggers-host.ts");
+		const folder = await triggersModules(options.url, options.stateDir, options.log);
+		if (!folder) throw new Error("no runtime");
+		const { startTriggers } = (await import(pathToFileURL(path.join(folder, "triggers-host.ts")).href)) as typeof import("./triggers-host.ts");
 		return await startTriggers(options);
 	} catch {
-		options.log("Triggers are on, but their runtime couldn't start here, so this computer runs no triggers.");
+		options.log("The triggers runtime couldn't start here, so this computer runs no triggers.");
 		return null;
 	}
 }
@@ -1810,8 +1852,8 @@ async function main(): Promise<void> {
 	const spacesd = values.spacesd ?? env.PIM_SPACESD_URL ?? "http://127.0.0.1:3211";
 	const screen = spacesdTokenFile ? spacesdScreen(spacesd, spacesdTokenFile) : undefined;
 	const driver = spacesdTokenFile ? spacesdDriver(spacesd, spacesdTokenFile) : undefined;
-	// Off unless the gate is on; then triggers' observers, like apps, outlast a dropped connection until the space's lease ends, and end with this process.
-	const triggers = await loadTriggers(env, { token: token!, stateDir: path.join(os.homedir(), ".pim-computer"), root, log });
+	// Triggers' observers, like apps, outlast a dropped connection until the space's lease ends, and end with this process.
+	const triggers = await loadTriggers({ url, token: token!, stateDir: path.join(os.homedir(), ".pim-computer"), root, log });
 	// Apps keep running when the connection to the space drops; they end with this process.
 	const apps = new Apps();
 	process.on("exit", () => apps.killAll());

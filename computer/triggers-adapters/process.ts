@@ -3,9 +3,8 @@
  * named by the handle it was launched under, from the durable receipt its
  * supervisor wrote. Its contract is in docs/triggers-adapters.md.
  *
- * Behind a gate. Only the triggers host (../triggers-host.ts) uses it,
- * which pim-computer loads only when `PIM_COMPUTER_TRIGGERS` is `internal`,
- * which nothing sets. Pim has no managed launcher yet: nothing in
+ * Only the triggers host (../triggers-host.ts) uses it, which pim-computer
+ * loads as it starts. Pim has no managed launcher yet: nothing in
  * pim-computer starts a process under a handle, so no handle resolves and
  * every watch fails to start.
  *

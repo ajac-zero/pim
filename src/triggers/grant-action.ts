@@ -11,8 +11,9 @@
  * hears what it should run. What they read says plainly that the command
  * runs as their own user, with that user's access.
  *
- * Pim offers the tool, and can run the action, only where computer
- * triggers are on, behind their gate (`computerTriggersAllowed`).
+ * Pim offers the tool wherever the space's triggers are, and the action
+ * runs only where its trigger engine is on. With no computer paired, the
+ * tool refuses: there is nothing to grant a source on.
  */
 
 import { Type } from "@earendil-works/pi-ai";

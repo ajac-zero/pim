@@ -133,7 +133,7 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 
 A variable Pim can't read counts as its default, except a limit or a cap on accounts, which counts as 0, so a typo never lifts it. Settings → Deployment says which and why.
 
-Time triggers are on for everyone but guests, with nothing to set: each person's space turns them on as it starts and when they register. Leave `PIM_TRIGGERS_COMPUTER`, `PIM_TRIGGERS_MIGRATION` and `PIM_TRIGGERS_CUTOVER` unset. See [triggers in Pim](triggers.md#in-pim).
+Time triggers are on for everyone but guests, with nothing to set: each person's space turns them on as it starts and when they register. Their computer sources need no variable of their own either: they run on a person's paired computer under that person's grant of each. Leave `PIM_TRIGGERS_MIGRATION` and `PIM_TRIGGERS_CUTOVER` unset. See [triggers in Pim](triggers.md#in-pim).
 
 Attach your domain in the dashboard too (Workers & Pages → `pim` → Settings → Domains & Routes): deploys leave it alone.
 

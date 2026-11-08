@@ -1314,8 +1314,6 @@ const translations = {
     triggerCapabilityAvailable: "Pim can run it here",
     triggerCapabilityDraftOnly:
       "Draft only: Pim doesn't take connector events in yet, so it can't be turned on",
-    triggerCapabilityComputerOff:
-      "Not available here: triggers on your computer are off",
     triggerCapabilityUnavailable: "Not available here: nothing hands it on yet",
     triggerGrant: "Your permission",
     triggerGrantNotRequired: "Not needed",
@@ -1325,7 +1323,6 @@ const translations = {
     triggerGrantCurrent: "Allowed for exactly this source",
     triggerGrantNotCurrent:
       "No longer valid: the source changed since you allowed it",
-    triggerGrantUnavailable: "Triggers on your computer are off",
     triggerGrantReview: "Review the request",
     triggerGrantSee: "Permission requests",
     triggerGrantTitle: "Computer access for {label}",
@@ -1375,8 +1372,6 @@ const translations = {
     triggerGrantNoneWaiting: "No request from its agent is waiting.",
     triggerGrantNotRequiredHere:
       "This trigger doesn't run on your computer, so it needs no permission.",
-    triggerGrantOffHere:
-      "Triggers on your computer are off in this space, so permission requests can't be decided here.",
     triggerComputerAccess:
       "Commands run on your computer as the user who runs pim-computer, with all of that user's access to your files and accounts. They aren't sandboxed.",
     triggerComputerScriptAccess:
@@ -2978,8 +2973,6 @@ const translations = {
     triggerCapabilityAvailable: "Pim puede ejecutarlo aquí",
     triggerCapabilityDraftOnly:
       "Solo borrador: Pim aún no recibe eventos de conectores, así que no se puede activar",
-    triggerCapabilityComputerOff:
-      "No disponible aquí: los disparadores en tu computadora están desactivados",
     triggerCapabilityUnavailable: "No disponible aquí: aún nada lo entrega",
     triggerGrant: "Tu permiso",
     triggerGrantNotRequired: "No hace falta",
@@ -2989,8 +2982,6 @@ const translations = {
     triggerGrantCurrent: "Permitido para exactamente este origen",
     triggerGrantNotCurrent:
       "Ya no vale: el origen cambió desde que lo permitiste",
-    triggerGrantUnavailable:
-      "Los disparadores en tu computadora están desactivados",
     triggerGrantReview: "Revisar la solicitud",
     triggerGrantSee: "Solicitudes de permiso",
     triggerGrantTitle: "Acceso a la computadora para {label}",
@@ -3040,8 +3031,6 @@ const translations = {
     triggerGrantNoneWaiting: "No hay ninguna solicitud de su agente esperando.",
     triggerGrantNotRequiredHere:
       "Este disparador no se ejecuta en tu computadora, así que no necesita permiso.",
-    triggerGrantOffHere:
-      "Los disparadores en tu computadora están desactivados en este espacio, así que aquí no se pueden decidir solicitudes de permiso.",
     triggerComputerAccess:
       "Los comandos se ejecutan en tu computadora como el usuario que ejecuta pim-computer, con todo el acceso de ese usuario a tus archivos y cuentas. No están aislados.",
     triggerComputerScriptAccess:

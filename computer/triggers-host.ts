@@ -5,12 +5,12 @@
  * grant check, and carries `triggers.v1` frames over pim-computer's own
  * connection to the space, the one its token opened.
  *
- * Behind a gate. pim-computer loads this module only when
- * `PIM_COMPUTER_TRIGGERS` is `internal` (`loadTriggers` there), which
- * nothing sets; otherwise nothing of triggers is loaded, made or listened
- * for. The Pim's install and update download pim-computer.ts alone, so an
- * installed computer can't load it even then. The contract with the space
- * is in docs/triggers-runtime.md, "Over pim-computer's connection".
+ * pim-computer loads this module as it starts (`loadTriggers` there): from
+ * beside it, or, on an installed computer, which the Pim's install and
+ * update give pim-computer.ts alone, from the Pim's newest copy, which it
+ * gets then. Without it, nothing of triggers is made or listened for. The
+ * contract with the space is in docs/triggers-runtime.md, "Over
+ * pim-computer's connection".
  *
  * Nothing here widens what the computer may do. A source runs only after the
  * space asks for it in a reconcile on this connection and its grant names
@@ -189,7 +189,7 @@ async function privateFolder(folder: string): Promise<void> {
 export async function startTriggers(options: TriggersHostOptions): Promise<TriggersHost | null> {
 	const binding = triggersBinding(options.token);
 	if (!binding) {
-		options.log("Triggers are on, but this computer's token names no space, so it runs no triggers.");
+		options.log("This computer's token names no space, so it runs no triggers.");
 		return null;
 	}
 	const folder = path.join(options.stateDir, "triggers");

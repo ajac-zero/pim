@@ -320,9 +320,11 @@ export function nextLine(trigger: Trigger): NextLine {
   if (!trigger.capability.delivers) {
     return {
       key:
-        trigger.capability.status === "draft_only"
-          ? "triggerNextNotWired"
-          : "triggerNextUnavailable",
+        trigger.capability.reason === "computer_not_paired"
+          ? "triggerPairComputerFirst"
+          : trigger.capability.status === "draft_only"
+            ? "triggerNextNotWired"
+            : "triggerNextUnavailable",
     };
   }
   if (trigger.lifecycle !== "enabled") return { key: "triggerNextOff" };
@@ -1148,7 +1150,7 @@ export async function sourceConfigHash(source: TriggerSource): Promise<string> {
  * would grant nothing the trigger runs now.
  */
 export type GrantStanding =
-  | { kind: "not_required" | "off" | "none" }
+  | { kind: "not_required" | "none" }
   | {
       kind: "pending" | "approved" | "declined";
       approval: Approval;
@@ -1179,7 +1181,6 @@ export function grantStanding(
   now: number,
 ): GrantStanding {
   if (!trigger.grant.required) return { kind: "not_required" };
-  if (trigger.grant.state === "unavailable") return { kind: "off" };
   const requests = approvals
     .map((approval) => ({ approval, scope: grantScopeOf(approval) }))
     .filter(

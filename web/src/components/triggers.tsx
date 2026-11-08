@@ -694,15 +694,15 @@ const GRANT_TEXT: Record<Trigger["grant"]["state"], TranslationKey> = {
   pending_approval: "triggerGrantPending",
   current: "triggerGrantCurrent",
   not_current: "triggerGrantNotCurrent",
-  unavailable: "triggerGrantUnavailable",
 };
 
 function capabilityKey(capability: Trigger["capability"]): TranslationKey {
   if (capability.status === "available") return "triggerCapabilityAvailable";
+  if (capability.reason === "computer_not_paired") {
+    return "triggerPairComputerFirst";
+  }
   if (capability.status === "draft_only") return "triggerCapabilityDraftOnly";
-  return capability.reason === "computer_triggers_off"
-    ? "triggerCapabilityComputerOff"
-    : "triggerCapabilityUnavailable";
+  return "triggerCapabilityUnavailable";
 }
 
 /** A line under words that gives what they were made from, smaller. */
@@ -1113,20 +1113,19 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
           </Row>
           <Row label={t("triggerGrant")}>
             {t(GRANT_TEXT[trigger.grant.state])}
-            {trigger.grant.required &&
-              trigger.grant.state !== "unavailable" && (
-                <Link
-                  to="/triggers/$triggerId/grant"
-                  params={{ triggerId: trigger.id }}
-                  className="mt-1 block text-link text-sm underline-offset-2 hover:underline"
-                >
-                  {t(
-                    trigger.grant.state === "pending_approval"
-                      ? "triggerGrantReview"
-                      : "triggerGrantSee",
-                  )}
-                </Link>
-              )}
+            {trigger.grant.required && (
+              <Link
+                to="/triggers/$triggerId/grant"
+                params={{ triggerId: trigger.id }}
+                className="mt-1 block text-link text-sm underline-offset-2 hover:underline"
+              >
+                {t(
+                  trigger.grant.state === "pending_approval"
+                    ? "triggerGrantReview"
+                    : "triggerGrantSee",
+                )}
+              </Link>
+            )}
           </Row>
         </dl>
         {runsCommands(trigger.source.kind) && (
@@ -1269,9 +1268,14 @@ export function TriggerActions({
   const canEdit = !locked && !gone && trigger.lifecycle !== "ended";
   const canPause = !locked && trigger.lifecycle === "enabled";
   // A source nothing delivers can't be turned on; the access section says why, and so does a note here.
+  // One that waits only for a computer offers Turn on, whose confirmation says to pair one first.
   const turnable =
     trigger.lifecycle === "draft" || trigger.lifecycle === "paused";
-  const canResume = !locked && trigger.capability.delivers && turnable;
+  const canResume =
+    !locked &&
+    turnable &&
+    (trigger.capability.delivers ||
+      trigger.capability.reason === "computer_not_paired");
   return (
     <Section title={t("triggerActions")}>
       <div className="flex flex-wrap gap-2">
@@ -1314,7 +1318,7 @@ export function TriggerActions({
           </Button>
         )}
       </div>
-      {!locked && !trigger.capability.delivers && turnable && (
+      {!locked && !canResume && !trigger.capability.delivers && turnable && (
         <p role="note" className="mt-3 text-[13px] text-muted-foreground">
           {t(capabilityKey(trigger.capability))}
         </p>
@@ -1633,10 +1637,7 @@ export function RunRow({
   );
 }
 
-type Decided = Exclude<
-  GrantStanding,
-  { kind: "not_required" | "off" | "none" }
->;
+type Decided = Exclude<GrantStanding, { kind: "not_required" | "none" }>;
 
 const STANDING_TEXT: Record<Decided["kind"], [TranslationKey, Tone]> = {
   pending: ["triggerGrantStandingPending", "active"],
@@ -1753,9 +1754,7 @@ export function GrantReview({
         <p className="mt-4 text-[15px]">
           {standing.kind === "not_required"
             ? t("triggerGrantNotRequiredHere")
-            : standing.kind === "off"
-              ? t("triggerGrantOffHere")
-              : t(GRANT_TEXT[trigger.grant.state])}
+            : t(GRANT_TEXT[trigger.grant.state])}
         </p>
         {standing.kind === "none" && (
           <p className="mt-1 text-[13px] text-muted-foreground">

@@ -80,6 +80,9 @@ Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–204
   hosts, denies IP literals and `localhost`, resolves the name itself, refuses it if any
   answer is loopback, RFC1918, link-local (169.254/16), CGNAT or an IPv6 equivalent, and dials
   the address it checked.
+- **No DNS in sessions.** Docker's embedded DNS is unavailable under gVisor, so sessions reach the
+  proxy by IP (read from the proxy's address on the session network) and have no name
+  resolution; the proxy resolves hostnames.
 - **Docker API exposure.** The socket is mounted only into `docker-socket-proxy`. Allowing
   `POST` on containers means the proxy cannot stop a privileged create; refusing that is the
   manager's job (`template.js`), not the proxy's. The manager

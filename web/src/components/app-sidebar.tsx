@@ -38,6 +38,7 @@ import {
   Trash2,
   Users,
   X,
+  Zap,
 } from "~/components/icons";
 import {
   ProfilePopover,
@@ -51,6 +52,7 @@ import {
   SIDEBAR_TOOLTIP_CLASS,
   SkillsPanel,
 } from "~/components/sidebar-panels";
+import { useTriggersAvailable } from "~/components/triggers";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -144,6 +146,8 @@ export function useNavigationState() {
     hasDesktop: !!computer && (computer.managed || !!computer.computer?.screen),
     // Alone on this Pim, there is nobody to share with or discover.
     withOthers: !!account && !account.alone,
+    // Triggers show only once their API answers: where it doesn't, nothing of them does.
+    triggers: useTriggersAvailable(),
     awaitingApproval: useAwaitingApproval(),
     /* Requests from people in your circles, waiting in Sharing. */
     guestRequests:
@@ -202,6 +206,7 @@ export function AppSidebar({
     profile,
     hasDesktop,
     withOthers,
+    triggers,
     awaitingApproval,
     guestRequests,
     unreadNotifications,
@@ -252,6 +257,20 @@ export function AppSidebar({
             icon={<CalendarClock className="size-4.5" />}
             label={t("schedules")}
           />
+          {triggers && (
+            <RailItem icon={<Zap className="size-4.5" />} label={t("triggers")}>
+              {(content) => (
+                <Link
+                  to="/triggers"
+                  className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
+                  activeOptions={{ includeSearch: false }}
+                  aria-label={t("triggers")}
+                >
+                  {content}
+                </Link>
+              )}
+            </RailItem>
+          )}
           {/* Below, what opens over the chat instead of beside it. */}
           <div className="mt-auto" />
           <RailDialogLink

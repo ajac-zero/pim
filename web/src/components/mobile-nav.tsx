@@ -25,6 +25,7 @@ import {
   Shapes,
   SquarePen,
   Users,
+  Zap,
 } from "~/components/icons";
 import {
   ProfilePopover,
@@ -202,6 +203,7 @@ function MoreSheet({
   profile,
   hasDesktop,
   withOthers,
+  triggers,
   guestRequests,
   open,
   onOpenChange,
@@ -310,6 +312,19 @@ function MoreSheet({
           "schedules",
           <CalendarClock className={ROW_ICON_CLASS} />,
           t("schedules"),
+        )}
+        {triggers && (
+          <Link
+            to="/triggers"
+            onClick={() => {
+              close();
+              onHideList();
+            }}
+            className={ROW_CLASS}
+          >
+            <Zap className={ROW_ICON_CLASS} />
+            {t("triggers")}
+          </Link>
         )}
         <div className="mx-3 my-1 h-px bg-border" />
         {hasDesktop &&

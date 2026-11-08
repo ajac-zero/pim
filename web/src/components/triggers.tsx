@@ -61,6 +61,7 @@ import {
   SOURCE_TEXT,
   type TriggerProblem,
   triggerProblem,
+  triggerZone,
   withHealth,
 } from "~/lib/triggers";
 import { cn } from "~/lib/utils";
@@ -173,6 +174,48 @@ function useFormats() {
       timeZoneName: "short",
       ...(timeZone ? { timeZone } : {}),
     });
+  /**
+   * A time in the trigger's own zone, named by its place, with UTC after it:
+   * "Nov 9, 8:00 AM Lisbon time (7:00 AM UTC)". Without a zone, the plain date.
+   */
+  const zoned = (at: number, timeZone?: string) => {
+    if (!timeZone || timeZone === "UTC" || timeZone === "Etc/UTC") {
+      return date(at, timeZone);
+    }
+    const when = new Date(at);
+    const day: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
+    const time: Intl.DateTimeFormatOptions = {
+      hour: "numeric",
+      minute: "2-digit",
+    };
+    // The year shows only when it isn't this one, the zone's own year included.
+    const year = (zone: string) =>
+      formatDate(when, { year: "numeric", timeZone: zone }) ===
+      formatDate(new Date(), { year: "numeric", timeZone: zone })
+        ? {}
+        : { year: "numeric" as const };
+    try {
+      const local = formatDate(when, {
+        ...year(timeZone),
+        ...day,
+        ...time,
+        timeZone,
+      });
+      const sameDay =
+        formatDate(when, { ...day, timeZone }) ===
+        formatDate(when, { ...day, timeZone: "UTC" });
+      const utc = formatDate(when, {
+        ...(sameDay ? {} : { ...year("UTC"), ...day }),
+        ...time,
+        timeZone: "UTC",
+        timeZoneName: "short",
+      });
+      const place = (timeZone.split("/").pop() ?? timeZone).replace(/_/g, " ");
+      return t("triggerZonedTime", { local, place, utc });
+    } catch {
+      return date(at);
+    }
+  };
   const duration = (ms: number) => {
     const units = [
       ["day", 86_400_000],
@@ -189,17 +232,19 @@ function useFormats() {
       unitDisplay: "long",
     });
   };
-  return { t, date, duration };
+  return { t, date, zoned, duration };
 }
 
 /** When a trigger acts next, in words, with a date only where Pim gave one. */
 export function NextText({ trigger }: { trigger: Trigger }) {
-  const { t, date } = useFormats();
+  const { t, zoned } = useFormats();
   const next = nextLine(trigger);
   return (
     <>
       {t(next.key, {
-        ...(next.at === undefined ? {} : { date: date(next.at) }),
+        ...(next.at === undefined
+          ? {}
+          : { date: zoned(next.at, triggerZone(trigger)) }),
         ...(next.minutes === undefined ? {} : { minutes: next.minutes }),
       })}
     </>
@@ -548,11 +593,11 @@ export function TriggerRow({
         >
           {trigger.label}
         </Link>
-        <p className="mt-0.5 break-words text-[13px] text-muted-foreground">
-          {t(SOURCE_TEXT[trigger.source.kind])} · {agent}
-        </p>
-        <p className="mt-0.5 text-[13px] text-muted-foreground">
+        <p className="mt-0.5 break-words text-[14px]">
           <NextText trigger={trigger} />
+        </p>
+        <p className="mt-0.5 break-words text-[12px] text-muted-foreground">
+          {agent} · {t(SOURCE_TEXT[trigger.source.kind])}
         </p>
       </div>
       <div className="flex flex-wrap gap-1.5">
@@ -760,11 +805,13 @@ export function ComputerSourceDisclosure({ trigger }: { trigger: Trigger }) {
 }
 
 export function TriggerDetail({ trigger }: { trigger: Trigger }) {
-  const { t, date, duration } = useFormats();
+  const { t, zoned, duration } = useFormats();
   const { data: agents } = useQuery(agentsQuery());
   const { data: sessions } = useQuery(sessionsQuery());
   const runs = useInfiniteQuery(triggerRunsQuery(trigger.id));
-  const lastEvent = runs.data?.pages[0]?.runs[0]?.dueAt ?? null;
+  const latestRun = runs.data?.pages[0]?.runs[0];
+  const lastEvent = latestRun?.dueAt ?? null;
+  const zone = triggerZone(trigger);
   const next = nextLine(trigger);
   const chatTitle = (id: string) =>
     sessions?.find((session: Session) => session.id === id)?.title ??
@@ -810,17 +857,37 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
               </code>
             </Row>
           )}
-          <Row label={t("triggerNext")}>
-            {next.key === "triggerNextAt" && next.at !== undefined ? (
-              date(next.at)
-            ) : (
-              <NextText trigger={trigger} />
-            )}
-          </Row>
+          {trigger.lifecycle === "ended" ? (
+            <Row label={t("triggerResult")}>
+              {latestRun ? (
+                t(
+                  latestRun.outcomeKnown
+                    ? "triggerResultKnown"
+                    : "triggerResultUnknown",
+                  {
+                    date: zoned(latestRun.endedAt ?? latestRun.dueAt, zone),
+                    state: t(RUN_TEXT[latestRun.state].key),
+                  },
+                )
+              ) : (
+                <span className="text-muted-foreground">
+                  {runs.isPending ? t("loading") : t("triggerResultNone")}
+                </span>
+              )}
+            </Row>
+          ) : (
+            <Row label={t("triggerNext")}>
+              {next.key === "triggerNextAt" && next.at !== undefined ? (
+                zoned(next.at, zone)
+              ) : (
+                <NextText trigger={trigger} />
+              )}
+            </Row>
+          )}
           {trigger.schedule?.nextCheckAt != null &&
             trigger.schedule.nextCheckAt !== next.at && (
               <Row label={t("triggerNextCheck")}>
-                {date(trigger.schedule.nextCheckAt)}
+                {zoned(trigger.schedule.nextCheckAt, zone)}
               </Row>
             )}
           <Row label={t("triggerLastCheck")}>
@@ -834,7 +901,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
                 {runs.isPending ? t("loading") : t("triggerNoEventYet")}
               </span>
             ) : (
-              date(lastEvent)
+              zoned(lastEvent, zone)
             )}
           </Row>
         </dl>
@@ -1306,7 +1373,7 @@ export function RunHistory({ trigger }: { trigger: Trigger }) {
       ) : (
         <ul className="divide-y divide-border">
           {list.map((run) => (
-            <RunRow key={run.id} run={run} />
+            <RunRow key={run.id} run={run} timeZone={triggerZone(trigger)} />
           ))}
         </ul>
       )}
@@ -1331,10 +1398,16 @@ export function RunHistory({ trigger }: { trigger: Trigger }) {
   );
 }
 
-export function RunRow({ run }: { run: TriggerRun }) {
-  const { t, date } = useFormats();
+export function RunRow({
+  run,
+  timeZone,
+}: {
+  run: TriggerRun;
+  timeZone?: string;
+}) {
+  const { t, zoned } = useFormats();
   const { key, tone } = RUN_TEXT[run.state];
-  const when = date(run.dueAt);
+  const when = zoned(run.dueAt, timeZone);
   return (
     <li className="flex flex-col gap-1 py-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0">

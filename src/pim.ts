@@ -200,7 +200,7 @@ import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHA
 import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAnswer, TriggerApi, TriggerApiError, triggerBody } from "./triggers/api";
 import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
-import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
+import { ENGINE_KEY, ENGINE_LISTED_KEY, engineAllowed, engineListed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
 import { ConnectorIngress, ingressResponse, strictShape } from "./triggers/connector";
 import {
 	type ApplyOutcome,
@@ -1871,6 +1871,8 @@ export class Pim extends DurableAgent<Env> {
 			}
 		}
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
+		// Before any request: changing the deployment's variables starts every space again, so the first request already sees what they say.
+		await this.#followTriggerAllowlist().catch((error) => console.warn("following the triggers' allowlist failed", error));
 		// A tick cut short leaves no wake: the next is set again, where triggers are on.
 		if (this.triggerEngine()) void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error));
 		// A Sprite Pim started before it kept computers with a host is out of reach: the space has no computer until it gets another.
@@ -2141,9 +2143,10 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * This space's time triggers, when the deployment allows them and the
-	 * space was opted in (`enableTriggerEngine`); null otherwise, and then
-	 * nothing of them exists: no table, no wake. Internal: no route, tool or
-	 * setting reaches it.
+	 * space was opted in (`enableTriggerEngine`, which the deployment's
+	 * allowlist calls as the space starts); null otherwise, and then nothing
+	 * of them exists: no table, no wake. Internal: no route, tool or setting
+	 * reaches it.
 	 */
 	triggerEngine(): TriggerEngine | null {
 		if (this.#closed() || !engineAllowed(this.env) || this.store.meta(ENGINE_KEY) !== "on") return null;
@@ -2305,6 +2308,34 @@ export class Pim extends DurableAgent<Env> {
 		this.#computerTriggersKept = undefined;
 		this.#installTriggerTools();
 		await this.wakeTriggers();
+	}
+
+	/**
+	 * Follows the deployment's allowlist of spaces (`PIM_TRIGGERS_ENGINE_SPACES`)
+	 * as the space starts, only while its gate is `internal`: a person's own
+	 * space on the list is opted in, and one the list opted in that is no
+	 * longer on it is turned off, keeping everything, as
+	 * `disableTriggerEngine` does. A guest's space, or one not yet
+	 * provisioned, counts as not on it. With the gate off nothing changes
+	 * here, since no space has the engine then anyway; a space opted in
+	 * by internal code and never listed is left as it is.
+	 */
+	async #followTriggerAllowlist(): Promise<void> {
+		if (this.#closed() || !engineAllowed(this.env)) return;
+		const listed = engineListed(this.env, this.name) && this.profile() !== null && this.guestBot() === null;
+		const marked = this.store.meta(ENGINE_LISTED_KEY) !== undefined;
+		if (listed) {
+			if (this.store.meta(ENGINE_KEY) !== "on") {
+				await this.enableTriggerEngine();
+				console.log(JSON.stringify({ event: "pim.triggers_on", owner: this.name, by: "allowlist" }));
+			}
+			if (!marked) this.store.setMeta(ENGINE_LISTED_KEY, "on");
+		} else if (marked) {
+			await this.disableTriggerEngine();
+			// Only once turned off: a failure tries again at the next start.
+			this.store.deleteMeta(ENGINE_LISTED_KEY);
+			console.log(JSON.stringify({ event: "pim.triggers_off", owner: this.name, by: "allowlist" }));
+		}
 	}
 
 	/**

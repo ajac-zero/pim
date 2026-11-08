@@ -39,6 +39,9 @@ Live check: `scripts/live-smoke.sh` (needs a Docker daemon with runsc, `curl`, `
 | `WORKSPACE_TMPFS` | 0 | `1` makes `/workspace` a size-capped tmpfs volume (enforces `diskMiB`, but counts against RAM) |
 | `EGRESS_PROXY_CONTAINER`, `EGRESS_PROXY_URL`, `EGRESS_PROXY_ADMIN_URL` | `egress-proxy`, `http://egress-proxy:3128`, `http://egress-proxy:3129` | Where the proxy lives |
 
+`DOCKER_SOCKET` (compose only, default `/var/run/docker.sock`) is the host path of the Docker
+socket mounted into `docker-socket-proxy`; set it for rootless or non-default installs.
+
 A separate data disk is optional: point Docker's `data-root` at it and set `DOCKER_ROOT_HOST`
 in compose to a directory on that disk, so disk governance measures the right filesystem.
 
@@ -77,7 +80,9 @@ Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–204
   hosts, denies IP literals and `localhost`, resolves the name itself, refuses it if any
   answer is loopback, RFC1918, link-local (169.254/16), CGNAT or an IPv6 equivalent, and dials
   the address it checked.
-- **Docker API exposure.** The socket is mounted only into `docker-socket-proxy`. The manager
+- **Docker API exposure.** The socket is mounted only into `docker-socket-proxy`. Allowing
+  `POST` on containers means the proxy cannot stop a privileged create; refusing that is the
+  manager's job (`template.js`), not the proxy's. The manager
   holds no socket, so a compromised manager can reach only the allowed API groups.
 - **Confinement of files.** Paths with `..` are rejected before reaching Docker. Symlink
   escapes are caught by resolving the path with `realpath -m` inside the container, in the same
@@ -107,5 +112,3 @@ Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–204
   reconcile. The manager has no per-session ownership check beyond the single bearer token.
 - Image pulls have no timeout, and the manager does not verify digests itself.
 - No streaming exec, no TTY, no file listing, no metrics.
-- The `docker-socket-proxy` route table for `/containers/{id}/exec` has not been verified in this
-  spike (see untested list in the hand-off).

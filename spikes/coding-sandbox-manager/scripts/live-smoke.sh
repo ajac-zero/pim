@@ -15,6 +15,13 @@ SID="smoke-$RANDOM"
 URL="http://127.0.0.1:$MANAGER_PORT"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
+docker compose version >/dev/null 2>&1 || fail "'docker compose' (the compose plugin) is required"
+command -v jq >/dev/null || fail "jq is required"
+command -v curl >/dev/null || fail "curl is required"
+# Classic builder when buildx is missing.
+docker buildx version >/dev/null 2>&1 || export DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0
+# Mount the daemon's socket from a unix:// DOCKER_HOST.
+case "${DOCKER_HOST:-}" in unix://*) export DOCKER_SOCKET="${DOCKER_HOST#unix://}";; esac
 api() { curl -sS -H "authorization: Bearer $MANAGER_TOKEN" -H 'content-type: application/json' "$@"; }
 
 # A tiny sandbox image: sh, realpath, curl, and /workspace owned by the sandbox user.
@@ -42,9 +49,16 @@ ok "exec echo hi"
 # gVisor's kernel reports itself in uname; runc would show the host kernel build.
 UNAME=$(exec_json '{"cmd":["uname","-a"],"timeoutMs":10000}' | jq -r .stdout)
 echo "uname: $UNAME"
-echo "$UNAME" | grep -qiE 'runsc| 4\.4\.0 ' || fail "uname does not look like gVisor"
+echo "$UNAME" | grep -qi gvisor || fail "uname does not show gVisor"
 docker inspect "pim-s-$SID" --format '{{.HostConfig.Runtime}}' | grep -qx runsc || fail "container is not runtime runsc"
 ok "runtime is runsc"
+
+# docker-socket-proxy must allow exec on containers and must refuse what the manager never needs.
+via_proxy() { docker compose exec -T sandbox-manager node -e "fetch('http://docker-socket-proxy:2375'+process.argv[1],{method:'POST',headers:{'content-type':'application/json'},body:process.argv[2]}).then(r=>console.log(r.status))" "$@"; }
+[ "$(via_proxy "/containers/pim-s-$SID/exec" '{"Cmd":["true"]}')" = 201 ] || fail "docker-socket-proxy does not allow container exec"
+[ "$(via_proxy /build '{}')" = 403 ] || fail "docker-socket-proxy allows /build"
+[ "$(via_proxy /swarm/init '{}')" = 403 ] || fail "docker-socket-proxy allows /swarm"
+ok "docker-socket-proxy allows exec, denies build and swarm"
 
 code=$(exec_json "{\"cmd\":[\"curl\",\"-sS\",\"-o\",\"/dev/null\",\"-w\",\"%{http_code}\",\"--max-time\",\"15\",\"https://$ALLOWED\"],\"timeoutMs\":30000}" | jq -r .stdout)
 case "$code" in 2*|3*) ok "allowlisted https://$ALLOWED reachable ($code)";; *) fail "allowlisted host not reachable: $code";; esac

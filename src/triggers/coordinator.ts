@@ -33,8 +33,8 @@
  * time, never what it carried, which the store doesn't keep. What an
  * observer on the person's computer saw (`poll`, `stream` and `process`,
  * which ./computer.ts admits) is handed on the same way only where the
- * coordinator is made with `computerEvents`, which Pim does only behind
- * computer triggers' gate, only at the revision it was taken in under, and
+ * coordinator is made with `computerEvents`, which Pim's engine always is,
+ * only at the revision it was taken in under, and
  * only while the grant that revision names is still current, as `authorize`
  * says at each step: its run is told the source's kind and the event's id
  * and time, never what was seen. An occurrence of any other source stays
@@ -323,7 +323,7 @@ export type TriggerCoordinatorOptions = {
 	readonly maxRunning?: number;
 	/** Whether connector events' occurrences are handed on, as time firings are (false: they stay pending). Nothing in Pim sets it yet. */
 	readonly connectorEvents?: boolean;
-	/** Whether what observers on the computer saw (`poll`, `stream`, `process`) is handed on (false: it stays pending). Pim sets it only behind computer triggers' gate. */
+	/** Whether what observers on the computer saw (`poll`, `stream`, `process`) is handed on (false: it stays pending). Pim's engine always sets it. */
 	readonly computerEvents?: boolean;
 	/** The check that a computer source's grant is still current, asked at every step of handing its occurrence on; without one, none is handed on. */
 	readonly authorize?: (request: AuthorizationRequest) => AuthorizationVerdict;

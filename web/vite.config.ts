@@ -74,11 +74,16 @@ export default defineConfig(({ mode }) => {
         },
       },
       {
-        // pim-computer, which people download from their Pim to connect a computer, and pim-host,
-        // which the admin downloads to keep everyone's computers (../computer).
+        // pim-computer, which people download from their Pim to connect a computer, with its triggers
+        // runtime, which it gets as it starts, and pim-host, which the admin downloads to keep
+        // everyone's computers: every module in ../computer, at the same path.
         name: "pim-computer",
         generateBundle() {
-          for (const file of ["pim-computer.ts", "pim-host.ts"]) {
+          const files = readdirSync(new URL("../computer", import.meta.url), {
+            encoding: "utf8",
+            recursive: true,
+          }).filter((file) => file.endsWith(".ts"));
+          for (const file of files) {
             this.emitFile({
               type: "asset",
               fileName: file,

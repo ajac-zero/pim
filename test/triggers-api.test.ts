@@ -6,7 +6,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { guestRequest } from "../src/accounts";
 import type { Pim } from "../src/pim";
 import { API_TABLES } from "../src/triggers/api";
-import { COMPUTER_TRIGGERS_VARIABLE } from "../src/triggers/computer";
 import { ENGINE_KEY } from "../src/triggers/engine";
 import { MIGRATION_VARIABLE } from "../src/triggers/migration";
 import { TRIGGER_TOOLS, TRIGGERS_EXTENSION } from "../src/triggers/tools";
@@ -252,7 +251,7 @@ describe("triggers' API where triggers are on", () => {
 			[{ ...base, source: cron(), enabled: "yes" }, 400, "invalid_request", "enabled"],
 			[{ ...base, source: { kind: "rss", url: SECRET } }, 400, "invalid_request", "source"],
 			[{ ...base, source: { kind: "file", path: "/tmp", events: ["created"] } }, 422, "source_unavailable", "source.kind"],
-			[{ ...base, source: { kind: "poll", command: `curl -H 'Authorization: ${SECRET}' x` }, condition: { when: { op: "exists", path: ["a"] } } }, 422, "source_unavailable", "source.kind"],
+			[{ ...base, source: { kind: "poll", command: `curl -H 'Authorization: ${SECRET}' x` }, condition: { when: { op: "exists", path: ["a"] } }, enabled: true }, 409, "source_not_wired", undefined],
 			[{ ...base, source: { kind: "connector_event", connectorId: "bank", event: "payment", arguments: { token: SECRET } } }, 422, "source_unavailable", "source.event"],
 			[{ ...base, source: { kind: "connector_event", connectorId: "bank", event: "payment", arguments: { [SECRET]: { deep: [SECRET] } } } }, 422, "source_unavailable", "source.event"],
 			[{ ...base, source: cron(), agentId: "no-such-agent" }, 422, "unknown_agent", "agentId"],
@@ -394,50 +393,73 @@ describe("triggers' API where triggers are on", () => {
 		expect(await call(`/triggers/${id}/test`, { method: "POST", body: { samples: [{ value: 1 }] } })).toMatchObject({ status: 400, body: { field: "samples" } });
 		expect(await everything()).toBe(before);
 
-		// Behind computer triggers' own gate a poll can be drafted: its condition is evaluated in order, from a fresh start, on the samples alone.
-		const SECRET = "sk_live_DRYRUNsecret";
-		await inSpace((pim) => {
-			ownEnv(pim)[COMPUTER_TRIGGERS_VARIABLE] = "internal";
+		// A poll can be drafted with no computer paired: its condition is evaluated in order, from a fresh start, on the samples alone, and it says what it lacks to run.
+		const SECRET = "[REDACTED:stripe-secret-token]";
+		const draft = { label: "Price", instruction: "Tell me.", source: { kind: "poll", command: "echo {}", intervalMs: 5 * MINUTE }, condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 500 } } };
+		const samples = [{ value: { price: 512.37, note: SECRET } }, { value: { price: 455.91, note: SECRET } }, { value: {} }, { value: { price: 410.33 } }];
+		const pending = faux.getPendingResponseCount();
+		const quiet = await everything();
+		const answered = await tool("test_trigger", { trigger: draft, samples });
+		expect(answered.isError).toBe(false);
+		expect(answered.body).toMatchObject({
+			dryRun: true,
+			sourceKind: "poll",
+			capability: { status: "draft_only", reason: "computer_not_paired" },
+			grant: { required: true, state: "missing" },
+			blockers: ["source_not_wired", "grant_required"],
 		});
-		try {
-			const draft = { label: "Price", instruction: "Tell me.", source: { kind: "poll", command: "echo {}", intervalMs: 5 * MINUTE }, condition: { when: { op: "compare", path: ["price"], cmp: "lt", value: 500 } } };
-			const samples = [{ value: { price: 512.37, note: SECRET } }, { value: { price: 455.91, note: SECRET } }, { value: {} }, { value: { price: 410.33 } }];
-			const pending = faux.getPendingResponseCount();
-			const quiet = await everything();
-			const answered = await tool("test_trigger", { trigger: draft, samples });
-			expect(answered.isError).toBe(false);
-			expect(answered.body).toMatchObject({ dryRun: true, sourceKind: "poll", capability: { status: "available" }, grant: { required: true, state: "missing" }, blockers: ["grant_required"] });
-			expect(answered.body.evaluations.map((step: { truth: string; fires: boolean }) => [step.truth, step.fires])).toEqual([
-				["false", false],
-				["true", true],
-				["unknown", false],
-				["true", false],
-			]);
-			expect(answered.body.evaluations[2].fields).toEqual([{ path: ["price"], present: false }]);
-			expect(answered.text).not.toContain(SECRET);
-			expect(answered.text).not.toMatch(/512\.37|455\.91|410\.33/);
-			expect(faux.getPendingResponseCount()).toBe(pending);
-			// The chat recorded the call; no trigger table changed and no computer table was made.
-			const triggersNow = JSON.parse(await everything()).filter(([table]: [string]) => table.startsWith("pim_trigger"));
-			expect(triggersNow).toEqual(JSON.parse(quiet).filter(([table]: [string]) => table.startsWith("pim_trigger")));
-		} finally {
-			await inSpace((pim) => {
-				delete ownEnv(pim)[COMPUTER_TRIGGERS_VARIABLE];
-			});
-		}
+		expect(answered.body.evaluations.map((step: { truth: string; fires: boolean }) => [step.truth, step.fires])).toEqual([
+			["false", false],
+			["true", true],
+			["unknown", false],
+			["true", false],
+		]);
+		expect(answered.body.evaluations[2].fields).toEqual([{ path: ["price"], present: false }]);
+		expect(answered.text).not.toContain(SECRET);
+		expect(answered.text).not.toMatch(/512\.37|455\.91|410\.33/);
+		expect(faux.getPendingResponseCount()).toBe(pending);
+		// The chat recorded the call; no trigger table changed.
+		const triggersNow = JSON.parse(await everything()).filter(([table]: [string]) => table.startsWith("pim_trigger"));
+		expect(triggersNow).toEqual(JSON.parse(quiet).filter(([table]: [string]) => table.startsWith("pim_trigger")));
 		await call(`/triggers/${id}`, { method: "DELETE" });
 	});
 
-	it("lists sources as they are: time runs, connector events are drafts only, the computer's only behind its gate, files not yet", async () => {
+	it("lists sources as they are: time runs, connector events are drafts only, the computer's drafts only until one is paired, files not yet", async () => {
 		const answered = await tool("list_trigger_sources", {});
 		expect(answered.body.sources).toEqual([
 			{ kind: "time", status: "available", delivers: true, reason: null, schedules: ["once", "cron", "interval"] },
 			{ kind: "connector_event", status: "draft_only", delivers: false, reason: "not_wired", connectors: [] },
-			{ kind: "poll", status: "unavailable", delivers: false, reason: "computer_triggers_off", requiresGrant: true, computerPaired: false },
-			{ kind: "stream", status: "unavailable", delivers: false, reason: "computer_triggers_off", requiresGrant: true, computerPaired: false },
-			{ kind: "process", status: "unavailable", delivers: false, reason: "computer_triggers_off", requiresGrant: true, computerPaired: false },
+			{ kind: "poll", status: "draft_only", delivers: false, reason: "computer_not_paired", requiresGrant: true, computerPaired: false },
+			{ kind: "stream", status: "draft_only", delivers: false, reason: "computer_not_paired", requiresGrant: true, computerPaired: false },
+			{ kind: "process", status: "draft_only", delivers: false, reason: "computer_not_paired", requiresGrant: true, computerPaired: false },
 			{ kind: "file", status: "unavailable", delivers: false, reason: "not_wired" },
 		]);
+	});
+
+	it("keeps a computer source a draft with no computer paired, with no deployment setting for it: nothing grants it or turns it on", async () => {
+		// Nothing in the deployment's settings turns computer triggers on or off.
+		expect(Object.keys(env).filter((name) => /COMPUTER/.test(name) && /TRIGGER/.test(name))).toEqual([]);
+		expect(await inSpace((pim) => Object.keys(ownEnv(pim)).filter((name) => /COMPUTER/.test(name) && /TRIGGER/.test(name)))).toEqual([]);
+		expect(await offeredTools()).toContain("trigger_computer_grant");
+
+		const made = await call("/triggers", { method: "POST", body: { label: "Syslog", instruction: "Tell me what it said.", source: { kind: "stream", command: "tail -F /var/log/syslog" } } });
+		expect(made).toMatchObject({
+			status: 201,
+			body: { lifecycle: "draft", capability: { status: "draft_only", delivers: false, reason: "computer_not_paired" }, grant: { required: true, state: "missing" } },
+		});
+		const id = made.body.id as string;
+		// Turning it on, or making one on, is refused until a computer is paired.
+		expect(await call(`/triggers/${id}/resume`, { method: "POST", headers: { "if-match": '"1"' } })).toMatchObject({ status: 409, body: { code: "source_not_wired", error: expect.stringContaining("pair one first") } });
+		expect(await call("/triggers", { method: "POST", body: { label: "On", instruction: "Now.", source: { kind: "stream", command: "tail -F log" }, enabled: true } })).toMatchObject({
+			status: 409,
+			body: { code: "source_not_wired" },
+		});
+		// An agent can't ask for a grant: there is no computer to grant it on.
+		const asked = await tool("trigger_computer_grant", { triggerId: id });
+		expect(asked).toMatchObject({ isError: true, text: expect.stringContaining("No computer is paired") });
+		expect(await inSpace((pim) => pim.store.approvals("pending").filter((approval) => approval.action === "trigger_computer_source"))).toEqual([]);
+		expect((await call(`/triggers/${id}`)).body).toMatchObject({ lifecycle: "draft", grant: { state: "missing" } });
+		await call(`/triggers/${id}`, { method: "DELETE" });
 	});
 
 	it("lets agents use their own triggers through tools, the majordomo everyone's, and no agent anyone else's", async () => {

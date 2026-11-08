@@ -4,6 +4,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pim } from "../src/pim";
 import { TaskStore } from "../src/tasks";
+import { COMPUTER_TABLES } from "../src/triggers/computer";
 import { TriggerCoordinator, type TriggerRun } from "../src/triggers/coordinator";
 import { ENGINE_TABLES, TRIGGER_TICK_CALLBACK, type TriggerEngine, triggerHistory } from "../src/triggers/engine";
 import { PimTriggerHost, TriggerChatDoc, type TriggerSpace } from "../src/triggers/host";
@@ -102,9 +103,9 @@ describe("time triggers in Pim", () => {
 		expect(await wakes()).toEqual([]);
 		expect(await inSpace((pim) => pim.remainingData())).not.toContain("triggers");
 		expect(JSON.parse(await inSpace((pim) => pim.exportData()))).not.toHaveProperty("triggers");
-		// On, it makes its tables, and still no wake while nothing waits.
+		// On, it makes its tables, those of triggers on the computer with them, and still no wake while nothing waits.
 		await inSpace((pim) => pim.enableTriggerEngine());
-		expect(await triggerTables()).toEqual([...ENGINE_TABLES].sort());
+		expect(await triggerTables()).toEqual([...ENGINE_TABLES, ...COMPUTER_TABLES].sort());
 		expect(await wakes()).toEqual([]);
 	});
 

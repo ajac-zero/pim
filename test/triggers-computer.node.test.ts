@@ -16,7 +16,6 @@ import {
 	COMPUTER_TABLES,
 	ComputerGrants,
 	ComputerTriggers,
-	computerTriggersAllowed,
 	grantScopeHash,
 	PROTOCOL,
 	runtimeIdOf,
@@ -395,8 +394,8 @@ function watch(space: Space, id: string, command: string, extra: Record<string, 
 
 const inbox = (space: Space) => Number(space.sql.exec("SELECT COUNT(*) AS n FROM pim_trigger_inbox").one().n);
 
-describe("computer triggers' digests and gate", () => {
-	it("computes the same digests, runtime id and envelope as the computer, and is on only for exactly `internal`", () => {
+describe("computer triggers' digests", () => {
+	it("computes the same digests, runtime id and envelope as the computer", () => {
 		const sources: ComputerSource[] = [
 			stream("tail -F log | jq -c ."),
 			{ kind: "poll", command: "./price.sh", cwd: "/srv", intervalMs: 300_000, deadlineMs: 30_000 },
@@ -410,9 +409,6 @@ describe("computer triggers' digests and gate", () => {
 		expect(runtimeIdOf(null)).toBeNull();
 		expect(TRIGGERS_ENVELOPE).toBe(HOST_ENVELOPE);
 		expect(PROTOCOL).toBe(HOST_PROTOCOL);
-		for (const value of [undefined, "", "1", "true", "on", "Internal", " internal", "internal "]) expect(computerTriggersAllowed(value === undefined ? {} : { PIM_TRIGGERS_COMPUTER: value })).toBe(false);
-		expect(computerTriggersAllowed(null)).toBe(false);
-		expect(computerTriggersAllowed({ PIM_TRIGGERS_COMPUTER: "internal" })).toBe(true);
 	});
 });
 
@@ -760,6 +756,38 @@ describe("computer triggers, end to end", () => {
 		space.close();
 	});
 
+	it("fails closed with no computer paired: nothing is granted, enabled or run, and what was enabled waits for a computer", async () => {
+		const clock = new FakeClock();
+		const space = openSpace(path.join(dir, "space.sqlite"), clock);
+		const computer = await openComputer(clock);
+		const { source } = watch(space, "watch", "tail-the-log");
+		const wire = await connect(space, computer, clock);
+		expect(space.store.get("watch")).toMatchObject({ health: "healthy" });
+		expect(computer.stream.children).toHaveLength(1);
+
+		// The computer is removed: told so (as Pim does when it changes), the space sends it nothing more, and the trigger waits.
+		space.digest = null;
+		const sent = wire.toComputer.length;
+		space.triggers.refresh();
+		expect(wire.toComputer).toHaveLength(sent);
+		expect(space.store.get("watch")).toMatchObject({ lifecycle: "enabled", health: "waiting_computer" });
+
+		// Its grant, though the person approved it, covers nothing now: it can't be turned on again, a new one can't be asked for, and a new trigger can't be enabled with it.
+		expect(space.store.setLifecycle({ id: "watch", to: "paused" })).toMatchObject({ ok: true });
+		expect(space.store.setLifecycle({ id: "watch", to: "enabled", expectedRevision: space.store.get("watch")!.revision })).toMatchObject({ ok: false, reason: "authorization_denied" });
+		expect(grantRequest(space.store, OWNER, space.triggers.runtimeId(), "watch")).toEqual({ refused: expect.stringContaining("No computer is paired") });
+		const ref = space.store.get("watch")!.spec.authorizationRef;
+		expect(space.store.create({ id: "other", spec: { ...base, source, authorizationRef: ref }, lifecycle: "enabled" })).toMatchObject({ ok: false, reason: "authorization_denied" });
+
+		// The computer's runtime says hello again, as after reconnecting: the space doesn't know it, so nothing is reconciled and nothing more runs.
+		const again = await connect(space, computer, clock);
+		expect(again.toComputer).toEqual([]);
+		expect(computer.stream.children).toHaveLength(1);
+		again.close();
+		await closeComputer(computer, clock);
+		space.close();
+	});
+
 	it("keeps every frame within its bound both ways, and leaves out what doesn't fit in a reconcile", async () => {
 		const clock = new FakeClock();
 		const space = openSpace(path.join(dir, "space.sqlite"), clock, { reconcileBytes: 32_768 });
@@ -866,7 +894,7 @@ class FakeAgentHost implements TriggerAgentHost<TriggerEvidence> {
 	}
 }
 
-/** A coordinator over the space's store, made as Pim's engine makes it behind computer triggers' gate, or, with `computerEvents` false, as it is without. */
+/** A coordinator over the space's store, made as Pim's engine makes it, or, with `computerEvents` false, as a coordinator made without them. */
 function coordinatorOf(space: Space, clock: FakeClock, host: FakeAgentHost, computerEvents = true): TriggerCoordinator {
 	const sleep = (_ms: number, signal: AbortSignal) => new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve()));
 	return new TriggerCoordinator(space.sql, {
@@ -936,7 +964,7 @@ describe("computer triggers, wired", () => {
 		await clock.advance(0);
 		const [observation] = wire.from("observation");
 
-		// As Pim's engine is with computer triggers' gate off: it stays pending.
+		// A coordinator made without `computerEvents` leaves it pending.
 		const host = new FakeAgentHost();
 		await coordinatorOf(space, clock, host, false).tick();
 		expect(host.submissions).toEqual([]);

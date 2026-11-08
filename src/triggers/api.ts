@@ -69,7 +69,7 @@ export const PERSON: TriggerActor = { kind: "person" };
 /** What a source kind can do in this space now. */
 export type SourceStatus = "available" | "draft_only" | "unavailable";
 
-export type GrantState = "not_required" | "missing" | "pending_approval" | "current" | "not_current" | "unavailable";
+export type GrantState = "not_required" | "missing" | "pending_approval" | "current" | "not_current";
 
 /** What the API reads of the space around it. Chat ids are internal unless named public. */
 export type TriggerApiHost = {
@@ -84,8 +84,8 @@ export type TriggerApiHost = {
 	readonly chatOf: (publicId: string) => string | null;
 	/** The connectors an agent works with (every connected one, for null) and the events their catalogs list. */
 	readonly connectors: (agentId: string | null) => readonly { readonly connectorId: string; readonly name: string; readonly events: readonly string[] }[];
-	/** Whether computer triggers are on (their own gate), and whether a computer is paired. */
-	readonly computer: () => { readonly triggers: boolean; readonly paired: boolean };
+	/** Whether a computer is paired, which computer sources run on. */
+	readonly computer: () => { readonly paired: boolean };
 	/** Where a computer source's grant stands, for a trigger whose source runs on the computer. */
 	readonly grant: (trigger: { readonly id: string; readonly spec: TriggerSpec }) => GrantState;
 };
@@ -428,7 +428,7 @@ export class TriggerApi {
 		if (capability.status !== "available") blockers.push("source_not_wired");
 		const grant = runsOnComputer(spec.source) ? (trigger ? this.#host.grant(trigger) : "missing") : "not_required";
 		if (grant === "missing" || grant === "pending_approval") blockers.push("grant_required");
-		if (grant === "not_current" || grant === "unavailable") blockers.push("grant_not_current");
+		if (grant === "not_current") blockers.push("grant_not_current");
 		if (trigger && migrationRecordOf(this.#sql, trigger.id)?.owner === "legacy") blockers.push("owned_elsewhere");
 		const result: Record<string, JsonValue> = {
 			dryRun: true,
@@ -534,22 +534,23 @@ export class TriggerApi {
 
 	/** Refuses enabling a source nothing in this space delivers. */
 	#checkWired(spec: TriggerSpec): void {
-		if (this.#capability(spec.source.kind).status !== "available") {
-			throw new TriggerApiError(409, "source_not_wired", "Nothing delivers this kind of source yet: it can be kept only as a draft");
-		}
+		const { status, reason } = this.#capability(spec.source.kind);
+		if (status === "available") return;
+		if (reason === "computer_not_paired") throw new TriggerApiError(409, "source_not_wired", "No computer is paired to run this source: pair one first; until then it can be kept only as a draft");
+		throw new TriggerApiError(409, "source_not_wired", "Nothing delivers this kind of source yet: it can be kept only as a draft");
 	}
 
 	/**
 	 * What a kind of source can do here, honestly: time triggers run; a
 	 * connector's events are taken in by nothing yet, so they are drafts
-	 * only; computer sources run only behind computer triggers' own gate,
-	 * and files never yet.
+	 * only; a poll, stream or process watch runs on the paired computer, so
+	 * with none it is a draft only until one is paired; and files never yet.
 	 */
 	#capability(kind: SourceKind): { status: SourceStatus; reason: string | null } {
 		if (kind === "time") return { status: "available", reason: null };
 		if (kind === "connector_event") return { status: "draft_only", reason: "not_wired" };
 		if (kind === "file") return { status: "unavailable", reason: "not_wired" };
-		return this.#host.computer().triggers ? { status: "available", reason: null } : { status: "unavailable", reason: "computer_triggers_off" };
+		return this.#host.computer().paired ? { status: "available", reason: null } : { status: "draft_only", reason: "computer_not_paired" };
 	}
 
 	#samples(value: unknown, now: number): { value: JsonValue; observedAt: number; gap: boolean }[] {

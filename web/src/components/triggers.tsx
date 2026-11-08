@@ -416,29 +416,12 @@ export function TriggerRow({
         <p className="mt-0.5 text-[13px] text-muted-foreground">
           <NextText trigger={trigger} />
         </p>
-        {trigger.source.kind === "time" && <MissedNote id={trigger.id} />}
       </div>
       <div className="flex flex-wrap gap-1.5">
         <LifecyclePill lifecycle={trigger.lifecycle} />
         <HealthPill health={trigger.health} />
       </div>
     </li>
-  );
-}
-
-/**
- * Says when the latest run was missed. There is no run-now action in Pim
- * yet, so it offers none.
- */
-function MissedNote({ id }: { id: string }) {
-  const { t, date } = useFormats();
-  const { data } = useInfiniteQuery(triggerRunsQuery(id));
-  const latest = data?.pages[0]?.runs[0];
-  if (latest?.state !== "missed") return null;
-  return (
-    <p className="mt-0.5 text-[13px] text-muted-foreground">
-      {t("triggerMissedAt", { time: date(latest.dueAt) })}
-    </p>
   );
 }
 

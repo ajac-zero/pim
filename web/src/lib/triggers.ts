@@ -220,9 +220,7 @@ export type NextLine = { key: TranslationKey; at?: number; minutes?: number };
 
 export function nextLine(trigger: Trigger): NextLine {
   if (trigger.lifecycle === "deleted") return { key: "triggerNextDeleted" };
-  if (trigger.lifecycle === "ended") {
-    return { key: "triggerNextEnded", at: trigger.updatedAt };
-  }
+  if (trigger.lifecycle === "ended") return { key: "triggerNextEnded" };
   if (trigger.migration && !trigger.migration.enableable) {
     return {
       key:

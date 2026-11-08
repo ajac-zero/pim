@@ -121,30 +121,22 @@ describe("the list", () => {
     expect(text).toContain("Command, checked · Ada");
   });
 
-  it("words paused, ended and missed rows, with no time for paused", async () => {
+  it("words paused and ended rows, with no time for paused", async () => {
     const client = clientWith();
     const at = Date.UTC(2026, 10, 9, 9);
     const schedule = { nextFiringAt: at, nextCheckAt: at };
     setList(client, [
       page([
         triggerFixture({ id: "t_paused", lifecycle: "paused", schedule }),
-        triggerFixture({
-          id: "t_ended",
-          lifecycle: "ended",
-          updatedAt: Date.UTC(2026, 10, 1, 8),
-        }),
-        triggerFixture({ id: "t_missed", lifecycle: "enabled", schedule }),
+        triggerFixture({ id: "t_ended", lifecycle: "ended" }),
       ]),
-    ]);
-    setRuns(client, "t_missed", [
-      runFixture({ state: "missed", dueAt: Date.UTC(2026, 10, 8, 7) }),
     ]);
     const text = textOf(await render(TriggersPage, client));
     expect(text).toContain(
       "Paused. Will resume at the next scheduled time when turned on.",
     );
-    expect(text).toMatch(/Ended Nov 1, 2026/);
-    expect(text).toMatch(/Missed Nov 8, 2026/);
+    expect(text).toContain("Ended.");
+    expect(text).not.toMatch(/Missed \d|Missed [A-Z][a-z]{2} /);
   });
 
   it("labels every filter, including health, source and agent", async () => {

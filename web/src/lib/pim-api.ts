@@ -227,6 +227,8 @@ export type Agent = {
   contacts: string[];
   /** The model it runs on; null follows the default model (Settings → Model). */
   model: { provider: string; id: string } | null;
+  /** The models it moves on to, in order, when its own fails for good, such as when its quota runs out. */
+  fallbacks: { provider: string; id: string }[];
   /** The template it was made from. */
   source: { template: string; author: string } | null;
   /** Its template in the gallery, while published. */
@@ -1634,6 +1636,14 @@ export const pim = {
     call<Agent>(`/agents/${encodeURIComponent(agent)}/model`, {
       method: "PUT",
       body: JSON.stringify(model ?? { provider: null, id: null }),
+    }),
+  setAgentFallbacks: (
+    agent: string,
+    models: Pick<ModelInfo, "provider" | "id">[],
+  ) =>
+    call<Agent>(`/agents/${encodeURIComponent(agent)}/fallbacks`, {
+      method: "PUT",
+      body: JSON.stringify({ models }),
     }),
   chooseUtilityModel: (model: Pick<ModelInfo, "provider" | "id">) =>
     call<{ model: ModelInfo | null }>("/model/utility", {

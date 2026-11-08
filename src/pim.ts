@@ -1263,11 +1263,37 @@ export class Pim extends DurableAgent<Env> {
 	 * Whether a run whose model failed for good is held for the person to try again. Only a chat is, and not while it works
 	 * on a task: a task or a review has no one watching it, and its requester or caller needs the failure to go on.
 	 */
-	#holdsRun(message: { errorMessage?: string }, conversation: string): boolean {
-		if (message.errorMessage === NOT_DELIVERED || this.#taskApart(conversation) || this.#taskUnderway(conversation)) return false;
+	#holdsRun(message: { errorMessage?: string; provider?: string; model?: string }, conversation: string): boolean {
+		if (message.errorMessage === NOT_DELIVERED) return false;
+		// Held only for a moment: the agent's next model takes the run over.
+		const next = this.#nextModel(conversation, message);
+		if (next) {
+			void this.keepAliveWhile(() => this.#failOver(conversation, next));
+			return true;
+		}
+		if (this.#taskApart(conversation) || this.#taskUnderway(conversation)) return false;
 		// The chat list stops showing it as working once the hold is committed, just after this answers.
 		setTimeout(() => this.broadcastMessage({ type: "sessions" }), 1000);
 		return true;
+	}
+
+	/** The model after the one that failed in the agent's own and fallback models; none when it was the last, or isn't one of them. */
+	#nextModel(conversation: string, failed: { provider?: string; model?: string }): PiModel | undefined {
+		const agent = this.agents.ofSession(conversation);
+		const chain = [this.agentModel(agent), ...this.#fallbackModels(agent)];
+		const at = chain.findIndex((model) => model.provider === failed.provider && model.id === failed.model);
+		return at < 0 ? undefined : chain[at + 1];
+	}
+
+	/** Moves a held run onto `model` and runs it again there. */
+	async #failOver(conversation: string, model: PiModel): Promise<void> {
+		console.warn(JSON.stringify({ event: "pim.failover", owner: this.name, conversation, provider: model.provider, model: model.id }));
+		await this.harness.session(conversation).setModel(model);
+		// The run is held just after its hook answers.
+		for (let attempt = 0; attempt < 20; attempt++) {
+			if (await this.#resumeHeld(conversation)) return;
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
 	}
 
 	/** The conversations whose runs are held after a model error: not working, but waiting for the person to try again. */
@@ -1443,6 +1469,11 @@ export class Pim extends DurableAgent<Env> {
 		return this.chosenModel();
 	}
 
+	/** The models an agent moves on to, in order, when its own fails for good; ones that are gone are not read: see `#dropModels`. */
+	#fallbackModels(agent: Agent): PiModel[] {
+		return agent.fallbacks.flatMap((fallback) => this.modelCatalog().getModel(fallback.provider, fallback.id) ?? []);
+	}
+
 	/**
 	 * A model from `GET /model`'s choices, by provider and id: the deployment's,
 	 * one it allows besides, or one on the connected ChatGPT plan.
@@ -1474,6 +1505,11 @@ export class Pim extends DurableAgent<Env> {
 		return changed;
 	}
 
+	/** Sets the models an agent moves on to when its own fails, from `GET /model`'s choices. */
+	async chooseAgentFallbacks(agent: Agent, models: PiModel[]): Promise<Agent> {
+		return this.agents.setFallbacks(agent.id, models);
+	}
+
 	/** Puts every session on its agent's model. */
 	async #syncModels(): Promise<void> {
 		for (const session of await this.harness.sessions.list()) {
@@ -1485,6 +1521,7 @@ export class Pim extends DurableAgent<Env> {
 	#dropModels(gone: (model: AgentModel) => boolean): void {
 		for (const agent of this.agents.list()) {
 			if (agent.model && gone(agent.model)) this.agents.setModel(agent.id, null);
+			if (agent.fallbacks.some(gone)) this.agents.setFallbacks(agent.id, agent.fallbacks.filter((model) => !gone(model)));
 		}
 	}
 
@@ -1876,6 +1913,9 @@ export class Pim extends DurableAgent<Env> {
 	/** Gives pi input for a conversation, traced as part of its run (see ./telemetry.ts). */
 	async #submit(session: string, content: UserInput, options: { operationId?: string; whenBusy?: "followUp" | "steer" }, from: string): Promise<PiReceipt> {
 		const withdraw = this.telemetry.submitting(session, content, from);
+		// A conversation that moved on to a fallback model tries the agent's own again.
+		const agent = this.agents.ofSession(session);
+		if (agent.fallbacks.length > 0) await this.harness.session(session).setModel(this.agentModel(agent));
 		let receipt: PiReceipt;
 		try {
 			receipt = await this.harness.submit(content, { session, ...options });
@@ -6181,6 +6221,19 @@ export class Pim extends DurableAgent<Env> {
 				if (provider === null && model === null) return this.chooseAgentModel(agent, null);
 				if (typeof provider !== "string" || typeof model !== "string") throw new HttpError(400, "provider and id must be strings, or both null");
 				return this.chooseAgentModel(agent, await this.#choice(provider, model));
+			},
+		],
+		// The models an agent moves on to, in order, when its own fails for good, from `GET /model`'s choices.
+		[
+			"PUT",
+			"/agents/:agent/fallbacks",
+			async ({ agent: id }, request) => {
+				const agent = this.#agent(id!);
+				const { models } = (await readJson<{ models: { provider: string; id: string }[] }>(request)) ?? {};
+				if (!Array.isArray(models) || models.some((model) => typeof model?.provider !== "string" || typeof model.id !== "string")) {
+					throw new HttpError(400, "models must be a list of provider and id");
+				}
+				return this.chooseAgentFallbacks(agent, await Promise.all(models.map((model) => this.#choice(model.provider, model.id))));
 			},
 		],
 		// Skills the agents wrote, with the person's approval, every version kept; each agent lists the ones it uses.

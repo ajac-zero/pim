@@ -47,6 +47,7 @@ export async function startFakeDocker({ runtimes = { runc: {}, runsc: {} }, prob
 		if ((m = /^POST \/containers\/([^/]+)\/start$/.exec(key))) return out(204)
 		if ((m = /^POST \/containers\/([^/]+)\/wait$/.exec(key))) return out(200, { StatusCode: probeExit })
 		if ((m = /^GET \/containers\/([^/]+)\/json$/.exec(key))) {
+			if (m[1] === 'egress-proxy') return out(200, { NetworkSettings: { Networks: Object.fromEntries([...f.proxyNet].map((net) => [net, { IPAddress: '10.9.100.2' }])) } })
 			const c = containers.get(m[1])
 			if (!c) return out(404, { message: 'no such container' })
 			return out(200, { NetworkSettings: { Networks: { [c.body.HostConfig.NetworkMode]: { IPAddress: c.ip } } } })

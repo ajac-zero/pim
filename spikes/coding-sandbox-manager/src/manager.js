@@ -81,17 +81,24 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	async function doCreate(params) {
-		const spec = buildSpec(params, cfg)
 		const id = params.sessionId
+		const n = names(id)
 		try {
 			await ensureImage(docker, params.image)
-			await docker.request('POST', '/volumes/create', spec.volume)
-			await docker.request('POST', '/networks/create', spec.network)
-			await docker.request('POST', `/containers/create?name=${spec.container.name}`, spec.container.body)
-			await docker.request('POST', `/networks/${spec.network.Name}/connect`, { Container: cfg.proxyContainer, EndpointConfig: { Aliases: [cfg.proxyContainer] } })
-			await docker.request('POST', `/containers/${spec.container.name}/start`)
-			const info = await docker.request('GET', `/containers/${spec.container.name}/json`)
-			const ip = info.NetworkSettings.Networks[spec.network.Name].IPAddress
+			// Docker's embedded DNS does not work under gVisor, so the session reaches the proxy by
+			// IP: attach the proxy first, read its address on the session network, then create.
+			const { volume, network } = buildSpec(params, cfg) // the container part is rebuilt below with the proxy IP
+			await docker.request('POST', '/volumes/create', volume)
+			await docker.request('POST', '/networks/create', network)
+			await docker.request('POST', `/networks/${n.network}/connect`, { Container: cfg.proxyContainer, EndpointConfig: { Aliases: [cfg.proxyContainer] } })
+			const proxyInfo = await docker.request('GET', `/containers/${cfg.proxyContainer}/json`)
+			const proxyUrl = new URL(cfg.proxyUrl)
+			proxyUrl.hostname = proxyInfo.NetworkSettings.Networks[n.network].IPAddress
+			const container = buildSpec(params, { ...cfg, proxyUrl: proxyUrl.origin }).container
+			await docker.request('POST', `/containers/create?name=${container.name}`, container.body)
+			await docker.request('POST', `/containers/${container.name}/start`)
+			const info = await docker.request('GET', `/containers/${container.name}/json`)
+			const ip = info.NetworkSettings.Networks[n.network].IPAddress
 			await proxyAdmin.set(ip, params.egressAllow)
 			const s = { params, createdAt: now(), lastUsed: now(), ip, lock: Promise.resolve() }
 			sessions.set(id, s)

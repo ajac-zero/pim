@@ -9,7 +9,7 @@ import type { Pim } from "../src/pim";
 import type { AppWatch } from "../src/store";
 import { ConnectorIngress } from "../src/triggers/connector";
 import { DELIVERY_TTL_MS } from "../src/triggers/coordinator";
-import type { TriggerEngine } from "../src/triggers/engine";
+import { TRIGGER_TICK_CALLBACK, type TriggerEngine } from "../src/triggers/engine";
 import {
 	adoptedSubscription,
 	cutoverReceipts,
@@ -315,6 +315,29 @@ function snapshot(pim: Pim): string {
 		.toArray()
 		.map((row) => String(row.name));
 	return JSON.stringify(tables.map((table) => [table, sql.exec(`SELECT * FROM ${table}`).toArray()]));
+}
+
+/**
+ * What a start must leave as it was when nothing is due: every row of every
+ * table of the trigger engine and the migration (records, owner history,
+ * receipts, kept event data, triggers, their revisions, sources,
+ * occurrences, inbox, outbox, runs, tombstones and host operations), the
+ * schedules and watches themselves, and what a firing or an event would
+ * have submitted or notified. Not the rest of the database, which starting
+ * a new instance writes as the runtime's own bookkeeping, whatever the
+ * migration does: the agents SDK's host jobs (`cf:keep-alive`, there until
+ * the old instance lets go of a run that held it awake, and
+ * `cf:housekeeping`), the trigger wake's job, set again from the clock at
+ * each start, pi's wake jobs, and the workspace's `_vfs_*` tables.
+ */
+function deliveryState(pim: Pim): string {
+	const sql = sqlOf(pim);
+	const tables = sql
+		.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE 'pim\\_trigger\\_%' ESCAPE '\\' OR name IN ('pim_triggers', 'pim_app_watches', 'pi_submissions', 'pim_notifications')) ORDER BY name")
+		.toArray()
+		.map((row) => String(row.name));
+	const schedules = sql.exec("SELECT * FROM cf_agents_jobs WHERE capability = 'scheduler' AND fn != ? ORDER BY id", TRIGGER_TICK_CALLBACK).toArray();
+	return JSON.stringify([...tables.map((table) => [table, sql.exec(`SELECT * FROM ${table}`).toArray()]), ["cf_agents_jobs (schedules)", schedules]]);
 }
 
 /** The space's root chat, by its own id. */
@@ -695,8 +718,14 @@ const moveTo = (at: number) => {
 /** A schedule's firing at `seconds`, as the agents SDK hands it to runScheduledTask. */
 const firingAt = (scheduled: Awaited<ReturnType<typeof oneTime>>, seconds: number) => ({ ...scheduled, time: seconds });
 
-/** An hourly schedule, as schedule_task makes it. */
-const hourly = (pim: Pim, chat: string) => pim.schedule("0 * * * *", "runScheduledTask", { session: chat, instruction: "Check the fare.", label: "Fare check" });
+/**
+ * An hourly schedule, as schedule_task makes it, at the minute half an hour
+ * from now: its next firing is half an hour away whatever the time of day,
+ * never moments away, where a test moving the triggers' clock on to settle
+ * a run would reach it unasked.
+ */
+const hourly = (pim: Pim, chat: string) =>
+	pim.schedule(`${(new Date().getUTCMinutes() + 30) % 60} * * * *`, "runScheduledTask", { session: chat, instruction: "Check the fare.", label: "Fare check" });
 
 /** Lets the trigger engine hand on what is due, and the chat take it. */
 async function handOn(pim: Pim) {
@@ -1881,11 +1910,14 @@ describe("cutting over, in a space", () => {
 			expect((await deliverIn(pim, kept.id, kept.secret, "ev-e-0")).status).toBe(204);
 			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
 			expect((await pim.cutoverTriggerMigration())!.map((item) => item.outcome)).toEqual(["cut_over", "cut_over"]);
+			// The engine looks at what is due now, so its wake is at the schedule's next firing and can't tick in the middle of what follows, and the event's run ends.
+			await settle(pim);
 			// A restart makes a new instance on the same storage, whose start runs the migration again: nothing to do.
 			const restarted = new (pim.constructor as new (ctx: DurableObjectState, env: unknown) => Pim)(stateOf(pim), envOf(pim));
-			const before = snapshot(pim);
+			const before = deliveryState(pim);
+			for (const part of ['"owner":"trigger"', '"fn":"runScheduledTask"', `"id":"${kept.id}"`]) expect(before).toContain(part);
 			await restarted.ensureTriggerEngine();
-			expect(snapshot(pim)).toBe(before);
+			expect(deliveryState(pim)).toBe(before);
 			const engine = restarted.triggerEngine()!;
 			expect(engine).not.toBe(pim.triggerEngine());
 			expect(engine.connectorEvents).toBe(true);

@@ -86,7 +86,11 @@ describe('template validation', () => {
 		assert.deepEqual(h.Mounts.map((m) => [m.Type, m.Target]), [['volume', '/workspace']])
 		assert.equal(c.Labels['pim.coding.session'], 'abc-1')
 		assert.equal(h.NetworkMode, 'pim-net-abc-1')
-		assert.ok(c.Env.includes('HTTPS_PROXY=http://egress-proxy:3128'))
+		// Docker's embedded DNS is unavailable under gVisor, so the env carries the proxy's IP.
+		for (const k of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) assert.ok(c.Env.includes(`${k}=http://10.9.100.2:3128`), k)
+		assert.ok(!c.Env.some((e) => e.includes('egress-proxy')))
+		const order = fake.calls.map((x) => x.path)
+		assert.ok(order.indexOf('/networks/pim-net-abc-1/connect') < order.indexOf('/containers/create'), 'proxy attached before the container is created')
 		const net = fake.calls.find((x) => x.path === '/networks/create').body
 		assert.equal(net.Internal, true)
 		assert.ok(fake.proxyNet.has('pim-net-abc-1'))

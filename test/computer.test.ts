@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
-import { COMPUTER_GRANT_ACTION, COMPUTER_TRIGGERS_VARIABLE, computerTriggersAllowed, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
+import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
 import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
@@ -379,54 +379,36 @@ describe("the computer", () => {
 		}
 	});
 
-	it("ignores triggers' messages, as before, where computer triggers are off, even in a space whose triggers are on, and answers them only behind the gate", async () => {
-		expect(computerTriggersAllowed(env)).toBe(false);
+	it("answers the computer's triggers runtime on its own connection wherever the space's triggers are on, with no deployment setting for it", async () => {
+		expect(Object.keys(env).filter((name) => /COMPUTER/.test(name) && /TRIGGER/.test(name))).toEqual([]);
 		await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine());
 		const answered: string[] = [];
 		const listen = (event: MessageEvent) => {
 			if (String(event.data).startsWith(TRIGGERS_ENVELOPE)) answered.push(String(event.data));
 		};
-		computer.socket.addEventListener("message", listen);
 		const digest = createHash("sha256").update(token).digest("hex");
-		computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId: runtimeIdOf(digest), connectionId: "connection-1", lastEpoch: null, pending: 0 })}}`);
-		// A computer's own hello after it: once the space has taken that, it has taken the triggers' message before it.
-		const hello = (hostname: string) => JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname, platform: "linux", arch: "x64", user: "ada", root: computer.root, browser: null, screen: false, desktop: false });
-		computer.socket.send(hello("after-triggers"));
-		await vi.waitFor(async () => expect((await status()).computer?.hostname).toBe("after-triggers"));
-		computer.socket.send(hello("test-box"));
-		await vi.waitFor(async () => expect((await status()).computer?.hostname).toBe("test-box"));
-		computer.socket.removeEventListener("message", listen);
-		expect(answered).toEqual([]);
-		const tables = await runInDurableObject(agent(), (_pim: Pim, state) => state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name LIKE 'pim_trigger_computer%'").toArray());
-		expect(tables).toEqual([]);
-
-		// With the gate set on this space's own env for the test, the same hello is the runtime's, answered on the same socket before the computer's own messages are read.
-		const own = () => runInDurableObject(agent(), (pim: Pim) => (pim as unknown as { env: Record<string, unknown> }).env);
-		(await own())[COMPUTER_TRIGGERS_VARIABLE] = "internal";
+		// The runtime's hello is answered on the same socket before the computer's own messages are read.
+		computer.socket.addEventListener("message", listen);
 		try {
-			computer.socket.addEventListener("message", listen);
 			computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId: runtimeIdOf(digest), connectionId: "connection-2", lastEpoch: null, pending: 0 })}}`);
+			computer.socket.send(JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname: "test-box", platform: "linux", arch: "x64", user: "ada", root: computer.root, browser: null, screen: false, desktop: false }));
 			await vi.waitFor(() => expect(answered).toHaveLength(1));
-			computer.socket.removeEventListener("message", listen);
-			expect(JSON.parse(answered[0]!)).toEqual({
-				type: "triggers",
-				frame: { protocol: PROTOCOL, type: "reconcile", binding: { space: OWNER, runtimeId: runtimeIdOf(digest) }, connectionId: "connection-2", serverEpoch: 1, desiredRevision: 1, leaseMs: 120_000, sources: [] },
-			});
-			expect(await status()).toMatchObject({ state: "online", computer: { hostname: "test-box" } });
 		} finally {
-			delete (await own())[COMPUTER_TRIGGERS_VARIABLE];
+			computer.socket.removeEventListener("message", listen);
 		}
+		expect(JSON.parse(answered[0]!)).toEqual({
+			type: "triggers",
+			frame: { protocol: PROTOCOL, type: "reconcile", binding: { space: OWNER, runtimeId: runtimeIdOf(digest) }, connectionId: "connection-2", serverEpoch: 1, desiredRevision: 1, leaseMs: 120_000, sources: [] },
+		});
+		await vi.waitFor(async () => expect(await status()).toMatchObject({ state: "online", computer: { hostname: "test-box" } }));
 		await runInDurableObject(agent(), async (pim: Pim, state) => {
 			expect(state.storage.sql.exec("SELECT runtime_id, server_epoch FROM pim_trigger_computer_runtimes").toArray()).toEqual([{ runtime_id: runtimeIdOf(digest), server_epoch: 1 }]);
 			await pim.disableTriggerEngine();
 		});
 	});
 
-	it("asks the person, through an agent, to grant a trigger's source on the computer, records only their approval, and tells the computer of each change, behind the gate", async () => {
+	it("asks the person, through an agent, to grant a trigger's source on the computer, records only their approval, and tells the computer of each change", async () => {
 		const runtimeId = runtimeIdOf(createHash("sha256").update(token).digest("hex"));
-		const own = () => runInDurableObject(agent(), (pim: Pim) => (pim as unknown as { env: Record<string, unknown> }).env);
-		// The approval policy changing rebuilds the tools that describe it, which is when the space notices the gate.
-		const policy = (approvalPolicy: string | null) => api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy }) });
 		const reconciles: { connectionId: string; serverEpoch: number; desiredRevision: number; sources: { triggerId: string; grant: { grantRef: string } }[] }[] = [];
 		const listen = (event: MessageEvent) => {
 			const data = String(event.data);
@@ -434,13 +416,13 @@ describe("the computer", () => {
 		};
 		const source = { kind: "stream", command: "tail -F /var/log/syslog", cwd: null } as const;
 		const spec = { version: 1, owningAgentId: "majordomo", originChatId: "chat-1", label: "Syslog", instruction: "Tell me what it said.", destination: { type: "new_chat" }, source } as const;
-		(await own())[COMPUTER_TRIGGERS_VARIABLE] = "internal";
 		try {
-			await policy("explicit");
-			await policy(null);
-			expect(await offeredTools()).toContain("trigger_computer_grant");
+			// The grant tool comes with the space's triggers.
 			await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine());
+			expect(await offeredTools()).toContain("trigger_computer_grant");
 			expect(await runInDurableObject(agent(), (pim: Pim) => pim.triggerEngine()!.store.create({ id: "syslog", spec }))).toMatchObject({ ok: true, trigger: { lifecycle: "draft" } });
+			// With a computer paired, its source is one Pim runs, once granted.
+			expect((await api("/triggers/syslog")).body).toMatchObject({ capability: { status: "available", delivers: true, reason: null }, grant: { required: true, state: "missing" } });
 			computer.socket.addEventListener("message", listen);
 			computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId, connectionId: "connection-3", lastEpoch: 1, pending: 0 })}}`);
 			// The link from before, still open, heard of the new draft; the new connection takes its place in the same durable epoch, as the space kept it.
@@ -478,9 +460,6 @@ describe("the computer", () => {
 			expect(await runInDurableObject(agent(), (pim: Pim) => pim.triggerEngine()!.store.get("syslog")!.health)).toBe("auth_required");
 		} finally {
 			computer.socket.removeEventListener("message", listen);
-			delete (await own())[COMPUTER_TRIGGERS_VARIABLE];
-			await policy("explicit");
-			await policy(null);
 			await runInDurableObject(agent(), async (pim: Pim) => {
 				pim.triggerEngine()?.store.remove({ id: "syslog" });
 				await pim.disableTriggerEngine();

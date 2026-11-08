@@ -271,9 +271,9 @@ describe("what a trigger does next", () => {
     for (const capability of [
       { status: "available", delivers: true, reason: null },
       {
-        status: "unavailable",
+        status: "draft_only",
         delivers: false,
-        reason: "computer_triggers_off",
+        reason: "computer_not_paired",
       },
     ] as const) {
       expect(
@@ -293,6 +293,20 @@ describe("what a trigger does next", () => {
       ).toEqual({ key: "triggerNextOnceOn", everyMs: 900_000 });
     }
     expect(nextLine(connectorFixture()).key).toBe("triggerNextNotWired");
+    // An enabled computer source whose computer was removed says to pair one, not that it waits.
+    expect(
+      nextLine(
+        pollFixture({
+          lifecycle: "enabled",
+          health: "waiting_computer",
+          capability: {
+            status: "draft_only",
+            delivers: false,
+            reason: "computer_not_paired",
+          },
+        }),
+      ).key,
+    ).toBe("triggerPairComputerFirst");
   });
 
   it("says a shadow runs through its schedule, whatever its next firing", () => {
@@ -317,9 +331,9 @@ describe("the editor's form", () => {
       offeredKinds([
         pollFixture({
           capability: {
-            status: "unavailable",
+            status: "draft_only",
             delivers: false,
-            reason: "computer_triggers_off",
+            reason: "computer_not_paired",
           },
         }),
       ]),
@@ -522,14 +536,8 @@ describe("a grant request", () => {
     ).toBe("none");
   });
 
-  it("needs nothing for a trigger off the computer, and decides nothing while computer triggers are off", () => {
+  it("needs nothing for a trigger off the computer", () => {
     expect(standing([request()], triggerFixture()).kind).toBe("not_required");
-    expect(
-      standing(
-        [request()],
-        pollFixture({ grant: { required: true, state: "unavailable" } }),
-      ).kind,
-    ).toBe("off");
   });
 
   it("is decided once: a request someone already decided answers as it stands", async () => {

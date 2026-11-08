@@ -198,7 +198,7 @@ import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessag
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
 import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAnswer, TriggerApi, TriggerApiError, triggerBody } from "./triggers/api";
-import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
+import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
 import { ENGINE_KEY, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
 import { ConnectorIngress, ingressResponse, strictShape } from "./triggers/connector";
@@ -804,7 +804,7 @@ export class Pim extends DurableAgent<Env> {
 		return [
 			...this.#ownActions,
 			...[...this.abilities.values()].flatMap((ability) => ability.actions ?? []),
-			...(computerTriggersAllowed(this.env) ? [this.#computerGrantAction] : []),
+			this.#computerGrantAction,
 		];
 	}
 
@@ -857,7 +857,6 @@ export class Pim extends DurableAgent<Env> {
 				reviewExtension({ majordomo: () => this.agents.majordomo(), decide: (conversation, decision, note) => this.#reviewDecision(conversation, decision, note) }),
 			);
 			this.registry.install(approvalsExtension(services, this.#offeredActions()));
-			this.#installComputerGrants(services);
 			this.#installTriggerTools();
 			this.registry.install(webExtension);
 			this.registry.install(
@@ -1273,9 +1272,9 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Extensions only some conversations select: connectors, by the agents that list
-	 * them; reviews', by the majordomo's reviews; the computer triggers' grant
-	 * tool, by chats while computer triggers are on; and triggers' tools, by
-	 * chats while the space's triggers are on.
+	 * them; reviews', by the majordomo's reviews; and triggers' tools, with
+	 * the computer triggers' grant tool, by chats while the space's triggers
+	 * are on.
 	 */
 	#perPim(name: string): boolean {
 		return name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION || name === COMPUTER_GRANT_EXTENSION || name === TRIGGERS_EXTENSION;
@@ -2155,10 +2154,9 @@ export class Pim extends DurableAgent<Env> {
 			transaction: (work) => this.ctx.storage.transactionSync(work),
 			now: () => this.triggerClock(),
 			space: this.#triggerSpace(),
-			// Computer sources' grants are checked, their occurrences handed on, and the computer told of changes only where computer triggers are on, which no deployment is.
-			...(computerTriggersAllowed(this.env)
-				? { authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())), changed: () => this.#computerTriggers()?.refresh() }
-				: {}),
+			// Computer sources' grants are checked against the computer paired now, so with none no grant is current; their occurrences are handed on, and the computer told of changes.
+			authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())),
+			changed: () => this.#computerTriggers()?.refresh(),
 			// Connector events are handed on, and a trigger that took over a schedule or watch delivers as it did, only where a watch may be or has been cut over (./triggers/migration.ts).
 			...(cutoverAllowed(this.env) || migrationRecords(this.ctx.storage.sql).some((record) => record.kind === "watch" && record.owner === "trigger") ? { connectorEvents: true } : {}),
 			takeover: this.#triggerTakeover(),
@@ -2214,7 +2212,7 @@ export class Pim extends DurableAgent<Env> {
 	#computerGrantsKept: ComputerGrants | undefined;
 	#computerTriggersKept: ComputerTriggers | undefined;
 
-	/** The grants of computer sources, only where computer triggers are on. */
+	/** The grants of computer sources. */
 	#computerGrants(): ComputerGrants {
 		this.#computerGrantsKept ??= new ComputerGrants(this.ctx.storage.sql, { approval: (id) => this.store.approval(id), space: this.name, now: () => this.triggerClock() });
 		return this.#computerGrantsKept;
@@ -2222,12 +2220,10 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Triggers on the person's computer (./triggers/computer.ts), when the
-	 * deployment's gate for them (`PIM_TRIGGERS_COMPUTER`), which nothing
-	 * sets, is `internal` and the space's trigger engine is on; null
-	 * otherwise, and then nothing of them exists.
+	 * space's trigger engine is on; null otherwise, and then nothing of them
+	 * exists.
 	 */
 	#computerTriggers(): ComputerTriggers | null {
-		if (!computerTriggersAllowed(this.env)) return null;
 		const engine = this.triggerEngine();
 		if (!engine) return null;
 		this.#computerTriggersKept ??= new ComputerTriggers(this.ctx.storage.sql, {
@@ -2266,14 +2262,14 @@ export class Pim extends DurableAgent<Env> {
 		};
 	}
 
-	/** The action an approved grant runs, which Pim knows of only where computer triggers are on. */
+	/** The action an approved grant runs, which refuses where the space's trigger engine is off. */
 	readonly #computerGrantAction = computerGrantAction(() => (this.#computerTriggers() ? this.#computerGrantHost() : null));
 
 	/**
 	 * Internal: revokes a grant of a computer source, for good. What its
 	 * source observes is refused from now on, its observer stops at once,
 	 * and an occurrence not yet handed on never is. False where there was no
-	 * such grant, or computer triggers are off.
+	 * such grant, or the space's triggers are off.
 	 */
 	revokeComputerGrant(grantRef: string): boolean {
 		const triggers = this.#computerTriggers();
@@ -2553,9 +2549,8 @@ export class Pim extends DurableAgent<Env> {
 						const offered = agentId === null ? servers : agent ? this.#appsOf(agent).flatMap((app) => serverFor(servers, app) ?? []) : [];
 						return offered.map((server) => ({ connectorId: server.id, name: server.name, events: this.catalog.events(server.id).map((event) => event.name) }));
 					},
-					computer: () => ({ triggers: computerTriggersAllowed(this.env), paired: this.computer.paired() }),
+					computer: () => ({ paired: this.computer.paired() }),
 					grant: (trigger) => {
-						if (!computerTriggersAllowed(this.env)) return "unavailable";
 						const ref = trigger.spec.authorizationRef;
 						if (ref !== null && this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest()))({ triggerId: trigger.id, spec: trigger.spec, authorizationRef: ref, now: this.triggerClock() }).ok) return "current";
 						const asked = this.store.approvals("pending").some((approval) => approval.action === COMPUTER_GRANT_ACTION && (approval.args as { triggerId?: unknown }).triggerId === trigger.id);
@@ -2567,10 +2562,11 @@ export class Pim extends DurableAgent<Env> {
 		return this.#triggerApiKept;
 	}
 
-	/** Agents' tools for triggers, installed only while the API exists; chats select them (`#selectAbilities`). */
+	/** Agents' tools for triggers, and the computer's grant tool, installed only while the API exists; chats select them (`#selectAbilities`). */
 	#installTriggerTools(): void {
 		if (this.#triggerApi()) this.registry.install(triggersExtension({ api: () => this.#triggerApi(), roleOf: (session) => this.#roleOf(session) }));
 		else if (this.registry.snapshot().extension(TRIGGERS_EXTENSION)) this.registry.uninstall({ name: TRIGGERS_EXTENSION });
+		this.#installComputerGrants(this.services());
 	}
 
 	/** Answers a triggers' route: the API's value, or its refusal with its code; nothing else of an error. */
@@ -4386,7 +4382,7 @@ export class Pim extends DurableAgent<Env> {
 	 * or the switches may have changed since.
 	 * Visits choose their own extensions, and the conversations of tasks that
 	 * aren't chats got theirs when made. A chat whose selection is unchanged
-	 * isn't written to. Where computer triggers are on, the grant tool comes
+	 * isn't written to. Where the space's triggers are on, the grant tool comes
 	 * after the connectors, so adding or taking it out only appends or removes
 	 * at the end; where they are off, the selection is as it was without it.
 	 */
@@ -7341,11 +7337,12 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * The tool that asks the person to grant a trigger's source on their
-	 * computer, installed only where computer triggers are on. Chats select it
-	 * (`#selectAbilities`), so where they are off nothing of it is in any chat.
+	 * computer, installed only while triggers' API exists, as their other
+	 * tools are. Chats select it (`#selectAbilities`), so where the space's
+	 * triggers are off nothing of it is in any chat.
 	 */
 	#installComputerGrants(services: PimServices): void {
-		if (computerTriggersAllowed(this.env)) this.registry.install(computerGrantExtension(services, this.#computerGrantHost()));
+		if (this.#triggerApi()) this.registry.install(computerGrantExtension(services, this.#computerGrantHost()));
 		else if (this.registry.snapshot().extension(COMPUTER_GRANT_EXTENSION)) this.registry.uninstall({ name: COMPUTER_GRANT_EXTENSION });
 	}
 
@@ -7370,6 +7367,8 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	#computerChanged(): void {
 		this.broadcastMessage({ type: "computer" });
+		// Triggers on the computer follow the one paired now: with none, or another, they wait for it.
+		this.#computerTriggers()?.refresh();
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
 		// Replaced in place, so chats begun before see the change, as they do an approval policy's.
 		this.registry.install(filesExtension(this.#files));
@@ -7977,7 +7976,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** A message from the computer: what it is, when it has just connected, an answer, or what a stream of its desktop says. */
 	#computerSaid(raw: string | ArrayBuffer | ArrayBufferView, connection: Connection): void {
-		// Triggers' frames, where computer triggers are on, before anything else reads the message; elsewhere they go on as before, to be ignored.
+		// Triggers' frames, where the space's triggers are on, before anything else reads the message; elsewhere they go on as before, to be ignored.
 		if (typeof raw === "string" && raw.startsWith(TRIGGERS_ENVELOPE)) {
 			const triggers = this.#computerTriggers();
 			if (triggers) {

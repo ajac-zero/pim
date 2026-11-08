@@ -1,11 +1,11 @@
-// pim-computer's triggers host, in Node: off by default, where it loads, makes and listens for nothing; and on, over a fake socket, with fake launchers on a fake clock for the protocol and the grants, the real runtime and spool in a temporary folder, and a few tiny real children for what only a real process group shows. Nothing here opens a socket or reaches the network.
+// pim-computer's triggers host, in Node: how pim-computer gets and loads it, and runs nothing without it; and over a fake socket, with fake launchers on a fake clock for the protocol and the grants, the real runtime and spool in a temporary folder, and a few tiny real children for what only a real process group shows. Nothing here opens a socket or reaches the network.
 import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Link, loadTriggers, TRIGGERS_GATE } from "../computer/pim-computer";
+import { Link, loadTriggers, TRIGGERS_MODULES } from "../computer/pim-computer";
 import type { ChildEvents, ChildExit, OwnedChild } from "../computer/triggers-adapters/poll";
 import type { StreamChild, StreamChildEvents } from "../computer/triggers-adapters/stream";
 import { ENVELOPE_BYTES, MAX_BUFFERED_BYTES, startTriggers, TRIGGERS_ENVELOPE, type TriggersHost, type TriggersSocket, grantScopeHash, triggersBinding } from "../computer/triggers-host";
@@ -221,19 +221,58 @@ async function close(h: Harness): Promise<void> {
 	await closing;
 }
 
-describe("triggers in pim-computer, off", () => {
-	it("loads, makes and listens for nothing unless the gate is exactly `internal`", async () => {
+describe("triggers in pim-computer, loaded", () => {
+	it("gets the runtime from the Pim when it isn't beside pim-computer, all of it or none, and runs no triggers without it", async () => {
+		// pim-computer.ts alone, as the Pim's install and update leave it, with the Pim's files behind a fetch that reaches no network.
+		const computer = path.join(import.meta.dirname, "..", "computer");
+		const alone = path.join(dir, "installed");
+		await fs.mkdir(alone);
+		await fs.copyFile(path.join(computer, "pim-computer.ts"), path.join(alone, "pim-computer.ts"));
+		const installed = (await import(path.join(alone, "pim-computer.ts"))) as typeof import("../computer/pim-computer");
+		let served = true;
+		const asked: string[] = [];
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = (async (input: string | URL | Request) => {
+			const url = new URL(String(input));
+			asked.push(url.pathname);
+			const file = path.join(computer, url.pathname);
+			// As the Pim's assets do: a file it has as it is, and its app's page for anything else.
+			if (served && file.startsWith(`${computer}${path.sep}`) && (await fs.stat(file).catch(() => null))?.isFile()) {
+				return new Response(await fs.readFile(file), { headers: { "content-type": "application/typescript" } });
+			}
+			return new Response("<!doctype html><title>Pim</title>", { headers: { "content-type": "text/html; charset=utf-8" } });
+		}) as typeof fetch;
 		const listeners = () => ["exit", "SIGTERM", "SIGINT", "SIGHUP"].map((name) => process.listenerCount(name));
-		const before = { listeners: listeners(), resources: process.getActiveResourcesInfo().sort() };
-		for (const value of [undefined, "", "1", "true", "on", "yes", "Internal", " internal", "internal "]) {
-			const logs: string[] = [];
-			const env = value === undefined ? {} : { [TRIGGERS_GATE]: value };
-			expect(await loadTriggers(env, { token: TOKEN, stateDir, root: dir, log: (line) => logs.push(line) })).toBeNull();
+		const before = listeners();
+		const logs: string[] = [];
+		const options = { url: "https://pim.test/", token: TOKEN, stateDir, root: dir, log: (line: string) => logs.push(line) };
+		try {
+			// Every module the host imports is one it gets: a module missing from the list would fail to load here.
+			const host = await installed.loadTriggers(options);
+			expect(host).not.toBeNull();
+			await host!.close();
+			expect(asked).toEqual(TRIGGERS_MODULES.map((file) => `/${file}`));
+			for (const file of TRIGGERS_MODULES) expect(await fs.readFile(path.join(stateDir, "triggers-runtime", file), "utf8")).toBe(readFileSync(path.join(computer, file), "utf8"));
 			expect(logs).toEqual([]);
+
+			// A Pim that doesn't serve them leaves the copy from before, whole, which still runs.
+			served = false;
+			const again = await installed.loadTriggers(options);
+			expect(again).not.toBeNull();
+			await again!.close();
+			expect(logs).toEqual([expect.stringContaining("Couldn't get the triggers runtime from your Pim")]);
+			expect((await fs.readdir(stateDir)).sort()).toEqual(["triggers", "triggers-runtime"]);
+
+			// With no copy at all, nothing of triggers is made or listened for.
+			logs.length = 0;
+			const fresh = path.join(dir, "fresh");
+			expect(await installed.loadTriggers({ ...options, stateDir: fresh })).toBeNull();
+			expect(logs).toEqual([expect.stringContaining("Couldn't get the triggers runtime"), "The triggers runtime couldn't start here, so this computer runs no triggers."]);
+			expect(await fs.readdir(fresh).catch(() => [])).toEqual([]);
+			expect(listeners()).toEqual(before);
+		} finally {
+			globalThis.fetch = realFetch;
 		}
-		await expect(fs.stat(stateDir)).rejects.toMatchObject({ code: "ENOENT" });
-		expect(listeners()).toEqual(before.listeners);
-		expect(process.getActiveResourcesInfo().sort()).toEqual(before.resources);
 	});
 
 	it("keeps pim-computer one file that imports only Node's own modules, and leaves a triggers message to a Link that ignores it", async () => {
@@ -251,7 +290,7 @@ describe("triggers in pim-computer, off", () => {
 	});
 });
 
-describe("triggers in pim-computer, on", () => {
+describe("triggers in pim-computer", () => {
 	it("binds to the token's space under an id from its digest, and runs nothing for a token of another form or a state folder that isn't private", async () => {
 		expect(BINDING.space).toBe(OWNER);
 		expect(BINDING.runtimeId).toMatch(/^rt_[0-9a-f]{32}$/);
@@ -259,14 +298,13 @@ describe("triggers in pim-computer, on", () => {
 		expect(triggersBinding(`pimc_${OWNER}_another-secret`)!.runtimeId).not.toBe(BINDING.runtimeId);
 		expect(triggersBinding("not-a-computer-token")).toBeNull();
 
-		const on = { [TRIGGERS_GATE]: "internal" };
 		const logs: string[] = [];
-		expect(await loadTriggers(on, { token: "not-a-computer-token", stateDir, root: dir, log: (line) => logs.push(line) })).toBeNull();
+		expect(await loadTriggers({ token: "not-a-computer-token", stateDir, root: dir, log: (line) => logs.push(line) })).toBeNull();
 		const elsewhere = path.join(dir, "elsewhere");
 		await fs.mkdir(elsewhere);
 		await fs.mkdir(stateDir);
 		await fs.symlink(elsewhere, path.join(stateDir, "triggers"));
-		expect(await loadTriggers(on, { token: TOKEN, stateDir, root: dir, log: (line) => logs.push(line) })).toBeNull();
+		expect(await loadTriggers({ token: TOKEN, stateDir, root: dir, log: (line) => logs.push(line) })).toBeNull();
 		expect(logs).toHaveLength(2);
 		expect(await fs.readdir(elsewhere)).toEqual([]);
 	});
@@ -507,7 +545,7 @@ describe("triggers in pim-computer, on real children", () => {
 
 	it("stops a stream's process group when the lease ends after the connection drops, kills what is still its own at exit, and signals nothing else", async () => {
 		let bystander: ChildProcess | undefined;
-		const host = await loadTriggers({ [TRIGGERS_GATE]: "internal" }, { token: TOKEN, stateDir, root: dir, log: () => {} });
+		const host = await loadTriggers({ token: TOKEN, stateDir, root: dir, log: () => {} });
 		if (!host) throw new Error("no host");
 		try {
 			bystander = spawn("sleep", ["30"], { stdio: "ignore" });

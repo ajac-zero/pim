@@ -592,6 +592,7 @@ export class TriggerApi {
 			revision: trigger.revision,
 			lifecycle: trigger.lifecycle,
 			health: trigger.health,
+			healthDetail: trigger.healthDetail,
 			agentId: spec.owningAgentId,
 			label: spec.label,
 			instruction: spec.instruction,

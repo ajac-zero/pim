@@ -167,6 +167,7 @@ describe("triggers' API behind the gate", () => {
 			revision: 1,
 			lifecycle: "enabled",
 			health: "unknown",
+			healthDetail: null,
 			agentId: boss,
 			label: "Morning brief",
 			source: { kind: "time", schedule: "cron", expression: "0 9 * * *", timeZone: "Europe/Lisbon", catchUpMs: HOUR },
@@ -183,6 +184,14 @@ describe("triggers' API behind the gate", () => {
 
 		const read = await call(`/triggers/${id}`);
 		expect(read).toMatchObject({ status: 200, etag: '"1"', body: { id, revision: 1 } });
+
+		// The detail a source recorded with its health is read as stored; the store refuses more than 500 characters.
+		await inSpace((pim) => {
+			const store = pim.triggerEngine()!.store;
+			store.setHealth({ id, generation: store.get(id)!.generation, health: "unknown", detail: "x".repeat(500) });
+		});
+		const detailed = (await call(`/triggers/${id}`)).body;
+		expect(detailed).toMatchObject({ health: "unknown", healthDetail: "x".repeat(500) });
 		expect((await call("/triggers")).body.triggers.map((trigger: { id: string }) => trigger.id)).toContain(id);
 
 		// Edits name the revision they mean: none is 428, an old one 409 with the current one.

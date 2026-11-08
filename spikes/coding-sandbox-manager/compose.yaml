@@ -20,7 +20,8 @@ services:
       # Everything else stays at the image default of 0: BUILD, SWARM, SECRETS, PLUGINS,
       # SERVICES, TASKS, NODES, CONFIGS, SYSTEM, AUTH, COMMIT, DISTRIBUTION, EVENTS...
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # DOCKER_SOCKET is the daemon's socket path on the host (rootless or non-default installs).
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
     networks: [control]
 
   sandbox-manager:

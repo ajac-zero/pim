@@ -8,7 +8,13 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { type TranslationKey, useI18n } from "~/components/i18n";
-import { ArrowLeft, Plus, TriangleAlert } from "~/components/icons";
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  Plus,
+  TriangleAlert,
+} from "~/components/icons";
 import { EmptyState, Page } from "~/components/page";
 import { Button } from "~/components/ui/button";
 import {
@@ -310,13 +316,25 @@ export function TriggersPage() {
   };
   const list = useInfiniteQuery(triggersQuery(filters));
   const { data: agents } = useQuery(agentsQuery());
-  const problem = list.error ? triggerProblem(list.error) : null;
-  if (problem?.code === "unavailable") return <Unavailable />;
+  const failure = list.error ? triggerProblem(list.error) : null;
+  if (failure?.code === "unavailable") return <Unavailable />;
+  // A failed refetch keeps the earlier list; only a first load that failed is an error state.
+  const stale = !!list.data && !!failure;
+  const problem = stale ? null : failure;
 
   const loaded = list.data?.pages.flatMap((page) => page.triggers) ?? [];
   const shown = withHealth(loaded, health || undefined);
   const pages = list.data?.pages.length ?? 0;
-  const filtered = !!(lifecycle || health || sourceKind || agentId);
+  const applied = [lifecycle, health, sourceKind, agentId].filter(
+    Boolean,
+  ).length;
+  const filtered = applied > 0;
+  const clearFilters = () => {
+    setLifecycle("");
+    setHealth("");
+    setSourceKind("");
+    setAgentId("");
+  };
 
   return (
     <Page title={t("triggers")} description={t("triggersDescription")}>
@@ -340,15 +358,6 @@ export function TriggersPage() {
           }))}
         />
         <FilterSelect
-          label={t("triggerHealth")}
-          value={health}
-          onChange={setHealth}
-          options={TRIGGER_HEALTHS.map((value) => ({
-            value,
-            label: t(HEALTH_TEXT[value]),
-          }))}
-        />
-        <FilterSelect
           label={t("triggerSource")}
           value={sourceKind}
           onChange={setSourceKind}
@@ -366,7 +375,53 @@ export function TriggersPage() {
             label: agent.name,
           }))}
         />
+        <FilterSelect
+          label={t("triggerHealth")}
+          value={health}
+          onChange={setHealth}
+          options={TRIGGER_HEALTHS.map((value) => ({
+            value,
+            label: t(HEALTH_TEXT[value]),
+          }))}
+        />
       </fieldset>
+      {filtered && (
+        <div className="mb-4 flex items-center gap-3 text-[13px] text-muted-foreground">
+          <span>
+            {t(applied === 1 ? "triggerFiltersOne" : "triggerFiltersCount", {
+              count: applied,
+            })}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={clearFilters}
+          >
+            {t("triggerFiltersClear")}
+          </Button>
+        </div>
+      )}
+      {stale && (
+        <div
+          role="alert"
+          className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-destructive/10 px-4 py-3 text-sm"
+        >
+          <p className="flex items-start gap-2 text-destructive">
+            <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+            {t("triggersStale")}
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={list.isFetching}
+            onClick={() => list.refetch()}
+          >
+            {t("triggersRetry")}
+          </Button>
+        </div>
+      )}
       {health && (
         <p className="mb-4 text-[13px] text-muted-foreground">
           {t("triggerHealthFilterNote")}
@@ -390,10 +445,11 @@ export function TriggersPage() {
           {t("triggersLoading")}
         </p>
       ) : shown.length === 0 ? (
-        <EmptyState
-          icon={<Plus />}
-          text={t(filtered ? "triggersNoneMatch" : "triggersNone")}
-        />
+        filtered ? (
+          <EmptyState icon={<Plus />} text={t("triggersNoneMatch")} />
+        ) : (
+          <NoTriggers />
+        )
       ) : (
         <ul className="divide-y divide-border">
           {shown.map((trigger) => (
@@ -423,6 +479,51 @@ export function TriggersPage() {
           </p>
         ))}
     </Page>
+  );
+}
+
+const EXAMPLE_PROMPTS = [
+  "triggerExample1",
+  "triggerExample2",
+  "triggerExample3",
+] as const;
+
+/** What a person with no triggers sees: what they are, and prompts to ask an agent for one. */
+function NoTriggers() {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState<string | null>(null);
+  return (
+    <section className="flex flex-col gap-3 py-6">
+      <div>
+        <h2 className="text-[15px]">{t("triggersNone")}</h2>
+        <p className="mt-1 text-[13px] text-muted-foreground">
+          {t("triggersNoneHint")}
+        </p>
+      </div>
+      <ul className="flex flex-col gap-2">
+        {EXAMPLE_PROMPTS.map((key) => (
+          <li
+            key={key}
+            className="flex items-center justify-between gap-3 rounded-xl border px-3 py-2"
+          >
+            <span className="min-w-0 text-[14px]">{t(key)}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="shrink-0"
+              onClick={async () => {
+                await navigator.clipboard.writeText(t(key));
+                setCopied(key);
+              }}
+            >
+              {copied === key ? <Check /> : <Copy />}
+              {t(copied === key ? "copied" : "copy")}
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

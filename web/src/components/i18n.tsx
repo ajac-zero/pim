@@ -1261,10 +1261,9 @@ const translations = {
     triggerWouldFireAt: "Not on yet. First run would be {date}.",
     triggerNextPaused:
       "Paused. Will resume at the next scheduled time when turned on.",
-    triggerMissedAt: "Missed {time}",
     triggerNextNone: "No time left to fire",
     triggerNextDeleted: "Deleted: it won't fire",
-    triggerNextEnded: "Ended {date}.",
+    triggerNextEnded: "Ended.",
     triggerNextLegacySchedule: "Runs through its schedule, not as a trigger",
     triggerNextLegacyWatch:
       "Runs through its connector watch, not as a trigger",
@@ -2760,10 +2759,9 @@ const translations = {
       "Aún no está activo. La primera ejecución sería el {date}.",
     triggerNextPaused:
       "En pausa. Se reanudará a la próxima hora programada al activarlo.",
-    triggerMissedAt: "Perdido: {time}",
     triggerNextNone: "No le queda ninguna hora para dispararse",
     triggerNextDeleted: "Eliminado: no se disparará",
-    triggerNextEnded: "Terminado: {date}.",
+    triggerNextEnded: "Terminado.",
     triggerNextLegacySchedule: "Lo ejecuta su programación, no como disparador",
     triggerNextLegacyWatch:
       "Lo ejecuta su vigilancia de conector, no como disparador",

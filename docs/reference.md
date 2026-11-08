@@ -133,6 +133,8 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 
 A variable Pim can't read counts as its default, except a limit or a cap on accounts, which counts as 0, so a typo never lifts it. Settings → Deployment says which and why.
 
+Triggers are early and off everywhere. To give them to chosen people only, set two variables, which Settings → Deployment doesn't show: `PIM_TRIGGERS_ENGINE` to `internal`, and `PIM_TRIGGERS_ENGINE_SPACES` to their owner ids, comma-separated (`o_…`, each person's `ownerId` in `GET /api/account`; the admin sees everyone's in `GET /api/admin/accounts`). Each listed space gets triggers when it next starts, which saving the variables makes happen; taking an id off the list, or unsetting either variable, takes them away again and keeps what they recorded. Guests never get them. Leave `PIM_TRIGGERS_COMPUTER`, `PIM_TRIGGERS_MIGRATION` and `PIM_TRIGGERS_CUTOVER` unset. See [the allowlist](triggers.md#in-pim-behind-a-gate).
+
 Attach your domain in the dashboard too (Workers & Pages → `pim` → Settings → Domains & Routes): deploys leave it alone.
 
 `ratelimits` in `wrangler.jsonc` slow down sign-in attempts from one address and API requests from one person; leave them out and nothing is slowed down. Their namespace IDs must be unique in your Cloudflare account.

@@ -6,7 +6,7 @@ import { guestRequest } from "../src/accounts";
 import type { Pim } from "../src/pim";
 import { API_TABLES } from "../src/triggers/api";
 import { COMPUTER_TRIGGERS_VARIABLE } from "../src/triggers/computer";
-import { ENGINE_VARIABLE, engineAllowed } from "../src/triggers/engine";
+import { ENGINE_KEY, ENGINE_LISTED_KEY, ENGINE_SPACES_VARIABLE, ENGINE_VARIABLE, engineAllowed } from "../src/triggers/engine";
 import { MIGRATION_VARIABLE } from "../src/triggers/migration";
 import { TRIGGER_TOOLS, TRIGGERS_EXTENSION } from "../src/triggers/tools";
 import { apiUrl, messagesOf, OWNER, post, ROOT, say, settled, TOKEN, toolUse } from "./helpers";
@@ -574,5 +574,119 @@ describe("triggers' API behind the gate", () => {
 		const tools = await offeredTools();
 		for (const name of TRIGGER_TOOLS) expect(tools).not.toContain(name);
 		expect(await inSpace((pim) => pim.registry.snapshot().extension(TRIGGERS_EXTENSION))).toBeUndefined();
+	});
+});
+
+describe("triggers' allowlist of spaces", () => {
+	/** Starts the space again as a deploy that sets the gate and the allowlist so does (undefined: unset); the variables stay so until changed again. */
+	const startWith = (gate: string | undefined, spaces: string | undefined) =>
+		inSpace(async (pim) => {
+			const own = ownEnv(pim);
+			for (const [name, value] of [
+				[ENGINE_VARIABLE, gate],
+				[ENGINE_SPACES_VARIABLE, spaces],
+			] as const) {
+				if (value === undefined) delete own[name];
+				else own[name] = value;
+			}
+			await pim.onStart();
+		});
+	/** The space's opt-in and whether the allowlist made it, as its meta holds them. */
+	const optedIn = () => inSpace((pim) => ({ engine: pim.store.meta(ENGINE_KEY) ?? null, listed: pim.store.meta(ENGINE_LISTED_KEY) ?? null }));
+	const OFF = { engine: null, listed: null };
+	const ON = { engine: "on", listed: "on" };
+	const neutral = async () => {
+		const answered = await call("/triggers");
+		return { status: answered.status, text: answered.text };
+	};
+	const makeTrigger = async () => {
+		const made = await call("/triggers", { method: "POST", body: { label: "Listed", instruction: "Write my brief.", source: cron(), enabled: true } });
+		expect(made.status).toBe(201);
+		return made.body.id as string;
+	};
+
+	afterAll(() =>
+		inSpace((pim) => {
+			ownEnv(pim)[ENGINE_VARIABLE] = "internal";
+			delete ownEnv(pim)[ENGINE_SPACES_VARIABLE];
+		}),
+	);
+
+	it("changes nothing where it is unset, empty, names someone else or nearly names this space, or the gate is off", async () => {
+		expect(await optedIn()).toEqual(OFF);
+		for (const spaces of [undefined, "", " , ", "o_someoneelse", `${OWNER}x`, OWNER.slice(0, -1), OWNER.toUpperCase(), `${OWNER};o_someoneelse`]) {
+			await startWith("internal", spaces);
+			expect([spaces, await neutral(), await optedIn()]).toEqual([spaces, NOT_FOUND, OFF]);
+		}
+		// Listed, but the deployment's gate is off: nothing either.
+		for (const gate of [undefined, "on"]) {
+			await startWith(gate, OWNER);
+			expect([gate, await neutral(), await optedIn()]).toEqual([gate, NOT_FOUND, OFF]);
+		}
+		// A space internal code opted in, and the list never did, is left as it is.
+		await startWith("internal", undefined);
+		expect(await inSpace((pim) => pim.enableTriggerEngine())).toBe(true);
+		await startWith("internal", undefined);
+		expect((await call("/triggers")).status).toBe(200);
+		expect(await optedIn()).toEqual({ engine: "on", listed: null });
+		await inSpace((pim) => pim.disableTriggerEngine());
+	});
+
+	it("never opts a guest's space in, even listed", async () => {
+		await inSpace((pim) => pim.store.setMeta("guest_bot", JSON.stringify({ bot: "b_0000000000000000", agent: pim.agents.majordomo().id, sharedAt: 1, owner: "o_admin", tools: [] })));
+		try {
+			await startWith("internal", OWNER);
+			expect(await neutral()).toEqual(NOT_FOUND);
+			expect(await optedIn()).toEqual(OFF);
+		} finally {
+			await inSpace((pim) => pim.store.deleteMeta("guest_bot"));
+		}
+	});
+
+	it("opts the listed space in as it starts, with its routes and tools, and only once", async () => {
+		await startWith("internal", ` o_someoneelse ,${OWNER} `);
+		expect(await optedIn()).toEqual(ON);
+		expect((await call("/triggers")).status).toBe(200);
+		const tools = await offeredTools();
+		for (const name of TRIGGER_TOOLS) expect(tools).toContain(name);
+		const id = await makeTrigger();
+		// Starting again changes nothing.
+		await startWith("internal", OWNER);
+		expect(await optedIn()).toEqual(ON);
+		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: { revision: 1, lifecycle: "enabled" } });
+	});
+
+	it("takes the engine away, keeping everything, when the gate goes or the space leaves the list", async () => {
+		await startWith("internal", OWNER);
+		const id = await makeTrigger();
+		const gone = async () => {
+			expect(await neutral()).toEqual(NOT_FOUND);
+			const tools = await offeredTools();
+			for (const name of TRIGGER_TOOLS) expect(tools).not.toContain(name);
+			expect(await inSpace((pim) => pim.exportData())).toContain(id);
+		};
+
+		// The gate off: no engine, while the space stays opted in for when it is back.
+		await startWith(undefined, OWNER);
+		await gone();
+		expect(await optedIn()).toEqual(ON);
+		await startWith("internal", OWNER);
+		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: { revision: 1, lifecycle: "enabled" } });
+
+		// Off the list, with the gate on: turned off at the next start.
+		await startWith("internal", "o_someoneelse");
+		await gone();
+		expect(await optedIn()).toEqual(OFF);
+		expect(await inSpace((pim) => pim.registry.snapshot().extension(TRIGGERS_EXTENSION))).toBeUndefined();
+		// Listed again, it has what it had.
+		await startWith("internal", OWNER);
+		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: { revision: 1, lifecycle: "enabled" } });
+
+		// Off the list while the gate is off: nothing changes until the gate is back, and then it is turned off.
+		await startWith(undefined, undefined);
+		expect(await optedIn()).toEqual(ON);
+		await startWith("internal", undefined);
+		await gone();
+		expect(await optedIn()).toEqual(OFF);
 	});
 });

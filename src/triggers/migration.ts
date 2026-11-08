@@ -72,6 +72,7 @@ import type { Schedule } from "agents";
 import type { ScheduledTaskPayload } from "../extensions/services";
 import type { AppWatch } from "../store";
 import type { ConnectorSubscription } from "./connector";
+import { DELIVERY_TTL_MS } from "./coordinator";
 import { type TriggerSpec, TRIGGER_DEFAULTS, TRIGGER_LIMITS, cronFields, parseTriggerSpec } from "./spec";
 import type { Refusal, TriggerStore } from "./store";
 import { isScheduledFiring, previewFirings } from "./time";
@@ -155,8 +156,12 @@ export const MIGRATION_PRIVATE_TABLES = ["pim_trigger_legacy_events"] as const;
 /** Receipts kept per item: the newest; older ones go. */
 const RECEIPTS_KEPT = 200;
 
-/** How long a cut-over watch's event data is kept at most, if its run is never submitted. */
-export const LEGACY_EVENT_DATA_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a cut-over watch's event data is kept at most, if its run is
+ * never submitted: as long as the coordinator may still submit that run
+ * (`DELIVERY_TTL_MS` from admission, 24 h), and not a moment longer.
+ */
+export const LEGACY_EVENT_DATA_TTL_MS = DELIVERY_TTL_MS;
 
 /** Legacy event data kept in the run's text, as app-events.ts clips it. */
 const LEGACY_EVENT_DATA_CHARS = 8_000;
@@ -702,7 +707,10 @@ export function strictVerdict(sql: SqlStorage, watchId: string): StrictVerdict {
  * What a cut-over watch's events carried, from their admission until their
  * runs are submitted: kept in the admission's transaction, read by the
  * host when it submits, deleted once the submission is accepted, and swept
- * after `LEGACY_EVENT_DATA_TTL_MS` whatever happened. The data is the
+ * once `LEGACY_EVENT_DATA_TTL_MS` has passed whatever happened. It is
+ * readable up to and including the last instant its run may be submitted
+ * (the coordinator expires a run only once `now > deliverBy`), so a run
+ * that is submitted at all is told what its event carried. The data is the
  * event's `data` as JSON, as the watch's run would have been told it.
  */
 export class LegacyEventData {
@@ -712,7 +720,8 @@ export class LegacyEventData {
 		this.#sql = sql;
 	}
 
-	keep(input: { occurrenceId: string; triggerId: string; eventId: string; data: string; now: number }): void {
+	/** Keeps an event's data from its admission (the occurrence's `createdAt`, which its run's `deliverBy` counts from). */
+	keep(input: { occurrenceId: string; triggerId: string; eventId: string; data: string; admittedAt: number }): void {
 		this.#sql.exec(EVENTS_SCHEMA);
 		this.#sql.exec(
 			"INSERT OR REPLACE INTO pim_trigger_legacy_events (occurrence_id, trigger_id, event_id, data, kept_until) VALUES (?, ?, ?, ?, ?)",
@@ -720,14 +729,14 @@ export class LegacyEventData {
 			input.triggerId,
 			input.eventId,
 			input.data,
-			input.now + LEGACY_EVENT_DATA_TTL_MS,
+			input.admittedAt + LEGACY_EVENT_DATA_TTL_MS,
 		);
 	}
 
 	/** The data kept for an event of a trigger, or null when none is (never kept, swept, or already given to its run). */
 	read(triggerId: string, eventId: string, now: number): string | null {
 		if (!hasTable(this.#sql, "pim_trigger_legacy_events")) return null;
-		const [row] = this.#sql.exec("SELECT data FROM pim_trigger_legacy_events WHERE trigger_id = ? AND event_id = ? AND kept_until > ? ORDER BY rowid DESC LIMIT 1", triggerId, eventId, now).toArray();
+		const [row] = this.#sql.exec("SELECT data FROM pim_trigger_legacy_events WHERE trigger_id = ? AND event_id = ? AND kept_until >= ? ORDER BY rowid DESC LIMIT 1", triggerId, eventId, now).toArray();
 		return row ? String(row.data) : null;
 	}
 
@@ -736,10 +745,23 @@ export class LegacyEventData {
 		this.#sql.exec("DELETE FROM pim_trigger_legacy_events WHERE trigger_id = ? AND event_id = ?", triggerId, eventId);
 	}
 
-	/** Deletes what was kept past its time; the count. */
+	/** Deletes what was kept past its time, which no run can be submitted with any more; the count. */
 	sweep(now: number): number {
 		if (!hasTable(this.#sql, "pim_trigger_legacy_events")) return 0;
-		return this.#sql.exec("DELETE FROM pim_trigger_legacy_events WHERE kept_until <= ?", now).rowsWritten;
+		return this.#sql.exec("DELETE FROM pim_trigger_legacy_events WHERE kept_until < ?", now).rowsWritten;
+	}
+
+	/** The first instant `sweep` would delete something, for the wake to come then; null when nothing is kept. */
+	nextSweepAt(): number | null {
+		if (!hasTable(this.#sql, "pim_trigger_legacy_events")) return null;
+		const [row] = this.#sql.exec("SELECT MIN(kept_until) AS at FROM pim_trigger_legacy_events").toArray();
+		return row?.at === null || row?.at === undefined ? null : Number(row.at) + 1;
+	}
+
+	/** Deletes everything kept, for when nothing will hand those events on: the space's triggers are turned off. */
+	clear(): void {
+		if (!hasTable(this.#sql, "pim_trigger_legacy_events")) return;
+		this.#sql.exec("DELETE FROM pim_trigger_legacy_events");
 	}
 }
 

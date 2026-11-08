@@ -2202,6 +2202,8 @@ export class Pim extends DurableAgent<Env> {
 		// Items a trigger took over go back to their schedules and watches first, since nothing would deliver them otherwise; a firing the trigger admitted and hasn't handed on waits until it owns the item again.
 		const engine = this.triggerEngine();
 		if (engine && migrationRecords(this.ctx.storage.sql).some((record) => record.owner === "trigger")) this.#triggerMigration(engine).cutback(undefined, { force: true });
+		// Nothing hands an event on while triggers are off, and no wake sweeps: what was kept of cut-over watches' events goes now. A run handed on later is told it isn't kept.
+		new LegacyEventData(this.ctx.storage.sql).clear();
 		this.store.deleteMeta(ENGINE_KEY);
 		this.#triggerEngine = undefined;
 		this.#computerTriggersKept?.stop();
@@ -2377,7 +2379,7 @@ export class Pim extends DurableAgent<Env> {
 				connector: () => "connected",
 			},
 			// The event's data, as the watch's run would have read it, until the trigger's run has it.
-			kept: (admitted) => new LegacyEventData(sql).keep({ ...admitted, data: JSON.stringify(admitted.data, null, 2), now: this.triggerClock() }),
+			kept: (admitted) => new LegacyEventData(sql).keep({ ...admitted, data: JSON.stringify(admitted.data, null, 2) }),
 		});
 		const outcome = await ingress.receive({ owner: this.name, key: watchId }, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
 		if (outcome.disposition === "accepted") {
@@ -2550,8 +2552,9 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	wakeTriggers(): Promise<void> {
 		const next = this.#triggerWake.then(async () => {
-			// The coordinator's next work, or renewing the computer's lease on its triggers, whichever comes first.
-			const due = [this.triggerEngine()?.coordinator.nextWakeAt() ?? null, this.#computerTriggers()?.renewAt() ?? null].filter((at) => at !== null);
+			// The coordinator's next work, renewing the computer's lease on its triggers, or sweeping what cut-over watches' events carried, whichever comes first.
+			const engine = this.triggerEngine();
+			const due = [engine?.coordinator.nextWakeAt() ?? null, this.#computerTriggers()?.renewAt() ?? null, engine ? new LegacyEventData(this.ctx.storage.sql).nextSweepAt() : null].filter((at) => at !== null);
 			const wake = due.length === 0 ? null : Math.min(...due);
 			const at = wake === null ? null : Math.ceil((Date.now() + Math.max(1_000, wake - this.triggerClock())) / 1000);
 			const wakes = (await this.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK);

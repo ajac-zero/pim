@@ -1,5 +1,11 @@
-import { queryOptions } from "@tanstack/react-query";
-import { type ArtifactFrom, admin, pim } from "~/lib/pim-api";
+import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
+import {
+  type ArtifactFrom,
+  admin,
+  pim,
+  type TriggerFilters,
+} from "~/lib/pim-api";
+import { triggersAvailable } from "~/lib/triggers";
 
 /** Pim's lists. Live changes arrive on the socket and invalidate these. */
 
@@ -252,5 +258,46 @@ export const personQuery = (username: string) =>
   queryOptions({
     queryKey: ["people", username],
     queryFn: () => pim.person(username),
+    retry: false,
+  });
+
+/**
+ * Whether this space has triggers: false where the routes answer as unknown
+ * paths (the gate is off) or for a guest. Nothing about triggers shows until
+ * this is true.
+ */
+export const triggersAvailableQuery = () =>
+  queryOptions({
+    queryKey: ["triggers", "available"],
+    queryFn: triggersAvailable,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+
+/** One trigger. A missing one answers 404: no retries. */
+export const triggerQuery = (id: string) =>
+  queryOptions({
+    queryKey: ["triggers", "one", id],
+    queryFn: () => pim.trigger(id),
+    retry: false,
+  });
+
+/** Triggers by the API's filters, a page at a time, oldest first. */
+export const triggersQuery = (filters: TriggerFilters) =>
+  infiniteQueryOptions({
+    queryKey: ["triggers", "list", filters],
+    queryFn: ({ pageParam }) => pim.triggers(filters, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    retry: false,
+  });
+
+/** A trigger's runs, a page at a time, newest first. */
+export const triggerRunsQuery = (id: string) =>
+  infiniteQueryOptions({
+    queryKey: ["triggers", "runs", id],
+    queryFn: ({ pageParam }) => pim.triggerRuns(id, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
     retry: false,
   });

@@ -1010,6 +1010,259 @@ export type PimSchedule = {
   agent?: string;
 };
 
+/*
+ * Triggers, as the API in docs/triggers.md ("The API") gives them. The
+ * routes exist only where a space's triggers are on; elsewhere they answer
+ * 404 as any unknown path does.
+ */
+
+export const TRIGGER_LIFECYCLES = [
+  "draft",
+  "enabled",
+  "paused",
+  "ended",
+  "deleted",
+] as const;
+export type TriggerLifecycle = (typeof TRIGGER_LIFECYCLES)[number];
+
+export const TRIGGER_HEALTHS = [
+  "unknown",
+  "healthy",
+  "waiting_computer",
+  "reconnecting",
+  "gap",
+  "auth_required",
+  "budget_blocked",
+  "configuration_error",
+] as const;
+export type TriggerHealth = (typeof TRIGGER_HEALTHS)[number];
+
+export const TRIGGER_SOURCE_KINDS = [
+  "time",
+  "connector_event",
+  "poll",
+  "stream",
+  "process",
+  "file",
+] as const;
+export type TriggerSourceKind = (typeof TRIGGER_SOURCE_KINDS)[number];
+
+/** What a trigger watches. Times are milliseconds since 1970. */
+export type TriggerSource =
+  | { kind: "time"; schedule: "once"; at: number; maxLatenessMs: number }
+  | {
+      kind: "time";
+      schedule: "cron";
+      expression: string;
+      timeZone: string;
+      catchUpMs: number;
+    }
+  | {
+      kind: "time";
+      schedule: "interval";
+      everyMs: number;
+      anchorAt: number;
+      catchUpMs: number;
+    }
+  | {
+      kind: "connector_event";
+      connectorId: string;
+      event: string;
+      arguments: Record<string, unknown>;
+    }
+  | {
+      kind: "poll";
+      command: string;
+      cwd: string | null;
+      intervalMs: number;
+      deadlineMs: number;
+    }
+  | { kind: "stream"; command: string; cwd: string | null }
+  | { kind: "process"; handle: string; expiresAt: number }
+  | {
+      kind: "file";
+      path: string;
+      events: ("created" | "modified" | "deleted")[];
+      recursive: boolean;
+    };
+
+/** A condition's expression: JSON, never code (docs/triggers.md, "Conditions"). */
+export type TriggerExpression =
+  | {
+      op: "compare";
+      path: string[];
+      cmp: "eq" | "ne" | "lt" | "lte" | "gt" | "gte";
+      value: string | number | boolean;
+    }
+  | { op: "exists"; path: string[] }
+  | { op: "changed"; path: string[] }
+  | { op: "all" | "any"; of: TriggerExpression[] }
+  | { op: "not"; of: TriggerExpression }
+  | { op: "stable_for"; ms: number; of: TriggerExpression }
+  | {
+      op: "hysteresis";
+      path: string[];
+      direction: "rising" | "falling";
+      enter: number;
+      exit: number;
+    };
+
+export type TriggerCondition = {
+  when: TriggerExpression;
+  staleAfterMs?: number | null;
+};
+
+export type TriggerDestination =
+  | { type: "new_chat" }
+  | { type: "existing_chat"; chatId: string };
+
+export type TriggerSourceStatus = "available" | "draft_only" | "unavailable";
+
+export type TriggerGrantState =
+  | "not_required"
+  | "missing"
+  | "pending_approval"
+  | "current"
+  | "not_current"
+  | "unavailable";
+
+export type Trigger = {
+  id: string;
+  /** The spec's revision: lifecycle and health change without it. */
+  revision: number;
+  /** What the person wants. */
+  lifecycle: TriggerLifecycle;
+  /** How the source is doing, apart from the lifecycle. */
+  health: TriggerHealth;
+  agentId: string;
+  label: string;
+  instruction: string;
+  source: TriggerSource;
+  condition: TriggerCondition | null;
+  destination: TriggerDestination;
+  origin: { type: "api" } | { type: "chat"; chatId: string };
+  policies: {
+    lateness:
+      | { maxLatenessMs: number; missed: "recorded" }
+      | { catchUpMs: number; coalesce: "latest_due" }
+      | null;
+    maxPendingEvents: number | null;
+    pendingSnapshots: number | null;
+    rawSamples: false;
+    runsAtOnce: number;
+    deliveryTtlMs: number;
+    replayHorizonMs: number | null;
+    staleAfterMs: number | null;
+  };
+  /** For time sources: the next firing after now, and when the engine looks next (only while enabled). */
+  schedule: { nextFiringAt: number | null; nextCheckAt: number | null } | null;
+  capability: {
+    status: TriggerSourceStatus;
+    delivers: boolean;
+    reason: string | null;
+  };
+  grant: { required: boolean; state: TriggerGrantState };
+  /** A draft shadow of a schedule or connector watch that still owns it. */
+  migration: {
+    kind: "schedule" | "watch";
+    legacyId: string;
+    owner: "legacy" | "trigger";
+    phase: string;
+    enableable: boolean;
+  } | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export const TRIGGER_RUN_STATES = [
+  "pending",
+  "preparing",
+  "submitting",
+  "accepted",
+  "queued",
+  "running",
+  "waiting_approval",
+  "completed",
+  "failed",
+  "cancelled",
+  "not_submitted",
+  "missed",
+  "superseded",
+  "outcome_unknown",
+] as const;
+export type TriggerRunState = (typeof TRIGGER_RUN_STATES)[number];
+
+/** One occurrence of a trigger and what came of it, as far as Pim knows. */
+export type TriggerRun = {
+  id: string;
+  triggerId: string;
+  revision: number;
+  state: TriggerRunState;
+  /** Whether `state` is final and known. */
+  outcomeKnown: boolean;
+  occurrenceStatus: string;
+  phase: string | null;
+  dueAt: number;
+  /** Why it fired: times, and for events only which fields were there. */
+  evidence:
+    | { reason: "time"; scheduledFor: number; older?: unknown }
+    | {
+        reason: string;
+        truth: string;
+        observedAt: number;
+        fields: { path: string[]; present: boolean }[];
+      };
+  /** The chat it was pinned to, once pinned. */
+  chatId: string | null;
+  deliverBy: number | null;
+  submittedAt: number | null;
+  acceptedAt: number | null;
+  endedAt: number | null;
+  deferrals: number;
+  unknownAnswers: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** A dry run: what a trigger would do, computed without writing or running anything. */
+export type TriggerDryRun = {
+  dryRun: true;
+  valid: true;
+  sourceKind: TriggerSourceKind;
+  capability: Trigger["capability"];
+  grant: Trigger["grant"];
+  policies: Trigger["policies"];
+  blockers: string[];
+  id?: string;
+  revision?: number;
+  lifecycle?: TriggerLifecycle;
+  firings?: { at: number; timeZone: string; local: string; offset: string }[];
+  skippedCount?: number;
+  exhausted?: boolean;
+  evaluations?: {
+    index: number;
+    truth: "true" | "false" | "unknown";
+    fires: boolean;
+    stale: boolean;
+  }[];
+};
+
+/** What making a trigger takes; `enabled` is left false, so it is a draft. */
+export type TriggerInput = {
+  label: string;
+  instruction: string;
+  source: TriggerSource;
+  condition?: TriggerCondition | null;
+  destination: TriggerDestination;
+  agentId?: string;
+};
+
+export type TriggerFilters = {
+  lifecycle?: TriggerLifecycle;
+  agentId?: string;
+  sourceKind?: TriggerSourceKind;
+};
+
 export type ModelInfo = {
   provider: string;
   id: string;
@@ -1121,6 +1374,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** The refusal as Pim sent it, such as a trigger's `{ error, code, field }`. */
+    readonly body: Record<string, unknown> | null = null,
   ) {
     super(message);
   }
@@ -1171,6 +1426,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(
       response.status,
       body?.error ?? `Pim answered ${response.status}`,
+      body as Record<string, unknown> | null,
     );
   }
   return body as T;
@@ -1574,6 +1830,64 @@ export const pim = {
     call<{ deleted: boolean }>(`/schedules/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+  /** A page of triggers, oldest first; 404 where the space's triggers are off. */
+  triggers: (filters: TriggerFilters = {}, cursor?: string, limit = 20) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    for (const [name, value] of Object.entries(filters)) {
+      if (value) query.set(name, value);
+    }
+    if (cursor) query.set("cursor", cursor);
+    return call<{ triggers: Trigger[]; nextCursor: string | null }>(
+      `/triggers?${query}`,
+    );
+  },
+  trigger: (id: string) => call<Trigger>(`/triggers/${encodeURIComponent(id)}`),
+  /** Makes a draft; the key makes a retried request give the same trigger. */
+  createTrigger: (input: TriggerInput, idempotencyKey: string) =>
+    call<Trigger>("/triggers", {
+      method: "POST",
+      headers: { "idempotency-key": idempotencyKey },
+      body: JSON.stringify(input),
+    }),
+  /** Changes a trigger only if it is still at the revision the person reviewed. */
+  updateTrigger: (
+    id: string,
+    revision: number,
+    change: Partial<Omit<TriggerInput, "agentId">>,
+  ) =>
+    call<Trigger>(`/triggers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "if-match": `"${revision}"` },
+      body: JSON.stringify(change),
+    }),
+  pauseTrigger: (id: string, revision: number) =>
+    call<Trigger>(`/triggers/${encodeURIComponent(id)}/pause`, {
+      method: "POST",
+      headers: { "if-match": `"${revision}"` },
+    }),
+  resumeTrigger: (id: string, revision: number) =>
+    call<Trigger>(`/triggers/${encodeURIComponent(id)}/resume`, {
+      method: "POST",
+      headers: { "if-match": `"${revision}"` },
+    }),
+  deleteTrigger: (id: string, revision: number) =>
+    call<{ deleted: true; trigger: Trigger }>(
+      `/triggers/${encodeURIComponent(id)}`,
+      { method: "DELETE", headers: { "if-match": `"${revision}"` } },
+    ),
+  /** A dry run: writes nothing, starts no agent and runs no command. */
+  testTrigger: (id: string) =>
+    call<TriggerDryRun>(`/triggers/${encodeURIComponent(id)}/test`, {
+      method: "POST",
+      body: JSON.stringify({ count: 5 }),
+    }),
+  triggerRuns: (id: string, cursor?: string, limit = 20) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return call<{ runs: TriggerRun[]; nextCursor: string | null }>(
+      `/triggers/${encodeURIComponent(id)}/runs?${query}`,
+    );
+  },
   pushKey: () =>
     call<{ publicKey: string }>("/push/key").then((body) => body.publicKey),
   subscribePush: (subscription: {

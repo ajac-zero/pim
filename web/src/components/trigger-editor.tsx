@@ -10,9 +10,9 @@ import { useI18n } from "~/components/i18n";
 import {
   ComputerDisclosure,
   ConditionText,
+  NextAtText,
   ObservedText,
   ProblemNotice,
-  SourceText,
   WhenText,
 } from "~/components/triggers";
 import { Button } from "~/components/ui/button";
@@ -21,6 +21,7 @@ import {
   pim,
   type Session,
   type Trigger,
+  type TriggerExpression,
   type TriggerInput,
 } from "~/lib/pim-api";
 import {
@@ -531,12 +532,49 @@ export function TriggerSummary({
   /** The existing chat it delivers to, by title; null for a new chat each time. */
   chat: string | null;
 }) {
+  // When only needs the schedule: a poll's interval reads before its command is typed.
+  const when = sourceOf(
+    form.kind === "poll" && !form.command.trim()
+      ? { ...form, command: "-" }
+      : form,
+  );
+  const read = sourceOf(form);
+  return (
+    <SummaryCard
+      kind={form.kind}
+      source={"source" in read ? read.source : null}
+      when={"source" in when ? when.source : null}
+      instruction={form.instruction.trim()}
+      condition={form.kind === "time" ? null : conditionOf(form)}
+      agent={agent}
+      chat={chat}
+    />
+  );
+}
+
+/** The When, Do and Observe lines, for the form as it fills in and for the review. */
+function SummaryCard({
+  kind,
+  source,
+  when = source,
+  instruction,
+  condition,
+  agent,
+  chat,
+}: {
+  kind: TriggerForm["kind"];
+  /** Null until the source is complete. */
+  source: Trigger["source"] | null;
+  /** What When reads from; the source, unless the schedule alone is already usable. */
+  when?: Trigger["source"] | null;
+  instruction: string;
+  condition: { when: TriggerExpression } | null;
+  agent: string;
+  /** The existing chat it delivers to, by title; null for a new chat each time. */
+  chat: string | null;
+}) {
   const i18n = useI18n();
   const { t } = i18n;
-  const instruction = form.instruction.trim();
-  const read = sourceOf(form);
-  const source = "source" in read ? read.source : null;
-  const condition = form.kind === "time" ? null : conditionOf(form);
   const notSet = (
     <span className="text-muted-foreground">{t("triggerSummaryNotSet")}</span>
   );
@@ -550,7 +588,12 @@ export function TriggerSummary({
       </h2>
       <dl className="mt-1 divide-y divide-border">
         <ReviewRow label={t("triggerSummaryWhen")}>
-          {source ? <WhenText source={source} /> : notSet}
+          {when ? <WhenText source={when} /> : notSet}
+          {when?.kind === "time" && when.schedule === "once" && (
+            <span className="block text-muted-foreground text-sm">
+              <NextAtText at={when.at} />
+            </span>
+          )}
         </ReviewRow>
         <ReviewRow label={t("triggerSummaryDo")}>
           <span className="whitespace-pre-wrap">
@@ -567,7 +610,7 @@ export function TriggerSummary({
         <ReviewRow label={t("triggerSummaryObserve")}>
           {source ? (
             <ObservedText source={source} />
-          ) : form.kind === "time" ? (
+          ) : kind === "time" ? (
             t("triggerObserveNothing")
           ) : (
             notSet
@@ -588,7 +631,6 @@ export function TriggerSummary({
   );
 }
 
-/** The fields of the chosen kind of source, and what the person should know of it. */
 export function SourceFields({
   form,
   set,
@@ -954,7 +996,7 @@ function ConditionFields({
   );
 }
 
-/** A trigger as it would be saved, in words, with what the person should know before saving it. */
+/** A trigger as it would be saved: its name, what it will do in words, and what the person should know before saving it. */
 export function TriggerReview({
   input,
   agent,
@@ -969,27 +1011,17 @@ export function TriggerReview({
   const kind = input.source.kind;
   return (
     <div className="flex flex-col gap-4">
-      <dl className="divide-y divide-border">
+      <dl>
         <ReviewRow label={t("triggerLabel")}>{input.label}</ReviewRow>
-        <ReviewRow label={t("triggerInstruction")}>
-          <span className="whitespace-pre-wrap">{input.instruction}</span>
-        </ReviewRow>
-        <ReviewRow label={t("triggerAgent")}>{agent}</ReviewRow>
-        <ReviewRow label={t("triggerDestination")}>
-          {chat ?? t("triggerNewChatEachTime")}
-        </ReviewRow>
-        <ReviewRow label={t("triggerSource")}>
-          <span className="block text-[13px] text-muted-foreground">
-            {t(SOURCE_TEXT[kind])}
-          </span>
-          <SourceText source={input.source} />
-        </ReviewRow>
-        {input.condition && (
-          <ReviewRow label={t("triggerCondition")}>
-            <ConditionText expression={input.condition.when} />
-          </ReviewRow>
-        )}
       </dl>
+      <SummaryCard
+        kind={kind}
+        source={input.source}
+        instruction={input.instruction}
+        condition={input.condition ?? null}
+        agent={agent}
+        chat={chat}
+      />
       {kind === "connector_event" && (
         <p role="note" className="rounded-xl bg-muted px-4 py-3 text-sm">
           {t("triggerConnectorDraftOnly")}

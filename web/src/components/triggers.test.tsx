@@ -1143,8 +1143,11 @@ describe("the editor", () => {
     );
     expect(text).toContain("Build watcher");
     expect(text).toContain("Tell me when the build breaks.");
-    expect(text).toContain("A new chat each time");
-    expect(text).toContain("Runs this command every 5 minutes:");
+    expect(text).toContain("Result: a new chat each time");
+    expect(text).toContain("WhenEvery 5 minutes");
+    expect(text).toContain("What this trigger will do");
+    expect(text).not.toContain("Source");
+    expect(text).toContain("What make check reports each time it runs");
     expect(text).toContain("They aren't sandboxed.");
     expect(text).toContain("Its instruction is fixed");
     const mail = textOf(
@@ -1153,6 +1156,27 @@ describe("the editor", () => {
       )),
     );
     expect(mail).toContain("can be saved only as drafts");
+    const once = textOf(
+      await render(() => (
+        <TriggerReview
+          input={{
+            ...poll,
+            source: {
+              kind: "time",
+              schedule: "once",
+              at: Date.UTC(2031, 0, 5, 9),
+              maxLatenessMs: 60_000,
+            },
+            condition: undefined,
+          }}
+          agent="Ada"
+          chat={null}
+        />
+      )),
+    );
+    expect(once).toContain("WhenOnce, at");
+    expect(once).toContain("Next at Jan 5, 2031, 9:00 AM UTC");
+    expect(once).toContain("ObserveNothing to watch");
     expect(mail).not.toContain("SECRET");
   });
 
@@ -1217,8 +1241,16 @@ describe("the editor", () => {
         "ObserveWhat make check reports each time it runs " +
         "Only when the command fails (exits with an error).",
     );
-    expect(await summary({ ...poll, command: " " })).toContain(
+    // A poll's interval reads before its command is typed; Observe still waits for it.
+    const quiet = await summary({ ...poll, command: " " });
+    expect(quiet).toContain("WhenEvery 5 minutesDo");
+    expect(quiet).toContain("ObserveNot set yet");
+    expect(await summary({ ...poll, command: " ", pollMinutes: "" })).toContain(
       "WhenNot set yetDo",
+    );
+    // Sixty minutes is an hour, said once, the way the review says it.
+    expect(await summary({ ...time, everyMinutes: "60" })).toContain(
+      "WhenEvery 1 hourDo",
     );
     expect(
       await summary({

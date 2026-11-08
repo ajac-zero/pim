@@ -516,6 +516,23 @@ describe("triggers' API where triggers are on", () => {
 		await call(`/triggers/${id}`, { method: "DELETE" });
 	});
 
+	it("declares a condition as an object, and takes one written out as JSON text but refuses other text", async () => {
+		const schemas = await inSpace((pim) => Object.fromEntries(pim.registry.snapshot().extension(TRIGGERS_EXTENSION)!.tools!.map((candidate) => [candidate.name, JSON.parse(JSON.stringify(candidate.parameters))])));
+		const kinds = (schema: { anyOf: { type: string }[] }) => schema.anyOf.map((branch) => branch.type).sort();
+		expect(kinds(schemas.create_trigger.properties.condition)).toEqual(["object", "string"]);
+		expect(kinds(schemas.test_trigger.properties.trigger.properties.condition)).toEqual(["object", "string"]);
+		expect(kinds(schemas.update_trigger.properties.condition)).toEqual(["null", "object", "string"]);
+		expect(schemas.test_trigger.properties.samples.items.properties.value.anyOf).toBeDefined();
+
+		const when = { op: "compare", path: ["flag"], cmp: "eq", value: 1 };
+		const base = { label: "Flag", instruction: "Tell me.", source: { kind: "poll", command: "echo {}", intervalMs: 5 * MINUTE } };
+		const text = await tool("create_trigger", { ...base, condition: JSON.stringify({ when }) });
+		expect(text.isError).toBe(false);
+		expect(text.body.trigger.condition).toMatchObject({ when });
+		for (const bad of ["not json", "[1]", "3", '"x"']) expect((await tool("create_trigger", { ...base, condition: bad })).body).toEqual({ code: "invalid_request", error: "condition: must be an object", field: "condition" });
+		await call(`/triggers/${text.body.trigger.id}`, { method: "DELETE" });
+	});
+
 	it("lists sources as they are: time runs, connector events are drafts only, the computer's drafts only until one is paired, files not yet", async () => {
 		const answered = await tool("list_trigger_sources", {});
 		expect(answered.body.sources).toEqual([

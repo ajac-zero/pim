@@ -31,7 +31,11 @@ RUN apk add --no-cache curl && mkdir /workspace && chown 10001:10001 /workspace
 DOCKERFILE
 export ALLOWED_IMAGES="$IMAGE"
 
-cleanup() { [ "${KEEP:-}" = 1 ] || docker compose down -v --remove-orphans >/dev/null 2>&1 || true; }
+cleanup() {
+	# Remove the session first so a failed step leaks no container, volume or network.
+	curl -sS -X DELETE -H "authorization: Bearer $MANAGER_TOKEN" "$URL/sessions/$SID" >/dev/null 2>&1 || true
+	[ "${KEEP:-}" = 1 ] || docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 docker compose up -d --build

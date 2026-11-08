@@ -630,9 +630,9 @@ describe("a trigger's page", () => {
             trigger={pollFixture({
               lifecycle: "draft",
               capability: {
-                status: "unavailable",
+                status: "draft_only",
                 delivers: false,
-                reason: "computer_triggers_off",
+                reason: "computer_not_paired",
               },
             })}
           />
@@ -663,17 +663,6 @@ describe("a trigger's page", () => {
       client,
     );
     expect(textOf(granted)).toContain("Permission requests");
-    const off = await render(
-      () => (
-        <TriggerDetail
-          trigger={pollFixture({
-            grant: { required: true, state: "unavailable" },
-          })}
-        />
-      ),
-      client,
-    );
-    expect(off).not.toContain("/grant");
     const time = await render(
       () => <TriggerDetail trigger={triggerFixture()} />,
       client,
@@ -783,6 +772,19 @@ describe("a trigger's page", () => {
     expect(unavailable).not.toContain("Turn on");
     expect(unavailable).toContain("Draft only");
     expect(unavailable).toContain("Edit");
+    // A computer source with no computer paired offers Turn on, whose confirmation says to pair one first.
+    const unpaired = await actions(
+      pollFixture({
+        lifecycle: "paused",
+        capability: {
+          status: "draft_only",
+          delivers: false,
+          reason: "computer_not_paired",
+        },
+      }),
+    );
+    expect(unpaired).toContain("Turn on");
+    expect(unpaired).not.toContain("Pair a computer first");
     const on = await actions(triggerFixture({ lifecycle: "enabled" }));
     expect(on).toContain("Pause");
     expect(on).not.toContain("Turn on");
@@ -1166,9 +1168,9 @@ describe("the editor", () => {
       page([
         pollFixture({
           capability: {
-            status: "unavailable",
+            status: "draft_only",
             delivers: false,
-            reason: "computer_triggers_off",
+            reason: "computer_not_paired",
           },
         }),
       ]),
@@ -1551,13 +1553,6 @@ describe("a grant request's page", () => {
     );
     expect(none).toContain("No permission yet. Ask its agent in chat");
     expect(none).toContain("No request from its agent is waiting.");
-    expect(
-      textOf(
-        await review(
-          pollFixture({ grant: { required: true, state: "unavailable" } }),
-        ),
-      ),
-    ).toContain("Triggers on your computer are off in this space");
     const time = await review(triggerFixture());
     expect(textOf(time)).toContain("it needs no permission");
     expect(buttons(time)).toEqual([]);

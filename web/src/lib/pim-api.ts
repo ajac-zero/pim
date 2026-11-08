@@ -1125,8 +1125,7 @@ export type TriggerGrantState =
   | "missing"
   | "pending_approval"
   | "current"
-  | "not_current"
-  | "unavailable";
+  | "not_current";
 
 export type Trigger = {
   id: string;

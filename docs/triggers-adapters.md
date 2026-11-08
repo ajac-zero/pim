@@ -1,6 +1,6 @@
 # Trigger observers on the computer
 
-> **Behind a gate, and not active.** Only pim-computer's triggers host ([`computer/triggers-host.ts`](../computer/triggers-host.ts)) constructs these adapters, and pim-computer loads it only when `PIM_COMPUTER_TRIGGERS` is `internal`, which nothing sets; no service or install script registers them, and nothing in Pim sends a reconcile yet ([triggers-runtime.md](triggers-runtime.md#over-pim-computers-connection)). **Pim has no managed launcher yet**, so no process handle resolves and every process watch fails to start.
+> **On wherever a space's triggers are.** Only pim-computer's triggers host ([`computer/triggers-host.ts`](../computer/triggers-host.ts)) constructs these adapters, and pim-computer loads it as it starts; a source runs only once the space reconciles it under the person's grant of exactly it, on the computer paired now ([triggers-runtime.md](triggers-runtime.md#over-pim-computers-connection)). **Pim has no managed launcher yet**, so no process handle resolves and every process watch fails to start.
 
 The triggers runtime ([triggers-runtime.md](triggers-runtime.md)) runs the computer sources a space wants through `ObserverAdapter`s. This tranche adds two concrete ones, for the two sources that need no long-lived stream: `poll` and `process`. `stream` has its own ([triggers-stream.md](triggers-stream.md)), which `observerAdapters` offers when given stream options, the same as `poll` and `process`. `file` has none: `observerAdapters` refuses it, and so a `stream` source when no stream options are given, and the runtime reports `unsupported`.
 
@@ -107,7 +107,7 @@ The runtime drops an adapter's health until the observer is installed, by design
 
 ## Not done here
 
-- The space's side of `triggers.v1` (pim-computer's side, with the host's grant check, is behind a gate: [triggers-runtime.md](triggers-runtime.md#over-pim-computers-connection)).
+- The space's side of `triggers.v1` (pim-computer's side, with the host's grant check, is in [triggers-runtime.md](triggers-runtime.md#over-pim-computers-connection)).
 - A production managed launcher: the tool that starts jobs under handles, its approvals, detaching jobs from pim-computer, where the state folder lives, and retiring old records (they hold identities and exit statuses only).
 - A `file` observer.
 - Process watches on macOS and Windows.

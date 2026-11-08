@@ -35,11 +35,11 @@ export type TriggerEngineOptions = {
 	readonly now: () => number;
 	readonly space: TriggerSpace;
 	/**
-	 * Where computer triggers are on (./computer.ts), and only there: the
-	 * check of computer sources' grants, without which no computer source can
-	 * be enabled or its occurrence handed on; and what to tell of each
-	 * trigger that changes, so the computer hears what it should run now.
-	 * With `authorize`, the coordinator hands on what the computer saw.
+	 * The check of computer sources' grants (./computer.ts), without which no
+	 * computer source can be enabled or its occurrence handed on; and what to
+	 * tell of each trigger that changes, so the computer hears what it should
+	 * run now. Pim gives both in every space. With `authorize`, the
+	 * coordinator hands on what the computer saw.
 	 */
 	readonly authorize?: (request: AuthorizationRequest) => AuthorizationVerdict;
 	readonly changed?: (id: string) => void;
@@ -98,7 +98,7 @@ export class TriggerEngine {
 	constructor(sql: SqlStorage, options: TriggerEngineOptions) {
 		this.space = options.space;
 		this.connectorEvents = options.connectorEvents === true;
-		// No `authorize` but where computer triggers are on: elsewhere no computer source can be enabled, and none's occurrence is handed on.
+		// Without `authorize`, no computer source can be enabled, and none's occurrence is handed on.
 		const computer = options.authorize ? { authorize: options.authorize } : {};
 		// A trigger made from a schedule or watch that still delivers its work is never enabled (./migration.ts).
 		this.store = new TriggerStore(sql, {

@@ -20,13 +20,13 @@
  * one trigger on one computer, and the record isn't revoked. The person is
  * asked through `trigger_computer_grant` (./grant-action.ts).
  *
- * Behind a gate. Pim builds this only when `PIM_TRIGGERS_COMPUTER` is
- * `internal`, which nothing sets, in a space whose trigger engine is on
- * (./engine.ts). Off, nothing of it is built, no table is made, and a
- * triggers message from the computer goes where it went before, to
- * `Computer.receive`, which ignores it. Behind the gate, the engine's
- * coordinator hands computer triggers' occurrences to their agent
- * (`computerEvents`), checking their grant again at each step.
+ * Pim builds this in every space whose trigger engine is on (./engine.ts);
+ * where the engine isn't, a triggers message from the computer goes to
+ * `Computer.receive`, which ignores it. The engine's coordinator hands
+ * computer triggers' occurrences to their agent (`computerEvents`),
+ * checking their grant again at each step. With no computer paired, no
+ * grant is current, so nothing is enabled or handed on, and enabled
+ * triggers wait for the computer (`waiting_computer`).
  */
 
 import { createHash } from "node:crypto";
@@ -34,14 +34,6 @@ import type { Approval } from "../store";
 import { type FileSource, type PollSource, type ProcessSource, runsOnComputer, type StreamSource, type TriggerHealth } from "./spec";
 import type { Admission, AuthorizationRequest, AuthorizationVerdict, Trigger, TriggerStore } from "./store";
 import { TriggerValidationError } from "./validate";
-
-/** The deployment's gate: unset, or anything but `internal`, and nothing of computer triggers is built. */
-export const COMPUTER_TRIGGERS_VARIABLE = "PIM_TRIGGERS_COMPUTER";
-
-/** Whether this deployment answers computer triggers, in spaces whose trigger engine is on. */
-export function computerTriggersAllowed(env: unknown): boolean {
-	return (env as Record<string, unknown> | null)?.[COMPUTER_TRIGGERS_VARIABLE] === "internal";
-}
 
 export const PROTOCOL = "triggers.v1";
 
@@ -418,10 +410,15 @@ export class ComputerTriggers {
 		this.#options.wake();
 	}
 
-	/** Sends the desired set again on the current socket, as after a trigger or a grant changed. */
+	/**
+	 * Sends the desired set again on the current socket, as after a trigger,
+	 * a grant or the paired computer changed. With no socket from the
+	 * computer paired now, its enabled triggers wait for it.
+	 */
 	refresh(): void {
 		const link = this.#restore();
-		if (link && link.runtimeId !== null) this.#reconcile(link);
+		if (link && link.runtimeId !== null && link.runtimeId === this.runtimeId()) this.#reconcile(link);
+		else this.#setHealthAll("waiting_computer", null);
 	}
 
 	/** When the lease on the current socket is next to be renewed (`renew`), or null with none to renew. */

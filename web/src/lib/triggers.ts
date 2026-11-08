@@ -235,6 +235,24 @@ export const RUN_TEXT: Record<
   outcome_unknown: { key: "triggerRunUnknown", tone: "problem" },
 };
 
+/** One plain line on what a run's state means, true to docs/triggers.md. */
+export const RUN_REASON: Record<TriggerRunState, TranslationKey> = {
+  pending: "triggerRunWhyPending",
+  preparing: "triggerRunWhyPreparing",
+  submitting: "triggerRunWhySubmitting",
+  accepted: "triggerRunWhyAccepted",
+  queued: "triggerRunWhyQueued",
+  running: "triggerRunWhyRunning",
+  waiting_approval: "triggerRunWhyWaitingApproval",
+  completed: "triggerRunWhyCompleted",
+  failed: "triggerRunWhyFailed",
+  cancelled: "triggerRunWhyCancelled",
+  not_submitted: "triggerRunWhyNotSubmitted",
+  missed: "triggerRunWhyMissed",
+  superseded: "triggerRunWhySuperseded",
+  outcome_unknown: "triggerRunWhyUnknown",
+};
+
 const COMPUTER_KINDS: readonly TriggerSourceKind[] = [
   "poll",
   "stream",

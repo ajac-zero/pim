@@ -12,6 +12,7 @@ import {
   ConditionText,
   NextAtText,
   ObservedText,
+  PairComputerNote,
   ProblemNotice,
   WhenText,
 } from "~/components/triggers";
@@ -312,6 +313,7 @@ export function TriggerEditor({
           }}
           noValidate
         >
+          <PairComputerNote kind={form.kind} />
           <TriggerSummary
             form={form}
             agent={agentName(form.agentId)}
@@ -532,12 +534,16 @@ export function TriggerSummary({
   /** The existing chat it delivers to, by title; null for a new chat each time. */
   chat: string | null;
 }) {
-  // When only needs the schedule: a poll's interval reads before its command is typed.
-  const when = sourceOf(
-    form.kind === "poll" && !form.command.trim()
-      ? { ...form, command: "-" }
-      : form,
-  );
+  // When reads only what says when it acts: a poll's interval, a file's path, a
+  // connector's event. What it never reads (a command, a process handle and
+  // its expiry, which file events) must not keep it at "not set yet".
+  const when = sourceOf({
+    ...form,
+    command: form.command.trim() ? form.command : "-",
+    handle: form.handle.trim() || "-",
+    expiresAt: form.expiresAt || "2100-01-01T00:00",
+    fileEvents: form.fileEvents.length ? form.fileEvents : ["modified"],
+  });
   const read = sourceOf(form);
   return (
     <SummaryCard

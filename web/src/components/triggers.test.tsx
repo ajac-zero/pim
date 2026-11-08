@@ -521,14 +521,14 @@ describe("a trigger's page", () => {
         await render(() => <TriggerDetail trigger={pollFixture()} />, client),
       ),
     ).toContain("Last checkNot reported by Pim yet");
-    expect(text).toContain("Last occurrence");
+    expect(text).toContain("Last time it fired");
     expect(text).toMatch(/Nov 6, 9:00 AM Lisbon time/);
     expect(text).toContain(
-      "Runs the latest firing up to 1 hour late; older ones are recorded as missed",
+      "Runs the latest missed time up to 1 hour late; older ones are recorded as missed",
     );
     expect(text).toContain("Not kept");
     expect(text).toContain(
-      "Hand-off window1 dayHow long Pim keeps trying to deliver a firing.",
+      "Time to start the run1 dayHow long Pim keeps trying to start a run.",
     );
   });
 
@@ -662,7 +662,7 @@ describe("a trigger's page", () => {
       ),
       client,
     );
-    expect(textOf(granted)).toContain("Grant requests");
+    expect(textOf(granted)).toContain("Permission requests");
     const off = await render(
       () => (
         <TriggerDetail
@@ -860,6 +860,42 @@ describe("turning on a computer source", () => {
       ([, , inner]) => textOf(inner ?? "") === label,
     )?.[1];
 
+  it("says a computer source needs a paired computer, only once the status says none is paired", async () => {
+    const note = "none is paired yet";
+    const page = async (trigger: Trigger, client: QueryClient) => {
+      setRuns(client, trigger.id, []);
+      return textOf(
+        await render(() => <TriggerDetail trigger={trigger} />, client),
+      );
+    };
+    const editor = async (trigger: Trigger, client: QueryClient) =>
+      textOf(
+        await render(
+          () => <TriggerEditor trigger={trigger} onDone={() => {}} />,
+          client,
+        ),
+      );
+    expect(await page(pollFixture(), withComputer(null))).toContain(note);
+    expect(await page(pollFixture(), withComputer("ada-laptop"))).not.toContain(
+      note,
+    );
+    // Still loading: nothing is claimed.
+    expect(await page(pollFixture(), clientWith())).not.toContain(note);
+    // A time trigger never needs a computer.
+    expect(await page(triggerFixture(), withComputer(null))).not.toContain(
+      note,
+    );
+    // The edit form says it too, for a computer source only.
+    expect(await editor(pollFixture(), withComputer(null))).toContain(note);
+    expect(
+      await editor(pollFixture(), withComputer("ada-laptop")),
+    ).not.toContain(note);
+    expect(await editor(pollFixture(), clientWith())).not.toContain(note);
+    expect(await editor(triggerFixture(), withComputer(null))).not.toContain(
+      note,
+    );
+  });
+
   it("discloses a script's access, computer, version and frequency, and keeps Turn on off until understood", async () => {
     const trigger = pollFixture({
       lifecycle: "paused",
@@ -870,7 +906,7 @@ describe("turning on a computer source", () => {
     const text = textOf(html);
     expect(text).toContain(ACCESS);
     expect(text).toContain("Computerada-laptop");
-    expect(text).toContain("Script versionRevision 7");
+    expect(text).toContain("Script versionVersion 7");
     expect(text).toContain("FrequencyEvery 5 minutes");
     expect(text).toContain("Approval policyAsks you before external actions");
     expect(text).toContain(UNDERSTAND);
@@ -1028,7 +1064,9 @@ describe("runs", () => {
     );
     const text = textOf(html);
     expect(text).toContain("Run: Agent finished");
-    expect(text).toContain("Check the chat for what it did.");
+    expect(text).toContain("Agent finished: check the chat for what it did");
+    expect(text).toContain("Pim can't tell whether the agent got it");
+    expect(text).toContain("Handed to the agent: it is working on it");
     expect(text).toContain("Run: Outcome unknown");
     expect(text).toContain("Run: Handed to the agent");
     expect(text).not.toMatch(/succe/i);
@@ -1066,7 +1104,7 @@ describe("refusals", () => {
     });
     expect(conflict).toContain('role="alert"');
     expect(textOf(conflict)).toContain("Someone changed this trigger");
-    expect(textOf(conflict)).toContain("It's at revision 5 now.");
+    expect(textOf(conflict)).toContain("It's now at version 5.");
     expect(textOf(conflict)).toContain("Reload and review");
     const required = await notice(428, {
       error: "If-Match: required",
@@ -1078,7 +1116,11 @@ describe("refusals", () => {
   it("explains the rest of the table without offering a reload", async () => {
     for (const [status, code, text] of [
       [409, "source_not_wired", "Pim doesn't deliver this kind of source yet."],
-      [409, "grant_required", "It needs your grant for exactly this source"],
+      [
+        409,
+        "grant_required",
+        "It needs your permission for exactly this source",
+      ],
       [409, "owned_elsewhere", "still owns it"],
       [409, "invalid_transition", "can't do that in its current state"],
       [422, "chat_unavailable", "That chat can't take"],
@@ -1113,7 +1155,7 @@ describe("a test", () => {
     expect(text).toContain(
       "nothing was saved, no agent started, no command ran and no request was sent",
     );
-    expect(text).toContain("It has no firing left.");
+    expect(text).toContain("It has no run time left.");
   });
 });
 
@@ -1316,6 +1358,35 @@ describe("the editor", () => {
     expect(await summary({ ...time, everyMinutes: "60" })).toContain(
       "WhenEvery 1 hourDo",
     );
+    // Every source shape reads its When once what it says is entered, whatever else is missing.
+    const blank = { ...time, command: "", handle: "", path: "" };
+    expect(await summary({ ...blank, kind: "stream" })).toContain(
+      "WhenEach time the script prints a lineDo",
+    );
+    expect(await summary({ ...blank, kind: "process" })).toContain(
+      "WhenOnce, when the process exitsDo",
+    );
+    expect(await summary({ ...blank, kind: "file" })).toContain(
+      "WhenNot set yetDo",
+    );
+    expect(
+      await summary({ ...blank, kind: "file", path: "/a", fileEvents: [] }),
+    ).toContain("WhenEach time /a changesDo");
+    expect(
+      await summary({
+        ...blank,
+        kind: "connector_event",
+        connectorId: "gmail",
+      }),
+    ).toContain("WhenNot set yetDo");
+    expect(
+      await summary({
+        ...blank,
+        kind: "connector_event",
+        connectorId: "gmail",
+        event: "new_mail",
+      }),
+    ).toContain("WhenEach time gmail sends new_mailDo");
     expect(
       await summary({
         ...poll,
@@ -1450,7 +1521,7 @@ describe("a grant request's page", () => {
     );
     const text = textOf(html);
     expect(text).toContain("Request: Approved");
-    expect(text).toContain("Granted for exactly this source");
+    expect(text).toContain("Allowed for exactly this source");
     expect(text).toContain('Granted: the trigger "Build watcher" may run');
     expect(text).toContain("Decided");
     expect(buttons(html)).toEqual([]);
@@ -1466,7 +1537,7 @@ describe("a grant request's page", () => {
       }),
     ]);
     expect(textOf(html)).toContain("Request: Declined");
-    expect(textOf(html)).toContain("Declined: this request granted nothing.");
+    expect(textOf(html)).toContain("Declined: this request allowed nothing.");
     expect(textOf(html)).toContain("Its chat stopped before the decision");
     expect(buttons(html)).toEqual([]);
   });
@@ -1478,7 +1549,7 @@ describe("a grant request's page", () => {
         [],
       ),
     );
-    expect(none).toContain("Not granted. Ask its agent in chat");
+    expect(none).toContain("No permission yet. Ask its agent in chat");
     expect(none).toContain("No request from its agent is waiting.");
     expect(
       textOf(
@@ -1488,7 +1559,7 @@ describe("a grant request's page", () => {
       ),
     ).toContain("Triggers on your computer are off in this space");
     const time = await review(triggerFixture());
-    expect(textOf(time)).toContain("it needs no grant");
+    expect(textOf(time)).toContain("it needs no permission");
     expect(buttons(time)).toEqual([]);
   });
 });

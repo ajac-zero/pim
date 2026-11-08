@@ -61,6 +61,7 @@ import {
   nextLine,
   observesSource,
   PROBLEM_TEXT,
+  RUN_REASON,
   RUN_TEXT,
   runsCommands,
   runsOnComputer,
@@ -824,6 +825,29 @@ export function ComputerDisclosure() {
   );
 }
 
+/**
+ * Says a computer source needs a paired computer, near the top of its page
+ * and form. It shows only once the status says none is paired: never while
+ * it loads or fails to load, so it can't claim what isn't known.
+ */
+export function PairComputerNote({
+  kind,
+}: {
+  kind: Trigger["source"]["kind"];
+}) {
+  const { t } = useI18n();
+  const computer = useQuery({
+    ...computerQuery(),
+    enabled: runsOnComputer(kind),
+  });
+  if (!runsOnComputer(kind) || computer.data?.state !== "none") return null;
+  return (
+    <p role="note" className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm">
+      {t("triggerPairComputerNote")}
+    </p>
+  );
+}
+
 /** When a source acts, in words, from its own fields. */
 export function WhenText({ source }: { source: Trigger["source"] }) {
   const { t, duration } = useFormats();
@@ -964,6 +988,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
         <LifecyclePill lifecycle={trigger.lifecycle} />
         <HealthPill trigger={trigger} />
       </div>
+      <PairComputerNote kind={trigger.source.kind} />
       {trigger.migration && trigger.migration.phase === "shadow" && (
         <p role="note" className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm">
           {t(
@@ -1583,11 +1608,7 @@ export function RunRow({
           </time>
         </p>
         <p className="text-[13px] text-muted-foreground">
-          {run.state === "completed"
-            ? t("triggerRunCompletedHint")
-            : run.outcomeKnown
-              ? t("triggerRunRevision", { revision: run.revision })
-              : t("triggerRunNotFinal")}
+          {t(RUN_REASON[run.state])}
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">

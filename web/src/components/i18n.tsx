@@ -1293,7 +1293,7 @@ const translations = {
     triggerNextCheck: "Pim looks next at",
     triggerLastCheck: "Last check",
     triggerNotReported: "Not reported by Pim yet",
-    triggerLastEvent: "Last occurrence",
+    triggerLastEvent: "Last time it fired",
     triggerNoEventYet: "None yet",
     triggerZonedTime: "{local} {place} time ({utc})",
     triggerZonedPrimary: "{local} {place} time",
@@ -1317,17 +1317,17 @@ const translations = {
     triggerCapabilityComputerOff:
       "Not available here: triggers on your computer are off",
     triggerCapabilityUnavailable: "Not available here: nothing hands it on yet",
-    triggerGrant: "Your grant",
+    triggerGrant: "Your permission",
     triggerGrantNotRequired: "Not needed",
     triggerGrantMissing:
-      "Not granted. Ask its agent in chat to request access to exactly this source.",
+      "No permission yet. Ask its agent in chat to request access to exactly this source.",
     triggerGrantPending: "Waiting for your approval",
-    triggerGrantCurrent: "Granted for exactly this source",
+    triggerGrantCurrent: "Allowed for exactly this source",
     triggerGrantNotCurrent:
-      "No longer current: the source changed since you granted it",
+      "No longer valid: the source changed since you allowed it",
     triggerGrantUnavailable: "Triggers on your computer are off",
     triggerGrantReview: "Review the request",
-    triggerGrantSee: "Grant requests",
+    triggerGrantSee: "Permission requests",
     triggerGrantTitle: "Computer access for {label}",
     triggerGrantBack: "Back to {label}",
     triggerGrantLoading: "Loading the request…",
@@ -1342,7 +1342,7 @@ const translations = {
     triggerGrantScopeTrigger: "Trigger",
     triggerGrantOnlyTrigger: "This trigger only",
     triggerGrantSourceExact:
-      "Exactly this configuration. Any change to it needs a new grant.",
+      "Exactly this configuration. Any change to it needs a new permission.",
     triggerGrantSourceChanged:
       "The source as it was when its agent asked, which isn't what the trigger has now.",
     triggerGrantScopeComputer: "Computer",
@@ -1352,7 +1352,7 @@ const translations = {
     triggerGrantDecidedAt: "Decided",
     triggerGrantExpiresAt: "Expires",
     triggerGrantLimits:
-      "Approving doesn't turn the trigger on. To stop it later, pause or delete the trigger, or change its source. Revoking a grant on its own isn't in the app yet.",
+      "Approving doesn't turn the trigger on. To stop it later, pause or delete the trigger, or change its source. Taking back a permission on its own isn't in the app yet.",
     triggerGrantApprove: "Approve",
     triggerGrantDecline: "Decline",
     triggerGrantApproving: "Approving…",
@@ -1363,20 +1363,20 @@ const translations = {
       "Someone already decided this request. This is how it stands.",
     triggerGrantDecideFailed: "Your decision wasn't recorded.",
     triggerGrantOutdatedChanged:
-      "The trigger's source changed after its agent asked, so approving this would grant nothing the trigger runs now. Decline it, and ask its agent in chat to ask again.",
+      "The trigger's source changed after its agent asked, so approving this would allow nothing the trigger runs now. Decline it, and ask its agent in chat to ask again.",
     triggerGrantOutdatedEnded:
-      "This trigger has ended or was deleted, so there's nothing left to grant.",
+      "This trigger has ended or was deleted, so there's nothing left to allow.",
     triggerGrantExpiredTimeout:
-      "This request expired before you decided, so nothing was granted. Ask its agent in chat to ask again.",
+      "This request expired before you decided, so nothing was allowed. Ask its agent in chat to ask again.",
     triggerGrantExpiredSource:
       "The process watch this request covers has expired, so there's nothing left to grant.",
     triggerGrantRecorded: "What Pim recorded",
-    triggerGrantDeclinedNote: "Declined: this request granted nothing.",
+    triggerGrantDeclinedNote: "Declined: this request allowed nothing.",
     triggerGrantNoneWaiting: "No request from its agent is waiting.",
     triggerGrantNotRequiredHere:
-      "This trigger doesn't run on your computer, so it needs no grant.",
+      "This trigger doesn't run on your computer, so it needs no permission.",
     triggerGrantOffHere:
-      "Triggers on your computer are off in this space, so grant requests can't be decided here.",
+      "Triggers on your computer are off in this space, so permission requests can't be decided here.",
     triggerComputerAccess:
       "Commands run on your computer as the user who runs pim-computer, with all of that user's access to your files and accounts. They aren't sandboxed.",
     triggerComputerScriptAccess:
@@ -1405,14 +1405,14 @@ const translations = {
     triggerLatenessOnce:
       "Runs up to {duration} late; later, it's recorded as missed",
     triggerLatenessRecurring:
-      "Runs the latest firing up to {duration} late; older ones are recorded as missed",
+      "Runs the latest missed time up to {duration} late; older ones are recorded as missed",
     triggerQueue: "Queue",
     triggerQueueEvents: "Up to {count} events waiting",
     triggerAtOnce: "At once",
     triggerRunsAtOnce: "{count} run at a time",
-    triggerDeliveryTtl: "Hand-off window",
+    triggerDeliveryTtl: "Time to start the run",
     triggerDeliveryTtlHint:
-      "How long Pim keeps trying to deliver a firing. After that it is not delivered",
+      "How long Pim keeps trying to start a run. After that it doesn't start",
     triggerReplay: "Repeats ignored for",
     triggerStale: "Stale after",
     triggerSamples: "Observed values",
@@ -1490,13 +1490,13 @@ const translations = {
     triggerResumedNow: "Turned on.",
     triggerDeletedNow: "Trigger deleted.",
     triggerReloadReview: "Reload and review",
-    triggerConflictRevision: "It's at revision {revision} now.",
+    triggerConflictRevision: "It's now at version {revision}.",
     triggerTestNoEffects:
       "A test only: nothing was saved, no agent started, no command ran and no request was sent.",
     triggerTestBlockers: "Turning it on now would be refused:",
     triggerTestNoBlockers: "Nothing would stop it being turned on now.",
-    triggerTestFirings: "Its next firings:",
-    triggerTestExhausted: "It has no more firings after these.",
+    triggerTestFirings: "Its next run times:",
+    triggerTestExhausted: "It has no more run times after these.",
     triggerTestNoSamples:
       "No samples were given, so its condition wasn't evaluated.",
     triggerRuns: "Runs",
@@ -1518,10 +1518,26 @@ const translations = {
     triggerRunMissed: "Missed: too late to run",
     triggerRunSuperseded: "Replaced by a newer one",
     triggerRunUnknown: "Outcome unknown",
-    triggerRunCompletedHint:
-      "The agent finished its turn. Check the chat for what it did.",
-    triggerRunNotFinal: "Not final yet",
-    triggerRunRevision: "Revision {revision}",
+    triggerRunWhyPending:
+      "Waiting its turn: it hasn't been handed to the agent yet",
+    triggerRunWhyPreparing: "Getting ready to hand it to the agent",
+    triggerRunWhySubmitting: "Being handed to the agent: not confirmed yet",
+    triggerRunWhyAccepted: "Handed to the agent: it is working on it",
+    triggerRunWhyQueued: "Handed to the agent: it is waiting for a turn",
+    triggerRunWhyRunning: "Handed to the agent: it is working on it",
+    triggerRunWhyWaitingApproval:
+      "The agent is waiting for you to approve something",
+    triggerRunWhyCompleted: "Agent finished: check the chat for what it did",
+    triggerRunWhyFailed: "The agent's run stopped with an error",
+    triggerRunWhyCancelled: "Stopped before it finished",
+    triggerRunWhyNotSubmitted: "Not handed on: the trigger was off or too late",
+    triggerRunWhyMissed: "Too late to run: it is only recorded",
+    triggerRunWhySuperseded:
+      "Replaced by a newer one: a newer firing took its place",
+    triggerRunWhyUnknown: "Pim can't tell whether the agent got it",
+    triggerPairComputerNote:
+      "This trigger runs on your computer, and none is paired yet. Pair one first, or it can't run.",
+    triggerRunRevision: "Version {revision}",
     triggerRunChatFor: "Open the chat of the run at {date}",
     triggerEditTitle: "Edit trigger",
     triggerReview: "Review",
@@ -1552,7 +1568,7 @@ const translations = {
     triggerSaveChanges: "Save changes",
     triggerSaving: "Saving…",
     triggerSaved: "Saved.",
-    triggerSavedNow: "Saved now, revision {revision}",
+    triggerSavedNow: "Saved now, version {revision}",
     triggerYours: "Your change",
     triggerNothingChanged: "Nothing changed.",
     triggerDraftNote:
@@ -1623,9 +1639,10 @@ const translations = {
     triggerErrorOwnedElsewhere:
       "Its schedule or connector watch still owns it, so it can't be changed here.",
     triggerErrorGrantRequired:
-      "It needs your grant for exactly this source first.",
-    triggerErrorGrantNotCurrent: "Your grant no longer matches this source.",
-    triggerErrorExhausted: "It has no firing left.",
+      "It needs your permission for exactly this source first.",
+    triggerErrorGrantNotCurrent:
+      "Your permission no longer matches this source.",
+    triggerErrorExhausted: "It has no run time left.",
     triggerErrorNotWired: "Pim doesn't deliver this kind of source yet.",
     triggerErrorIdempotency:
       "This request was already sent with other details. Go back and review again.",
@@ -1634,7 +1651,7 @@ const translations = {
     triggerErrorSourceUnavailable:
       "This kind of source, or this connector event, isn't available here.",
     triggerErrorRevisionRequired:
-      "Pim needs the revision you reviewed. Reload it and review again.",
+      "Pim needs the version you reviewed. Reload it and review again.",
     triggerErrorInternal: "Something went wrong in Pim. Try again.",
     triggerErrorUnknown: "Something went wrong.",
   },
@@ -2940,7 +2957,7 @@ const translations = {
     triggerNextCheck: "Pim revisa de nuevo el",
     triggerLastCheck: "Última revisión",
     triggerNotReported: "Pim aún no lo informa",
-    triggerLastEvent: "Última ocurrencia",
+    triggerLastEvent: "Última vez que se disparó",
     triggerNoEventYet: "Ninguna aún",
     triggerZonedTime: "{local}, hora de {place} ({utc})",
     triggerZonedPrimary: "{local}, hora de {place}",
@@ -2969,9 +2986,9 @@ const translations = {
     triggerGrantMissing:
       "Sin permiso. Pide a su agente en el chat que solicite acceso a exactamente este origen.",
     triggerGrantPending: "Esperando tu aprobación",
-    triggerGrantCurrent: "Concedido para exactamente este origen",
+    triggerGrantCurrent: "Permitido para exactamente este origen",
     triggerGrantNotCurrent:
-      "Ya no vale: el origen cambió desde que lo concediste",
+      "Ya no vale: el origen cambió desde que lo permitiste",
     triggerGrantUnavailable:
       "Los disparadores en tu computadora están desactivados",
     triggerGrantReview: "Revisar la solicitud",
@@ -3000,7 +3017,7 @@ const translations = {
     triggerGrantDecidedAt: "Decidido",
     triggerGrantExpiresAt: "Caduca",
     triggerGrantLimits:
-      "Aprobar no activa el disparador. Para detenerlo después, pausa o elimina el disparador, o cambia su origen. Revocar solo un permiso aún no está en la app.",
+      "Aprobar no activa el disparador. Para detenerlo después, pausa o elimina el disparador, o cambia su origen. Retirar solo un permiso aún no está en la app.",
     triggerGrantApprove: "Aprobar",
     triggerGrantDecline: "Rechazar",
     triggerGrantApproving: "Aprobando…",
@@ -3011,15 +3028,15 @@ const translations = {
       "Alguien ya decidió esta solicitud. Así es como quedó.",
     triggerGrantDecideFailed: "Tu decisión no se registró.",
     triggerGrantOutdatedChanged:
-      "El origen del disparador cambió después de que su agente lo pidiera, así que aprobarla no concedería nada de lo que ejecuta ahora. Recházala y pide a su agente en el chat que lo pida de nuevo.",
+      "El origen del disparador cambió después de que su agente lo pidiera, así que aprobarla no permitiría nada de lo que ejecuta ahora. Recházala y pide a su agente en el chat que lo pida de nuevo.",
     triggerGrantOutdatedEnded:
-      "Este disparador terminó o fue eliminado, así que ya no queda nada que conceder.",
+      "Este disparador terminó o fue eliminado, así que ya no queda nada que permitir.",
     triggerGrantExpiredTimeout:
-      "Esta solicitud caducó antes de que decidieras, así que no se concedió nada. Pide a su agente en el chat que lo pida de nuevo.",
+      "Esta solicitud caducó antes de que decidieras, así que no se permitió nada. Pide a su agente en el chat que lo pida de nuevo.",
     triggerGrantExpiredSource:
       "La vigilancia del proceso que abarca esta solicitud caducó, así que ya no queda nada que conceder.",
     triggerGrantRecorded: "Lo que registró Pim",
-    triggerGrantDeclinedNote: "Rechazada: esta solicitud no concedió nada.",
+    triggerGrantDeclinedNote: "Rechazada: esta solicitud no permitió nada.",
     triggerGrantNoneWaiting: "No hay ninguna solicitud de su agente esperando.",
     triggerGrantNotRequiredHere:
       "Este disparador no se ejecuta en tu computadora, así que no necesita permiso.",
@@ -3053,14 +3070,14 @@ const translations = {
     triggerLatenessOnce:
       "Se ejecuta con hasta {duration} de retraso; más tarde, queda registrado como perdido",
     triggerLatenessRecurring:
-      "Ejecuta el último disparo con hasta {duration} de retraso; los anteriores quedan registrados como perdidos",
+      "Ejecuta la última hora pendiente con hasta {duration} de retraso; las anteriores se registran como perdidas",
     triggerQueue: "Cola",
     triggerQueueEvents: "Hasta {count} eventos en espera",
     triggerAtOnce: "A la vez",
     triggerRunsAtOnce: "{count} ejecución a la vez",
-    triggerDeliveryTtl: "Plazo de entrega",
+    triggerDeliveryTtl: "Plazo para empezar",
     triggerDeliveryTtlHint:
-      "Cuánto tiempo sigue Pim intentando entregar un disparo. Pasado ese plazo ya no se entrega",
+      "Cuánto tiempo sigue Pim intentando iniciar una ejecución. Pasado ese plazo ya no se inicia",
     triggerReplay: "Repeticiones ignoradas durante",
     triggerStale: "Obsoleto tras",
     triggerSamples: "Valores observados",
@@ -3139,13 +3156,13 @@ const translations = {
     triggerResumedNow: "Activado.",
     triggerDeletedNow: "Disparador eliminado.",
     triggerReloadReview: "Recargar y revisar",
-    triggerConflictRevision: "Ahora está en la revisión {revision}.",
+    triggerConflictRevision: "Ahora está en la versión {revision}.",
     triggerTestNoEffects:
       "Solo una prueba: no se guardó nada, no empezó ningún agente, no se ejecutó ningún comando ni se envió ninguna solicitud.",
     triggerTestBlockers: "Activarlo ahora sería rechazado:",
     triggerTestNoBlockers: "Nada impediría activarlo ahora.",
-    triggerTestFirings: "Sus próximos disparos:",
-    triggerTestExhausted: "No le quedan más disparos después de estos.",
+    triggerTestFirings: "Sus próximas ejecuciones:",
+    triggerTestExhausted: "No le quedan más ejecuciones después de estas.",
     triggerTestNoSamples:
       "No se dieron muestras, así que su condición no se evaluó.",
     triggerRuns: "Ejecuciones",
@@ -3167,10 +3184,27 @@ const translations = {
     triggerRunMissed: "Perdida: demasiado tarde",
     triggerRunSuperseded: "Reemplazada por una más nueva",
     triggerRunUnknown: "Resultado desconocido",
-    triggerRunCompletedHint:
-      "El agente terminó su turno. Revisa el chat para ver qué hizo.",
-    triggerRunNotFinal: "Aún no es definitivo",
-    triggerRunRevision: "Revisión {revision}",
+    triggerRunWhyPending: "Esperando su turno: aún no se entregó al agente",
+    triggerRunWhyPreparing: "Preparándose para entregarla al agente",
+    triggerRunWhySubmitting: "Entregándose al agente: aún sin confirmar",
+    triggerRunWhyAccepted: "Entregada al agente: está trabajando en ello",
+    triggerRunWhyQueued: "Entregada al agente: espera su turno",
+    triggerRunWhyRunning: "Entregada al agente: está trabajando en ello",
+    triggerRunWhyWaitingApproval: "El agente espera que apruebes algo",
+    triggerRunWhyCompleted:
+      "El agente terminó: revisa el chat para ver qué hizo",
+    triggerRunWhyFailed: "La ejecución del agente se detuvo con un error",
+    triggerRunWhyCancelled: "Detenida antes de terminar",
+    triggerRunWhyNotSubmitted:
+      "No se entregó: el disparador estaba apagado o llegó tarde",
+    triggerRunWhyMissed:
+      "Demasiado tarde para ejecutarse: solo queda registrada",
+    triggerRunWhySuperseded:
+      "Reemplazada por una más nueva: una posterior ocupó su lugar",
+    triggerRunWhyUnknown: "Pim no puede saber si el agente la recibió",
+    triggerPairComputerNote:
+      "Este disparador se ejecuta en tu computadora y aún no hay ninguna vinculada. Vincula una primero o no podrá ejecutarse.",
+    triggerRunRevision: "Versión {revision}",
     triggerRunChatFor: "Abrir el chat de la ejecución del {date}",
     triggerEditTitle: "Editar disparador",
     triggerReview: "Revisar",
@@ -3201,7 +3235,7 @@ const translations = {
     triggerSaveChanges: "Guardar cambios",
     triggerSaving: "Guardando…",
     triggerSaved: "Guardado.",
-    triggerSavedNow: "Guardado ahora, revisión {revision}",
+    triggerSavedNow: "Guardado ahora, versión {revision}",
     triggerYours: "Tu cambio",
     triggerNothingChanged: "No cambió nada.",
     triggerDraftNote:
@@ -3276,7 +3310,7 @@ const translations = {
     triggerErrorGrantRequired:
       "Primero necesita tu permiso para exactamente este origen.",
     triggerErrorGrantNotCurrent: "Tu permiso ya no coincide con este origen.",
-    triggerErrorExhausted: "No le queda ningún disparo.",
+    triggerErrorExhausted: "No le queda ninguna hora de ejecución.",
     triggerErrorNotWired: "Pim aún no entrega este tipo de origen.",
     triggerErrorIdempotency:
       "Esta solicitud ya se envió con otros datos. Vuelve atrás y revisa de nuevo.",
@@ -3286,7 +3320,7 @@ const translations = {
     triggerErrorSourceUnavailable:
       "Este tipo de origen, o este evento de conector, no está disponible aquí.",
     triggerErrorRevisionRequired:
-      "Pim necesita la revisión que revisaste. Recárgalo y revisa de nuevo.",
+      "Pim necesita la versión que revisaste. Recárgalo y revisa de nuevo.",
     triggerErrorInternal: "Algo falló en Pim. Inténtalo de nuevo.",
     triggerErrorUnknown: "Algo falló.",
   },

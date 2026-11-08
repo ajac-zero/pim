@@ -1536,6 +1536,7 @@ const translations = {
     triggerConditionChanged: "changed",
     triggerConditionKept:
       "This condition is more than this form edits; it's kept as it is.",
+    triggerIncomplete: "Add a name and an instruction to review.",
     triggerNeedsLabel: "Give it a name.",
     triggerNeedsInstruction: "Say what the agent should do.",
     triggerNeedsTime: "Choose a date and time.",
@@ -3123,6 +3124,7 @@ const translations = {
     triggerConditionChanged: "cambió",
     triggerConditionKept:
       "Esta condición es más de lo que edita este formulario; se mantiene como está.",
+    triggerIncomplete: "Añade un nombre y una instrucción para revisar.",
     triggerNeedsLabel: "Ponle un nombre.",
     triggerNeedsInstruction: "Di qué debe hacer el agente.",
     triggerNeedsTime: "Elige una fecha y hora.",

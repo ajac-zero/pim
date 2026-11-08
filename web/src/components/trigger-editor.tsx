@@ -199,6 +199,8 @@ export function TriggerEditor({
       : loadedKinds;
   const read = inputOf(form);
   const input = "input" in read ? read.input : null;
+  // Review waits for the two things every trigger needs; Pim checks the rest.
+  const complete = !!form.label.trim() && !!form.instruction.trim();
 
   const save = useMutation({
     mutationFn: async (input: TriggerInput) => {
@@ -416,11 +418,25 @@ export function TriggerEditor({
             trigger={trigger}
           />
           {problem && <ProblemNotice problem={problem} onReload={reload} />}
+          {!complete && (
+            <p
+              id="trigger-incomplete"
+              className="text-[13px] text-muted-foreground"
+            >
+              {t("triggerIncomplete")}
+            </p>
+          )}
           <div className={ACTION_BAR}>
             <Button type="button" variant="outline" onClick={cancel}>
               {t("cancel")}
             </Button>
-            <Button type="submit">{t("triggerReviewButton")}</Button>
+            <Button
+              type="submit"
+              disabled={!complete}
+              aria-describedby={complete ? undefined : "trigger-incomplete"}
+            >
+              {t("triggerReviewButton")}
+            </Button>
           </div>
         </form>
       ) : (

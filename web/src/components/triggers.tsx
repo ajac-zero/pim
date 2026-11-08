@@ -82,7 +82,7 @@ export function useTriggersAvailable(): boolean {
 type Tone = "muted" | "done" | "problem" | "active";
 
 const PILL_TONES: Record<Tone, string> = {
-  muted: "bg-muted text-muted-foreground",
+  muted: "bg-muted text-foreground",
   active: "bg-muted text-foreground",
   done: "bg-muted text-foreground",
   problem: "bg-muted text-foreground",
@@ -346,7 +346,7 @@ export function TriggersPage() {
           </Link>
         </Button>
       </div>
-      <fieldset className="-mx-1 mb-4 flex min-w-0 gap-3 overflow-x-auto px-1 pb-1 md:mx-0 md:grid md:grid-cols-4 md:overflow-visible md:px-0">
+      <fieldset className="-mx-1 mb-4 flex min-w-0 gap-3 overflow-x-auto px-1 pb-1 md:mx-0 md:grid md:grid-cols-4 md:overflow-visible md:px-0 max-md:pr-8 max-md:[mask-image:linear-gradient(to_right,#000_calc(100%-2rem),transparent)]">
         <legend className="sr-only">{t("triggerFilters")}</legend>
         <FilterSelect
           label={t("triggerLifecycle")}

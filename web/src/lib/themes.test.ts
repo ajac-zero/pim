@@ -66,6 +66,20 @@ describe("user message surfaces", () => {
   );
 });
 
+// The lifecycle and health chips sit on `muted` and say their state in words:
+// `text-foreground`, whatever the tone.
+describe("status chips", () => {
+  it.each(themes)("$name keeps chip text readable in both modes", (theme) => {
+    for (const mode of ["light", "dark"] as const) {
+      const colors = theme[mode];
+      expect(
+        contrast(colors.foreground, colors.muted),
+        `${mode} text`,
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+});
+
 describe("recolored code themes", () => {
   it("finds Pim's own", () => {
     expect(recolored.length).toBeGreaterThan(0);

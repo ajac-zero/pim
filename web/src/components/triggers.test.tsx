@@ -235,6 +235,27 @@ describe("a trigger's page", () => {
     expect(text).toContain("Not kept");
   });
 
+  it("shows one Next run row, and Pim looks next at only when it differs", async () => {
+    const fire = Date.UTC(2026, 10, 9, 9, 0);
+    const detail = async (nextCheckAt: number | null) => {
+      const trigger = triggerFixture({
+        lifecycle: "enabled",
+        schedule: { nextFiringAt: fire, nextCheckAt },
+      });
+      return textOf(
+        await render(() => <TriggerDetail trigger={trigger} />, clientWith()),
+      );
+    };
+    for (const check of [null, fire]) {
+      const text = await detail(check);
+      expect(text).toContain("Next run");
+      expect(text).not.toContain("Next at");
+      expect(text).not.toContain("Pim looks next at");
+      expect(text).not.toContain("Source");
+    }
+    expect(await detail(fire - 60_000)).toContain("Pim looks next at");
+  });
+
   it("says a computer source runs with the user's full access, and where its grant stands", async () => {
     const client = clientWith();
     setRuns(client, "trg_build", []);

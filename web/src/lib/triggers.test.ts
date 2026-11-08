@@ -26,6 +26,7 @@ import {
   TRIGGER_ERROR_CODES,
   triggerProblem,
   triggersAvailable,
+  withHealth,
 } from "~/lib/triggers";
 import {
   connectorFixture,
@@ -539,7 +540,11 @@ describe("healthChip", () => {
   );
 
   it.each(cases)("%s × %s", (lifecycle, health) => {
-    const chip = healthChip({ lifecycle, health });
+    const chip = healthChip({
+      lifecycle,
+      health,
+      source: pollFixture().source,
+    });
     if (lifecycle !== "enabled") return expect(chip).toBeNull();
     expect(chip?.reason).toBeNull();
     expect(chip?.text).toBe(
@@ -547,10 +552,22 @@ describe("healthChip", () => {
     );
   });
 
+  it("hides non-problem health of a time trigger, and filters the same way", () => {
+    const time = triggerFixture({ lifecycle: "enabled", health: "healthy" });
+    const gap = triggerFixture({ lifecycle: "enabled", health: "gap" });
+    const poll = pollFixture({ health: "healthy" });
+    expect(healthChip(time)).toBeNull();
+    expect(healthChip(gap)).not.toBeNull();
+    expect(healthChip(poll)).not.toBeNull();
+    expect(withHealth([time, gap, poll], "healthy")).toEqual([poll]);
+    expect(withHealth([time, gap, poll], "gap")).toEqual([gap]);
+  });
+
   it.each(TRIGGER_LIFECYCLES)("%s with lost evidence", (lifecycle) => {
     const chip = healthChip({
       lifecycle,
       health: "unknown",
+      source: pollFixture().source,
       healthDetail: "  the computer went quiet ",
     });
     expect(chip).toEqual(
@@ -563,8 +580,12 @@ describe("healthChip", () => {
   it("never words unknown as healthy", () => {
     for (const healthDetail of [undefined, null, "", "lost"]) {
       expect(
-        healthChip({ lifecycle: "enabled", health: "unknown", healthDetail })
-          ?.text,
+        healthChip({
+          lifecycle: "enabled",
+          health: "unknown",
+          source: pollFixture().source,
+          healthDetail,
+        })?.text,
       ).not.toBe("triggerHealthHealthy");
     }
   });

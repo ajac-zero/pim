@@ -179,6 +179,33 @@ describe("the list", () => {
     expect(text).not.toContain("Health: Healthy");
   });
 
+  it("shows a time trigger no health chip unless its health is a problem", async () => {
+    const client = clientWith();
+    setList(client, [
+      page([
+        triggerFixture({
+          id: "trg_a",
+          lifecycle: "enabled",
+          health: "unknown",
+        }),
+        triggerFixture({
+          id: "trg_b",
+          lifecycle: "enabled",
+          health: "healthy",
+        }),
+        triggerFixture({
+          id: "trg_c",
+          lifecycle: "enabled",
+          health: "budget_blocked",
+        }),
+      ]),
+    ]);
+    const text = textOf(await render(TriggersPage, client));
+    expect(text.match(/Health: /g)).toHaveLength(1);
+    expect(text).not.toContain("Health: Waiting for first check");
+    expect(text).not.toContain("Health: Healthy");
+  });
+
   it("labels every filter, including health, source and agent", async () => {
     const client = clientWith();
     setList(client, [page([])]);
@@ -356,7 +383,13 @@ describe("a trigger's page", () => {
     expect(text).toContain("On the schedule 0 9 * * 1-5, in Europe/Lisbon");
     expect(text).toContain("A new chat each time");
     expect(text).toContain("Here, by you");
-    expect(text).toContain("Not reported by Pim yet");
+    expect(text).not.toContain("Last check");
+    expect(text).not.toContain("Not reported by Pim yet");
+    expect(
+      textOf(
+        await render(() => <TriggerDetail trigger={pollFixture()} />, client),
+      ),
+    ).toContain("Last checkNot reported by Pim yet");
     expect(text).toContain("Last occurrence");
     expect(text).toMatch(/Nov 6, 2026/);
     expect(text).toContain(

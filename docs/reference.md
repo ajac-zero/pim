@@ -80,7 +80,7 @@ In chat, agents link to your files with Markdown such as `[Report](/workspace/re
 
 The chat never displays raw tool calls, their arguments or results, working notes, or reasoning, including while a run streams. These remain in the durable transcript for debugging. A tool call is only a step in the folded "Worked for …" list, marked ✓ once approved, ✗ if denied, or with a clock while it waits. The request itself, with Approve and Deny, waits under "Waiting for you" in the box beside the chat (the activity button in its header), which opens by itself while one is waiting, and when the chat's browser opens or it hands out a task. Generated apps keep their dedicated user-facing cards; a busy indicator shows when Pim is working.
 
-File links in an agent's replies and generated images open in the same resizable canvas beside the chat as apps, or over the chat on narrow screens. Close the viewer to return to the full conversation. A file link outside a chat opens the file on its own page.
+File links in an agent's replies and generated images open in the same resizable canvas beside the chat as apps, or over the chat on narrow screens. Close the viewer to return to the full conversation. A file link outside a chat opens the file on its own page. An image file in the workspace, written as Markdown `![alt](/workspace/path.png)` in an agent's message, shows in the message itself.
 
 ## Deploy
 

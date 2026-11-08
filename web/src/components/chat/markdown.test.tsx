@@ -297,6 +297,23 @@ describe("an agent's Markdown", () => {
     expect(html).toContain("[tracker]");
   });
 
+  it("shows image files in the workspace, and no other file or address", () => {
+    const shown = renderToStaticMarkup(
+      <Markdown text="![sheet](/workspace/birds/sheet%20one.png) ![notes](/workspace/notes.md) ![etc](/etc/a.png)" />,
+    );
+    const srcs = elements(shown).flatMap((element) =>
+      element.attributes.filter((a) => a.name === "src").map((a) => a.value),
+    );
+    expect(srcs).toHaveLength(1);
+    const url = new URL(srcs[0] as string, "https://pim.example");
+    expect([url.pathname, url.searchParams.get("path")]).toEqual([
+      "/api/files/content",
+      "/workspace/birds/sheet one.png",
+    ]);
+    expect(shown).toContain("[notes]");
+    expect(shown).toContain("[etc]");
+  });
+
   it("draws cards with Pim's copies of their images, and never the images' own addresses", () => {
     const html = renderToStaticMarkup(
       <ReplyImages

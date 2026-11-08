@@ -30,7 +30,8 @@ import {
   CodeBlockTitle,
 } from "~/components/ui/code-block";
 import { type CanvasSearch, openCanvasTab } from "~/lib/canvas";
-import { type Agent, FILES_ROOT } from "~/lib/pim-api";
+import { previewOf } from "~/lib/files";
+import { type Agent, FILES_ROOT, fileContentUrl } from "~/lib/pim-api";
 import {
   agentsQuery,
   majordomoQuery,
@@ -543,6 +544,22 @@ const untrustedComponents = {
 const OWN_IMAGE = /^\/api\/images\/[\w-]+$/;
 
 /**
+ * Where the app loads an image of an agent's message from, or null when it
+ * isn't Pim's own: a kept copy, or an image file in the person's workspace,
+ * which the agent names by its path.
+ */
+function ownImage(src: string): string | null {
+  if (OWN_IMAGE.test(src)) return src;
+  if (!src.startsWith(`${FILES_ROOT}/`)) return null;
+  try {
+    const path = decodeURIComponent(src);
+    return previewOf(path).kind === "image" ? fileContentUrl(path) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * An agent's message shows only Pim's own images. One from elsewhere would be
  * fetched as soon as the message shows, and its address could carry what the
  * agent read: a page it read could tell it to write such an image. Its alt
@@ -552,8 +569,9 @@ const agentComponents = {
   img: (props: object) => {
     const { src, alt } = props as { src?: unknown; alt?: unknown };
     const label = typeof alt === "string" ? alt : "";
-    return typeof src === "string" && OWN_IMAGE.test(src) ? (
-      <img src={src} alt={label} className="my-3 max-w-full rounded-xl" />
+    const shown = typeof src === "string" ? ownImage(src) : null;
+    return shown ? (
+      <img src={shown} alt={label} className="my-3 max-w-full rounded-xl" />
     ) : (
       <span className="text-muted-foreground">[{label || "image"}]</span>
     );

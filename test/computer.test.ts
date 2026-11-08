@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { Workspace } from "@cloudflare/computer";
 import type { Message } from "@earendil-works/pi-ai";
@@ -6,6 +7,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
+import { COMPUTER_TRIGGERS_VARIABLE, computerTriggersAllowed, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
@@ -374,6 +376,49 @@ describe("the computer", () => {
 			answer = wasAnswer;
 			vi.restoreAllMocks();
 		}
+	});
+
+	it("ignores triggers' messages, as before, where computer triggers are off, even in a space whose triggers are on, and answers them only behind the gate", async () => {
+		expect(computerTriggersAllowed(env)).toBe(false);
+		expect(await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine())).toBe(true);
+		const answered: string[] = [];
+		const listen = (event: MessageEvent) => {
+			if (String(event.data).startsWith(TRIGGERS_ENVELOPE)) answered.push(String(event.data));
+		};
+		computer.socket.addEventListener("message", listen);
+		const digest = createHash("sha256").update(token).digest("hex");
+		computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId: runtimeIdOf(digest), connectionId: "connection-1", lastEpoch: null, pending: 0 })}}`);
+		// A computer's own hello after it: once the space has taken that, it has taken the triggers' message before it.
+		const hello = (hostname: string) => JSON.stringify({ type: "hello", version: 1, agent: "pim-computer/test", hostname, platform: "linux", arch: "x64", user: "ada", root: computer.root, browser: null, screen: false, desktop: false });
+		computer.socket.send(hello("after-triggers"));
+		await vi.waitFor(async () => expect((await status()).computer?.hostname).toBe("after-triggers"));
+		computer.socket.send(hello("test-box"));
+		await vi.waitFor(async () => expect((await status()).computer?.hostname).toBe("test-box"));
+		computer.socket.removeEventListener("message", listen);
+		expect(answered).toEqual([]);
+		const tables = await runInDurableObject(agent(), (_pim: Pim, state) => state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name LIKE 'pim_trigger_computer%'").toArray());
+		expect(tables).toEqual([]);
+
+		// With the gate set on this space's own env for the test, the same hello is the runtime's, answered on the same socket before the computer's own messages are read.
+		const own = () => runInDurableObject(agent(), (pim: Pim) => (pim as unknown as { env: Record<string, unknown> }).env);
+		(await own())[COMPUTER_TRIGGERS_VARIABLE] = "internal";
+		try {
+			computer.socket.addEventListener("message", listen);
+			computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId: runtimeIdOf(digest), connectionId: "connection-2", lastEpoch: null, pending: 0 })}}`);
+			await vi.waitFor(() => expect(answered).toHaveLength(1));
+			computer.socket.removeEventListener("message", listen);
+			expect(JSON.parse(answered[0]!)).toEqual({
+				type: "triggers",
+				frame: { protocol: PROTOCOL, type: "reconcile", binding: { space: OWNER, runtimeId: runtimeIdOf(digest) }, connectionId: "connection-2", serverEpoch: 1, desiredRevision: 1, leaseMs: 120_000, sources: [] },
+			});
+			expect(await status()).toMatchObject({ state: "online", computer: { hostname: "test-box" } });
+		} finally {
+			delete (await own())[COMPUTER_TRIGGERS_VARIABLE];
+		}
+		await runInDurableObject(agent(), async (pim: Pim, state) => {
+			expect(state.storage.sql.exec("SELECT runtime_id, server_epoch FROM pim_trigger_computer_runtimes").toArray()).toEqual([{ runtime_id: runtimeIdOf(digest), server_epoch: 1 }]);
+			await pim.disableTriggerEngine();
+		});
 	});
 
 	it("is offline while it isn't connected, with the same tools", async () => {

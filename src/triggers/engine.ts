@@ -9,9 +9,10 @@
  * export holds either way (`triggerHistory`).
  */
 
+import { COMPUTER_TABLES } from "./computer";
 import { COORDINATOR_TABLES, TriggerCoordinator } from "./coordinator";
 import { HOST_TABLES, PimTriggerHost, type TriggerSpace } from "./host";
-import { TRIGGER_TABLES, TriggerStore } from "./store";
+import { type AuthorizationRequest, type AuthorizationVerdict, TRIGGER_TABLES, TriggerStore } from "./store";
 import { SUBSCRIPTION_PRIVATE_COLUMNS, SUBSCRIPTION_TABLES } from "./subscriptions";
 
 /** The method of `Pim` its trigger wake calls. */
@@ -40,6 +41,8 @@ export type TriggerEngineOptions = {
 	/** The triggers' clock. */
 	readonly now: () => number;
 	readonly space: TriggerSpace;
+	/** The check of computer sources' grants (./computer.ts), only where computer triggers are on; without it no computer source can be enabled. */
+	readonly authorize?: (request: AuthorizationRequest) => AuthorizationVerdict;
 };
 
 /**
@@ -47,7 +50,8 @@ export type TriggerEngineOptions = {
  * export: whether the engine is on now or not, since turning it off keeps
  * what it recorded. Connector subscriptions' bindings (./subscriptions.ts),
  * which nothing in Pim makes yet, are in it too when their table exists,
- * without their callback key or secret. Read only: it makes no table, and
+ * without their callback key or secret, and so are computer triggers' epochs
+ * and grants (./computer.ts), which only a gate nothing sets makes. Read only: it makes no table, and
  * builds nothing. Null when the space has none of the tables.
  */
 export function triggerHistory(sql: SqlStorage): Record<string, Record<string, SqlStorageValue>[]> | null {
@@ -57,7 +61,7 @@ export function triggerHistory(sql: SqlStorage): Record<string, Record<string, S
 			.toArray()
 			.map((row) => String(row.name)),
 	);
-	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES].filter((table) => existing.has(table));
+	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES, ...COMPUTER_TABLES].filter((table) => existing.has(table));
 	if (tables.length === 0) return null;
 	return Object.fromEntries(
 		tables.map((table) => {
@@ -77,8 +81,8 @@ export class TriggerEngine {
 
 	constructor(sql: SqlStorage, options: TriggerEngineOptions) {
 		this.space = options.space;
-		// No `authorize`: no computer source can be enabled until grants are checked here.
-		this.store = new TriggerStore(sql, { transaction: options.transaction, now: options.now });
+		// No `authorize` but where computer triggers are on: elsewhere no computer source can be enabled.
+		this.store = new TriggerStore(sql, { transaction: options.transaction, now: options.now, ...(options.authorize ? { authorize: options.authorize } : {}) });
 		this.host = new PimTriggerHost(sql, options.space);
 		this.coordinator = new TriggerCoordinator(sql, {
 			store: this.store,

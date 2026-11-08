@@ -322,6 +322,28 @@ describe("A person's own model providers", () => {
 		await api("/providers/proxy", { method: "DELETE" });
 	});
 
+	it("takes a custom endpoint's real context window and prices, and keeps them when its models are read again", async () => {
+		await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" });
+		const overrides = { "vision-model": { contextWindow: 200_000, cost: { input: 3, output: 15 } } };
+		const saved = (await put("/providers/home-server", { overrides })).body.provider;
+		expect(saved.models.find((model: { id: string }) => model.id === "vision-model")).toMatchObject({ contextWindow: 200_000, maxTokens: 8_192, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } });
+		// What the server says about the others stays; saving again keeps the settings.
+		expect(saved.models.find((model: { id: string }) => model.id === "served-model")).toMatchObject({ contextWindow: 4_096 });
+		expect((await put("/providers/home-server", { name: "Home" })).body.provider.overrides).toEqual({ "vision-model": { contextWindow: 200_000, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } } });
+
+		// A chat's cost is its tokens at that price: 10 in and 3 out, per million.
+		await put("/model", { provider: "own:home-server", id: "vision-model" });
+		const session = (await post("/sessions", { title: "Priced" })).body.id;
+		await say("Hello?", session);
+		expect((await api(`/sessions/${session}/cost`)).body.total).toBeCloseTo((10 * 3 + 3 * 15) / 1e6, 10);
+
+		expect((await put("/providers/home-server", { overrides: { "vision-model": { contextWindow: 0 } } })).status).toBe(400);
+		expect((await put("/providers/home-server", { overrides: { "vision-model": { cost: { input: -1 } } } })).status).toBe(400);
+		// An empty set takes them away.
+		expect((await put("/providers/home-server", { overrides: {} })).body.provider.models[1]).toMatchObject({ contextWindow: 32_768 });
+		await api("/providers/home-server", { method: "DELETE" });
+	});
+
 	it("offers a provider's models for side jobs only when it answers in a JSON schema", async () => {
 		const utility = async () => (await api("/model")).body.utility as { model: { id: string }; choices: { provider: string; id: string }[] };
 		const choose = (provider: string, id: string) => put("/model/utility", { provider, id });

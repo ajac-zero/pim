@@ -850,7 +850,7 @@ describe("turning on a computer source", () => {
     expect(text).toContain("Computerada-laptop");
     expect(text).toContain("Script versionRevision 7");
     expect(text).toContain("FrequencyEvery 5 minutes");
-    expect(text).toContain("Approval policyAsks before external actions");
+    expect(text).toContain("Approval policyAsks you before external actions");
     expect(text).toContain(UNDERSTAND);
     // The disclosure and the box come before the action they gate.
     expect(text.indexOf(ACCESS)).toBeLessThan(text.indexOf(UNDERSTAND));
@@ -914,19 +914,61 @@ describe("turning on a computer source", () => {
         ),
       );
     const auto = await approvals("auto");
-    expect(auto).toContain("Approval policyApprove it if I don't answer");
-    expect(auto).not.toContain("Asks before external actions");
+    expect(auto).toContain(
+      "Approval policyApproves by itself if you don't answer in 30 seconds",
+    );
+    expect(auto).not.toContain("Asks you before external actions");
     const majordomo = await approvals("majordomo");
-    expect(majordomo).toContain("Approval policyMy majordomo decides");
-    expect(majordomo).not.toContain("Asks before external actions");
+    expect(majordomo).toContain(
+      "Approval policyYour majordomo can approve on your behalf",
+    );
+    expect(majordomo).toContain(
+      "Tools you set to Always approve run without asking",
+    );
+    expect(majordomo).not.toContain("Asks you before external actions");
     const unread = await approvals(null);
     expect(unread).not.toContain("Approval policy");
-    expect(unread).not.toContain("Asks before external actions");
+    expect(unread).not.toContain("Asks you before external actions");
+    expect(unread).not.toContain("Always approve run without asking");
     // The rest of the disclosure, and its box, stay whatever the policy.
     for (const text of [auto, majordomo, unread]) {
       expect(text).toContain(ACCESS);
       expect(text).toContain(UNDERSTAND);
     }
+  });
+
+  it("turns on only with a paired computer, and says why when it can't", async () => {
+    const trigger = pollFixture({ lifecycle: "paused" });
+    const paired = await confirm(trigger, "resume", withComputer("ada-laptop"));
+    expect(textOf(paired)).not.toContain("Pair a computer first");
+    expect(textOf(paired)).not.toContain("Checking for your computer");
+    expect(textOf(paired)).not.toContain("Couldn't check your computer");
+    expect(paired).toContain('type="checkbox"');
+
+    const none = await confirm(trigger, "resume", withComputer(null));
+    expect(textOf(none)).toContain("Pair a computer first");
+    expect(buttonFor(none, "Turn on")).toMatch(DISABLED);
+    expect(textOf(none)).toContain(ACCESS);
+    expect(none).toContain('type="checkbox"');
+
+    const loading = await confirm(trigger, "resume", clientWith());
+    expect(textOf(loading)).toContain("Checking for your computer…");
+    expect(textOf(loading)).not.toContain("Pair a computer first");
+    expect(buttonFor(loading, "Turn on")).toMatch(DISABLED);
+
+    const failing = clientWith();
+    failing
+      .getQueryCache()
+      .build(failing, { queryKey: computerQuery().queryKey })
+      .setState({
+        status: "error",
+        error: new Error("down"),
+        fetchStatus: "idle",
+      } as never);
+    const failed = await confirm(trigger, "resume", failing);
+    expect(textOf(failed)).toContain("Couldn't check your computer");
+    expect(textOf(failed)).not.toContain("Pair a computer first");
+    expect(buttonFor(failed, "Turn on")).toMatch(DISABLED);
   });
 
   it("asks nothing more of a time trigger, or of deleting a computer source", async () => {

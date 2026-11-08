@@ -274,8 +274,8 @@ export const personQuery = (username: string) =>
 
 /**
  * Whether this space has triggers: false where the routes answer as unknown
- * paths (the gate is off) or for a guest. Nothing about triggers shows until
- * this is true.
+ * paths (a space whose triggers aren't on) or for a guest. Nothing about
+ * triggers shows until this is true.
  */
 export const triggersAvailableQuery = () =>
   queryOptions({

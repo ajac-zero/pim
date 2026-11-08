@@ -372,6 +372,8 @@ async function register(request: Request, env: Env, address: string, now: number
 		// The deployment's limits are for members: the admin pays for the deployment.
 		if (account.role === "admin") await pim.setLimits(UNLIMITED);
 		if (account.role === "guest" && bot) await pim.adoptBot(await botCopy(env, bot));
+		// Triggers from the start, not only from the space's next start; a guest's space never gets them. It never throws.
+		if (account.role !== "guest") await pim.ensureTriggerEngine();
 		// Everyone else gets a copy of the agent the admin chose, if they chose one, besides the majordomo they name next.
 		const everyone = account.role === "guest" ? null : await gallery(env).defaultAgent();
 		if (everyone) {

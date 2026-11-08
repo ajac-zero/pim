@@ -1,10 +1,10 @@
 # Triggers
 
-> **Not active.** This is a review-only foundation. Pim builds the engine for time triggers (the store, the coordinator and its real host, and a wake) only in a space opted in where the deployment allows it, and no deployment does: the gate is a variable no deployment sets, and only tests opt a space in (below). No tool, route, prompt, UI, setting or computer call reaches it, and no space's database has its tables unless it was opted in. The ingress adapter for connector events (below) is constructed by nothing: no route, subscription or callback reaches it. The coordinator hands connector events on only when it is made with `connectorEvents`, which nothing in Pim does: Pim's engine leaves them pending. It hands computer sources' occurrences on only behind computer triggers' own gate, which nothing sets either. Schedules (`schedule_task`), connector watches (`watch_connector_event`) and Pim's own alarms work exactly as before. Turning triggers on for people, and moving schedules and watches to them, are later changes.
+> **Not active.** This is a review-only foundation. Pim builds the engine for time triggers (the store, the coordinator and its real host, and a wake) only in a space opted in where the deployment allows it, and no deployment does: the gate is a variable no deployment sets, and only tests opt a space in (below). No tool, route, prompt, UI, setting or computer call reaches it, and no space's database has its tables unless it was opted in. The ingress adapter for connector events (below) is constructed by nothing: no route, subscription or callback reaches it. The coordinator hands connector events on only when it is made with `connectorEvents`, which nothing in Pim does: Pim's engine leaves them pending. It hands computer sources' occurrences on only behind computer triggers' own gate, which nothing sets either. Schedules (`schedule_task`), connector watches (`watch_connector_event`) and Pim's own alarms work exactly as before. Moving schedules and watches to triggers goes as far as draft shadows owned by the schedule or watch, behind a gate of its own that nothing sets ("Moving schedules and watches", below). Turning triggers on for people, and handing a schedule or watch over to its trigger, are later changes.
 
 A trigger is work an agent does when something happens: at a time, on a connector's event, or when something it watches on the person's computer changes. Triggers are meant to replace schedules and watches with one thing people see and manage. Each space's Durable Object stays the authority for its triggers; the person's computer runs the observations (polls, streams, process exits, files), and Pim keeps the record and decides what is an occurrence.
 
-The code is in eight modules, with tests in `test/triggers.test.ts`, `test/triggers-time.test.ts`, `test/triggers-coordinator.test.ts`, `test/triggers-connector.test.ts`, `test/triggers-event-dispatch.test.ts` and, for Pim's engine and host, `test/triggers-host.test.ts`:
+The code is in these modules, with tests in `test/triggers.test.ts`, `test/triggers-time.test.ts`, `test/triggers-coordinator.test.ts`, `test/triggers-connector.test.ts`, `test/triggers-event-dispatch.test.ts`, for Pim's engine and host `test/triggers-host.test.ts`, and for moving schedules and watches `test/triggers-migration.test.ts`:
 
 | Module | What it is |
 | --- | --- |
@@ -16,6 +16,7 @@ The code is in eight modules, with tests in `test/triggers.test.ts`, `test/trigg
 | [`src/triggers/host.ts`](../src/triggers/host.ts) | `PimTriggerHost`: the host in Pim, which makes chats and submits through `submitTo`, keyed by operation |
 | [`src/triggers/engine.ts`](../src/triggers/engine.ts) | `TriggerEngine`: the three built together for one space, and the gate |
 | [`src/triggers/connector.ts`](../src/triggers/connector.ts) | `ConnectorIngress`: takes a signed connector event delivery into `admit`, unwired; and the typed contract for keeping a subscription alive |
+| [`src/triggers/migration.ts`](../src/triggers/migration.ts) | Moving schedules and watches: a pure mapping, a preview, and draft shadows owned by the schedule or watch, behind its own gate |
 
 ## What a trigger is
 
@@ -73,7 +74,7 @@ These are decided now, so integration doesn't have to guess. The store enforces 
 - **Handing on**: one attempt at a time per trigger, and, for time triggers, one agent run at a time (the coordinator). A state, or a time trigger, holds one pending snapshot. Events queue, up to 20 by default (`maxPendingEvents`, up to 100).
 - **Raw samples** are off, and turning them on is refused until it is built. An occurrence keeps why it fired, its truth, when, and which fields the condition read were present, never their values or an event's body.
 - **Replay**: event ids are remembered for 7 days, the shortest the store accepts.
-- **Moving schedules and watches** to triggers is deferred. Their data and behavior stay as they are.
+- **Moving schedules and watches** to triggers goes as far as draft shadows that never fire (below). Their data and behavior stay as they are.
 
 ## Conditions
 
@@ -166,7 +167,7 @@ Each event the condition is true for is an occurrence; unknown or false ones are
 
 ## The store
 
-`new TriggerStore(sql, { transaction, now, authorize?, newId?, retention? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, and `authorize` is the host's check of grants. Pim constructs one only in a space opted in (below), with no `authorize` unless computer triggers' own gate is on (below), so no computer source can be enabled there.
+`new TriggerStore(sql, { transaction, now, authorize?, newId?, retention?, ownedElsewhere? })` makes its own tables, prefixed `pim_trigger`, in the database it is given. `transaction` is the Durable Object's `transactionSync`, `now` is the clock, `authorize` is the host's check of grants, and `ownedElsewhere` says whether a schedule or watch still delivers a trigger's work, so enabling it is refused (`owned_elsewhere`; see "Moving schedules and watches"). Pim constructs one only in a space opted in (below), with no `authorize` unless computer triggers' own gate is on (below), so no computer source can be enabled there.
 
 | Table | Holds |
 | --- | --- |
@@ -304,7 +305,7 @@ Anywhere else `triggerEngine()` is null. Nothing is built, admitted or handed on
 
 **Computer sources, behind a second gate.** `src/triggers/computer.ts` is the space's side of `triggers.v1`, which pim-computer's triggers runtime speaks over the computer's connection: it checks the runtime against the stored token's digest, keeps its epoch and desired revision with the runtime durably, reconciles the enabled computer triggers that have a current grant with a lease it renews, takes observations in with `admit` and gaps with `recordGap`, acknowledging each only once its transaction has returned, and reads everything else the runtime says as health. Grants (`ComputerGrants`) are records made only from an approval the person themselves gave for exactly one source of one trigger on one computer, and checked again at every reconcile and admission, so a revoked grant stops admission at once. `Pim` builds it only when `PIM_TRIGGERS_COMPUTER` is `internal`, which nothing sets, in a space whose engine is on, and only then gives the engine's store an `authorize`. Behind the same gate, agents get `trigger_computer_grant`, which files the approval of exactly a trigger's current source for the person to decide and, once they approve it, records the grant and points the trigger at it; the computer is told again whenever a trigger or grant changes; the link with the runtime is kept in SQLite and its lease renewed from the space's wake, so an eviction loses nothing; and the coordinator hands each computer occurrence on as a `computer_event` (the source's kind and the event's id, never what was seen), checking that the trigger wasn't edited and its grant is still current before every step. Its tables (`COMPUTER_TABLES`) are in the export and `remainingData` when they exist. The details, and what is not wired (no route or screen to ask for, see or revoke a grant; no contract for a run reading what was observed), are in [triggers-runtime.md](triggers-runtime.md), "In Pim, behind its gate".
 
-**Tables made before.** The coordinator adds a column it needs to a `pim_trigger_runs` made by an earlier version (`unknown_answers`, at 0), once, keeping every run as it was. Nothing else is migrated: schedules and watches stay as they are.
+**Tables made before.** The coordinator adds a column it needs to a `pim_trigger_runs` made by an earlier version (`unknown_answers`, at 0), once, keeping every run as it was. Nothing else is migrated: schedules and watches stay as they are, and get at most a draft shadow ("Moving schedules and watches", below).
 
 ### The host
 
@@ -394,7 +395,7 @@ A coordinator made with `connectorEvents: true` hands a connector's event to its
 
 **Keeping the subscription** is the subscription manager's, below; it is unwired too.
 
-**Compatibility with watches, for a later migration (nothing is migrated).** `app-events.ts` and its callback `/mcp/events/<owner>/<watch>` are unchanged, as are each watch's secret, provider subscription id (`remoteId`), cursor and the operation id it submits under (`event:<watch>:<eventId>`). Moving a watch to a trigger must keep the provider's subscription, which the draft keys by its callback URL: so the watch's id as the binding's key under the same path, its secret and its `remoteId`. It must also keep events from running twice across the move: a trigger's occurrences are keyed `event:<trigger>#<revision>:<eventId>` and handed on as `trigger:<trigger>:<occurrence>`, which share nothing with a watch's operation ids, so the move needs either the watch's recent event ids seeded as taken in or the old operation ids honored. The adapter is stricter than the watch receiver, which a migration must check each connector against: it requires `X-MCP-Subscription-Id`, `webhook-id` equal to `eventId`, a `timestamp` and a JSON content type, refuses fields the draft doesn't define and control types it doesn't know (a watch acknowledges unknown types), and answers a gone watch's deliveries `410` as a watch does.
+**Compatibility with watches** (the migration's contract for them is in "Moving schedules and watches", below). `app-events.ts` and its callback `/mcp/events/<owner>/<watch>` are unchanged, as are each watch's secret, provider subscription id (`remoteId`), cursor and the operation id it submits under (`event:<watch>:<eventId>`). Moving a watch to a trigger must keep the provider's subscription, which the draft keys by its callback URL: so the watch's id as the binding's key under the same path, its secret and its `remoteId`. It must also keep events from running twice across the move: a trigger's occurrences are keyed `event:<trigger>#<revision>:<eventId>` and handed on as `trigger:<trigger>:<occurrence>`, which share nothing with a watch's operation ids, so the move needs either the watch's recent event ids seeded as taken in or the old operation ids honored. The adapter is stricter than the watch receiver, which a migration must check each connector against: it requires `X-MCP-Subscription-Id`, `webhook-id` equal to `eventId`, a `timestamp` and a JSON content type, refuses fields the draft doesn't define and control types it doesn't know (a watch acknowledges unknown types), and answers a gone watch's deliveries `410` as a watch does.
 
 ### Keeping the subscription
 
@@ -430,7 +431,81 @@ A pause, an edit of the source or condition, or a deletion all start a new gener
 
 **Bounds and history.** Every query is bounded by its batch, so a tick sends at most `batch.effects` requests; `nextWakeAt` is now while bindings wait to be made or revoked, else the earliest due binding, or null. A trigger keeps its 20 newest ended bindings as history. The table is made by `CREATE TABLE IF NOT EXISTS` beside the engine's, which it leaves as they are; `PimStore.remainingData` lists it, and erasing the space removes it with everything else.
 
-**Not done, and not tested.** Nothing constructs the manager, so there is no real provider over the MCP bridge, no route for the callback URL, no wake, and no engine that ticks it. The ingress adapter refuses a delivery while the binding has no provider subscription id (`not_ready`), so a connector that verifies the callback before it answers the first subscribe would be refused; whether any connector does needs checking against real ones. A termination the adapter records (health) is not read by the manager: the binding is subscribed again at its next renewal, and a fatal answer then ends it. The health a fatal code set isn't cleared by a later success, which only a new generation brings. A subscribe aborted at its deadline may still land after an unsubscribe that followed it; such a subscription lapses at its grant and its deliveries answer `410`. A watch's callback key and secret can't yet be adopted as a binding's, which moving watches needs. A removed connector is noticed only when its binding is next due.
+**Not done, and not tested.** Nothing constructs the manager, so there is no real provider over the MCP bridge, no route for the callback URL, no wake, and no engine that ticks it. The ingress adapter refuses a delivery while the binding has no provider subscription id (`not_ready`), so a connector that verifies the callback before it answers the first subscribe would be refused; whether any connector does needs checking against real ones. A termination the adapter records (health) is not read by the manager: the binding is subscribed again at its next renewal, and a fatal answer then ends it. The health a fatal code set isn't cleared by a later success, which only a new generation brings. A subscribe aborted at its deadline may still land after an unsubscribe that followed it; such a subscription lapses at its grant and its deliveries answer `410`. A watch's callback key and secret can be read as an adopted binding (`adoptedSubscription`, below), but the manager doesn't take one in yet, which handing a watch over needs. A removed connector is noticed only when its binding is next due.
+
+## Moving schedules and watches
+
+[`src/triggers/migration.ts`](../src/triggers/migration.ts) represents each schedule `schedule_task` made, and each connector watch, as a trigger, without changing how either is delivered. It goes as far as a **shadow**: a draft trigger with the same work, which the store refuses to enable while the schedule or watch still owns it. Its tests are in `test/triggers-migration.test.ts`, on a real space's SQLite database with the legacy paths as they are.
+
+**Nothing changes for schedules and watches.** `runScheduledTask`, the agents SDK's alarms, `AppEvents` and the callback `/mcp/events/<owner>/<watch>` are unchanged, and none of them reads anything this module writes. A schedule fires, and a watch takes its events, exactly as before, whether a shadow exists or not.
+
+### The mapping
+
+`planMigration({ schedules, watches, records }, context)` is pure and deterministic: given the same items, records and context it gives the same plan, in the same order (schedules, then watches, each by id). The context is resolved beforehand: the clock, the space's owner and public origin, whether an agent exists, a chat's agent (read only), and whether a chat is one a trigger may deliver to, as the host's preflight checks it. Each item is `migratable`, with the spec of its trigger, or `unsupported`, with the reason; **nothing that can't be represented exactly is approximated**. A migratable item also lists its `differences`, what its trigger would do differently once it delivers, and its `cutoverBlockers`, what must be built before it may (below).
+
+A schedule (`callback: runScheduledTask`):
+
+| Schedule | Trigger |
+| --- | --- |
+| `type: "scheduled"` (`at`), `time` | `time`, `once`, `at` = `time` × 1000, `maxLatenessMs` 7 days |
+| `type: "delayed"` (`delay_seconds`), `time`, `delayInSeconds` | The same: the instant the delay ends at, which the SDK fires it at; `delayInSeconds` isn't needed |
+| `type: "cron"`, `cron` | `time`, `cron`, the same `expression`, `timeZone: "UTC"`, `catchUpMs` 7 days |
+| `type: "interval"` | Unsupported (`interval_schedule`): `schedule_task` never makes one |
+| `payload.instruction` | `instruction` |
+| `payload.label` | `label`; with none, the instruction's first line, as a schedule's chats are titled, cut to 120 characters (`label_derived`) |
+| `payload.session` | `originChatId`; and, without `newChat`, `destination: { existing_chat, chatId }` |
+| `payload.newChat` | `destination: { new_chat }` |
+| `payload.agent` (with `newChat`) | `owningAgentId`, while that agent exists; else the chat's agent, as `runScheduledTask` falls back. Without `agent`, the chat's agent |
+| `id` | The trigger's id, `legacy:schedule:<id>:<attempt>` |
+
+**Time zones.** The agents SDK reads a cron expression in the runtime's zone, which on Workers is UTC, so a moved cron stays in `UTC`, unchanged, never the person's zone. A one-time schedule is an instant and stays one. **Cron is checked against how the SDK read it** (cron-schedule), not only parsed: names (`MON`), macros (`@daily`) and a seconds field are `cron_syntax`; a step from a single value (`5/15`, which the SDK reads as `5` alone) and day fields the two combine differently (the SDK takes a day field as restricted unless it names every value, triggers unless it starts with `*`, so `0 9 */2 * 5` and `0 9 1-31 * 5` differ) are `cron_semantics`. The day fields are compared on every day of the month against every day of the week. A one-time schedule whose time has come is `one_time_due`: its alarm runs it. A spec the store would refuse (a label over 120 characters, an instruction over 10,000, control characters) is `invalid_field`, naming the field and never its value.
+
+A watch:
+
+| Watch | Trigger, or the binding it would adopt |
+| --- | --- |
+| `serverId`, `event`, `arguments` | `connector_event` source: `connectorId`, `event`, `arguments` (up to 4 KB and 6 levels, else `invalid_field`) |
+| `instruction` | `instruction` |
+| `session` | `originChatId`, `destination: { existing_chat }`, and its agent as `owningAgentId` |
+| (no label) | `Connector event <event>` (`label_derived`) |
+| `id` | The binding's callback `key`, so its URL stays `/mcp/events/<owner>/<watch>`; the trigger's id is `legacy:watch:<id>:<attempt>` |
+| `url` | Must be the URL Pim would make for it now, else `callback_changed`: adopting it would subscribe a new URL |
+| `secret` | Never copied: the binding reads it from the watch (`secret: "kept_in_watch"`) |
+| `remoteId` | The binding's `providerSubscriptionId`, so no new provider subscription is made. Null, or `status: pending`: `watch_not_subscribed` |
+| `cursor` | The source's checkpoint cursor at cutover; the plan says only whether there is one |
+| `refreshBefore` | The binding's grant |
+| `status: ended` | `watch_ended` |
+| `lastError`, `lastEventAt`, `createdAt` | Not carried |
+| The operation id of each event, `event:<watch>:<eventId>` | `legacyOperationId`, which a cutover must honor (`legacyEventOperationId`) |
+
+`adoptedSubscription(watch, trigger)` is the **binding adoption contract** as code: the `ConnectorSubscription` the ingress adapter reads, built from the live watch when needed and never stored, with the watch's key, secret and provider subscription id. A test admits a delivery signed with a watch's own secret, to its own key and subscription id, through the real adapter into a trigger made from its plan, and takes it again as a duplicate. Nothing in Pim calls it.
+
+Unsupported for either: a chat that is deleted or isn't one a trigger may deliver to, such as another agent's seat in a group chat (`chat_unavailable`), and a chat whose agent doesn't exist yet, in a space whose majordomo was never made (`agent_unavailable`).
+
+**Differences, accepted and documented.** `run_text`: the run reads `[Trigger "<label>" <id>]` and when it was due, not `[Scheduled task …]` or `[Connector event] …`. `lateness_bound`: a firing more than 7 days late is recorded as missed, where an alarm runs however late. `refused_runs_retry`: a run the limit or a suspension refuses is tried again until `deliverBy`, where a schedule's firing is skipped and the person told once a day. `agent_fixed`: the agent is fixed when migrated, where a schedule resolves it at each firing. `label_derived`, above.
+
+**Cutover blockers**, which keep an item with its schedule or watch until they are built: `firing_notification` (every schedule's firing notifies open apps; a trigger's handoff doesn't yet); `event_contents` (a watch's run reads what the event carried; a trigger's is told only its name, id and time); `stricter_ingress` (each connector must be checked against the adapter's stricter rules, under "Compatibility with watches" above); `legacy_event_ids` (an event a watch took in before the cutover and sent again after it must be a duplicate, so the trigger must honor the watch's operation ids: the adoption test shows a trigger keys it `event:<trigger>#<revision>:<eventId>` instead); `binding_adoption` (nothing routes the watch's callback to the adapter, and the subscription manager takes in no adopted binding).
+
+### The preview
+
+`Pim.previewTriggerMigration()` reads the schedules (`listSchedules`, as `schedule_task` lists them), the watches and the records, checks the chats as the host's preflight does, and returns the plan, with each item's record and the records whose item is gone (`orphans`, such as a one-time schedule that has fired since; its shadow is kept until rolled back). It **writes nothing** and makes no table, whether triggers are on or not: no engine is built, no agent made (a chat's agent is read only), and the records are read without making their table. Nothing secret is in it: no webhook secret and no cursor. It is internal: nothing calls it.
+
+### Apply, one owner, and rollback
+
+`Pim.applyTriggerMigration()` runs only where the deployment sets **`PIM_TRIGGERS_MIGRATION`** to `internal`, which no deployment, the preview or `vitest.config.ts` does (its tests set it on one space's env for the call), and only in a space whose engine is on; elsewhere it returns null and makes nothing. It plans again, then for each migratable item, in **one transaction**: writes its record (`pim_trigger_migrations`, `MIGRATION_TABLES`), owned by `legacy`, phase `shadow`, then makes its trigger as a `draft` at revision 1 with the planned id. So a crash or a throw at any step, after the record, after the trigger, or at the commit, leaves nothing of that item, and applying again makes it; a crash between items keeps those done. An item already shadowed is `already`, so applying again changes nothing, and two applies at once make one shadow, since the record and the trigger's id are unique. An unsupported item is reported and nothing is written for it; one already shadowed stays as it was. The store refusing a trigger (an id another took) writes nothing for that item and is reported `refused`.
+
+**One owner per item.** A record's `owner` says which system delivers its item: `legacy` (the schedule or watch) or `trigger`. Applying writes `legacy`, and **nothing writes `trigger`**: there is no cutover. A shadow can't fire while its record says `legacy`:
+
+- It is a draft: it is never due (`admitDueTime`), its events are refused (`not_enabled`), and nothing claims it.
+- Enabling it is refused. The store takes `ownedElsewhere` (`TriggerStore` option), which Pim's engine gives it as `ownedByLegacy`, read in the transaction that would enable a trigger (`setLifecycle` to `enabled`, or `create` enabled): `owned_elsewhere`.
+
+So a due schedule fires once, through its alarm (a retried firing is one submission, as before), and its shadow admits nothing however the clock moves, across the engine being built again (a restart) and a second apply; a watch's event is run once through its callback, retried deliveries included, and the same delivery offered to the shadow through its adopted binding is refused before its body is read. The tests check each of these.
+
+`Pim.rollbackTriggerMigration()` gives every shadowed item back to its schedule or watch for good, one transaction each: its trigger is deleted (kept as any deleted trigger is, with its tombstone, so its id is never reused), and its record says `legacy`, `rolled_back`. The schedule and the watch are exactly as they were. It is idempotent (`already`), and works wherever the engine is on and something was applied, even with the migration's gate off, so it can always be undone. Applying again after a rollback makes a new shadow, `attempt` 2, under a new id.
+
+**What is kept, and what isn't.** A record holds the item's kind and id, its attempt, its trigger's id, the owner, the phase and two times: no secret, cursor, callback URL or instruction (the instruction is in the trigger's revision, as any trigger's). The watch's id is in it, as it is in the export's `watches`. The table is in the export (`triggerHistory`, all of it) and in `remainingData` ("schedules and watches moved to triggers") when it exists; erasing the space removes it with everything else.
+
+**Not wired, and not done.** Nothing calls the preview, apply or rollback: no route, tool, setting or UI. No deployment sets the gate. There is no cutover: nothing writes `owner: trigger`, stops a schedule's alarm or a watch's callback, or enables a shadow, and the legacy paths don't read the records, so a cutover must make them defer to the owner before anything writes `trigger`. Each blocker above is unbuilt. A shadow is made once and not kept in step: a schedule cancelled or fired since leaves an orphan for rollback, and the preview lists it. A rollback after a real cutover would also have to give the item back to its schedule or watch, which no rollback here needs to do.
 
 ## Turning it on later
 
@@ -441,9 +516,9 @@ What is left, roughly in order. Each step is its own change:
 3. **Tools, routes and UI for time triggers**: showing `previewFirings`, skipped times included, when one is made, and the refusals when it is saved.
 4. **Connector events.** Done, unwired: the ingress adapter, the renewal contract, the subscription manager that records bindings, intents and grants (above), and handing events on through the coordinator with `connectorEvents`. Left: a real provider over the MCP bridge, a route, a wake for the manager, a cursor kept with a gap, and turning the manager and `connectorEvents` on in Pim's engine.
 5. **Computer observers.** Done behind two gates, unwired: pim-computer's runtime and observers (triggers-runtime.md) and the space's side (above), with health from the connection (`waiting_computer`, `reconnecting`) and `recordGap` from the runtime's gaps. Also done behind computer triggers' gate: the agent's tool that asks for a grant and the action that records it, refreshing the computer when a trigger or grant changes, handing computer occurrences on (kind and id only), and keeping the link and its lease across an eviction. Left: a route or UI to ask for, see and revoke grants, a contract for what of an observation a run may read, and a run against a real pim-computer and Durable Object.
-6. **Moving schedules and watches**, behind a migration that keeps their behavior.
+6. **Moving schedules and watches.** Done behind its own gate, unwired: the mapping, the preview, draft shadows owned by the schedule or watch, and rollback (below). Left: everything in its cutover blockers, and the cutover itself.
 
-Not done here: setting the gate in any deployment, any observer, tool, route or UI, a notification for a trigger's chat, a run-status bridge, a manual run, keeping raw samples, expiry for computer sources other than a process, the migration, and quotas across a space's triggers. The coordinator hands on time firings, and connector events only when made with `connectorEvents`, which nothing in Pim does; it doesn't cancel or stop a run (deleting or pausing a trigger doesn't stop one already going), and a chat it made for an operation that was never submitted is left for the host to clean up.
+Not done here: setting the gate in any deployment, any observer, tool, route or UI, a notification for a trigger's chat, a run-status bridge, a manual run, keeping raw samples, expiry for computer sources other than a process, handing a schedule or watch over to its trigger, and quotas across a space's triggers. The coordinator hands on time firings, and connector events only when made with `connectorEvents`, which nothing in Pim does; it doesn't cancel or stop a run (deleting or pausing a trigger doesn't stop one already going), and a chat it made for an operation that was never submitted is left for the host to clean up.
 
 These are conditions for later tranches to meet before they are accepted, not work done here:
 

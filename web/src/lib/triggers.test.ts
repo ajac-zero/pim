@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type Approval, pim, type Trigger } from "~/lib/pim-api";
+import {
+  ApiError,
+  type Approval,
+  pim,
+  TRIGGER_HEALTHS,
+  TRIGGER_LIFECYCLES,
+  type Trigger,
+} from "~/lib/pim-api";
 import { triggersQuery } from "~/lib/queries";
 import {
   changeOf,
@@ -9,6 +16,8 @@ import {
   emptyForm,
   formOf,
   grantStanding,
+  HEALTH_TEXT,
+  healthChip,
   inputOf,
   nextLine,
   offeredKinds,
@@ -24,6 +33,7 @@ import {
   pollFixture,
   triggerFixture,
 } from "~/test/trigger-fixtures";
+import type { Theme } from "../../../src/themes";
 
 type Answer = { status: number; body: unknown };
 
@@ -520,5 +530,79 @@ describe("a grant request", () => {
     await expect(decideGrant("apr_grant", "approve")).rejects.toThrow(
       "This capability is turned off",
     );
+  });
+});
+
+describe("healthChip", () => {
+  const cases = TRIGGER_LIFECYCLES.flatMap((lifecycle) =>
+    TRIGGER_HEALTHS.map((health) => [lifecycle, health] as const),
+  );
+
+  it.each(cases)("%s × %s", (lifecycle, health) => {
+    const chip = healthChip({ lifecycle, health });
+    if (lifecycle !== "enabled") return expect(chip).toBeNull();
+    expect(chip?.reason).toBeNull();
+    expect(chip?.text).toBe(
+      health === "unknown" ? "triggerHealthWaitingFirst" : HEALTH_TEXT[health],
+    );
+  });
+
+  it.each(TRIGGER_LIFECYCLES)("%s with lost evidence", (lifecycle) => {
+    const chip = healthChip({
+      lifecycle,
+      health: "unknown",
+      healthDetail: "  the computer went quiet ",
+    });
+    expect(chip).toEqual(
+      lifecycle === "enabled"
+        ? { text: "triggerHealthCantCheck", reason: "the computer went quiet" }
+        : null,
+    );
+  });
+
+  it("never words unknown as healthy", () => {
+    for (const healthDetail of [undefined, null, "", "lost"]) {
+      expect(
+        healthChip({ lifecycle: "enabled", health: "unknown", healthDetail })
+          ?.text,
+      ).not.toBe("triggerHealthHealthy");
+    }
+  });
+});
+
+describe("chip colors", () => {
+  const themes = Object.values(
+    import.meta.glob<Record<string, Theme>>(
+      [
+        "../../../src/extensions/themes/*.ts",
+        "!../../../src/extensions/themes/index.ts",
+      ],
+      { eager: true },
+    ),
+  ).flatMap((module) => Object.values(module));
+
+  /** Relative luminance of a hex or neutral OKLCH color, as themes.test.ts reads them. */
+  const luminance = (color: string) => {
+    const neutral = /^oklch\(([\d.]+) 0 0\)$/.exec(color);
+    if (neutral) return Number(neutral[1]) ** 3;
+    return [0.2126, 0.7152, 0.0722].reduce((sum, weight, index) => {
+      const channel =
+        Number.parseInt(color.slice(1 + index * 2, 3 + index * 2), 16) / 255;
+      const linear =
+        channel <= 0.04045
+          ? channel / 12.92
+          : ((channel + 0.055) / 1.055) ** 2.4;
+      return sum + linear * weight;
+    }, 0);
+  };
+
+  // Chips are drawn as foreground text on the muted fill; the colored dot is decoration.
+  it.each(themes)("$name's chip text reads at 4.5:1 in both modes", (theme) => {
+    for (const mode of ["light", "dark"] as const) {
+      const a = luminance(theme[mode].foreground);
+      const b = luminance(theme[mode].muted);
+      const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      expect(ratio, `${theme.id} ${mode}`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

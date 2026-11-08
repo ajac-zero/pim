@@ -145,7 +145,7 @@ export const LIFECYCLE_TEXT: Record<TriggerLifecycle, TranslationKey> = {
 };
 
 export const HEALTH_TEXT: Record<TriggerHealth, TranslationKey> = {
-  unknown: "triggerHealthUnknown",
+  unknown: "triggerHealthWaitingFirst",
   healthy: "triggerHealthHealthy",
   waiting_computer: "triggerHealthWaitingComputer",
   reconnecting: "triggerHealthReconnecting",
@@ -154,6 +154,24 @@ export const HEALTH_TEXT: Record<TriggerHealth, TranslationKey> = {
   budget_blocked: "triggerHealthBudget",
   configuration_error: "triggerHealthConfiguration",
 };
+
+/**
+ * The health chip a trigger shows, or null for none. Only a trigger that is
+ * on has health to show: a draft, paused or ended one isn't running, so
+ * nothing about a source is said of it. For an on trigger, `unknown` with no
+ * reason means nothing has been checked yet; with one it means the evidence
+ * was lost, which is "can't check", never "healthy".
+ */
+export function healthChip(
+  trigger: Pick<Trigger, "lifecycle" | "health" | "healthDetail">,
+): { text: TranslationKey; reason: string | null } | null {
+  if (trigger.lifecycle !== "enabled") return null;
+  const reason = trigger.healthDetail?.trim() || null;
+  if (trigger.health === "unknown" && reason) {
+    return { text: "triggerHealthCantCheck", reason };
+  }
+  return { text: HEALTH_TEXT[trigger.health], reason: null };
+}
 
 /** Health that needs the person's attention, which the screens mark in the error color. */
 export const HEALTH_PROBLEMS: readonly TriggerHealth[] = [
@@ -274,7 +292,10 @@ export function withHealth(
   health: TriggerHealth | undefined,
 ) {
   return health
-    ? triggers.filter((trigger) => trigger.health === health)
+    ? triggers.filter(
+        (trigger) =>
+          trigger.lifecycle === "enabled" && trigger.health === health,
+      )
     : [...triggers];
 }
 

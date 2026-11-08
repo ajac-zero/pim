@@ -500,11 +500,11 @@ describe("poll on real children", () => {
 		}
 	};
 	async function gone(pid: number): Promise<boolean> {
-		for (let tries = 0; tries < 40 && alive(pid); tries++) await new Promise((resolve) => setTimeout(resolve, 25));
+		for (let tries = 0; tries < 1_200 && alive(pid); tries++) await new Promise((resolve) => setTimeout(resolve, 25));
 		return !alive(pid);
 	}
 	async function pidFrom(file: string): Promise<number> {
-		for (let tries = 0; tries < 80; tries++) {
+		for (let tries = 0; tries < 1_200; tries++) {
 			const text = await fs.readFile(file, "utf8").catch(() => "");
 			if (/^\d+\n$/.test(text)) return Number(text);
 			await new Promise((resolve) => setTimeout(resolve, 25));
@@ -1010,7 +1010,7 @@ describe.runIf(process.platform === "linux")("managed records on a real computer
 		return { child, exited };
 	}
 	async function intentOf(handle: string): Promise<void> {
-		for (let tries = 0; tries < 200; tries++) {
+		for (let tries = 0; tries < 1_200; tries++) {
 			if (await readManagedRecord(stateDir, handle).catch(() => null)) return;
 			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
@@ -1031,7 +1031,7 @@ describe.runIf(process.platform === "linux")("managed records on a real computer
 			},
 		};
 		const watched = await startWatch(provider, processSource({ handle, expiresAt: clock.time + PROCESS_WATCH.defaultMs }), clock);
-		for (let tries = 0; tries < 200 && !running && watched.sink.emits.length === 0 && watched.sink.reports.length === 0; tries++) {
+		for (let tries = 0; tries < 3_000 && !running && watched.sink.emits.length === 0 && watched.sink.reports.length === 0; tries++) {
 			await clock.advance(0);
 			await new Promise((resolve) => setTimeout(resolve, 10));
 		}

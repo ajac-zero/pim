@@ -65,7 +65,9 @@ export default defineConfig({
 			},
 			{
 				// What starts real processes, which workerd can't: the computer's supervisor of apps.
-				test: { name: "node", testTimeout: 30_000, include: live ? [] : ["test/*.node.test.ts"] },
+				// Their waits poll for the real condition with a 30 s deadline, so a starved 2-vCPU CI runner
+				// (next to the Worker project) can be slow without failing; the test timeout is above it.
+				test: { name: "node", testTimeout: 60_000, include: live ? [] : ["test/*.node.test.ts"] },
 			},
 		],
 	},

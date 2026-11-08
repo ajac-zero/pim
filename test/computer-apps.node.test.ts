@@ -61,7 +61,7 @@ const alive = (pid: number) => {
 	}
 };
 
-async function until<T>(read: () => T | Promise<T>, done: (value: T) => boolean, ms = 10_000): Promise<T> {
+async function until<T>(read: () => T | Promise<T>, done: (value: T) => boolean, ms = 30_000): Promise<T> {
 	for (const end = Date.now() + ms; ; await sleep(20)) {
 		const value = await read();
 		if (done(value) || Date.now() > end) return value;

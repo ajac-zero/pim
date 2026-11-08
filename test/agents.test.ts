@@ -8,7 +8,8 @@ import { TaskStore } from "../src/tasks";
 import { CREATE_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { INSTALL_SKILL, WRITE_SKILL } from "../src/extensions/skills";
 import { api, apiUrl, OWNER, pairTestComputer, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
-import { faux, type Pim } from "./worker";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { faux, napper, type Pim } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
 const system = (messages: readonly Message[]) => JSON.stringify(messages.filter((message) => message.role === "system").at(-1));
@@ -183,6 +184,30 @@ describe("the owner's agents", () => {
 		expect(seen[5]!.result).toContain('\\"exists\\": true');
 		expect((await api("/agents")).body.agents.filter((agent: { name: string }) => agent.name === "Code reviewer")).toHaveLength(1);
 		expect(seen[5]!.prompt).toContain("- Code reviewer: Reviews my pull requests.");
+	});
+
+	it("moves a chat on to the agent's fallback models when its model fails for good, and starts the next message on its own again", async () => {
+		const coach = (await post("/agents", { name: "Backup planner", instructions: "Plan my week." })).body;
+		expect(coach.fallbacks).toEqual([]);
+		expect((await api(`/agents/${coach.id}/fallbacks`, { method: "PUT", body: JSON.stringify({ models: [{ provider: "napper", id: "nope" }] }) })).status).toBe(400);
+		const saved = await api(`/agents/${coach.id}/fallbacks`, { method: "PUT", body: JSON.stringify({ models: [{ provider: "napper", id: "napper-model" }] }) });
+		expect(saved.body.fallbacks).toEqual([{ provider: "napper", id: "napper-model" }]);
+		const session = (await post("/sessions", { agent: coach.id })).body.id;
+
+		const outOfQuota = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "insufficient_quota: you exceeded your current quota" });
+		faux.setResponses([outOfQuota]);
+		napper.setResponses([toolUse("send_to_user", { message: "From the fallback." })]);
+		expect(await say("Plan my week", session)).toMatchObject({ status: "done", replies: ["From the fallback."] });
+
+		// The agent's own model is asked first again.
+		faux.setResponses([toolUse("send_to_user", { message: "From the first." })]);
+		expect(await say("And next week", session)).toMatchObject({ status: "done", replies: ["From the first."] });
+
+		// With every model failed, the run is held for Try again, as it is without fallbacks.
+		faux.setResponses([outOfQuota]);
+		napper.setResponses([outOfQuota]);
+		await post(`/sessions/${session}/messages`, { content: "Once more" });
+		await vi.waitFor(async () => expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session).held).toBe(true));
 	});
 
 	it("renames another agent or itself in chat without asking, keeping its identity and settings", async () => {

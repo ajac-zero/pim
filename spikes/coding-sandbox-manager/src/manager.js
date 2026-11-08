@@ -88,7 +88,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			await docker.request('POST', '/volumes/create', spec.volume)
 			await docker.request('POST', '/networks/create', spec.network)
 			await docker.request('POST', `/containers/create?name=${spec.container.name}`, spec.container.body)
-			await docker.request('POST', `/networks/${spec.network.Name}/connect`, { Container: cfg.proxyContainer })
+			await docker.request('POST', `/networks/${spec.network.Name}/connect`, { Container: cfg.proxyContainer, EndpointConfig: { Aliases: [cfg.proxyContainer] } })
 			await docker.request('POST', `/containers/${spec.container.name}/start`)
 			const info = await docker.request('GET', `/containers/${spec.container.name}/json`)
 			const ip = info.NetworkSettings.Networks[spec.network.Name].IPAddress

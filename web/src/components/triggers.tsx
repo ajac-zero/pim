@@ -45,6 +45,7 @@ import {
   triggersQuery,
 } from "~/lib/queries";
 import {
+  browserTimeZone,
   conditionText,
   conditionWords,
   cronWords,
@@ -243,6 +244,12 @@ export function NextText({ trigger }: { trigger: Trigger }) {
       })}
     </>
   );
+}
+
+/** When a one-time trigger would run, in the person's own zone. */
+export function NextAtText({ at }: { at: number }) {
+  const { t, zoned } = useFormats();
+  return <>{t("triggerNextAt", { date: zoned(at, browserTimeZone()) })}</>;
 }
 
 /** A refusal or failure, in words, with what the person can do about it. */

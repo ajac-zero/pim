@@ -607,7 +607,7 @@ export const ApprovalBlock = memo(function ApprovalBlock({
         </p>
       )}
       {view.fields.length > 0 && (
-        <Collapsible className="mt-2">
+        <Collapsible className="mt-2" defaultOpen={approval.action === "shell"}>
           <CollapsibleTrigger className="group flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground">
             <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
             {t("details")}

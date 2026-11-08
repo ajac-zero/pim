@@ -232,6 +232,8 @@ export function nextLine(trigger: Trigger): NextLine {
   const source = trigger.source;
   if (source.kind === "time") {
     const at = trigger.schedule?.nextFiringAt ?? null;
+    // A paused trigger shows no time: it resumes at the next scheduled one.
+    if (trigger.lifecycle === "paused") return { key: "triggerNextPaused" };
     if (at === null) return { key: "triggerNextNone" };
     return {
       key:

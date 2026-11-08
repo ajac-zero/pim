@@ -705,7 +705,7 @@ describe("layoutThread approvals", () => {
       shown: () => false,
       work: {
         running: true,
-        lines: { a: "Run on your computer: ls", b: "Run on your computer: ls" },
+        lines: { a: "Run a command", b: "Run a command" },
         approvals: { a: "approved", b: "denied" },
       },
     });
@@ -713,10 +713,10 @@ describe("layoutThread approvals", () => {
       steps: [
         {
           tool: "shell",
-          text: "Run on your computer: ls",
+          text: "Run a command",
           approval: "approved",
         },
-        { tool: "shell", text: "Run on your computer: ls", approval: "denied" },
+        { tool: "shell", text: "Run a command", approval: "denied" },
       ],
     });
   });

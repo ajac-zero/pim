@@ -234,7 +234,7 @@ describe("the computer", () => {
 		]);
 		const testing = say("Run the tests.");
 		const approval = await pendingApproval();
-		expect(approval.summary).toBe("Run on your computer: npm test");
+		expect(approval.summary).toBe("Run a command");
 		expect(ran).toEqual([]);
 		await post(`/approvals/${approval.id}/approve`);
 		await testing;

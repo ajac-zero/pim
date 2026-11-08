@@ -108,9 +108,6 @@ export function fileDeleteAction(services: FileServices): GatedAction {
 	});
 }
 
-/** The longest command the person reads in an approval request; the rest is cut. */
-const MAX_SUMMARY_COMMAND = 500;
-
 /** Running a command on the computer: it can do anything there, so the person approves it unless they let it run. */
 export function shellAction(computer: Computer): GatedAction {
 	return defineGatedAction({
@@ -123,10 +120,8 @@ export function shellAction(computer: Computer): GatedAction {
 				Type.Integer({ minimum: 1, maximum: MAX_COMMAND_MS / 1000, description: `How long it may run, in seconds: ${DEFAULT_COMMAND_MS / 1000} unless set.` }),
 			),
 		}),
-		summarize: ({ command }) => {
-			const shown = command.length > MAX_SUMMARY_COMMAND ? `${command.slice(0, MAX_SUMMARY_COMMAND)}…` : command;
-			return `Run on your computer: ${shown}`;
-		},
+		// The approval request lists the command itself; a notice in a chat only says that one ran.
+		summarize: () => "Run a command",
 		async run({ command, cwd, timeout_seconds }) {
 			if (cwd !== undefined && filesPath(cwd) === null) throw new Error(`${cwd} is not a folder under ${FILES_ROOT}.`);
 			const result = await computer.exec(command, { ...(cwd ? { cwd } : {}), ...(timeout_seconds ? { timeoutMs: timeout_seconds * 1000 } : {}) });

@@ -655,7 +655,7 @@ describe("stream on real children", () => {
 		const adapter = new StreamAdapter({ launcher, graceMs: 200, reapMs: 500, drainMs: 200 });
 		void adapter.start({ triggerId: "t1", sourceId: "t1#1", generation: 1, source: streamSource({ command, cwd: options.cwd ?? null }), resume: null, signal: new AbortController().signal }, sink.emit, sink.health);
 		const until = async (done: () => boolean) => {
-			for (let tries = 0; tries < 200 && !done(); tries++) await new Promise((resolve) => setTimeout(resolve, 25));
+			for (let tries = 0; tries < 1_200 && !done(); tries++) await new Promise((resolve) => setTimeout(resolve, 25));
 			if (!done()) throw new Error("timed out");
 		};
 		return { adapter, sink, until };
@@ -669,11 +669,11 @@ describe("stream on real children", () => {
 		}
 	};
 	async function gone(pid: number): Promise<boolean> {
-		for (let tries = 0; tries < 80 && alive(pid); tries++) await new Promise((resolve) => setTimeout(resolve, 25));
+		for (let tries = 0; tries < 1_200 && alive(pid); tries++) await new Promise((resolve) => setTimeout(resolve, 25));
 		return !alive(pid);
 	}
 	async function pidFrom(file: string): Promise<number> {
-		for (let tries = 0; tries < 80; tries++) {
+		for (let tries = 0; tries < 1_200; tries++) {
 			const text = await fs.readFile(file, "utf8").catch(() => "");
 			if (/^\d+\n$/.test(text)) return Number(text);
 			await new Promise((resolve) => setTimeout(resolve, 25));

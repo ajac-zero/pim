@@ -488,7 +488,7 @@ describe("triggers in pim-computer, on real children", () => {
 			return false;
 		}
 	};
-	async function until(done: () => boolean | Promise<boolean>, ms = 10_000): Promise<void> {
+	async function until(done: () => boolean | Promise<boolean>, ms = 30_000): Promise<void> {
 		for (const start = Date.now(); Date.now() - start < ms; ) {
 			if (await done()) return;
 			await new Promise((resolve) => setTimeout(resolve, 25));

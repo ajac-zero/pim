@@ -250,6 +250,7 @@ describe("what a trigger does next", () => {
         owner: "legacy",
         phase: "shadow",
         enableable: false,
+        ownerSince: null,
       },
     });
     expect(nextLine(shadow)).toEqual({ key: "triggerNextLegacySchedule" });

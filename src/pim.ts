@@ -197,8 +197,32 @@ import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAn
 import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
 import { ENGINE_KEY, engineAllowed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
-import { type ApplyOutcome, type LegacySchedule, type MigrationPlan, migrationAllowed, migrationRecords, planMigration, type RollbackOutcome, TriggerMigration } from "./triggers/migration";
-import { TriggerChatDoc, type TriggerSpace } from "./triggers/host";
+import { ConnectorIngress, ingressResponse, strictShape } from "./triggers/connector";
+import {
+	type ApplyOutcome,
+	adoptedSubscription,
+	type CutbackOutcome,
+	type CutoverOutcome,
+	cutoverAllowed,
+	firingOwner,
+	LegacyEventData,
+	type LegacyKind,
+	type LegacySchedule,
+	legacyEventContents,
+	legacyEventOperationId,
+	legacyFiringOperationId,
+	type MigrationPlan,
+	migrationAllowed,
+	migrationRecordOf,
+	migrationRecordOfItem,
+	migrationRecords,
+	planMigration,
+	recordReceipt,
+	type RollbackOutcome,
+	strictVerdict,
+	TriggerMigration,
+} from "./triggers/migration";
+import { TriggerChatDoc, type TriggerSpace, type TriggerTakeover } from "./triggers/host";
 import { TRIGGERS_EXTENSION, triggersExtension } from "./triggers/tools";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
@@ -1955,6 +1979,11 @@ export class Pim extends DurableAgent<Env> {
 	 * skipped, not retried; the person hears about the limit once a day.
 	 */
 	async runScheduledTask(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<void> {
+		// A firing a trigger took over (./triggers/migration.ts) is the trigger's: skipped here, and the skip recorded.
+		if (firingOwner(this.ctx.storage.sql, "schedule", schedule.id, schedule.time * 1000) === "trigger") {
+			recordReceipt(this.ctx.storage.sql, { kind: "schedule", legacyId: schedule.id, receipt: "skipped_firing", ref: String(schedule.time * 1000), at: this.triggerClock() });
+			return;
+		}
 		const label = payload.label ? ` "${payload.label}"` : "";
 		// The same firing retried is one submission and one notification.
 		const firing = `schedule:${schedule.id}:${schedule.time}`;
@@ -2031,8 +2060,56 @@ export class Pim extends DurableAgent<Env> {
 			...(computerTriggersAllowed(this.env)
 				? { authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())), changed: () => this.#computerTriggers()?.refresh() }
 				: {}),
+			// Connector events are handed on, and a trigger that took over a schedule or watch delivers as it did, only where a watch may be or has been cut over (./triggers/migration.ts).
+			...(cutoverAllowed(this.env) || migrationRecords(this.ctx.storage.sql).some((record) => record.kind === "watch" && record.owner === "trigger") ? { connectorEvents: true } : {}),
+			takeover: this.#triggerTakeover(),
 		});
 		return this.#triggerEngine;
+	}
+
+	/**
+	 * How a trigger that took over a schedule or watch delivers as it did
+	 * (./triggers/migration.ts): a schedule's firing goes in under the
+	 * schedule's key and notifies open apps as `runScheduledTask` does; a
+	 * watch's event goes in under the watch's key, with what it carried,
+	 * which is forgotten once pi has it. For any other trigger: nothing.
+	 */
+	#triggerTakeover(): TriggerTakeover {
+		const sql = this.ctx.storage.sql;
+		const taken = (triggerId: string) => {
+			const record = migrationRecordOf(sql, triggerId);
+			return record?.phase === "shadow" ? record : null;
+		};
+		return {
+			submissionKey: (evidence) => {
+				const record = taken(evidence.triggerId);
+				if (!record) return null;
+				if (evidence.kind === "time" && record.kind === "schedule") return legacyFiringOperationId(record.legacyId, evidence.scheduledFor);
+				if (evidence.kind === "connector_event" && record.kind === "watch") return legacyEventOperationId(record.legacyId, evidence.eventId);
+				return null;
+			},
+			contents: (evidence) => {
+				const record = taken(evidence.triggerId);
+				if (!record || evidence.kind !== "connector_event" || record.kind !== "watch") return null;
+				const data = new LegacyEventData(sql).read(evidence.triggerId, evidence.eventId, this.triggerClock());
+				if (data === null) return null;
+				const app = this.apps.servers().find((server) => server.id === evidence.connectorId)?.name ?? evidence.connectorId;
+				return legacyEventContents(app, data);
+			},
+			delivered: async (evidence, chatId, submissionKey) => {
+				const record = taken(evidence.triggerId);
+				if (!record) return;
+				if (evidence.kind === "connector_event" && record.kind === "watch") {
+					new LegacyEventData(sql).forget(evidence.triggerId, evidence.eventId);
+					return;
+				}
+				if (evidence.kind !== "time" || record.kind !== "schedule" || record.notificationTitle === null) return;
+				// As runScheduledTask notifies: once per firing, by its key, to open apps only.
+				if (this.store.notification(submissionKey)) return;
+				const notification = this.store.addNotification({ id: submissionKey, kind: "scheduled", session: chatId, title: record.notificationTitle, body: "" });
+				await this.deliverNotification(notification, { push: false });
+			},
+		};
 	}
 
 	#computerGrantsKept: ComputerGrants | undefined;
@@ -2122,6 +2199,9 @@ export class Pim extends DurableAgent<Env> {
 	 * and runs already going go on.
 	 */
 	async disableTriggerEngine(): Promise<void> {
+		// Items a trigger took over go back to their schedules and watches first, since nothing would deliver them otherwise; a firing the trigger admitted and hasn't handed on waits until it owns the item again.
+		const engine = this.triggerEngine();
+		if (engine && migrationRecords(this.ctx.storage.sql).some((record) => record.owner === "trigger")) this.#triggerMigration(engine).cutback(undefined, { force: true });
 		this.store.deleteMeta(ENGINE_KEY);
 		this.#triggerEngine = undefined;
 		this.#computerTriggersKept?.stop();
@@ -2153,13 +2233,66 @@ export class Pim extends DurableAgent<Env> {
 				// Read only: a space whose majordomo was never made doesn't get one from a preview.
 				chatAgent: (chat) => this.agents.findOfSession(chat)?.id ?? null,
 				chatOpen: (chat) => open.has(chat),
+				// What a watch's deliveries did against the ingress adapter's rules, from the receipts Pim's events route keeps where cutover is allowed.
+				strictDeliveries: (watchId) => strictVerdict(this.ctx.storage.sql, watchId),
 			},
 		);
 	}
 
 	/** The migration's records and steps over the engine's store; made only where the engine is on. */
 	#triggerMigration(engine: TriggerEngine): TriggerMigration {
-		return new TriggerMigration(this.ctx.storage.sql, { store: engine.store, transaction: (work) => this.ctx.storage.transactionSync(work), now: () => this.triggerClock() });
+		return new TriggerMigration(this.ctx.storage.sql, {
+			store: engine.store,
+			transaction: (work) => this.ctx.storage.transactionSync(work),
+			now: () => this.triggerClock(),
+			// A run between its claim and pi's acceptance of it: the coordinator's, which the outbox doesn't show as pending.
+			inFlight: (triggerId) => {
+				const run = engine.coordinator.runs(triggerId).find((run) => run.phase === "preparing" || run.phase === "submitting");
+				return run ? `a firing is being handed on (${run.operationId})` : null;
+			},
+		});
+	}
+
+	/**
+	 * Internal: hands each shadowed item (or only `which`) to its trigger,
+	 * which delivers it from now on; its schedule or watch skips what the
+	 * trigger owns (./triggers/migration.ts). An item with a blocker unmet
+	 * stays with its schedule or watch and is reported. Null where the
+	 * deployment's gate (`PIM_TRIGGERS_CUTOVER`, which nothing sets) is off
+	 * or the engine isn't on; no route, tool or setting calls it.
+	 */
+	async cutoverTriggerMigration(which?: readonly { readonly kind: LegacyKind; readonly legacyId: string }[]): Promise<CutoverOutcome[] | null> {
+		this.#assertOpen();
+		if (!cutoverAllowed(this.env) || !this.triggerEngine()) return null;
+		const plan = await this.previewTriggerMigration();
+		const engine = this.triggerEngine();
+		if (!engine) return null;
+		// A watch's events are handed on only by a coordinator made to (`connectorEvents`), which this instance's was unless it was built before the gate was set.
+		const wanted = plan.items.filter((item) => !which || which.some((one) => one.kind === item.kind && one.legacyId === item.legacyId));
+		const refused = engine.connectorEvents ? [] : wanted.filter((item) => item.kind === "watch");
+		const outcomes = this.#triggerMigration(engine).cutover(
+			plan,
+			wanted.filter((item) => !refused.includes(item)).map((item) => ({ kind: item.kind, legacyId: item.legacyId })),
+		);
+		// A cut-over trigger's firings are the coordinator's work now.
+		await this.wakeTriggers();
+		return [
+			...outcomes,
+			...refused.map((item): CutoverOutcome => ({ kind: item.kind, legacyId: item.legacyId, triggerId: item.status === "migratable" ? item.triggerId : (item.record?.triggerId ?? ""), outcome: "refused", reason: "this instance's coordinator doesn't hand connector events on; it does once made again" })),
+		];
+	}
+
+	/**
+	 * Internal: gives each cut-over item (or only `which`) back to its
+	 * schedule or watch. Refused for an item whose trigger has a firing
+	 * admitted and not handed on, which it still delivers, unless `force`.
+	 * Works wherever the engine is on, even once the gate is taken off, so a
+	 * cutover can always be undone; null otherwise.
+	 */
+	cutbackTriggerMigration(which?: readonly { readonly kind: LegacyKind; readonly legacyId: string }[], options: { readonly force?: boolean } = {}): CutbackOutcome[] | null {
+		const engine = this.triggerEngine();
+		if (!engine || migrationRecords(this.ctx.storage.sql).length === 0) return null;
+		return this.#triggerMigration(engine).cutback(which, options);
 	}
 
 	/**
@@ -2184,10 +2317,82 @@ export class Pim extends DurableAgent<Env> {
 	 * even once the gate is taken off, so a migration can always be undone;
 	 * null otherwise.
 	 */
-	rollbackTriggerMigration(): RollbackOutcome[] | null {
+	rollbackTriggerMigration(which?: readonly { readonly kind: LegacyKind; readonly legacyId: string }[], options: { readonly force?: boolean } = {}): RollbackOutcome[] | null {
 		const engine = this.triggerEngine();
 		if (!engine || migrationRecords(this.ctx.storage.sql).length === 0) return null;
-		return this.#triggerMigration(engine).rollback();
+		return this.#triggerMigration(engine).rollback(which, options);
+	}
+
+	/**
+	 * One delivery to `/mcp/events/<owner>/<watch>`: the watch's own
+	 * receiver (./extensions/app-events.ts), as ever, unless a trigger took
+	 * the watch over (./triggers/migration.ts); then an event goes to the
+	 * ingress adapter (./triggers/connector.ts) with the watch's own secret
+	 * and provider subscription, and what the adapter won't take, a control
+	 * message, or anything it refuses or can't take now, goes to the watch's
+	 * receiver instead, so exactly one of them delivers it. Every delivery
+	 * to a shadowed watch is checked against the adapter's rules where
+	 * cutover is allowed, and the verdict recorded, which is what makes the
+	 * watch eligible for cutover; the response is the receiver's either way.
+	 */
+	async #receiveWatchEvent(watchId: string, request: Request): Promise<Response> {
+		const sql = this.ctx.storage.sql;
+		const record = migrationRecordOfItem(sql, "watch", watchId);
+		const watch = record?.phase === "shadow" ? this.store.watch(watchId) : undefined;
+		if (!record || record.phase !== "shadow" || !watch || watch.status === "ended") return this.appEvents.receive(watchId, request);
+		const engine = this.triggerEngine();
+		const trigger = engine?.store.get(record.triggerId);
+		const source = engine?.store.sourceState(record.triggerId);
+		if (record.owner !== "trigger" || !engine || !trigger || !source) {
+			if (!cutoverAllowed(this.env)) return this.appEvents.receive(watchId, request);
+			// Owned by the watch: delivered by it, and its shape checked beside, so a cutover knows whether what the connector sends would pass.
+			const text = await request.text();
+			const response = await this.appEvents.receive(watchId, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
+			if (response.ok) {
+				// Only events count, either way: a verification passing says nothing of what the connector's events look like.
+				const shape = strictShape(request.headers, text, { providerSubscriptionId: watch.remoteId, event: watch.event });
+				if (!shape.ok) recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_fail", ref: shape.reason, at: this.triggerClock() });
+				else if (shape.type === "event") recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_pass", ref: shape.eventId ?? "", at: this.triggerClock() });
+			}
+			return response;
+		}
+		const text = await request.text();
+		const legacy = () => this.appEvents.receive(watchId, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
+		const fallback = (reason: string) => {
+			recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "legacy_fallback", ref: reason, at: this.triggerClock() });
+			return legacy();
+		};
+		const shape = strictShape(request.headers, text, { providerSubscriptionId: watch.remoteId, event: watch.event });
+		if (!shape.ok) return fallback(shape.reason);
+		// Verifications, gaps and the end of the subscription are the watch's: it keeps the subscription, as it did.
+		if (shape.type !== "event") return legacy();
+		const ingress = new ConnectorIngress({
+			store: engine.store,
+			now: () => this.triggerClock(),
+			transaction: (work) => this.ctx.storage.transactionSync(work),
+			host: {
+				owner: () => this.name,
+				subscription: (key) => (key === watchId ? adoptedSubscription(watch, { id: trigger.id, generation: trigger.generation, sourceRevision: source.sourceRevision }) : undefined),
+				// The watch's receiver never asked whether its connector's client is up: its subscription is the connector's, and removing the connector ends its watches. The same here.
+				connector: () => "connected",
+			},
+			// The event's data, as the watch's run would have read it, until the trigger's run has it.
+			kept: (admitted) => new LegacyEventData(sql).keep({ ...admitted, data: JSON.stringify(admitted.data, null, 2), now: this.triggerClock() }),
+		});
+		const outcome = await ingress.receive({ owner: this.name, key: watchId }, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
+		if (outcome.disposition === "accepted") {
+			if (outcome.reason === "admitted") {
+				// As the watch records a delivery it took: the cursor the event carried, and when it came.
+				const cursor = (JSON.parse(text) as Record<string, unknown>).cursor;
+				this.store.updateWatch(watchId, { ...(typeof cursor === "string" ? { cursor } : {}), lastEventAt: Date.now() });
+				recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "routed_event", ref: shape.eventId ?? "", at: this.triggerClock() });
+				await this.wakeTriggers();
+			}
+			return ingressResponse(outcome);
+		}
+		// A delivery that doesn't authenticate is refused as the watch would refuse it; any other refusal is the adapter's own, and the watch delivers instead.
+		if (outcome.disposition === "reject" && (outcome.reason === "unauthenticated" || outcome.reason === "wrong_subscription")) return ingressResponse(outcome);
+		return fallback(outcome.reason);
 	}
 
 	#triggerApiKept: TriggerApi | undefined;
@@ -2331,6 +2536,8 @@ export class Pim extends DurableAgent<Env> {
 		try {
 			this.#computerTriggers()?.renew();
 			await this.triggerEngine()?.coordinator.tick();
+			// What cut-over watches' events carried is kept a day at most.
+			if (this.triggerEngine()) new LegacyEventData(this.ctx.storage.sql).sweep(this.triggerClock());
 		} finally {
 			await this.wakeTriggers();
 		}
@@ -6772,7 +6979,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		// Deliveries from connectors; authenticated by their Standard Webhooks signature, not the API token.
-		["POST", "/mcp/events/:watch", ({ watch }, request) => this.appEvents.receive(watch!, request)],
+		["POST", "/mcp/events/:watch", ({ watch }, request) => this.#receiveWatchEvent(watch!, request)],
 
 		// Event watches.
 		["GET", "/watches", () => ({ watches: this.appEvents.list() })],

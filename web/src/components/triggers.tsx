@@ -568,12 +568,16 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
         <LifecyclePill lifecycle={trigger.lifecycle} />
         <HealthPill health={trigger.health} />
       </div>
-      {trigger.migration && !trigger.migration.enableable && (
+      {trigger.migration && trigger.migration.phase === "shadow" && (
         <p role="note" className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm">
           {t(
-            trigger.migration.kind === "schedule"
-              ? "triggerOwnedBySchedule"
-              : "triggerOwnedByWatch",
+            trigger.migration.owner === "trigger"
+              ? trigger.migration.kind === "schedule"
+                ? "triggerTookOverSchedule"
+                : "triggerTookOverWatch"
+              : trigger.migration.kind === "schedule"
+                ? "triggerOwnedBySchedule"
+                : "triggerOwnedByWatch",
           )}
         </p>
       )}
@@ -794,7 +798,8 @@ export function TriggerActions({
       setProblem(triggerProblem(error));
     },
   });
-  const locked = trigger.migration !== null && !trigger.migration.enableable;
+  // A shadow changes only through the migration, whichever side owns it: the API refuses anything else.
+  const locked = trigger.migration?.phase === "shadow";
   const gone = trigger.lifecycle === "deleted";
   const canEdit = !locked && !gone && trigger.lifecycle !== "ended";
   const canPause = !locked && trigger.lifecycle === "enabled";

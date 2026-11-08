@@ -90,6 +90,16 @@ export type ConnectorIngressOptions = {
 	/** The clock signatures' freshness is checked against; the store's own, in Pim. */
 	readonly now: () => number;
 	readonly bodyDeadlineMs?: number;
+	/**
+	 * What to do with an event's data once its occurrence is admitted, in
+	 * the admission's transaction, so an admission and what is kept of it
+	 * are one write or none; needs `transaction`. Only Pim's cutover of a
+	 * connector watch (./migration.ts) gives one, to tell the run what the
+	 * watch's run would have read. Without it, the data is never kept.
+	 */
+	readonly kept?: (admitted: { readonly triggerId: string; readonly occurrenceId: string; readonly eventId: string; readonly data: Record<string, unknown> }) => void;
+	/** The database's transactions (`transactionSync`), for `kept`. */
+	readonly transaction?: <T>(work: () => T) => T;
 };
 
 /** What the adapter made of a delivery, with no part of the body but a verification's challenge. */
@@ -210,12 +220,17 @@ export class ConnectorIngress {
 	readonly #host: ConnectorIngressHost;
 	readonly #now: () => number;
 	readonly #bodyDeadlineMs: number;
+	readonly #kept: ConnectorIngressOptions["kept"];
+	readonly #transaction: <T>(work: () => T) => T;
 
 	constructor(options: ConnectorIngressOptions) {
 		this.#store = options.store;
 		this.#host = options.host;
 		this.#now = options.now;
 		this.#bodyDeadlineMs = integer(options.bodyDeadlineMs ?? CONNECTOR_INGRESS_LIMITS.bodyDeadlineMs, "bodyDeadlineMs", 1, 60_000);
+		if (options.kept && !options.transaction) throw new TriggerValidationError("transaction", "keeping event data needs the database's transactions");
+		this.#kept = options.kept;
+		this.#transaction = options.transaction ?? ((work) => work());
 	}
 
 	/**
@@ -330,7 +345,11 @@ export class ConnectorIngress {
 		const checkpoint = event.cursor === null || source === undefined ? undefined : { position: (source.position ?? 0) + 1, cursor: event.cursor };
 		let admission: ReturnType<TriggerStore["admit"]>;
 		try {
-			admission = this.#store.admit({ id: trigger.id, generation: binding.generation, eventId: event.eventId, observedAt: event.observedAt, payload: event.data, ...(checkpoint ? { checkpoint } : {}) });
+			admission = this.#transaction(() => {
+				const admitted = this.#store.admit({ id: trigger.id, generation: binding.generation, eventId: event.eventId, observedAt: event.observedAt, payload: event.data, ...(checkpoint ? { checkpoint } : {}) });
+				if (admitted.status === "accepted" && admitted.occurrence !== null) this.#kept?.({ triggerId: trigger.id, occurrenceId: admitted.occurrence.id, eventId: event.eventId, data: event.data });
+				return admitted;
+			});
 		} catch (error) {
 			return error instanceof TriggerValidationError ? reject("invalid_event") : retry("admission_failed");
 		}
@@ -374,6 +393,50 @@ export class ConnectorIngress {
 		if (connector !== "connected") return retry("connector_disconnected");
 		return { binding, trigger };
 	}
+}
+
+/** What the strict shape check made of a delivery: its envelope's type and, for an event, its id; or the reason the ingress would refuse it. */
+export type StrictShape = { readonly ok: true; readonly type: Envelope["type"]; readonly eventId: string | null } | { readonly ok: false; readonly reason: RejectReason };
+
+/**
+ * Whether a delivery's headers and body have the shape the ingress holds
+ * deliveries to, checked without a signature, a clock or a binding: the
+ * headers are there and within bounds, the subscription header names the
+ * provider subscription, the body is JSON within its depth, its envelope
+ * is one the draft defines, and an event's `webhook-id` is its `eventId`
+ * and its name the subscribed event. Pim's cutover of a connector watch
+ * (./migration.ts) runs it beside the watch's own receipt of deliveries
+ * to learn, before the watch moves, whether what the provider sends would
+ * pass the ingress; and on a cut-over watch, before routing, to hand a
+ * delivery the ingress would refuse back to the watch instead. Reads
+ * nothing it does not return, and keeps nothing.
+ */
+export function strictShape(headers: Pick<Headers, "get">, body: string, expected: { readonly providerSubscriptionId: string | null; readonly event: string }): StrictShape {
+	const refuse = (reason: RejectReason): StrictShape => ({ ok: false, reason });
+	const subscriptionId = headers.get("x-mcp-subscription-id");
+	if (subscriptionId === null || subscriptionId.length === 0 || subscriptionId.length > CONNECTOR_INGRESS_LIMITS.subscriptionIdLength) return refuse("bad_headers");
+	if (expected.providerSubscriptionId !== null && subscriptionId !== expected.providerSubscriptionId) return refuse("wrong_subscription");
+	const webhookId = headers.get("webhook-id");
+	const timestamp = headers.get("webhook-timestamp");
+	const signatures = headers.get("webhook-signature");
+	if (webhookId === null || !plainText(webhookId, CONNECTOR_INGRESS_LIMITS.headerIdLength)) return refuse("bad_headers");
+	if (timestamp === null || !/^\d{1,12}$/.test(timestamp)) return refuse("bad_headers");
+	if (signatures === null || signatures.length > CONNECTOR_INGRESS_LIMITS.signatureHeaderLength || signatures.split(" ").length > CONNECTOR_INGRESS_LIMITS.signatures) return refuse("bad_headers");
+	if (!jsonMediaType(headers.get("content-type"))) return refuse("unsupported_media_type");
+	if (new TextEncoder().encode(body).byteLength > CONNECTOR_INGRESS_LIMITS.maxBodyBytes) return refuse("too_large");
+	if (!nestingWithin(body, CONNECTOR_INGRESS_LIMITS.maxDepth)) return refuse("too_deep");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return refuse("malformed_json");
+	}
+	const envelope = readEnvelope(parsed);
+	if ("disposition" in envelope) return refuse(envelope.disposition === "reject" ? envelope.reason : "invalid_event");
+	if (envelope.type !== "event") return { ok: true, type: envelope.type, eventId: null };
+	if (envelope.event.eventId !== webhookId) return refuse("event_id_mismatch");
+	if (envelope.event.name !== expected.event) return refuse("wrong_event");
+	return { ok: true, type: "event", eventId: envelope.event.eventId };
 }
 
 function sameBinding(a: ConnectorSubscription, b: ConnectorSubscription): boolean {

@@ -27,6 +27,14 @@
  * Questions about an operation while this instance is still making its chat
  * or submitting it are answered "not known", so a coordinator that stopped
  * waiting never makes a second chat or a second run.
+ *
+ * A trigger that took over a schedule or watch (./migration.ts) submits as
+ * the schedule or watch did, through a `TriggerTakeover` Pim gives this
+ * host: its first submission goes in under the key the schedule or watch
+ * would have used, so a firing or event the other side already ran is a
+ * duplicate here and the reverse; its text carries what the watch's run
+ * would have read; and once pi has taken it, the takeover is told, to
+ * notify as the schedule did or forget what it kept of the event.
  */
 
 import type { ConversationInit } from "@earendil-works/pi-durable";
@@ -117,17 +125,33 @@ export type HostOperation = Row;
 /** Questions to the host while it is making the operation's chat or submitting it here: their answers aren't known yet. */
 const BUSY = "another handoff of this operation is under way here";
 
+/**
+ * How a trigger that took over a schedule or watch delivers as it did
+ * (./migration.ts). Each is asked with the firing's evidence; for a
+ * trigger that took nothing over, each answers null or does nothing.
+ */
+export interface TriggerTakeover {
+	/** The key the schedule or watch would have submitted this firing under; used only for the operation's first submission, since a recorded key is kept. */
+	submissionKey(evidence: TriggerEvidence): string | null;
+	/** What the watch's run would have been told of the event, to put after the firing's text; null where there is nothing. */
+	contents(evidence: TriggerEvidence): string | null;
+	/** Told once pi has the submission, new or duplicate, with the chat and key it went in under. Must be safe to tell again. */
+	delivered(evidence: TriggerEvidence, chatId: string, submissionKey: string): Promise<void>;
+}
+
 export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 	readonly #sql: SqlStorage;
 	readonly #space: TriggerSpace;
 	readonly #now: () => number;
+	readonly #takeover: TriggerTakeover | null;
 	readonly #busy = new Map<string, Promise<unknown>>();
 
 	/** `now` is the space's own clock, which approvals are stamped with. */
-	constructor(sql: SqlStorage, space: TriggerSpace, now: () => number = Date.now) {
+	constructor(sql: SqlStorage, space: TriggerSpace, now: () => number = Date.now, takeover: TriggerTakeover | null = null) {
 		this.#sql = sql;
 		this.#space = space;
 		this.#now = now;
+		this.#takeover = takeover;
 		this.#sql.exec(SCHEMA);
 	}
 
@@ -236,7 +260,10 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 				// Submitted before under its key: looked up, and never submitted under another.
 				const record = await this.#space.submission(row.submissionChat, row.submissionKey).catch(() => null);
 				if (record === null) return { status: "uncertain", reason: "pi's record of the submission couldn't be read" };
-				if (record) return { status: "duplicate", receipt: await this.#accept(row) };
+				if (record) {
+					await this.#delivered(input.evidence, row.submissionChat, row.submissionKey);
+					return { status: "duplicate", receipt: await this.#accept(row) };
+				}
 				if (row.submissionChat !== input.chatId) return { status: "failed", reason: "the operation was keyed for another chat" };
 			}
 			const state = this.#space.state();
@@ -269,9 +296,12 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 					);
 				},
 			};
+			// A trigger that took over a schedule or watch goes in under its key, the first time; a key once recorded is kept whatever the takeover says now.
+			const key = row.submissionKey ?? this.#takeover?.submissionKey(input.evidence) ?? operationId;
+			const text = firingText(input.instruction, input.evidence, this.#takeover?.contents(input.evidence) ?? null);
 			let receipt: PiReceipt;
 			try {
-				receipt = await this.#space.submit(input.chatId, firingText(input.instruction, input.evidence), { operationId: row.submissionKey ?? operationId, stable });
+				receipt = await this.#space.submit(input.chatId, text, { operationId: key, stable });
 			} catch (error) {
 				// Once its key was recorded, a failure may have come after pi took it.
 				if (kept || !(error instanceof HttpError)) return { status: "uncertain", reason: errorText(error) };
@@ -282,8 +312,19 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 			}
 			const keyed = this.operation(operationId)!;
 			if (keyed.submissionKey !== receipt.operationId) return { status: "uncertain", reason: "pi took the input under another key than the one recorded" };
+			await this.#delivered(input.evidence, input.chatId, keyed.submissionKey);
 			return { status: receipt.accepted ? "accepted" : "duplicate", receipt: await this.#accept(keyed) };
 		});
+	}
+
+	/** Tells the takeover pi has the submission. A failure there is logged and not held against the submission, which pi has: the run goes on, as the schedule's or watch's would have. */
+	async #delivered(evidence: TriggerEvidence, chatId: string, submissionKey: string): Promise<void> {
+		if (!this.#takeover) return;
+		try {
+			await this.#takeover.delivered(evidence, chatId, submissionKey);
+		} catch (error) {
+			console.warn("a trigger's takeover of its schedule or watch failed after its submission", error);
+		}
 	}
 
 	async lookupRun(input: { operationId: string; receipt: string }): Promise<RunStatus> {
@@ -368,11 +409,14 @@ async function receiptOf(chatId: string, key: string): Promise<string> {
  * it was due, which connector's event it was, by name, id and time, or which
  * kind of source on the person's computer saw something, with the event's id
  * and time. What an event carried or an observer saw is never kept, so it is
- * never here.
+ * never here, except for a trigger that took over a connector watch, whose
+ * run is told what the watch's run would have read (`contents`, from
+ * ../migration.ts), after the same text.
  */
-export function firingText(instruction: string, evidence: TriggerEvidence): string {
+export function firingText(instruction: string, evidence: TriggerEvidence, contents: string | null = null): string {
 	if (evidence.kind === "connector_event") {
-		return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(On ${evidence.event} from ${evidence.connectorId} at ${new Date(evidence.observedAt).toISOString()}, event ${evidence.eventId}. What the event carried isn't kept or passed on.)`;
+		const head = `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(On ${evidence.event} from ${evidence.connectorId} at ${new Date(evidence.observedAt).toISOString()}, event ${evidence.eventId}.`;
+		return contents === null ? `${head} What the event carried isn't kept or passed on.)` : `${head} What it carried follows.)\n\n${contents}`;
 	}
 	if (evidence.kind === "computer_event") {
 		return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(On what its ${evidence.source} on the person's computer saw at ${new Date(evidence.observedAt).toISOString()}, event ${evidence.eventId}. What it saw isn't kept or passed on.)`;

@@ -35,6 +35,8 @@ import { Button } from "~/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "~/components/ui/sheet";
 import { cn } from "~/lib/utils";
 
+const noop = () => {};
+
 /** The panels that live under More rather than in the bar. */
 const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
   "skills",
@@ -104,9 +106,9 @@ export function MobileNav({
       </Button>
       <NavItem
         to="."
-        search={(prev) => ({ ...prev, panel: "artifacts" })}
-        onClick={onShowList}
-        active={showing("artifacts")}
+        search={(prev) => ({ ...prev, dialog: "artifacts" })}
+        onClick={noop}
+        active={false}
         icon={<Shapes className="size-5" />}
         label={t("artifacts")}
       />
@@ -237,6 +239,7 @@ function MoreSheet({
       | "sharing"
       | "discover"
       | "apps"
+      | "artifacts"
       | "computer"
       | "agents",
     icon: ReactNode,

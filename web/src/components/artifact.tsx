@@ -375,7 +375,7 @@ function MarkdownArtifact({
       )}
       style={fill ? undefined : { maxHeight }}
     >
-      <Markdown text={data.content ?? ""} untrusted />
+      <Markdown text={data.content ?? ""} untrusted drawings />
     </div>
   );
 }
@@ -484,7 +484,7 @@ export function ArtifactCard({
         <span className="truncate text-muted-foreground text-xs">
           {deleted
             ? t("artifactDeleted")
-            : `${ARTIFACT_KIND_NAMES[reference.kind]} · ${t("artifactVersion", { version: reference.version })}`}
+            : `${reference.kind === "markdown" ? t("noteText") : ARTIFACT_KIND_NAMES[reference.kind]} · ${t("artifactVersion", { version: reference.version })}`}
         </span>
       </span>
     </>

@@ -1,7 +1,7 @@
 import { math } from "@streamdown/math";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { isValidElement, memo, type ReactNode } from "react";
+import { isValidElement, memo, type ReactNode, useState } from "react";
 import type { BundledLanguage } from "shiki";
 import {
   defaultRehypePlugins,
@@ -30,7 +30,8 @@ import {
   CodeBlockTitle,
 } from "~/components/ui/code-block";
 import { type CanvasSearch, openCanvasTab } from "~/lib/canvas";
-import { type Agent, FILES_ROOT } from "~/lib/pim-api";
+import { previewOf } from "~/lib/files";
+import { type Agent, FILES_ROOT, fileContentUrl } from "~/lib/pim-api";
 import {
   agentsQuery,
   majordomoQuery,
@@ -543,6 +544,22 @@ const untrustedComponents = {
 const OWN_IMAGE = /^\/api\/images\/[\w-]+$/;
 
 /**
+ * Where the app loads an image of an agent's message from, or null when it
+ * isn't Pim's own: a kept copy, or an image file in the person's workspace,
+ * which the agent names by its path.
+ */
+function ownImage(src: string): string | null {
+  if (OWN_IMAGE.test(src)) return src;
+  if (!src.startsWith(`${FILES_ROOT}/`)) return null;
+  try {
+    const path = decodeURIComponent(src);
+    return previewOf(path).kind === "image" ? fileContentUrl(path) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * An agent's message shows only Pim's own images. One from elsewhere would be
  * fetched as soon as the message shows, and its address could carry what the
  * agent read: a page it read could tell it to write such an image. Its alt
@@ -552,8 +569,9 @@ const agentComponents = {
   img: (props: object) => {
     const { src, alt } = props as { src?: unknown; alt?: unknown };
     const label = typeof alt === "string" ? alt : "";
-    return typeof src === "string" && OWN_IMAGE.test(src) ? (
-      <img src={src} alt={label} className="my-3 max-w-full rounded-xl" />
+    const shown = typeof src === "string" ? ownImage(src) : null;
+    return shown ? (
+      <img src={shown} alt={label} className="my-3 max-w-full rounded-xl" />
     ) : (
       <span className="text-muted-foreground">[{label || "image"}]</span>
     );
@@ -582,12 +600,47 @@ const TONES = {
   },
 };
 
+/** An SVG element, after at most an XML declaration and comments, as Pim takes drawings. */
+const SVG_START = /^\s*(<\?xml[^>]*\?>\s*)?(<!--[\s\S]*?-->\s*)*<svg[\s>]/i;
+
+/**
+ * A note's drawing, as an image: an SVG shown by `<img>` runs no script and
+ * loads nothing, so it can't reach the page or send anything out. One that
+ * isn't an `<svg>` element, or doesn't draw, shows as its source.
+ */
+function SvgDrawing({
+  source,
+  fallback,
+}: {
+  source: string;
+  fallback: ReactNode;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed || !SVG_START.test(source)) return fallback;
+  // An SVG image needs its namespace, which inline SVG does without.
+  const markup = /<svg[^>]*\sxmlns=/i.test(source)
+    ? source
+    : source.replace(
+        /<svg(?=[\s>])/i,
+        '<svg xmlns="http://www.w3.org/2000/svg"',
+      );
+  return (
+    <img
+      src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`}
+      alt=""
+      onError={() => setFailed(true)}
+      className="my-4 block max-h-80 w-full object-contain"
+    />
+  );
+}
+
 export const Markdown = memo(function Markdown({
   text,
   className,
   streaming,
   untrusted,
   bubble,
+  drawings,
 }: {
   text: string;
   className?: string;
@@ -609,6 +662,13 @@ export const Markdown = memo(function Markdown({
    * from the bubble.
    */
   bubble?: boolean;
+  /**
+   * For a note: its ` ```mermaid ` and ` ```svg ` blocks are drawn, as
+   * untrusted text's other code is not. A diagram is drawn in the same
+   * sandboxed frame as an agent's, and a drawing is an image, which runs
+   * nothing and loads nothing from elsewhere.
+   */
+  drawings?: boolean;
 }) {
   const safe = untrusted || bubble;
   const tone = bubble ? TONES.bubble : TONES.page;
@@ -763,8 +823,15 @@ export const Markdown = memo(function Markdown({
                 </CodeBlockHeader>
               </CodeBlock>
             );
-            // An agent's cards, galleries and diagrams are drawn; anyone else's are code.
-            if (safe) return code;
+            // An agent's cards, galleries and diagrams are drawn; anyone else's are code, but a note's drawings.
+            if (safe) {
+              if (!drawings) return code;
+              if (language === "mermaid")
+                return <Diagram source={source} fallback={code} />;
+              if ((language as string) === "svg")
+                return <SvgDrawing source={source} fallback={code} />;
+              return code;
+            }
             if (isReplyBlock(language)) {
               return (
                 <ReplyBlock kind={language} source={source} fallback={code} />

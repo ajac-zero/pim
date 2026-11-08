@@ -3,7 +3,6 @@ import { Link, useParams } from "@tanstack/react-router";
 import { type ReactNode, type Ref, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
-import { ARTIFACT_KIND_NAMES, ArtifactIcon } from "~/components/artifact-icon";
 import { ApprovalBlock } from "~/components/chat/items";
 import { useI18n } from "~/components/i18n";
 import {
@@ -30,11 +29,10 @@ import {
 import { type PimNotification, type PimSchedule, pim } from "~/lib/pim-api";
 import {
   approvalsQuery,
-  artifactsQuery,
+  builtinAppsQuery,
   notificationsQuery,
   schedulesQuery,
   sessionsQuery,
-  sharedArtifactsQuery,
   skillsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -318,81 +316,10 @@ function NotificationRow({
   );
 }
 
-/** Documents and pages your agents made, most recently changed first. */
-export function ArtifactsPanel({ onNavigate }: { onNavigate?: () => void }) {
-  const { t, formatDate } = useI18n();
-  const { data } = useQuery(artifactsQuery());
-  const { data: shared } = useQuery(sharedArtifactsQuery());
-  return (
-    <>
-      <SidebarPanelHeader title={t("artifacts")} />
-      <PanelList
-        label={t("artifacts")}
-        empty={
-          data?.artifacts.length === 0 && !shared?.length && t("noArtifacts")
-        }
-      >
-        {data?.artifacts.map((artifact) => {
-          const row = (
-            <>
-              <ArtifactIcon kind={artifact.kind} className={ROW_ICON_CLASS} />
-              <RowText
-                title={artifact.title}
-                meta={`${ARTIFACT_KIND_NAMES[artifact.kind]} · ${formatDate(
-                  new Date(artifact.updatedAt),
-                  { dateStyle: "medium" },
-                )}`}
-              />
-            </>
-          );
-          return (
-            <li key={artifact.id}>
-              <Link
-                to="/artifacts/$artifactId"
-                params={{ artifactId: artifact.id }}
-                search={{ v: artifact.version }}
-                onClick={onNavigate}
-                className={ROW_CLASS}
-                activeOptions={{ includeSearch: false }}
-                activeProps={{ className: "bg-sidebar-accent" }}
-              >
-                {row}
-              </Link>
-            </li>
-          );
-        })}
-        {shared && shared.length > 0 && (
-          <li className="pt-3">
-            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
-              {t("sharedWithYou")}
-            </div>
-            <ul className="space-y-px" aria-label={t("sharedWithYou")}>
-              {shared.map((artifact) => (
-                <li key={`${artifact.host}/${artifact.id}`}>
-                  <Link
-                    to="/artifacts/shared/$host/$artifactId"
-                    params={{ host: artifact.host, artifactId: artifact.id }}
-                    onClick={onNavigate}
-                    className={ROW_CLASS}
-                    activeProps={{ className: "bg-sidebar-accent" }}
-                  >
-                    <ArtifactIcon
-                      kind={artifact.kind}
-                      className={ROW_ICON_CLASS}
-                    />
-                    <RowText
-                      title={artifact.title}
-                      meta={`${ARTIFACT_KIND_NAMES[artifact.kind]} · ${t("sharedBy", { host: artifact.host })}`}
-                    />
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </li>
-        )}
-      </PanelList>
-    </>
-  );
+/** Whether the admin left Notes on; while that's loading, it is. */
+export function useNotesOn() {
+  const { data } = useQuery(builtinAppsQuery());
+  return data?.some((app) => app.id === "notes") ?? true;
 }
 
 /** How your agents do work that comes up again, by name; each opens the skill. */

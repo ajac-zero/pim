@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import pimConfig from "../pim.config";
+import { isBuiltinApp } from "./builtin-apps";
 import { HttpError } from "./http";
 import { type CustomProvider, MAX_PROVIDERS, type ProviderInput, prepareProvider } from "./providers";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
@@ -298,6 +299,9 @@ CREATE TABLE IF NOT EXISTS providers (
 	provider TEXT NOT NULL,
 	created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS disabled_builtin_apps (
+	id TEXT PRIMARY KEY
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -579,6 +583,22 @@ export class Gallery extends DurableObject<Env> {
 	/** Takes a provider away from everyone; their chats on its models go back to the default model. */
 	removeSharedProvider(id: string): boolean {
 		return this.#sql("DELETE FROM providers WHERE id = ?", id).rowsWritten > 0;
+	}
+
+	/** The built-in apps (../builtin-apps.ts) the admin turned off for everyone. */
+	disabledBuiltinApps(): string[] {
+		return this.#sql("SELECT id FROM disabled_builtin_apps ORDER BY id")
+			.toArray()
+			.map((row) => String(row.id))
+			.filter(isBuiltinApp);
+	}
+
+	/** The admin turns a built-in app on or off for everyone. False when Pim has no such app. */
+	setBuiltinApp(id: string, enabled: boolean): boolean {
+		if (!isBuiltinApp(id)) return false;
+		if (enabled) this.#sql("DELETE FROM disabled_builtin_apps WHERE id = ?", id);
+		else this.#sql("INSERT OR IGNORE INTO disabled_builtin_apps (id) VALUES (?)", id);
+		return true;
 	}
 
 	profile(username: string): Profile {

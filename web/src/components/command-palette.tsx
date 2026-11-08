@@ -19,7 +19,6 @@ import {
   Check,
   Compass,
   Contact,
-  FileIcon,
   Lightbulb,
   MessagesSquare,
   Monitor,
@@ -30,6 +29,7 @@ import {
   Repeat,
   Search,
   Settings,
+  Shapes,
   Sun,
   Users,
 } from "~/components/icons";
@@ -52,7 +52,6 @@ const PANELS: {
   icon: ReactNode;
 }[] = [
   { panel: "notifications", label: "notifications", icon: <Bell /> },
-  { panel: "artifacts", label: "artifacts", icon: <FileIcon /> },
   { panel: "skills", label: "skills", icon: <Lightbulb /> },
   { panel: "schedules", label: "schedules", icon: <CalendarClock /> },
 ];
@@ -150,6 +149,7 @@ export function CommandPalette({
       | "sharing"
       | "discover"
       | "apps"
+      | "artifacts"
       | "computer"
       | "agents",
     agent?: string,
@@ -232,6 +232,12 @@ export function CommandPalette({
                     <Shortcut keys="⇧D" />
                   </Command.Item>
                 )}
+                <Command.Item
+                  className={ITEM}
+                  onSelect={openDialog("artifacts")}
+                >
+                  <Shapes /> {t("artifacts")}
+                </Command.Item>
                 <Command.Item className={ITEM} onSelect={openDialog("apps")}>
                   <Blocks /> {t("connectedApps")}
                 </Command.Item>

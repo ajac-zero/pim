@@ -656,8 +656,8 @@ export class ArtifactStore {
 		if (!summary) throw new HttpError(404, `No app ${id}`);
 		const replayed = () => {
 			if (input.callId === undefined) return undefined;
-			const [made] = this.#sql.exec("SELECT version FROM pim_artifact_versions WHERE artifact = ? AND call_id = ?", id, input.callId).toArray();
-			return made ? { version: this.version(id, Number(made.version))!, changed: true } : undefined;
+			const made = this.byCall(id, input.callId);
+			return made ? { version: made, changed: true } : undefined;
 		};
 		const early = replayed();
 		if (early) return early;
@@ -695,6 +695,19 @@ export class ArtifactStore {
 			this.#sql.exec("UPDATE pim_artifacts SET head = ?, title = ?, updated_at = ? WHERE id = ?", next, input.title ?? current.title, now, id);
 			return { version: this.version(id, next)!, changed: true };
 		});
+	}
+
+	/** The version a tool call made, so a replayed call finds it instead of making another. */
+	byCall(id: string, callId: string): ArtifactVersion | undefined {
+		const [made] = this.#sql.exec("SELECT version FROM pim_artifact_versions WHERE artifact = ? AND call_id = ?", id, callId).toArray();
+		return made ? this.version(id, Number(made.version)) : undefined;
+	}
+
+	/** Renames an app, making no version. */
+	rename(id: string, title: string): ArtifactSummary {
+		if (!this.get(id)) throw new HttpError(404, `No app ${id}`);
+		this.#sql.exec("UPDATE pim_artifacts SET title = ?, updated_at = ? WHERE id = ?", checkTitle(title), Date.now(), id);
+		return this.get(id)!;
 	}
 
 	/** Restores `version` as a new latest version, if `baseVersion` is still the latest. */
@@ -981,14 +994,18 @@ const PAGE_HEAD =
  * one in a page that fits it to the frame; a Mermaid one as its source, in
  * text, which the Mermaid runtime draws; a JSX one compiled, after the React
  * runtime and the modules it imports. Each ends with the height script.
+ * With `thumbnail`, it ends with the script that takes a picture of the page
+ * and sends it to the app that shows it (see `web/src/artifact-runtime/thumbnail.ts`).
  */
-export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string): Response {
+export function framePage(kind: ArtifactKind, files: LoadedFiles, origin: string, options: { thumbnail?: boolean } = {}): Response {
 	const entry = ENTRY_FILES[kind];
 	const main = files.get(entry);
 	if (!main) throw new HttpError(404, `The app has no ${entry}`);
 	const content = textOf(main.bytes);
 	const html = (body: string, runtime = false) =>
-		new Response(body + RESIZE_SCRIPT, { headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime }) });
+		new Response(body + RESIZE_SCRIPT + (options.thumbnail ? `<script src="${origin}${RUNTIME_PATH}thumbnail.js"></script>` : ""), {
+			headers: artifactHeaders(origin, "text/html; charset=utf-8", { runtime: runtime || options.thumbnail }),
+		});
 	switch (kind) {
 		case "html":
 			return inlineOwnFiles(html(withBridge(content)), files);

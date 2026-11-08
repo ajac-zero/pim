@@ -18,6 +18,7 @@ import { AgentIcon } from "~/components/agent-icon";
 import { sessionTitle } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
 import { Composer } from "~/components/chat/composer";
+import { QueuedMessages } from "~/components/chat/queued-messages";
 import { Thread } from "~/components/chat/thread";
 import { useI18n } from "~/components/i18n";
 import {
@@ -524,6 +525,7 @@ function GuestChat({
           ref={cardRef}
           className="pointer-events-auto w-full max-w-4xl px-4"
         >
+          <QueuedMessages sessionId={sessionId} queue={view.queue} />
           <Composer
             key={sessionId}
             draftKey={sessionId}

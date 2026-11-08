@@ -67,35 +67,53 @@ export function groupByAge(sessions: readonly Session[], now = Date.now()) {
 }
 
 /**
- * Chats your agents started for tasks, and chats that carry on a longer
- * one, under the chat they were started from or carry on: the chats with none above them in the list, in its order, and for
- * each, every chat started from it or from one under it, oldest first. A
- * chat whose starting chat isn't in the list, such as one deleted or left
- * out by a search, stands on its own.
+ * Chats your agents started for tasks under the chat they were started from,
+ * however deep the chain goes: the chats with none above them in the list, in
+ * its order, and for each chat the ones directly under it, oldest first. A
+ * chat whose starting chat isn't in the list, such as one deleted or left out
+ * by a search, stands on its own, and so does a chat that carries on one that
+ * isn't in the list.
+ *
+ * A chat that carries on a longer one takes its place: chats the longer one
+ * started go under the chat that carries it on, even though the longer one,
+ * archived, is listed apart. `all` is every chat, for finding that chat when
+ * `list` is only some of them.
  */
-export function nestChats(list: readonly Session[]) {
-  const byId = new Map(list.map((session) => [session.id, session]));
-  const above = (session: Session) =>
-    session.startedBy?.session ?? session.continuedFrom ?? "";
-  const topOf = (session: Session) => {
-    let top = session;
-    const seen = new Set([session.id]);
-    for (
-      let parent = byId.get(above(session));
-      parent && !seen.has(parent.id);
-      parent = byId.get(above(parent))
-    ) {
-      seen.add(parent.id);
-      top = parent;
+export function nestChats(list: readonly Session[], all = list) {
+  const byId = new Map(all.map((session) => [session.id, session]));
+  const next = new Map<string, Session>();
+  for (const session of all) {
+    if (session.continuedFrom) next.set(session.continuedFrom, session);
+  }
+  const latest = (session: Session) => {
+    const seen = new Set([session]);
+    let last = session;
+    for (let more = next.get(last.id); more && !seen.has(more); ) {
+      seen.add(more);
+      last = more;
+      more = next.get(last.id);
     }
-    return top;
+    return last;
   };
+  const listed = new Set(list);
+  const parentOf = new Map<string, Session>();
   const top: Session[] = [];
   const children = new Map<string, Session[]>();
   for (const session of list) {
-    const above = topOf(session);
-    if (above === session) top.push(session);
-    else children.set(above.id, [...(children.get(above.id) ?? []), session]);
+    const start = byId.get(session.startedBy?.session ?? "");
+    const from = byId.get(session.continuedFrom ?? "");
+    const parent = start ? latest(start) : from;
+    // A link that would close a loop is left out, so every chat is shown.
+    let loops = false;
+    for (let up = parent; up && !loops; up = parentOf.get(up.id)) {
+      loops = up === session;
+    }
+    if (!parent || !listed.has(parent) || loops) {
+      top.push(session);
+      continue;
+    }
+    parentOf.set(session.id, parent);
+    children.set(parent.id, [...(children.get(parent.id) ?? []), session]);
   }
   for (const under of children.values()) {
     under.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));

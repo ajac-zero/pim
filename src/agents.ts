@@ -49,6 +49,8 @@ export type Agent = {
 	readonly memoryScopes: readonly string[];
 	/** The model it runs on, by provider and id; null follows the space's own choice (Settings → Model), else the deployment's. */
 	readonly model: AgentModel | null;
+	/** The models it moves on to, in order, when the one it runs on fails for good, such as when its provider's quota is used up. */
+	readonly fallbacks: readonly AgentModel[];
 	/** The template it was made from. */
 	readonly source: { readonly template: string; readonly author: string } | null;
 	/** Its published template, if the owner published it. */
@@ -125,6 +127,7 @@ CREATE TABLE IF NOT EXISTS pim_agents (
 	memory_scope TEXT,
 	memory_scopes TEXT NOT NULL DEFAULT '[]',
 	model TEXT,
+	fallbacks TEXT NOT NULL DEFAULT '[]',
 	copy_of TEXT
 );
 CREATE TABLE IF NOT EXISTS pim_agent_icons (
@@ -192,6 +195,7 @@ const agentOf = (row: Row, directory: () => readonly DirectoryApp[]): Agent => (
 	memoryScope: String(row.memory_scope),
 	memoryScopes: JSON.parse(String(row.memory_scopes)) as string[],
 	model: row.model ? (JSON.parse(String(row.model)) as AgentModel) : null,
+	fallbacks: JSON.parse(String(row.fallbacks)) as AgentModel[],
 	source: row.source ? (JSON.parse(String(row.source)) as Agent["source"]) : null,
 	published: row.published === null ? null : String(row.published),
 	icon: row.icon === null ? null : Number(row.icon),
@@ -339,6 +343,7 @@ export class AgentStore {
 		if (!columns.includes("memory_scope")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scope TEXT");
 		if (!columns.includes("memory_scopes")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN memory_scopes TEXT NOT NULL DEFAULT '[]'");
 		if (!columns.includes("model")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN model TEXT");
+		if (!columns.includes("fallbacks")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN fallbacks TEXT NOT NULL DEFAULT '[]'");
 		if (!columns.includes("copy_of")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN copy_of TEXT");
 		// Agents were called by their role: it is their name, until the person gives them another.
 		if (!columns.includes("role")) this.#sql.exec("ALTER TABLE pim_agents ADD COLUMN role TEXT");
@@ -519,6 +524,12 @@ export class AgentStore {
 	/** Sets the model it runs on, checked by the space; null follows the space's choice. */
 	setModel(id: string, model: AgentModel | null): Agent {
 		this.#sql.exec("UPDATE pim_agents SET model = ? WHERE id = ?", model && JSON.stringify({ provider: model.provider, id: model.id }), id);
+		return this.get(id)!;
+	}
+
+	/** Sets the models it moves on to, in order, when its own fails. */
+	setFallbacks(id: string, models: readonly AgentModel[]): Agent {
+		this.#sql.exec("UPDATE pim_agents SET fallbacks = ? WHERE id = ?", JSON.stringify(models.map(({ provider, id }) => ({ provider, id }))), id);
 		return this.get(id)!;
 	}
 

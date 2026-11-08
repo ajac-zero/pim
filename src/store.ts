@@ -845,6 +845,12 @@ export class PimStore {
 		return row?.continued_from == null ? null : String(row.continued_from);
 	}
 
+	/** The chat that carries a chat on, once it has one. */
+	continuation(id: string): string | null {
+		const [row] = this.#sql.exec("SELECT id FROM pim_sessions WHERE continued_from = ? LIMIT 1", id).toArray();
+		return row ? String(row.id) : null;
+	}
+
 	/** Whether a chat already has a continuation. */
 	isContinued(id: string): boolean {
 		return this.#sql.exec("SELECT 1 FROM pim_sessions WHERE continued_from = ? LIMIT 1", id).toArray().length > 0;

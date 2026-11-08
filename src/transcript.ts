@@ -19,6 +19,12 @@ export const NOTICE_PREFIXES = [
 /** How a message starts that another agent in a group chat said, with its name (see ./rooms.ts). */
 export const ROOM_POST = /^\[From ([^\]\n]+)\]\n?/;
 
+/** Whether a user-role message's text is the person's own, rather than something Pim or another agent gave the agent. */
+export function fromPerson(text: string): boolean {
+	if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION) || ROOM_POST.test(text)) return false;
+	return NOTICE_PREFIXES.every(([prefix]) => !prefix.test(text));
+}
+
 /**
  * The headings of a model's summarized reasoning, in order. OpenAI's models
  * summarize theirs as sections that each start with a bold line, such as

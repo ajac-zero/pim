@@ -1,13 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
+import { toast } from "sonner";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import { AlertCircle } from "~/components/icons";
-import type {
-  DeploymentSettings,
-  DeploymentVariable,
-  Limits,
+import { Switch } from "~/components/ui/switch";
+import {
+  admin,
+  type DeploymentSettings,
+  type DeploymentVariable,
+  type Limits,
 } from "~/lib/pim-api";
-import { deploymentQuery } from "~/lib/queries";
+import { adminBuiltinAppsQuery, deploymentQuery } from "~/lib/queries";
 
 const LIMITS: [keyof Limits, TranslationKey][] = [
   ["dailyTokens", "limitDailyTokens"],
@@ -30,8 +33,9 @@ const limitVariable = (name: keyof Limits) =>
 /**
  * How this deployment runs for everyone, as its variables in the Cloudflare
  * dashboard say: each setting, the variable that sets it, whether it's the
- * default, and what's wrong with any Pim can't read. Read-only: they change
- * in the dashboard. The admin's alone.
+ * default, and what's wrong with any Pim can't read. Those are read-only:
+ * they change in the dashboard. Which of Pim's built-in apps people get is
+ * chosen here. The admin's alone.
  */
 export function DeploymentSection() {
   const { t, formatNumber } = useI18n();
@@ -132,6 +136,7 @@ export function DeploymentSection() {
           "deploymentImageModelHint",
         )}
       </Group>
+      <BuiltinApps />
       <Group
         title={t("deploymentEveryone")}
         description={t("deploymentEveryoneHint")}
@@ -176,6 +181,55 @@ export function DeploymentSection() {
         {row("PIM_EMAIL_FROM", "deploymentEmailFrom", off(settings.emailFrom))}
       </Group>
     </div>
+  );
+}
+
+/** Each of Pim's built-in apps, with a switch that turns it on or off for everyone. */
+function BuiltinApps() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: apps } = useQuery(adminBuiltinAppsQuery());
+  const toggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      admin.setBuiltinApp(id, enabled),
+    onSuccess: async (next) => {
+      queryClient.setQueryData(adminBuiltinAppsQuery().queryKey, next);
+      await queryClient.invalidateQueries({ queryKey: ["builtin-apps"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  if (!apps) return null;
+  return (
+    <Group title={t("deploymentApps")} description={t("deploymentAppsHint")}>
+      {apps.map((app) => {
+        // Pim's own apps are named in the person's language; one this web app doesn't know yet keeps the server's name.
+        const known = app.id === "notes";
+        const name = known ? t("notes") : app.name;
+        return (
+          <div
+            key={app.id}
+            className="flex items-center justify-between gap-6 px-4 py-3"
+          >
+            <dt className="min-w-0">
+              <span className="block text-sm">{name}</span>
+              <span className="block text-muted-foreground text-xs">
+                {known ? t("notesDescription") : app.description}
+              </span>
+            </dt>
+            <dd>
+              <Switch
+                checked={app.enabled}
+                disabled={toggle.isPending}
+                onCheckedChange={(enabled) =>
+                  toggle.mutate({ id: app.id, enabled })
+                }
+                aria-label={t("deploymentAppToggle", { app: name })}
+              />
+            </dd>
+          </div>
+        );
+      })}
+    </Group>
   );
 }
 

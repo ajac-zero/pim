@@ -68,6 +68,7 @@ const DIALOGS = [
   "sharing",
   "discover",
   "apps",
+  "artifacts",
   "new-chat",
   "computer",
   "agents",
@@ -75,12 +76,12 @@ const DIALOGS = [
 type AppDialog = (typeof DIALOGS)[number];
 
 /**
- * Settings, Sharing, Discover, Connectors, New chat, Computer and Agents open as
+ * Settings, Sharing, Discover, Connectors, Apps, New chat, Computer and Agents open as
  * dialogs over any page, named in the URL so links and redirects can open
  * them: `?dialog=settings&tab=model`, `?dialog=new-chat&agent=<id>&prompt=…`
  * for a chat with that agent, starting from that message, or
  * `?dialog=agents&agent=<id>` for that agent's settings.
- * What the sidebar shows is in the URL too (`?panel=artifacts`), and stays
+ * What the sidebar shows is in the URL too (`?panel=skills`), and stays
  * as you move between chats.
  */
 type AppSearch = {
@@ -106,6 +107,11 @@ const SharingDialog = lazy(() =>
 const DiscoverDialog = lazy(() =>
   import("~/components/discover-dialog").then((module) => ({
     default: module.DiscoverDialog,
+  })),
+);
+const ArtifactsDialog = lazy(() =>
+  import("~/components/artifacts-dialog").then((module) => ({
+    default: module.ArtifactsDialog,
   })),
 );
 const AppsDialog = lazy(() =>
@@ -558,6 +564,7 @@ function AppDialogs() {
       <Suspense fallback={null}>
         <SharingDialog open={dialog === "sharing"} onOpenChange={close} />
         <DiscoverDialog open={dialog === "discover"} onOpenChange={close} />
+        <ArtifactsDialog open={dialog === "artifacts"} onOpenChange={close} />
         <AppsDialog open={dialog === "apps"} onOpenChange={close} />
         <NewChatDialog
           open={dialog === "new-chat"}

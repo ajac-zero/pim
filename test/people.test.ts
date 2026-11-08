@@ -1075,7 +1075,7 @@ describe("artifacts", () => {
 		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST" })).body.link).toBe(link);
 		expect((await gus.browser.json(`/api/artifacts/${id}/publish`, { method: "POST", json: { public: false } })).body.link).toBeNull();
 		expect((await anonymous(link)).status).toBe(404);
-		faux.setResponses([toolUse("app_create", { title: "Notes", kind: "markdown", content: "# Notes" }), toolUse("send_to_user", { message: "Made it." })]);
+		faux.setResponses([toolUse("note_create", { title: "Notes", content: "# Notes" }), toolUse("send_to_user", { message: "Made it." })]);
 		await gus.browser.json(`/api/sessions/${await rootOf(gus.browser)}/messages`, { method: "POST", json: { content: "Make notes", wait: true } });
 		const notes = (await gus.browser.json("/api/artifacts")).body.artifacts[0].id;
 		expect((await gus.browser.json(`/api/artifacts/${notes}/publish`, { method: "POST", json: { public: true } })).status).toBe(400);
@@ -1231,6 +1231,63 @@ describe("the admin", () => {
 		expect(after.providers).toEqual([]);
 		expect(after.model.id).toBe("faux-model");
 		expect((await admin("/api/admin/providers/team-gpu", { method: "DELETE" })).status).toBe(404);
+	});
+
+	it("turns Pim's built-in apps on and off for everyone, leaving people's notes theirs", async () => {
+		const nell = await person("notes-nell");
+		const { body: kept } = await nell.browser.json("/api/notes", { method: "POST", json: { title: "Kept" } });
+		// What Nell's agent is given in a chat, and what loading Notes' skill gets it.
+		const chat = async () => {
+			const seen = { prompt: "", tools: [] as string[], skill: { text: "", isError: false } };
+			faux.setResponses([
+				(context) => {
+					seen.prompt = JSON.stringify(context.messages.filter((message) => message.role === "system"));
+					// The tools offered: every tool the system messages added, less those they removed.
+					const tools = new Set<string>();
+					for (const message of context.messages) {
+						if (message.role !== "system") continue;
+						for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+						for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+					}
+					seen.tools = [...tools];
+					return toolUse("read_skill", { app: "notes", skill: "notes" });
+				},
+				(context) => {
+					const result = context.messages.findLast((message) => message.role === "toolResult");
+					seen.skill = { text: JSON.stringify(result?.content), isError: result?.isError ?? false };
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			]);
+			await nell.browser.json(`/api/sessions/${await rootOf(nell.browser)}/messages`, { method: "POST", json: { content: "Write it down", wait: true } });
+			return seen;
+		};
+
+		expect((await nell.browser.json("/api/admin/builtin-apps/notes", { method: "PUT", json: { enabled: false } })).status).toBe(403);
+		expect((await admin("/api/admin/builtin-apps")).body.apps).toEqual([expect.objectContaining({ id: "notes", name: "Notes", enabled: true })]);
+		expect((await admin("/api/admin/builtin-apps/nope", { method: "PUT", json: { enabled: false } })).status).toBe(404);
+		expect((await admin("/api/admin/builtin-apps/notes", { method: "PUT", json: { enabled: "no" } })).status).toBe(400);
+
+		const off = await admin("/api/admin/builtin-apps/notes", { method: "PUT", json: { enabled: false } });
+		expect(off.body.apps).toEqual([expect.objectContaining({ id: "notes", enabled: false })]);
+		expect((await nell.browser.json("/api/builtin-apps")).body.apps).toEqual([]);
+		const without = await chat();
+		expect(without.tools).not.toContain("note_create");
+		expect(without.tools).toContain("app_create");
+		expect(without.prompt).not.toContain("Notes is one of Pim's built-in apps");
+		expect(without.skill.isError).toBe(true);
+		expect((await nell.browser.json("/api/notes", { method: "POST", json: { title: "New" } })).status).toBe(403);
+		// The notes Nell has stay hers to read and change.
+		expect((await nell.browser.json(`/api/artifacts/${kept.id}`)).status).toBe(200);
+		const saved = await nell.browser.json(`/api/artifacts/${kept.id}/versions`, { method: "POST", json: { baseVersion: 1, content: "Still mine" } });
+		expect(saved.status).toBe(201);
+
+		await admin("/api/admin/builtin-apps/notes", { method: "PUT", json: { enabled: true } });
+		expect((await nell.browser.json("/api/builtin-apps")).body.apps).toEqual([expect.objectContaining({ id: "notes" })]);
+		const back = await chat();
+		expect(back.tools).toContain("note_create");
+		expect(back.prompt).toContain("Notes is one of Pim's built-in apps");
+		expect(back.skill).toMatchObject({ isError: false, text: expect.stringContaining("note_edit") });
+		expect((await nell.browser.json("/api/notes", { method: "POST", json: { title: "New" } })).status).toBe(201);
 	});
 
 	it("shares a built-in service with members without sharing its key or their own connections", async () => {

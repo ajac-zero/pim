@@ -16,6 +16,7 @@ import {
 	Harness,
 	hook,
 	type HarnessSettings,
+	InboxDoc,
 	type ModelRef,
 	type TaskId,
 	ROOT_CONVERSATION_ID,
@@ -90,6 +91,8 @@ import {
 } from "./extensions/approvals";
 import pimConfig from "../pim.config";
 import { artifactsExtension } from "./extensions/artifacts";
+import { NOTES_SKILL, notesExtension } from "./extensions/notes";
+import { BUILTIN_APPS } from "./builtin-apps";
 import { APP_DEPLOY, appDeployAction, hostedExtension } from "./extensions/hosted";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, BROWSER_UPLOAD, browserClickAction, browserExtension, browserTypeAction, browserUploadAction } from "./extensions/browser";
@@ -174,6 +177,7 @@ import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADE
 import { machineName } from "./computer-host";
 import { FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
+import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "./notes";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
 import { type DeploymentSettings, deploymentSettings } from "./deployment";
 import { dispatch, HttpError, readJson, type Route } from "./http";
@@ -228,7 +232,7 @@ import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_ST
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
-import { forkPoint, projectEntries } from "./transcript";
+import { forkPoint, fromPerson, projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
@@ -462,6 +466,8 @@ const CUSTOM_APPS_KEY = "custom_apps";
 const OWNER_ADMIN_KEY = "owner_admin";
 /** How long what the admin shares through the gallery (connectors and model providers) is used before it's read again. */
 const CUSTOM_APPS_TTL_MS = 60_000;
+/** The built-in apps (./builtin-apps.ts) the admin turned off, as last read from the gallery with their connectors. */
+const DISABLED_BUILTIN_APPS_KEY = "disabled_builtin_apps";
 /** The person's own model providers (./providers.ts), keys included. */
 const OWN_PROVIDERS_KEY = "own_providers";
 /** The admin's model providers, as last read from the gallery. */
@@ -488,6 +494,8 @@ const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "aband
 
 /** A socket's chat, or for an app showing the computer's desktop, the channel its stream comes on. */
 type SocketState = { readonly session: string; readonly channel?: number };
+/** A socket editing a note: which one. */
+type NoteSocketState = { readonly note: string };
 
 function clipTitle(text: string): string {
 	const line = text.trim().split(/\r?\n/)[0]!.trim();
@@ -573,6 +581,10 @@ export class Pim extends DurableAgent<Env> {
 		owner: () => this.name,
 		storageRoom: () => this.#storageRoom(),
 	});
+	/** Notes: the live text of Markdown apps, which the person and the agent write in together (see ./notes.ts). */
+	readonly notes = new NoteStore(this.ctx.storage.sql, this.artifacts, (note) =>
+		[...this.getConnections<NoteSocketState>(NOTE_TAG)].filter((connection) => connection.state?.note === note).map((connection) => this.#notePeer(connection)),
+	);
 	/** The person's computer, which their agents use, if they have one (see ./computer.ts). */
 	readonly computer: Computer = new Computer({
 		meta: this.store,
@@ -730,7 +742,8 @@ export class Pim extends DurableAgent<Env> {
 		publicUrl: () => this.deployment().publicUrl ?? undefined,
 		owner: () => this.name,
 		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
-		submit: async (session, content, operationId) => {
+		submit: async (watched, content, operationId) => {
+			const session = await this.#carriedOn(watched);
 			await this.submitTo(session, content, { operationId }, "pim");
 			// A member's own conversation isn't the one the person reads, so the chat is told too.
 			const seat = this.#rooms.of(session);
@@ -819,6 +832,10 @@ export class Pim extends DurableAgent<Env> {
 					roleOf: (session) => this.#roleOf(session),
 					delegates: (session) => this.#delegates(session),
 					start: (requester, batch, tasks, options) => this.#startTasks(requester, batch, tasks, options),
+					archive: (conversation) => {
+						this.store.archiveSession(conversation);
+						this.broadcastMessage({ type: "sessions" });
+					},
 					tasks: this.#tasks,
 				}),
 			);
@@ -850,6 +867,7 @@ export class Pim extends DurableAgent<Env> {
 					readFile: (path) => this.files.bytes(path),
 				}),
 			);
+			this.#installNotes();
 			this.registry.install(filesExtension(this.#files));
 			this.registry.install(hostedExtension(this.#hostedServices));
 			this.#installImageGeneration();
@@ -1046,7 +1064,7 @@ export class Pim extends DurableAgent<Env> {
 	#appExtras(services: PimServices) {
 		return {
 			catalog: this.catalog,
-			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files), ...eventTools(
+			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files, this.#builtinOn("notes") ? [NOTES_SKILL] : []), ...eventTools(
 					this.apps,
 					this.catalog,
 					this.appEvents,
@@ -1130,9 +1148,19 @@ export class Pim extends DurableAgent<Env> {
 		try {
 			const gallery = this.env.Gallery.getByName("gallery");
 			// The directory failing to answer leaves what it said before.
-			const [apps, providers, admin] = await Promise.all([gallery.customApps(), gallery.sharedProviders(), this.#ownerIsAdmin().catch(() => null)]);
+			const [apps, providers, admin, off] = await Promise.all([
+				gallery.customApps(),
+				gallery.sharedProviders(),
+				this.#ownerIsAdmin().catch(() => null),
+				gallery.disabledBuiltinApps(),
+			]);
 			const custom = JSON.stringify(apps);
 			if (custom !== this.store.meta(CUSTOM_APPS_KEY)) this.store.setMeta(CUSTOM_APPS_KEY, custom);
+			const disabled = JSON.stringify(off);
+			if (disabled !== (this.store.meta(DISABLED_BUILTIN_APPS_KEY) ?? "[]")) {
+				this.store.setMeta(DISABLED_BUILTIN_APPS_KEY, disabled);
+				this.#builtinAppsChanged();
+			}
 			if (admin !== null && (admin ? "1" : "0") !== this.store.meta(OWNER_ADMIN_KEY)) {
 				this.store.setMeta(OWNER_ADMIN_KEY, admin ? "1" : "0");
 				this.#reinstallApprovals();
@@ -1145,6 +1173,31 @@ export class Pim extends DurableAgent<Env> {
 		} catch (error) {
 			console.warn("reading the admin's connectors and providers failed", error);
 		}
+	}
+
+	/** Whether the admin left one of Pim's built-in apps on, as this space last read it. */
+	#builtinOn(id: string): boolean {
+		return !(JSON.parse(this.store.meta(DISABLED_BUILTIN_APPS_KEY) ?? "[]") as string[]).includes(id);
+	}
+
+	/** Notes' tools and prompt section, or nothing in their place while the admin has Notes off. */
+	#installNotes(): void {
+		this.registry.install(
+			this.#builtinOn("notes")
+				? notesExtension({ artifacts: this.artifacts, notes: this.notes, assertOpen: () => this.#assertOpen() })
+				: defineExtension({ name: "pim.notes" }),
+		);
+	}
+
+	/**
+	 * The admin turned a built-in app on or off: its tools, prompt section and
+	 * skill come or go from the next request, in chats begun before too. The
+	 * person's notes stay theirs to open, change and export either way.
+	 */
+	#builtinAppsChanged(): void {
+		if (!this.registry.snapshot().extension("pim.approvals")) return;
+		this.#installNotes();
+		this.#installApps();
 	}
 
 	/** Whether this space's owner runs this Pim, as the directory says now. */
@@ -1253,11 +1306,37 @@ export class Pim extends DurableAgent<Env> {
 	 * Whether a run whose model failed for good is held for the person to try again. Only a chat is, and not while it works
 	 * on a task: a task or a review has no one watching it, and its requester or caller needs the failure to go on.
 	 */
-	#holdsRun(message: { errorMessage?: string }, conversation: string): boolean {
-		if (message.errorMessage === NOT_DELIVERED || this.#taskApart(conversation) || this.#taskUnderway(conversation)) return false;
+	#holdsRun(message: { errorMessage?: string; provider?: string; model?: string }, conversation: string): boolean {
+		if (message.errorMessage === NOT_DELIVERED) return false;
+		// Held only for a moment: the agent's next model takes the run over.
+		const next = this.#nextModel(conversation, message);
+		if (next) {
+			void this.keepAliveWhile(() => this.#failOver(conversation, next));
+			return true;
+		}
+		if (this.#taskApart(conversation) || this.#taskUnderway(conversation)) return false;
 		// The chat list stops showing it as working once the hold is committed, just after this answers.
 		setTimeout(() => this.broadcastMessage({ type: "sessions" }), 1000);
 		return true;
+	}
+
+	/** The model after the one that failed in the agent's own and fallback models; none when it was the last, or isn't one of them. */
+	#nextModel(conversation: string, failed: { provider?: string; model?: string }): PiModel | undefined {
+		const agent = this.agents.ofSession(conversation);
+		const chain = [this.agentModel(agent), ...this.#fallbackModels(agent)];
+		const at = chain.findIndex((model) => model.provider === failed.provider && model.id === failed.model);
+		return at < 0 ? undefined : chain[at + 1];
+	}
+
+	/** Moves a held run onto `model` and runs it again there. */
+	async #failOver(conversation: string, model: PiModel): Promise<void> {
+		console.warn(JSON.stringify({ event: "pim.failover", owner: this.name, conversation, provider: model.provider, model: model.id }));
+		await this.harness.session(conversation).setModel(model);
+		// The run is held just after its hook answers.
+		for (let attempt = 0; attempt < 20; attempt++) {
+			if (await this.#resumeHeld(conversation)) return;
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
 	}
 
 	/** The conversations whose runs are held after a model error: not working, but waiting for the person to try again. */
@@ -1433,6 +1512,11 @@ export class Pim extends DurableAgent<Env> {
 		return this.chosenModel();
 	}
 
+	/** The models an agent moves on to, in order, when its own fails for good; ones that are gone are not read: see `#dropModels`. */
+	#fallbackModels(agent: Agent): PiModel[] {
+		return agent.fallbacks.flatMap((fallback) => this.modelCatalog().getModel(fallback.provider, fallback.id) ?? []);
+	}
+
 	/**
 	 * A model from `GET /model`'s choices, by provider and id: the deployment's,
 	 * one it allows besides, or one on the connected ChatGPT plan.
@@ -1464,6 +1548,11 @@ export class Pim extends DurableAgent<Env> {
 		return changed;
 	}
 
+	/** Sets the models an agent moves on to when its own fails, from `GET /model`'s choices. */
+	async chooseAgentFallbacks(agent: Agent, models: PiModel[]): Promise<Agent> {
+		return this.agents.setFallbacks(agent.id, models);
+	}
+
 	/** Puts every session on its agent's model. */
 	async #syncModels(): Promise<void> {
 		for (const session of await this.harness.sessions.list()) {
@@ -1475,6 +1564,7 @@ export class Pim extends DurableAgent<Env> {
 	#dropModels(gone: (model: AgentModel) => boolean): void {
 		for (const agent of this.agents.list()) {
 			if (agent.model && gone(agent.model)) this.agents.setModel(agent.id, null);
+			if (agent.fallbacks.some(gone)) this.agents.setFallbacks(agent.id, agent.fallbacks.filter((model) => !gone(model)));
 		}
 	}
 
@@ -1878,6 +1968,9 @@ export class Pim extends DurableAgent<Env> {
 	/** Gives pi input for a conversation, traced as part of its run (see ./telemetry.ts). */
 	async #submit(session: string, content: UserInput, options: { operationId?: string; whenBusy?: "followUp" | "steer" }, from: string): Promise<PiReceipt> {
 		const withdraw = this.telemetry.submitting(session, content, from);
+		// A conversation that moved on to a fallback model tries the agent's own again.
+		const agent = this.agents.ofSession(session);
+		if (agent.fallbacks.length > 0) await this.harness.session(session).setModel(this.agentModel(agent));
 		let receipt: PiReceipt;
 		try {
 			receipt = await this.harness.submit(content, { session, ...options });
@@ -1988,10 +2081,12 @@ export class Pim extends DurableAgent<Env> {
 		// The same firing retried is one submission and one notification.
 		const firing = `schedule:${schedule.id}:${schedule.time}`;
 		let started: string | null = null;
+		let target = payload.session;
 		try {
 			if (payload.newChat) started = await this.#scheduledChat(payload, schedule);
+			target = started ?? (await this.#carriedOn(payload.session));
 			await this.submitTo(
-				started ?? payload.session,
+				target,
 				`[Scheduled task${label} ${schedule.id}] ${payload.instruction}`,
 				{ operationId: firing },
 				"pim",
@@ -2008,7 +2103,7 @@ export class Pim extends DurableAgent<Env> {
 		const notification = this.store.addNotification({
 			id: firing,
 			kind: "scheduled",
-			session: started ?? payload.session,
+			session: target,
 			title: title.length > 80 ? `${title.slice(0, 79)}…` : title,
 			// The title names the task; the instruction can be pages long and lives in the chat.
 			body: "",
@@ -3665,7 +3760,8 @@ export class Pim extends DurableAgent<Env> {
 		for (const [position, { to, task, continues }] of given.entries()) {
 			let record = this.#tasks.at(batch, position);
 			if (!record) {
-				const conversation = continues?.conversation ?? (await this.#taskConversation(to));
+				// A chat that grew too long carries on in a new one, so a follow-up goes on there: the old chat is full.
+				const conversation = continues ? await this.#carriedOn(continues.conversation) : await this.#taskConversation(to);
 				record = this.#tasks.start({
 					kind: "agent",
 					conversation,
@@ -3780,6 +3876,24 @@ export class Pim extends DurableAgent<Env> {
 		await this.#giveUpdate(requester, batch, operation);
 	}
 
+	/**
+	 * Where what is sent to a chat goes: a chat that grew too long is carried on in a new one,
+	 * which then hears the answers to the tasks the chat handed out, its schedules and its events,
+	 * and which a task's follow-ups go to, since the old chat is full. The tasks the chat did or
+	 * handed out move over, so the new chat is the one recorded for them, only once the old chat
+	 * is at rest: nothing at work for it, no call waiting in it for answers, and no task of its
+	 * own under way. Until then the old chat is the one that is still going on.
+	 */
+	async #carriedOn(session: string): Promise<string> {
+		for (let next = this.store.continuation(session); next !== null; next = this.store.continuation(session)) {
+			if (this.#tasks.isWaiting(session) || this.#taskUnderway(session) || (await this.harness.session(session).busy())) return session;
+			if (this.#tasks.byRequester(session).some((task) => task.state === "working" || task.state === "auth-required")) return session;
+			this.#tasks.carryOn(session, next);
+			session = next;
+		}
+		return session;
+	}
+
 	/** Submits an update `#deliver` marked as being given; again after a restart, which gives it once. */
 	async #giveUpdate(requester: string, batch: string, operation: string): Promise<void> {
 		const tasks = this.#tasks.inBatch(batch);
@@ -3789,7 +3903,7 @@ export class Pim extends DurableAgent<Env> {
 			tasks.filter((task) => task.state === "auth-required").map(by),
 		);
 		try {
-			await this.submitTo(requester, text, { operationId: operation, whenBusy: "followUp" }, "task");
+			await this.submitTo(await this.#carriedOn(requester), text, { operationId: operation, whenBusy: "followUp" }, "task");
 		} catch (error) {
 			console.warn(`giving ${operation} failed`, error);
 			return;
@@ -3979,6 +4093,39 @@ export class Pim extends DurableAgent<Env> {
 			);
 		}
 		return { operationId, session, accepted: !known };
+	}
+
+	/**
+	 * Changes one of the person's messages queued behind the work in a chat,
+	 * before the agent reads it: `steer` has it join the running work after
+	 * the agent's current step, rather than wait for the run to end; `text`
+	 * rewrites it, keeping its images; `cancel` takes it back. Only the chat's
+	 * own agent's queue changes: in a group chat, the other agents keep what they heard.
+	 */
+	async #changeQueued(session: string, id: number, change: "steer" | "cancel" | { readonly text: string }): Promise<void> {
+		const conversation = await this.harness.conversation(session);
+		const outcome = await conversation.commit(async (tx) => {
+			const items = (await tx.doc(InboxDoc, conversation.id)).items;
+			const index = items.findIndex((item) => item.id === id);
+			const item = items[index];
+			if (!item) return "gone";
+			if (item.mode === "write" || !fromPerson(textOf(item.content as UserInput))) return "not_yours";
+			if (change === "steer") {
+				item.mode = "steer";
+			} else if (change === "cancel") {
+				tx.settleSubmission(item.id, { status: "unanswered", reason: "aborted" });
+				items.splice(index, 1);
+			} else {
+				const content = item.content as UserInput;
+				const images = typeof content === "string" ? [] : content.filter((part) => part.type !== "text");
+				if (change.text.trim() === "" && images.length === 0) return "empty";
+				item.content = (images.length === 0 ? change.text : [...(change.text.trim() === "" ? [] : [{ type: "text", text: change.text }]), ...images]) as typeof item.content;
+			}
+			return "changed";
+		}, BACKGROUND_CONTEXT);
+		if (outcome === "gone") throw new HttpError(409, "The agent has this message already");
+		if (outcome === "not_yours") throw new HttpError(404, "No such message of yours is queued");
+		if (outcome === "empty") throw new HttpError(400, "A message needs text or an image");
 	}
 
 	/**
@@ -4246,8 +4393,8 @@ export class Pim extends DurableAgent<Env> {
 	 * The messages offered under a chat. Once the chat has something said in
 	 * it, the utility model writes them from that chat and what Pim remembers,
 	 * and writes them again only when either has changed since, so a chat nobody
-	 * continues costs nothing. Until then, and when the model can't, Pim's own
-	 * starters.
+	 * continues costs nothing. Until then, Pim's own starters; when the model
+	 * can't, none, since starters rarely fit a chat already under way.
 	 */
 	async #suggestions(agent: Agent, session: string, locale: string): Promise<string[]> {
 		const starters = ASSISTANT_STARTERS.map((starter) => localize(starter, locale));
@@ -4287,7 +4434,7 @@ export class Pim extends DurableAgent<Env> {
 			return await writing.promise;
 		} catch (error) {
 			if (!(error instanceof HttpError)) console.warn("prompt suggestions failed", error);
-			return cached?.items ?? starters;
+			return cached?.items ?? [];
 		}
 	}
 
@@ -4330,7 +4477,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Who started a chat to hand its agent a task, from which chat, and how the task is going; null for a chat the person started. */
 	#startedBy(session: string): { session: string; agent: { id: string; name: string }; task: string; state: Task["state"] } | null {
-		const task = this.#tasks.of(session);
+		const continuation = this.store.continuation(session);
+		const task = this.#tasks.of(session) ?? (continuation === null ? undefined : this.#tasks.of(continuation));
 		if (!task?.chat || task.requester === null) return null;
 		const agent = this.#roleOf(task.requester).agent;
 		return { session: this.store.publicId(task.root), agent: { id: agent.id, name: agent.name }, task: task.id, state: task.state };
@@ -4345,7 +4493,7 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * Compaction would hide a long chat's early history in the chat itself. Instead the chat
 	 * stays as it is, and a fork of it, compacted, is the chat the conversation goes on in: it
-	 * opens with the summary, and the sidebar lists it under the chat it carries on. A chat is
+	 * opens with the summary, and the sidebar lists it in the place of the chat it carries on, which is archived. A chat is
 	 * continued once; a run that already overflowed is still compacted in place, to go on.
 	 */
 	#continuationExtension() {
@@ -4824,6 +4972,8 @@ export class Pim extends DurableAgent<Env> {
 	 * and push keys stay behind. JSON text, ready to download.
 	 */
 	async exportData(): Promise<string> {
+		// What the person wrote in a note since its last version is part of it.
+		await this.notes.checkpointAll();
 		const deleted = this.store.deletedSessions();
 		const triggers = triggerHistory(this.ctx.storage.sql);
 		const sessions = [];
@@ -5325,7 +5475,8 @@ export class Pim extends DurableAgent<Env> {
 						responseAt: info?.responseAt ?? null,
 						unread,
 						// A chat still working, or with a reply not yet read, stays in the list however old it is.
-						archived: info?.archivedAt != null || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
+						// A chat that has been carried on is archived: the chat that carries it on has taken its place.
+						archived: info?.archivedAt != null || this.store.isContinued(session.id) || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: this.#agentRef(session.id),
 						room: this.#roomInfo(session.id, busy, heldErrors),
@@ -5590,8 +5741,18 @@ export class Pim extends DurableAgent<Env> {
 			async ({ session }) => {
 				const id = await this.#session(session!);
 				const pi = await this.harness.pi();
+				// The chat's cost includes every task its agents handed out, and the tasks those handed out in turn.
+				const conversations = new Set<string>();
+				const pending = [id];
+				for (let chat = pending.pop(); chat !== undefined; chat = pending.pop()) {
+					for (const conversation of this.#rooms.everyConversation(chat)) {
+						if (conversations.has(conversation)) continue;
+						conversations.add(conversation);
+						for (const task of this.#tasks.byRequester(conversation)) pending.push(task.conversation);
+					}
+				}
 				const ledgers = await Promise.all(
-					this.#rooms.everyConversation(id).map((conversation) => pi.snapshot(UsageDoc, Number(conversation) as ConversationId, BACKGROUND_CONTEXT)),
+					[...conversations].map((conversation) => pi.snapshot(UsageDoc, Number(conversation) as ConversationId, BACKGROUND_CONTEXT)),
 				);
 				return sessionCost(ledgers.filter((ledger) => ledger !== undefined));
 			},
@@ -5685,6 +5846,33 @@ export class Pim extends DurableAgent<Env> {
 					for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) others = (await this.harness.session(seat.conversation).abort()) || others;
 				}
 				return { aborted: (await this.harness.session(id).abort(operationId)) || others };
+			},
+		],
+		// The person's messages queued behind the work in a chat, by their `id` in pi's inbox, before the agent reads them.
+		[
+			"POST",
+			"/sessions/:session/queue/:id/steer",
+			async ({ session, id }) => {
+				await this.#changeQueued(await this.#session(session!), Number(id), "steer");
+				return { id: Number(id) };
+			},
+		],
+		[
+			"PUT",
+			"/sessions/:session/queue/:id",
+			async ({ session, id }, request) => {
+				const { text } = await readJson<{ text: string }>(request);
+				if (typeof text !== "string") throw new HttpError(400, "text must be a string");
+				await this.#changeQueued(await this.#session(session!), Number(id), { text });
+				return { id: Number(id) };
+			},
+		],
+		[
+			"DELETE",
+			"/sessions/:session/queue/:id",
+			async ({ session, id }) => {
+				await this.#changeQueued(await this.#session(session!), Number(id), "cancel");
+				return { id: Number(id) };
 			},
 		],
 		[
@@ -5860,8 +6048,36 @@ export class Pim extends DurableAgent<Env> {
 					this.#assertOpen();
 					const artifact = this.#artifact(id!);
 					await this.hosted.forget(artifact.id);
+					this.notes.forget(artifact.id);
 					await this.artifacts.delete(artifact.id);
 					return noStore({ deleted: true });
+				}),
+		],
+		[
+			"PUT",
+			"/artifacts/:id",
+			({ id }, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const artifact = this.#artifact(id!);
+					const { title } = await readJson<{ title: unknown }>(request);
+					if (typeof title !== "string") throw new HttpError(400, "title must be a string");
+					this.#assertOpen();
+					return noStore(this.#publicArtifact(this.artifacts.rename(artifact.id, title)));
+				}),
+		],
+		// A note the person starts themselves, empty, to write in with their agents.
+		[
+			"POST",
+			"/notes",
+			(_params, request, url) =>
+				this.#artifactRequest(url, async () => {
+					const { title } = await readJson<{ title: unknown }>(request);
+					if (typeof title !== "string") throw new HttpError(400, "title must be a string");
+					this.#assertOpen();
+					if (!this.#builtinOn("notes")) throw new HttpError(403, "Notes is off on this Pim.");
+					const id = crypto.randomUUID();
+					await this.artifacts.create({ id, title: checkTitle(title), kind: "markdown", content: "", session: null });
+					return noStore(this.#publicArtifact(this.artifacts.get(id)!), 201);
 				}),
 		],
 		[
@@ -5883,12 +6099,12 @@ export class Pim extends DurableAgent<Env> {
 					}
 					const name = title === undefined ? undefined : checkTitle(title);
 					this.#assertOpen();
-					const { version, changed } = await this.artifacts.append(artifact.id, {
-						baseVersion: baseVersion!,
-						files: { [file]: content },
-						source: "person",
-						...(name !== undefined ? { title: name } : {}),
-					});
+					const change = { baseVersion: baseVersion!, source: "person", ...(name !== undefined ? { title: name } : {}) } as const;
+					// A note's whole new text goes into its live text too, where the person's editors see it.
+					const { version, changed } =
+						artifact.kind === "markdown"
+							? await this.notes.write(artifact.id, { ...change, content })
+							: await this.artifacts.append(artifact.id, { ...change, files: { [file]: content } });
 					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), saved: version.version, changed }, changed ? 201 : 200);
 				}),
 		],
@@ -5903,7 +6119,10 @@ export class Pim extends DurableAgent<Env> {
 						throw new HttpError(400, "version and baseVersion must be version numbers");
 					}
 					this.#assertOpen();
-					const restored = await this.artifacts.restore(artifact.id, version!, baseVersion!);
+					const restored =
+						artifact.kind === "markdown"
+							? await this.notes.restore(artifact.id, version!, baseVersion!)
+							: await this.artifacts.restore(artifact.id, version!, baseVersion!);
 					return noStore({ ...this.#publicSession(this.artifacts.get(artifact.id)!), restored: restored.version }, 201);
 				}),
 		],
@@ -5932,7 +6151,7 @@ export class Pim extends DurableAgent<Env> {
 						if (this.hosted.version(artifact.id) === undefined) throw new HttpError(409, "This app's backend hasn't been run yet. Deploy it, and it opens here.");
 						return new Response(null, { status: 302, headers: { location: await this.hosted.address(this.name, artifact.id), "cache-control": "no-store, private" } });
 					}
-					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin);
+					return framePage(artifact.kind, await this.artifacts.read(artifact.id, found.version), url.origin, { thumbnail: url.searchParams.has("thumbnail") });
 				}),
 		],
 		[
@@ -6074,7 +6293,7 @@ export class Pim extends DurableAgent<Env> {
 			({ host, id, version }, _request, url) =>
 				this.#artifactRequest(url, async () => {
 					const { artifact, load } = await this.#othersArtifact(host!, id!, version!);
-					return framePage(artifact.kind, await load(), url.origin);
+					return framePage(artifact.kind, await load(), url.origin, { thumbnail: url.searchParams.has("thumbnail") });
 				}),
 		],
 		[
@@ -6655,6 +6874,19 @@ export class Pim extends DurableAgent<Env> {
 				return this.chooseAgentModel(agent, await this.#choice(provider, model));
 			},
 		],
+		// The models an agent moves on to, in order, when its own fails for good, from `GET /model`'s choices.
+		[
+			"PUT",
+			"/agents/:agent/fallbacks",
+			async ({ agent: id }, request) => {
+				const agent = this.#agent(id!);
+				const { models } = (await readJson<{ models: { provider: string; id: string }[] }>(request)) ?? {};
+				if (!Array.isArray(models) || models.some((model) => typeof model?.provider !== "string" || typeof model.id !== "string")) {
+					throw new HttpError(400, "models must be a list of provider and id");
+				}
+				return this.chooseAgentFallbacks(agent, await Promise.all(models.map((model) => this.#choice(model.provider, model.id))));
+			},
+		],
 		// Skills the agents wrote, with the person's approval, every version kept; each agent lists the ones it uses.
 		[
 			"GET",
@@ -6876,6 +7108,15 @@ export class Pim extends DurableAgent<Env> {
 		],
 		["POST", "/visits/:username", async ({ username }) => ({ session: this.store.publicId(await this.startVisit(username!)) })],
 
+		// The apps Pim brings that the admin left on.
+		[
+			"GET",
+			"/builtin-apps",
+			async () => {
+				await this.#refreshCustomApps(true);
+				return { apps: BUILTIN_APPS.filter((app) => this.#builtinOn(app.id)) };
+			},
+		],
 		// The connectors people can connect, and the person's connections to them.
 		[
 			"GET",
@@ -7443,6 +7684,7 @@ export class Pim extends DurableAgent<Env> {
 	override getConnectionTags(_connection: Connection, ctx: ConnectionContext): string[] {
 		const { pathname } = new URL(ctx.request.url);
 		if (pathname === COMPUTER_SCREEN_PATH) return [SCREEN_TAG];
+		if (pathname === NOTE_LIVE_PATH) return [NOTE_TAG];
 		return pathname === COMPUTER_PATH ? [COMPUTER_TAG] : pathname === BROWSER_LIVE_PATH ? [BROWSER_TAG] : [];
 	}
 
@@ -7456,6 +7698,46 @@ export class Pim extends DurableAgent<Env> {
 
 	#isScreenViewer(connection: Connection): boolean {
 		return connection.tags.includes(SCREEN_TAG);
+	}
+
+	#isNoteEditor(connection: Connection): boolean {
+		return connection.tags.includes(NOTE_TAG);
+	}
+
+	/** A socket editing a note, as the notes see it. */
+	#notePeer(connection: Connection): NotePeer {
+		return {
+			id: connection.id,
+			send: (data) => {
+				if (connection.readyState !== WebSocket.OPEN) return;
+				try {
+					connection.send(data);
+				} catch {
+					// Closed between the check and the send.
+				}
+			},
+			close: (code, reason) => connection.close(code, reason),
+		};
+	}
+
+	/** An editor opens a note (`?note=`, kept as the socket's state) and syncs with its live text. */
+	async #openNote(connection: Connection<NoteSocketState>, request: Request): Promise<void> {
+		const note = new URL(request.url).searchParams.get("note") ?? "";
+		try {
+			if (this.artifacts.get(note)?.kind !== "markdown") throw new HttpError(404, `No note ${note}`);
+			connection.setState({ note });
+			await this.notes.joined(note, this.#notePeer(connection));
+		} catch (error) {
+			connection.close(4004, errorMessage(error).slice(0, 120));
+		}
+	}
+
+	/** An editor went: the note keeps what was written, once the last one has. */
+	async #closeNote(connection: Connection<NoteSocketState>): Promise<void> {
+		const note = connection.state?.note;
+		if (!note) return;
+		const remaining = [...this.getConnections<NoteSocketState>(NOTE_TAG)].filter((other) => other.id !== connection.id && other.state?.note === note).length;
+		await this.notes.left(note, connection.id, remaining);
 	}
 
 	/**
@@ -7566,6 +7848,10 @@ export class Pim extends DurableAgent<Env> {
 			await this.#viewScreen(connection);
 			return;
 		}
+		if (this.#isNoteEditor(connection)) {
+			await this.#openNote(connection as unknown as Connection<NoteSocketState>, ctx.request);
+			return;
+		}
 		const requested = new URL(ctx.request.url).searchParams.get("session");
 		let session: string;
 		try {
@@ -7582,6 +7868,17 @@ export class Pim extends DurableAgent<Env> {
 
 	async onMessage(connection: Connection<SocketState>, raw: WSMessage): Promise<void> {
 		if (this.#isComputer(connection)) return this.#computerSaid(raw, connection);
+		if (this.#isNoteEditor(connection)) {
+			const note = (connection.state as unknown as Partial<NoteSocketState> | undefined)?.note;
+			if (!note || typeof raw === "string") return;
+			const bytes = raw instanceof ArrayBuffer ? new Uint8Array(raw) : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+			try {
+				await this.notes.receive(note, this.#notePeer(connection), bytes);
+			} catch (error) {
+				connection.close(4004, errorMessage(error).slice(0, 120));
+			}
+			return;
+		}
 		if (typeof raw !== "string") return;
 		if (this.#isScreenViewer(connection)) {
 			if (raw.startsWith(SCREEN_PING)) return this.#screenPing(connection, raw);
@@ -7623,6 +7920,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected(connection);
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
+		if (this.#isNoteEditor(connection)) return this.#closeNote(connection as Connection<NoteSocketState>);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
@@ -7631,6 +7929,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isComputer(connection)) return this.#computerDisconnected(connection);
 		if (this.#isBrowserWatcher(connection)) return this.browser.unwatch(connection.id);
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
+		if (this.#isNoteEditor(connection)) return this.#closeNote(connection as Connection<NoteSocketState>);
 		this.#watchRequests.delete(connection.id);
 		await this.#unwatch(connection.id);
 	}
@@ -7788,11 +8087,13 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
-	/** Tells every open app; the computer's connection, and those taking the browser over or showing the desktop, speak other protocols. */
+	/** Tells every open app; the computer's connection, and those taking the browser over, showing the desktop or editing a note, speak other protocols. */
 	broadcastMessage(message: ServerMessage): void {
 		this.broadcast(
 			JSON.stringify(message),
-			[...this.getConnections(COMPUTER_TAG), ...this.getConnections(BROWSER_TAG), ...this.getConnections(SCREEN_TAG)].map((connection) => connection.id),
+			[...this.getConnections(COMPUTER_TAG), ...this.getConnections(BROWSER_TAG), ...this.getConnections(SCREEN_TAG), ...this.getConnections(NOTE_TAG)].map(
+				(connection) => connection.id,
+			),
 		);
 	}
 }

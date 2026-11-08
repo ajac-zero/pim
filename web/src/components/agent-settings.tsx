@@ -9,12 +9,14 @@ import {
 } from "~/components/agent-icon";
 import { AppIcon } from "~/components/app-icon";
 import { BotShareButton } from "~/components/bot-share";
+import { ModelMark, useAgentModel } from "~/components/chat/model-menu";
 import { useSaveContacts } from "~/components/contact-map";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
   Blocks,
   ChevronDown,
+  ChevronUpIcon,
   Globe,
   MessageCircle,
   Pencil,
@@ -45,6 +47,13 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "~/components/ui/popover";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import { Switch } from "~/components/ui/switch";
 import {
   type Agent,
@@ -52,6 +61,7 @@ import {
   admin,
   MAJORDOMO_TONES,
   type MajordomoPreferences,
+  type ModelInfo,
   pim,
   type ToolPermissionInfo,
 } from "~/lib/pim-api";
@@ -66,6 +76,7 @@ import {
   majordomoQuery,
 } from "~/lib/queries";
 import { newChatSearch } from "~/lib/start-chat";
+import { modelName } from "~/lib/utils";
 
 const EMPTY: AgentInput = {
   name: "",
@@ -262,6 +273,7 @@ export function AgentSettings({
         </span>
       </div>
       {agent.majordomo && <MajordomoPreferencesSection agent={agent} />}
+      <AgentModels agent={agent} />
       <AgentApps agent={agent} />
       <AgentSkills agent={agent} />
       <AgentContacts agent={agent} onShowNetwork={onShowNetwork} />
@@ -725,6 +737,150 @@ function AgentToolRow({
  * added in the network of your agents, where Add contacts goes with this agent
  * chosen. Your majordomo hands tasks to all of them, so it has no list.
  */
+/**
+ * The models an agent runs on, in order: the first is the one it runs on, and
+ * the rest are the ones it moves on to when that fails for good, such as when
+ * its provider's quota is used up.
+ */
+function AgentModels({ agent }: { agent: Agent }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { settings, current, pinned } = useAgentModel(agent.id);
+  const save = useMutation({
+    mutationFn: async (models: ModelInfo[]) => {
+      const [first, ...rest] = models;
+      if (
+        first &&
+        !(first.provider === current?.provider && first.id === current.id)
+      ) {
+        await pim.chooseAgentModel(agent.id, first);
+      }
+      return pim.setAgentFallbacks(agent.id, rest);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agents"] }),
+    onError: (error) => toast.error(error.message),
+  });
+  if (!settings || !current) return null;
+  const same = (
+    a: { provider: string; id: string },
+    b: { provider: string; id: string },
+  ) => a.provider === b.provider && a.id === b.id;
+  const models = [
+    current,
+    ...agent.fallbacks.flatMap(
+      (fallback) =>
+        settings.choices.find((choice) => same(choice, fallback)) ?? [],
+    ),
+  ];
+  const unused = settings.choices.filter(
+    (choice) => !models.some((used) => same(used, choice)),
+  );
+  return (
+    <section className="mt-8 space-y-2" aria-label={t("agentModels")}>
+      <h2 className="text-[13px] text-muted-foreground">{t("agentModels")}</h2>
+      <p className="text-muted-foreground text-xs">
+        {t("fallbackModelsHint", { name: agent.name })}
+      </p>
+      <ol className="divide-y overflow-hidden rounded-xl border">
+        {models.map((model, index) => {
+          const name = modelName(model.name);
+          const move = (to: number) => {
+            const next = [...models];
+            next.splice(to, 0, ...next.splice(index, 1));
+            save.mutate(next);
+          };
+          const button = "size-6 text-muted-foreground [&_svg]:size-3.5";
+          return (
+            <li
+              key={`${model.provider}/${model.id}`}
+              className="flex items-center gap-2 px-3 py-1 text-sm"
+            >
+              <span className="w-4 text-muted-foreground text-xs">
+                {index + 1}
+              </span>
+              <ModelMark
+                settings={settings}
+                model={model}
+                className="size-4 shrink-0 text-foreground"
+              />
+              <span className="min-w-0 flex-1 truncate">
+                {name}
+                {index === 0 && !pinned && (
+                  <span className="ml-2 text-muted-foreground text-xs">
+                    {t("defaultModelTag")}
+                  </span>
+                )}
+              </span>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                className={button}
+                aria-label={t("moveFallbackUp", { model: name })}
+                title={t("moveFallbackUp", { model: name })}
+                disabled={save.isPending || index === 0}
+                onClick={() => move(index - 1)}
+              >
+                <ChevronUpIcon />
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                className={button}
+                aria-label={t("moveFallbackDown", { model: name })}
+                title={t("moveFallbackDown", { model: name })}
+                disabled={save.isPending || index === models.length - 1}
+                onClick={() => move(index + 1)}
+              >
+                <ChevronDown />
+              </Button>
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                className={button}
+                aria-label={t("removeFallback", { model: name })}
+                title={t("removeFallback", { model: name })}
+                disabled={save.isPending || models.length === 1}
+                onClick={() =>
+                  save.mutate(models.filter((other) => other !== model))
+                }
+              >
+                <X />
+              </Button>
+            </li>
+          );
+        })}
+      </ol>
+      {unused.length > 0 && (
+        <Select
+          // Chosen, a model joins the list and the field is empty again.
+          value=""
+          onValueChange={(value) => {
+            const added = unused.find(
+              (choice) => `${choice.provider}/${choice.id}` === value,
+            );
+            if (added) save.mutate([...models, added]);
+          }}
+          disabled={save.isPending}
+        >
+          <SelectTrigger className="w-full" aria-label={t("addFallback")}>
+            <SelectValue placeholder={t("addFallback")} />
+          </SelectTrigger>
+          <SelectContent>
+            {unused.map((choice) => (
+              <SelectItem
+                key={`${choice.provider}/${choice.id}`}
+                value={`${choice.provider}/${choice.id}`}
+              >
+                {modelName(choice.name)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+    </section>
+  );
+}
+
 function AgentContacts({
   agent,
   onShowNetwork,

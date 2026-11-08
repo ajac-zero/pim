@@ -224,6 +224,17 @@ export const suggestionsQuery = (session: string, locale: string) =>
 export const deploymentQuery = () =>
   queryOptions({ queryKey: ["deployment"], queryFn: admin.deployment });
 
+/** Pim's built-in apps and which are on: the admin's view. */
+export const adminBuiltinAppsQuery = () =>
+  queryOptions({
+    queryKey: ["builtin-apps", "admin"],
+    queryFn: admin.builtinApps,
+  });
+
+/** The apps Pim brings that the admin left on. */
+export const builtinAppsQuery = () =>
+  queryOptions({ queryKey: ["builtin-apps"], queryFn: pim.builtinApps });
+
 /** The agent everyone who joins starts with: the admin's view. */
 export const defaultAgentQuery = () =>
   queryOptions({ queryKey: ["default-agent"], queryFn: admin.defaultAgent });

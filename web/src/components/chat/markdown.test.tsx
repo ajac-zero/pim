@@ -297,6 +297,23 @@ describe("an agent's Markdown", () => {
     expect(html).toContain("[tracker]");
   });
 
+  it("shows image files in the workspace, and no other file or address", () => {
+    const shown = renderToStaticMarkup(
+      <Markdown text="![sheet](/workspace/birds/sheet%20one.png) ![notes](/workspace/notes.md) ![etc](/etc/a.png)" />,
+    );
+    const srcs = elements(shown).flatMap((element) =>
+      element.attributes.filter((a) => a.name === "src").map((a) => a.value),
+    );
+    expect(srcs).toHaveLength(1);
+    const url = new URL(srcs[0] as string, "https://pim.example");
+    expect([url.pathname, url.searchParams.get("path")]).toEqual([
+      "/api/files/content",
+      "/workspace/birds/sheet one.png",
+    ]);
+    expect(shown).toContain("[notes]");
+    expect(shown).toContain("[etc]");
+  });
+
   it("draws cards with Pim's copies of their images, and never the images' own addresses", () => {
     const html = renderToStaticMarkup(
       <ReplyImages
@@ -378,6 +395,48 @@ describe("an agent's Markdown", () => {
     const shared = renderToStaticMarkup(<Markdown text={text} untrusted />);
     expect(shared).not.toContain("<iframe");
     expect(shared).toContain("flowchart LR");
+  });
+});
+
+describe("a note's drawings", () => {
+  const drawing =
+    '<svg viewBox="0 0 10 10"><circle r="4" cx="5" cy="5"/></svg>';
+  const text = [
+    HOSTILE,
+    "",
+    "```mermaid\nflowchart LR\n  A --> B\n```",
+    "",
+    `\`\`\`svg\n${drawing}\n\`\`\``,
+    "",
+    '```svg\n<img src="https://evil.example/x.png" onerror="alert(1)">\n```',
+  ].join("\n");
+  const found = elements(
+    renderToStaticMarkup(<Markdown text={text} untrusted drawings />),
+  );
+  const attribute = (element: (typeof found)[number], name: string) =>
+    element.attributes.find((a) => a.name === name)?.value;
+
+  it("draws a diagram in a sandboxed frame and a drawing as an image of itself, and nothing else", () => {
+    const frames = found.filter((element) => element.tag === "iframe");
+    expect(
+      frames.map((frame) => [
+        attribute(frame, "src"),
+        attribute(frame, "sandbox"),
+      ]),
+    ).toEqual([["/api/diagram", "allow-scripts"]]);
+    // The one image is the drawing, with its namespace, from its own source: it loads nothing.
+    const images = found.filter((element) => element.tag === "img");
+    expect(images.map((image) => attribute(image, "src"))).toEqual([
+      `data:image/svg+xml;charset=utf-8,${encodeURIComponent(drawing.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"'))}`,
+    ]);
+  });
+
+  it("shows a block that isn't an <svg> element as code", () => {
+    expect(
+      found.some((element) =>
+        element.attributes.some((a) => a.value.includes("evil.example/x.png")),
+      ),
+    ).toBe(false);
   });
 });
 

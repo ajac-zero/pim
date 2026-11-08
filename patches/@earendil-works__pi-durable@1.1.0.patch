@@ -1,3 +1,37 @@
+diff --git a/dist/harness/events.d.ts b/dist/harness/events.d.ts
+index ed54f31d19c342eb04a05b0716bd40b6fb07b067..93e6ab68753bd609994c576f2265731d9a27a9d5 100644
+--- a/dist/harness/events.d.ts
++++ b/dist/harness/events.d.ts
+@@ -6,9 +6,14 @@ import type { CompactionStatus, ToolSlot } from "./live.ts";
+ import type { AgentState, CompactionReason, Harness, ToolDiagnostic } from "./types.ts";
+ import { type UsageState } from "./usage.ts";
+ type Block = AssistantMessage["content"][number];
++/** A queued input carries its content; a queued write does not. */
+ type QueuedItem = {
+     id: SubmissionId;
+-    mode: InboxItem["mode"];
++    mode: "steer" | "followUp";
++    content: Extract<InboxItem, { content: unknown }>["content"];
++} | {
++    id: SubmissionId;
++    mode: "write";
+ };
+ /** One change to the in-flight assistant message, relative to that message. */
+ export type MessageChange = {
+diff --git a/dist/harness/events.js b/dist/harness/events.js
+index f0dc0688bfa3381e081850acf15d7aa5acbbba66..cd3f40499e870f36ab7e75f50eaa171b42137125 100644
+--- a/dist/harness/events.js
++++ b/dist/harness/events.js
+@@ -26,7 +26,8 @@ function snapshotOf(view) {
+     };
+ }
+ function queued(inbox) {
+-    return (inbox?.items ?? []).map((item) => ({ id: item.id, mode: item.mode }));
++    // An input carries its content, so a host can show and change what is queued.
++    return (inbox?.items ?? []).map((item) => item.mode === "write" ? { id: item.id, mode: item.mode } : { id: item.id, mode: item.mode, content: item.content });
+ }
+ /**
+  * Experimental: attach to one conversation's agent events (spec §9.4). The snapshot and the registration for later
 diff --git a/dist/harness/generation.js b/dist/harness/generation.js
 index abb121be414e3cac5b94869a9688cee68534b77c..59573f22e6d3ab5c181dd820ef1e3dceab910d0e 100644
 --- a/dist/harness/generation.js

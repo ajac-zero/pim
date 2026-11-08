@@ -242,7 +242,7 @@ function FilterSelect<T extends string>({
   const { t } = useI18n();
   const id = useId();
   return (
-    <div className="flex min-w-0 flex-col gap-1.5">
+    <div className="flex w-36 shrink-0 flex-col gap-1.5 md:w-auto md:min-w-0">
       <label htmlFor={id} className="text-[13px] text-muted-foreground">
         {label}
       </label>
@@ -290,7 +290,7 @@ export function TriggersPage() {
 
   return (
     <Page title={t("triggers")} description={t("triggersDescription")}>
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <Button asChild>
           <Link to="/triggers/new">
             <Plus />
@@ -298,7 +298,7 @@ export function TriggersPage() {
           </Link>
         </Button>
       </div>
-      <fieldset className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 md:grid-cols-4">
+      <fieldset className="-mx-1 mb-4 flex min-w-0 gap-3 overflow-x-auto px-1 pb-1 md:mx-0 md:grid md:grid-cols-4 md:overflow-visible md:px-0">
         <legend className="sr-only">{t("triggerFilters")}</legend>
         <FilterSelect
           label={t("triggerLifecycle")}
@@ -803,9 +803,10 @@ export function TriggerActions({
   const gone = trigger.lifecycle === "deleted";
   const canEdit = !locked && !gone && trigger.lifecycle !== "ended";
   const canPause = !locked && trigger.lifecycle === "enabled";
-  const canResume =
-    !locked &&
-    (trigger.lifecycle === "draft" || trigger.lifecycle === "paused");
+  // A source nothing delivers can't be turned on; the access section says why, and so does a note here.
+  const turnable =
+    trigger.lifecycle === "draft" || trigger.lifecycle === "paused";
+  const canResume = !locked && trigger.capability.delivers && turnable;
   return (
     <Section title={t("triggerActions")}>
       <div className="flex flex-wrap gap-2">
@@ -848,6 +849,11 @@ export function TriggerActions({
           </Button>
         )}
       </div>
+      {!locked && !trigger.capability.delivers && turnable && (
+        <p role="note" className="mt-3 text-[13px] text-muted-foreground">
+          {t(capabilityKey(trigger.capability))}
+        </p>
+      )}
       {confirming && (
         <Confirm
           text={t(CONFIRM_TEXT[confirming][0])}

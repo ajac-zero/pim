@@ -344,6 +344,10 @@ describe("a trigger's page", () => {
     const draft = await actions(triggerFixture());
     expect(draft).toContain("Turn on");
     expect(draft).not.toContain("Pause");
+    const unavailable = await actions(connectorFixture());
+    expect(unavailable).not.toContain("Turn on");
+    expect(unavailable).toContain("Draft only");
+    expect(unavailable).toContain("Edit");
     const on = await actions(triggerFixture({ lifecycle: "enabled" }));
     expect(on).toContain("Pause");
     expect(on).not.toContain("Turn on");

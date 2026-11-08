@@ -554,6 +554,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
   const { data: sessions } = useQuery(sessionsQuery());
   const runs = useInfiniteQuery(triggerRunsQuery(trigger.id));
   const lastEvent = runs.data?.pages[0]?.runs[0]?.dueAt ?? null;
+  const next = nextLine(trigger);
   const chatTitle = (id: string) =>
     sessions?.find((session: Session) => session.id === id)?.title ??
     t("triggerAChat");
@@ -588,10 +589,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
       </Section>
       <Section title={t("triggerWhen")}>
         <dl className="divide-y divide-border">
-          <Row label={t("triggerSource")}>
-            <span className="block text-[13px] text-muted-foreground">
-              {t(SOURCE_TEXT[trigger.source.kind])}
-            </span>
+          <Row label={t(SOURCE_TEXT[trigger.source.kind])}>
             <SourceText source={trigger.source} />
           </Row>
           {trigger.condition && (
@@ -602,13 +600,18 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
             </Row>
           )}
           <Row label={t("triggerNext")}>
-            <NextText trigger={trigger} />
+            {next.key === "triggerNextAt" && next.at !== undefined ? (
+              date(next.at)
+            ) : (
+              <NextText trigger={trigger} />
+            )}
           </Row>
-          {trigger.schedule?.nextCheckAt != null && (
-            <Row label={t("triggerNextCheck")}>
-              {date(trigger.schedule.nextCheckAt)}
-            </Row>
-          )}
+          {trigger.schedule?.nextCheckAt != null &&
+            trigger.schedule.nextCheckAt !== next.at && (
+              <Row label={t("triggerNextCheck")}>
+                {date(trigger.schedule.nextCheckAt)}
+              </Row>
+            )}
           <Row label={t("triggerLastCheck")}>
             <span className="text-muted-foreground">
               {t("triggerNotReported")}

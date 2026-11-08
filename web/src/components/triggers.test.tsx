@@ -157,6 +157,15 @@ describe("the list", () => {
     expect(text).not.toMatch(/Missed \d|Missed [A-Z][a-z]{2} /);
   });
 
+  it("fades the right edge of the scrolling filter row on narrow screens only", async () => {
+    const client = clientWith();
+    setList(client, [page([pollFixture()])]);
+    const html = await render(TriggersPage, client);
+    const row = /<fieldset class="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(row).toContain("max-md:[mask-image:linear-gradient(to_right");
+    expect(row).not.toMatch(/(^| )(md:)?\[mask-image/);
+  });
+
   it("shows no health chip for a trigger that isn't on, and says what an on one lacks", async () => {
     const client = clientWith();
     setList(client, [
@@ -855,6 +864,23 @@ describe("the editor", () => {
     expect(text).toContain("Connector event");
     expect(text).not.toContain("Command, checked");
     expect(text).not.toContain("Save draft");
+  });
+
+  it("disables Review until the name and instruction are filled, and says why", async () => {
+    const client = clientWith();
+    setList(client, [page([pollFixture()])]);
+    const empty = await render(() => <TriggerEditor />, client);
+    expect(empty).toMatch(
+      /<button[^>]*type="submit"[^>]*disabled=""[^>]*aria-describedby="trigger-incomplete"|<button[^>]*aria-describedby="trigger-incomplete"[^>]*disabled=""/,
+    );
+    expect(empty).toContain('id="trigger-incomplete"');
+    expect(textOf(empty)).toContain("Add a name and an instruction to review.");
+    const filled = await render(
+      () => <TriggerEditor trigger={pollFixture()} onDone={() => {}} />,
+      client,
+    );
+    expect(filled).not.toContain("trigger-incomplete");
+    expect(filled).not.toMatch(/<button[^>]*type="submit"[^>]*disabled/);
   });
 
   it("offers a computer source where Pim said it's available, with the access disclosed", async () => {

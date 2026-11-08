@@ -15,12 +15,18 @@
  * - **Preview**: the plan, read without writing anything: Pim's
  *   `previewTriggerMigration` reads the legacy items and the records below
  *   (without making their table) and maps them.
- * - **Apply and rollback** (`TriggerMigration`), behind an internal gate
- *   nothing sets (`PIM_TRIGGERS_MIGRATION`), and only in a space whose
+ * - **Apply and rollback** (`TriggerMigration`), only in a space whose
  *   trigger engine is on: each item's record and its trigger, made as a
  *   draft (the shadow), in one transaction, so a crash at any step leaves
  *   the item as it was and applying again finishes it. Rollback deletes the
  *   shadow and leaves the item with its schedule or watch.
+ * - **The automatic migration** (`migrate`), which Pim runs wherever a
+ *   space's engine is on, as it starts and as the person registers: each
+ *   migratable item gets its shadow and is then cut over (below), at most
+ *   `MIGRATION_ITEMS_PER_START` items a start. An item stays with its
+ *   schedule or watch, with the reason, where the plan can't represent it
+ *   exactly, where a blocker is unmet, or where a person or an operator
+ *   gave it back before (a cutback or a rollback stands).
  *
  * **One owner.** Each record names the system that delivers its item
  * (`owner`). Applying writes `legacy`: the schedule or watch keeps
@@ -28,11 +34,10 @@
  * whose record says `legacy` (`ownedElsewhere`, wired by ./engine.ts), so
  * its shadow never fires.
  *
- * **Cutover and cutback** (`cutover`, `cutback`), behind a second internal
- * gate nothing sets (`PIM_TRIGGERS_CUTOVER`): the owner becomes `trigger`
- * and the trigger is enabled, in one transaction; cutback pauses the
- * trigger and makes the schedule or watch the owner again. Each change of
- * owner is one row of `pim_trigger_ownership`, with the instant it took
+ * **Cutover and cutback** (`cutover`, `cutback`): the owner becomes
+ * `trigger` and the trigger is enabled, in one transaction; cutback pauses
+ * the trigger and makes the schedule or watch the owner again. Each change
+ * of owner is one row of `pim_trigger_ownership`, with the instant it took
  * effect, and that history decides which system a firing belongs to:
  *
  * - A schedule's firing due at instant T belongs to whichever owner the
@@ -78,21 +83,12 @@ import type { Refusal, TriggerStore } from "./store";
 import { isScheduledFiring, previewFirings } from "./time";
 import { TriggerValidationError } from "./validate";
 
-/** The deployment's gate for applying a migration: unset, or anything but `internal`, and nothing is applied. No deployment sets it. */
-export const MIGRATION_VARIABLE = "PIM_TRIGGERS_MIGRATION";
-
-/** Whether this deployment lets a space's schedules and watches be moved to shadow triggers. */
-export function migrationAllowed(env: unknown): boolean {
-	return (env as Record<string, unknown> | null)?.[MIGRATION_VARIABLE] === "internal";
-}
-
-/** The deployment's gate for cutting an item over to its trigger: unset, or anything but `internal`, and nothing is cut over. No deployment sets it. */
-export const CUTOVER_VARIABLE = "PIM_TRIGGERS_CUTOVER";
-
-/** Whether this deployment lets a shadowed item be handed to its trigger, and the watches' deliveries be checked against the ingress adapter's rules. */
-export function cutoverAllowed(env: unknown): boolean {
-	return (env as Record<string, unknown> | null)?.[CUTOVER_VARIABLE] === "internal";
-}
+/**
+ * Items the automatic migration writes to in one start, at most: each is a
+ * shadow made and a cutover, a few small transactions. The rest wait for
+ * the space's next start, so a start never waits on all of a large space.
+ */
+export const MIGRATION_ITEMS_PER_START = 25;
 
 const RECEIPTS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_trigger_cutover_receipts (
@@ -667,11 +663,11 @@ export type CutoverReceipt = {
  * to the trigger (`ref`: the event id), one the trigger's adapter wouldn't
  * take and the watch delivered instead (`ref`: the adapter's reason), or a
  * delivery of a watch still its own checked against the adapter's rules
- * (`ref`: the envelope's type, or the reason it would be refused). Ids,
- * instants and reasons only; never a body or a secret. The newest
- * `RECEIPTS_KEPT` per item are kept. Makes its table where it is missing,
- * which it is only for a space whose records predate it: a receipt is
- * recorded only for a shadowed item.
+ * (`ref`: the event id, or the reason it would be refused), which Pim's
+ * route does for every watch's event in a space whose triggers are on,
+ * shadowed or not yet. Ids, instants and reasons only; never a body or a
+ * secret. The newest `RECEIPTS_KEPT` per item are kept. Makes its table
+ * where it is missing.
  */
 export function recordReceipt(sql: SqlStorage, receipt: CutoverReceipt): void {
 	sql.exec(RECEIPTS_SCHEMA);
@@ -809,6 +805,47 @@ export type CutbackOutcome = {
 	readonly outcome: "cut_back" | "already" | "in_flight";
 };
 
+/**
+ * Why the automatic migration leaves an item with its schedule or watch:
+ * the plan's reason it can't be represented exactly, the cutover blocker
+ * still unmet, or what was done to it before. `rolled_back` and `cut_back`:
+ * a person or an operator gave it back, which the automatic migration never
+ * undoes. `refused`: the store refused its shadow or its enabling, tried
+ * again at the next start. `deferred`: past this start's
+ * `MIGRATION_ITEMS_PER_START`, for the next start.
+ */
+export type LegacyReason = UnsupportedReason | CutoverBlocker | "rolled_back" | "cut_back" | "refused" | "deferred";
+
+export type MigrateOutcome =
+	/** Its trigger delivers it: cut over by this run (`cut_over`), or before (`already`). */
+	| { readonly kind: LegacyKind; readonly legacyId: string; readonly owner: "trigger"; readonly outcome: "cut_over" | "already"; readonly triggerId: string }
+	/** Its schedule or watch delivers it, as before, for `reason`; `triggerId` is its shadow's, where it has one. */
+	| { readonly kind: LegacyKind; readonly legacyId: string; readonly owner: "legacy"; readonly reason: LegacyReason; readonly triggerId: string | null };
+
+/** What the automatic migration found and did, as counts: how many items, by outcome, and why those left with their schedule or watch are. Never an id, a field or a secret. */
+export type MigrationCounts = {
+	readonly schedules: number;
+	readonly watches: number;
+	readonly outcomes: { readonly cut_over: number; readonly already: number; readonly legacy: number };
+	readonly reasons: Readonly<Partial<Record<LegacyReason, number>>>;
+};
+
+export function migrationCounts(outcomes: readonly MigrateOutcome[]): MigrationCounts {
+	const reasons: Partial<Record<LegacyReason, number>> = {};
+	for (const outcome of outcomes) if (outcome.owner === "legacy") reasons[outcome.reason] = (reasons[outcome.reason] ?? 0) + 1;
+	const count = (test: (outcome: MigrateOutcome) => boolean) => outcomes.filter(test).length;
+	return {
+		schedules: count((outcome) => outcome.kind === "schedule"),
+		watches: count((outcome) => outcome.kind === "watch"),
+		outcomes: {
+			cut_over: count((outcome) => outcome.owner === "trigger" && outcome.outcome === "cut_over"),
+			already: count((outcome) => outcome.owner === "trigger" && outcome.outcome === "already"),
+			legacy: count((outcome) => outcome.owner === "legacy"),
+		},
+		reasons,
+	};
+}
+
 export type TriggerMigrationOptions = {
 	readonly store: Pick<TriggerStore, "create" | "get" | "remove" | "setLifecycle" | "sourceState" | "admitDueTime" | "outbox">;
 	/** The database's transactions (`transactionSync`); they nest. */
@@ -834,9 +871,9 @@ class Refused extends Error {
 
 /**
  * Applies a plan, cuts items over to their triggers and back, and rolls it
- * back, in a space whose trigger engine is on and where the deployment
- * allows it. Makes its tables when constructed, and adds the records'
- * newer columns to a table made before them.
+ * back, in a space whose trigger engine is on. Makes its tables when
+ * constructed, and adds the records' newer columns to a table made before
+ * them.
  */
 export class TriggerMigration {
 	readonly #sql: SqlStorage;
@@ -848,6 +885,47 @@ export class TriggerMigration {
 		this.#sql.exec(SCHEMA);
 		const columns = new Set(this.#sql.exec("PRAGMA table_info(pim_trigger_migrations)").toArray().map((row) => String(row.name)));
 		for (const [column, type] of RECORD_COLUMNS_ADDED) if (!columns.has(column)) this.#sql.exec(`ALTER TABLE pim_trigger_migrations ADD COLUMN ${column} ${type}`);
+	}
+
+	/**
+	 * The automatic migration, which Pim runs as a space whose triggers are
+	 * on starts: each migratable item in `plan` gets its shadow (`apply`)
+	 * and is then handed to its trigger (`cutover`), each step its own
+	 * transaction, so whatever fails leaves every item delivered by exactly
+	 * one side, and the next run goes on from there. An item stays with its
+	 * schedule or watch, reported with the reason, where the plan can't
+	 * represent it, where a blocker is unmet (a watch whose deliveries
+	 * haven't passed the adapter's rules gets its shadow, and waits), and
+	 * where it was given back before: a cutback or a rollback stands until
+	 * undone by hand. At most `limit` items are written to; the rest are
+	 * `deferred`. Idempotent: run again, it changes nothing it already did.
+	 */
+	migrate(plan: MigrationPlan, options: { readonly limit: number }): MigrateOutcome[] {
+		let budget = options.limit;
+		return plan.items.map((item): MigrateOutcome => {
+			const { kind, legacyId } = item;
+			const legacy = (reason: LegacyReason): MigrateOutcome => {
+				const record = this.#record(kind, legacyId);
+				return { kind, legacyId, owner: "legacy", reason, triggerId: record?.phase === "shadow" ? record.triggerId : null };
+			};
+			const record = this.#record(kind, legacyId);
+			if (record?.phase === "shadow" && record.owner === "trigger") return { kind, legacyId, owner: "trigger", outcome: "already", triggerId: record.triggerId };
+			if (record?.phase === "rolled_back") return legacy("rolled_back");
+			// Owned by its schedule or watch again after a cutover: given back by a cutback, which stands.
+			if (record !== null && ownershipChanges(this.#sql, kind, legacyId).length > 0) return legacy("cut_back");
+			if (item.status === "unsupported") return legacy(item.reason);
+			const blocker = item.cutoverBlockers[0];
+			// Shadowed already, with a blocker unmet: nothing to write until it is met.
+			if (record !== null && blocker !== undefined) return legacy(blocker);
+			if (budget <= 0) return legacy("deferred");
+			budget--;
+			const only: MigrationPlan = { items: [item], orphans: [] };
+			if (record === null && this.apply(only)[0]?.outcome === "refused") return legacy("refused");
+			if (blocker !== undefined) return legacy(blocker);
+			const [cut] = this.cutover(only);
+			if (cut?.outcome === "cut_over" || cut?.outcome === "already") return { kind, legacyId, owner: "trigger", outcome: cut.outcome, triggerId: cut.triggerId };
+			return legacy(cut?.outcome === "blocked" && cut.blockers[0] !== undefined ? cut.blockers[0] : "refused");
+		});
 	}
 
 	/**

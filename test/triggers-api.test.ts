@@ -7,7 +7,6 @@ import { guestRequest } from "../src/accounts";
 import type { Pim } from "../src/pim";
 import { API_TABLES } from "../src/triggers/api";
 import { ENGINE_KEY, TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
-import { MIGRATION_VARIABLE } from "../src/triggers/migration";
 import { TRIGGER_TOOLS, TRIGGERS_EXTENSION } from "../src/triggers/tools";
 import { apiUrl, messagesOf, OWNER, post, ROOT, say, settled, TOKEN, toolUse } from "./helpers";
 import { faux, triggerClock } from "./worker";
@@ -639,33 +638,28 @@ describe("triggers' API where triggers are on", () => {
 		for (const id of [made.first.trigger.id, made.other.trigger.id]) await call(`/triggers/${id}`, { method: "DELETE" });
 	});
 
-	it("lists schedules' shadows as owned by their schedule, never enabled or changed through the API", async () => {
-		const shadow = await inSpace(async (pim) => {
+	it("lists schedules' shadows as owned by their schedule, never enabled or changed through the API, and deleting one cancels its schedule", async () => {
+		const { shadow, scheduleId } = await inSpace(async (pim) => {
 			const chat = pim.store.sessionOf(ROOT)!;
-			await pim.schedule("0 9 * * *", "runScheduledTask", { session: chat, instruction: "Write my brief.", label: "Brief", newChat: true });
-			ownEnv(pim)[MIGRATION_VARIABLE] = "internal";
-			try {
-				const applied = await pim.applyTriggerMigration();
-				return applied!.find((item) => item.outcome === "created")!;
-			} finally {
-				delete ownEnv(pim)[MIGRATION_VARIABLE];
-			}
+			const scheduled = await pim.schedule("0 9 * * *", "runScheduledTask", { session: chat, instruction: "Write my brief.", label: "Brief", newChat: true });
+			const applied = await pim.applyTriggerMigration();
+			return { shadow: applied!.find((item) => item.outcome === "created")!, scheduleId: scheduled.id };
 		});
 		const id = (shadow as { triggerId: string }).triggerId;
 		const listed = (await call("/triggers?lifecycle=draft")).body.triggers.find((trigger: { id: string }) => trigger.id === id);
 		expect(listed).toMatchObject({ lifecycle: "draft", migration: { kind: "schedule", owner: "legacy", phase: "shadow", enableable: false }, source: { expression: "0 9 * * *", timeZone: "UTC" } });
 		expect(await call(`/triggers/${encodeURIComponent(id)}/resume`, { method: "POST", headers: { "if-match": '"1"' } })).toMatchObject({ status: 409, body: { code: "owned_elsewhere" } });
 		expect(await call(`/triggers/${encodeURIComponent(id)}`, { method: "PATCH", body: { label: "Mine" }, headers: { "if-match": '"1"' } })).toMatchObject({ status: 409, body: { code: "owned_elsewhere" } });
-		expect(await call(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE" })).toMatchObject({ status: 409, body: { code: "owned_elsewhere" } });
 		expect(await call(`/triggers/${encodeURIComponent(id)}/test`, { method: "POST" })).toMatchObject({ status: 200, body: { blockers: ["owned_elsewhere"] } });
 		expect((await tool("resume_trigger", { id, expectedRevision: 1 })).body).toMatchObject({ code: "owned_elsewhere" });
 		expect((await call(`/triggers/${encodeURIComponent(id)}`)).body.lifecycle).toBe("draft");
-		// Rolled back, it is deleted history that says so.
-		await inSpace((pim) => pim.rollbackTriggerMigration());
+		// Deleting it is how the person stops that work: only at the revision they saw, and then the schedule goes with it.
+		expect(await call(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "if-match": '"2"' } })).toMatchObject({ status: 409, body: { code: "revision_conflict" } });
+		expect(await inSpace(async (pim) => (await pim.listSchedules()).some((schedule) => schedule.id === scheduleId))).toBe(true);
+		expect(await call(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "if-match": '"1"' } })).toMatchObject({ status: 200, body: { deleted: true } });
+		expect(await inSpace(async (pim) => (await pim.listSchedules()).some((schedule) => schedule.id === scheduleId))).toBe(false);
 		expect((await call(`/triggers/${encodeURIComponent(id)}`)).body).toMatchObject({ lifecycle: "deleted", migration: { phase: "rolled_back", enableable: false } });
-		await inSpace(async (pim) => {
-			for (const schedule of await pim.listSchedules()) if (schedule.callback === "runScheduledTask") await pim.cancelSchedule(schedule.id);
-		});
+		expect(await call(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE" })).toMatchObject({ status: 409, body: { code: "trigger_deleted" } });
 	});
 
 	it("is closed to guests: their accounts can't reach it, and a guest's space has no route or tool of it", async () => {

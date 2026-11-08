@@ -1111,9 +1111,13 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), and into what a space holds; the preview and the web app don't use it", () => {
 		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
 		expect(Object.keys(files)).toContain("../src/pim.ts");
+		// A file uses triggers when it imports a module of src/triggers/ (statically, for its effects, dynamically or to re-export it) or names their classes or tables; a URL such as the web app's `/triggers/<id>` is not a use.
+		const root = new URL("file:///repo/test/");
+		const importsTriggers = (path: string, source: string) =>
+			[...source.matchAll(/\b(?:from|import)\s*\(?\s*["'`]([^"'`]+)["'`]/g)].some(([, specifier]) => specifier!.startsWith(".") && new URL(specifier!, new URL(path, root)).pathname.startsWith("/repo/src/triggers/"));
 		const users = Object.entries(files)
 			.filter(([path]) => !path.startsWith("../src/triggers/"))
-			.filter(([, source]) => /triggers\/|TriggerCoordinator|TriggerStore|pim_trigger/.test(source))
+			.filter(([path, source]) => importsTriggers(path, source) || /TriggerCoordinator|TriggerStore|pim_trigger/.test(source))
 			.map(([path]) => path);
 		expect(users).toEqual(["../src/pim.ts", "../src/store.ts"]);
 	});

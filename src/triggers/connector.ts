@@ -97,7 +97,7 @@ export type ConnectorIngressOptions = {
 	 * connector watch (./migration.ts) gives one, to tell the run what the
 	 * watch's run would have read. Without it, the data is never kept.
 	 */
-	readonly kept?: (admitted: { readonly triggerId: string; readonly occurrenceId: string; readonly eventId: string; readonly data: Record<string, unknown> }) => void;
+	readonly kept?: (admitted: { readonly triggerId: string; readonly occurrenceId: string; readonly eventId: string; readonly admittedAt: number; readonly data: Record<string, unknown> }) => void;
 	/** The database's transactions (`transactionSync`), for `kept`. */
 	readonly transaction?: <T>(work: () => T) => T;
 };
@@ -347,7 +347,7 @@ export class ConnectorIngress {
 		try {
 			admission = this.#transaction(() => {
 				const admitted = this.#store.admit({ id: trigger.id, generation: binding.generation, eventId: event.eventId, observedAt: event.observedAt, payload: event.data, ...(checkpoint ? { checkpoint } : {}) });
-				if (admitted.status === "accepted" && admitted.occurrence !== null) this.#kept?.({ triggerId: trigger.id, occurrenceId: admitted.occurrence.id, eventId: event.eventId, data: event.data });
+				if (admitted.status === "accepted" && admitted.occurrence !== null) this.#kept?.({ triggerId: trigger.id, occurrenceId: admitted.occurrence.id, eventId: event.eventId, admittedAt: admitted.occurrence.createdAt, data: event.data });
 				return admitted;
 			});
 		} catch (error) {

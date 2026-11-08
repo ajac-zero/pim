@@ -1,5 +1,6 @@
 // The concrete trigger observers, `poll` and `process`, in Node: on a fake clock with a fake launcher and a fake provider for timing and lifecycle, on tiny real children and real receipts in a temporary folder for what only a real process shows, and inside the real runtime for the order of what the space hears. Nothing here reaches the network, and every real child is the test's own and ends within seconds.
 import { type ChildProcess, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -491,10 +492,11 @@ describe("poll on real children", () => {
 		void adapter.start(adapterConfig(pollSource({ command, cwd: null, deadlineMs: options.deadlineMs ?? 5_000 })), emit, health);
 		return { adapter, sink, settled };
 	}
+	/** Whether the process runs: a zombie, which is gone but not yet reaped by whoever inherited it, doesn't. */
 	const alive = (pid: number) => {
 		try {
-			process.kill(pid, 0);
-			return true;
+			const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+			return stat[stat.lastIndexOf(")") + 2] !== "Z";
 		} catch {
 			return false;
 		}

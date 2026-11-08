@@ -54,6 +54,7 @@ import {
   MAX_PAGES,
   needsReload,
   nextLine,
+  observesSource,
   PROBLEM_TEXT,
   RUN_TEXT,
   runsCommands,
@@ -823,11 +824,13 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
                 {date(trigger.schedule.nextCheckAt)}
               </Row>
             )}
-          <Row label={t("triggerLastCheck")}>
-            <span className="text-muted-foreground">
-              {t("triggerNotReported")}
-            </span>
-          </Row>
+          {observesSource(trigger.source.kind) && (
+            <Row label={t("triggerLastCheck")}>
+              <span className="text-muted-foreground">
+                {t("triggerNotReported")}
+              </span>
+            </Row>
+          )}
           <Row label={t("triggerLastEvent")}>
             {lastEvent === null ? (
               <span className="text-muted-foreground">

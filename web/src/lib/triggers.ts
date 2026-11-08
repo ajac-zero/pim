@@ -155,6 +155,19 @@ export const HEALTH_TEXT: Record<TriggerHealth, TranslationKey> = {
   configuration_error: "triggerHealthConfiguration",
 };
 
+/** A time trigger has no source that is checked; every other kind observes or polls one. */
+export const observesSource = (kind: TriggerSourceKind) => kind !== "time";
+
+/** The health a time trigger still shows, because it is a real problem. */
+const TIME_PROBLEMS: readonly TriggerHealth[] = [
+  "configuration_error",
+  "budget_blocked",
+  "auth_required",
+  "gap",
+  "reconnecting",
+  "waiting_computer",
+];
+
 /**
  * The health chip a trigger shows, or null for none. Only a trigger that is
  * on has health to show: a draft, paused or ended one isn't running, so
@@ -163,9 +176,15 @@ export const HEALTH_TEXT: Record<TriggerHealth, TranslationKey> = {
  * was lost, which is "can't check", never "healthy".
  */
 export function healthChip(
-  trigger: Pick<Trigger, "lifecycle" | "health" | "healthDetail">,
+  trigger: Pick<Trigger, "lifecycle" | "health" | "healthDetail" | "source">,
 ): { text: TranslationKey; reason: string | null } | null {
   if (trigger.lifecycle !== "enabled") return null;
+  if (
+    !observesSource(trigger.source.kind) &&
+    !TIME_PROBLEMS.includes(trigger.health)
+  ) {
+    return null;
+  }
   const reason = trigger.healthDetail?.trim() || null;
   if (trigger.health === "unknown" && reason) {
     return { text: "triggerHealthCantCheck", reason };
@@ -293,8 +312,7 @@ export function withHealth(
 ) {
   return health
     ? triggers.filter(
-        (trigger) =>
-          trigger.lifecycle === "enabled" && trigger.health === health,
+        (trigger) => healthChip(trigger) !== null && trigger.health === health,
       )
     : [...triggers];
 }

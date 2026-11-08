@@ -1049,6 +1049,17 @@ export type ModelSettings = {
   providers: ModelProvider[];
 };
 
+/** A model's price in dollars per million tokens. */
+export type ModelCost = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+};
+
+/** What the person set for a custom endpoint's model: its real context window and its price. */
+export type ModelOverride = { contextWindow?: number; cost?: ModelCost };
+
 /** A model on a provider someone added, with what Pim knows about it. */
 export type ProviderModelInfo = {
   id: string;
@@ -1057,6 +1068,7 @@ export type ProviderModelInfo = {
   maxTokens: number;
   images: boolean;
   reasoning: boolean;
+  cost?: ModelCost;
 };
 
 /** A built-in service or custom endpoint the person or admin added. Never its key. */
@@ -1077,6 +1089,8 @@ export type ModelProvider = {
   structuredOutput?: boolean;
   /** A custom endpoint's API when it isn't OpenAI's chat completions. */
   api?: "anthropic-messages";
+  /** A custom endpoint's models' settings by model id. */
+  overrides?: Record<string, ModelOverride>;
 };
 
 /** A provider as adding or changing it answers. */
@@ -1091,6 +1105,8 @@ export type ProviderInput = {
   models?: string[] | null;
   structuredOutput?: boolean;
   api?: "openai-completions" | "anthropic-messages";
+  /** Every model's settings by model id; one left out goes back to what the server says. */
+  overrides?: Record<string, ModelOverride>;
 };
 
 export type BuiltinProvider = {

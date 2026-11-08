@@ -641,6 +641,16 @@ const translations = {
     providerModelsHint:
       "Separate them with commas. Leave empty to offer every model it lists.",
     providerModelsAll: "Every model it lists",
+    providerLimits: "Context window and prices",
+    providerLimitsHint:
+      "Set them where the server can't say. Prices are dollars per million tokens, and chats' costs use them. Leave a field empty to use what the server says, or free.",
+    providerLimitsNone:
+      "Name the models above to set theirs. To set the ones it lists, save first and edit it.",
+    providerContextWindow: "Context window",
+    providerPriceInput: "Input $",
+    providerPriceOutput: "Output $",
+    providerPriceCacheRead: "Cache read $",
+    providerPriceCacheWrite: "Cache write $",
     providerStructured: "Supports structured outputs",
     providerStructuredHint:
       "Its models follow a JSON schema (response_format). Only then can they be the utility model; if it doesn't, side jobs will fail.",
@@ -1838,6 +1848,16 @@ const translations = {
     providerModelsHint:
       "Sepáralos con comas. Déjalo vacío para ofrecer todos los modelos que lista.",
     providerModelsAll: "Todos los modelos que lista",
+    providerLimits: "Ventana de contexto y precios",
+    providerLimitsHint:
+      "Indícalos donde el servidor no lo dice. Los precios son dólares por millón de tokens, y el costo de los chats los usa. Deja un campo vacío para usar lo que dice el servidor, o gratis.",
+    providerLimitsNone:
+      "Nombra los modelos arriba para indicar los suyos. Para los que lista, guarda primero y edítalo.",
+    providerContextWindow: "Ventana de contexto",
+    providerPriceInput: "Entrada $",
+    providerPriceOutput: "Salida $",
+    providerPriceCacheRead: "Lectura de caché $",
+    providerPriceCacheWrite: "Escritura de caché $",
     providerStructured: "Admite salidas estructuradas",
     providerStructuredHint:
       "Sus modelos siguen un esquema JSON (response_format). Solo entonces pueden ser el modelo de utilidades; si no lo hace, las tareas auxiliares fallarán.",

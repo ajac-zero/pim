@@ -555,7 +555,7 @@ describe("connector events in Pim, handed on by a coordinator made with them", (
 	});
 
 	it("is left pending by Pim's own engine, and goes through Pim's runs as the trigger's agent, where its actions still wait for approval", async () => {
-		expect(await inSpace((pim) => pim.enableTriggerEngine())).toBe(true);
+		await inSpace((pim) => pim.enableTriggerEngine());
 		const agent = await inSpace((pim) => pim.agents.majordomo().id);
 		expect((await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) })).status).toBe(200);
 		try {

@@ -200,7 +200,7 @@ import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHA
 import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAnswer, TriggerApi, TriggerApiError, triggerBody } from "./triggers/api";
 import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, computerTriggersAllowed, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
-import { ENGINE_KEY, ENGINE_LISTED_KEY, engineAllowed, engineListed, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
+import { ENGINE_KEY, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
 import { ConnectorIngress, ingressResponse, strictShape } from "./triggers/connector";
 import {
 	type ApplyOutcome,
@@ -1871,10 +1871,12 @@ export class Pim extends DurableAgent<Env> {
 			}
 		}
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
-		// Before any request: changing the deployment's variables starts every space again, so the first request already sees what they say.
-		await this.#followTriggerAllowlist().catch((error) => console.warn("following the triggers' allowlist failed", error));
+		// Before any request, so the first one already finds them. It never throws: a failure is logged and tried again at the next start.
+		await this.ensureTriggerEngine();
 		// A tick cut short leaves no wake: the next is set again, where triggers are on.
-		if (this.triggerEngine()) void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error));
+		void Promise.resolve()
+			.then(() => (this.triggerEngine() ? this.wakeTriggers() : undefined))
+			.catch((error) => console.warn("setting the trigger wake failed", error));
 		// A Sprite Pim started before it kept computers with a host is out of reach: the space has no computer until it gets another.
 		const sprite = this.computer.forgetSprite();
 		if (sprite) console.warn(JSON.stringify({ event: "pim.sprite_forgotten", owner: this.name, sprite }));
@@ -2142,14 +2144,13 @@ export class Pim extends DurableAgent<Env> {
 	#triggerWake: Promise<void> = Promise.resolve();
 
 	/**
-	 * This space's time triggers, when the deployment allows them and the
-	 * space was opted in (`enableTriggerEngine`, which the deployment's
-	 * allowlist calls as the space starts); null otherwise, and then nothing
-	 * of them exists: no table, no wake. Internal: no route, tool or setting
-	 * reaches it.
+	 * This space's time triggers, once they are on (`enableTriggerEngine`,
+	 * which `ensureTriggerEngine` calls in a person's own space as it starts
+	 * and as they register); null otherwise, and then nothing of them exists:
+	 * no table, no wake.
 	 */
 	triggerEngine(): TriggerEngine | null {
-		if (this.#closed() || !engineAllowed(this.env) || this.store.meta(ENGINE_KEY) !== "on") return null;
+		if (this.#closed() || this.store.meta(ENGINE_KEY) !== "on") return null;
 		this.#triggerEngine ??= new TriggerEngine(this.ctx.storage.sql, {
 			transaction: (work) => this.ctx.storage.transactionSync(work),
 			now: () => this.triggerClock(),
@@ -2280,21 +2281,20 @@ export class Pim extends DurableAgent<Env> {
 		return revoked;
 	}
 
-	/** Internal: opts this space in to time triggers, where the deployment allows it; false where it doesn't. */
-	async enableTriggerEngine(): Promise<boolean> {
+	/** Internal: turns this space's triggers on, whoever's space it is; `ensureTriggerEngine` is what decides who gets them. */
+	async enableTriggerEngine(): Promise<void> {
 		this.#assertOpen();
-		if (!engineAllowed(this.env)) return false;
 		this.store.setMeta(ENGINE_KEY, "on");
 		// Once pi's registry is set up; before, setting it up installs them.
 		if (this.registry.snapshot().extension("pim.approvals")) this.#installTriggerTools();
 		await this.wakeTriggers();
-		return true;
 	}
 
 	/**
-	 * Internal: turns the space's triggers off. Nothing is handed on and no
-	 * wake is kept until they are on again; everything they recorded stays,
-	 * and runs already going go on.
+	 * Internal: turns the space's triggers off, until it next starts or
+	 * `enableTriggerEngine` is called. Nothing is handed on and no wake is
+	 * kept until they are on again; everything they recorded stays, and runs
+	 * already going go on.
 	 */
 	async disableTriggerEngine(): Promise<void> {
 		// Items a trigger took over go back to their schedules and watches first, since nothing would deliver them otherwise; a firing the trigger admitted and hasn't handed on waits until it owns the item again.
@@ -2311,30 +2311,28 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * Follows the deployment's allowlist of spaces (`PIM_TRIGGERS_ENGINE_SPACES`)
-	 * as the space starts, only while its gate is `internal`: a person's own
-	 * space on the list is opted in, and one the list opted in that is no
-	 * longer on it is turned off, keeping everything, as
-	 * `disableTriggerEngine` does. A guest's space, or one not yet
-	 * provisioned, counts as not on it. With the gate off nothing changes
-	 * here, since no space has the engine then anyway; a space opted in
-	 * by internal code and never listed is left as it is.
+	 * Turns triggers on in a person's own space, as it starts and as they
+	 * register; a guest's space, or one not yet provisioned, is left without
+	 * them. Idempotent: a space that has them, as one the deployment's old
+	 * allowlist opted in does, keeps them and everything they recorded. It
+	 * never throws, so a failure can't keep the space from starting: the
+	 * space is left without triggers, as it was, the failure is logged, and
+	 * the next start tries again.
 	 */
-	async #followTriggerAllowlist(): Promise<void> {
-		if (this.#closed() || !engineAllowed(this.env)) return;
-		const listed = engineListed(this.env, this.name) && this.profile() !== null && this.guestBot() === null;
-		const marked = this.store.meta(ENGINE_LISTED_KEY) !== undefined;
-		if (listed) {
-			if (this.store.meta(ENGINE_KEY) !== "on") {
-				await this.enableTriggerEngine();
-				console.log(JSON.stringify({ event: "pim.triggers_on", owner: this.name, by: "allowlist" }));
+	async ensureTriggerEngine(): Promise<void> {
+		try {
+			if (this.#closed() || this.store.meta(ENGINE_KEY) === "on" || this.profile() === null || this.guestBot() !== null) return;
+			await this.enableTriggerEngine();
+			console.log(JSON.stringify({ event: "pim.triggers_on", owner: this.name }));
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.triggers_on_failed", owner: this.name, error: String(error) }));
+			try {
+				this.store.deleteMeta(ENGINE_KEY);
+				this.#triggerEngine = undefined;
+				if (this.registry.snapshot().extension(TRIGGERS_EXTENSION)) this.#installTriggerTools();
+			} catch (undoing) {
+				console.warn(JSON.stringify({ event: "pim.triggers_on_failed", owner: this.name, error: String(undoing) }));
 			}
-			if (!marked) this.store.setMeta(ENGINE_LISTED_KEY, "on");
-		} else if (marked) {
-			await this.disableTriggerEngine();
-			// Only once turned off: a failure tries again at the next start.
-			this.store.deleteMeta(ENGINE_LISTED_KEY);
-			console.log(JSON.stringify({ event: "pim.triggers_off", owner: this.name, by: "allowlist" }));
 		}
 	}
 

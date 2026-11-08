@@ -1,11 +1,9 @@
 /**
  * Time triggers in one space, built only where they are turned on: the
  * store, the coordinator and Pim's host over the space's own database
- * (docs/triggers.md). Nothing is built, no table made and no alarm set
- * unless the deployment allows it (`PIM_TRIGGERS_ENGINE` set to
- * `internal`) and the space was opted in: by the deployment's allowlist
- * (`PIM_TRIGGERS_ENGINE_SPACES`) as the space starts, or by internal code.
- * There is no route, tool or setting for it.
+ * (docs/triggers.md). Every person's own space turns them on as it starts
+ * and as they register; a guest's space, or one not yet provisioned, never
+ * does, and then nothing is built, no table made and no alarm set.
  * Turning it off again keeps everything it recorded, which the person's
  * export holds either way (`triggerHistory`).
  */
@@ -21,37 +19,14 @@ import { SUBSCRIPTION_PRIVATE_COLUMNS, SUBSCRIPTION_TABLES } from "./subscriptio
 /** The method of `Pim` its trigger wake calls. */
 export const TRIGGER_TICK_CALLBACK = "runTriggerTick";
 
-/** The deployment's gate: unset, or anything but `internal`, and no space can be opted in. */
-export const ENGINE_VARIABLE = "PIM_TRIGGERS_ENGINE";
-
-/**
- * The deployment's allowlist: owner ids (`o_…`), comma-separated, whose
- * spaces are opted in as they start, while the gate is `internal`.
- */
-export const ENGINE_SPACES_VARIABLE = "PIM_TRIGGERS_ENGINE_SPACES";
-
-/** The space's own opt-in, in its meta. */
+/** In the space's meta: its triggers are on. */
 export const ENGINE_KEY = "triggers:engine";
-
-/** In the space's meta: the allowlist opted it in, so taking it off the list turns its triggers off again. */
-export const ENGINE_LISTED_KEY = "triggers:engine:listed";
 
 /** Runs of a space's triggers that may hold compute at once: below the coordinator's own ceiling, as planned for Pim. */
 export const ENGINE_MAX_RUNNING = 2;
 
 /** Every table the engine makes, for what a space still holds and for erasing it. */
 export const ENGINE_TABLES = [...TRIGGER_TABLES, ...COORDINATOR_TABLES, ...HOST_TABLES] as const;
-
-/** Whether this deployment lets a space be opted in. */
-export function engineAllowed(env: unknown): boolean {
-	return (env as Record<string, unknown> | null)?.[ENGINE_VARIABLE] === "internal";
-}
-
-/** Whether the deployment's allowlist names this owner id exactly, an entry's surrounding spaces aside. Unset or empty names nobody. */
-export function engineListed(env: unknown, ownerId: string): boolean {
-	const spaces = (env as Record<string, unknown> | null)?.[ENGINE_SPACES_VARIABLE];
-	return typeof spaces === "string" && ownerId !== "" && spaces.split(",").some((entry) => entry.trim() === ownerId);
-}
 
 export type TriggerEngineOptions = {
 	/** The database's transactions (`transactionSync`). */

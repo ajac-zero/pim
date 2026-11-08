@@ -5,14 +5,14 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pim } from "../src/pim";
 import { TaskStore } from "../src/tasks";
 import { TriggerCoordinator, type TriggerRun } from "../src/triggers/coordinator";
-import { ENGINE_KEY, ENGINE_TABLES, ENGINE_VARIABLE, engineAllowed, TRIGGER_TICK_CALLBACK, type TriggerEngine, triggerHistory } from "../src/triggers/engine";
+import { ENGINE_TABLES, TRIGGER_TICK_CALLBACK, type TriggerEngine, triggerHistory } from "../src/triggers/engine";
 import { PimTriggerHost, TriggerChatDoc, type TriggerSpace } from "../src/triggers/host";
 import { TriggerStore } from "../src/triggers/store";
 import { api, lastUserText, messagesOf, OWNER, pendingApproval, post, ROOT, settled, toolUse } from "./helpers";
 import { faux, triggerClock } from "./worker";
 
-// Time triggers in Pim itself: the engine behind its gate, Pim's host over submitTo, and the wake, with the faux model
-// in place of a real one. Only this file opts its space in; the deployment gate is set for tests in vitest.config.ts.
+// Time triggers in Pim itself: the engine, Pim's host over submitTo, and the wake, with the faux model in place of a
+// real one. The tests' space was provisioned after it started, so its triggers are on only once a test turns them on.
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -23,25 +23,6 @@ const inSpace = <T>(work: (pim: Pim) => T | Promise<T>) => runInDurableObject(sp
 const engineOf = (pim: Pim): TriggerEngine => pim.triggerEngine()!;
 /** The space's database, which tests read and write directly to stand for a crash at a given point. */
 const sqlOf = (pim: Pim) => (pim as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
-
-/**
- * Runs `work` in a space whose deployment doesn't set the gate, as no
- * deployment does: the variable is taken off that space's own env, as
- * Workers gives it, for the time `work` takes.
- */
-async function gateOff<T>(stub: ReturnType<typeof space>, work: (pim: Pim) => Promise<T>): Promise<T> {
-	return runInDurableObject(stub, async (pim: Pim) => {
-		const own = (pim as unknown as { env: Record<string, unknown> }).env;
-		const set = own[ENGINE_VARIABLE];
-		delete own[ENGINE_VARIABLE];
-		try {
-			expect(engineAllowed(own)).toBe(false);
-			return await work(pim);
-		} finally {
-			own[ENGINE_VARIABLE] = set;
-		}
-	});
-}
 
 /** The triggers' clock, which the tests move on; everything else in the space keeps the time. */
 const clock = () => Date.now() + triggerClock.offset;
@@ -113,10 +94,7 @@ async function cleanUp() {
 describe("time triggers in Pim", () => {
 	afterEach(cleanUp);
 
-	it("builds nothing, and wakes nothing, in a space not opted in", async () => {
-		expect(engineAllowed({})).toBe(false);
-		expect(engineAllowed({ PIM_TRIGGERS_ENGINE: "on" })).toBe(false);
-		expect(engineAllowed({ PIM_TRIGGERS_ENGINE: "internal" })).toBe(true);
+	it("builds nothing, and wakes nothing, in a space whose triggers aren't on", async () => {
 		expect(await inSpace((pim) => pim.triggerEngine())).toBeNull();
 		// A wake left behind runs nothing and makes nothing.
 		await tick();
@@ -124,8 +102,8 @@ describe("time triggers in Pim", () => {
 		expect(await wakes()).toEqual([]);
 		expect(await inSpace((pim) => pim.remainingData())).not.toContain("triggers");
 		expect(JSON.parse(await inSpace((pim) => pim.exportData()))).not.toHaveProperty("triggers");
-		// Opted in, it makes its tables, and still no wake while nothing waits.
-		expect(await inSpace((pim) => pim.enableTriggerEngine())).toBe(true);
+		// On, it makes its tables, and still no wake while nothing waits.
+		await inSpace((pim) => pim.enableTriggerEngine());
 		expect(await triggerTables()).toEqual([...ENGINE_TABLES].sort());
 		expect(await wakes()).toEqual([]);
 	});
@@ -199,18 +177,8 @@ describe("time triggers in Pim", () => {
 		expect(await exported()).toEqual(JSON.parse(JSON.stringify(history)));
 		expect(await inSpace((pim) => pim.remainingData())).toEqual(expect.arrayContaining(["triggers", "trigger revisions", "triggers' sources", "trigger history", "triggers' runs"]));
 
-		// Opted in, in a deployment that doesn't allow triggers: the same.
-		await gateOff(space(), async (pim) => {
-			expect(await pim.enableTriggerEngine()).toBe(false);
-			pim.store.setMeta(ENGINE_KEY, "on");
-			expect(pim.triggerEngine()).toBeNull();
-			await pim.runTriggerTick();
-			expect(triggerHistory(sqlOf(pim))).toEqual(history);
-			expect((await pim.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK)).toEqual([]);
-			expect(JSON.parse(await pim.exportData()).triggers).toEqual(JSON.parse(JSON.stringify(history)));
-		});
-
 		// On again: what it had is as it was, and the firing it passed while off, still within its hour, goes on.
+		await inSpace((pim) => pim.enableTriggerEngine());
 		expect(await inSpace((pim) => triggerHistory(sqlOf(pim)))).toEqual(history);
 		expect(await runs("resumed")).toEqual([expect.objectContaining({ operationId: first.operationId, receipt: first.receipt, phase: "completed" })]);
 		expect(await inSpace((pim) => engineOf(pim).store.get("resumed"))).toMatchObject({ revision: 1, lifecycle: "enabled" });
@@ -855,35 +823,6 @@ describe("the triggers' host, cut short", () => {
 	});
 });
 
-describe("a deployment that doesn't allow triggers", () => {
-	it("doesn't set the gate in either Worker's configuration", () => {
-		const configs = import.meta.glob(["../wrangler.jsonc", "../wrangler.preview.jsonc"], { query: "?raw", import: "default", eager: true });
-		expect(Object.keys(configs).sort()).toEqual(["../wrangler.jsonc", "../wrangler.preview.jsonc"]);
-		for (const source of Object.values(configs)) expect(source).not.toContain(ENGINE_VARIABLE);
-	});
-
-	it("gives a space opted in before no table, wake or handoff, and nothing of triggers to export or hold", async () => {
-		const ownerId = `gated-${crypto.randomUUID()}`;
-		await (await getAgentByName(env.Pim, ownerId)).provision({ ownerId, username: "gated" });
-		await gateOff(env.Pim.getByName(ownerId), async (pim) => {
-			pim.store.setMeta(ENGINE_KEY, "on");
-			expect(await pim.enableTriggerEngine()).toBe(false);
-			expect(pim.triggerEngine()).toBeNull();
-			await pim.runTriggerTick();
-			await pim.wakeTriggers();
-			expect(
-				sqlOf(pim)
-					.exec("SELECT name FROM sqlite_master WHERE name LIKE 'pim_trigger%'")
-					.toArray(),
-			).toEqual([]);
-			expect((await pim.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK)).toEqual([]);
-			expect(triggerHistory(sqlOf(pim))).toBeNull();
-			expect(JSON.parse(await pim.exportData())).not.toHaveProperty("triggers");
-			expect((await pim.remainingData()).filter((kind) => kind.includes("trigger"))).toEqual([]);
-		});
-	});
-});
-
 describe("a space with triggers, erased", () => {
 	it("keeps nothing of them", async () => {
 		triggerClock.offset = 0;
@@ -892,7 +831,7 @@ describe("a space with triggers, erased", () => {
 		await stub.provision({ ownerId, username: "erased" });
 		const erased = env.Pim.getByName(ownerId);
 		await runInDurableObject(erased, async (pim: Pim) => {
-			expect(await pim.enableTriggerEngine()).toBe(true);
+			await pim.enableTriggerEngine();
 			const agent = pim.agents.majordomo().id;
 			expect(engineOf(pim).store.create({ id: "daily", spec: { ...base(agent), source: interval(clock() + HOUR) }, lifecycle: "enabled" })).toMatchObject({ ok: true });
 			await pim.wakeTriggers();

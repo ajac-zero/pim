@@ -192,6 +192,41 @@ describe("the list", () => {
     expect(html).toContain('<option value="p_rowan">Rowan</option>');
   });
 
+  it("gives each row one named link with a focus ring, and writes times with their zone", async () => {
+    const client = clientWith();
+    setList(client, [page([triggerFixture({ label: "Weekly review" })])]);
+    const html = await render(TriggersPage, client);
+    const row = /<li[\s\S]*?<\/li>/.exec(html)?.[0] ?? "";
+    expect(row.match(/<a /g)).toHaveLength(1);
+    expect(row).toMatch(/<a [^>]*focus-visible:ring[^>]*>Weekly review<\/a>/);
+    expect(textOf(row)).toMatch(/Nov 9, 2026.*(UTC|GMT)/);
+  });
+
+  it("announces loading, the filtered count and errors in a polite live region", async () => {
+    const live = (html: string) =>
+      /<p role="status" aria-live="polite" class="sr-only">([^<]*)<\/p>/.exec(
+        html,
+      )?.[1];
+    const loading = clientWith();
+    expect(live(await render(TriggersPage, loading))).toBe("Loading triggers…");
+    const client = clientWith();
+    setList(client, [page([triggerFixture()])]);
+    expect(live(await render(TriggersPage, client))).toBe("1 triggers shown");
+    const failed = clientWith();
+    const options = triggersQuery({});
+    failed
+      .getQueryCache()
+      .build(failed, options as never)
+      .setState({
+        status: "error",
+        error: new ApiError(409, "x", {
+          error: "x",
+          code: "revision_conflict",
+        }),
+      } as never);
+    expect(live(await render(TriggersPage, failed))).toMatch(/changed/i);
+  });
+
   it("shows an empty line for no triggers, and no rows", async () => {
     const client = clientWith();
     setList(client, [page([])]);

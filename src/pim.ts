@@ -5050,8 +5050,18 @@ export class Pim extends DurableAgent<Env> {
 			async ({ session }) => {
 				const id = await this.#session(session!);
 				const pi = await this.harness.pi();
+				// The chat's cost includes every task its agents handed out, and the tasks those handed out in turn.
+				const conversations = new Set<string>();
+				const pending = [id];
+				for (let chat = pending.pop(); chat !== undefined; chat = pending.pop()) {
+					for (const conversation of this.#rooms.everyConversation(chat)) {
+						if (conversations.has(conversation)) continue;
+						conversations.add(conversation);
+						for (const task of this.#tasks.byRequester(conversation)) pending.push(task.conversation);
+					}
+				}
 				const ledgers = await Promise.all(
-					this.#rooms.everyConversation(id).map((conversation) => pi.snapshot(UsageDoc, Number(conversation) as ConversationId, BACKGROUND_CONTEXT)),
+					[...conversations].map((conversation) => pi.snapshot(UsageDoc, Number(conversation) as ConversationId, BACKGROUND_CONTEXT)),
 				);
 				return sessionCost(ledgers.filter((ledger) => ledger !== undefined));
 			},

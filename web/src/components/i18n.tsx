@@ -1228,6 +1228,16 @@ const translations = {
     triggersShownFiltered: "{count} triggers match these filters",
     triggersNone: "No triggers yet",
     triggersNoneMatch: "No triggers match these filters",
+    triggersNoneHint:
+      "Ask an agent in chat to set one up. For example, copy one of these:",
+    triggerExample1: "Every weekday at 9am, summarize my calendar",
+    triggerExample2: "When a new email arrives from my manager, tell me",
+    triggerExample3: "Every Friday at 4pm, draft my weekly update",
+    triggersRetry: "Retry",
+    triggersStale: "Showing earlier data. Couldn't refresh.",
+    triggerFiltersCount: "{count} filters",
+    triggerFiltersOne: "{count} filter",
+    triggerFiltersClear: "Clear all",
     triggersMore: "Load more",
     triggersBounded:
       "Showing the first {count}. Narrow the filters to see others.",
@@ -2800,6 +2810,16 @@ const translations = {
     triggersShownFiltered: "{count} disparadores coinciden con estos filtros",
     triggersNone: "Aún no hay disparadores",
     triggersNoneMatch: "Ningún disparador coincide con estos filtros",
+    triggersNoneHint:
+      "Pide a un agente en el chat que configure uno. Por ejemplo, copia uno de estos:",
+    triggerExample1: "Cada día laborable a las 9, resume mi calendario",
+    triggerExample2: "Cuando llegue un correo nuevo de mi jefe, avísame",
+    triggerExample3: "Cada viernes a las 16:00, redacta mi resumen semanal",
+    triggersRetry: "Reintentar",
+    triggersStale: "Mostrando datos anteriores. No se pudo actualizar.",
+    triggerFiltersCount: "{count} filtros",
+    triggerFiltersOne: "{count} filtro",
+    triggerFiltersClear: "Borrar todo",
     triggersMore: "Cargar más",
     triggersBounded:
       "Se muestran los primeros {count}. Ajusta los filtros para ver otros.",

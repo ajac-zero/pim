@@ -229,12 +229,49 @@ describe("the list", () => {
     expect(live(await render(TriggersPage, failed))).toMatch(/changed/i);
   });
 
-  it("shows an empty line for no triggers, and no rows", async () => {
+  it("orders the filters State, Source, Agent, Health", async () => {
     const client = clientWith();
     setList(client, [page([])]);
     const html = await render(TriggersPage, client);
-    expect(textOf(html)).toContain("No triggers yet");
-    expect(html).not.toContain("<li");
+    const at = ["State", "Source", "Agent", "Health"].map((label) =>
+      html.indexOf(`>${label}</label>`),
+    );
+    expect(at.every((index) => index > 0)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+  });
+
+  it("offers copyable example prompts to a person with no triggers", async () => {
+    const client = clientWith();
+    setList(client, [page([])]);
+    const text = textOf(await render(TriggersPage, client));
+    expect(text).toContain("No triggers yet");
+    expect(text).toContain("Every weekday at 9am, summarize my calendar");
+    expect(text).toContain("Copy");
+    expect(text).not.toContain("Clear all");
+    expect(text).not.toContain("No triggers match");
+  });
+
+  it("shows no filter count until one is applied", async () => {
+    const client = clientWith();
+    setList(client, [page([triggerFixture()])]);
+    const text = textOf(await render(TriggersPage, client));
+    expect(text).not.toContain("Clear all");
+  });
+
+  it("keeps earlier rows and offers Retry when a refetch fails", async () => {
+    const client = clientWith();
+    setList(client, [page([triggerFixture({ label: "Weekly review" })])]);
+    client
+      .getQueryCache()
+      .find({ queryKey: triggersQuery({}).queryKey })
+      ?.setState({
+        status: "error",
+        error: new ApiError(500, "x", { error: "x", code: "internal" }),
+      } as never);
+    const text = textOf(await render(TriggersPage, client));
+    expect(text).toContain("Showing earlier data. Couldn't refresh.");
+    expect(text).toContain("Retry");
+    expect(text).toContain("Weekly review");
   });
 
   it("offers the next page while there is one, and stops after the bound", async () => {

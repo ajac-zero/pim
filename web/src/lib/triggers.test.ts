@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { i18nFor } from "~/components/i18n";
 import {
   ApiError,
   type Approval,
@@ -8,10 +9,13 @@ import {
   TRIGGER_HEALTHS,
   TRIGGER_LIFECYCLES,
   type Trigger,
+  type TriggerExpression,
 } from "~/lib/pim-api";
 import { triggersQuery } from "~/lib/queries";
 import {
   changeOf,
+  conditionWords,
+  cronWords,
   decideGrant,
   emptyForm,
   formOf,
@@ -263,6 +267,31 @@ describe("what a trigger does next", () => {
     expect(nextLine(pollFixture({ lifecycle: "paused" })).key).toBe(
       "triggerNextOff",
     );
+    // A draft poll says how often it will run, whether or not Pim can run it here yet.
+    for (const capability of [
+      { status: "available", delivers: true, reason: null },
+      {
+        status: "unavailable",
+        delivers: false,
+        reason: "computer_triggers_off",
+      },
+    ] as const) {
+      expect(
+        nextLine(
+          pollFixture({
+            lifecycle: "draft",
+            capability,
+            source: {
+              kind: "poll",
+              command: "make check",
+              cwd: null,
+              intervalMs: 900_000,
+              deadlineMs: 30_000,
+            },
+          }),
+        ),
+      ).toEqual({ key: "triggerNextOnceOn", everyMs: 900_000 });
+    }
     expect(nextLine(connectorFixture()).key).toBe("triggerNextNotWired");
   });
 
@@ -625,5 +654,180 @@ describe("chip colors", () => {
       const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
       expect(ratio, `${theme.id} ${mode}`).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+describe("sources and conditions in words", () => {
+  const en = i18nFor("en");
+  const es = i18nFor("es");
+  // Some ICU versions put a narrow no-break space before AM and PM.
+  const cron = (expression: string, zone: string, i18n = en) =>
+    cronWords(expression, zone, i18n)?.replace(/\u202f/g, " ") ?? null;
+
+  it("says a daily cron at its time and its zone's city", () => {
+    expect(cron("0 8 * * *", "Europe/Lisbon")).toBe(
+      "Every day at 8:00 AM, Lisbon time",
+    );
+    expect(cron("0 8 * * *", "Europe/Lisbon", es)).toBe(
+      "Todos los días a las 8:00, hora de Lisbon",
+    );
+    expect(cron("30 13 * * *", "America/New_York")).toBe(
+      "Every day at 1:30 PM, New York time",
+    );
+    expect(cron("0 1 * * *", "UTC", es)).toBe("Todos los días a la 1:00, UTC");
+  });
+
+  it("says every n minutes or hours only where n divides the cycle", () => {
+    expect(cron("*/15 * * * *", "UTC")).toBe("Every 15 minutes");
+    expect(cron("* * * * *", "UTC")).toBe("Every minute");
+    expect(cron("0 */2 * * *", "Europe/Lisbon")).toBe("Every 2 hours");
+    expect(cron("0 * * * *", "UTC", es)).toBe("Cada hora");
+    expect(cron("30 */6 * * *", "UTC")).toBe("Every 6 hours, at minute 30");
+    expect(cron("*/7 * * * *", "UTC")).toBeNull();
+    expect(cron("0 */5 * * *", "UTC")).toBeNull();
+  });
+
+  it("names weekdays, the days of a week and a day of the month", () => {
+    expect(cron("0 9 * * 1-5", "Europe/Lisbon")).toBe(
+      "Every weekday at 9:00 AM, Lisbon time",
+    );
+    expect(cron("0 9 * * 1,2,3,4,5", "UTC", es)).toBe(
+      "De lunes a viernes a las 9:00, UTC",
+    );
+    expect(cron("0 18 * * 7,1,4", "UTC")).toBe(
+      "Every Monday, Thursday, and Sunday at 6:00 PM, UTC",
+    );
+    expect(cron("0 18 * * 1,4", "UTC", es)).toBe(
+      "Cada lunes y jueves a las 18:00, UTC",
+    );
+    expect(cron("0 9 * * 0-6", "UTC")).toBe("Every day at 9:00 AM, UTC");
+    expect(cron("0 9 1 * *", "UTC")).toBe(
+      "Every month on the 1st at 9:00 AM, UTC",
+    );
+    expect(cron("15 7 22 * *", "UTC")).toBe(
+      "Every month on the 22nd at 7:15 AM, UTC",
+    );
+    expect(cron("0 9 13 * *", "UTC")).toBe(
+      "Every month on the 13th at 9:00 AM, UTC",
+    );
+    expect(cron("0 9 1 * *", "UTC", es)).toBe(
+      "Cada mes, el día 1, a las 9:00, UTC",
+    );
+  });
+
+  it("gives no words for any other shape, or a zone that isn't a city", () => {
+    for (const expression of [
+      "0 9 31 * *",
+      "0 9 1 6 *",
+      "0 9 13 * 5",
+      "0 9-17 * * *",
+      "*/15 9 * * *",
+      "0 9 * * 1/2",
+      "0 9 * *",
+      "",
+    ]) {
+      expect(cron(expression, "UTC"), expression).toBeNull();
+    }
+    expect(cron("0 8 * * *", "Etc/GMT+5")).toBeNull();
+    expect(cron("0 8 * * *", "Not/AZone")).toBeNull();
+  });
+
+  it("says a command or a process failing or succeeding in words", () => {
+    const exit = (path: string, cmp: "eq" | "ne" | "gt" | "lt") =>
+      conditionWords({ op: "compare", path: [path], cmp, value: 0 }, en);
+    expect(exit("status", "ne")).toBe(
+      "the command fails (exits with an error)",
+    );
+    expect(exit("status", "gt")).toBe(
+      "the command fails (exits with an error)",
+    );
+    expect(exit("status", "eq")).toBe(
+      "the command succeeds (exits without an error)",
+    );
+    expect(exit("exitCode", "ne")).toBe("the process exits with an error");
+    expect(exit("status", "lt")).toBe("the field status is below 0");
+    expect(
+      conditionWords(
+        { op: "compare", path: ["status"], cmp: "ne", value: 0 },
+        es,
+      ),
+    ).toBe("el comando falla (termina con un error)");
+  });
+
+  it("says comparisons, presence, changes, bands and durations of a field", () => {
+    expect(
+      conditionWords(
+        { op: "compare", path: ["price", "amount"], cmp: "lt", value: 500 },
+        en,
+      ),
+    ).toBe("the field price.amount is below 500");
+    expect(
+      conditionWords(
+        { op: "compare", path: ["state"], cmp: "eq", value: "done" },
+        en,
+      ),
+    ).toBe('the field state is "done"');
+    expect(
+      conditionWords(
+        { op: "compare", path: ["ok"], cmp: "ne", value: true },
+        es,
+      ),
+    ).toBe("el campo ok no es verdadero");
+    expect(
+      conditionWords(
+        { op: "compare", path: ["price"], cmp: "gte", value: 1.25 },
+        es,
+      ),
+    ).toBe("el campo price es 1,25 o más");
+    expect(
+      conditionWords(
+        {
+          op: "all",
+          of: [
+            { op: "exists", path: ["price"] },
+            { op: "changed", path: ["price"] },
+          ],
+        },
+        en,
+      ),
+    ).toBe("the field price is there and the field price changes");
+    expect(
+      conditionWords(
+        {
+          op: "hysteresis",
+          path: ["price"],
+          direction: "falling",
+          enter: 500,
+          exit: 520,
+        },
+        en,
+      ),
+    ).toBe(
+      "the field price drops to 500 or less (until it climbs back to 520)",
+    );
+    expect(
+      conditionWords(
+        {
+          op: "stable_for",
+          ms: 600_000,
+          of: { op: "compare", path: ["status"], cmp: "ne", value: 0 },
+        },
+        en,
+      ),
+    ).toBe("the command fails (exits with an error), for at least 10 minutes");
+  });
+
+  it("gives no words for a negation, a list of lists, or anything inside them", () => {
+    const leaf: TriggerExpression = { op: "exists", path: ["a"] };
+    expect(conditionWords({ op: "not", of: leaf }, en)).toBeNull();
+    expect(
+      conditionWords(
+        { op: "any", of: [leaf, { op: "all", of: [leaf, leaf] }] },
+        en,
+      ),
+    ).toBeNull();
+    expect(
+      conditionWords({ op: "all", of: [leaf, { op: "not", of: leaf }] }, en),
+    ).toBeNull();
   });
 });

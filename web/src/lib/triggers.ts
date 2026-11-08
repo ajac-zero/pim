@@ -1,4 +1,4 @@
-import type { TranslationKey } from "~/components/i18n";
+import type { I18nContextValue, TranslationKey } from "~/components/i18n";
 import {
   ApiError,
   type Approval,
@@ -262,7 +262,13 @@ export function triggerZone(trigger: Trigger): string | undefined {
  * otherwise what it is honestly doing (listening, checking, waiting for the
  * computer) or why it won't act.
  */
-export type NextLine = { key: TranslationKey; at?: number; minutes?: number };
+export type NextLine = {
+  key: TranslationKey;
+  at?: number;
+  minutes?: number;
+  /** How often it would run, for a draft that runs on an interval once on. */
+  everyMs?: number;
+};
 
 export function nextLine(trigger: Trigger): NextLine {
   if (trigger.lifecycle === "deleted") return { key: "triggerNextDeleted" };
@@ -288,6 +294,10 @@ export function nextLine(trigger: Trigger): NextLine {
           : "triggerWouldFireAt",
       at,
     };
+  }
+  // A draft poll isn't checking anything yet: say how often it will once on.
+  if (source.kind === "poll" && trigger.lifecycle === "draft") {
+    return { key: "triggerNextOnceOn", everyMs: source.intervalMs };
   }
   if (!trigger.capability.delivers) {
     return {
@@ -521,7 +531,8 @@ function conditionValue(text: string): string | number | boolean {
   return text;
 }
 
-function conditionOf(form: TriggerForm): TriggerCondition | null {
+/** The condition the form describes, or null for none. */
+export function conditionOf(form: TriggerForm): TriggerCondition | null {
   const path = form.conditionPath
     .split(".")
     .map((key) => key.trim())
@@ -554,6 +565,39 @@ export function inputOf(
   if (!form.instruction.trim()) {
     return problem("instruction", "triggerNeedsInstruction");
   }
+  const read = sourceOf(form);
+  if ("problem" in read) return read;
+  const { source } = read;
+  const condition = form.kind === "time" ? null : conditionOf(form);
+  if (form.kind === "poll" && condition === null) {
+    return problem("conditionPath", "triggerNeedsCondition");
+  }
+  const destination: TriggerDestination =
+    form.destination === "existing_chat"
+      ? { type: "existing_chat", chatId: form.chatId }
+      : { type: "new_chat" };
+  if (destination.type === "existing_chat" && !destination.chatId) {
+    return problem("chatId", "triggerNeedsChat");
+  }
+  return {
+    input: {
+      label: form.label.trim(),
+      instruction: form.instruction,
+      source,
+      ...(condition ? { condition } : {}),
+      destination,
+      agentId: form.agentId,
+    },
+  };
+}
+
+/** The source the form describes, or what to fix in it first, whatever the rest of the form says. */
+export function sourceOf(
+  form: TriggerForm,
+): { source: TriggerSource } | { problem: FormProblem } {
+  const problem = (field: keyof TriggerForm, key: TranslationKey) => ({
+    problem: { field, key },
+  });
   let source: TriggerSource;
   switch (form.kind) {
     case "time": {
@@ -637,27 +681,7 @@ export function inputOf(
       };
       break;
   }
-  const condition = form.kind === "time" ? null : conditionOf(form);
-  if (form.kind === "poll" && condition === null) {
-    return problem("conditionPath", "triggerNeedsCondition");
-  }
-  const destination: TriggerDestination =
-    form.destination === "existing_chat"
-      ? { type: "existing_chat", chatId: form.chatId }
-      : { type: "new_chat" };
-  if (destination.type === "existing_chat" && !destination.chatId) {
-    return problem("chatId", "triggerNeedsChat");
-  }
-  return {
-    input: {
-      label: form.label.trim(),
-      instruction: form.instruction,
-      source,
-      ...(condition ? { condition } : {}),
-      destination,
-      agentId: form.agentId,
-    },
-  };
+  return { source };
 }
 
 /** Whether a source the form made is the one a trigger has: its defaults aside, the same fields. */
@@ -728,6 +752,308 @@ export function conditionText(expression: TriggerExpression): string {
       return `${conditionText(expression.of)} for ${Math.round(expression.ms / 1000)} s`;
     case "hysteresis":
       return `${expression.path.join(".")} ${expression.direction} past ${expression.enter} (until ${expression.exit})`;
+  }
+}
+
+/*
+ * Sources and conditions in words. Each gives a sentence for the shapes
+ * people usually write, and null for anything else, so the screen shows the
+ * expression as it is rather than guess at it.
+ */
+
+type Words = Pick<I18nContextValue, "t" | "locale">;
+
+/** A length of time in its largest whole unit, such as "2 hours". */
+export function durationText(ms: number, locale: string): string {
+  const units = [
+    ["day", 86_400_000],
+    ["hour", 3_600_000],
+    ["minute", 60_000],
+  ] as const;
+  const [unit, size] = units.find(([, size]) => ms % size === 0) ?? [
+    "second",
+    1000,
+  ];
+  return new Intl.NumberFormat(locale, {
+    style: "unit",
+    unit,
+    unitDisplay: "long",
+  }).format(ms / size);
+}
+
+/** The first letter in capitals, for a fragment that starts a line. */
+export const upperFirst = (text: string, locale: string) =>
+  text.charAt(0).toLocaleUpperCase(locale) + text.slice(1);
+
+type CronShape =
+  | { kind: "minutes"; every: number }
+  | { kind: "hours"; every: number; minute: number }
+  | {
+      kind: "daily" | "weekdays";
+      hour: number;
+      minute: number;
+    }
+  | { kind: "weekly"; days: number[]; hour: number; minute: number }
+  | { kind: "monthly"; day: number; hour: number; minute: number };
+
+/** `*`, alone or with a step that divides the cycle evenly, so it really is every n. */
+function cronStep(field: string, cycle: number): number | null {
+  const match = /^\*(?:\/(\d{1,2}))?$/.exec(field);
+  if (!match) return null;
+  const step = match[1] === undefined ? 1 : Number(match[1]);
+  return step >= 1 && cycle % step === 0 ? step : null;
+}
+
+function cronNumber(field: string, min: number, max: number): number | null {
+  if (!/^\d{1,2}$/.test(field)) return null;
+  const value = Number(field);
+  return value >= min && value <= max ? value : null;
+}
+
+/** Days of the week as numbers, ranges and lists, Monday first; 7 is Sunday, as 0 is. */
+function cronWeekdays(field: string): number[] | null {
+  const days = new Set<number>();
+  for (const item of field.split(",")) {
+    const match = /^(\d)(?:-(\d))?$/.exec(item);
+    if (!match) return null;
+    const from = Number(match[1]);
+    const to = match[2] === undefined ? from : Number(match[2]);
+    if (from > to || to > 7) return null;
+    for (let day = from; day <= to; day++) days.add(day % 7);
+  }
+  return [...days].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
+}
+
+/** The common shapes of a cron expression, or null for any other (cron as docs/triggers.md reads it). */
+function cronShape(expression: string): CronShape | null {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [minuteField, hourField, dayField, month, weekdayField] = fields as [
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
+  if (month !== "*") return null;
+  const anyDay = dayField === "*" && weekdayField === "*";
+  if (anyDay && hourField === "*") {
+    const every = cronStep(minuteField, 60);
+    if (every !== null) return { kind: "minutes", every };
+  }
+  const minute = cronNumber(minuteField, 0, 59);
+  if (minute === null) return null;
+  if (anyDay) {
+    const every = cronStep(hourField, 24);
+    if (every !== null) return { kind: "hours", every, minute };
+  }
+  const hour = cronNumber(hourField, 0, 23);
+  if (hour === null) return null;
+  if (anyDay) return { kind: "daily", hour, minute };
+  if (dayField === "*") {
+    const days = cronWeekdays(weekdayField);
+    if (days === null) return null;
+    if (days.length === 7) return { kind: "daily", hour, minute };
+    if (days.join() === "1,2,3,4,5") return { kind: "weekdays", hour, minute };
+    return { kind: "weekly", days, hour, minute };
+  }
+  // Days past the 28th aren't in every month, so "every month" would overclaim.
+  const day = weekdayField === "*" ? cronNumber(dayField, 1, 28) : null;
+  return day === null ? null : { kind: "monthly", day, hour, minute };
+}
+
+/** A zone's city, such as "Lisbon" for Europe/Lisbon, "UTC" for UTC, or null for a zone that isn't a city. */
+function zoneCity(timeZone: string): string | null {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone });
+  } catch {
+    return null;
+  }
+  if (["UTC", "Etc/UTC", "GMT", "Etc/GMT"].includes(timeZone)) return "UTC";
+  const city = timeZone.split("/").at(-1);
+  if (!timeZone.includes("/") || timeZone.startsWith("Etc/") || !city) {
+    return null;
+  }
+  return city.replaceAll("_", " ");
+}
+
+const ORDINAL_TEXT: Partial<Record<Intl.LDMLPluralRule, TranslationKey>> = {
+  one: "triggerOrdinalOne",
+  two: "triggerOrdinalTwo",
+  few: "triggerOrdinalFew",
+};
+
+/**
+ * A cron expression in words, such as "Every day at 8:00 AM, Lisbon time"
+ * for `0 8 * * *` in Europe/Lisbon, or null for a shape it doesn't know.
+ */
+export function cronWords(
+  expression: string,
+  timeZone: string,
+  { t, locale }: Words,
+): string | null {
+  const shape = cronShape(expression);
+  const city = zoneCity(timeZone);
+  if (shape === null || city === null) return null;
+  if (shape.kind === "minutes") {
+    return shape.every === 1
+      ? t("triggerCronEveryMinute")
+      : t("triggerCronEveryMinutes", { count: shape.every });
+  }
+  if (shape.kind === "hours") {
+    const every =
+      shape.every === 1
+        ? t("triggerCronEveryHour")
+        : t("triggerCronEveryHours", { count: shape.every });
+    return shape.minute === 0
+      ? every
+      : t("triggerCronAtMinute", { every, minute: shape.minute });
+  }
+  const time = new Intl.DateTimeFormat(locale, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+  }).format(Date.UTC(2000, 0, 1, shape.hour, shape.minute));
+  // Spanish says "a la 1:00" but "a las 2:00".
+  const at = t(
+    new Intl.PluralRules(locale).select(shape.hour) === "one"
+      ? "triggerCronAtOne"
+      : "triggerCronAt",
+    { time },
+  );
+  let schedule: string;
+  switch (shape.kind) {
+    case "daily":
+      schedule = t("triggerCronDaily", { at });
+      break;
+    case "weekdays":
+      schedule = t("triggerCronWeekdays", { at });
+      break;
+    case "weekly": {
+      const name = new Intl.DateTimeFormat(locale, {
+        weekday: "long",
+        timeZone: "UTC",
+      });
+      // 1 January 2023 was a Sunday, day 0.
+      const days = new Intl.ListFormat(locale, { type: "conjunction" }).format(
+        shape.days.map((day) => name.format(Date.UTC(2023, 0, 1 + day))),
+      );
+      schedule = t("triggerCronWeekly", { days, at });
+      break;
+    }
+    case "monthly": {
+      const rule = new Intl.PluralRules(locale, { type: "ordinal" }).select(
+        shape.day,
+      );
+      const day = t(ORDINAL_TEXT[rule] ?? "triggerOrdinalOther", {
+        n: shape.day,
+      });
+      schedule = t("triggerCronMonthly", { day, at });
+      break;
+    }
+  }
+  return city === "UTC"
+    ? t("triggerCronUtc", { schedule })
+    : t("triggerCronZone", { schedule, city });
+}
+
+const COMPARE_TEXT: Record<
+  Extract<TriggerExpression, { op: "compare" }>["cmp"],
+  TranslationKey
+> = {
+  eq: "triggerIfEq",
+  ne: "triggerIfNe",
+  lt: "triggerIfLt",
+  lte: "triggerIfLte",
+  gt: "triggerIfGt",
+  gte: "triggerIfGte",
+};
+
+/** A command's exit status, or a process's exit code, compared with 0. */
+function exitWords(
+  expression: Extract<TriggerExpression, { op: "compare" }>,
+): TranslationKey | null {
+  const [field, ...rest] = expression.path;
+  if (rest.length > 0 || expression.value !== 0) return null;
+  const command = field === "status";
+  if (!command && field !== "exitCode") return null;
+  if (expression.cmp === "ne" || expression.cmp === "gt") {
+    return command ? "triggerIfCommandFails" : "triggerIfProcessFails";
+  }
+  if (expression.cmp === "eq") {
+    return command ? "triggerIfCommandSucceeds" : "triggerIfProcessSucceeds";
+  }
+  return null;
+}
+
+/**
+ * A condition in words, to follow "when", such as "the command fails (exits
+ * with an error)" for `status ≠ 0`, or null for one it doesn't know.
+ */
+export function conditionWords(
+  expression: TriggerExpression,
+  words: Words,
+): string | null {
+  const { t, locale } = words;
+  const field = (path: string[]) =>
+    t("triggerIfField", { path: path.join(".") });
+  const number = (value: number) =>
+    new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }).format(value);
+  switch (expression.op) {
+    case "compare": {
+      const exit = exitWords(expression);
+      if (exit) return t(exit);
+      const { value } = expression;
+      return t(COMPARE_TEXT[expression.cmp], {
+        field: field(expression.path),
+        value:
+          typeof value === "boolean"
+            ? t(value ? "triggerValueTrue" : "triggerValueFalse")
+            : typeof value === "number"
+              ? number(value)
+              : JSON.stringify(value),
+      });
+    }
+    case "exists":
+      return t("triggerIfExists", { field: field(expression.path) });
+    case "changed":
+      return t("triggerIfChanged", { field: field(expression.path) });
+    case "hysteresis":
+      return t(
+        expression.direction === "rising"
+          ? "triggerIfRising"
+          : "triggerIfFalling",
+        {
+          field: field(expression.path),
+          enter: number(expression.enter),
+          exit: number(expression.exit),
+        },
+      );
+    case "stable_for": {
+      const condition = conditionWords(expression.of, words);
+      return condition === null
+        ? null
+        : t("triggerIfStable", {
+            condition,
+            duration: durationText(expression.ms, locale),
+          });
+    }
+    case "all":
+    case "any": {
+      // A list of lists would read ambiguously, so only one level is put in words.
+      if (
+        expression.of.some((each) => each.op === "all" || each.op === "any")
+      ) {
+        return null;
+      }
+      const parts = expression.of.map((each) => conditionWords(each, words));
+      if (parts.some((part) => part === null)) return null;
+      return new Intl.ListFormat(locale, {
+        type: expression.op === "all" ? "conjunction" : "disjunction",
+      }).format(parts as string[]);
+    }
+    case "not":
+      return null;
   }
 }
 

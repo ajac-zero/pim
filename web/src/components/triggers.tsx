@@ -27,6 +27,7 @@ import {
   TRIGGER_SOURCE_KINDS,
   type Trigger,
   type TriggerDryRun,
+  type TriggerExpression,
   type TriggerHealth,
   type TriggerLifecycle,
   type TriggerRun,
@@ -45,7 +46,10 @@ import {
 } from "~/lib/queries";
 import {
   conditionText,
+  conditionWords,
+  cronWords,
   decideGrant,
+  durationText,
   type GrantStanding,
   HEALTH_PROBLEMS,
   HEALTH_TEXT,
@@ -63,6 +67,7 @@ import {
   type TriggerProblem,
   triggerProblem,
   triggerZone,
+  upperFirst,
   withHealth,
 } from "~/lib/triggers";
 import { cn } from "~/lib/utils";
@@ -163,7 +168,7 @@ export function HealthPill({ trigger }: { trigger: Trigger }) {
 }
 
 function useFormats() {
-  const { t, formatDate, formatNumber } = useI18n();
+  const { t, locale, formatDate } = useI18n();
   // The zone is always written out, so an exact time never depends on hovering.
   const date = (at: number, timeZone?: string) =>
     formatDate(new Date(at), {
@@ -217,28 +222,13 @@ function useFormats() {
       return date(at);
     }
   };
-  const duration = (ms: number) => {
-    const units = [
-      ["day", 86_400_000],
-      ["hour", 3_600_000],
-      ["minute", 60_000],
-    ] as const;
-    const [unit, size] = units.find(([, size]) => ms % size === 0) ?? [
-      "second",
-      1000,
-    ];
-    return formatNumber(ms / size, {
-      style: "unit",
-      unit,
-      unitDisplay: "long",
-    });
-  };
+  const duration = (ms: number) => durationText(ms, locale);
   return { t, date, zoned, duration };
 }
 
 /** When a trigger acts next, in words, with a date only where Pim gave one. */
 export function NextText({ trigger }: { trigger: Trigger }) {
-  const { t, zoned } = useFormats();
+  const { t, zoned, duration } = useFormats();
   const next = nextLine(trigger);
   return (
     <>
@@ -247,6 +237,9 @@ export function NextText({ trigger }: { trigger: Trigger }) {
           ? {}
           : { date: zoned(next.at, triggerZone(trigger)) }),
         ...(next.minutes === undefined ? {} : { minutes: next.minutes }),
+        ...(next.everyMs === undefined
+          ? {}
+          : { duration: duration(next.everyMs) }),
       })}
     </>
   );
@@ -665,35 +658,85 @@ function capabilityKey(capability: Trigger["capability"]): TranslationKey {
     : "triggerCapabilityUnavailable";
 }
 
-/** What a source watches, in words. Arguments a connector takes aren't shown: only how many. */
+/** A line under words that gives what they were made from, smaller. */
+function Exact({ children }: { children: ReactNode }) {
+  return (
+    <span className="block text-[13px] text-muted-foreground">{children}</span>
+  );
+}
+
+/** A cron expression in words, with the expression and its zone beneath; as it is when it has no words. */
+function CronText({
+  expression,
+  timeZone,
+}: {
+  expression: string;
+  timeZone: string;
+}) {
+  const i18n = useI18n();
+  const words = cronWords(expression, timeZone, i18n);
+  if (words === null) {
+    return <>{i18n.t("triggerCronIn", { expression, timeZone })}</>;
+  }
+  return (
+    <>
+      {words}
+      <Exact>
+        <code className="font-mono">{expression}</code> · {timeZone}
+      </Exact>
+    </>
+  );
+}
+
+/** A condition in words, with the expression beneath; as it is when it has no words. */
+export function ConditionText({
+  expression,
+}: {
+  expression: TriggerExpression;
+}) {
+  const i18n = useI18n();
+  const words = conditionWords(expression, i18n);
+  const exact = (
+    <code className="font-mono text-sm">{conditionText(expression)}</code>
+  );
+  if (words === null) return exact;
+  return (
+    <>
+      {upperFirst(words, i18n.locale)}
+      <Exact>{exact}</Exact>
+    </>
+  );
+}
+
+/** What a source watches, in words. Arguments a connector takes aren't shown, only that it has some. */
 export function SourceText({ source }: { source: Trigger["source"] }) {
   const { t, date, duration } = useFormats();
   switch (source.kind) {
     case "time":
+      if (source.schedule === "cron") {
+        return (
+          <CronText expression={source.expression} timeZone={source.timeZone} />
+        );
+      }
       return (
         <>
           {source.schedule === "once"
             ? t("triggerOnceAt", { date: date(source.at) })
-            : source.schedule === "cron"
-              ? t("triggerCronIn", {
-                  expression: source.expression,
-                  timeZone: source.timeZone,
-                })
-              : t("triggerEvery", { duration: duration(source.everyMs) })}
+            : t("triggerEvery", { duration: duration(source.everyMs) })}
         </>
       );
-    case "connector_event": {
-      const count = Object.keys(source.arguments ?? {}).length;
+    case "connector_event":
       return (
         <>
           {t("triggerConnectorEvent", {
             event: source.event,
             connector: source.connectorId,
           })}
-          {count > 0 && ` ${t("triggerArgumentsHidden", { count })}`}
+          {Object.keys(source.arguments ?? {}).length > 0 && (
+            <Exact>{t("triggerArgumentsHidden")}</Exact>
+          )}
         </>
       );
-    }
     case "poll":
     case "stream":
       return (
@@ -735,10 +778,21 @@ export function ComputerDisclosure() {
   );
 }
 
-/** How often a computer source acts, in words, from its own fields. */
-function FrequencyText({ source }: { source: Trigger["source"] }) {
+/** When a source acts, in words, from its own fields. */
+export function WhenText({ source }: { source: Trigger["source"] }) {
   const { t, duration } = useFormats();
   switch (source.kind) {
+    case "time":
+      return <SourceText source={source} />;
+    case "connector_event":
+      return (
+        <>
+          {t("triggerFrequencyConnector", {
+            event: source.event,
+            connector: source.connectorId,
+          })}
+        </>
+      );
     case "poll":
       return (
         <>{t("triggerEvery", { duration: duration(source.intervalMs) })}</>
@@ -749,8 +803,39 @@ function FrequencyText({ source }: { source: Trigger["source"] }) {
       return <>{t("triggerFrequencyProcess")}</>;
     case "file":
       return <>{t("triggerFrequencyFile", { path: source.path })}</>;
-    default:
-      return null;
+  }
+}
+
+/** What a source looks at, in words; a time source looks at nothing. */
+export function ObservedText({ source }: { source: Trigger["source"] }) {
+  const { t, date } = useFormats();
+  switch (source.kind) {
+    case "time":
+      return <>{t("triggerObserveNothing")}</>;
+    case "connector_event":
+      return (
+        <>
+          {t("triggerConnectorEvent", {
+            event: source.event,
+            connector: source.connectorId,
+          })}
+        </>
+      );
+    case "poll":
+      return <>{t("triggerObservePoll", { command: source.command })}</>;
+    case "stream":
+      return <>{t("triggerObserveStream", { command: source.command })}</>;
+    case "process":
+      return (
+        <>
+          {t("triggerObserveProcess", {
+            handle: source.handle,
+            date: date(source.expiresAt),
+          })}
+        </>
+      );
+    case "file":
+      return <>{t("triggerFileChanges", { path: source.path })}</>;
   }
 }
 
@@ -788,7 +873,7 @@ export function ComputerSourceDisclosure({ trigger }: { trigger: Trigger }) {
           t("triggerScriptVersion"),
           t("triggerRunRevision", { revision: trigger.revision }),
         )}
-        {fact(t("triggerFrequency"), <FrequencyText source={trigger.source} />)}
+        {fact(t("triggerFrequency"), <WhenText source={trigger.source} />)}
         {policy &&
           fact(
             t("triggerApprovalPolicy"),
@@ -853,9 +938,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
           </Row>
           {trigger.condition && (
             <Row label={t("triggerCondition")}>
-              <code className="font-mono text-sm">
-                {conditionText(trigger.condition.when)}
-              </code>
+              <ConditionText expression={trigger.condition.when} />
             </Row>
           )}
           {trigger.lifecycle === "ended" ? (

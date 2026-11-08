@@ -9,8 +9,11 @@ import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "~/components/i18n";
 import {
   ComputerDisclosure,
+  ConditionText,
+  ObservedText,
   ProblemNotice,
   SourceText,
+  WhenText,
 } from "~/components/triggers";
 import { Button } from "~/components/ui/button";
 import {
@@ -29,7 +32,9 @@ import {
 import {
   changeOf,
   conditionEditable,
+  conditionOf,
   conditionText,
+  conditionWords,
   creationKey,
   emptyForm,
   type FormProblem,
@@ -38,6 +43,7 @@ import {
   offeredKinds,
   runsCommands,
   SOURCE_TEXT,
+  sourceOf,
   type TriggerForm,
   type TriggerProblem,
   triggerProblem,
@@ -306,7 +312,6 @@ export function TriggerEditor({
           noValidate
         >
           <TriggerSummary
-            input={input}
             form={form}
             agent={agentName(form.agentId)}
             chat={
@@ -513,23 +518,28 @@ export function TriggerEditor({
 
 /**
  * What the trigger will do, in three lines that follow the form: when it
- * fires, what the agent is told, and where the person sees the result.
+ * fires, what the agent is told and where the result goes, and what it
+ * watches. Each says "not set yet" until its part of the form is complete.
  */
 export function TriggerSummary({
-  input,
   form,
   agent,
   chat,
 }: {
-  /** The form as it would be saved; null while it has a problem. */
-  input: TriggerInput | null;
   form: TriggerForm;
   agent: string;
   /** The existing chat it delivers to, by title; null for a new chat each time. */
   chat: string | null;
 }) {
-  const { t } = useI18n();
+  const i18n = useI18n();
+  const { t } = i18n;
   const instruction = form.instruction.trim();
+  const read = sourceOf(form);
+  const source = "source" in read ? read.source : null;
+  const condition = form.kind === "time" ? null : conditionOf(form);
+  const notSet = (
+    <span className="text-muted-foreground">{t("triggerSummaryNotSet")}</span>
+  );
   return (
     <section
       aria-label={t("triggerSummary")}
@@ -540,11 +550,7 @@ export function TriggerSummary({
       </h2>
       <dl className="mt-1 divide-y divide-border">
         <ReviewRow label={t("triggerSummaryWhen")}>
-          {input ? (
-            <SourceText source={input.source} />
-          ) : (
-            t(SOURCE_TEXT[form.kind])
-          )}
+          {source ? <WhenText source={source} /> : notSet}
         </ReviewRow>
         <ReviewRow label={t("triggerSummaryDo")}>
           <span className="whitespace-pre-wrap">
@@ -552,16 +558,27 @@ export function TriggerSummary({
               ? t("triggerSummaryDoText", { agent, instruction })
               : t("triggerSummaryNoInstruction", { agent })}
           </span>
+          <span className="block text-muted-foreground text-sm">
+            {chat === null
+              ? t("triggerSummaryResultNewChat")
+              : t("triggerSummaryResultChat", { chat })}
+          </span>
         </ReviewRow>
         <ReviewRow label={t("triggerSummaryObserve")}>
-          {t("triggerSummaryObserveIn", {
-            chat: chat ?? t("triggerNewChatEachTime"),
-          })}
-          {input?.condition && (
+          {source ? (
+            <ObservedText source={source} />
+          ) : form.kind === "time" ? (
+            t("triggerObserveNothing")
+          ) : (
+            notSet
+          )}
+          {condition && (
             <>
               {" "}
               {t("triggerSummaryObserveCondition", {
-                condition: conditionText(input.condition.when),
+                condition:
+                  conditionWords(condition.when, i18n) ??
+                  conditionText(condition.when),
               })}
             </>
           )}
@@ -595,9 +612,7 @@ export function SourceFields({
         <span className="text-[13px] text-muted-foreground">
           {t("triggerCondition")}:{" "}
         </span>
-        <code className="font-mono text-sm">
-          {conditionText(trigger.condition.when)}
-        </code>{" "}
+        <ConditionText expression={trigger.condition.when} />{" "}
         <span className="text-[13px] text-muted-foreground">
           {t("triggerConditionKept")}
         </span>
@@ -971,9 +986,7 @@ export function TriggerReview({
         </ReviewRow>
         {input.condition && (
           <ReviewRow label={t("triggerCondition")}>
-            <code className="font-mono text-sm">
-              {conditionText(input.condition.when)}
-            </code>
+            <ConditionText expression={input.condition.when} />
           </ReviewRow>
         )}
       </dl>

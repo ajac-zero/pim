@@ -51,8 +51,10 @@ class FakeClock {
 	now = () => this.time;
 	#timers: { at: number; order: number; run: () => void; cancelled: boolean }[] = [];
 	#order = 0;
+	/** How much before its time a timer of more than a millisecond runs, as Node's can: libuv's clock may be coarser than `Date.now()`. */
+	early = 0;
 	setTimer = (ms: number, run: () => void) => {
-		const timer = { at: this.time + ms, order: this.#order++, run, cancelled: false };
+		const timer = { at: this.time + (ms > 1 ? ms - this.early : ms), order: this.#order++, run, cancelled: false };
 		this.#timers.push(timer);
 		return () => {
 			timer.cancelled = true;
@@ -576,6 +578,15 @@ describe("observer lifecycle", () => {
 		await h.reconcile([source], { revision: 3 });
 		expect(h.adapters).toHaveLength(2);
 		expect(h.adapters[1]?.stops).toEqual([]);
+
+		// A lease timer that runs a millisecond before the clock reaches the lease's end stops nothing yet, and the lease still ends on time.
+		h.clock.early = 1;
+		await h.reconcile([source], { revision: 4 });
+		h.runtime.detach("c2");
+		await h.tick(119_999);
+		expect(h.adapters[1]?.stops).toEqual([]);
+		await h.tick(1);
+		expect(h.adapters[1]?.stops).toEqual(["lease_expired"]);
 	});
 
 	it("starts nothing after a restart until the space reconciles, and then only what it still allows", async () => {

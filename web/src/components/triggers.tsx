@@ -29,7 +29,9 @@ import {
 import {
   agentsQuery,
   approvalsQuery,
+  computerQuery,
   sessionsQuery,
+  settingsQuery,
   triggerQuery,
   triggerRunsQuery,
   triggersAvailableQuery,
@@ -48,6 +50,7 @@ import {
   PROBLEM_TEXT,
   RUN_TEXT,
   runsCommands,
+  runsOnComputer,
   SOURCE_TEXT,
   type TriggerProblem,
   triggerProblem,
@@ -552,6 +555,76 @@ export function ComputerDisclosure() {
   );
 }
 
+/** How often a computer source acts, in words, from its own fields. */
+function FrequencyText({ source }: { source: Trigger["source"] }) {
+  const { t, duration } = useFormats();
+  switch (source.kind) {
+    case "poll":
+      return (
+        <>{t("triggerEvery", { duration: duration(source.intervalMs) })}</>
+      );
+    case "stream":
+      return <>{t("triggerFrequencyStream")}</>;
+    case "process":
+      return <>{t("triggerFrequencyProcess")}</>;
+    case "file":
+      return <>{t("triggerFrequencyFile", { path: source.path })}</>;
+    default:
+      return null;
+  }
+}
+
+/**
+ * What turning a computer source on lets it do, read before the person
+ * confirms. The trigger doesn't name its computer, so the name is the one the
+ * space's computer last reported; the script's version is the trigger's
+ * revision, which turning it on names; and approvals are the person's
+ * approval policy, left out when it can't be read.
+ */
+export function ComputerSourceDisclosure({ trigger }: { trigger: Trigger }) {
+  const { t } = useI18n();
+  const computer = useQuery(computerQuery());
+  const hostname = computer.data?.computer?.hostname;
+  // Only waiting for the person asks them before acting; the majordomo or a timeout may answer otherwise.
+  const policy = useQuery(settingsQuery()).data?.approvalPolicy;
+  const fact = (label: string, value: ReactNode) => (
+    <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-4">
+      <dt className="shrink-0 text-[13px] text-muted-foreground sm:w-32">
+        {label}
+      </dt>
+      <dd className="min-w-0 break-words">{value}</dd>
+    </div>
+  );
+  return (
+    <div role="note" className="rounded-xl bg-muted px-4 py-3 text-sm">
+      <p>{t("triggerComputerScriptAccess")}</p>
+      <dl className="mt-3 flex flex-col gap-2">
+        {fact(
+          t("triggerComputerName"),
+          hostname ??
+            (computer.isPending ? t("loading") : t("triggerNotReported")),
+        )}
+        {fact(
+          t("triggerScriptVersion"),
+          t("triggerRunRevision", { revision: trigger.revision }),
+        )}
+        {fact(t("triggerFrequency"), <FrequencyText source={trigger.source} />)}
+        {policy &&
+          fact(
+            t("triggerApprovalPolicy"),
+            t(
+              policy === "explicit"
+                ? "triggerAsksBeforeExternal"
+                : policy === "auto"
+                  ? "approvalAuto"
+                  : "approvalMajordomo",
+            ),
+          )}
+      </dl>
+    </div>
+  );
+}
+
 export function TriggerDetail({ trigger }: { trigger: Trigger }) {
   const { t, date, duration } = useFormats();
   const { data: agents } = useQuery(agentsQuery());
@@ -876,18 +949,14 @@ export function TriggerActions({
         </p>
       )}
       {confirming && (
-        <Confirm
-          text={t(CONFIRM_TEXT[confirming][0])}
-          action={t(CONFIRM_TEXT[confirming][1])}
-          destructive={confirming === "delete"}
+        <ConfirmAction
+          // Each action's confirmation starts afresh, so a box checked for one is never carried to another.
+          key={confirming}
+          trigger={trigger}
+          action={confirming}
           pending={act.isPending}
           onConfirm={() => act.mutate(confirming)}
           onCancel={() => setConfirming(null)}
-          extra={
-            confirming === "resume" && runsCommands(trigger.source.kind) ? (
-              <ComputerDisclosure />
-            ) : null
-          }
         />
       )}
       <p role="status" aria-live="polite" className="mt-3 text-sm empty:hidden">
@@ -909,13 +978,52 @@ export function TriggerActions({
   );
 }
 
-/** A confirmation in place, focused when it opens, so the person reads what will happen first. */
+/**
+ * Confirming one of a trigger's actions. Turning on a script or watch on the
+ * computer first says what it can reach, and waits until the person checks
+ * that they understand it has their computer user's access.
+ */
+export function ConfirmAction({
+  trigger,
+  action,
+  pending,
+  onConfirm,
+  onCancel,
+}: {
+  trigger: Trigger;
+  action: Action;
+  pending?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  const consent = action === "resume" && runsOnComputer(trigger.source.kind);
+  return (
+    <Confirm
+      text={t(CONFIRM_TEXT[action][0])}
+      action={t(CONFIRM_TEXT[action][1])}
+      destructive={action === "delete"}
+      pending={pending}
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+      extra={consent ? <ComputerSourceDisclosure trigger={trigger} /> : null}
+      acknowledge={consent ? t("triggerUnderstandComputerAccess") : undefined}
+    />
+  );
+}
+
+/**
+ * A confirmation in place, focused when it opens, so the person reads what
+ * will happen first. With `acknowledge`, the action waits until the person
+ * checks that statement; each opening starts unchecked.
+ */
 export function Confirm({
   text,
   action,
   destructive,
   pending,
   extra,
+  acknowledge,
   onConfirm,
   onCancel,
 }: {
@@ -924,12 +1032,14 @@ export function Confirm({
   destructive?: boolean;
   pending?: boolean;
   extra?: ReactNode;
+  acknowledge?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const { t } = useI18n();
   const id = useId();
   const cancel = useRef<HTMLButtonElement>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
   useEffect(() => cancel.current?.focus(), []);
   return (
     <div
@@ -944,6 +1054,18 @@ export function Confirm({
         {text}
       </p>
       {extra}
+      {acknowledge && (
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            required
+            checked={acknowledged}
+            onChange={(event) => setAcknowledged(event.target.checked)}
+            className="mt-0.5 size-4 accent-primary"
+          />
+          {acknowledge}
+        </label>
+      )}
       <div className="flex flex-wrap justify-between gap-2">
         <Button ref={cancel} type="button" variant="outline" onClick={onCancel}>
           {t("cancel")}
@@ -951,7 +1073,7 @@ export function Confirm({
         <Button
           type="button"
           variant={destructive ? "destructive" : "default"}
-          disabled={pending}
+          disabled={pending || (acknowledge !== undefined && !acknowledged)}
           onClick={onConfirm}
         >
           {action}

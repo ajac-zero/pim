@@ -16,6 +16,7 @@ import {
   TriggerReview,
 } from "~/components/trigger-editor";
 import {
+  ConfirmAction,
   GrantReview,
   ProblemNotice,
   RunHistory,
@@ -24,9 +25,16 @@ import {
   TriggerDetail,
   TriggersPage,
 } from "~/components/triggers";
-import { ApiError, type Trigger, type TriggerRun } from "~/lib/pim-api";
+import {
+  ApiError,
+  type ApprovalPolicy,
+  type Trigger,
+  type TriggerRun,
+} from "~/lib/pim-api";
 import {
   agentsQuery,
+  computerQuery,
+  settingsQuery,
   triggerRunsQuery,
   triggersAvailableQuery,
   triggersQuery,
@@ -439,6 +447,180 @@ describe("a trigger's page", () => {
     for (const action of ["Turn on", "Edit", "Pause", "Delete", "Test"]) {
       expect(deleted).not.toContain(action);
     }
+  });
+});
+
+describe("turning on a computer source", () => {
+  const ACCESS =
+    "Runs a script as your computer user. It can access anything that user can.";
+  const UNDERSTAND = "I understand this script has my computer user's access";
+
+  function withComputer(
+    hostname: string | null,
+    approvalPolicy: ApprovalPolicy | null = "explicit",
+  ) {
+    const client = clientWith();
+    if (approvalPolicy) {
+      client.setQueryData(settingsQuery().queryKey, {
+        timeZone: "Europe/Lisbon",
+        approvalPolicy,
+        deviceAlerts: "important",
+        approvalTimeoutSeconds: approvalPolicy === "auto" ? 30 : null,
+      });
+    }
+    client.setQueryData(computerQuery().queryKey, {
+      state: hostname ? "online" : "none",
+      managed: false,
+      pairedAt: hostname ? Date.UTC(2026, 10, 1) : null,
+      error: null,
+      computer: hostname
+        ? {
+            agent: "pim-computer",
+            hostname,
+            platform: "linux",
+            arch: "x64",
+            user: "ada",
+            root: "/home/ada/pim",
+            browser: null,
+            screen: false,
+            desktop: false,
+            connectedAt: Date.UTC(2026, 10, 1),
+          }
+        : null,
+    });
+    return client;
+  }
+
+  const confirm = (
+    trigger: Trigger,
+    action: "resume" | "delete",
+    client: QueryClient,
+  ) =>
+    render(
+      () => (
+        <ConfirmAction
+          trigger={trigger}
+          action={action}
+          onConfirm={() => {}}
+          onCancel={() => {}}
+        />
+      ),
+      client,
+    );
+
+  /** The disabled attribute, not the `disabled:` styles every button has. */
+  const DISABLED = /\sdisabled=""/;
+
+  /** The opening tag of the button that reads `label`. */
+  const buttonFor = (html: string, label: string) =>
+    [...html.matchAll(/<button([^>]*)>([\s\S]*?)<\/button>/g)].find(
+      ([, , inner]) => textOf(inner ?? "") === label,
+    )?.[1];
+
+  it("discloses a script's access, computer, version and frequency, and keeps Turn on off until understood", async () => {
+    const trigger = pollFixture({
+      lifecycle: "paused",
+      revision: 7,
+      grant: { required: true, state: "current" },
+    });
+    const html = await confirm(trigger, "resume", withComputer("ada-laptop"));
+    const text = textOf(html);
+    expect(text).toContain(ACCESS);
+    expect(text).toContain("Computerada-laptop");
+    expect(text).toContain("Script versionRevision 7");
+    expect(text).toContain("FrequencyEvery 5 minutes");
+    expect(text).toContain("Approval policyAsks before external actions");
+    expect(text).toContain(UNDERSTAND);
+    // The disclosure and the box come before the action they gate.
+    expect(text.indexOf(ACCESS)).toBeLessThan(text.indexOf(UNDERSTAND));
+    expect(text.indexOf(UNDERSTAND)).toBeLessThan(text.lastIndexOf("Turn on"));
+    const box = html.match(/<input[^>]*type="checkbox"[^>]*>/)?.[0];
+    expect(box).toContain("required");
+    expect(box).not.toMatch(/\schecked/);
+    expect(buttonFor(html, "Turn on")).toMatch(DISABLED);
+    expect(buttonFor(html, "Cancel")).not.toMatch(DISABLED);
+  });
+
+  it("discloses each watch's frequency from its own source", async () => {
+    const client = withComputer("ada-laptop");
+    const cases: [Trigger["source"], string][] = [
+      [
+        { kind: "stream", command: "tail -f log", cwd: null },
+        "Each time the script prints a line",
+      ],
+      [
+        { kind: "process", handle: "proc_1", expiresAt: Date.UTC(2026, 10, 9) },
+        "Once, when the process exits",
+      ],
+      [
+        {
+          kind: "file",
+          path: "/home/ada/inbox",
+          events: ["created"],
+          recursive: false,
+        },
+        "Each time /home/ada/inbox changes",
+      ],
+    ];
+    for (const [source, frequency] of cases) {
+      const html = await confirm(
+        pollFixture({ lifecycle: "draft", source, condition: null }),
+        "resume",
+        client,
+      );
+      expect(textOf(html)).toContain(ACCESS);
+      expect(textOf(html)).toContain(`Frequency${frequency}`);
+      expect(buttonFor(html, "Turn on")).toMatch(DISABLED);
+    }
+  });
+
+  it("says the computer isn't reported rather than naming one", async () => {
+    const html = await confirm(
+      pollFixture({ lifecycle: "paused" }),
+      "resume",
+      withComputer(null),
+    );
+    expect(textOf(html)).toContain("ComputerNot reported by Pim yet");
+  });
+
+  it("says it asks first only where the approval policy waits for the person", async () => {
+    const approvals = async (policy: ApprovalPolicy | null) =>
+      textOf(
+        await confirm(
+          pollFixture({ lifecycle: "paused" }),
+          "resume",
+          withComputer("ada-laptop", policy),
+        ),
+      );
+    const auto = await approvals("auto");
+    expect(auto).toContain("Approval policyApprove it if I don't answer");
+    expect(auto).not.toContain("Asks before external actions");
+    const majordomo = await approvals("majordomo");
+    expect(majordomo).toContain("Approval policyMy majordomo decides");
+    expect(majordomo).not.toContain("Asks before external actions");
+    const unread = await approvals(null);
+    expect(unread).not.toContain("Approval policy");
+    expect(unread).not.toContain("Asks before external actions");
+    // The rest of the disclosure, and its box, stay whatever the policy.
+    for (const text of [auto, majordomo, unread]) {
+      expect(text).toContain(ACCESS);
+      expect(text).toContain(UNDERSTAND);
+    }
+  });
+
+  it("asks nothing more of a time trigger, or of deleting a computer source", async () => {
+    const client = withComputer("ada-laptop");
+    const time = await confirm(triggerFixture(), "resume", client);
+    expect(textOf(time)).not.toContain(ACCESS);
+    expect(time).not.toContain('type="checkbox"');
+    expect(buttonFor(time, "Turn on")).not.toMatch(DISABLED);
+    const deleting = await confirm(
+      pollFixture({ lifecycle: "paused" }),
+      "delete",
+      client,
+    );
+    expect(textOf(deleting)).not.toContain(UNDERSTAND);
+    expect(buttonFor(deleting, "Delete")).not.toMatch(DISABLED);
   });
 });
 

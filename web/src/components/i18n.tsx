@@ -1359,6 +1359,18 @@ const translations = {
       "Triggers on your computer are off in this space, so grant requests can't be decided here.",
     triggerComputerAccess:
       "Commands run on your computer as the user who runs pim-computer, with all of that user's access to your files and accounts. They aren't sandboxed.",
+    triggerComputerScriptAccess:
+      "Runs a script as your computer user. It can access anything that user can.",
+    triggerComputerName: "Computer",
+    triggerScriptVersion: "Script version",
+    triggerFrequency: "Frequency",
+    triggerFrequencyStream: "Each time the script prints a line",
+    triggerFrequencyProcess: "Once, when the process exits",
+    triggerFrequencyFile: "Each time {path} changes",
+    triggerApprovalPolicy: "Approval policy",
+    triggerAsksBeforeExternal: "Asks before external actions",
+    triggerUnderstandComputerAccess:
+      "I understand this script has my computer user's access",
     triggerPolicies: "How it runs",
     triggerLateness: "Lateness",
     triggerLatenessOnce:
@@ -2910,6 +2922,18 @@ const translations = {
       "Los disparadores en tu computadora están desactivados en este espacio, así que aquí no se pueden decidir solicitudes de permiso.",
     triggerComputerAccess:
       "Los comandos se ejecutan en tu computadora como el usuario que ejecuta pim-computer, con todo el acceso de ese usuario a tus archivos y cuentas. No están aislados.",
+    triggerComputerScriptAccess:
+      "Ejecuta un script como tu usuario de la computadora. Puede acceder a todo lo que ese usuario puede.",
+    triggerComputerName: "Computadora",
+    triggerScriptVersion: "Versión del script",
+    triggerFrequency: "Frecuencia",
+    triggerFrequencyStream: "Cada vez que el script imprime una línea",
+    triggerFrequencyProcess: "Una vez, cuando termina el proceso",
+    triggerFrequencyFile: "Cada vez que cambia {path}",
+    triggerApprovalPolicy: "Política de aprobación",
+    triggerAsksBeforeExternal: "Pregunta antes de acciones externas",
+    triggerUnderstandComputerAccess:
+      "Entiendo que este script tiene el acceso de mi usuario de la computadora",
     triggerPolicies: "Cómo se ejecuta",
     triggerLateness: "Retraso",
     triggerLatenessOnce:

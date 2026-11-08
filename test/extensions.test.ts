@@ -109,8 +109,8 @@ describe("extensions", () => {
 		const forgotten = (await post("/memory/log", { text: "Lives in Lisbon", scope: "everyone" })).body;
 		await api(`/memory/log/${forgotten.id}`, { method: "DELETE" });
 
-		// Pim's starters, while the utility model has nothing to suggest.
-		expect(await suggestions(chat)).toEqual(["What can you do?", "Plan my week"]);
+		// Nothing to suggest while the utility model can't write them: starters wouldn't fit a chat under way.
+		expect(await suggestions(chat)).toEqual([]);
 		const coaching = await widgetsShown(chat, builtIn);
 		expect(coaching.map((shown) => shown.id)).toEqual(builtIn);
 		const [scheduled] = widget(coaching, "pim.schedule/upcoming").items;
@@ -130,7 +130,7 @@ describe("extensions", () => {
 		expect(widget(home, "pim.schedule/upcoming").items).toEqual([]);
 		expect(widget(home, "pim.memory/recent").items.map((item: { title: string }) => item.title)).toEqual(["Saving for a new car", "Prefers morning runs"]);
 		const mine = ((await api("/agents")).body.agents as Agent[]).find((agent) => agent.majordomo)!;
-		expect((await suggestions(ROOT, "es"))[0]).toBe("¿Qué puedes hacer?");
+		expect(await suggestions((await post("/sessions", { agent: mine.id })).body.id, "es")).toEqual(["¿Qué puedes hacer?", "Planea mi semana"]);
 	});
 
 	it("suggests what to say next in a chat from that chat and memory, writing them again only when that changes", async () => {

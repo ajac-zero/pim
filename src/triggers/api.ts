@@ -466,12 +466,17 @@ export class TriggerApi {
 		return trigger;
 	}
 
-	/** A trigger the actor may change: not deleted, and not a shadow its schedule or watch still owns. */
+	/** A trigger the actor may change: not deleted, and not a shadow, which only the migration changes, whichever side owns it. */
 	#changeable(actor: TriggerActor, id: unknown): Trigger {
 		const trigger = this.#visible(actor, id);
 		if (trigger.lifecycle === "deleted") throw new TriggerApiError(409, "trigger_deleted", "The trigger was deleted");
-		if (migrationRecordOf(this.#sql, trigger.id)?.phase === "shadow") {
-			throw new TriggerApiError(409, "owned_elsewhere", "A schedule or watch still delivers this trigger's work; it changes only by rolling the migration back");
+		const record = migrationRecordOf(this.#sql, trigger.id);
+		if (record?.phase === "shadow") {
+			throw new TriggerApiError(
+				409,
+				"owned_elsewhere",
+				record.owner === "trigger" ? "This trigger took over a schedule or watch; it changes only by cutting the migration back or rolling it back" : "A schedule or watch still delivers this trigger's work; it changes only by rolling the migration back",
+			);
 		}
 		return trigger;
 	}
@@ -598,7 +603,7 @@ export class TriggerApi {
 			schedule,
 			capability: { status: capability.status, delivers: capability.status === "available", reason: capability.reason },
 			grant: { required: runsOnComputer(spec.source), state: grant },
-			migration: record === null ? null : { kind: record.kind, legacyId: record.legacyId, owner: record.owner, phase: record.phase, enableable: record.owner === "trigger" },
+			migration: record === null ? null : { kind: record.kind, legacyId: record.legacyId, owner: record.owner, phase: record.phase, enableable: record.owner === "trigger", ownerSince: record.ownerSince },
 			createdAt: trigger.createdAt,
 			updatedAt: trigger.updatedAt,
 		};

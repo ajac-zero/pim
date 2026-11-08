@@ -1162,13 +1162,15 @@ export type Trigger = {
     reason: string | null;
   };
   grant: { required: boolean; state: TriggerGrantState };
-  /** A draft shadow of a schedule or connector watch that still owns it. */
+  /** A shadow of a schedule or connector watch: owned by it, or, once cut over, owning its work. It changes only through the migration while its phase is `shadow`. */
   migration: {
     kind: "schedule" | "watch";
     legacyId: string;
     owner: "legacy" | "trigger";
     phase: string;
     enableable: boolean;
+    /** When the owner last changed; null while it never did. */
+    ownerSince: number | null;
   } | null;
   createdAt: number;
   updatedAt: number;

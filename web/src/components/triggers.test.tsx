@@ -272,6 +272,7 @@ describe("a trigger's page", () => {
         owner: "legacy",
         phase: "shadow",
         enableable: false,
+        ownerSince: null,
       },
     });
     const client = clientWith();
@@ -292,6 +293,39 @@ describe("a trigger's page", () => {
     );
     expect(actions).toContain("Test");
     for (const action of ["Turn on", "Edit", "Pause", "Delete"]) {
+      expect(actions).not.toContain(action);
+    }
+  });
+
+  it("marks a shadow that took its schedule over as running it, still changed only through the migration", async () => {
+    const takenOver = triggerFixture({
+      lifecycle: "enabled",
+      migration: {
+        kind: "schedule",
+        legacyId: "s1",
+        owner: "trigger",
+        phase: "shadow",
+        enableable: true,
+        ownerSince: 1_700_000_000_000,
+      },
+    });
+    const client = clientWith();
+    setRuns(client, takenOver.id, []);
+    const detail = textOf(
+      await render(() => <TriggerDetail trigger={takenOver} />, client),
+    );
+    expect(detail).toContain("Took over its schedule");
+    expect(detail).not.toContain("Runs through its schedule, not as a trigger");
+    const actions = textOf(
+      await render(() => (
+        <TriggerActions
+          trigger={takenOver}
+          onEdit={() => {}}
+          onReload={() => {}}
+        />
+      )),
+    );
+    for (const action of ["Edit", "Pause", "Delete"]) {
       expect(actions).not.toContain(action);
     }
   });

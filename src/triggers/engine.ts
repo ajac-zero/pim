@@ -12,8 +12,8 @@
 import { API_TABLES } from "./api";
 import { COMPUTER_TABLES } from "./computer";
 import { COORDINATOR_TABLES, TriggerCoordinator } from "./coordinator";
-import { HOST_TABLES, PimTriggerHost, type TriggerSpace } from "./host";
-import { MIGRATION_TABLES, ownedByLegacy } from "./migration";
+import { HOST_TABLES, PimTriggerHost, type TriggerSpace, type TriggerTakeover } from "./host";
+import { MIGRATION_PRIVATE_TABLES, MIGRATION_TABLES, ownedByLegacy } from "./migration";
 import { type AuthorizationRequest, type AuthorizationVerdict, TRIGGER_TABLES, TriggerStore } from "./store";
 import { SUBSCRIPTION_PRIVATE_COLUMNS, SUBSCRIPTION_TABLES } from "./subscriptions";
 
@@ -52,6 +52,14 @@ export type TriggerEngineOptions = {
 	 */
 	readonly authorize?: (request: AuthorizationRequest) => AuthorizationVerdict;
 	readonly changed?: (id: string) => void;
+	/**
+	 * Where a connector watch may be, or has been, handed to its trigger
+	 * (./migration.ts), and only there: the coordinator hands connector
+	 * events on, and the host submits a trigger that took over a schedule
+	 * or watch as the schedule or watch did.
+	 */
+	readonly connectorEvents?: boolean;
+	readonly takeover?: TriggerTakeover;
 };
 
 /**
@@ -63,8 +71,9 @@ export type TriggerEngineOptions = {
  * and grants (./computer.ts), which only a gate nothing sets makes, and
  * the records of schedules and watches moved to shadow triggers
  * (./migration.ts), which hold no secret, and the API's creation keys
- * (./api.ts), which are digests. Read only: it makes no table, and
- * builds nothing. Null when the space has none of the tables.
+ * (./api.ts), which are digests. What a cut-over watch's events carried
+ * (`MIGRATION_PRIVATE_TABLES`) is not in it. Read only: it makes no table,
+ * and builds nothing. Null when the space has none of the tables.
  */
 export function triggerHistory(sql: SqlStorage): Record<string, Record<string, SqlStorageValue>[]> | null {
 	const existing = new Set(
@@ -73,7 +82,9 @@ export function triggerHistory(sql: SqlStorage): Record<string, Record<string, S
 			.toArray()
 			.map((row) => String(row.name)),
 	);
-	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES, ...COMPUTER_TABLES, ...MIGRATION_TABLES, ...API_TABLES].filter((table) => existing.has(table));
+	const tables = [...ENGINE_TABLES, ...SUBSCRIPTION_TABLES, ...COMPUTER_TABLES, ...MIGRATION_TABLES, ...API_TABLES].filter(
+		(table) => existing.has(table) && !(MIGRATION_PRIVATE_TABLES as readonly string[]).includes(table),
+	);
 	if (tables.length === 0) return null;
 	return Object.fromEntries(
 		tables.map((table) => {
@@ -90,9 +101,12 @@ export class TriggerEngine {
 	readonly host: PimTriggerHost;
 	/** What the host may do in the space. */
 	readonly space: TriggerSpace;
+	/** Whether the coordinator hands connector events on, as it was made. */
+	readonly connectorEvents: boolean;
 
 	constructor(sql: SqlStorage, options: TriggerEngineOptions) {
 		this.space = options.space;
+		this.connectorEvents = options.connectorEvents === true;
 		// No `authorize` but where computer triggers are on: elsewhere no computer source can be enabled, and none's occurrence is handed on.
 		const computer = options.authorize ? { authorize: options.authorize } : {};
 		// A trigger made from a schedule or watch that still delivers its work is never enabled (./migration.ts).
@@ -103,7 +117,7 @@ export class TriggerEngine {
 			...computer,
 			...(options.changed ? { changed: options.changed } : {}),
 		});
-		this.host = new PimTriggerHost(sql, options.space);
+		this.host = new PimTriggerHost(sql, options.space, Date.now, options.takeover ?? null);
 		this.coordinator = new TriggerCoordinator(sql, {
 			store: this.store,
 			host: this.host,
@@ -111,6 +125,7 @@ export class TriggerEngine {
 			now: options.now,
 			maxRunning: ENGINE_MAX_RUNNING,
 			...(options.authorize ? { computerEvents: true, authorize: options.authorize } : {}),
+			...(options.connectorEvents ? { connectorEvents: true } : {}),
 		});
 	}
 

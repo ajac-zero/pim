@@ -1281,6 +1281,10 @@ const translations = {
       "Owned by its schedule, which still runs this work. This is a copy kept for moving to triggers later: it can't be turned on, changed or deleted here.",
     triggerOwnedByWatch:
       "Owned by its connector watch, which still runs this work. This is a copy kept for moving to triggers later: it can't be turned on, changed or deleted here.",
+    triggerTookOverSchedule:
+      "Took over its schedule, which now skips what this trigger runs. It changes only by moving it back: it can't be changed, paused or deleted here.",
+    triggerTookOverWatch:
+      "Took over its connector watch, whose events now come here. It changes only by moving it back: it can't be changed, paused or deleted here.",
     triggerOnceAt: "Once, at {date}",
     triggerCronIn: "On the schedule {expression}, in {timeZone}",
     triggerEvery: "Every {duration}",
@@ -2730,6 +2734,10 @@ const translations = {
       "Pertenece a su programación, que sigue ejecutando este trabajo. Es una copia guardada para pasar a disparadores más adelante: aquí no se puede activar, cambiar ni eliminar.",
     triggerOwnedByWatch:
       "Pertenece a su vigilancia de conector, que sigue ejecutando este trabajo. Es una copia guardada para pasar a disparadores más adelante: aquí no se puede activar, cambiar ni eliminar.",
+    triggerTookOverSchedule:
+      "Tomó el relevo de su programación, que ahora omite lo que ejecuta este disparador. Solo cambia al devolverlo: aquí no se puede cambiar, pausar ni eliminar.",
+    triggerTookOverWatch:
+      "Tomó el relevo de su vigilancia de conector, cuyos eventos ahora llegan aquí. Solo cambia al devolverlo: aquí no se puede cambiar, pausar ni eliminar.",
     triggerOnceAt: "Una vez, el {date}",
     triggerCronIn: "Según la programación {expression}, en {timeZone}",
     triggerEvery: "Cada {duration}",

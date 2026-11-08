@@ -703,12 +703,14 @@ describe("keeping connector events' subscriptions (an inert manager)", () => {
 		});
 	});
 
-	it("is constructed nowhere in Pim", () => {
+	it("is constructed nowhere in Pim; the ingress adapter only in Pim's events route, for a watch a trigger took over", () => {
 		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
-		const users = Object.entries(files)
-			.filter(([path]) => path !== "../src/triggers/subscriptions.ts")
-			.filter(([, source]) => /ConnectorSubscriptionManager|new ConnectorIngress\b/.test(source as string))
-			.map(([path]) => path);
-		expect(users).toEqual([]);
+		const users = (pattern: RegExp) =>
+			Object.entries(files)
+				.filter(([path]) => path !== "../src/triggers/subscriptions.ts")
+				.filter(([, source]) => pattern.test(source as string))
+				.map(([path]) => path);
+		expect(users(/ConnectorSubscriptionManager/)).toEqual([]);
+		expect(users(/new ConnectorIngress\b/)).toEqual(["../src/pim.ts"]);
 	});
 });

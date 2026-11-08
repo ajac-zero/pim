@@ -381,7 +381,7 @@ describe("the computer", () => {
 
 	it("ignores triggers' messages, as before, where computer triggers are off, even in a space whose triggers are on, and answers them only behind the gate", async () => {
 		expect(computerTriggersAllowed(env)).toBe(false);
-		expect(await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine())).toBe(true);
+		await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine());
 		const answered: string[] = [];
 		const listen = (event: MessageEvent) => {
 			if (String(event.data).startsWith(TRIGGERS_ENVELOPE)) answered.push(String(event.data));
@@ -439,7 +439,7 @@ describe("the computer", () => {
 			await policy("explicit");
 			await policy(null);
 			expect(await offeredTools()).toContain("trigger_computer_grant");
-			expect(await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine())).toBe(true);
+			await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine());
 			expect(await runInDurableObject(agent(), (pim: Pim) => pim.triggerEngine()!.store.create({ id: "syslog", spec }))).toMatchObject({ ok: true, trigger: { lifecycle: "draft" } });
 			computer.socket.addEventListener("message", listen);
 			computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId, connectionId: "connection-3", lastEpoch: 1, pending: 0 })}}`);

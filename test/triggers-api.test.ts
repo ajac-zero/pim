@@ -1,4 +1,5 @@
 import type { Message } from "@earendil-works/pi-ai";
+import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -6,14 +7,14 @@ import { guestRequest } from "../src/accounts";
 import type { Pim } from "../src/pim";
 import { API_TABLES } from "../src/triggers/api";
 import { COMPUTER_TRIGGERS_VARIABLE } from "../src/triggers/computer";
-import { ENGINE_KEY, ENGINE_LISTED_KEY, ENGINE_SPACES_VARIABLE, ENGINE_VARIABLE, engineAllowed } from "../src/triggers/engine";
+import { ENGINE_KEY } from "../src/triggers/engine";
 import { MIGRATION_VARIABLE } from "../src/triggers/migration";
 import { TRIGGER_TOOLS, TRIGGERS_EXTENSION } from "../src/triggers/tools";
 import { apiUrl, messagesOf, OWNER, post, ROOT, say, settled, TOKEN, toolUse } from "./helpers";
 import { faux, triggerClock } from "./worker";
 
-// Triggers' public API, behind the engine's gate: the HTTP routes and the agents' tools over one space's real SQLite,
-// with the faux model in place of a real one. Only this file's space is opted in, and only after the gate-off checks.
+// Triggers' public API: the HTTP routes and the agents' tools over one space's real SQLite, with the faux model in place
+// of a real one. The tests' space was provisioned after it started, so its triggers are on only once the tests turn them on.
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -142,10 +143,10 @@ describe("triggers' API where triggers are off", () => {
 	});
 });
 
-describe("triggers' API behind the gate", () => {
+describe("triggers' API where triggers are on", () => {
 	let boss = "";
 	beforeAll(async () => {
-		expect(await inSpace((pim) => pim.enableTriggerEngine())).toBe(true);
+		await inSpace((pim) => pim.enableTriggerEngine());
 		boss = await majordomo();
 	});
 	afterAll(async () => {
@@ -554,20 +555,7 @@ describe("triggers' API behind the gate", () => {
 		}
 	});
 
-	it("is a neutral 404 again where the deployment's gate is off, and its tools go when the space is turned off", async () => {
-		await inSpace(async (pim) => {
-			const own = ownEnv(pim);
-			delete own[ENGINE_VARIABLE];
-			expect(engineAllowed(own)).toBe(false);
-		});
-		try {
-			const answered = await call("/triggers");
-			expect({ status: answered.status, text: answered.text }).toEqual(NOT_FOUND);
-		} finally {
-			await inSpace((pim) => {
-				ownEnv(pim)[ENGINE_VARIABLE] = "internal";
-			});
-		}
+	it("is a neutral 404 again, and its tools go, when the space's triggers are turned off", async () => {
 		expect((await call("/triggers")).status).toBe(200);
 		await inSpace((pim) => pim.disableTriggerEngine());
 		expect({ status: (await call("/triggers")).status }).toEqual({ status: 404 });
@@ -577,116 +565,101 @@ describe("triggers' API behind the gate", () => {
 	});
 });
 
-describe("triggers' allowlist of spaces", () => {
-	/** Starts the space again as a deploy that sets the gate and the allowlist so does (undefined: unset); the variables stay so until changed again. */
-	const startWith = (gate: string | undefined, spaces: string | undefined) =>
-		inSpace(async (pim) => {
-			const own = ownEnv(pim);
-			for (const [name, value] of [
-				[ENGINE_VARIABLE, gate],
-				[ENGINE_SPACES_VARIABLE, spaces],
-			] as const) {
-				if (value === undefined) delete own[name];
-				else own[name] = value;
-			}
-			await pim.onStart();
-		});
-	/** The space's opt-in and whether the allowlist made it, as its meta holds them. */
-	const optedIn = () => inSpace((pim) => ({ engine: pim.store.meta(ENGINE_KEY) ?? null, listed: pim.store.meta(ENGINE_LISTED_KEY) ?? null }));
-	const OFF = { engine: null, listed: null };
-	const ON = { engine: "on", listed: "on" };
+describe("triggers as a space starts", () => {
+	const engine = () => inSpace((pim) => pim.store.meta(ENGINE_KEY) ?? null);
 	const neutral = async () => {
 		const answered = await call("/triggers");
 		return { status: answered.status, text: answered.text };
 	};
-	const makeTrigger = async () => {
-		const made = await call("/triggers", { method: "POST", body: { label: "Listed", instruction: "Write my brief.", source: cron(), enabled: true } });
+	const makeTrigger = async (label: string) => {
+		const made = await call("/triggers", { method: "POST", body: { label, instruction: "Write my brief.", source: cron(), enabled: true } });
 		expect(made.status).toBe(201);
 		return made.body.id as string;
 	};
 
-	afterAll(() =>
-		inSpace((pim) => {
-			ownEnv(pim)[ENGINE_VARIABLE] = "internal";
-			delete ownEnv(pim)[ENGINE_SPACES_VARIABLE];
-		}),
-	);
-
-	it("changes nothing where it is unset, empty, names someone else or nearly names this space, or the gate is off", async () => {
-		expect(await optedIn()).toEqual(OFF);
-		for (const spaces of [undefined, "", " , ", "o_someoneelse", `${OWNER}x`, OWNER.slice(0, -1), OWNER.toUpperCase(), `${OWNER};o_someoneelse`]) {
-			await startWith("internal", spaces);
-			expect([spaces, await neutral(), await optedIn()]).toEqual([spaces, NOT_FOUND, OFF]);
-		}
-		// Listed, but the deployment's gate is off: nothing either.
-		for (const gate of [undefined, "on"]) {
-			await startWith(gate, OWNER);
-			expect([gate, await neutral(), await optedIn()]).toEqual([gate, NOT_FOUND, OFF]);
-		}
-		// A space internal code opted in, and the list never did, is left as it is.
-		await startWith("internal", undefined);
-		expect(await inSpace((pim) => pim.enableTriggerEngine())).toBe(true);
-		await startWith("internal", undefined);
+	it("turns them on in a person's own space, with its routes and tools, and changes nothing when it starts again", async () => {
+		expect(await engine()).toBeNull();
+		expect(await neutral()).toEqual(NOT_FOUND);
+		await inSpace((pim) => pim.onStart());
+		expect(await engine()).toBe("on");
 		expect((await call("/triggers")).status).toBe(200);
-		expect(await optedIn()).toEqual({ engine: "on", listed: null });
-		await inSpace((pim) => pim.disableTriggerEngine());
+		const tools = await offeredTools();
+		for (const name of [...TRIGGER_TOOLS, "schedule_task"]) expect(tools).toContain(name);
+		const id = await makeTrigger("Started");
+		await inSpace((pim) => pim.onStart());
+		expect(await engine()).toBe("on");
+		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: { revision: 1, lifecycle: "enabled" } });
+		await call(`/triggers/${id}`, { method: "DELETE" });
 	});
 
-	it("never opts a guest's space in, even listed", async () => {
+	it("keeps what a space the old allowlist opted in has, as it was", async () => {
+		await inSpace((pim) => pim.disableTriggerEngine());
+		// As the allowlist left a space: on, and marked as the list's.
+		await inSpace((pim) => pim.enableTriggerEngine());
+		await inSpace((pim) => pim.store.setMeta("triggers:engine:listed", "on"));
+		const id = await makeTrigger("Listed");
+		const before = await call(`/triggers/${id}`);
+		await inSpace((pim) => pim.onStart());
+		expect(await engine()).toBe("on");
+		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: before.body });
+		expect(await inSpace((pim) => pim.exportData())).toContain(id);
+		// A new instance over the same storage, as after an eviction, builds the engine over what it had.
+		const rebuilt = await inSpace((pim) => {
+			const again = new (pim.constructor as new (ctx: DurableObjectState, env: unknown) => Pim)((pim as unknown as { ctx: DurableObjectState }).ctx, ownEnv(pim));
+			return again.triggerEngine()?.store.get(id)?.lifecycle ?? null;
+		});
+		expect(rebuilt).toBe("enabled");
+		await call(`/triggers/${id}`, { method: "DELETE" });
+	});
+
+	it("never turns them on in a guest's space, or in one not yet provisioned", async () => {
+		await inSpace((pim) => pim.disableTriggerEngine());
 		await inSpace((pim) => pim.store.setMeta("guest_bot", JSON.stringify({ bot: "b_0000000000000000", agent: pim.agents.majordomo().id, sharedAt: 1, owner: "o_admin", tools: [] })));
 		try {
-			await startWith("internal", OWNER);
+			await inSpace((pim) => pim.onStart());
+			expect(await engine()).toBeNull();
 			expect(await neutral()).toEqual(NOT_FOUND);
-			expect(await optedIn()).toEqual(OFF);
 		} finally {
 			await inSpace((pim) => pim.store.deleteMeta("guest_bot"));
 		}
+		// Started before anyone owns it, as at registration.
+		const ownerId = `unprovisioned-${crypto.randomUUID()}`;
+		await getAgentByName(env.Pim, ownerId);
+		const unprovisioned = env.Pim.getByName(ownerId);
+		const before = await runInDurableObject(unprovisioned, async (pim: Pim) => {
+			await pim.onStart();
+			return { engine: pim.store.meta(ENGINE_KEY) ?? null, built: pim.triggerEngine(), tables: sqlOf(pim).exec("SELECT name FROM sqlite_master WHERE name LIKE 'pim_trigger%'").toArray() };
+		});
+		expect(before).toEqual({ engine: null, built: null, tables: [] });
+		// Provisioned, its next start turns them on.
+		const after = await runInDurableObject(unprovisioned, async (pim: Pim) => {
+			await pim.provision({ ownerId, username: "unprovisioned" });
+			await pim.onStart();
+			return pim.triggerEngine() !== null;
+		});
+		expect(after).toBe(true);
 	});
 
-	it("opts the listed space in as it starts, with its routes and tools, and only once", async () => {
-		await startWith("internal", ` o_someoneelse ,${OWNER} `);
-		expect(await optedIn()).toEqual(ON);
-		expect((await call("/triggers")).status).toBe(200);
+	it("starts the space when turning them on fails, without them, and turns them on at the next start", async () => {
+		const started = await inSpace(async (pim) => {
+			await pim.disableTriggerEngine();
+			const failing = vi.spyOn(pim, "wakeTriggers").mockRejectedValue(new Error("No alarm today"));
+			try {
+				await pim.onStart();
+			} finally {
+				failing.mockRestore();
+			}
+			return { engine: pim.store.meta(ENGINE_KEY) ?? null, built: pim.triggerEngine() !== null, tools: pim.registry.snapshot().extension(TRIGGERS_EXTENSION) !== undefined };
+		});
+		expect(started).toEqual({ engine: null, built: false, tools: false });
+		expect(await neutral()).toEqual(NOT_FOUND);
+		// The space answers as ever, and its chats go on.
+		expect((await call("/")).status).toBe(200);
 		const tools = await offeredTools();
-		for (const name of TRIGGER_TOOLS) expect(tools).toContain(name);
-		const id = await makeTrigger();
-		// Starting again changes nothing.
-		await startWith("internal", OWNER);
-		expect(await optedIn()).toEqual(ON);
-		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: { revision: 1, lifecycle: "enabled" } });
-	});
-
-	it("takes the engine away, keeping everything, when the gate goes or the space leaves the list", async () => {
-		await startWith("internal", OWNER);
-		const id = await makeTrigger();
-		const gone = async () => {
-			expect(await neutral()).toEqual(NOT_FOUND);
-			const tools = await offeredTools();
-			for (const name of TRIGGER_TOOLS) expect(tools).not.toContain(name);
-			expect(await inSpace((pim) => pim.exportData())).toContain(id);
-		};
-
-		// The gate off: no engine, while the space stays opted in for when it is back.
-		await startWith(undefined, OWNER);
-		await gone();
-		expect(await optedIn()).toEqual(ON);
-		await startWith("internal", OWNER);
-		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: { revision: 1, lifecycle: "enabled" } });
-
-		// Off the list, with the gate on: turned off at the next start.
-		await startWith("internal", "o_someoneelse");
-		await gone();
-		expect(await optedIn()).toEqual(OFF);
-		expect(await inSpace((pim) => pim.registry.snapshot().extension(TRIGGERS_EXTENSION))).toBeUndefined();
-		// Listed again, it has what it had.
-		await startWith("internal", OWNER);
-		expect(await call(`/triggers/${id}`)).toMatchObject({ status: 200, body: { revision: 1, lifecycle: "enabled" } });
-
-		// Off the list while the gate is off: nothing changes until the gate is back, and then it is turned off.
-		await startWith(undefined, undefined);
-		expect(await optedIn()).toEqual(ON);
-		await startWith("internal", undefined);
-		await gone();
-		expect(await optedIn()).toEqual(OFF);
+		expect(tools).toContain("schedule_task");
+		for (const name of TRIGGER_TOOLS) expect(tools).not.toContain(name);
+		await inSpace((pim) => pim.onStart());
+		expect(await engine()).toBe("on");
+		expect((await call("/triggers")).status).toBe(200);
 	});
 });

@@ -133,7 +133,7 @@ Then set `PIM_PUBLIC_URL` in the dashboard as above (from the CLI, `pnpm wrangle
 
 A variable Pim can't read counts as its default, except a limit or a cap on accounts, which counts as 0, so a typo never lifts it. Settings → Deployment says which and why.
 
-Triggers are early and off everywhere. To give them to chosen people only, set two variables, which Settings → Deployment doesn't show: `PIM_TRIGGERS_ENGINE` to `internal`, and `PIM_TRIGGERS_ENGINE_SPACES` to their owner ids, comma-separated (`o_…`, each person's `ownerId` in `GET /api/account`; the admin sees everyone's in `GET /api/admin/accounts`). Each listed space gets triggers when it next starts, which saving the variables makes happen; taking an id off the list, or unsetting either variable, takes them away again and keeps what they recorded. Guests never get them. Leave `PIM_TRIGGERS_COMPUTER`, `PIM_TRIGGERS_MIGRATION` and `PIM_TRIGGERS_CUTOVER` unset. See [the allowlist](triggers.md#in-pim-behind-a-gate).
+Time triggers are on for everyone but guests, with nothing to set: each person's space turns them on as it starts and when they register. Leave `PIM_TRIGGERS_COMPUTER`, `PIM_TRIGGERS_MIGRATION` and `PIM_TRIGGERS_CUTOVER` unset. See [triggers in Pim](triggers.md#in-pim).
 
 Attach your domain in the dashboard too (Workers & Pages → `pim` → Settings → Domains & Routes): deploys leave it alone.
 
@@ -734,5 +734,5 @@ To add tools every agent gets, apps, or widgets, write an extension and list it 
 - Computers that Pim starts for people who don't bring one.
 - Extensions beyond MCP: full pi extensions that Pim builds into itself by redeploying its own Worker.
 - Secret placeholders, so approved requests can use credentials the model never sees.
-- Triggers, which will replace schedules and watches. A review-only foundation is in `src/triggers/`, with an engine for time triggers that Pim builds only in a space opted in where the deployment allows it, which none does; nothing people use reaches it yet ([triggers.md](triggers.md)).
+- Triggers in place of schedules and watches. Time triggers are on in every person's own space, beside schedules and watches; moving those to triggers, and connector and computer sources, are built in `src/triggers/` behind gates no deployment sets ([triggers.md](triggers.md)).
 - Semantic recall. `recall` is a regular expression over the log, so it finds words, not meanings.

@@ -167,6 +167,8 @@ describe("registration", () => {
 		const account = await browser.json("/api/account");
 		expect(account.body).toMatchObject({ username: "alice", role: "member", status: "active", ownerId: expect.stringMatching(/^o_[0-9a-z]{26}$/) });
 		expect((await browser.json("/api/settings")).body).toMatchObject({ timeZone: "Europe/Lisbon", approvalPolicy: "auto" });
+		// Triggers are on from the start, before the space ever starts again.
+		expect((await browser.json("/api/triggers?limit=1")).body).toEqual({ triggers: [], nextCursor: null });
 		// The link works once.
 		expect(await addPasskey(new Browser(), await Authenticator.make(), { setup })).toBe(401);
 	});
@@ -2221,6 +2223,8 @@ describe("bots", () => {
 		expect((await register("bot-nobody", { bot: "b_0000000000000000" })).status).toBe(404);
 		const guest = await person("bot-guest", { bot: botId });
 		expect(guest.registered.role).toBe("guest");
+		// A guest's space never has triggers.
+		expect(await runInDurableObject(env.Pim.getByName(guest.ownerId), (pim: Pim) => pim.triggerEngine())).toBeNull();
 		const bot = (await guest.browser.json("/api/bot")).body;
 		expect(bot).toMatchObject({ bot: { id: botId, name: "Spanish tutor", dailyMessages: 2 }, agent: expect.any(String) });
 		expect(JSON.stringify(bot)).not.toContain("Answer only in Spanish");

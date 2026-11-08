@@ -90,6 +90,9 @@ describe('template validation', () => {
 		const net = fake.calls.find((x) => x.path === '/networks/create').body
 		assert.equal(net.Internal, true)
 		assert.ok(fake.proxyNet.has('pim-net-abc-1'))
+		// Without the alias the proxy's name does not resolve inside the session network.
+		const connect = fake.calls.find((x) => x.path === '/networks/pim-net-abc-1/connect').body
+		assert.deepEqual(connect, { Container: 'egress-proxy', EndpointConfig: { Aliases: ['egress-proxy'] } })
 		assert.deepEqual(Object.values(proxy.map), [['github.com', '*.npmjs.org']])
 	})
 })

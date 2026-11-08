@@ -6,8 +6,10 @@
  * space must do", asks. The runtime's `hello` is checked against the runtime
  * id the stored token's digest names; the space keeps its epoch with that
  * runtime durably; it reconciles the enabled computer triggers that have a
- * current grant, with a lease it renews; it takes observations into
- * `TriggerStore` with `admit` and gaps with `recordGap`, and acknowledges
+ * current grant, with a lease it renews from the space's wake (`renew`,
+ * `renewAt`), and keeps its link with the runtime durably, so an eviction
+ * doesn't lose it; it takes observations into `TriggerStore` with `admit`
+ * and gaps with `recordGap`, and acknowledges
  * each only once that write has returned from its transaction; and it reads
  * everything else the runtime says as health, never as an observation.
  *
@@ -15,16 +17,16 @@
  * per grant, named by the approval it came from, and a grant is current
  * only while that approval was approved by the person themselves (not a
  * timeout, an "always approve" or the majordomo), for exactly one source of
- * one trigger on one computer, and the record isn't revoked. Nothing files
- * such approvals yet, and nothing here asks for one.
+ * one trigger on one computer, and the record isn't revoked. The person is
+ * asked through `trigger_computer_grant` (./grant-action.ts).
  *
  * Behind a gate. Pim builds this only when `PIM_TRIGGERS_COMPUTER` is
  * `internal`, which nothing sets, in a space whose trigger engine is on
  * (./engine.ts). Off, nothing of it is built, no table is made, and a
  * triggers message from the computer goes where it went before, to
- * `Computer.receive`, which ignores it. Computer triggers' occurrences are
- * taken into the store's outbox, and nothing hands them on yet: the
- * coordinator hands on only time firings and connectors' events.
+ * `Computer.receive`, which ignores it. Behind the gate, the engine's
+ * coordinator hands computer triggers' occurrences to their agent
+ * (`computerEvents`), checking their grant again at each step.
  */
 
 import { createHash } from "node:crypto";
@@ -50,7 +52,7 @@ export const TRIGGERS_ENVELOPE = '{"type":"triggers","frame":';
 export const COMPUTER_GRANT_ACTION = "trigger_computer_source";
 
 /** Every table this makes, for the person's export and what a space still holds. */
-export const COMPUTER_TABLES = ["pim_trigger_computer_runtimes", "pim_trigger_computer_grants"] as const;
+export const COMPUTER_TABLES = ["pim_trigger_computer_runtimes", "pim_trigger_computer_grants", "pim_trigger_computer_links"] as const;
 
 export const COMPUTER_LIMITS = {
 	/** The lease each reconcile asks for, and the most the runtime takes. */
@@ -71,6 +73,16 @@ CREATE TABLE IF NOT EXISTS pim_trigger_computer_runtimes (
 	desired_digest TEXT,
 	updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_trigger_computer_links (
+	socket_id TEXT PRIMARY KEY,
+	runtime_id TEXT NOT NULL,
+	connection_id TEXT NOT NULL,
+	server_epoch INTEGER NOT NULL,
+	sent TEXT NOT NULL,
+	lease_until INTEGER NOT NULL,
+	renew_at INTEGER,
+	updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pim_trigger_computer_grants (
 	grant_ref TEXT PRIMARY KEY,
 	trigger_id TEXT NOT NULL,
@@ -82,7 +94,7 @@ CREATE TABLE IF NOT EXISTS pim_trigger_computer_grants (
 );
 `;
 
-type ComputerSource = PollSource | StreamSource | ProcessSource | FileSource;
+export type ComputerSource = PollSource | StreamSource | ProcessSource | FileSource;
 
 /** An id as the protocol takes it: printable ASCII other than `"` and `\`. */
 const IDENT = /^[\x21\x23-\x5b\x5d-\x7e]+$/;
@@ -256,7 +268,10 @@ export type ComputerTriggersOptions = {
 	readonly space: string;
 	/** The digest of the paired computer's token, as the space keeps it; null with none paired. */
 	readonly tokenDigest: () => string | null;
-	readonly setTimer: (ms: number, run: () => void) => () => void;
+	/** The computer's open socket with this id, if it is still open: what a link kept from before the Durable Object was evicted is found again by. */
+	readonly socket: (id: string) => TriggersSocket | undefined;
+	/** Told whenever `renewAt` may have changed, so the space's wake (an alarm) is set for it. */
+	readonly wake: () => void;
 	/** The lease each reconcile asks for: at most, and by default, 120 seconds. */
 	readonly leaseMs?: number;
 	/** The most bytes one reconcile may have; at most, and by default, 1 MiB. */
@@ -274,7 +289,12 @@ type Desired = {
 	readonly checkpoint: { readonly position: number; readonly cursor: string | null } | null;
 };
 
-/** One socket the runtime said `hello` on. */
+/**
+ * One socket the runtime said `hello` on. A link to the runtime the token
+ * names is kept in `pim_trigger_computer_links` as well as here, so a
+ * Durable Object evicted while the socket stays open finds it again, with
+ * its lease and when to renew it.
+ */
 type Link = {
 	readonly socket: TriggersSocket;
 	/** Null when its `hello` named another runtime: nothing of triggers is said on it. */
@@ -287,7 +307,8 @@ type Link = {
 	answer: { revision: number; parts: number; seen: Map<number, readonly { triggerId: string; generation: number; state: string }[]> } | null;
 	/** Until when the space takes observations on this socket: a lease counted from when the last reconcile answered in full was sent. */
 	leaseUntil: number;
-	renew: (() => void) | null;
+	/** When to send the desired set again, to renew the lease: a third of it after the last was sent. Null before the first. */
+	renewAt: number | null;
 };
 
 /** What a message from the computer says, read strictly; anything else is dropped. */
@@ -359,7 +380,7 @@ export class ComputerTriggers {
 			this.#hello(socket, read);
 			return true;
 		}
-		const link = this.#link;
+		const link = this.#restore();
 		if (!link || link.socket.id !== socket.id || link.runtimeId === null) return true;
 		switch (read.type) {
 			case "reconciled":
@@ -382,23 +403,44 @@ export class ComputerTriggers {
 
 	/** The socket closed: its triggers wait for the computer, and nothing more is sent on it. */
 	closed(socket: TriggersSocket): void {
-		const link = this.#link;
-		if (!link || link.socket.id !== socket.id) return;
-		link.renew?.();
-		this.#link = null;
-		if (link.runtimeId !== null) this.#setHealthAll("waiting_computer", null);
+		const kept = this.#sql.exec("DELETE FROM pim_trigger_computer_links WHERE socket_id = ?", socket.id).rowsWritten > 0;
+		const link = this.#link?.socket.id === socket.id ? this.#link : null;
+		if (link) this.#link = null;
+		if (!kept && !link) return;
+		if (kept || link?.runtimeId !== null) this.#setHealthAll("waiting_computer", null);
+		this.#options.wake();
 	}
 
-	/** Says nothing more on the current socket, and renews nothing: for turning triggers off. */
+	/** Says nothing more on any socket, and renews nothing: for turning triggers off. */
 	stop(): void {
-		this.#link?.renew?.();
 		this.#link = null;
+		this.#sql.exec("DELETE FROM pim_trigger_computer_links");
+		this.#options.wake();
 	}
 
 	/** Sends the desired set again on the current socket, as after a trigger or a grant changed. */
 	refresh(): void {
-		const link = this.#link;
+		const link = this.#restore();
 		if (link && link.runtimeId !== null) this.#reconcile(link);
+	}
+
+	/** When the lease on the current socket is next to be renewed (`renew`), or null with none to renew. */
+	renewAt(): number | null {
+		return this.#restore()?.renewAt ?? null;
+	}
+
+	/**
+	 * The space's wake: renews the lease on the current socket when it is
+	 * due, finding the socket again after an eviction. A wake that came after
+	 * the space's own lease lapsed says so (`reconnecting`) until the runtime
+	 * answers; the runtime, which stopped its observers when its lease ran
+	 * out, records the break as a gap before anything they see after it.
+	 */
+	renew(): void {
+		const link = this.#restore();
+		if (!link || link.runtimeId === null || link.renewAt === null || this.#options.now() < link.renewAt) return;
+		if (this.#options.now() >= link.leaseUntil) this.#setHealthAll("reconnecting", null);
+		this.#reconcile(link);
 	}
 
 	// What the runtime says.
@@ -407,16 +449,17 @@ export class ComputerTriggers {
 		if (!exactly(frame, ["protocol", "type", "runtimeId", "connectionId", "lastEpoch", "pending"])) return;
 		const { runtimeId, connectionId, lastEpoch, pending } = frame;
 		if (!ident(runtimeId) || !ident(connectionId) || !(lastEpoch === null || int(lastEpoch, 0)) || !int(pending, 0)) return;
-		this.#link?.renew?.();
 		this.#link = null;
+		this.#sql.exec("DELETE FROM pim_trigger_computer_links");
 		const expected = this.runtimeId();
 		if (expected === null || runtimeId !== expected) {
 			// Another computer's runtime, or a token since replaced: this socket's triggers are ignored.
-			this.#link = { socket, runtimeId: null, connectionId, epoch: 0, sent: [], answer: null, leaseUntil: 0, renew: null };
+			this.#link = { socket, runtimeId: null, connectionId, epoch: 0, sent: [], answer: null, leaseUntil: 0, renewAt: null };
+			this.#options.wake();
 			return;
 		}
 		const epoch = this.#options.transaction(() => this.#epochFor(runtimeId, lastEpoch));
-		const link: Link = { socket, runtimeId, connectionId, epoch, sent: [], answer: null, leaseUntil: 0, renew: null };
+		const link: Link = { socket, runtimeId, connectionId, epoch, sent: [], answer: null, leaseUntil: 0, renewAt: null };
 		this.#link = link;
 		this.#setHealthAll("reconnecting", null);
 		this.#reconcile(link);
@@ -439,6 +482,7 @@ export class ComputerTriggers {
 		const index = link.sent.findIndex((sent) => sent.revision === desiredRevision);
 		link.leaseUntil = Math.max(link.leaseUntil, link.sent[index]!.at + this.#leaseMs);
 		link.sent = link.sent.slice(index + 1);
+		this.#keep(link);
 		const answered = [...link.answer.seen.values()].flat();
 		link.answer = null;
 		for (const source of answered) {
@@ -481,6 +525,7 @@ export class ComputerTriggers {
 		const point = checkpoint as { position: number; cursor: string | null } | null;
 		let result: "accepted" | "duplicate" | "deferred" | "rejected";
 		let reason: string;
+		let occurred = false;
 		try {
 			const refusal = this.#refusal(link, triggerId, sourceId, generation);
 			if (refusal) {
@@ -491,6 +536,7 @@ export class ComputerTriggers {
 				const admission = this.#options.store.admit({ id: triggerId, generation, eventId, observedAt: occurredAt, payload: data, ...(point ? { checkpoint: point } : {}), gap: coalesced !== null });
 				result = ACK_RESULT[admission.status];
 				reason = admission.status;
+				occurred = admission.status === "accepted" && admission.occurrence !== null;
 			}
 		} catch (error) {
 			if (!(error instanceof TriggerValidationError)) return; // Not written: no ack, so the runtime sends it again.
@@ -498,6 +544,8 @@ export class ComputerTriggers {
 			reason = "invalid";
 		}
 		this.#ack(link, [{ sequence, eventId, result, reason, retryAfterMs: result === "deferred" ? RETRY_AFTER_MS : null }]);
+		// An occurrence to hand on: the space's wake comes for it.
+		if (occurred) this.#options.wake();
 	}
 
 	#gap(link: Link, frame: Frame): void {
@@ -572,11 +620,54 @@ export class ComputerTriggers {
 			leaseMs: this.#leaseMs,
 			sources,
 		});
-		link.renew?.();
-		link.renew = this.#options.setTimer(Math.floor(this.#leaseMs / 3), () => {
-			link.renew = null;
-			this.#reconcile(link);
-		});
+		link.renewAt = at + Math.floor(this.#leaseMs / 3);
+		this.#keep(link);
+		this.#options.wake();
+	}
+
+	/** Keeps the link as it stands now, for after an eviction. */
+	#keep(link: Link): void {
+		if (link.runtimeId === null || this.#link !== link) return;
+		this.#sql.exec(
+			`INSERT INTO pim_trigger_computer_links (socket_id, runtime_id, connection_id, server_epoch, sent, lease_until, renew_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (socket_id) DO UPDATE SET sent = excluded.sent, lease_until = excluded.lease_until, renew_at = excluded.renew_at, updated_at = excluded.updated_at`,
+			link.socket.id,
+			link.runtimeId,
+			link.connectionId,
+			link.epoch,
+			JSON.stringify(link.sent),
+			link.leaseUntil,
+			link.renewAt,
+			this.#options.now(),
+		);
+	}
+
+	/**
+	 * The current link: the one in memory, or, after an eviction, the one
+	 * kept, on its socket if that is still open. A kept link whose socket
+	 * has closed is forgotten, and its triggers wait for the computer.
+	 */
+	#restore(): Link | null {
+		if (this.#link) return this.#link;
+		const row = this.#sql.exec("SELECT * FROM pim_trigger_computer_links ORDER BY updated_at DESC LIMIT 1").toArray()[0];
+		if (!row) return null;
+		const socket = this.#options.socket(String(row.socket_id));
+		if (!socket) {
+			this.#sql.exec("DELETE FROM pim_trigger_computer_links");
+			this.#setHealthAll("waiting_computer", null);
+			return null;
+		}
+		this.#link = {
+			socket,
+			runtimeId: String(row.runtime_id),
+			connectionId: String(row.connection_id),
+			epoch: Number(row.server_epoch),
+			sent: JSON.parse(String(row.sent)) as { revision: number; at: number }[],
+			answer: null,
+			leaseUntil: Number(row.lease_until),
+			renewAt: row.renew_at === null ? null : Number(row.renew_at),
+		};
+		return this.#link;
 	}
 
 	/**

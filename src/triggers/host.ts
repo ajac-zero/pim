@@ -365,12 +365,17 @@ async function receiptOf(chatId: string, key: string): Promise<string> {
 
 /**
  * What the agent reads when a trigger fires: its instruction, and only when
- * it was due, or which connector's event it was, by name, id and time. An
- * event's contents are never kept, so they are never here.
+ * it was due, which connector's event it was, by name, id and time, or which
+ * kind of source on the person's computer saw something, with the event's id
+ * and time. What an event carried or an observer saw is never kept, so it is
+ * never here.
  */
 export function firingText(instruction: string, evidence: TriggerEvidence): string {
 	if (evidence.kind === "connector_event") {
 		return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(On ${evidence.event} from ${evidence.connectorId} at ${new Date(evidence.observedAt).toISOString()}, event ${evidence.eventId}. What the event carried isn't kept or passed on.)`;
+	}
+	if (evidence.kind === "computer_event") {
+		return `[Trigger "${evidence.label}" ${evidence.triggerId}] ${instruction}\n\n(On what its ${evidence.source} on the person's computer saw at ${new Date(evidence.observedAt).toISOString()}, event ${evidence.eventId}. What it saw isn't kept or passed on.)`;
 	}
 	const missed = evidence.older && evidence.older.count > 0 ? ` ${evidence.older.count} earlier ${evidence.older.count === 1 ? "firing" : "firings"} were missed and won't run.` : "";
 	const zone = evidence.schedule.schedule === "cron" ? ` (${evidence.schedule.timeZone})` : "";

@@ -7,7 +7,8 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
-import { COMPUTER_TRIGGERS_VARIABLE, computerTriggersAllowed, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
+import { COMPUTER_GRANT_ACTION, COMPUTER_TRIGGERS_VARIABLE, computerTriggersAllowed, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
+import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
 import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
@@ -419,6 +420,73 @@ describe("the computer", () => {
 			expect(state.storage.sql.exec("SELECT runtime_id, server_epoch FROM pim_trigger_computer_runtimes").toArray()).toEqual([{ runtime_id: runtimeIdOf(digest), server_epoch: 1 }]);
 			await pim.disableTriggerEngine();
 		});
+	});
+
+	it("asks the person, through an agent, to grant a trigger's source on the computer, records only their approval, and tells the computer of each change, behind the gate", async () => {
+		const runtimeId = runtimeIdOf(createHash("sha256").update(token).digest("hex"));
+		const own = () => runInDurableObject(agent(), (pim: Pim) => (pim as unknown as { env: Record<string, unknown> }).env);
+		// The approval policy changing rebuilds the tools that describe it, which is when the space notices the gate.
+		const policy = (approvalPolicy: string | null) => api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy }) });
+		const reconciles: { connectionId: string; serverEpoch: number; desiredRevision: number; sources: { triggerId: string; grant: { grantRef: string } }[] }[] = [];
+		const listen = (event: MessageEvent) => {
+			const data = String(event.data);
+			if (data.startsWith(TRIGGERS_ENVELOPE)) reconciles.push(JSON.parse(data).frame);
+		};
+		const source = { kind: "stream", command: "tail -F /var/log/syslog", cwd: null } as const;
+		const spec = { version: 1, owningAgentId: "majordomo", originChatId: "chat-1", label: "Syslog", instruction: "Tell me what it said.", destination: { type: "new_chat" }, source } as const;
+		(await own())[COMPUTER_TRIGGERS_VARIABLE] = "internal";
+		try {
+			await policy("explicit");
+			await policy(null);
+			expect(await offeredTools()).toContain("trigger_computer_grant");
+			expect(await runInDurableObject(agent(), (pim: Pim) => pim.enableTriggerEngine())).toBe(true);
+			expect(await runInDurableObject(agent(), (pim: Pim) => pim.triggerEngine()!.store.create({ id: "syslog", spec }))).toMatchObject({ ok: true, trigger: { lifecycle: "draft" } });
+			computer.socket.addEventListener("message", listen);
+			computer.socket.send(`${TRIGGERS_ENVELOPE}${JSON.stringify({ protocol: PROTOCOL, type: "hello", runtimeId, connectionId: "connection-3", lastEpoch: 1, pending: 0 })}}`);
+			// The link from before, still open, heard of the new draft; the new connection takes its place in the same durable epoch, as the space kept it.
+			await vi.waitFor(() => expect(reconciles.at(-1)).toMatchObject({ connectionId: "connection-3", serverEpoch: 1, sources: [] }));
+
+			// The agent asks; the person is asked exactly for this source on this computer, with no timeout to decide it for them.
+			let told: ReturnType<typeof lastToolResult> = { text: "", isError: false, images: [] };
+			faux.setResponses([
+				toolUse("trigger_computer_grant", { triggerId: "syslog" }),
+				(context) => {
+					told = lastToolResult(context.messages);
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			]);
+			const said = say("Watch my syslog.");
+			const approval = await pendingApproval();
+			expect(approval).toMatchObject({ action: COMPUTER_GRANT_ACTION, args: { space: OWNER, runtimeId, triggerId: "syslog", sourceId: "syslog#1", configHash: expect.any(String) }, expiresAt: null });
+			expect(approval.summary).toContain("`tail -F /var/log/syslog`");
+			expect((await post(`/approvals/${approval.id}/approve`)).body).toMatchObject({ status: "approved", result: expect.stringMatching(/^Granted: /) });
+			expect(await said).toMatchObject({ status: "done" });
+			expect(told.text).toContain("Granted: ");
+			const granted = await runInDurableObject(agent(), (pim: Pim) => pim.triggerEngine()!.store.get("syslog"));
+			expect(granted).toMatchObject({ revision: 2, spec: { authorizationRef: approval.id } });
+
+			// Enabled, the computer is told to run it, with its grant, and the space keeps a wake to renew the lease.
+			expect(await runInDurableObject(agent(), (pim: Pim) => pim.triggerEngine()!.store.setLifecycle({ id: "syslog", to: "enabled", expectedRevision: 2 }))).toMatchObject({ ok: true });
+			await vi.waitFor(() => expect(reconciles.at(-1)!.sources).toEqual([expect.objectContaining({ triggerId: "syslog", grant: expect.objectContaining({ grantRef: approval.id }) })]));
+			expect(await runInDurableObject(agent(), async (pim: Pim) => (await pim.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK).length)).toBeGreaterThan(0);
+
+			// Revoked, it is taken off the computer at once, and the trigger needs a grant again.
+			const before = reconciles.length;
+			expect(await runInDurableObject(agent(), (pim: Pim) => pim.revokeComputerGrant(approval.id))).toBe(true);
+			await vi.waitFor(() => expect(reconciles.length).toBeGreaterThan(before));
+			expect(reconciles.at(-1)!.sources).toEqual([]);
+			expect(await runInDurableObject(agent(), (pim: Pim) => pim.triggerEngine()!.store.get("syslog")!.health)).toBe("auth_required");
+		} finally {
+			computer.socket.removeEventListener("message", listen);
+			delete (await own())[COMPUTER_TRIGGERS_VARIABLE];
+			await policy("explicit");
+			await policy(null);
+			await runInDurableObject(agent(), async (pim: Pim) => {
+				pim.triggerEngine()?.store.remove({ id: "syslog" });
+				await pim.disableTriggerEngine();
+			});
+		}
+		expect(await offeredTools()).not.toContain("trigger_computer_grant");
 	});
 
 	it("is offline while it isn't connected, with the same tools", async () => {

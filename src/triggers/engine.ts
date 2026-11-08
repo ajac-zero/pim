@@ -41,8 +41,15 @@ export type TriggerEngineOptions = {
 	/** The triggers' clock. */
 	readonly now: () => number;
 	readonly space: TriggerSpace;
-	/** The check of computer sources' grants (./computer.ts), only where computer triggers are on; without it no computer source can be enabled. */
+	/**
+	 * Where computer triggers are on (./computer.ts), and only there: the
+	 * check of computer sources' grants, without which no computer source can
+	 * be enabled or its occurrence handed on; and what to tell of each
+	 * trigger that changes, so the computer hears what it should run now.
+	 * With `authorize`, the coordinator hands on what the computer saw.
+	 */
 	readonly authorize?: (request: AuthorizationRequest) => AuthorizationVerdict;
+	readonly changed?: (id: string) => void;
 };
 
 /**
@@ -81,8 +88,9 @@ export class TriggerEngine {
 
 	constructor(sql: SqlStorage, options: TriggerEngineOptions) {
 		this.space = options.space;
-		// No `authorize` but where computer triggers are on: elsewhere no computer source can be enabled.
-		this.store = new TriggerStore(sql, { transaction: options.transaction, now: options.now, ...(options.authorize ? { authorize: options.authorize } : {}) });
+		// No `authorize` but where computer triggers are on: elsewhere no computer source can be enabled, and none's occurrence is handed on.
+		const computer = options.authorize ? { authorize: options.authorize } : {};
+		this.store = new TriggerStore(sql, { transaction: options.transaction, now: options.now, ...computer, ...(options.changed ? { changed: options.changed } : {}) });
 		this.host = new PimTriggerHost(sql, options.space);
 		this.coordinator = new TriggerCoordinator(sql, {
 			store: this.store,
@@ -90,6 +98,7 @@ export class TriggerEngine {
 			transaction: options.transaction,
 			now: options.now,
 			maxRunning: ENGINE_MAX_RUNNING,
+			...(options.authorize ? { computerEvents: true, authorize: options.authorize } : {}),
 		});
 	}
 

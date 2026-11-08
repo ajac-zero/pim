@@ -52,7 +52,7 @@ const Source = Type.Union(
 			anchorAt: Instant,
 			catchUpMs: optionalInteger("How late the latest missed firing may still run; 1 hour by default."),
 		}),
-		Type.Object({ kind: literal("connector_event"), connectorId: Type.String(), event: Type.String(), arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown())) }),
+		Type.Object({ kind: literal("connector_event"), connectorId: Type.String(), event: Type.String(), arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "The event's arguments, a JSON object, as list_trigger_sources describes the event." })) }),
 		Type.Object({ kind: literal("poll"), command: Type.String(), cwd: Type.Optional(Type.Union([Type.String(), Type.Null()])), intervalMs: optionalInteger("1 minute to 1 day; 5 minutes by default."), deadlineMs: optionalInteger("1 to 30 seconds.") }),
 		Type.Object({ kind: literal("stream"), command: Type.String(), cwd: Type.Optional(Type.Union([Type.String(), Type.Null()])) }),
 		Type.Object({ kind: literal("process"), handle: Type.String(), expiresAt: Instant }),
@@ -61,9 +61,26 @@ const Source = Type.Union(
 	{ description: "What it watches. Ask list_trigger_sources which kinds this space can run." },
 );
 
-const Condition = Type.Unknown({
-	description: 'Optional; JSON, never code, such as {"when": {"op": "compare", "path": ["price"], "cmp": "lt", "value": 500}}. A time source takes none; a poll needs one.',
+/** A condition is a JSON object, never code; `draft` also takes one written out as JSON text. */
+const conditionKinds = [Type.Object({}, { additionalProperties: true }), Type.String({ description: "The same object written out as JSON text." })];
+const conditionNote = 'Optional; a JSON object, never code: {"when": <test>}, where a test is such as {"op": "compare", "path": ["price"], "cmp": "lt", "value": 500}. A time source takes none; a poll needs one.';
+const Condition = Type.Union(conditionKinds, { description: conditionNote });
+
+/** Any JSON value, which a sample's value may be. */
+const JsonValue = Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null(), Type.Array(Type.Any()), Type.Object({}, { additionalProperties: true })], {
+	description: "What the source reported: any JSON value, usually an object.",
 });
+
+/** A condition written out as JSON text means the object it parses to; anything else is left for the API to refuse. */
+function conditionOf(value: unknown): unknown {
+	if (typeof value !== "string") return value;
+	try {
+		const parsed: unknown = JSON.parse(value);
+		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : value;
+	} catch {
+		return value;
+	}
+}
 
 const draftFields = {
 	label: Type.String({ description: "A short name the person sees, up to 120 characters." }),
@@ -84,7 +101,7 @@ function draft(args: { label?: string; instruction?: string; source?: unknown; c
 		...(args.label === undefined ? {} : { label: args.label }),
 		...(args.instruction === undefined ? {} : { instruction: args.instruction }),
 		...(args.source === undefined ? {} : { source: args.source }),
-		...(args.condition === undefined ? {} : { condition: args.condition }),
+		...(args.condition === undefined ? {} : { condition: conditionOf(args.condition) }),
 		...(args.newChat === undefined ? {} : { destination: { type: args.newChat ? "new_chat" : "existing_chat" } }),
 		...(args.maxPendingEvents === undefined ? {} : { delivery: { maxPendingEvents: args.maxPendingEvents } }),
 		...(args.agentId === undefined ? {} : { agentId: args.agentId }),
@@ -140,7 +157,7 @@ export function triggersExtension(host: TriggerToolsHost) {
 					label: Type.Optional(draftFields.label),
 					instruction: Type.Optional(draftFields.instruction),
 					source: Type.Optional(Source),
-					condition: Type.Optional(Type.Union([Condition, Type.Null()])),
+					condition: Type.Optional(Type.Union([...conditionKinds, Type.Null()], { description: `${conditionNote} null takes it off.` })),
 					newChat: draftFields.newChat,
 					maxPendingEvents: draftFields.maxPendingEvents,
 				}),
@@ -188,7 +205,7 @@ export function triggersExtension(host: TriggerToolsHost) {
 					id: Type.Optional(Type.String()),
 					trigger: Type.Optional(Draft),
 					samples: Type.Optional(
-						Type.Array(Type.Object({ value: Type.Unknown(), observedAt: optionalInteger("Milliseconds; now by default."), gap: Type.Optional(Type.Boolean()) }), { maxItems: 10 }),
+						Type.Array(Type.Object({ value: JsonValue, observedAt: optionalInteger("Milliseconds; now by default."), gap: Type.Optional(Type.Boolean()) }), { maxItems: 10 }),
 					),
 					count: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
 				}),

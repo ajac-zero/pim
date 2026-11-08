@@ -1192,10 +1192,11 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Extensions only some conversations select: connectors, by the agents that list
-	 * them; and reviews', by the majordomo's reviews.
+	 * them; reviews', by the majordomo's reviews; and the computer triggers' grant
+	 * tool, by chats while computer triggers are on.
 	 */
 	#perPim(name: string): boolean {
-		return name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION;
+		return name.startsWith(APP_PREFIX) || name === REVIEW_EXTENSION || name === COMPUTER_GRANT_EXTENSION;
 	}
 
 	/** pi's run policy, shared by every session. */
@@ -3794,13 +3795,16 @@ export class Pim extends DurableAgent<Env> {
 	 * or the switches may have changed since.
 	 * Visits choose their own extensions, and the conversations of tasks that
 	 * aren't chats got theirs when made. A chat whose selection is unchanged
-	 * isn't written to.
+	 * isn't written to. Where computer triggers are on, the grant tool comes
+	 * after the connectors, so adding or taking it out only appends or removes
+	 * at the end; where they are off, the selection is as it was without it.
 	 */
 	async #selectAbilities(session: string): Promise<void> {
 		if (this.visits.bySession(session) || this.#taskApart(session)) return;
 		const agent = this.agents.ofSession(session);
 		// Connectors last: their tools come and go, and pi only appends cheaply at the end.
-		const wanted = this.#appExtensionsOf(agent);
+		const grants = this.registry.snapshot().extension(COMPUTER_GRANT_EXTENSION) ? [COMPUTER_GRANT_EXTENSION] : [];
+		const wanted = [...this.#appExtensionsOf(agent), ...grants];
 		const off = [...this.#switchedOff(agent)];
 		const key = [...wanted, ...off.map((name) => `-${name}`)].join(" ");
 		if ((this.agents.abilities(session) ?? "") === key) return;
@@ -6645,12 +6649,12 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * The tool that asks the person to grant a trigger's source on their
-	 * computer, only where computer triggers are on. Elsewhere its extension
-	 * is there with no tools, as the desktop's is, so chats made meanwhile
-	 * have its place and get the tool once the gate is on.
+	 * computer, installed only where computer triggers are on. Chats select it
+	 * (`#selectAbilities`), so where they are off nothing of it is in any chat.
 	 */
 	#installComputerGrants(services: PimServices): void {
-		this.registry.install(computerTriggersAllowed(this.env) ? computerGrantExtension(services, this.#computerGrantHost()) : defineExtension({ name: COMPUTER_GRANT_EXTENSION, tools: [] }));
+		if (computerTriggersAllowed(this.env)) this.registry.install(computerGrantExtension(services, this.#computerGrantHost()));
+		else if (this.registry.snapshot().extension(COMPUTER_GRANT_EXTENSION)) this.registry.uninstall({ name: COMPUTER_GRANT_EXTENSION });
 	}
 
 	/** Rebuilds the extensions whose tools describe the approval policy, once pi's registry has been set up. */

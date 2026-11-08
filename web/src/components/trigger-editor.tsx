@@ -53,6 +53,14 @@ import { cn } from "~/lib/utils";
 const FIELD_CLASS =
   "w-full rounded-xl border bg-background px-3 text-[15px] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 aria-invalid:border-destructive";
 
+/**
+ * The buttons of a step. On narrow screens they stick to the bottom of the
+ * page, which ends where the app's bottom navigation begins, with room for the
+ * device's safe area; on wider ones they stay inline.
+ */
+const ACTION_BAR =
+  "flex flex-wrap justify-between gap-2 max-md:sticky max-md:bottom-0 max-md:z-10 max-md:-mx-4 max-md:border-t max-md:bg-background max-md:px-4 max-md:pt-3 max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))]";
+
 /** A labelled field, with the problem the form found in it, if any. */
 function Field({
   label,
@@ -284,6 +292,7 @@ export function TriggerEditor({
             ? t("triggerReviewEditHint")
             : t("triggerReviewDraftHint")
           : t("triggerFormHint")}
+        {trigger && ` ${t("triggerEditFutureOnly")}`}
       </p>
       {step === "edit" ? (
         <form
@@ -294,6 +303,17 @@ export function TriggerEditor({
           }}
           noValidate
         >
+          <TriggerSummary
+            input={input}
+            form={form}
+            agent={agentName(form.agentId)}
+            chat={
+              form.destination === "existing_chat" && form.chatId
+                ? chats.find((chat) => chat.id === form.chatId)?.title ||
+                  t("newChat")
+                : null
+            }
+          />
           <Field label={t("triggerLabel")} error={errorOf("label")}>
             {(props) => (
               <input
@@ -396,7 +416,7 @@ export function TriggerEditor({
             trigger={trigger}
           />
           {problem && <ProblemNotice problem={problem} onReload={reload} />}
-          <div className="flex flex-wrap justify-between gap-2">
+          <div className={ACTION_BAR}>
             <Button type="button" variant="outline" onClick={cancel}>
               {t("cancel")}
             </Button>
@@ -439,7 +459,7 @@ export function TriggerEditor({
               </p>
             )}
             {problem && <ProblemNotice problem={problem} onReload={reload} />}
-            <div className="flex flex-wrap justify-between gap-2">
+            <div className={ACTION_BAR}>
               <Button
                 type="button"
                 variant="outline"
@@ -472,6 +492,66 @@ export function TriggerEditor({
         {status}
       </p>
     </div>
+  );
+}
+
+/**
+ * What the trigger will do, in three lines that follow the form: when it
+ * fires, what the agent is told, and where the person sees the result.
+ */
+export function TriggerSummary({
+  input,
+  form,
+  agent,
+  chat,
+}: {
+  /** The form as it would be saved; null while it has a problem. */
+  input: TriggerInput | null;
+  form: TriggerForm;
+  agent: string;
+  /** The existing chat it delivers to, by title; null for a new chat each time. */
+  chat: string | null;
+}) {
+  const { t } = useI18n();
+  const instruction = form.instruction.trim();
+  return (
+    <section
+      aria-label={t("triggerSummary")}
+      className="rounded-2xl border bg-muted/40 px-4 py-3"
+    >
+      <h2 className="text-[13px] text-muted-foreground">
+        {t("triggerSummary")}
+      </h2>
+      <dl className="mt-1 divide-y divide-border">
+        <ReviewRow label={t("triggerSummaryWhen")}>
+          {input ? (
+            <SourceText source={input.source} />
+          ) : (
+            t(SOURCE_TEXT[form.kind])
+          )}
+        </ReviewRow>
+        <ReviewRow label={t("triggerSummaryDo")}>
+          <span className="whitespace-pre-wrap">
+            {instruction
+              ? t("triggerSummaryDoText", { agent, instruction })
+              : t("triggerSummaryNoInstruction", { agent })}
+          </span>
+        </ReviewRow>
+        <ReviewRow label={t("triggerSummaryObserve")}>
+          {t("triggerSummaryObserveIn", {
+            chat: chat ?? t("triggerNewChatEachTime"),
+          })}
+          {input?.condition && (
+            <>
+              {" "}
+              {t("triggerSummaryObserveCondition", {
+                condition: conditionText(input.condition.when),
+              })}
+            </>
+          )}
+        </ReviewRow>
+      </dl>
+    </section>
   );
 }
 

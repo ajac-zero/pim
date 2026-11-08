@@ -1465,6 +1465,16 @@ const translations = {
     triggerReviewEditHint:
       "Check what it will do. Your change is saved only if no one changed the trigger since you opened it.",
     triggerReviewButton: "Review",
+    triggerSummary: "What this trigger will do",
+    triggerSummaryWhen: "When",
+    triggerSummaryDo: "Do",
+    triggerSummaryObserve: "Observe",
+    triggerSummaryNoInstruction: "{agent}: your instruction, not written yet.",
+    triggerSummaryDoText: "{agent}: {instruction}",
+    triggerSummaryObserveIn: "The result shows in {chat}.",
+    triggerSummaryObserveCondition: "Only when {condition}.",
+    triggerEditFutureOnly:
+      "Changes apply to future runs only. Runs already started or finished stay as they were.",
     triggerSaveDraft: "Save draft",
     triggerSaveChanges: "Save changes",
     triggerSaving: "Saving…",
@@ -3030,6 +3040,16 @@ const translations = {
     triggerReviewEditHint:
       "Comprueba lo que hará. Tu cambio se guarda solo si nadie cambió el disparador desde que lo abriste.",
     triggerReviewButton: "Revisar",
+    triggerSummary: "Qué hará este disparador",
+    triggerSummaryWhen: "Cuándo",
+    triggerSummaryDo: "Hacer",
+    triggerSummaryObserve: "Observar",
+    triggerSummaryNoInstruction: "{agent}: tu instrucción, aún sin escribir.",
+    triggerSummaryDoText: "{agent}: {instruction}",
+    triggerSummaryObserveIn: "El resultado aparece en {chat}.",
+    triggerSummaryObserveCondition: "Solo cuando {condition}.",
+    triggerEditFutureOnly:
+      "Los cambios solo afectan a las ejecuciones futuras. Las ya iniciadas o terminadas no cambian.",
     triggerSaveDraft: "Guardar borrador",
     triggerSaveChanges: "Guardar cambios",
     triggerSaving: "Guardando…",

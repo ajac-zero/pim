@@ -23,6 +23,7 @@ import {
   CornerDownRight,
   ExternalLink,
   FileText,
+  History,
   Loader2,
   MessagesSquare,
   Monitor,
@@ -420,6 +421,7 @@ function ChatsPanel({
         ) : (
           <DatedChats
             list={open}
+            all={current}
             activeId={activeId}
             awaitingApproval={awaitingApproval}
             onNavigate={onNavigate}
@@ -429,6 +431,7 @@ function ChatsPanel({
           <FoldedChats
             label={t("inactive")}
             list={inactive}
+            all={current}
             activeId={activeId}
             searching={!!search}
             awaitingApproval={awaitingApproval}
@@ -439,6 +442,7 @@ function ChatsPanel({
           <FoldedChats
             label={t("archived")}
             list={archived}
+            all={current}
             activeId={activeId}
             searching={!!search}
             awaitingApproval={awaitingApproval}
@@ -597,17 +601,19 @@ function RailDialogLink({
 /** Chats under dividers for today, yesterday, last week and the last 14 days. */
 function DatedChats({
   list,
+  all,
   activeId,
   awaitingApproval,
   onNavigate,
 }: {
   list: Session[];
+  all: Session[];
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
 }) {
   const { t } = useI18n();
-  const { top, children } = nestChats(list);
+  const { top, children } = nestChats(list, all);
   return groupByAge(top).map(({ age, sessions }) => (
     <div key={age}>
       <div className="px-2 pt-2 pb-1 text-muted-foreground/70 text-xs">
@@ -690,6 +696,7 @@ const DONE_STATES = new Set(["completed", "failed", "canceled"]);
 function FoldedChats({
   label,
   list,
+  all,
   activeId,
   searching,
   awaitingApproval,
@@ -697,6 +704,7 @@ function FoldedChats({
 }: {
   label: string;
   list: Session[];
+  all: Session[];
   activeId?: string;
   searching: boolean;
   awaitingApproval: ReadonlySet<string>;
@@ -710,7 +718,7 @@ function FoldedChats({
     if (holdsActive) setOpen(true);
   }
   const expanded = open || searching;
-  const nested = nestChats(list);
+  const nested = nestChats(list, all);
   return (
     <section className="mb-3" aria-label={label}>
       <button
@@ -1013,6 +1021,16 @@ function SessionRow({
               {stateBadge}
             </span>
           )
+        )}
+        {session.continuedFrom && (
+          <span
+            className="-mr-0.5 flex shrink-0"
+            role="img"
+            aria-label={t("continuedMark")}
+            title={t("continuedMark")}
+          >
+            <History className="size-3.5 text-muted-foreground/70" />
+          </span>
         )}
         <span className="min-w-0 flex-1">
           {/* A long title fills the row and is cut off with an ellipsis. While the row shows its options button, it slides to reveal its end. */}

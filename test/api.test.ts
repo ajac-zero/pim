@@ -909,6 +909,10 @@ describe("conversation", () => {
 		// The chat keeps all it said; the new one opens with the summary.
 		expect((await api(`/sessions/${id}/messages`)).body.messages).toHaveLength(before);
 		const next = (await continued()).id;
+		// The chat that carries it on has taken its place in the list.
+		const listed = (await api("/sessions")).body.sessions;
+		expect(listed.find((session: { id: string }) => session.id === id).archived).toBe(true);
+		expect(listed.find((session: { id: string }) => session.id === next).archived).toBe(false);
 		await vi.waitFor(async () => {
 			const { messages } = (await api(`/sessions/${next}/messages`)).body;
 			expect(textOf(messages[0])).toContain("The user asked two questions.");

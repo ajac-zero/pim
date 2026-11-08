@@ -420,6 +420,7 @@ const translations = {
     startedBy: "Started by {agent}",
     startedFrom: "{agent} started this chat from",
     continuedFrom: "This chat carries on",
+    continuedMark: "Continued from an earlier chat",
     taskChatsDone: "{done} of {total} tasks done",
     hideTaskChats:
       "Hide the chats started from this one ({done} of {total} done)",
@@ -1612,6 +1613,7 @@ const translations = {
     startedBy: "Iniciado por {agent}",
     startedFrom: "{agent} inició este chat desde",
     continuedFrom: "Este chat continúa",
+    continuedMark: "Continúa un chat anterior",
     taskChatsDone: "{done} de {total} tareas hechas",
     hideTaskChats:
       "Ocultar los chats iniciados desde este ({done} de {total} hechas)",

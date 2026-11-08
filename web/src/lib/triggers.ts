@@ -1,6 +1,7 @@
 import type { TranslationKey } from "~/components/i18n";
 import {
   ApiError,
+  type Approval,
   pim,
   type Trigger,
   type TriggerCondition,
@@ -684,4 +685,155 @@ export function conditionText(expression: TriggerExpression): string {
 /** A fresh key for one creation, so sending it again gives the same trigger. */
 export function creationKey(): string {
   return `web-${crypto.randomUUID()}`;
+}
+
+/*
+ * A computer source's grant. An agent asks for it with
+ * `trigger_computer_grant`, which files an approval of
+ * `trigger_computer_source` whose arguments are exactly the grant's scope
+ * (src/triggers/grant-action.ts); the person decides it like any approval.
+ */
+
+/** The approval's action a grant comes from (`COMPUTER_GRANT_ACTION` in src/triggers/computer.ts). */
+export const GRANT_ACTION = "trigger_computer_source";
+
+/** What a grant consents to: one source's exact configuration, of one trigger, on one computer. */
+export type GrantScope = {
+  space: string;
+  runtimeId: string;
+  triggerId: string;
+  sourceId: string;
+  configHash: string;
+};
+
+/** The scope an approval asks for, or null when it isn't a grant request. */
+export function grantScopeOf(approval: Approval): GrantScope | null {
+  if (approval.action !== GRANT_ACTION) return null;
+  const args = (approval.args ?? {}) as Record<string, unknown>;
+  const fields = [
+    "space",
+    "runtimeId",
+    "triggerId",
+    "sourceId",
+    "configHash",
+  ] as const;
+  if (!fields.every((field) => typeof args[field] === "string")) return null;
+  return args as GrantScope;
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * The digest of a computer source's configuration, as Pim and pim-computer
+ * compute it (`sourceConfigHash` in src/triggers/computer.ts), so the screen
+ * can tell whether a request is for the source the trigger has now.
+ */
+export async function sourceConfigHash(source: TriggerSource): Promise<string> {
+  const bytes = new TextEncoder().encode(
+    `triggers.v1/source\n${canonical(source)}`,
+  );
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Where a trigger's grant request stands, for the screen that decides it.
+ * `pending` is the only one the person may approve; `outdated` and an
+ * `expired` one still pending may only be declined, since approving them
+ * would grant nothing the trigger runs now.
+ */
+export type GrantStanding =
+  | { kind: "not_required" | "off" | "none" }
+  | {
+      kind: "pending" | "approved" | "declined";
+      approval: Approval;
+      scope: GrantScope;
+    }
+  | {
+      kind: "outdated";
+      reason: "changed" | "ended";
+      approval: Approval;
+      scope: GrantScope;
+    }
+  | {
+      kind: "expired";
+      reason: "timeout" | "source";
+      approval: Approval;
+      scope: GrantScope;
+    };
+
+/**
+ * The request the screen shows for a trigger, and where it stands: the
+ * newest still waiting, or else the newest decided. `currentHash` is
+ * `sourceConfigHash` of the trigger's source as loaded.
+ */
+export function grantStanding(
+  trigger: Trigger,
+  approvals: readonly Approval[],
+  currentHash: string,
+  now: number,
+): GrantStanding {
+  if (!trigger.grant.required) return { kind: "not_required" };
+  if (trigger.grant.state === "unavailable") return { kind: "off" };
+  const requests = approvals
+    .map((approval) => ({ approval, scope: grantScopeOf(approval) }))
+    .filter(
+      (request): request is { approval: Approval; scope: GrantScope } =>
+        request.scope?.triggerId === trigger.id,
+    )
+    .sort((a, b) => b.approval.createdAt - a.approval.createdAt);
+  const request =
+    requests.find(({ approval }) => approval.status === "pending") ??
+    requests[0];
+  if (!request) return { kind: "none" };
+  const { approval } = request;
+  if (approval.status === "pending") {
+    if (approval.expiresAt !== null && approval.expiresAt <= now) {
+      return { kind: "expired", reason: "timeout", ...request };
+    }
+    if (trigger.source.kind === "process" && trigger.source.expiresAt <= now) {
+      return { kind: "expired", reason: "source", ...request };
+    }
+    if (trigger.lifecycle === "ended" || trigger.lifecycle === "deleted") {
+      return { kind: "outdated", reason: "ended", ...request };
+    }
+    if (request.scope.configHash !== currentHash) {
+      return { kind: "outdated", reason: "changed", ...request };
+    }
+    return { kind: "pending", ...request };
+  }
+  if (approval.status === "approved") return { kind: "approved", ...request };
+  if (approval.decidedBy === "timeout") {
+    return { kind: "expired", reason: "timeout", ...request };
+  }
+  return { kind: "declined", ...request };
+}
+
+/**
+ * Decides a grant request. When someone already decided it, from another
+ * tab or the chat, it answers with the request as it stands instead, so the
+ * screen shows that decision rather than an error.
+ */
+export async function decideGrant(
+  id: string,
+  decision: "approve" | "deny",
+): Promise<{ approval: Approval; already: boolean }> {
+  try {
+    return { approval: await pim.decide(id, decision), already: false };
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 409) throw error;
+    return { approval: await pim.approval(id), already: true };
+  }
 }

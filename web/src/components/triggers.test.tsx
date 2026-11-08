@@ -123,7 +123,9 @@ const textOf = (html: string) =>
     .replace(/<[^>]+>/g, "")
     .replace(/&#x27;/g, "'")
     .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, "&");
+    .replace(/&amp;/g, "&")
+    // Some ICU versions put a narrow no-break space before AM and PM.
+    .replace(/\u202f/g, " ");
 
 /** A cron trigger in New York, firing at 8:00 AM there on Nov 9, when it is 1:00 PM UTC. */
 const newYork = (overrides: Partial<Trigger> = {}) =>
@@ -489,7 +491,8 @@ describe("a trigger's page", () => {
       await render(() => <TriggerDetail trigger={triggerFixture()} />, client),
     );
     expect(text).toContain("Summarize my calendar for today.");
-    expect(text).toContain("On the schedule 0 9 * * 1-5, in Europe/Lisbon");
+    expect(text).toContain("Every weekday at 9:00 AM, Lisbon time");
+    expect(text).toContain("0 9 * * 1-5 · Europe/Lisbon");
     expect(text).toContain("A new chat each time");
     expect(text).toContain("Here, by you");
     expect(text).not.toContain("Last check");
@@ -538,8 +541,85 @@ describe("a trigger's page", () => {
     expect(text).toContain("with all of that user's access");
     expect(text).toContain("They aren't sandboxed.");
     expect(text).toContain("Waiting for your approval");
-    expect(text).toContain("status ≠ 0");
+    expect(text).toContain("The command fails (exits with an error)status ≠ 0");
     expect(text).toContain("None yet");
+  });
+
+  it("says a cron source in words with the expression smaller beneath, and as it is when it can't", async () => {
+    const detail = async (expression: string, timeZone: string) =>
+      render(
+        () => (
+          <TriggerDetail
+            trigger={triggerFixture({
+              source: {
+                kind: "time",
+                schedule: "cron",
+                expression,
+                timeZone,
+                catchUpMs: 3_600_000,
+              },
+            })}
+          />
+        ),
+        clientWith(),
+      );
+    const lisbon = await detail("0 8 * * *", "Europe/Lisbon");
+    // The schedule in words, and the next firing in the zone's own time beside it.
+    expect(textOf(lisbon)).toContain(
+      "WhenTimeEvery day at 8:00 AM, Lisbon time0 8 * * * · Europe/LisbonNext run",
+    );
+    expect(textOf(lisbon)).toContain("9:00 AM Lisbon time (9:00 AM UTC)");
+    expect(lisbon).toContain(
+      '<span class="block text-[13px] text-muted-foreground"><code class="font-mono">0 8 * * *</code> · Europe/Lisbon</span>',
+    );
+    const odd = textOf(await detail("0 9-17/2 * * 1-5", "Europe/Lisbon"));
+    expect(odd).toContain(
+      "WhenTimeOn the schedule 0 9-17/2 * * 1-5, in Europe/LisbonNext run",
+    );
+  });
+
+  it("shows a condition it can't put in words as it is", async () => {
+    const client = clientWith();
+    setRuns(client, "trg_build", []);
+    const html = await render(
+      () => (
+        <TriggerDetail
+          trigger={pollFixture({
+            condition: {
+              when: { op: "not", of: { op: "exists", path: ["price"] } },
+            },
+          })}
+        />
+      ),
+      client,
+    );
+    expect(html).toContain(
+      '<code class="font-mono text-sm">not (price exists)</code></dd>',
+    );
+  });
+
+  it("says how often a draft poll will run once on, not that it isn't available", async () => {
+    const client = clientWith();
+    setRuns(client, "trg_build", []);
+    const text = textOf(
+      await render(
+        () => (
+          <TriggerDetail
+            trigger={pollFixture({
+              lifecycle: "draft",
+              capability: {
+                status: "unavailable",
+                delivers: false,
+                reason: "computer_triggers_off",
+              },
+            })}
+          />
+        ),
+        client,
+      ),
+    );
+    expect(text).toContain("Next runRuns every 5 minutes once turned on");
+    expect(text).not.toContain("Next runNot available here");
   });
 
   it("links a computer source's grant to its request, and nothing else's", async () => {
@@ -588,7 +668,10 @@ describe("a trigger's page", () => {
     );
     expect(html).not.toContain("SECRET");
     expect(html).not.toContain("label:invoices");
-    expect(textOf(html)).toContain("(arguments not shown: 2)");
+    expect(textOf(html)).toContain(
+      "message_received from gmailFilter details hidden",
+    );
+    expect(textOf(html)).not.toContain("arguments");
     expect(textOf(html)).toContain(
       "Draft only: Pim doesn't take connector events in yet, so it can't be turned on",
     );
@@ -1079,29 +1162,72 @@ describe("the editor", () => {
     const html = await render(() => <TriggerEditor />, client);
     const text = textOf(html);
     expect(text).toContain("What this trigger will do");
+    expect(text).toContain("WhenNot set yet");
     expect(text).toContain("your instruction, not written yet.");
     expect(text.indexOf("What this trigger will do")).toBeLessThan(
       text.indexOf("Instruction"),
     );
-    const summary = async (form: TriggerForm, chat: string | null) =>
+    const summary = async (form: TriggerForm, chat: string | null = null) =>
       textOf(
         await render(() => (
-          <TriggerSummary input={null} form={form} agent="Ada" chat={chat} />
+          <TriggerSummary form={form} agent="Ada" chat={chat} />
         )),
       );
-    const form = {
+    // The schedule is in words as soon as it is complete, whatever else is missing.
+    const time = {
       ...emptyForm("p_ada"),
       instruction: "Summarise the inbox",
-      kind: "poll" as const,
-      destination: "existing_chat" as const,
+      timeSchedule: "interval" as const,
+      everyMinutes: "120",
     };
-    const changed = await summary(form, "Inbox");
-    expect(changed).toContain("WhenCommand, checked");
-    expect(changed).toContain("DoAda: Summarise the inbox");
-    expect(changed).toContain("ObserveThe result shows in Inbox.");
-    expect(await summary({ ...form, instruction: "  " }, null)).toContain(
-      "The result shows in A new chat each time.",
+    const every = await summary(time);
+    expect(every).toContain("WhenEvery 2 hours");
+    expect(every).toContain(
+      "DoAda: Summarise the inboxResult: a new chat each time",
     );
+    expect(every).toContain("ObserveNothing to watch. It runs on the clock.");
+    expect(every).not.toContain("A new chat");
+    const lisbon = await summary(
+      {
+        ...time,
+        timeSchedule: "cron",
+        expression: "0 8 * * *",
+        timeZone: "Europe/Lisbon",
+      },
+      "Inbox",
+    );
+    expect(lisbon).toContain("WhenEvery day at 8:00 AM, Lisbon time");
+    expect(lisbon).toContain("Result: in Inbox");
+    expect(await summary({ ...time, everyMinutes: "" })).toContain(
+      "WhenNot set yetDo",
+    );
+
+    const poll = {
+      ...time,
+      kind: "poll" as const,
+      command: "make check",
+      pollMinutes: "5",
+      conditionPath: "status",
+      conditionOp: "ne" as const,
+      conditionValue: "0",
+    };
+    expect(await summary(poll)).toContain(
+      "WhenEvery 5 minutes" +
+        "DoAda: Summarise the inboxResult: a new chat each time" +
+        "ObserveWhat make check reports each time it runs " +
+        "Only when the command fails (exits with an error).",
+    );
+    expect(await summary({ ...poll, command: " " })).toContain(
+      "WhenNot set yetDo",
+    );
+    expect(
+      await summary({
+        ...poll,
+        kind: "file",
+        path: "/home/ada/inbox",
+        conditionPath: "",
+      }),
+    ).toContain("ObserveChanges to /home/ada/inbox");
   });
 
   it("puts the actions in a sticky bar above the navigation on narrow screens only", async () => {

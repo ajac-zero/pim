@@ -1281,6 +1281,7 @@ const translations = {
       "Runs through its connector watch, not as a trigger",
     triggerNextNotWired: "Draft only: Pim doesn't take connector events in yet",
     triggerNextUnavailable: "Not available here",
+    triggerNextOnceOn: "Runs every {duration} once turned on",
     triggerNextOff: "Off: not listening",
     triggerNextWaitingComputer: "Waiting for your computer",
     triggerNextChecking: "Checking every {minutes} min",
@@ -1384,6 +1385,7 @@ const translations = {
     triggerFrequencyStream: "Each time the script prints a line",
     triggerFrequencyProcess: "Once, when the process exits",
     triggerFrequencyFile: "Each time {path} changes",
+    triggerFrequencyConnector: "Each time {connector} sends {event}",
     triggerApprovalPolicy: "Approval policy",
     triggerAsksBeforeExternal: "Asks before external actions",
     triggerUnderstandComputerAccess:
@@ -1413,9 +1415,46 @@ const translations = {
       "Took over its connector watch, whose events now come here. It changes only by moving it back: it can't be changed, paused or deleted here.",
     triggerOnceAt: "Once, at {date}",
     triggerCronIn: "On the schedule {expression}, in {timeZone}",
+    triggerCronEveryMinute: "Every minute",
+    triggerCronEveryMinutes: "Every {count} minutes",
+    triggerCronEveryHour: "Every hour",
+    triggerCronEveryHours: "Every {count} hours",
+    triggerCronAtMinute: "{every}, at minute {minute}",
+    triggerCronAt: "at {time}",
+    triggerCronAtOne: "at {time}",
+    triggerCronDaily: "Every day {at}",
+    triggerCronWeekdays: "Every weekday {at}",
+    triggerCronWeekly: "Every {days} {at}",
+    triggerCronMonthly: "Every month on the {day} {at}",
+    triggerCronZone: "{schedule}, {city} time",
+    triggerCronUtc: "{schedule}, UTC",
+    triggerOrdinalOne: "{n}st",
+    triggerOrdinalTwo: "{n}nd",
+    triggerOrdinalFew: "{n}rd",
+    triggerOrdinalOther: "{n}th",
+    triggerIfCommandFails: "the command fails (exits with an error)",
+    triggerIfCommandSucceeds: "the command succeeds (exits without an error)",
+    triggerIfProcessFails: "the process exits with an error",
+    triggerIfProcessSucceeds: "the process exits without an error",
+    triggerIfField: "the field {path}",
+    triggerIfEq: "{field} is {value}",
+    triggerIfNe: "{field} isn't {value}",
+    triggerIfLt: "{field} is below {value}",
+    triggerIfLte: "{field} is {value} or less",
+    triggerIfGt: "{field} is above {value}",
+    triggerIfGte: "{field} is {value} or more",
+    triggerIfExists: "{field} is there",
+    triggerIfChanged: "{field} changes",
+    triggerIfRising:
+      "{field} reaches {enter} or more (until it drops back to {exit})",
+    triggerIfFalling:
+      "{field} drops to {enter} or less (until it climbs back to {exit})",
+    triggerIfStable: "{condition}, for at least {duration}",
+    triggerValueTrue: "true",
+    triggerValueFalse: "false",
     triggerEvery: "Every {duration}",
     triggerConnectorEvent: "{event} from {connector}",
-    triggerArgumentsHidden: "(arguments not shown: {count})",
+    triggerArgumentsHidden: "Filter details hidden",
     triggerPollEvery: "Runs this command every {duration}:",
     triggerStreamLines: "Each line this command prints is an event:",
     triggerInFolder: "In {cwd}",
@@ -1487,7 +1526,13 @@ const translations = {
     triggerSummaryObserve: "Observe",
     triggerSummaryNoInstruction: "{agent}: your instruction, not written yet.",
     triggerSummaryDoText: "{agent}: {instruction}",
-    triggerSummaryObserveIn: "The result shows in {chat}.",
+    triggerSummaryNotSet: "Not set yet",
+    triggerSummaryResultNewChat: "Result: a new chat each time",
+    triggerSummaryResultChat: "Result: in {chat}",
+    triggerObserveNothing: "Nothing to watch. It runs on the clock.",
+    triggerObservePoll: "What {command} reports each time it runs",
+    triggerObserveStream: "Each line {command} prints",
+    triggerObserveProcess: "Process {handle}, until {date}",
     triggerSummaryObserveCondition: "Only when {condition}.",
     triggerEditFutureOnly:
       "Changes apply to future runs only. Runs already started or finished stay as they were.",
@@ -2871,6 +2916,7 @@ const translations = {
     triggerNextNotWired:
       "Solo borrador: Pim aún no recibe eventos de conectores",
     triggerNextUnavailable: "No disponible aquí",
+    triggerNextOnceOn: "Se ejecutará cada {duration} una vez activado",
     triggerNextOff: "Desactivado: no escucha",
     triggerNextWaitingComputer: "Esperando tu computadora",
     triggerNextChecking: "Revisa cada {minutes} min",
@@ -2975,6 +3021,7 @@ const translations = {
     triggerFrequencyStream: "Cada vez que el script imprime una línea",
     triggerFrequencyProcess: "Una vez, cuando termina el proceso",
     triggerFrequencyFile: "Cada vez que cambia {path}",
+    triggerFrequencyConnector: "Cada vez que {connector} envía {event}",
     triggerApprovalPolicy: "Política de aprobación",
     triggerAsksBeforeExternal: "Pregunta antes de acciones externas",
     triggerUnderstandComputerAccess:
@@ -3004,9 +3051,46 @@ const translations = {
       "Tomó el relevo de su vigilancia de conector, cuyos eventos ahora llegan aquí. Solo cambia al devolverlo: aquí no se puede cambiar, pausar ni eliminar.",
     triggerOnceAt: "Una vez, el {date}",
     triggerCronIn: "Según la programación {expression}, en {timeZone}",
+    triggerCronEveryMinute: "Cada minuto",
+    triggerCronEveryMinutes: "Cada {count} minutos",
+    triggerCronEveryHour: "Cada hora",
+    triggerCronEveryHours: "Cada {count} horas",
+    triggerCronAtMinute: "{every}, en el minuto {minute}",
+    triggerCronAt: "a las {time}",
+    triggerCronAtOne: "a la {time}",
+    triggerCronDaily: "Todos los días {at}",
+    triggerCronWeekdays: "De lunes a viernes {at}",
+    triggerCronWeekly: "Cada {days} {at}",
+    triggerCronMonthly: "Cada mes, el día {day}, {at}",
+    triggerCronZone: "{schedule}, hora de {city}",
+    triggerCronUtc: "{schedule}, UTC",
+    triggerOrdinalOne: "{n}",
+    triggerOrdinalTwo: "{n}",
+    triggerOrdinalFew: "{n}",
+    triggerOrdinalOther: "{n}",
+    triggerIfCommandFails: "el comando falla (termina con un error)",
+    triggerIfCommandSucceeds: "el comando funciona (termina sin errores)",
+    triggerIfProcessFails: "el proceso termina con un error",
+    triggerIfProcessSucceeds: "el proceso termina sin errores",
+    triggerIfField: "el campo {path}",
+    triggerIfEq: "{field} es {value}",
+    triggerIfNe: "{field} no es {value}",
+    triggerIfLt: "{field} es menor que {value}",
+    triggerIfLte: "{field} es {value} o menos",
+    triggerIfGt: "{field} es mayor que {value}",
+    triggerIfGte: "{field} es {value} o más",
+    triggerIfExists: "{field} está presente",
+    triggerIfChanged: "{field} cambia",
+    triggerIfRising:
+      "{field} llega a {enter} o más (hasta que vuelve a bajar a {exit})",
+    triggerIfFalling:
+      "{field} baja a {enter} o menos (hasta que vuelve a subir a {exit})",
+    triggerIfStable: "{condition}, durante al menos {duration}",
+    triggerValueTrue: "verdadero",
+    triggerValueFalse: "falso",
     triggerEvery: "Cada {duration}",
     triggerConnectorEvent: "{event} de {connector}",
-    triggerArgumentsHidden: "(argumentos ocultos: {count})",
+    triggerArgumentsHidden: "Detalles del filtro ocultos",
     triggerPollEvery: "Ejecuta este comando cada {duration}:",
     triggerStreamLines: "Cada línea que imprime este comando es un evento:",
     triggerInFolder: "En {cwd}",
@@ -3079,7 +3163,13 @@ const translations = {
     triggerSummaryObserve: "Observar",
     triggerSummaryNoInstruction: "{agent}: tu instrucción, aún sin escribir.",
     triggerSummaryDoText: "{agent}: {instruction}",
-    triggerSummaryObserveIn: "El resultado aparece en {chat}.",
+    triggerSummaryNotSet: "Aún sin definir",
+    triggerSummaryResultNewChat: "Resultado: un chat nuevo cada vez",
+    triggerSummaryResultChat: "Resultado: en {chat}",
+    triggerObserveNothing: "Nada que vigilar. Se ejecuta según el reloj.",
+    triggerObservePoll: "Lo que informa {command} cada vez que se ejecuta",
+    triggerObserveStream: "Cada línea que imprime {command}",
+    triggerObserveProcess: "El proceso {handle}, hasta el {date}",
     triggerSummaryObserveCondition: "Solo cuando {condition}.",
     triggerEditFutureOnly:
       "Los cambios solo afectan a las ejecuciones futuras. Las ya iniciadas o terminadas no cambian.",
@@ -3201,7 +3291,7 @@ function interpolate(message: string, values?: Variables): string {
   );
 }
 
-interface I18nContextValue {
+export interface I18nContextValue {
   locale: Locale;
   setLocale: (locale: Locale) => void;
   t: (key: TranslationKey, values?: Variables) => string;
@@ -3209,17 +3299,20 @@ interface I18nContextValue {
   formatNumber: (value: number, options?: Intl.NumberFormatOptions) => string;
 }
 
-const defaultI18n: I18nContextValue = {
-  locale: "en",
-  setLocale: () => {},
-  t: (key, values) => interpolate(translations.en[key], values),
-  formatDate: (date, options) =>
-    new Intl.DateTimeFormat("en", options).format(date),
-  formatNumber: (number, options) =>
-    new Intl.NumberFormat("en", options).format(number),
-};
+/** The words and formats of one language, outside React as well as in it. */
+export function i18nFor(locale: Locale): I18nContextValue {
+  return {
+    locale,
+    setLocale: () => {},
+    t: (key, values) => interpolate(translations[locale][key], values),
+    formatDate: (date, options) =>
+      new Intl.DateTimeFormat(locale, options).format(date),
+    formatNumber: (number, options) =>
+      new Intl.NumberFormat(locale, options).format(number),
+  };
+}
 
-const I18nContext = createContext<I18nContextValue>(defaultI18n);
+const I18nContext = createContext<I18nContextValue>(i18nFor("en"));
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(initialLocale);
@@ -3233,15 +3326,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     window.localStorage.setItem(STORAGE_KEY, nextLocale);
   };
 
-  const value: I18nContextValue = {
-    locale,
-    setLocale,
-    t: (key, values) => interpolate(translations[locale][key], values),
-    formatDate: (date, options) =>
-      new Intl.DateTimeFormat(locale, options).format(date),
-    formatNumber: (number, options) =>
-      new Intl.NumberFormat(locale, options).format(number),
-  };
+  const value: I18nContextValue = { ...i18nFor(locale), setLocale };
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

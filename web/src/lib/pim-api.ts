@@ -1136,6 +1136,8 @@ export type Trigger = {
   lifecycle: TriggerLifecycle;
   /** How the source is doing, apart from the lifecycle. */
   health: TriggerHealth;
+  /** Why health is `unknown` when evidence was lost; absent while nothing has been checked yet. */
+  healthDetail?: string | null;
   agentId: string;
   label: string;
   instruction: string;

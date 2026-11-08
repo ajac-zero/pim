@@ -43,6 +43,7 @@ import {
   type GrantStanding,
   HEALTH_PROBLEMS,
   HEALTH_TEXT,
+  healthChip,
   LIFECYCLE_TEXT,
   MAX_PAGES,
   needsReload,
@@ -77,8 +78,8 @@ type Tone = "muted" | "done" | "problem" | "active";
 const PILL_TONES: Record<Tone, string> = {
   muted: "bg-muted text-muted-foreground",
   active: "bg-muted text-foreground",
-  done: "bg-success/12 text-success",
-  problem: "bg-destructive/10 text-destructive",
+  done: "bg-muted text-foreground",
+  problem: "bg-muted text-foreground",
 };
 const DOT_TONES: Record<Tone, string> = {
   muted: "bg-muted-foreground/60",
@@ -126,21 +127,30 @@ export function LifecyclePill({ lifecycle }: { lifecycle: TriggerLifecycle }) {
   );
 }
 
-export function HealthPill({ health }: { health: TriggerHealth }) {
+/** The health chip, or nothing for a trigger that isn't on. Its words say what it means; only the dot is colored, and green is for healthy alone. */
+export function HealthPill({ trigger }: { trigger: Trigger }) {
   const { t } = useI18n();
+  const chip = healthChip(trigger);
+  if (!chip) return null;
+  const { health } = trigger;
+  const tone: Tone = chip.reason
+    ? "muted"
+    : HEALTH_PROBLEMS.includes(health)
+      ? "problem"
+      : health === "healthy"
+        ? "done"
+        : "muted";
   return (
-    <Pill
-      tone={
-        HEALTH_PROBLEMS.includes(health)
-          ? "problem"
-          : health === "healthy"
-            ? "done"
-            : "muted"
-      }
-      of={t("triggerHealth")}
-    >
-      {t(HEALTH_TEXT[health])}
-    </Pill>
+    <>
+      <Pill tone={tone} of={t("triggerHealth")}>
+        {t(chip.text)}
+      </Pill>
+      {chip.reason && (
+        <span className="basis-full text-[13px] text-muted-foreground">
+          {chip.reason}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -426,7 +436,7 @@ export function TriggerRow({
       </div>
       <div className="flex flex-wrap gap-1.5">
         <LifecyclePill lifecycle={trigger.lifecycle} />
-        <HealthPill health={trigger.health} />
+        <HealthPill trigger={trigger} />
       </div>
     </li>
   );
@@ -644,7 +654,7 @@ export function TriggerDetail({ trigger }: { trigger: Trigger }) {
       </h1>
       <div className="mt-3 flex flex-wrap gap-1.5">
         <LifecyclePill lifecycle={trigger.lifecycle} />
-        <HealthPill health={trigger.health} />
+        <HealthPill trigger={trigger} />
       </div>
       {trigger.migration && trigger.migration.phase === "shadow" && (
         <p role="note" className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm">

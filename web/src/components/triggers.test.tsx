@@ -129,7 +129,7 @@ describe("the list", () => {
     setList(client, [page([triggerFixture(), pollFixture()])]);
     const text = textOf(await render(TriggersPage, client));
     expect(text).toContain("State: Draft");
-    expect(text).toContain("Health: Health unknown");
+    expect(text.match(/Health: /g)).toHaveLength(1);
     expect(text).toContain("State: On");
     expect(text).toContain("Health: Waiting for computer");
     expect(text).toContain("Waiting for your computer");
@@ -153,6 +153,28 @@ describe("the list", () => {
     );
     expect(text).toContain("Ended.");
     expect(text).not.toMatch(/Missed \d|Missed [A-Z][a-z]{2} /);
+  });
+
+  it("shows no health chip for a trigger that isn't on, and says what an on one lacks", async () => {
+    const client = clientWith();
+    setList(client, [
+      page([
+        pollFixture({ id: "trg_a", lifecycle: "paused", health: "healthy" }),
+        pollFixture({ id: "trg_b", lifecycle: "ended", health: "gap" }),
+        pollFixture({ id: "trg_c", health: "unknown" }),
+        pollFixture({
+          id: "trg_d",
+          health: "unknown",
+          healthDetail: "lost contact with the computer",
+        }),
+      ]),
+    ]);
+    const text = textOf(await render(TriggersPage, client));
+    expect(text.match(/Health: /g)).toHaveLength(2);
+    expect(text).toContain("Health: Waiting for first check");
+    expect(text).toContain("Health: Can't check right now");
+    expect(text).toContain("lost contact with the computer");
+    expect(text).not.toContain("Health: Healthy");
   });
 
   it("labels every filter, including health, source and agent", async () => {

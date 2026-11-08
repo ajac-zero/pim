@@ -3,8 +3,8 @@
  * and the space's HTTP routes (`/triggers`, `/trigger-runs` in ../pim.ts)
  * call, so a later screen and the agents read and change triggers the same
  * way. It sits over the engine (./engine.ts) and exists only where the
- * engine does: a space opted in where the deployment allows it, which no
- * deployment does. Elsewhere Pim builds none of it, its routes answer as
+ * engine does, in a person's own space, never a guest's. Elsewhere Pim
+ * builds none of it, its routes answer as
  * any unknown path, and no agent is offered its tools. See docs/triggers.md,
  * "The API".
  *

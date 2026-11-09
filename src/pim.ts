@@ -175,7 +175,7 @@ import { webExtension } from "./extensions/web";
 import { HostedApps, SESSION_COOKIE as HOSTED_SESSION_COOKIE } from "./hosted";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
-import { FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
+import { byteRange, FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "./notes";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -6731,7 +6731,7 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"GET",
 			"/files/content",
-			(_params, _request, url) =>
+			(_params, request, url) =>
 				this.#artifactRequest(url, async () => {
 					// A guest has no files: the images their bot made are in its author's, where only this guest's folder is theirs to read.
 					const guest = this.guestBot();
@@ -6740,8 +6740,20 @@ export class Pim extends DurableAgent<Env> {
 						if (!image) throw new HttpError(404, "No such image");
 						return new Response(image.bytes, { headers: fileHeaders({ name: image.name, size: image.bytes.byteLength, type: image.type }, url.searchParams.has("download")) });
 					}
-					const file = await this.files.read(url.searchParams.get("path"));
-					return new Response(file.body, { headers: fileHeaders(file, url.searchParams.has("download")) });
+					const path = url.searchParams.get("path");
+					const whole = await this.files.read(path);
+					// A video's playbar seeks with a Range request; answering it with the whole file makes the player snap back.
+					const range = byteRange(request.headers.get("range"), whole.size);
+					if (range === "unsatisfiable") {
+						await whole.body.cancel();
+						return new Response(null, { status: 416, headers: { "content-range": `bytes */${whole.size}` } });
+					}
+					if (!range) return new Response(whole.body, { headers: fileHeaders(whole, url.searchParams.has("download")) });
+					await whole.body.cancel();
+					const part = await this.files.read(path, range);
+					const headers = fileHeaders({ ...part, size: range.end - range.start + 1 }, url.searchParams.has("download"));
+					headers.set("content-range", `bytes ${range.start}-${range.end}/${part.size}`);
+					return new Response(part.body, { status: 206, headers });
 				}),
 		],
 		[

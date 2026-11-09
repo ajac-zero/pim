@@ -88,6 +88,7 @@ export function fileHeaders(file: { name: string; size: number; type: string }, 
 	const headers = new Headers({
 		"content-type": file.type,
 		"content-length": String(file.size),
+		"accept-ranges": "bytes",
 		"content-security-policy": "default-src 'none'; sandbox",
 		"x-content-type-options": "nosniff",
 		"cache-control": "no-store, private",
@@ -100,6 +101,22 @@ export function fileHeaders(file: { name: string; size: number; type: string }, 
 		headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(utf8)}`);
 	}
 	return headers;
+}
+
+/** The bytes a `Range` header asks for in a file of `size` bytes: null when it asks for the whole file or something else, "unsatisfiable" when it lies past the end. */
+export function byteRange(header: string | null, size: number): { start: number; end: number } | "unsatisfiable" | null {
+	const match = /^bytes=(\d*)-(\d*)$/.exec(header?.trim() ?? "");
+	if (!match || (match[1] === "" && match[2] === "")) return null;
+	let start: number;
+	let end: number;
+	if (match[1] === "") {
+		start = Math.max(0, size - Number(match[2]));
+		end = size - 1;
+	} else {
+		start = Number(match[1]);
+		end = match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1);
+	}
+	return start >= size || start > end ? "unsatisfiable" : { start, end };
 }
 
 /** An image's type, from its first bytes, for the types models take; else null. */
@@ -162,14 +179,14 @@ export class Files {
 		return { path: folder, entries };
 	}
 
-	/** A file's bytes and what to serve them as. */
-	async read(path: unknown): Promise<{ path: string; name: string; size: number; type: string; body: ReadableStream<Uint8Array> }> {
+	/** A file's bytes and what to serve them as; with `range`, only those bytes (inclusive), as a player asks for them to seek. */
+	async read(path: unknown, range?: { start: number; end: number }): Promise<{ path: string; name: string; size: number; type: string; body: ReadableStream<Uint8Array> }> {
 		const file = checkedPath(path);
 		const name = file.slice(file.lastIndexOf("/") + 1);
 		try {
 			const stat = await this.#fs.stat(file);
 			if (!stat.isFile) throw new HttpError(404, `No file ${file}`);
-			return { path: file, name, size: stat.size, type: fileType(name), body: await this.#fs.readFile(file) };
+			return { path: file, name, size: stat.size, type: fileType(name), body: await this.#fs.readFile(file, range && { byteOffset: range.start, byteLength: range.end - range.start + 1 }) };
 		} catch (error) {
 			throw answer(error, `No file ${file}`);
 		}

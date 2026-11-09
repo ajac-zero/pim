@@ -2,6 +2,9 @@ import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import {
   type CodingStreamMessage,
+  type CodingThreadState,
+  type CodingThreadSummary,
+  codingByChat,
   EMPTY_LIVE,
   type LiveTranscript,
   ndjson,
@@ -10,6 +13,7 @@ import {
   startInput,
   startProblems,
   stateReasonKey,
+  subthreadStatus,
   transcriptRows,
   writingMessage,
 } from "~/lib/coding";
@@ -338,5 +342,38 @@ describe("why a thread stopped", () => {
       reason: "low_disk",
     });
     expect(stateReasonKey(null)).toBeNull();
+  });
+});
+
+describe("subthreadStatus", () => {
+  it("maps each state to the badge the chat list shows", () => {
+    const states: Record<CodingThreadState, string> = {
+      provisioning: "queued",
+      queued: "queued",
+      running: "running",
+      waiting_input: "waiting",
+      idle: "done",
+      archived: "done",
+      failed: "failed",
+    };
+    for (const [state, badge] of Object.entries(states)) {
+      expect(subthreadStatus(state as CodingThreadState)).toBe(badge);
+    }
+  });
+});
+
+describe("codingByChat", () => {
+  const thread = (id: string, chat: string | null, createdAt: number) =>
+    ({ id, chat, createdAt }) as CodingThreadSummary;
+
+  it("groups threads under the chat that started them, oldest first, and leaves out the rest", () => {
+    const byChat = codingByChat([
+      thread("late", "a", 30),
+      thread("other", "b", 20),
+      thread("alone", null, 15),
+      thread("early", "a", 10),
+    ]);
+    expect([...byChat.keys()].sort()).toEqual(["a", "b"]);
+    expect(byChat.get("a")?.map((t) => t.id)).toEqual(["early", "late"]);
   });
 });

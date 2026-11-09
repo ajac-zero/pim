@@ -1,11 +1,13 @@
 import type { CodingThreadStatus } from "./thread-do";
 import type { QueuePlace } from "./scheduler";
-import type { AgentProfile, CodingThreadState } from "./thread-store";
+import type { AgentProfile, CodingHarness, CodingThreadState } from "./thread-store";
 
 /**
  * The coding threads API, under `/api/coding/threads`: what the web app and
  * other clients see of a space's coding threads. See docs/coding-api.md.
  */
+
+export type { CodingHarness };
 
 /** Who started a thread: the person (the web app or the API), or one of their agents, from a chat. */
 export type CodingCreator = { readonly type: "person" } | { readonly type: "agent"; readonly agent: string; readonly chat: string };
@@ -24,6 +26,9 @@ export type CodingThreadSummary = {
 	readonly queue: QueuePlace | null;
 	readonly createdBy: CodingCreator;
 	readonly parent: string | null;
+	/** The chat it was started from, under which the chat list shows it; null for one started elsewhere. */
+	readonly chat: string | null;
+	readonly harness: CodingHarness;
 	readonly spentUsd: number;
 	readonly budgetUsd: number;
 	readonly createdAt: number;
@@ -49,6 +54,10 @@ export type StartCodingThread = {
 	readonly ref?: string;
 	readonly task: string;
 	readonly profile?: AgentProfile;
+	/** The coding agent that runs it; `pi` by default. The others aren't available yet. */
+	readonly harness?: CodingHarness;
+	/** The chat it is started from, for the chat list to show it under. An agent's own chat is recorded without it. */
+	readonly chat?: string;
 	readonly budgetUsd?: number;
 	readonly parent?: string;
 	readonly operationId?: string;

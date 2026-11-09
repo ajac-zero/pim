@@ -23,6 +23,7 @@ import {
 	type AgentProfile,
 	type Checkpoint,
 	type CodingEvent,
+	type CodingHarness,
 	type CodingLimits,
 	type CodingThreadRow,
 	type CodingThreadState,
@@ -260,6 +261,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				baseRef: input.ref ?? "main",
 				branch: branchName(task, threadId),
 				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },
+				harness: input.harness ?? "pi",
 				providerId,
 				state: "provisioning",
 				createdBy: input.createdBy,
@@ -288,6 +290,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			stateDetail: thread.stateDetail,
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch, baseSha: thread.baseSha },
 			profile: thread.profile,
+			harness: thread.harness,
 			workspaceProvider: thread.providerId,
 			slot: thread.slot,
 			queue,
@@ -1228,6 +1231,8 @@ export type StartThread = {
 	readonly task: string;
 	/** The model it runs on: the space's default unless given (`defaultProfile`). */
 	readonly profile?: AgentProfile;
+	/** The coding agent that runs it (pi). */
+	readonly harness?: CodingHarness;
 	/** The most the thread may spend on its model, in dollars ($3). */
 	readonly budgetUsd?: number;
 	/** The thread that started this one, if any. */
@@ -1249,6 +1254,7 @@ export type CodingThreadStatus = {
 	readonly stateDetail: string | null;
 	readonly repo: { readonly url: string; readonly ref: string; readonly branch: string; readonly baseSha: string | null };
 	readonly profile: AgentProfile;
+	readonly harness: CodingHarness;
 	readonly workspaceProvider: string;
 	readonly slot: CodingThreadRow["slot"];
 	/** Its place in the space's queue while it waits for a slot. */

@@ -9,6 +9,10 @@ import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
+import {
+  CodingSubthreadRow,
+  useCodingByChat,
+} from "~/components/coding-subthread-row";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -68,6 +72,7 @@ import {
   TooltipTrigger,
 } from "~/components/ui/tooltip";
 import { flatChats, groupByAge, isInactive, nestChats } from "~/lib/chat-list";
+import { subthreadStatus } from "~/lib/coding";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -665,6 +670,7 @@ function ChatTree({
   const [open, setOpen] = useState(depth === 0);
   const below = (chat: Session): Session[] =>
     (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
+  const coding = useCodingByChat().get(session.id) ?? [];
   const under = below(session);
   const expanded = open || under.some((chat) => chat.id === activeId);
   return (
@@ -676,18 +682,31 @@ function ChatTree({
         awaitingApproval={awaitingApproval.has(session.id)}
         onNavigate={onNavigate}
         tasks={
-          under.length > 0
+          under.length + coding.length > 0
             ? {
-                done: under.filter((child) =>
-                  DONE_STATES.has(child.startedBy?.state ?? "completed"),
-                ).length,
-                total: under.length,
+                done:
+                  under.filter((child) =>
+                    DONE_STATES.has(child.startedBy?.state ?? "completed"),
+                  ).length +
+                  coding.filter((thread) =>
+                    ["done", "failed"].includes(subthreadStatus(thread.state)),
+                  ).length,
+                total: under.length + coding.length,
                 expanded,
                 toggle: () => setOpen(!expanded),
               }
             : undefined
         }
       />
+      {expanded &&
+        coding.map((thread) => (
+          <CodingSubthreadRow
+            key={thread.id}
+            thread={thread}
+            depth={depth + 1}
+            onNavigate={onNavigate}
+          />
+        ))}
       {expanded &&
         tree
           .get(session.id)

@@ -12,6 +12,11 @@ import type { WorkspaceRef } from "./workspace/types";
 /** Where a thread is: getting a workspace ready, waiting for a slot, between turns, in a turn, waiting for the person, stopped by a failure, or done. */
 export type CodingThreadState = "provisioning" | "queued" | "idle" | "running" | "waiting_input" | "failed" | "archived";
 
+/** Which coding agent runs a thread: pi, the one Pim has built in, or one of the other harnesses. */
+export type CodingHarness = "pi" | "claude-code" | "codex";
+
+export const CODING_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code", "codex"];
+
 /** Which model a thread runs on, by the space's provider id (such as `own:anthropic`) and the model's id there. */
 export type AgentProfile = { readonly providerId: string; readonly model: string; readonly thinking?: ModelThinkingLevel };
 
@@ -30,6 +35,7 @@ export type CodingThreadRow = {
 	readonly baseSha: string | null;
 	readonly branch: string;
 	readonly profile: AgentProfile;
+	readonly harness: CodingHarness;
 	/** The workspace provider's id. */
 	readonly providerId: string;
 	readonly workspaceRef: WorkspaceRef | null;
@@ -103,6 +109,7 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	base_sha TEXT,
 	branch TEXT NOT NULL,
 	agent_profile TEXT NOT NULL,
+	harness TEXT NOT NULL DEFAULT 'pi',
 	provider_id TEXT NOT NULL,
 	workspace_ref TEXT,
 	state TEXT NOT NULL,
@@ -207,7 +214,10 @@ export class CodingThreadStore {
 	}
 
 	/** Brings an older thread's tables up to date. Columns added after the first schema go here, as `ALTER TABLE` behind a check. */
-	#migrate(): void {}
+	#migrate(): void {
+		const columns = this.#sql.exec("PRAGMA table_info(coding_thread)").toArray();
+		if (!columns.some((column) => column.name === "harness")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
+	}
 
 	thread(): CodingThreadRow | null {
 		const row = this.#sql.exec("SELECT * FROM coding_thread LIMIT 1").toArray()[0];
@@ -224,14 +234,15 @@ export class CodingThreadStore {
 	create(thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "createdAt" | "updatedAt">): void {
 		const now = this.#now();
 		this.#sql.exec(
-			`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, harness, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			thread.threadId,
 			thread.space,
 			thread.repoUrl,
 			thread.baseRef,
 			thread.branch,
 			JSON.stringify(thread.profile),
+			thread.harness,
 			thread.providerId,
 			thread.state,
 			thread.createdBy,
@@ -419,6 +430,7 @@ function threadOf(row: Row): CodingThreadRow {
 		baseSha: text(row.base_sha),
 		branch: String(row.branch),
 		profile: JSON.parse(String(row.agent_profile)) as AgentProfile,
+		harness: String(row.harness) as CodingHarness,
 		providerId: String(row.provider_id),
 		workspaceRef: row.workspace_ref === null ? null : (JSON.parse(String(row.workspace_ref)) as WorkspaceRef),
 		state: String(row.state) as CodingThreadState,

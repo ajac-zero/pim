@@ -23,6 +23,10 @@ import {
   CodingPage,
   CodingThreadPage,
 } from "~/components/coding";
+import {
+  CodingSubthreadRow,
+  useCodingByChat,
+} from "~/components/coding-subthread-row";
 import type {
   CodingApi,
   CodingStreamMessage,
@@ -81,6 +85,7 @@ const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
     baseSha: "abc",
   },
   profile: { providerId: "p", model: "m" },
+  harness: "pi",
   workspaceProvider: "manager",
   slot: "held",
   queue: null,
@@ -186,6 +191,8 @@ const summary = (
   queue: null,
   createdBy: { type: "person" },
   parent: null,
+  chat: null,
+  harness: "pi",
   spentUsd: 0.42,
   budgetUsd: 3,
   createdAt: Date.UTC(2026, 10, 9, 10),
@@ -686,5 +693,72 @@ describe("a thread's page", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "There's no such coding thread in your space.",
     );
+  });
+});
+
+describe("the harness", () => {
+  it("is named with its mark in the thread's header", async () => {
+    const { api } = fakeApi(view({ harness: "claude-code" }));
+    threadPage(api);
+    const header = (await screen.findByRole("banner")) as HTMLElement;
+    expect(within(header).getByText("Claude Code")).toBeTruthy();
+    expect(
+      header.querySelector("svg[data-harness='claude-code']"),
+    ).toBeTruthy();
+  });
+});
+
+describe("a coding subthread in the chat list", () => {
+  const row = (overrides: Partial<CodingThreadSummary> = {}) =>
+    renderWith(fakeApi().api, () => (
+      <ul>
+        <CodingSubthreadRow thread={summary(overrides)} depth={1} />
+      </ul>
+    ));
+
+  it("shows the harness mark, the task's first line, a status badge and a link to its page", async () => {
+    row({
+      harness: "codex",
+      task: "Fix the flaky date test\nIt fails on Sundays.",
+      state: "running",
+    });
+    const link = await screen.findByRole("link");
+    expect(link.getAttribute("href")).toBe("/coding/t1");
+    expect(within(link).getByText("Fix the flaky date test")).toBeTruthy();
+    expect(link.querySelector("svg[data-harness='codex']")).toBeTruthy();
+    expect(within(link).getByText("Running")).toBeTruthy();
+  });
+
+  it("falls back to the repository for a title, and names each state's badge", async () => {
+    row({ task: "  ", state: "waiting_input" });
+    const link = await screen.findByRole("link");
+    expect(within(link).getByText("acme/widgets")).toBeTruthy();
+    expect(within(link).getByText("Waiting")).toBeTruthy();
+  });
+
+  it("is listed under the chat it was started from, by the list's own query", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({
+      threads: [
+        summary({ id: "a", chat: "chat-1" }),
+        summary({ id: "b", chat: "chat-2" }),
+        summary({ id: "c", chat: null }),
+      ],
+    });
+    const Under = () => {
+      const under = useCodingByChat().get("chat-1") ?? [];
+      return (
+        <ul>
+          {under.map((thread) => (
+            <CodingSubthreadRow key={thread.id} thread={thread} depth={1} />
+          ))}
+        </ul>
+      );
+    };
+    renderWith(api, Under);
+    const links = await screen.findAllByRole("link");
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "/coding/a",
+    ]);
   });
 });

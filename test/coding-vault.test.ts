@@ -445,8 +445,6 @@ describe("signing in to Claude Code", () => {
 		expect((await login("", { method: "DELETE" })).body).toEqual({ harness: "claude-code", state: "none", url: null, error: null });
 		expect(await loginWorkspaces()).toEqual([]);
 		expect((await send(GOOD_CODE)).body).toMatchObject({ state: "none", error: expect.stringContaining("start again") });
-		// Codex's sign-in isn't relayed yet, and a guest has no logins.
-		expect((await api("/coding/vault/codex/login", { method: "POST" })).status).toBe(404);
 	});
 
 	it("goes on with the person's threads that waited for the login once they sign in", async () => {

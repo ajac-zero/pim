@@ -513,13 +513,13 @@ So a due schedule fires once, through its alarm (a retried firing is one submiss
 
 ### The automatic migration
 
-`Pim.ensureTriggerEngine()`, as a person's own space starts and as they register, turns triggers on and then, wherever they are on, runs `Pim.runTriggerMigration()`: it plans (the preview, above), and `TriggerMigration.migrate` goes through the plan's items in its order, schedules then watches, each by id:
+`Pim.ensureTriggerEngine()`, as a person's own space starts and as they register, turns triggers on and then, wherever they are on, runs `Pim.runTriggerMigration()`; the trigger wake also sweeps with it while the space runs ("The sweep", below). A run plans (the preview, above), and `TriggerMigration.migrate` goes through the plan's items in its order, schedules then watches, each by id:
 
 - An item its trigger already owns is `already`, and nothing is written.
 - An item given back before stays with its schedule or watch: `rolled_back` (its record says so) or `cut_back` (its owner history has a cutover, and the schedule or watch owns it now, by a cutback, a forced one included). Neither is ever undone automatically; only cutting it over by hand moves it again.
 - An item the plan can't represent exactly stays, with the plan's reason: `interval_schedule`, `one_time_due`, `cron_syntax`, `cron_semantics`, `schedule_exhausted`, `invalid_field`, `chat_unavailable`, `agent_unavailable`, `watch_ended`, `watch_not_subscribed` or `callback_changed` (above). Nothing is written for it.
 - Any other item gets its shadow (apply), then, with no blocker unmet, is cut over: two transactions, each as above. A watch whose deliveries haven't yet passed the adapter's rules gets its shadow and stays (`stricter_ingress`); a later start cuts it over once at least one of its event deliveries was checked and the latest passed. A watch no event has reached yet stays until one does.
-- At most `MIGRATION_ITEMS_PER_START` (25) items are written to in a start; the rest are `deferred` to the next start. An item the store refuses (`refused`) is tried again at the next start.
+- At most `MIGRATION_ITEMS_PER_START` (25) items are written to in a run; the rest are `deferred` to the next run. An item the store refuses (`refused`) is tried again at the next run.
 
 So time-based schedules move (`scheduled`, `delayed` and `cron`, on the conditions in "The mapping"), and watches move once a delivery shows the connector sends what the adapter takes. Every item is reported (`MigrateOutcome`): owned by its trigger, `cut_over` or `already`, or by its schedule or watch, with the reason (`LegacyReason`). A space with schedules or watches logs one line a start, of counts only, never an id, an instruction, a URL or a secret:
 
@@ -527,9 +527,39 @@ So time-based schedules move (`scheduled`, `delayed` and `cron`, on the conditio
 {"event":"pim.triggers_migration","owner":"ada","schedules":3,"watches":2,"outcomes":{"cut_over":2,"already":0,"legacy":3},"reasons":{"cron_syntax":1,"stricter_ingress":1,"watch_not_subscribed":1}}
 ```
 
-What moved is in `GET /triggers`, each with its `migration`; what stayed is in `GET /schedules` and `GET /watches` as ever, and a watch's shadow waiting on `stricter_ingress` is listed as a draft its watch owns. `Pim.previewTriggerMigration()` gives each item's reason (internal).
+What moved is in `GET /triggers`, each with its `migration`; what stayed is in `GET /schedules` and `GET /watches` as ever, and a watch's shadow waiting on `stricter_ingress` is listed as a draft its watch owns. Where every item stands, with its reason, is `GET /triggers/migration` and the `list_trigger_migration` tool ("Where each item stands", below).
 
 It never holds up or breaks the start: at a start it runs before the space answers any request or runs any alarm, bounded as above; a failure anywhere is caught and logged (`pim.triggers_migration_failed`, with the error), and the next start goes on from there. Whatever fails, each item is delivered by exactly one side: each step is its own transaction, and an item between its shadow and its cutover is a draft its schedule or watch owns. It never moves a firing under way: a schedule's firing due before the cutover is the schedule's however late its alarm runs, and a watch's delivery is whoever owned the watch when it came in ("One owner at every instant", below). In a space with neither schedules nor watches it makes no table and logs nothing.
+
+### The sweep
+
+A space that was already running when the migration shipped, or that gets a schedule or watch after it started, isn't left until its next start: the trigger wake's callback (`Pim.runTriggerTick`) runs the same migration after the coordinator's tick, as a **sweep**. It sweeps on the first tick after a start, on the next tick after `schedule_task` makes a schedule or `watch_connector_event` subscribes a watch (each asks for one, and the wake is set for now), and otherwise at most once an hour (`MIGRATION_SWEEP_INTERVAL_MS`, kept on the real clock, `migrationSweepClock`). A sweep is the same run as at a start: the same plan, the same 25 items at most, each item one owner throughout, and what it already did is `already`, so sweeping again never moves an item twice. It never throws, and the wake is set again after it, whatever it did.
+
+The wake comes back for a sweep only while an item may still move by itself: one this instance hasn't run for yet, one a failed run didn't reach, or one left `deferred`, `refused` or `agent_unavailable` (`MIGRATION_RETRY_REASONS`); then an hour after the last run, or now on the first tick after a start. An item its trigger delivers, one given back, and one left for a reason that lasts until the item changes (a cron the triggers read differently, a deleted chat, a watch waiting on `stricter_ingress`) set no wake, so a space whose items are settled has none for the migration; its sweeps then come only with ticks the coordinator needs anyway. A sweep that finds nothing to move writes nothing, and in a space with neither schedules nor watches it makes no table.
+
+Every sweep logs one line, of counts only, with why it ran (`first_tick`, `asked` or `hourly`), even when it found nothing; a failure logs `pim.triggers_migration_failed` with the same `cause`:
+
+```json
+{"event":"pim.triggers_migration_sweep","owner":"ada","cause":"hourly","schedules":2,"watches":0,"outcomes":{"cut_over":1,"already":1,"legacy":0},"reasons":{}}
+```
+
+Tested in `test/triggers-migration.test.ts` ("the migration's sweep, in a space that is already running"): a space whose triggers were on, with a new-chat cron scheduled in another agent's chat, an hourly and a one-time schedule, and no start after they were made, moves all three on the wake's next tick, owned by the agent `runScheduledTask` would start the chat with; the hourly firing that was due before the cutover runs once by its alarm, late, and never by the trigger, and the later firings run once by the triggers while each alarm skips them. A schedule made directly waits for the hour and then moves; one `schedule_task` makes moves on the next tick; a sweep with nothing new writes nothing; each item changes owner once however many sweeps saw it; and a sweep that fails is logged, leaves the item with its schedule, and the wake comes back an hour on to move it.
+
+### Where each item stands
+
+`GET /triggers/migration` (the person) and the `list_trigger_migration` tool (an agent) show where each schedule and watch stands, read only, a page at a time (`limit` 1 to 50, 20 by default, and `cursor`), in the plan's order:
+
+```json
+{
+  "runs": { "startedAt": 1794182230000, "lastRunAt": 1794182231000, "lastRun": "ok", "nextSweepAt": null },
+  "items": [
+    { "kind": "schedule", "legacyId": "Y-O2UFtcx", "label": "Scout", "agentId": "p_b8aac116480e", "status": "migrated", "owner": "trigger", "reason": null, "nextFiringAt": 1794232800000, "triggerId": "legacy:schedule:Y-O2UFtcx:1" }
+  ],
+  "nextCursor": null
+}
+```
+
+`status` is `migrated` (its trigger delivers it), `migratable` (the next run moves it), `deferred` (it maps, and waits: past the next run's 25 items, `reason: "deferred"`, or for its blocker, such as `stricter_ingress`), `unsupported` (with the plan's reason) or `given_back` (`cut_back` or `rolled_back`, which stands). `owner` says which side delivers it now; `label` is the schedule's label (null without one) or the watch's event name; `nextFiringAt` is a schedule's next firing as its alarm has it; `triggerId` is its live trigger's, the shadow's included. `runs` is what this instance knows of the migration's runs: when it started, when it last ran and whether that failed, and when the wake comes back to sweep. Nothing else of an item is in it: no instruction, secret, callback URL or cursor. It writes nothing, as the preview. The person and the majordomo see every item; another agent sees its own, an item being the agent's whose trigger has it or would have it. Like the other routes it exists only where the space's triggers are on, and is closed to guests. Tested in `test/triggers-api.test.ts`.
 
 **Stopping a moved item, from either side.** A schedule or watch and the trigger made from it are one piece of work the person sees in two places, Schedules and Triggers; stopping it in either stops both:
 
@@ -573,7 +603,7 @@ The contract both sides read is the owner history: `firingOwner(sql, kind, id, a
 
 **The API and the screen** show the owner honestly: a shadow's `migration` says `owner`, `phase`, `enableable` (true once the trigger owns it) and `ownerSince` (the one field added here). A shadow is never edited, paused or turned on through the API, whichever side owns it (`owned_elsewhere`), since only the cutover, the cutback and the rollback change its owner; deleting one ends its schedule or watch with it ("Stopping a moved item", above). A cut-over one reads as `enabled`, its runs listed as any trigger's. The screen says the trigger delivers in the schedule's or watch's place since when.
 
-**Not wired, and not done.** No route, tool, setting or UI calls the preview, apply, cutover, cutback or rollback: the automatic migration runs at each start, and the rest is reached only from the Durable Object, by an operator. A shadow is made once and not kept in step: a one-time schedule that fired since leaves an orphan, and the preview lists it; a cut-over one-time schedule that fired by trigger stays cut over, and its record is kept, as its ended trigger is. A cut-over watch whose connector ended the subscription stays an enabled trigger nothing reaches, until the watch is stopped or the trigger deleted. A forced cutback leaves what the trigger admitted pending until the next cutover, and a forced rollback cancels it. An event the trigger admitted and couldn't hand on within a day (its run slot held, or its triggers off) is recorded as not handed on ("the time to hand it on ran out"), as any trigger's is, where the watch's receiver would have run it at once or answered the provider with an error to be sent it again. The adapter is told the watch's connector is `connected` without asking, as the watch's receiver never asked. Not proven here, since nothing of it runs outside the tests: a real provider's deliveries, retries and subscription renewals; real alarm timing on Cloudflare and a Durable Object's eviction mid-transaction (the tests crash each step by throwing inside the transaction, and restart by building the engine again or making a new instance on the same storage, not by evicting the object); the interleavings in the Cloudflare runtime itself, where the test's sweep makes bodies settle at once and treats pi's submission as one step. In production, the strict checks stand in for a look at each watch's deliveries: a watch is cut over only once the latest of its checked deliveries passed.
+**Not wired, and not done.** No route, tool, setting or UI calls the preview, apply, cutover, cutback or rollback: the automatic migration runs at each start and at the wake's sweeps, `GET /triggers/migration` only reads, and the rest is reached only from the Durable Object, by an operator. A shadow is made once and not kept in step: a one-time schedule that fired since leaves an orphan, and the preview lists it; a cut-over one-time schedule that fired by trigger stays cut over, and its record is kept, as its ended trigger is. A cut-over watch whose connector ended the subscription stays an enabled trigger nothing reaches, until the watch is stopped or the trigger deleted. A forced cutback leaves what the trigger admitted pending until the next cutover, and a forced rollback cancels it. An event the trigger admitted and couldn't hand on within a day (its run slot held, or its triggers off) is recorded as not handed on ("the time to hand it on ran out"), as any trigger's is, where the watch's receiver would have run it at once or answered the provider with an error to be sent it again. The adapter is told the watch's connector is `connected` without asking, as the watch's receiver never asked. Not proven here, since nothing of it runs outside the tests: a real provider's deliveries, retries and subscription renewals; real alarm timing on Cloudflare and a Durable Object's eviction mid-transaction (the tests crash each step by throwing inside the transaction, and restart by building the engine again or making a new instance on the same storage, not by evicting the object); the interleavings in the Cloudflare runtime itself, where the test's sweep makes bodies settle at once and treats pi's submission as one step. In production, the strict checks stand in for a look at each watch's deliveries: a watch is cut over only once the latest of its checked deliveries passed.
 
 ## The API
 
@@ -608,13 +638,14 @@ Every body is JSON; times are milliseconds since 1970 (UTC), and a source's `at`
 | `POST /triggers/:id/resume` | `If-Match` (required) | The `Trigger`, `enabled`, exactly as at that revision |
 | `POST /triggers/:id/test` | `{ samples?, count? }` | A `DryRun` |
 | `GET /triggers/:id/runs` | `limit`, `cursor` | `{ runs: Run[], nextCursor }`, newest first |
+| `GET /triggers/migration` | `limit`, `cursor` | `{ runs, items, nextCursor }`: where each schedule and watch stands in the move to triggers ("Where each item stands") |
 | `GET /trigger-runs/:runId` | | The `Run` |
 
 There is no route to run a trigger now, and none for the sources: `list_trigger_sources` is a tool only so far. `If-Match` takes `"3"` or `3`; a weak or other ETag is `400`. A cursor is opaque, works only for the listing that gave it (and, for runs, that trigger), and is `invalid_cursor` anywhere else. Unknown query parameters are ignored; unknown body fields are refused.
 
 ### Tools
 
-`create_trigger`, `update_trigger` (`expectedRevision`), `list_triggers`, `get_trigger`, `pause_trigger`, `resume_trigger` (`expectedRevision`), `delete_trigger` (optional `expectedRevision`), `list_trigger_runs`, `test_trigger` and `list_trigger_sources` take the same fields as the routes, with `newChat` for the destination (`true` a new chat, `false` the chat they are called in) and `maxPendingEvents` for `delivery`. They answer the same JSON; a refusal is the tool result `{ error, code, ... }` marked as an error. `create_trigger` answers `{ trigger, replayed }`.
+`create_trigger`, `update_trigger` (`expectedRevision`), `list_triggers`, `get_trigger`, `pause_trigger`, `resume_trigger` (`expectedRevision`), `delete_trigger` (optional `expectedRevision`), `list_trigger_runs`, `test_trigger`, `list_trigger_sources` and `list_trigger_migration` take the same fields as the routes, with `newChat` for the destination (`true` a new chat, `false` the chat they are called in) and `maxPendingEvents` for `delivery`. They answer the same JSON; a refusal is the tool result `{ error, code, ... }` marked as an error. `create_trigger` answers `{ trigger, replayed }`.
 
 **One creation per tool call.** `create_trigger` makes its trigger under the creation key `tool:<conversation>:<tool task>`, the durable identity pi gives the call, so the call replayed after an eviction gives the trigger it made (`replayed: true`) instead of a second one.
 

@@ -125,6 +125,7 @@ describe("triggers' API where triggers are off", () => {
 			["POST", "/triggers/abc/resume"],
 			["POST", "/triggers/abc/test"],
 			["GET", "/triggers/abc/runs"],
+			["GET", "/triggers/migration"],
 			["GET", "/trigger-runs/abc"],
 			["PUT", "/triggers"],
 		] as const) {
@@ -662,9 +663,75 @@ describe("triggers' API where triggers are on", () => {
 		expect(await call(`/triggers/${encodeURIComponent(id)}`, { method: "DELETE" })).toMatchObject({ status: 409, body: { code: "trigger_deleted" } });
 	});
 
+	it("shows where each schedule and watch stands in the migration, a page at a time, to the person and the majordomo, and to another agent its own, writing nothing", async () => {
+		const scout = (await post("/agents", { name: "Ranger", instructions: "Find things." })).body;
+		expect(scout.id).toEqual(expect.any(String));
+		const scoutChat = (await post("/sessions", { agent: scout.id })).body.id as string;
+		const secret = "whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0LTEyMw==";
+		const made = await inSpace(async (pim) => {
+			const chat = pim.store.sessionOf(ROOT)!;
+			const task = (cron: string, payload: Record<string, unknown>) => pim.schedule(cron, "runScheduledTask", { session: chat, ...payload } as never);
+			// Moved: a new-chat task scheduled in Ranger's chat, which is Ranger's work.
+			const moved = await task("0 9 * * *", { session: pim.store.sessionOf(scoutChat)!, instruction: "MOVED-INSTRUCTION", label: "Scout brief", newChat: true });
+			// Given back by a cutback, which stands.
+			const back = await task("0 10 * * *", { instruction: "BACK-INSTRUCTION", label: "Back" });
+			// A day's name, which triggers would read differently, and no label.
+			const named = await task("0 9 * * MON", { instruction: "NAMED-INSTRUCTION" });
+			// A watch whose deliveries haven't been checked against the adapter's rules yet: shadowed, and waiting.
+			const watchId = crypto.randomUUID();
+			pim.store.addWatch({ id: watchId, serverId: "travel", event: "flight.price_changed", arguments: { route: "JFK-LIS" }, instruction: "WATCH-INSTRUCTION", session: chat, secret, url: `https://pim.test/mcp/events/${OWNER}/${watchId}` });
+			pim.store.updateWatch(watchId, { status: "active", remoteId: "sub_travel_1", cursor: "cursor-kept-77", refreshBefore: Date.now() + HOUR });
+			await pim.runTriggerMigration();
+			expect(pim.cutbackTriggerMigration([{ kind: "schedule", legacyId: back.id }])!.map((item) => item.outcome)).toEqual(["cut_back"]);
+			// Made since the last run: the next one moves it.
+			const fresh = await task("0 11 * * *", { instruction: "FRESH-INSTRUCTION", label: "Fresh" });
+			return { moved, back, named, fresh, watchId };
+		});
+		const ours = new Set([made.moved.id, made.back.id, made.named.id, made.fresh.id, made.watchId]);
+		const schedule = (scheduled: { id: string; time: number }, rest: Record<string, unknown>) => ({ kind: "schedule", legacyId: scheduled.id, nextFiringAt: scheduled.time * 1000, ...rest });
+		const expected = [
+			schedule(made.moved, { label: "Scout brief", agentId: scout.id, status: "migrated", owner: "trigger", reason: null, triggerId: `legacy:schedule:${made.moved.id}:1` }),
+			schedule(made.back, { label: "Back", agentId: boss, status: "given_back", owner: "legacy", reason: "cut_back", triggerId: `legacy:schedule:${made.back.id}:1` }),
+			schedule(made.named, { label: null, agentId: boss, status: "unsupported", owner: "legacy", reason: "cron_syntax", triggerId: null }),
+			schedule(made.fresh, { label: "Fresh", agentId: boss, status: "migratable", owner: "legacy", reason: null, triggerId: null }),
+		].sort((a, b) => (a.legacyId < b.legacyId ? -1 : 1));
+		expected.push({ kind: "watch", legacyId: made.watchId, label: "flight.price_changed", agentId: boss, status: "deferred", owner: "legacy", reason: "stricter_ingress", nextFiringAt: null, triggerId: `legacy:watch:${made.watchId}:1` } as never);
+		try {
+			const before = await everything();
+			const listed = await call("/triggers/migration");
+			expect(listed.status).toBe(200);
+			expect(listed.body.items.filter((item: { legacyId: string }) => ours.has(item.legacyId))).toEqual(expected);
+			expect(listed.body.runs).toMatchObject({ startedAt: expect.any(Number), lastRunAt: expect.any(Number), lastRun: "ok" });
+			for (const kept of ["INSTRUCTION", secret, "cursor-kept-77", "https://pim.test", "sub_travel_1"]) expect(listed.text).not.toContain(kept);
+
+			// A page at a time, in the same order, until there is no next cursor.
+			const paged: unknown[] = [];
+			let cursor: string | null = null;
+			do {
+				const page: Awaited<ReturnType<typeof call>> = await call(`/triggers/migration?limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+				expect(page.body.items.length).toBeLessThanOrEqual(2);
+				paged.push(...page.body.items);
+				cursor = page.body.nextCursor;
+			} while (cursor !== null);
+			expect(paged).toEqual(listed.body.items);
+			expect(await call("/triggers/migration?cursor=nope")).toMatchObject({ status: 400, body: { code: "invalid_cursor" } });
+			expect(await call("/triggers/migration?limit=0")).toMatchObject({ status: 400, body: { code: "invalid_request" } });
+			expect(await everything()).toBe(before);
+
+			// The majordomo's tool shows the same; Ranger's shows its own and nothing else.
+			const majordomo = await tool("list_trigger_migration", { limit: 50 });
+			expect(majordomo.body.items.filter((item: { legacyId: string }) => ours.has(item.legacyId))).toEqual(expected);
+			expect((await tool("list_trigger_migration", {}, scoutChat)).body.items).toEqual([expected.find((item) => item.legacyId === made.moved.id)]);
+		} finally {
+			for (const id of [made.moved.id, made.back.id, made.named.id, made.fresh.id]) await call(`/schedules/${id}`, { method: "DELETE" });
+			await call(`/watches/${made.watchId}`, { method: "DELETE" });
+			await call(`/agents/${scout.id}`, { method: "DELETE" });
+		}
+	});
+
 	it("is closed to guests: their accounts can't reach it, and a guest's space has no route or tool of it", async () => {
 		const guest = { ownerId: "o_someguest", role: "guest" } as never;
-		for (const path of ["/triggers", "/triggers/abc", "/triggers/abc/runs", "/trigger-runs/abc"]) {
+		for (const path of ["/triggers", "/triggers/abc", "/triggers/abc/runs", "/triggers/migration", "/trigger-runs/abc"]) {
 			const refused = await guestRequest(env, guest, new Request(apiUrl(path)), path);
 			expect([path, refused?.status]).toEqual([path, 403]);
 		}

@@ -210,18 +210,26 @@ import {
 	firingOwner,
 	LegacyEventData,
 	type LegacyKind,
+	type LegacyReason,
 	type LegacySchedule,
 	legacyEventContents,
 	legacyEventOperationId,
 	legacyFiringOperationId,
 	MIGRATION_ITEMS_PER_START,
+	MIGRATION_RETRY_REASONS,
+	MIGRATION_SWEEP_INTERVAL_MS,
 	type MigrateOutcome,
+	type MigrationContext,
 	type MigrationPlan,
 	type MigrationRecord,
+	type MigrationStatusItem,
+	type MigrationSweepCause,
 	migrationCounts,
 	migrationRecordOf,
 	migrationRecordOfItem,
 	migrationRecords,
+	migrationStatus,
+	ownershipChanges,
 	planMigration,
 	recordReceipt,
 	type RollbackOutcome,
@@ -760,6 +768,8 @@ export class Pim extends DurableAgent<Env> {
 			const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
 			await this.deliverNotification(notification);
 		},
+		// Its receiver delivers it until the wake's next sweep moves it, if it can.
+		watched: () => this.#askMigrationSweep(),
 		// A trigger made from the watch ends with it, whoever stops it.
 		stopping: (id) => this.#retireMigrated("watch", id),
 	});
@@ -1795,7 +1805,10 @@ export class Pim extends DurableAgent<Env> {
 				if (schedules !== null && (await this.services().listSchedules()).length >= schedules) {
 					throw new Error(`The limit of ${schedules} scheduled tasks is reached. Cancel one first.`);
 				}
-				return this.schedule(when, SCHEDULED_TASK_CALLBACK, payload);
+				const made = await this.schedule(when, SCHEDULED_TASK_CALLBACK, payload);
+				// Its schedule delivers it until the wake's next sweep moves it, if it can.
+				this.#askMigrationSweep();
+				return made;
 			},
 			listSchedules: async () =>
 				(await this.listSchedules()).filter(
@@ -1863,6 +1876,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onStart(): Promise<void> {
+		this.#migrationRuns.startedAt = this.migrationSweepClock();
 		this.mcp.configureOAuthCallback({
 			customHandler: (result) => signInResultPage(result.authSuccess, this.deployment().publicUrl ?? undefined, String(result.authError ?? "")),
 		});
@@ -2354,6 +2368,23 @@ export class Pim extends DurableAgent<Env> {
 	 * runs; no secret is in it.
 	 */
 	async previewTriggerMigration(): Promise<MigrationPlan> {
+		const { input, context } = await this.#migrationInput();
+		return planMigration(input, context);
+	}
+
+	/**
+	 * Internal: where each schedule and watch stands in the migration, as the
+	 * next run would leave it (`migrationStatus`), for the status route and
+	 * tool. Writes nothing, as the preview.
+	 */
+	async triggerMigrationStatus(): Promise<MigrationStatusItem[]> {
+		const { input, context } = await this.#migrationInput();
+		const sql = this.ctx.storage.sql;
+		return migrationStatus(input, context, (kind, legacyId) => ownershipChanges(sql, kind, legacyId).length > 0);
+	}
+
+	/** What the migration's mapping reads of the space: its schedules, watches and records, and the space as the mapping sees it. Writes nothing. */
+	async #migrationInput(): Promise<{ input: Parameters<typeof planMigration>[0]; context: MigrationContext }> {
 		const schedules = (await this.services().listSchedules()) as LegacySchedule[];
 		const watches = this.store.watches();
 		// The chats a trigger would deliver to, checked as its host's preflight checks them, before the pure mapping reads them.
@@ -2361,9 +2392,9 @@ export class Pim extends DurableAgent<Env> {
 		const space = this.#triggerSpace();
 		const open = new Set<string>();
 		for (const chat of chats) if (await space.chatOpen(chat)) open.add(chat);
-		return planMigration(
-			{ schedules, watches, records: migrationRecords(this.ctx.storage.sql) },
-			{
+		return {
+			input: { schedules, watches, records: migrationRecords(this.ctx.storage.sql) },
+			context: {
 				now: this.triggerClock(),
 				owner: this.name,
 				publicUrl: this.deployment().publicUrl ?? null,
@@ -2374,7 +2405,7 @@ export class Pim extends DurableAgent<Env> {
 				// What a watch's deliveries did against the ingress adapter's rules, from the receipts Pim's events route keeps.
 				strictDeliveries: (watchId) => strictVerdict(this.ctx.storage.sql, watchId),
 			},
-		);
+		};
 	}
 
 	/** The migration's records and steps over the engine's store; made only where the engine is on. */
@@ -2395,30 +2426,130 @@ export class Pim extends DurableAgent<Env> {
 	 * Moves this space's schedules and watches to triggers as far as is safe
 	 * (`TriggerMigration.migrate`, ./triggers/migration.ts), wherever its
 	 * engine is on: `ensureTriggerEngine` runs it as the space starts and as
-	 * the person registers. At most `MIGRATION_ITEMS_PER_START` items are
-	 * changed a run; the rest wait for the next. Logs one line of counts by
-	 * outcome and reason (`pim.triggers_migration`), never an id, a field or
-	 * a secret. It never throws: a failure is logged, every item is left
-	 * delivered by exactly one side, and the next start goes on from there.
-	 * Null where the engine is off or the run failed.
+	 * the person registers, and the trigger wake sweeps with it while the
+	 * space runs (`#sweepMigration`). At most `MIGRATION_ITEMS_PER_START`
+	 * items are changed a run; the rest wait for the next. Logs one line of
+	 * counts by outcome and reason (`pim.triggers_migration`), never an id, a
+	 * field or a secret. It never throws: a failure is logged, every item is
+	 * left delivered by exactly one side, and the next run goes on from
+	 * there. Null where the engine is off or the run failed.
 	 */
-	async runTriggerMigration(): Promise<MigrateOutcome[] | null> {
+	runTriggerMigration(): Promise<MigrateOutcome[] | null> {
+		return this.#migrate(null);
+	}
+
+	/** One run of the automatic migration, at a start (`sweep` null) or as a sweep of the wake, logged as `pim.triggers_migration_sweep` whatever it found. */
+	async #migrate(sweep: MigrationSweepCause | null): Promise<MigrateOutcome[] | null> {
+		const run = this.#migrationRuns;
 		try {
 			if (this.#closed() || !this.triggerEngine()) return null;
+			run.lastAt = this.migrationSweepClock();
 			const plan = await this.previewTriggerMigration();
 			// Read again after the plan's awaits, so it runs with the engine as it is now.
 			const engine = this.triggerEngine();
+			if (!engine) return [];
 			// A space with nothing to move gets none of the migration's tables.
-			if (!engine || (plan.items.length === 0 && plan.orphans.length === 0)) return [];
-			const outcomes = this.#triggerMigration(engine).migrate(plan, { limit: MIGRATION_ITEMS_PER_START });
-			console.log(JSON.stringify({ event: "pim.triggers_migration", owner: this.name, ...migrationCounts(outcomes) }));
+			const outcomes = plan.items.length === 0 && plan.orphans.length === 0 ? [] : this.#triggerMigration(engine).migrate(plan, { limit: MIGRATION_ITEMS_PER_START });
+			run.last = { failed: false, left: new Map(outcomes.map((outcome) => [`${outcome.kind}:${outcome.legacyId}`, outcome.owner === "trigger" ? null : outcome.reason])) };
+			if (sweep !== null) console.log(JSON.stringify({ event: "pim.triggers_migration_sweep", owner: this.name, cause: sweep, ...migrationCounts(outcomes) }));
+			else if (outcomes.length > 0) console.log(JSON.stringify({ event: "pim.triggers_migration", owner: this.name, ...migrationCounts(outcomes) }));
 			// A cut-over trigger's firings are the coordinator's work now.
 			if (outcomes.some((outcome) => outcome.owner === "trigger" && outcome.outcome === "cut_over")) await this.wakeTriggers();
 			return outcomes;
 		} catch (error) {
-			console.warn(JSON.stringify({ event: "pim.triggers_migration_failed", owner: this.name, error: String(error) }));
+			run.last = { failed: true, left: null };
+			console.warn(JSON.stringify({ event: "pim.triggers_migration_failed", owner: this.name, ...(sweep === null ? {} : { cause: sweep }), error: String(error) }));
 			return null;
 		}
+	}
+
+	/**
+	 * What this instance knows of the automatic migration's runs: when it
+	 * started, whether the wake ticked since, whether a schedule or watch
+	 * was made since the last sweep, and when the last run was and which
+	 * items it left with their schedule or watch, by reason (null for one a
+	 * trigger delivers); `left` is null where it failed. Kept in memory
+	 * only: a new instance starts with a run of its own. Instants are the
+	 * sweeps' clock's (`migrationSweepClock`).
+	 */
+	readonly #migrationRuns: {
+		startedAt: number | null;
+		ticked: boolean;
+		asked: boolean;
+		lastAt: number | null;
+		last: { readonly failed: boolean; readonly left: ReadonlyMap<string, LegacyReason | null> | null } | null;
+	} = { startedAt: null, ticked: false, asked: false, lastAt: null, last: null };
+
+	/**
+	 * When the wake should next tick to sweep for the migration; null when
+	 * no sweep needs a tick of its own. Now when a schedule or watch was
+	 * just made, or on the first tick after a start; otherwise an hour after
+	 * the last run, while some item may still move by itself: one this
+	 * instance never ran for, one a failed run didn't reach, or one left for
+	 * a reason that may pass (`MIGRATION_RETRY_REASONS`). A space whose
+	 * items are all settled sets no wake for it. On the sweeps' clock; reads
+	 * only.
+	 */
+	#migrationSweepAt(schedules: readonly Pick<Schedule<unknown>, "id" | "callback">[]): number | null {
+		const run = this.#migrationRuns;
+		if (!this.triggerEngine()) return null;
+		if (run.asked) return this.migrationSweepClock();
+		const live = [
+			...schedules.filter((schedule) => schedule.callback === SCHEDULED_TASK_CALLBACK).map((schedule) => `schedule:${schedule.id}`),
+			...this.store
+				.watches()
+				.filter((watch) => watch.status !== "ended")
+				.map((watch) => `watch:${watch.id}`),
+		];
+		if (live.length === 0) return null;
+		const left = run.last?.left;
+		// Settled by its record whatever the last run saw: a trigger delivers it, or it was given back, which stands.
+		const sql = this.ctx.storage.sql;
+		const records = new Map(migrationRecords(sql).map((record) => [`${record.kind}:${record.legacyId}`, record]));
+		const changed = new Set(records.size === 0 ? [] : ownershipChanges(sql).map((change) => `${change.kind}:${change.legacyId}`));
+		const pending = live.some((key) => {
+			const record = records.get(key);
+			if (record && (record.phase === "rolled_back" || record.owner === "trigger" || changed.has(key))) return false;
+			if (!left?.has(key)) return true;
+			const reason = left.get(key);
+			return reason !== null && reason !== undefined && MIGRATION_RETRY_REASONS.has(reason);
+		});
+		if (!pending) return null;
+		if (!run.ticked || run.lastAt === null) return this.migrationSweepClock();
+		return run.lastAt + MIGRATION_SWEEP_INTERVAL_MS;
+	}
+
+	/** The clock the migration's sweeps keep their hour by: the real one, apart from the triggers' clock (`triggerClock`), which tests move to fire triggers. */
+	protected migrationSweepClock(): number {
+		return Date.now();
+	}
+
+	/**
+	 * The migration's sweep, on a tick of the trigger wake, for a space that
+	 * is already running: on the first tick after a start, when a schedule
+	 * or watch was made since, and otherwise at most once an hour. A sweep
+	 * that finds nothing to move writes nothing.
+	 */
+	async #sweepMigration(): Promise<void> {
+		const run = this.#migrationRuns;
+		if (!this.triggerEngine()) return;
+		const cause: MigrationSweepCause | null = run.asked
+			? "asked"
+			: !run.ticked
+				? "first_tick"
+				: run.lastAt === null || this.migrationSweepClock() >= run.lastAt + MIGRATION_SWEEP_INTERVAL_MS
+					? "hourly"
+					: null;
+		run.ticked = true;
+		run.asked = false;
+		if (cause !== null) await this.#migrate(cause);
+	}
+
+	/** Asks the wake for a sweep now, as a schedule or watch was made, where the space's triggers are on. */
+	#askMigrationSweep(): void {
+		if (!this.triggerEngine()) return;
+		this.#migrationRuns.asked = true;
+		void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error));
 	}
 
 	/**
@@ -2631,6 +2762,12 @@ export class Pim extends DurableAgent<Env> {
 						const offered = agentId === null ? servers : agent ? this.#appsOf(agent).flatMap((app) => serverFor(servers, app) ?? []) : [];
 						return offered.map((server) => ({ connectorId: server.id, name: server.name, events: this.catalog.events(server.id).map((event) => event.name) }));
 					},
+					migration: async () => {
+						const items = await this.triggerMigrationStatus();
+						const run = this.#migrationRuns;
+						const runs = { startedAt: run.startedAt, lastRunAt: run.lastAt, lastRun: run.last === null ? null : run.last.failed ? ("failed" as const) : ("ok" as const), nextSweepAt: this.#migrationSweepAt(await this.listSchedules()) };
+						return { items, runs };
+					},
 					computer: () => ({ paired: this.computer.paired() }),
 					grant: (trigger) => {
 						const ref = trigger.spec.authorizationRef;
@@ -2680,6 +2817,8 @@ export class Pim extends DurableAgent<Env> {
 					return { status: made.replayed ? 200 : 201, body: made.trigger, revision: made.trigger.revision };
 				}),
 		],
+		// Before `/triggers/:id`, which would read it as a trigger's id.
+		["GET", "/triggers/migration", (_params, _request, url) => this.#triggersAnswer(async (api) => ({ body: await api.migration(PERSON, queryOf(url, ["cursor", "limit"])) }))],
 		[
 			"GET",
 			"/triggers/:id",
@@ -2747,6 +2886,8 @@ export class Pim extends DurableAgent<Env> {
 			// What cut-over watches' events carried is kept a day at most.
 			if (this.triggerEngine()) new LegacyEventData(this.ctx.storage.sql).sweep(this.triggerClock());
 		} finally {
+			// Schedules and watches move to triggers in a space that is already running too; it never throws.
+			await this.#sweepMigration();
 			await this.wakeTriggers();
 		}
 	}
@@ -2758,12 +2899,19 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	wakeTriggers(): Promise<void> {
 		const next = this.#triggerWake.then(async () => {
-			// The coordinator's next work, renewing the computer's lease on its triggers, or sweeping what cut-over watches' events carried, whichever comes first.
+			// The coordinator's next work, renewing the computer's lease on its triggers, sweeping what cut-over watches' events carried, or sweeping for the migration, whichever comes first.
 			const engine = this.triggerEngine();
-			const due = [engine?.coordinator.nextWakeAt() ?? null, this.#computerTriggers()?.renewAt() ?? null, engine ? new LegacyEventData(this.ctx.storage.sql).nextSweepAt() : null].filter((at) => at !== null);
+			const schedules = await this.listSchedules();
+			const sweepAt = this.#migrationSweepAt(schedules);
+			const due = [
+				engine?.coordinator.nextWakeAt() ?? null,
+				this.#computerTriggers()?.renewAt() ?? null,
+				engine ? new LegacyEventData(this.ctx.storage.sql).nextSweepAt() : null,
+				sweepAt === null ? null : this.triggerClock() + (sweepAt - this.migrationSweepClock()),
+			].filter((at) => at !== null);
 			const wake = due.length === 0 ? null : Math.min(...due);
 			const at = wake === null ? null : Math.ceil((Date.now() + Math.max(1_000, wake - this.triggerClock())) / 1000);
-			const wakes = (await this.listSchedules()).filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK);
+			const wakes = schedules.filter((schedule) => schedule.callback === TRIGGER_TICK_CALLBACK);
 			if (at !== null && wakes.length === 1 && wakes[0]!.time === at) return;
 			for (const schedule of wakes) await this.cancelSchedule(schedule.id);
 			if (at !== null) await this.schedule(new Date(at * 1000), TRIGGER_TICK_CALLBACK);

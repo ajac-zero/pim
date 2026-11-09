@@ -85,7 +85,9 @@ function writeLeftCanvas(sessionId: string, search?: ChatSearch) {
 }
 
 export const Route = createFileRoute("/chat/$sessionId")({
-  beforeLoad: ({ params, search }) => {
+  beforeLoad: ({ params, search, preload }) => {
+    // A pointer resting on a link preloads it; that must not use up the entry.
+    if (preload) return;
     const remembered = readLeftCanvas()[params.sessionId];
     if (!remembered) return;
     writeLeftCanvas(params.sessionId);

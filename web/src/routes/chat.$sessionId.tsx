@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
+import {
+  createFileRoute,
+  notFound,
+  redirect,
+  useNavigate,
+} from "@tanstack/react-router";
 import {
   type CSSProperties,
   useEffect,
@@ -49,7 +54,50 @@ type ChatSearch = CanvasSearch & { task?: string };
 /** The strip, in pixels, an overlay scrollbar draws in at the thread's edge. */
 const OVERLAY_SCROLLBAR_ROOM = 12;
 
+/**
+ * The canvas each chat had open when the person left it, so coming back to a
+ * chat shows the same files and apps, even after a reload. A chat's entry is
+ * used once, on return.
+ */
+const LEFT_CANVAS_KEY = "pim-chat-canvas";
+
+function readLeftCanvas(): Record<string, ChatSearch> {
+  try {
+    const stored = JSON.parse(localStorage.getItem(LEFT_CANVAS_KEY) ?? "{}");
+    return stored && typeof stored === "object" && !Array.isArray(stored)
+      ? stored
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLeftCanvas(sessionId: string, search?: ChatSearch) {
+  const { [sessionId]: _, ...rest } = readLeftCanvas();
+  try {
+    localStorage.setItem(
+      LEFT_CANVAS_KEY,
+      JSON.stringify(search ? { ...rest, [sessionId]: search } : rest),
+    );
+  } catch {
+    // Without storage nothing is remembered.
+  }
+}
+
 export const Route = createFileRoute("/chat/$sessionId")({
+  beforeLoad: ({ params, search }) => {
+    const remembered = readLeftCanvas()[params.sessionId];
+    if (!remembered) return;
+    writeLeftCanvas(params.sessionId);
+    if (!Object.keys(search).length) {
+      throw redirect({
+        to: "/chat/$sessionId",
+        params,
+        search: remembered,
+        replace: true,
+      });
+    }
+  },
   validateSearch: (search: Record<string, unknown>): ChatSearch => {
     const v = Number(search.v);
     const artifact =
@@ -115,6 +163,24 @@ function ChatPage() {
   const [canvasWidth, setCanvasWidth] = useStoredSize(
     "pim-canvas-width",
     CANVAS_WIDTH.default,
+  );
+  const canvas = useRef<ChatSearch>({});
+  // Leaving the chat remembers what its canvas showed. The ref is set in an
+  // effect so that, on a switch, it still holds the chat being left.
+  useEffect(() => {
+    canvas.current = { artifact, v, file, tabs, task };
+  });
+  useEffect(
+    () => () => {
+      const open = Object.fromEntries(
+        Object.entries(canvas.current).filter(
+          ([, value]) =>
+            value !== undefined && !(Array.isArray(value) && !value.length),
+        ),
+      );
+      if (Object.keys(open).length) writeLeftCanvas(sessionId, open);
+    },
+    [sessionId],
   );
   const showCanvas = (search: ChatSearch) =>
     void navigate({

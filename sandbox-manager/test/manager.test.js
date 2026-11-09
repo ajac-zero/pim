@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'node:test'
@@ -25,6 +25,14 @@ async function call(method, path, body, headers = {}, host = '127.0.0.1') {
 	let json
 	try { json = JSON.parse(text) } catch {}
 	return { status: r.status, json, text }
+}
+const alive = (pid) => {
+	try {
+		process.kill(pid, 0)
+		return !/\) Z /.test(readFileSync(`/proc/${pid}/stat`, 'utf8')) // zombies are dead
+	} catch {
+		return false
+	}
 }
 const envOf = (name) => Object.fromEntries(fake.containers.get(name).body.Env.map((e) => e.split(/=(.*)/s).slice(0, 2)))
 
@@ -310,22 +318,132 @@ describe('exec and files through agentd', () => {
 		assert.equal((await call('GET', '/sessions/abc-1/files?path=/workspace/link/x')).status, 403)
 	})
 	test('write, read, list, stat and delete map to agentd; missing files are 404', async () => {
+		// `/file` is the route; `/files` is the older spelling and stays.
 		assert.deepEqual((await call('PUT', '/sessions/abc-1/files?path=dir/a.txt', 'hello')).json, { ok: true })
+		assert.deepEqual((await call('PUT', '/sessions/abc-1/file?path=dir/run.sh&mode=0755', '#!/bin/sh')).json, { ok: true })
 		assert.equal(agent.files.get('dir/a.txt').toString(), 'hello')
+		assert.equal(agent.calls.find((c) => c.query.path === 'dir/run.sh').query.mode, '0755')
+		assert.equal((await call('PUT', '/sessions/abc-1/file?path=x&mode=777;rm', 'x')).status, 400)
 		assert.equal((await call('GET', '/sessions/abc-1/files?path=/workspace/dir/a.txt')).text, 'hello')
-		assert.deepEqual((await call('GET', '/sessions/abc-1/list?path=dir')).json, [{ name: 'a.txt', type: 'file', size: 5, mtimeMs: 1 }])
-		assert.deepEqual((await call('GET', '/sessions/abc-1/stat?path=dir/a.txt')).json, { name: 'a.txt', type: 'file', size: 5, mtimeMs: 1 })
-		assert.deepEqual((await call('DELETE', '/sessions/abc-1/files?path=dir/a.txt')).json, { ok: true })
-		for (const [m, p] of [['GET', 'files'], ['GET', 'stat'], ['DELETE', 'files']]) assert.equal((await call(m, `/sessions/abc-1/${p}?path=dir/a.txt`)).status, 404, `${m} ${p}`)
+		assert.equal((await call('GET', '/sessions/abc-1/file?path=dir/a.txt')).text, 'hello')
+		assert.deepEqual((await call('GET', '/sessions/abc-1/list?path=dir')).json, [{ name: 'a.txt', type: 'file', size: 5, mode: 0o644, mtimeMs: 1 }, { name: 'run.sh', type: 'file', size: 9, mode: 0o755, mtimeMs: 1 }])
+		assert.deepEqual((await call('GET', '/sessions/abc-1/stat?path=dir/a.txt')).json, { name: 'a.txt', type: 'file', size: 5, mode: 0o644, mtimeMs: 1 })
+		assert.deepEqual((await call('DELETE', '/sessions/abc-1/file?path=dir/a.txt')).json, { ok: true })
+		for (const [m, p] of [['GET', 'file'], ['GET', 'files'], ['GET', 'stat'], ['DELETE', 'file']]) {
+			const r = await call(m, `/sessions/abc-1/${p}?path=dir/a.txt`)
+			// The Worker's client tells a missing file from a missing session by this message.
+			assert.deepEqual([r.status, r.json.code], [404, 'not_found'], `${m} ${p}`)
+			assert.match(r.json.error, /no such file/i)
+		}
 		await call('GET', '/sessions/abc-1/list')
 		await call('DELETE', '/sessions/abc-1/files?path=dir&recursive=1')
 		assert.deepEqual(agent.calls.slice(-2).map((c) => c.query), [{ path: '.' }, { path: 'dir', recursive: '1' }])
+	})
+	test('a write past the disk limit is 507 disk_full', async () => {
+		agent.diskFull = true // the filesystem refused it (volume or tmpfs quota)
+		const r = await call('PUT', '/sessions/abc-1/file?path=a', 'data')
+		assert.deepEqual([r.status, r.json.code], [507, 'disk_full'])
+		agent.diskFull = false
+		// In measure mode the manager refuses before agentd, from the measured use.
+		agent.status.rootBytes = 1024 * MiB - 3
+		mgr.sessions.get('abc-1').disk = null
+		assert.equal((await call('PUT', '/sessions/abc-1/file?path=a', 'abc')).status, 200)
+		const over = await call('PUT', '/sessions/abc-1/file?path=b', 'd')
+		assert.deepEqual([over.status, over.json.code, over.json.diskQuotaBytes], [507, 'disk_full', 1024 * MiB])
+		assert.ok(!agent.files.has('b'))
+	})
+	test('exec takes env on top of the proxy variables', async () => {
+		await call('POST', '/sessions/abc-1/exec', { cmd: ['env'], timeoutMs: 1000, env: { FOO: 'bar', HTTPS_PROXY: '' } })
+		const { env } = execCalls()[0].body
+		assert.deepEqual([env.FOO, env.HTTPS_PROXY, env.HTTP_PROXY], ['bar', '', 'http://10.9.100.2:3128'])
+		for (const env of [{ 'A-B': 'x' }, { A: 1 }, ['A=1']]) assert.equal((await call('POST', '/sessions/abc-1/exec', { cmd: ['env'], timeoutMs: 1000, env })).status, 400)
+	})
+	test('exec/stream passes agentd events through as NDJSON', async () => {
+		const evs = [{ type: 'stdout', data: 'a' }, { type: 'stderr', data: 'b' }, exit(2)]
+		agent.onExec = () => evs
+		const r = await call('POST', '/sessions/abc-1/exec/stream', { cmd: ['x'], timeoutMs: 1000 })
+		assert.equal(r.status, 200)
+		assert.deepEqual(r.text.trim().split('\n').map((l) => JSON.parse(l)), evs)
+		agent.onExec = () => ({ spawnFailed: 'cannot start x: ENOENT' })
+		const missing = await call('POST', '/sessions/abc-1/exec/stream', { cmd: ['x'], timeoutMs: 1000 })
+		assert.deepEqual(missing.text.trim().split('\n').map((l) => JSON.parse(l)), [{ type: 'stderr', data: 'cannot start x: ENOENT\n' }, exit(127)])
+		agent.onExec = () => ({ hang: true })
+		const hung = await call('POST', '/sessions/abc-1/exec/stream', { cmd: ['x'], timeoutMs: 100 })
+		assert.deepEqual(JSON.parse(hung.text.trim()), { type: 'exit', code: null, signal: 'SIGKILL', timedOut: true })
+		assert.equal((await call('POST', '/sessions/abc-1/exec/stream', { cmd: 'x', timeoutMs: 1000 })).status, 400)
+		assert.equal((await call('POST', '/sessions/nope/exec/stream', { cmd: ['x'], timeoutMs: 1000 })).status, 404)
 	})
 	test('status reports state and disk use measured by agentd', async () => {
 		agent.status = { ...agent.status, rootBytes: 1234, diskFreeBytes: 99, activeExecs: 1 }
 		const r = await call('GET', '/sessions/abc-1/status')
 		assert.deepEqual({ ...r.json, measuredAt: typeof r.json.measuredAt }, { sessionId: 'abc-1', state: 'running', reason: null, quotaMode: 'measure', diskBytes: 1234, diskQuotaBytes: 1024 * MiB, diskFreeBytes: 99, activeExecs: 1, measuredAt: 'number' })
 		assert.equal((await call('GET', '/sessions/nope/status')).status, 404)
+	})
+})
+
+describe('session lifecycle', () => {
+	beforeEach(() => setup({ maxConcurrent: 3 }))
+	afterEach(() => teardown())
+
+	test('GET /sessions lists running, starting, stopped and kept sessions from the registry', async () => {
+		await call('POST', '/sessions', { ...good, sessionId: 'b-run' })
+		await call('POST', '/sessions', { ...good, sessionId: 'a-stop' })
+		await call('POST', '/sessions', { ...good, sessionId: 'c-kept' })
+		await call('POST', '/sessions/a-stop/stop')
+		await call('DELETE', '/sessions/c-kept?keepVolume=1')
+		const slow = fake.startAgentd
+		let release
+		fake.startAgentd = async (c) => (await new Promise((r) => (release = r)), slow(c))
+		const pending = call('POST', '/sessions', { ...good, sessionId: 'd-new' })
+		while (!release) await new Promise((r) => setTimeout(r, 5))
+		const r = await call('GET', '/sessions')
+		release()
+		await pending
+		assert.deepEqual(r.json.map((x) => [x.sessionId, x.state, x.reason ?? null]), [['a-stop', 'stopped', 'stopped'], ['b-run', 'running', null], ['c-kept', 'gone', 'kept_volume'], ['d-new', 'creating', null]])
+		const run = r.json[1]
+		assert.deepEqual({ image: run.image, limits: run.limits, egressAllow: run.egressAllow, createdAt: typeof run.createdAt }, { image: IMAGE, limits, egressAllow: good.egressAllow, createdAt: 'number' })
+		assert.equal(r.json[0].keptVolume, 'pim-ws-a-stop')
+		// A restarted manager lists the same, from Docker labels.
+		const fresh = make()
+		await fresh.reconcile()
+		assert.deepEqual(fresh.list().map((x) => [x.sessionId, x.state]), [['a-stop', 'stopped'], ['b-run', 'running'], ['c-kept', 'gone'], ['d-new', 'running']])
+	})
+	test('stop keeps the files and frees the slot; start brings the session back', async () => {
+		await call('POST', '/sessions', good)
+		const createdAt = (await call('GET', '/sessions/abc-1')).json.createdAt
+		const stopped = await call('POST', '/sessions/abc-1/stop')
+		assert.deepEqual([stopped.status, stopped.json.state, stopped.json.reason], [200, 'stopped', 'stopped'])
+		assert.ok(!fake.containers.has('pim-s-abc-1') && !fake.networks.has('pim-net-abc-1'))
+		assert.ok(fake.volumes.has('pim-ws-abc-1'))
+		assert.equal((await call('GET', '/sessions/abc-1')).json.state, 'stopped')
+		assert.equal((await call('GET', '/health', undefined, {})).json.running, 0)
+		const ex = await call('POST', '/sessions/abc-1/exec', { cmd: ['ls'], timeoutMs: 1000 })
+		assert.deepEqual([ex.status, ex.json.code], [409, 'session_stopped'])
+		assert.equal((await call('POST', '/sessions/abc-1/stop')).status, 200, 'stopping a stopped session does nothing')
+		// The stop survives a manager restart.
+		const fresh = make()
+		await fresh.reconcile()
+		assert.equal((await fresh.status('abc-1')).state, 'stopped')
+		const started = await call('POST', '/sessions/abc-1/start')
+		assert.deepEqual([started.status, started.json.state, started.json.createdAt], [200, 'running', createdAt])
+		assert.ok(fake.containers.has('pim-s-abc-1'))
+		assert.equal(fake.calls.filter((c) => c.path === '/volumes/create' && c.body.Name === 'pim-ws-abc-1').length, 2, 'the same volume')
+		assert.ok(!fake.volumes.has('pim-kept-abc-1'))
+		assert.equal((await call('POST', '/sessions/abc-1/start')).status, 200, 'starting a running session does nothing')
+		assert.equal(fake.calls.filter((c) => c.path === '/containers/create').length, 2)
+	})
+	test('start goes through the same limits as create; gone and unknown sessions are 404', async () => {
+		await call('POST', '/sessions', good)
+		await call('POST', '/sessions/abc-1/stop')
+		await call('POST', '/sessions', { ...good, sessionId: 'x-1' })
+		await call('POST', '/sessions', { ...good, sessionId: 'x-2' })
+		await call('POST', '/sessions', { ...good, sessionId: 'x-3' })
+		const full = await call('POST', '/sessions/abc-1/start')
+		assert.deepEqual([full.status, full.json.code], [429, 'capacity'])
+		assert.equal((await call('GET', '/sessions/abc-1')).json.state, 'stopped')
+		await call('DELETE', '/sessions/x-3?keepVolume=1')
+		for (const p of ['/sessions/x-3/start', '/sessions/x-3/stop', '/sessions/nope/start', '/sessions/nope/stop']) assert.equal((await call('POST', p)).status, 404, p)
+		assert.equal((await call('GET', '/sessions/x-3')).status, 404)
 	})
 })
 
@@ -394,7 +512,8 @@ describe('disk governance', () => {
 		assert.ok(!fake.containers.has('pim-s-abc-1') && !fake.networks.has('pim-net-abc-1'))
 		assert.ok(fake.volumes.has('pim-ws-abc-1'))
 		assert.equal((await call('GET', '/sessions/abc-1')).status, 404)
-		assert.deepEqual([(await call('GET', '/sessions/abc-1/status')).json.state, (await call('GET', '/sessions/abc-1/status')).json.reason], ['stopped', 'kept_volume'])
+		const st = (await call('GET', '/sessions/abc-1/status')).json
+		assert.deepEqual([st.state, st.reason], ['gone', 'kept_volume'])
 		// Restart: the kept volume is not an orphan.
 		const fresh = make({ keptVolumeDays: 7 })
 		await fresh.reconcile()
@@ -491,6 +610,22 @@ describe('with the real workspace-agentd', () => {
 		assert.deepEqual(slow.json, { stdout: 'alive\n', stderr: '', exitCode: 0, timedOut: false, truncated: false })
 		const missing = await call('POST', '/sessions/abc-1/exec', { cmd: ['definitely-not-a-command'], timeoutMs: 1000 })
 		assert.equal(missing.json.exitCode, 127)
+	})
+	test('a client that drops exec/stream kills that command', async () => {
+		const ac = new AbortController()
+		const res = await fetch(`${base}/sessions/abc-1/exec/stream`, { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer t0ken' }, body: JSON.stringify({ cmd: ['sh', '-c', 'echo start; sleep 60 & echo $!; wait'], timeoutMs: 60000 }) })
+		assert.equal(res.headers.get('content-type'), 'application/x-ndjson')
+		const reader = res.body.getReader()
+		let text = ''
+		while (text.split('\n').length < 3) text += new TextDecoder().decode((await reader.read()).value)
+		const lines = text.trim().split('\n').map((l) => JSON.parse(l))
+		assert.deepEqual(lines[0], { type: 'stdout', data: 'start\n' })
+		const pid = Number(lines.map((l) => l.data).join('').split('\n')[1])
+		assert.ok(alive(pid))
+		ac.abort()
+		const end = Date.now() + 8000
+		while (alive(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
+		assert.ok(!alive(pid), 'the command outlived the client')
 	})
 	test('files round-trip and symlink escapes are refused', async () => {
 		assert.equal((await call('PUT', '/sessions/abc-1/files?path=d/a.txt', 'héllo')).status, 200)

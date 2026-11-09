@@ -10,12 +10,14 @@ export async function startFakeAgentd({ token }) {
 		calls: [],
 		files: new Map(), // agentd-relative path -> Buffer
 		escapes: new Set(), // paths agentd would refuse as symlink escapes
+		modes: new Map(), // agentd-relative path -> permission bits
+		diskFull: false, // writes fail as a full disk does
 		status: { diskUsedBytes: 0, diskFreeBytes: 10 * 2 ** 30, rootBytes: 0, activeExecs: 0, uptimeSec: 1 },
 		// Returns NDJSON events, {spawnFailed: message}, or {hang: true} (never answers).
 		onExec: () => [exit(0)],
 	}
 	const open = new Set()
-	const record = (name, p) => ({ name, type: 'file', size: f.files.get(p).length, mtimeMs: 1 })
+	const record = (name, p) => ({ name, type: 'file', size: f.files.get(p).length, mode: f.modes.get(p), mtimeMs: 1 })
 	const server = http.createServer(async (req, res) => {
 		open.add(res)
 		res.on('close', () => open.delete(res))
@@ -27,7 +29,8 @@ export async function startFakeAgentd({ token }) {
 		const call = { method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), token: req.headers.authorization, body: raw }
 		f.calls.push(call)
 		const send = (code, o) => res.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify(o))
-		const error = (code, error) => send(code, { error, message: `${error}: ${p}` })
+		const messages = { not_found: 'no such file or directory', disk_full: 'no space left for' }
+		const error = (code, error) => send(code, { error, message: `${messages[error] ?? error}: ${p}` })
 		if (req.headers.authorization !== `Bearer ${f.token}`) return error(401, 'unauthorized')
 		if (p !== null && f.escapes.has(p)) return error(400, 'path_escape')
 		const key = `${req.method} ${url.pathname}`
@@ -42,7 +45,12 @@ export async function startFakeAgentd({ token }) {
 			if (r.hang) return
 			return res.end(r.map((e) => `${JSON.stringify(e)}\n`).join(''))
 		}
-		if (key === 'PUT /file') return f.files.set(p, raw), send(200, { ok: true, size: raw.length })
+		if (key === 'PUT /file') {
+			if (f.diskFull) return error(507, 'disk_full')
+			f.files.set(p, raw)
+			f.modes.set(p, Number.parseInt(url.searchParams.get('mode') ?? '644', 8))
+			return send(200, { ok: true, size: raw.length })
+		}
 		if (key === 'GET /file') return f.files.has(p) ? res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(f.files.get(p)) : error(404, 'not_found')
 		if (key === 'DELETE /file') return f.files.delete(p) ? send(200, { ok: true }) : error(404, 'not_found')
 		if (key === 'GET /stat') return f.files.has(p) ? send(200, record(p.split('/').at(-1), p)) : error(404, 'not_found')

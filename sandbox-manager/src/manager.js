@@ -101,6 +101,29 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	const view = (s) => ({ ...s.params, state: 'running', createdAt: s.createdAt, lastUsedAt: s.lastUsed })
+	// A kept workspace is 'stopped' (stop, or over its disk quota) or 'gone' (deleted with
+	// keepVolume: the session no longer exists, only its volume does).
+	const keptState = (k) => (k.reason === 'kept_volume' ? 'gone' : 'stopped')
+	const keptView = (id, k) => ({ ...k.params, state: keptState(k), reason: k.reason, createdAt: k.createdAt ?? null, keptAt: k.keptAt, keptVolume: names(id).volume })
+
+	// The session as GET /sessions/:id shows it: running, starting or stopped. 404 otherwise.
+	function describe(id) {
+		const s = sessions.get(id)
+		if (s) return view(s)
+		const c = creating.get(id)
+		if (c) return { ...c.params, state: 'creating' }
+		const k = kept.get(id)
+		if (k && keptState(k) === 'stopped') return keptView(id, k)
+		throw new HttpError(404, 'no such session')
+	}
+
+	// Every session the manager knows, from its registry (rebuilt from Docker labels at start).
+	function list() {
+		const all = [...sessions.values()].map(view)
+		for (const c of creating.values()) all.push({ ...c.params, state: 'creating' })
+		for (const [id, k] of kept) all.push(keptView(id, k))
+		return all.sort((a, b) => (a.sessionId < b.sessionId ? -1 : 1))
+	}
 
 	// Connects `container` to each network it is not on yet (a recreated container has lost them)
 	// and returns its address on every network it is on.
@@ -177,7 +200,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			const info = await docker.request('GET', `/containers/${container.name}/json`)
 			const ip = info.NetworkSettings.Networks[n.network].IPAddress
 			await proxyAdmin.set(ip, params.egressAllow)
-			const s = { params, createdAt: now(), lastUsed: now(), ip, proxyIp, token, egress: true, disk: null }
+			const s = { params, createdAt: kept.get(id)?.createdAt ?? now(), lastUsed: now(), ip, proxyIp, token, egress: true, disk: null }
 			await agentd.ready(target(s), cfg.agentdReadyMs ?? 30000)
 			if (resuming) {
 				await docker.request('DELETE', `/volumes/${n.marker}`).catch(() => {})
@@ -215,6 +238,12 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			s.lastUsed = now()
 			return { created: false, session: view(s) }
 		}
+		return { created: true, session: view(await launch(params)) }
+	}
+
+	// Starts a container for `params`, reusing a kept volume of the same session.
+	async function launch(params) {
+		const id = params.sessionId
 		// Check and reserve the slot in one synchronous step (no await in between), so concurrent
 		// creates cannot pass the checks together. Existing sessions over the limit are left alone.
 		const running = sessions.size + creating.size
@@ -230,7 +259,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		})()
 		creating.set(id, { params, promise })
 		try {
-			return { created: true, session: view(await promise) }
+			return await promise
 		} finally {
 			creating.delete(id)
 		}
@@ -242,23 +271,53 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			s.lastUsed = now()
 			return s
 		}
-		if (kept.get(id)?.reason === 'over_disk_quota') throw new HttpError(409, 'session was stopped: its workspace went over its disk quota', { code: 'over_disk_quota' })
+		const k = kept.get(id)
+		if (k?.reason === 'over_disk_quota') throw new HttpError(409, 'session was stopped: its workspace went over its disk quota', { code: 'over_disk_quota' })
+		if (k?.reason === 'stopped') throw new HttpError(409, 'session is stopped; start it first', { code: 'session_stopped' })
 		throw new HttpError(404, 'no such session')
+	}
+
+	// Removes the container and network and keeps the volume, recording why in a marker volume.
+	async function keep(id, reason) {
+		const s = sessions.get(id)
+		const k = kept.get(id)
+		sessions.delete(id)
+		const params = s?.params ?? k?.params
+		const info = params && { params, createdAt: s?.createdAt ?? k?.createdAt ?? null, keptAt: now(), reason, diskBytes: s?.disk?.rootBytes ?? k?.diskBytes ?? null }
+		if (info) kept.set(id, info)
+		await teardown(id, { ip: s?.ip, keep: info ? { info } : true })
+	}
+
+	// Stops a session and keeps its files; stopping a stopped session does nothing.
+	async function stop(id) {
+		await creating.get(id)?.promise.catch(() => {})
+		if (sessions.has(id)) await keep(id, 'stopped')
+		return describe(id)
+	}
+
+	// Starts a stopped session again with its parameters, through the same limits as a create.
+	async function start(id) {
+		const k = kept.get(id)
+		if (!sessions.has(id) && !creating.has(id) && k && keptState(k) === 'stopped') await launch(k.params)
+		await creating.get(id)?.promise
+		return describe(id)
 	}
 
 	// Each exec runs in its own process group inside agentd, so a timeout kills only that exec.
 	// The proxy variables are passed each time because a re-attached proxy can change address.
-	function exec(s, opts) {
-		return agentd.exec(target(s), { ...opts, cwd: agentdPath(opts.cwd), env: proxyEnv(proxyUrlFor(s.proxyIp)) }, graceMs)
-	}
+	const execSpec = (s, opts) => ({ ...opts, cwd: agentdPath(opts.cwd), env: { ...proxyEnv(proxyUrlFor(s.proxyIp)), ...opts.env } })
 
 	function parseExec(b) {
 		if (!b || typeof b !== 'object') throw new HttpError(400, 'body must be an object')
-		for (const k of Object.keys(b)) if (!['cmd', 'cwd', 'timeoutMs', 'stdin'].includes(k)) throw new HttpError(400, `unknown field ${k}`)
+		for (const k of Object.keys(b)) if (!['cmd', 'cwd', 'timeoutMs', 'stdin', 'env'].includes(k)) throw new HttpError(400, `unknown field ${k}`)
 		if (!Array.isArray(b.cmd) || !b.cmd.length || b.cmd.length > 256 || !b.cmd.every((c) => typeof c === 'string')) throw new HttpError(400, 'cmd must be a non-empty string array')
 		if (!Number.isInteger(b.timeoutMs) || b.timeoutMs < 1 || b.timeoutMs > 600000) throw new HttpError(400, 'timeoutMs must be an integer in [1, 600000]')
 		if (b.stdin !== undefined && typeof b.stdin !== 'string') throw new HttpError(400, 'stdin must be a string')
-		return { cmd: b.cmd, cwd: b.cwd === undefined ? '/workspace' : workspacePath(b.cwd), timeoutMs: b.timeoutMs, stdin: b.stdin }
+		const env = b.env ?? {}
+		if (typeof env !== 'object' || Array.isArray(env) || Object.keys(env).length > 256 || !Object.entries(env).every(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string')) {
+			throw new HttpError(400, 'env must map variable names to strings')
+		}
+		return { cmd: b.cmd, cwd: b.cwd === undefined ? '/workspace' : workspacePath(b.cwd), timeoutMs: b.timeoutMs, stdin: b.stdin, env }
 	}
 
 	const fileQuery = (p, extra = '') => `?path=${q(agentdPath(workspacePath(p)))}${extra}`
@@ -266,15 +325,12 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	// Removes a session. With keepVolume the workspace volume stays (and is reused when the same
 	// sessionId is created again) until a plain delete or the kept-volume reaper removes it.
 	async function remove(id, keepVolume = false) {
-		const s = sessions.get(id)
-		sessions.delete(id)
-		const params = s?.params ?? kept.get(id)?.params
 		if (keepVolume) {
-			const info = params && { params, keptAt: now(), reason: 'kept_volume', diskBytes: s?.disk?.rootBytes ?? kept.get(id)?.diskBytes ?? null }
-			if (info) kept.set(id, info)
-			await teardown(id, { ip: s?.ip, keep: info ? { info } : true })
+			await keep(id, 'kept_volume')
 			return { deleted: id, keptVolume: names(id).volume }
 		}
+		const s = sessions.get(id)
+		sessions.delete(id)
 		kept.delete(id)
 		await teardown(id, { ip: s?.ip })
 		return { deleted: id }
@@ -286,6 +342,17 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		return s.disk
 	}
 
+	// In 'measure' mode nothing stops a write past the quota, so the manager refuses one that would
+	// take the workspace (as last measured, at most 5 s ago) over it. The other modes leave it to the
+	// filesystem, which agentd reports as disk_full too.
+	async function checkWrite(s, bytes) {
+		if (cfg.quotaMode !== 'measure') return
+		if (!s.disk || now() - s.disk.measuredAt > 5000) await measure(s).catch(() => {})
+		const used = s.disk?.rootBytes ?? 0
+		const quota = s.params.limits.diskMiB * MiB
+		if (used + bytes > quota) throw new HttpError(507, 'the write would take the workspace over its disk quota', { code: 'disk_full', diskBytes: used, diskQuotaBytes: quota })
+	}
+
 	// Measures every workspace. In 'measure' mode nothing else bounds a workspace, so a session
 	// over its quota is stopped: its container goes, its volume is kept for inspection or resume.
 	async function checkDisk() {
@@ -294,10 +361,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			const quota = s.params.limits.diskMiB * MiB
 			if (!d || cfg.quotaMode !== 'measure' || d.rootBytes <= quota || sessions.get(id) !== s) continue
 			console.warn(`session ${id} stopped: workspace uses ${d.rootBytes} bytes, quota ${quota}`)
-			sessions.delete(id)
-			const info = { params: s.params, keptAt: now(), reason: 'over_disk_quota', diskBytes: d.rootBytes }
-			kept.set(id, info)
-			await teardown(id, { ip: s.ip, keep: { info } }).catch((e) => console.error(`stopping ${id}:`, e.message))
+			await keep(id, 'over_disk_quota').catch((e) => console.error(`stopping ${id}:`, e.message))
 		}
 	}
 
@@ -313,7 +377,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		const c = creating.get(id)
 		if (c) return { ...base(c.params), state: 'creating', reason: null, diskBytes: null, diskFreeBytes: null, activeExecs: null, measuredAt: null }
 		const k = kept.get(id)
-		if (k) return { ...base(k.params), state: 'stopped', reason: k.reason, diskBytes: k.diskBytes, diskFreeBytes: null, activeExecs: null, measuredAt: null, keptAt: k.keptAt }
+		if (k) return { ...base(k.params), state: keptState(k), reason: k.reason, diskBytes: k.diskBytes, diskFreeBytes: null, activeExecs: null, measuredAt: null, keptAt: k.keptAt }
 		throw new HttpError(404, 'no such session')
 	}
 
@@ -419,29 +483,50 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		try {
 			if (req.method === 'GET' && url.pathname === '/health') return send(200, await health())
 			if (!authorized(req)) throw new HttpError(401, 'unauthorized')
-			if (req.method === 'POST' && url.pathname === '/sessions') {
+			if (url.pathname === '/sessions') {
+				if (req.method === 'GET') return send(200, list())
+				if (req.method !== 'POST') throw new HttpError(405, 'method not allowed')
 				const r = await createSession(await json())
 				return send(r.created ? 201 : 200, r.session)
 			}
-			const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec|files|list|stat|status))?$/.exec(url.pathname)
+			const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec|exec\/stream|files?|list|stat|status|stop|start))?$/.exec(url.pathname)
 			if (!m) throw new HttpError(404, 'not found')
-			const [, id, sub] = m
-			const route = `${req.method} ${sub ?? ''}`
-			if (route === 'GET ') return send(200, view(get(id)))
+			const [, id, sub = ''] = m
+			// `files` is the older spelling of `file`.
+			const route = `${req.method} ${sub === 'files' ? 'file' : sub}`
+			if (route === 'GET ') return send(200, describe(id))
 			if (route === 'DELETE ') return send(200, await remove(id, ['1', 'true'].includes(url.searchParams.get('keepVolume'))))
 			if (route === 'GET status') return send(200, await status(id))
+			if (route === 'POST stop') return send(200, await stop(id))
+			if (route === 'POST start') return send(200, await start(id))
 			if (route === 'POST exec') {
 				const s = get(id)
-				return send(200, await exec(s, parseExec(await json())))
+				return send(200, await agentd.exec(target(s), execSpec(s, parseExec(await json())), graceMs))
 			}
-			if (route === 'PUT files') {
+			if (route === 'POST exec/stream') {
 				const s = get(id)
-				const query = fileQuery(path())
+				const spec = execSpec(s, parseExec(await json()))
+				// A client that goes away aborts the request to agentd, which then kills the command.
+				const gone = new AbortController()
+				res.on('close', () => gone.abort())
+				const events = await agentd.startExec(target(s), spec, graceMs, gone.signal)
+				res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' })
+				res.flushHeaders()
+				for await (const ev of events) res.write(`${JSON.stringify(ev)}\n`)
+				return res.end()
+			}
+			if (route === 'PUT file') {
+				const s = get(id)
+				const mode = url.searchParams.get('mode')
+				if (mode !== null && !/^[0-7]{3,4}$/.test(mode)) throw new HttpError(400, 'mode must be octal, such as 0644')
+				const query = fileQuery(path(), mode === null ? '' : `&mode=${mode}`)
 				const body = await raw(MAX_FILE)
+				await checkWrite(s, body.length)
 				await agentd.json(target(s), 'PUT', `/file${query}`, { body, headers: { 'content-type': 'application/octet-stream', 'content-length': body.length } })
+				if (s.disk) s.disk.rootBytes += body.length
 				return send(200, { ok: true })
 			}
-			if (route === 'GET files') {
+			if (route === 'GET file') {
 				const s = get(id)
 				const r = await agentd.request(target(s), 'GET', `/file${fileQuery(path())}`)
 				if (r.statusCode !== 200) await agentd.fail(r)
@@ -449,7 +534,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 				r.on('error', () => res.destroy())
 				return r.pipe(res)
 			}
-			if (route === 'DELETE files') {
+			if (route === 'DELETE file') {
 				const s = get(id)
 				const recursive = ['1', 'true'].includes(url.searchParams.get('recursive')) ? '&recursive=1' : ''
 				await agentd.json(target(s), 'DELETE', `/file${fileQuery(path(), recursive)}`)
@@ -467,5 +552,5 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	const server = http.createServer(handle)
-	return { server, createSession, reconcile, reattach, reap, checkDisk, status, health, remove, sessions, kept }
+	return { server, createSession, start, stop, list, reconcile, reattach, reap, checkDisk, status, health, remove, sessions, kept }
 }

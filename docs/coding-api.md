@@ -143,3 +143,15 @@ POST /api/coding/threads
 ## Agents
 
 Every agent can start and follow threads with the `coding_*` tools ([`src/extensions/coding.ts`](../src/extensions/coding.ts)): `coding_start`, `coding_status`, `coding_steer`, `coding_diff`, `coding_tests`, `coding_abort`, `coding_push` and `coding_archive`. A thread an agent starts is `createdBy: { type: "agent", agent, chat }`, and when each of its turns ends that chat is woken with a message saying how it went. `coding_push` asks the person first, every time, as an approval like `POST …/push` files.
+
+## Harness logins
+
+Harnesses run the unmodified vendor CLIs, Claude Code (`claude-code`) and Codex (`codex`), inside the person's own workspace, signed in with their own subscription through the CLI's own login. Pim keeps each person's login per harness in their own space: the CLI's credential and config files only (the lists are `HARNESS_FILES` in [`src/coding/vault/harnesses.ts`](../src/coding/vault/harnesses.ts)), packed into one archive of at most 512 KiB and sealed with AES-256-GCM under a key derived from the Directory's own. Pim never opens the files. A login is put into a workspace before a harness runs only when that workspace is one of the same person's threads, and what the CLI changed, such as refreshed tokens, is kept afterwards unless a newer login or a disconnect came first. The disclosures a person accepts before connecting are `HARNESS_DISCLOSURES` in the same file.
+
+| Method | Path | Answers |
+| --- | --- | --- |
+| GET | `/coding/vault` | `{ harnesses: [{ harness, connected, updatedAt, byteLength }] }`, one per harness |
+| GET | `/coding/vault/:harness` | `{ harness, connected, updatedAt, byteLength }`; an unknown harness is `404` |
+| DELETE | `/coding/vault/:harness` | The same, now disconnected: the login is deleted |
+
+No route returns or accepts a login's contents. A guest's account has none (`403`).

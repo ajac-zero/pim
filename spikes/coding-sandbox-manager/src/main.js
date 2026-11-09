@@ -1,5 +1,5 @@
 import { Docker } from './docker.js'
-import { createManager, selfCheck } from './manager.js'
+import { createManager, defaultMaxConcurrent, selfCheck } from './manager.js'
 
 const env = process.env
 const need = (k) => env[k] || (console.error(`${k} is required`), process.exit(1))
@@ -7,8 +7,8 @@ const cfg = {
 	token: need('MANAGER_TOKEN'),
 	allowedImages: need('ALLOWED_IMAGES').split(',').map((s) => s.trim()).filter(Boolean),
 	dockerRoot: env.DOCKER_ROOT ?? '/var/lib/docker',
-	minFreePct: Number(env.MIN_FREE_PCT ?? 15),
-	maxConcurrent: Number(env.MAX_CONCURRENT ?? 4),
+	minFreePct: Number(env.MIN_FREE_DISK_PCT ?? 15),
+	maxConcurrent: Number(env.MAX_CONCURRENT || defaultMaxConcurrent()),
 	idleMin: Number(env.IDLE_MIN ?? 30),
 	proxyContainer: env.EGRESS_PROXY_CONTAINER ?? 'egress-proxy',
 	proxyUrl: env.EGRESS_PROXY_URL ?? 'http://egress-proxy:3128',

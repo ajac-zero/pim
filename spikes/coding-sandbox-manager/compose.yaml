@@ -38,8 +38,8 @@ services:
       EGRESS_PROXY_CONTAINER: egress-proxy
       EGRESS_PROXY_URL: http://egress-proxy:3128
       EGRESS_PROXY_ADMIN_URL: http://egress-proxy:3129
-      MIN_FREE_PCT: ${MIN_FREE_PCT:-15}
-      MAX_CONCURRENT: ${MAX_CONCURRENT:-4}
+      MIN_FREE_DISK_PCT: ${MIN_FREE_DISK_PCT:-15}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-}
       IDLE_MIN: ${IDLE_MIN:-30}
       # statfs() runs inside this container, so it needs a directory on the SAME filesystem as
       # Docker's data-root (not data-root itself: that would expose every layer). With a

@@ -32,8 +32,8 @@ Live check: `scripts/live-smoke.sh` (needs a Docker daemon with runsc, `curl`, `
 | `PROXY_ADMIN_TOKEN` | required | Shared with the egress-proxy admin endpoint |
 | `DOCKER_HOST` / `DOCKER_SOCKET` | `/var/run/docker.sock` | Daemon address |
 | `DOCKER_ROOT` | `/var/lib/docker` | Directory whose filesystem is checked for free space |
-| `MIN_FREE_PCT` | 15 | Refuse create (507) below this free-disk percentage |
-| `MAX_CONCURRENT` | 4 | Refuse create (429) at this many sessions |
+| `MIN_FREE_DISK_PCT` | 15 | Refuse create (507, `low_disk`) below this free-disk percentage |
+| `MAX_CONCURRENT` | derived | Refuse create (429, `capacity`) at this many live sessions. Default `clamp(min(cpus, floor((memGiB - 1) / 1.5)), 1, 8)`: 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4 |
 | `IDLE_MIN` | 30 | Reaper removes sessions idle longer than this |
 | `PROBE_IMAGE` | `busybox:1.36` | Image for the startup gVisor probe |
 | `WORKSPACE_TMPFS` | 0 | `1` makes `/workspace` a size-capped tmpfs volume (enforces `diskMiB`, but counts against RAM) |
@@ -49,7 +49,7 @@ in compose to a directory on that disk, so disk governance measures the right fi
 
 All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`.
 
-- `GET /health` gives `{runsc, freeDiskPct, sessions}`.
+- `GET /health` gives `{runsc, freeDiskPct, maxConcurrent, running, free, sessions}`.
 - `POST /sessions {sessionId, image, limits:{cpu,memMiB,diskMiB,pids}, egressAllow:[host]}`.
   Idempotent on `sessionId` (201 on create, 200 when it exists, 409 if the parameters differ).
   `egressAllow` takes hostnames or `*.suffix`.
@@ -90,8 +90,14 @@ Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–204
 - **Confinement of files.** Paths with `..` are rejected before reaching Docker. Symlink
   escapes are caught by resolving the path with `realpath -m` inside the container, in the same
   shell command that then reads or writes.
-- **Governance.** Create is refused below `MIN_FREE_PCT` free disk or at `MAX_CONCURRENT`
-  sessions. A reaper removes sessions idle beyond `IDLE_MIN`. At start the manager rebuilds its
+- **Governance.** Create is refused with `{error, code:'capacity', limit, running}` (429) at
+  `MAX_CONCURRENT` live sessions, and with `{error, code:'low_disk', ...}` (507) below
+  `MIN_FREE_DISK_PCT` free disk. The capacity check and the slot reservation happen in one
+  synchronous step, so concurrent creates cannot exceed the limit. Sessions already over the limit
+  (after lowering it or a restart) are never killed; they only block new creates until they end.
+  The manager only refuses: it keeps no queue and does not retry. The Pim control plane owns
+  queueing and decides when to retry after a refusal. Re-creating an existing `sessionId` is
+  idempotent and never counts against the limit. A reaper removes sessions idle beyond `IDLE_MIN`. At start the manager rebuilds its
   registry from the `pim.coding.session` labels and removes half-created leftovers.
 
 ## Known gaps

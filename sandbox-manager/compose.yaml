@@ -1,24 +1,33 @@
-# sandbox-manager + docker-socket-proxy + egress-proxy.
+# sandbox-manager + docker-socket-proxy + egress-proxy, and the default workspace image.
 # The Docker socket is mounted ONLY into docker-socket-proxy, which allows just the API
 # groups the manager needs. Session containers and networks are created by the manager at
-# runtime; the egress-proxy is attached to each session's internal network.
+# runtime; the egress-proxy and the manager are attached to each session's internal network.
+# The host must already have Docker with gVisor registered as the `runsc` runtime.
 #
-#   MANAGER_TOKEN=... PROXY_ADMIN_TOKEN=... ALLOWED_IMAGES=registry/img@sha256:... docker compose up -d --build
+#   MANAGER_TOKEN=... PROXY_ADMIN_TOKEN=... AGENTD_TOKEN_SECRET=... docker compose up -d --build
 
 services:
+  # Builds workspace-agentd's image, the default sandbox image, then exits.
+  workspace-image:
+    build: ../workspace-agentd
+    image: pim-workspace:local
+    entrypoint: ["true"]
+    network_mode: none
+    restart: "no"
+
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:0.3.0
     restart: unless-stopped
     environment:
-      CONTAINERS: 1 # create, start, inspect, remove, list, wait; exec is a sub-route
-      EXEC: 1
+      CONTAINERS: 1 # create, start, inspect, remove, list, wait
       VOLUMES: 1
-      NETWORKS: 1 # create, remove, connect/disconnect the egress-proxy
+      NETWORKS: 1 # create, remove, connect/disconnect the egress-proxy and the manager
       IMAGES: 1 # inspect and pull
       INFO: 1 # the runsc check reads /info
       POST: 1 # the default is read-only
-      # Everything else stays at the image default of 0: BUILD, SWARM, SECRETS, PLUGINS,
-      # SERVICES, TASKS, NODES, CONFIGS, SYSTEM, AUTH, COMMIT, DISTRIBUTION, EVENTS...
+      # Everything else stays at the image default of 0, including EXEC: commands run through
+      # workspace-agentd, not Docker exec. Also BUILD, SWARM, SECRETS, PLUGINS, SERVICES, TASKS,
+      # NODES, CONFIGS, SYSTEM, AUTH, COMMIT, DISTRIBUTION, EVENTS...
     volumes:
       # DOCKER_SOCKET is the daemon's socket path on the host (rootless or non-default installs).
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
@@ -27,20 +36,31 @@ services:
   sandbox-manager:
     build: .
     image: pim-sandbox-manager
+    container_name: sandbox-manager # it attaches itself to session networks by this name
     restart: unless-stopped
-    depends_on: [docker-socket-proxy, egress-proxy]
+    depends_on:
+      docker-socket-proxy: { condition: service_started }
+      egress-proxy: { condition: service_started }
+      workspace-image: { condition: service_completed_successfully }
     environment:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
       MANAGER_TOKEN: ${MANAGER_TOKEN:?set MANAGER_TOKEN}
       PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set PROXY_ADMIN_TOKEN}
-      ALLOWED_IMAGES: ${ALLOWED_IMAGES:?set ALLOWED_IMAGES (comma separated, digest-pinned in prod)}
+      AGENTD_TOKEN_SECRET: ${AGENTD_TOKEN_SECRET:-}
+      ALLOWED_IMAGES: ${ALLOWED_IMAGES:-pim-workspace:local}
       PROBE_IMAGE: ${PROBE_IMAGE:-busybox:1.36}
+      MANAGER_CONTAINER: sandbox-manager
       EGRESS_PROXY_CONTAINER: egress-proxy
       EGRESS_PROXY_URL: http://egress-proxy:3128
       EGRESS_PROXY_ADMIN_URL: http://egress-proxy:3129
       MIN_FREE_DISK_PCT: ${MIN_FREE_DISK_PCT:-15}
       MAX_CONCURRENT: ${MAX_CONCURRENT:-}
       IDLE_MIN: ${IDLE_MIN:-30}
+      DEFAULT_DISK_MIB: ${DEFAULT_DISK_MIB:-5120}
+      MAX_TOTAL_WORKSPACE_GB: ${MAX_TOTAL_WORKSPACE_GB:-100}
+      DISK_QUOTA_MODE: ${DISK_QUOTA_MODE:-auto}
+      DISK_CHECK_SEC: ${DISK_CHECK_SEC:-60}
+      KEPT_VOLUME_DAYS: ${KEPT_VOLUME_DAYS:-7}
       # statfs() runs inside this container, so it needs a directory on the SAME filesystem as
       # Docker's data-root (not data-root itself: that would expose every layer). With a
       # dedicated data disk for Docker, set DOCKER_ROOT_HOST to a directory on that disk.

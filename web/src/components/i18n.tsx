@@ -1279,6 +1279,47 @@ const translations = {
     triggerNextLegacySchedule: "Runs through its schedule, not as a trigger",
     triggerNextLegacyWatch:
       "Runs through its connector watch, not as a trigger",
+    triggerLegacyTitle: "Not triggers yet",
+    triggerLegacyHint:
+      "These schedules and connector watches still run as they always did. Each says why it hasn't moved to triggers.",
+    triggerLegacyFailed:
+      "Couldn't load the schedules and watches that haven't moved to triggers.",
+    triggerLegacySchedule: "Scheduled task",
+    triggerLegacyWatch: "Connector watch",
+    triggerMigration: "Move to triggers",
+    triggerMigrationMigratable: "Moving soon",
+    triggerMigrationDeferred: "Waiting to move",
+    triggerMigrationUnsupported: "Can't move",
+    triggerMigrationGivenBack: "Given back",
+    triggerMigrationMigrated: "Moved",
+    triggerMigrationWhyMigratable: "Pim moves it to triggers shortly.",
+    triggerMigrationWhyDeferred:
+      "Pim moves a few at a time; this one is next in line.",
+    triggerMigrationWhyRefused:
+      "Pim couldn't make its trigger and will try again.",
+    triggerMigrationWhyAgent: "The agent it would belong to doesn't exist yet.",
+    triggerMigrationWhyIngress:
+      "Waiting for one of its events to pass the checks triggers make.",
+    triggerMigrationWhyBlocked:
+      "Waiting on a check before a trigger can take it over.",
+    triggerMigrationWhyInterval:
+      "It repeats on an interval, which triggers don't keep the same way.",
+    triggerMigrationWhyDue: "Its time has come, so its schedule runs it.",
+    triggerMigrationWhyCron:
+      "Triggers would read its schedule differently, so it stays as it is.",
+    triggerMigrationWhyExhausted: "It has no time left to run.",
+    triggerMigrationWhyChat:
+      "The chat it runs in is gone, or can't take a trigger's runs.",
+    triggerMigrationWhyField:
+      "One of its fields is longer or more complex than a trigger can hold.",
+    triggerMigrationWhyWatchEnded: "The watch has ended.",
+    triggerMigrationWhyNotSubscribed:
+      "Its connector hasn't confirmed the subscription yet.",
+    triggerMigrationWhyCallback:
+      "Its callback address changed, so moving it would need a new subscription.",
+    triggerMigrationWhyGivenBack:
+      "It was handed back from its trigger, and stays as it is.",
+    triggerMigrationWhyOther: "It stays as it is for now ({reason}).",
     triggerNextNotWired: "Draft only: Pim doesn't take connector events in yet",
     triggerNextUnavailable: "Not available here",
     triggerNextOnceOn: "Runs every {duration} once turned on",
@@ -2941,6 +2982,48 @@ const translations = {
     triggerNextLegacySchedule: "Lo ejecuta su programación, no como disparador",
     triggerNextLegacyWatch:
       "Lo ejecuta su vigilancia de conector, no como disparador",
+    triggerLegacyTitle: "Aún no son disparadores",
+    triggerLegacyHint:
+      "Estas programaciones y vigilancias de conector siguen funcionando como siempre. Cada una dice por qué no ha pasado a disparadores.",
+    triggerLegacyFailed:
+      "No se pudieron cargar las programaciones y vigilancias que no han pasado a disparadores.",
+    triggerLegacySchedule: "Tarea programada",
+    triggerLegacyWatch: "Vigilancia de conector",
+    triggerMigration: "Paso a disparadores",
+    triggerMigrationMigratable: "Pasará pronto",
+    triggerMigrationDeferred: "En espera",
+    triggerMigrationUnsupported: "No puede pasar",
+    triggerMigrationGivenBack: "Devuelta",
+    triggerMigrationMigrated: "Pasada",
+    triggerMigrationWhyMigratable: "Pim la pasa a disparadores en breve.",
+    triggerMigrationWhyDeferred:
+      "Pim pasa unas pocas cada vez; esta es la siguiente.",
+    triggerMigrationWhyRefused:
+      "Pim no pudo crear su disparador y lo intentará de nuevo.",
+    triggerMigrationWhyAgent: "El agente al que pertenecería aún no existe.",
+    triggerMigrationWhyIngress:
+      "Espera a que uno de sus eventos pase las comprobaciones de los disparadores.",
+    triggerMigrationWhyBlocked:
+      "Espera una comprobación antes de que un disparador se haga cargo.",
+    triggerMigrationWhyInterval:
+      "Se repite a intervalos, que los disparadores no llevan igual.",
+    triggerMigrationWhyDue:
+      "Ya llegó su hora, así que la ejecuta su programación.",
+    triggerMigrationWhyCron:
+      "Los disparadores leerían su programación de otra forma, así que se queda como está.",
+    triggerMigrationWhyExhausted: "Ya no le queda ninguna ejecución.",
+    triggerMigrationWhyChat:
+      "El chat donde se ejecuta ya no existe o no admite ejecuciones de un disparador.",
+    triggerMigrationWhyField:
+      "Uno de sus campos es más largo o complejo de lo que admite un disparador.",
+    triggerMigrationWhyWatchEnded: "La vigilancia terminó.",
+    triggerMigrationWhyNotSubscribed:
+      "Su conector aún no ha confirmado la suscripción.",
+    triggerMigrationWhyCallback:
+      "Su dirección de retorno cambió, así que pasarla requeriría una suscripción nueva.",
+    triggerMigrationWhyGivenBack:
+      "Se le devolvió desde su disparador y se queda como está.",
+    triggerMigrationWhyOther: "Por ahora se queda como está ({reason}).",
     triggerNextNotWired:
       "Solo borrador: Pim aún no recibe eventos de conectores",
     triggerNextUnavailable: "No disponible aquí",

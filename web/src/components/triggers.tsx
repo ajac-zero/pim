@@ -30,6 +30,7 @@ import {
   type TriggerExpression,
   type TriggerHealth,
   type TriggerLifecycle,
+  type TriggerMigrationItem,
   type TriggerRun,
   type TriggerSourceKind,
 } from "~/lib/pim-api";
@@ -37,8 +38,10 @@ import {
   agentsQuery,
   approvalsQuery,
   computerQuery,
+  schedulesQuery,
   sessionsQuery,
   settingsQuery,
+  triggerMigrationQuery,
   triggerQuery,
   triggerRunsQuery,
   triggersAvailableQuery,
@@ -57,6 +60,8 @@ import {
   healthChip,
   LIFECYCLE_TEXT,
   MAX_PAGES,
+  MIGRATION_STATUS_TEXT,
+  migrationReason,
   needsReload,
   nextLine,
   observesSource,
@@ -394,6 +399,8 @@ export function TriggersPage() {
   };
   const list = useInfiniteQuery(triggersQuery(filters));
   const { data: agents } = useQuery(agentsQuery());
+  const migration = useQuery(triggerMigrationQuery());
+  const { data: schedules } = useQuery(schedulesQuery());
   const failure = list.error ? triggerProblem(list.error) : null;
   if (failure?.code === "unavailable") return <Unavailable />;
   // A failed refetch keeps the earlier list; only a first load that failed is an error state.
@@ -407,6 +414,26 @@ export function TriggersPage() {
     Boolean,
   ).length;
   const filtered = applied > 0;
+  // Schedules and watches still delivered as before: a shadow's on its trigger's row, the rest in a list of their own, by the filters that apply to them.
+  const stillLegacy = (migration.data ?? []).filter(
+    (item) => item.owner === "legacy",
+  );
+  const legacyOf = new Map(
+    stillLegacy.flatMap((item) =>
+      item.triggerId === null ? [] : [[item.triggerId, item] as const],
+    ),
+  );
+  const legacy =
+    lifecycle || health
+      ? []
+      : stillLegacy.filter(
+          (item) =>
+            item.triggerId === null &&
+            (!agentId || item.agentId === agentId) &&
+            (!sourceKind ||
+              sourceKind ===
+                (item.kind === "schedule" ? "time" : "connector_event")),
+        );
   const clearFilters = () => {
     setLifecycle("");
     setHealth("");
@@ -543,6 +570,7 @@ export function TriggersPage() {
               key={trigger.id}
               trigger={trigger}
               agent={agentName(agents, trigger.agentId)}
+              migration={legacyOf.get(trigger.id)}
             />
           ))}
         </ul>
@@ -564,7 +592,126 @@ export function TriggersPage() {
             {t("triggersBounded", { count: loaded.length })}
           </p>
         ))}
+      {legacy.length > 0 && (
+        <section className="mt-8">
+          <h2 className="text-[15px]">{t("triggerLegacyTitle")}</h2>
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            {t("triggerLegacyHint")}
+          </p>
+          <ul className="mt-2 divide-y divide-border">
+            {legacy.map((item) => (
+              <LegacyRow
+                key={`${item.kind}:${item.legacyId}`}
+                item={item}
+                instruction={
+                  schedules?.find((schedule) => schedule.id === item.legacyId)
+                    ?.instruction
+                }
+                agent={item.agentId ? agentName(agents, item.agentId) : null}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
+      {migration.isError && (
+        <p role="alert" className="mt-8 text-[13px] text-destructive">
+          {t("triggerLegacyFailed")}
+        </p>
+      )}
     </Page>
+  );
+}
+
+/** Where a schedule or watch stands in its move to triggers. */
+function MigrationPill({ item }: { item: TriggerMigrationItem }) {
+  const { t } = useI18n();
+  const { key, tone } = MIGRATION_STATUS_TEXT[item.status];
+  return (
+    <Pill tone={tone} of={t("triggerMigration")}>
+      {t(key)}
+    </Pill>
+  );
+}
+
+/** Why a schedule or watch stands where it does, in words. */
+function MigrationReason({ item }: { item: TriggerMigrationItem }) {
+  const { t } = useI18n();
+  const why = migrationReason(item);
+  return (
+    <p className="mt-0.5 break-words text-[13px] text-muted-foreground">
+      {t(why.key, why.reason ? { reason: why.reason } : undefined)}
+    </p>
+  );
+}
+
+/**
+ * A schedule or watch that hasn't moved to triggers and has no trigger to
+ * show it: what it is, when it runs next, and why it stays. A schedule can
+ * be cancelled here, as the old Schedules list could.
+ */
+function LegacyRow({
+  item,
+  instruction,
+  agent,
+}: {
+  item: TriggerMigrationItem;
+  /** The schedule's instruction, for one without a label. */
+  instruction: string | undefined;
+  agent: string | null;
+}) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const kind = t(
+    item.kind === "schedule" ? "triggerLegacySchedule" : "triggerLegacyWatch",
+  );
+  // Cancelling asks twice: the first click turns the button into a confirmation.
+  const [confirming, setConfirming] = useState(false);
+  const cancel = useMutation({
+    mutationFn: () => pim.cancelSchedule(item.legacyId),
+    onSuccess: () => {
+      toast.success(t("scheduleCancelled"));
+      queryClient.invalidateQueries({ queryKey: ["schedules"] });
+      queryClient.invalidateQueries({ queryKey: ["triggers", "migration"] });
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  return (
+    <li className="flex flex-col gap-2 py-4 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[15px]" title={instruction}>
+          {item.label ?? instruction ?? kind}
+        </p>
+        <p className="mt-0.5 break-words text-[14px]">
+          {item.nextFiringAt !== null ? (
+            <NextAtText at={item.nextFiringAt} />
+          ) : (
+            t(
+              item.kind === "schedule"
+                ? "triggerNextLegacySchedule"
+                : "triggerNextLegacyWatch",
+            )
+          )}
+        </p>
+        <p className="mt-0.5 break-words text-[12px] text-muted-foreground">
+          {agent ? `${agent} · ${kind}` : kind}
+        </p>
+        <MigrationReason item={item} />
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <MigrationPill item={item} />
+        {item.kind === "schedule" && (
+          <Button
+            type="button"
+            variant={confirming ? "destructive" : "ghost"}
+            size="sm"
+            disabled={cancel.isPending}
+            onClick={() => (confirming ? cancel.mutate() : setConfirming(true))}
+          >
+            {t(confirming ? "confirmCancelSchedule" : "cancelSchedule")}
+          </Button>
+        )}
+      </div>
+    </li>
   );
 }
 
@@ -616,9 +763,12 @@ function NoTriggers() {
 export function TriggerRow({
   trigger,
   agent,
+  migration,
 }: {
   trigger: Trigger;
   agent: string;
+  /** Where the schedule or watch this trigger shadows stands, while that still delivers it. */
+  migration?: TriggerMigrationItem;
 }) {
   const { t } = useI18n();
   return (
@@ -640,10 +790,12 @@ export function TriggerRow({
         <p className="mt-0.5 break-words text-[12px] text-muted-foreground">
           {agent} · {t(SOURCE_TEXT[trigger.source.kind])}
         </p>
+        {migration && <MigrationReason item={migration} />}
       </div>
       <div className="flex flex-wrap gap-1.5">
         <LifecyclePill lifecycle={trigger.lifecycle} />
         <HealthPill trigger={trigger} />
+        {migration && <MigrationPill item={migration} />}
       </div>
     </li>
   );
@@ -1240,6 +1392,9 @@ export function TriggerActions({
         // Its schedule, if it was made from one, is cancelled with it.
         if (trigger.migration) {
           void queryClient.invalidateQueries({ queryKey: ["schedules"] });
+          void queryClient.invalidateQueries({
+            queryKey: ["triggers", "migration"],
+          });
         }
         toast.success(done);
         void navigate({ to: "/triggers" });

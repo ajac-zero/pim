@@ -23,6 +23,7 @@ import {
 	type AgentProfile,
 	type Checkpoint,
 	type CodingEvent,
+	type CodingHarness,
 	type CodingLimits,
 	type CodingThreadRow,
 	type CodingThreadState,
@@ -138,7 +139,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** The machine image a workspace starts from. */
 	protected workspaceImage(): string {
-		return "pim-coding";
+		return "pim-workspace:local";
+	}
+
+	/** Hosts the workspace may reach through the egress proxy: Pim's git broker and the common package registries. */
+	protected egressAllow(): string[] {
+		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org"];
+		try {
+			const origin = deploymentSettings(this.env).publicUrl;
+			if (origin) hosts.unshift(new URL(origin).hostname);
+		} catch {}
+		return hosts;
 	}
 
 	/**
@@ -250,6 +261,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				baseRef: input.ref ?? "main",
 				branch: branchName(task, threadId),
 				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },
+				harness: input.harness ?? "pi",
 				providerId,
 				state: "provisioning",
 				createdBy: input.createdBy,
@@ -278,6 +290,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			stateDetail: thread.stateDetail,
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch, baseSha: thread.baseSha },
 			profile: thread.profile,
+			harness: thread.harness,
 			workspaceProvider: thread.providerId,
 			slot: thread.slot,
 			queue,
@@ -1125,7 +1138,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			image: this.workspaceImage(),
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch },
 			limits: thread.limits,
-			egress: { allow: [] },
+			egress: { allow: this.egressAllow() },
 			gitAuth: { mode: "none" },
 		};
 	}
@@ -1141,7 +1154,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// The broker token as an HTTP header for these two commands alone: git keeps no copy of it in the repository.
 		const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
 		await git(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
-		await git(workspace, ["fetch", "origin", thread.baseRef], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+		const fetchOptions = { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token };
+		try {
+			await git(workspace, ["fetch", "origin", thread.baseRef], fetchOptions);
+		} catch (error) {
+			// A repository whose default branch isn't "main" (the ref nobody chose): use the remote's default branch.
+			if (thread.baseRef !== "main") throw error;
+			await git(workspace, ["fetch", "origin", "HEAD"], fetchOptions);
+		}
 		await git(workspace, ["checkout", "-B", thread.branch, "FETCH_HEAD"]);
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
 		if (this.store.required().baseSha === null) this.store.update({ baseSha: sha });
@@ -1211,6 +1231,8 @@ export type StartThread = {
 	readonly task: string;
 	/** The model it runs on: the space's default unless given (`defaultProfile`). */
 	readonly profile?: AgentProfile;
+	/** The coding agent that runs it (pi). */
+	readonly harness?: CodingHarness;
 	/** The most the thread may spend on its model, in dollars ($3). */
 	readonly budgetUsd?: number;
 	/** The thread that started this one, if any. */
@@ -1232,6 +1254,7 @@ export type CodingThreadStatus = {
 	readonly stateDetail: string | null;
 	readonly repo: { readonly url: string; readonly ref: string; readonly branch: string; readonly baseSha: string | null };
 	readonly profile: AgentProfile;
+	readonly harness: CodingHarness;
 	readonly workspaceProvider: string;
 	readonly slot: CodingThreadRow["slot"];
 	/** Its place in the space's queue while it waits for a slot. */

@@ -10,13 +10,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
 import { ChatTabs, tabShortcutPosition } from "~/components/chat/tabs";
 import { sessionsQuery } from "~/lib/queries";
-import { openTab, pruneTabs } from "~/lib/tabs";
+import { pinTab, pruneTabs } from "~/lib/tabs";
 
 it.each([["travel"], ["travel", "work", "weekend"]])(
   "keeps open chats accessible with none selected on the home page (%j)",
   async (...sessions) => {
     pruneTabs(new Set());
-    for (const session of sessions) openTab(session);
+    for (const session of sessions) pinTab(session);
     const client = new QueryClient();
     client.setQueryData(
       sessionsQuery().queryKey,
@@ -97,7 +97,7 @@ it.each([
 it("shows each tab's shortcut and none past the ninth", async () => {
   const ids = Array.from({ length: 10 }, (_, i) => `chat${i}`);
   pruneTabs(new Set());
-  for (const id of ids) openTab(id);
+  for (const id of ids) pinTab(id);
   const client = new QueryClient();
   client.setQueryData(
     sessionsQuery().queryKey,

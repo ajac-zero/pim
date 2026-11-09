@@ -120,7 +120,7 @@ export type Notification = {
 	readonly readAt: number | null;
 };
 
-/** A subscription to one event type of a connector, and what to do when it fires. */
+/** A subscription to one event type of a connector, and what to do when it fires, as watches kept them before they were triggers. */
 export type AppWatch = {
 	readonly id: string;
 	readonly serverId: string;
@@ -442,7 +442,7 @@ export class PimStore {
 			pim_trigger_migrations: "schedules and watches moved to triggers",
 			pim_trigger_ownership: "who delivered moved schedules and watches",
 			pim_trigger_cutover_receipts: "what moved schedules and watches skipped or routed",
-			pim_trigger_legacy_events: "what moved watches' events carried",
+			pim_trigger_legacy_events: "what connector events carried",
 			pim_trigger_api_creations: "triggers' creation keys",
 			pi_entries: "conversations",
 		};
@@ -731,54 +731,10 @@ export class PimStore {
 		this.#sql.exec("DELETE FROM pim_app_catalog WHERE server_id = ?", serverId);
 	}
 
-	// Event watches: subscriptions to connectors' events.
+	// Watches kept before watches were triggers: read once, as the space starts, and dropped (`Pim#retireWatches`).
 
-	addWatch(watch: Omit<AppWatch, "remoteId" | "cursor" | "refreshBefore" | "status" | "lastError" | "lastEventAt" | "createdAt">): AppWatch {
-		this.#sql.exec(
-			"INSERT OR IGNORE INTO pim_app_watches (id, server_id, event, arguments, instruction, session, secret, url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
-			watch.id,
-			watch.serverId,
-			watch.event,
-			JSON.stringify(watch.arguments),
-			watch.instruction,
-			watch.session,
-			watch.secret,
-			watch.url,
-			Date.now(),
-		);
-		return this.watch(watch.id)!;
-	}
-
-	watch(id: string): AppWatch | undefined {
-		const [row] = this.#sql.exec("SELECT * FROM pim_app_watches WHERE id = ?", id).toArray();
-		return row ? watchOf(row) : undefined;
-	}
-
-	watches(serverId?: string): AppWatch[] {
-		const rows =
-			serverId === undefined
-				? this.#sql.exec("SELECT * FROM pim_app_watches ORDER BY created_at, rowid")
-				: this.#sql.exec("SELECT * FROM pim_app_watches WHERE server_id = ? ORDER BY created_at, rowid", serverId);
-		return rows.toArray().map(watchOf);
-	}
-
-	updateWatch(
-		id: string,
-		change: Partial<Pick<AppWatch, "remoteId" | "cursor" | "refreshBefore" | "status" | "lastError" | "lastEventAt">>,
-	): void {
-		const watch = this.watch(id);
-		if (!watch) return;
-		const next = { ...watch, ...change };
-		this.#sql.exec(
-			"UPDATE pim_app_watches SET remote_id = ?, cursor = ?, refresh_before = ?, status = ?, last_error = ?, last_event_at = ? WHERE id = ?",
-			next.remoteId,
-			next.cursor,
-			next.refreshBefore,
-			next.status,
-			next.lastError,
-			next.lastEventAt,
-			id,
-		);
+	watches(): AppWatch[] {
+		return this.#sql.exec("SELECT * FROM pim_app_watches ORDER BY created_at, rowid").toArray().map(watchOf);
 	}
 
 	deleteWatch(id: string): boolean {

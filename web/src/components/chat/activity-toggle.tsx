@@ -81,6 +81,7 @@ export function ActivityToggle({
       aria-label={label}
       title={label}
       aria-expanded={open}
+      data-activity-toggle
       onClick={() => setOpen(!open)}
       className={cn(
         "relative rounded-full",

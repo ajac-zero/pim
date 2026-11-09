@@ -13,9 +13,9 @@ import type { Session } from "~/lib/pim-api";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
 import {
   CHAT_DRAG_TYPE,
-  closeTab,
-  openTab,
+  pinTab,
   pruneTabs,
+  unpinTab,
   useTabs,
 } from "~/lib/tabs";
 import { cn, MAC } from "~/lib/utils";
@@ -48,11 +48,77 @@ export function tabShortcutPosition(
   return /^[1-9]$/.test(event.key) ? Number(event.key) - 1 : undefined;
 }
 
+/** Whether a chat is working or waiting for the person, in a mark. */
+function SessionStatus({ session }: { session: Session }) {
+  const { t } = useI18n();
+  const awaitingApproval = useAwaitingApproval();
+  return session.busy ? (
+    <Loader2
+      className="size-3 shrink-0 text-primary motion-safe:animate-spin"
+      role="img"
+      aria-label={t("working")}
+    />
+  ) : session.held ? (
+    <AlertCircle
+      className="size-3 shrink-0 text-destructive"
+      role="img"
+      aria-label={t("waitingToTryAgain")}
+    />
+  ) : awaitingApproval.has(session.id) ? (
+    <AwaitingApprovalMark className="ml-0" />
+  ) : null;
+}
+
+/** The open chat's agent icon, status and title, in its header. */
+export function ChatTitle({
+  activeId,
+  className,
+}: {
+  activeId: string;
+  className?: string;
+}) {
+  const { t } = useI18n();
+  const { data: sessions } = useQuery(sessionsQuery());
+  const { data: agents } = useQuery(agentsQuery());
+  const session = sessions?.find((candidate) => candidate.id === activeId);
+  if (!session) return <div className={className} />;
+  const agent = session.visit
+    ? undefined
+    : agents?.find((candidate) =>
+        session.agent ? candidate.id === session.agent.id : candidate.majordomo,
+      );
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-2 pl-4 text-[15px]",
+        className,
+      )}
+    >
+      {agent && (
+        <Link
+          to="."
+          search={(prev) => ({ ...prev, dialog: "agents", agent: agent.id })}
+          aria-label={t("editAgent")}
+          className="shrink-0 rounded-md"
+        >
+          <AgentIcon
+            agent={agent}
+            tile
+            className="size-6 shrink-0 rounded-md"
+          />
+        </Link>
+      )}
+      <SessionStatus session={session} />
+      <span className="truncate">{sessionTitle(session, t)}</span>
+    </div>
+  );
+}
+
 /**
- * The open chats, as tabs in the chat's header. Each shows its title
+ * The pinned chats, as tabs above the chat's header. Each shows its title
  * and whether it is working or waiting for an approval, so chats in
- * the background stay in view with the sidebar collapsed. With only one
- * open, it shows that chat's title instead.
+ * the background stay in view with the sidebar collapsed. A chat that is not
+ * pinned has no tab.
  */
 export function ChatTabs({ activeId }: { activeId: string }) {
   const { t } = useI18n();
@@ -60,7 +126,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   const tabs = useTabs();
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: agents } = useQuery(agentsQuery());
-  const awaitingApproval = useAwaitingApproval();
   const activeRef = useRef<HTMLLIElement>(null);
 
   useEffect(() => {
@@ -96,59 +161,6 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     activeRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeId, tabs.length]);
 
-  const close = (session: string) => {
-    const next = closeTab(session);
-    if (session !== activeId) return;
-    navigate(
-      next
-        ? { to: "/chat/$sessionId", params: { sessionId: next } }
-        : { to: "/" },
-    );
-  };
-
-  const statusOf = (session: Session) =>
-    session.busy ? (
-      <Loader2
-        className="size-3 shrink-0 text-primary motion-safe:animate-spin"
-        role="img"
-        aria-label={t("working")}
-      />
-    ) : session.held ? (
-      <AlertCircle
-        className="size-3 shrink-0 text-destructive"
-        role="img"
-        aria-label={t("waitingToTryAgain")}
-      />
-    ) : awaitingApproval.has(session.id) ? (
-      <AwaitingApprovalMark className="ml-0" />
-    ) : null;
-
-  // A lone chat shows its title only while it is open, not on the home page.
-  if (open.length <= 1 && activeId) {
-    const session = sessions?.find((candidate) => candidate.id === activeId);
-    if (!session) return <div className="flex-1" />;
-    const agent = session.visit
-      ? undefined
-      : agents?.find((candidate) =>
-          session.agent
-            ? candidate.id === session.agent.id
-            : candidate.majordomo,
-        );
-    return (
-      <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
-        {agent && (
-          <AgentIcon
-            agent={agent}
-            tile
-            className="size-6 shrink-0 rounded-md"
-          />
-        )}
-        {statusOf(session)}
-        <span className="truncate">{sessionTitle(session, t)}</span>
-      </div>
-    );
-  }
-
   return (
     <nav
       aria-label={t("openChats")}
@@ -168,7 +180,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
             agents?.find((agent) => agent.id === session.agent?.id)?.color ??
               null,
           );
-          const status = statusOf(session);
+          const status = <SessionStatus session={session} />;
           const shortcut =
             position < 9 ? `${MAC ? "⌘" : "Ctrl+"}${position + 1}` : undefined;
           return (
@@ -222,7 +234,7 @@ export function ChatTabs({ activeId }: { activeId: string }) {
                   // A middle click closes the tab, as in a browser.
                   if (event.button !== 1) return;
                   event.preventDefault();
-                  close(session.id);
+                  unpinTab(session.id);
                 }}
                 className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-t-xl pr-8 pl-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
               >
@@ -231,8 +243,8 @@ export function ChatTabs({ activeId }: { activeId: string }) {
               </Link>
               <button
                 type="button"
-                onClick={() => close(session.id)}
-                aria-label={t("closeTab")}
+                onClick={() => unpinTab(session.id)}
+                aria-label={t("unpinTab")}
                 className={cn(
                   "absolute right-2 flex size-6 items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover/tab:opacity-100",
                   active && "opacity-100",
@@ -249,8 +261,8 @@ export function ChatTabs({ activeId }: { activeId: string }) {
 }
 
 /**
- * Lets a chat dragged from the sidebar be dropped on an element to open in a
- * new tab: spread `dropZone` on it. `dropping` is true while one is over it.
+ * Lets a chat dragged from the sidebar be dropped on an element to pin it
+ * as a tab: spread `dropZone` on it. `dropping` is true while one is over it.
  */
 export function useChatDrop() {
   const navigate = useNavigate();
@@ -290,7 +302,7 @@ export function useChatDrop() {
       const session = event.dataTransfer.getData(CHAT_DRAG_TYPE);
       if (!session) return;
       event.preventDefault();
-      openTab(session);
+      pinTab(session);
       navigate({ to: "/chat/$sessionId", params: { sessionId: session } });
     },
   };

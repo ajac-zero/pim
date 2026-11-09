@@ -70,9 +70,9 @@ import { PimThemes } from "./themes";
  *   only this.
  * - `/install.sh`: public, what installs pim-host or pim-computer from this
  *   Pim (./install-script.ts).
- * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
+ * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<key>`: public, for
  *   connectors. Each is checked another way: the OAuth state, and the
- *   watch's signing secret.
+ *   signing secret of the trigger's subscription the key names.
  * - Everything else: the web app (`web/`, built to `web/dist`).
  */
 
@@ -205,7 +205,7 @@ export type ApiExtension = (path: string, request: Request) => Promise<Response 
  * OAuth sign-in's redirect, which the space matches against the callback URL
  * it gave), `/mcp/callback/apps` (the same for the connectors extensions
  * implement, whose `state` starts with the owner: see `serveAppReturn`), or
- * `/mcp/events/<owner>/<watch>` (POST, which the space answers as `/mcp/events/<watch>`).
+ * `/mcp/events/<owner>/<key>` (POST, which the space answers as `/mcp/events/<key>`).
  * Also `/mcp/client/<owner>` (GET): Pim's client metadata document for that
  * owner's sign-ins, for services that take one instead of registering clients.
  */

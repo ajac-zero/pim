@@ -5,6 +5,7 @@ import {
 } from "@tanstack/react-query";
 import {
   createRootRouteWithContext,
+  Link,
   Outlet,
   redirect,
   retainSearchParams,
@@ -410,7 +411,18 @@ function MobileTitle() {
   return (
     <span className="flex min-w-0 items-center gap-2 text-[15px]">
       {agent && (
-        <AgentIcon agent={agent} tile className="size-6 shrink-0 rounded-md" />
+        <Link
+          to="."
+          search={(prev) => ({ ...prev, dialog: "agents", agent: agent.id })}
+          aria-label={t("editAgent")}
+          className="shrink-0 rounded-md"
+        >
+          <AgentIcon
+            agent={agent}
+            tile
+            className="size-6 shrink-0 rounded-md"
+          />
+        </Link>
       )}
       <span className="truncate">
         {session ? sessionTitle(session, t) : "Pim"}

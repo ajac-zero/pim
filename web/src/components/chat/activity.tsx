@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   usePendingApprovals,
   useSummaryOpen,
@@ -24,10 +24,10 @@ import { browserQuery } from "~/lib/queries";
 const BROWSER_REFRESH_MS = 4_000;
 
 /**
- * The chat's options, in a box beside it (above it on phones): the agents in
+ * The chat's options, in a popup floating over its top right corner: the agents in
  * the chat, copying the conversation or its id, its public link, and what it
  * has cost; then a quick summary of it and its next steps, from the utility
- * model; below that, while it's open, the browser the person's agents share. The thread makes room for it. Approvals the chat
+ * model; below that, while it's open, the browser the person's agents share. Approvals the chat
  * is waiting on come first, and open the box even when it's closed. Nothing is
  * written until the summary dropdown is open. While open, it asks again only
  * when the chat has settled with new entries (`entries`),
@@ -43,7 +43,8 @@ export function ActivityBox({
   settled: boolean;
 }) {
   const { t } = useI18n();
-  const [open] = useSummaryOpen();
+  const [open, setOpen] = useSummaryOpen();
+  const box = useRef<HTMLElement>(null);
   const approvals = usePendingApprovals(sessionId);
   const [summaryOpen, setSummaryOpen] = useState(false);
   const summary = useQuery({
@@ -59,12 +60,33 @@ export function ActivityBox({
     enabled: open,
     refetchInterval: BROWSER_REFRESH_MS,
   });
+  // A press outside the popup closes it. The header button toggles it itself, and
+  // the menus the popup opens render outside it, so they count as inside.
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        !box.current?.contains(target) &&
+        !target.closest(
+          "[data-activity-toggle], [role=menu], [role=dialog], [data-radix-popper-content-wrapper]",
+        )
+      )
+        setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open, setOpen]);
   if (!open && approvals.length === 0) return null;
   const page = browser.data?.page;
 
   return (
-    <aside className="order-first flex max-h-[45%] shrink-0 flex-col px-3 pt-3 pb-2 md:order-none md:absolute md:inset-y-0 md:right-(--scrollbar) md:max-h-none md:w-80 md:pb-3 md:pl-0">
-      <div className="fade-in-0 min-h-0 animate-in overflow-y-auto rounded-[18px] border bg-muted/40 duration-150">
+    <aside
+      ref={box}
+      className="absolute top-2 right-(--scrollbar) z-30 flex max-h-[calc(100%-1rem)] w-80 max-w-[calc(100%-1.5rem)] flex-col pr-3 md:pr-0"
+    >
+      <div className="fade-in-0 min-h-0 animate-in overflow-y-auto rounded-[18px] border bg-popover text-popover-foreground shadow-[0_8px_30px_-6px_rgb(0_0_0/0.18)] duration-150">
         {approvals.length > 0 && (
           <section className="space-y-2 border-b p-3">
             <h2 className="px-1 text-[13px] text-muted-foreground">

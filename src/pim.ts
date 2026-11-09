@@ -1404,6 +1404,16 @@ export class Pim extends DurableAgent<Env> {
 		];
 	}
 
+	/**
+	 * One of the space's model providers by its catalog id, key included, or
+	 * null. Only for the space's coding threads (src/coding/thread-do.ts),
+	 * which call their model from their own Durable Objects and keep the
+	 * provider in memory only; it is never served by the API.
+	 */
+	async codingModelProvider(catalogId: string): Promise<CustomProvider | null> {
+		return this.customProviders().find((entry) => entry.catalogId === catalogId)?.provider ?? null;
+	}
+
 	/** Puts the providers as they are now in the catalog, which pi keeps, and takes out those that are gone. */
 	#syncProviders(): void {
 		const models = this.#models;

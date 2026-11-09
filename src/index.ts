@@ -5,6 +5,7 @@ export { Auth } from "./auth";
 export { Directory } from "./directory";
 export { Gallery } from "./gallery";
 export { CodingSchedulerDO } from "./coding/scheduler-do";
+export { CodingThreadDO } from "./coding/thread-do";
 
 /**
  * A Pim: one Worker for everyone on it, each with their own agent. The

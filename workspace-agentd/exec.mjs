@@ -35,10 +35,11 @@ function killGroup(pid, signal) {
 }
 
 // Runs `spec` and streams NDJSON events to `res`. Rejects with HttpError if the process cannot start.
-export async function runExec(spec, cwd, res, { maxOutputBytes, onStart, onEnd }) {
+// `baseEnv` is agentd's environment without its own token.
+export async function runExec(spec, cwd, res, { baseEnv, maxOutputBytes, onStart, onEnd }) {
 	const child = spawn(spec.cmd[0], spec.cmd.slice(1), {
 		cwd,
-		env: { ...process.env, ...spec.env },
+		env: { ...baseEnv, ...spec.env },
 		detached: true,
 		stdio: ['pipe', 'pipe', 'pipe'],
 	})

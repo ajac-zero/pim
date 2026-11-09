@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type Api, type AssistantMessage, createAssistantMessageEventStream, type Model, type Provider } from "@earendil-works/pi-ai";
+import { type Api, type AssistantMessage, createAssistantMessageEventStream, type Message, type Model, type Provider } from "@earendil-works/pi-ai";
 import { createModels, type Models, type MutableModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, type EntryRecord, Harness, type HarnessSettings, section } from "@earendil-works/pi-durable";
 import { getAgentByName } from "agents";
-import { type PiOperationResult, PiHarness } from "agents/harness/pi";
+import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext, type LifecycleJobOutcome } from "agents/lifecycle";
 import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 import { deploymentSettings } from "../deployment";
@@ -45,6 +45,9 @@ import { checkBranch, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePus
 import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
 import type { Fetch, GitHubApp } from "./git-broker/github-app";
 import { brokerTokenKey, deploymentGitHubApp, GIT_BROKER_PATH } from "./git-broker/routes";
+import { authEnv } from "./harness/auth";
+import { type CliHarness, cliHarness } from "./harness";
+import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun } from "./harness/runner";
 import { supervisorSink } from "./supervisor";
 import {
 	type AgentProfile,
@@ -58,9 +61,12 @@ import {
 	type TestRun,
 } from "./thread-store";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
+import { restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
+import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
-import { NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
+import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceProvider, type WorkspaceSpec } from "./workspace/types";
+import type { HarnessEvent as CliEvent } from "./harness/types";
 
 /**
  * One coding thread, in a Durable Object of its own named by the thread's
@@ -84,6 +90,12 @@ import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceP
  * Every step is driven from durable state by one job (`advance`), so an
  * eviction loses nothing: on restart pi resumes its run, and the job picks
  * up provisioning, the next input, or the end of the turn where they were.
+ *
+ * A thread whose `harness` is a vendor's CLI, such as Claude Code, runs each
+ * turn as one run of that CLI in the workspace instead of a pi run
+ * (./harness/): what it prints goes into the same transcript, log, test runs
+ * and checkpoints. A CLI run can't outlive this object: after an eviction
+ * the turn ends `interrupted`, and the next turn resumes the CLI's session.
  */
 export class CodingThreadDO extends DurableObject<Env> {
 	readonly store = new CodingThreadStore(
@@ -118,8 +130,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			await this.ctx.storage.sync();
 		},
 	};
-	/** Who follows the output of commands as they run (`events()`). */
-	readonly #outputListeners = new Set<(event: CodingOutputEvent) => void>();
+	/** Who follows the thread live besides pi's events (`events()`): commands' output as they run, and a CLI harness's text as it is written. */
+	readonly #liveListeners = new Set<(message: CodingLiveMessage) => void>();
+	/** The CLI harness's turn under way in this isolate, and its end. */
+	#cli: { operation: string; runner: HarnessRunner; done: Promise<void> } | null = null;
 	/** Turns being ended, by operation, so two who notice one end it once. */
 	readonly #endings = new Map<string, Promise<void>>();
 	/** The space's list being told of the thread's row, and whether it changed again meanwhile. */
@@ -132,7 +146,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		harness: async ({ storage, context }) => {
 			const thread = this.store.thread();
 			// A run resumed after a restart needs its model; one whose provider is gone fails its turn instead of the object's startup.
-			if (thread) await this.#loadModel(thread.space, thread.profile).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.model_unavailable", thread: thread.threadId, error: String(error) })));
+			if (thread && !cliHarness(thread.harness)) await this.#loadModel(thread.space, thread.profile).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.model_unavailable", thread: thread.threadId, error: String(error) })));
 			this.registry.install({
 				name: "coding",
 				sections: [section("coding_agent", () => CODING_PROMPT, { tag: false }), section("repository", () => this.#repositorySection())],
@@ -140,9 +154,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 					workspace: () => this.#workspace(),
 					journal: this.#journal,
 					onTestRun: (run) => this.store.addTestRun(run),
-					sink: (event) => {
-						for (const listener of this.#outputListeners) listener(event);
-					},
+					sink: (event) => this.#tellLive({ type: "output", ...event }),
 				}),
 			});
 			return Harness.open(storage, { models: this.#meter(this.#models), registry: this.registry, settings: CODING_SETTINGS }, context);
@@ -168,7 +180,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** The machine image a workspace starts from. */
 	protected workspaceImage(): string {
-		return "pim-workspace:local";
+		return DEFAULT_WORKSPACE_IMAGE;
 	}
 
 	/** Hosts the workspace may reach through the egress proxy: Pim's git broker and the common package registries. */
@@ -194,6 +206,31 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (!origin) throw new Error("PIM_PUBLIC_URL isn't set, so the workspace can't reach Pim's git broker");
 		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo });
 		return { url: `${origin}/api${GIT_BROKER_PATH}/${repo.owner}/${repo.name}.git`, token };
+	}
+
+	/** How a CLI harness signs in for the thread: the person's subscription, unless `authEnv` says otherwise (./harness/auth.ts). */
+	protected harnessAuth(thread: CodingThreadRow): HarnessAuth {
+		return authEnv(thread);
+	}
+
+	/** The person's login for the harness, put into the thread's workspace and written back from it, through the coding vault. */
+	protected harnessCredentials(thread: CodingThreadRow, harness: CliHarness, workspace: Workspace): RunnerDeps["credentials"] {
+		const vault = codingVault(this.env);
+		const owns = threadOwnership(this.env);
+		const target = () => {
+			const ref = this.store.required().workspaceRef;
+			if (!ref) throw new Error("The coding thread has no workspace");
+			return { userId: thread.space, ref, workspace };
+		};
+		return {
+			restore: () => restoreHarnessCredentials(vault, owns, target(), harness.id),
+			writeBack: (restored) => writeBackHarnessCredentials(vault, owns, restored, target()),
+		};
+	}
+
+	/** How long a CLI harness has to end its turn after SIGINT. */
+	protected harnessGraceMs(): number {
+		return INTERRUPT_GRACE_MS;
 	}
 
 	/** Who hears of what the thread does: the chat of the agent that started it, if one did (./supervisor.ts). */
@@ -293,9 +330,15 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const budgetUsd = input.budgetUsd ?? DEFAULT_BUDGET_USD;
 		if (!(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
-		const profile = input.profile ?? (await this.defaultProfile(input.space));
+		const harness = input.harness ?? "pi";
+		const cli = cliHarness(harness);
+		if (harness !== "pi" && !cli) throw new Error("harness not yet available");
+		// A CLI harness picks its own model: a profile of its own names one, any other means its default.
+		const profile = cli
+			? { providerId: cli.id, model: input.profile?.providerId === cli.id ? input.profile.model : "default" }
+			: (input.profile ?? (await this.defaultProfile(input.space)));
 		// The model is checked before anything is recorded, so a thread never starts on a model it can't call.
-		await this.#loadModel(input.space, profile);
+		if (!cli) await this.#loadModel(input.space, profile);
 		const threadId = this.#threadId();
 		this.ctx.storage.transactionSync(() => {
 			this.store.create({
@@ -305,7 +348,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				baseRef: input.ref ?? "main",
 				branch: branchName(task, threadId),
 				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },
-				harness: input.harness ?? "pi",
+				harness,
 				providerId,
 				state: "provisioning",
 				createdBy: input.createdBy,
@@ -360,6 +403,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.#live();
 		if (!text.trim()) throw new Error("Say something");
 		if (thread.currentOperation && !options.interrupt) {
+			if (cliHarness(thread.harness)) {
+				// A CLI takes no input mid-turn: the text is the next turn, which resumes the CLI's session.
+				this.store.enqueue(options.operationId, text);
+				return this.status();
+			}
 			await this.harness.submit(text, { operationId: options.operationId, whenBusy: "steer" });
 			return this.status();
 		}
@@ -444,7 +492,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		this.#assertBudget(this.store.required());
 		this.ctx.storage.transactionSync(() => {
-			this.store.enqueue(options.operationId, CONTINUE_TEXT);
+			// A thread waiting for the person's login still has the input it waited with: that goes on, with nothing added.
+			if (!(thread.state === "waiting_input" && this.store.inboxSize() > 0)) this.store.enqueue(options.operationId, CONTINUE_TEXT);
 			this.#reopen();
 		});
 		this.#kick();
@@ -518,14 +567,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const stream = await this.harness.session().events();
 		const encoder = new TextEncoder();
 		const line = (value: unknown) => encoder.encode(`${JSON.stringify(value)}\n`);
-		const listeners = this.#outputListeners;
-		let listener: ((event: CodingOutputEvent) => void) | null = null;
+		const listeners = this.#liveListeners;
+		let listener: ((message: CodingLiveMessage) => void) | null = null;
 		return new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(line(stream.snapshot));
-				listener = (event) => {
+				listener = (message) => {
 					try {
-						controller.enqueue(line({ type: "output", ...event }));
+						controller.enqueue(line(message));
 					} catch {
 						if (listener) listeners.delete(listener);
 					}
@@ -885,7 +934,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** A failed or stopped thread with new input waits for a slot again. Runs in the caller's transaction. */
 	#reopen(): void {
 		const thread = this.store.required();
-		if (thread.state === "failed" || (thread.state === "idle" && thread.slot === "none")) this.store.update({ state: thread.slot === "queued" ? "queued" : "provisioning", stateReason: null, stateDetail: null, budgetStopped: false });
+		if (thread.state === "failed" || thread.state === "waiting_input" || (thread.state === "idle" && thread.slot === "none")) this.store.update({ state: thread.slot === "queued" ? "queued" : "provisioning", stateReason: null, stateDetail: null, budgetStopped: false });
 	}
 
 	/** Runs the `advance` job now, and in memory at once. */
@@ -920,17 +969,23 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** One pass: notices a turn's end, asks for a slot, readies the workspace, and starts the next input's turn. */
 	async #step(): Promise<void> {
 		let thread = this.store.thread();
-		if (!thread || thread.state === "archived" || thread.state === "failed") return;
+		if (!thread || thread.state === "archived" || thread.state === "failed" || thread.state === "waiting_input") return;
 		if (thread.currentOperation) {
 			const operation = thread.currentOperation;
-			const pending = await this.harness.pending();
-			if (pending.some((item) => item.operationId === operation)) {
-				this.#watch(operation);
-				return;
+			if (cliHarness(thread.harness)) {
+				if (this.#cli?.operation === operation) return;
+				// The run that was this turn's is gone with the isolate that ran it.
+				await this.#endCliTurn(operation, await this.#recoverCliRun(thread));
+			} else {
+				const pending = await this.harness.pending();
+				if (pending.some((item) => item.operationId === operation)) {
+					this.#watch(operation);
+					return;
+				}
+				await this.#endTurn(operation, await this.harness.wait(operation));
 			}
-			await this.#endTurn(operation, await this.harness.wait(operation));
 			thread = this.store.thread();
-			if (!thread || thread.state === "failed" || thread.state === "archived") return;
+			if (!thread || thread.state === "failed" || thread.state === "archived" || thread.state === "waiting_input") return;
 		}
 		const work = this.store.inboxSize() > 0;
 		if (!work) {
@@ -1088,6 +1143,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		const input = this.store.nextInput();
 		if (!input || thread.currentOperation) return;
+		const cli = cliHarness(thread.harness);
+		if (cli) return this.#startCliTurn(thread, cli, input);
 		await this.#loadModel(thread.space, thread.profile);
 		await this.#configure(thread.profile);
 		// The same operation twice is one submission, so a restart between here and the record below repeats nothing.
@@ -1116,11 +1173,187 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/**
+	 * Starts the inbox's oldest input as a turn of the thread's CLI harness:
+	 * readies the run first (the person's lock on their login, and the login
+	 * put into the workspace), then records the turn and runs the CLI in the
+	 * background, resuming its session after the first turn. Without a login
+	 * the thread waits for the person (`login_required`), the input kept;
+	 * while another of the person's threads runs the harness, it tries again
+	 * at the next heartbeat.
+	 */
+	async #startCliTurn(thread: CodingThreadRow, cli: CliHarness, input: { seq: number; operationId: string; text: string }): Promise<void> {
+		// A run readied before a restart, whose turn never started, is finished off first.
+		if (this.store.harnessRun()) await this.#recoverCliRun(thread);
+		if (thread.spentUsd >= thread.budgetUsd) {
+			this.store.update({ state: "failed", stateReason: "budget", stateDetail: null });
+			await this.#giveBack({ keepVolume: true });
+			return;
+		}
+		const workspace = await this.#workspace();
+		const session = this.store.harnessSession();
+		const sessionId = session?.sessionId ?? crypto.randomUUID();
+		const timeoutMs = thread.limits.wallClockMin * 60_000;
+		const runner = new HarnessRunner(this.#cliDeps(thread, cli, workspace, timeoutMs));
+		const prepared = await runner.prepare(input.operationId, { sessionId, resume: session !== null });
+		if (prepared.status === "busy") {
+			this.store.update({ stateReason: "harness_busy", stateDetail: `Another of your coding threads is running ${cli.name}; this one starts when it ends` });
+			await this.#schedule(Date.now() + HEARTBEAT_MS);
+			return;
+		}
+		if (prepared.status === "login_required") {
+			this.ctx.storage.transactionSync(() => {
+				this.store.update({ state: "waiting_input", stateReason: "login_required", stateDetail: `Connect ${cli.name} with your subscription, then continue the thread` });
+				this.store.recordEvent("thread.waiting_input", { reason: "login_required", harness: cli.id, operationId: input.operationId });
+			});
+			await this.#report("waiting");
+			return;
+		}
+		const operation = input.operationId;
+		this.ctx.storage.transactionSync(() => {
+			this.store.dequeue(input.seq);
+			this.store.update({ state: "running", stateReason: null, stateDetail: null, currentOperation: operation, budgetStopped: false });
+			this.store.recordEvent("thread.turn_started", { operationId: operation });
+		});
+		const fresh = this.store.required();
+		const turn = {
+			prompt: input.text,
+			sessionId,
+			resume: session !== null,
+			maxBudgetUsd: fresh.budgetUsd - fresh.spentUsd,
+			model: fresh.profile.providerId === cli.id && fresh.profile.model !== "default" ? fresh.profile.model : null,
+			instructions: cliInstructions(fresh),
+		};
+		// Known at once, before anything is awaited, so a stop that comes meanwhile finds the run to stop.
+		let go = () => {};
+		const started = new Promise<void>((resolve) => {
+			go = resolve;
+		});
+		const done = started
+			.then(() => runner.run(turn, timeoutMs))
+			.catch((error): RunResult => ({ ...NO_RUN, reason: "harness_error", detail: errorText(error).slice(0, 500) }))
+			.then((result) => this.#endCliTurn(operation, result))
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.harness_turn_failed", operation, error: String(error) })))
+			.finally(() => {
+				if (this.#cli?.operation === operation) this.#cli = null;
+				void this.#advance();
+			});
+		this.#cli = { operation, runner, done };
+		try {
+			await this.#writeMessage({ role: "user", content: input.text, timestamp: this.now() });
+			await this.#report("running");
+		} finally {
+			go();
+		}
+	}
+
+	/** What a CLI run needs from the thread: its workspace, the person's login and lock, and where its record and events go. */
+	#cliDeps(thread: CodingThreadRow, cli: CliHarness, workspace: Workspace, timeoutMs: number): RunnerDeps {
+		const scheduler = codingScheduler(this.env, thread.space);
+		const grace = this.harnessGraceMs();
+		return {
+			harness: cli,
+			workspace,
+			auth: this.harnessAuth(thread),
+			credentials: this.harnessCredentials(thread, cli, workspace),
+			// Held at most as long as a run can last, so a thread that is gone can't keep it.
+			lock: { acquire: () => scheduler.acquireHarness(cli.id, thread.threadId, timeoutMs + 4 * grace + 60_000), release: () => scheduler.releaseHarness(cli.id, thread.threadId) },
+			journal: { save: (record) => this.store.saveHarnessRun(record), clear: () => this.store.saveHarnessRun(null) },
+			onEvent: (event) => this.#onCliEvent(event),
+			onTestRun: (run) => this.store.addTestRun(run),
+			now: () => this.now(),
+			graceMs: grace,
+		};
+	}
+
+	/** Finishes off a CLI run this isolate didn't start: the CLI killed, the login written back, the lock let go. The turn was `interrupted`. */
+	async #recoverCliRun(thread: CodingThreadRow): Promise<RunResult> {
+		const cli = cliHarness(thread.harness)!;
+		const record = this.store.harnessRun();
+		const interrupted: RunResult = { ...NO_RUN, reason: "interrupted", detail: `The thread restarted while ${cli.name} ran; its turn was stopped` };
+		if (!record) return interrupted;
+		let workspace: Workspace | null = null;
+		try {
+			if (thread.slot === "held") workspace = await this.#workspace();
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.harness_recover_workspace", thread: thread.threadId, error: String(error) }));
+		}
+		if (!workspace) {
+			// Without the workspace there is no CLI to stop and no login to keep: only the lock is let go.
+			if (record.locked) await codingScheduler(this.env, thread.space).releaseHarness(cli.id, thread.threadId);
+			this.store.saveHarnessRun(null);
+			return interrupted;
+		}
+		const result = await recoverRun(this.#cliDeps(thread, cli, workspace, thread.limits.wallClockMin * 60_000), record);
+		console.warn(JSON.stringify({ event: "pim.coding.harness_interrupted", thread: thread.threadId, operation: record.operationId, lines: record.lines }));
+		return result;
+	}
+
+	/**
+	 * A CLI turn ended: what it cost is recorded, as the change in the
+	 * session's whole cost the CLI reported, and the session kept for the next
+	 * turn; then the turn ends as any does. A resumed session that the CLI no
+	 * longer has is let go, so the next turn starts a new one.
+	 */
+	async #endCliTurn(operation: string, result: RunResult): Promise<void> {
+		const thread = this.store.thread();
+		if (!thread || thread.currentOperation !== operation) return;
+		const before = this.store.harnessSession();
+		this.ctx.storage.transactionSync(() => {
+			const cost = result.sessionCostUsd === null ? 0 : Math.max(0, result.sessionCostUsd - (before?.sessionId === result.sessionId ? before.costUsd : 0));
+			const { usage } = result;
+			if (cost > 0 || usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0) this.store.recordModelCall(thread.harness, result.model ?? "unknown", usage, cost);
+			if (result.sessionId && result.sessionCostUsd !== null) this.store.setHarnessSession({ sessionId: result.sessionId, costUsd: result.sessionCostUsd });
+			else if (result.status !== "done" && result.sessionId === null && result.reason === "harness_error" && before) this.store.setHarnessSession(null);
+			if (result.reason === "budget") this.store.update({ budgetStopped: true });
+		});
+		await this.#endTurn(operation, result);
+	}
+
+	/** What a CLI's output means for the thread: messages into the transcript, retries and refusals into the log, text as it is written to whoever follows live. */
+	async #onCliEvent(event: CliEvent): Promise<void> {
+		switch (event.type) {
+			case "session": {
+				const known = this.store.harnessSession();
+				if (known?.sessionId !== event.sessionId) this.store.setHarnessSession({ sessionId: event.sessionId, costUsd: 0 });
+				return;
+			}
+			case "delta":
+				this.#tellLive({ type: "partial", kind: event.kind, text: event.text });
+				return;
+			case "assistant":
+			case "tool_result":
+				await this.#writeMessage(event.message);
+				return;
+			case "retry":
+				this.store.recordEvent("harness.api_retry", { attempt: event.attempt, maxRetries: event.maxRetries, delayMs: event.delayMs, error: event.error, status: event.status });
+				return;
+			case "permission_denied":
+				this.store.recordEvent("harness.permission_denied", { tool: event.tool, message: event.message.slice(0, 500) });
+				return;
+			case "unparsed":
+				// Its length only: what the CLI printed may hold anything.
+				console.warn(JSON.stringify({ event: "pim.coding.harness_unparsed", length: event.line.length }));
+				return;
+		}
+	}
+
+	/** Appends a message to the conversation as it is, without asking pi's model anything: a CLI harness's own. */
+	async #writeMessage(message: Message): Promise<void> {
+		const root = await (await this.harness.pi()).root(BACKGROUND_CONTEXT);
+		await root.submit({ type: "write", entry: { kind: CLI_MESSAGE, model: [message] } }, BACKGROUND_CONTEXT);
+	}
+
+	/** Tells whoever follows the thread live. */
+	#tellLive(message: CodingLiveMessage): void {
+		for (const listener of this.#liveListeners) listener(message);
+	}
+
+	/**
 	 * A turn ended: commits a checkpoint, settles the thread's state, records
 	 * and emits `thread.turn_ended`, and gives the slot back when the thread
 	 * failed. Ending a turn already ended does nothing.
 	 */
-	#endTurn(operation: string, result: PiOperationResult): Promise<void> {
+	#endTurn(operation: string, result: TurnResult): Promise<void> {
 		let ending = this.#endings.get(operation);
 		if (!ending) {
 			ending = this.#settleTurn(operation, result).finally(() => this.#endings.delete(operation));
@@ -1129,7 +1362,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return ending;
 	}
 
-	async #settleTurn(operation: string, result: PiOperationResult): Promise<void> {
+	async #settleTurn(operation: string, result: TurnResult): Promise<void> {
 		if (this.store.thread()?.currentOperation !== operation) return;
 		const checkpoint = await this.#checkpoint(operation).catch((error) => {
 			console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) }));
@@ -1138,9 +1371,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		if (thread.currentOperation !== operation) return;
 		const budget = thread.budgetStopped;
-		const outcome: TurnOutcome = budget ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : "error";
-		const reason = budget ? "budget" : outcome === "error" ? (result.reason ?? "error") : null;
-		const state: CodingThreadState = outcome === "error" ? "failed" : "idle";
+		// A CLI harness whose login is missing or expired waits for the person to connect it again, and goes on when continued.
+		const login = result.status !== "done" && result.reason === "login_required";
+		const outcome: TurnOutcome = budget ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : login ? "needs_approval" : "error";
+		const reason = budget ? "budget" : outcome === "error" || login ? (result.reason ?? "error") : null;
+		const state: CodingThreadState = outcome === "error" ? "failed" : login ? "waiting_input" : "idle";
 		const said = await this.#lastSaid().catch(() => null);
 		const event: TurnEndedEvent = {
 			type: "thread.turn_ended",
@@ -1157,12 +1392,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 			at: this.now(),
 		};
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: null });
+			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: outcome === "completed" ? null : (result.detail ?? null) });
 			this.store.recordEvent(event.type, event);
 			if (budget) this.store.recordEvent("app.budget_stop", { budgetUsd: thread.budgetUsd, spentUsd: thread.spentUsd });
 		});
 		if (budget) await this.#write("app.budget_stop", { budgetUsd: thread.budgetUsd, spentUsd: thread.spentUsd });
 		if (state === "failed") await this.#giveBack({ keepVolume: true });
+		else if (state === "waiting_input") await this.#report("waiting");
 		else if (this.store.inboxSize() === 0) await this.#report("idle");
 		// Last, so whoever hears of the turn's end finds the slot already given back or idle.
 		await this.#emit(event);
@@ -1185,7 +1421,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Stops the turn under way: kills its commands, aborts pi's run and waits for the turn to end. */
 	async #stopTurn(): Promise<void> {
-		const operation = this.store.required().currentOperation;
+		const thread = this.store.required();
+		const operation = thread.currentOperation;
+		if (cliHarness(thread.harness)) {
+			const run = this.#cli;
+			if (run && run.operation === operation) {
+				await run.runner.abort();
+				await run.done;
+			} else if (operation) await this.#endCliTurn(operation, await this.#recoverCliRun(thread));
+			this.#killCommands();
+			return;
+		}
 		this.#killCommands();
 		await this.harness.abort();
 		if (operation) await this.#endTurn(operation, await this.harness.wait(operation));
@@ -1328,7 +1574,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			image: this.workspaceImage(),
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch },
 			limits: thread.limits,
-			egress: { allow: this.egressAllow() },
+			egress: { allow: [...this.egressAllow(), ...(cliHarness(thread.harness)?.egress ?? [])] },
 			gitAuth: { mode: "none" },
 		};
 	}
@@ -1463,7 +1709,19 @@ export type CodingThreadStatus = {
 
 export type CodingDiff = { readonly since: string | null; readonly head: string | null; readonly diff: string; readonly truncated: boolean };
 
-/** How a turn ended. `needs_approval` is for a turn held for the person's approval, which no coding tool asks for yet. */
+/** How a turn ended, from pi or a CLI harness: answered, or why not, with what to tell the person. */
+type TurnResult = { readonly status: "done" | "unanswered"; readonly reason?: string; readonly detail?: string };
+
+/** What `events()` sends besides pi's own events: a command's output as it runs, and a CLI harness's text or thinking as it is written. */
+export type CodingLiveMessage = ({ readonly type: "output" } & CodingOutputEvent) | { readonly type: "partial"; readonly kind: "text" | "thinking"; readonly text: string };
+
+/** The kind of a CLI harness's messages in the conversation. */
+const CLI_MESSAGE = "harness.message";
+
+/** A CLI run that ended before it ran. */
+const NO_RUN: RunResult = { status: "unanswered", sessionId: null, sessionCostUsd: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, model: null, lines: 0 };
+
+/** How a turn ended. `needs_approval` is for a turn held for the person, such as for a CLI harness's login. */
 export type TurnOutcome = "completed" | "error" | "cancelled" | "needs_approval";
 
 export type TurnEndedEvent = {
@@ -1516,6 +1774,15 @@ export const CODING_PROMPT = `You are a coding agent working in a git repository
 - Before you say you are done, run the repository's tests (or the ones that cover your change) and its type checks or linters if it has them, and fix what fails. If you can't run them, say why.
 - Your changes are committed for you at the end of each turn; don't push or rewrite history.
 - When you finish, say briefly what you changed, how you checked it, and anything left undone.`;
+
+/** What every CLI harness is told besides its own instructions: the repository, and what Pim does for it. */
+export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branch" | "baseRef">): string {
+	return `You are working for a person who will review your work as a diff. The repository ${thread.repoUrl} is checked out in the current directory, on the branch ${thread.branch} made from ${thread.baseRef}.
+
+- Your changes are committed for you at the end of each turn: don't commit, push or rewrite history.
+- Before you say you are done, run the repository's tests (or the ones that cover your change) and its type checks or linters if it has them, and fix what fails. If you can't run them, say why.
+- When you finish, say briefly what you changed, how you checked it, and anything left undone.`;
+}
 
 /** What `continue` tells the model. */
 export const CONTINUE_TEXT = "Continue where you left off.";

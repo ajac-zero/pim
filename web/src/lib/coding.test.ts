@@ -219,6 +219,32 @@ describe("the live transcript", () => {
     );
     expect(ended.tools).toEqual([]);
   });
+
+  it("builds a CLI harness's message from its pieces until the whole message is appended", () => {
+    const writing = fold([
+      { type: "partial", kind: "thinking", text: "The test " },
+      { type: "partial", kind: "thinking", text: "uses local time." },
+      { type: "partial", kind: "text", text: "Pinning " },
+      { type: "partial", kind: "text", text: "the zone." },
+    ]);
+    expect(writing.writing?.content).toEqual([
+      { type: "thinking", thinking: "The test uses local time." },
+      { type: "text", text: "Pinning the zone." },
+    ]);
+    const appended = reduceLive(
+      writing,
+      events({
+        type: "entry_appended",
+        entry: assistant("2", [{ type: "text", text: "Pinning the zone." }]),
+      }),
+    );
+    expect(appended.writing).toBeNull();
+    expect(transcriptRows(appended.messages).at(-1)).toMatchObject({
+      kind: "text",
+      text: "Pinning the zone.",
+      writing: false,
+    });
+  });
 });
 
 describe("the stream's lines", () => {
@@ -332,6 +358,18 @@ describe("the start form", () => {
       budgetUsd: 5,
       operationId: "op-1",
     });
+    const base = {
+      repo: "https://github.com/acme/widgets",
+      ref: "",
+      task: "Fix it",
+      budget: "",
+    };
+    expect(startInput({ ...base, harness: "pi" }, "op-2")).not.toHaveProperty(
+      "harness",
+    );
+    expect(
+      startInput({ ...base, harness: "claude-code" }, "op-3"),
+    ).toMatchObject({ harness: "claude-code" });
   });
 });
 

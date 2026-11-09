@@ -160,11 +160,43 @@ export type CodingErrorCode =
   | "push_refused"
   | "conflict";
 
-/** One line of `GET …/events`: pi's agent events, and what `bash` and `test` print as they run. */
+/** One line of `GET …/events`: pi's agent events, what `bash` and `test` print as they run, and a CLI harness's text as it writes it. */
 export type CodingStreamMessage =
   | Extract<AgentEvent, { type: "snapshot" }>
   | { type: "events"; events: AgentEvent[] }
-  | { type: "output"; tool: "bash" | "test"; callId: string; data: string };
+  | { type: "output"; tool: "bash" | "test"; callId: string; data: string }
+  | { type: "partial"; kind: "text" | "thinking"; text: string };
+
+/** Which harness logins the person has, as `GET /api/coding/vault/:harness` says it; never what one holds. */
+export type HarnessLoginStatus = {
+  harness: "claude-code" | "codex";
+  connected: boolean;
+  updatedAt: number | null;
+  byteLength: number | null;
+};
+
+/** A sign-in to a harness with the person's subscription, through the CLI's own sign-in. */
+export type HarnessSignIn = {
+  harness: "claude-code";
+  state:
+    | "none"
+    | "starting"
+    | "waiting_code"
+    | "completing"
+    | "connected"
+    | "failed";
+  url: string | null;
+  error: string | null;
+};
+
+/** The coding vault's routes the web app uses: a harness's login, connecting it and disconnecting it. */
+export type CodingVaultApi = {
+  status: (harness: "claude-code") => Promise<HarnessLoginStatus>;
+  disconnect: (harness: "claude-code") => Promise<HarnessLoginStatus>;
+  signIn: (harness: "claude-code") => Promise<HarnessSignIn>;
+  sendCode: (harness: "claude-code", code: string) => Promise<HarnessSignIn>;
+  cancelSignIn: (harness: "claude-code") => Promise<HarnessSignIn>;
+};
 
 export type { MessagePart, TranscriptMessage };
 
@@ -196,7 +228,11 @@ export type CodingApi = {
     id: string,
     signal: AbortSignal,
   ) => AsyncIterable<CodingStreamMessage>;
+  vault: CodingVaultApi;
 };
+
+const vaultPath = (harness: string, rest = "") =>
+  `/coding/vault/${encodeURIComponent(harness)}${rest}`;
 
 const path = (id: string, rest = "") =>
   `/coding/threads/${encodeURIComponent(id)}${rest}`;
@@ -241,6 +277,15 @@ export const codingApi: CodingApi = {
       );
     }
     yield* ndjson<CodingStreamMessage>(response.body);
+  },
+  vault: {
+    status: (harness) => call(vaultPath(harness)),
+    disconnect: (harness) => call(vaultPath(harness), { method: "DELETE" }),
+    signIn: (harness) => call(vaultPath(harness, "/login"), post()),
+    sendCode: (harness, code) =>
+      call(vaultPath(harness, "/login/code"), post({ code })),
+    cancelSignIn: (harness) =>
+      call(vaultPath(harness, "/login"), { method: "DELETE" }),
   },
 };
 
@@ -377,6 +422,14 @@ export function stateReasonKey(
       return { key: "codingReasonCapacity" };
     case "workspace":
       return { key: "codingReasonWorkspace" };
+    case "login_required":
+      return { key: "codingReasonLoginRequired" };
+    case "harness_busy":
+      return { key: "codingReasonHarnessBusy" };
+    case "interrupted":
+      return { key: "codingReasonInterrupted" };
+    case "timeout":
+      return { key: "codingReasonTimeout" };
     default:
       return { key: "codingReasonOther", reason };
   }
@@ -392,7 +445,12 @@ export type StartForm = {
   ref: string;
   task: string;
   budget: string;
+  /** The coding agent that runs it; Pi when absent. */
+  harness?: CodingHarness;
 };
+
+/** The harnesses a thread can be started on now; Codex comes with its adapter. */
+export const START_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code"];
 
 export type StartProblems = Partial<Record<keyof StartForm, TranslationKey>>;
 
@@ -425,6 +483,7 @@ export function startInput(
     task: form.task.trim(),
     ...(ref ? { ref } : {}),
     ...(budget ? { budgetUsd: Number(budget) } : {}),
+    ...(form.harness && form.harness !== "pi" ? { harness: form.harness } : {}),
     operationId,
   };
 }
@@ -541,12 +600,15 @@ function reduceEvent(state: LiveTranscript, event: AgentEvent): LiveTranscript {
           event.entry.model?.[0]?.role === "assistant" ? null : state.writing,
       };
     case "entry_appended":
+      // A CLI harness's message, once complete, replaces the text it was writing.
       return {
         ...state,
         messages: mergeMessages(
           state.messages,
           projectCodingEntries([event.entry]),
         ),
+        writing:
+          event.entry.model?.[0]?.role === "assistant" ? null : state.writing,
       };
     case "tool_execution_start":
       return {
@@ -579,6 +641,8 @@ export function reduceLive(
       return reduceEvent(state, message);
     case "events":
       return message.events.reduce(reduceEvent, state);
+    case "partial":
+      return { ...state, writing: appendPartial(state.writing, message) };
     case "output": {
       const known = state.tools.some((tool) => tool.callId === message.callId);
       const tools = known
@@ -602,6 +666,45 @@ export function reduceLive(
     default:
       return state;
   }
+}
+
+/** A CLI harness's piece of text or thinking added to the message it is writing, which starts with it. */
+function appendPartial(
+  writing: AssistantMessage | null,
+  piece: { kind: "text" | "thinking"; text: string },
+): AssistantMessage {
+  const message =
+    writing ??
+    ({
+      role: "assistant",
+      content: [],
+      api: "anthropic-messages",
+      provider: "claude-code",
+      model: "",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: 0,
+    } as AssistantMessage);
+  const content = [...message.content];
+  const last = content.at(-1);
+  if (piece.kind === "text") {
+    if (last?.type === "text") {
+      content[content.length - 1] = { ...last, text: last.text + piece.text };
+    } else content.push({ type: "text", text: piece.text });
+  } else if (last?.type === "thinking") {
+    content[content.length - 1] = {
+      ...last,
+      thinking: last.thinking + piece.text,
+    };
+  } else content.push({ type: "thinking", thinking: piece.text });
+  return { ...message, content };
 }
 
 /** The message being written, as the transcript route would give it once written. */

@@ -217,6 +217,8 @@ export function ChatTabs({ activeId }: { activeId: string }) {
               <Link
                 to="/chat/$sessionId"
                 params={{ sessionId: session.id }}
+                // Clicking the open chat's tab keeps its files and apps open.
+                search={active ? (prev) => prev : undefined}
                 aria-current={active ? "page" : undefined}
                 aria-keyshortcuts={
                   shortcut

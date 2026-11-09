@@ -14,6 +14,7 @@ import { NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspa
 import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
 import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
+import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { OWNER, post, toolUse } from "./helpers";
 import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
 
@@ -812,5 +813,158 @@ describe("a Claude Code thread", () => {
 		const [, again] = await turns(id, 2);
 		expect(again).toMatchObject({ outcome: "completed", operationId: "after-login" });
 		expect(runs[1]!.argv.at(-1)).toBe(CONTINUE_TEXT);
+	});
+});
+
+describe("a Codex thread", () => {
+	// The thread runs `codex` in its in-memory workspace, where it is a script that prints the JSONL of
+	// test/fixtures/codex/, and `pkill` records the signal it was sent. The person's Codex login, `auth.json`, is in
+	// the coding vault for real.
+	type Run = { argv: string[]; env: Record<string, string>; cwd: string; login: string };
+	const runs: Run[] = [];
+	const signals: string[][] = [];
+	const waiting: (() => void)[] = [];
+	let codexCli: (context: Parameters<FakeCommandHandler>[0]) => Promise<FakeCommandResult> = async () => ({ stdout: codexFixture("turn") });
+	const decoder = new TextDecoder();
+	const encoder = new TextEncoder();
+	const LOGIN = '{"auth_mode":"chatgpt","tokens":{"access_token":"eyJ-original-access","refresh_token":"rt_original"}}';
+	const REFRESHED = '{"auth_mode":"chatgpt","tokens":{"access_token":"eyJ-refreshed-access","refresh_token":"rt_rotated"}}';
+	const AUTH = "/workspace/.codex/auth.json";
+	const started: Stub[] = [];
+
+	codingWorkspaces.register("codex", async (context) => {
+		const login = await context.workspace.readFile(`${context.env.CODEX_HOME}/auth.json`).then(
+			(data) => decoder.decode(data),
+			() => "",
+		);
+		runs.push({ argv: context.argv, env: context.env, cwd: context.cwd, login });
+		return codexCli(context);
+	});
+
+	async function signIn(login = LOGIN) {
+		const vault = codingVault(env);
+		const { version } = await vault.load(OWNER, "codex");
+		await vault.save(OWNER, "codex", [{ path: "auth.json", mode: 0o600, data: encoder.encode(login) }], version);
+	}
+
+	const storedLogin = async () => {
+		const files = (await codingVault(env).load(OWNER, "codex")).files;
+		return files ? decoder.decode(files.find((file) => file.path === "auth.json")!.data) : null;
+	};
+
+	async function startCodex(overrides: Partial<StartThread> = {}) {
+		const id = crypto.randomUUID();
+		await codingScheduler(env, OWNER).registerThread({ threadId: id, createdBy: { type: "person" }, parent: null, chat: null, harness: "codex", task: "Fix the greeting test", repo: REPO, ref: "main", budgetUsd: 3, createdAt: Date.now() });
+		const stub = codingThread(env, id);
+		started.push(stub);
+		await stub.start(startInput(id, { space: OWNER, harness: "codex", task: "Fix the greeting test", ...overrides }));
+		return { id, stub };
+	}
+
+	beforeEach(async () => {
+		runs.length = 0;
+		signals.length = 0;
+		codexCli = async () => ({ stdout: codexFixture("turn") });
+		await signIn();
+	});
+
+	afterEach(async () => {
+		for (const stub of started.splice(0)) await stub.archive().catch(() => {});
+	});
+
+	it("runs a turn with the person's login, keeps its transcript, tokens, tests and refreshed login, then resumes Codex's session", async () => {
+		codexCli = async ({ workspace }) => {
+			await workspace.writeFile(`${REPO_DIR}/greet.ts`, encoder.encode("export const greet = (name: string) => `Hello, ${name}`;\n"));
+			// Codex refreshed its token, rotating the refresh token, as it does.
+			await workspace.writeFile(AUTH, encoder.encode(REFRESHED), 0o600);
+			return { stdout: codexFixture("turn") };
+		};
+		const { id, stub } = await startCodex();
+		const [ended] = await turns(id, 1);
+		const status = await stub.status();
+		expect(ended).toMatchObject({ outcome: "completed", said: "Fixed `greet` to include the name; the greeting test passes now." });
+		expect(status).toMatchObject({ state: "idle", harness: "codex", profile: { providerId: "codex", model: "default" } });
+		const [first] = runs;
+		expect(first).toMatchObject({ cwd: REPO_DIR, login: LOGIN, env: { HOME: "/workspace", CODEX_HOME: "/workspace/.codex" } });
+		expect(first!.argv.slice(0, 2)).toEqual(["codex", "exec"]);
+		expect(first!.argv).not.toContain("resume");
+		expect(first!.argv.slice(-2)).toEqual(["--", "Fix the greeting test"]);
+		expect(first!.argv.find((arg) => arg.startsWith("developer_instructions="))).toContain(`on the branch ${status.repo.branch}`);
+		const spec = (await workspaceOf(id)) as unknown as { spec: { egress: { allow: string[] } } };
+		expect(spec.spec.egress.allow).toEqual(expect.arrayContaining(["auth.openai.com", "chatgpt.com", "api.openai.com", "registry.npmjs.org"]));
+		// The rotated login is kept, and none is left in the workspace or the thread's tables.
+		expect(await storedLogin()).toBe(REFRESHED);
+		await expect((await workspaceOf(id)).readFile(AUTH)).rejects.toThrow();
+		const tables = await everything(stub);
+		for (const secret of ["eyJ-", "rt_original", "rt_rotated"]) expect(tables).not.toContain(secret);
+		const transcript = await inside(stub, (thread) => thread.transcript());
+		expect(transcript[0]!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
+		expect(transcript.flatMap((message) => message.parts).find((part) => part.type === "tool-call" && part.name === "shell")).toMatchObject({ arguments: { command: "npm test" } });
+		expect(transcript.at(-1)!.parts).toEqual([{ type: "text", text: "Fixed `greet` to include the name; the greeting test passes now." }]);
+		// Its tokens as Codex counted them, at no cost, as it estimates none; its tests; its notices and retries.
+		const log = await stub.log();
+		expect(log.filter((event) => event.kind === "model_call")).toEqual([expect.objectContaining({ provider: "codex", model: "codex", costUsd: 0, input: 5110, output: 1180 })]);
+		expect(status.spentUsd).toBe(0);
+		expect(log.find((event) => event.kind === "harness.notice")?.data).toMatchObject({ message: expect.stringContaining("Falling back") });
+		expect(log.find((event) => event.kind === "harness.api_retry")?.data).toMatchObject({ attempt: 1, status: 503 });
+		expect((await stub.tests()).map((run) => [run.command, run.exitCode])).toEqual([
+			["npm test", 1],
+			["npx vitest run test/greet.test.ts && echo 'all good'", 0],
+		]);
+		expect((await stub.diff()).diff).toContain("+++ b/greet.ts");
+
+		// A steer is the next turn, which resumes the session Codex named; its tokens are what the session's grew by.
+		const turn = codexLines("turn");
+		codexCli = async () => ({ stdout: [turn[0], turn.at(-2), turn.at(-1)!.replace('"input_tokens":24310', '"input_tokens":30310').replace('"output_tokens":1180', '"output_tokens":1500')].join("\n") });
+		await stub.steer("Also add a test for an empty name", { operationId: "steer-1" });
+		const [, second] = await turns(id, 2);
+		expect(second).toMatchObject({ outcome: "completed", operationId: "steer-1" });
+		expect(runs[1]!.argv.slice(-4)).toEqual(["resume", CODEX_SESSION, "--", "Also add a test for an empty name"]);
+		expect(runs[1]!.login).toBe(REFRESHED);
+		const calls = (await stub.log()).filter((event) => event.kind === "model_call");
+		expect(calls[1]).toMatchObject({ input: 6000, output: 320, cacheRead: 0, costUsd: 0 });
+	});
+
+	it("waits for the person when Codex says its login expired, and goes on once continued", async () => {
+		codexCli = async () => ({ stdout: codexFixture("expired"), code: 1 });
+		const { id, stub } = await startCodex();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "needs_approval", reason: "login_required", state: "waiting_input" });
+		expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required" });
+		codexCli = async () => ({ stdout: codexFixture("turn") });
+		await stub.continue({ operationId: "after-login" });
+		const [, again] = await turns(id, 2);
+		expect(again).toMatchObject({ outcome: "completed", operationId: "after-login" });
+	});
+
+	it("waits for the person's login before running Codex when there is none", async () => {
+		const vault = codingVault(env);
+		await vault.delete(OWNER, "codex");
+		const { stub } = await startCodex();
+		await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", inbox: 1 }), { timeout: 10_000, interval: 20 });
+		expect((await stub.status()).stateDetail).toMatch(/Connect Codex/);
+		expect(runs).toEqual([]);
+	});
+
+	it("stops on abort with SIGINT to the process the turn's id names, ending the turn cancelled, and keeps the login", async () => {
+		// Registered here, once the Claude Code tests above have run, as it replaces their `pkill`.
+		codingWorkspaces.register("pkill", ({ argv }) => {
+			signals.push(argv.slice(1));
+			for (const resolve of waiting.splice(0)) resolve();
+			return {};
+		});
+		codexCli = async ({ killed }) => {
+			await Promise.race([new Promise<void>((resolve) => waiting.push(resolve)), killed]);
+			return { stdout: `${codexLines("turn")[0]}\n`, code: 1 };
+		};
+		const { id, stub } = await startCodex();
+		await vi.waitFor(() => expect(runs).toHaveLength(1), { timeout: 10_000, interval: 20 });
+		await stub.abort();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "cancelled" });
+		expect(signals[0]![0]).toBe("-INT");
+		// The id Pim gave the first turn, which its command line carries, as Codex hadn't named its session yet.
+		expect(runs[0]!.argv.join(" ")).toContain(signals[0]![2]);
+		expect(await storedLogin()).toBe(LOGIN);
 	});
 });

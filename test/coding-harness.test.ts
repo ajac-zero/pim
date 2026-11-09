@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { CLAUDE_CODE_FLAGS, ClaudeStreamParser, claudeCode } from "../src/coding/harness/claude-code";
+import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/coding/harness/codex";
 import { type HarnessAuth, HarnessRunner, LineBuffer, type RunRecord, recoverRun, type RunnerDeps } from "../src/coding/harness/runner";
 import type { HarnessEvent, HarnessTurn } from "../src/coding/harness/types";
 import type { TestRun } from "../src/coding/tools";
 import type { Restored } from "../src/coding/vault/inject";
 import type { ExecEvent, ExecOptions, Workspace } from "../src/coding/workspace/types";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
+import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 
 // The CLI harness framework (src/coding/harness/) on its own: Claude Code's command line and stream-json parser against
 // stream-json written from its documented schema (test/fixtures/claude-code/), and the runner against a workspace whose
@@ -157,6 +159,197 @@ describe("Claude Code's command line", () => {
 	});
 });
 
+describe("Codex's JSONL", () => {
+	const read = (text: string, parser = new CodexJsonParser()) => text.split("\n").flatMap((line) => parser.parseLine(line));
+	type Of<T extends HarnessEvent["type"]> = Extract<HarnessEvent, { type: T }>;
+	const messagesOf = (events: HarnessEvent[]) =>
+		events.flatMap((event) => (event.type === "assistant" ? [event.message.content.map((part) => (part.type === "toolCall" ? `call:${part.name}` : part.type)).join(",")] : event.type === "tool_result" ? [`result:${event.message.toolName}`] : []));
+
+	it("is read into the session, notices, retries, the transcript's messages with their tools, the session's tokens and the result", () => {
+		const events = read(codexFixture("turn"));
+		expect(events.filter((event) => event.type === "unparsed")).toEqual([]);
+		expect(events[0]).toEqual({ type: "session", sessionId: CODEX_SESSION, model: null });
+		expect(events.filter((event) => event.type === "notice")).toEqual([{ type: "notice", message: expect.stringContaining("Falling back from WebSockets") }]);
+		expect(events.find((event) => event.type === "retry")).toEqual({ type: "retry", attempt: 1, maxRetries: 5, delayMs: 0, error: expect.stringContaining("upstream connect error"), status: 503 });
+		expect(messagesOf(events)).toEqual([
+			"thinking",
+			"call:update_plan",
+			"result:update_plan",
+			"call:shell",
+			"result:shell",
+			"call:update_plan",
+			"result:update_plan",
+			"call:apply_patch",
+			"result:apply_patch",
+			"call:mcp__docs__search",
+			"result:mcp__docs__search",
+			"call:web_search",
+			"result:web_search",
+			// A command whose start wasn't printed still gets its call, once.
+			"call:shell",
+			"result:shell",
+			"call:update_plan",
+			"result:update_plan",
+			// The plan's completion at the turn's end repeats what was shown, so it isn't shown again.
+			"text",
+		]);
+		const assistants = events.filter((event): event is Of<"assistant"> => event.type === "assistant");
+		const results = events.filter((event): event is Of<"tool_result"> => event.type === "tool_result");
+		// The shell's command as the agent wrote it, not as Codex quoted it for `bash -lc`.
+		const calls = assistants.flatMap((event) => event.message.content.filter((part) => part.type === "toolCall"));
+		expect(calls.filter((call) => call.name === "shell").map((call) => call.arguments)).toEqual([{ command: "npm test" }, { command: "npx vitest run test/greet.test.ts && echo 'all good'" }]);
+		expect(calls.find((call) => call.name === "apply_patch")!.arguments).toEqual({ changes: [{ path: "/workspace/repo/greet.ts", kind: "update" }] });
+		expect(calls.filter((call) => call.name === "update_plan").map((call) => call.id)).toEqual(["item_2-0", "item_2-1", "item_2-2"]);
+		expect(calls.at(-1)!.arguments).toEqual({ plan: [{ text: "Run the tests", completed: true }, { text: "Fix greet", completed: true }] });
+		// Each result answers its call, and a shell's carries the command's own exit code.
+		const shell = results.filter((event) => event.message.toolName === "shell");
+		expect(shell.map((event) => [event.message.toolCallId, event.message.isError, event.exitCode])).toEqual([
+			["item_3", true, 1],
+			["item_7", false, 0],
+		]);
+		expect(shell[0]!.message.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("Tests  1 failed | 3 passed (4)") });
+		expect(results.find((event) => event.message.toolName === "mcp__docs__search")!.message.content).toEqual([{ type: "text", text: "test.each(table)(name, fn)" }]);
+		expect(assistants.at(-1)!.message).toMatchObject({ provider: "codex", model: "codex", stopReason: "stop", content: [{ type: "text", text: "Fixed `greet` to include the name; the greeting test passes now." }] });
+		expect(assistants.find((event) => event.message.content.some((part) => part.type === "toolCall"))!.message.stopReason).toBe("toolUse");
+		// OpenAI's input tokens include the cached ones, which are counted apart.
+		expect(events.at(-2)).toEqual({ type: "usage", usage: { input: 24310 - 19200, output: 1180, cacheRead: 19200, cacheWrite: 0 } });
+		expect(events.at(-1)).toEqual({ type: "result", ok: true, reason: null, sessionId: CODEX_SESSION, sessionCostUsd: null, text: "Fixed `greet` to include the name; the greeting test passes now.", errors: [] });
+		expect(events.some((event) => event.type === "auth_failed")).toBe(false);
+	});
+
+	it("says when the CLI isn't signed in or its login expired, as real Codex 0.167.0 printed it, and otherwise why the turn failed", () => {
+		const login = read(codexFixture("login"));
+		expect(login.filter((event) => event.type === "unparsed")).toEqual([]);
+		// Codex's retries mention the 401 too, but only the turn's failure says the login is missing.
+		expect(login.filter((event) => event.type === "retry")).toHaveLength(9);
+		expect(login.filter((event) => event.type === "auth_failed")).toHaveLength(1);
+		expect(login.at(-2)!.type).toBe("auth_failed");
+		expect(login.at(-1)).toMatchObject({ type: "result", ok: false, reason: "error", sessionId: "01a1c152-02a4-78b1-96e1-ff9573c99a94", sessionCostUsd: null });
+		const expired = read(codexFixture("expired"));
+		expect(expired.map((event) => event.type)).toEqual(["session", "notice", "auth_failed", "result"]);
+		expect(expired[2]).toEqual({ type: "auth_failed", message: "Your access token could not be refreshed. Please log out and sign in again." });
+		const failed = read(codexFixture("failed"));
+		expect(failed.some((event) => event.type === "auth_failed")).toBe(false);
+		expect(failed.at(-1)).toMatchObject({ type: "result", ok: false, reason: "error", errors: [expect.stringContaining("exceeds the context window")] });
+	});
+
+	it("keeps a line that isn't JSON, or isn't an event, as unparsed and goes on; what it doesn't know is skipped", () => {
+		const parser = new CodexJsonParser();
+		expect(parser.parseLine("")).toEqual([]);
+		expect(parser.parseLine("Reading additional input from stdin...")).toEqual([{ type: "unparsed", line: "Reading additional input from stdin..." }]);
+		expect(parser.parseLine('{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"cut')).toMatchObject([{ type: "unparsed" }]);
+		expect(parser.parseLine("[1,2]")).toMatchObject([{ type: "unparsed" }]);
+		expect(parser.parseLine('{"no":"type"}')).toMatchObject([{ type: "unparsed" }]);
+		expect(parser.parseLine('{"type":"turn.started"}')).toEqual([]);
+		expect(parser.parseLine('{"type":"thread.archived","thread_id":"x"}')).toEqual([]);
+		expect(parser.parseLine('{"type":"item.completed"}')).toEqual([]);
+		expect(parser.parseLine('{"type":"item.completed","item":{"id":"item_9","type":"collab_tool_call","tool":"spawn_agent","status":"completed"}}')).toEqual([]);
+		// A reasoning item with nothing in it, and an agent message still being written, are nothing yet.
+		expect(parser.parseLine('{"type":"item.completed","item":{"id":"item_9","type":"reasoning","text":""}}')).toEqual([]);
+		expect(parser.parseLine('{"type":"item.started","item":{"id":"item_9","type":"agent_message","text":"Hel"}}')).toEqual([]);
+		// A failed MCP call's result is its error; a declined command says so.
+		parser.parseLine('{"type":"item.started","item":{"id":"m","type":"mcp_tool_call","server":"s","tool":"t","arguments":{},"status":"in_progress"}}');
+		expect(parser.parseLine('{"type":"item.completed","item":{"id":"m","type":"mcp_tool_call","server":"s","tool":"t","arguments":{},"result":null,"error":{"message":"server gone"},"status":"failed"}}')).toMatchObject([
+			{ type: "tool_result", message: { toolCallId: "m", isError: true, content: [{ type: "text", text: "server gone" }] } },
+		]);
+		expect(parser.parseLine('{"type":"item.completed","item":{"id":"c","type":"command_execution","command":"rm -rf /","aggregated_output":"","exit_code":null,"status":"declined"}}')).toMatchObject([
+			{ type: "assistant" },
+			{ type: "tool_result", message: { isError: true, content: [{ type: "text", text: "Declined" }] }, exitCode: null },
+		]);
+		// A turn that ended without naming its session is of the session it resumed.
+		const resumed = new CodexJsonParser({ model: "gpt-5.5-codex", sessionId: CODEX_SESSION, resume: true });
+		expect(resumed.parseLine('{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0}}').at(-1)).toMatchObject({ sessionId: CODEX_SESSION });
+		expect(resumed.parseLine('{"type":"item.completed","item":{"id":"a","type":"agent_message","text":"ok"}}')).toMatchObject([{ message: { model: "gpt-5.5-codex" } }]);
+	});
+
+	it("is read the same however its output is split into chunks, a last line without a newline included", () => {
+		const text = codexFixture("turn").trimEnd();
+		const whole = read(text);
+		for (const size of [1, 7, 64, 4096]) {
+			const parser = new CodexJsonParser();
+			const buffer = new LineBuffer();
+			const events: HarnessEvent[] = [];
+			for (let at = 0; at < text.length; at += size) for (const line of buffer.push(text.slice(at, at + size))) events.push(...parser.parseLine(line));
+			for (const line of buffer.flush()) events.push(...parser.parseLine(line));
+			expect(events.map((event) => event.type)).toEqual(whole.map((event) => event.type));
+			expect(events.at(-1)).toEqual(whole.at(-1));
+		}
+	});
+
+	it("unwraps a shell's script from the command line Codex prints, keeping any other as it is", () => {
+		expect(shellScript("/bin/bash -lc 'npm test'")).toBe("npm test");
+		expect(shellScript(`bash -lc 'echo '"'"'hi'"'"' && ls'`)).toBe("echo 'hi' && ls");
+		expect(shellScript('/usr/bin/zsh -c "go test ./... | tee \\"out\\""')).toBe('go test ./... | tee "out"');
+		expect(shellScript("git status")).toBe("git status");
+		expect(shellScript("bash -lc 'unterminated")).toBe("bash -lc 'unterminated");
+		expect(shellScript("python -c 'print(1)'")).toBe("python -c 'print(1)'");
+	});
+});
+
+describe("Codex's command line", () => {
+	const CODEX_TURN: HarnessTurn = { ...TURN, sessionId: "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f" };
+
+	it("runs `codex exec --json` in the checkout, untrusted, without the person's config, rules or Codex's own sandbox, the prompt last", () => {
+		const command = codex.buildCommand(CODEX_TURN);
+		expect(command).toEqual([
+			"codex",
+			"exec",
+			"--json",
+			"--ignore-user-config",
+			"--ignore-rules",
+			"--sandbox",
+			"danger-full-access",
+			"-c",
+			'approval_policy="never"',
+			"-c",
+			'projects={"/workspace/repo"={trust_level="untrusted"}}',
+			"-c",
+			"analytics.enabled=false",
+			"-C",
+			"/workspace/repo",
+			// The id Pim gave the turn is on its command line, for `pkill -f`, before Codex names its session.
+			"-o",
+			`/tmp/pim-codex-${CODEX_TURN.sessionId}.txt`,
+			"-c",
+			'developer_instructions="Don\'t push."',
+			"--",
+			"Fix the greeting test",
+		]);
+		expect(command.slice(2, 2 + CODEX_FLAGS.length)).toEqual(CODEX_FLAGS);
+		expect(command).not.toContain("resume");
+		expect(command).not.toContain("--skip-git-repo-check");
+		expect(command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+	});
+
+	it("resumes Codex's session after the first turn, asks for a model when given one, and quotes instructions as a TOML string", () => {
+		const instructions = 'Say "done".\nThen stop. \\o/ true';
+		const command = codex.buildCommand({ ...TURN, sessionId: CODEX_SESSION, resume: true, model: "gpt-5.5-codex", prompt: "--help me", instructions });
+		expect(command.slice(-4)).toEqual(["resume", CODEX_SESSION, "--", "--help me"]);
+		expect(command[command.indexOf("-m") + 1]).toBe("gpt-5.5-codex");
+		expect(command).toContain(`/tmp/pim-codex-${CODEX_SESSION}.txt`);
+		const setting = command.find((arg) => arg.startsWith("developer_instructions="))!;
+		// A TOML basic string reads back as the text: JSON's escapes are TOML's.
+		expect(JSON.parse(setting.slice("developer_instructions=".length))).toBe(instructions);
+	});
+
+	it("signals the turn's process by its session, and finds the device-code page and code in what `codex login --device-auth` prints", () => {
+		expect(codex.signalCommand(CODEX_SESSION, "INT")).toEqual(["pkill", "-INT", "-f", CODEX_SESSION]);
+		expect(codex.login!.mode).toBe("device_code");
+		expect(codex.login!.command).toEqual(["sh", "-c", 'mkdir -p "$CODEX_HOME" && exec codex login --device-auth']);
+		// What Codex 0.167.0 printed, with its code replaced.
+		const printed =
+			"\nWelcome to Codex [v\u001b[90m0.167.0\u001b[0m]\n\u001b[90mOpenAI's command-line coding agent\u001b[0m\n\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \u001b[94mhttps://auth.openai.com/codex/device\u001b[0m\n\n2. Enter this one-time code \u001b[90m(expires in 15 minutes)\u001b[0m\n   \u001b[94mK7QM-4XT9P\u001b[0m\n\n\u001b[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\u001b[0m\n";
+		const halfway = printed.slice(0, printed.indexOf("2. Enter"));
+		expect(codex.login!.authorizationUrl(halfway)).toBe("https://auth.openai.com/codex/device");
+		expect(codex.login!.userCode!(halfway)).toBeNull();
+		expect(codex.login!.userCode!(printed.slice(0, printed.indexOf("K7QM") + 6))).toBeNull();
+		expect(codex.login!.userCode!(printed)).toBe("K7QM-4XT9P");
+		expect(codex.login!.authorizationUrl("Open https://evil.example/codex/device")).toBeNull();
+		expect(codex.env).toEqual({});
+		expect(codex.egress).toEqual(["auth.openai.com", "chatgpt.com", "api.openai.com"]);
+	});
+});
+
 /* The runner, with a scripted workspace. */
 
 type Script = (options: ExecOptions, signals: Signals) => AsyncGenerator<ExecEvent>;
@@ -181,7 +374,7 @@ class Signals {
 	}
 }
 
-/** A workspace whose `claude` runs `script`, and whose `pkill` sends what it is given. Everything it runs is recorded. */
+/** A workspace whose `claude` and `codex` run `script`, and whose `pkill` sends what it is given. Everything it runs is recorded. */
 function scripted(script: Script) {
 	const signals = new Signals();
 	const commands: { cmd: string[]; options: ExecOptions }[] = [];
@@ -195,8 +388,8 @@ function scripted(script: Script) {
 				yield { type: "exit", code: 0 };
 				return;
 			}
-			if (cmd[0] !== "claude") throw new Error(`no ${cmd[0]}`);
-			log.push("claude");
+			if (cmd[0] !== "claude" && cmd[0] !== "codex") throw new Error(`no ${cmd[0]}`);
+			log.push(cmd[0]);
 			yield* script(options, signals);
 		},
 	} as unknown as Workspace;
@@ -420,5 +613,102 @@ describe("a CLI harness run", () => {
 		const before = scripted(() => prints([]));
 		await recoverRun(deps(before.workspace, before.log).options, { ...record, restored: null, locked: false });
 		expect(before.log).toEqual(["signal -KILL"]);
+	});
+});
+
+describe("a Codex run", () => {
+	const CODEX_TURN: HarnessTurn = { ...TURN, sessionId: "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f" };
+	const codexDeps = (workspace: Workspace, log: string[], overrides: Partial<RunnerDeps> & { connected?: boolean } = {}) =>
+		deps(workspace, log, { harness: codex, credentials: { restore: async () => (log.push("restore"), { ...RESTORED, harness: "codex", connected: overrides.connected ?? true }), writeBack: async () => void log.push("write back") }, ...overrides });
+
+	it("restores the login, runs Codex in the checkout with its config directory, and reports the session's tokens and test runs", async () => {
+		const { workspace, commands, log } = scripted(() => prints(codexLines("turn")));
+		const { options, tests, events } = codexDeps(workspace, log);
+		const runner = new HarnessRunner(options);
+		expect(await runner.prepare("op-1", { sessionId: CODEX_TURN.sessionId, resume: false })).toEqual({ status: "ready" });
+		const result = await runner.run(CODEX_TURN, 60_000);
+		expect(result).toMatchObject({ status: "done", sessionId: CODEX_SESSION, sessionCostUsd: null, model: "codex", lines: codexLines("turn").length });
+		// Codex reports no tokens per message, only the session's at the turn's end.
+		expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(result.sessionUsage).toEqual({ input: 5110, output: 1180, cacheRead: 19200, cacheWrite: 0 });
+		expect(log).toEqual(["lock", "restore", "codex", "write back", "unlock"]);
+		expect(commands[0]!.cmd).toEqual(codex.buildCommand(CODEX_TURN));
+		expect(commands[0]!.options).toMatchObject({ cwd: "/workspace/repo", env: { HOME: "/workspace", CODEX_HOME: "/workspace/.codex" } });
+		expect(commands[0]!.options.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+		expect(events.filter((event) => event.type === "notice")).toHaveLength(1);
+		// Both shell commands ran tests: the failing run with vitest's summary, the passing one with its exit code.
+		expect(tests).toEqual([
+			expect.objectContaining({ command: "npm test", exitCode: 1, summary: { format: "vitest", passed: 3, failed: 1, skipped: 0, total: 4 } }),
+			expect.objectContaining({ command: "npx vitest run test/greet.test.ts && echo 'all good'", exitCode: 0, summary: { format: "vitest", passed: 4, failed: 0, skipped: 0, total: 4 } }),
+		]);
+	});
+
+	it("takes a shell command's exit code from Codex, not from whether it failed", async () => {
+		const line = '{"type":"item.completed","item":{"id":"t","type":"command_execution","command":"/bin/bash -lc pytest","aggregated_output":"interrupted","exit_code":2,"status":"failed"}}';
+		const { workspace, log } = scripted(() => prints([codexLines("turn")[0]!, line, codexLines("turn").at(-1)!]));
+		const { options, tests } = codexDeps(workspace, log);
+		await (await prepared(options)).run(CODEX_TURN, 60_000);
+		expect(tests).toEqual([expect.objectContaining({ command: "pytest", exitCode: 2 })]);
+	});
+
+	it("resumes Codex's session on a later turn, and asks for the thread's model", async () => {
+		const { workspace, commands, log } = scripted(() => prints(codexLines("turn")));
+		const { options } = codexDeps(workspace, log);
+		const turn = { ...TURN, sessionId: CODEX_SESSION, resume: true, model: "gpt-5.5-codex" };
+		const result = await (await prepared(options, true)).run(turn, 60_000);
+		expect(result).toMatchObject({ status: "done", sessionId: CODEX_SESSION, model: "gpt-5.5-codex" });
+		expect(commands[0]!.cmd.slice(-4)).toEqual(["resume", CODEX_SESSION, "--", TURN.prompt]);
+	});
+
+	it("never reports a turn as done without `turn.completed`: a lost login, a failure, a session Codex no longer has, a crash", async () => {
+		const cases: [Script, Partial<Awaited<ReturnType<HarnessRunner["run"]>>>][] = [
+			[() => prints(codexLines("login"), 1), { status: "unanswered", reason: "login_required", detail: "Codex isn't signed in: connect it again" }],
+			[() => prints(codexLines("expired"), 1), { status: "unanswered", reason: "login_required" }],
+			[() => prints(codexLines("failed"), 1), { status: "unanswered", reason: "harness_error", sessionId: CODEX_SESSION, detail: expect.stringContaining("exceeds the context window") }],
+			[() => prints(codexLines("turn").slice(0, -1), 0), { status: "unanswered", reason: "harness_error", detail: "Codex exited 0 without a result", sessionUsage: null }],
+			[
+				async function* () {
+					// What 0.167.0 prints when it resumes a session it doesn't have.
+					yield { type: "stderr", data: "Error: thread/resume: thread/resume failed: no rollout found for thread id 019a0000-0000-7000-8000-000000000000 (code -32600)\n" };
+					yield { type: "exit", code: 1 };
+				},
+				{ status: "unanswered", reason: "harness_error", sessionId: null, detail: expect.stringContaining("Codex exited 1 without a result: Error: thread/resume") },
+			],
+		];
+		for (const [script, expected] of cases) {
+			const { workspace, log } = scripted(script);
+			const { options } = codexDeps(workspace, log);
+			expect(await (await prepared(options)).run(CODEX_TURN, 60_000)).toMatchObject(expected);
+			expect(log.slice(-2)).toEqual(["write back", "unlock"]);
+		}
+	});
+
+	it("stops on abort with SIGINT to the process its first turn's id names, and reports the turn aborted", async () => {
+		const { workspace, log, commands, signals } = scripted(async function* (options, signals) {
+			yield { type: "stdout", data: `${codexLines("turn")[0]}\n` };
+			await signals.wait("INT", options.signal);
+			// Codex 0.167.0 prints nothing more when interrupted, and exits 1.
+			yield { type: "exit", code: 1 };
+		});
+		const { options } = codexDeps(workspace, log);
+		const runner = new HarnessRunner(options);
+		await runner.prepare("op-1", { sessionId: CODEX_TURN.sessionId, resume: false });
+		const running = runner.run(CODEX_TURN, 60_000);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		await runner.abort();
+		expect(await running).toMatchObject({ status: "unanswered", reason: "aborted", sessionId: CODEX_SESSION });
+		expect(signals.sent).toEqual(["INT"]);
+		const pkill = commands.find((command) => command.cmd[0] === "pkill")!.cmd;
+		expect(pkill).toEqual(["pkill", "-INT", "-f", CODEX_TURN.sessionId]);
+		expect(commands[0]!.cmd.join(" ")).toContain(CODEX_TURN.sessionId);
+		expect(log).toEqual(["lock", "restore", "codex", "signal -INT", "write back", "unlock"]);
+	});
+
+	it("waits for the person's login when there is none, without running Codex", async () => {
+		const { workspace, commands, log } = scripted(() => prints([]));
+		const { options } = codexDeps(workspace, log, { connected: false });
+		expect(await new HarnessRunner(options).prepare("op-1", { sessionId: CODEX_TURN.sessionId, resume: false })).toEqual({ status: "login_required" });
+		expect(commands).toEqual([]);
+		expect(log).toEqual(["lock", "restore", "write back", "unlock"]);
 	});
 });

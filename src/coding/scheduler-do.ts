@@ -225,13 +225,13 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	async harnessLoginStart(userId: string, harness: Harness): Promise<LoginStatus> {
 		await this.#forgetLogin(harness);
 		const cli = cliHarness(harness);
-		if (!cli?.login) return { harness, state: "failed", url: null, error: "This harness has no sign-in Pim can relay" };
+		if (!cli?.login) return { harness, state: "failed", url: null, userCode: null, error: "This harness has no sign-in Pim can relay" };
 		let provider: ReturnType<WorkspaceProviderRegistry["get"]>;
 		try {
 			const registry = this.loginProviders();
 			provider = registry.get(registry.defaultId() ?? "none");
 		} catch (error) {
-			return { harness, state: "failed", url: null, error: error instanceof Error ? error.message : String(error) };
+			return { harness, state: "failed", url: null, userCode: null, error: error instanceof Error ? error.message : String(error) };
 		}
 		const flow = new HarnessLoginFlow({
 			harness: cli,
@@ -248,20 +248,20 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 
 	/** Where the person's sign-in to `harness` is. */
 	harnessLoginStatus(harness: Harness): LoginStatus {
-		return this.#logins.get(harness)?.status() ?? { harness, state: "none", url: null, error: null };
+		return this.#logins.get(harness)?.status() ?? { harness, state: "none", url: null, userCode: null, error: null };
 	}
 
 	/** Hands the code the person pasted to the sign-in under way. */
 	async harnessLoginCode(harness: Harness, code: string): Promise<LoginStatus> {
 		const flow = this.#logins.get(harness);
-		if (!flow) return { harness, state: "none", url: null, error: "No sign-in is under way: start again" };
+		if (!flow) return { harness, state: "none", url: null, userCode: null, error: "No sign-in is under way: start again" };
 		return flow.submit(code);
 	}
 
 	/** Ends the person's sign-in to `harness`, deleting its workspace. */
 	async harnessLoginCancel(harness: Harness): Promise<LoginStatus> {
 		await this.#forgetLogin(harness);
-		return { harness, state: "none", url: null, error: null };
+		return { harness, state: "none", url: null, userCode: null, error: null };
 	}
 
 	/** Ends a sign-in under way, and deletes a workspace a sign-in left behind when this object restarted. */

@@ -41,6 +41,7 @@ import {
   type CodingThreadState,
   type CodingThreadSummary,
   type CodingThreadView,
+  type ConnectableHarness,
   codingApi,
   codingDiffQuery,
   codingErrorCode,
@@ -412,8 +413,8 @@ export function StartThreadForm() {
         value={form.harness ?? "pi"}
         onChange={(harness) => setForm((current) => ({ ...current, harness }))}
       />
-      {form.harness === "claude-code" && (
-        <HarnessConnectPanel harness="claude-code" />
+      {(form.harness === "claude-code" || form.harness === "codex") && (
+        <HarnessConnectPanel key={form.harness} harness={form.harness} />
       )}
       {refusal && (
         <p role="alert" className="text-destructive text-sm">
@@ -429,7 +430,7 @@ export function StartThreadForm() {
   );
 }
 
-/** Which coding agent runs the thread: Pi, on the space's own models, or Claude Code, with the person's subscription. */
+/** Which coding agent runs the thread: Pi, on the space's own models, or Claude Code or Codex, with the person's subscription. */
 function HarnessChooser({
   value,
   onChange,
@@ -477,12 +478,21 @@ function HarnessChooser({
   );
 }
 
+/** How often a sign-in that finishes by itself (Codex's device code) is asked where it is. */
+export const SIGN_IN_POLL_MS = 2000;
+
 /**
  * Connecting a harness with the person's own subscription: what they accept
  * by connecting, whether it is connected, and its CLI's own sign-in, relayed:
- * the page to sign in at, and a field for the code that page shows.
+ * the page to sign in at, and a field for the code that page shows (Claude
+ * Code), or the code to enter on that page while the sign-in is polled until
+ * the CLI finishes (Codex).
  */
-export function HarnessConnectPanel({ harness }: { harness: "claude-code" }) {
+export function HarnessConnectPanel({
+  harness,
+}: {
+  harness: ConnectableHarness;
+}) {
   const { t } = useI18n();
   const api = useCodingApi();
   const queryClient = useQueryClient();
@@ -519,12 +529,27 @@ export function HarnessConnectPanel({ harness }: { harness: "claude-code" }) {
     mutationFn: () => api.vault.cancelSignIn(harness),
     onSuccess: () => setSignIn(null),
   });
+  // A device-code sign-in ends without the person sending anything here: it is asked where it is until it does.
+  const device = signIn?.state === "waiting_code" && signIn.userCode !== null;
+  const polled = useQuery({
+    // Each sign-in's own code in the key, so one never reads what an earlier one ended with.
+    queryKey: [...statusKey, "sign-in", signIn?.userCode],
+    queryFn: () => api.vault.signInStatus(harness),
+    enabled: device,
+    refetchInterval: SIGN_IN_POLL_MS,
+    gcTime: 0,
+  });
+  const update = polled.data;
+  useEffect(() => {
+    if (device && update && update.state !== "waiting_code") connected(update);
+  });
   const disconnect = useMutation({
     mutationFn: () => api.vault.disconnect(harness),
     onSuccess: (next) => queryClient.setQueryData(statusKey, next),
   });
   const isConnected = status.data?.connected === true;
   const waiting = signIn?.state === "waiting_code" && signIn.url;
+  const userCode = waiting ? signIn.userCode : null;
   const error =
     (signIn?.state === "failed" ? signIn.error : null) ??
     ((start.error ?? send.error ?? cancel.error ?? disconnect.error)
@@ -573,6 +598,49 @@ export function HarnessConnectPanel({ harness }: { harness: "claude-code" }) {
           >
             {t("codingDisconnect")}
           </Button>
+        </div>
+      ) : waiting && userCode ? (
+        <div className="flex flex-col gap-3">
+          <ol className="list-decimal space-y-2 pl-5 text-sm">
+            <li>
+              <a
+                href={signIn.url ?? undefined}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn(
+                  "inline-flex items-center gap-1 text-link underline-offset-2 hover:underline",
+                  LINK_RING,
+                )}
+              >
+                {t("codingConnectOpen", { harness: name })}
+                <ExternalLink className="size-3.5" />
+              </a>
+            </li>
+            <li className="flex flex-col gap-1.5">
+              <span>{t("codingConnectEnterCode")}</span>
+              <code className="self-start rounded-lg bg-muted px-3 py-1.5 font-mono text-[17px] tracking-widest">
+                {userCode}
+              </code>
+            </li>
+          </ol>
+          <div className="flex flex-wrap items-center gap-2">
+            <p
+              aria-live="polite"
+              className="flex items-center gap-1.5 text-muted-foreground text-sm"
+            >
+              <Loader2 aria-hidden className="size-3.5 animate-spin" />
+              {t("codingConnectWaiting")}
+            </p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={cancel.isPending}
+              onClick={() => cancel.mutate()}
+            >
+              {t("codingCancel")}
+            </Button>
+          </div>
         </div>
       ) : waiting ? (
         <form
@@ -908,6 +976,7 @@ function StateNotice({ thread }: { thread: CodingThreadView }) {
           reason: why.reason ?? "",
           spent: money(thread.spentUsd),
           budget: money(thread.budgetUsd),
+          harness: HARNESS_NAMES[thread.harness],
         })}
       </p>
       {thread.stateDetail && (
@@ -916,8 +985,8 @@ function StateNotice({ thread }: { thread: CodingThreadView }) {
         </p>
       )}
       {thread.stateReason === "login_required" &&
-        thread.harness === "claude-code" && (
-          <HarnessConnectPanel harness="claude-code" />
+        (thread.harness === "claude-code" || thread.harness === "codex") && (
+          <HarnessConnectPanel harness={thread.harness} />
         )}
     </section>
   );

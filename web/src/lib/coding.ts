@@ -175,9 +175,17 @@ export type HarnessLoginStatus = {
   byteLength: number | null;
 };
 
-/** A sign-in to a harness with the person's subscription, through the CLI's own sign-in. */
+/** The harnesses a person connects with their own subscription. */
+export type ConnectableHarness = "claude-code" | "codex";
+
+/**
+ * A sign-in to a harness with the person's subscription, through the CLI's
+ * own sign-in. With `userCode`, the person enters that code on the page at
+ * `url` and the CLI finishes by itself (Codex's device code); without it,
+ * they paste the code the page shows (Claude Code).
+ */
 export type HarnessSignIn = {
-  harness: "claude-code";
+  harness: ConnectableHarness;
   state:
     | "none"
     | "starting"
@@ -186,16 +194,22 @@ export type HarnessSignIn = {
     | "connected"
     | "failed";
   url: string | null;
+  userCode: string | null;
   error: string | null;
 };
 
 /** The coding vault's routes the web app uses: a harness's login, connecting it and disconnecting it. */
 export type CodingVaultApi = {
-  status: (harness: "claude-code") => Promise<HarnessLoginStatus>;
-  disconnect: (harness: "claude-code") => Promise<HarnessLoginStatus>;
-  signIn: (harness: "claude-code") => Promise<HarnessSignIn>;
-  sendCode: (harness: "claude-code", code: string) => Promise<HarnessSignIn>;
-  cancelSignIn: (harness: "claude-code") => Promise<HarnessSignIn>;
+  status: (harness: ConnectableHarness) => Promise<HarnessLoginStatus>;
+  disconnect: (harness: ConnectableHarness) => Promise<HarnessLoginStatus>;
+  signIn: (harness: ConnectableHarness) => Promise<HarnessSignIn>;
+  /** Where a sign-in is, for one that finishes by itself. */
+  signInStatus: (harness: ConnectableHarness) => Promise<HarnessSignIn>;
+  sendCode: (
+    harness: ConnectableHarness,
+    code: string,
+  ) => Promise<HarnessSignIn>;
+  cancelSignIn: (harness: ConnectableHarness) => Promise<HarnessSignIn>;
 };
 
 export type { MessagePart, TranscriptMessage };
@@ -282,6 +296,7 @@ export const codingApi: CodingApi = {
     status: (harness) => call(vaultPath(harness)),
     disconnect: (harness) => call(vaultPath(harness), { method: "DELETE" }),
     signIn: (harness) => call(vaultPath(harness, "/login"), post()),
+    signInStatus: (harness) => call(vaultPath(harness, "/login")),
     sendCode: (harness, code) =>
       call(vaultPath(harness, "/login/code"), post({ code })),
     cancelSignIn: (harness) =>
@@ -449,8 +464,12 @@ export type StartForm = {
   harness?: CodingHarness;
 };
 
-/** The harnesses a thread can be started on now; Codex comes with its adapter. */
-export const START_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code"];
+/** The harnesses a thread can be started on. */
+export const START_HARNESSES: readonly CodingHarness[] = [
+  "pi",
+  "claude-code",
+  "codex",
+];
 
 export type StartProblems = Partial<Record<keyof StartForm, TranslationKey>>;
 

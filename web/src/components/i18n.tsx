@@ -1700,14 +1700,14 @@ const translations = {
       "There was no room for its workspace. It tries again on its own.",
     codingReasonWorkspace: "Its workspace failed.",
     codingReasonOther: "It stopped ({reason}).",
-    codingReasonLoginRequired: "Claude Code needs you to connect your account.",
+    codingReasonLoginRequired: "{harness} needs you to connect your account.",
     codingReasonHarnessBusy:
-      "Waiting for your other Claude Code run to finish; one runs at a time.",
+      "Waiting for your other {harness} run to finish; one runs at a time.",
     codingReasonInterrupted:
       "The run was interrupted before it finished; nothing was reported as done.",
     codingReasonTimeout: "It ran past its time limit.",
     codingHarnessHint:
-      "Pi uses this space's models. Claude Code uses your own Claude subscription.",
+      "Pi uses this space's models. Claude Code and Codex use your own Claude or ChatGPT subscription.",
     codingConnectTitle: "Connect {harness}",
     codingConnected: "Connected",
     codingNotConnected: "Not connected",
@@ -1718,6 +1718,8 @@ const translations = {
     codingConnectStarting: "Starting sign-in…",
     codingConnectOpen: "Sign in to {harness}",
     codingConnectPaste: "Paste the code that page shows you below.",
+    codingConnectEnterCode: "Enter this code on that page:",
+    codingConnectWaiting: "Waiting for you to enter the code…",
     codingConnectCode: "Code",
     codingConnectSend: "Connect",
     codingConnecting: "Connecting…",
@@ -3491,14 +3493,14 @@ const translations = {
       "No había sitio para su espacio de trabajo. Lo vuelve a intentar solo.",
     codingReasonWorkspace: "Su espacio de trabajo falló.",
     codingReasonOther: "Se detuvo ({reason}).",
-    codingReasonLoginRequired: "Claude Code necesita que conectes tu cuenta.",
+    codingReasonLoginRequired: "{harness} necesita que conectes tu cuenta.",
     codingReasonHarnessBusy:
-      "Esperando a que termine tu otra ejecución de Claude Code; se ejecuta una a la vez.",
+      "Esperando a que termine tu otra ejecución de {harness}; se ejecuta una a la vez.",
     codingReasonInterrupted:
       "La ejecución se interrumpió antes de terminar; no se dio nada por hecho.",
     codingReasonTimeout: "Superó su tiempo límite.",
     codingHarnessHint:
-      "Pi usa los modelos de este espacio. Claude Code usa tu propia suscripción de Claude.",
+      "Pi usa los modelos de este espacio. Claude Code y Codex usan tu propia suscripción de Claude o ChatGPT.",
     codingConnectTitle: "Conectar {harness}",
     codingConnected: "Conectado",
     codingNotConnected: "No conectado",
@@ -3509,6 +3511,8 @@ const translations = {
     codingConnectStarting: "Iniciando el acceso…",
     codingConnectOpen: "Inicia sesión en {harness}",
     codingConnectPaste: "Pega abajo el código que te muestra esa página.",
+    codingConnectEnterCode: "Escribe este código en esa página:",
+    codingConnectWaiting: "Esperando a que escribas el código…",
     codingConnectCode: "Código",
     codingConnectSend: "Conectar",
     codingConnecting: "Conectando…",

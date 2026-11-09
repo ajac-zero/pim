@@ -1,5 +1,6 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { RunRecord } from "./harness/runner";
+import type { HarnessUsage } from "./harness/types";
 import type { JournalEntry, TestRun as ToolTestRun, TestSummary } from "./tools";
 import type { WorkspaceRef } from "./workspace/types";
 
@@ -185,7 +186,8 @@ CREATE TABLE IF NOT EXISTS coding_notice (
 CREATE TABLE IF NOT EXISTS coding_harness_session (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
 	session_id TEXT NOT NULL,
-	cost_usd REAL NOT NULL DEFAULT 0
+	cost_usd REAL NOT NULL DEFAULT 0,
+	usage TEXT
 );
 CREATE TABLE IF NOT EXISTS coding_harness_run (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -207,8 +209,8 @@ export const CODING_THREAD_TABLES = [
 	"coding_harness_run",
 ] as const;
 
-/** The CLI harness's session a thread goes on with (./harness/), and its whole cost as the CLI last reported it. */
-export type HarnessSession = { readonly sessionId: string; readonly costUsd: number };
+/** The CLI harness's session a thread goes on with (./harness/), and its whole cost, or its whole usage for a CLI that reports only that, as the CLI last reported it. */
+export type HarnessSession = { readonly sessionId: string; readonly costUsd: number; readonly usage: HarnessUsage | null };
 
 type Row = Record<string, SqlStorageValue>;
 
@@ -234,6 +236,9 @@ export class CodingThreadStore {
 		if (!columns.has("harness")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 		// The nonce the thread's model gateway tokens carry (./model-gateway.ts): null until one is minted, and again once they are revoked.
 		if (!columns.has("gateway_nonce")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN gateway_nonce TEXT");
+		// A CLI harness's session's whole usage, for one that reports only that (Codex).
+		const session = new Set(this.#sql.exec("PRAGMA table_info(coding_harness_session)").toArray().map((row) => String(row.name)));
+		if (!session.has("usage")) this.#sql.exec("ALTER TABLE coding_harness_session ADD COLUMN usage TEXT");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -434,17 +439,18 @@ export class CodingThreadStore {
 
 	/** The CLI harness's session, once the CLI started one. */
 	harnessSession(): HarnessSession | null {
-		const row = this.#sql.exec("SELECT session_id, cost_usd FROM coding_harness_session WHERE id = 1").toArray()[0];
-		return row ? { sessionId: String(row.session_id), costUsd: Number(row.cost_usd) } : null;
+		const row = this.#sql.exec("SELECT session_id, cost_usd, usage FROM coding_harness_session WHERE id = 1").toArray()[0];
+		return row ? { sessionId: String(row.session_id), costUsd: Number(row.cost_usd), usage: row.usage === null ? null : (JSON.parse(String(row.usage)) as HarnessUsage) } : null;
 	}
 
 	setHarnessSession(session: HarnessSession | null): void {
 		if (!session) this.#sql.exec("DELETE FROM coding_harness_session");
 		else {
 			this.#sql.exec(
-				"INSERT INTO coding_harness_session (id, session_id, cost_usd) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET session_id = excluded.session_id, cost_usd = excluded.cost_usd",
+				"INSERT INTO coding_harness_session (id, session_id, cost_usd, usage) VALUES (1, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET session_id = excluded.session_id, cost_usd = excluded.cost_usd, usage = excluded.usage",
 				session.sessionId,
 				session.costUsd,
+				session.usage === null ? null : JSON.stringify(session.usage),
 			);
 		}
 	}

@@ -73,6 +73,7 @@ export const claudeCode: CliHarness = {
 		];
 	},
 	parser: () => new ClaudeStreamParser(),
+	shellTool: "Bash",
 	// Only what the CLI needs to talk to the model and sign in: no telemetry, error reports, surveys or self-updates.
 	env: {
 		CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -84,6 +85,7 @@ export const claudeCode: CliHarness = {
 	egress: ["api.anthropic.com", "claude.ai", "platform.claude.com"],
 	signalCommand: (sessionId, signal) => ["pkill", `-${signal}`, "-f", sessionId],
 	login: {
+		mode: "paste_code",
 		// Since v2.1.126 it prints the URL and reads the code the browser shows from standard input when the browser can't reach it.
 		command: ["claude", "auth", "login"],
 		authorizationUrl(output: string): string | null {

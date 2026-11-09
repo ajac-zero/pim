@@ -4,6 +4,8 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  isRedirect,
+  type Redirect,
   RouterProvider,
 } from "@tanstack/react-router";
 import type { ReactNode } from "react";
@@ -51,6 +53,8 @@ import {
   type TriggerForm,
   triggerProblem,
 } from "~/lib/triggers";
+import { Route as RootRoute } from "~/routes/__root";
+import { Route as SchedulesRoute } from "~/routes/schedules";
 import {
   connectorFixture,
   grantApprovalFixture,
@@ -588,8 +592,36 @@ describe("the entry point", () => {
     on.setQueryData(triggersAvailableQuery().queryKey, true);
     const html = await render(() => <AppSidebar />, on);
     expect(linkTo(html, "/triggers")).toContain('aria-label="Triggers"');
-    // Schedules stay where they were.
-    expect(html).toContain('aria-label="Schedules"');
+    // Schedules are listed among the triggers, with no entry of their own.
+    expect(html).not.toContain("Schedules");
+    expect(html).not.toContain("panel=schedules");
+  });
+
+  it("takes the old Schedules address and panel to Triggers", () => {
+    // The router can't follow a redirect outside a browser, so this checks where each one sends the person.
+    const thrownBy = (beforeLoad: unknown, panel?: string) => {
+      try {
+        (beforeLoad as (context: unknown) => void)({
+          location: { pathname: "/", search: panel ? { panel } : {} },
+        });
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+    for (const thrown of [
+      thrownBy(SchedulesRoute.options.beforeLoad),
+      thrownBy(RootRoute.options.beforeLoad, "schedules"),
+    ]) {
+      expect(isRedirect(thrown)).toBe(true);
+      expect((thrown as Redirect).options).toMatchObject({
+        to: "/triggers",
+        replace: true,
+      });
+      expect((thrown as Redirect).options.search).toBeUndefined();
+    }
+    expect(thrownBy(RootRoute.options.beforeLoad, "skills")).toBeUndefined();
+    expect(thrownBy(RootRoute.options.beforeLoad)).toBeUndefined();
   });
 });
 

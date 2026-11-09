@@ -15,7 +15,6 @@ import {
   Archive,
   Bell,
   Blocks,
-  CalendarClock,
   Check,
   ChevronDown,
   Compass,
@@ -48,7 +47,6 @@ import {
 import { Shortcut } from "~/components/shortcut";
 import {
   NotificationsPanel,
-  SchedulesPanel,
   SIDEBAR_TOOLTIP_CLASS,
   SkillsPanel,
 } from "~/components/sidebar-panels";
@@ -120,7 +118,7 @@ export function useAwaitingApproval() {
 }
 
 /** What the sidebar can show beside the rail instead of your chats, named in the URL (`?panel=skills`). */
-export const SIDEBAR_PANELS = ["notifications", "skills", "schedules"] as const;
+export const SIDEBAR_PANELS = ["notifications", "skills"] as const;
 export type SidebarPanel = (typeof SIDEBAR_PANELS)[number];
 
 /**
@@ -158,7 +156,7 @@ export function useNavigationState() {
   };
 }
 
-/** The panel the URL names: notifications, your chats, apps, skills or schedules. */
+/** The panel the URL names: notifications, your chats or skills. */
 export function SidebarPanelContent({
   awaitingApproval,
   onNavigate,
@@ -171,8 +169,6 @@ export function SidebarPanelContent({
     <NotificationsPanel onNavigate={onNavigate} />
   ) : panel === "skills" ? (
     <SkillsPanel onNavigate={onNavigate} />
-  ) : panel === "schedules" ? (
-    <SchedulesPanel onNavigate={onNavigate} />
   ) : (
     <ChatsPanel awaitingApproval={awaitingApproval} onNavigate={onNavigate} />
   );
@@ -180,8 +176,8 @@ export function SidebarPanelContent({
 
 /**
  * The sidebar on wider screens: a rail of icons beside a panel. The icons at
- * the top choose what the panel shows (notifications, your chats, apps,
- * skills or schedules) while the open chat stays where it is; those at
+ * the top choose what the panel shows (notifications, your chats or
+ * skills) while the open chat stays where it is; those at
  * the bottom open dialogs over it. Choosing the panel that's already showing
  * collapses the sidebar to the rail, and choosing any panel brings it back.
  */
@@ -242,12 +238,6 @@ export function AppSidebar({
             panel="skills"
             icon={<ScrollText className="size-4.5" />}
             label={t("skills")}
-          />
-          <RailPanel
-            {...railPanel}
-            panel="schedules"
-            icon={<CalendarClock className="size-4.5" />}
-            label={t("schedules")}
           />
           {triggers && (
             <RailItem icon={<Zap className="size-4.5" />} label={t("triggers")}>

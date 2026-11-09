@@ -20,7 +20,6 @@ import {
   extensionsQuery,
   majordomoQuery,
   notificationsQuery,
-  schedulesQuery,
   sessionsQuery,
 } from "~/lib/queries";
 import { restoreSavedQueries } from "~/lib/saved-queries";
@@ -108,7 +107,6 @@ restoreSavedQueries(queryClient, import.meta.env.PIM_BUILD).then(() => {
       queryClient.prefetchQuery(accountQuery());
       queryClient.prefetchQuery(computerQuery());
       queryClient.prefetchQuery(artifactsQuery());
-      queryClient.prefetchQuery(schedulesQuery());
     }
   }
   // biome-ignore lint/style/noNonNullAssertion: index.html has #root

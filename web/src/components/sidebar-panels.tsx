@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { type ReactNode, type Ref, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
@@ -8,31 +8,19 @@ import { useI18n } from "~/components/i18n";
 import {
   AtSign,
   CalendarClock,
-  Check,
   CheckCheck,
-  MoreHorizontal,
-  Repeat,
   ScrollText,
-  Trash2,
 } from "~/components/icons";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "~/components/ui/dropdown-menu";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { type PimNotification, type PimSchedule, pim } from "~/lib/pim-api";
+import { type PimNotification, pim } from "~/lib/pim-api";
 import {
   approvalsQuery,
   builtinAppsQuery,
   notificationsQuery,
-  schedulesQuery,
-  sessionsQuery,
   skillsQuery,
 } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -351,135 +339,5 @@ export function SkillsPanel({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </PanelList>
     </>
-  );
-}
-
-/** What your agents will do later, soonest first; each opens the chat it runs in. */
-export function SchedulesPanel({ onNavigate }: { onNavigate?: () => void }) {
-  const { t } = useI18n();
-  const { data: schedules } = useQuery(schedulesQuery());
-  const { data: sessions } = useQuery(sessionsQuery());
-  const soonestFirst = [...(schedules ?? [])].sort(
-    (a, b) => Date.parse(a.next) - Date.parse(b.next),
-  );
-  return (
-    <>
-      <SidebarPanelHeader title={t("schedules")} />
-      <PanelList
-        label={t("schedules")}
-        empty={schedules?.length === 0 && t("noSchedules")}
-      >
-        {soonestFirst.map((schedule) => (
-          <ScheduleRow
-            key={schedule.id}
-            schedule={schedule}
-            // A task that starts new chats outlives the chat that scheduled it: no link once that chat is gone.
-            linked={
-              !schedule.newChat ||
-              !!sessions?.some((session) => session.id === schedule.session)
-            }
-            onNavigate={onNavigate}
-          />
-        ))}
-      </PanelList>
-    </>
-  );
-}
-
-function ScheduleRow({
-  schedule,
-  linked,
-  onNavigate,
-}: {
-  schedule: PimSchedule;
-  linked: boolean;
-  onNavigate?: () => void;
-}) {
-  const { t, formatDate } = useI18n();
-  const queryClient = useQueryClient();
-  const params = useParams({ strict: false }) as { sessionId?: string };
-  const active = linked && params.sessionId === schedule.session;
-  const repeats = schedule.type === "cron" || schedule.type === "interval";
-  const Icon = repeats ? Repeat : CalendarClock;
-  // Cancelling asks twice: the first click turns the item into a confirmation.
-  const [confirming, setConfirming] = useState(false);
-  const cancel = useMutation({
-    mutationFn: () => pim.cancelSchedule(schedule.id),
-    onSuccess: () => {
-      toast.success(t("scheduleCancelled"));
-      queryClient.invalidateQueries({ queryKey: ["schedules"] });
-      // A trigger that took the schedule over ends with it.
-      queryClient.invalidateQueries({ queryKey: ["triggers", "list"] });
-    },
-    onError: (error) => toast.error(error.message),
-  });
-  const content = (
-    <>
-      <Icon className={ROW_ICON_CLASS} />
-      <RowText
-        title={schedule.label ?? schedule.instruction}
-        meta={t("scheduleNext", {
-          date: formatDate(new Date(schedule.next), {
-            month: "short",
-            day: "numeric",
-            hour: "numeric",
-            minute: "2-digit",
-          }),
-        })}
-      />
-    </>
-  );
-  return (
-    <li className="group/row relative" title={schedule.instruction}>
-      {linked ? (
-        <Link
-          to="/chat/$sessionId"
-          params={{ sessionId: schedule.session }}
-          onClick={onNavigate}
-          className={cn(ROW_CLASS, "pr-8", active && "bg-sidebar-accent")}
-        >
-          {content}
-        </Link>
-      ) : (
-        <div className={cn(ROW_CLASS, "pr-8 hover:bg-transparent")}>
-          {content}
-        </div>
-      )}
-      <DropdownMenu onOpenChange={() => setConfirming(false)}>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className={cn(
-              "-translate-y-1/2 absolute top-1/2 right-1.5 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-sidebar-accent hover:text-foreground focus:opacity-100 group-hover/row:opacity-100 data-[state=open]:opacity-100 pointer-coarse:opacity-100",
-              active && "opacity-100",
-            )}
-            aria-label={t("scheduleOptions")}
-          >
-            <MoreHorizontal className="size-4" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="right">
-          <DropdownMenuItem
-            variant="destructive"
-            disabled={cancel.isPending}
-            onSelect={(event) => {
-              if (!confirming) {
-                event.preventDefault();
-                setConfirming(true);
-                return;
-              }
-              cancel.mutate();
-            }}
-          >
-            {confirming ? (
-              <Check className="size-4" />
-            ) : (
-              <Trash2 className="size-4" />
-            )}
-            {confirming ? t("confirmCancelSchedule") : t("cancelSchedule")}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </li>
   );
 }

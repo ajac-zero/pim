@@ -467,11 +467,6 @@ const translations = {
     approvedByMajordomo: "Approved by {name}",
     deniedByMajordomo: "Denied by {name}",
     noNotifications: "No notifications yet.",
-    schedules: "Schedules",
-    noSchedules:
-      "Nothing scheduled. Ask Pim for a reminder or a recurring check-in.",
-    scheduleNext: "Next: {date}",
-    scheduleOptions: "Schedule options",
     cancelSchedule: "Cancel schedule",
     confirmCancelSchedule: "Cancel it for good",
     unread: "Unread",
@@ -2155,11 +2150,6 @@ const translations = {
     deniedByMajordomo: "Denegado por {name}",
     noNotifications: "Aún no hay notificaciones.",
     notifications: "Notificaciones",
-    schedules: "Programaciones",
-    noSchedules:
-      "Nada programado. Pide a Pim un recordatorio o un seguimiento periódico.",
-    scheduleNext: "Próxima: {date}",
-    scheduleOptions: "Opciones de la programación",
     cancelSchedule: "Cancelar programación",
     confirmCancelSchedule: "Cancelarla definitivamente",
     unread: "No leída",

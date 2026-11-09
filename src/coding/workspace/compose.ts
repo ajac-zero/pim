@@ -2,11 +2,10 @@
 //
 // The manager is reached with a bearer token. The token is only ever sent in the Authorization header of requests to the manager: it is never logged, and it is scrubbed from the message of any error this file throws. The manager's URL must be https, unless its host is a loopback or private address (localhost, 127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, fc00::/7, fe80::/10), where the traffic does not cross the public internet; and it may not carry a username or password.
 //
-// What the manager does not do yet, and so what this provider assumes or works around:
-// - Exec is one buffered request: output arrives as stdout, stderr and exit events when the command has ended, not while it runs. Aborting cancels the request, but today's manager only kills a command at its own timeout, which is why `timeoutMs` is always sent.
-// - `env` has no field in the manager's exec body, so it goes through `env(1)`. `stat`, `list`, `remove` and a file's mode have no routes, so they run as small `sh` scripts through exec (see `SCRIPTS`), which resolve symlinks inside the container as the manager's own file scripts do.
+// Routes used are the manager's own (sandbox-manager/README.md). What is worth knowing:
+// - Exec uses `/exec/stream`, so output arrives as the command prints it; aborting drops the connection, which makes the manager kill the command.
 // - The create body carries no repository, git auth or wall-clock limit, so the caller checks the repository out with exec and the manager's idle reaper bounds the lifetime.
-// - `GET /sessions` (list), `POST /sessions/:id/stop` and `/start`, `DELETE /sessions/:id?keepVolume=1`, and a 507 `disk_full` on a file write past the disk limit are routes and answers the manager has to gain. Until it does, these calls fail with the manager's 404 or 405.
+// - The manager's `stat` describes a symlink itself, while `Workspace.stat` follows it, so a symlink is resolved with `readlink -f` run through exec and its target is stat'ed, provided the target is inside /workspace. The workspace image ships coreutils.
 
 import type { ManagerHealth } from "../provider-capacity";
 import {
@@ -59,19 +58,10 @@ export class ComposeManagerError extends Error {
 	}
 }
 
-/** The scripts that run inside a workspace for what the manager has no route for. Each starts by resolving its path argument `$1` in the container and exits 77 when the result is outside /workspace, 78 when nothing is there, and 79 when a directory was expected. */
-export const SCRIPTS = {
-	stat: 'p=$(realpath -m -- "$1") || exit 70; case "$p" in /workspace|/workspace/*) ;; *) exit 77;; esac; [ -e "$p" ] || exit 78; stat -L -c \'%F|%s|%a|%Y|%n\' "$p"',
-	list: 'p=$(realpath -m -- "$1") || exit 70; case "$p" in /workspace|/workspace/*) ;; *) exit 77;; esac; [ -e "$p" ] || exit 78; [ -d "$p" ] || exit 79; find "$p" -mindepth 1 -maxdepth 1 -exec stat -c \'%F|%s|%a|%Y|%n\' {} +',
-	remove:
-		'd=$(realpath -m -- "$(dirname -- "$1")") || exit 70; case "$d" in /workspace|/workspace/*) ;; *) exit 77;; esac; t="$d/$(basename -- "$1")"; [ "$t" = /workspace ] && exit 77; [ -e "$t" ] || [ -L "$t" ] || exit 78; rm -rf -- "$t"',
-	chmod: 'p=$(realpath -m -- "$1") || exit 70; case "$p" in /workspace/*) ;; *) exit 77;; esac; [ -f "$p" ] || exit 78; chmod "$2" "$p"',
-} as const;
-
 /** The manager's own exec timeout ceiling, and how long past a command's timeout the client waits for the manager's answer before giving up on it. */
 const MAX_TIMEOUT_MS = 600_000;
 const GRACE_MS = 15_000;
-const SCRIPT_TIMEOUT_MS = 60_000;
+const READLINK_TIMEOUT_MS = 10_000;
 
 /** Whether a host is one where plain http is acceptable. */
 function isLocalHost(host: string): boolean {
@@ -160,7 +150,7 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	}
 
 	/** Throws the error that the manager's answer means, unless it was a success. `path` names the file when the request was about one. */
-	async check(res: Response, what: { path?: string; write?: boolean } = {}): Promise<void> {
+	async check(res: Response, what: { path?: string; write?: boolean; file?: boolean } = {}): Promise<void> {
 		if (res.ok) return;
 		const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string; limit?: number };
 		const message = this.#scrub(body.error ?? `The workspace manager answered ${res.status}`);
@@ -168,12 +158,13 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 			if (typeof body.limit === "number") this.#capabilities.maxConcurrent = body.limit;
 			throw new WorkspaceCapacityError(message);
 		}
-		if (res.status === 403 && what.path !== undefined) throw new WorkspacePathError(what.path);
-		if (res.status === 404) {
-			if (/no such file/i.test(message)) throw new WorkspaceFileError(message);
-			throw new WorkspaceNotFoundError(message);
-		}
-		if (what.write && (res.status === 413 || (res.status === 507 && body.code !== "low_disk"))) throw new WorkspaceLimitError(message);
+		if (body.code === "path_escape") throw new WorkspacePathError(what.path ?? message);
+		if (res.status === 507 && body.code === "disk_full") throw new WorkspaceLimitError(message);
+		if (res.status === 413 && what.write) throw new WorkspaceLimitError(message);
+		// A 404 without a code is the session; agentd's own refusals carry one, and are about the path.
+		if (res.status === 404 && !body.code) throw new WorkspaceNotFoundError(message);
+		const sessionRefusal = body.code === "session_stopped" || body.code === "over_disk_quota";
+		if (what.file && res.status >= 400 && res.status < 500 && !sessionRefusal && res.status !== 401) throw new WorkspaceFileError(message);
 		throw new ComposeManagerError(message, res.status, body.code);
 	}
 
@@ -189,6 +180,7 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 		const res = await this.call("GET", `/sessions/${encodeURIComponent(ref.id)}`);
 		if (res.status === 404) return null;
 		await this.check(res);
+		if (((await res.json()) as ManagerView).state === "gone") return null;
 		return new ComposeWorkspace(this, ref.id);
 	}
 
@@ -217,19 +209,6 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	}
 }
 
-const statType = (kind: string): FileStat["type"] => (kind.startsWith("directory") ? "dir" : kind.startsWith("symbolic") ? "symlink" : "file");
-
-/** Parses lines of `%F|%s|%a|%Y|%n` from stat. */
-function parseStats(out: string): FileStat[] {
-	return out
-		.split("\n")
-		.filter(Boolean)
-		.map((line) => {
-			const [kind = "", size = "0", mode = "0", mtime = "0", ...name] = line.split("|");
-			return { name: name.join("|").split("/").pop() ?? "", type: statType(kind), size: Number(size), mode: Number.parseInt(mode, 8), mtimeMs: Number(mtime) * 1000 };
-		});
-}
-
 class ComposeWorkspace implements Workspace {
 	constructor(
 		private provider: ComposeWorkspaceProvider,
@@ -244,24 +223,46 @@ class ComposeWorkspace implements Workspace {
 		const aborted: ExecEvent = { type: "exit", code: null, signal: "SIGTERM" };
 		if (o.signal?.aborted) return yield aborted;
 		const timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(1, Math.ceil(o.timeoutMs)));
-		const env = Object.entries(o.env ?? {}).map(([k, v]) => `${k}=${v}`);
 		const controller = new AbortController();
 		const onAbort = () => controller.abort();
 		o.signal?.addEventListener("abort", onAbort);
-		// The manager enforces the timeout itself; this only stops waiting on a manager that went silent.
+		// The manager ends a stream itself a few seconds after the timeout; this only stops waiting on one that went silent.
 		let silent = false;
 		const timer = setTimeout(() => {
 			silent = true;
 			controller.abort();
 		}, timeoutMs + GRACE_MS);
 		try {
-			const res = await this.provider.call("POST", `${this.base}/exec`, { json: { cmd: env.length ? ["env", ...env, ...cmd] : cmd, cwd: o.cwd ? absolute(o.cwd) : undefined, timeoutMs, stdin: o.stdin }, signal: controller.signal });
+			const res = await this.provider.call("POST", `${this.base}/exec/stream`, {
+				json: { cmd, cwd: o.cwd ? absolute(o.cwd) : undefined, timeoutMs, stdin: o.stdin, env: o.env },
+				signal: controller.signal,
+			});
 			await this.provider.check(res);
-			const r = (await res.json()) as { stdout: string; stderr: string; exitCode: number | null; timedOut?: boolean };
-			if (r.stdout) yield { type: "stdout", data: r.stdout };
-			if (r.stderr) yield { type: "stderr", data: r.stderr };
-			// A killed command has no meaningful exit code, whatever the shell inside reported.
-			yield r.timedOut ? { type: "exit", code: null, signal: "SIGKILL", timedOut: true } : { type: "exit", code: r.exitCode };
+			if (!res.body) throw new ComposeManagerError("The workspace manager sent no exec stream", 502);
+			const decoder = new TextDecoder();
+			const reader = res.body.getReader();
+			let buffer = "";
+			let exited = false;
+			const parse = (line: string): ExecEvent | null => {
+				if (!line.trim()) return null;
+				const e = JSON.parse(line) as ExecEvent;
+				return e.type === "exit" ? { type: "exit", code: e.code, ...(e.signal ? { signal: e.signal } : {}), ...(e.timedOut ? { timedOut: true } : {}) } : e;
+			};
+			for (;;) {
+				const { done, value } = await reader.read();
+				buffer += decoder.decode(value, { stream: !done });
+				const lines = buffer.split("\n");
+				buffer = done ? "" : (lines.pop() ?? "");
+				if (done && lines.at(-1) === "") lines.pop();
+				for (const line of lines) {
+					const event = parse(line);
+					if (!event) continue;
+					if (event.type === "exit") exited = true;
+					yield event;
+				}
+				if (done) break;
+			}
+			if (!exited) throw new ComposeManagerError("The workspace manager's exec stream ended without an exit", 502);
 		} catch (error) {
 			if (silent) yield { type: "exit", code: null, signal: "SIGKILL", timedOut: true };
 			else if (o.signal?.aborted) yield aborted;
@@ -272,46 +273,52 @@ class ComposeWorkspace implements Workspace {
 		}
 	}
 
-	/** Runs one of `SCRIPTS` and returns what it printed, mapping its exit codes to errors. */
-	private async script(name: keyof typeof SCRIPTS, path: string, ...rest: string[]): Promise<string> {
-		const res = await this.provider.call("POST", `${this.base}/exec`, { json: { cmd: ["sh", "-c", SCRIPTS[name], "sh", path, ...rest], timeoutMs: SCRIPT_TIMEOUT_MS } });
-		await this.provider.check(res);
-		const r = (await res.json()) as { stdout: string; stderr: string; exitCode: number | null; timedOut?: boolean };
-		if (r.exitCode === 77) throw new WorkspacePathError(path);
-		if (r.exitCode === 78) throw new WorkspaceFileError(`No such file or directory: ${path}`);
-		if (r.exitCode === 79) throw new WorkspaceFileError(`Not a directory: ${path}`);
-		if (r.exitCode !== 0) throw new ComposeManagerError(`${name} failed in the workspace${r.timedOut ? " (timed out)" : `: ${r.stderr.slice(0, 200)}`}`, 500);
-		return r.stdout;
+	private fileUrl(route: "file" | "list" | "stat", path: string, extra = "") {
+		return `${this.base}/${route}?path=${encodeURIComponent(path)}${extra}`;
+	}
+
+	private async json<T>(url: string, path: string): Promise<T> {
+		const res = await this.provider.call("GET", url);
+		await this.provider.check(res, { path, file: true });
+		return (await res.json()) as T;
 	}
 
 	async readFile(p: string): Promise<Uint8Array> {
-		const path = absolute(p);
-		const res = await this.provider.call("GET", `${this.base}/files?path=${encodeURIComponent(path)}`);
-		await this.provider.check(res, { path: p });
+		const res = await this.provider.call("GET", this.fileUrl("file", absolute(p)));
+		await this.provider.check(res, { path: p, file: true });
 		return new Uint8Array(await res.arrayBuffer());
 	}
 
 	async writeFile(p: string, data: Uint8Array, mode = 0o644): Promise<void> {
-		const path = absolute(p);
-		const res = await this.provider.call("PUT", `${this.base}/files?path=${encodeURIComponent(path)}`, { body: data });
-		await this.provider.check(res, { path: p, write: true });
-		await this.script("chmod", path, mode.toString(8));
+		const res = await this.provider.call("PUT", this.fileUrl("file", absolute(p), `&mode=${mode.toString(8).padStart(4, "0")}`), { body: data });
+		await this.provider.check(res, { path: p, write: true, file: true });
 	}
 
 	async list(p: string): Promise<FileStat[]> {
-		return parseStats(await this.script("list", absolute(p))).sort((a, b) => (a.name < b.name ? -1 : 1));
+		const entries = await this.json<FileStat[]>(this.fileUrl("list", absolute(p)), p);
+		return entries.sort((a, b) => (a.name < b.name ? -1 : 1));
 	}
 
+	/** The manager describes a symlink itself, so for one, finds where it leads and describes that, keeping the name asked for. */
 	async stat(p: string): Promise<FileStat> {
-		const [found] = parseStats(await this.script("stat", absolute(p)));
-		if (!found) throw new WorkspaceFileError(`No such file or directory: ${p}`);
-		return found;
+		const path = absolute(p);
+		const entry = await this.json<FileStat>(this.fileUrl("stat", path), p);
+		if (entry.type !== "symlink") return entry;
+		let target = "";
+		for await (const e of this.exec(["readlink", "-f", "--", path], { timeoutMs: READLINK_TIMEOUT_MS })) {
+			if (e.type === "stdout") target += e.data;
+			if (e.type === "exit" && e.code !== 0) throw new WorkspaceFileError(`Cannot resolve the symbolic link: ${p}`);
+		}
+		// readlink -f follows every link, so what it prints is a real path; one outside /workspace is an escape.
+		const resolved = absolute(target.trim());
+		return { ...(await this.json<FileStat>(this.fileUrl("stat", resolved), p)), name: entry.name };
 	}
 
 	async remove(p: string): Promise<void> {
 		const path = absolute(p);
 		if (path === WORKSPACE_ROOT) throw new WorkspaceFileError("Cannot remove the workspace root");
-		await this.script("remove", path);
+		const res = await this.provider.call("DELETE", this.fileUrl("file", path, "&recursive=1"));
+		await this.provider.check(res, { path: p, file: true });
 	}
 
 	async snapshot(): Promise<SnapshotRef> {

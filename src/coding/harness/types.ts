@@ -39,8 +39,16 @@ export type HarnessEvent =
 	| { readonly type: "delta"; readonly kind: "text" | "thinking"; readonly text: string }
 	/** A complete assistant message, with its usage when the CLI reports one; `messageId` names the model response it is part of. */
 	| { readonly type: "assistant"; readonly message: AssistantMessage; readonly messageId: string | null }
-	/** Results of tool calls the assistant made. */
-	| { readonly type: "tool_result"; readonly message: ToolResultMessage }
+	/** Results of tool calls the assistant made; `exitCode` when the CLI reports a shell command's own. */
+	| { readonly type: "tool_result"; readonly message: ToolResultMessage; readonly exitCode?: number | null }
+	/**
+	 * The tokens of the CLI's whole session so far, from a CLI that reports
+	 * only that (Codex) rather than each model response's: a turn's usage is
+	 * how much it grew.
+	 */
+	| { readonly type: "usage"; readonly usage: HarnessUsage }
+	/** Something the CLI warned of that didn't stop the turn, such as a configuration it ignored. */
+	| { readonly type: "notice"; readonly message: string }
 	/** The CLI is retrying a failed model request. */
 	| { readonly type: "retry"; readonly attempt: number; readonly maxRetries: number; readonly delayMs: number; readonly error: string; readonly status: number | null }
 	/** The CLI refused a tool call no rule allowed. */
@@ -50,14 +58,15 @@ export type HarnessEvent =
 	/**
 	 * The turn's end, as the CLI reports it: whether it succeeded, why not
 	 * (`budget`, `max_turns`, `error`), and the session's cost so far as the
-	 * CLI estimates it. `sessionCostUsd` counts every turn of the session.
+	 * CLI estimates it. `sessionCostUsd` counts every turn of the session;
+	 * null from a CLI that doesn't estimate one.
 	 */
 	| {
 			readonly type: "result";
 			readonly ok: boolean;
 			readonly reason: "budget" | "max_turns" | "error" | null;
 			readonly sessionId: string | null;
-			readonly sessionCostUsd: number;
+			readonly sessionCostUsd: number | null;
 			readonly text: string | null;
 			readonly errors: readonly string[];
 	  }
@@ -70,15 +79,23 @@ export interface HarnessParser {
 }
 
 /**
- * The CLI's own sign-in, inside a workspace: the command that prints a URL
- * for the person to open and then reads the code they paste on its standard
- * input, how to find that URL in what it prints, and the hosts it reaches.
+ * The CLI's own sign-in, inside a workspace, in one of two ways:
+ *
+ * - `paste_code`: the command prints a URL for the person to open, then
+ *   reads the code the page shows them, which they paste into Pim, on its
+ *   standard input (Claude Code).
+ * - `device_code`: the command prints a URL and a code the person enters on
+ *   that page, then polls the vendor until they have, and exits 0 once
+ *   signed in (Codex's device-code login). Nothing is handed back to it.
  */
 export type HarnessLoginFlow = {
-	/** The sign-in command. Its standard input is the code the person pastes, followed by a newline. */
+	readonly mode: "paste_code" | "device_code";
+	/** The sign-in command. With `paste_code`, its standard input is the code the person pastes, followed by a newline. */
 	readonly command: readonly string[];
 	/** The URL to send the person to, once the command has printed it; null until then. */
 	authorizationUrl(output: string): string | null;
+	/** With `device_code`: the code the person enters on that page, once the command has printed it; null until then. */
+	userCode?(output: string): string | null;
 };
 
 /** One vendor CLI that can run a coding thread's turns. */
@@ -90,7 +107,9 @@ export interface CliHarness {
 	/** The command line of one turn, run in the repository's checkout. */
 	buildCommand(turn: HarnessTurn): string[];
 	/** A parser for one turn's output. */
-	parser(): HarnessParser;
+	parser(turn?: HarnessTurn): HarnessParser;
+	/** The name of the CLI's shell tool in the transcript, whose commands may be test runs. */
+	readonly shellTool: string;
 	/** Environment the CLI always runs with, besides its config directory: such as turning its telemetry off. */
 	readonly env: Readonly<Record<string, string>>;
 	/** The hosts a workspace running it must reach, besides the git broker and package registries. */

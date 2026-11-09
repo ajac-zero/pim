@@ -87,6 +87,8 @@ export type RunResult = {
 	readonly sessionCostUsd: number | null;
 	/** The turn's tokens: each model response counted once. */
 	readonly usage: HarnessUsage;
+	/** The session's whole usage so far, from a CLI that reports only that (`usage` events); null from one that doesn't. */
+	readonly sessionUsage: HarnessUsage | null;
 	readonly model: string | null;
 	readonly lines: number;
 };
@@ -124,7 +126,7 @@ export class LineBuffer {
 /** Commands that run tests, for the thread's test runs. */
 const TEST_COMMAND = /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|npx\s+(?:vitest|jest|mocha)\b|vitest\b|jest\b|pytest\b|python3?\s+-m\s+(?:pytest|unittest)\b|go\s+test\b|cargo\s+test\b|mvn\s+test\b|gradle\w*\s+test\b|rspec\b|phpunit\b|ctest\b|make\s+test\b|deno\s+test\b)/;
 
-/** The exit code Claude Code's Bash tool writes at the head of a failed command's result ("Exit code 1"). */
+/** The exit code Claude Code's Bash tool writes at the head of a failed command's result ("Exit code 1"), for a CLI that doesn't report it apart. */
 const EXIT_CODE = /^(?:Error:\s*)?Exit code (\d+)/m;
 
 export class HarnessRunner {
@@ -202,7 +204,7 @@ export class HarnessRunner {
 
 	async #execute(record: RunRecord, turn: HarnessTurn, timeoutMs: number): Promise<RunResult> {
 		const { harness, workspace, auth } = this.#deps;
-		const parser = harness.parser();
+		const parser = harness.parser(turn);
 		const lines = new LineBuffer();
 		const usage = new Map<string, HarnessUsage>();
 		const calls = new Map<string, { command: string; startedAt: number }>();
@@ -212,6 +214,7 @@ export class HarnessRunner {
 			sessionId: null as string | null,
 			model: null as string | null,
 			result: null as Extract<HarnessEvent, { type: "result" }> | null,
+			sessionUsage: null as HarnessUsage | null,
 			authFailed: null as string | null,
 			stderr: "",
 			exit: null as { code: number | null; timedOut?: boolean } | null,
@@ -229,11 +232,14 @@ export class HarnessRunner {
 						usage.set(event.messageId ?? `unnamed-${unnamed++}`, event.message.usage);
 						seen.model = event.message.model;
 						for (const part of event.message.content) {
-							if (part.type === "toolCall" && part.name === "Bash" && typeof part.arguments.command === "string") calls.set(part.id, { command: part.arguments.command, startedAt: this.#now() });
+							if (part.type === "toolCall" && part.name === harness.shellTool && typeof part.arguments.command === "string") calls.set(part.id, { command: part.arguments.command, startedAt: this.#now() });
 						}
 						break;
 					case "tool_result":
-						this.#testRun(calls.get(event.message.toolCallId), event.message);
+						this.#testRun(calls.get(event.message.toolCallId), event.message, event.exitCode);
+						break;
+					case "usage":
+						seen.sessionUsage = event.usage;
 						break;
 					case "auth_failed":
 						seen.authFailed = event.message;
@@ -273,13 +279,13 @@ export class HarnessRunner {
 			}
 		}
 
-		const { sessionId, model, result, authFailed, stderr, exit, lines: count } = seen;
-		const ended = (reason: RunFailure, detail: string): RunResult => ({ status: "unanswered", reason, detail, sessionId, sessionCostUsd: result?.sessionCostUsd ?? null, usage: sum(usage), model, lines: count });
+		const { sessionId, model, result, authFailed, stderr, exit, sessionUsage, lines: count } = seen;
+		const ended = (reason: RunFailure, detail: string): RunResult => ({ status: "unanswered", reason, detail, sessionId, sessionCostUsd: result?.sessionCostUsd ?? null, usage: sum(usage), sessionUsage, model, lines: count });
 		if (this.#aborted) return ended("aborted", "Stopped");
 		if (this.#timedOut || exit?.timedOut) return ended("timeout", `The turn ran out of time after ${Math.round(timeoutMs / 60_000)} minutes`);
 		if (authFailed !== null) return ended("login_required", `${harness.name} isn't signed in: connect it again`);
 		if (result) {
-			if (result.ok) return { status: "done", sessionId, sessionCostUsd: result.sessionCostUsd, usage: sum(usage), model, lines: count };
+			if (result.ok) return { status: "done", sessionId, sessionCostUsd: result.sessionCostUsd, usage: sum(usage), sessionUsage, model, lines: count };
 			if (result.reason === "budget") return ended("budget", "The turn reached its budget");
 			if (result.reason === "max_turns") return ended("max_turns", "The turn reached its most steps");
 			return ended("harness_error", redact([...result.errors, result.text ?? ""].join("\n").trim()).slice(0, 500) || `${harness.name} reported an error`);
@@ -289,7 +295,7 @@ export class HarnessRunner {
 	}
 
 	/** Records a run of tests: a shell command that runs a test runner, or printed a test summary. */
-	#testRun(call: { command: string; startedAt: number } | undefined, message: { content: readonly { type: string; text?: string }[]; isError: boolean }): void {
+	#testRun(call: { command: string; startedAt: number } | undefined, message: { content: readonly { type: string; text?: string }[]; isError: boolean }, exitCode: number | null | undefined): void {
 		if (!call || !this.#deps.onTestRun) return;
 		const output = message.content.flatMap((part) => (part.type === "text" && typeof part.text === "string" ? [part.text] : [])).join("\n");
 		const summary = parseTestSummary(output) ?? null;
@@ -297,7 +303,7 @@ export class HarnessRunner {
 		const code = EXIT_CODE.exec(output);
 		this.#deps.onTestRun({
 			command: call.command,
-			exitCode: code ? Number(code[1]) : message.isError ? 1 : 0,
+			exitCode: typeof exitCode === "number" ? exitCode : code ? Number(code[1]) : message.isError ? 1 : 0,
 			timedOut: false,
 			startedAt: call.startedAt,
 			durationMs: Math.max(0, this.#now() - call.startedAt),
@@ -359,6 +365,7 @@ export async function recoverRun(deps: Pick<RunnerDeps, "harness" | "workspace" 
 		sessionId: null,
 		sessionCostUsd: null,
 		usage: NO_USAGE,
+		sessionUsage: null,
 		model: null,
 		lines: record.lines,
 	};

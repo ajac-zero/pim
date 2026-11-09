@@ -14,6 +14,7 @@ import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
 import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } from "../src/coding/scheduler-do";
 import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO } from "../src/coding/thread-do";
 import type { Fetch, GitHubApp } from "../src/coding/git-broker/github-app";
+import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "../src/coding/model-gateway";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -362,7 +363,18 @@ export class CodingThreadDO extends RealCodingThreadDO {
 	protected override githubFetch(): Fetch | undefined {
 		return codingGitHub.fetch ?? undefined;
 	}
+
+	protected override gatewayFetch(): typeof fetch {
+		return codingGateway.fetch ?? (() => Promise.reject(new Error("No model provider in tests")));
+	}
+
+	protected override gatewayLimits(): GatewayLimits {
+		return { ...DEFAULT_GATEWAY_LIMITS, ...codingGateway.limits };
+	}
 }
+
+/** The model providers the model gateway reaches in tests, as a test answers them (none, unless set), and its caps. */
+export const codingGateway: { fetch: typeof fetch | null; limits: Partial<GatewayLimits> } = { fetch: null, limits: {} };
 
 /** The GitHub App coding threads push with in tests: none unless a test sets one, and GitHub as a test answers it. */
 export const codingGitHub: { app: GitHubApp | null; fetch: Fetch | null } = { app: null, fetch: null };

@@ -1,4 +1,5 @@
 import { LOGIN_CODE_FILE } from "../src/coding/harness/login";
+import { codexDeviceLogin, isCodexLogin } from "./fake-codex-login";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import type { ExecEvent, ExecOptions, Workspace, WorkspaceProvider, WorkspaceRef } from "../src/coding/workspace/types";
 
@@ -53,7 +54,7 @@ async function* claudeAuthLogin(workspace: Workspace, options: ExecOptions): Asy
 	yield { type: "exit", code: 0 };
 }
 
-/** An in-memory provider whose workspaces run `claude auth login` as above, wrapped as Pim runs it. */
+/** An in-memory provider whose workspaces run `claude auth login` as above, wrapped as Pim runs it, and Codex's sign-in (./fake-codex-login.ts). */
 export function loginProvider(): WorkspaceProvider & { readonly backing: FakeWorkspaceProvider } {
 	const backing = new FakeWorkspaceProvider();
 	const wrap = (workspace: Workspace): Workspace =>
@@ -65,6 +66,7 @@ export function loginProvider(): WorkspaceProvider & { readonly backing: FakeWor
 							loginRuns.push({ cmd, env: options.env ?? {} });
 							return claudeAuthLogin(target, options);
 						}
+						if (isCodexLogin(cmd)) return codexDeviceLogin(target, cmd, options);
 						return target.exec(cmd, options);
 					};
 				}

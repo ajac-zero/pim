@@ -29,13 +29,17 @@ import {
 import {
   ApiError,
   type ApprovalPolicy,
+  type PimSchedule,
   type Trigger,
+  type TriggerMigrationItem,
   type TriggerRun,
 } from "~/lib/pim-api";
 import {
   agentsQuery,
   computerQuery,
+  schedulesQuery,
   settingsQuery,
+  triggerMigrationQuery,
   triggerRunsQuery,
   triggersAvailableQuery,
   triggersQuery,
@@ -446,6 +450,93 @@ describe("the list", () => {
     const text = textOf(await render(TriggersPage, bounded));
     expect(text).not.toContain("Load more");
     expect(text).toContain(`Showing the first ${MAX_PAGES}.`);
+  });
+
+  it("lists the schedules and watches that haven't moved, each with where it stands and why", async () => {
+    const legacy = (
+      overrides: Partial<TriggerMigrationItem>,
+    ): TriggerMigrationItem => ({
+      kind: "schedule",
+      legacyId: "s1",
+      label: null,
+      agentId: "p_ada",
+      status: "unsupported",
+      owner: "legacy",
+      reason: "chat_unavailable",
+      nextFiringAt: Date.UTC(2026, 10, 9, 9),
+      triggerId: null,
+      ...overrides,
+    });
+    const client = clientWith();
+    setList(client, [
+      page([
+        triggerFixture({ id: "trg_moved" }),
+        triggerFixture({ id: "trg_shadow", label: "Inbox watch" }),
+      ]),
+    ]);
+    client.setQueryData(triggerMigrationQuery().queryKey, [
+      legacy({}),
+      legacy({
+        kind: "watch",
+        legacyId: "w1",
+        label: "message.created",
+        agentId: "p_rowan",
+        status: "deferred",
+        reason: "stricter_ingress",
+        nextFiringAt: null,
+        triggerId: "trg_shadow",
+      }),
+      legacy({
+        legacyId: "s2",
+        label: "Rent reminder",
+        status: "deferred",
+        reason: "deferred",
+      }),
+      legacy({
+        legacyId: "s3",
+        label: "Odd one",
+        status: "given_back",
+        reason: "something_new",
+      }),
+      legacy({
+        legacyId: "s4",
+        label: "Already moved",
+        status: "migrated",
+        owner: "trigger",
+        reason: null,
+        triggerId: "trg_moved",
+      }),
+    ]);
+    client.setQueryData(schedulesQuery().queryKey, [
+      { id: "s1", instruction: "Water the plants." } as PimSchedule,
+    ]);
+    const text = textOf(await render(TriggersPage, client));
+    const [triggers, notYet = ""] = text.split("Not triggers yet");
+    // Without a label, a schedule goes by its instruction.
+    expect(notYet).toContain("Water the plants.");
+    expect(notYet).toContain("Ada · Scheduled task");
+    expect(notYet).toContain("Move to triggers: Can't move");
+    expect(notYet).toContain(
+      "The chat it runs in is gone, or can't take a trigger's runs.",
+    );
+    expect(notYet).toContain("Rent reminder");
+    expect(notYet).toContain("Move to triggers: Waiting to move");
+    expect(notYet).toContain(
+      "Pim moves a few at a time; this one is next in line.",
+    );
+    // A reason this app doesn't know yet is still shown, as Pim named it.
+    expect(notYet).toContain("Move to triggers: Given back");
+    expect(notYet).toContain("It stays as it is for now (something_new).");
+    expect(notYet.match(/Cancel schedule/g)).toHaveLength(3);
+    // A shadow is listed once, as its trigger, which says why its watch still runs it.
+    expect(notYet).not.toContain("message.created");
+    expect(triggers).toContain("Inbox watch");
+    expect(triggers).toContain("Move to triggers: Waiting to move");
+    expect(triggers).toContain(
+      "Waiting for one of its events to pass the checks triggers make.",
+    );
+    // What a trigger delivers is a trigger like any other.
+    expect(text).not.toContain("Already moved");
   });
 
   it("shows nothing of triggers where the gate is off", async () => {

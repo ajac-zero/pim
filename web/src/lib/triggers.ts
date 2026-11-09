@@ -10,6 +10,7 @@ import {
   type TriggerHealth,
   type TriggerInput,
   type TriggerLifecycle,
+  type TriggerMigrationItem,
   type TriggerRunState,
   type TriggerSource,
   type TriggerSourceKind,
@@ -252,6 +253,54 @@ export const RUN_REASON: Record<TriggerRunState, TranslationKey> = {
   superseded: "triggerRunWhySuperseded",
   outcome_unknown: "triggerRunWhyUnknown",
 };
+
+/** Where a schedule or watch stands in its move to triggers, and how it reads. */
+export const MIGRATION_STATUS_TEXT: Record<
+  TriggerMigrationItem["status"],
+  { key: TranslationKey; tone: "muted" | "active" | "done" | "problem" }
+> = {
+  migratable: { key: "triggerMigrationMigratable", tone: "active" },
+  deferred: { key: "triggerMigrationDeferred", tone: "active" },
+  unsupported: { key: "triggerMigrationUnsupported", tone: "muted" },
+  given_back: { key: "triggerMigrationGivenBack", tone: "muted" },
+  migrated: { key: "triggerMigrationMigrated", tone: "done" },
+};
+
+/** Why a schedule or watch is still delivered as before, by the migration's reason (docs/triggers.md, "Moving schedules and watches"). */
+const MIGRATION_REASON_TEXT: Record<string, TranslationKey> = {
+  interval_schedule: "triggerMigrationWhyInterval",
+  one_time_due: "triggerMigrationWhyDue",
+  cron_syntax: "triggerMigrationWhyCron",
+  cron_semantics: "triggerMigrationWhyCron",
+  schedule_exhausted: "triggerMigrationWhyExhausted",
+  chat_unavailable: "triggerMigrationWhyChat",
+  agent_unavailable: "triggerMigrationWhyAgent",
+  invalid_field: "triggerMigrationWhyField",
+  watch_ended: "triggerMigrationWhyWatchEnded",
+  watch_not_subscribed: "triggerMigrationWhyNotSubscribed",
+  callback_changed: "triggerMigrationWhyCallback",
+  stricter_ingress: "triggerMigrationWhyIngress",
+  firing_notification: "triggerMigrationWhyBlocked",
+  event_contents: "triggerMigrationWhyBlocked",
+  legacy_event_ids: "triggerMigrationWhyBlocked",
+  binding_adoption: "triggerMigrationWhyBlocked",
+  rolled_back: "triggerMigrationWhyGivenBack",
+  cut_back: "triggerMigrationWhyGivenBack",
+  refused: "triggerMigrationWhyRefused",
+  deferred: "triggerMigrationWhyDeferred",
+};
+
+/** Why an item stands where it does, in words; a reason this app doesn't know yet is named as Pim gave it. */
+export function migrationReason(item: TriggerMigrationItem): {
+  key: TranslationKey;
+  reason?: string;
+} {
+  if (item.reason === null) return { key: "triggerMigrationWhyMigratable" };
+  const key = MIGRATION_REASON_TEXT[item.reason];
+  return key
+    ? { key }
+    : { key: "triggerMigrationWhyOther", reason: item.reason };
+}
 
 const COMPUTER_KINDS: readonly TriggerSourceKind[] = [
   "poll",

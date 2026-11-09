@@ -261,8 +261,8 @@ function usePimEvents() {
         queryClient.invalidateQueries({ queryKey: ["files"] });
         queryClient.invalidateQueries({ queryKey: ["browser"] });
         queryClient.invalidateQueries({ queryKey: ["skills"] });
-        // Or made or changed a trigger, or taken one of its runs; whether triggers exist doesn't change.
-        for (const part of ["list", "one", "runs"]) {
+        // Or made or changed a trigger, or taken one of its runs, or moved a schedule to one; whether triggers exist doesn't change.
+        for (const part of ["list", "one", "runs", "migration"]) {
           queryClient.invalidateQueries({ queryKey: ["triggers", part] });
         }
       },

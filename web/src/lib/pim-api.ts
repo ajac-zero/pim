@@ -1229,6 +1229,28 @@ export type TriggerRun = {
   updatedAt: number;
 };
 
+/**
+ * Where one schedule or connector watch stands in its move to triggers
+ * (docs/triggers.md, "Where each item stands"): ids, a short label and the
+ * reason only, never its instruction.
+ */
+export type TriggerMigrationItem = {
+  kind: "schedule" | "watch";
+  legacyId: string;
+  /** The schedule's label (null without one), or the watch's event name. */
+  label: string | null;
+  agentId: string | null;
+  status: "migratable" | "unsupported" | "deferred" | "migrated" | "given_back";
+  /** Which side delivers it now. */
+  owner: "legacy" | "trigger";
+  /** Why it is still its schedule's or watch's, such as `chat_unavailable` or `stricter_ingress`. */
+  reason: string | null;
+  /** A schedule's next firing, as its alarm has it; null for a watch. */
+  nextFiringAt: number | null;
+  /** Its live trigger: the shadow, or the trigger that took it over. */
+  triggerId: string | null;
+};
+
 /** A dry run: what a trigger would do, computed without writing or running anything. */
 export type TriggerDryRun = {
   dryRun: true;
@@ -1928,6 +1950,14 @@ export const pim = {
     if (cursor) query.set("cursor", cursor);
     return call<{ runs: TriggerRun[]; nextCursor: string | null }>(
       `/triggers/${encodeURIComponent(id)}/runs?${query}`,
+    );
+  },
+  /** A page of where each schedule and watch stands in its move to triggers. */
+  triggerMigration: (cursor?: string, limit = 50) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set("cursor", cursor);
+    return call<{ items: TriggerMigrationItem[]; nextCursor: string | null }>(
+      `/triggers/migration?${query}`,
     );
   },
   pushKey: () =>

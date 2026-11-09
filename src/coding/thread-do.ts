@@ -138,7 +138,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** The machine image a workspace starts from. */
 	protected workspaceImage(): string {
-		return "pim-coding";
+		return "pim-workspace:local";
+	}
+
+	/** Hosts the workspace may reach through the egress proxy: Pim's git broker and the common package registries. */
+	protected egressAllow(): string[] {
+		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org"];
+		try {
+			const origin = deploymentSettings(this.env).publicUrl;
+			if (origin) hosts.unshift(new URL(origin).hostname);
+		} catch {}
+		return hosts;
 	}
 
 	/**
@@ -1125,7 +1135,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			image: this.workspaceImage(),
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch },
 			limits: thread.limits,
-			egress: { allow: [] },
+			egress: { allow: this.egressAllow() },
 			gitAuth: { mode: "none" },
 		};
 	}

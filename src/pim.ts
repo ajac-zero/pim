@@ -2613,8 +2613,11 @@ export class Pim extends DurableAgent<Env> {
 	async runTriggerTick(): Promise<void> {
 		try {
 			this.#computerTriggers()?.renew();
+			const subscriptions = this.#connectorSubscriptions();
+			// The wake usually starts the space afresh, with its connectors still reconnecting in the background: a subscription is renewed only once its connector is ready, so it doesn't lapse while it waits.
+			if (subscriptions) await this.mcp.waitForConnections({ timeout: 20_000 });
 			// Subscriptions first, so a trigger enabled since is subscribed before anything else waits on the connector.
-			await this.#connectorSubscriptions()?.tick();
+			await subscriptions?.tick();
 			await this.triggerEngine()?.coordinator.tick();
 			// What connector events carried is kept a day at most.
 			if (this.triggerEngine()) new ConnectorEventData(this.ctx.storage.sql).sweep(this.triggerClock());

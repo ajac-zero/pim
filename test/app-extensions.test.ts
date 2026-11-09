@@ -537,11 +537,19 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		expect((await exports.default.fetch(apiUrl("/triggers"))).status).toBe(401);
 	});
 
-	it("renews with the latest cursor, and ends the subscription when the app refuses", async () => {
+	it("renews with the latest cursor on a wake while the app still reconnects, and ends the subscription when the app refuses", async () => {
 		const before = subscribes.length;
-		// Past the renewal: subscribed again, with the same URL and secret and the last event's cursor.
+		// Past the renewal, on a wake that starts the space afresh: its connectors reconnect in the background, as they do on every start.
 		triggerClock.offset = 56 * 60_000;
-		await tick();
+		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const mcp = (instance as unknown as { mcp: { closeConnection(id: string): Promise<void>; restoreConnectionsFromStorage(name: string): Promise<void>; _isRestored: boolean } }).mcp;
+			await mcp.closeConnection("travel");
+			mcp._isRestored = false;
+			await mcp.restoreConnectionsFromStorage(instance.name);
+			expect(instance.apps.servers().find((server) => server.id === "travel")?.state).not.toBe("ready");
+			await instance.runTriggerTick();
+		});
+		// Subscribed again, with the same URL and secret and the last event's cursor.
 		expect(subscribes.slice(before)).toEqual([expect.objectContaining({ name: "flight.price_changed", cursor: "c1", delivery: { mode: "webhook", url: `https://pim.test/mcp/events/${OWNER}/${key}`, secret } })]);
 
 		refuseSubscribe = -32012;

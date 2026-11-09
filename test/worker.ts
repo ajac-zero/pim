@@ -18,6 +18,7 @@ import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "../src/coding/model-
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
 import type { Provider } from "@earendil-works/pi-ai";
+import { loginProvider } from "./fake-claude-login";
 import { fakeGit } from "./fake-git";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
@@ -306,6 +307,11 @@ export class CodingSchedulerDO extends RealCodingSchedulerDO {
 		return codingSchedulers.now ?? super.now();
 	}
 
+	/** Sign-ins run Claude Code's fake `claude auth login` (test/fake-claude-login.ts). */
+	protected override loginProviders(): WorkspaceProviderRegistry {
+		return workspaceRegistry([codingLogins]);
+	}
+
 	protected override notifier(): SchedulerNotifier {
 		return codingSchedulers.notifier ?? super.notifier();
 	}
@@ -324,6 +330,9 @@ export const codingFaux = fauxProvider({
 		{ id: "pricey", contextWindow: 200_000, maxTokens: 4_000, cost: { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 } },
 	],
 });
+
+/** The workspaces harness sign-ins run in. */
+export const codingLogins = loginProvider();
 
 /** Coding threads' workspaces in tests: in memory, with a fake git (test/fake-git.ts). */
 export const codingWorkspaces = new FakeWorkspaceProvider();

@@ -1,5 +1,5 @@
-import type { JsonValue, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import type { TestRunReport, ToolJournal, ToolJournalEntry, ToolJournalOutcome } from "./tools-port";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { JournalEntry, TestRun as ToolTestRun, TestSummary } from "./tools";
 import type { WorkspaceRef } from "./workspace/types";
 
 /**
@@ -34,8 +34,10 @@ export type CodingThreadRow = {
 	readonly providerId: string;
 	readonly workspaceRef: WorkspaceRef | null;
 	readonly state: CodingThreadState;
-	/** Why the thread failed, such as `budget` or `queue_expired`; null otherwise. */
+	/** Why the thread failed, such as `budget`, `no_backend` or `queue_expired`; null otherwise. */
 	readonly stateReason: string | null;
+	/** What to tell the person about it, such as how to set a backend up; null when the reason says enough. */
+	readonly stateDetail: string | null;
 	readonly createdBy: string;
 	readonly parentThread: string | null;
 	readonly limits: CodingLimits;
@@ -57,7 +59,18 @@ export type CodingThreadRow = {
 
 export type Checkpoint = { readonly seq: number; readonly sha: string; readonly message: string; readonly operationId: string | null; readonly createdAt: number };
 
-export type TestRun = TestRunReport & { readonly seq: number; readonly createdAt: number };
+/** One run of the `test` tool, as the thread keeps it. */
+export type TestRun = {
+	readonly seq: number;
+	readonly command: string;
+	readonly exitCode: number | null;
+	readonly timedOut: boolean;
+	readonly startedAt: number;
+	readonly durationMs: number;
+	readonly summary: TestSummary | null;
+	/** The end of what it printed. */
+	readonly output: string;
+};
 
 /** One line of a thread's log: a model call with its usage and cost, a turn's end, or a stop. */
 export type CodingEvent = {
@@ -94,6 +107,7 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	workspace_ref TEXT,
 	state TEXT NOT NULL,
 	state_reason TEXT,
+	state_detail TEXT,
 	created_by TEXT NOT NULL,
 	parent_thread TEXT,
 	limits TEXT NOT NULL,
@@ -126,11 +140,11 @@ CREATE TABLE IF NOT EXISTS coding_test_run (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
 	command TEXT NOT NULL,
 	exit_code INTEGER,
-	passed INTEGER,
-	failed INTEGER,
+	timed_out INTEGER NOT NULL,
+	started_at INTEGER NOT NULL,
 	duration_ms INTEGER NOT NULL,
-	summary TEXT NOT NULL,
-	created_at INTEGER NOT NULL
+	summary TEXT,
+	output TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS coding_event (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,13 +160,10 @@ CREATE TABLE IF NOT EXISTS coding_event (
 	data TEXT
 );
 CREATE TABLE IF NOT EXISTS coding_tool_journal (
-	call_id TEXT PRIMARY KEY,
+	key TEXT PRIMARY KEY,
 	tool TEXT NOT NULL,
-	args TEXT NOT NULL,
-	status TEXT,
-	result TEXT,
-	started_at INTEGER NOT NULL,
-	ended_at INTEGER
+	entry TEXT NOT NULL,
+	updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS coding_inbox (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,7 +192,7 @@ type Row = Record<string, SqlStorageValue>;
 
 const text = (value: SqlStorageValue | undefined) => (value === null || value === undefined ? null : String(value));
 
-export class CodingThreadStore implements ToolJournal {
+export class CodingThreadStore {
 	readonly #sql: SqlStorage;
 	readonly #now: () => number;
 
@@ -207,7 +218,7 @@ export class CodingThreadStore implements ToolJournal {
 		return thread;
 	}
 
-	create(thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "createdAt" | "updatedAt">): void {
+	create(thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "createdAt" | "updatedAt">): void {
 		const now = this.#now();
 		this.#sql.exec(
 			`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, created_at, updated_at)
@@ -231,10 +242,12 @@ export class CodingThreadStore implements ToolJournal {
 	}
 
 	/** Sets the given fields of the thread's row. */
-	update(change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd">>): void {
+	update(change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd">>): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
 		if (change.stateReason !== undefined) columns.state_reason = change.stateReason;
+		if (change.stateDetail !== undefined) columns.state_detail = change.stateDetail;
+		if (change.providerId !== undefined) columns.provider_id = change.providerId;
 		if (change.baseSha !== undefined) columns.base_sha = change.baseSha;
 		if (change.workspaceRef !== undefined) columns.workspace_ref = change.workspaceRef === null ? null : JSON.stringify(change.workspaceRef);
 		if (change.slot !== undefined) columns.slot = change.slot;
@@ -345,16 +358,16 @@ export class CodingThreadStore implements ToolJournal {
 		);
 	}
 
-	addTestRun(run: TestRunReport): void {
+	addTestRun(run: ToolTestRun): void {
 		this.#sql.exec(
-			"INSERT INTO coding_test_run (command, exit_code, passed, failed, duration_ms, summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO coding_test_run (command, exit_code, timed_out, started_at, duration_ms, summary, output) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			run.command,
 			run.exitCode,
-			run.passed ?? null,
-			run.failed ?? null,
+			run.timedOut ? 1 : 0,
+			run.startedAt,
 			Math.round(run.durationMs),
-			run.summary,
-			this.#now(),
+			run.summary === null ? null : JSON.stringify(run.summary),
+			run.output,
 		);
 	}
 
@@ -366,39 +379,28 @@ export class CodingThreadStore implements ToolJournal {
 				seq: Number(row.seq),
 				command: String(row.command),
 				exitCode: row.exit_code === null ? null : Number(row.exit_code),
-				...(row.passed === null ? {} : { passed: Number(row.passed) }),
-				...(row.failed === null ? {} : { failed: Number(row.failed) }),
+				timedOut: row.timed_out === 1,
+				startedAt: Number(row.started_at),
 				durationMs: Number(row.duration_ms),
-				summary: String(row.summary),
-				createdAt: Number(row.created_at),
+				summary: row.summary === null ? null : (JSON.parse(String(row.summary)) as TestSummary),
+				output: String(row.output),
 			}));
 	}
 
-	get(callId: string): ToolJournalEntry | null {
-		const row = this.#sql.exec("SELECT * FROM coding_tool_journal WHERE call_id = ?", callId).toArray()[0];
-		if (!row) return null;
-		return {
-			callId,
-			tool: String(row.tool),
-			args: JSON.parse(String(row.args)) as JsonValue,
-			startedAt: Number(row.started_at),
-			...(row.status === null ? {} : { outcome: { status: String(row.status) as ToolJournalOutcome["status"], result: JSON.parse(String(row.result)) as JsonValue } }),
-			...(row.ended_at === null ? {} : { endedAt: Number(row.ended_at) }),
-		};
+	/** What a tool call recorded in the journal, by its key (the call's task id). */
+	journalEntry(key: string): JournalEntry | undefined {
+		const row = this.#sql.exec("SELECT entry FROM coding_tool_journal WHERE key = ?", key).toArray()[0];
+		return row ? (JSON.parse(String(row.entry)) as JournalEntry) : undefined;
 	}
 
-	begin(callId: string, tool: string, args: JsonValue): void {
+	recordJournal(key: string, entry: JournalEntry): void {
 		this.#sql.exec(
-			"INSERT INTO coding_tool_journal (call_id, tool, args, started_at) VALUES (?, ?, ?, ?) ON CONFLICT (call_id) DO NOTHING",
-			callId,
-			tool,
-			JSON.stringify(args),
+			"INSERT INTO coding_tool_journal (key, tool, entry, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET tool = excluded.tool, entry = excluded.entry, updated_at = excluded.updated_at",
+			key,
+			entry.tool,
+			JSON.stringify(entry),
 			this.#now(),
 		);
-	}
-
-	end(callId: string, outcome: ToolJournalOutcome): void {
-		this.#sql.exec("UPDATE coding_tool_journal SET status = ?, result = ?, ended_at = ? WHERE call_id = ?", outcome.status, JSON.stringify(outcome.result), this.#now(), callId);
 	}
 }
 
@@ -415,6 +417,7 @@ function threadOf(row: Row): CodingThreadRow {
 		workspaceRef: row.workspace_ref === null ? null : (JSON.parse(String(row.workspace_ref)) as WorkspaceRef),
 		state: String(row.state) as CodingThreadState,
 		stateReason: text(row.state_reason),
+		stateDetail: text(row.state_detail),
 		createdBy: String(row.created_by),
 		parentThread: text(row.parent_thread),
 		limits: JSON.parse(String(row.limits)) as CodingLimits,

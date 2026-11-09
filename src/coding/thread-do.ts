@@ -2,16 +2,20 @@ import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type Api, type AssistantMessage, createAssistantMessageEventStream, type Model, type Provider } from "@earendil-works/pi-ai";
 import { createModels, type Models, type MutableModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, type EntryRecord, Harness, type HarnessSettings, section, type ToolRegistration } from "@earendil-works/pi-durable";
+import { createRegistry, type EntryRecord, Harness, type HarnessSettings, section } from "@earendil-works/pi-durable";
 import { getAgentByName } from "agents";
 import { type PiOperationResult, PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext, type LifecycleJobOutcome } from "agents/lifecycle";
 import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
+import { deploymentSettings } from "../deployment";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler } from "./scheduler-do";
+import { issueBrokerToken, parseRepoUrl } from "./git-broker/broker";
+import { brokerPolicy } from "./git-broker/config";
+import { brokerTokenKey, GIT_BROKER_PATH } from "./git-broker/routes";
 import {
 	type AgentProfile,
 	type Checkpoint,
@@ -22,8 +26,8 @@ import {
 	CodingThreadStore,
 	type TestRun,
 } from "./thread-store";
-import { type CodingToolsDeps, createCodingTools } from "./tools-port";
-import { NoWorkspaceProviderError, noWorkspaceProviders, type WorkspaceProviderRegistry } from "./workspace/registry";
+import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
+import { NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceSpec } from "./workspace/types";
 
 /**
@@ -66,6 +70,20 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The workspace opened in this isolate, by its ref's id. */
 	#open: { id: string; workspace: Workspace } | null = null;
 	#configured: string | null = null;
+	/**
+	 * The tools' journal, in `coding_tool_journal`. A call's record is on
+	 * disk before `put` returns, since the command it records starts right
+	 * after and a rerun after an eviction must find it.
+	 */
+	readonly #journal: ToolJournal = {
+		get: (key) => this.store.journalEntry(key),
+		put: async (key, entry) => {
+			this.store.recordJournal(key, entry);
+			await this.ctx.storage.sync();
+		},
+	};
+	/** Who follows the output of commands as they run (`events()`). */
+	readonly #outputListeners = new Set<(event: CodingOutputEvent) => void>();
 	/** Turns being ended, by operation, so two who notice one end it once. */
 	readonly #endings = new Map<string, Promise<void>>();
 
@@ -77,10 +95,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.registry.install({
 				name: "coding",
 				sections: [section("coding_agent", () => CODING_PROMPT, { tag: false }), section("repository", () => this.#repositorySection())],
-				tools: this.codingTools({
+				tools: createCodingTools({
 					workspace: () => this.#workspace(),
-					journal: this.store,
+					journal: this.#journal,
 					onTestRun: (run) => this.store.addTestRun(run),
+					sink: (event) => {
+						for (const listener of this.#outputListeners) listener(event);
+					},
 				}),
 			});
 			return Harness.open(storage, { models: this.#meter(this.#models), registry: this.registry, settings: CODING_SETTINGS }, context);
@@ -99,9 +120,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return Date.now();
 	}
 
-	/** The workspace providers threads may use: none until the deployment wires its own in. */
+	/** The workspace providers threads may use: the backends the deployment's environment sets up. */
 	protected workspaceProviders(): WorkspaceProviderRegistry {
-		return noWorkspaceProviders;
+		return workspaceBackends(this.env);
 	}
 
 	/** The machine image a workspace starts from. */
@@ -109,19 +130,24 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return "pim-coding";
 	}
 
-	/** Where the workspace clones the repository from. The repository's own URL until the git broker gives one of its own. */
-	protected async cloneUrl(thread: CodingThreadRow): Promise<string> {
-		return thread.repoUrl;
+	/**
+	 * Where the workspace clones the repository from: the git broker on this
+	 * Pim (./git-broker/), with a broker token for this thread and this
+	 * repository alone. The token goes to git in the clone's environment
+	 * only, never in a URL, argument or file, and the thread never writes it
+	 * down or logs it.
+	 */
+	protected async cloneSource(thread: CodingThreadRow): Promise<{ url: string; token: string }> {
+		const repo = parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
+		const origin = deploymentSettings(this.env).publicUrl;
+		if (!origin) throw new Error("PIM_PUBLIC_URL isn't set, so the workspace can't reach Pim's git broker");
+		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo });
+		return { url: `${origin}/api${GIT_BROKER_PATH}/${repo.owner}/${repo.name}.git`, token };
 	}
 
 	/** Who hears of what the thread does: nobody yet (see `CodingEventSink`). */
 	protected eventSink(): CodingEventSink {
 		return noCodingEvents;
-	}
-
-	/** The tools the model is offered. */
-	protected codingTools(deps: CodingToolsDeps): ToolRegistration[] {
-		return createCodingTools(deps);
 	}
 
 	/**
@@ -179,14 +205,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const task = input.task?.trim();
 		if (!task) throw new Error("A coding thread needs a task");
 		if (!input.space || !input.createdBy || !input.operationId) throw new Error("space, createdBy and operationId are required");
-		const repo = new URL(input.repo);
-		if (repo.protocol !== "https:" && repo.protocol !== "http:") throw new Error("repo must be an http(s) URL");
+		// Only GitHub repositories, through the git broker: no workspace ever clones from anywhere else.
+		const repo = parseRepoUrl(input.repo, brokerPolicy(this.env));
 		const budgetUsd = input.budgetUsd ?? DEFAULT_BUDGET_USD;
 		if (!(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
-		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId();
-		if (providerId === null) throw new NoWorkspaceProviderError(null);
-		// Throws when the deployment has no such provider.
-		this.workspaceProviders().get(providerId);
+		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
 		// The model is checked before anything is recorded, so a thread never starts on a model it can't call.
 		await this.#loadModel(input.space, input.profile);
 		const threadId = this.#threadId();
@@ -194,7 +217,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.create({
 				threadId,
 				space: input.space,
-				repoUrl: repo.href,
+				repoUrl: `https://github.com/${repo.fullName}`,
 				baseRef: input.ref ?? "main",
 				branch: branchName(task, threadId),
 				profile: { providerId: input.profile.providerId, model: input.profile.model, ...(input.profile.thinking ? { thinking: input.profile.thinking } : {}) },
@@ -208,8 +231,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			});
 			this.store.enqueue(input.operationId, task);
 		});
-		await this.#requestSlot();
-		this.#kick();
+		if (this.#ensureBackend()) {
+			await this.#requestSlot();
+			this.#kick();
+		}
 		return this.status();
 	}
 
@@ -221,6 +246,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			threadId: thread.threadId,
 			state: thread.state,
 			stateReason: thread.stateReason,
+			stateDetail: thread.stateDetail,
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch, baseSha: thread.baseSha },
 			profile: thread.profile,
 			workspaceProvider: thread.providerId,
@@ -351,17 +377,28 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/**
 	 * pi's agent events for the conversation, as newline-delimited JSON: a
-	 * `snapshot` first, then one line per commit, until the reader cancels.
-	 * For the web app to follow a thread live.
+	 * `snapshot` first, then one line per commit, until the reader cancels,
+	 * with the output of `bash` and `test` as it is printed (`output`) in
+	 * between. For the web app to follow a thread live.
 	 */
 	async events(): Promise<ReadableStream<Uint8Array>> {
 		await this.lifecycle.start();
 		const stream = await this.harness.session().events();
 		const encoder = new TextEncoder();
 		const line = (value: unknown) => encoder.encode(`${JSON.stringify(value)}\n`);
+		const listeners = this.#outputListeners;
+		let listener: ((event: CodingOutputEvent) => void) | null = null;
 		return new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(line(stream.snapshot));
+				listener = (event) => {
+					try {
+						controller.enqueue(line({ type: "output", ...event }));
+					} catch {
+						if (listener) listeners.delete(listener);
+					}
+				};
+				listeners.add(listener);
 				stream.start(async (events) => {
 					try {
 						controller.enqueue(line({ type: "events", events }));
@@ -376,6 +413,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				});
 			},
 			cancel() {
+				if (listener) listeners.delete(listener);
 				void stream.stop();
 			},
 		});
@@ -442,7 +480,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** A failed or stopped thread with new input waits for a slot again. Runs in the caller's transaction. */
 	#reopen(): void {
 		const thread = this.store.required();
-		if (thread.state === "failed" || (thread.state === "idle" && thread.slot === "none")) this.store.update({ state: thread.slot === "queued" ? "queued" : "provisioning", stateReason: null, budgetStopped: false });
+		if (thread.state === "failed" || (thread.state === "idle" && thread.slot === "none")) this.store.update({ state: thread.slot === "queued" ? "queued" : "provisioning", stateReason: null, stateDetail: null, budgetStopped: false });
 	}
 
 	/** Runs the `advance` job now, and in memory at once. */
@@ -494,7 +532,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (thread.state === "provisioning" && thread.slot !== "held") this.store.update({ state: "idle" });
 			return;
 		}
-		if (thread.slot === "none") await this.#requestSlot();
+		if (thread.slot === "none") {
+			if (!this.#ensureBackend()) return;
+			await this.#requestSlot();
+		}
 		thread = this.store.required();
 		if (thread.slot !== "held") return;
 		try {
@@ -509,8 +550,33 @@ export class CodingThreadDO extends DurableObject<Env> {
 			// Such as a model provider removed from the space since: the thread can't go on until it is continued.
 			console.warn(JSON.stringify({ event: "pim.coding.turn_not_started", thread: thread.threadId, error: String(error) }));
 			if (this.store.required().currentOperation !== null) return;
-			this.store.update({ state: "failed", stateReason: `turn: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) });
+			this.store.update({ state: "failed", stateReason: "turn", stateDetail: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
 			await this.#giveBack({ keepVolume: true });
+		}
+	}
+
+	/**
+	 * Whether the deployment has the thread's workspace backend. A thread
+	 * started while it had none takes the default once there is one. Without
+	 * one the thread fails with `no_backend` and says what to set up; it can
+	 * be continued once that's done.
+	 */
+	#ensureBackend(): boolean {
+		const thread = this.store.required();
+		const registry = this.workspaceProviders();
+		let id = thread.providerId;
+		const fallback = registry.defaultId();
+		if (id === NO_BACKEND && fallback !== null) {
+			id = fallback;
+			this.store.update({ providerId: id });
+		}
+		try {
+			registry.get(id);
+			return true;
+		} catch (error) {
+			if (!(error instanceof NoWorkspaceBackendError)) throw error;
+			this.store.update({ state: "failed", stateReason: error.code, stateDetail: error.message });
+			return false;
 		}
 	}
 
@@ -642,18 +708,19 @@ export class CodingThreadDO extends DurableObject<Env> {
 			at: this.now(),
 		};
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ currentOperation: null, state, stateReason: reason });
+			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: null });
 			this.store.recordEvent(event.type, event);
 			if (budget) this.store.recordEvent("app.budget_stop", { budgetUsd: thread.budgetUsd, spentUsd: thread.spentUsd });
 		});
 		if (budget) await this.#write("app.budget_stop", { budgetUsd: thread.budgetUsd, spentUsd: thread.spentUsd });
+		if (state === "failed") await this.#giveBack({ keepVolume: true });
+		else if (this.store.inboxSize() === 0) await this.#report("idle");
+		// Last, so whoever hears of the turn's end finds the slot already given back or idle.
 		try {
 			await this.eventSink().emit(event);
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.sink_failed", operation, error: String(error) }));
 		}
-		if (state === "failed") await this.#giveBack({ keepVolume: true });
-		else if (this.store.inboxSize() === 0) await this.#report("idle");
 	}
 
 	/** Stops the turn under way: kills its commands, aborts pi's run and waits for the turn to end. */
@@ -687,7 +754,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.state === "archived") return;
 		const aborted = error instanceof Error && / was stopped:/.test(error.message);
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
-		this.store.update(aborted ? { state: "idle", stateReason: "aborted" } : { state: "failed", stateReason: `workspace: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) });
+		this.store.update(
+			aborted
+				? { state: "idle", stateReason: "aborted" }
+				: error instanceof NoWorkspaceBackendError
+					? { state: "failed", stateReason: error.code, stateDetail: error.message }
+					: { state: "failed", stateReason: "workspace", stateDetail: (error instanceof Error ? error.message : String(error)).slice(0, 500) },
+		);
 		if (!aborted) await this.#giveBack({ keepVolume: true });
 	}
 
@@ -801,9 +874,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			() => false,
 		);
 		if (cloned) return;
-		const url = await this.cloneUrl(thread);
-		await git(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS });
-		await git(workspace, ["fetch", "origin", thread.baseRef], { timeoutMs: CLONE_TIMEOUT_MS });
+		const { url, token } = await this.cloneSource(thread);
+		// The broker token as an HTTP header for these two commands alone: git keeps no copy of it in the repository.
+		const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+		await git(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+		await git(workspace, ["fetch", "origin", thread.baseRef], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
 		await git(workspace, ["checkout", "-B", thread.branch, "FETCH_HEAD"]);
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
 		if (this.store.required().baseSha === null) this.store.update({ baseSha: sha });
@@ -866,6 +941,7 @@ export function codingThread(env: Env, threadId: string): DurableObjectStub<Codi
 export type StartThread = {
 	/** The space the thread belongs to: its owner's ID, which names its Pim and its scheduler. */
 	readonly space: string;
+	/** A GitHub repository, https://github.com/<owner>/<name>: workspaces clone it through Pim's git broker. */
 	readonly repo: string;
 	/** The branch, tag or commit to start from ("main"). */
 	readonly ref?: string;
@@ -879,7 +955,7 @@ export type StartThread = {
 	readonly createdBy: string;
 	/** Repeating a start with the same operation changes nothing. */
 	readonly operationId: string;
-	/** The workspace provider's id (the registry's default). */
+	/** The workspace backend's id (the deployment's default). */
 	readonly workspaceProvider?: string;
 	readonly limits?: Partial<CodingLimits>;
 };
@@ -888,6 +964,8 @@ export type CodingThreadStatus = {
 	readonly threadId: string;
 	readonly state: CodingThreadState;
 	readonly stateReason: string | null;
+	/** What to tell the person about the state, such as how to set up a workspace backend. */
+	readonly stateDetail: string | null;
 	readonly repo: { readonly url: string; readonly ref: string; readonly branch: string; readonly baseSha: string | null };
 	readonly profile: AgentProfile;
 	readonly workspaceProvider: string;
@@ -955,9 +1033,6 @@ export const CODING_PROMPT = `You are a coding agent working in a git repository
 - Your changes are committed for you at the end of each turn; don't push or rewrite history.
 - When you finish, say briefly what you changed, how you checked it, and anything left undone.`;
 
-/** The working copy of the repository in the workspace. */
-export const REPO_DIR = `${WORKSPACE_ROOT}/repo`;
-
 /** What `continue` tells the model. */
 export const CONTINUE_TEXT = "Continue where you left off.";
 
@@ -965,6 +1040,9 @@ export const CONTINUE_TEXT = "Continue where you left off.";
 export const BUDGET_MESSAGE = "Coding thread out of budget";
 
 export const DEFAULT_BUDGET_USD = 3;
+
+/** The workspace provider of a thread started while the deployment had none. */
+const NO_BACKEND = "none";
 
 const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 10_240, pids: 1024, wallClockMin: 240 };
 
@@ -1022,16 +1100,17 @@ function transcriptOf(entries: readonly EntryRecord[]): TranscriptMessage[] {
 }
 
 /** Runs git in the repository (or `cwd`) and returns its output; throws with its error output when it fails. */
-async function git(workspace: Workspace, args: string[], options: { cwd?: string; timeoutMs?: number } = {}): Promise<string> {
+async function git(workspace: Workspace, args: string[], options: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; secret?: string } = {}): Promise<string> {
 	let stdout = "";
 	let stderr = "";
 	let exit: { code: number | null; signal?: string; timedOut?: boolean } | null = null;
-	for await (const event of workspace.exec(["git", ...args], { cwd: options.cwd ?? REPO_DIR, timeoutMs: options.timeoutMs ?? GIT_TIMEOUT_MS, env: { GIT_TERMINAL_PROMPT: "0" } })) {
+	for await (const event of workspace.exec(["git", ...args], { cwd: options.cwd ?? REPO_DIR, timeoutMs: options.timeoutMs ?? GIT_TIMEOUT_MS, env: { GIT_TERMINAL_PROMPT: "0", ...options.env } })) {
 		if (event.type === "stdout") stdout += event.data;
 		else if (event.type === "stderr") stderr += event.data;
 		else if (event.type === "exit") exit = event;
 	}
 	if (exit?.code === 0) return stdout;
 	const how = exit === null ? "ended without an exit" : exit.code === null ? (exit.timedOut ? "timed out" : "was stopped") : `exited ${exit.code}`;
-	throw new Error(`git ${args[0] === "-c" ? "commit" : args[0]} ${how}: ${stderr.trim().slice(-500)}`);
+	const said = options.secret ? stderr.replaceAll(options.secret, "[redacted]") : stderr;
+	throw new Error(`git ${args[0] === "-c" ? "commit" : args[0]} ${how}: ${said.trim().slice(-500)}`);
 }

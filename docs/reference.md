@@ -169,6 +169,12 @@ Public repositories need nothing more. For private ones, and for pushing, make a
 
 Two variables, in the dashboard, set the rules: `PIM_GIT_BRANCH_PREFIX`, another prefix than `pim/` for the branches Pim pushes, or `none` for any; and `PIM_GIT_REPOS`, the repositories coding threads may use, such as `acme/*, me/notes`, every one on github.com when unset. A list Pim can't read allows none.
 
+Coding threads work only with repositories on GitHub, and every workspace clones through the broker: a thread refuses any other repository when it starts.
+
+### Workspaces for coding threads
+
+A coding thread runs its commands in a workspace on a backend the deployment sets up, read from its environment whenever a thread asks, so turning one on needs no flag. The sandbox manager is used when `PIM_CODING_MANAGER_URL` (a variable) and `PIM_CODING_MANAGER_TOKEN` (a secret) are both set; Cloudflare Sandbox, when the Worker has a `Sandbox` binding, which it doesn't today (see [coding-cloudflare-sandbox.md](coding-cloudflare-sandbox.md)). Without a backend, a thread fails with `no_backend` and says what to set; once one is set, continuing the thread uses it. See [`src/coding/workspace/registry.ts`](../src/coding/workspace/registry.ts).
+
 ### Email
 
 Pim can email each person, when they ask for it or for something worth keeping, such as a report. It's off until you set it up with [Cloudflare Email Service](https://developers.cloudflare.com/email-service/): onboard a domain for Email Sending, then add to `wrangler.jsonc`

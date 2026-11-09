@@ -3,8 +3,9 @@ import type { Workspace } from "../src/coding/workspace/types";
 
 /**
  * A git for the in-memory workspace (src/coding/workspace/fake.ts), enough
- * for a coding thread: `clone`, `fetch`, `checkout -B`, `rev-parse HEAD`,
- * `status --porcelain`, `add -A`, `commit` and `diff A B`. It keeps its
+ * for a coding thread and its tools: `clone`, `fetch`, `checkout -B`,
+ * `rev-parse HEAD`, `status`, `add`, `commit`, and `diff A B` or `diff`
+ * of the working tree. It keeps its
  * commits as files under `.git`, so a workspace's kept volume keeps them.
  * Remotes are `fakeRemotes`, by URL; cloning any other fails as a missing
  * repository does.
@@ -12,6 +13,9 @@ import type { Workspace } from "../src/coding/workspace/types";
 
 /** The files each remote's default branch has, by URL. */
 export const fakeRemotes = new Map<string, Record<string, string>>();
+
+/** Each clone, with the environment git ran in. */
+export const fakeClones: { url: string; env: Record<string, string> }[] = [];
 
 type Files = Record<string, string>;
 
@@ -33,9 +37,9 @@ async function readFiles(workspace: Workspace, root: string, dir = root): Promis
 const write = (workspace: Workspace, path: string, text: string) => workspace.writeFile(path, encoder.encode(text));
 const read = async (workspace: Workspace, path: string) => decoder.decode(await workspace.readFile(path));
 
-export const fakeGit: FakeCommandHandler = async ({ argv, cwd, workspace }) => {
+export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace }) => {
 	const args = argv.slice(1);
-	while (args[0] === "-c") args.splice(0, 2);
+	while (args[0] === "-c" || args[0] === "--no-pager") args.splice(0, args[0] === "-c" ? 2 : 1);
 	const [command, ...rest] = args;
 	const objects = (sha: string) => `${cwd}/.git/objects/${sha}`;
 	const commit = async (sha: string) => JSON.parse(await read(workspace, objects(sha))) as Files;
@@ -43,6 +47,7 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, workspace }) => {
 		case "clone": {
 			const [url, dir] = rest.filter((arg) => !arg.startsWith("--"));
 			if (!url || !dir || !fakeRemotes.has(url)) return { stderr: `fatal: repository '${url}' not found\n`, code: 128 };
+			fakeClones.push({ url, env });
 			const root = dir.startsWith("/") ? dir : `${cwd}/${dir}`;
 			await write(workspace, `${root}/.git/origin`, url);
 			return {};
@@ -82,9 +87,10 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, workspace }) => {
 			return { stdout: `[${sha}] ${rest[rest.indexOf("-m") + 1]}\n` };
 		}
 		case "diff": {
+			// `diff A B` between commits; with none, the working tree against HEAD.
 			const [from, to] = rest;
-			const a = await commit(from!);
-			const b = await commit(to!);
+			const a = await commit(from ?? (await read(workspace, `${cwd}/.git/HEAD`)));
+			const b = to ? await commit(to) : await readFiles(workspace, cwd);
 			const out = [...new Set([...Object.keys(a), ...Object.keys(b)])]
 				.sort()
 				.filter((path) => a[path] !== b[path])

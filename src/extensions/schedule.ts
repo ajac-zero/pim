@@ -28,9 +28,9 @@ type TriggerView = ReturnType<TriggerApi["get"]>;
 type TimeSource = Extract<TriggerSpec["source"], { kind: "time" }>;
 
 const TABLE = "pim_scheduled_tasks";
-const SCHEMA = `CREATE TABLE IF NOT EXISTS ${TABLE} (trigger_id TEXT PRIMARY KEY, label TEXT)`;
+const SCHEMA = `CREATE TABLE IF NOT EXISTS ${TABLE} (trigger_id TEXT PRIMARY KEY, label TEXT, at INTEGER NOT NULL DEFAULT 0)`;
 
-/** The triggers `schedule_task` made, with the label each was given, if any. Its table is made with the first. */
+/** The triggers `schedule_task` made, with the label each was given, if any, and whether it was given a time (`at`) rather than a delay. Its table is made with the first. */
 export class ScheduledTasks {
 	readonly #sql: SqlStorage;
 	#made = false;
@@ -39,18 +39,18 @@ export class ScheduledTasks {
 		this.#sql = sql;
 	}
 
-	mark(triggerId: string, label: string | null): void {
+	mark(triggerId: string, label: string | null, at = false): void {
 		this.#sql.exec(SCHEMA);
 		this.#made = true;
-		this.#sql.exec(`INSERT OR IGNORE INTO ${TABLE} (trigger_id, label) VALUES (?, ?)`, triggerId, label);
+		this.#sql.exec(`INSERT OR IGNORE INTO ${TABLE} (trigger_id, label, at) VALUES (?, ?, ?)`, triggerId, label, at ? 1 : 0);
 	}
 
 	/** The task a trigger is, if `schedule_task` made it. */
-	of(triggerId: string): { readonly label: string | null } | undefined {
+	of(triggerId: string): { readonly label: string | null; readonly at: boolean } | undefined {
 		this.#made ||= this.#sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", TABLE).toArray().length > 0;
 		if (!this.#made) return undefined;
-		const [row] = this.#sql.exec(`SELECT label FROM ${TABLE} WHERE trigger_id = ?`, triggerId).toArray();
-		return row ? { label: row.label === null ? null : String(row.label) } : undefined;
+		const [row] = this.#sql.exec(`SELECT label, at FROM ${TABLE} WHERE trigger_id = ?`, triggerId).toArray();
+		return row ? { label: row.label === null ? null : String(row.label), at: row.at === 1 } : undefined;
 	}
 }
 
@@ -99,7 +99,8 @@ export function describeTask(host: Pick<ScheduleHost, "tasks" | "chatAgent">, tr
 	const task = host.tasks().of(trigger.id);
 	return {
 		id: trigger.id,
-		type: source.schedule === "once" ? "scheduled" : source.schedule,
+		// As the agents SDK typed schedules: one given a time is "scheduled", any other one-time task "delayed".
+		type: source.schedule === "once" ? (task?.at ? "scheduled" : "delayed") : source.schedule,
 		next: next === null ? null : new Date(next).toISOString(),
 		...(source.schedule === "cron" ? { cron: source.expression, ...(source.timeZone === "UTC" ? {} : { timeZone: source.timeZone }) } : {}),
 		...(source.schedule === "interval" ? { intervalSeconds: source.everyMs / 1000 } : {}),
@@ -212,7 +213,7 @@ export function scheduleExtension(host: ScheduleHost) {
 					},
 					`schedule_task:${call.conversationId}:${call.taskId}`,
 				);
-				host.tasks().mark(trigger.id, label || null);
+				host.tasks().mark(trigger.id, label || null, at !== undefined);
 				return json(describeTask(host, trigger));
 			} catch (error) {
 				// Such as a task's conversation, or another agent's group chat, which no trigger delivers to.

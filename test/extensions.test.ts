@@ -6,7 +6,7 @@ import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
 import { nord } from "../src/extensions/themes/nord";
 import { PimThemes, type Theme, type ThemeList } from "../src/themes";
-import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse, widgetsShown } from "./helpers";
+import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse, triggersOn, widgetsShown } from "./helpers";
 import { faux, ledger, outbox, utility } from "./worker";
 
 type Agent = { id: string; name: string; majordomo: boolean; memoryScope: string };
@@ -80,6 +80,7 @@ describe("extensions", () => {
 	});
 
 	it("shows Pim's own widgets in a chat with what belongs to its agent's chats", async () => {
+		await triggersOn();
 		const tracker = (await post("/agents", { name: "Tracker", instructions: "Track goals." })).body as Agent;
 		const coach = (await post("/agents", { name: "Run coach", contacts: [tracker.id] })).body as Agent;
 		const chat = (await post("/sessions", { agent: coach.id })).body.id;

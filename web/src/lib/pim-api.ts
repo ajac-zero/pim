@@ -994,24 +994,6 @@ export type PimNotification = {
   readAt: number | null;
 };
 
-/** Work Pim scheduled for itself: once, or repeating on a cron in UTC. */
-export type PimSchedule = {
-  id: string;
-  type: "scheduled" | "delayed" | "cron" | "interval";
-  /** When it runs next, as an ISO date. */
-  next: string;
-  cron?: string;
-  intervalSeconds?: number;
-  /** The chat that scheduled it: where it runs, unless it starts a new chat each time. */
-  session: string;
-  label: string | null;
-  instruction: string;
-  /** Each run starts a new chat with the same agent; it outlives the chat that scheduled it. */
-  newChat: boolean;
-  /** The agent each new chat is with, when the majordomo scheduled it for another agent. */
-  agent?: string;
-};
-
 /*
  * Triggers, as the API in docs/triggers.md ("The API") gives them. The
  * routes exist only where a space's triggers are on; elsewhere they answer
@@ -1165,16 +1147,6 @@ export type Trigger = {
     reason: string | null;
   };
   grant: { required: boolean; state: TriggerGrantState };
-  /** A shadow of a schedule or connector watch: owned by it, or, once cut over, owning its work. It changes only through the migration while its phase is `shadow`. */
-  migration: {
-    kind: "schedule" | "watch";
-    legacyId: string;
-    owner: "legacy" | "trigger";
-    phase: string;
-    enableable: boolean;
-    /** When the owner last changed; null while it never did. */
-    ownerSince: number | null;
-  } | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -1227,28 +1199,6 @@ export type TriggerRun = {
   unknownAnswers: number;
   createdAt: number;
   updatedAt: number;
-};
-
-/**
- * Where one schedule or connector watch stands in its move to triggers
- * (docs/triggers.md, "Where each item stands"): ids, a short label and the
- * reason only, never its instruction.
- */
-export type TriggerMigrationItem = {
-  kind: "schedule" | "watch";
-  legacyId: string;
-  /** The schedule's label (null without one), or the watch's event name. */
-  label: string | null;
-  agentId: string | null;
-  status: "migratable" | "unsupported" | "deferred" | "migrated" | "given_back";
-  /** Which side delivers it now. */
-  owner: "legacy" | "trigger";
-  /** Why it is still its schedule's or watch's, such as `chat_unavailable` or `stricter_ingress`. */
-  reason: string | null;
-  /** A schedule's next firing, as its alarm has it; null for a watch. */
-  nextFiringAt: number | null;
-  /** Its live trigger: the shadow, or the trigger that took it over. */
-  triggerId: string | null;
 };
 
 /** A dry run: what a trigger would do, computed without writing or running anything. */
@@ -1889,14 +1839,6 @@ export const pim = {
     ),
   markRead: (id: string) =>
     call<PimNotification>(`/notifications/${id}/read`, { method: "POST" }),
-  schedules: () =>
-    call<{ schedules: PimSchedule[] }>("/schedules").then(
-      (body) => body.schedules,
-    ),
-  cancelSchedule: (id: string) =>
-    call<{ deleted: boolean }>(`/schedules/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    }),
   /** A page of triggers, oldest first; 404 where the space's triggers are off. */
   triggers: (filters: TriggerFilters = {}, cursor?: string, limit = 20) => {
     const query = new URLSearchParams({ limit: String(limit) });
@@ -1953,14 +1895,6 @@ export const pim = {
     if (cursor) query.set("cursor", cursor);
     return call<{ runs: TriggerRun[]; nextCursor: string | null }>(
       `/triggers/${encodeURIComponent(id)}/runs?${query}`,
-    );
-  },
-  /** A page of where each schedule and watch stands in its move to triggers. */
-  triggerMigration: (cursor?: string, limit = 50) => {
-    const query = new URLSearchParams({ limit: String(limit) });
-    if (cursor) query.set("cursor", cursor);
-    return call<{ items: TriggerMigrationItem[]; nextCursor: string | null }>(
-      `/triggers/migration?${query}`,
     );
   },
   pushKey: () =>

@@ -231,26 +231,10 @@ export const google = definePimExtension({ id: "test.google", name: "Test Google
 /** How far tests have moved the triggers' clock on from the time (test/triggers-host.test.ts). */
 export const triggerClock = { offset: 0 };
 
-/** How far tests have moved the clock the migration's sweeps keep their hour by, apart from the triggers'. */
-export const sweepClock = { offset: 0 };
-
 export class Pim extends RealPim {
 	/** The triggers' clock, which tests move on to make triggers due without waiting. */
 	protected override triggerClock(): number {
 		return Date.now() + triggerClock.offset;
-	}
-
-	/**
-	 * The callback schedules `schedule_task` made before it made triggers
-	 * named, which the agents SDK only schedules for a method it finds: here,
-	 * so tests can make such a schedule as a space may still hold one. Pim
-	 * has no such method, so one fires nothing there; here too.
-	 */
-	async runScheduledTask(): Promise<void> {}
-
-	/** The migration's sweeps' clock, which tests move on to make the hourly sweep due. */
-	protected override migrationSweepClock(): number {
-		return Date.now() + sweepClock.offset;
 	}
 
 	/** The deployment's extensions, and the tests' own. */

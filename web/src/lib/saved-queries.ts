@@ -22,7 +22,6 @@ const SAVED = new Set(
     ["account"],
     ["computer"],
     ["artifacts"],
-    ["schedules"],
     ["skills"],
     ["visits"],
     ["profile"],

@@ -512,7 +512,16 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 				const events = await agentd.startExec(target(s), spec, graceMs, gone.signal)
 				res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' })
 				res.flushHeaders()
-				for await (const ev of events) res.write(`${JSON.stringify(ev)}\n`)
+				// A silent command (a device-code sign-in polling for minutes) would hit Cloudflare's 100 s idle limit (524): a blank line, which clients skip, keeps the stream alive and the session in use.
+				const beat = setInterval(() => {
+					s.lastUsed = now()
+					if (!res.writableEnded) res.write('\n')
+				}, 15000)
+				try {
+					for await (const ev of events) res.write(`${JSON.stringify(ev)}\n`)
+				} finally {
+					clearInterval(beat)
+				}
 				return res.end()
 			}
 			if (route === 'PUT file') {

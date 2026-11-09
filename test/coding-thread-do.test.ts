@@ -16,6 +16,7 @@ import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
+import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
 import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
 
@@ -982,6 +983,108 @@ describe("a Codex thread", () => {
 		// The id Pim gave the first turn, which its command line carries, as Codex hadn't named its session yet.
 		expect(runs[0]!.argv.join(" ")).toContain(signals[0]![2]);
 		expect(await storedLogin()).toBe(LOGIN);
+	});
+});
+
+describe("a Mistral Vibe thread", () => {
+	// The thread runs Vibe in its in-memory workspace, where `/bin/sh` is a script that prints the streaming output of
+	// test/fixtures/vibe/ and leaves the export.json beside it that Vibe would. The person's API key is in the coding
+	// vault for real.
+	type Run = { argv: string[]; env: Record<string, string>; cwd: string };
+	const runs: Run[] = [];
+	let vibe: (run: Run & { workspace: Parameters<FakeCommandHandler>[0]["workspace"]; out: string }) => Promise<FakeCommandResult>;
+	const KEY = "THREADMISTRALKEY0123456789abcdef";
+	const started: Stub[] = [];
+	const encoder = new TextEncoder();
+
+	codingWorkspaces.register("/bin/sh", async ({ argv, env, cwd, workspace }) => {
+		runs.push({ argv, env, cwd });
+		// The shell's `$1` is the run's directory, where Vibe writes its export.
+		return vibe({ argv, env, cwd, workspace, out: `${argv[4]}/out` });
+	});
+
+	/** Vibe's run that printed `name` and left its export. */
+	const printsRun =
+		(name: "turn" | "resume" | "auth", code = 0) =>
+		async ({ workspace, out }: { workspace: Parameters<FakeCommandHandler>[0]["workspace"]; out: string }) => {
+			await workspace.writeFile(`${out}/export.json`, encoder.encode(vibeExport(name)));
+			await workspace.writeFile(`${out}/session/meta.json`, encoder.encode(VIBE_META));
+			return { stdout: vibeOutput(name), code };
+		};
+
+	async function startVibe() {
+		const id = crypto.randomUUID();
+		await codingScheduler(env, OWNER).registerThread({ threadId: id, createdBy: { type: "person" }, parent: null, chat: null, harness: "mistral-vibe", task: "Fix the greeting test", repo: REPO, ref: "main", budgetUsd: 3, createdAt: Date.now() });
+		const stub = codingThread(env, id);
+		started.push(stub);
+		await stub.start(startInput(id, { space: OWNER, harness: "mistral-vibe", task: "Fix the greeting test" }));
+		return { id, stub };
+	}
+
+	beforeEach(async () => {
+		runs.length = 0;
+		vibe = printsRun("turn");
+		expect((await api("/coding/vault/mistral-vibe/api-key", { method: "PUT", body: JSON.stringify({ apiKey: KEY }) })).status).toBe(200);
+	});
+
+	afterEach(async () => {
+		for (const stub of started.splice(0)) await stub.archive().catch(() => {});
+		await codingVault(env).delete(OWNER, "mistral-vibe");
+	});
+
+	it("runs a turn with the person's key, keeps its transcript, tests and cost, then resumes Vibe's session, counting only what the new run cost", async () => {
+		const { id, stub } = await startVibe();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "completed", said: "Fixed `greet` to end with an exclamation mark; the greeting test passes now." });
+		const [first] = runs;
+		expect(first).toMatchObject({ cwd: REPO_DIR, env: { HOME: "/workspace", MISTRAL_API_KEY: KEY, VIBE_ENABLE_MCP: "false" } });
+		expect(first!.argv[7]).toBe("vibe");
+		expect(first!.argv).not.toContain("--resume");
+		expect(first!.argv[5]).toContain(`on the branch ${(await stub.status()).repo.branch}`);
+		expect(first!.argv[6]).toBe("Fix the greeting test");
+		expect(JSON.stringify(first!.argv)).not.toContain(KEY);
+		const spec = (await workspaceOf(id)) as unknown as { spec: { egress: { allow: string[] } } };
+		expect(spec.spec.egress.allow).toEqual(expect.arrayContaining(["api.mistral.ai", "registry.npmjs.org"]));
+		// The run's directory, with its export, is gone after.
+		await expect((await workspaceOf(id)).readFile(`${first!.argv[4]}/out/export.json`)).rejects.toThrow();
+		const transcript = await inside(stub, (thread) => thread.transcript());
+		expect(transcript.flatMap((message) => message.parts).find((part) => part.type === "tool-call" && part.name === "file_system.bash")).toMatchObject({ arguments: { command: "npm test" } });
+		expect((await stub.tests()).map((run) => [run.command, run.exitCode])).toEqual([
+			["npm test", 1],
+			["npm test", 0],
+		]);
+		// What the run cost, as Vibe estimated it, with its tokens, cached input apart.
+		const log = await stub.log();
+		expect(log.filter((event) => event.kind === "model_call")).toEqual([expect.objectContaining({ provider: "mistral-vibe", model: "mistral-vibe-cli-latest", costUsd: 0.007125, input: 2500, output: 200, cacheRead: 12500 })]);
+		expect((await stub.status()).spentUsd).toBeCloseTo(0.007125, 12);
+
+		// A steer is the next turn, which resumes the session Vibe named; its export counts that run alone.
+		vibe = printsRun("resume");
+		await stub.steer("Now say what you changed", { operationId: "steer-1" });
+		const [, second] = await turns(id, 2);
+		expect(second).toMatchObject({ outcome: "completed", operationId: "steer-1" });
+		expect(runs[1]!.argv.slice(runs[1]!.argv.indexOf("--resume"), runs[1]!.argv.indexOf("--resume") + 2)).toEqual(["--resume", VIBE_SESSION]);
+		const calls = (await stub.log()).filter((event) => event.kind === "model_call");
+		expect(calls).toHaveLength(2);
+		expect(calls[1]).toMatchObject({ input: 500, output: 40, cacheRead: 3500 });
+		expect(calls[1]!.costUsd).toBeCloseTo(0.001575, 12);
+		expect((await stub.status()).spentUsd).toBeCloseTo(0.0087, 12);
+		// The key is nowhere in the thread's tables, its log or its transcript.
+		expect(await everything(stub)).not.toContain(KEY);
+		expect(JSON.stringify(await stub.log())).not.toContain(KEY);
+		expect(JSON.stringify(await inside(stub, (thread) => thread.transcript()))).not.toContain(KEY);
+	});
+
+	it("waits for the person when Mistral refused the key, and goes on once continued", async () => {
+		vibe = printsRun("auth", 1);
+		const { id, stub } = await startVibe();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "needs_approval", reason: "login_required", state: "waiting_input" });
+		expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required" });
+		vibe = printsRun("turn");
+		await stub.continue({ operationId: "after-key" });
+		const [, again] = await turns(id, 2);
+		expect(again).toMatchObject({ outcome: "completed", operationId: "after-key" });
 	});
 });
 

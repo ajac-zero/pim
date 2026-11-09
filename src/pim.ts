@@ -253,6 +253,9 @@ import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, 
 /** The hook that carries a chat on in a new one when compaction would shorten it (`#continuationExtension`). */
 const CONTINUATION_EXTENSION = "pim.continuation";
 
+/** Marks a chat that is archived as soon as it stops working: its meta key, then the chat's id. */
+const ARCHIVE_WHEN_IDLE_KEY = "archive-when-idle:";
+
 /** Starts the operation id of an input that wakes the agent of a finished task. */
 const WAKE = "wake:";
 
@@ -826,9 +829,10 @@ export class Pim extends DurableAgent<Env> {
 					roleOf: (session) => this.#roleOf(session),
 					delegates: (session) => this.#delegates(session),
 					start: (requester, batch, tasks, options) => this.#startTasks(requester, batch, tasks, options),
-					archive: (conversation) => {
-						this.store.archiveSession(conversation);
-						this.broadcastMessage({ type: "sessions" });
+					archive: async (conversation) => {
+						// A chat still at work is archived once it stops, so that what it says on the way does not list it again.
+						if (await this.harness.session(conversation).busy()) this.store.setMeta(`${ARCHIVE_WHEN_IDLE_KEY}${conversation}`, "1");
+						else this.#archive(conversation);
 					},
 					tasks: this.#tasks,
 				}),
@@ -2063,7 +2067,20 @@ export class Pim extends DurableAgent<Env> {
 			await this.images.delete(kept);
 			throw error;
 		}
-		if (receipt.accepted && from === "user") this.store.setMeta(awaitingKey(session), "1");
+		if (receipt.accepted && from === "user") {
+			this.store.setMeta(awaitingKey(session), "1");
+			// Something said in a chat lists it again: an archive waiting for it to stop no longer applies.
+			this.store.deleteMeta(`${ARCHIVE_WHEN_IDLE_KEY}${session}`);
+		}
+		if (receipt.accepted) {
+			void this.keepAliveWhile(async () => {
+				await this.harness.wait(receipt.operationId, { session });
+				const key = `${ARCHIVE_WHEN_IDLE_KEY}${session}`;
+				if (this.store.meta(key) === undefined || (await this.harness.session(session).busy())) return;
+				this.store.deleteMeta(key);
+				this.#archive(session);
+			});
+		}
 		if (receipt.accepted && waking) {
 			this.#tasks.reopen(waking.id, receipt.operationId);
 			this.#watchTask(session, receipt.operationId);
@@ -2075,6 +2092,12 @@ export class Pim extends DurableAgent<Env> {
 			await this.images.delete(kept);
 		}
 		return receipt;
+	}
+
+	/** Archives a chat as the person's Archive does by hand. */
+	#archive(session: string): void {
+		this.store.archiveSession(session);
+		this.broadcastMessage({ type: "sessions" });
 	}
 
 	/** Gives pi input for a conversation, traced as part of its run (see ./telemetry.ts). */

@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"019a5f3e-7c21-7d40-9b8e-2f4a6c8d0e12"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Looking at the test first."}}
+{"type":"error","message":"stream disconnected before completion: Your input exceeds the context window of this model. Please adjust your input and try again."}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion: Your input exceeds the context window of this model. Please adjust your input and try again."}}

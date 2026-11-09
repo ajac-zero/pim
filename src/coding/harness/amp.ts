@@ -64,7 +64,7 @@ export const amp: CliHarness = {
 			`--execute=${turn.resume ? turn.prompt : `<instructions from="Pim">\n${turn.instructions}\n</instructions>\n\n${turn.prompt}`}`,
 		];
 	},
-	parser: (turn) => new StreamJsonParser({ provider: "amp", model: turn?.model ?? "amp", loginFailure: LOGIN_FAILURE }),
+	parser: (turn) => new StreamJsonParser({ provider: "amp", model: turn.model ?? "amp", loginFailure: LOGIN_FAILURE }),
 	reportsCost: false,
 	shellTool: "shell_command",
 	// The managed settings turn update checks off too; this also stops the check `amp update` would make.

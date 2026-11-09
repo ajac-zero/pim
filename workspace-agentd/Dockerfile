@@ -1,5 +1,20 @@
 # Minimal workspace image: the tools a coding agent needs, the coding harness CLIs, plus agentd as the entrypoint.
 # Build from the repository root:  docker build -t pim-workspace workspace-agentd
+
+# Mistral Vibe's CLI, unmodified, for coding threads whose harness is `mistral-vibe` (docs/coding-vibe.md).
+# Pinned: bump it on purpose, after checking `vibe --help`, its streaming output and export.json against
+# src/coding/harness/vibe.ts. It needs Python 3.12 or later, which bookworm doesn't have, so uv (pinned too)
+# installs it with a Python of its own, both under /opt/vibe, in a stage of its own: the image keeps
+# /opt/vibe and not uv.
+ARG UV_VERSION=0.12.9
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM node:22-bookworm-slim AS vibe
+ARG VIBE_VERSION=3.1.0
+COPY --from=uv /uv /usr/local/bin/uv
+RUN UV_PYTHON_INSTALL_DIR=/opt/vibe/python UV_TOOL_DIR=/opt/vibe/tools UV_TOOL_BIN_DIR=/opt/vibe/bin \
+	uv tool install --no-cache --compile-bytecode --managed-python --python 3.12 "mistral-vibe==${VIBE_VERSION}"
+
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
@@ -35,6 +50,11 @@ COPY amp-managed-settings.json /etc/ampcode/managed-settings.json
 RUN npm install -g "@ampcode/cli@${AMP_VERSION}" \
 	&& npm cache clean --force \
 	&& amp --version
+
+# Mistral Vibe, from its stage above, at the same path: its scripts name their Python by it.
+COPY --from=vibe /opt/vibe /opt/vibe
+RUN ln -s /opt/vibe/bin/vibe /usr/local/bin/vibe \
+	&& vibe --version
 
 # Node's image already has a uid 1000 user; agentd runs as uid 10001.
 RUN groupadd --gid 10001 workspace \

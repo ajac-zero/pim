@@ -25,7 +25,7 @@ const parse = (text: string) => {
 	return text.split("\n").flatMap((line) => parser.parseLine(line));
 };
 
-const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, model: null, instructions: "Don't push." };
+const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, model: null, instructions: "Don't push.", sessionBefore: { costUsd: 0, usage: null } };
 
 describe("Claude Code's stream-json", () => {
 	it("is read into the session, the text as it is written, messages with their tools, retries, refusals and the result", () => {

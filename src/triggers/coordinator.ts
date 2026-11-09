@@ -468,7 +468,7 @@ export class TriggerCoordinator {
 	 */
 	nextWakeAt(): number | null {
 		const now = this.#now();
-		const times: (number | null)[] = [this.#store.nextTimeWake()];
+		const times: (number | null)[] = [this.#store.nextTimeWake(), this.#store.nextWatchExpiry()];
 		times.push(nullable(this.#sql.exec(`SELECT MIN(check_at) AS at FROM pim_trigger_runs WHERE phase IN (${inList(SLOT_PHASES)})`).one().at));
 		times.push(nullable(this.#sql.exec("SELECT MIN(dispatch_until) AS at FROM pim_trigger_runs WHERE phase = 'preparing' AND dispatch_until > ?", now).one().at));
 		if (this.#adoptable(1).length > 0 || this.#closable(1).length > 0) times.push(now);
@@ -483,6 +483,7 @@ export class TriggerCoordinator {
 	// Admission
 
 	#admit(report: TickReport): void {
+		this.#store.endExpiredWatches();
 		for (const due of this.#store.dueTimeTriggers({ now: this.#now(), limit: this.#batch.admissions })) {
 			const tick = this.#store.admitDueTime({ id: due.id, generation: due.generation });
 			if (!("occurrence" in tick) || tick.occurrence === null) continue;

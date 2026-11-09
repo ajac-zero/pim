@@ -1,18 +1,28 @@
 import { Docker } from './docker.js'
-import { createManager, defaultMaxConcurrent, selfCheck } from './manager.js'
+import { createManager, defaultMaxConcurrent, detectQuotaMode, selfCheck } from './manager.js'
+import { DEFAULT_DISK_MIB } from './template.js'
 
 const env = process.env
 const need = (k) => env[k] || (console.error(`${k} is required`), process.exit(1))
+const token = need('MANAGER_TOKEN')
 const cfg = {
-	token: need('MANAGER_TOKEN'),
-	allowedImages: need('ALLOWED_IMAGES').split(',').map((s) => s.trim()).filter(Boolean),
+	token,
+	// Rotating MANAGER_TOKEN without setting this changes every derived agentd token, and a
+	// restarted manager can then no longer reach the sessions that were running.
+	agentdSecret: env.AGENTD_TOKEN_SECRET || token,
+	allowedImages: (env.ALLOWED_IMAGES || 'pim-workspace:local').split(',').map((s) => s.trim()).filter(Boolean),
+	defaultDiskMiB: Number(env.DEFAULT_DISK_MIB || DEFAULT_DISK_MIB),
 	dockerRoot: env.DOCKER_ROOT ?? '/var/lib/docker',
 	minFreePct: Number(env.MIN_FREE_DISK_PCT ?? 15),
 	maxConcurrent: Number(env.MAX_CONCURRENT || defaultMaxConcurrent()),
+	maxTotalWorkspaceMiB: Number(env.MAX_TOTAL_WORKSPACE_GB ?? 100) * 1024,
 	idleMin: Number(env.IDLE_MIN ?? 30),
+	keptVolumeDays: Number(env.KEPT_VOLUME_DAYS ?? 7),
 	proxyContainer: env.EGRESS_PROXY_CONTAINER ?? 'egress-proxy',
 	proxyUrl: env.EGRESS_PROXY_URL ?? 'http://egress-proxy:3128',
-	workspaceTmpfs: env.WORKSPACE_TMPFS === '1',
+	managerContainer: env.MANAGER_CONTAINER || undefined,
+	agentdPort: Number(env.AGENTD_PORT || 8787),
+	agentdReadyMs: Number(env.AGENTD_READY_MS || 30000),
 }
 const adminUrl = env.EGRESS_PROXY_ADMIN_URL ?? 'http://egress-proxy:3129'
 const adminToken = need('PROXY_ADMIN_TOKEN')
@@ -25,11 +35,17 @@ const proxyAdmin = { set: (ip, hosts) => adminCall('PUT', ip, { hosts }), del: (
 const docker = new Docker(env.DOCKER_HOST ?? env.DOCKER_SOCKET)
 try {
 	await selfCheck(docker, env.PROBE_IMAGE ?? 'busybox:1.36')
+	const mode = env.WORKSPACE_TMPFS === '1' ? 'tmpfs' : env.DISK_QUOTA_MODE || 'auto'
+	if (!['auto', 'volume', 'measure', 'tmpfs'].includes(mode)) throw new Error(`DISK_QUOTA_MODE must be auto, volume, measure or tmpfs, not ${mode}`)
+	cfg.quotaMode = mode === 'auto' ? await detectQuotaMode(docker) : mode
 } catch (e) {
 	console.error(e.message)
 	process.exit(1)
 }
 const manager = createManager({ docker, cfg, proxyAdmin })
 await manager.reconcile()
-setInterval(() => manager.reap().catch(console.error), 30000).unref()
-manager.server.listen(Number(env.PORT ?? 8080), env.HOST ?? '0.0.0.0', () => console.log('sandbox-manager ready (runsc verified)'))
+const every = (sec, fn) => setInterval(() => fn().catch((e) => console.error(e)), sec * 1000).unref()
+every(30, manager.reap)
+every(30, manager.reattach)
+every(Number(env.DISK_CHECK_SEC || 60), manager.checkDisk)
+manager.server.listen(Number(env.PORT ?? 8080), env.HOST ?? '0.0.0.0', () => console.log(`sandbox-manager ready (runsc verified, disk quota: ${cfg.quotaMode})`))

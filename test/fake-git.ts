@@ -4,8 +4,8 @@ import type { Workspace } from "../src/coding/workspace/types";
 /**
  * A git for the in-memory workspace (src/coding/workspace/fake.ts), enough
  * for a coding thread and its tools: `clone`, `fetch`, `checkout -B`,
- * `rev-parse HEAD`, `status`, `add`, `commit`, and `diff A B` or `diff`
- * of the working tree. It keeps its
+ * `rev-parse HEAD`, `status`, `add`, `commit`, `diff A B` or `diff`
+ * of the working tree, and `update-ref` and `bundle create` for pushes. It keeps its
  * commits as files under `.git`, so a workspace's kept volume keeps them.
  * Remotes are `fakeRemotes`, by URL; cloning any other fails as a missing
  * repository does, printing the HTTP header it was given, as a verbose git
@@ -34,6 +34,9 @@ async function readFiles(workspace: Workspace, root: string, dir = root): Promis
 	}
 	return files;
 }
+
+/** A fake commit's name as git's: 40 hex digits. */
+export const hex40 = (sha: string) => [...encoder.encode(sha)].map((byte) => byte.toString(16).padStart(2, "0")).join("").padEnd(40, "0").slice(0, 40);
 
 const write = (workspace: Workspace, path: string, text: string) => workspace.writeFile(path, encoder.encode(text));
 const read = async (workspace: Workspace, path: string) => decoder.decode(await workspace.readFile(path));
@@ -70,6 +73,24 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 		}
 		case "rev-parse":
 			return { stdout: `${await read(workspace, `${cwd}/.git/HEAD`)}\n` };
+		case "update-ref": {
+			const [ref, sha] = rest;
+			await write(workspace, `${cwd}/.git/${ref}`, sha!);
+			return {};
+		}
+		case "bundle": {
+			// `bundle create <file> [<base>..]<ref>`: a bundle git could make, with each commit's name as 40 hex digits.
+			const [, file, range] = rest;
+			const [base, ref] = range!.includes("..") ? range!.split("..") : [null, range!];
+			const sha = await read(workspace, `${cwd}/.git/${ref}`).catch(() => read(workspace, `${cwd}/.git/HEAD`));
+			const header = `# v2 git bundle\n${base ? `-${hex40(base)}\n` : ""}${hex40(sha)} ${ref}\n\n`;
+			const pack = new Uint8Array(32);
+			pack.set(encoder.encode("PACK"));
+			pack[7] = 2;
+			const bytes = new Uint8Array([...encoder.encode(header), ...pack]);
+			await workspace.writeFile(file!.startsWith("/") ? file! : `${cwd}/${file}`, bytes);
+			return {};
+		}
 		case "add":
 			return {};
 		case "status": {

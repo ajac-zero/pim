@@ -566,7 +566,8 @@ export class PimStore {
 		tool: string | null;
 		args: unknown;
 		summary: string;
-		callId: string;
+		/** Null for a request no tool call filed, which nothing waits for. */
+		callId: string | null;
 		createdAt: number;
 		/** Null: it waits for an answer however long. */
 		expiresAt: number | null;

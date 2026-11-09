@@ -18,6 +18,7 @@ import {
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
 import { GIT_BROKER_PATH, serveGitBroker } from "./coding/git-broker/routes";
+import { codingApi } from "./coding/routes";
 import { appAddress, appOfHost, appOfLabel, SESSION_COOKIE as APP_SESSION_COOKIE } from "./hosted";
 import { installScript } from "./install-script";
 import { BROWSER_LIVE_PATH } from "./browser";
@@ -61,6 +62,8 @@ import { PimThemes } from "./themes";
  *   this connection, and the owner's space checks it.
  * - `/api/computer-host/sync`: this Pim's computer host (./computer-host.ts),
  *   with its own token, `pimh_<secret>`, which opens only this.
+ * - `/api/coding/threads`: the person's coding threads (./coding/routes.ts),
+ *   answered here, with the space's list of threads, not by the space.
  * - `/api/coding/git/<owner>/<name>.git`: the git broker
  *   (./coding/git-broker/routes.ts), where a coding workspace clones and
  *   fetches one repository with its broker token, `pimgit_<…>`, which opens
@@ -615,6 +618,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 		accountApi(env, account, site, request, viaSession),
 		adminApi(env, account, request, viaSession),
 		socialApi(env, account, request),
+		codingApi(env, account, request),
 	];
 	for (const extension of extensions) {
 		const answered = await extension(path, request);

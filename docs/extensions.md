@@ -91,9 +91,12 @@ Every agent's chats then have the ledger's tools and prompt sections, and a pers
 - `data`: the extension's own data, JSON values by key (`get`, `put`, `delete`, `list(prefix)`). No other extension sees it. It goes with the person's export and is erased with their account.
 - `timeZone`: the person's, as it is when read.
 - `notify(title, body)`: a notification in the app, pushed to their devices.
+- `space`: the space's ID, its owner's, which names its Durable Objects.
+- `conversationOf(session)`: a conversation, by the ID a tool gets as `api.conversationId`, as the person and the API know it: its chat's ID and the agent it is with.
 
 It returns a pi extension without its name (`tools`, `sections`, `hooks`, `wraps`, `tasks`; see [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable#extensions)), plus `actions`. The ability is installed under the extension's id and selected in every agent's chats, and in the conversations of tasks they work on.
 
+- **Checking before asking.** An action's optional `prepare(args, { session })` runs before the request is filed, once per call: it returns the arguments `run` gets and the line the person reads, or `{ refused }`, which the model reads instead, with nothing asked. [`coding.ts`](../src/extensions/coding.ts)'s `coding_push` uses it to make the push it asks about.
 - **Assigned actions run without a prompt.** Each `GatedAction` files an approval, which is approved immediately, unless the person chose Ask or Off. Mark risky actions `explicitApproval: true`: every call waits for the person's decision, with no timeout or Always approve. Other requests follow the person's approval policy. Actions are listed in Settings → Permissions with Pim's own.
 - **Names are checked.** An ability whose tool or action has the name of one of Pim's tools, or of another extension's, stops the agent with an error. pi would let the later tool replace the earlier one, so an extension could otherwise stand in for `send_to_user` or a tool that asks first. Prefix your tools' names with your extension's.
 - **Code-level trust.** An ability runs in the person's agent, with what the context gives it and whatever its code can reach, such as `fetch`. Install only extensions you would merge into Pim itself.

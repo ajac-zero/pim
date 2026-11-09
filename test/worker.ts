@@ -13,6 +13,7 @@ import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimC
 import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
 import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } from "../src/coding/scheduler-do";
 import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO } from "../src/coding/thread-do";
+import type { Fetch, GitHubApp } from "../src/coding/git-broker/github-app";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -343,7 +344,25 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return providerId === "coding-faux" ? codingFaux.provider : super.modelProvider(space, providerId);
 	}
 
+	/** Recorded in `codingEvents`, then told as the deployment tells them. */
 	protected override eventSink(): CodingEventSink {
-		return { emit: (event) => void codingEvents.push(event) };
+		const sink = super.eventSink();
+		return {
+			emit: (event) => {
+				codingEvents.push(event);
+				return sink.emit(event);
+			},
+		};
+	}
+
+	protected override githubApp(): GitHubApp | null {
+		return codingGitHub.app;
+	}
+
+	protected override githubFetch(): Fetch | undefined {
+		return codingGitHub.fetch ?? undefined;
 	}
 }
+
+/** The GitHub App coding threads push with in tests: none unless a test sets one, and GitHub as a test answers it. */
+export const codingGitHub: { app: GitHubApp | null; fetch: Fetch | null } = { app: null, fetch: null };

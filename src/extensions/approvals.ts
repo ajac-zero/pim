@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/chord";
+import type { Context, JsonValue } from "@earendil-works/chord";
 import { type Static, type TSchema, Type } from "@earendil-works/pi-ai";
 import {
 	defineExtension,
@@ -75,6 +75,13 @@ export type GatedAction<P extends TSchema = TSchema> = {
 	readonly internal?: boolean;
 	/** Every call needs the person's decision: no timeout or always-approve permission. */
 	readonly explicitApproval?: boolean;
+	/**
+	 * Checks and readies a call before anyone is asked: the arguments `run`
+	 * gets and the line the person reads, or a refusal the model reads
+	 * instead, with nothing filed. Once per call: a call woken by its
+	 * decision finds what it readied. Without it, the call is filed as made.
+	 */
+	prepare?(args: Static<P>, request: { readonly session: string }): Promise<{ readonly args: Static<P>; readonly summary: string } | { readonly refused: string }>;
 };
 
 export function defineGatedAction<P extends TSchema>(action: GatedAction<P>): GatedAction<P> {
@@ -135,7 +142,16 @@ function gatedTool(action: GatedAction, services: PimServices, permission: ToolP
 		parameters: action.parameters,
 		replay: "safe",
 		async execute(args, api, context) {
-			return fileApproval(services, api, context, { action: action.name, tool: action.explicitApproval ? null : action.name, args, summary: action.summarize(args) }, action.explicitApproval);
+			let filed = { args, summary: "" };
+			if (action.prepare) {
+				const known = await api.memo<JsonValue>("prepared", context);
+				if (known === undefined) {
+					const prepared = await action.prepare(args, { session: String(api.conversationId) });
+					if ("refused" in prepared) return text(prepared.refused, true);
+					filed = (await api.memo("prepared", prepared as unknown as JsonValue, context)) as unknown as typeof filed;
+				} else filed = known as unknown as typeof filed;
+			} else filed.summary = action.summarize(args);
+			return fileApproval(services, api, context, { action: action.name, tool: action.explicitApproval ? null : action.name, args: filed.args, summary: filed.summary }, action.explicitApproval);
 		},
 	});
 }

@@ -66,6 +66,14 @@ export type AbilityContext = {
 	readonly timeZone: string;
 	/** Tells the person: a notification in the app, pushed to their devices. */
 	notify(title: string, body: string): Promise<void>;
+	/** The space's ID: its owner's, which names its Durable Objects, such as its Pim. */
+	readonly space: string;
+	/**
+	 * A conversation, by its ID (a tool's `api.conversationId`), as the
+	 * person and the API know it: its chat's ID, which links and the API take,
+	 * and the agent it is with.
+	 */
+	conversationOf(session: string): { readonly chat: string; readonly agent: { readonly id: string; readonly name: string } };
 };
 
 /**

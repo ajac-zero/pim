@@ -13,6 +13,7 @@ import {
 	type SlotRequest,
 	type Sweep,
 } from "./scheduler";
+import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRegistration } from "./thread-index";
 
 /**
  * A space's coding scheduler (./scheduler.ts) in a Durable Object of its
@@ -37,9 +38,13 @@ import {
  * when it was delivered but the object restarted before deleting it, so
  * each carries a key that never changes, for its receiver to ignore it the
  * second time.
+ *
+ * It also keeps the space's list of its threads (./thread-index.ts), which
+ * says which threads are the space's.
  */
 export class CodingSchedulerDO extends DurableObject<Env> {
 	readonly #scheduler: CodingScheduler;
+	readonly #threads: CodingThreadIndex;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -49,6 +54,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 			now: () => this.now(),
 			defaultLimit: DEFAULT_SPACE_CAP,
 		});
+		this.#threads = new CodingThreadIndex(ctx.storage.sql);
 	}
 
 	/** The clock the scheduler and its alarm go by. */
@@ -141,6 +147,32 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 			const reconciliation = this.#scheduler.reconcile(liveThreadIds);
 			return { result: reconciliation, admitted: reconciliation.admitted };
 		});
+	}
+
+	/** Enters a thread about to start in the space's list. */
+	registerThread(thread: ThreadRegistration): void {
+		this.#threads.register(thread);
+	}
+
+	/** Takes a thread whose start failed out of the list. */
+	forgetThread(threadId: string): void {
+		this.#threads.forget(threadId);
+	}
+
+	/** The thread's own object bringing its row up to date. */
+	recordThread(thread: ThreadRecord): void {
+		this.#threads.record(thread);
+	}
+
+	/** One of the space's threads, with its place in the queue while it waits; null for a thread that isn't the space's. */
+	thread(threadId: string): (IndexedThread & { readonly queue: QueuePlace | null }) | null {
+		const thread = this.#threads.get(threadId);
+		return thread && { ...thread, queue: this.#scheduler.position(threadId) };
+	}
+
+	/** The space's threads, newest first, each with its place in the queue while it waits. */
+	threads(): (IndexedThread & { readonly queue: QueuePlace | null })[] {
+		return this.#threads.list().map((thread) => ({ ...thread, queue: this.#scheduler.position(thread.threadId) }));
 	}
 
 	recordDuration(ms: number): void {

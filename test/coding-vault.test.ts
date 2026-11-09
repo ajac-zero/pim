@@ -230,7 +230,7 @@ describe("harness workspaces", () => {
 	/** A thread of `user`'s, registered in their space's list as starting one does, and a workspace for it. */
 	async function threadOf(user: string, provider: FakeWorkspaceProvider) {
 		const threadId = await codingThreadId(user, crypto.randomUUID());
-		await codingScheduler(env, user).registerThread({ threadId, createdBy: { type: "person" }, parent: null, task: "t", repo: "https://github.com/acme/demo", ref: "main", budgetUsd: 1, createdAt: Date.now() });
+		await codingScheduler(env, user).registerThread({ threadId, createdBy: { type: "person" }, chat: null, harness: "pi", parent: null, task: "t", repo: "https://github.com/acme/demo", ref: "main", budgetUsd: 1, createdAt: Date.now() });
 		const ref = await provider.create(spec(threadId));
 		return { userId: user, ref, workspace: (await provider.get(ref))! };
 	}

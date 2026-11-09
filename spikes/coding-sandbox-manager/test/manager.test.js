@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { after, afterEach, beforeEach, describe, test } from 'node:test'
 import { Docker } from '../src/docker.js'
-import { createManager, selfCheck } from '../src/manager.js'
+import { createManager, defaultMaxConcurrent, selfCheck } from '../src/manager.js'
 import { startFakeDocker } from '../support/fake-docker.js'
 
 const IMAGE = 'registry.example/sandbox@sha256:abc'
@@ -117,9 +117,44 @@ describe('sessions', () => {
 		assert.equal((await call('POST', '/sessions', good, { authorization: '' })).status, 401)
 		await call('POST', '/sessions', good)
 		await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })
-		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'abc-3' })).status, 429)
+		const full = await call('POST', '/sessions', { ...good, sessionId: 'abc-3' })
+		assert.equal(full.status, 429)
+		assert.deepEqual(full.json, { error: 'at capacity', code: 'capacity', limit: 2, running: 2 })
+		await call('DELETE', '/sessions/abc-2')
 		const low = createManager({ docker: new Docker(fake.path), cfg, proxyAdmin: proxy, statfsFn: async () => ({ bavail: 10, blocks: 100 }) })
-		await assert.rejects(low.createSession({ ...good, sessionId: 'abc-9' }), { status: 507 })
+		await assert.rejects(low.createSession({ ...good, sessionId: 'abc-9' }), (e) => e.status === 507 && e.extra.code === 'low_disk')
+	})
+	test('concurrent creates far above the limit never exceed it, and delete frees a slot', async () => {
+		const rs = await Promise.all(Array.from({ length: 12 }, (_, i) => call('POST', '/sessions', { ...good, sessionId: `s-${i}` })))
+		assert.equal(rs.filter((r) => r.status === 201).length, 2)
+		assert.equal(rs.filter((r) => r.status === 429 && r.json.code === 'capacity').length, 10)
+		assert.equal(fake.containers.size, 2)
+		assert.equal((await call('DELETE', `/sessions/${rs.find((r) => r.status === 201).json.sessionId}`)).status, 200)
+		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'later' })).status, 201)
+		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'later2' })).status, 429)
+	})
+	test('a failed create releases its slot', async () => {
+		fake.containers.set('pim-s-abc-1', { id: 'x', body: {}, ip: '1' })
+		assert.equal((await call('POST', '/sessions', good)).status, 500)
+		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })).status, 201)
+		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'abc-3' })).status, 201)
+	})
+	test('a lowered limit refuses new sessions but kills none, and idempotent create still works', async () => {
+		await call('POST', '/sessions', good)
+		await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })
+		const lowered = createManager({ docker: new Docker(fake.path), cfg: { ...cfg, maxConcurrent: 1 }, proxyAdmin: proxy, statfsFn })
+		await lowered.reconcile()
+		assert.equal(lowered.sessions.size, 2)
+		await assert.rejects(lowered.createSession({ ...good, sessionId: 'abc-3' }), { status: 429, extra: { code: 'capacity', limit: 1, running: 2 } })
+		assert.equal((await lowered.createSession(good)).created, false)
+		assert.equal(fake.containers.size, 2)
+	})
+	test('low disk is refused with a typed error and creates nothing', async () => {
+		const low = createManager({ docker: new Docker(fake.path), cfg: { ...cfg, minFreePct: 20 }, proxyAdmin: proxy, statfsFn: async () => ({ bavail: 19, blocks: 100 }) })
+		await assert.rejects(low.createSession(good), { status: 507, extra: { code: 'low_disk', freeDiskPct: 19, minFreePct: 20 } })
+		assert.equal(fake.containers.size, 0)
+		const ok = createManager({ docker: new Docker(fake.path), cfg: { ...cfg, minFreePct: 20 }, proxyAdmin: proxy, statfsFn: async () => ({ bavail: 20, blocks: 100 }) })
+		assert.equal((await ok.createSession(good)).created, true)
 	})
 	test('delete removes container, volume and network, and is safe to repeat', async () => {
 		await call('POST', '/sessions', good)
@@ -151,7 +186,16 @@ describe('sessions', () => {
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.deepEqual(r.json, { runsc: true, freeDiskPct: 50, sessions: 1 })
+		assert.deepEqual(r.json, { runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1 })
+	})
+})
+
+describe('defaultMaxConcurrent', () => {
+	const GiB = 2 ** 30
+	test('derives the limit from cpus and memory, clamped to 1..8', () => {
+		const table = [[2, 3, 1], [4, 16, 4], [8, 8, 4], [16, 64, 8], [1, 1, 1], [32, 2, 1], [3, 4.5, 2], [6, 10, 6]]
+		for (const [cpus, mem, want] of table) assert.equal(defaultMaxConcurrent(cpus, mem * GiB), want, `${cpus} cpus ${mem} GiB`)
+		assert.ok(defaultMaxConcurrent() >= 1 && defaultMaxConcurrent() <= 8)
 	})
 })
 

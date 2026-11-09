@@ -2,6 +2,7 @@
 import http from 'node:http'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { statfs } from 'node:fs/promises'
+import os from 'node:os'
 import { DockerError } from './docker.js'
 import { HttpError } from './errors.js'
 import { LABEL, LABEL_SPEC, buildSpec, names, parseCreate, workspacePath } from './template.js'
@@ -47,6 +48,13 @@ export async function selfCheck(docker, probeImage) {
 	} finally {
 		if (id) await docker.request('DELETE', `/containers/${id}?force=true`).catch(() => {})
 	}
+}
+
+// The default MAX_CONCURRENT: one session per CPU, each assumed to need 1.5 GiB of memory after
+// reserving 1 GiB for the host, clamped to 1..8. For example 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4.
+export function defaultMaxConcurrent(cpus = os.cpus().length, totalMem = os.totalmem()) {
+	const memGiB = totalMem / 2 ** 30
+	return Math.min(8, Math.max(1, Math.min(cpus, Math.floor((memGiB - 1) / 1.5))))
 }
 
 // cfg: { token, allowedImages, dockerRoot, minFreePct, maxConcurrent, idleMin, proxyUrl,
@@ -119,10 +127,15 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			s.lastUsed = now()
 			return { created: false, session: view(s) }
 		}
-		if (sessions.size + creating.size >= cfg.maxConcurrent) throw new HttpError(429, 'too many concurrent sessions')
-		const free = await freeDiskPct()
-		if (free < cfg.minFreePct) throw new HttpError(507, `free disk ${free.toFixed(1)}% is below ${cfg.minFreePct}%`)
-		const p = doCreate(params)
+		// Check and reserve the slot in one synchronous step (no await in between), so concurrent
+		// creates cannot pass the check together. Existing sessions over the limit are left alone.
+		const running = sessions.size + creating.size
+		if (running >= cfg.maxConcurrent) throw new HttpError(429, 'at capacity', { code: 'capacity', limit: cfg.maxConcurrent, running })
+		const p = (async () => {
+			const free = await freeDiskPct()
+			if (free < cfg.minFreePct) throw new HttpError(507, `free disk ${free.toFixed(1)}% is below ${cfg.minFreePct}%`, { code: 'low_disk', freeDiskPct: Math.round(free * 10) / 10, minFreePct: cfg.minFreePct })
+			return doCreate(params)
+		})()
 		creating.set(params.sessionId, p)
 		try {
 			return { created: true, session: view(await p) }
@@ -203,7 +216,15 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	async function health() {
-		return { runsc: await hasRunsc(docker).catch(() => false), freeDiskPct: Math.round((await freeDiskPct().catch(() => NaN)) * 10) / 10, sessions: sessions.size }
+		const running = sessions.size + creating.size
+		return {
+			runsc: await hasRunsc(docker).catch(() => false),
+			freeDiskPct: Math.round((await freeDiskPct().catch(() => NaN)) * 10) / 10,
+			maxConcurrent: cfg.maxConcurrent,
+			running,
+			free: Math.max(0, cfg.maxConcurrent - running),
+			sessions: sessions.size,
+		}
 	}
 
 	const authorized = (req) => timingSafeEqual(sha(req.headers.authorization?.replace(/^Bearer /, '') ?? ''), sha(cfg.token))
@@ -254,7 +275,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			}
 			throw new HttpError(405, 'method not allowed')
 		} catch (e) {
-			if (e instanceof HttpError) return send(e.status, { error: e.message })
+			if (e instanceof HttpError) return send(e.status, { error: e.message, ...e.extra })
 			console.error(e)
 			send(500, { error: 'internal error' })
 		}

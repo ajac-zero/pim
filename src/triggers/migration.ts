@@ -74,7 +74,6 @@
  */
 
 import type { Schedule } from "agents";
-import type { ScheduledTaskPayload } from "../extensions/services";
 import type { AppWatch } from "../store";
 import type { ConnectorSubscription } from "./connector";
 import { DELIVERY_TTL_MS } from "./coordinator";
@@ -162,7 +161,19 @@ export const LEGACY_EVENT_DATA_TTL_MS = DELIVERY_TTL_MS;
 /** Legacy event data kept in the run's text, as app-events.ts clips it. */
 const LEGACY_EVENT_DATA_CHARS = 8_000;
 
-/** The schedule `schedule_task` makes, as the agents SDK keeps it. */
+/** Payload of a schedule `schedule_task` made before it made triggers. */
+export type ScheduledTaskPayload = {
+	/** The chat that scheduled it: where it fires, or whose agent starts each new chat. */
+	readonly session: string;
+	readonly instruction: string;
+	readonly label?: string;
+	/** Each firing starts a new chat with the scheduling chat's agent instead of continuing that chat. */
+	readonly newChat?: true;
+	/** The agent each new chat is with, when the majordomo scheduled the work for another of the person's agents. */
+	readonly agent?: string;
+};
+
+/** A schedule `schedule_task` made before it made triggers, as the agents SDK keeps it. */
 export type LegacySchedule = Pick<Schedule<ScheduledTaskPayload>, "id" | "payload"> &
 	(
 		| { readonly type: "scheduled"; readonly time: number }

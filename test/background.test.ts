@@ -2,32 +2,85 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/provid
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { CompactionTask } from "@earendil-works/pi-durable";
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it, vi } from "vitest";
+import type { JsonValue } from "@earendil-works/pi-ai";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DELIVERY_REMINDER } from "../src/transcript";
-import { api, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, toolUse, widgetsShown } from "./helpers";
-import { faux, outbox, type Pim } from "./worker";
+import { api, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, toolUse, triggersOn, widgetsShown } from "./helpers";
+import { faux, outbox, type Pim, triggerClock } from "./worker";
+
+const SECOND = 1_000;
+const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+const inSpace = <T>(work: (pim: Pim) => T | Promise<T>) => runInDurableObject(env.Pim.getByName(OWNER), work);
+
+/** Runs the triggers' engine as the space's wake would at `at`, on the triggers' clock. */
+async function tickAt(at: number) {
+	triggerClock.offset = at - Date.now();
+	await inSpace((pim) => pim.runTriggerTick());
+}
+
+/** A scheduled task's runs, newest first, as the triggers' API shows them. */
+const runsOf = async (id: string) => (await api(`/triggers/${encodeURIComponent(id)}/runs`)).body.runs as { state: string; chatId: string | null; dueAt: number }[];
+
+/** Ticks on, from `at`, until each of a task's runs is known to have ended, as the wake would. */
+async function finish(id: string, at: number) {
+	await tickAt(at);
+	await vi.waitFor(
+		async () => {
+			await tickAt(Date.now() + triggerClock.offset + 2 * MINUTE);
+			expect((await runsOf(id)).filter((run) => !["completed", "failed", "cancelled"].includes(run.state))).toEqual([]);
+		},
+		{ timeout: 10_000, interval: 200 },
+	);
+}
+
+/** Has the agent of `chat` call one tool, and gives back what it answered. */
+async function toolResult(name: string, args: Record<string, JsonValue>, chat = ROOT): Promise<{ text: string; isError: boolean }> {
+	let result = { text: "", isError: false };
+	faux.setResponses([
+		toolUse(name, args),
+		(context) => {
+			const answer = context.messages.findLast((message) => message.role === "toolResult");
+			if (answer?.role === "toolResult") result = { text: answer.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""), isError: answer.isError === true };
+			return toolUse("send_to_user", { message: "Done." });
+		},
+	]);
+	await say(`Please use ${name}.`, chat);
+	return result;
+}
 
 describe("scheduled tasks", () => {
-	it("schedules work for later and hands it back to the same session when it fires", async () => {
-		faux.setResponses([
-			toolUse("schedule_task", {
-				instruction: "Check whether the flight price dropped.",
-				label: "Flight check",
-				delay_seconds: 3600,
-			}),
-			toolUse("send_to_user", { message: "I'll check in an hour." }),
-		]);
+	beforeAll(() => triggersOn());
+	afterEach(() => {
+		triggerClock.offset = 0;
+	});
+
+	it("schedules work for later as a trigger, which fires it into the same chat with its notification", async () => {
 		const before = Date.now();
-		await say("Watch the flight price.");
-		const { body } = await api("/schedules");
-		expect(body.schedules).toHaveLength(1);
-		const [schedule] = body.schedules;
-		expect(schedule).toMatchObject({ type: "delayed", session: ROOT, label: "Flight check" });
-		const next = Date.parse(schedule.next);
+		const made = await toolResult("schedule_task", { instruction: "Check whether the flight price dropped.", label: "Flight check", delay_seconds: 3600 });
+		expect(made.isError).toBe(false);
+		const task = JSON.parse(made.text);
+		expect(task).toEqual({ id: expect.any(String), type: "delayed", next: expect.any(String), session: ROOT, label: "Flight check", instruction: "Check whether the flight price dropped.", newChat: false });
+		const next = Date.parse(task.next);
 		expect(next).toBeGreaterThanOrEqual(before + 3_599_000);
 		expect(next).toBeLessThanOrEqual(Date.now() + 3_601_000);
+		expect((await api("/schedules")).body.schedules).toEqual([task]);
+		// It is a time trigger of the chat's agent, enabled, which the person sees among their triggers.
+		const majordomo = ((await api("/agents")).body.agents as { id: string; majordomo: boolean }[]).find((agent) => agent.majordomo)!.id;
+		expect((await api(`/triggers/${task.id}`)).body).toMatchObject({
+			lifecycle: "enabled",
+			agentId: majordomo,
+			label: "Flight check",
+			source: { kind: "time", schedule: "once", at: next },
+			destination: { type: "existing_chat", chatId: ROOT },
+		});
 
-		// Fire it now instead of waiting an hour.
+		// Not before its time.
+		await tickAt(next - MINUTE);
+		expect(await runsOf(task.id)).toEqual([]);
+		// At its time the engine hands it to the chat, which reads it as a scheduled task: work Pim gave itself may stay silent, so no reminder to reply.
 		let woken = "";
 		faux.setResponses([
 			(context) => {
@@ -35,124 +88,99 @@ describe("scheduled tasks", () => {
 				return fauxAssistantMessage("Same price.");
 			},
 		]);
-		const operation = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
-			const [due] = await instance.listSchedules();
-			await instance.runScheduledTask(due!.payload as never, due as never);
-			// The same firing retried tells the person once.
-			await instance.runScheduledTask(due!.payload as never, due as never);
-			return `schedule:${due!.id}:${due!.time}`;
-		});
-		// The person sees that it ran, with a link to the chat it ran in.
-		expect((await api("/notifications")).body.notifications).toEqual([
-			expect.objectContaining({
-				session: ROOT,
-				kind: "scheduled",
-				title: "Flight check",
-				body: "",
-				readAt: null,
-			}),
-		]);
-		const [ran] = (await api("/notifications")).body.notifications;
-		await post(`/notifications/${ran.id}/read`);
-		const settled = await api(`/sessions/${ROOT}/operations/${encodeURIComponent(operation)}`);
-		// Work Pim gave itself may stay silent: its final text is notes, not a reply.
-		expect(settled.body).toMatchObject({ status: "done", replies: [] });
-		expect(settled.body).not.toHaveProperty("text");
-		expect(woken).toBe(`[Scheduled task "Flight check" ${schedule.id}] Check whether the flight price dropped.`);
-
-		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
+		await tickAt(next + SECOND);
+		await settled(ROOT);
+		expect(woken).toBe(`[Scheduled task "Flight check" ${task.id}] Check whether the flight price dropped.`);
+		expect(await runsOf(task.id)).toEqual([expect.objectContaining({ chatId: ROOT, dueAt: next })]);
+		// The person sees that it ran, once, with a link to the chat it ran in.
+		await finish(task.id, next + MINUTE);
+		const ran = (await api("/notifications")).body.notifications.filter((notification: { kind: string }) => notification.kind === "scheduled");
+		expect(ran).toEqual([expect.objectContaining({ session: ROOT, kind: "scheduled", title: "Flight check", body: "", readAt: null })]);
+		await post(`/notifications/${ran[0].id}/read`);
+		// Fired once, it is done.
+		expect((await api(`/triggers/${task.id}`)).body.lifecycle).toBe("ended");
 		expect((await api("/schedules")).body.schedules).toEqual([]);
 	});
 
-	it("starts a new chat with the same agent each time a new-chat task fires", async () => {
+	it("starts a new chat with the same agent each time a new-chat cron task fires, in UTC", async () => {
 		const coach = (await post("/agents", { name: "Coach", instructions: "Coach me." })).body;
 		const origin = (await post("/sessions", { agent: coach.id, title: "Training" })).body.id;
-		faux.setResponses([
-			toolUse("schedule_task", { instruction: "Write today's training plan.", label: "Daily plan", cron: "0 9 * * *", new_chat: true }),
-			toolUse("send_to_user", { message: "Every morning." }),
-		]);
-		await say("Plan my training every morning.", origin);
-		const [schedule] = (await api("/schedules")).body.schedules;
-		expect(schedule).toMatchObject({ type: "cron", session: origin, newChat: true });
+		const made = await toolResult("schedule_task", { instruction: "Write today's training plan.", label: "Daily plan", cron: "0 9 * * *", new_chat: true }, origin);
+		const task = JSON.parse(made.text);
+		expect(task).toMatchObject({ type: "cron", cron: "0 9 * * *", session: origin, newChat: true, label: "Daily plan" });
+		expect(task).not.toHaveProperty("agent");
+		const next = Date.parse(task.next);
+		expect(new Date(next).getUTCHours()).toBe(9);
+		expect(next - Date.now()).toBeLessThanOrEqual(DAY);
+		expect((await api(`/triggers/${task.id}`)).body).toMatchObject({ agentId: coach.id, source: { schedule: "cron", expression: "0 9 * * *", timeZone: "UTC" }, destination: { type: "new_chat" } });
 		const originLength = (await api(`/sessions/${origin}/messages`)).body.messages.length;
 
-		// Two days' firings, the first retried: one chat per day, none for the retry.
-		faux.setResponses([fauxAssistantMessage("Day one."), fauxAssistantMessage("Day two.")]);
-		const fire = (days: number, times: number) =>
-			runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
-				const [due] = await instance.listSchedules();
-				const firing = { ...due!, time: due!.time + days * 86_400 };
-				for (let i = 0; i < times; i++) await instance.runScheduledTask(firing.payload as never, firing as never);
-				return `schedule:${firing.id}:${firing.time}`;
-			});
-		const operations = [await fire(0, 2)];
+		faux.setResponses([fauxAssistantMessage("Day one.")]);
+		await tickAt(next + SECOND);
+		const [first] = await runsOf(task.id);
+		await settled(first!.chatId!);
+		await finish(task.id, next + MINUTE);
 		expect((await api(`/sessions/${origin}/messages`)).body.messages).toHaveLength(originLength);
 
 		// Deleting the chat that scheduled it leaves it running.
 		expect((await api(`/sessions/${origin}`, { method: "DELETE" })).status).toBe(200);
-		expect((await api("/schedules")).body.schedules).toMatchObject([{ id: schedule.id }]);
-		operations.push(await fire(1, 1));
+		expect((await api("/schedules")).body.schedules).toMatchObject([{ id: task.id }]);
+		faux.setResponses([fauxAssistantMessage("Day two.")]);
+		await tickAt(next + DAY + SECOND);
+		const [second] = await runsOf(task.id);
+		expect(second!.dueAt).toBe(next + DAY);
+		await settled(second!.chatId!);
+		await finish(task.id, next + DAY + MINUTE);
 		// The agent's chats still show it coming up, without a link to the deleted chat.
 		const [upcoming] = await widgetsShown((await post("/sessions", { agent: coach.id })).body.id, ["pim.schedule/upcoming"]);
 		expect(upcoming.items).toEqual([{ title: "Daily plan", time: expect.any(String) }]);
 
 		const chats = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Daily plan");
-		expect(chats).toHaveLength(2);
-		chats.sort((a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt);
+		expect(chats.map((chat: { id: string }) => chat.id).sort()).toEqual([first!.chatId, second!.chatId].sort());
 		// Each run's notification links to the chat it started.
 		const ran = (await api("/notifications")).body.notifications.filter((notification: { title: string }) => notification.title === "Daily plan");
 		expect(ran.map((notification: { session: string }) => notification.session).sort()).toEqual(chats.map((chat: { id: string }) => chat.id).sort());
 		for (const notification of ran) await post(`/notifications/${notification.id}/read`);
-		for (const [index, chat] of chats.entries()) {
+		for (const chat of chats) {
 			expect(chat.agent).toMatchObject({ id: coach.id });
-			expect((await api(`/sessions/${chat.id}/operations/${encodeURIComponent(operations[index]!)}`)).body).toMatchObject({ status: "done" });
-			const { messages } = (await api(`/sessions/${chat.id}/messages`)).body;
-			const fired = JSON.stringify(messages).split(`[Scheduled task \\"Daily plan\\" ${schedule.id}] Write today's training plan.`);
-			expect(fired).toHaveLength(2);
+			expect(await messagesOf(chat.id, "user")).toEqual([`[Scheduled task "Daily plan" ${task.id}] Write today's training plan.`]);
 		}
-		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
+		expect((await api(`/schedules/${task.id}`, { method: "DELETE" })).status).toBe(200);
+		expect((await api(`/triggers/${task.id}`)).body.lifecycle).toBe("deleted");
 	});
 
 	it("lets only the majordomo schedule new chats with another agent", async () => {
 		const scout = (await post("/agents", { name: "Scout", instructions: "Find things to do in NYC." })).body;
 		const coach = (await post("/agents", { name: "Fitness coach", instructions: "Coach me." })).body;
 		const training = (await post("/sessions", { agent: coach.id, title: "Training" })).body.id;
-		let refused = "";
-		faux.setResponses([
-			toolUse("schedule_task", { instruction: "Find this weekend's events.", cron: "0 9 * * 5", agent: scout.id }),
-			(context) => {
-				refused = JSON.stringify(context.messages.at(-1));
-				return toolUse("send_to_user", { message: "I can't." });
-			},
-		]);
-		await say("Have Scout look for events every Friday.", training);
-		expect(refused).toContain("Only the majordomo schedules work for other agents");
+		const refused = await toolResult("schedule_task", { instruction: "Find this weekend's events.", cron: "0 9 * * 5", agent: scout.id }, training);
+		expect(refused).toEqual({ isError: true, text: expect.stringContaining("Only the majordomo schedules work for other agents") });
+		expect((await toolResult("schedule_task", { instruction: "Find events.", cron: "0 9 * * 5", agent: "no-such-agent" })).text).toContain("No agent has the id no-such-agent");
 		expect((await api("/schedules")).body.schedules).toEqual([]);
 
-		faux.setResponses([
-			toolUse("schedule_task", { instruction: "Find this weekend's events.", label: "Weekend events", cron: "0 9 * * 5", agent: scout.id }),
-			toolUse("send_to_user", { message: "Scout will look every Friday." }),
-		]);
-		await say("Have Scout look for events every Friday.");
-		const [schedule] = (await api("/schedules")).body.schedules;
-		expect(schedule).toMatchObject({ session: ROOT, newChat: true, agent: scout.id });
+		const made = await toolResult("schedule_task", { instruction: "Find this weekend's events.", label: "Weekend events", cron: "0 9 * * 5", agent: scout.id });
+		const task = JSON.parse(made.text);
+		expect(task).toMatchObject({ session: ROOT, newChat: true, agent: scout.id });
+		expect((await api(`/triggers/${task.id}`)).body).toMatchObject({ agentId: scout.id, destination: { type: "new_chat" } });
 		// Scout's chats show it coming up, since Scout does the work, and Coach's don't.
-		for (const [agent, shown] of [[scout.id, 1], [coach.id, 0]] as const) {
+		for (const [agent, shown] of [
+			[scout.id, 1],
+			[coach.id, 0],
+		] as const) {
 			const [upcoming] = await widgetsShown((await post("/sessions", { agent })).body.id, ["pim.schedule/upcoming"]);
 			expect(upcoming.items).toHaveLength(shown);
 		}
 
 		faux.setResponses([fauxAssistantMessage("Found three.")]);
-		const operation = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
-			const [due] = await instance.listSchedules();
-			await instance.runScheduledTask(due!.payload as never, due as never);
-			return `schedule:${due!.id}:${due!.time}`;
-		});
+		await tickAt(Date.parse(task.next) + SECOND);
+		const [run] = await runsOf(task.id);
+		await settled(run!.chatId!);
+		await finish(task.id, Date.parse(task.next) + MINUTE);
 		const [chat] = (await api("/sessions")).body.sessions.filter((session: { title: string }) => session.title === "Weekend events");
-		expect(chat.agent).toMatchObject({ id: scout.id });
-		expect((await api(`/sessions/${chat.id}/operations/${encodeURIComponent(operation)}`)).body).toMatchObject({ status: "done" });
-		await post(`/notifications/${encodeURIComponent(operation)}/read`);
-		expect((await api(`/schedules/${schedule.id}`, { method: "DELETE" })).status).toBe(200);
+		expect(chat).toMatchObject({ id: run!.chatId, agent: { id: scout.id } });
+		expect(await messagesOf(chat.id, "user")).toEqual([`[Scheduled task "Weekend events" ${task.id}] Find this weekend's events.`]);
+		for (const notification of (await api("/notifications")).body.notifications.filter((notification: { session: string }) => notification.session === chat.id)) await post(`/notifications/${notification.id}/read`);
+		expect((await api(`/schedules/${task.id}`, { method: "DELETE" })).status).toBe(200);
 	});
 
 	it("rejects ambiguous or past times without scheduling anything", async () => {
@@ -162,6 +190,8 @@ describe("scheduled tasks", () => {
 				[
 					fauxToolCall("schedule_task", { instruction: "x", delay_seconds: 60, cron: "0 9 * * *" }),
 					fauxToolCall("schedule_task", { instruction: "x", at: "2001-01-01T00:00:00Z" }),
+					fauxToolCall("schedule_task", { instruction: "x", at: new Date(Date.now() - MINUTE).toISOString() }),
+					fauxToolCall("schedule_task", { instruction: "x", at: "next tuesday" }),
 				],
 				{ stopReason: "toolUse" },
 			),
@@ -172,8 +202,65 @@ describe("scheduled tasks", () => {
 		]);
 		await say("Remind me.");
 		expect(results).toContain("exactly one of delay_seconds, at, or cron");
-		expect(results).toContain("is in the past");
+		expect(results.split("is in the past")).toHaveLength(3);
+		expect(results).toContain('Cannot read \\"next tuesday\\" as a date');
 		expect((await api("/schedules")).body.schedules).toEqual([]);
+		expect((await api("/triggers?sourceKind=time&lifecycle=enabled")).body.triggers).toEqual([]);
+	});
+
+	it("lists and cancels only the caller's own scheduled tasks, by id, and the majordomo's every one", async () => {
+		const helper = (await post("/agents", { name: "Helper", instructions: "Help." })).body;
+		const chat = (await post("/sessions", { agent: helper.id })).body.id;
+		const at = new Date(Date.now() + 2 * HOUR).toISOString();
+		const helpers = JSON.parse((await toolResult("schedule_task", { instruction: "Water the plants.", at }, chat)).text);
+		expect(helpers).toMatchObject({ type: "scheduled", next: at, label: null, session: chat });
+		const mine = JSON.parse((await toolResult("schedule_task", { instruction: "Pay rent.", label: "Rent", cron: "0 8 1 * *" })).text);
+		// Another kind of trigger is no scheduled task.
+		const draft = (await post("/triggers", { label: "Fares", instruction: "Check fares.", source: { kind: "time", schedule: "cron", expression: "0 7 * * *", timeZone: "Europe/Lisbon" } })).body;
+
+		expect(JSON.parse((await toolResult("list_scheduled_tasks", {}, chat)).text)).toEqual([helpers]);
+		expect(JSON.parse((await toolResult("list_scheduled_tasks", {})).text)).toEqual([helpers, mine]);
+		// Helper can't see, or cancel, the majordomo's, nor a trigger that isn't enabled and on time.
+		expect(await toolResult("cancel_scheduled_task", { id: mine.id }, chat)).toEqual({ isError: true, text: `No scheduled task with id ${mine.id}.` });
+		expect(await toolResult("cancel_scheduled_task", { id: "nope" }, chat)).toEqual({ isError: true, text: "No scheduled task with id nope." });
+		expect(await toolResult("cancel_scheduled_task", { id: helpers.id }, chat)).toEqual({ isError: false, text: "Cancelled." });
+		expect((await api(`/triggers/${helpers.id}`)).body.lifecycle).toBe("deleted");
+		expect(await toolResult("cancel_scheduled_task", { id: helpers.id }, chat)).toEqual({ isError: true, text: `No scheduled task with id ${helpers.id}.` });
+		expect(JSON.parse((await toolResult("list_scheduled_tasks", {}, chat)).text)).toEqual([]);
+		expect(await toolResult("cancel_scheduled_task", { id: mine.id })).toEqual({ isError: false, text: "Cancelled." });
+		expect(JSON.parse((await toolResult("list_scheduled_tasks", {})).text)).toEqual([]);
+		expect((await api(`/triggers/${draft.id}`)).body.lifecycle).toBe("draft");
+		await api(`/triggers/${draft.id}`, { method: "DELETE" });
+	});
+
+	it("makes one task of a call replayed after an eviction, for the time its first run worked out", async () => {
+		const made = await inSpace(async (pim) => {
+			const tool = pim.registry.snapshot().extension("pim.schedule")!.tools!.find((candidate) => candidate.name === "schedule_task")!;
+			const memos = new Map<string, unknown>();
+			// The same durable call twice, with its memos kept between, as pi replays a tool call.
+			const call = {
+				conversationId: Number(pim.store.sessionOf(ROOT)),
+				taskId: "task-replayed",
+				callId: "call-1",
+				memo: async (name: string, ...rest: unknown[]) => {
+					if (rest.length === 2 && !memos.has(name)) memos.set(name, rest[0]);
+					return memos.get(name);
+				},
+			} as never;
+			const args = { instruction: "Stretch.", label: "Stretch", delay_seconds: 600 } as never;
+			const read = (result: { content?: readonly { type: string; text?: string }[] }) => JSON.parse(result.content![0]!.text!);
+			const first = read(await tool.execute(args, call, undefined as never));
+			// Replayed five minutes on: the same task, at the same time, not five minutes later.
+			triggerClock.offset = 5 * MINUTE;
+			const again = read(await tool.execute(args, call, undefined as never));
+			const other = read(await tool.execute(args, { ...(call as object), taskId: "task-other", memo: async (_name: string, ...rest: unknown[]) => rest[0] } as never, undefined as never));
+			return { first, again, other };
+		});
+		expect(made.again).toEqual(made.first);
+		expect(made.other.id).not.toBe(made.first.id);
+		expect(Date.parse(made.other.next) - Date.parse(made.first.next)).toBeGreaterThanOrEqual(5 * MINUTE - SECOND);
+		expect(((await api("/schedules")).body.schedules as { id: string }[]).map((task) => task.id).sort()).toEqual([made.first.id, made.other.id].sort());
+		for (const id of [made.first.id, made.other.id]) expect((await api(`/schedules/${id}`, { method: "DELETE" })).status).toBe(200);
 	});
 
 	it("hands work to the chat that carries on the chat that scheduled it, once that chat grew too long", async () => {
@@ -181,7 +268,7 @@ describe("scheduled tasks", () => {
 		faux.setResponses([toolUse("schedule_task", { instruction: "Check in.", delay_seconds: 3600 }), toolUse("send_to_user", { message: "Will do." })]);
 		await say("Remind me.", id);
 		faux.setResponses([fauxAssistantMessage("The person asked for a reminder.")]);
-		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+		await inSpace(async (instance) => {
 			const pi = await instance.harness.pi();
 			const conversation = Number(instance.store.sessionOf(id));
 			const compaction = await (await pi.conversation(conversation as never, BACKGROUND_CONTEXT))!.commit(
@@ -194,17 +281,16 @@ describe("scheduled tasks", () => {
 		await vi.waitFor(async () => expect(await carried()).toBeDefined());
 		const next = await carried();
 
+		const [task] = (await api("/schedules")).body.schedules.filter((scheduled: { session: string }) => scheduled.session === id);
 		faux.setResponses([fauxAssistantMessage("Hello again.")]);
-		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
-			const due = (await instance.listSchedules()).find((schedule) => (schedule.payload as { session: string }).session === instance.store.sessionOf(id));
-			await instance.runScheduledTask(due!.payload as never, due as never);
-		});
+		await tickAt(Date.parse(task.next) + SECOND);
 		await vi.waitFor(async () => expect((await messagesOf(next, "user")).some((text) => text.includes("Check in."))).toBe(true));
 		expect((await messagesOf(id, "user")).some((text) => text.includes("Check in."))).toBe(false);
+		await settled(next);
+		await finish(task.id, Date.parse(task.next) + MINUTE);
 		const note = (await api("/notifications")).body.notifications.find((note: { session: string }) => note.session === next);
-		expect(note).toBeDefined();
+		expect(note).toMatchObject({ kind: "scheduled", title: "Check in." });
 		await post(`/notifications/${note.id}/read`);
-		for (const schedule of (await api("/schedules")).body.schedules) await api(`/schedules/${schedule.id}`, { method: "DELETE" });
 	});
 });
 

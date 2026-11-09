@@ -3,8 +3,9 @@
  * agent of the chat they are called in. Pim installs them only in a space
  * whose trigger engine is on (./engine.ts), which no deployment allows, and
  * never in a guest's space; chats select them (`#selectAbilities` in
- * ../pim.ts), so where triggers are off no chat has them. Schedules'
- * (`schedule_task`) and watches' tools are untouched.
+ * ../pim.ts), so where triggers are off no chat has them. `schedule_task`
+ * (../extensions/schedule.ts) makes time triggers through the same API;
+ * watches' tools are untouched.
  */
 
 import { type TSchema, Type } from "@earendil-works/pi-ai";

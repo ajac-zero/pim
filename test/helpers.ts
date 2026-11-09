@@ -101,6 +101,11 @@ export async function comeBack(params: Record<string, string>, cookie?: string):
 	);
 }
 
+/** Turns the space's triggers on, as registering does: the tests' space was provisioned after it started, so they are off until a test turns them on. */
+export async function triggersOn(owner = OWNER) {
+	await (await getAgentByName(env.Pim, owner)).ensureTriggerEngine();
+}
+
 /** Sends a message and waits for the answer. */
 export async function say(content: string, session = ROOT) {
 	const { status, body } = await post(`/sessions/${session}/messages`, { content, wait: true });

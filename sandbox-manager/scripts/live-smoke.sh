@@ -97,6 +97,22 @@ r=$(exec_json '{"cmd":["sleep","30"],"timeoutMs":1000}')
 [ "$(exec_json "{\"cmd\":[\"sh\",\"-c\",\"kill -0 $pid\"],\"timeoutMs\":5000}" | jq -r .exitCode)" = 0 ] || fail "timeout killed an unrelated process"
 ok "exec timeout kills only its own process group"
 
+# Streaming exec, and a dropped stream kills its command.
+api -X POST "$URL/sessions/$SID/exec/stream" -d '{"cmd":["sh","-c","echo a; echo b >&2"],"timeoutMs":10000}' | jq -se '.[-1].type == "exit" and .[-1].code == 0 and (map(select(.type == "stdout")) | length) == 1' >/dev/null || fail "exec/stream"
+api --max-time 2 -X POST "$URL/sessions/$SID/exec/stream" -d '{"cmd":["sh","-c","echo $$ > /workspace/streampid; exec sleep 300"],"timeoutMs":600000}' >/dev/null 2>&1 || true
+sleep 3
+spid=$(api "$URL/sessions/$SID/file?path=streampid")
+[ "$(exec_json "{\"cmd\":[\"sh\",\"-c\",\"kill -0 $spid\"],\"timeoutMs\":5000}" | jq -r .exitCode)" != 0 ] || fail "dropped stream left its command running"
+ok "exec/stream, and a dropped stream kills its command"
+
+# Stop keeps the files; start brings them back.
+echo kept | api -X PUT "$URL/sessions/$SID/file?path=keep.txt" --data-binary @- >/dev/null
+api -X POST "$URL/sessions/$SID/stop" | jq -e '.state == "stopped"' >/dev/null || fail "stop"
+api "$URL/sessions" | jq -e "map(select(.sessionId == \"$SID\"))[0].state == \"stopped\"" >/dev/null || fail "list after stop"
+api -X POST "$URL/sessions/$SID/start" | jq -e '.state == "running"' >/dev/null || fail "start"
+[ "$(api "$URL/sessions/$SID/file?path=keep.txt")" = kept ] || fail "files lost across stop/start"
+ok "stop and start keep the workspace"
+
 # Restarting the manager and recreating the proxy must keep the session usable.
 docker compose up -d --force-recreate egress-proxy sandbox-manager >/dev/null
 for _ in $(seq 60); do curl -fsS "$URL/health" >/dev/null 2>&1 && break; sleep 1; done

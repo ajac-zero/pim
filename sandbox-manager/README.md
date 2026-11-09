@@ -67,35 +67,72 @@ in compose to a directory on that disk, so disk governance measures the right fi
 ## API
 
 All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors are
-`{error: message, code?}` with the HTTP status.
+`{error: message, code?}` with the HTTP status. `:id` is a `sessionId` (`[a-z0-9][a-z0-9-]{0,62}`).
 
-- `GET /health` gives `{runsc, freeDiskPct, maxConcurrent, running, free, sessions}`.
-- `POST /sessions {sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow:[host]}`.
-  Idempotent on `sessionId` (201 on create, 200 when it exists, 409 if the parameters differ;
-  defaults count as parameters). Answers once the session's agentd is up. `egressAllow` takes
-  hostnames or `*.suffix`. Refusals: 429 `capacity`, 507 `low_disk`, 507 `workspace_quota`
-  (`{reservedMiB, requestedMiB, maxTotalMiB}`), 502 `agentd_unreachable`.
-- `GET /sessions/:id` gives the parameters with `{state: 'running', createdAt, lastUsedAt}`.
-- `DELETE /sessions/:id` removes container, network and volume. `?keepVolume=1` keeps the
-  workspace volume and answers `{deleted, keptVolume}`; creating the same `sessionId` again
-  reuses it.
-- `GET /sessions/:id/status` gives `{sessionId, state, reason, diskBytes, diskQuotaBytes,
-  diskFreeBytes, activeExecs, quotaMode, measuredAt}`. `state` is `creating`, `running` or
-  `stopped`; a stopped session has `reason` `over_disk_quota` or `kept_volume` and `keptAt`. For
-  a running session it measures now; `error` is set if agentd did not answer. It does not count
-  as use for the idle reaper.
-- `POST /sessions/:id/exec {cmd:[...], cwd?, timeoutMs, stdin?}` gives
-  `{stdout, stderr, exitCode, timedOut, truncated}`. Output is capped at 10 MiB per stream. A
-  command that cannot start gives exit code 127, one killed by a signal 128 + its number, a
-  timeout `exitCode: null`. Execs run concurrently.
-- `PUT|GET|DELETE /sessions/:id/files?path=` writes, reads or deletes (`&recursive=1` for a
-  directory). Writes are capped at 32 MiB and answer `{ok: true}`; reads stream raw bytes.
-- `GET /sessions/:id/list?path=` (default `/workspace`) gives `[{name, type, size, mtimeMs}]`;
-  `GET /sessions/:id/stat?path=` gives one such record. `type` is `file`, `dir` or `symlink`.
+| Route | Body / query | Answer |
+| --- | --- | --- |
+| `GET /health` | (no token) | `{runsc, freeDiskPct, maxConcurrent, running, free, sessions}` |
+| `GET /sessions` | | Every known session, sorted by id: `[{sessionId, image, limits, egressAllow, state, ...}]` |
+| `POST /sessions` | `{sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow?}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
+| `GET /sessions/:id` | | The session: `state` `running`, `creating` or `stopped`; 404 otherwise |
+| `DELETE /sessions/:id` | `?keepVolume=1` | `{deleted}`; with `keepVolume` also `keptVolume`, and the volume stays |
+| `POST /sessions/:id/stop` | | The session, now `stopped`; does nothing if stopped already |
+| `POST /sessions/:id/start` | | The session, now `running`; does nothing if running already |
+| `GET /sessions/:id/status` | | `{sessionId, state, reason, diskBytes, diskQuotaBytes, diskFreeBytes, activeExecs, quotaMode, measuredAt}` |
+| `POST /sessions/:id/exec` | `{cmd:[...], cwd?, timeoutMs, stdin?, env?}` | `{stdout, stderr, exitCode, timedOut, truncated}` |
+| `POST /sessions/:id/exec/stream` | same as exec | `application/x-ndjson` ExecEvents |
+| `PUT /sessions/:id/file` | `?path=&mode=0644`, raw body | `{ok: true}` |
+| `GET /sessions/:id/file` | `?path=` | raw bytes |
+| `DELETE /sessions/:id/file` | `?path=&recursive=1` | `{ok: true}` |
+| `GET /sessions/:id/list` | `?path=` (default `/workspace`) | `[{name, type, size, mode, mtimeMs}]` |
+| `GET /sessions/:id/stat` | `?path=` | `{name, type, size, mode, mtimeMs}` |
 
-Paths are relative to `/workspace` or absolute under it; anything else, including a symlink that
-leads out, is 403. A missing file is 404. Exec and file routes on a session stopped for its disk
-quota give 409 `over_disk_quota`.
+`/sessions/:id/files` is the older spelling of `/file` and still works.
+
+**Sessions.** A create answers once the session's agentd is up. Defaults: `image` is the first
+of `ALLOWED_IMAGES`, `limits.diskMiB` is `DEFAULT_DISK_MIB`, `egressAllow` is empty; they count as
+parameters for the idempotency check. `egressAllow` takes hostnames or `*.suffix`. Create and
+start are refused with 429 `capacity`, 507 `low_disk`, 507 `workspace_quota`
+(`{reservedMiB, requestedMiB, maxTotalMiB}`) or 502 `agentd_unreachable`.
+
+**States.** A session list entry or `GET /sessions/:id` has `state` and, when the container is
+gone, `reason`, `keptAt` and `keptVolume`:
+
+| `state` | `reason` | Meaning |
+| --- | --- | --- |
+| `creating` | | Its container is starting |
+| `running` | | `createdAt`, `lastUsedAt` |
+| `stopped` | `stopped` | Stopped through `/stop`: container and network removed, volume kept. `/start` (or a create with the same id) brings it back with the same files |
+| `stopped` | `over_disk_quota` | Stopped by the manager in `measure` mode; start it again the same way |
+| `gone` | `kept_volume` | Deleted with `keepVolume`: only in the list and in status; `GET /sessions/:id`, stop and start give 404; a create with the same id reuses the volume |
+
+Stop removes the container (its processes die) and frees its `MAX_CONCURRENT` slot; its disk
+quota stays reserved. The state survives a manager restart (see Kept volumes).
+`/status` measures a running session now (`error` is set if agentd did not answer) and does not
+count as use for the idle reaper.
+
+**Exec.** Each command runs in its own process group with agentd's environment, the proxy
+variables and `env` (names `[A-Za-z_][A-Za-z0-9_]*`, string values). `timeoutMs` is 1–600000.
+The buffered `/exec` caps each stream at 10 MiB (`truncated`); a command that cannot start gives
+exit code 127, one killed by a signal 128 + its number, a timeout `exitCode: null`.
+`/exec/stream` answers as soon as the command starts, with one JSON object per line:
+`{type: "stdout"|"stderr", data}` as output arrives, then exactly one
+`{type: "exit", code, signal, timedOut}`. A command that cannot start gives a stderr line and
+`{type: "exit", code: 127}`. If the client disconnects, the manager closes its request to agentd,
+which kills the command's process group. If agentd goes silent past the timeout plus 5 s, the
+stream ends with `{type: "exit", code: null, signal: "SIGKILL", timedOut: true}`. Execs run
+concurrently. Exec and file routes on a stopped session give 409 `session_stopped` or
+`over_disk_quota`.
+
+**Files.** Paths are relative to `/workspace` or absolute under it; anything else, including a
+symlink that leads out, is 403 `path_escape`. A missing path is 404 `not_found` with a message
+starting "no such file or directory". Writes create parent directories, replace the file
+atomically, are capped at 32 MiB (413), and take `mode` as octal permission bits (default 0644).
+A write the disk or quota cannot hold is 507 `disk_full`: agentd reports it from the filesystem
+in `volume` and `tmpfs` modes, and in `measure` mode the manager refuses a write that would take
+the measured workspace (re-measured when older than 5 s) over its quota. Deleting a directory
+needs `recursive=1` (otherwise 409). `stat` describes a symlink itself rather than its target;
+`type` is `file`, `dir` or `symlink`.
 
 Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–2048.
 
@@ -166,7 +203,7 @@ Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–204
   block new creates. The manager keeps no queue and does not retry; the Pim control plane owns
   queueing and decides when to retry after a refusal. Re-creating an existing `sessionId` is
   idempotent and never counts against the limits.
-- **Kept volumes.** `DELETE ?keepVolume=1` and the quota stop keep the volume and record that in
+- **Kept volumes.** `/stop`, `DELETE ?keepVolume=1` and the quota stop keep the volume and record that in
   a marker volume (`pim-kept-<id>`, labels `pim.coding.kept` and `pim.coding.kept-info`), so a
   restarted manager knows about them. A plain `DELETE`, or the reaper after `KEPT_VOLUME_DAYS`,
   removes the volume and its marker.
@@ -204,5 +241,6 @@ restarted while the manager kept running gets its networks and allowlists back t
   removed at the next start of the manager. The manager has no per-session ownership check
   beyond the single bearer token.
 - Image pulls have no timeout, and the manager does not verify digests itself.
-- No streaming exec and no TTY through the manager (agentd streams; the manager buffers to keep
-  its API), and no metrics.
+- No TTY and no metrics.
+- A stopped session stays reserved against `MAX_TOTAL_WORKSPACE_GB` and is removed, files and
+  all, by the reaper after `KEPT_VOLUME_DAYS`.

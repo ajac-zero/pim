@@ -1,7 +1,7 @@
 import type { CodingHarness } from "../thread-store";
+import { amp } from "./amp";
 import { claudeCode } from "./claude-code";
 import { codex } from "./codex";
-import { amp } from "./pending";
 import type { CliHarness } from "./types";
 import { mistralVibe } from "./vibe";
 

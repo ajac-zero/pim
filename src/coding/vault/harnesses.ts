@@ -143,6 +143,7 @@ export const HARNESS_DISCLOSURES: { readonly [H in Harness]: HarnessDisclosure }
 		title: "Use your Amp access token with Amp",
 		paragraphs: [
 			"The real Amp CLI runs inside your own sandbox with an access token of yours. What it does is billed to your Amp account.",
+			"While it runs, code in the repository it works on, such as its tests or an Amp plugin it brings, can read the token and use it on ampcode.com as you could. Use a token you keep for this, and work only on repositories you trust.",
 			"Pim keeps the token encrypted and gives it, through the CLI's environment, only to your own coding sessions. It is never shown again, not even to you.",
 			"Disconnect at any time to delete it. To stop the token working anywhere, revoke it in your Amp settings too.",
 			"One person per token: don't share your token with anyone or pool it with other people's.",

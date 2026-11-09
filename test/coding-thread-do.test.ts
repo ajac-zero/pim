@@ -13,6 +13,7 @@ import type { FakeCommandHandler, FakeCommandResult } from "../src/coding/worksp
 import { NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
 import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
 import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
+import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
@@ -926,6 +927,21 @@ describe("a Codex thread", () => {
 		expect(calls[1]).toMatchObject({ input: 6000, output: 320, cacheRead: 0, costUsd: 0 });
 	});
 
+	it("keeps its budget as a ceiling on tokens, since Codex estimates no cost, and goes on once given a bigger one", async () => {
+		// $0.02 allows 20,000 tokens; the turn used 25,490 (5,110 in, 1,180 out, 19,200 read from the cache).
+		const { id, stub } = await startCodex({ budgetUsd: 0.02 });
+		const [ended] = await turns(id, 1);
+		// Codex reports its tokens only at the turn's end, so the turn that crossed the ceiling ran to its end.
+		expect(ended).toMatchObject({ outcome: "completed", spentUsd: 0 });
+		const refusal = "This coding thread has used 25,490 of the 20,000 tokens its $0.02 budget allows, as Codex reports no cost: continue it with a bigger one";
+		await expect(inside(stub, (thread) => thread.steer("Go on.", { operationId: "more" }))).rejects.toThrow(refusal);
+		await expect(inside(stub, (thread) => thread.continue({ operationId: "more" }))).rejects.toThrow(refusal);
+		expect(await api(`/coding/threads/${id}/steer`, { method: "POST", body: JSON.stringify({ text: "Go on." }) })).toMatchObject({ status: 409, body: { code: "budget_spent", error: refusal } });
+		await stub.continue({ operationId: "bigger", budgetUsd: 1 });
+		const [, again] = await turns(id, 2);
+		expect(again).toMatchObject({ outcome: "completed", operationId: "bigger", budgetUsd: 1 });
+	});
+
 	it("waits for the person when Codex says its login expired, and goes on once continued", async () => {
 		codexCli = async () => ({ stdout: codexFixture("expired"), code: 1 });
 		const { id, stub } = await startCodex();
@@ -1073,44 +1089,92 @@ describe("a Mistral Vibe thread", () => {
 });
 
 describe("an Amp thread", () => {
-	// Amp signs in with the person's access token, from the coding vault. Its adapter isn't written yet, so a turn that
-	// gets past signing in fails closed, which is how these tests see that the thread went on.
+	// Amp signs in with the person's access token, from the coding vault. The thread runs `amp` in its in-memory
+	// workspace, where it is a script that prints the stream-json of test/fixtures/amp/.
 	const KEY = "sgamp_user_THREADKEY_0123456789abcdef";
 	const started: Stub[] = [];
+	const runs: { argv: string[]; env: Record<string, string> }[] = [];
+	codingWorkspaces.register("amp", ({ argv, env }) => {
+		runs.push({ argv, env });
+		return { stdout: ampFixture("turn.jsonl") };
+	});
 
-	async function startAmp() {
+	async function startAmp(overrides: Partial<StartThread> = {}) {
 		const id = crypto.randomUUID();
 		await codingScheduler(env, OWNER).registerThread({ threadId: id, createdBy: { type: "person" }, parent: null, chat: null, harness: "amp", task: "Fix the greeting test", repo: REPO, ref: "main", budgetUsd: 3, createdAt: Date.now() });
 		const stub = codingThread(env, id);
 		started.push(stub);
-		await stub.start(startInput(id, { space: OWNER, harness: "amp", task: "Fix the greeting test" }));
+		await stub.start(startInput(id, { space: OWNER, harness: "amp", task: "Fix the greeting test", ...overrides }));
 		return { id, stub };
 	}
 
-	beforeEach(() => codingVault(env).delete(OWNER, "amp"));
+	const saveKey = async () => expect((await api("/coding/vault/amp/api-key", { method: "PUT", body: JSON.stringify({ apiKey: KEY }) })).status).toBe(200);
+
+	beforeEach(async () => {
+		runs.length = 0;
+		await codingVault(env).delete(OWNER, "amp");
+	});
 
 	afterEach(async () => {
 		for (const stub of started.splice(0)) await stub.archive().catch(() => {});
 		await codingVault(env).delete(OWNER, "amp");
 	});
 
-	it("waits for the person's key when there is none, and goes on once they save one, never storing it", async () => {
+	it("waits for the person's key, then runs Amp with it, keeping its thread, transcript, tokens and tests but never the key", async () => {
 		const { id, stub } = await startAmp();
 		await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", inbox: 1 }), { timeout: 10_000, interval: 20 });
 		expect((await stub.status()).stateDetail).toBe("Connect Amp with your API key, then continue the thread");
 		expect((await stub.log()).find((event) => event.kind === "thread.waiting_input")?.data).toMatchObject({ reason: "login_required", harness: "amp" });
+		expect(runs).toEqual([]);
 		// Its workspace may reach Amp, besides the broker and the registries.
 		const spec = (await workspaceOf(id)) as unknown as { spec: { egress: { allow: string[] } } };
 		expect(spec.spec.egress.allow).toEqual(expect.arrayContaining(["ampcode.com", "*.ampcode.com", "registry.npmjs.org"]));
 
-		// Saving the key goes on with the thread, which the placeholder then fails, saying so.
-		expect((await api("/coding/vault/amp/api-key", { method: "PUT", body: JSON.stringify({ apiKey: KEY }) })).status).toBe(200);
+		// Saving the key goes on with the thread, which runs Amp with it in its environment.
+		await saveKey();
 		const [ended] = await turns(id, 1);
-		expect(ended).toMatchObject({ outcome: "error", reason: "harness_error", state: "failed" });
-		expect((await stub.status()).stateDetail).toBe("Amp isn't implemented yet: Pim can't run its CLI");
+		expect(ended).toMatchObject({ outcome: "completed", said: "Fixed `greet` to include the name; the greeting test passes now." });
+		const [first] = runs;
+		expect(first!.env).toMatchObject({ HOME: "/workspace", AMP_API_KEY: KEY, AMP_SKIP_UPDATE_CHECK: "1" });
+		expect(first!.argv.slice(0, 2)).toEqual(["amp", "--stream-json"]);
+		expect(first!.argv.at(-1)).toMatch(/^--execute=<instructions from="Pim">\nYou are working for a person[\s\S]*\n<\/instructions>\n\nFix the greeting test$/);
+		expect(JSON.stringify(runs.map((run) => run.argv))).not.toContain("THREADKEY");
+		// Its tokens as Amp counted them, at no cost, since it reports none; its tests, refusals and notices.
+		const log = await stub.log();
+		expect(log.filter((event) => event.kind === "model_call")).toEqual([expect.objectContaining({ provider: "amp", model: "high", costUsd: 0, input: 45, output: 477, cacheRead: 84518, cacheWrite: 17323 })]);
+		expect((await stub.status()).spentUsd).toBe(0);
+		expect(log.find((event) => event.kind === "harness.permission_denied")?.data).toMatchObject({ tool: "shell_command" });
+		expect(log.find((event) => event.kind === "harness.notice")?.data).toMatchObject({ message: "A background subagent (toolu_01Bg) failed" });
+		expect((await stub.tests()).map((run) => [run.command, run.exitCode])).toEqual([
+			["npm test", 1],
+			["npm test", 0],
+		]);
+		const transcript = await inside(stub, (thread) => thread.transcript());
+		expect(transcript[0]!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
+		expect(transcript.flatMap((message) => message.parts).find((part) => part.type === "tool-call" && part.name === "shell_command")).toMatchObject({ arguments: { command: "npm test" } });
+
+		// A steer is the next turn, which goes on with Amp's thread.
+		await stub.steer("Also add a test for an empty name", { operationId: "steer-1" });
+		await turns(id, 2);
+		expect(runs[1]!.argv.slice(0, 4)).toEqual(["amp", "threads", "continue", AMP_SESSION]);
+		expect(runs[1]!.argv.at(-1)).toBe("--execute=Also add a test for an empty name");
 		// The key is nowhere in the thread's tables, its log or its transcript.
 		expect(await everything(stub)).not.toContain("THREADKEY");
 		expect(JSON.stringify(await stub.log())).not.toContain("THREADKEY");
 		expect(JSON.stringify(await inside(stub, (thread) => thread.transcript()))).not.toContain("THREADKEY");
+	});
+
+	it("stops at the tokens its budget allows, as Amp reports no cost, saying so in tokens", async () => {
+		await saveKey();
+		// $0.03 allows 30,000 tokens; the turn's second model response passes them, and the turn is stopped there.
+		const { id, stub } = await startAmp({ budgetUsd: 0.03 });
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "error", reason: "budget", state: "failed", spentUsd: 0, budgetUsd: 0.03 });
+		// The fake CLI printed its whole turn at once, so every token of it was counted before the turn was stopped.
+		const status = await stub.status();
+		expect(status).toMatchObject({ state: "failed", stateReason: "budget", stateDetail: "This coding thread has used 102,363 of the 30,000 tokens its $0.03 budget allows, as Amp reports no cost" });
+		expect((await stub.log()).find((event) => event.kind === "app.budget_stop")?.data).toEqual({ budgetUsd: 0.03, spentUsd: 0, tokens: 102_363, tokenCeiling: 30_000 });
+		const transcript = await inside(stub, (thread) => thread.transcript());
+		expect(transcript.at(-1)).toMatchObject({ role: "notice", parts: [{ type: "text", text: "Stopped: the thread used 102,363 of the 30,000 tokens its $0.03 budget allows." }] });
 	});
 });

@@ -340,6 +340,11 @@ export class CodingThreadStore {
 		this.#changed();
 	}
 
+	/** The tokens of every model call the thread made, of all kinds. */
+	tokensUsed(): number {
+		return Number(this.#sql.exec("SELECT COALESCE(SUM(input + output + cache_read + cache_write), 0) AS n FROM coding_event WHERE kind = 'model_call'").one().n);
+	}
+
 	/** The nonce the thread's live gateway tokens carry, or null when none are. */
 	gatewayNonce(): string | null {
 		return text(this.#sql.exec("SELECT gateway_nonce FROM coding_thread LIMIT 1").toArray()[0]?.gateway_nonce);

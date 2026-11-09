@@ -150,6 +150,21 @@ describe("the live transcript", () => {
       kind: "notice",
       text: "Stopped: the thread spent $3.01 of its $3 budget.",
     });
+    // A CLI harness that estimates no cost is stopped at its token ceiling, and says so in tokens, not dollars.
+    const ceiling = {
+      ...stop,
+      data: {
+        budgetUsd: 3,
+        spentUsd: 0,
+        tokens: 3_012_345,
+        tokenCeiling: 3_000_000,
+      },
+    } as unknown as EntryRecord;
+    expect(
+      transcriptRows(fold([snapshot([task, ceiling])]).messages)[1],
+    ).toMatchObject({
+      text: "Stopped: the thread used 3,012,345 of the 3,000,000 tokens its $3 budget allows.",
+    });
   });
 
   it("follows a message being written and drops it once written", () => {

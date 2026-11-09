@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { CLAUDE_CODE_FLAGS, ClaudeStreamParser, claudeCode } from "../src/coding/harness/claude-code";
+import { AMP_FLAGS, amp, ampLogFile } from "../src/coding/harness/amp";
 import { authEnv } from "../src/coding/harness/auth";
 import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/coding/harness/codex";
 import { cliHarness } from "../src/coding/harness/index";
-import { amp } from "../src/coding/harness/pending";
 import { type HarnessAuth, HarnessRunner, LineBuffer, type RunRecord, recoverRun, type RunnerDeps } from "../src/coding/harness/runner";
 import type { CliHarness, HarnessEvent, HarnessFiles, HarnessTurn } from "../src/coding/harness/types";
 import { mistralVibe, VIBE_FLAGS, VIBE_SESSIONS, VibeStreamParser, vibeRunDir } from "../src/coding/harness/vibe";
@@ -11,6 +11,7 @@ import type { CodingThreadRow } from "../src/coding/thread-store";
 import type { TestRun } from "../src/coding/tools";
 import type { Restored } from "../src/coding/vault/inject";
 import { type ExecEvent, type ExecOptions, type Workspace, WorkspaceFileError } from "../src/coding/workspace/types";
+import { AMP_SESSION, ampFixture, ampLines } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeLines, vibeOutput } from "./fixtures/vibe";
@@ -27,7 +28,7 @@ const parse = (text: string) => {
 	return text.split("\n").flatMap((line) => parser.parseLine(line));
 };
 
-const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, model: null, instructions: "Don't push.", sessionBefore: { costUsd: 0, usage: null } };
+const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, maxTokens: null, model: null, instructions: "Don't push.", sessionBefore: { costUsd: 0, usage: null } };
 
 describe("Claude Code's stream-json", () => {
 	it("is read into the session, the text as it is written, messages with their tools, retries, refusals and the result", () => {
@@ -622,8 +623,8 @@ class Signals {
 }
 
 /**
- * A workspace whose `claude`, `codex` and `vibe` (started by `/bin/sh`) run `script`, and whose `pkill` sends what it
- * is given. Its files are `files`, by path, which a script may write. Everything it runs is recorded.
+ * A workspace whose `claude`, `codex`, `amp` and `vibe` (started by `/bin/sh`) run `script`, and whose `pkill` sends
+ * what it is given. Its files are `files`, by path, which a script may write. Everything it runs is recorded.
  */
 function scripted(script: Script, files = new Map<string, string>()) {
 	const signals = new Signals();
@@ -639,7 +640,7 @@ function scripted(script: Script, files = new Map<string, string>()) {
 				return;
 			}
 			const name = cmd[0] === "/bin/sh" ? cmd[7] : cmd[0];
-			if (name !== "claude" && name !== "codex" && name !== "vibe") throw new Error(`no ${cmd[0]}`);
+			if (name !== "claude" && name !== "codex" && name !== "amp" && name !== "vibe") throw new Error(`no ${cmd[0]}`);
 			log.push(name);
 			yield* script(options, signals);
 		},
@@ -829,6 +830,19 @@ describe("a CLI harness run", () => {
 		expect(await running).toMatchObject({ status: "unanswered", reason: "aborted", sessionCostUsd: 0.02 });
 		expect(signals.sent).toEqual(["INT"]);
 		expect(log).toEqual(["lock", "restore", "claude", "signal -INT", "write back", "unlock"]);
+	});
+
+	it("stops a turn with SIGINT once its tokens reach `maxTokens`, the ceiling of a CLI that estimates no cost, and says it reached its budget", async () => {
+		const turn = lines("turn");
+		// The turn's first message, of 2,114 tokens in, 184 out, 13,008 read from the cache and 5,120 written to it: 20,426.
+		const printed = [turn[0]!, turn.find((line) => JSON.parse(line).type === "assistant")!, turn.at(-1)!];
+		const run = async (maxTokens: number) => {
+			const { workspace, log, signals } = scripted(() => prints(printed));
+			const result = await (await prepared(deps(workspace, log).options)).run({ ...TURN, maxTokens }, 60_000);
+			return { result, signals: signals.sent };
+		};
+		expect(await run(20_426)).toEqual({ result: expect.objectContaining({ status: "unanswered", reason: "budget", detail: "The turn reached the thread's token ceiling" }), signals: ["INT"] });
+		expect(await run(20_427)).toEqual({ result: expect.objectContaining({ status: "done" }), signals: [] });
 	});
 
 	it("kills a CLI that ignores SIGINT after the grace, on abort and when the turn runs out of time", async () => {
@@ -1055,8 +1069,8 @@ describe("a Mistral Vibe run", () => {
 });
 
 describe("a run signed in with an API key", () => {
-	// Amp's adapter isn't written yet, so the CLI here is Claude Code's script under Amp's name and sign-in: what is
-	// checked is what the runner does with the key, whatever the CLI.
+	// The CLI here is Claude Code's script under the name and sign-in of a harness with an API key: what is checked is
+	// what the runner does with the key, whatever the CLI. Amp's own runs are below.
 	const KEY = "sgamp_user_TESTKEY0123456789abcdefXYZ";
 	const harness: CliHarness = { ...claudeCode, id: "amp", name: "Amp", login: undefined, apiKeyEnv: "AMP_API_KEY" };
 	const auth: HarnessAuth = { mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] };
@@ -1126,21 +1140,180 @@ describe("a run signed in with an API key", () => {
 		expect(asked).toEqual(["amp", "mistral-vibe"]);
 	});
 
-	it("fails closed for Amp, whose adapter isn't written yet, and says which hosts and variable it needs", () => {
-		expect(cliHarness("mistral-vibe")).toBe(mistralVibe);
+	it("lists Amp and Mistral Vibe among the CLI harnesses, with the variable and hosts each needs", () => {
 		expect(cliHarness("amp")).toBe(amp);
+		expect(cliHarness("mistral-vibe")).toBe(mistralVibe);
 		expect(amp).toMatchObject({ name: "Amp", apiKeyEnv: "AMP_API_KEY", egress: ["ampcode.com", "*.ampcode.com"] });
+		expect(mistralVibe).toMatchObject({ name: "Mistral Vibe", apiKeyEnv: "MISTRAL_API_KEY", egress: ["api.mistral.ai"] });
 		expect(amp.login).toBeUndefined();
-		expect(() => amp.buildCommand(TURN)).toThrow("Amp isn't implemented yet");
-		expect(() => amp.parser(TURN)).toThrow("isn't implemented yet");
-		expect(() => amp.signalCommand(SESSION, "KILL")).toThrow("isn't implemented yet");
+		expect(mistralVibe.login).toBeUndefined();
+	});
+});
+
+describe("Amp's stream-json", () => {
+	const read = (text: string, parser = amp.parser(TURN)) => text.split("\n").flatMap((line) => parser.parseLine(line));
+
+	it("is read into the thread, the transcript's messages with their tools, a failed background subagent, a refusal and the result", () => {
+		const events = read(ampFixture("turn.jsonl"), amp.parser({ ...TURN, model: "high" }));
+		expect(events.filter((event) => event.type === "unparsed")).toEqual([]);
+		// The session is Amp's thread, and the model the mode Amp says it runs.
+		expect(events[0]).toEqual({ type: "session", sessionId: AMP_SESSION, model: "high" });
+		// Amp prints messages whole: nothing as it is written.
+		expect(events.some((event) => event.type === "delta")).toBe(false);
+		const messages = events.flatMap((event) => (event.type === "assistant" || event.type === "tool_result" ? [event.message] : []));
+		expect(messages.map((message) => (message.role === "assistant" ? message.content.map((part) => (part.type === "toolCall" ? part.name : part.type)) : [`result:${message.toolName}`]))).toEqual([
+			["text", "shell_command"],
+			["result:shell_command"],
+			["edit_file"],
+			["result:edit_file"],
+			// The subagent's own call and result aren't the thread's; what it found comes back as the Task call's result.
+			["Task"],
+			["result:Task"],
+			["Task"],
+			["result:Task"],
+			["shell_command"],
+			["result:shell_command"],
+			["text"],
+		]);
+		const first = events.find((event): event is Extract<HarnessEvent, { type: "assistant" }> => event.type === "assistant")!;
+		expect(first.message.content[1]).toEqual({ type: "toolCall", id: "toolu_01Shell", name: "shell_command", arguments: { command: "npm test" } });
+		// Its tokens as Amp counted them, with no message id: each line is a model response of its own.
+		expect(first).toMatchObject({ messageId: null, message: { provider: "amp", model: "high", stopReason: "toolUse", usage: { input: 10, output: 99, cacheRead: 0, cacheWrite: 16256 } } });
+		expect(messages[1]).toMatchObject({ toolCallId: "toolu_01Shell", isError: true, content: [{ type: "text", text: expect.stringContaining("Tests  1 failed | 3 passed (4)") }] });
+		expect(events.filter((event) => event.type === "notice")).toEqual([{ type: "notice", message: "A background subagent (toolu_01Bg) failed" }]);
+		expect(events.filter((event) => event.type === "permission_denied")).toEqual([{ type: "permission_denied", tool: "shell_command", message: "" }]);
+		// Amp reports tokens, never dollars.
+		expect(events.at(-1)).toEqual({ type: "result", ok: true, reason: null, sessionId: AMP_SESSION, sessionCostUsd: null, text: "Fixed `greet` to include the name; the greeting test passes now.", errors: [] });
+		expect(events.some((event) => event.type === "auth_failed")).toBe(false);
 	});
 
-	it("never runs a placeholder's CLI, even with a key", async () => {
-		const { workspace, commands, log } = scripted(() => prints(lines("turn")));
-		const { options } = deps(workspace, log, { harness: amp, auth });
-		const runner = await prepared(options);
-		await expect(runner.run(TURN, 60_000)).rejects.toThrow("Amp isn't implemented yet");
-		expect(commands).toEqual([]);
+	it("says why a run failed: its most turns, an error with no result after it, credits, and a refused token", () => {
+		expect(read(ampFixture("max-turns.jsonl")).at(-1)).toMatchObject({ type: "result", ok: false, reason: "max_turns", sessionCostUsd: null, errors: ["Reached the maximum number of turns"] });
+		expect(read(ampFixture("failed.jsonl")).at(-1)).toEqual({ type: "result", ok: false, reason: "error", sessionId: AMP_SESSION, sessionCostUsd: null, text: null, errors: ["Model provider returned an error: overloaded"] });
+		const credits = read(ampFixture("credits.jsonl"));
+		expect(credits.at(-1)).toMatchObject({ ok: false, reason: "error", errors: ["You are out of credits. Add paid credits or choose a paid tier."] });
+		expect(credits.some((event) => event.type === "auth_failed")).toBe(false);
+		// The CLI's own words for a refused token, in a failed result rather than on its error output.
+		const refused = `{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"error":"${ampLines("login.stderr")[0]}","session_id":"${AMP_SESSION}"}`;
+		expect(read(refused).map((event) => event.type)).toEqual(["auth_failed", "result"]);
+	});
+});
+
+describe("Amp's command line", () => {
+	const NEW = "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f";
+	const help = ampFixture("help.txt");
+
+	it("starts a private thread in execute mode with stream-json, Pim's instructions opening its first message, and nothing past the workspace", () => {
+		const cmd = amp.buildCommand({ ...TURN, sessionId: NEW });
+		expect(cmd).toEqual([
+			"amp",
+			"--stream-json",
+			"--no-ide",
+			"--no-notifications",
+			"--no-color",
+			"--no-remote-control-terminal",
+			"--log-file",
+			`/workspace/.cache/amp/logs/pim-${NEW}.log`,
+			"--visibility",
+			"private",
+			`--execute=<instructions from="Pim">\nDon't push.\n</instructions>\n\nFix the greeting test`,
+		]);
+		// Every flag is one the pinned CLI's `amp --help` lists.
+		for (const flag of [...AMP_FLAGS, "--log-file", "--visibility", "--mode", "--execute"]) expect(help).toMatch(new RegExp(`^ {2}(?:-\\w+, )?${flag}\\b`, "m"));
+		expect(help).toContain("continue                           [alias: c] Continue an existing thread");
+		expect(help).toContain("AMP_API_KEY");
+		expect(ampLogFile(NEW)).toContain(NEW);
+	});
+
+	it("goes on with Amp's thread after the first turn, asks for one of Amp's modes, and keeps a prompt that looks like a flag a prompt", () => {
+		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true, prompt: "--help me" })).toEqual([
+			"amp",
+			"threads",
+			"continue",
+			AMP_SESSION,
+			...AMP_FLAGS,
+			"--log-file",
+			`/workspace/.cache/amp/logs/pim-${AMP_SESSION}.log`,
+			"--execute=--help me",
+		]);
+		expect(amp.buildCommand({ ...TURN, sessionId: NEW, model: "High" })).toEqual(expect.arrayContaining(["--mode", "high"]));
+		// A thread's mode is fixed when Amp makes it.
+		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true, model: "high" })).not.toContain("--mode");
+		expect(() => amp.buildCommand({ ...TURN, model: "claude-opus-5" })).toThrow('Amp has no mode "claude-opus-5": ask for low, medium, high, ultra');
+	});
+
+	it("signs in with the token in AMP_API_KEY, needs only Amp's hosts, estimates no cost, and is signalled by the turn's id", () => {
+		expect(cliHarness("amp")).toBe(amp);
+		expect(amp).toMatchObject({ name: "Amp", apiKeyEnv: "AMP_API_KEY", egress: ["ampcode.com", "*.ampcode.com"], reportsCost: false, shellTool: "shell_command", env: { AMP_SKIP_UPDATE_CHECK: "1" } });
+		expect(amp.login).toBeUndefined();
+		expect(amp.signalCommand(NEW, "INT")).toEqual(["pkill", "-INT", "-f", NEW]);
+		expect(amp.loginFailure!.test(ampFixture("login.stderr"))).toBe(true);
+		expect(amp.loginFailure!.test(ampFixture("unreachable.stderr"))).toBe(false);
+	});
+});
+
+describe("an Amp run", () => {
+	const KEY = "sgamp_user_AMPRUNKEY0123456789abcdef";
+	const auth: HarnessAuth = { mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] };
+	const AMP_TURN: HarnessTurn = { ...TURN, sessionId: "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f", maxTokens: 3_000_000 };
+	const ampDeps = (workspace: Workspace, log: string[]) => deps(workspace, log, { harness: amp, auth });
+	const ready = async (options: RunnerDeps) => {
+		const runner = new HarnessRunner(options);
+		expect(await runner.prepare("op-1", { sessionId: AMP_TURN.sessionId, resume: false })).toEqual({ status: "ready" });
+		return runner;
+	};
+
+	it("runs Amp in the checkout with the token in its environment alone, and reports its thread, tokens and test runs, with no cost", async () => {
+		const { workspace, commands, log } = scripted(() => prints(ampLines("turn.jsonl")));
+		const { options, tests, events } = ampDeps(workspace, log);
+		const result = await (await ready(options)).run(AMP_TURN, 60_000);
+		expect(result).toMatchObject({ status: "done", sessionId: AMP_SESSION, sessionCostUsd: null, sessionUsage: null, model: "high" });
+		// Each model response's tokens, the subagent's left out as its messages are.
+		expect(result.usage).toEqual({ input: 45, output: 477, cacheRead: 84518, cacheWrite: 17323 });
+		// No login restored or written back, and no lock: only Amp ran.
+		expect(log).toEqual(["amp"]);
+		expect(commands[0]!.cmd).toEqual(amp.buildCommand(AMP_TURN));
+		expect(commands[0]!.options).toMatchObject({ cwd: "/workspace/repo", env: { HOME: "/workspace", AMP_API_KEY: KEY, AMP_SKIP_UPDATE_CHECK: "1" } });
+		expect(JSON.stringify(commands.map((command) => command.cmd))).not.toContain(KEY);
+		expect(tests).toEqual([
+			expect.objectContaining({ command: "npm test", exitCode: 1, summary: { format: "vitest", passed: 3, failed: 1, skipped: 0, total: 4 } }),
+			expect.objectContaining({ command: "npm test", exitCode: 0, summary: { format: "vitest", passed: 4, failed: 0, skipped: 0, total: 4 } }),
+		]);
+		expect(events.find((event) => event.type === "permission_denied")).toMatchObject({ tool: "shell_command" });
+	});
+
+	it("never reports a turn as done without a successful result: a refused token, no server, no credits, its most turns, an error", async () => {
+		const stderr = (name: "login.stderr" | "unreachable.stderr") =>
+			async function* (): AsyncGenerator<ExecEvent> {
+				// As the real CLI did: nothing on its output, its error on the error output, exit 1.
+				yield { type: "stderr", data: ampFixture(name) };
+				yield { type: "exit", code: 1 };
+			};
+		const cases: [Script, Partial<Awaited<ReturnType<HarnessRunner["run"]>>>][] = [
+			[stderr("login.stderr"), { status: "unanswered", reason: "login_required", detail: "Amp isn't signed in: connect it again", sessionId: null }],
+			[stderr("unreachable.stderr"), { status: "unanswered", reason: "harness_error", detail: expect.stringMatching(/^Amp exited 1 without a result: Error: Couldn't connect to the Amp server at https:\/\/unreachable\.invalid\./) }],
+			[() => prints(ampLines("credits.jsonl"), 1), { status: "unanswered", reason: "harness_error", detail: "Amp usage limit reached: You are out of credits. Add paid credits or choose a paid tier." }],
+			[() => prints(ampLines("max-turns.jsonl"), 1), { status: "unanswered", reason: "max_turns", sessionId: AMP_SESSION }],
+			[() => prints(ampLines("failed.jsonl"), 1), { status: "unanswered", reason: "harness_error", detail: "Model provider returned an error: overloaded" }],
+			[() => prints(ampLines("turn.jsonl").slice(0, -1), 0), { status: "unanswered", reason: "harness_error", detail: "Amp exited 0 without a result" }],
+		];
+		for (const [script, expected] of cases) {
+			const { workspace, log } = scripted(script);
+			expect(await (await ready(ampDeps(workspace, log).options)).run(AMP_TURN, 60_000)).toMatchObject(expected);
+		}
+	});
+
+	it("is stopped with SIGINT, by the id on its command line, once its tokens reach what is left of the thread's ceiling", async () => {
+		const { workspace, log, commands, signals } = scripted(async function* (options, signals) {
+			// The first model response's 16,365 tokens, then the CLI waits, as one mid-turn does.
+			for (const line of ampLines("turn.jsonl").slice(0, 3)) yield { type: "stdout", data: `${line}\n` };
+			await signals.wait("INT", options.signal);
+			yield { type: "exit", code: 130 };
+		});
+		const result = await (await ready(ampDeps(workspace, log).options)).run({ ...AMP_TURN, maxTokens: 16_000 }, 60_000);
+		expect(result).toMatchObject({ status: "unanswered", reason: "budget", sessionId: AMP_SESSION, usage: { input: 10, output: 99, cacheRead: 0, cacheWrite: 16256 } });
+		expect(commands.find((command) => command.cmd[0] === "pkill")!.cmd).toEqual(["pkill", "-INT", "-f", AMP_TURN.sessionId]);
+		expect(commands[0]!.cmd.join(" ")).toContain(AMP_TURN.sessionId);
+		expect(signals.sent).toEqual(["INT"]);
 	});
 });

@@ -11,6 +11,33 @@ import { deploymentSettings } from "../deployment";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
+import {
+	DEFAULT_GATEWAY_LIMITS,
+	forwardToProvider,
+	GATEWAY_FAMILIES,
+	GATEWAY_TOKEN_MARGIN_MS,
+	type GatewayCredential,
+	type GatewayFamily,
+	gatewayCost,
+	gatewayError,
+	GatewayGate,
+	type GatewayHarness,
+	type GatewayLimits,
+	gatewayPrice,
+	gatewayRoute,
+	gatewayTokenKey,
+	HARNESS_FAMILY,
+	estimatedUsage,
+	issueGatewayToken,
+	type MeteredAnswer,
+	newGatewayNonce,
+	readCapped,
+	readGatewayBody,
+	sameNonce,
+	sandboxModelEnv,
+	type SandboxModelEnv,
+	verifyGatewayToken,
+} from "./model-gateway";
 import type { ManagerHealth } from "./provider-capacity";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler } from "./scheduler-do";
@@ -98,6 +125,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The space's list being told of the thread's row, and whether it changed again meanwhile. */
 	#indexing: Promise<void> | null = null;
 	#indexAgain = false;
+	/** The model gateway's caps on this thread's requests. */
+	readonly #gate = new GatewayGate();
 
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
@@ -206,6 +235,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const provider = await pim.codingModelProvider(providerId);
 		if (!provider) throw new Error(`The space has no model provider ${providerId}`);
 		return piProvider(providerId, provider);
+	}
+
+	/** How the model gateway reaches model providers: the Worker's `fetch`, unless given. */
+	protected gatewayFetch(): typeof fetch {
+		return (input, init) => fetch(input, init);
+	}
+
+	/** The model gateway's caps on this thread's requests. */
+	protected gatewayLimits(): GatewayLimits {
+		return DEFAULT_GATEWAY_LIMITS;
+	}
+
+	/** The space's key for `family`, read from the space's Pim for one request, preferring the provider the thread runs on. */
+	protected async gatewayCredential(space: string, family: GatewayFamily, preferred: string): Promise<GatewayCredential | null> {
+		return (await getAgentByName(this.env.Pim, space)).codingGatewayCredential(family, preferred);
 	}
 
 	/** Startup: work left mid-way by an eviction goes on. */
@@ -334,6 +378,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.#live();
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
+		// Whatever runs in the workspace loses its model at once.
+		this.store.setGatewayNonce(null);
 		if (thread.currentOperation) await this.#stopTurn();
 		else {
 			this.#killCommands();
@@ -410,6 +456,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
 		if (thread.state === "archived") return this.status();
+		this.store.setGatewayNonce(null);
 		if (thread.currentOperation) await this.#stopTurn();
 		this.#killCommands();
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
@@ -584,6 +631,149 @@ export class CodingThreadDO extends DurableObject<Env> {
 		} finally {
 			await workspace.remove(file).catch(() => {});
 		}
+	}
+
+	/**
+	 * A token for the model gateway (./model-gateway.ts) for this thread and
+	 * `families`, to give a CLI in its workspace instead of a key. It lasts
+	 * the thread's wall clock and a margin, and every token of the thread is
+	 * revoked when it is aborted or archived (`revokeGatewayTokens`); one
+	 * minted after that carries a new nonce.
+	 */
+	async gatewayToken(families: readonly GatewayFamily[]): Promise<{ token: string; expiresAt: number }> {
+		await this.lifecycle.start();
+		const thread = this.#live();
+		if (families.length === 0 || !families.every((family) => GATEWAY_FAMILIES.includes(family))) throw new Error(`families must be some of ${GATEWAY_FAMILIES.join(", ")}`);
+		let nonce = this.store.gatewayNonce();
+		if (nonce === null) {
+			nonce = newGatewayNonce();
+			this.store.setGatewayNonce(nonce);
+		}
+		const expiresAt = this.now() + thread.limits.wallClockMin * 60_000 + GATEWAY_TOKEN_MARGIN_MS;
+		const token = await issueGatewayToken(await gatewayTokenKey(this.env), { threadId: thread.threadId, space: thread.space, families: [...new Set(families)], nonce, expiresAt });
+		return { token, expiresAt };
+	}
+
+	/** Revokes every gateway token of the thread: a CLI still holding one is refused from its next request. */
+	async revokeGatewayTokens(): Promise<void> {
+		await this.lifecycle.start();
+		this.store.setGatewayNonce(null);
+	}
+
+	/**
+	 * What to put in the workspace for `harness` to call its model through the
+	 * gateway: its environment, with a fresh token as its key, and the one host
+	 * its egress must allow, this Pim's.
+	 */
+	async modelGatewayEnv(harness: GatewayHarness): Promise<SandboxModelEnv> {
+		const origin = deploymentSettings(this.env).publicUrl;
+		if (!origin) throw new Error("PIM_PUBLIC_URL isn't set, so the workspace can't reach Pim's model gateway");
+		const { token } = await this.gatewayToken([HARNESS_FAMILY[harness]]);
+		return sandboxModelEnv(origin, harness, token);
+	}
+
+	/**
+	 * A CLI's request to the model gateway, `path` being under the family's
+	 * route, as the Worker hands it on (`serveModelGateway`). It is refused
+	 * unless the token is this thread's current one and lets `family`, the
+	 * route is one the gateway forwards, the thread is under its request caps
+	 * and its budget, and its space has a key for the family. Then the space's
+	 * key goes with it to the provider, and once the answer ends its usage is
+	 * charged to the thread, in the log and its spend in one transaction.
+	 * Requests already under way may together spend past the budget; the
+	 * next one is refused.
+	 */
+	async gatewayRequest(token: string, family: GatewayFamily, path: string, request: Request): Promise<Response> {
+		await this.lifecycle.start();
+		const claims = await verifyGatewayToken(await gatewayTokenKey(this.env), token, this.now());
+		const thread = this.store.thread();
+		const nonce = this.store.gatewayNonce();
+		if (!claims || !thread || claims.threadId !== thread.threadId || claims.space !== thread.space || nonce === null || !sameNonce(claims.nonce, nonce) || thread.state === "archived") {
+			await request.body?.cancel().catch(() => {});
+			return gatewayError(family, 401, "invalid_token", "This model gateway token isn't valid for this coding thread any more");
+		}
+		if (!claims.families.includes(family)) return gatewayError(family, 403, "family_not_allowed", `This token doesn't let the thread call ${family}`);
+		const url = new URL(request.url);
+		const api = gatewayRoute(family, request.method, path, url.search);
+		if (api instanceof Response) return api;
+		const limits = this.gatewayLimits();
+		const refused = this.#gate.admit(this.now(), limits);
+		if (refused) {
+			const message = refused.refused === "rate_limited" ? `This coding thread made ${limits.requestsPerMinute} model requests in the last minute: wait a little` : `This coding thread has ${limits.concurrent} model requests under way: wait for one to finish`;
+			return gatewayError(family, 429, refused.refused, message, { "retry-after": String(refused.retryAfter) });
+		}
+		let released = false;
+		const release = () => {
+			if (!released) this.#gate.release();
+			released = true;
+		};
+		try {
+			const current = this.store.required();
+			if (current.spentUsd >= current.budgetUsd) {
+				release();
+				return gatewayError(family, 402, "budget_exhausted", `${BUDGET_MESSAGE}: spent $${current.spentUsd.toFixed(4)} of $${current.budgetUsd}`);
+			}
+			const raw = await readCapped(request, limits.maxRequestBytes);
+			if (raw === null) {
+				release();
+				return gatewayError(family, 413, "too_large", `The request is larger than the ${limits.maxRequestBytes} bytes the model gateway takes`);
+			}
+			const read = readGatewayBody(api, raw);
+			if (typeof read === "string") {
+				release();
+				return gatewayError(family, 400, "invalid_request", read);
+			}
+			const credential = await this.gatewayCredential(thread.space, family, thread.profile.providerId);
+			if (!credential) {
+				release();
+				return gatewayError(family, 403, "no_credential", `The space has no ${family === "anthropic" ? "Anthropic" : "OpenAI API"} key: add one in Pim's Settings → Model`);
+			}
+			const started = this.now();
+			return await forwardToProvider({
+				family,
+				api,
+				path,
+				search: url.search,
+				request,
+				body: read.body,
+				credential,
+				fetch: this.gatewayFetch(),
+				limits,
+				settle: (answer) => {
+					release();
+					this.#settleGateway({ family, api, providerId: credential.providerId, model: read.model, requestBytes: read.body.byteLength, started }, answer);
+				},
+			});
+		} catch (error) {
+			release();
+			console.warn(JSON.stringify({ event: "pim.coding.gateway_failed", thread: thread.threadId, family, error: String(error).slice(0, 300) }));
+			return gatewayError(family, 502, "upstream_unreachable", "The model gateway couldn't forward the request");
+		}
+	}
+
+	/** Charges an answer the gateway passed on to the thread, and logs the request, never its key or content. */
+	#settleGateway(call: { family: GatewayFamily; api: string; providerId: string; model: string; requestBytes: number; started: number }, answer: MeteredAnswer | null): void {
+		const log = { event: "pim.coding.gateway", thread: this.store.thread()?.threadId ?? null, family: call.family, api: call.api, model: call.model, ms: this.now() - call.started };
+		// Refused or failed answers, and counting tokens, cost nothing.
+		if (answer === null || call.api === "anthropic-count-tokens") {
+			console.log(JSON.stringify({ ...log, charged: false }));
+			return;
+		}
+		void (async () => {
+			const usage = answer.usage ?? estimatedUsage(call.requestBytes, answer.bytes);
+			const { model, pricing } = await gatewayPrice(call.family, call.model);
+			const costUsd = gatewayCost(model, usage);
+			this.ctx.storage.transactionSync(() =>
+				this.store.recordModelCall(call.providerId, call.model, usage, costUsd, {
+					via: "gateway",
+					api: call.api,
+					pricing,
+					...(pricing === "fallback" ? { pricedAs: model.id ?? null } : {}),
+					...(answer.usage === null ? { estimated: true } : {}),
+				}),
+			);
+			console.log(JSON.stringify({ ...log, charged: true, costUsd, estimated: answer.usage === null, pricing }));
+		})().catch((error) => console.warn(JSON.stringify({ event: "pim.coding.gateway_charge_failed", error: String(error).slice(0, 300) })));
 	}
 
 	/** The scheduler's notice: the queued thread holds a slot now. */

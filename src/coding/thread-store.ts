@@ -215,8 +215,10 @@ export class CodingThreadStore {
 
 	/** Brings an older thread's tables up to date. Columns added after the first schema go here, as `ALTER TABLE` behind a check. */
 	#migrate(): void {
-		const columns = this.#sql.exec("PRAGMA table_info(coding_thread)").toArray();
-		if (!columns.some((column) => column.name === "harness")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
+		const columns = new Set(this.#sql.exec("PRAGMA table_info(coding_thread)").toArray().map((row) => String(row.name)));
+		if (!columns.has("harness")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
+		// The nonce the thread's model gateway tokens carry (./model-gateway.ts): null until one is minted, and again once they are revoked.
+		if (!columns.has("gateway_nonce")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN gateway_nonce TEXT");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -300,10 +302,10 @@ export class CodingThreadStore {
 		return Number(this.#sql.exec("SELECT COUNT(*) AS n FROM coding_inbox").one().n);
 	}
 
-	/** Records a model call's usage and cost, and adds the cost to what the thread has spent. */
-	recordModelCall(provider: string, model: string, usage: { input: number; output: number; cacheRead: number; cacheWrite: number }, costUsd: number): void {
+	/** Records a model call's usage and cost, and adds the cost to what the thread has spent. `data` says more of it, such as that it went through the model gateway. */
+	recordModelCall(provider: string, model: string, usage: { input: number; output: number; cacheRead: number; cacheWrite: number }, costUsd: number, data: EventData | null = null): void {
 		this.#sql.exec(
-			"INSERT INTO coding_event (kind, at, provider, model, input, output, cache_read, cache_write, cost_usd) VALUES ('model_call', ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO coding_event (kind, at, provider, model, input, output, cache_read, cache_write, cost_usd, data) VALUES ('model_call', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			this.#now(),
 			provider,
 			model,
@@ -312,9 +314,20 @@ export class CodingThreadStore {
 			usage.cacheRead,
 			usage.cacheWrite,
 			costUsd,
+			data === null ? null : JSON.stringify(data),
 		);
 		this.#sql.exec("UPDATE coding_thread SET spent_usd = spent_usd + ?", costUsd);
 		this.#changed();
+	}
+
+	/** The nonce the thread's live gateway tokens carry, or null when none are. */
+	gatewayNonce(): string | null {
+		return text(this.#sql.exec("SELECT gateway_nonce FROM coding_thread LIMIT 1").toArray()[0]?.gateway_nonce);
+	}
+
+	/** Sets the nonce gateway tokens must carry; null revokes every token minted. */
+	setGatewayNonce(nonce: string | null): void {
+		this.#sql.exec("UPDATE coding_thread SET gateway_nonce = ?", nonce);
 	}
 
 	recordEvent(kind: string, data: EventData): CodingEvent {

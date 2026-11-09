@@ -48,6 +48,8 @@ export async function createAgentd(config) {
 	const maxBodyBytes = config.maxBodyBytes ?? 64 * MiB
 	const tokenHash = sha(config.token)
 	const startedAt = Date.now()
+	// Commands never inherit the token, so it cannot end up in their output or logs.
+	const { AGENTD_TOKEN: _, ...baseEnv } = process.env
 	let activeExecs = 0
 
 	async function handle(req, res) {
@@ -85,6 +87,7 @@ export async function createAgentd(config) {
 					return dir
 				})
 				return runExec(spec, cwd, res, {
+					baseEnv,
 					maxOutputBytes,
 					onStart: () => activeExecs++,
 					onEnd: () => activeExecs--,

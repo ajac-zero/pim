@@ -17,6 +17,7 @@ import {
 } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
+import { GIT_BROKER_PATH, serveGitBroker } from "./coding/git-broker/routes";
 import { appAddress, appOfHost, appOfLabel, SESSION_COOKIE as APP_SESSION_COOKIE } from "./hosted";
 import { installScript } from "./install-script";
 import { BROWSER_LIVE_PATH } from "./browser";
@@ -60,6 +61,10 @@ import { PimThemes } from "./themes";
  *   this connection, and the owner's space checks it.
  * - `/api/computer-host/sync`: this Pim's computer host (./computer-host.ts),
  *   with its own token, `pimh_<secret>`, which opens only this.
+ * - `/api/coding/git/<owner>/<name>.git`: the git broker
+ *   (./coding/git-broker/routes.ts), where a coding workspace clones and
+ *   fetches one repository with its broker token, `pimgit_<…>`, which opens
+ *   only this.
  * - `/install.sh`: public, what installs pim-host or pim-computer from this
  *   Pim (./install-script.ts).
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<watch>`: public, for
@@ -596,6 +601,8 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	if (path === "/health") return withCors(Response.json({ name: "pim", ok: true }));
 	if (path === "/computer/connect") return serveComputer(request, env);
 	if (path === "/computer-host/sync") return serveComputerHost(request, env);
+	// A coding workspace's clones and fetches, opened by its broker token only.
+	if (under(path, GIT_BROKER_PATH)) return serveGitBroker(request, env, path);
 	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;

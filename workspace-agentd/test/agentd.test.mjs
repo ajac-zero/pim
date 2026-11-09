@@ -4,6 +4,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { after, before, describe, test } from 'node:test'
+import { guard } from '../files.mjs'
 import { createAgentd } from '../server.mjs'
 
 const TOKEN = 'test-token-123'
@@ -97,6 +98,19 @@ describe('exec', () => {
 		const out = ev.filter((e) => e.type === 'stdout').map((e) => e.data).join('')
 		assert.equal(out, `héllo\nbar\n${path.join(root, 'sub')}\n`)
 	})
+	test('commands do not inherit the token from the environment', async () => {
+		process.env.AGENTD_TOKEN = TOKEN
+		process.env.AGENTD_OTHER = 'kept'
+		const { s, url } = await start()
+		try {
+			const res = await fetch(`${url}/exec`, { method: 'POST', headers: auth, body: JSON.stringify({ cmd: ['sh', '-c', 'echo ${AGENTD_TOKEN-unset} $AGENTD_OTHER'], timeoutMs: 10000 }) })
+			assert.equal((await events(res))[0].data, 'unset kept\n')
+		} finally {
+			delete process.env.AGENTD_TOKEN
+			delete process.env.AGENTD_OTHER
+			s.close()
+		}
+	})
 	test('argv is not a shell', async () => {
 		const ev = await events(await exec({ cmd: ['echo', '$HOME;', 'x'] }))
 		assert.equal(ev[0].data, '$HOME; x\n')
@@ -174,6 +188,7 @@ describe('files', () => {
 		assert.equal(by['f.txt'].type, 'file')
 		assert.equal(by['f.txt'].size, 5)
 		assert.equal(typeof by['f.txt'].mtimeMs, 'number')
+		assert.equal(by['f.txt'].mode, 0o644)
 		assert.equal(by.l.type, 'symlink')
 		assert.equal(by.sub.type, 'dir')
 		const st = await (await api('/stat?path=d/f.txt')).json()
@@ -186,6 +201,11 @@ describe('files', () => {
 		assert.equal((await api('/stat?path=d/f.txt')).status, 404)
 		assert.equal((await api('/file?path=d&recursive=1', { method: 'DELETE' })).status, 200)
 		assert.equal(existsSync(path.join(root, 'd')), false)
+	})
+	test('a full disk or quota is 507 disk_full', async () => {
+		for (const code of ['ENOSPC', 'EDQUOT']) {
+			await assert.rejects(guard('a', () => Promise.reject(Object.assign(new Error(code), { code }))), { status: 507, code: 'disk_full' })
+		}
 	})
 	test('rejects escapes for read, write, list, delete and exec cwd', async () => {
 		const bad = ['../outside/secret.txt', 'a/../../outside/secret.txt', path.join(outside, 'secret.txt'), '/etc/passwd', 'linkfile', 'linkdir/secret.txt', 'linkdir/new.txt', 'linkdir/sub/new.txt', 'dangling/x', '/']

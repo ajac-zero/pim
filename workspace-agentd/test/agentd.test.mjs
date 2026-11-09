@@ -97,6 +97,19 @@ describe('exec', () => {
 		const out = ev.filter((e) => e.type === 'stdout').map((e) => e.data).join('')
 		assert.equal(out, `héllo\nbar\n${path.join(root, 'sub')}\n`)
 	})
+	test('commands do not inherit the token from the environment', async () => {
+		process.env.AGENTD_TOKEN = TOKEN
+		process.env.AGENTD_OTHER = 'kept'
+		const { s, url } = await start()
+		try {
+			const res = await fetch(`${url}/exec`, { method: 'POST', headers: auth, body: JSON.stringify({ cmd: ['sh', '-c', 'echo ${AGENTD_TOKEN-unset} $AGENTD_OTHER'], timeoutMs: 10000 }) })
+			assert.equal((await events(res))[0].data, 'unset kept\n')
+		} finally {
+			delete process.env.AGENTD_TOKEN
+			delete process.env.AGENTD_OTHER
+			s.close()
+		}
+	})
 	test('argv is not a shell', async () => {
 		const ev = await events(await exec({ cmd: ['echo', '$HOME;', 'x'] }))
 		assert.equal(ev[0].data, '$HOME; x\n')

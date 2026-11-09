@@ -1108,7 +1108,7 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 		});
 	});
 
-	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), and into what a space holds; the preview and the web app don't use it", () => {
+	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), into connector watches, which are triggers, and into what a space holds; the preview and the web app don't use it", () => {
 		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
 		expect(Object.keys(files)).toContain("../src/pim.ts");
 		// A file uses triggers when it imports a module of src/triggers/ (statically, for its effects, dynamically or to re-export it) or names their classes or tables; a URL such as the web app's `/triggers/<id>` is not a use.
@@ -1120,6 +1120,6 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 			.filter(([path, source]) => importsTriggers(path, source) || /TriggerCoordinator|TriggerStore|pim_trigger/.test(source))
 			.map(([path]) => path);
 		// schedule_task makes its tasks through the triggers' API, in Pim's own extension.
-		expect(users).toEqual(["../src/extensions/schedule.ts", "../src/pim.ts", "../src/store.ts"]);
+		expect(users).toEqual(["../src/extensions/app-events.ts", "../src/extensions/schedule.ts", "../src/pim.ts", "../src/store.ts"]);
 	});
 });

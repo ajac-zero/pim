@@ -157,6 +157,13 @@ describe("the computer", () => {
 		expect(await download.text()).toBe("# Lisbon\nFlight TP 202");
 		expect(download.headers.get("content-disposition")).toContain('filename="lisbon.md"');
 
+		// A player's playbar seeks with Range requests, which are answered with just those bytes.
+		const slice = await raw("/files/content?path=/workspace/trips/lisbon.md", { headers: { range: "bytes=2-7" } });
+		expect([slice.status, slice.headers.get("content-range"), slice.headers.get("content-length"), await slice.text()]).toEqual([206, "bytes 2-7/22", "6", "Lisbon"]);
+		const tail = await raw("/files/content?path=/workspace/trips/lisbon.md", { headers: { range: "bytes=-3" } });
+		expect([tail.status, await tail.text()]).toEqual([206, "202"]);
+		expect((await raw("/files/content?path=/workspace/trips/lisbon.md", { headers: { range: "bytes=30-" } })).status).toBe(416);
+
 		// The person uploads one, larger than one message carries; it arrives whole, and the agent reads it.
 		const big = new TextEncoder().encode(`night,price\n${"1,140\n".repeat(400_000)}`);
 		expect((await upload("/workspace/receipts/hotel.csv", big)).status).toBe(201);

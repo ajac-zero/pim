@@ -616,14 +616,13 @@ export class TriggerApi {
 	}
 
 	/**
-	 * What a kind of source can do here, honestly: time triggers run; a
-	 * connector's events are taken in by nothing yet, so they are drafts
-	 * only; a poll, stream or process watch runs on the paired computer, so
-	 * with none it is a draft only until one is paired; and files never yet.
+	 * What a kind of source can do here, honestly: time triggers and a
+	 * connector's events run; a poll, stream or process watch runs on the
+	 * paired computer, so with none it is a draft only until one is paired;
+	 * and files never yet.
 	 */
 	#capability(kind: SourceKind): { status: SourceStatus; reason: string | null } {
-		if (kind === "time") return { status: "available", reason: null };
-		if (kind === "connector_event") return { status: "draft_only", reason: "not_wired" };
+		if (kind === "time" || kind === "connector_event") return { status: "available", reason: null };
 		if (kind === "file") return { status: "unavailable", reason: "not_wired" };
 		return this.#host.computer().paired ? { status: "available", reason: null } : { status: "draft_only", reason: "computer_not_paired" };
 	}

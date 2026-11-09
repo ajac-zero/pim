@@ -9,6 +9,10 @@ import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
+import {
+  CodingSubthreadRow,
+  useCodingByChat,
+} from "~/components/coding-subthread-row";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -21,13 +25,14 @@ import {
   Compass,
   Contact,
   CornerDownRight,
-  ExternalLink,
   History,
   Loader2,
   MessagesSquare,
   Monitor,
   MoreHorizontal,
   Pencil,
+  Pin,
+  PinOff,
   RotateCcw,
   ScrollText,
   Search,
@@ -67,6 +72,7 @@ import {
   TooltipTrigger,
 } from "~/components/ui/tooltip";
 import { flatChats, groupByAge, isInactive, nestChats } from "~/lib/chat-list";
+import { subthreadStatus } from "~/lib/coding";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -80,7 +86,7 @@ import {
   sessionsQuery,
 } from "~/lib/queries";
 import { newChatSearch } from "~/lib/start-chat";
-import { CHAT_DRAG_TYPE, closeTab, openTab } from "~/lib/tabs";
+import { CHAT_DRAG_TYPE, pinTab, unpinTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 import { version } from "../../../package.json";
 
@@ -664,6 +670,7 @@ function ChatTree({
   const [open, setOpen] = useState(depth === 0);
   const below = (chat: Session): Session[] =>
     (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
+  const coding = useCodingByChat().get(session.id) ?? [];
   const under = below(session);
   const expanded = open || under.some((chat) => chat.id === activeId);
   return (
@@ -675,18 +682,31 @@ function ChatTree({
         awaitingApproval={awaitingApproval.has(session.id)}
         onNavigate={onNavigate}
         tasks={
-          under.length > 0
+          under.length + coding.length > 0
             ? {
-                done: under.filter((child) =>
-                  DONE_STATES.has(child.startedBy?.state ?? "completed"),
-                ).length,
-                total: under.length,
+                done:
+                  under.filter((child) =>
+                    DONE_STATES.has(child.startedBy?.state ?? "completed"),
+                  ).length +
+                  coding.filter((thread) =>
+                    ["done", "failed"].includes(subthreadStatus(thread.state)),
+                  ).length,
+                total: under.length + coding.length,
                 expanded,
                 toggle: () => setOpen(!expanded),
               }
             : undefined
         }
       />
+      {expanded &&
+        coding.map((thread) => (
+          <CodingSubthreadRow
+            key={thread.id}
+            thread={thread}
+            depth={depth + 1}
+            onNavigate={onNavigate}
+          />
+        ))}
       {expanded &&
         tree
           .get(session.id)
@@ -877,14 +897,15 @@ function SessionRow({
   });
 
   const navigate = useNavigate();
+  const pinned = useTabs().some((tab) => tab.session === session.id);
   // Delete asks twice: the first click turns the item into a confirmation.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const deleteMutation = useMutation({
     mutationFn: () => pim.deleteSession(session.id),
     onSuccess: async () => {
       if (pimClient.getState().session === session.id) pimClient.close();
-      // The deleted chat's tab closes; the chat next to it takes its place.
-      const next = closeTab(session.id);
+      // A deleted chat is unpinned; the pinned chat next to it takes its place.
+      const next = unpinTab(session.id);
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       if (active) {
         await navigate(
@@ -1112,15 +1133,14 @@ function SessionRow({
           {/* Tabs show only on wider screens. */}
           <DropdownMenuItem
             className="max-md:hidden"
-            onClick={() => {
-              openTab(session.id);
-              navigate({
-                to: "/chat/$sessionId",
-                params: { sessionId: session.id },
-              });
-            }}
+            onClick={() => (pinned ? unpinTab(session.id) : pinTab(session.id))}
           >
-            <ExternalLink className="size-4" /> {t("openInNewTab")}
+            {pinned ? (
+              <PinOff className="size-4" />
+            ) : (
+              <Pin className="size-4" />
+            )}{" "}
+            {pinned ? t("unpinChat") : t("pinChat")}
           </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => {

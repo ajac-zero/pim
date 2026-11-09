@@ -53,6 +53,8 @@ type CodingThreadSummary = {
   queue: QueuePlace | null;
   createdBy: CodingCreator;
   parent: string | null;    // the thread that started this one
+  chat: string | null;      // the chat it was started from, which the chat list shows it under as a subthread
+  harness: "pi" | "claude-code" | "codex"; // the coding agent that runs it
   spentUsd: number;
   budgetUsd: number;
   createdAt: number;
@@ -82,6 +84,7 @@ type CodingThreadView = {
   inbox: number;            // inputs waiting for a turn
   checkpoint: { seq: number; sha: string; message: string; operationId: string | null; createdAt: number } | null;
   createdBy: CodingCreator;
+  harness: "pi" | "claude-code" | "codex";
   parentThread: string | null;
   createdAt: number;
   updatedAt: number;
@@ -95,7 +98,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 | Method | Path | Body / query | Answers |
 | --- | --- | --- | --- |
 | GET | `/coding/threads` | | `{ threads: CodingThreadSummary[] }`, newest first, archived ones included |
-| POST | `/coding/threads` | `{ repo, ref?, task, profile?, budgetUsd?, parent?, operationId? }` | `201` with `CodingThreadView`, or `200` with the same thread when `operationId` started one already. It returns at once: the thread is `provisioning`, or `queued` with `position` and `reason` when the space's slots are taken |
+| POST | `/coding/threads` | `{ repo, ref?, task, profile?, harness?, chat?, budgetUsd?, parent?, operationId? }` | `201` with `CodingThreadView`, or `200` with the same thread when `operationId` started one already. It returns at once: the thread is `provisioning`, or `queued` with `position` and `reason` when the space's slots are taken |
 | GET | `/coding/threads/:id` | | `CodingThreadView` |
 | GET | `/coding/threads/:id/transcript` | | `{ messages: TranscriptMessage[] }`, as `/sessions/:s/messages` has them, with the thread's own notices (a budget stop) as `role: "notice"` |
 | GET | `/coding/threads/:id/diff` | `?since=<sha>` | `{ since, head, diff, truncated }`: `git diff` from `since` (the commit it started from, by default) to its latest checkpoint, at most 256 KiB. From the start it is kept for every checkpoint; from another commit it needs the workspace (`workspace_not_running`) |
@@ -139,6 +142,8 @@ POST /api/coding/threads
 - `profile` is the thread's model. Without one, it is the space's default model, the one its chats use when an agent has none of its own (`GET /api/model`'s `model`), unless that is a ChatGPT plan model, which coding threads can't use: then it is the deployment's default.
 - `budgetUsd` is the most it spends on its model, $3 by default; at it, the thread stops, `failed` with `stateReason: "budget"`, until continued with a bigger one.
 - `parent` must be a thread of this space (`not_found`).
+- `harness` is the coding agent that runs it: `pi` by default. `claude-code` and `codex` are accepted by the types but refused with `invalid` ("harness not yet available") until their adapters land.
+- `chat` is the chat the thread is started from, for the chat list to show it under that chat. A thread an agent starts records its own chat, so it needs none.
 
 ## Agents
 

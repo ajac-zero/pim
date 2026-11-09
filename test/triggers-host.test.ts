@@ -9,6 +9,7 @@ import { TriggerCoordinator, type TriggerRun } from "../src/triggers/coordinator
 import { ENGINE_TABLES, TRIGGER_TICK_CALLBACK, type TriggerEngine, triggerHistory } from "../src/triggers/engine";
 import { PimTriggerHost, TriggerChatDoc, type TriggerSpace } from "../src/triggers/host";
 import { TriggerStore } from "../src/triggers/store";
+import { SUBSCRIPTION_TABLES } from "../src/triggers/subscriptions";
 import { api, lastUserText, messagesOf, OWNER, pendingApproval, post, ROOT, settled, toolUse } from "./helpers";
 import { faux, triggerClock } from "./worker";
 
@@ -103,9 +104,9 @@ describe("time triggers in Pim", () => {
 		expect(await wakes()).toEqual([]);
 		expect(await inSpace((pim) => pim.remainingData())).not.toContain("triggers");
 		expect(JSON.parse(await inSpace((pim) => pim.exportData()))).not.toHaveProperty("triggers");
-		// On, it makes its tables, those of triggers on the computer with them, and still no wake while nothing waits.
+		// On, it makes its tables, those of triggers on the computer and of connector subscriptions with them, and still no wake while nothing waits.
 		await inSpace((pim) => pim.enableTriggerEngine());
-		expect(await triggerTables()).toEqual([...ENGINE_TABLES, ...COMPUTER_TABLES].sort());
+		expect(await triggerTables()).toEqual([...ENGINE_TABLES, ...COMPUTER_TABLES, ...SUBSCRIPTION_TABLES].sort());
 		expect(await wakes()).toEqual([]);
 	});
 

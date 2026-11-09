@@ -25,6 +25,14 @@ export type CodingThreadState =
   | "failed"
   | "archived";
 
+export type CodingHarness = "pi" | "claude-code" | "codex";
+
+export const HARNESS_NAMES: Record<CodingHarness, string> = {
+  pi: "Pi",
+  "claude-code": "Claude Code",
+  codex: "Codex",
+};
+
 export type CodingCreator =
   | { type: "person" }
   | { type: "agent"; agent: string; chat: string };
@@ -49,6 +57,9 @@ export type CodingThreadSummary = {
   queue: QueuePlace | null;
   createdBy: CodingCreator;
   parent: string | null;
+  /** The chat it was started from, which the chat list shows it under. */
+  chat: string | null;
+  harness: CodingHarness;
   spentUsd: number;
   budgetUsd: number;
   createdAt: number;
@@ -76,6 +87,7 @@ export type CodingThreadView = {
   stateDetail: string | null;
   repo: { url: string; ref: string; branch: string; baseSha: string | null };
   profile: AgentProfile;
+  harness: CodingHarness;
   workspaceProvider: string;
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
@@ -95,6 +107,8 @@ export type StartCodingThread = {
   ref?: string;
   task: string;
   profile?: AgentProfile;
+  harness?: CodingHarness;
+  chat?: string;
   budgetUsd?: number;
   parent?: string;
   operationId?: string;
@@ -284,6 +298,47 @@ export const STATE_TEXT: Record<CodingThreadState, TranslationKey> = {
   failed: "codingStateFailed",
   archived: "codingStateArchived",
 };
+
+export type SubthreadStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "done"
+  | "failed";
+
+/**
+ * A thread's state as the badge on its row in the chat list says it: starting
+ * and queued threads are queued; between turns and archived ones are done.
+ */
+export function subthreadStatus(state: CodingThreadState): SubthreadStatus {
+  switch (state) {
+    case "provisioning":
+    case "queued":
+      return "queued";
+    case "running":
+      return "running";
+    case "waiting_input":
+      return "waiting";
+    case "failed":
+      return "failed";
+    case "idle":
+    case "archived":
+      return "done";
+  }
+}
+
+/** The threads started from each chat, oldest first, for the chat list to nest under it. */
+export function codingByChat(
+  threads: readonly CodingThreadSummary[],
+): Map<string, CodingThreadSummary[]> {
+  const byChat = new Map<string, CodingThreadSummary[]>();
+  for (const thread of [...threads].sort((a, b) => a.createdAt - b.createdAt)) {
+    if (thread.chat) {
+      byChat.set(thread.chat, [...(byChat.get(thread.chat) ?? []), thread]);
+    }
+  }
+  return byChat;
+}
 
 /** What a queued thread waits for, in words. */
 export function queueReasonKey(reason: string): TranslationKey {

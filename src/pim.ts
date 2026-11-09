@@ -242,6 +242,8 @@ import { TRIGGERS_EXTENSION, triggersExtension } from "./triggers/tools";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
+import { HARNESSES, type Harness as CodingHarness, isHarness } from "./coding/vault/harnesses";
+import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { forkPoint, fromPerson, projectEntries } from "./transcript";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
@@ -1440,6 +1442,38 @@ export class Pim extends DurableAgent<Env> {
 		const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title: "Pim needs your approval", body: approval.summary });
 		await this.deliverNotification(notification, { sockets: false });
 		return { id, status: approval.status };
+	}
+
+	/** The space's coding harness logins (src/coding/vault), made on first use. */
+	#codingVaultStore: VaultStore | null = null;
+
+	#codingVault(harness?: unknown): VaultStore {
+		this.#assertOpen();
+		if (harness !== undefined && !isHarness(harness)) throw new HttpError(404, "No such coding harness");
+		return (this.#codingVaultStore ??= new VaultStore(this.ctx.storage.sql));
+	}
+
+	/**
+	 * The coding vault (src/coding/vault/vault.ts) keeps each harness's login
+	 * here, sealed before it arrives: this object stores the blob and its
+	 * version and never opens it. Only for the vault, over RPC; the API
+	 * serves the status alone.
+	 */
+	async codingVaultStatus(): Promise<VaultStatus[]> {
+		const vault = this.#codingVault();
+		return HARNESSES.map((harness) => vault.status(harness));
+	}
+
+	async codingVaultRead(harness: CodingHarness): Promise<VaultRecord> {
+		return this.#codingVault(harness).read(harness);
+	}
+
+	async codingVaultWrite(harness: CodingHarness, sealed: Uint8Array, byteLength: number, expectedVersion: number): Promise<VaultWriteResult> {
+		return this.#codingVault(harness).write(harness, sealed, byteLength, expectedVersion, Date.now());
+	}
+
+	async codingVaultDelete(harness: CodingHarness): Promise<VaultStatus> {
+		return this.#codingVault(harness).delete(harness, Date.now());
 	}
 
 	/** Puts the providers as they are now in the catalog, which pi keeps, and takes out those that are gone. */

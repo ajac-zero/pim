@@ -736,13 +736,15 @@ describe("the account", () => {
 		await rita.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } });
 		await runInDurableObject(env.Pim.getByName(rita.ownerId), async (instance: Pim) => {
 			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "rita-access", refresh: "rita-refresh" }));
+			// A coding harness's sealed login: a one-byte archive and the seal's 29 bytes.
+			await instance.codingVaultWrite("codex", new Uint8Array(30), 1, 0);
 			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Call the bank" });
 			// Images, and files kept before files moved to people's computers, are in R2, outside the space's storage.
 			await instance.images.keep("1", [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 			await env.BLOBS.put(`${rita.ownerId}/files/scan`, new Uint8Array([0x25, 0x50, 0x44, 0x46, 0]));
 		});
 		expect((await holdings(rita.ownerId)).remaining).toEqual(
-			expect.arrayContaining(["credentials", "memories", "schedules", "owner profile", "images"]),
+			expect.arrayContaining(["credentials", "coding harness logins", "memories", "schedules", "owner profile", "images"]),
 		);
 
 		// The space can't be reached: nothing is erased, and nothing says it was.

@@ -2,6 +2,8 @@ import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { codex } from "../src/coding/harness/codex";
+import { HarnessLoginFlow } from "../src/coding/harness/login";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { codingThreadId } from "../src/coding/threads";
 import { ArchiveError, type ArchiveFile, MAX_ARCHIVE_BYTES, MAX_ARCHIVE_FILES, packArchive, unpackArchive } from "../src/coding/vault/archive";
@@ -14,6 +16,7 @@ import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { fakeRemotes } from "./fake-git";
 import { codesGiven, GOOD_CODE, LOGIN_URL, loginRuns, SAVED_LOGIN } from "./fake-claude-login";
+import { DEVICE_URL, deviceLogin, SAVED_AUTH, USER_CODE } from "./fake-codex-login";
 import { api, apiUrl, OWNER, TOKEN } from "./helpers";
 import { codingLogins } from "./worker";
 
@@ -404,7 +407,7 @@ describe("signing in to Claude Code", () => {
 	it("relays the CLI's sign-in URL and the pasted code, keeps the login the CLI saved, and deletes the workspace", async () => {
 		const runs = loginRuns.length;
 		const started = await login("", { method: "POST" });
-		expect(started).toEqual({ status: 200, body: { harness: "claude-code", state: "waiting_code", url: LOGIN_URL, error: null } });
+		expect(started).toEqual({ status: 200, body: { harness: "claude-code", state: "waiting_code", url: LOGIN_URL, userCode: null, error: null } });
 		expect((await login()).body).toMatchObject({ state: "waiting_code", url: LOGIN_URL });
 		// The CLI ran wrapped so its standard input is the code once written, with its config directory and no telemetry, in a
 		// workspace that may reach only Anthropic.
@@ -417,7 +420,7 @@ describe("signing in to Claude Code", () => {
 		expect(spec.spec.egress.allow).toEqual(["api.anthropic.com", "claude.ai", "platform.claude.com"]);
 
 		const connected = await send(`  ${GOOD_CODE} `);
-		expect(connected).toEqual({ status: 200, body: { harness: "claude-code", state: "connected", url: LOGIN_URL, error: null } });
+		expect(connected).toEqual({ status: 200, body: { harness: "claude-code", state: "connected", url: LOGIN_URL, userCode: null, error: null } });
 		expect(codesGiven.at(-1)).toBe(`${GOOD_CODE}\n`);
 		expect((await api("/coding/vault/claude-code")).body).toMatchObject({ connected: true });
 		const files = (await codingVault(env).load(OWNER, "claude-code")).files!;
@@ -442,7 +445,7 @@ describe("signing in to Claude Code", () => {
 
 		expect((await login("", { method: "POST" })).body).toMatchObject({ state: "waiting_code" });
 		expect(await loginWorkspaces()).toHaveLength(1);
-		expect((await login("", { method: "DELETE" })).body).toEqual({ harness: "claude-code", state: "none", url: null, error: null });
+		expect((await login("", { method: "DELETE" })).body).toEqual({ harness: "claude-code", state: "none", url: null, userCode: null, error: null });
 		expect(await loginWorkspaces()).toEqual([]);
 		expect((await send(GOOD_CODE)).body).toMatchObject({ state: "none", error: expect.stringContaining("start again") });
 	});
@@ -457,6 +460,122 @@ describe("signing in to Claude Code", () => {
 		await login("", { method: "POST" });
 		expect((await send(GOOD_CODE)).body).toMatchObject({ state: "connected" });
 		// It went on: its task started a turn with the login now in the vault.
+		await vi.waitFor(
+			async () => {
+				const log = (await api<{ events: { kind: string }[] }>(`/coding/threads/${id}/log`)).body.events;
+				expect(log.map((event) => event.kind)).toContain("thread.turn_started");
+			},
+			{ timeout: 10_000, interval: 50 },
+		);
+		await api(`/coding/threads/${id}/archive`, { method: "POST" });
+	});
+});
+
+describe("signing in to Codex", () => {
+	// Codex signs in with a device code: `codex login --device-auth` prints a page and a code, the person enters the code
+	// on that page, and the CLI exits once OpenAI says they did (test/fake-codex-login.ts plays it). Pim relays the page and
+	// the code, and keeps the login when the CLI exits 0. Neither the code nor the login may reach a log line.
+	const login = (path = "", init: RequestInit = {}) => api<Record<string, unknown>>(`/coding/vault/codex/login${path}`, init);
+	const loginWorkspaces = () => codingLogins.backing.list();
+	const settled = (state: string) =>
+		vi.waitFor(
+			async () => {
+				const status = (await login()).body;
+				expect(status.state).toBe(state);
+				return status;
+			},
+			{ timeout: 5_000, interval: 20 },
+		);
+
+	beforeEach(() => {
+		deviceLogin.outcome = null;
+	});
+
+	afterEach(async () => {
+		deviceLogin.outcome = "refuse";
+		await login("", { method: "DELETE" });
+		const said = logged.join("\n");
+		expect(said).not.toContain(USER_CODE);
+		expect(said).not.toContain("eyJ-device");
+		expect(said).not.toContain("rt_device_login");
+	});
+
+	it("relays the page and the code, takes no code back, and keeps the login once the CLI exits 0", async () => {
+		const runs = deviceLogin.runs.length;
+		const started = await login("", { method: "POST" });
+		expect(started).toEqual({ status: 200, body: { harness: "codex", state: "waiting_code", url: DEVICE_URL, userCode: USER_CODE, error: null } });
+		// Codex ran as itself, its config directory made first, with no code file to read, in a workspace that may reach only OpenAI.
+		const run = deviceLogin.runs[runs]!;
+		expect(run.cmd).toEqual(["sh", "-c", 'mkdir -p "$CODEX_HOME" && exec codex login --device-auth']);
+		expect(run.env).toMatchObject({ HOME: "/workspace", CODEX_HOME: "/workspace/.codex" });
+		expect(run.env).not.toHaveProperty("PIM_LOGIN_CODE");
+		const [workspace] = await loginWorkspaces();
+		expect(workspace!.ref.sessionId).toMatch(/^login-codex-/);
+		const spec = (await codingLogins.backing.get(workspace!.ref)) as unknown as { spec: WorkspaceSpec };
+		expect(spec.spec.egress.allow).toEqual(["auth.openai.com", "chatgpt.com", "api.openai.com"]);
+		// Nothing is pasted back: the code is entered on OpenAI's page.
+		const pasted = await login("/code", { method: "POST", body: JSON.stringify({ code: USER_CODE }) });
+		expect([pasted.status, pasted.body.code]).toEqual([400, "invalid"]);
+		expect((await login()).body).toMatchObject({ state: "waiting_code", userCode: USER_CODE });
+		expect((await api("/coding/vault/codex")).body).toMatchObject({ connected: false });
+
+		// The person entered the code; Codex saved its login and exited 0, which Pim notices by itself.
+		deviceLogin.outcome = "approve";
+		const connected = await settled("connected");
+		expect(connected).toMatchObject({ harness: "codex", error: null });
+		expect((await api("/coding/vault/codex")).body).toMatchObject({ connected: true });
+		const files = (await codingVault(env).load(OWNER, "codex")).files!;
+		expect(files.map((file) => [file.path, file.mode])).toEqual([["auth.json", 0o600]]);
+		expect(text(files[0])).toBe(SAVED_AUTH);
+		expect(await loginWorkspaces()).toEqual([]);
+		expect(JSON.stringify(connected)).not.toContain("eyJ-");
+	});
+
+	it("fails when OpenAI refuses the sign-in, saving nothing; a sign-in can be cancelled, and then stays cancelled", async () => {
+		await login("", { method: "POST" });
+		deviceLogin.outcome = "refuse";
+		const failed = await settled("failed");
+		expect(failed).toMatchObject({ url: null, userCode: null, error: "Codex's sign-in didn't finish (it exited 1): start again" });
+		expect((await api("/coding/vault/codex")).body).toMatchObject({ connected: false });
+		expect(await loginWorkspaces()).toEqual([]);
+
+		deviceLogin.outcome = null;
+		expect((await login("", { method: "POST" })).body).toMatchObject({ state: "waiting_code", userCode: USER_CODE });
+		expect(await loginWorkspaces()).toHaveLength(1);
+		expect((await login("", { method: "DELETE" })).body).toEqual({ harness: "codex", state: "none", url: null, userCode: null, error: null });
+		expect(await loginWorkspaces()).toEqual([]);
+		// The CLI stopped with its workspace; that isn't a failure, and nothing more happens.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect((await login()).body).toMatchObject({ state: "none" });
+	});
+
+	it("fails when the CLI runs out of time before the code is entered, deleting its workspace", async () => {
+		const provider = codingLogins;
+		const flow = new HarnessLoginFlow({ harness: codex, userId: OWNER, provider, image: "pim-workspace:local", vault: codingVault(env), timeoutMs: 100 });
+		expect(await flow.start()).toMatchObject({ state: "waiting_code", url: DEVICE_URL, userCode: USER_CODE });
+		await vi.waitFor(() => expect(flow.status()).toMatchObject({ state: "failed", error: "Codex's sign-in didn't finish: start again" }), { timeout: 5_000, interval: 20 });
+		expect(await provider.backing.list()).toEqual([]);
+		expect((await codingVault(env).status(OWNER)).find((status) => status.harness === "codex")).toMatchObject({ connected: false });
+	});
+
+	it("fails when the CLI prints its page but no code", async () => {
+		const provider = codingLogins;
+		const silent = { ...codex, login: { ...codex.login!, userCode: () => null } };
+		const flow = new HarnessLoginFlow({ harness: silent, userId: OWNER, provider, image: "pim-workspace:local", vault: codingVault(env), urlTimeoutMs: 50 });
+		expect(await flow.start()).toMatchObject({ state: "failed", url: null, userCode: null, error: "Codex didn't print a sign-in code" });
+		expect(await provider.backing.list()).toEqual([]);
+	});
+
+	it("goes on with the person's Codex threads that waited for the login once they sign in", async () => {
+		fakeRemotes.set("https://pim.test/api/coding/git/acme/demo.git", { "README.md": "# Demo\n" });
+		const { status, body } = await api("/coding/threads", { method: "POST", body: JSON.stringify({ repo: "https://github.com/acme/demo", task: "Fix it", harness: "codex" }) });
+		expect(status).toBe(201);
+		const id = (body as { id: string }).id;
+		const view = async () => (await api<{ state: string; stateReason: string | null }>(`/coding/threads/${id}`)).body;
+		await vi.waitFor(async () => expect(await view()).toMatchObject({ state: "waiting_input", stateReason: "login_required" }), { timeout: 10_000, interval: 50 });
+		await login("", { method: "POST" });
+		deviceLogin.outcome = "approve";
+		await settled("connected");
 		await vi.waitFor(
 			async () => {
 				const log = (await api<{ events: { kind: string }[] }>(`/coding/threads/${id}/log`)).body.events;

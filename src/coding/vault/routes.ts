@@ -16,7 +16,8 @@ import { codingVault } from "./vault";
  * route returns what a login holds, and a login is only ever made by the
  * CLI's own sign-in inside the person's workspace, which `/:harness/login`
  * starts and relays (../harness/login.ts): the sign-in URL to the person,
- * and the code they paste back to the CLI.
+ * and the code they paste back to the CLI, or with a device-code sign-in
+ * the code they enter on the vendor's page.
  */
 export function codingVaultApi(env: Env, account: Account, request: Request): ApiExtension {
 	return async (path) => {
@@ -73,6 +74,8 @@ function vaultRoutes(env: Env, userId: string): Route[] {
 		route("POST", "/:harness/login/code", async ({ harness }, request) => {
 			const known = loginOf(harness);
 			if (!known) return noLogin();
+			// A device-code sign-in takes its code on the vendor's page, never here.
+			if (cliHarness(known)?.login?.mode !== "paste_code") return Response.json({ error: "This sign-in takes no code here: enter it on the sign-in page", code: "invalid" }, { status: 400 });
 			const body = (await readJson(request).catch(() => null)) as { code?: unknown } | null;
 			// The code is a credential: it is handed on and never logged, echoed or kept.
 			if (!validLoginCode(body?.code)) return Response.json({ error: "Paste the code the sign-in page shows", code: "invalid" }, { status: 400 });

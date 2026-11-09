@@ -47,6 +47,29 @@ const GLYPHS: Record<CodingHarness, { color: string; glyph: ReactNode }> = {
       />
     ),
   },
+  // Mistral Vibe: an M of square blocks, as pixels, in Mistral's orange.
+  "mistral-vibe": {
+    color: "#fa500f",
+    glyph: (
+      <path
+        d="M3 3h3.6v3.6H3zM17.4 3H21v3.6h-3.6zM3 6.6h3.6v3.6H3zM6.6 6.6h3.6v3.6H6.6zM13.8 6.6h3.6v3.6h-3.6zM17.4 6.6H21v3.6h-3.6zM3 10.2h3.6v3.6H3zM10.2 10.2h3.6v3.6h-3.6zM17.4 10.2H21v3.6h-3.6zM3 13.8h3.6v3.6H3zM17.4 13.8H21v3.6h-3.6zM3 17.4h3.6V21H3zM17.4 17.4H21V21h-3.6z"
+        fill="currentColor"
+      />
+    ),
+  },
+  // Amp: a lightning bolt.
+  amp: {
+    color: "#2f80ed",
+    glyph: (
+      <path
+        d="M13.5 3 5.5 13.5h6L10.5 21l8-10.5h-6z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    ),
+  },
 };
 
 /** The harness's mark, labelled with its name for screen readers. */

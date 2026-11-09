@@ -137,11 +137,18 @@ export function ChatTabs({ activeId }: { activeId: string }) {
     return (
       <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
         {agent && (
-          <AgentIcon
-            agent={agent}
-            tile
-            className="size-6 shrink-0 rounded-md"
-          />
+          <Link
+            to="."
+            search={(prev) => ({ ...prev, dialog: "agents", agent: agent.id })}
+            aria-label={t("editAgent")}
+            className="shrink-0 rounded-md"
+          >
+            <AgentIcon
+              agent={agent}
+              tile
+              className="size-6 shrink-0 rounded-md"
+            />
+          </Link>
         )}
         {statusOf(session)}
         <span className="truncate">{sessionTitle(session, t)}</span>

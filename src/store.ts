@@ -415,6 +415,8 @@ export class PimStore {
 			pim_session_ids: "chat ids",
 			pim_chat_links: "public links to chats",
 			pim_credentials: "credentials",
+			// Made by the coding vault (./coding/vault/store.ts) on first use.
+			pim_coding_vault: "coding harness logins",
 			pim_app_connections: "connector connections",
 			pim_tool_widgets: "widgets from connectors' results",
 			pim_notifications: "notifications",

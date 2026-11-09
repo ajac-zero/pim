@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { CLAUDE_CODE_FLAGS, ClaudeStreamParser, claudeCode } from "../src/coding/harness/claude-code";
+import { authEnv } from "../src/coding/harness/auth";
 import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/coding/harness/codex";
+import { cliHarness } from "../src/coding/harness/index";
+import { amp, mistralVibe } from "../src/coding/harness/pending";
 import { type HarnessAuth, HarnessRunner, LineBuffer, type RunRecord, recoverRun, type RunnerDeps } from "../src/coding/harness/runner";
-import type { HarnessEvent, HarnessTurn } from "../src/coding/harness/types";
+import type { CliHarness, HarnessEvent, HarnessTurn } from "../src/coding/harness/types";
+import type { CodingThreadRow } from "../src/coding/thread-store";
 import type { TestRun } from "../src/coding/tools";
 import type { Restored } from "../src/coding/vault/inject";
 import type { ExecEvent, ExecOptions, Workspace } from "../src/coding/workspace/types";
@@ -710,5 +714,99 @@ describe("a Codex run", () => {
 		expect(await new HarnessRunner(options).prepare("op-1", { sessionId: CODEX_TURN.sessionId, resume: false })).toEqual({ status: "login_required" });
 		expect(commands).toEqual([]);
 		expect(log).toEqual(["lock", "restore", "write back", "unlock"]);
+	});
+});
+
+describe("a run signed in with an API key", () => {
+	// Amp's and Mistral Vibe's adapters aren't written yet, so the CLI here is Claude Code's script under Amp's name and
+	// sign-in: what is checked is what the runner does with the key, whatever the CLI.
+	const KEY = "sgamp_user_TESTKEY0123456789abcdefXYZ";
+	const harness: CliHarness = { ...claudeCode, id: "amp", name: "Amp", login: undefined, apiKeyEnv: "AMP_API_KEY" };
+	const auth: HarnessAuth = { mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] };
+
+	it("hands the key to the CLI in its environment alone, restores and locks nothing, and takes it out of all the CLI printed", async () => {
+		// The CLI printed the key in its text, a test's output, a retry and a refusal.
+		const leaky = lines("turn").map((line) =>
+			line
+				.replaceAll("tests first.", `tests first with ${KEY}.`)
+				.replace("Duration  412ms", `Duration  412ms ${KEY}`)
+				.replace('"error": "overloaded"', `"error": "overloaded for ${KEY}"`)
+				.replace("Permission to use WebFetch", `Permission for ${KEY} to use WebFetch`),
+		);
+		const { workspace, commands, log } = scripted(() => prints(leaky));
+		const { options, records, events, tests } = deps(workspace, log, { harness, auth });
+		const runner = await prepared(options);
+		const result = await runner.run(TURN, 60_000);
+		expect(result.status).toBe("done");
+		expect(log).toEqual(["claude"]);
+		// The key is in the CLI's environment, never on its command line, which `ps` shows.
+		expect(commands[0]!.options.env).toMatchObject({ AMP_API_KEY: KEY, HOME: "/workspace" });
+		expect(commands[0]!.options.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+		expect(JSON.stringify(commands.map((command) => command.cmd))).not.toContain(KEY);
+		// Nothing the CLI printed reaches the thread with the key in it: not its transcript, log, test runs, result or records.
+		const handed = JSON.stringify({ events, tests, records, result });
+		expect(handed).not.toContain(KEY);
+		expect(handed).not.toContain("TESTKEY");
+		expect(events.find((event) => event.type === "delta" && event.text.startsWith("tests first"))).toEqual({ type: "delta", kind: "text", text: "tests first with [redacted]." });
+		expect(events.find((event) => event.type === "retry")).toMatchObject({ error: "overloaded for [redacted]" });
+		expect(events.find((event) => event.type === "permission_denied")).toMatchObject({ message: expect.stringContaining("Permission for [redacted] to use") });
+		expect(tests[0]!.output).toContain("412ms [redacted]");
+		expect(records.every((record) => record === null || (record.restored === null && !record.locked))).toBe(true);
+	});
+
+	it("takes the key out of the CLI's error output too, though it came in pieces", async () => {
+		const { workspace, log } = scripted(async function* () {
+			yield { type: "stderr", data: `Error: invalid key ${KEY.slice(0, 10)}` };
+			yield { type: "stderr", data: `${KEY.slice(10)} was refused\n` };
+			yield { type: "exit", code: 1 };
+		});
+		const { options } = deps(workspace, log, { harness, auth });
+		const result = await (await prepared(options)).run(TURN, 60_000);
+		expect(result).toMatchObject({ status: "unanswered", reason: "harness_error", detail: "Amp exited 1 without a result: Error: invalid key [redacted] was refused" });
+		expect(JSON.stringify(result)).not.toContain("TESTKEY");
+	});
+
+	it("waits for the person's key when they have given none, touching nothing", async () => {
+		const { workspace, commands, log } = scripted(() => prints(lines("turn")));
+		const { options, records } = deps(workspace, log, { harness, auth: { mode: "signed_out" } });
+		expect(await new HarnessRunner(options).prepare("op-1", { sessionId: SESSION, resume: false })).toEqual({ status: "login_required" });
+		expect(commands).toEqual([]);
+		expect(log).toEqual([]);
+		expect(records).toEqual([]);
+	});
+
+	it("is how `authEnv` signs in a harness that declares its key's variable, with the person's key or none", async () => {
+		const thread = {} as CodingThreadRow;
+		const asked: string[] = [];
+		const keys = async (id: string) => {
+			asked.push(id);
+			return id === "amp" ? KEY : null;
+		};
+		expect(await authEnv(thread, claudeCode, keys)).toEqual({ mode: "subscription" });
+		expect(await authEnv(thread, codex, keys)).toEqual({ mode: "subscription" });
+		expect(await authEnv(thread, amp, keys)).toEqual({ mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] });
+		expect(await authEnv(thread, mistralVibe, keys)).toEqual({ mode: "signed_out" });
+		expect(asked).toEqual(["amp", "mistral-vibe"]);
+	});
+
+	it("fails closed for Mistral Vibe and Amp, whose adapters aren't written yet, and says which hosts and variable each needs", () => {
+		expect(cliHarness("mistral-vibe")).toBe(mistralVibe);
+		expect(cliHarness("amp")).toBe(amp);
+		expect(mistralVibe).toMatchObject({ name: "Mistral Vibe", apiKeyEnv: "MISTRAL_API_KEY", egress: ["api.mistral.ai"] });
+		expect(amp).toMatchObject({ name: "Amp", apiKeyEnv: "AMP_API_KEY", egress: ["ampcode.com", "*.ampcode.com"] });
+		for (const each of [mistralVibe, amp]) {
+			expect(each.login).toBeUndefined();
+			expect(() => each.buildCommand(TURN)).toThrow(`${each.name} isn't implemented yet`);
+			expect(() => each.parser(TURN)).toThrow("isn't implemented yet");
+			expect(() => each.signalCommand(SESSION, "KILL")).toThrow("isn't implemented yet");
+		}
+	});
+
+	it("never runs a placeholder's CLI, even with a key", async () => {
+		const { workspace, commands, log } = scripted(() => prints(lines("turn")));
+		const { options } = deps(workspace, log, { harness: amp, auth });
+		const runner = await prepared(options);
+		await expect(runner.run(TURN, 60_000)).rejects.toThrow("Amp isn't implemented yet");
+		expect(commands).toEqual([]);
 	});
 });

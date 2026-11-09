@@ -28,11 +28,20 @@ import type { CliHarness, HarnessEvent, HarnessTurn, HarnessUsage } from "./type
  */
 
 /**
- * How the CLI is signed in: with the person's own subscription login, from
- * the vault, or with environment variables that carry a key (the API-key or
- * gateway mode, which `authEnv` in ./auth.ts decides).
+ * How the CLI is signed in, as `authEnv` in ./auth.ts decides: with the
+ * person's own subscription login, from the vault; with environment
+ * variables that carry a key (the API-key or gateway mode), whose
+ * `secrets` the runner takes out of everything the CLI prints before
+ * anything else reads it; or not at all, for a harness that signs in with
+ * an API key the person hasn't given (`signed_out`).
  */
-export type HarnessAuth = { readonly mode: "subscription" } | { readonly mode: "env"; readonly env: Readonly<Record<string, string>> };
+export type HarnessAuth =
+	| { readonly mode: "subscription" }
+	| { readonly mode: "env"; readonly env: Readonly<Record<string, string>>; readonly secrets?: readonly string[] }
+	| { readonly mode: "signed_out" };
+
+/** What a secret is replaced with wherever the CLI printed it. */
+const REDACTED = "[redacted]";
 
 /** A run as the thread keeps it while it goes on. Plain data, stored as JSON. */
 export type RunRecord = {
@@ -149,10 +158,12 @@ export class HarnessRunner {
 	/**
 	 * Gets the run ready, before its turn starts: takes the person's lock for
 	 * the harness and puts their login into the workspace. Without a login
-	 * the workspace is cleared again and the lock let go.
+	 * the workspace is cleared again and the lock let go. Signed in through
+	 * its environment, it needs neither; signed out, it touches nothing.
 	 */
 	async prepare(operationId: string, session: { sessionId: string; resume: boolean }): Promise<Prepared> {
 		const { auth, credentials, lock, journal } = this.#deps;
+		if (auth.mode === "signed_out") return { status: "login_required" };
 		const record: RunRecord = { operationId, ...session, startedAt: this.#now(), lines: 0, restored: null, locked: auth.mode === "subscription" };
 		if (auth.mode !== "subscription") {
 			this.#keep(record);
@@ -205,6 +216,9 @@ export class HarnessRunner {
 	async #execute(record: RunRecord, turn: HarnessTurn, timeoutMs: number): Promise<RunResult> {
 		const { harness, workspace, auth } = this.#deps;
 		const parser = harness.parser(turn);
+		// A key the CLI was given never goes further than its process: what it prints is read without it.
+		const secrets = auth.mode === "env" ? (auth.secrets ?? []).filter((secret) => secret.length > 0) : [];
+		const scrub = (text: string) => secrets.reduce((clean, secret) => clean.replaceAll(secret, REDACTED), text);
 		const lines = new LineBuffer();
 		const usage = new Map<string, HarnessUsage>();
 		const calls = new Map<string, { command: string; startedAt: number }>();
@@ -222,7 +236,7 @@ export class HarnessRunner {
 		};
 
 		const handle = async (line: string) => {
-			for (const event of parser.parseLine(line)) {
+			for (const event of parser.parseLine(scrub(line))) {
 				switch (event.type) {
 					case "session":
 						seen.sessionId = event.sessionId;
@@ -270,7 +284,8 @@ export class HarnessRunner {
 				// The workspace's own timeout is the last resort, past the grace the CLI gets after SIGINT.
 				for await (const event of workspace.exec(harness.buildCommand(turn), { cwd: `${HARNESS_HOME}/repo`, env, timeoutMs: timeoutMs + 2 * grace, signal: this.#controller.signal })) {
 					if (event.type === "stdout") for (const line of lines.push(event.data)) await handle(line);
-					else if (event.type === "stderr") seen.stderr = (seen.stderr + event.data).slice(-STDERR_TAIL);
+					// Scrubbed as a whole before it is cut, so a secret split across chunks is found too.
+					else if (event.type === "stderr") seen.stderr = scrub(seen.stderr + event.data).slice(-STDERR_TAIL);
 					else if (event.type === "exit") seen.exit = event;
 				}
 				for (const line of lines.flush()) await handle(line);

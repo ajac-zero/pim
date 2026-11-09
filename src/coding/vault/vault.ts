@@ -3,7 +3,7 @@ import { base64UrlDecode } from "../../auth/encoding";
 import { codingScheduler } from "../scheduler-do";
 import { ArchiveError, type ArchiveFile, packArchive, unpackArchive } from "./archive";
 import { openBlob, sealBlob, VaultUnreadableError, vaultKey } from "./crypto";
-import { HARNESS_FILES, type Harness, isHarness } from "./harnesses";
+import { type ApiKeyHarness, apiKeyProblem, HARNESS_FILES, type Harness, isApiKeyHarness, isHarness, isLoginHarness, type LoginHarness } from "./harnesses";
 import type { VaultRecord, VaultStatus, VaultWriteResult } from "./store";
 
 /**
@@ -12,6 +12,12 @@ import type { VaultRecord, VaultStatus, VaultWriteResult } from "./store";
  * sealed (./crypto.ts) before they leave this module, so the space only
  * ever holds ciphertext; they are opened here, for that person's own
  * workspaces (./inject.ts), and nothing here reads the files inside.
+ *
+ * An entry is one of two kinds, by its harness: a subscription harness's
+ * login, an archive of the CLI's files (`load`, `save`), or an API-key
+ * harness's key, its UTF-8 bytes (`loadApiKey`, `saveApiKey`). Both are
+ * sealed alike and bound to their person and harness, so neither opens as
+ * the other.
  */
 
 /** One person's sealed entries, wherever they are kept. Every call names the person; an implementation reaches only that person's. */
@@ -70,8 +76,8 @@ export class CodingVault {
 	}
 
 	/** The person's entry, opened. */
-	async load(userId: string, harness: Harness): Promise<VaultEntry> {
-		checked(harness);
+	async load(userId: string, harness: LoginHarness): Promise<VaultEntry> {
+		if (!isLoginHarness(harness)) throw new Error("No such coding harness login");
 		const record = await this.backend.read(userId, harness);
 		if (record.sealed === null) return { version: record.version, files: null, unreadable: false };
 		try {
@@ -85,16 +91,64 @@ export class CodingVault {
 	}
 
 	/** Stores the person's files for a harness, if the entry is still at `expectedVersion`. */
-	async save(userId: string, harness: Harness, files: readonly ArchiveFile[], expectedVersion: number): Promise<VaultWriteResult> {
-		checked(harness);
+	async save(userId: string, harness: LoginHarness, files: readonly ArchiveFile[], expectedVersion: number): Promise<VaultWriteResult> {
+		if (!isLoginHarness(harness)) throw new Error("No such coding harness login");
 		const archive = packArchive(files, HARNESS_FILES[harness].files);
 		const sealed = await sealBlob(await this.key(), { userId, harness }, archive);
 		return this.backend.write(userId, harness, sealed, archive.byteLength, expectedVersion);
 	}
 
+	/**
+	 * The person's API key for `harness`, opened, or null when they have
+	 * none or it doesn't open as theirs. Only for handing to that person's
+	 * own CLI runs.
+	 */
+	async loadApiKey(userId: string, harness: ApiKeyHarness): Promise<string | null> {
+		if (!isApiKeyHarness(harness)) throw new Error("No such coding harness API key");
+		const record = await this.backend.read(userId, harness);
+		if (record.sealed === null) return null;
+		try {
+			const key = new TextDecoder().decode(await openBlob(await this.key(), { userId, harness }, record.sealed));
+			return apiKeyProblem(harness, key) === null ? key : null;
+		} catch (error) {
+			if (!(error instanceof VaultUnreadableError)) throw error;
+			console.warn(JSON.stringify({ event: "pim.coding.vault_unreadable", user: userId, harness, version: record.version, error: error.name }));
+			return null;
+		}
+	}
+
+	/**
+	 * Stores the person's API key for `harness`, in place of any they had.
+	 * A key that doesn't look right is refused with `ApiKeyError`, whose
+	 * message never quotes it.
+	 */
+	async saveApiKey(userId: string, harness: ApiKeyHarness, apiKey: string): Promise<VaultStatus> {
+		if (!isApiKeyHarness(harness)) throw new Error("No such coding harness API key");
+		const problem = apiKeyProblem(harness, apiKey);
+		if (problem) throw new ApiKeyError(problem);
+		const plaintext = new TextEncoder().encode(apiKey);
+		const sealed = await sealBlob(await this.key(), { userId, harness }, plaintext);
+		// The newest key wins: a write that lost to another is tried again on the version it lost to.
+		let { version } = await this.backend.read(userId, harness);
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const written = await this.backend.write(userId, harness, sealed, plaintext.byteLength, version);
+			if (written.ok) return (await this.backend.status(userId)).find((status) => status.harness === harness)!;
+			version = written.version;
+		}
+		throw new Error("The API key kept losing to other writes");
+	}
+
 	/** Disconnects the person's harness: their entry is deleted. */
 	async delete(userId: string, harness: Harness): Promise<VaultStatus> {
 		return this.backend.delete(userId, checked(harness));
+	}
+}
+
+/** An API key that doesn't look right; the message says why without quoting it. */
+export class ApiKeyError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "ApiKeyError";
 	}
 }
 

@@ -1,6 +1,6 @@
 import { WORKSPACE_ROOT, type Workspace, WorkspaceFileError, type WorkspaceRef } from "../workspace/types";
 import { ArchiveError, type ArchiveFile, MAX_ARCHIVE_BYTES, packArchive } from "./archive";
-import { HARNESS_FILES, type Harness } from "./harnesses";
+import { HARNESS_FILES, type Harness, isLoginHarness, type LoginHarness } from "./harnesses";
 import type { CodingVault, Ownership } from "./vault";
 
 /**
@@ -21,12 +21,13 @@ import type { CodingVault, Ownership } from "./vault";
 export const HARNESS_HOME = WORKSPACE_ROOT;
 
 /** Where a harness's config directory is in a workspace. */
-export function harnessConfigDir(harness: Harness): string {
+export function harnessConfigDir(harness: LoginHarness): string {
 	return `${HARNESS_HOME}/${HARNESS_FILES[harness].dir}`;
 }
 
-/** The environment a harness run sets, so the CLI finds its config directory. */
+/** The environment a harness run sets, so the CLI finds its config directory; none for an API-key harness, which keeps no files. */
 export function harnessEnv(harness: Harness): Record<string, string> {
+	if (!isLoginHarness(harness)) return {};
 	return { [HARNESS_FILES[harness].env]: harnessConfigDir(harness) };
 }
 
@@ -45,7 +46,7 @@ export class VaultOwnershipError extends Error {
 export type Restored = {
 	readonly userId: string;
 	readonly sessionId: string;
-	readonly harness: Harness;
+	readonly harness: LoginHarness;
 	/** The entry's version when read: the write-back is refused if it has moved on. */
 	readonly version: number;
 	/** Whether a login was put in. */
@@ -70,7 +71,7 @@ async function fingerprint(archive: Uint8Array): Promise<string> {
 }
 
 /** Removes a harness's allowlisted files; a symlink is removed itself, never what it points to. */
-async function clear(workspace: Workspace, harness: Harness): Promise<void> {
+async function clear(workspace: Workspace, harness: LoginHarness): Promise<void> {
 	const home = await workspace.list(HARNESS_HOME);
 	const dir = home.find((entry) => entry.name === HARNESS_FILES[harness].dir);
 	if (!dir) return;
@@ -92,7 +93,7 @@ async function clear(workspace: Workspace, harness: Harness): Promise<void> {
  * whatever of its allowlisted files was there; with no login, it only
  * clears them. Throws `VaultOwnershipError` for someone else's workspace.
  */
-export async function restoreHarnessCredentials(vault: CodingVault, owns: Ownership, target: HarnessTarget, harness: Harness): Promise<Restored> {
+export async function restoreHarnessCredentials(vault: CodingVault, owns: Ownership, target: HarnessTarget, harness: LoginHarness): Promise<Restored> {
 	await assertOwned(owns, target);
 	const entry = await vault.load(target.userId, harness);
 	await clear(target.workspace, harness);
@@ -105,7 +106,7 @@ export async function restoreHarnessCredentials(vault: CodingVault, owns: Owners
 }
 
 /** The allowlisted files as the CLI left them, or a reason they can't be kept. */
-async function readBack(workspace: Workspace, harness: Harness): Promise<ArchiveFile[] | { refused: string }> {
+async function readBack(workspace: Workspace, harness: LoginHarness): Promise<ArchiveFile[] | { refused: string }> {
 	const dir = harnessConfigDir(harness);
 	const home = await workspace.list(HARNESS_HOME);
 	const entry = home.find((item) => item.name === HARNESS_FILES[harness].dir);

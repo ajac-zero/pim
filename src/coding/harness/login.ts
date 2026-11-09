@@ -1,4 +1,4 @@
-import type { Harness } from "../vault/harnesses";
+import { type Harness, isLoginHarness } from "../vault/harnesses";
 import { harnessEnv, HARNESS_HOME, type Restored, writeBackHarnessCredentials } from "../vault/inject";
 import type { CodingVault } from "../vault/vault";
 import { WORKSPACE_ROOT, type Workspace, type WorkspaceProvider, type WorkspaceRef, type WorkspaceSpec } from "../workspace/types";
@@ -167,8 +167,10 @@ export class HarnessLoginFlow {
 				const retry = harness.login?.mode === "device_code" ? "start again" : "check the code and start again";
 				return this.#fail(`${harness.name}'s sign-in didn't finish${exit === null ? "" : ` (it exited ${exit})`}: ${retry}`);
 			}
-			const entry = (await vault.status(userId)).find((status) => status.harness === harness.id);
-			const restored: Restored = { userId, sessionId: this.#ref!.sessionId, harness: harness.id, version: entry?.version ?? 0, connected: false, fingerprint: null };
+			const id = harness.id;
+			if (!isLoginHarness(id)) throw new Error("Only a harness whose login the vault keeps as files signs in here");
+			const entry = (await vault.status(userId)).find((status) => status.harness === id);
+			const restored: Restored = { userId, sessionId: this.#ref!.sessionId, harness: id, version: entry?.version ?? 0, connected: false, fingerprint: null };
 			// The login workspace is the person's because this sign-in made it for them.
 			const owns = async (user: string, session: string) => user === userId && session === this.#ref?.sessionId;
 			const written = await writeBackHarnessCredentials(vault, owns, restored, { userId, ref: this.#ref!, workspace });

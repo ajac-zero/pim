@@ -15,7 +15,7 @@ import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
 import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
-import { OWNER, post, toolUse } from "./helpers";
+import { api, OWNER, post, toolUse } from "./helpers";
 import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
@@ -966,5 +966,48 @@ describe("a Codex thread", () => {
 		// The id Pim gave the first turn, which its command line carries, as Codex hadn't named its session yet.
 		expect(runs[0]!.argv.join(" ")).toContain(signals[0]![2]);
 		expect(await storedLogin()).toBe(LOGIN);
+	});
+});
+
+describe("an Amp thread", () => {
+	// Amp signs in with the person's access token, from the coding vault. Its adapter isn't written yet, so a turn that
+	// gets past signing in fails closed, which is how these tests see that the thread went on.
+	const KEY = "sgamp_user_THREADKEY_0123456789abcdef";
+	const started: Stub[] = [];
+
+	async function startAmp() {
+		const id = crypto.randomUUID();
+		await codingScheduler(env, OWNER).registerThread({ threadId: id, createdBy: { type: "person" }, parent: null, chat: null, harness: "amp", task: "Fix the greeting test", repo: REPO, ref: "main", budgetUsd: 3, createdAt: Date.now() });
+		const stub = codingThread(env, id);
+		started.push(stub);
+		await stub.start(startInput(id, { space: OWNER, harness: "amp", task: "Fix the greeting test" }));
+		return { id, stub };
+	}
+
+	beforeEach(() => codingVault(env).delete(OWNER, "amp"));
+
+	afterEach(async () => {
+		for (const stub of started.splice(0)) await stub.archive().catch(() => {});
+		await codingVault(env).delete(OWNER, "amp");
+	});
+
+	it("waits for the person's key when there is none, and goes on once they save one, never storing it", async () => {
+		const { id, stub } = await startAmp();
+		await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", inbox: 1 }), { timeout: 10_000, interval: 20 });
+		expect((await stub.status()).stateDetail).toBe("Connect Amp with your API key, then continue the thread");
+		expect((await stub.log()).find((event) => event.kind === "thread.waiting_input")?.data).toMatchObject({ reason: "login_required", harness: "amp" });
+		// Its workspace may reach Amp, besides the broker and the registries.
+		const spec = (await workspaceOf(id)) as unknown as { spec: { egress: { allow: string[] } } };
+		expect(spec.spec.egress.allow).toEqual(expect.arrayContaining(["ampcode.com", "*.ampcode.com", "registry.npmjs.org"]));
+
+		// Saving the key goes on with the thread, which the placeholder then fails, saying so.
+		expect((await api("/coding/vault/amp/api-key", { method: "PUT", body: JSON.stringify({ apiKey: KEY }) })).status).toBe(200);
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "error", reason: "harness_error", state: "failed" });
+		expect((await stub.status()).stateDetail).toBe("Amp isn't implemented yet: Pim can't run its CLI");
+		// The key is nowhere in the thread's tables, its log or its transcript.
+		expect(await everything(stub)).not.toContain("THREADKEY");
+		expect(JSON.stringify(await stub.log())).not.toContain("THREADKEY");
+		expect(JSON.stringify(await inside(stub, (thread) => thread.transcript()))).not.toContain("THREADKEY");
 	});
 });

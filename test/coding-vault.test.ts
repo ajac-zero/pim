@@ -8,10 +8,10 @@ import { codingScheduler } from "../src/coding/scheduler-do";
 import { codingThreadId } from "../src/coding/threads";
 import { ArchiveError, type ArchiveFile, MAX_ARCHIVE_BYTES, MAX_ARCHIVE_FILES, packArchive, unpackArchive } from "../src/coding/vault/archive";
 import { openBlob, sealBlob, VaultUnreadableError, vaultKey } from "../src/coding/vault/crypto";
-import { HARNESS_FILES } from "../src/coding/vault/harnesses";
+import { apiKeyProblem, HARNESS_FILES, HARNESSES } from "../src/coding/vault/harnesses";
 import { harnessEnv, restoreHarnessCredentials, VaultOwnershipError, writeBackHarnessCredentials } from "../src/coding/vault/inject";
 import { MAX_SEALED_BYTES } from "../src/coding/vault/store";
-import { CodingVault, codingVault, type Ownership, spaceVaultBackend, threadOwnership } from "../src/coding/vault/vault";
+import { ApiKeyError, CodingVault, codingVault, type Ownership, spaceVaultBackend, threadOwnership } from "../src/coding/vault/vault";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { fakeRemotes } from "./fake-git";
@@ -59,7 +59,7 @@ beforeEach(() => {
 afterEach(async () => {
 	expect(logged.join("\n")).not.toContain(MARKER);
 	vi.restoreAllMocks();
-	for (const user of [OWNER, other]) for (const harness of ["codex", "claude-code"] as const) await codingVault(env).delete(user, harness);
+	for (const user of [OWNER, other]) for (const harness of HARNESSES) await codingVault(env).delete(user, harness);
 });
 
 describe("sealing", () => {
@@ -365,13 +365,12 @@ describe("the API", () => {
 		expect(raw.status).toBe(200);
 		expect(body).not.toContain(MARKER);
 		const { harnesses } = JSON.parse(body) as { harnesses: Record<string, unknown>[] };
-		expect(harnesses.map((entry) => Object.keys(entry).sort())).toEqual([
-			["byteLength", "connected", "harness", "updatedAt"],
-			["byteLength", "connected", "harness", "updatedAt"],
-		]);
+		expect(harnesses.map((entry) => Object.keys(entry).sort())).toEqual(HARNESSES.map(() => ["byteLength", "connected", "harness", "updatedAt"]));
 		expect(harnesses).toMatchObject([
 			{ harness: "claude-code", connected: false, byteLength: null },
 			{ harness: "codex", connected: true, byteLength: packArchive([AUTH, CONFIG]).byteLength },
+			{ harness: "mistral-vibe", connected: false, byteLength: null },
+			{ harness: "amp", connected: false, byteLength: null },
 		]);
 		expect((await api("/coding/vault/codex")).body).toMatchObject({ harness: "codex", connected: true });
 		expect((await api("/coding/vault/gemini")).status).toBe(404);
@@ -387,6 +386,135 @@ describe("the API", () => {
 		// No route writes or reads a login's contents.
 		expect((await api("/coding/vault/codex", { method: "PUT", body: "{}" })).status).toBe(405);
 		expect((await api("/coding/vault/codex/blob")).status).toBe(404);
+	});
+});
+
+describe("API keys", () => {
+	// Mistral Vibe and Amp sign in with a key the person gives Pim. Each key carries MARKER, which must never reach a
+	// response or a log line.
+	const VIBE_KEY = `${MARKER}0123456789abcdef`;
+	const AMP_KEY = `sgamp_user_${MARKER}_0123456789`;
+	const put = (harness: string, body: unknown, as = TOKEN) =>
+		exports.default.fetch(
+			new Request(apiUrl(`/coding/vault/${harness}/api-key`), {
+				method: "PUT",
+				body: typeof body === "string" ? body : JSON.stringify(body),
+				headers: { Authorization: `Bearer ${as}`, "content-type": "application/json" },
+			}),
+		);
+
+	it("are only ever a line of printable characters of a sane length, and Amp's start with sgamp_", () => {
+		expect(apiKeyProblem("mistral-vibe", VIBE_KEY)).toBeNull();
+		expect(apiKeyProblem("amp", AMP_KEY)).toBeNull();
+		const refused: [string, unknown][] = [
+			["mistral-vibe", ""],
+			["mistral-vibe", undefined],
+			["mistral-vibe", 12345678901234567890],
+			["mistral-vibe", "short-key"],
+			["mistral-vibe", "k".repeat(513)],
+			["mistral-vibe", ` ${VIBE_KEY}`],
+			["mistral-vibe", `${VIBE_KEY}\n`],
+			["mistral-vibe", `${VIBE_KEY.slice(0, 8)} ${VIBE_KEY.slice(8)}`],
+			["mistral-vibe", `${VIBE_KEY}\u0000`],
+			["mistral-vibe", `${VIBE_KEY}\t`],
+			["mistral-vibe", `${VIBE_KEY}é`],
+			["mistral-vibe", `${VIBE_KEY}"`],
+			["amp", VIBE_KEY],
+			["amp", `SGAMP_${MARKER}0123456789`],
+		];
+		for (const [harness, key] of refused) {
+			const problem = apiKeyProblem(harness as "amp", key);
+			expect(problem, JSON.stringify(key)).not.toBeNull();
+			expect(problem).not.toContain(MARKER);
+		}
+		expect(apiKeyProblem("amp", VIBE_KEY)).toBe("This key should start with sgamp_");
+		expect(apiKeyProblem("mistral-vibe", "k".repeat(16))).toBeNull();
+		expect(apiKeyProblem("mistral-vibe", "k".repeat(512))).toBeNull();
+		expect(apiKeyProblem("mistral-vibe", "k".repeat(15))).not.toBeNull();
+	});
+
+	it("are kept sealed in the person's space, opened only as theirs, and deleted on disconnect", async () => {
+		const vault = codingVault(env);
+		expect(await vault.loadApiKey(OWNER, "amp")).toBeNull();
+		const saved = await vault.saveApiKey(OWNER, "amp", AMP_KEY);
+		expect(saved).toMatchObject({ harness: "amp", connected: true });
+		expect(await vault.loadApiKey(OWNER, "amp")).toBe(AMP_KEY);
+		// The space holds ciphertext only, and another person or harness has nothing of it.
+		const record = await spaceVaultBackend(env).read(OWNER, "amp");
+		expect(decoder.decode(record.sealed!)).not.toContain(MARKER);
+		expect(await vault.loadApiKey(other, "amp")).toBeNull();
+		expect(await vault.loadApiKey(OWNER, "mistral-vibe")).toBeNull();
+		// A new key replaces the old one.
+		const next = `sgamp_user_${MARKER}_9876543210`;
+		expect((await vault.saveApiKey(OWNER, "amp", next)).version).toBe(saved.version + 1);
+		expect(await vault.loadApiKey(OWNER, "amp")).toBe(next);
+		// A key that doesn't look right is refused without being quoted, and the one kept stays.
+		await expect(vault.saveApiKey(OWNER, "amp", VIBE_KEY)).rejects.toBeInstanceOf(ApiKeyError);
+		await expect(vault.saveApiKey(OWNER, "amp", VIBE_KEY)).rejects.not.toThrow(MARKER);
+		expect(await vault.loadApiKey(OWNER, "amp")).toBe(next);
+		// A key and a login never open as each other.
+		await expect(vault.load(OWNER, "amp" as "codex")).rejects.toThrow();
+		await expect(vault.loadApiKey(OWNER, "codex" as "amp")).rejects.toThrow();
+		expect((await vault.delete(OWNER, "amp")).connected).toBe(false);
+		expect(await vault.loadApiKey(OWNER, "amp")).toBeNull();
+	});
+
+	it("open as none when the entry isn't the person's own key for that harness", async () => {
+		const real = spaceVaultBackend(env);
+		const vault = codingVault(env);
+		await vault.saveApiKey(OWNER, "amp", AMP_KEY);
+		await vault.save(OWNER, "codex", [AUTH], (await real.read(OWNER, "codex")).version);
+		const misrouted = new CodingVault({ ...real, read: (_user, harness) => real.read(OWNER, harness) }, vault.key);
+		expect(await misrouted.loadApiKey(other, "amp")).toBeNull();
+		const swapped = new CodingVault({ ...real, read: (user) => real.read(user, "amp") }, vault.key);
+		expect(await swapped.loadApiKey(OWNER, "mistral-vibe")).toBeNull();
+		const archive = new CodingVault({ ...real, read: (user) => real.read(user, "codex") }, vault.key);
+		expect(await archive.loadApiKey(OWNER, "amp")).toBeNull();
+		expect(logged.some((line) => line.includes("pim.coding.vault_unreadable"))).toBe(true);
+	});
+
+	it("are written through the API and never read back: no response holds the key, any part of it, or its length", async () => {
+		const response = await put("amp", { apiKey: AMP_KEY });
+		const text = await response.text();
+		expect(response.status).toBe(200);
+		expect(text).not.toContain(MARKER);
+		expect(JSON.parse(text)).toEqual({ harness: "amp", connected: true, updatedAt: expect.any(Number), byteLength: null });
+		expect(await codingVault(env).loadApiKey(OWNER, "amp")).toBe(AMP_KEY);
+		for (const path of ["/coding/vault", "/coding/vault/amp"]) {
+			const raw = await exports.default.fetch(new Request(apiUrl(path), { headers: { Authorization: `Bearer ${TOKEN}` } }));
+			const body = await raw.text();
+			expect(body).not.toContain(MARKER);
+			expect(body).not.toContain(String(AMP_KEY.length));
+		}
+		expect((await api("/coding/vault")).body.harnesses.find((entry: { harness: string }) => entry.harness === "amp")).toEqual({ harness: "amp", connected: true, updatedAt: expect.any(Number), byteLength: null });
+		// The other person's key is theirs alone.
+		expect((await put("amp", { apiKey: `sgamp_user_other_0123456789` }, otherToken)).status).toBe(200);
+		expect(await codingVault(env).loadApiKey(OWNER, "amp")).toBe(AMP_KEY);
+		// Disconnecting deletes it.
+		expect((await api("/coding/vault/amp", { method: "DELETE" })).body).toMatchObject({ harness: "amp", connected: false, byteLength: null });
+		expect(await codingVault(env).loadApiKey(OWNER, "amp")).toBeNull();
+		expect(logged.some((line) => line.includes("pim.coding.harness_connected"))).toBe(true);
+	});
+
+	it("are refused through the API when they don't look right, or for a harness that doesn't take one, saying why without quoting them", async () => {
+		const cases: [string, unknown, number][] = [
+			["amp", { apiKey: VIBE_KEY }, 400],
+			["mistral-vibe", { apiKey: `${VIBE_KEY} ` }, 400],
+			["mistral-vibe", { apiKey: `${VIBE_KEY}\n` }, 400],
+			["mistral-vibe", { key: VIBE_KEY }, 400],
+			["mistral-vibe", `{"apiKey": "${VIBE_KEY}"`, 400],
+			["codex", { apiKey: VIBE_KEY }, 404],
+			["gemini", { apiKey: VIBE_KEY }, 404],
+		];
+		for (const [harness, body, status] of cases) {
+			const response = await put(harness, body);
+			expect(response.status, JSON.stringify(body)).toBe(status);
+			expect(await response.text()).not.toContain(MARKER);
+		}
+		expect(await codingVault(env).loadApiKey(OWNER, "amp")).toBeNull();
+		expect(await codingVault(env).loadApiKey(OWNER, "mistral-vibe")).toBeNull();
+		// An API-key harness has no sign-in to relay.
+		expect((await api("/coding/vault/amp/login", { method: "POST" })).status).toBe(404);
 	});
 });
 

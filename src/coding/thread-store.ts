@@ -15,9 +15,9 @@ import type { WorkspaceRef } from "./workspace/types";
 export type CodingThreadState = "provisioning" | "queued" | "idle" | "running" | "waiting_input" | "failed" | "archived";
 
 /** Which coding agent runs a thread: pi, the one Pim has built in, or one of the other harnesses. */
-export type CodingHarness = "pi" | "claude-code" | "codex";
+export type CodingHarness = "pi" | "claude-code" | "codex" | "mistral-vibe" | "amp";
 
-export const CODING_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code", "codex"];
+export const CODING_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code", "codex", "mistral-vibe", "amp"];
 
 /** Which model a thread runs on, by the space's provider id (such as `own:anthropic`) and the model's id there. */
 export type AgentProfile = { readonly providerId: string; readonly model: string; readonly thinking?: ModelThinkingLevel };

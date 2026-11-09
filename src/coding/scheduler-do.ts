@@ -285,6 +285,11 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		else this.ctx.storage.sql.exec("DELETE FROM pim_coding_harness_login WHERE harness = ?", harness);
 	}
 
+	/** The person connected `harness` some other way than a sign-in here, such as by giving its API key: their threads that waited for it go on. */
+	harnessConnected(harness: Harness): void {
+		this.#resumeWaiting(harness);
+	}
+
 	/** Goes on with the person's threads that waited for their login to `harness`, now that they signed in. */
 	#resumeWaiting(harness: Harness): void {
 		const waiting = this.#threads.list().filter((thread) => thread.harness === harness && thread.state === "waiting_input" && thread.stateReason === "login_required");

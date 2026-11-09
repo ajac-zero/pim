@@ -24,6 +24,18 @@ RUN npm install -g "@openai/codex@${CODEX_VERSION}" \
 	&& npm cache clean --force \
 	&& codex --version
 
+# Amp's CLI, unmodified, for coding threads whose harness is `amp` (docs/coding-amp.md). Pinned the same way: bump it
+# on purpose, after checking `amp --help`, the managed settings below and its stream-json against
+# src/coding/harness/amp.ts. `@ampcode/cli` (once `@sourcegraph/amp`) installs the platform's native binary from an
+# optional dependency. The managed settings are the one settings file a repository's `.amp/settings.json` can't
+# override: no MCP server starts, no updates, no confirmations nobody could answer, and no web tools that would fetch
+# from Amp's servers past the workspace's egress allowlist.
+ARG AMP_VERSION=0.0.1794240032-ga42e06
+COPY amp-managed-settings.json /etc/ampcode/managed-settings.json
+RUN npm install -g "@ampcode/cli@${AMP_VERSION}" \
+	&& npm cache clean --force \
+	&& amp --version
+
 # Node's image already has a uid 1000 user; agentd runs as uid 10001.
 RUN groupadd --gid 10001 workspace \
 	&& useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash workspace \

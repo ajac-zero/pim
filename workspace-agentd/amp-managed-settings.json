@@ -1,0 +1,10 @@
+{
+	"amp.dangerouslyAllowAll": true,
+	"amp.mcpPermissions": [
+		{ "matches": { "command": "*" }, "action": "reject" },
+		{ "matches": { "url": "*" }, "action": "reject" }
+	],
+	"amp.tools.disable": ["read_web_page", "web_search"],
+	"amp.updates.mode": "disabled",
+	"amp.notifications.enabled": false
+}

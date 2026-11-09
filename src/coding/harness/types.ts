@@ -133,6 +133,12 @@ export interface CliHarness {
 	 * pressing Ctrl-C does, so the CLI records it; SIGKILL when it doesn't.
 	 */
 	signalCommand(sessionId: string, signal: "INT" | "KILL"): string[];
+	/**
+	 * What the CLI prints on its error output when it exits without a result
+	 * because its login or key was refused, for a CLI that says so only
+	 * there (Amp).
+	 */
+	readonly loginFailure?: RegExp;
 	/** The CLI's own sign-in with a subscription, where it has one Pim can relay. */
 	readonly login?: HarnessLoginFlow;
 	/**

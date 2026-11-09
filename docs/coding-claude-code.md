@@ -4,7 +4,7 @@ A coding thread started with `harness: "claude-code"` is run by Anthropic's `cla
 
 ## The framework
 
-Any CLI that works in a workspace is a `CliHarness` (`src/coding/harness/types.ts`): how a turn is started (`buildCommand`), how a line of its output reads (`parser().parseLine`, into `HarnessEvent`s), the environment and egress it needs, how its process is signalled, and optionally how it signs in (`login`). `cliHarness(id)` in `src/coding/harness/index.ts` lists the ones there are: `claude-code` and `codex` ([coding-codex.md](coding-codex.md)).
+Any CLI that works in a workspace is a `CliHarness` (`src/coding/harness/types.ts`): how a turn is started (`buildCommand`), how a line of its output reads (`parser().parseLine`, into `HarnessEvent`s), the environment and egress it needs, how its process is signalled, and optionally how it signs in (`login`). `cliHarness(id)` in `src/coding/harness/index.ts` lists the ones there are: `claude-code`, `codex` ([coding-codex.md](coding-codex.md)) and `amp` ([coding-amp.md](coding-amp.md)).
 
 `HarnessRunner` (`src/coding/harness/runner.ts`) runs one turn for `CodingThreadDO` when `thread.harness !== "pi"`:
 

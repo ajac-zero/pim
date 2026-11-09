@@ -20,6 +20,7 @@ import {
   ChevronRight,
   Code,
   DollarSign,
+  ExternalLink,
   GitFork,
   ListChecks,
   Loader2,
@@ -33,6 +34,7 @@ import { Input } from "~/components/ui/input";
 import {
   ACTIVE_STATES,
   type CodingApi,
+  type CodingHarness,
   type CodingPushRequested,
   type CodingStreamMessage,
   type CodingTestRun,
@@ -48,6 +50,7 @@ import {
   codingTranscriptQuery,
   EMPTY_LIVE,
   HARNESS_NAMES,
+  type HarnessSignIn,
   MAX_TASK,
   mergeMessages,
   parseDiff,
@@ -55,6 +58,7 @@ import {
   reduceLive,
   repoName,
   resultText,
+  START_HARNESSES,
   STATE_TEXT,
   type StartForm,
   type StartProblems,
@@ -69,6 +73,7 @@ import {
 import { ApiError, pim, SignInRequired } from "~/lib/pim-api";
 import { approvalsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
+import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
 /*
  * Coding threads (docs/coding-api.md): the space's list with a form to start
@@ -292,7 +297,13 @@ function Field({
   );
 }
 
-const EMPTY_FORM: StartForm = { repo: "", ref: "", task: "", budget: "" };
+const EMPTY_FORM: StartForm = {
+  repo: "",
+  ref: "",
+  task: "",
+  budget: "",
+  harness: "pi",
+};
 
 /** Starts a thread on a repository: where, what to do, and at most how much to spend. */
 export function StartThreadForm() {
@@ -397,6 +408,13 @@ export function StartThreadForm() {
           />
         )}
       </Field>
+      <HarnessChooser
+        value={form.harness ?? "pi"}
+        onChange={(harness) => setForm((current) => ({ ...current, harness }))}
+      />
+      {form.harness === "claude-code" && (
+        <HarnessConnectPanel harness="claude-code" />
+      )}
       {refusal && (
         <p role="alert" className="text-destructive text-sm">
           {refusal}
@@ -408,6 +426,242 @@ export function StartThreadForm() {
         </Button>
       </div>
     </form>
+  );
+}
+
+/** Which coding agent runs the thread: Pi, on the space's own models, or Claude Code, with the person's subscription. */
+function HarnessChooser({
+  value,
+  onChange,
+}: {
+  value: CodingHarness;
+  onChange: (harness: CodingHarness) => void;
+}) {
+  const { t } = useI18n();
+  const labelId = useId();
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span id={labelId} className="text-[13px] text-muted-foreground">
+        {t("codingHarness")}
+      </span>
+      <div
+        role="radiogroup"
+        aria-labelledby={labelId}
+        className="inline-flex self-start rounded-full bg-muted p-1"
+      >
+        {START_HARNESSES.map((harness) => (
+          <button
+            key={harness}
+            type="button"
+            role="radio"
+            aria-checked={value === harness}
+            onClick={() => onChange(harness)}
+            className={cn(
+              "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm transition-colors",
+              value === harness
+                ? "bg-background shadow-xs"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <span aria-hidden className="contents">
+              <HarnessIcon harness={harness} />
+            </span>
+            {HARNESS_NAMES[harness]}
+          </button>
+        ))}
+      </div>
+      <p className="text-[13px] text-muted-foreground">
+        {t("codingHarnessHint")}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Connecting a harness with the person's own subscription: what they accept
+ * by connecting, whether it is connected, and its CLI's own sign-in, relayed:
+ * the page to sign in at, and a field for the code that page shows.
+ */
+export function HarnessConnectPanel({ harness }: { harness: "claude-code" }) {
+  const { t } = useI18n();
+  const api = useCodingApi();
+  const queryClient = useQueryClient();
+  const titleId = useId();
+  const codeId = useId();
+  const name = HARNESS_NAMES[harness];
+  const disclosure = HARNESS_DISCLOSURES[harness];
+  const statusKey = ["coding", "vault", harness];
+  const status = useQuery({
+    queryKey: statusKey,
+    queryFn: () => api.vault.status(harness),
+  });
+  const [signIn, setSignIn] = useState<HarnessSignIn | null>(null);
+  const [code, setCode] = useState("");
+  const connected = (next: HarnessSignIn) => {
+    setSignIn(next.state === "connected" ? null : next);
+    setCode("");
+    if (next.state === "connected") {
+      queryClient.invalidateQueries({ queryKey: statusKey });
+      // Threads that waited for the login go on.
+      queryClient.invalidateQueries({ queryKey: ["coding", "thread"] });
+      queryClient.invalidateQueries({ queryKey: ["coding", "threads"] });
+    }
+  };
+  const start = useMutation({
+    mutationFn: () => api.vault.signIn(harness),
+    onSuccess: setSignIn,
+  });
+  const send = useMutation({
+    mutationFn: () => api.vault.sendCode(harness, code.trim()),
+    onSuccess: connected,
+  });
+  const cancel = useMutation({
+    mutationFn: () => api.vault.cancelSignIn(harness),
+    onSuccess: () => setSignIn(null),
+  });
+  const disconnect = useMutation({
+    mutationFn: () => api.vault.disconnect(harness),
+    onSuccess: (next) => queryClient.setQueryData(statusKey, next),
+  });
+  const isConnected = status.data?.connected === true;
+  const waiting = signIn?.state === "waiting_code" && signIn.url;
+  const error =
+    (signIn?.state === "failed" ? signIn.error : null) ??
+    ((start.error ?? send.error ?? cancel.error ?? disconnect.error)
+      ? problemText(
+          start.error ?? send.error ?? cancel.error ?? disconnect.error,
+        )
+      : null);
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="flex flex-col gap-3 rounded-2xl border px-4 py-4"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <HarnessIcon harness={harness} />
+        <h3 id={titleId} className="min-w-0 flex-1 text-[15px]">
+          {t("codingConnectTitle", { harness: name })}
+        </h3>
+        {status.data && (
+          <span
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[13px]",
+            )}
+          >
+            <span
+              aria-hidden
+              className={cn(
+                "size-1.5 rounded-full",
+                isConnected ? "bg-success" : "bg-muted-foreground/60",
+              )}
+            />
+            {isConnected ? t("codingConnected") : t("codingNotConnected")}
+          </span>
+        )}
+      </div>
+      {isConnected ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="min-w-0 flex-1 text-muted-foreground text-sm">
+            {t("codingConnectedNote", { harness: name })}
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={disconnect.isPending}
+            onClick={() => disconnect.mutate()}
+          >
+            {t("codingDisconnect")}
+          </Button>
+        </div>
+      ) : waiting ? (
+        <form
+          className="flex flex-col gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (code.trim()) send.mutate();
+          }}
+        >
+          <ol className="list-decimal space-y-1 pl-5 text-sm">
+            <li>
+              <a
+                href={signIn.url ?? undefined}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cn(
+                  "inline-flex items-center gap-1 text-link underline-offset-2 hover:underline",
+                  LINK_RING,
+                )}
+              >
+                {t("codingConnectOpen", { harness: name })}
+                <ExternalLink className="size-3.5" />
+              </a>
+            </li>
+            <li>{t("codingConnectPaste")}</li>
+          </ol>
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor={codeId}
+              className="text-[13px] text-muted-foreground"
+            >
+              {t("codingConnectCode")}
+            </label>
+            <Input
+              id={codeId}
+              autoComplete="off"
+              spellCheck={false}
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="submit"
+              size="sm"
+              disabled={send.isPending || !code.trim()}
+            >
+              {send.isPending ? t("codingConnecting") : t("codingConnectSend")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={cancel.isPending}
+              onClick={() => cancel.mutate()}
+            >
+              {t("codingCancel")}
+            </Button>
+          </div>
+        </form>
+      ) : (
+        <>
+          <div className="flex flex-col gap-2 text-muted-foreground text-sm">
+            <p className="text-foreground">{disclosure.title}</p>
+            {disclosure.paragraphs.map((paragraph) => (
+              <p key={paragraph}>{paragraph}</p>
+            ))}
+          </div>
+          <div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={start.isPending}
+              onClick={() => start.mutate()}
+            >
+              {start.isPending
+                ? t("codingConnectStarting")
+                : t("codingConnect", { harness: name })}
+            </Button>
+          </div>
+        </>
+      )}
+      {error && (
+        <p role="alert" className="text-destructive text-sm">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -661,6 +915,10 @@ function StateNotice({ thread }: { thread: CodingThreadView }) {
           {thread.stateDetail}
         </p>
       )}
+      {thread.stateReason === "login_required" &&
+        thread.harness === "claude-code" && (
+          <HarnessConnectPanel harness="claude-code" />
+        )}
     </section>
   );
 }
@@ -699,6 +957,7 @@ function ThreadActions({ thread }: { thread: CodingThreadView }) {
   const waiting = thread.state === "queued" || thread.state === "provisioning";
   const stopped =
     thread.state === "failed" ||
+    thread.state === "waiting_input" ||
     (thread.state === "idle" &&
       (thread.stateReason === "aborted" || thread.stateReason === "cancelled"));
   const error = abort.error ?? archive.error;

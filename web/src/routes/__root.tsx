@@ -257,14 +257,13 @@ function usePimEvents() {
     pimClient.handlers = {
       onActivity: () => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        // A run may have scheduled work, made an agent, saved a skill, written files, or used the browser.
-        queryClient.invalidateQueries({ queryKey: ["schedules"] });
+        // A run may have made an agent, saved a skill, written files, or used the browser.
         queryClient.invalidateQueries({ queryKey: ["agents"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });
         queryClient.invalidateQueries({ queryKey: ["browser"] });
         queryClient.invalidateQueries({ queryKey: ["skills"] });
-        // Or made or changed a trigger, or taken one of its runs, or moved a schedule to one; whether triggers exist doesn't change.
-        for (const part of ["list", "one", "runs", "migration"]) {
+        // Or made or changed a trigger, such as by scheduling work, or taken one of its runs; whether triggers exist doesn't change.
+        for (const part of ["list", "one", "runs"]) {
           queryClient.invalidateQueries({ queryKey: ["triggers", part] });
         }
       },

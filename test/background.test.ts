@@ -100,6 +100,9 @@ describe("scheduled tasks", () => {
 		// Fired once, it is done.
 		expect((await api(`/triggers/${task.id}`)).body.lifecycle).toBe("ended");
 		expect((await api("/schedules")).body.schedules).toEqual([]);
+		// Ticking on later runs nothing more.
+		await tickAt(next + 2 * HOUR);
+		expect(await runsOf(task.id)).toHaveLength(1);
 	});
 
 	it("starts a new chat with the same agent each time a new-chat cron task fires, in UTC", async () => {

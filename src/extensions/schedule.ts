@@ -74,8 +74,6 @@ export type ScheduleHost = {
 	chatAgent(chat: string): string | null;
 	/** The conversation a chat's public id names; null for none. */
 	sessionOf(chat: string): string | null;
-	/** The trigger a schedule made before triggers moved to, by the schedule's id; the id itself otherwise. */
-	triggerOf(id: string): string;
 };
 
 /** The enabled time triggers the actor may see, oldest first: its scheduled tasks. */
@@ -243,7 +241,7 @@ export function scheduleExtension(host: ScheduleHost) {
 		async execute({ id }, call) {
 			const api = host.api();
 			try {
-				if (api && (await cancelTask(api, actorOf(call), host.triggerOf(id)))) return text("Cancelled.");
+				if (api && (await cancelTask(api, actorOf(call), id))) return text("Cancelled.");
 			} catch (error) {
 				if (error instanceof TriggerApiError) return text(error.message, true);
 				throw error;

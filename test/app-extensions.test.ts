@@ -7,8 +7,7 @@ import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { newSecret, signWebhook } from "../src/extensions/app-events";
-import { type AppWatch, type Approval, PimStore } from "../src/store";
-import { mapWatch, type MigrationContext, TriggerMigration } from "../src/triggers/migration";
+import { type Approval, PimStore } from "../src/store";
 import { api, apiUrl, lastUserText, OWNER, pendingApproval, post, ROOT as ROOT_SESSION, say, settled, toolUse, url } from "./helpers";
 import { faux, type Pim, triggerClock } from "./worker";
 
@@ -145,45 +144,6 @@ async function subscriptionOf(triggerId: string) {
 		const [row] = state.storage.sql.exec("SELECT key, secret, next_at, refresh_before FROM pim_trigger_subscriptions WHERE trigger_id = ? ORDER BY rowid DESC LIMIT 1", triggerId).toArray();
 		return { key: String(row!.key), secret: String(row!.secret), nextAt: Number(row!.next_at), refreshBefore: Number(row!.refresh_before) };
 	});
-}
-
-/** A watch as watches were kept before they were triggers, subscribed by its connector: only its row. */
-function keptWatch(state: DurableObjectState, session: string, instruction: string): AppWatch {
-	const id = crypto.randomUUID();
-	const watch: AppWatch = {
-		id,
-		serverId: "travel",
-		event: "flight.price_changed",
-		arguments: { route: "LIS-OPO" },
-		instruction,
-		session,
-		secret: newSecret(),
-		url: `https://pim.test/mcp/events/${OWNER}/${id}`,
-		remoteId: "sub_travel_1",
-		cursor: "c-kept",
-		refreshBefore: Date.now() + 3_600_000,
-		status: "active",
-		lastError: null,
-		lastEventAt: null,
-		createdAt: Date.now(),
-	};
-	state.storage.sql.exec(
-		"INSERT INTO pim_app_watches (id, server_id, event, arguments, instruction, session, secret, url, remote_id, cursor, refresh_before, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		id,
-		watch.serverId,
-		watch.event,
-		JSON.stringify(watch.arguments),
-		instruction,
-		session,
-		watch.secret,
-		watch.url,
-		watch.remoteId,
-		watch.cursor,
-		watch.refreshBefore,
-		watch.status,
-		watch.createdAt,
-	);
-	return watch;
 }
 
 /** One tick of the trigger wake: subscriptions kept, and events taken in handed to their chats. */
@@ -595,72 +555,6 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		const late = { eventId: "evt_2", name: "flight.price_changed", timestamp: now(), data: {} };
 		expect((await deliver(`/mcp/events/${OWNER}/${key}`, secret, late)).status).toBe(410);
 		expect((await api(`/triggers/${watchId}`, { method: "DELETE" })).status).toBe(200);
-	});
-
-	it("hands a watch a trigger took over to that trigger as the space starts, keeping its callback, secret and subscription, and stops any other", async () => {
-		const before = { subscribes: subscribes.length, unsubscribes: unsubscribes.length };
-		const { taken, stray, triggerId } = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim, state) => {
-			const chat = instance.store.sessionOf(ROOT_SESSION)!;
-			const taken = keptWatch(state, chat, "Tell me about Porto fares.");
-			const stray = keptWatch(state, chat, "Tell me about Faro fares.");
-			// The migration cut the first over to its trigger, as it did each watch whose deliveries passed its checks, and left the second with its watch.
-			const engine = instance.triggerEngine()!;
-			const context: MigrationContext = {
-				now: Date.now(),
-				owner: OWNER,
-				publicUrl: "https://pim.test",
-				agentExists: () => true,
-				chatAgent: () => instance.agents.majordomo().id,
-				chatOpen: () => true,
-				strictDeliveries: (id) => (id === taken.id ? "passing" : "unchecked"),
-			};
-			const migration = new TriggerMigration(state.storage.sql, { store: engine.store, transaction: (work) => state.storage.transactionSync(work), now: Date.now });
-			const moved = migration.migrate({ items: [mapWatch(taken, context), mapWatch(stray, context)], orphans: [] }, { limit: 5 });
-			expect(moved.map((outcome) => outcome.owner)).toEqual(["trigger", "legacy"]);
-			const triggerId = moved[0]!.triggerId!;
-			// A renewal alarm, as watches kept them.
-			const legacy = instance as unknown as { refreshAppWatch?: () => void };
-			legacy.refreshAppWatch = () => {};
-			await instance.schedule(new Date(Date.now() + 3_000_000), "refreshAppWatch" as never, { id: taken.id } as never);
-			delete legacy.refreshAppWatch;
-
-			await instance.onStart();
-			expect(state.storage.sql.exec("SELECT COUNT(*) AS n FROM pim_app_watches").one().n).toBe(0);
-			expect((await instance.listSchedules()).filter((schedule) => schedule.callback === "refreshAppWatch")).toEqual([]);
-			// The taken one's subscription is its trigger's now, under the watch's own key and secret.
-			const [binding] = state.storage.sql.exec("SELECT key, secret, provider_subscription_id, status, phase FROM pim_trigger_subscriptions WHERE trigger_id = ?", triggerId).toArray();
-			expect(binding).toEqual({ key: taken.id, secret: taken.secret, provider_subscription_id: "sub_travel_1", status: "active", phase: "open" });
-			// The other is stopped, with its shadow, and the person told.
-			expect(engine.store.get(moved[1]!.triggerId!)?.lifecycle).toBe("deleted");
-			expect(instance.store.notifications({ unread: false }).map((notification) => notification.title)).toContain("Stopped watching Travel");
-			return { taken, stray, triggerId };
-		});
-		// Nothing new was subscribed; the stray watch was unsubscribed.
-		expect(subscribes.length).toBe(before.subscribes);
-		expect(unsubscribes.slice(before.unsubscribes)).toEqual([{ name: "flight.price_changed", arguments: { route: "LIS-OPO" }, delivery: { url: stray.url } }]);
-
-		// An event to the taken watch's own callback, signed with its own secret, runs once in its chat, under the key the watch used.
-		let woken = "";
-		faux.setResponses([
-			(context) => {
-				woken = lastUserText(context.messages);
-				return toolUse("send_to_user", { message: "Porto is cheap." });
-			},
-		]);
-		const event = { eventId: "evt_kept", name: "flight.price_changed", timestamp: now(), data: { route: "LIS-OPO", price: 40 } };
-		expect((await deliver(`/mcp/events/${OWNER}/${taken.id}`, taken.secret, event)).status).toBe(204);
-		await tick();
-		await settled();
-		expect(woken).toContain(`[Connector event] travel sent "flight.price_changed" (event evt_kept at ${event.timestamp}) for trigger "Connector event flight.price_changed" ${triggerId}.`);
-		expect(woken).toContain("Your instruction for this trigger: Tell me about Porto fares.");
-		expect(woken).toContain('"price": 40');
-		expect((await api(`/sessions/${ROOT_SESSION}/operations/event:${taken.id}:evt_kept`)).body).toMatchObject({ status: "done", text: "Porto is cheap." });
-		expect((await deliver(`/mcp/events/${OWNER}/${stray.id}`, stray.secret, { ...event, eventId: "evt_stray" })).status).toBe(410);
-
-		// stop_watch takes the watch's own id too, and unsubscribes its callback.
-		expect(await toolsSay([["stop_watch", { id: taken.id }]])).toContain("Stopped.");
-		expect(unsubscribes.at(-1)).toEqual({ name: "flight.price_changed", arguments: { route: "LIS-OPO" }, delivery: { url: taken.url } });
-		expect((await api(`/triggers/${encodeURIComponent(triggerId)}`)).body).toMatchObject({ lifecycle: "deleted" });
 	});
 
 	it("records a termination, and unsubscribes when a watch is stopped, its chat deleted or its app removed", async () => {

@@ -11,7 +11,7 @@ import { Pim as RealPim } from "../src/pim";
 import { INTRODUCTION } from "../src/transcript";
 import { Authenticator } from "../test/webauthn";
 
-export { Auth, CodingSchedulerDO, Directory, Gallery } from "../src/index";
+export { Auth, CodingSchedulerDO, CodingThreadDO, Directory, Gallery } from "../src/index";
 
 /**
  * The Worker `pnpm preview` runs (wrangler.preview.jsonc): the real Pim, with

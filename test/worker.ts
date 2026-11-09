@@ -12,6 +12,13 @@ import { section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
 import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
 import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } from "../src/coding/scheduler-do";
+import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO, REPO_DIR } from "../src/coding/thread-do";
+import type { CodingToolsDeps } from "../src/coding/tools-port";
+import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
+import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
+import type { Provider } from "@earendil-works/pi-ai";
+import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
+import { fakeGit } from "./fake-git";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -291,7 +298,7 @@ export class Pim extends RealPim {
 	}
 }
 
-/** The coding schedulers' clock and notifier in tests (test/coding-scheduler-do.test.ts): real time and nobody told until a test sets them. */
+/** The coding schedulers' clock and notifier in tests (test/coding-scheduler-do.test.ts): real time and the threads' own Durable Objects until a test sets them. */
 export const codingSchedulers: { now: number | null; notifier: SchedulerNotifier | null } = { now: null, notifier: null };
 
 export class CodingSchedulerDO extends RealCodingSchedulerDO {
@@ -301,5 +308,78 @@ export class CodingSchedulerDO extends RealCodingSchedulerDO {
 
 	protected override notifier(): SchedulerNotifier {
 		return codingSchedulers.notifier ?? super.notifier();
+	}
+}
+
+/**
+ * Coding threads' scripted model (test/coding-thread-do.test.ts), apart from
+ * the space's: `coder` costs $1 per million tokens each way, and `pricey`
+ * $1 per token, so one call spends any small budget.
+ */
+export const codingFaux = fauxProvider({
+	provider: "coding-faux",
+	models: [
+		{ id: "coder", contextWindow: 200_000, maxTokens: 64_000, cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } },
+		{ id: "pricey", contextWindow: 200_000, maxTokens: 4_000, cost: { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 } },
+	],
+});
+
+/** Coding threads' workspaces in tests: in memory, with a fake git (test/fake-git.ts). */
+export const codingWorkspaces = new FakeWorkspaceProvider();
+codingWorkspaces.register("git", fakeGit);
+
+/** What coding threads emitted, in order. */
+export const codingEvents: CodingThreadEvent[] = [];
+
+/** What tests offer a coding thread's model until the real tools land: writing a file, and running a command (optionally as the tests). */
+function testCodingTools({ workspace, journal, onTestRun }: CodingToolsDeps): ToolRegistration[] {
+	return [
+		defineTool({
+			name: "write_file",
+			description: "Write a file in the repository.",
+			parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+			async execute({ path, content }) {
+				await (await workspace()).writeFile(`${REPO_DIR}/${path}`, new TextEncoder().encode(content));
+				return { content: [{ type: "text", text: `Wrote ${path}` }] };
+			},
+		}) as ToolRegistration,
+		defineTool({
+			name: "run",
+			description: "Run a command in the repository.",
+			parameters: Type.Object({ argv: Type.Array(Type.String()), test: Type.Optional(Type.Boolean()) }),
+			// It doesn't pass on pi's abort signal: stopping the thread kills the command through the workspace (test/coding-thread-do.test.ts).
+			async execute({ argv, test }, api) {
+				journal.begin(String(api.taskId), "run", { argv });
+				const started = Date.now();
+				let output = "";
+				let code: number | null = null;
+				for await (const event of (await workspace()).exec(argv, { cwd: REPO_DIR, timeoutMs: 60_000 })) {
+					if (event.type === "exit") code = event.code;
+					else output += event.data;
+				}
+				journal.end(String(api.taskId), { status: code === 0 ? "ok" : "error", result: { code, output } });
+				if (test) await onTestRun?.({ command: argv.join(" "), exitCode: code, passed: code === 0 ? 1 : 0, failed: code === 0 ? 0 : 1, durationMs: Date.now() - started, summary: output });
+				return { content: [{ type: "text", text: `exit ${code}\n${output}` }] };
+			},
+		}) as ToolRegistration,
+	];
+}
+
+export class CodingThreadDO extends RealCodingThreadDO {
+	protected override workspaceProviders(): WorkspaceProviderRegistry {
+		return workspaceRegistry([codingWorkspaces]);
+	}
+
+	/** The scripted model besides the space's real providers. */
+	protected override async modelProvider(space: string, providerId: string): Promise<Provider> {
+		return providerId === "coding-faux" ? codingFaux.provider : super.modelProvider(space, providerId);
+	}
+
+	protected override eventSink(): CodingEventSink {
+		return { emit: (event) => void codingEvents.push(event) };
+	}
+
+	protected override codingTools(deps: CodingToolsDeps): ToolRegistration[] {
+		return testCodingTools(deps);
 	}
 }

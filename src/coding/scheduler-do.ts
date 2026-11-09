@@ -56,9 +56,9 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		return Date.now();
 	}
 
-	/** Who hears of what happens to threads: nobody yet, until coding threads have Durable Objects of their own. */
+	/** Who hears of what happens to threads: each thread's own Durable Object (./thread-do.ts). */
 	protected notifier(): SchedulerNotifier {
-		return noopNotifier;
+		return threadNotifier(this.env);
 	}
 
 	/** Gives the thread a slot or a place in the queue (`CodingScheduler.request`). */
@@ -237,8 +237,8 @@ export const MAX_NOTICE_ATTEMPTS = 20;
  * Who hears of what happens to a space's coding threads. Each method gets
  * the notice's key, the same every time that notice is delivered, and
  * throws when the notice wasn't taken, to have it delivered again later.
- * Coding threads' Durable Objects will implement it, each for its own
- * thread.
+ * Coding threads' Durable Objects implement it, each for its own thread
+ * (`threadNotifier`).
  */
 export interface SchedulerNotifier {
 	/** The thread was admitted from the queue and holds a slot: it may start its workspace. */
@@ -251,6 +251,15 @@ export interface SchedulerNotifier {
 
 /** Tells nobody: every notice counts as delivered. */
 export const noopNotifier: SchedulerNotifier = { admitted() {}, expired() {}, released() {} };
+
+/** Tells each thread's Durable Object, which ignores a notice it already took by its key. A thread that can't be reached throws, so the notice is delivered again later. */
+export function threadNotifier(env: Env): SchedulerNotifier {
+	return {
+		admitted: (threadId, key) => env.CodingThread.getByName(threadId).admitted(key),
+		expired: (entry, key) => env.CodingThread.getByName(entry.threadId).expired(entry, key),
+		released: (released, key) => env.CodingThread.getByName(released.threadId).released(released, key),
+	};
+}
 
 /** A notice as delivered. */
 export type SchedulerNotice = { readonly key: string; readonly threadId: string } & (

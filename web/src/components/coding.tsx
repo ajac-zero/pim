@@ -33,6 +33,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
   ACTIVE_STATES,
+  type ApiKeyHarness,
   type CodingApi,
   type CodingHarness,
   type CodingPushRequested,
@@ -52,6 +53,7 @@ import {
   EMPTY_LIVE,
   HARNESS_NAMES,
   type HarnessSignIn,
+  isApiKeyHarness,
   MAX_TASK,
   mergeMessages,
   parseDiff,
@@ -74,7 +76,10 @@ import {
 import { ApiError, pim, SignInRequired } from "~/lib/pim-api";
 import { approvalsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
-import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
+import {
+  HARNESS_API_KEYS,
+  HARNESS_DISCLOSURES,
+} from "../../../src/coding/vault/harnesses";
 
 /*
  * Coding threads (docs/coding-api.md): the space's list with a form to start
@@ -413,7 +418,7 @@ export function StartThreadForm() {
         value={form.harness ?? "pi"}
         onChange={(harness) => setForm((current) => ({ ...current, harness }))}
       />
-      {(form.harness === "claude-code" || form.harness === "codex") && (
+      {form.harness && form.harness !== "pi" && (
         <HarnessConnectPanel key={form.harness} harness={form.harness} />
       )}
       {refusal && (
@@ -430,7 +435,7 @@ export function StartThreadForm() {
   );
 }
 
-/** Which coding agent runs the thread: Pi, on the space's own models, or Claude Code or Codex, with the person's subscription. */
+/** Which coding agent runs the thread: Pi, on the space's own models, or a vendor's CLI with the person's subscription or API key. */
 function HarnessChooser({
   value,
   onChange,
@@ -448,7 +453,7 @@ function HarnessChooser({
       <div
         role="radiogroup"
         aria-labelledby={labelId}
-        className="inline-flex self-start rounded-full bg-muted p-1"
+        className="inline-flex max-w-full flex-wrap self-start rounded-[1.25rem] bg-muted p-1"
       >
         {START_HARNESSES.map((harness) => (
           <button
@@ -481,6 +486,209 @@ function HarnessChooser({
 /** How often a sign-in that finishes by itself (Codex's device code) is asked where it is. */
 export const SIGN_IN_POLL_MS = 2000;
 
+/** Connecting a harness with the person's own account: their subscription, or an API key of theirs. */
+export function HarnessConnectPanel({
+  harness,
+}: {
+  harness: ConnectableHarness;
+}) {
+  return isApiKeyHarness(harness) ? (
+    <ApiKeyConnectPanel harness={harness} />
+  ) : (
+    <SubscriptionConnectPanel harness={harness} />
+  );
+}
+
+/** The panel's heading: the harness's mark and name, and whether it is connected once that is known. */
+function ConnectPanelHeading({
+  harness,
+  titleId,
+  connected,
+}: {
+  harness: ConnectableHarness;
+  titleId: string;
+  connected: boolean | undefined;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <HarnessIcon harness={harness} />
+      <h3 id={titleId} className="min-w-0 flex-1 text-[15px]">
+        {t("codingConnectTitle", { harness: HARNESS_NAMES[harness] })}
+      </h3>
+      {connected !== undefined && (
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[13px]",
+          )}
+        >
+          <span
+            aria-hidden
+            className={cn(
+              "size-1.5 rounded-full",
+              connected ? "bg-success" : "bg-muted-foreground/60",
+            )}
+          />
+          {connected ? t("codingConnected") : t("codingNotConnected")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Where a person makes each API-key harness's key, and what the field for it is called. */
+const API_KEY_TEXT: Record<
+  ApiKeyHarness,
+  { where: TranslationKey; label: TranslationKey; site: string }
+> = {
+  "mistral-vibe": {
+    where: "codingApiKeyWhereMistral",
+    label: "codingApiKeyLabel",
+    site: "console.mistral.ai",
+  },
+  amp: {
+    where: "codingApiKeyWhereAmp",
+    label: "codingAccessTokenLabel",
+    site: "ampcode.com/settings",
+  },
+};
+
+/**
+ * Connecting a harness with an API key of the person's: what they accept by
+ * connecting, where to make a key, and a masked field to save it in. Pim
+ * never sends the key back, so once saved the panel only says it is
+ * connected, and offers to disconnect, which deletes it.
+ */
+function ApiKeyConnectPanel({ harness }: { harness: ApiKeyHarness }) {
+  const { t } = useI18n();
+  const api = useCodingApi();
+  const queryClient = useQueryClient();
+  const titleId = useId();
+  const keyId = useId();
+  const name = HARNESS_NAMES[harness];
+  const disclosure = HARNESS_DISCLOSURES[harness];
+  const text = API_KEY_TEXT[harness];
+  const statusKey = ["coding", "vault", harness];
+  const status = useQuery({
+    queryKey: statusKey,
+    queryFn: () => api.vault.status(harness),
+  });
+  const [apiKey, setApiKey] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.vault.saveApiKey(harness, apiKey.trim()),
+    onSuccess: (next) => {
+      // The key leaves the page as soon as it is saved.
+      setApiKey("");
+      // The answer is the vault's own status: the panel says connected at once.
+      queryClient.setQueryData(statusKey, next);
+      // Threads that waited for the key go on.
+      queryClient.invalidateQueries({ queryKey: ["coding", "thread"] });
+      queryClient.invalidateQueries({ queryKey: ["coding", "threads"] });
+    },
+  });
+  const disconnect = useMutation({
+    mutationFn: () => api.vault.disconnect(harness),
+    onSuccess: (next) => {
+      save.reset();
+      queryClient.setQueryData(statusKey, next);
+    },
+  });
+  const isConnected = status.data?.connected === true;
+  const failed = save.error ?? disconnect.error;
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="flex flex-col gap-3 rounded-2xl border px-4 py-4"
+    >
+      <ConnectPanelHeading
+        harness={harness}
+        titleId={titleId}
+        connected={status.data?.connected}
+      />
+      {isConnected ? (
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="min-w-0 flex-1 text-muted-foreground text-sm">
+            {t("codingApiKeyConnectedNote", { harness: name })}
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={disconnect.isPending}
+            onClick={() => disconnect.mutate()}
+          >
+            {t("codingDisconnect")}
+          </Button>
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-col gap-2 text-muted-foreground text-sm">
+            <p className="text-foreground">{disclosure.title}</p>
+            {disclosure.paragraphs.map((paragraph) => (
+              <p key={paragraph}>{paragraph}</p>
+            ))}
+          </div>
+          <form
+            className="flex flex-col gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (apiKey.trim()) save.mutate();
+            }}
+          >
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor={keyId}
+                className="text-[13px] text-muted-foreground"
+              >
+                {t(text.label)}
+              </label>
+              <Input
+                id={keyId}
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={apiKey}
+                onChange={(event) => setApiKey(event.target.value)}
+              />
+              <p className="text-[13px] text-muted-foreground">
+                {t(text.where)}{" "}
+                <a
+                  href={HARNESS_API_KEYS[harness].url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={cn(
+                    "inline-flex items-center gap-1 text-link underline-offset-2 hover:underline",
+                    LINK_RING,
+                  )}
+                >
+                  {text.site}
+                  <ExternalLink className="size-3" />
+                </a>
+              </p>
+            </div>
+            <div>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={save.isPending || !apiKey.trim()}
+              >
+                {save.isPending
+                  ? t("codingApiKeySaving")
+                  : t("codingApiKeySave")}
+              </Button>
+            </div>
+          </form>
+        </>
+      )}
+      {failed && (
+        <p role="alert" className="text-destructive text-sm">
+          {problemText(failed)}
+        </p>
+      )}
+    </section>
+  );
+}
+
 /**
  * Connecting a harness with the person's own subscription: what they accept
  * by connecting, whether it is connected, and its CLI's own sign-in, relayed:
@@ -488,10 +696,10 @@ export const SIGN_IN_POLL_MS = 2000;
  * Code), or the code to enter on that page while the sign-in is polled until
  * the CLI finishes (Codex).
  */
-export function HarnessConnectPanel({
+function SubscriptionConnectPanel({
   harness,
 }: {
-  harness: ConnectableHarness;
+  harness: Exclude<ConnectableHarness, ApiKeyHarness>;
 }) {
   const { t } = useI18n();
   const api = useCodingApi();
@@ -567,28 +775,11 @@ export function HarnessConnectPanel({
       aria-labelledby={titleId}
       className="flex flex-col gap-3 rounded-2xl border px-4 py-4"
     >
-      <div className="flex flex-wrap items-center gap-2">
-        <HarnessIcon harness={harness} />
-        <h3 id={titleId} className="min-w-0 flex-1 text-[15px]">
-          {t("codingConnectTitle", { harness: name })}
-        </h3>
-        {status.data && (
-          <span
-            className={cn(
-              "inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[13px]",
-            )}
-          >
-            <span
-              aria-hidden
-              className={cn(
-                "size-1.5 rounded-full",
-                isConnected ? "bg-success" : "bg-muted-foreground/60",
-              )}
-            />
-            {isConnected ? t("codingConnected") : t("codingNotConnected")}
-          </span>
-        )}
-      </div>
+      <ConnectPanelHeading
+        harness={harness}
+        titleId={titleId}
+        connected={status.data?.connected}
+      />
       {isConnected ? (
         <div className="flex flex-wrap items-center gap-3">
           <p className="min-w-0 flex-1 text-muted-foreground text-sm">
@@ -989,10 +1180,9 @@ function StateNotice({ thread }: { thread: CodingThreadView }) {
           {thread.stateDetail}
         </p>
       )}
-      {thread.stateReason === "login_required" &&
-        (thread.harness === "claude-code" || thread.harness === "codex") && (
-          <HarnessConnectPanel harness={thread.harness} />
-        )}
+      {thread.stateReason === "login_required" && thread.harness !== "pi" && (
+        <HarnessConnectPanel harness={thread.harness} />
+      )}
     </section>
   );
 }

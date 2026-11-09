@@ -194,6 +194,12 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
       cancelSignIn: vi.fn<CodingApi["vault"]["cancelSignIn"]>(async () =>
         signIn("none"),
       ),
+      saveApiKey: vi.fn<CodingApi["vault"]["saveApiKey"]>(async (harness) => ({
+        harness,
+        connected: true,
+        updatedAt: 1,
+        byteLength: null,
+      })),
     },
   } satisfies CodingApi;
   return { api, connections };
@@ -1106,5 +1112,161 @@ describe("a coding subthread in the chat list", () => {
     expect(links.map((link) => link.getAttribute("href"))).toEqual([
       "/coding/a",
     ]);
+  });
+});
+
+describe("connecting with an API key", () => {
+  const VIBE_KEY = "mistral-SECRET-0123456789abcdef";
+  const AMP_KEY = "sgamp_user_SECRET_0123456789";
+  const keyApi = (
+    harness: "mistral-vibe" | "amp",
+    thread?: CodingThreadView,
+  ) => {
+    const { api } = fakeApi(thread);
+    vi.mocked(api.vault.status).mockResolvedValue({
+      ...notConnected(),
+      harness,
+    });
+    return api;
+  };
+
+  it("offers Mistral Vibe in the start form, saves its key from a masked field, and says it's connected at once, never showing the key again", async () => {
+    const api = keyApi("mistral-vibe");
+    renderWith(api, CodingPage, "/coding");
+    fireEvent.click(await screen.findByRole("radio", { name: "Mistral Vibe" }));
+    const region = await screen.findByRole("region", {
+      name: "Connect Mistral Vibe",
+    });
+    const panel = within(region);
+    expect(await panel.findByText("Not connected")).toBeTruthy();
+    expect(
+      region.querySelector("svg[data-harness='mistral-vibe']"),
+    ).toBeTruthy();
+    const disclosure = HARNESS_DISCLOSURES["mistral-vibe"];
+    expect(panel.getByText(disclosure.title)).toBeTruthy();
+    for (const paragraph of disclosure.paragraphs) {
+      expect(panel.getByText(paragraph)).toBeTruthy();
+    }
+    // Where to make a key, opening apart from Pim.
+    const link = panel.getByRole("link", {
+      name: /console\.mistral\.ai/,
+    }) as HTMLAnchorElement;
+    expect(link.href).toBe("https://console.mistral.ai/api-keys");
+    expect(link.target).toBe("_blank");
+    expect(link.rel).toBe("noopener noreferrer");
+    // No subscription sign-in to start here.
+    expect(panel.queryByRole("button", { name: /^Connect/ })).toBeNull();
+
+    const field = panel.getByLabelText("API key") as HTMLInputElement;
+    expect(field.type).toBe("password");
+    const save = panel.getByRole("button", {
+      name: "Save",
+    }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.change(field, { target: { value: `  ${VIBE_KEY}  ` } });
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(api.vault.saveApiKey).toHaveBeenCalledWith(
+        "mistral-vibe",
+        VIBE_KEY,
+      ),
+    );
+    // Connected straight from the answer, without the page loading again or the status being asked.
+    expect(await panel.findByText("Connected")).toBeTruthy();
+    expect(
+      panel.getByText(
+        "Coding threads that use Mistral Vibe run with your key. Pim won't show it again.",
+      ),
+    ).toBeTruthy();
+    expect(panel.queryByLabelText("API key")).toBeNull();
+    expect(document.body.innerHTML).not.toContain("SECRET");
+
+    // A thread can be started on it.
+    fireEvent.change(screen.getByRole("textbox", { name: /Repository/ }), {
+      target: { value: "https://github.com/acme/widgets" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Task/ }), {
+      target: { value: "Fix it" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start.mock.calls[0]?.[0]).toMatchObject({
+      harness: "mistral-vibe",
+    });
+  });
+
+  it("asks an Amp thread waiting for its token to connect, goes on with it once saved, and disconnects", async () => {
+    const api = keyApi(
+      "amp",
+      view({
+        harness: "amp",
+        state: "waiting_input",
+        stateReason: "login_required",
+      }),
+    );
+    threadPage(api);
+    expect(
+      await screen.findByText("Amp needs you to connect your account."),
+    ).toBeTruthy();
+    const panel = within(
+      await screen.findByRole("region", { name: "Connect Amp" }),
+    );
+    expect(await panel.findByText("Not connected")).toBeTruthy();
+    expect(
+      (panel.getByRole("link", { name: /ampcode\.com/ }) as HTMLAnchorElement)
+        .href,
+    ).toBe("https://ampcode.com/settings");
+    const field = panel.getByLabelText("Access token") as HTMLInputElement;
+    expect(field.type).toBe("password");
+    const threadCalls = vi.mocked(api.thread).mock.calls.length;
+    fireEvent.change(field, { target: { value: AMP_KEY } });
+    fireEvent.click(panel.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(api.vault.saveApiKey).toHaveBeenCalledWith("amp", AMP_KEY),
+    );
+    expect(await panel.findByText("Connected")).toBeTruthy();
+    // The thread, which goes on now, is asked for again.
+    await waitFor(() =>
+      expect(vi.mocked(api.thread).mock.calls.length).toBeGreaterThan(
+        threadCalls,
+      ),
+    );
+    expect(document.body.innerHTML).not.toContain("SECRET");
+
+    vi.mocked(api.vault.disconnect).mockResolvedValue({
+      ...notConnected(),
+      harness: "amp",
+    });
+    fireEvent.click(panel.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() =>
+      expect(api.vault.disconnect).toHaveBeenCalledWith("amp"),
+    );
+    expect(await panel.findByText("Not connected")).toBeTruthy();
+    expect(
+      (panel.getByLabelText("Access token") as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("says why a key was refused, keeping the field to fix it", async () => {
+    const api = keyApi("amp");
+    vi.mocked(api.vault.saveApiKey).mockRejectedValue(
+      new ApiError(400, "This key should start with sgamp_", null),
+    );
+    renderWith(api, CodingPage, "/coding");
+    fireEvent.click(await screen.findByRole("radio", { name: "Amp" }));
+    const panel = within(
+      await screen.findByRole("region", { name: "Connect Amp" }),
+    );
+    fireEvent.change(await panel.findByLabelText("Access token"), {
+      target: { value: VIBE_KEY },
+    });
+    fireEvent.click(panel.getByRole("button", { name: "Save" }));
+    expect((await panel.findByRole("alert")).textContent).toBe(
+      "This key should start with sgamp_",
+    );
+    expect(panel.getByText("Not connected")).toBeTruthy();
+    expect(panel.getByLabelText("Access token")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("SECRET");
   });
 });

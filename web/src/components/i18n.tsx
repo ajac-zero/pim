@@ -1707,7 +1707,7 @@ const translations = {
       "The run was interrupted before it finished; nothing was reported as done.",
     codingReasonTimeout: "It ran past its time limit.",
     codingHarnessHint:
-      "Pi uses this space's models. Claude Code and Codex use your own Claude or ChatGPT subscription.",
+      "Pi uses this space's models. Claude Code and Codex use your own Claude or ChatGPT subscription; Mistral Vibe and Amp use an API key of yours.",
     codingConnectTitle: "Connect {harness}",
     codingConnected: "Connected",
     codingNotConnected: "Not connected",
@@ -1723,6 +1723,14 @@ const translations = {
     codingConnectCode: "Code",
     codingConnectSend: "Connect",
     codingConnecting: "Connecting…",
+    codingApiKeyLabel: "API key",
+    codingAccessTokenLabel: "Access token",
+    codingApiKeyWhereMistral: "Create an API key under API Keys at",
+    codingApiKeyWhereAmp: "Create an access token in your Amp settings at",
+    codingApiKeySave: "Save",
+    codingApiKeySaving: "Saving…",
+    codingApiKeyConnectedNote:
+      "Coding threads that use {harness} run with your key. Pim won't show it again.",
     codingStop: "Stop",
     codingContinue: "Continue",
     codingNewBudget: "New budget (USD)",
@@ -3500,7 +3508,7 @@ const translations = {
       "La ejecución se interrumpió antes de terminar; no se dio nada por hecho.",
     codingReasonTimeout: "Superó su tiempo límite.",
     codingHarnessHint:
-      "Pi usa los modelos de este espacio. Claude Code y Codex usan tu propia suscripción de Claude o ChatGPT.",
+      "Pi usa los modelos de este espacio. Claude Code y Codex usan tu propia suscripción de Claude o ChatGPT; Mistral Vibe y Amp usan una clave de API tuya.",
     codingConnectTitle: "Conectar {harness}",
     codingConnected: "Conectado",
     codingNotConnected: "No conectado",
@@ -3516,6 +3524,15 @@ const translations = {
     codingConnectCode: "Código",
     codingConnectSend: "Conectar",
     codingConnecting: "Conectando…",
+    codingApiKeyLabel: "Clave de API",
+    codingAccessTokenLabel: "Token de acceso",
+    codingApiKeyWhereMistral: "Crea una clave de API en API Keys de",
+    codingApiKeyWhereAmp:
+      "Crea un token de acceso en tu configuración de Amp en",
+    codingApiKeySave: "Guardar",
+    codingApiKeySaving: "Guardando…",
+    codingApiKeyConnectedNote:
+      "Los hilos de código que usan {harness} se ejecutan con tu clave. Pim no volverá a mostrarla.",
     codingStop: "Detener",
     codingContinue: "Continuar",
     codingNewBudget: "Nuevo presupuesto (USD)",

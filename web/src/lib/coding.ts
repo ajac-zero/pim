@@ -25,12 +25,19 @@ export type CodingThreadState =
   | "failed"
   | "archived";
 
-export type CodingHarness = "pi" | "claude-code" | "codex";
+export type CodingHarness =
+  | "pi"
+  | "claude-code"
+  | "codex"
+  | "mistral-vibe"
+  | "amp";
 
 export const HARNESS_NAMES: Record<CodingHarness, string> = {
   pi: "Pi",
   "claude-code": "Claude Code",
   codex: "Codex",
+  "mistral-vibe": "Mistral Vibe",
+  amp: "Amp",
 };
 
 export type CodingCreator =
@@ -169,14 +176,23 @@ export type CodingStreamMessage =
 
 /** Which harness logins the person has, as `GET /api/coding/vault/:harness` says it; never what one holds. */
 export type HarnessLoginStatus = {
-  harness: "claude-code" | "codex";
+  harness: ConnectableHarness;
   connected: boolean;
   updatedAt: number | null;
   byteLength: number | null;
 };
 
-/** The harnesses a person connects with their own subscription. */
-export type ConnectableHarness = "claude-code" | "codex";
+/** The harnesses a person connects with their own account: every one but Pi. */
+export type ConnectableHarness = Exclude<CodingHarness, "pi">;
+
+/** The harnesses a person connects with an API key they give Pim, rather than a subscription sign-in. */
+export type ApiKeyHarness = "mistral-vibe" | "amp";
+
+export function isApiKeyHarness(
+  harness: CodingHarness,
+): harness is ApiKeyHarness {
+  return harness === "mistral-vibe" || harness === "amp";
+}
 
 /**
  * A sign-in to a harness with the person's subscription, through the CLI's
@@ -210,6 +226,11 @@ export type CodingVaultApi = {
     code: string,
   ) => Promise<HarnessSignIn>;
   cancelSignIn: (harness: ConnectableHarness) => Promise<HarnessSignIn>;
+  /** Stores the harness's API key; the answer says only that it is connected. */
+  saveApiKey: (
+    harness: ApiKeyHarness,
+    apiKey: string,
+  ) => Promise<HarnessLoginStatus>;
 };
 
 export type { MessagePart, TranscriptMessage };
@@ -301,6 +322,11 @@ export const codingApi: CodingApi = {
       call(vaultPath(harness, "/login/code"), post({ code })),
     cancelSignIn: (harness) =>
       call(vaultPath(harness, "/login"), { method: "DELETE" }),
+    saveApiKey: (harness, apiKey) =>
+      call(vaultPath(harness, "/api-key"), {
+        method: "PUT",
+        body: JSON.stringify({ apiKey }),
+      }),
   },
 };
 
@@ -469,6 +495,8 @@ export const START_HARNESSES: readonly CodingHarness[] = [
   "pi",
   "claude-code",
   "codex",
+  "mistral-vibe",
+  "amp",
 ];
 
 export type StartProblems = Partial<Record<keyof StartForm, TranslationKey>>;

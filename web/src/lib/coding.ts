@@ -340,6 +340,12 @@ export function codingByChat(
   return byChat;
 }
 
+/** The row's title: the first line of the task, or the repository when there is none. */
+export function subthreadTitle(thread: CodingThreadSummary): string {
+  const line = thread.task.trim().split("\n")[0] ?? "";
+  return line || repoName(thread.repo);
+}
+
 /** What a queued thread waits for, in words. */
 export function queueReasonKey(reason: string): TranslationKey {
   switch (reason) {

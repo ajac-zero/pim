@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { chatAge, flatChats, isInactive, nestChats } from "~/lib/chat-list";
+import {
+  chatAge,
+  flatChats,
+  isInactive,
+  nestChats,
+  threadsMatching,
+} from "~/lib/chat-list";
+import type { CodingThreadSummary } from "~/lib/coding";
 import type { Session } from "~/lib/pim-api";
 
 const chat = (
@@ -67,6 +74,47 @@ describe("chatAge", () => {
     expect(chatAge(at(15, 0), now)).toBe("lastWeek");
     expect(chatAge(at(14, 23), now)).toBe("last14Days");
     expect(chatAge(null, now)).toBe("today");
+  });
+});
+
+describe("coding threads in the list", () => {
+  const thread = (id: string, task: string, updatedAt: number) =>
+    ({
+      id,
+      task,
+      updatedAt,
+      repo: "https://github.com/acme/widgets",
+    }) as CodingThreadSummary;
+  const coding = new Map([
+    ["older unread", [thread("t1", "Fix the date test\nmore", 95)]],
+    ["newer unread", [thread("t2", "Refactor", 10)]],
+  ]);
+
+  it("match a search for their title, showing only them under a chat that doesn't match", () => {
+    const found = flatChats(sessions, "date test", "New chat", coding);
+    expect(ids(found)).toEqual(["older unread"]);
+    expect(
+      threadsMatching(found[0] as Session, coding, "date test", "New chat").map(
+        (t) => t.id,
+      ),
+    ).toEqual(["t1"]);
+    // A chat that matches itself keeps all its threads.
+    expect(
+      threadsMatching(sessions[3] as Session, coding, "newer", "New chat").map(
+        (t) => t.id,
+      ),
+    ).toEqual(["t2"]);
+    expect(
+      threadsMatching(sessions[3] as Session, coding, "zzz", "New chat"),
+    ).toEqual([]);
+  });
+
+  it("move their chat to the date of their latest change, and never back", () => {
+    const list = flatChats(sessions, "", "New chat", coding);
+    expect(ids(list)[0]).toBe("older unread");
+    expect(list[0]?.updatedAt).toBe(95);
+    // An older thread leaves the chat's own date.
+    expect(list.find((s) => s.id === "newer unread")?.updatedAt).toBe(50);
   });
 });
 

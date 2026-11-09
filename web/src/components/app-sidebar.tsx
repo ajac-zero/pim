@@ -71,8 +71,14 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { flatChats, groupByAge, isInactive, nestChats } from "~/lib/chat-list";
-import { subthreadStatus } from "~/lib/coding";
+import {
+  flatChats,
+  groupByAge,
+  isInactive,
+  nestChats,
+  threadsMatching,
+} from "~/lib/chat-list";
+import { type CodingThreadSummary, subthreadStatus } from "~/lib/coding";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -368,9 +374,21 @@ function ChatsPanel({
   const params = useParams({ strict: false }) as { sessionId?: string };
   const activeId = params.sessionId;
   const newChat = useNewChat(onNavigate);
+  const codingByChat = useCodingByChat();
   const current = useMemo(
-    () => flatChats(sessions ?? [], search, t("newChat")),
-    [sessions, search, t],
+    () => flatChats(sessions ?? [], search, t("newChat"), codingByChat),
+    [sessions, codingByChat, search, t],
+  );
+  // While searching, a chat that matches only through a thread shows just that thread.
+  const coding = useMemo(
+    () =>
+      new Map(
+        current.map((session) => [
+          session.id,
+          threadsMatching(session, codingByChat, search, t("newChat")),
+        ]),
+      ),
+    [current, codingByChat, search, t],
   );
   const archived = current.filter((session) => session.archived);
   const inactive = current.filter((session) => isInactive(session));
@@ -427,6 +445,7 @@ function ChatsPanel({
             all={current}
             activeId={activeId}
             awaitingApproval={awaitingApproval}
+            coding={coding}
             onNavigate={onNavigate}
           />
         )}
@@ -438,6 +457,7 @@ function ChatsPanel({
             activeId={activeId}
             searching={!!search}
             awaitingApproval={awaitingApproval}
+            coding={coding}
             onNavigate={onNavigate}
           />
         )}
@@ -449,6 +469,7 @@ function ChatsPanel({
             activeId={activeId}
             searching={!!search}
             awaitingApproval={awaitingApproval}
+            coding={coding}
             onNavigate={onNavigate}
           />
         )}
@@ -608,18 +629,22 @@ function RailDialogLink({
   );
 }
 
+type CodingMap = ReadonlyMap<string, readonly CodingThreadSummary[]>;
+
 /** Chats under dividers for today, yesterday, last week and the last 14 days. */
 function DatedChats({
   list,
   all,
   activeId,
   awaitingApproval,
+  coding,
   onNavigate,
 }: {
   list: Session[];
   all: Session[];
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
+  coding: CodingMap;
   onNavigate?: () => void;
 }) {
   const { t } = useI18n();
@@ -637,6 +662,7 @@ function DatedChats({
             tree={children}
             activeId={activeId}
             awaitingApproval={awaitingApproval}
+            coding={coding}
             onNavigate={onNavigate}
           />
         ))}
@@ -657,6 +683,7 @@ function ChatTree({
   tree,
   activeId,
   awaitingApproval,
+  coding: codingByChat,
   onNavigate,
   depth = 0,
 }: {
@@ -664,13 +691,14 @@ function ChatTree({
   tree: ReadonlyMap<string, Session[]>;
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
+  coding: CodingMap;
   onNavigate?: () => void;
   depth?: number;
 }) {
   const [open, setOpen] = useState(depth === 0);
   const below = (chat: Session): Session[] =>
     (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
-  const coding = useCodingByChat().get(session.id) ?? [];
+  const coding = codingByChat.get(session.id) ?? [];
   const under = below(session);
   const expanded = open || under.some((chat) => chat.id === activeId);
   return (
@@ -717,6 +745,7 @@ function ChatTree({
               tree={tree}
               activeId={activeId}
               awaitingApproval={awaitingApproval}
+              coding={codingByChat}
               onNavigate={onNavigate}
               depth={depth + 1}
             />
@@ -738,6 +767,7 @@ function FoldedChats({
   activeId,
   searching,
   awaitingApproval,
+  coding,
   onNavigate,
 }: {
   label: string;
@@ -746,6 +776,7 @@ function FoldedChats({
   activeId?: string;
   searching: boolean;
   awaitingApproval: ReadonlySet<string>;
+  coding: CodingMap;
   onNavigate?: () => void;
 }) {
   const holdsActive = list.some((session) => session.id === activeId);
@@ -783,6 +814,7 @@ function FoldedChats({
               tree={nested.children}
               activeId={activeId}
               awaitingApproval={awaitingApproval}
+              coding={coding}
               onNavigate={onNavigate}
             />
           ))}

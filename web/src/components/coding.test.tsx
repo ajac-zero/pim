@@ -339,6 +339,29 @@ const snapshot = (entries: EntryRecord[]): CodingStreamMessage =>
   }) as unknown as CodingStreamMessage;
 
 describe("a thread's page", () => {
+  it("leads back to the chat an agent started it from", async () => {
+    const { api } = fakeApi(
+      view({ createdBy: { type: "agent", agent: "coder", chat: "trip-chat" } }),
+    );
+    const router = threadPage(api);
+    fireEvent.click(
+      await screen.findByRole("link", { name: "Back to the chat" }),
+    );
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/chat/trip-chat"),
+    );
+  });
+
+  it("leads back to every thread when you started it", async () => {
+    const { api } = fakeApi();
+    threadPage(api);
+    expect(
+      (
+        await screen.findByRole("link", { name: "All coding threads" })
+      ).getAttribute("href"),
+    ).toBe("/coding");
+  });
+
   it("shows a queued thread's place and why it waits, and cancels it", async () => {
     const { api } = fakeApi(
       view({

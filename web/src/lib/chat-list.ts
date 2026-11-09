@@ -1,16 +1,58 @@
+import { type CodingThreadSummary, subthreadTitle } from "~/lib/coding";
 import type { Session } from "~/lib/pim-api";
 
-/** Chats matching a search, most recently active first; one never used goes last. */
+/** The coding threads started from each chat, as the chat list nests them. */
+type CodingByChat = ReadonlyMap<string, readonly CodingThreadSummary[]>;
+
+/**
+ * The coding threads to show under a chat while searching: all of them when
+ * the chat itself matches, otherwise only those whose title does.
+ */
+export function threadsMatching(
+  session: Session,
+  coding: CodingByChat,
+  search: string,
+  untitled: string,
+) {
+  const threads = coding.get(session.id) ?? [];
+  const query = search.toLowerCase();
+  if ((session.title ?? untitled).toLowerCase().includes(query)) {
+    return threads;
+  }
+  return threads.filter((thread) =>
+    subthreadTitle(thread).toLowerCase().includes(query),
+  );
+}
+
+/**
+ * Chats matching a search, most recently active first; one never used goes
+ * last. A chat also matches through the titles of its coding threads, and is
+ * as active as its latest one, so work in a thread keeps its chat from
+ * sliding down the dates.
+ */
 export function flatChats(
   sessions: readonly Session[],
   search: string,
   untitled: string,
+  coding: CodingByChat = new Map(),
 ) {
-  const query = search.toLowerCase();
   return sessions
-    .filter((session) =>
-      (session.title ?? untitled).toLowerCase().includes(query),
+    .filter(
+      (session) =>
+        (session.title ?? untitled)
+          .toLowerCase()
+          .includes(search.toLowerCase()) ||
+        threadsMatching(session, coding, search, untitled).length > 0,
     )
+    .map((session) => {
+      const latest = Math.max(
+        session.updatedAt ?? 0,
+        ...(coding.get(session.id) ?? []).map((thread) => thread.updatedAt),
+      );
+      return latest > (session.updatedAt ?? 0)
+        ? { ...session, updatedAt: latest }
+        : session;
+    })
     .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
 }
 

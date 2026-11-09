@@ -11,9 +11,9 @@ import {
   codingByChat,
   codingThreadsQuery,
   HARNESS_NAMES,
-  repoName,
   type SubthreadStatus,
   subthreadStatus,
+  subthreadTitle,
 } from "~/lib/coding";
 import { cn } from "~/lib/utils";
 
@@ -43,12 +43,6 @@ export function useCodingByChat() {
         : false,
   });
   return useMemo(() => codingByChat(data ?? []), [data]);
-}
-
-/** The row's title: the first line of the task, or the repository when there is none. */
-export function subthreadTitle(thread: CodingThreadSummary): string {
-  const line = thread.task.trim().split("\n")[0] ?? "";
-  return line || repoName(thread.repo);
 }
 
 /**

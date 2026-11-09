@@ -413,16 +413,27 @@ export function StartThreadForm() {
 
 /* A thread's page. */
 
-function BackLink() {
+/** Back to the chat an agent started the thread from, or else to every thread. */
+function BackLink({ thread }: { thread?: CodingThreadView }) {
   const { t } = useI18n();
+  const className = cn(
+    "inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground",
+    LINK_RING,
+  );
+  if (thread?.createdBy.type === "agent") {
+    return (
+      <Link
+        to="/chat/$sessionId"
+        params={{ sessionId: thread.createdBy.chat }}
+        className={className}
+      >
+        <ArrowLeft className="size-4" />
+        {t("codingBackToChat")}
+      </Link>
+    );
+  }
   return (
-    <Link
-      to="/coding"
-      className={cn(
-        "inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground",
-        LINK_RING,
-      )}
-    >
+    <Link to="/coding" className={className}>
       <ArrowLeft className="size-4" />
       {t("codingAll")}
     </Link>
@@ -468,7 +479,7 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
       <div className="mx-auto w-full max-w-[768px] px-4 py-6 sm:px-6 md:py-10">
-        <BackLink />
+        <BackLink thread={thread} />
         <ThreadHeader thread={thread} />
         <StateNotice thread={thread} />
         <ThreadActions thread={thread} />

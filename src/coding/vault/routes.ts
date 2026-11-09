@@ -4,9 +4,9 @@ import { dispatch, readJson, type Route } from "../../http";
 import { cliHarness } from "../harness";
 import { validLoginCode } from "../harness/login";
 import { codingScheduler } from "../scheduler-do";
-import { CODING_VAULT_PATH, type HarnessLoginStatus, isHarness } from "./harnesses";
+import { apiKeyProblem, CODING_VAULT_PATH, type HarnessLoginStatus, isApiKeyHarness, isHarness } from "./harnesses";
 import type { VaultStatus } from "./store";
-import { codingVault } from "./vault";
+import { ApiKeyError, codingVault } from "./vault";
 
 /**
  * The coding vault's API, `/api/coding/vault`, for the signed-in person's
@@ -17,7 +17,9 @@ import { codingVault } from "./vault";
  * CLI's own sign-in inside the person's workspace, which `/:harness/login`
  * starts and relays (../harness/login.ts): the sign-in URL to the person,
  * and the code they paste back to the CLI, or with a device-code sign-in
- * the code they enter on the vendor's page.
+ * the code they enter on the vendor's page. A harness that signs in with an
+ * API key takes it on `PUT /:harness/api-key`, write-only: no route returns
+ * it, any part of it, or its length.
  */
 export function codingVaultApi(env: Env, account: Account, request: Request): ApiExtension {
 	return async (path) => {
@@ -27,8 +29,8 @@ export function codingVaultApi(env: Env, account: Account, request: Request): Ap
 	};
 }
 
-/** Only what the API may say of an entry. */
-const publicStatus = ({ harness, connected, updatedAt, byteLength }: VaultStatus): HarnessLoginStatus => ({ harness, connected, updatedAt, byteLength });
+/** Only what the API may say of an entry: not even an API key's length. */
+const publicStatus = ({ harness, connected, updatedAt, byteLength }: VaultStatus): HarnessLoginStatus => ({ harness, connected, updatedAt, byteLength: isApiKeyHarness(harness) ? null : byteLength });
 
 const route = (method: string, pattern: string, handler: Route[2]): Route => [
 	method,
@@ -85,6 +87,24 @@ function vaultRoutes(env: Env, userId: string): Route[] {
 			const known = loginOf(harness);
 			if (!known) return noLogin();
 			return codingScheduler(env, userId).harnessLoginCancel(known);
+		}),
+		route("PUT", "/:harness/api-key", async ({ harness }, request) => {
+			if (!isApiKeyHarness(harness)) return Response.json({ error: "That harness doesn't sign in with an API key", code: "not_found" }, { status: 404 });
+			// The key is a credential: it is stored sealed and never logged, echoed or kept anywhere else.
+			const body = (await readJson(request).catch(() => null)) as { apiKey?: unknown } | null;
+			const problem = apiKeyProblem(harness, body?.apiKey);
+			if (problem) return Response.json({ error: problem, code: "invalid" }, { status: 400 });
+			let status: VaultStatus;
+			try {
+				status = await vault.saveApiKey(userId, harness, body!.apiKey as string);
+			} catch (error) {
+				if (error instanceof ApiKeyError) return Response.json({ error: error.message, code: "invalid" }, { status: 400 });
+				throw error;
+			}
+			console.info(JSON.stringify({ event: "pim.coding.harness_connected", user: userId, harness, version: status.version }));
+			// Threads that waited for the key go on.
+			await codingScheduler(env, userId).harnessConnected(harness);
+			return publicStatus(status);
 		}),
 		route("DELETE", "/:harness", async ({ harness }) => {
 			const known = harnessOf(harness);

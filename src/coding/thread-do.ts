@@ -61,6 +61,7 @@ import {
 	type TestRun,
 } from "./thread-store";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
+import { isLoginHarness } from "./vault/harnesses";
 import { restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
@@ -208,9 +209,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return { url: `${origin}/api${GIT_BROKER_PATH}/${repo.owner}/${repo.name}.git`, token };
 	}
 
-	/** How a CLI harness signs in for the thread: the person's subscription, unless `authEnv` says otherwise (./harness/auth.ts). */
-	protected harnessAuth(thread: CodingThreadRow): HarnessAuth {
-		return authEnv(thread);
+	/** How a CLI harness signs in for the thread, as `authEnv` says (./harness/auth.ts): the person's subscription, or their API key from the coding vault. */
+	protected harnessAuth(thread: CodingThreadRow, harness: CliHarness): Promise<HarnessAuth> {
+		const vault = codingVault(this.env);
+		return authEnv(thread, harness, (id) => vault.loadApiKey(thread.space, id));
 	}
 
 	/** The person's login for the harness, put into the thread's workspace and written back from it, through the coding vault. */
@@ -222,8 +224,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (!ref) throw new Error("The coding thread has no workspace");
 			return { userId: thread.space, ref, workspace };
 		};
+		const id = harness.id;
 		return {
-			restore: () => restoreHarnessCredentials(vault, owns, target(), harness.id),
+			restore: () => {
+				// Only a harness whose login the vault keeps as files has one to put in.
+				if (!isLoginHarness(id)) throw new Error(`${harness.name} keeps no login files`);
+				return restoreHarnessCredentials(vault, owns, target(), id);
+			},
 			writeBack: (restored) => writeBackHarnessCredentials(vault, owns, restored, target()),
 		};
 	}
@@ -1193,7 +1200,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const session = this.store.harnessSession();
 		const sessionId = session?.sessionId ?? crypto.randomUUID();
 		const timeoutMs = thread.limits.wallClockMin * 60_000;
-		const runner = new HarnessRunner(this.#cliDeps(thread, cli, workspace, timeoutMs));
+		const runner = new HarnessRunner(this.#cliDeps(thread, cli, workspace, timeoutMs, await this.harnessAuth(thread, cli)));
 		const prepared = await runner.prepare(input.operationId, { sessionId, resume: session !== null });
 		if (prepared.status === "busy") {
 			this.store.update({ stateReason: "harness_busy", stateDetail: `Another of your coding threads is running ${cli.name}; this one starts when it ends` });
@@ -1202,7 +1209,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		if (prepared.status === "login_required") {
 			this.ctx.storage.transactionSync(() => {
-				this.store.update({ state: "waiting_input", stateReason: "login_required", stateDetail: `Connect ${cli.name} with your subscription, then continue the thread` });
+				const how = cli.apiKeyEnv ? "your API key" : "your subscription";
+				this.store.update({ state: "waiting_input", stateReason: "login_required", stateDetail: `Connect ${cli.name} with ${how}, then continue the thread` });
 				this.store.recordEvent("thread.waiting_input", { reason: "login_required", harness: cli.id, operationId: input.operationId });
 			});
 			await this.#report("waiting");
@@ -1246,14 +1254,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** What a CLI run needs from the thread: its workspace, the person's login and lock, and where its record and events go. */
-	#cliDeps(thread: CodingThreadRow, cli: CliHarness, workspace: Workspace, timeoutMs: number): RunnerDeps {
+	/** What a CLI run needs from the thread: its workspace, how it signs in, the person's login and lock, and where its record and events go. */
+	#cliDeps(thread: CodingThreadRow, cli: CliHarness, workspace: Workspace, timeoutMs: number, auth: HarnessAuth): RunnerDeps {
 		const scheduler = codingScheduler(this.env, thread.space);
 		const grace = this.harnessGraceMs();
 		return {
 			harness: cli,
 			workspace,
-			auth: this.harnessAuth(thread),
+			auth,
 			credentials: this.harnessCredentials(thread, cli, workspace),
 			// Held at most as long as a run can last, so a thread that is gone can't keep it.
 			lock: { acquire: () => scheduler.acquireHarness(cli.id, thread.threadId, timeoutMs + 4 * grace + 60_000), release: () => scheduler.releaseHarness(cli.id, thread.threadId) },
@@ -1283,7 +1291,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.saveHarnessRun(null);
 			return interrupted;
 		}
-		const result = await recoverRun(this.#cliDeps(thread, cli, workspace, thread.limits.wallClockMin * 60_000), record);
+		// Finishing a run off signs nothing in: only its record says what to undo.
+		const result = await recoverRun(this.#cliDeps(thread, cli, workspace, thread.limits.wallClockMin * 60_000, { mode: "signed_out" }), record);
 		console.warn(JSON.stringify({ event: "pim.coding.harness_interrupted", thread: thread.threadId, operation: record.operationId, lines: record.lines }));
 		return result;
 	}

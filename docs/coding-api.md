@@ -54,7 +54,7 @@ type CodingThreadSummary = {
   createdBy: CodingCreator;
   parent: string | null;    // the thread that started this one
   chat: string | null;      // the chat it was started from, which the chat list shows it under as a subthread
-  harness: "pi" | "claude-code" | "codex"; // the coding agent that runs it
+  harness: "pi" | "claude-code" | "codex" | "mistral-vibe" | "amp"; // the coding agent that runs it
   spentUsd: number;
   budgetUsd: number;
   createdAt: number;
@@ -84,7 +84,7 @@ type CodingThreadView = {
   inbox: number;            // inputs waiting for a turn
   checkpoint: { seq: number; sha: string; message: string; operationId: string | null; createdAt: number } | null;
   createdBy: CodingCreator;
-  harness: "pi" | "claude-code" | "codex";
+  harness: "pi" | "claude-code" | "codex" | "mistral-vibe" | "amp";
   parentThread: string | null;
   createdAt: number;
   updatedAt: number;
@@ -122,7 +122,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `thread.turn_ended`: `data: { type, threadId, space, operationId, outcome, reason?, checkpoint?, at }`, where `outcome` is `completed`, `error`, `cancelled` or `needs_approval`.
 - `app.budget_stop`: `data: { budgetUsd, spentUsd }`.
 - `thread.pushed`: `data: { repo, branch, before, after, outcome }`, where `outcome` is `created`, `updated` or `unchanged`.
-- `thread.waiting_input`: `data: { reason, harness, operationId }`: a `claude-code` or `codex` thread's input waits for the person to connect the harness (`reason: "login_required"`).
+- `thread.waiting_input`: `data: { reason, harness, operationId }`: a CLI harness thread's input waits for the person to connect the harness (`reason: "login_required"`): to sign in with their subscription, or to give their API key.
 - `harness.api_retry`: `data: { attempt, maxRetries, delayMs, error, status }`: the CLI is retrying a model request.
 - `harness.permission_denied`: `data: { tool, message }`: the CLI refused a tool call nothing allowed.
 - `harness.notice`: `data: { message }`: the CLI warned of something that didn't stop the turn (Codex's error items).
@@ -148,7 +148,7 @@ POST /api/coding/threads
 - `profile` is the thread's model. Without one, it is the space's default model, the one its chats use when an agent has none of its own (`GET /api/model`'s `model`), unless that is a ChatGPT plan model, which coding threads can't use: then it is the deployment's default.
 - `budgetUsd` is the most it spends on its model, $3 by default; at it, the thread stops, `failed` with `stateReason: "budget"`, until continued with a bigger one.
 - `parent` must be a thread of this space (`not_found`).
-- `harness` is the coding agent that runs it: `pi` by default, `claude-code`, Anthropic's Claude Code CLI ([coding-claude-code.md](coding-claude-code.md)), or `codex`, OpenAI's Codex CLI ([coding-codex.md](coding-codex.md)), each run in the thread's workspace with the person's own subscription. A `claude-code` thread's `profile` is `{ providerId: "claude-code", model: "default" }`, the CLI's own model, unless it is given one with that `providerId`, whose `model` the CLI is asked for (`--model`); a `codex` thread's likewise, with `providerId: "codex"` (`-m`).
+- `harness` is the coding agent that runs it: `pi` by default, `claude-code`, Anthropic's Claude Code CLI ([coding-claude-code.md](coding-claude-code.md)), or `codex`, OpenAI's Codex CLI ([coding-codex.md](coding-codex.md)), each run in the thread's workspace with the person's own subscription, or `mistral-vibe`, Mistral's Vibe CLI, or `amp`, Amp's CLI, each run with the person's own API key. Mistral Vibe and Amp are placeholders until their adapters land: a thread on one waits for the person's key like any other, then fails its first turn with "not implemented yet" without running anything. A `claude-code` thread's `profile` is `{ providerId: "claude-code", model: "default" }`, the CLI's own model, unless it is given one with that `providerId`, whose `model` the CLI is asked for (`--model`); a `codex` thread's likewise, with `providerId: "codex"` (`-m`).
 - `chat` is the chat the thread is started from, for the chat list to show it under that chat. A thread an agent starts records its own chat, so it needs none.
 
 ## Agents
@@ -159,11 +159,14 @@ Every agent can start and follow threads with the `coding_*` tools ([`src/extens
 
 Harnesses run the unmodified vendor CLIs, Claude Code (`claude-code`) and Codex (`codex`), inside the person's own workspace, signed in with their own subscription through the CLI's own login. Pim keeps each person's login per harness in their own space: the CLI's credential and config files only (the lists are `HARNESS_FILES` in [`src/coding/vault/harnesses.ts`](../src/coding/vault/harnesses.ts)), packed into one archive of at most 512 KiB and sealed with AES-256-GCM under a key derived from the Directory's own. Pim never opens the files. A login is put into a workspace before a harness runs only when that workspace is one of the same person's threads, and what the CLI changed, such as refreshed tokens, is kept afterwards unless a newer login or a disconnect came first. The disclosures a person accepts before connecting are `HARNESS_DISCLOSURES` in the same file.
 
+Mistral Vibe (`mistral-vibe`) and Amp (`amp`) sign in with an API key instead: a Mistral API key, or an Amp access token (which starts with `sgamp_`). The person saves it once with `PUT …/api-key`; Pim seals it with the same key and binding as a login, in the same table, and never returns it, any part of it, or its length. A run of the harness reads it from the vault and hands it to the CLI in the environment variable the harness declares (`apiKeyEnv`: `MISTRAL_API_KEY`, `AMP_API_KEY`), never on its command line, with no config files restored or written back and no lock taken (`authEnv` in [`src/coding/harness/auth.ts`](../src/coding/harness/auth.ts)). The runner replaces the key with `[redacted]` in every line the CLI prints before anything reads it, so it never reaches the transcript, the log, test runs or the thread's state. A thread on such a harness without a key waits with `login_required`, and goes on when the key is saved. A key is 16 to 512 characters of letters, digits and `._~+/=-`.
+
 | Method | Path | Answers |
 | --- | --- | --- |
 | GET | `/coding/vault` | `{ harnesses: [{ harness, connected, updatedAt, byteLength }] }`, one per harness |
-| GET | `/coding/vault/:harness` | `{ harness, connected, updatedAt, byteLength }`; an unknown harness is `404` |
-| DELETE | `/coding/vault/:harness` | The same, now disconnected: the login is deleted |
+| GET | `/coding/vault/:harness` | `{ harness, connected, updatedAt, byteLength }`; an unknown harness is `404`. `byteLength` is always `null` for an API key |
+| DELETE | `/coding/vault/:harness` | The same, now disconnected: the login or API key is deleted |
+| PUT | `/coding/vault/:harness/api-key` | `{ apiKey }`, for `mistral-vibe` or `amp`: stores the key, replacing any before it, and goes on with the person's threads that waited for it. Answers `{ harness, connected: true, updatedAt, byteLength: null }`; a key that doesn't look right is `400` with why, never quoting it, and another harness is `404` |
 | POST | `/coding/vault/:harness/login` | `LoginStatus`: starts the CLI's own sign-in in a short-lived workspace of the person's, ending one already under way, and answers once the CLI printed what the person needs: `state: "waiting_code"` with `url`, and for `codex` the `userCode` to enter there |
 | GET | `/coding/vault/:harness/login` | `LoginStatus` of the sign-in under way, `state: "none"` without one. A `codex` sign-in ends by itself, so the web app polls this until it is `connected` or `failed` |
 | POST | `/coding/vault/claude-code/login/code` | `{ code }`, the code the sign-in page shows. Pim hands it to the CLI on its standard input, waits for the CLI to save its login and keeps that in the vault: `state: "connected"`, or `failed` with `error`. `codex` takes no code here (`400`) |

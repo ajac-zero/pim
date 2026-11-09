@@ -82,8 +82,8 @@ export const coding = definePimExtension({
 						),
 					),
 					harness: Type.Optional(
-						Type.Union([Type.Literal("pi"), Type.Literal("claude-code"), Type.Literal("codex")], {
-							description: "The coding agent that runs it; pi by default. Only pi is available yet.",
+						Type.Union([Type.Literal("pi"), Type.Literal("claude-code"), Type.Literal("codex"), Type.Literal("mistral-vibe"), Type.Literal("amp")], {
+							description: "The coding agent that runs it; pi by default. The others run the vendor's own CLI signed in as the person, who connects it on the coding page first.",
 						}),
 					),
 					budget: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "The most it may spend on its model, in US dollars; 3 by default." })),

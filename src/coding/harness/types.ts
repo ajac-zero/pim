@@ -122,4 +122,11 @@ export interface CliHarness {
 	signalCommand(sessionId: string, signal: "INT" | "KILL"): string[];
 	/** The CLI's own sign-in with a subscription, where it has one Pim can relay. */
 	readonly login?: HarnessLoginFlow;
+	/**
+	 * With API-key sign-in, in place of `login`: the environment variable the
+	 * CLI reads its key from, such as `MISTRAL_API_KEY`. A run sets it to the
+	 * person's key from the vault (./auth.ts), and the runner takes the key
+	 * out of everything the CLI prints (./runner.ts).
+	 */
+	readonly apiKeyEnv?: string;
 }

@@ -1,11 +1,11 @@
 /**
- * Keeping connector events' subscriptions: an inert manager that makes the
+ * Keeping connector events' subscriptions: the manager that makes the
  * bindings the ingress adapter (./connector.ts) reads, subscribes each one
  * with its connector, and keeps it renewed while its trigger is enabled,
- * through a provider it is given. Nothing constructs it: no route, tool,
- * alarm, MCP bridge or engine reaches it, and connector watches
- * (../extensions/app-events.ts) work exactly as before. See "Keeping the
- * subscription" in docs/triggers.md.
+ * through a provider it is given. Pim constructs it wherever the space's
+ * triggers are on, over its MCP bridge, and ticks it from the trigger wake;
+ * a connector watch (`watch_connector_event`, ../extensions/app-events.ts)
+ * is such a trigger. See "Keeping the subscription" in docs/triggers.md.
  *
  * A binding is one trigger at one generation and source revision, with a
  * callback key and a Standard Webhooks secret made once, when the binding
@@ -79,7 +79,7 @@ CREATE TRIGGER IF NOT EXISTS pim_trigger_subscriptions_secret BEFORE UPDATE OF s
 BEGIN SELECT RAISE(ABORT, 'a binding keeps its secret until it is wiped'); END;
 `;
 
-/** The manager's tables, beside the engine's. Pim makes none of them yet. */
+/** The manager's tables, beside the engine's. */
 export const SUBSCRIPTION_TABLES = ["pim_trigger_subscriptions"] as const;
 
 /** Columns the export leaves out: the callback's key, which is the last segment of its URL, and the secret. */
@@ -326,6 +326,46 @@ export class ConnectorSubscriptionManager {
 	/** What the ingress adapter asks of the space, answered from these bindings. */
 	ingressHost(): ConnectorIngressHost {
 		return { owner: () => this.#owner(), subscription: (key) => this.subscription(key), connector: (id) => this.#provider.connector(id) };
+	}
+
+	/**
+	 * Takes in a subscription made before its trigger had a binding, such as
+	 * one a connector watch made before watches were triggers: the trigger,
+	 * enabled on a connector's event, gets a binding at its generation now
+	 * with the subscription's own key, secret and provider subscription id,
+	 * granted until `refreshBefore` (null: no expiry), so its callback URL
+	 * stays the same and the connector notices nothing. It is renewed from
+	 * then on like any other. False, writing nothing, where the trigger
+	 * isn't enabled on a connector's event, already has a binding for its
+	 * generation, or the key is taken.
+	 */
+	adopt(input: { readonly key: string; readonly triggerId: string; readonly secret: string; readonly providerSubscriptionId: string; readonly refreshBefore: number | null }): boolean {
+		return this.#transaction(() => {
+			const trigger = this.#store.get(input.triggerId);
+			const source = this.#store.sourceState(input.triggerId);
+			if (!trigger || trigger.lifecycle !== "enabled" || trigger.spec.source.kind !== "connector_event" || !source) return false;
+			const now = this.#now();
+			// Due now: the next step works out the renewal from the grant, as after a subscribe.
+			return (
+				this.#sql.exec(
+					`INSERT OR IGNORE INTO pim_trigger_subscriptions (key, trigger_id, source_revision, generation, connector_id, event, secret, status, phase, provider_subscription_id, granted_at, refresh_before, failures, next_at, created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'open', ?, ?, ?, 0, ?, ?, ?)`,
+					input.key,
+					trigger.id,
+					source.sourceRevision,
+					trigger.generation,
+					trigger.spec.source.connectorId,
+					trigger.spec.source.event,
+					input.secret,
+					input.providerSubscriptionId,
+					now,
+					input.refreshBefore,
+					now,
+					now,
+					now,
+				).rowsWritten > 0
+			);
+		});
 	}
 
 	/** A trigger's bindings, oldest first, without their secrets. */

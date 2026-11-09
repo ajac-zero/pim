@@ -1,16 +1,20 @@
 // The sandbox-manager: one hardened gVisor container per session, driven through the Docker API.
+// Commands and files go to the workspace-agentd running inside each container.
 import http from 'node:http'
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { statfs } from 'node:fs/promises'
 import os from 'node:os'
+import * as agentd from './agentd.js'
 import { DockerError } from './docker.js'
 import { HttpError } from './errors.js'
-import { LABEL, LABEL_SPEC, buildSpec, names, parseCreate, workspacePath } from './template.js'
+import { AGENTD_PORT, LABEL, LABEL_KEPT, LABEL_KEPT_INFO, LABEL_NONCE, LABEL_SPEC, agentdPath, buildSpec, names, parseCreate, proxyEnv, workspacePath } from './template.js'
 
 const MAX_FILE = 32 * 1024 * 1024
+const MiB = 1024 * 1024
 const notFound = (e) => e instanceof DockerError && e.status === 404
 const sha = (s) => createHash('sha256').update(s).digest()
 const q = (s) => encodeURIComponent(s)
+const labelFilter = (label) => q(JSON.stringify({ label: [label] }))
 
 export const RUNSC_REQUIRED = 'gVisor (runsc) is required: register the runsc runtime with Docker and make sure `docker run --runtime=runsc` works'
 
@@ -50,6 +54,21 @@ export async function selfCheck(docker, probeImage) {
 	}
 }
 
+// 'volume' when Docker's local volume driver accepts a size (an XFS project quota on its data
+// root), otherwise 'measure': the manager measures each workspace and stops sessions over quota.
+export async function detectQuotaMode(docker) {
+	const name = `pim-quota-probe-${randomBytes(4).toString('hex')}`
+	try {
+		await docker.request('POST', '/volumes/create', { Name: name, Driver: 'local', DriverOpts: { size: '64m' } })
+		return 'volume'
+	} catch (e) {
+		if (e instanceof DockerError) return 'measure'
+		throw e
+	} finally {
+		await docker.request('DELETE', `/volumes/${name}`).catch(() => {})
+	}
+}
+
 // The default MAX_CONCURRENT: one session per CPU, each assumed to need 1.5 GiB of memory after
 // reserving 1 GiB for the host, clamped to 1..8. For example 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4.
 export function defaultMaxConcurrent(cpus = os.cpus().length, totalMem = os.totalmem()) {
@@ -57,11 +76,24 @@ export function defaultMaxConcurrent(cpus = os.cpus().length, totalMem = os.tota
 	return Math.min(8, Math.max(1, Math.min(cpus, Math.floor((memGiB - 1) / 1.5))))
 }
 
-// cfg: { token, allowedImages, dockerRoot, minFreePct, maxConcurrent, idleMin, proxyUrl,
-//        proxyContainer, workspaceTmpfs }. proxyAdmin: { set(ip, hosts), del(ip) }.
-export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now = Date.now }) {
-	const sessions = new Map() // id -> {params, createdAt, lastUsed, ip, lock}
-	const creating = new Map() // id -> Promise
+// cfg: { token, agentdSecret, allowedImages, defaultDiskMiB, dockerRoot, minFreePct, maxConcurrent,
+//        maxTotalWorkspaceMiB, idleMin, keptVolumeDays, quotaMode, proxyUrl, proxyContainer,
+//        managerContainer, agentdPort, agentdReadyMs, execGraceMs }.
+// proxyAdmin: { set(ip, hosts), del(ip) }. agentdAddress maps a container IP to {host, port};
+// tests point it at local fake daemons.
+export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now = Date.now, agentdAddress }) {
+	const sessions = new Map() // id -> {params, createdAt, lastUsed, ip, proxyIp, token, egress, disk}
+	const creating = new Map() // id -> {params, promise}
+	const kept = new Map() // id -> {params, keptAt, reason, diskBytes}: the volume outlives the container
+	const selfIps = new Map() // session network -> this manager's address on it
+	const agentdPort = cfg.agentdPort ?? AGENTD_PORT
+	const graceMs = cfg.execGraceMs ?? 5000
+	const address = agentdAddress ?? ((ip) => ({ host: ip, port: agentdPort }))
+	let proxyStartedAt
+
+	// The token is derived, not stored, so a restarted manager can still reach every agentd.
+	const tokenFor = (id, nonce) => createHmac('sha256', cfg.agentdSecret).update(`${id}.${nonce}`).digest('hex')
+	const target = (s) => ({ ...address(s.ip), token: s.token })
 
 	async function freeDiskPct() {
 		const s = await statfsFn(cfg.dockerRoot)
@@ -70,7 +102,30 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 
 	const view = (s) => ({ ...s.params, state: 'running', createdAt: s.createdAt, lastUsedAt: s.lastUsed })
 
-	async function teardown(id, ip) {
+	// Connects `container` to each network it is not on yet (a recreated container has lost them)
+	// and returns its address on every network it is on.
+	async function attach(container, networks, alias) {
+		let info = await docker.request('GET', `/containers/${container}/json`)
+		const missing = networks.filter((n) => !info.NetworkSettings?.Networks?.[n])
+		const errors = []
+		for (const n of missing) {
+			await docker.request('POST', `/networks/${n}/connect`, { Container: container, ...(alias && { EndpointConfig: { Aliases: [container] } }) }).catch((e) => errors.push(e))
+		}
+		if (missing.length) info = await docker.request('GET', `/containers/${container}/json`)
+		if (errors.length) throw errors[0]
+		const ips = Object.fromEntries(Object.entries(info.NetworkSettings?.Networks ?? {}).map(([n, v]) => [n, v.IPAddress]))
+		return { ips, startedAt: info.State?.StartedAt, connected: missing }
+	}
+
+	async function attachSelf(networks) {
+		if (!cfg.managerContainer) return
+		const { ips } = await attach(cfg.managerContainer, networks)
+		for (const n of networks) if (ips[n]) selfIps.set(n, ips[n])
+	}
+
+	// Removes what exists of a session. `keep` leaves the workspace volume; `keep.info` also
+	// records it in a marker volume so it survives a manager restart.
+	async function teardown(id, { ip, keep } = {}) {
 		const n = names(id)
 		const errors = []
 		const step = async (fn) => {
@@ -82,95 +137,119 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		}
 		if (ip) await proxyAdmin.del(ip).catch(() => {})
 		await step(() => docker.request('DELETE', `/containers/${n.container}?force=true&v=true`))
-		await step(() => docker.request('POST', `/networks/${n.network}/disconnect`, { Container: cfg.proxyContainer, Force: true }))
+		// A container that is not on the network (a recreated one) fails to disconnect; removing the
+		// network below reports anything still attached.
+		for (const c of [cfg.proxyContainer, cfg.managerContainer].filter(Boolean)) {
+			await docker.request('POST', `/networks/${n.network}/disconnect`, { Container: c, Force: true }).catch(() => {})
+		}
+		selfIps.delete(n.network)
 		await step(() => docker.request('DELETE', `/networks/${n.network}`))
-		await step(() => docker.request('DELETE', `/volumes/${n.volume}?force=true`))
+		if (keep?.info) {
+			await step(() => docker.request('DELETE', `/volumes/${n.marker}`))
+			await step(() => docker.request('POST', '/volumes/create', { Name: n.marker, Labels: { [LABEL_KEPT]: id, [LABEL_KEPT_INFO]: JSON.stringify(keep.info) } }))
+		} else if (!keep) {
+			await step(() => docker.request('DELETE', `/volumes/${n.volume}?force=true`))
+			await step(() => docker.request('DELETE', `/volumes/${n.marker}`))
+		}
 		if (errors.length) throw errors[0]
 	}
 
 	async function doCreate(params) {
 		const id = params.sessionId
 		const n = names(id)
+		const resuming = kept.has(id)
 		try {
 			await ensureImage(docker, params.image)
-			// Docker's embedded DNS does not work under gVisor, so the session reaches the proxy by
-			// IP: attach the proxy first, read its address on the session network, then create.
-			const { volume, network } = buildSpec(params, cfg) // the container part is rebuilt below with the proxy IP
+			const nonce = randomBytes(12).toString('hex')
+			const token = tokenFor(id, nonce)
+			const base = { quotaMode: cfg.quotaMode, nonce, token, agentdPort }
+			// Creating a volume that exists returns it, so a kept workspace is reused as it is.
+			const { volume, network } = buildSpec(params, { ...base, proxyUrl: cfg.proxyUrl })
 			await docker.request('POST', '/volumes/create', volume)
 			await docker.request('POST', '/networks/create', network)
-			await docker.request('POST', `/networks/${n.network}/connect`, { Container: cfg.proxyContainer, EndpointConfig: { Aliases: [cfg.proxyContainer] } })
-			const proxyInfo = await docker.request('GET', `/containers/${cfg.proxyContainer}/json`)
-			const proxyUrl = new URL(cfg.proxyUrl)
-			proxyUrl.hostname = proxyInfo.NetworkSettings.Networks[n.network].IPAddress
-			const container = buildSpec(params, { ...cfg, proxyUrl: proxyUrl.origin }).container
+			// Docker's embedded DNS does not work under gVisor, so the session reaches the proxy by
+			// IP: attach the proxy first, read its address on the session network, then create.
+			const proxyIp = (await attach(cfg.proxyContainer, [n.network], true)).ips[n.network]
+			await attachSelf([n.network])
+			const container = buildSpec(params, { ...base, proxyUrl: proxyUrlFor(proxyIp) }).container
 			await docker.request('POST', `/containers/create?name=${container.name}`, container.body)
 			await docker.request('POST', `/containers/${container.name}/start`)
 			const info = await docker.request('GET', `/containers/${container.name}/json`)
 			const ip = info.NetworkSettings.Networks[n.network].IPAddress
 			await proxyAdmin.set(ip, params.egressAllow)
-			const s = { params, createdAt: now(), lastUsed: now(), ip, lock: Promise.resolve() }
+			const s = { params, createdAt: now(), lastUsed: now(), ip, proxyIp, token, egress: true, disk: null }
+			await agentd.ready(target(s), cfg.agentdReadyMs ?? 30000)
+			if (resuming) {
+				await docker.request('DELETE', `/volumes/${n.marker}`).catch(() => {})
+				kept.delete(id)
+			}
 			sessions.set(id, s)
 			return s
 		} catch (e) {
-			await teardown(id).catch(() => {})
+			await teardown(id, { keep: resuming }).catch(() => {})
 			throw e
 		}
 	}
 
+	function proxyUrlFor(ip) {
+		const u = new URL(cfg.proxyUrl)
+		u.hostname = ip
+		return u.origin
+	}
+
+	// Disk promised to workspaces: the quota of every live, starting and kept workspace.
+	function reservedMiB(except) {
+		let sum = 0
+		for (const [id, x] of [...sessions, ...creating, ...kept]) if (id !== except) sum += x.params.limits.diskMiB
+		return sum
+	}
+
 	async function createSession(body) {
-		const params = parseCreate(body, cfg.allowedImages)
-		const existing = sessions.get(params.sessionId)
-		const pending = creating.get(params.sessionId)
+		const params = parseCreate(body, cfg.allowedImages, cfg.defaultDiskMiB)
+		const id = params.sessionId
+		const existing = sessions.get(id)
+		const pending = creating.get(id)
 		if (existing || pending) {
-			const s = existing ?? (await pending)
+			const s = existing ?? (await pending.promise)
 			if (JSON.stringify(s.params) !== JSON.stringify(params)) throw new HttpError(409, 'session exists with different parameters')
 			s.lastUsed = now()
 			return { created: false, session: view(s) }
 		}
 		// Check and reserve the slot in one synchronous step (no await in between), so concurrent
-		// creates cannot pass the check together. Existing sessions over the limit are left alone.
+		// creates cannot pass the checks together. Existing sessions over the limit are left alone.
 		const running = sessions.size + creating.size
 		if (running >= cfg.maxConcurrent) throw new HttpError(429, 'at capacity', { code: 'capacity', limit: cfg.maxConcurrent, running })
-		const p = (async () => {
+		const reserved = reservedMiB(id)
+		if (cfg.maxTotalWorkspaceMiB && reserved + params.limits.diskMiB > cfg.maxTotalWorkspaceMiB) {
+			throw new HttpError(507, `workspace disk would exceed ${cfg.maxTotalWorkspaceMiB} MiB`, { code: 'workspace_quota', reservedMiB: reserved, requestedMiB: params.limits.diskMiB, maxTotalMiB: cfg.maxTotalWorkspaceMiB })
+		}
+		const promise = (async () => {
 			const free = await freeDiskPct()
 			if (free < cfg.minFreePct) throw new HttpError(507, `free disk ${free.toFixed(1)}% is below ${cfg.minFreePct}%`, { code: 'low_disk', freeDiskPct: Math.round(free * 10) / 10, minFreePct: cfg.minFreePct })
 			return doCreate(params)
 		})()
-		creating.set(params.sessionId, p)
+		creating.set(id, { params, promise })
 		try {
-			return { created: true, session: view(await p) }
+			return { created: true, session: view(await promise) }
 		} finally {
-			creating.delete(params.sessionId)
+			creating.delete(id)
 		}
 	}
 
 	function get(id) {
 		const s = sessions.get(id)
-		if (!s) throw new HttpError(404, 'no such session')
-		s.lastUsed = now()
-		return s
+		if (s) {
+			s.lastUsed = now()
+			return s
+		}
+		if (kept.get(id)?.reason === 'over_disk_quota') throw new HttpError(409, 'session was stopped: its workspace went over its disk quota', { code: 'over_disk_quota' })
+		throw new HttpError(404, 'no such session')
 	}
 
-	// Serialised per session: a timeout kills every process of the sandbox user.
+	// Each exec runs in its own process group inside agentd, so a timeout kills only that exec.
+	// The proxy variables are passed each time because a re-attached proxy can change address.
 	function exec(s, opts) {
-		const run = s.lock.then(() => docker.exec(names(s.params.sessionId).container, opts))
-		s.lock = run.catch(() => {})
-		return run
-	}
-
-	const FILE_SCRIPT = {
-		// Resolve inside the container (following symlinks), then act only if still under /workspace.
-		write: 'p=$(realpath -m -- "$1") || exit 70; case "$p" in /workspace/*) ;; *) exit 77;; esac; mkdir -p -- "$(dirname -- "$p")" && cat > "$p"',
-		read: 'p=$(realpath -m -- "$1") || exit 70; case "$p" in /workspace/*) ;; *) exit 77;; esac; [ -f "$p" ] || exit 78; cat -- "$p"',
-	}
-
-	async function fileOp(s, kind, path, stdin) {
-		const r = await exec(s, { cmd: ['sh', '-c', FILE_SCRIPT[kind], 'sh', workspacePath(path)], stdin, timeoutMs: 60000, maxOutput: MAX_FILE })
-		if (r.timedOut) throw new HttpError(504, 'file operation timed out')
-		if (r.exitCode === 77) throw new HttpError(403, 'path escapes /workspace')
-		if (r.exitCode === 78) throw new HttpError(404, 'no such file')
-		if (r.exitCode !== 0 || r.truncated) throw new HttpError(500, `file operation failed: ${r.stderr.toString().slice(0, 200)}`)
-		return r.stdout
+		return agentd.exec(target(s), { ...opts, cwd: agentdPath(opts.cwd), env: proxyEnv(proxyUrlFor(s.proxyIp)) }, graceMs)
 	}
 
 	function parseExec(b) {
@@ -182,37 +261,121 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		return { cmd: b.cmd, cwd: b.cwd === undefined ? '/workspace' : workspacePath(b.cwd), timeoutMs: b.timeoutMs, stdin: b.stdin }
 	}
 
-	async function remove(id) {
+	const fileQuery = (p, extra = '') => `?path=${q(agentdPath(workspacePath(p)))}${extra}`
+
+	// Removes a session. With keepVolume the workspace volume stays (and is reused when the same
+	// sessionId is created again) until a plain delete or the kept-volume reaper removes it.
+	async function remove(id, keepVolume = false) {
 		const s = sessions.get(id)
 		sessions.delete(id)
-		await teardown(id, s?.ip)
+		const params = s?.params ?? kept.get(id)?.params
+		if (keepVolume) {
+			const info = params && { params, keptAt: now(), reason: 'kept_volume', diskBytes: s?.disk?.rootBytes ?? kept.get(id)?.diskBytes ?? null }
+			if (info) kept.set(id, info)
+			await teardown(id, { ip: s?.ip, keep: info ? { info } : true })
+			return { deleted: id, keptVolume: names(id).volume }
+		}
+		kept.delete(id)
+		await teardown(id, { ip: s?.ip })
+		return { deleted: id }
+	}
+
+	async function measure(s) {
+		const st = await agentd.json(target(s), 'GET', '/status', { idleMs: 10000 })
+		s.disk = { rootBytes: st.rootBytes, diskFreeBytes: st.diskFreeBytes, activeExecs: st.activeExecs, measuredAt: now() }
+		return s.disk
+	}
+
+	// Measures every workspace. In 'measure' mode nothing else bounds a workspace, so a session
+	// over its quota is stopped: its container goes, its volume is kept for inspection or resume.
+	async function checkDisk() {
+		for (const [id, s] of [...sessions]) {
+			const d = await measure(s).catch(() => null)
+			const quota = s.params.limits.diskMiB * MiB
+			if (!d || cfg.quotaMode !== 'measure' || d.rootBytes <= quota || sessions.get(id) !== s) continue
+			console.warn(`session ${id} stopped: workspace uses ${d.rootBytes} bytes, quota ${quota}`)
+			sessions.delete(id)
+			const info = { params: s.params, keptAt: now(), reason: 'over_disk_quota', diskBytes: d.rootBytes }
+			kept.set(id, info)
+			await teardown(id, { ip: s.ip, keep: { info } }).catch((e) => console.error(`stopping ${id}:`, e.message))
+		}
+	}
+
+	async function status(id) {
+		const base = (params) => ({ sessionId: id, quotaMode: cfg.quotaMode, diskQuotaBytes: params.limits.diskMiB * MiB })
+		const s = sessions.get(id)
+		if (s) {
+			let error
+			await measure(s).catch((e) => (error = e.message))
+			const d = s.disk ?? {}
+			return { ...base(s.params), state: 'running', reason: null, diskBytes: d.rootBytes ?? null, diskFreeBytes: d.diskFreeBytes ?? null, activeExecs: d.activeExecs ?? null, measuredAt: d.measuredAt ?? null, ...(error && { error }) }
+		}
+		const c = creating.get(id)
+		if (c) return { ...base(c.params), state: 'creating', reason: null, diskBytes: null, diskFreeBytes: null, activeExecs: null, measuredAt: null }
+		const k = kept.get(id)
+		if (k) return { ...base(k.params), state: 'stopped', reason: k.reason, diskBytes: k.diskBytes, diskFreeBytes: null, activeExecs: null, measuredAt: null, keptAt: k.keptAt }
+		throw new HttpError(404, 'no such session')
+	}
+
+	// Makes sure the egress proxy (and this manager, when it runs in a container) is on every live
+	// session network, and re-registers allowlists the proxy may have lost. A recreated container
+	// has lost its network attachments and a restarted proxy has lost its allowlists.
+	async function reattach() {
+		const nets = [...sessions.values()].map((s) => names(s.params.sessionId).network)
+		const proxy = await attach(cfg.proxyContainer, nets, true)
+		const restarted = proxy.startedAt !== proxyStartedAt
+		proxyStartedAt = proxy.startedAt
+		await attachSelf(nets)
+		for (const s of sessions.values()) {
+			const net = names(s.params.sessionId).network
+			s.proxyIp = proxy.ips[net] ?? s.proxyIp
+			if (restarted || proxy.connected.includes(net) || !s.egress) {
+				s.egress = await proxyAdmin.set(s.ip, s.params.egressAllow).then(() => true, () => false)
+			}
+		}
 	}
 
 	// Rebuilds the registry from labels after a restart and removes half-created leftovers.
 	async function reconcile() {
-		const filters = q(JSON.stringify({ label: [LABEL] }))
-		const containers = await docker.request('GET', `/containers/json?all=true&filters=${filters}`)
+		const containers = await docker.request('GET', `/containers/json?all=true&filters=${labelFilter(LABEL)}`)
 		const live = new Set()
 		for (const c of containers) {
 			const id = c.Labels[LABEL]
 			try {
 				const params = JSON.parse(c.Labels[LABEL_SPEC])
-				if (c.State !== 'running') throw new Error('not running')
+				const nonce = c.Labels[LABEL_NONCE]
 				const ip = c.NetworkSettings?.Networks?.[names(id).network]?.IPAddress
-				await proxyAdmin.set(ip, params.egressAllow)
-				sessions.set(id, { params, createdAt: c.Created * 1000, lastUsed: now(), ip, lock: Promise.resolve() })
+				if (c.State !== 'running' || !nonce || !ip) throw new Error('not running')
+				sessions.set(id, { params, createdAt: c.Created * 1000, lastUsed: now(), ip, proxyIp: null, token: tokenFor(id, nonce), egress: false, disk: null })
 				live.add(id)
 			} catch {
 				await teardown(id).catch(() => {})
 			}
 		}
-		const vols = (await docker.request('GET', `/volumes?filters=${filters}`)).Volumes ?? []
-		const nets = await docker.request('GET', `/networks?filters=${filters}`)
-		for (const id of new Set([...vols, ...nets].map((o) => o.Labels?.[LABEL]).filter(Boolean))) if (!live.has(id)) await teardown(id).catch(() => {})
+		for (const v of (await docker.request('GET', `/volumes?filters=${labelFilter(LABEL_KEPT)}`)).Volumes ?? []) {
+			const id = v.Labels[LABEL_KEPT]
+			if (live.has(id)) await docker.request('DELETE', `/volumes/${v.Name}`).catch(() => {}) // a resume that finished
+			else {
+				try {
+					kept.set(id, JSON.parse(v.Labels[LABEL_KEPT_INFO]))
+				} catch {
+					await docker.request('DELETE', `/volumes/${v.Name}`).catch(() => {})
+				}
+			}
+		}
+		const vols = (await docker.request('GET', `/volumes?filters=${labelFilter(LABEL)}`)).Volumes ?? []
+		const nets = await docker.request('GET', `/networks?filters=${labelFilter(LABEL)}`)
+		for (const id of new Set([...vols, ...nets].map((o) => o.Labels?.[LABEL]).filter(Boolean))) {
+			if (!live.has(id)) await teardown(id, { keep: kept.has(id) }).catch(() => {})
+		}
+		// The periodic reattach retries if the proxy is not up yet.
+		await reattach().catch((e) => console.error('re-attaching session networks:', e.message))
 	}
 
 	async function reap() {
 		for (const [id, s] of [...sessions]) if (now() - s.lastUsed > cfg.idleMin * 60000) await remove(id).catch(() => {})
+		if (!cfg.keptVolumeDays) return
+		for (const [id, k] of [...kept]) if (now() - k.keptAt > cfg.keptVolumeDays * 86400000) await remove(id).catch(() => {})
 	}
 
 	async function health() {
@@ -228,8 +391,12 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	const authorized = (req) => timingSafeEqual(sha(req.headers.authorization?.replace(/^Bearer /, '') ?? ''), sha(cfg.token))
+	// The manager's own address on a session network is reachable from inside the session; nothing
+	// is served there.
+	const fromSessionNetwork = (req) => [...selfIps.values()].includes(req.socket.localAddress?.replace(/^::ffff:/, ''))
 
 	async function handle(req, res) {
+		if (fromSessionNetwork(req)) return req.socket.destroy()
 		const url = new URL(req.url, 'http://x')
 		const send = (code, body) => res.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify(body))
 		const raw = async (max) => {
@@ -248,6 +415,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 				throw e instanceof HttpError ? e : new HttpError(400, 'invalid JSON')
 			}
 		}
+		const path = () => url.searchParams.get('path')
 		try {
 			if (req.method === 'GET' && url.pathname === '/health') return send(200, await health())
 			if (!authorized(req)) throw new HttpError(401, 'unauthorized')
@@ -255,26 +423,43 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 				const r = await createSession(await json())
 				return send(r.created ? 201 : 200, r.session)
 			}
-			const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec|files))?$/.exec(url.pathname)
+			const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec|files|list|stat|status))?$/.exec(url.pathname)
 			if (!m) throw new HttpError(404, 'not found')
 			const [, id, sub] = m
-			if (!sub && req.method === 'GET') return send(200, view(get(id)))
-			if (!sub && req.method === 'DELETE') return await remove(id), send(200, { deleted: id })
-			if (sub === 'exec' && req.method === 'POST') {
-				const r = await exec(get(id), parseExec(await json()))
-				return send(200, { stdout: r.stdout.toString(), stderr: r.stderr.toString(), exitCode: r.exitCode, timedOut: r.timedOut, truncated: r.truncated })
+			const route = `${req.method} ${sub ?? ''}`
+			if (route === 'GET ') return send(200, view(get(id)))
+			if (route === 'DELETE ') return send(200, await remove(id, ['1', 'true'].includes(url.searchParams.get('keepVolume'))))
+			if (route === 'GET status') return send(200, await status(id))
+			if (route === 'POST exec') {
+				const s = get(id)
+				return send(200, await exec(s, parseExec(await json())))
 			}
-			if (sub === 'files' && req.method === 'PUT') {
+			if (route === 'PUT files') {
+				const s = get(id)
+				const query = fileQuery(path())
 				const body = await raw(MAX_FILE)
-				await fileOp(get(id), 'write', url.searchParams.get('path'), body)
+				await agentd.json(target(s), 'PUT', `/file${query}`, { body, headers: { 'content-type': 'application/octet-stream', 'content-length': body.length } })
 				return send(200, { ok: true })
 			}
-			if (sub === 'files' && req.method === 'GET') {
-				const data = await fileOp(get(id), 'read', url.searchParams.get('path'))
-				return res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(data)
+			if (route === 'GET files') {
+				const s = get(id)
+				const r = await agentd.request(target(s), 'GET', `/file${fileQuery(path())}`)
+				if (r.statusCode !== 200) await agentd.fail(r)
+				res.writeHead(200, { 'content-type': 'application/octet-stream', ...(r.headers['content-length'] && { 'content-length': r.headers['content-length'] }) })
+				r.on('error', () => res.destroy())
+				return r.pipe(res)
 			}
+			if (route === 'DELETE files') {
+				const s = get(id)
+				const recursive = ['1', 'true'].includes(url.searchParams.get('recursive')) ? '&recursive=1' : ''
+				await agentd.json(target(s), 'DELETE', `/file${fileQuery(path(), recursive)}`)
+				return send(200, { ok: true })
+			}
+			if (route === 'GET list') return send(200, await agentd.json(target(get(id)), 'GET', `/list${fileQuery(path() ?? '/workspace')}`))
+			if (route === 'GET stat') return send(200, await agentd.json(target(get(id)), 'GET', `/stat${fileQuery(path())}`))
 			throw new HttpError(405, 'method not allowed')
 		} catch (e) {
+			if (res.headersSent) return res.destroy()
 			if (e instanceof HttpError) return send(e.status, { error: e.message, ...e.extra })
 			console.error(e)
 			send(500, { error: 'internal error' })
@@ -282,5 +467,5 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	const server = http.createServer(handle)
-	return { server, createSession, reconcile, reap, health, remove, sessions }
+	return { server, createSession, reconcile, reattach, reap, checkDisk, status, health, remove, sessions, kept }
 }

@@ -1,11 +1,11 @@
+import { posix } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ComposeManagerError, ComposeWorkspaceProvider, SCRIPTS } from "../src/coding/workspace/compose";
+import { ComposeManagerError, ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
 import { runConformanceSuite } from "../src/coding/workspace/conformance";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { ProviderCapacity } from "../src/coding/provider-capacity";
 import {
 	type ExecEvent,
-	type FileStat,
 	WorkspaceCapacityError,
 	WorkspaceFileError,
 	WorkspaceLimitError,
@@ -19,14 +19,34 @@ const TOKEN = "s3cret-manager-token";
 const URL_BASE = "http://127.0.0.1:8080";
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-const kind = (stat: FileStat) => (stat.type === "dir" ? "directory" : stat.type === "symlink" ? "symbolic link" : "regular file");
-const statLine = (s: FileStat) => `${kind(s)}|${s.size}|${s.mode.toString(8)}|${Math.floor(s.mtimeMs / 1000)}|/workspace/${s.name}\n`;
+const refusal = (error: unknown): Response | null => {
+	if (error instanceof WorkspacePathError) return json(403, { error: "path escapes /workspace", code: "path_escape" });
+	if (error instanceof WorkspaceLimitError) return json(507, { error: "the write would take the workspace over its disk quota", code: "disk_full" });
+	if (error instanceof WorkspaceFileError) return json(/Not a|Is a/.test(error.message) ? 409 : 404, { error: `no such file or directory: ${error.message}`, code: /Not a|Is a/.test(error.message) ? "conflict" : "not_found" });
+	return null;
+};
 
-/** A fetch stub that is the sandbox-manager's routes, backed by a FakeWorkspaceProvider. The `sh` scripts the provider runs for stat, list, remove and chmod are answered with the workspace's own operations, as the real scripts would answer them in a container (checked by hand against a real shell, not here). */
+type FakeNodes = Map<string, { type: string; target?: string }>;
+
+/** A fetch stub that speaks the sandbox-manager's route contract (sandbox-manager/README.md), backed by a FakeWorkspaceProvider. Where the real manager differs from the fake's workspace it follows the manager: `stat` describes a symlink itself, a deleted-with-keepVolume session is listed as gone, exec and files on a stopped session are 409, and `/exec/stream` answers NDJSON as the command prints. `readlink -f` is a command of the fake's shell. */
 function fakeManager(max = 3) {
 	const backing = new FakeWorkspaceProvider({ maxConcurrent: max });
 	const requests: { method: string; path: string; auth: string | null; body?: unknown }[] = [];
 	const refs = new Map<string, WorkspaceRef>();
+	const kept = new Map<string, number>();
+	backing.register("readlink", async ({ argv, workspace }) => {
+		const nodes = (workspace as unknown as { nodes: FakeNodes }).nodes;
+		let path = posix.normalize(argv.at(-1) ?? "");
+		for (let hops = 0; hops < 32; hops++) {
+			const parts = path.split("/").filter(Boolean);
+			const at = parts.findIndex((_, i) => nodes.get(`/${parts.slice(0, i + 1).join("/")}`)?.type === "symlink");
+			if (at < 0) break;
+			const link = `/${parts.slice(0, at + 1).join("/")}`;
+			path = posix.normalize(posix.join(posix.dirname(link), nodes.get(link)?.target ?? "", ...parts.slice(at + 1)));
+			if (nodes.get(link)?.target?.startsWith("/")) path = posix.normalize(posix.join(nodes.get(link)?.target ?? "", ...parts.slice(at + 1)));
+		}
+		return { stdout: `${path}\n` };
+	});
 
 	// Like a real fetch, a request whose signal aborts rejects, whatever the manager was doing.
 	const handler = (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> =>
@@ -47,8 +67,9 @@ function fakeManager(max = 3) {
 		if (url.pathname === "/health") return json(200, { runsc: true, freeDiskPct: 42.5, maxConcurrent: max, running: refs.size, free: max - refs.size, sessions: refs.size });
 		if (auth !== `Bearer ${TOKEN}`) return json(401, { error: "unauthorized" });
 		if (url.pathname === "/sessions" && method === "GET") {
-			const infos = await backing.list();
-			return json(200, infos.map((i) => ({ sessionId: i.ref.sessionId, state: i.state, createdAt: i.createdAt })));
+			const live = (await backing.list()).map((i) => ({ sessionId: i.ref.sessionId, state: i.state, createdAt: i.createdAt }));
+			const gone = [...kept].map(([sessionId, createdAt]) => ({ sessionId, state: "gone", reason: "kept_volume", createdAt }));
+			return json(200, [...live, ...gone].sort((a, b) => (a.sessionId < b.sessionId ? -1 : 1)));
 		}
 		if (url.pathname === "/sessions" && method === "POST") {
 			const spec = {
@@ -63,63 +84,69 @@ function fakeManager(max = 3) {
 			try {
 				const ref = await backing.create(spec);
 				refs.set(spec.sessionId, ref);
+				kept.delete(spec.sessionId);
 				return json(existed ? 200 : 201, { sessionId: spec.sessionId, state: "running", createdAt: 1 });
 			} catch (error) {
 				if (error instanceof WorkspaceCapacityError) return json(429, { error: "at capacity", code: "capacity", limit: max, running: refs.size });
 				throw error;
 			}
 		}
-		const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec|files|stop|start))?$/.exec(url.pathname);
+		const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec\/stream|exec|file|list|stat|stop|start))?$/.exec(url.pathname);
 		if (!m) return json(404, { error: "not found" });
 		const [, id = "", sub] = m;
 		const ref = refs.get(id);
-		if (!ref) return method === "DELETE" ? json(404, { error: "no such session" }) : json(404, { error: "no such session" });
-		const ws = await backing.get(ref);
-		if (!ws) return json(404, { error: "no such session" });
+		const ws = ref ? await backing.get(ref) : null;
+		if (!ref || !ws) return json(404, { error: "no such session" });
 		if (!sub && method === "GET") return json(200, { sessionId: id, ...(await ws.status()) });
 		if (!sub && method === "DELETE") {
-			await backing.destroy(ref, { keepVolume: url.searchParams.get("keepVolume") === "1" });
+			const keep = url.searchParams.get("keepVolume") === "1";
+			await backing.destroy(ref, { keepVolume: keep });
 			refs.delete(id);
+			if (keep) kept.set(id, 1);
 			return json(200, { deleted: id });
 		}
-		if (sub === "stop") return await ws.stop(), json(200, { ok: true });
-		if (sub === "start") return await ws.start(), json(200, { ok: true });
+		if (sub === "stop") return await ws.stop(), json(200, { sessionId: id, state: "stopped" });
+		if (sub === "start") return await ws.start(), json(200, { sessionId: id, state: "running" });
+		if ((await ws.status()).state === "stopped") return json(409, { error: "session is stopped; start it first", code: "session_stopped" });
 		const path = url.searchParams.get("path") ?? "";
 		try {
-			if (sub === "files" && method === "PUT") {
-				await ws.writeFile(path, new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer()));
+			if (sub === "file" && method === "PUT") {
+				const mode = url.searchParams.get("mode");
+				await ws.writeFile(path, new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer()), mode ? Number.parseInt(mode, 8) : undefined);
 				return json(200, { ok: true });
 			}
-			if (sub === "files" && method === "GET") return new Response(await ws.readFile(path), { status: 200 });
+			if (sub === "file" && method === "GET") return new Response(await ws.readFile(path), { status: 200 });
+			if (sub === "file" && method === "DELETE") return await ws.remove(path), json(200, { ok: true });
+			if (sub === "list") return json(200, await ws.list(path));
+			if (sub === "stat") {
+				// lstat: the entry itself, found among its parent's entries.
+				if (posix.normalize(path) === "/workspace") return json(200, await ws.stat(path));
+				const entry = (await ws.list(posix.dirname(path))).find((e) => e.name === posix.basename(path));
+				return entry ? json(200, entry) : json(404, { error: "no such file or directory", code: "not_found" });
+			}
 		} catch (error) {
-			if (error instanceof WorkspacePathError) return json(403, { error: "path escapes /workspace" });
-			if (error instanceof WorkspaceLimitError) return json(507, { error: error.message, code: "disk_full" });
-			if (error instanceof WorkspaceFileError) return json(404, { error: "no such file" });
+			const answer = refusal(error);
+			if (answer) return answer;
 			throw error;
 		}
-		// exec
-		const { cmd, cwd, timeoutMs, stdin } = body as { cmd: string[]; cwd?: string; timeoutMs: number; stdin?: string };
-		const out = (exitCode: number, stdout = "", stderr = "") => json(200, { stdout, stderr, exitCode, timedOut: false, truncated: false });
-		const script = cmd[0] === "sh" && cmd[1] === "-c" ? (Object.entries(SCRIPTS).find(([, s]) => s === cmd[2])?.[0] as keyof typeof SCRIPTS | undefined) : undefined;
-		if (script) {
-			const target = cmd[4] ?? "";
-			try {
-				if (script === "stat") return out(0, statLine(await ws.stat(target)).replace("/workspace/", `/workspace/`));
-				if (script === "list") return out(0, (await ws.list(target)).map(statLine).join(""));
-				if (script === "remove") return await ws.remove(target), out(0);
-				// chmod: the fake keeps a mode with the file's data, so rewrite the file with the new one.
-				await ws.writeFile(target, await ws.readFile(target), Number.parseInt(cmd[5] ?? "644", 8));
-				return out(0);
-			} catch (error) {
-				if (error instanceof WorkspacePathError) return out(77);
-				return out(error instanceof WorkspaceFileError && /Not a directory/.test(error.message) ? 79 : 78);
-			}
+		const { cmd, cwd, timeoutMs, stdin, env } = body as { cmd: string[]; cwd?: string; timeoutMs: number; stdin?: string; env?: Record<string, string> };
+		const events = ws.exec(cmd, { cwd, timeoutMs, stdin, env, signal: init.signal ?? undefined });
+		if (sub === "exec/stream") {
+			const encoder = new TextEncoder();
+			return new Response(
+				new ReadableStream({
+					async start(controller) {
+						init.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")));
+						try {
+							for await (const event of events) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+							controller.close();
+						} catch {}
+					},
+				}),
+				{ status: 200, headers: { "content-type": "application/x-ndjson" } },
+			);
 		}
-		const events: ExecEvent[] = [];
-		for await (const event of ws.exec(cmd, { cwd, timeoutMs, stdin, signal: init.signal ?? undefined })) events.push(event);
-		const exit = events.at(-1) as Extract<ExecEvent, { type: "exit" }>;
-		const text = (type: string) => events.map((e) => (e.type === type ? (e as { data: string }).data : "")).join("");
-		return json(200, { stdout: text("stdout"), stderr: text("stderr"), exitCode: exit.code ?? 137, timedOut: exit.timedOut === true, truncated: false });
+		throw new Error("the provider no longer uses buffered exec");
 	};
 	return { fetch: handler as typeof fetch, requests, backing };
 }
@@ -202,7 +229,7 @@ describe("ComposeWorkspaceProvider", () => {
 			managerUrl: URL_BASE,
 			token: TOKEN,
 			fetch: ((_url: string, init: RequestInit) => {
-				if (String(_url).endsWith("/sessions/h")) return Promise.resolve(json(200, { sessionId: "h" }));
+				if (String(_url).endsWith("/sessions/h")) return Promise.resolve(json(200, { sessionId: "h", state: "running" }));
 				seen = init.signal ?? undefined;
 				return new Promise((_, reject) => init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
 			}) as unknown as typeof fetch,
@@ -219,13 +246,13 @@ describe("ComposeWorkspaceProvider", () => {
 		expect(before).toEqual(events);
 	});
 
-	it("sends env through env(1) and the timeout to the manager", async () => {
+	it("sends env and the timeout in the exec body", async () => {
 		const m = fakeManager();
 		const p = provider(m);
 		const ws = await p.get(await p.create(spec("env-1")));
 		await ws!.writeFile("sub/x", new Uint8Array());
 		for await (const _ of ws!.exec(["echo", "hi"], { timeoutMs: 1234, env: { A: "1" }, cwd: "sub" })) void _;
-		expect(m.requests.at(-1)?.body).toMatchObject({ cmd: ["env", "A=1", "echo", "hi"], cwd: "/workspace/sub", timeoutMs: 1234 });
+		expect(m.requests.at(-1)?.body).toMatchObject({ cmd: ["echo", "hi"], env: { A: "1" }, cwd: "/workspace/sub", timeoutMs: 1234 });
 	});
 
 	it("maps the manager's health for ProviderCapacity and refreshes capabilities", async () => {
@@ -240,6 +267,103 @@ describe("ComposeWorkspaceProvider", () => {
 		// A disk the manager could not read is reported as null by JSON, and is NaN here.
 		const blind = new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: (async () => json(200, { runsc: false, freeDiskPct: null, maxConcurrent: 1, running: 1, free: 0 })) as typeof fetch });
 		expect(await blind.managerHealth()).toMatchObject({ freeDiskPct: Number.NaN, runscVerified: false });
+	});
+
+	it("maps file and session refusals by their codes", async () => {
+		const m = fakeManager();
+		const p = provider(m);
+		const ref = await p.create(spec("map-1"));
+		const ws = (await p.get(ref))!;
+		await expect(ws.readFile("missing")).rejects.toBeInstanceOf(WorkspaceFileError);
+		await expect(ws.readFile("../x")).rejects.toBeInstanceOf(WorkspacePathError);
+		await ws.stop();
+		await expect(ws.writeFile("a", new Uint8Array())).rejects.toMatchObject({ status: 409, code: "session_stopped" });
+		await expect(ws.exec(["true"], { timeoutMs: 1000 })[Symbol.asyncIterator]().next()).rejects.toMatchObject({ status: 409, code: "session_stopped" });
+		await ws.start();
+		await p.destroy(ref);
+		await expect(ws.readFile("a")).rejects.toBeInstanceOf(WorkspaceNotFoundError);
+		expect(await ws.status()).toEqual({ state: "gone" });
+	});
+
+	it("lists a session kept by destroy as gone and opens none for it", async () => {
+		const m = fakeManager();
+		const p = provider(m);
+		const ref = await p.create(spec("keep-1"));
+		await p.destroy(ref, { keepVolume: true });
+		expect(m.requests.at(-1)?.path).toBe("/sessions/keep-1?keepVolume=1");
+		expect((await p.list({ state: "gone" })).map((i) => i.ref.sessionId)).toEqual(["keep-1"]);
+		expect(await p.get(ref)).toBeNull();
+		// A manager that did answer a gone session on GET would still give no workspace.
+		const odd = new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: (async () => json(200, { sessionId: "keep-1", state: "gone" })) as typeof fetch });
+		expect(await odd.get(ref)).toBeNull();
+	});
+
+	it("stat follows a symlink the manager describes as itself, within /workspace", async () => {
+		const m = fakeManager();
+		const p = provider(m);
+		const ws = (await p.get(await p.create(spec("stat-1"))))!;
+		const run = async (cmd: string[]) => {
+			for await (const _ of ws.exec(cmd, { timeoutMs: 5000 })) void _;
+		};
+		await ws.writeFile("real/data.txt", new TextEncoder().encode("12345"), 0o600);
+		await run(["ln", "-s", "real/data.txt", "file-link"]);
+		await run(["ln", "-s", "file-link", "chain"]);
+		await run(["ln", "-s", "real", "dir-link"]);
+		await run(["ln", "-s", "/etc/hostname", "out-link"]);
+		await run(["ln", "-s", "nowhere", "dangling"]);
+		// The manager's own stat is of the link.
+		expect((await (await m.fetch(`${URL_BASE}/sessions/stat-1/stat?path=file-link`, { headers: { authorization: `Bearer ${TOKEN}` } })).json()) as { type: string }).toMatchObject({ type: "symlink" });
+		expect(await ws.stat("file-link")).toMatchObject({ name: "file-link", type: "file", size: 5, mode: 0o600 });
+		expect(await ws.stat("chain")).toMatchObject({ name: "chain", type: "file", size: 5 });
+		expect(await ws.stat("dir-link")).toMatchObject({ type: "dir" });
+		expect(await ws.stat("real/data.txt")).toMatchObject({ type: "file", size: 5 });
+		await expect(ws.stat("out-link")).rejects.toBeInstanceOf(WorkspacePathError);
+		await expect(ws.stat("dangling")).rejects.toBeInstanceOf(WorkspaceFileError);
+		// Only a symlink costs the extra exec.
+		const before = m.requests.length;
+		await ws.stat("real/data.txt");
+		expect(m.requests.length - before).toBe(1);
+	});
+
+	it("streams output as the command prints it", async () => {
+		const p = provider();
+		const ws = (await p.get(await p.create(spec("stream-1"))))!;
+		const seen: { at: number; event: ExecEvent }[] = [];
+		const started = Date.now();
+		for await (const event of ws.exec(["sh", "-c", "echo first; sleep 0.5; echo second"], { timeoutMs: 10_000 })) seen.push({ at: Date.now() - started, event });
+		expect(seen.map((s) => s.event)).toEqual([
+			{ type: "stdout", data: "first\n" },
+			{ type: "stdout", data: "second\n" },
+			{ type: "exit", code: 0 },
+		]);
+		expect(seen[1]!.at - seen[0]!.at).toBeGreaterThanOrEqual(400);
+		expect(seen[0]!.at).toBeLessThan(300);
+	});
+
+	it("reads NDJSON split across chunks and fails when the stream ends without an exit", async () => {
+		const chunked = (parts: string[]) => {
+			const encoder = new TextEncoder();
+			return new ComposeWorkspaceProvider({
+				managerUrl: URL_BASE,
+				token: TOKEN,
+				fetch: (async (url: string) =>
+					String(url).endsWith("/exec/stream")
+						? new Response(new ReadableStream({ start: (c) => (parts.forEach((x) => c.enqueue(encoder.encode(x))), c.close()) }), { status: 200 })
+						: json(200, { sessionId: "c", state: "running" })) as unknown as typeof fetch,
+			});
+		};
+		const run = async (parts: string[]) => {
+			const p = chunked(parts);
+			const ws = (await p.get({ id: "c", providerId: "compose", sessionId: "c" }))!;
+			const out: ExecEvent[] = [];
+			for await (const e of ws.exec(["x"], { timeoutMs: 1000 })) out.push(e);
+			return out;
+		};
+		expect(await run(['{"type":"stdout","da', 'ta":"h\\u00e9"}\n{"type":"exit","code":3,"signal":null}', "\n"])).toEqual([
+			{ type: "stdout", data: "h\u00e9" },
+			{ type: "exit", code: 3 },
+		]);
+		await expect(run(['{"type":"stdout","data":"x"}\n'])).rejects.toBeInstanceOf(ComposeManagerError);
 	});
 
 	it("accepts https, and http only to loopback or private hosts", () => {

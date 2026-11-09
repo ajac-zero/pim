@@ -35,14 +35,16 @@
       { "name": "Pim", "class_name": "Pim" },
       { "name": "Auth", "class_name": "Auth" },
       { "name": "Directory", "class_name": "Directory" },
-      { "name": "Gallery", "class_name": "Gallery" }
+      { "name": "Gallery", "class_name": "Gallery" },
+      { "name": "CodingScheduler", "class_name": "CodingSchedulerDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Pim"] },
     { "tag": "v2", "new_sqlite_classes": ["Auth"] },
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
-    { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
+    { "tag": "v4", "new_sqlite_classes": ["Gallery"] },
+    { "tag": "v5", "new_sqlite_classes": ["CodingSchedulerDO"] }
   ],
   // Only what differs from the defaults in src/deployment.ts.
   "vars": {

@@ -180,7 +180,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-describe("keeping connector events' subscriptions (an inert manager)", () => {
+describe("keeping connector events' subscriptions", () => {
 	it("subscribes an enabled trigger once, with a key and secret of its own, and its binding admits the connector's signed events", async () => {
 		await withManager(async ({ manager, connector, store, trigger, clock, sql }) => {
 			const id = trigger();
@@ -703,14 +703,14 @@ describe("keeping connector events' subscriptions (an inert manager)", () => {
 		});
 	});
 
-	it("is constructed nowhere in Pim; the ingress adapter only in Pim's events route, for a watch a trigger took over", () => {
+	it("is constructed only by Pim, which also runs the ingress adapter for connector events", () => {
 		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
 		const users = (pattern: RegExp) =>
 			Object.entries(files)
 				.filter(([path]) => path !== "../src/triggers/subscriptions.ts")
 				.filter(([, source]) => pattern.test(source as string))
 				.map(([path]) => path);
-		expect(users(/ConnectorSubscriptionManager/)).toEqual([]);
+		expect(users(/new ConnectorSubscriptionManager\b/)).toEqual(["../src/pim.ts"]);
 		expect(users(/new ConnectorIngress\b/)).toEqual(["../src/pim.ts"]);
 	});
 });

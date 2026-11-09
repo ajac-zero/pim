@@ -511,6 +511,21 @@ describe("connector events handed on by the coordinator", () => {
 		});
 	});
 
+	it("ends a process watch when it runs out, waking at that instant", async () => {
+		await withDispatch(async ({ clock, restart }) => {
+			const { store, coordinator } = restart({ storeOptions: { authorize: () => ({ ok: true }) } });
+			expect(store.create({ id: "exit", spec: { ...base, source: { kind: "process", handle: "proc-1", expiresAt: clock.now + HOUR }, authorizationRef: "approval-1" }, lifecycle: "enabled" })).toMatchObject({ ok: true });
+			expect(coordinator.nextWakeAt()).toBe(clock.now + HOUR);
+			clock.now += HOUR - 1;
+			await coordinator.tick();
+			expect(store.get("exit")).toMatchObject({ lifecycle: "enabled" });
+			clock.now += 1;
+			await coordinator.tick();
+			expect(store.get("exit")).toMatchObject({ lifecycle: "ended" });
+			expect(coordinator.nextWakeAt()).toBeNull();
+		});
+	});
+
 	it("hands on a bounded batch per tick, within the space's compute, and wakes again for the rest", async () => {
 		await withDispatch(
 			async ({ store, coordinator, host, clock }) => {

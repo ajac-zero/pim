@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/workspace/repo","session_id":"T-3f9a2c71-8b4e-4d1a-9c6f-5e2b7a8d0c14","tools":["create_file","edit_file","shell_command","shell_command_kill","shell_command_status","skill","Task"],"mcp_servers":[],"agent_mode":"high","subagents":[]}
+{"type":"result","subtype":"error_during_execution","duration_ms":812,"is_error":true,"num_turns":0,"error":"You are out of credits. Add paid credits or choose a paid tier.","session_id":"T-3f9a2c71-8b4e-4d1a-9c6f-5e2b7a8d0c14"}

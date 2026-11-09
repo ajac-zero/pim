@@ -2,10 +2,16 @@ import type { AssistantMessage, ImageContent, JsonObject, StopReason, TextConten
 import type { HarnessEvent, HarnessParser } from "./types";
 
 /**
- * Claude Code's stream-json (https://code.claude.com/docs/en/headless), as
- * Claude Code prints it with `--output-format stream-json`: one JSON message
- * a line, `system`, `stream_event`, `assistant` and `user` messages, and a
- * closing `result`.
+ * Claude Code's stream-json (https://code.claude.com/docs/en/headless): one
+ * JSON message a line, `system`, `stream_event`, `assistant` and `user`
+ * messages, and a closing `result`. Claude Code prints it
+ * (./claude-code.ts), and Amp prints a version of its own
+ * (https://ampcode.com/docs/cli/streaming-json, ./amp.ts), whose
+ * differences this parser reads too: no `stream_event`s; `init` names its
+ * mode (`agent_mode`), not a model; a background subagent's end
+ * (`subagent_finished`); errors as `system` messages; a failed result's
+ * `error` in place of `errors`; no cost; and the calls it refused as
+ * strings (`permission_denials`).
  */
 
 /** What tells one CLI's stream-json from another's. */
@@ -29,8 +35,9 @@ const AUTH_ERRORS = ["authentication_failed", "oauth_org_not_allowed"];
 
 /**
  * Reads stream-json, one line at a time: `system` (`init`, `api_retry`,
- * `permission_denied`), `stream_event` (the model's stream as it is
- * written), `assistant` and `user` messages, and the closing `result`.
+ * `permission_denied`, `subagent_finished` and errors), `stream_event` (the
+ * model's stream as it is written), `assistant` and `user` messages, and
+ * the closing `result`.
  * Messages of subagents (`parent_tool_use_id` set) stay out of the thread's
  * transcript: what the subagent found comes back as its tool call's result.
  * Lines of any other type are skipped; a line that isn't JSON is
@@ -78,7 +85,7 @@ export class StreamJsonParser implements HarnessParser {
 			case "init": {
 				const sessionId = str(value.session_id);
 				if (!sessionId) return [];
-				const model = str(value.model);
+				const model = str(value.model) ?? str(value.agent_mode);
 				if (model) this.#model = model;
 				return [{ type: "session", sessionId, model }];
 			}
@@ -95,6 +102,13 @@ export class StreamJsonParser implements HarnessParser {
 				];
 			case "permission_denied":
 				return [{ type: "permission_denied", tool: str(value.tool_name) ?? "tool", message: str(value.message) ?? "" }];
+			case "subagent_finished":
+				// What a background subagent found comes back to the agent as a message of its own; only its failure is news.
+				return value.status === "completed" ? [] : [{ type: "notice", message: `A background subagent (${str(value.tool_use_id) ?? "unknown"}) ${str(value.status) ?? "stopped"}` }];
+			case "error_during_execution":
+			case "error_max_turns":
+				// Amp's error, which may come in place of a result: one that comes after takes its place.
+				return this.#result({ ...value, is_error: true });
 			default:
 				return [];
 		}
@@ -169,10 +183,16 @@ export class StreamJsonParser implements HarnessParser {
 		const ok = subtype === "success" && value.is_error !== true;
 		const reason = ok ? null : subtype === "error_max_budget_usd" ? "budget" : subtype === "error_max_turns" ? "max_turns" : "error";
 		const text = str(value.result);
-		const errors = Array.isArray(value.errors) ? value.errors.filter((error): error is string => typeof error === "string") : [];
+		// Claude Code's `errors`, or Amp's one `error`.
+		const failure = str(value.error);
+		const errors = [...(Array.isArray(value.errors) ? value.errors.filter((error): error is string => typeof error === "string") : []), ...(failure ? [failure] : [])];
 		const events: HarnessEvent[] = [];
+		// Amp lists the calls it refused as strings. Claude Code's are objects, each also a `permission_denied` message of its own.
+		const denials = Array.isArray(value.permission_denials) ? value.permission_denials.filter((denial): denial is string => typeof denial === "string") : [];
+		for (const denial of denials) events.push({ type: "permission_denied", tool: denial.slice(0, 200), message: "" });
 		if (!ok && [text ?? "", ...errors].some((said) => this.#dialect.loginFailure.test(said))) events.push({ type: "auth_failed", message: text ?? errors[0] ?? "" });
-		events.push({ type: "result", ok, reason, sessionId: str(value.session_id), sessionCostUsd: num(value.total_cost_usd), text, errors });
+		const cost = value.total_cost_usd;
+		events.push({ type: "result", ok, reason, sessionId: str(value.session_id), sessionCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null, text, errors });
 		return events;
 	}
 }

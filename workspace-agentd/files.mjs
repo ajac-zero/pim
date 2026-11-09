@@ -13,6 +13,9 @@ function map(error, p) {
 			return new HttpError(400, 'is_directory', `is a directory: ${p}`)
 		case 'ENOTEMPTY':
 			return new HttpError(409, 'not_empty', `directory is not empty: ${p}`)
+		case 'ENOSPC':
+		case 'EDQUOT':
+			return new HttpError(507, 'disk_full', `no space left for: ${p}`)
 		case 'EACCES':
 		case 'EPERM':
 			return new HttpError(403, 'permission_denied', `permission denied: ${p}`)
@@ -31,7 +34,7 @@ export async function guard(p, fn) {
 
 export function record(name, st) {
 	const type = st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'dir' : 'file'
-	return { name, type, size: st.size, mtimeMs: st.mtimeMs }
+	return { name, type, size: st.size, mode: st.mode & 0o7777, mtimeMs: st.mtimeMs }
 }
 
 export const stat = (resolver, p) =>

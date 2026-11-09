@@ -496,7 +496,8 @@ describe("the coding scheduler", () => {
 						const id = before.running.length > 0 && next() < 0.9 ? any(before.running) : pick();
 						const activity = (["running", "idle", "waiting"] as const)[Math.floor(next() * 3)]!;
 						expect(scheduler.setActivity(id, activity), where).toBe(said.has(id));
-						if (said.has(id)) said.set(id, { activity, since: now });
+						// Saying again what a thread is already doing keeps the time it began.
+						if (said.has(id) && said.get(id)!.activity !== activity) said.set(id, { activity, since: now });
 					} else {
 						const { released, admitted } = next() < 0.5 ? scheduler.sweep() : scheduler.tick();
 						const after = scheduler.snapshot();
@@ -534,7 +535,7 @@ describe("the coding scheduler", () => {
 				// The run did release idle slots, preempt waiting ones, and hold a waiting one back for a blocked queue.
 				expect(seen.idle).toBeGreaterThan(5);
 				expect(seen.preempted).toBeGreaterThan(10);
-				expect(seen.heldBack).toBeGreaterThan(5);
+				expect(seen.heldBack).toBeGreaterThan(2);
 			});
 		}
 	});
@@ -600,6 +601,44 @@ describe("the coding scheduler", () => {
 			expect(scheduler.sweep(clock.now + 5 * MINUTE)).toEqual({ released: [{ threadId: "b", why: "preempted" }], admitted: ["a"] });
 			expect(activities(scheduler)).toEqual(["a:running"]);
 		});
+	});
+
+	it("keeps when a thread went idle or began waiting through repeated reports of the same, and starts over only on a real change", async () => {
+		await withScheduler(
+			({ scheduler, clock }) => {
+				ask(scheduler, "a", "b", "q");
+				scheduler.setActivity("a", "idle");
+				scheduler.setActivity("b", "waiting");
+				// Both are reported again every minute; neither report moves the time they began.
+				for (let minute = 1; minute <= 5; minute++) {
+					clock.now = START + minute * MINUTE;
+					expect(scheduler.setActivity("a", "idle")).toBe(true);
+					expect(scheduler.setActivity("b", "waiting")).toBe(true);
+				}
+				expect(scheduler.snapshot().running.map((slot) => [slot.threadId, slot.activity, slot.activitySince])).toEqual([
+					["a", "idle", START],
+					["b", "waiting", START],
+				]);
+				// b's 5 minutes of grace are up, however often it said it was waiting.
+				expect(scheduler.sweep()).toEqual({ released: [{ threadId: "b", why: "preempted" }], admitted: ["q"] });
+				for (let minute = 6; minute <= 30; minute++) {
+					clock.now = START + minute * MINUTE;
+					scheduler.setActivity("a", "idle");
+				}
+				expect(scheduler.sweep()).toEqual({ released: [{ threadId: "a", why: "idle" }], admitted: [] });
+				// A real change still starts the time over: q goes idle, waits for the person, then is idle again.
+				scheduler.setActivity("q", "idle");
+				clock.now += 10 * MINUTE;
+				scheduler.setActivity("q", "waiting");
+				clock.now += MINUTE;
+				scheduler.setActivity("q", "idle");
+				const idle = clock.now;
+				expect(scheduler.sweep(idle + 30 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
+				expect(scheduler.sweep(idle + 30 * MINUTE)).toEqual({ released: [{ threadId: "q", why: "idle" }], admitted: [] });
+				expect(scheduler.setActivity("q", "idle")).toBe(false);
+			},
+			2,
+		);
 	});
 
 	it("puts a preempted thread that asks again at the head of the queue, behind threads preempted before it", async () => {

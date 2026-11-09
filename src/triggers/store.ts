@@ -758,6 +758,31 @@ export class TriggerStore {
 			.map((row) => ({ id: String(row.trigger_id), generation: Number(row.generation), nextWakeAt: Number(row.next_wake_at) }));
 	}
 
+	/** Enabled triggers watching a process, as `SELECT` rows of the trigger and when its watch runs out. */
+	#processWatches = "SELECT t.id, CAST(json_extract(v.spec, '$.source.expiresAt') AS INTEGER) AS expires_at FROM pim_triggers t JOIN pim_trigger_revisions v ON v.trigger_id = t.id AND v.revision = t.revision WHERE t.lifecycle = 'enabled' AND json_extract(v.spec, '$.source.kind') = 'process'";
+
+	/** Ends every enabled process watch that ran out without the process exiting, so it doesn't stay on for good; returns their ids. */
+	endExpiredWatches(): string[] {
+		const ended: string[] = [];
+		this.#options.transaction(() => {
+			const now = this.#options.now();
+			for (const row of this.#sql.exec(`${this.#processWatches} AND expires_at <= ?`, now).toArray()) {
+				const id = String(row.id);
+				this.#sql.exec("UPDATE pim_triggers SET lifecycle = 'ended', updated_at = ? WHERE id = ?", now, id);
+				this.#nextGeneration(id, now, null);
+				ended.push(id);
+			}
+		});
+		for (const id of ended) this.#options.changed?.(id);
+		return ended;
+	}
+
+	/** When the earliest enabled process watch runs out, or null. */
+	nextWatchExpiry(): number | null {
+		const row = this.#sql.exec(`SELECT MIN(expires_at) AS at FROM (${this.#processWatches})`).one();
+		return row.at === null ? null : Number(row.at);
+	}
+
 	/** The earliest wake of any enabled time trigger, or null. */
 	nextTimeWake(): number | null {
 		const row = this.#sql.exec("SELECT MIN(s.next_wake_at) AS at FROM pim_trigger_sources s JOIN pim_triggers t ON t.id = s.trigger_id WHERE t.lifecycle = 'enabled'").one();

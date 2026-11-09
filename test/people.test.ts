@@ -433,10 +433,9 @@ describe("isolation between people", () => {
 		expect((await hal.browser.json("/api/mcp")).body.servers).toEqual([]);
 		expect(await toolNames(hal.browser)).not.toContain("notes_search");
 
-		await runInDurableObject(env.Pim.getByName(gus.ownerId), async (instance: Pim) => {
-			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Water the plants" });
-		});
-		expect((await gus.browser.json("/api/schedules")).body.schedules).toHaveLength(1);
+		const watering = { label: "Plants", instruction: "Water the plants", source: { kind: "time", schedule: "once", at: Date.now() + 60 * 60_000 }, enabled: true };
+		expect((await gus.browser.json("/api/triggers", { method: "POST", json: watering })).status).toBe(201);
+		expect((await gus.browser.json("/api/schedules")).body.schedules).toMatchObject([{ instruction: "Water the plants" }]);
 		expect((await hal.browser.json("/api/schedules")).body.schedules).toEqual([]);
 
 		await gus.browser.json("/api/settings", { method: "PUT", json: { timeZone: "Asia/Tokyo", approvalPolicy: "auto" } });
@@ -734,15 +733,15 @@ describe("the account", () => {
 		const rita = await person("rita");
 		await rita.browser.json("/api/memory/log", { method: "POST", json: { text: "Rita's bank is in Porto" } });
 		await rita.browser.json("/auth/tokens", { method: "POST", json: { name: "CLI" } });
+		await rita.browser.json("/api/triggers", { method: "POST", json: { label: "Bank", instruction: "Call the bank", source: { kind: "time", schedule: "once", at: Date.now() + 60 * 60_000 }, enabled: true } });
 		await runInDurableObject(env.Pim.getByName(rita.ownerId), async (instance: Pim) => {
 			instance.store.putCredential("openai", JSON.stringify({ type: "oauth", access: "rita-access", refresh: "rita-refresh" }));
-			await instance.schedule(new Date(Date.now() + 60 * 60_000), "runScheduledTask", { session: "1", instruction: "Call the bank" });
 			// Images, and files kept before files moved to people's computers, are in R2, outside the space's storage.
 			await instance.images.keep("1", [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }]);
 			await env.BLOBS.put(`${rita.ownerId}/files/scan`, new Uint8Array([0x25, 0x50, 0x44, 0x46, 0]));
 		});
 		expect((await holdings(rita.ownerId)).remaining).toEqual(
-			expect.arrayContaining(["credentials", "memories", "schedules", "owner profile", "images"]),
+			expect.arrayContaining(["credentials", "memories", "triggers", "owner profile", "images"]),
 		);
 
 		// The space can't be reached: nothing is erased, and nothing says it was.
@@ -1772,11 +1771,10 @@ describe("erasure boundaries", () => {
 
 	it("runs no scheduled work that comes due after the deletion", async () => {
 		const eve = await person("eb-schedule");
-		await runInDurableObject(env.Pim.getByName(eve.ownerId), async (instance: Pim) => {
-			await instance.schedule(new Date(Date.now() + 200), "runScheduledTask", { session: "1", instruction: "Write something" });
-		});
+		const due = { label: "Write", instruction: "Write something", source: { kind: "time", schedule: "once", at: Date.now() + 1_000 }, enabled: true };
+		expect((await eve.browser.json("/api/triggers", { method: "POST", json: due })).status).toBe(201);
 		expect(await deleteAccount(eve.browser, "eb-schedule")).toEqual({ deleted: true });
-		await new Promise((resolve) => setTimeout(resolve, 300));
+		await new Promise((resolve) => setTimeout(resolve, 2_100));
 		// Wiping cleared the alarm; firing one anyway does nothing.
 		await runDurableObjectAlarm(env.Pim.getByName(eve.ownerId));
 		await expectErased(eve.ownerId);

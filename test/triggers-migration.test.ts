@@ -346,7 +346,7 @@ const root = (pim: Pim) => pim.store.sessionOf(ROOT)!;
 
 /** A one-time schedule, as schedule_task makes it, an hour from the triggers' clock. */
 async function oneTime(pim: Pim, chat: string, instruction = "Check the fare.") {
-	return pim.schedule(new Date(clock() + HOUR), "runScheduledTask", { session: chat, instruction, label: "Fare check" });
+	return pim.schedule(new Date(clock() + HOUR), "runScheduledTask" as never, { session: chat, instruction, label: "Fare check" });
 }
 
 /** A watch, as watch_connector_event leaves it once the connector answered its subscribe. */
@@ -490,7 +490,7 @@ describe("the migration in a space", () => {
 		await inSpace(async (pim) => {
 			const chat = root(pim);
 			const scheduled = await oneTime(pim, chat);
-			const daily = await pim.schedule("0 9 * * *", "runScheduledTask", { session: chat, instruction: "Write my brief.", label: "Brief", newChat: true });
+			const daily = await pim.schedule("0 9 * * *", "runScheduledTask" as never, { session: chat, instruction: "Write my brief.", label: "Brief", newChat: true });
 			const kept = addWatch(pim, chat);
 			await pim.enableTriggerEngine();
 			const first = await pim.applyTriggerMigration();
@@ -571,7 +571,7 @@ describe("the migration in a space", () => {
 		});
 	});
 
-	it("never fires a due schedule twice: its alarm runs it once, its shadow never, across a restart and a second apply", async () => {
+	it("never fires a shadow its schedule owns, across a restart and a second apply", async () => {
 		await inSpace(async (pim) => {
 			const chat = root(pim);
 			const scheduled = await oneTime(pim, chat);
@@ -586,13 +586,6 @@ describe("the migration in a space", () => {
 			expect(engineOf(pim).coordinator.runs(id)).toEqual([]);
 			// Nothing enables it while the schedule owns it.
 			expect(engineOf(pim).store.setLifecycle({ id, to: "enabled", expectedRevision: 1 })).toMatchObject({ ok: false, reason: "owned_elsewhere" });
-
-			// The schedule's alarm runs it, retried once, as one submission.
-			faux.setResponses([fauxAssistantMessage("Checked.")]);
-			await pim.runScheduledTask(scheduled.payload, scheduled);
-			await pim.runScheduledTask(scheduled.payload, scheduled);
-			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([`schedule:${scheduled.id}:${scheduled.time}`]);
 
 			// A restart builds the engine again; applying again changes nothing; the shadow still never fires.
 			await pim.disableTriggerEngine();
@@ -727,7 +720,7 @@ const firingAt = (scheduled: Awaited<ReturnType<typeof oneTime>>, seconds: numbe
  * a run would reach it unasked.
  */
 const hourly = (pim: Pim, chat: string) =>
-	pim.schedule(`${(new Date().getUTCMinutes() + 30) % 60} * * * *`, "runScheduledTask", { session: chat, instruction: "Check the fare.", label: "Fare check" });
+	pim.schedule(`${(new Date().getUTCMinutes() + 30) % 60} * * * *`, "runScheduledTask" as never, { session: chat, instruction: "Check the fare.", label: "Fare check" });
 
 /** Lets the trigger engine hand on what is due, and the chat take it. */
 async function handOn(pim: Pim) {
@@ -915,7 +908,7 @@ const logged = (spy: { mock: { calls: unknown[][] } }, event: string) =>
 describe("the automatic migration, as a space starts", () => {
 	afterEach(cleanUp);
 
-	it("moves what it can as the space starts, leaves the rest with its reason, and across a restart delivers each firing and event once, by one side", async () => {
+	it("moves what it can as the space starts, cancels the schedules left, and across a restart delivers each firing and event once, by one side", async () => {
 		// A space of its own, since the restart below leaves a second instance on its storage.
 		const owner = await freshSpace("restarted");
 		const log = vi.spyOn(console, "log");
@@ -926,7 +919,7 @@ describe("the automatic migration, as a space starts", () => {
 				const hourlyTask = await hourly(pim, chat);
 				const soon = await oneTime(pim, chat, "Book the table.");
 				// A cron with a day's name, which triggers would read differently: its schedule keeps it.
-				const named = await pim.schedule("0 9 * * MON", "runScheduledTask", { session: chat, instruction: "Plan the week.", label: "Week" });
+				const named = await pim.schedule("0 9 * * MON", "runScheduledTask" as never, { session: chat, instruction: "Plan the week.", label: "Week" });
 				const passing = addWatch(pim, chat, owner);
 				const silent = addWatch(pim, chat, owner);
 				const pending = addWatch(pim, chat, owner, { subscribed: false });
@@ -955,6 +948,9 @@ describe("the automatic migration, as a space starts", () => {
 				]);
 				const line = JSON.stringify(logged(log, "pim.triggers_migration"));
 				for (const kept of [hourlyTask.id, soon.id, named.id, passing.id, silent.id, passing.secret, "Check the fare.", "Plan the week."]) expect(line).not.toContain(kept);
+				// Then it cancels every schedule left from before schedule_task made triggers, firing none: the triggers that took two over deliver them, and the one no trigger took is dropped, and counted.
+				expect((await pim.listSchedules()).filter((scheduled) => scheduled.callback === "runScheduledTask")).toEqual([]);
+				expect(logged(log, "pim.legacy_schedules_cancelled")).toEqual([{ event: "pim.legacy_schedules_cancelled", owner, cancelled: 3, dropped: 1 }]);
 
 				// Each watch's event, sent twice as a provider retries: the trigger takes the cut-over watch's, every other watch its own.
 				answerRuns(4, ran);
@@ -964,17 +960,14 @@ describe("the automatic migration, as a space starts", () => {
 				// The wake's first tick since the start sweeps: it moves the watch whose event has now passed the adapter's rules, and nothing else.
 				await settle(pim);
 				expect(owners()).toEqual(["trigger:enabled", "trigger:enabled", null, "trigger:enabled", "trigger:enabled", null, null]);
-				const legacyReasons = { cron_syntax: 1, watch_not_subscribed: 1, callback_changed: 1 };
+				const legacyReasons = { watch_not_subscribed: 1, callback_changed: 1 };
 				expect(logged(log, "pim.triggers_migration_sweep")).toEqual([
-					{ event: "pim.triggers_migration_sweep", owner, cause: "first_tick", schedules: 3, watches: 4, outcomes: { cut_over: 1, already: 3, legacy: 3 }, reasons: legacyReasons },
+					{ event: "pim.triggers_migration_sweep", owner, cause: "first_tick", schedules: 0, watches: 4, outcomes: { cut_over: 1, already: 1, legacy: 2 }, reasons: legacyReasons },
 				]);
-				// The first hourly firing: its alarm skips it, and its trigger runs it. The named schedule's alarm, run twice, runs it once.
+				// The first hourly firing: its trigger runs it.
 				const t1 = hourlyTask.time * 1000;
 				moveTo(t1 + SECOND);
-				answerRuns(2, ran);
-				await pim.runScheduledTask(hourlyTask.payload, firingAt(hourlyTask, t1 / 1000));
-				await pim.runScheduledTask(named.payload, named);
-				await pim.runScheduledTask(named.payload, named);
+				answerRuns(1, ran);
 				await settle(pim);
 				triggerClock.offset = 0;
 
@@ -982,7 +975,7 @@ describe("the automatic migration, as a space starts", () => {
 				const restarted = new (pim.constructor as new (ctx: DurableObjectState, env: unknown) => Pim)(stateOf(pim), envOf(pim));
 				await restarted.ensureTriggerEngine();
 				expect(owners()).toEqual(["trigger:enabled", "trigger:enabled", null, "trigger:enabled", "trigger:enabled", null, null]);
-				const unchanged = { event: "pim.triggers_migration", owner, schedules: 3, watches: 4, outcomes: { cut_over: 0, already: 4, legacy: 3 }, reasons: legacyReasons };
+				const unchanged = { event: "pim.triggers_migration", owner, schedules: 0, watches: 4, outcomes: { cut_over: 0, already: 2, legacy: 2 }, reasons: legacyReasons };
 				expect(logged(log, "pim.triggers_migration").slice(1)).toEqual([unchanged, unchanged]);
 
 				// Each watch's event again, twice, and one the watch ran before its cutover, which its trigger takes in as a duplicate to pi.
@@ -992,18 +985,14 @@ describe("the automatic migration, as a space starts", () => {
 				}
 				expect((await send(restarted, silent, "ev-g-2")).status).toBe(204);
 				await settle(restarted);
-				// The one-time schedule's time, then the second hourly firing and the named schedule's next: each alarm skips what a trigger owns.
+				// The one-time schedule's time, then the second hourly firing: each by its trigger.
 				const at = soon.time * 1000;
 				moveTo(at + SECOND);
 				answerRuns(1, ran);
-				await restarted.runScheduledTask(soon.payload, soon);
 				await settle(restarted);
 				const t2 = t1 + HOUR;
-				const nextWeek = { ...named, time: named.time + 7 * 24 * 3600 };
 				moveTo(t2 + SECOND);
-				answerRuns(2, ran);
-				await restarted.runScheduledTask(hourlyTask.payload, firingAt(hourlyTask, t2 / 1000));
-				await restarted.runScheduledTask(named.payload, nextWeek);
+				answerRuns(1, ran);
 				await settle(restarted);
 				triggerClock.offset = 0;
 
@@ -1022,17 +1011,16 @@ describe("the automatic migration, as a space starts", () => {
 					"ev-g-8": ["watch"],
 				});
 				for (const [n, kept] of Object.entries(watchOf)) expect(submittedAnywhere(pim, `ev-g-${n}`)).toEqual([legacyEventOperationId(kept.id, `ev-g-${n}`)]);
-				// Each firing went in once, under its schedule's key: by the trigger for what it took over, whose alarms skipped them, and by the schedule for the rest.
+				// Each firing of what a trigger took over went in once, by the trigger, under its schedule's key; the dropped schedule's never.
 				const keys = (scheduled: { id: string }, ...times: number[]) => times.map((time) => legacyFiringOperationId(scheduled.id, time)).sort();
 				expect(submittedAnywhere(pim, `schedule:${hourlyTask.id}:`).sort()).toEqual(keys(hourlyTask, t1, t2));
 				expect(submittedAnywhere(pim, `schedule:${soon.id}:`)).toEqual(keys(soon, at));
-				expect(submittedAnywhere(pim, `schedule:${named.id}:`).sort()).toEqual(keys(named, named.time * 1000, nextWeek.time * 1000));
+				expect(submittedAnywhere(pim, `schedule:${named.id}:`)).toEqual([]);
 				const engine = restarted.triggerEngine()!;
 				expect(engine.coordinator.runs(recordOf(pim, "schedule", hourlyTask.id)!.triggerId).map((run) => run.scheduledFor)).toEqual([t1, t2]);
 				expect(engine.coordinator.runs(recordOf(pim, "schedule", soon.id)!.triggerId).map((run) => run.scheduledFor)).toEqual([at]);
-				expect(receiptsOf(pim, "schedule", hourlyTask.id)).toEqual([["skipped_firing", String(t1)], ["skipped_firing", String(t2)]]);
-				expect(receiptsOf(pim, "schedule", soon.id)).toEqual([["skipped_firing", String(at)]]);
-				expect(receiptsOf(pim, "schedule", named.id)).toEqual([]);
+				// No alarm was left to skip any.
+				for (const scheduled of [hourlyTask, soon, named]) expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([]);
 				await restarted.disableTriggerEngine();
 			});
 		} finally {
@@ -1048,7 +1036,7 @@ describe("the automatic migration, as a space starts", () => {
 				const chat = root(pim);
 				pim.agents.majordomo();
 				const count = MIGRATION_ITEMS_PER_START + 2;
-				for (let n = 0; n < count; n++) await pim.schedule("0 * * * *", "runScheduledTask", { session: chat, instruction: `Check fare ${n}.`, label: `Fare ${n}` });
+				for (let n = 0; n < count; n++) await pim.schedule("0 * * * *", "runScheduledTask" as never, { session: chat, instruction: `Check fare ${n}.`, label: `Fare ${n}` });
 				const ids = (await pim.listSchedules()).filter((scheduled) => scheduled.callback === "runScheduledTask").map((scheduled) => scheduled.id).sort();
 				expect(ids).toHaveLength(count);
 				await pim.enableTriggerEngine();
@@ -1107,14 +1095,14 @@ describe("the automatic migration, as a space starts", () => {
 		}
 	});
 
-	it("ends a schedule or watch with the trigger made from it, whichever side it is stopped from, and gives back what a deleted agent's triggers took over", async () => {
+	it("ends a schedule or watch with the trigger made from it, whichever side it is stopped from, and gives back the watches a deleted agent's triggers took over", async () => {
 		const scout = (await post("/agents", { name: "Scout" })).body.id as string;
 		const made = await inSpace(async (pim) => {
 			const chat = root(pim);
 			pim.agents.majordomo();
 			const deleted = await hourly(pim, chat);
-			const cancelled = await pim.schedule("30 * * * *", "runScheduledTask", { session: chat, instruction: "Check the train.", label: "Train" });
-			const scouted = await pim.schedule("15 * * * *", "runScheduledTask", { session: chat, instruction: "Scout the news.", label: "News", newChat: true, agent: scout });
+			const cancelled = await pim.schedule("30 * * * *", "runScheduledTask" as never, { session: chat, instruction: "Check the train.", label: "Train" });
+			const scouted = await pim.schedule("15 * * * *", "runScheduledTask" as never, { session: chat, instruction: "Scout the news.", label: "News", newChat: true, agent: scout });
 			const stopped = addWatch(pim, chat);
 			const quiet = addWatch(pim, chat);
 			await pim.enableTriggerEngine();
@@ -1137,7 +1125,7 @@ describe("the automatic migration, as a space starts", () => {
 		// Stopping a watch, as stop_watch does, deletes its trigger; deleting the shadow of a watch that still delivers its own events stops the watch.
 		expect((await api(`/watches/${items.stopped[1]}`, { method: "DELETE" })).status).toBe(200);
 		expect((await api(path("quiet"), { method: "DELETE" })).status).toBe(200);
-		// The agent is deleted: the schedule its trigger took over goes back to the schedule, which goes on with the chat's agent.
+		// The agent is deleted: a schedule has no alarm to go back to, so its trigger keeps it.
 		expect((await api(`/agents/${scout}`, { method: "DELETE" })).status).toBe(200);
 
 		await inSpace(async (pim) => {
@@ -1150,11 +1138,10 @@ describe("the automatic migration, as a space starts", () => {
 				return [record.phase, record.owner, engine.store.get(record.triggerId)!.lifecycle];
 			};
 			for (const name of ["deleted", "cancelled", "stopped", "quiet"] as const) expect([name, ...state(name)]).toEqual([name, "rolled_back", "legacy", "deleted"]);
-			expect(state("scouted")).toEqual(["shadow", "legacy", "paused"]);
-			expect(ownersOf(pim, "schedule", items.scouted[1])).toEqual([["trigger", "cutover"], ["legacy", "forced"]]);
-			expect(firingOwner(sqlOf(pim), "schedule", items.scouted[1], clock() + HOUR)).toBe("legacy");
-			// The next start leaves the given-back schedule where it is, and nothing of the others comes back.
-			expect(await pim.runTriggerMigration()).toEqual([{ kind: "schedule", legacyId: items.scouted[1], owner: "legacy", reason: "cut_back", triggerId: records.scouted!.triggerId }]);
+			expect(state("scouted")).toEqual(["shadow", "trigger", "enabled"]);
+			expect(ownersOf(pim, "schedule", items.scouted[1])).toEqual([["trigger", "cutover"]]);
+			// The next migration leaves it with its trigger, and nothing of the others comes back.
+			expect(await pim.runTriggerMigration()).toEqual([{ kind: "schedule", legacyId: items.scouted[1], owner: "trigger", outcome: "already", triggerId: records.scouted!.triggerId }]);
 			await pim.disableTriggerEngine();
 		});
 	});
@@ -1191,7 +1178,7 @@ describe("the migration's sweep, in a space that is already running", () => {
 				const richardChat = await chatWith(pim, owner, richard.id);
 				await pim.enableTriggerEngine();
 				const scoutCron = farCron();
-				const scout = await pim.schedule(scoutCron, "runScheduledTask", { session: richardChat, instruction: "Scout the news.", label: "Scout", newChat: true });
+				const scout = await pim.schedule(scoutCron, "runScheduledTask" as never, { session: richardChat, instruction: "Scout the news.", label: "Scout", newChat: true });
 				const hourlyTask = await hourly(pim, chat);
 				const soon = await oneTime(pim, chat, "Book the table.");
 				const items = [scout, hourlyTask, soon];
@@ -1211,32 +1198,25 @@ describe("the migration's sweep, in a space that is already running", () => {
 					{ event: "pim.triggers_migration_sweep", owner, cause: "first_tick", schedules: 3, watches: 0, outcomes: { cut_over: 3, already: 0, legacy: 0 }, reasons: {} },
 				]);
 
-				// The firing due before the cutover is its schedule's: the trigger never fires it, and its alarm, however late, runs it.
+				// The firing due before the cutover was its schedule's: the trigger never fires it.
 				const ran: Ran[] = [];
 				await settle(pim);
 				expect(engine.coordinator.runs(triggerOf(hourlyTask))).toEqual([]);
-				answerRuns(1, ran);
-				await pim.runScheduledTask(hourlyTask.payload, firingAt(hourlyTask, t1 / 1000));
-				await settle(pim);
-				// The one-time task's time and the hourly task's next firing are the triggers': each alarm skips its own.
+				// The one-time task's time and the hourly task's next firing are the triggers'.
 				moveTo(at + SECOND);
 				answerRuns(1, ran);
-				await pim.runScheduledTask(soon.payload, soon);
 				await settle(pim);
 				moveTo(t2 + SECOND);
 				answerRuns(1, ran);
-				await pim.runScheduledTask(hourlyTask.payload, firingAt(hourlyTask, t2 / 1000));
 				await settle(pim);
 
-				expect(ran.map((run) => (run.input.startsWith("[Trigger") ? "trigger" : run.input.startsWith("[Scheduled task") ? "schedule" : run.input))).toEqual(["schedule", "trigger", "trigger"]);
+				expect(ran.map((run) => (run.input.startsWith("[Trigger") ? "trigger" : run.input))).toEqual(["trigger", "trigger"]);
 				const keys = (scheduled: { id: string }, ...times: number[]) => times.map((time) => legacyFiringOperationId(scheduled.id, time)).sort();
-				expect(submittedAnywhere(pim, `schedule:${hourlyTask.id}:`).sort()).toEqual(keys(hourlyTask, t1, t2));
+				expect(submittedAnywhere(pim, `schedule:${hourlyTask.id}:`).sort()).toEqual(keys(hourlyTask, t2));
 				expect(submittedAnywhere(pim, `schedule:${soon.id}:`)).toEqual(keys(soon, at));
 				expect(submittedAnywhere(pim, `schedule:${scout.id}:`)).toEqual([]);
 				expect(engine.coordinator.runs(triggerOf(hourlyTask)).map((run) => run.scheduledFor)).toEqual([t2]);
 				expect(engine.coordinator.runs(triggerOf(soon)).map((run) => run.scheduledFor)).toEqual([at]);
-				expect(receiptsOf(pim, "schedule", hourlyTask.id)).toEqual([["skipped_firing", String(t2)]]);
-				expect(receiptsOf(pim, "schedule", soon.id)).toEqual([["skipped_firing", String(at)]]);
 				// Each item changed owner once, by the one sweep.
 				expect(items.map((scheduled) => ownersOf(pim, "schedule", scheduled.id))).toEqual(items.map(() => [["trigger", "cutover"]]));
 				await pim.disableTriggerEngine();
@@ -1246,7 +1226,7 @@ describe("the migration's sweep, in a space that is already running", () => {
 		}
 	});
 
-	it("sweeps again only after the hour, or at once for what schedule_task made, moving each item once however often it sweeps", async () => {
+	it("sweeps again only after the hour, moving each item once however often it sweeps", async () => {
 		const owner = await freshSpace("swept");
 		const log = vi.spyOn(console, "log");
 		try {
@@ -1254,13 +1234,13 @@ describe("the migration's sweep, in a space that is already running", () => {
 				const chat = ROOT_SESSION;
 				pim.agents.majordomo();
 				await pim.enableTriggerEngine();
-				const first = await pim.schedule(farCron(), "runScheduledTask", { session: chat, instruction: "Plan the day.", label: "Day" });
+				const first = await pim.schedule(farCron(), "runScheduledTask" as never, { session: chat, instruction: "Plan the day.", label: "Day" });
 				await pim.runTriggerTick();
 				expect(recordOf(pim, "schedule", first.id)!.owner).toBe("trigger");
 				const moved = JSON.stringify(migrationRecords(sqlOf(pim)));
 
 				// Made after the start and not through schedule_task, a schedule waits for the hour: ticks within it don't sweep, and its schedule delivers it meanwhile.
-				const later = await pim.schedule(farCron(15), "runScheduledTask", { session: chat, instruction: "Plan the evening.", label: "Evening" });
+				const later = await pim.schedule(farCron(15), "runScheduledTask" as never, { session: chat, instruction: "Plan the evening.", label: "Evening" });
 				await pim.runTriggerTick();
 				await pim.runTriggerTick();
 				expect(recordOf(pim, "schedule", later.id)).toBeNull();
@@ -1276,23 +1256,13 @@ describe("the migration's sweep, in a space that is already running", () => {
 				await pim.runTriggerTick();
 				expect(deliveryState(pim)).toBe(settled);
 
-				// What schedule_task makes is swept on the wake's next tick, which is set for now, without waiting the hour.
-				const services = (pim as unknown as { services(): { schedule(when: string, payload: Record<string, unknown>): Promise<{ id: string }> } }).services();
-				const asked = await services.schedule(farCron(30), { session: chat, instruction: "Plan the night.", label: "Night" });
-				await pim.wakeTriggers();
-				const [wake] = (await pim.listSchedules()).filter((scheduled) => scheduled.callback === TRIGGER_TICK_CALLBACK);
-				expect(wake!.time * 1000).toBeLessThanOrEqual(Date.now() + 2 * SECOND);
-				await pim.runTriggerTick();
-				expect(recordOf(pim, "schedule", asked.id)!.owner).toBe("trigger");
-
 				expect(logged(log, "pim.triggers_migration_sweep").map(({ cause, outcomes }) => [cause, outcomes])).toEqual([
 					["first_tick", { cut_over: 1, already: 0, legacy: 0 }],
 					["hourly", { cut_over: 1, already: 1, legacy: 0 }],
 					["hourly", { cut_over: 0, already: 2, legacy: 0 }],
-					["asked", { cut_over: 1, already: 2, legacy: 0 }],
 				]);
 				// One change of owner per item, however many sweeps saw it.
-				expect(ownershipChanges(sqlOf(pim)).map((change) => [change.legacyId, change.owner])).toEqual([first.id, later.id, asked.id].map((id) => [id, "trigger"]));
+				expect(ownershipChanges(sqlOf(pim)).map((change) => [change.legacyId, change.owner])).toEqual([first.id, later.id].map((id) => [id, "trigger"]));
 				await pim.disableTriggerEngine();
 			});
 		} finally {
@@ -1309,7 +1279,7 @@ describe("the migration's sweep, in a space that is already running", () => {
 				const chat = ROOT_SESSION;
 				pim.agents.majordomo();
 				await pim.enableTriggerEngine();
-				const scheduled = await pim.schedule(farCron(), "runScheduledTask", { session: chat, instruction: "Plan the day.", label: "Day" });
+				const scheduled = await pim.schedule(farCron(), "runScheduledTask" as never, { session: chat, instruction: "Plan the day.", label: "Day" });
 				const unreadable = vi.spyOn(pim, "previewTriggerMigration").mockRejectedValueOnce(new Error("No plan today"));
 				await pim.runTriggerTick();
 				unreadable.mockRestore();
@@ -1372,12 +1342,11 @@ describe("cutting over, in a space", () => {
 		await inSpace((pim) => pim.disableTriggerEngine());
 	});
 
-	it("fires a cut-over schedule from its trigger, notifying as the schedule did, while the schedule's alarm skips what the trigger owns", async () => {
+	it("fires a cut-over schedule from its trigger, under the schedule's key, notifying as the schedule did", async () => {
 		await inSpace(async (pim) => {
 			const chat = root(pim);
 			pim.agents.majordomo();
 			const scheduled = await oneTime(pim, chat);
-			const control = await oneTime(pim, chat);
 			await pim.enableTriggerEngine();
 			await pim.applyTriggerMigration();
 			const [cut] = (await pim.cutoverTriggerMigration([{ kind: "schedule", legacyId: scheduled.id }]))!;
@@ -1386,13 +1355,6 @@ describe("cutting over, in a space", () => {
 			const due = scheduled.time * 1000;
 			expect(firingOwner(sqlOf(pim), "schedule", scheduled.id, due)).toBe("trigger");
 			expect(firingOwner(sqlOf(pim), "schedule", scheduled.id, recordOf(pim, "schedule", scheduled.id)!.ownerSince! - 1)).toBe("legacy");
-			expect(firingOwner(sqlOf(pim), "schedule", control.id, control.time * 1000)).toBe("legacy");
-
-			// The schedule's alarm comes first, early: its firing is the trigger's, so it runs nothing.
-			await pim.runScheduledTask(scheduled.payload, scheduled);
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([]);
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([["skipped_firing", String(due)]]);
-			expect(notificationOf(pim, legacyFiringOperationId(scheduled.id, due))).toBeNull();
 
 			// The trigger fires it: one submission, under the schedule's key, and the notification the schedule would have given.
 			moveTo(due + MINUTE);
@@ -1405,28 +1367,16 @@ describe("cutting over, in a space", () => {
 			const notified = notificationOf(pim, key);
 			expect(notified).toMatchObject({ id: key, kind: "scheduled", session: chat, title: "Fare check", body: "" });
 
-			// The alarm again, late, as the SDK retries: still the trigger's, still nothing.
-			await pim.runScheduledTask(scheduled.payload, scheduled);
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([key]);
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([["skipped_firing", String(due)], ["skipped_firing", String(due)]]);
-			expect(pim.store.notifications({ limit: 1000 }).filter((one) => one.id === key)).toHaveLength(1);
-			// Nor does the trigger fire it twice.
+			// Nor does it fire it twice, or notify twice.
 			await handOn(pim);
 			expect(engineOf(pim).coordinator.runs(triggerId)).toHaveLength(1);
-
-			// The schedule still its own runs and notifies as ever: the same notification, but for its own key.
-			faux.setResponses([fauxAssistantMessage("Checked by the schedule.")]);
-			await pim.runScheduledTask(control.payload, control);
-			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
-			const legacy = notificationOf(pim, `schedule:${control.id}:${control.time}`)!;
-			const shape = ({ kind, session, title, body }: typeof legacy) => ({ kind, session, title, body });
-			expect(shape(notified!)).toEqual(shape(legacy));
-			expect(receiptsOf(pim, "schedule", control.id)).toEqual([]);
+			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([key]);
+			expect(pim.store.notifications({ limit: 1000 }).filter((one) => one.id === key)).toHaveLength(1);
 			await pim.disableTriggerEngine();
 		});
 	});
 
-	it("cuts a schedule back only once its trigger handed on what was due, and the schedule runs every firing from then; over again, the trigger takes the next", async () => {
+	it("cuts a schedule back only once its trigger handed on what was due, and the trigger admits nothing from then; over again, it takes the next", async () => {
 		await inSpace(async (pim) => {
 			const chat = root(pim);
 			pim.agents.majordomo();
@@ -1446,8 +1396,7 @@ describe("cutting over, in a space", () => {
 			expect(pim.cutbackTriggerMigration()).toEqual([{ kind: "schedule", legacyId: scheduled.id, triggerId, outcome: "in_flight" }]);
 			expect(snapshot(pim)).toBe(before);
 			expect(engineOf(pim).store.get(triggerId)!.lifecycle).toBe("enabled");
-			// The alarm skips it; the trigger hands it on; then the cutback goes through, and the trigger is paused.
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, t1 / 1000));
+			// The trigger hands it on; then the cutback goes through, and the trigger is paused.
 			faux.setResponses([toolUse("send_to_user", { message: "One." })]);
 			await handOn(pim);
 			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t1)]);
@@ -1459,16 +1408,11 @@ describe("cutting over, in a space", () => {
 			expect(firingOwner(sqlOf(pim), "schedule", scheduled.id, t1)).toBe("trigger");
 			expect(firingOwner(sqlOf(pim), "schedule", scheduled.id, t2)).toBe("legacy");
 
-			// The next firing is the schedule's: the trigger admits nothing, and the alarm runs it, notifying as ever.
+			// The next firing is the schedule's: the trigger admits nothing.
 			moveTo(t2 + SECOND);
 			await handOn(pim);
 			expect(engineOf(pim).coordinator.runs(triggerId)).toHaveLength(1);
-			faux.setResponses([fauxAssistantMessage("Two.")]);
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, t2 / 1000));
-			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t1), keyAt(t2)]);
-			expect(notificationOf(pim, keyAt(t2))).toMatchObject({ kind: "scheduled", title: "Fare check" });
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([["skipped_firing", String(t1)]]);
+			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t1)]);
 
 			// Over again: the trigger, enabled again, owns the firings from now, under a new generation.
 			expect((await pim.cutoverTriggerMigration())!.map((item) => item.outcome)).toEqual(["cut_over"]);
@@ -1476,17 +1420,15 @@ describe("cutting over, in a space", () => {
 			expect(firingOwner(sqlOf(pim), "schedule", scheduled.id, t2)).toBe("legacy");
 			expect(firingOwner(sqlOf(pim), "schedule", scheduled.id, t3)).toBe("trigger");
 			moveTo(t3 + SECOND);
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, t3 / 1000));
 			faux.setResponses([toolUse("send_to_user", { message: "Three." })]);
 			await handOn(pim);
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t1), keyAt(t2), keyAt(t3)]);
+			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t1), keyAt(t3)]);
 			expect(engineOf(pim).coordinator.runs(triggerId).map((run) => run.scheduledFor)).toEqual([t1, t3]);
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([["skipped_firing", String(t1)], ["skipped_firing", String(t3)]]);
 			await pim.disableTriggerEngine();
 		});
 	});
 
-	it("leaves a firing due before the cutover to the schedule, however late its alarm runs, and the trigger never fires it", async () => {
+	it("leaves a firing due before the cutover to the schedule: the trigger never fires it, and fires the next", async () => {
 		await inSpace(async (pim) => {
 			const chat = root(pim);
 			pim.agents.majordomo();
@@ -1511,22 +1453,14 @@ describe("cutting over, in a space", () => {
 			expect(engineOf(pim).coordinator.runs(triggerId)).toEqual([]);
 			expect(engineOf(pim).store.occurrences(triggerId)).toEqual([]);
 
-			// Its alarm, late, runs it as ever: one submission under its key, its notification, and no receipt.
-			faux.setResponses([fauxAssistantMessage("One, by the schedule.")]);
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, t1 / 1000));
-			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t1)]);
-			expect(notificationOf(pim, keyAt(t1))).toMatchObject({ kind: "scheduled", title: "Fare check" });
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([]);
+			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([]);
 
-			// The next is the trigger's: its alarm skips it, and the trigger runs it once.
+			// The next is the trigger's, which runs it once.
 			moveTo(t2 + SECOND);
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, t2 / 1000));
 			faux.setResponses([toolUse("send_to_user", { message: "Two, by the trigger." })]);
 			await handOn(pim);
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t1), keyAt(t2)]);
+			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([keyAt(t2)]);
 			expect(engineOf(pim).coordinator.runs(triggerId).map((run) => run.scheduledFor)).toEqual([t2]);
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([["skipped_firing", String(t2)]]);
 			await pim.disableTriggerEngine();
 		});
 	});
@@ -1604,17 +1538,13 @@ describe("cutting over, in a space", () => {
 			expect(state()).toEqual(overAgain);
 			expect(made(storeOf(engine)).rollback().map((item) => item.outcome)).toEqual(["rolled_back"]);
 			expect(state()).toMatchObject({ record: { owner: "legacy", phase: "rolled_back" }, trigger: { lifecycle: "deleted" }, owners: [["trigger", "cutover"], ["legacy", "cutback"], ["trigger", "cutover"], ["legacy", "rollback"]] });
-			// The schedule is its own from the rollback on: what it fires now, it runs.
+			// The schedule is its own from the rollback on.
 			expect(firingOwner(sqlOf(pim), "schedule", scheduled.id, clock())).toBe("legacy");
-			faux.setResponses([fauxAssistantMessage("Run by the schedule.")]);
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, Math.floor(clock() / 1000) + 1));
-			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toHaveLength(1);
 			await pim.disableTriggerEngine();
 		});
 	});
 
-	it("gives cut-over items back when the engine is turned off, keeping what their triggers admitted for when they own them again", async () => {
+	it("keeps a cut-over schedule with its trigger when the engine is turned off, which hands on what was due once it is on again", async () => {
 		await inSpace(async (pim) => {
 			const chat = root(pim);
 			pim.agents.majordomo();
@@ -1625,33 +1555,20 @@ describe("cutting over, in a space", () => {
 			const triggerId = recordOf(pim, "schedule", scheduled.id)!.triggerId;
 			const t1 = scheduled.time * 1000;
 			moveTo(t1 + SECOND);
-			// Off, with a firing due: the item is the schedule's again, by force; the firing, the trigger's, waits.
+			// Off, with a firing due: a schedule has no alarm to go back to, so it stays its trigger's, and nothing is handed on.
 			await pim.disableTriggerEngine();
 			expect(pim.triggerEngine()).toBeNull();
-			expect(recordOf(pim, "schedule", scheduled.id)).toMatchObject({ owner: "legacy", phase: "shadow" });
-			expect(ownersOf(pim, "schedule", scheduled.id)).toEqual([["trigger", "cutover"], ["legacy", "forced"]]);
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, t1 / 1000));
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([["skipped_firing", String(t1)]]);
+			expect(recordOf(pim, "schedule", scheduled.id)).toMatchObject({ owner: "trigger", phase: "shadow" });
+			expect(ownersOf(pim, "schedule", scheduled.id)).toEqual([["trigger", "cutover"]]);
+			await pim.runTriggerTick();
 			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([]);
-			// The next firing is the schedule's.
-			const t2 = t1 + HOUR;
-			moveTo(t2 + SECOND);
-			faux.setResponses([fauxAssistantMessage("Two.")]);
-			await pim.runScheduledTask(scheduled.payload, firingAt(scheduled, t2 / 1000));
-			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([legacyFiringOperationId(scheduled.id, t2)]);
 
-			// On again, the record is read back as it is, and the trigger is paused with the first firing pending.
+			// On again, the trigger is as it was, and hands the firing on, late, under the schedule's key.
 			await pim.enableTriggerEngine();
-			expect(engineOf(pim).store.get(triggerId)!.lifecycle).toBe("paused");
-			expect(engineOf(pim).store.outbox(triggerId).map((item) => item.status)).toEqual(["pending"]);
-			await handOn(pim);
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([legacyFiringOperationId(scheduled.id, t2)]);
-			// Over again: the trigger hands the kept firing on, late, and the next is its own.
-			expect((await pim.cutoverTriggerMigration())!.map((item) => item.outcome)).toEqual(["cut_over"]);
+			expect(engineOf(pim).store.get(triggerId)!.lifecycle).toBe("enabled");
 			faux.setResponses([toolUse("send_to_user", { message: "One, late." })]);
 			await handOn(pim);
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`).sort()).toEqual([legacyFiringOperationId(scheduled.id, t1), legacyFiringOperationId(scheduled.id, t2)].sort());
+			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([legacyFiringOperationId(scheduled.id, t1)]);
 			expect(engineOf(pim).coordinator.runs(triggerId).map((run) => run.scheduledFor)).toEqual([t1]);
 			await pim.disableTriggerEngine();
 		});
@@ -2014,61 +1931,38 @@ describe("cutting over, in a space", () => {
 		});
 	});
 
-	it("starts a new chat for each firing of a cut-over new-chat schedule, as its schedule does: the same agent, title and notification", async () => {
+	it("starts a new chat for each firing of a cut-over new-chat schedule, as its schedule did: the same agent, title and notification", async () => {
 		await inSpace(async (pim) => {
 			const chat = root(pim);
 			const majordomo = pim.agents.majordomo();
-			// Two schedules alike but for their instructions (the agents SDK keeps one schedule for identical ones), titled by the same label.
-			const everyHour = (instruction: string) => pim.schedule("0 * * * *", "runScheduledTask", { session: chat, instruction, label: "Morning brief", newChat: true as const, agent: majordomo.id });
-			const control = await everyHour("Write my brief.");
-			const cut = await everyHour("Write my brief, please.");
-			expect(cut.id).not.toBe(control.id);
+			const cut = await pim.schedule("0 * * * *", "runScheduledTask" as never, { session: chat, instruction: "Write my brief, please.", label: "Morning brief", newChat: true as const, agent: majordomo.id });
 			await pim.enableTriggerEngine();
 			await pim.applyTriggerMigration();
 			expect((await pim.cutoverTriggerMigration([{ kind: "schedule", legacyId: cut.id }]))!.map((item) => item.outcome)).toEqual(["cut_over"]);
 			const t1 = cut.time * 1000;
 			const t2 = t1 + HOUR;
 			const ran: Ran[] = [];
-			const sessions = () => Number(sqlOf(pim).exec("SELECT COUNT(*) AS n FROM pim_sessions").one().n);
 			for (const at of [t1, t2]) {
 				moveTo(at + SECOND);
-				answerRuns(2, ran);
-				await pim.runScheduledTask(control.payload, firingAt(control, at / 1000));
-				const made = sessions();
-				// The cut-over schedule's alarm, retried: skipped before it starts a chat, so none is left empty.
-				await pim.runScheduledTask(cut.payload, firingAt(cut, at / 1000));
-				await pim.runScheduledTask(cut.payload, firingAt(cut, at / 1000));
-				expect(sessions()).toBe(made);
+				answerRuns(1, ran);
 				await settle(pim);
 			}
 			/** Each firing's chat, by pi's record of its input, and what the person and the chat show of it. */
-			const firings = (scheduleId: string) =>
-				[t1, t2].map((at) => {
-					const key = legacyFiringOperationId(scheduleId, at);
-					const [submitted, ...more] = sqlOf(pim).exec("SELECT conversation_id FROM pi_submissions WHERE request_id = ?", JSON.stringify(key)).toArray();
-					expect(more).toEqual([]);
-					const chatId = String(submitted!.conversation_id);
-					const notification = notificationOf(pim, key)!;
-					const title = sqlOf(pim).exec("SELECT title FROM pim_sessions WHERE id = ?", chatId).one().title;
-					return { chatId, notified: notification.session, kind: notification.kind, title: notification.title, body: notification.body, chatTitle: title, agent: pim.agents.ofSession(chatId).id };
-				});
-			const own = firings(cut.id);
-			const legacy = firings(control.id);
-			const shape = ({ chatId: _chat, notified: _notified, ...rest }: (typeof own)[number]) => rest;
-			expect(own.map(shape)).toEqual(legacy.map(shape));
-			expect(own[0]).toMatchObject({ kind: "scheduled", title: "Morning brief", body: "", chatTitle: "Morning brief", agent: majordomo.id });
-			// A chat of its own each firing, which the notification links to, as the schedule's.
-			for (const firing of [...own, ...legacy]) expect(firing.notified).toBe(firing.chatId);
-			expect(new Set([...own, ...legacy].map((firing) => firing.chatId)).size).toBe(4);
-			expect([...own, ...legacy].some((firing) => firing.chatId === chat)).toBe(false);
+			const firings = [t1, t2].map((at) => {
+				const key = legacyFiringOperationId(cut.id, at);
+				const [submitted, ...more] = sqlOf(pim).exec("SELECT conversation_id FROM pi_submissions WHERE request_id = ?", JSON.stringify(key)).toArray();
+				expect(more).toEqual([]);
+				const chatId = String(submitted!.conversation_id);
+				const notification = notificationOf(pim, key)!;
+				const title = sqlOf(pim).exec("SELECT title FROM pim_sessions WHERE id = ?", chatId).one().title;
+				return { chatId, notified: notification.session, kind: notification.kind, title: notification.title, body: notification.body, chatTitle: title, agent: pim.agents.ofSession(chatId).id };
+			});
+			for (const firing of firings) expect(firing).toMatchObject({ kind: "scheduled", title: "Morning brief", body: "", chatTitle: "Morning brief", agent: majordomo.id });
+			// A chat of its own each firing, which the notification links to.
+			for (const firing of firings) expect(firing.notified).toBe(firing.chatId);
+			expect(new Set(firings.map((firing) => firing.chatId)).size).toBe(2);
+			expect(firings.some((firing) => firing.chatId === chat)).toBe(false);
 			expect(engineOf(pim).coordinator.runs(recordOf(pim, "schedule", cut.id)!.triggerId).map((run) => run.scheduledFor)).toEqual([t1, t2]);
-			expect(receiptsOf(pim, "schedule", cut.id)).toEqual([
-				["skipped_firing", String(t1)],
-				["skipped_firing", String(t1)],
-				["skipped_firing", String(t2)],
-				["skipped_firing", String(t2)],
-			]);
-			expect(receiptsOf(pim, "schedule", control.id)).toEqual([]);
 			await pim.disableTriggerEngine();
 		});
 	});
@@ -2093,7 +1987,10 @@ describe("cutting over, in a space", () => {
 			const before = deliveryState(pim);
 			for (const part of ['"owner":"trigger"', '"fn":"runScheduledTask"', `"id":"${kept.id}"`]) expect(before).toContain(part);
 			await restarted.ensureTriggerEngine();
-			expect(deliveryState(pim)).toBe(before);
+			// The triggers' records are as they were; the schedule's own alarm, which nothing fires now, its start cancelled, and its trigger delivers it.
+			const triggersOf = (state: string) => (JSON.parse(state) as unknown[]).slice(0, -1);
+			expect(triggersOf(deliveryState(pim))).toEqual(triggersOf(before));
+			expect((JSON.parse(deliveryState(pim)) as unknown[]).at(-1)).toEqual(["cf_agents_jobs (schedules)", []]);
 			const engine = restarted.triggerEngine()!;
 			expect(engine).not.toBe(pim.triggerEngine());
 			expect(engine.connectorEvents).toBe(true);
@@ -2101,7 +1998,7 @@ describe("cutting over, in a space", () => {
 			const watchTrigger = recordOf(pim, "watch", kept.id)!.triggerId;
 			expect([recordOf(pim, "schedule", scheduled.id)!.owner, recordOf(pim, "watch", kept.id)!.owner]).toEqual(["trigger", "trigger"]);
 
-			// Still the trigger's: the watch's events go to it, and the schedule's alarm skips the firing it runs.
+			// Still the trigger's: the watch's events go to it, and the schedule's firing too.
 			answerRuns(1, ran);
 			expect((await deliverIn(restarted, kept.id, kept.secret, "ev-e-1")).status).toBe(204);
 			expect(receiptsOf(pim, "watch", kept.id).at(-1)).toEqual(["routed_event", "ev-e-1"]);
@@ -2109,24 +2006,20 @@ describe("cutting over, in a space", () => {
 			const t1 = scheduled.time * 1000;
 			moveTo(t1 + SECOND);
 			answerRuns(1, ran);
-			await restarted.runScheduledTask(scheduled.payload, firingAt(scheduled, t1 / 1000));
-			expect(receiptsOf(pim, "schedule", scheduled.id)).toEqual([["skipped_firing", String(t1)]]);
 			await settle(restarted);
 			expect(engine.coordinator.runs(watchTrigger)).toHaveLength(1);
 			expect(engine.coordinator.runs(scheduleTrigger).map((run) => run.scheduledFor)).toEqual([t1]);
 			expect(ran.filter((run) => run.eventId === "ev-e-1")).toHaveLength(1);
 			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([legacyFiringOperationId(scheduled.id, t1)]);
 
-			// Cutting back hands both back, and the next start's migration leaves them there.
+			// Cutting back hands both back, and the next start's migration leaves the watch there; the schedule, whose alarm the start cancelled, is nobody's.
 			expect(restarted.cutbackTriggerMigration()!.map((item) => item.outcome)).toEqual(["cut_back", "cut_back"]);
 			expect((await restarted.runTriggerMigration())!.map((item) => [item.kind, item.owner, item.owner === "legacy" ? item.reason : item.outcome])).toEqual([
-				["schedule", "legacy", "cut_back"],
 				["watch", "legacy", "cut_back"],
 			]);
 			const t2 = t1 + HOUR;
 			moveTo(t2 + SECOND);
-			answerRuns(2, ran);
-			await restarted.runScheduledTask(scheduled.payload, firingAt(scheduled, t2 / 1000));
+			answerRuns(1, ran);
 			triggerClock.offset = 0;
 			expect((await deliverIn(restarted, kept.id, kept.secret, "ev-e-2")).status).toBe(204);
 			await vi.waitFor(() => expect(faux.getPendingResponseCount()).toBe(0));
@@ -2134,7 +2027,8 @@ describe("cutting over, in a space", () => {
 			await settle(restarted);
 			expect(engine.coordinator.runs(watchTrigger)).toHaveLength(1);
 			expect(engine.coordinator.runs(scheduleTrigger)).toHaveLength(1);
-			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([legacyFiringOperationId(scheduled.id, t1), legacyFiringOperationId(scheduled.id, t2)]);
+			// Given back, the schedule's next firing is nobody's: no alarm runs it now.
+			expect(submissions(pim, chat, `schedule:${scheduled.id}:`)).toEqual([legacyFiringOperationId(scheduled.id, t1)]);
 			// The watch delivered it, checked against the adapter's rules beside, as any watch still its own.
 			expect(receiptsOf(pim, "watch", kept.id).slice(-2)).toEqual([["routed_event", "ev-e-1"], ["strict_pass", "ev-e-2"]]);
 			expect(ran.filter((run) => run.eventId === "ev-e-2")).toHaveLength(1);

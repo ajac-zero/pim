@@ -19,6 +19,7 @@ import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTok
 import { readSync } from "./computer-host";
 import { GIT_BROKER_PATH, serveGitBroker } from "./coding/git-broker/routes";
 import { codingApi } from "./coding/routes";
+import { codingVaultApi } from "./coding/vault/routes";
 import { appAddress, appOfHost, appOfLabel, SESSION_COOKIE as APP_SESSION_COOKIE } from "./hosted";
 import { installScript } from "./install-script";
 import { BROWSER_LIVE_PATH } from "./browser";
@@ -619,6 +620,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 		adminApi(env, account, request, viaSession),
 		socialApi(env, account, request),
 		codingApi(env, account, request),
+		codingVaultApi(env, account, request),
 	];
 	for (const extension of extensions) {
 		const answered = await extension(path, request);

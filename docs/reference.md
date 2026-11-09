@@ -161,6 +161,14 @@ People pick Drive files on Pim's page `https://<your Pim>/app-pages/google/drive
 
 Disconnecting a Google connector revokes its grant at Google; so does erasing an account. If Google can't be reached then, the person can remove Pim at [myaccount.google.com/connections](https://myaccount.google.com/connections). A grant revoked at Google, or expired, shows the connector as failed in Connectors, to be connected again.
 
+### GitHub for coding threads
+
+A coding thread's workspace never holds a GitHub credential. Its git `origin` is Pim's git broker, `https://<your Pim>/api/coding/git/<owner>/<name>.git`, which it signs in to with a broker token: signed by Pim, bound to one coding session and one repository, and good for an hour unless the session asks for less (12 hours at most). The broker only clones and fetches, through GitHub's smart HTTP protocol. Pushing is Pim's to do, once the person approves: the workspace hands Pim a git bundle of the branch, and Pim sends it to GitHub. Pim never pushes to the repository's default branch, `main` or `master`, pushes only branches that start with `pim/`, never rewrites a branch (one that exists only moves forward), and pushes at most 64 MiB at once. See [`src/coding/git-broker/`](../src/coding/git-broker/broker.ts).
+
+Public repositories need nothing more. For private ones, and for pushing, make a GitHub App (Settings → Developer settings → GitHub Apps) with the repository permission **Contents: Read and write** and nothing else, install it on the repositories coding threads may use, and set its ID and a private key of it as Worker secrets: `PIM_GITHUB_APP_ID` and `PIM_GITHUB_APP_PRIVATE_KEY` (the `.pem` file as GitHub gives it). Set `PIM_GITHUB_APP_INSTALLATION_ID` too to use one installation for every repository, rather than the one GitHub finds for each. Until the ID and key are set, the GitHub App is not configured: public repositories still clone, and pushes fail with "GitHub App not configured". Pim gets a token from the App for each repository on its own, with only `contents: read` to fetch, or `contents: write` to push, and keeps it until 5 minutes before it expires.
+
+Two variables, in the dashboard, set the rules: `PIM_GIT_BRANCH_PREFIX`, another prefix than `pim/` for the branches Pim pushes, or `none` for any; and `PIM_GIT_REPOS`, the repositories coding threads may use, such as `acme/*, me/notes`, every one on github.com when unset. A list Pim can't read allows none.
+
 ### Email
 
 Pim can email each person, when they ask for it or for something worth keeping, such as a report. It's off until you set it up with [Cloudflare Email Service](https://developers.cloudflare.com/email-service/): onboard a domain for Email Sending, then add to `wrangler.jsonc`

@@ -1380,6 +1380,21 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * The space's key for a family of model APIs, for a coding thread's model
+	 * gateway (src/coding/model-gateway.ts), which adds it to what a CLI in
+	 * the thread's workspace sends: the built-in provider of that service the
+	 * thread runs on, else the person's own, else the admin's. Null when the
+	 * space has none, or is closed. The thread keeps it in memory for the one
+	 * request only.
+	 */
+	async codingGatewayCredential(family: string, preferred: string | null): Promise<{ providerId: string; url: string; key: string } | null> {
+		if (this.#closed()) return null;
+		const keyed = this.customProviders().filter((entry) => entry.provider.builtin === family && entry.provider.key);
+		const chosen = keyed.find((entry) => entry.catalogId === preferred) ?? keyed.find((entry) => !entry.shared) ?? keyed[0];
+		return chosen ? { providerId: chosen.catalogId, url: chosen.provider.url, key: chosen.provider.key! } : null;
+	}
+
+	/**
 	 * The model a coding thread started without one runs on: the space's, as
 	 * agents without a model of their own use it, or the deployment's default
 	 * when that is a ChatGPT plan model, which coding threads can't call.

@@ -18,6 +18,7 @@ import {
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
 import { GIT_BROKER_PATH, serveGitBroker } from "./coding/git-broker/routes";
+import { MODEL_GATEWAY_PATH, serveModelGateway } from "./coding/model-gateway";
 import { codingApi } from "./coding/routes";
 import { codingVaultApi } from "./coding/vault/routes";
 import { appAddress, appOfHost, appOfLabel, SESSION_COOKIE as APP_SESSION_COOKIE } from "./hosted";
@@ -69,6 +70,10 @@ import { PimThemes } from "./themes";
  *   (./coding/git-broker/routes.ts), where a coding workspace clones and
  *   fetches one repository with its broker token, `pimgit_<…>`, which opens
  *   only this.
+ * - `/api/coding/gateway/<anthropic|openai>/…`: the model gateway
+ *   (./coding/model-gateway.ts), where a CLI in a coding workspace calls
+ *   its model with the thread's gateway token, `pimgw_<…>`, which opens
+ *   only this, and Pim adds the space's key.
  * - `/install.sh`: public, what installs pim-host or pim-computer from this
  *   Pim (./install-script.ts).
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<key>`: public, for
@@ -607,6 +612,8 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	if (path === "/computer-host/sync") return serveComputerHost(request, env);
 	// A coding workspace's clones and fetches, opened by its broker token only.
 	if (under(path, GIT_BROKER_PATH)) return serveGitBroker(request, env, path);
+	// A coding workspace's CLI calling its model, opened by its gateway token only.
+	if (under(path, MODEL_GATEWAY_PATH)) return serveModelGateway(request, env, path);
 	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(caller);
 	const { account, viaSession } = caller;

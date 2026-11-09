@@ -1451,7 +1451,10 @@ export function checkAddress(
   }
 }
 
-async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function call<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
     // Access answers an expired session with a redirect to its sign-in page.

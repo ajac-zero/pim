@@ -1,8 +1,9 @@
 import type { CodingHarness } from "../thread-store";
 import { claudeCode } from "./claude-code";
 import { codex } from "./codex";
-import { amp, mistralVibe } from "./pending";
+import { amp } from "./pending";
 import type { CliHarness } from "./types";
+import { mistralVibe } from "./vibe";
 
 /**
  * The CLI harnesses coding threads can run (./types.ts), by the thread's

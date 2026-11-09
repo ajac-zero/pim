@@ -1,0 +1,42 @@
+{
+  "outcome": "config_error",
+  "stop_reason": null,
+  "error": {
+    "message": "Invalid API key (from env var MISTRAL_API_KEY). Please check your API key and try again.",
+    "code": "invalid_api_key"
+  },
+  "session_id": "d9c68827-6d6a-e228-0343-3f0e04549498",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cached_input_tokens": 0,
+    "total_tokens": 0
+  },
+  "cost_usd": 0,
+  "steps": 1,
+  "config": {
+    "active_model": "",
+    "models": {
+      "mistral-medium-3.5": {
+        "name": "mistral-vibe-cli-latest",
+        "provider": "mistral",
+        "alias": "mistral-medium-3.5",
+        "input_price": 1.5,
+        "output_price": 7.5,
+        "cached_input_price": 0.15
+      }
+    }
+  },
+  "schema_version": 1,
+  "vibe_version": "3.1.0",
+  "journal_dir": "session",
+  "started_at": "2026-11-09T19:34:15.159128Z",
+  "ended_at": "2026-11-09T19:34:18.811655Z",
+  "limits": {
+    "max_turns": null,
+    "max_price": 1,
+    "max_tokens": null,
+    "time_limit_s": null
+  },
+  "exit_code": 1
+}

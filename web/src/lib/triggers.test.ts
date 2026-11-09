@@ -308,20 +308,6 @@ describe("what a trigger does next", () => {
       ).key,
     ).toBe("triggerPairComputerFirst");
   });
-
-  it("says a shadow runs through its schedule, whatever its next firing", () => {
-    const shadow = triggerFixture({
-      migration: {
-        kind: "schedule",
-        legacyId: "s1",
-        owner: "legacy",
-        phase: "shadow",
-        enableable: false,
-        ownerSince: null,
-      },
-    });
-    expect(nextLine(shadow)).toEqual({ key: "triggerNextLegacySchedule" });
-  });
 });
 
 describe("the editor's form", () => {

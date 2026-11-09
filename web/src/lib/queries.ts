@@ -4,9 +4,8 @@ import {
   admin,
   pim,
   type TriggerFilters,
-  type TriggerMigrationItem,
 } from "~/lib/pim-api";
-import { MAX_PAGES, triggersAvailable } from "~/lib/triggers";
+import { triggersAvailable } from "~/lib/triggers";
 
 /** Pim's lists. Live changes arrive on the socket and invalidate these. */
 
@@ -63,9 +62,6 @@ export const visitsQuery = () =>
 
 export const notificationsQuery = () =>
   queryOptions({ queryKey: ["notifications"], queryFn: pim.notifications });
-
-export const schedulesQuery = () =>
-  queryOptions({ queryKey: ["schedules"], queryFn: pim.schedules });
 
 export const modelQuery = () =>
   queryOptions({ queryKey: ["model"], queryFn: pim.model });
@@ -301,28 +297,6 @@ export const triggersQuery = (filters: TriggerFilters) =>
     queryFn: ({ pageParam }) => pim.triggers(filters, pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor ?? undefined,
-    retry: false,
-  });
-
-/**
- * Where each schedule and watch stands in its move to triggers, every page
- * up to the screens' bound, so the list can show the ones still delivered
- * as before.
- */
-export const triggerMigrationQuery = () =>
-  queryOptions({
-    queryKey: ["triggers", "migration"],
-    queryFn: async () => {
-      const items: TriggerMigrationItem[] = [];
-      let cursor: string | undefined;
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const body = await pim.triggerMigration(cursor);
-        items.push(...body.items);
-        cursor = body.nextCursor ?? undefined;
-        if (!cursor) break;
-      }
-      return items;
-    },
     retry: false,
   });
 

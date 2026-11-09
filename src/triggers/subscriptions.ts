@@ -328,46 +328,6 @@ export class ConnectorSubscriptionManager {
 		return { owner: () => this.#owner(), subscription: (key) => this.subscription(key), connector: (id) => this.#provider.connector(id) };
 	}
 
-	/**
-	 * Takes in a subscription made before its trigger had a binding, such as
-	 * one a connector watch made before watches were triggers: the trigger,
-	 * enabled on a connector's event, gets a binding at its generation now
-	 * with the subscription's own key, secret and provider subscription id,
-	 * granted until `refreshBefore` (null: no expiry), so its callback URL
-	 * stays the same and the connector notices nothing. It is renewed from
-	 * then on like any other. False, writing nothing, where the trigger
-	 * isn't enabled on a connector's event, already has a binding for its
-	 * generation, or the key is taken.
-	 */
-	adopt(input: { readonly key: string; readonly triggerId: string; readonly secret: string; readonly providerSubscriptionId: string; readonly refreshBefore: number | null }): boolean {
-		return this.#transaction(() => {
-			const trigger = this.#store.get(input.triggerId);
-			const source = this.#store.sourceState(input.triggerId);
-			if (!trigger || trigger.lifecycle !== "enabled" || trigger.spec.source.kind !== "connector_event" || !source) return false;
-			const now = this.#now();
-			// Due now: the next step works out the renewal from the grant, as after a subscribe.
-			return (
-				this.#sql.exec(
-					`INSERT OR IGNORE INTO pim_trigger_subscriptions (key, trigger_id, source_revision, generation, connector_id, event, secret, status, phase, provider_subscription_id, granted_at, refresh_before, failures, next_at, created_at, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'open', ?, ?, ?, 0, ?, ?, ?)`,
-					input.key,
-					trigger.id,
-					source.sourceRevision,
-					trigger.generation,
-					trigger.spec.source.connectorId,
-					trigger.spec.source.event,
-					input.secret,
-					input.providerSubscriptionId,
-					now,
-					input.refreshBefore,
-					now,
-					now,
-					now,
-				).rowsWritten > 0
-			);
-		});
-	}
-
 	/** A trigger's bindings, oldest first, without their secrets. */
 	bindings(triggerId: string): SubscriptionBinding[] {
 		return this.#sql.exec("SELECT * FROM pim_trigger_subscriptions WHERE trigger_id = ? ORDER BY created_at, rowid", triggerId).toArray().map(bindingOf);

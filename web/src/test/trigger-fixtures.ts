@@ -43,7 +43,6 @@ export function triggerFixture(overrides: Partial<Trigger> = {}): Trigger {
     schedule: { nextFiringAt: Date.UTC(2026, 10, 9, 9, 0), nextCheckAt: null },
     capability: { status: "available", delivers: true, reason: null },
     grant: { required: false, state: "not_required" },
-    migration: null,
     createdAt: Date.UTC(2026, 10, 1),
     updatedAt: Date.UTC(2026, 10, 2),
     ...overrides,

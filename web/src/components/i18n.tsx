@@ -466,10 +466,7 @@ const translations = {
     approvedByMajordomo: "Approved by {name}",
     deniedByMajordomo: "Denied by {name}",
     noNotifications: "No notifications yet.",
-    cancelSchedule: "Cancel schedule",
-    confirmCancelSchedule: "Cancel it for good",
     unread: "Unread",
-    scheduleCancelled: "Schedule cancelled",
     notifications: "Notifications",
     pushNotifications: "Push notifications",
     pushDescription: "Get replies and alerts while you're away.",
@@ -1270,50 +1267,6 @@ const translations = {
     triggerNextNone: "No time left to fire",
     triggerNextDeleted: "Deleted: it won't fire",
     triggerNextEnded: "Ended.",
-    triggerNextLegacySchedule: "Runs through its schedule, not as a trigger",
-    triggerNextLegacyWatch:
-      "Runs through its connector watch, not as a trigger",
-    triggerLegacyTitle: "Not triggers yet",
-    triggerLegacyHint:
-      "These schedules and connector watches still run as they always did. Each says why it hasn't moved to triggers.",
-    triggerLegacyFailed:
-      "Couldn't load the schedules and watches that haven't moved to triggers.",
-    triggerLegacySchedule: "Scheduled task",
-    triggerLegacyWatch: "Connector watch",
-    triggerMigration: "Move to triggers",
-    triggerMigrationMigratable: "Moving soon",
-    triggerMigrationDeferred: "Waiting to move",
-    triggerMigrationUnsupported: "Can't move",
-    triggerMigrationGivenBack: "Given back",
-    triggerMigrationMigrated: "Moved",
-    triggerMigrationWhyMigratable: "Pim moves it to triggers shortly.",
-    triggerMigrationWhyDeferred:
-      "Pim moves a few at a time; this one is next in line.",
-    triggerMigrationWhyRefused:
-      "Pim couldn't make its trigger and will try again.",
-    triggerMigrationWhyAgent: "The agent it would belong to doesn't exist yet.",
-    triggerMigrationWhyIngress:
-      "Waiting for one of its events to pass the checks triggers make.",
-    triggerMigrationWhyBlocked:
-      "Waiting on a check before a trigger can take it over.",
-    triggerMigrationWhyInterval:
-      "It repeats on an interval, which triggers don't keep the same way.",
-    triggerMigrationWhyDue: "Its time has come, so its schedule runs it.",
-    triggerMigrationWhyCron:
-      "Triggers would read its schedule differently, so it stays as it is.",
-    triggerMigrationWhyExhausted: "It has no time left to run.",
-    triggerMigrationWhyChat:
-      "The chat it runs in is gone, or can't take a trigger's runs.",
-    triggerMigrationWhyField:
-      "One of its fields is longer or more complex than a trigger can hold.",
-    triggerMigrationWhyWatchEnded: "The watch has ended.",
-    triggerMigrationWhyNotSubscribed:
-      "Its connector hasn't confirmed the subscription yet.",
-    triggerMigrationWhyCallback:
-      "Its callback address changed, so moving it would need a new subscription.",
-    triggerMigrationWhyGivenBack:
-      "It was handed back from its trigger, and stays as it is.",
-    triggerMigrationWhyOther: "It stays as it is for now ({reason}).",
     triggerNextNotWired: "Draft only: Pim doesn't take connector events in yet",
     triggerNextUnavailable: "Not available here",
     triggerNextOnceOn: "Runs every {duration} once turned on",
@@ -1447,14 +1400,6 @@ const translations = {
     triggerStale: "Stale after",
     triggerSamples: "Observed values",
     triggerSamplesOff: "Not kept",
-    triggerOwnedBySchedule:
-      "Owned by its schedule, which still runs this work: this copy can't be turned on or changed here, and deleting it cancels the schedule too.",
-    triggerOwnedByWatch:
-      "Owned by its connector watch, which still runs this work: this copy can't be turned on or changed here, and deleting it stops the watch too.",
-    triggerTookOverSchedule:
-      "Took over its schedule, which now skips what this trigger runs. It can't be changed or paused here, and deleting it cancels the schedule too.",
-    triggerTookOverWatch:
-      "Took over its connector watch, whose events now come here. It can't be changed or paused here, and deleting it stops the watch too.",
     triggerOnceAt: "Once, at {date}",
     triggerCronIn: "On the schedule {expression}, in {timeZone}",
     triggerCronEveryMinute: "Every minute",
@@ -1516,10 +1461,6 @@ const translations = {
       "Pause this trigger? It stops firing; a run already going goes on.",
     triggerConfirmDelete:
       "Delete this trigger for good? It stops firing and its history stays. A run already going goes on.",
-    triggerConfirmDeleteSchedule:
-      "Delete this trigger and cancel the schedule it came from? Neither runs again, and the history stays. A run already going goes on.",
-    triggerConfirmDeleteWatch:
-      "Delete this trigger and stop the connector watch it came from? Its events no longer come in, and the history stays. A run already going goes on.",
     triggerPausedNow: "Paused.",
     triggerResumedNow: "Turned on.",
     triggerDeletedNow: "Trigger deleted.",
@@ -1670,8 +1611,6 @@ const translations = {
       "Someone changed this trigger since you opened it. Reload it and review your change again.",
     triggerErrorTransition: "It can't do that in its current state.",
     triggerErrorDeleted: "This trigger was deleted.",
-    triggerErrorOwnedElsewhere:
-      "Its schedule or connector watch still owns it, so it can't be changed here.",
     triggerErrorGrantRequired:
       "It needs your permission for exactly this source first.",
     triggerErrorGrantNotCurrent:
@@ -2298,10 +2237,7 @@ const translations = {
     deniedByMajordomo: "Denegado por {name}",
     noNotifications: "Aún no hay notificaciones.",
     notifications: "Notificaciones",
-    cancelSchedule: "Cancelar programación",
-    confirmCancelSchedule: "Cancelarla definitivamente",
     unread: "No leída",
-    scheduleCancelled: "Programación cancelada",
     pushNotifications: "Notificaciones push",
     pushDescription: "Recibe respuestas y avisos cuando no estás aquí.",
     pushAllow: "Permitir notificaciones",
@@ -3117,51 +3053,6 @@ const translations = {
     triggerNextNone: "No le queda ninguna hora para dispararse",
     triggerNextDeleted: "Eliminado: no se disparará",
     triggerNextEnded: "Terminado.",
-    triggerNextLegacySchedule: "Lo ejecuta su programación, no como disparador",
-    triggerNextLegacyWatch:
-      "Lo ejecuta su vigilancia de conector, no como disparador",
-    triggerLegacyTitle: "Aún no son disparadores",
-    triggerLegacyHint:
-      "Estas programaciones y vigilancias de conector siguen funcionando como siempre. Cada una dice por qué no ha pasado a disparadores.",
-    triggerLegacyFailed:
-      "No se pudieron cargar las programaciones y vigilancias que no han pasado a disparadores.",
-    triggerLegacySchedule: "Tarea programada",
-    triggerLegacyWatch: "Vigilancia de conector",
-    triggerMigration: "Paso a disparadores",
-    triggerMigrationMigratable: "Pasará pronto",
-    triggerMigrationDeferred: "En espera",
-    triggerMigrationUnsupported: "No puede pasar",
-    triggerMigrationGivenBack: "Devuelta",
-    triggerMigrationMigrated: "Pasada",
-    triggerMigrationWhyMigratable: "Pim la pasa a disparadores en breve.",
-    triggerMigrationWhyDeferred:
-      "Pim pasa unas pocas cada vez; esta es la siguiente.",
-    triggerMigrationWhyRefused:
-      "Pim no pudo crear su disparador y lo intentará de nuevo.",
-    triggerMigrationWhyAgent: "El agente al que pertenecería aún no existe.",
-    triggerMigrationWhyIngress:
-      "Espera a que uno de sus eventos pase las comprobaciones de los disparadores.",
-    triggerMigrationWhyBlocked:
-      "Espera una comprobación antes de que un disparador se haga cargo.",
-    triggerMigrationWhyInterval:
-      "Se repite a intervalos, que los disparadores no llevan igual.",
-    triggerMigrationWhyDue:
-      "Ya llegó su hora, así que la ejecuta su programación.",
-    triggerMigrationWhyCron:
-      "Los disparadores leerían su programación de otra forma, así que se queda como está.",
-    triggerMigrationWhyExhausted: "Ya no le queda ninguna ejecución.",
-    triggerMigrationWhyChat:
-      "El chat donde se ejecuta ya no existe o no admite ejecuciones de un disparador.",
-    triggerMigrationWhyField:
-      "Uno de sus campos es más largo o complejo de lo que admite un disparador.",
-    triggerMigrationWhyWatchEnded: "La vigilancia terminó.",
-    triggerMigrationWhyNotSubscribed:
-      "Su conector aún no ha confirmado la suscripción.",
-    triggerMigrationWhyCallback:
-      "Su dirección de retorno cambió, así que pasarla requeriría una suscripción nueva.",
-    triggerMigrationWhyGivenBack:
-      "Se le devolvió desde su disparador y se queda como está.",
-    triggerMigrationWhyOther: "Por ahora se queda como está ({reason}).",
     triggerNextNotWired:
       "Solo borrador: Pim aún no recibe eventos de conectores",
     triggerNextUnavailable: "No disponible aquí",
@@ -3296,14 +3187,6 @@ const translations = {
     triggerStale: "Obsoleto tras",
     triggerSamples: "Valores observados",
     triggerSamplesOff: "No se guardan",
-    triggerOwnedBySchedule:
-      "Pertenece a su programación, que sigue ejecutando este trabajo: esta copia no se puede activar ni cambiar aquí, y al eliminarla también se cancela la programación.",
-    triggerOwnedByWatch:
-      "Pertenece a su vigilancia de conector, que sigue ejecutando este trabajo: esta copia no se puede activar ni cambiar aquí, y al eliminarla también se detiene la vigilancia.",
-    triggerTookOverSchedule:
-      "Tomó el relevo de su programación, que ahora omite lo que ejecuta este disparador. Aquí no se puede cambiar ni pausar, y al eliminarlo también se cancela la programación.",
-    triggerTookOverWatch:
-      "Tomó el relevo de su vigilancia de conector, cuyos eventos ahora llegan aquí. Aquí no se puede cambiar ni pausar, y al eliminarlo también se detiene la vigilancia.",
     triggerOnceAt: "Una vez, el {date}",
     triggerCronIn: "Según la programación {expression}, en {timeZone}",
     triggerCronEveryMinute: "Cada minuto",
@@ -3366,10 +3249,6 @@ const translations = {
       "¿Pausar este disparador? Deja de dispararse; una ejecución en curso continúa.",
     triggerConfirmDelete:
       "¿Eliminar este disparador para siempre? Deja de dispararse y su historial se conserva. Una ejecución en curso continúa.",
-    triggerConfirmDeleteSchedule:
-      "¿Eliminar este disparador y cancelar la programación de la que viene? Ninguno vuelve a ejecutarse y el historial se conserva. Una ejecución en curso continúa.",
-    triggerConfirmDeleteWatch:
-      "¿Eliminar este disparador y detener la vigilancia de conector de la que viene? Sus eventos dejan de llegar y el historial se conserva. Una ejecución en curso continúa.",
     triggerPausedNow: "En pausa.",
     triggerResumedNow: "Activado.",
     triggerDeletedNow: "Disparador eliminado.",
@@ -3523,8 +3402,6 @@ const translations = {
       "Alguien cambió este disparador desde que lo abriste. Recárgalo y revisa tu cambio de nuevo.",
     triggerErrorTransition: "No puede hacer eso en su estado actual.",
     triggerErrorDeleted: "Este disparador fue eliminado.",
-    triggerErrorOwnedElsewhere:
-      "Aún pertenece a su programación o vigilancia de conector, así que aquí no se puede cambiar.",
     triggerErrorGrantRequired:
       "Primero necesita tu permiso para exactamente este origen.",
     triggerErrorGrantNotCurrent: "Tu permiso ya no coincide con este origen.",

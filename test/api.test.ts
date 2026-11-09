@@ -7,7 +7,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
-import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, textOf, TOKEN, toolUse, url } from "./helpers";
+import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, textOf, TOKEN, toolUse, triggersOn, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -307,6 +307,7 @@ describe("conversation", () => {
 	});
 
 	it("deletes a chat: it leaves the list and the API, and its scheduled tasks stop", async () => {
+		await triggersOn();
 		const kept = (await post("/sessions")).body.id;
 		const doomed = (await post("/sessions")).body.id;
 		for (const [session, instruction] of [

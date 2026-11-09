@@ -80,8 +80,6 @@ export type WatchHost = {
 	readonly sync: () => Promise<void>;
 	/** Where a watch's subscription stands. */
 	readonly subscription: (triggerId: string) => WatchSubscription;
-	/** The trigger that took over a watch made before watches were triggers, by that watch's id; null for any other id. */
-	readonly triggerOfWatch: (watchId: string) => string | null;
 };
 
 const MAX_LABEL = 120;
@@ -227,11 +225,10 @@ export function eventTools(
 			const missing = text(`No watch with id ${id}.`, true);
 			if (!triggers) return missing;
 			const actor = host.actor(String(api.conversationId));
-			const triggerId = host.triggerOfWatch(id) ?? id;
 			try {
-				const view = triggers.get(actor, triggerId);
+				const view = triggers.get(actor, id);
 				if ((view.source as { kind: string }).kind !== "connector_event" || view.lifecycle === "deleted") return missing;
-				await triggers.remove(actor, triggerId);
+				await triggers.remove(actor, id);
 			} catch (error) {
 				if (error instanceof TriggerApiError) return error.code === "not_found" ? missing : text(error.message, true);
 				throw error;

@@ -76,7 +76,7 @@ import { CodexImages } from "./codex-images";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
 import { ASSISTANT_STARTERS } from "./extensions/assistant";
-import { AppEvents, eventTools, watchAction } from "./extensions/app-events";
+import { eventTools, type WatchHost, type WatchSubscription } from "./extensions/app-events";
 import { skillTools } from "./extensions/app-skills";
 import { INSTALL_SKILL, type SkillWriters, skillsExtension, skillsSwitch, WRITE_SKILL, writeSkillAction } from "./extensions/skills";
 import { SKILL_NAME, SkillStore } from "./skills";
@@ -202,10 +202,10 @@ import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAn
 import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
 import { ENGINE_KEY, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
-import { ConnectorIngress, ingressResponse, strictShape } from "./triggers/connector";
+import { ConnectorIngress, ingressResponse } from "./triggers/connector";
+import { ConnectorSubscriptionManager, type ProviderAnswer, type SubscriptionProvider } from "./triggers/subscriptions";
 import {
 	type ApplyOutcome,
-	adoptedSubscription,
 	type CutbackOutcome,
 	type CutoverOutcome,
 	firingOwner,
@@ -234,10 +234,10 @@ import {
 	planMigration,
 	recordReceipt,
 	type RollbackOutcome,
-	strictVerdict,
 	TriggerMigration,
 } from "./triggers/migration";
 import { TriggerChatDoc, type TriggerSpace, type TriggerTakeover } from "./triggers/host";
+import type { ConnectorEventSource, TriggerDestination } from "./triggers/spec";
 import { TRIGGERS_EXTENSION, triggersExtension } from "./triggers/tools";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
@@ -284,9 +284,10 @@ export const APPS_CALLBACK_PATH = `${MCP_CALLBACK_PATH}/apps`;
 export const MCP_CLIENT_PATH = "/mcp/client";
 /** Where the Worker sends `/mcp`: this space as an MCP server (./mcp-server.ts). */
 export const MCP_SERVER_PATH = "/mcp-server";
-/** Where connectors deliver event webhooks, as `/mcp/events/<owner>/<watch id>`; signed, so served without the API token. The space sees `/mcp/events/<watch id>`. */
+/** Where connectors deliver event webhooks, as `/mcp/events/<owner>/<key>`, the key of a trigger's subscription; signed, so served without the API token. The space sees `/mcp/events/<key>`. */
 export const MCP_EVENTS_PATH = "/mcp/events/";
-const WATCH_REFRESH_CALLBACK = "refreshAppWatch";
+/** The renewal alarms watches kept before they were triggers; any left is cancelled as the space starts. */
+const LEGACY_WATCH_REFRESH = "refreshAppWatch";
 /** How long an approval waits for the user under the `auto` policy before it is granted, so background work never stalls. */
 const APPROVAL_TIMEOUT_MS = 30_000;
 /** Decides an approval its timeout reached, as it was filed to be decided. */
@@ -472,6 +473,10 @@ const MAJORDOMO_TOOLS = [CREATE_MEMORY_SCOPE, SHARE_MEMORY_SCOPE, ADD_CUSTOM_CON
 const WATCH_APP_EVENT = "watch_connector_event";
 /** Pim's own tools that asked first once and run without asking now: their settings are only Off or On, as `WATCH_APP_EVENT`'s. */
 const UNASKED_TOOLS: readonly string[] = [WATCH_APP_EVENT, UPDATE_AGENT];
+/** Pim's own tools with no action to approve, only an Off or On switch in Tool permissions. */
+const SWITCHED_TOOLS: readonly { readonly name: string; readonly description: string }[] = [
+	{ name: WATCH_APP_EVENT, description: "Have a connected connector notify Pim whenever an event happens, with what to do each time." },
+];
 /** Set once chats' agents come from the prompt's `agent` section, not from instructions stored in each chat. */
 /** The admin's connectors, as this space last read them from the gallery, and how long before it reads them again. */
 const CUSTOM_APPS_KEY = "custom_apps";
@@ -747,42 +752,12 @@ export class Pim extends DurableAgent<Env> {
 	};
 	/** Connectors' skills and event types, cached in this object's database. */
 	readonly catalog = new AppCatalog(this.apps, this.store);
-	/** Watches on connectors' events (MCP Events, webhook delivery). */
-	readonly appEvents = new AppEvents({
-		bridge: this.apps,
-		store: this.store,
-		catalog: this.catalog,
-		publicUrl: () => this.deployment().publicUrl ?? undefined,
-		owner: () => this.name,
-		scheduleRefresh: (id, at) => this.#scheduleWatchRefresh(id, at),
-		submit: async (watched, content, operationId) => {
-			const session = await this.#carriedOn(watched);
-			await this.submitTo(session, content, { operationId }, "pim");
-			// A member's own conversation isn't the one the person reads, so the chat is told too.
-			const seat = this.#rooms.of(session);
-			if (seat && seat.conversation !== seat.room) {
-				const name = this.agents.get(seat.agent)?.name ?? "An agent";
-				const first = content.split("\n")[0]?.replace(/^\[(?:Connector|App) event\]\s*/, "") ?? "";
-				await this.#write(seat.room, `${ROOM_NOTICE} ${name} got a connector event: ${first}`, `event:${operationId}`);
-				this.broadcastMessage({ type: "sessions" });
-			}
-		},
-		notify: async (title, body) => {
-			const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
-			await this.deliverNotification(notification);
-		},
-		// Its receiver delivers it until the wake's next sweep moves it, if it can.
-		watched: () => this.#askMigrationSweep(),
-		// A trigger made from the watch ends with it, whoever stops it.
-		stopping: (id) => this.#retireMigrated("watch", id),
-	});
 	/** What decides who writes which skill, read as it is at each check (./extensions/skills.ts). */
 	readonly #skillWriters: SkillWriters = { agents: this.agents, store: this.store, skills: this.skills, roleOf: (session) => this.#roleOf(session) };
 	/** Pim's own actions; the extensions' come with their abilities. */
 	readonly #ownActions: readonly GatedAction[] = [
 		httpRequest as GatedAction,
 		...mcpActions(this.apps),
-		watchAction(this.apps, this.appEvents),
 		updateAgentAction(this.agents, this.files),
 		shareMemoryScopeAction(this.agents, () => this.memory.store.namedScopes()),
 		manageAppsAction(this.agents, this.apps, () => this.appDirectory()),
@@ -1083,26 +1058,11 @@ export class Pim extends DurableAgent<Env> {
 			tools: [...skillTools(this.apps, this.catalog, this.skills, this.files, this.#builtinOn("notes") ? [NOTES_SKILL] : []), ...eventTools(
 					this.apps,
 					this.catalog,
-					this.appEvents,
 					(session) => this.#appsOf(this.#roleOf(session).agent),
 					() => ownToolPermission(this.store, WATCH_APP_EVENT).chosen === "off",
+					this.#watchHost,
 				)],
 		};
-	}
-
-	/** One pending renewal per watch: a new one replaces the old. */
-	async #scheduleWatchRefresh(id: string, at: Date): Promise<void> {
-		for (const schedule of await this.listSchedules()) {
-			if (schedule.callback === WATCH_REFRESH_CALLBACK && (schedule.payload as { id?: string } | undefined)?.id === id) {
-				await this.cancelSchedule(schedule.id);
-			}
-		}
-		await this.schedule(at, WATCH_REFRESH_CALLBACK, { id });
-	}
-
-	/** Fired by a watch's renewal schedule. */
-	async refreshAppWatch(payload: { id: string }): Promise<void> {
-		await this.appEvents.refresh(payload.id);
 	}
 
 	/** Rebuilds the connectors' extensions, once pi's registry has been set up. */
@@ -1970,6 +1930,8 @@ export class Pim extends DurableAgent<Env> {
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
 		// Before any request, so the first one already finds them. It never throws: a failure is logged and tried again at the next start.
 		await this.ensureTriggerEngine();
+		// Before the wake ticks the subscriptions, which would otherwise subscribe a trigger that took over a watch anew.
+		await this.#retireWatches();
 		// A tick cut short leaves no wake: the next is set again, where triggers are on.
 		void Promise.resolve()
 			.then(() => (this.triggerEngine() ? this.wakeTriggers() : undefined))
@@ -2255,7 +2217,7 @@ export class Pim extends DurableAgent<Env> {
 			// Computer sources' grants are checked against the computer paired now, so with none no grant is current; their occurrences are handed on, and the computer told of changes.
 			authorize: this.#computerGrants().authorize(() => runtimeIdOf(this.computer.tokenDigest())),
 			changed: () => this.#computerTriggers()?.refresh(),
-			// Connector events are handed on, which reach the engine only through a watch cut over to its trigger, and a trigger that took over a schedule or watch delivers as it did (./triggers/migration.ts).
+			// Connector events are handed on, which the events route takes in for triggers' subscriptions, and a trigger that took over a schedule or watch delivers as it did (./triggers/migration.ts).
 			connectorEvents: true,
 			takeover: this.#triggerTakeover(),
 		});
@@ -2266,8 +2228,10 @@ export class Pim extends DurableAgent<Env> {
 	 * How a trigger that took over a schedule or watch delivers as it did
 	 * (./triggers/migration.ts): a schedule's firing goes in under the
 	 * schedule's key and notifies open apps as `runScheduledTask` does; a
-	 * watch's event goes in under the watch's key, with what it carried,
-	 * which is forgotten once pi has it. For any other trigger: nothing.
+	 * watch's event goes in under the watch's key. And for every trigger on
+	 * a connector's event, as watches always did: its run is told what the
+	 * event carried, which the events route kept, and which is forgotten
+	 * once pi has it.
 	 */
 	#triggerTakeover(): TriggerTakeover {
 		const sql = this.ctx.storage.sql;
@@ -2284,21 +2248,19 @@ export class Pim extends DurableAgent<Env> {
 				return null;
 			},
 			contents: (evidence) => {
-				const record = taken(evidence.triggerId);
-				if (!record || evidence.kind !== "connector_event" || record.kind !== "watch") return null;
+				if (evidence.kind !== "connector_event") return null;
 				const data = new LegacyEventData(sql).read(evidence.triggerId, evidence.eventId, this.triggerClock());
 				if (data === null) return null;
 				const app = this.apps.servers().find((server) => server.id === evidence.connectorId)?.name ?? evidence.connectorId;
 				return legacyEventContents(app, data);
 			},
 			delivered: async (evidence, chatId, submissionKey) => {
-				const record = taken(evidence.triggerId);
-				if (!record) return;
-				if (evidence.kind === "connector_event" && record.kind === "watch") {
+				if (evidence.kind === "connector_event") {
 					new LegacyEventData(sql).forget(evidence.triggerId, evidence.eventId);
 					return;
 				}
-				if (evidence.kind !== "time" || record.kind !== "schedule" || record.notificationTitle === null) return;
+				const record = taken(evidence.triggerId);
+				if (!record || evidence.kind !== "time" || record.kind !== "schedule" || record.notificationTitle === null) return;
 				// As runScheduledTask notifies: once per firing, by its key, to open apps only.
 				if (this.store.notification(submissionKey)) return;
 				const notification = this.store.addNotification({ id: submissionKey, kind: "scheduled", session: chatId, title: record.notificationTitle, body: "" });
@@ -2393,15 +2355,17 @@ export class Pim extends DurableAgent<Env> {
 	 * already going go on.
 	 */
 	async disableTriggerEngine(): Promise<void> {
-		// Items a trigger took over go back to their schedules and watches first, since nothing would deliver them otherwise; a firing the trigger admitted and hasn't handed on waits until it owns the item again.
+		// Schedules a trigger took over go back to their schedules first, since nothing would deliver them otherwise; a firing the trigger admitted and hasn't handed on waits until it owns the item again. Watches are triggers now, with nothing to go back to.
 		const engine = this.triggerEngine();
-		if (engine && migrationRecords(this.ctx.storage.sql).some((record) => record.owner === "trigger")) this.#triggerMigration(engine).cutback(undefined, { force: true });
-		// Nothing hands an event on while triggers are off, and no wake sweeps: what was kept of cut-over watches' events goes now. A run handed on later is told it isn't kept.
+		const taken = migrationRecords(this.ctx.storage.sql).filter((record) => record.kind === "schedule" && record.owner === "trigger");
+		if (engine && taken.length > 0) this.#triggerMigration(engine).cutback(taken, { force: true });
+		// Nothing hands an event on while triggers are off, and no wake sweeps: what was kept of connector events goes now. A run handed on later is told it isn't kept.
 		new LegacyEventData(this.ctx.storage.sql).clear();
 		this.store.deleteMeta(ENGINE_KEY);
 		this.#triggerEngine = undefined;
 		this.#computerTriggersKept?.stop();
 		this.#computerTriggersKept = undefined;
+		this.#connectorSubscriptionsKept = undefined;
 		this.#installTriggerTools();
 		await this.wakeTriggers();
 	}
@@ -2464,14 +2428,14 @@ export class Pim extends DurableAgent<Env> {
 	/** What the migration's mapping reads of the space: its schedules, watches and records, and the space as the mapping sees it. Writes nothing. */
 	async #migrationInput(): Promise<{ input: Parameters<typeof planMigration>[0]; context: MigrationContext }> {
 		const schedules = (await this.services().listSchedules()) as LegacySchedule[];
-		const watches = this.store.watches();
 		// The chats a trigger would deliver to, checked as its host's preflight checks them, before the pure mapping reads them.
-		const chats = new Set([...schedules.filter((schedule) => schedule.payload.newChat !== true).map((schedule) => schedule.payload.session), ...watches.map((watch) => watch.session)]);
+		const chats = new Set(schedules.filter((schedule) => schedule.payload.newChat !== true).map((schedule) => schedule.payload.session));
 		const space = this.#triggerSpace();
 		const open = new Set<string>();
 		for (const chat of chats) if (await space.chatOpen(chat)) open.add(chat);
 		return {
-			input: { schedules, watches, records: migrationRecords(this.ctx.storage.sql) },
+			// Watches are triggers already (`#retireWatches`): none is left to move.
+			input: { schedules, watches: [], records: migrationRecords(this.ctx.storage.sql) },
 			context: {
 				now: this.triggerClock(),
 				owner: this.name,
@@ -2480,8 +2444,7 @@ export class Pim extends DurableAgent<Env> {
 				// Read only: a space whose majordomo was never made doesn't get one from a preview.
 				chatAgent: (chat) => this.agents.findOfSession(chat)?.id ?? null,
 				chatOpen: (chat) => open.has(chat),
-				// What a watch's deliveries did against the ingress adapter's rules, from the receipts Pim's events route keeps.
-				strictDeliveries: (watchId) => strictVerdict(this.ctx.storage.sql, watchId),
+				strictDeliveries: () => "unchecked",
 			},
 		};
 	}
@@ -2572,13 +2535,7 @@ export class Pim extends DurableAgent<Env> {
 		const run = this.#migrationRuns;
 		if (!this.triggerEngine()) return null;
 		if (run.asked) return this.migrationSweepClock();
-		const live = [
-			...schedules.filter((schedule) => schedule.callback === SCHEDULED_TASK_CALLBACK).map((schedule) => `schedule:${schedule.id}`),
-			...this.store
-				.watches()
-				.filter((watch) => watch.status !== "ended")
-				.map((watch) => `watch:${watch.id}`),
-		];
+		const live = schedules.filter((schedule) => schedule.callback === SCHEDULED_TASK_CALLBACK).map((schedule) => `schedule:${schedule.id}`);
 		if (live.length === 0) return null;
 		const left = run.last?.left;
 		// Settled by its record whatever the last run saw: a trigger delivers it, or it was given back, which stands.
@@ -2712,7 +2669,8 @@ export class Pim extends DurableAgent<Env> {
 	 * gone leaves only its trigger to end.
 	 */
 	async #endMigrated(record: MigrationRecord): Promise<void> {
-		const ended = record.kind === "schedule" ? await this.services().cancelSchedule(record.legacyId) : await this.appEvents.stop(record.legacyId);
+		// A watch is gone once its trigger took it over (`#retireWatches`): only the trigger is left to end, and its subscription with it.
+		const ended = record.kind === "schedule" && (await this.services().cancelSchedule(record.legacyId));
 		if (!ended) this.#retireMigrated(record.kind, record.legacyId);
 	}
 
@@ -2726,87 +2684,185 @@ export class Pim extends DurableAgent<Env> {
 	#handBackFrom(agentId: string): void {
 		const engine = this.triggerEngine();
 		if (!engine) return;
-		const owned = migrationRecords(this.ctx.storage.sql).filter((record) => record.phase === "shadow" && record.owner === "trigger" && engine.store.get(record.triggerId)?.spec.owningAgentId === agentId);
+		// Schedules only: a watch's trigger has no watch to go back to, and ends its firings as any trigger of a deleted agent does.
+		const owned = migrationRecords(this.ctx.storage.sql).filter(
+			(record) => record.kind === "schedule" && record.phase === "shadow" && record.owner === "trigger" && engine.store.get(record.triggerId)?.spec.owningAgentId === agentId,
+		);
 		if (owned.length > 0) this.#triggerMigration(engine).cutback(owned, { force: true });
 	}
 
+	#connectorSubscriptionsKept: { readonly engine: TriggerEngine; readonly manager: ConnectorSubscriptionManager } | undefined;
+
 	/**
-	 * One delivery to `/mcp/events/<owner>/<watch>`: the watch's own
-	 * receiver (./extensions/app-events.ts), as ever, unless a trigger took
-	 * the watch over (./triggers/migration.ts); then an event goes to the
-	 * ingress adapter (./triggers/connector.ts) with the watch's own secret
-	 * and provider subscription, and what the adapter won't take, a control
-	 * message, or anything it refuses or can't take now, goes to the watch's
-	 * receiver instead, so exactly one of them delivers it. Every delivery
-	 * to a watch still its own, shadowed or not yet, is checked against the
-	 * adapter's rules where the space's triggers are on, and the verdict
-	 * recorded, which is what makes the watch eligible for cutover; the
-	 * response is the receiver's either way.
+	 * The subscriptions of triggers on connectors' events
+	 * (./triggers/subscriptions.ts), where the space's triggers are on; null
+	 * otherwise. Each is made, renewed and undone through the connector's MCP
+	 * client, with a callback URL on `MCP_EVENTS_PATH`, and ticked from the
+	 * trigger wake.
 	 */
-	async #receiveWatchEvent(watchId: string, request: Request): Promise<Response> {
-		const sql = this.ctx.storage.sql;
-		const watch = this.store.watch(watchId);
-		const engine = watch && watch.status !== "ended" ? this.triggerEngine() : null;
-		// A watch gone or ended, or any watch where the space's triggers are off, is its receiver's alone, as ever.
-		if (!watch || !engine) return this.appEvents.receive(watchId, request);
-		const record = migrationRecordOfItem(sql, "watch", watchId);
-		const taken = record?.phase === "shadow" && record.owner === "trigger" ? record : null;
-		const trigger = taken ? engine.store.get(taken.triggerId) : undefined;
-		const source = taken ? engine.store.sourceState(taken.triggerId) : undefined;
-		if (!trigger || !source) {
-			// Owned by the watch: delivered by it, and its shape checked beside, so the migration knows whether what the connector sends would pass.
-			const text = await request.text();
-			const response = await this.appEvents.receive(watchId, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
-			if (response.ok) {
-				// Only events count, either way: a verification passing says nothing of what the connector's events look like.
+	#connectorSubscriptions(): ConnectorSubscriptionManager | null {
+		const engine = this.triggerEngine();
+		if (!engine) return null;
+		if (this.#connectorSubscriptionsKept?.engine !== engine) {
+			const request = async (connectorId: string, method: string, params: Record<string, unknown>): Promise<ProviderAnswer<never>> => {
 				try {
-					const shape = strictShape(request.headers, text, { providerSubscriptionId: watch.remoteId, event: watch.event });
-					if (!shape.ok) recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_fail", ref: shape.reason, at: this.triggerClock() });
-					else if (shape.type === "event") recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "strict_pass", ref: shape.eventId ?? "", at: this.triggerClock() });
+					return { ok: true, value: (await this.apps.request(connectorId, method, params)) as never };
 				} catch (error) {
-					// The watch delivered it either way: a check that couldn't be recorded leaves the watch waiting for its next delivery.
-					console.warn(JSON.stringify({ event: "pim.triggers_strict_check_failed", owner: this.name, error: String(error) }));
+					// The connector's refusal, with its code; anything else (not connected, no answer) is unknown, and tried again.
+					const code = (error as { code?: unknown } | null)?.code;
+					if (typeof code === "number" && Number.isSafeInteger(code)) return { ok: false, code };
+					throw error;
 				}
-			}
-			return response;
+			};
+			const provider: SubscriptionProvider = {
+				connector: (id) => {
+					const server = this.apps.servers().find((candidate) => candidate.id === id);
+					return !server ? "removed" : server.state === "ready" ? "connected" : "disconnected";
+				},
+				subscribe: ({ connectorId, name, arguments: args, delivery, cursor, ttlMs }) => request(connectorId, "events/subscribe", { name, arguments: args, delivery, cursor, ttlMs }),
+				unsubscribe: ({ connectorId, name, arguments: args, delivery }) => request(connectorId, "events/unsubscribe", { name, arguments: args, delivery }),
+			};
+			const manager = new ConnectorSubscriptionManager(this.ctx.storage.sql, {
+				store: engine.store,
+				provider,
+				transaction: (work) => this.ctx.storage.transactionSync(work),
+				now: () => this.triggerClock(),
+				owner: () => this.name,
+				callbackUrl: ({ owner, key }) => `${(this.deployment().publicUrl ?? "").replace(/\/$/, "")}${MCP_EVENTS_PATH}${owner}/${key}`,
+			});
+			this.#connectorSubscriptionsKept = { engine, manager };
 		}
-		const text = await request.text();
-		const legacy = () => this.appEvents.receive(watchId, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
-		const fallback = (reason: string) => {
-			recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "legacy_fallback", ref: reason, at: this.triggerClock() });
-			return legacy();
-		};
-		const shape = strictShape(request.headers, text, { providerSubscriptionId: watch.remoteId, event: watch.event });
-		if (!shape.ok) return fallback(shape.reason);
-		// Verifications, gaps and the end of the subscription are the watch's: it keeps the subscription, as it did.
-		if (shape.type !== "event") return legacy();
+		return this.#connectorSubscriptionsKept.manager;
+	}
+
+	/** Sends what triggers' subscriptions call for now, then sets the wake for what is left. Never throws. */
+	async #syncConnectorSubscriptions(): Promise<void> {
+		try {
+			await this.#connectorSubscriptions()?.tick();
+			await this.wakeTriggers();
+		} catch (error) {
+			console.warn("keeping connector subscriptions failed", error);
+		}
+	}
+
+	/** What the watch tools (./extensions/app-events.ts) need: watches are triggers on connectors' events. */
+	readonly #watchHost: WatchHost = {
+		api: () => this.#triggerApi(),
+		actor: (session) => {
+			const { agent } = this.#roleOf(session);
+			return { kind: "agent", agentId: agent.id, majordomo: agent.majordomo, chatId: session };
+		},
+		publicUrl: () => this.deployment().publicUrl ?? null,
+		sync: () => this.#syncConnectorSubscriptions(),
+		subscription: (triggerId): WatchSubscription => {
+			const engine = this.triggerEngine();
+			const trigger = engine?.store.get(triggerId);
+			const lastEventAt = engine?.store.sourceState(triggerId)?.lastObservedAt ?? null;
+			const binding = trigger ? this.#connectorSubscriptions()?.bindings(triggerId).filter((candidate) => candidate.generation === trigger.generation).at(-1) : undefined;
+			if (!binding) return { status: "pending", lastError: null, renewsBefore: null, lastEventAt };
+			const status = binding.phase !== "open" || binding.status !== "active" ? "ended" : binding.grant ? "active" : "pending";
+			return { status, lastError: binding.lastError, renewsBefore: binding.grant?.refreshBefore ?? null, lastEventAt };
+		},
+		triggerOfWatch: (watchId) => {
+			const record = migrationRecordOfItem(this.ctx.storage.sql, "watch", watchId);
+			return record?.phase === "shadow" ? record.triggerId : null;
+		},
+	};
+
+	/**
+	 * Deletes the triggers on connectors' events `which` picks, and asks
+	 * their connectors to unsubscribe now, as stopping a watch always did:
+	 * for a chat deleted, or a connector about to be removed.
+	 */
+	async #stopConnectorTriggers(which: (source: ConnectorEventSource, destination: TriggerDestination) => boolean): Promise<void> {
+		const engine = this.triggerEngine();
+		if (!engine) return;
+		let stopped = false;
+		for (const trigger of engine.store.list()) {
+			const spec = trigger.spec;
+			if (trigger.lifecycle === "deleted" || spec.source.kind !== "connector_event" || !which(spec.source, spec.destination)) continue;
+			const record = migrationRecordOf(this.ctx.storage.sql, trigger.id);
+			if (record?.phase === "shadow") this.#retireMigrated(record.kind, record.legacyId);
+			else engine.store.remove({ id: trigger.id });
+			stopped = true;
+		}
+		if (stopped) await this.#syncConnectorSubscriptions();
+	}
+
+	/**
+	 * Watches are triggers now. A watch kept from before is ended as the
+	 * space starts, with its renewal alarms: one a trigger took over
+	 * (./triggers/migration.ts) hands its subscription to that trigger, which
+	 * keeps its callback URL, secret and provider subscription, so the
+	 * connector notices nothing; any other is unsubscribed and dropped, with
+	 * its shadow trigger if it had one, and the person is told. Never throws.
+	 */
+	async #retireWatches(): Promise<void> {
+		try {
+			for (const schedule of await this.listSchedules()) {
+				if (schedule.callback === LEGACY_WATCH_REFRESH) await this.cancelSchedule(schedule.id);
+			}
+			const sql = this.ctx.storage.sql;
+			for (const watch of this.store.watches()) {
+				const record = migrationRecordOfItem(sql, "watch", watch.id);
+				const subscriptions = this.#connectorSubscriptions();
+				const adopted =
+					subscriptions !== null &&
+					record?.phase === "shadow" &&
+					record.owner === "trigger" &&
+					watch.status !== "ended" &&
+					watch.remoteId !== null &&
+					subscriptions.adopt({ key: watch.id, triggerId: record.triggerId, secret: watch.secret, providerSubscriptionId: watch.remoteId, refreshBefore: watch.refreshBefore });
+				if (!adopted) {
+					if (record?.phase === "shadow") this.#retireMigrated("watch", watch.id);
+					if (watch.status !== "ended") {
+						await this.apps
+							.request(watch.serverId, "events/unsubscribe", { name: watch.event, arguments: watch.arguments, delivery: { url: watch.url } })
+							.catch(() => console.warn(JSON.stringify({ event: "pim.watch_unsubscribe_failed", owner: this.name })));
+						const app = this.apps.servers().find((server) => server.id === watch.serverId)?.name ?? watch.serverId;
+						const notification = this.store.addNotification({
+							id: crypto.randomUUID(),
+							session: null,
+							title: `Stopped watching ${app}`,
+							body: `The watch for "${watch.event}" ended: watches are triggers now. Ask your agent to watch it again.`,
+						});
+						await this.deliverNotification(notification);
+					}
+				}
+				this.store.deleteWatch(watch.id);
+				console.log(JSON.stringify({ event: "pim.watch_retired", owner: this.name, adopted }));
+			}
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.watch_retire_failed", owner: this.name, error: String(error) }));
+		}
+	}
+
+	/**
+	 * One delivery to `/mcp/events/<owner>/<key>`, which names a trigger's
+	 * subscription: taken in by the ingress adapter (./triggers/connector.ts)
+	 * with the binding's own secret and provider subscription id, and what
+	 * the event carried kept for its run until pi has it. Anything else
+	 * answers as the adapter says: `410` for a key that names nothing.
+	 */
+	async #receiveConnectorEvent(key: string, request: Request): Promise<Response> {
+		const engine = this.triggerEngine();
+		const subscriptions = this.#connectorSubscriptions();
+		if (!engine || !subscriptions) return new Response("Gone", { status: 410 });
+		const sql = this.ctx.storage.sql;
 		const ingress = new ConnectorIngress({
 			store: engine.store,
 			now: () => this.triggerClock(),
 			transaction: (work) => this.ctx.storage.transactionSync(work),
 			host: {
-				owner: () => this.name,
-				subscription: (key) => (key === watchId ? adoptedSubscription(watch, { id: trigger.id, generation: trigger.generation, sourceRevision: source.sourceRevision }) : undefined),
-				// The watch's receiver never asked whether its connector's client is up: its subscription is the connector's, and removing the connector ends its watches. The same here.
-				connector: () => "connected",
+				...subscriptions.ingressHost(),
+				// A subscription is the connector's, whether or not its client is up here; removing the connector ends it.
+				connector: (id) => (this.apps.servers().some((server) => server.id === id) ? "connected" : "removed"),
 			},
-			// The event's data, as the watch's run would have read it, until the trigger's run has it.
 			kept: (admitted) => new LegacyEventData(sql).keep({ ...admitted, data: JSON.stringify(admitted.data, null, 2) }),
 		});
-		const outcome = await ingress.receive({ owner: this.name, key: watchId }, new Request(request.url, { method: request.method, headers: request.headers, body: text }));
-		if (outcome.disposition === "accepted") {
-			if (outcome.reason === "admitted") {
-				// As the watch records a delivery it took: the cursor the event carried, and when it came.
-				const cursor = (JSON.parse(text) as Record<string, unknown>).cursor;
-				this.store.updateWatch(watchId, { ...(typeof cursor === "string" ? { cursor } : {}), lastEventAt: Date.now() });
-				recordReceipt(sql, { kind: "watch", legacyId: watchId, receipt: "routed_event", ref: shape.eventId ?? "", at: this.triggerClock() });
-				await this.wakeTriggers();
-			}
-			return ingressResponse(outcome);
-		}
-		// A delivery that doesn't authenticate is refused as the watch would refuse it; any other refusal is the adapter's own, and the watch delivers instead.
-		if (outcome.disposition === "reject" && (outcome.reason === "unauthenticated" || outcome.reason === "wrong_subscription")) return ingressResponse(outcome);
-		return fallback(outcome.reason);
+		const outcome = await ingress.receive({ owner: this.name, key }, request);
+		if (outcome.disposition === "accepted" && outcome.reason === "admitted") await this.wakeTriggers();
+		return ingressResponse(outcome);
 	}
 
 	#triggerApiKept: TriggerApi | undefined;
@@ -2960,8 +3016,10 @@ export class Pim extends DurableAgent<Env> {
 	async runTriggerTick(): Promise<void> {
 		try {
 			this.#computerTriggers()?.renew();
+			// Subscriptions first, so a trigger enabled since is subscribed before anything else waits on the connector.
+			await this.#connectorSubscriptions()?.tick();
 			await this.triggerEngine()?.coordinator.tick();
-			// What cut-over watches' events carried is kept a day at most.
+			// What connector events carried is kept a day at most.
 			if (this.triggerEngine()) new LegacyEventData(this.ctx.storage.sql).sweep(this.triggerClock());
 		} finally {
 			// Schedules and watches move to triggers in a space that is already running too; it never throws.
@@ -2977,12 +3035,13 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	wakeTriggers(): Promise<void> {
 		const next = this.#triggerWake.then(async () => {
-			// The coordinator's next work, renewing the computer's lease on its triggers, sweeping what cut-over watches' events carried, or sweeping for the migration, whichever comes first.
+			// The coordinator's next work, keeping connectors' subscriptions, renewing the computer's lease on its triggers, sweeping what connector events carried, or sweeping for the migration, whichever comes first.
 			const engine = this.triggerEngine();
 			const schedules = await this.listSchedules();
 			const sweepAt = this.#migrationSweepAt(schedules);
 			const due = [
 				engine?.coordinator.nextWakeAt() ?? null,
+				this.#connectorSubscriptions()?.nextWakeAt() ?? null,
 				this.#computerTriggers()?.renewAt() ?? null,
 				engine ? new LegacyEventData(this.ctx.storage.sql).nextSweepAt() : null,
 				sweepAt === null ? null : this.triggerClock() + (sweepAt - this.migrationSweepClock()),
@@ -3462,7 +3521,18 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	toolPermissions(audience: string = OWNER): ToolPermissionInfo[] {
 		if (audience === OWNER) {
-			return this.#ownGatedActions().map((action) => ({
+			const switched = SWITCHED_TOOLS.map((tool) => ({
+				app: null,
+				appName: null,
+				tool: tool.name,
+				name: tool.name,
+				description: tool.description,
+				readOnly: false,
+				destructive: false,
+				choices: ["off", "on"] as const,
+				...this.#unaskedPermission(tool.name),
+			}));
+			const gated = this.#ownGatedActions().map((action): ToolPermissionInfo => ({
 				app: null,
 				appName: null,
 				tool: action.name,
@@ -3473,6 +3543,7 @@ export class Pim extends DurableAgent<Env> {
 				choices: UNASKED_TOOLS.includes(action.name) ? ["off", "on"] : action.explicitApproval ? ["off", "ask"] : TOOL_PERMISSIONS,
 				...(UNASKED_TOOLS.includes(action.name) ? this.#unaskedPermission(action.name) : ownToolPermission(this.store, action.name)),
 			}));
+			return [...gated, ...switched];
 		}
 		const servers = new Map(this.apps.servers().map((server) => [server.id, server]));
 		const apps = this.apps.tools().flatMap((tool) => {
@@ -3561,7 +3632,7 @@ export class Pim extends DurableAgent<Env> {
 		if (audience !== OWNER) this.#circle(audience);
 		let definition: string | null = null;
 		if (app === "") {
-			const known = audience === OWNER && this.#ownGatedActions().some((action) => action.name === tool);
+			const known = audience === OWNER && (this.#ownGatedActions().some((action) => action.name === tool) || SWITCHED_TOOLS.some((switched) => switched.name === tool));
 			if (!known) throw new HttpError(404, `No tool ${tool}`);
 			if (UNASKED_TOOLS.includes(tool) && permission === "ask") throw new HttpError(400, "This tool can only be off or on: it runs without asking");
 			if (permission === "on" && this.#ownGatedActions().find((action) => action.name === tool)?.explicitApproval) {
@@ -5355,7 +5426,6 @@ export class Pim extends DurableAgent<Env> {
 			sharedWithMe: this.visits.shares().map(({ ownerId, username, sharedAt, revoked }) => ({ ownerId, username, sharedAt, revoked })),
 			notifications: this.store.notifications({ unread: false }).map((notification) => this.#publicSession(notification)),
 			apps: this.apps.servers().map(({ id, name, url, approval }) => ({ id, name, url, approval })),
-			watches: this.appEvents.list(),
 			// Whatever triggers recorded, read as it is, whether they are on now or not.
 			...(triggers ? { triggers } : {}),
 			...(await this.artifacts.export().then(({ artifacts, files }) => ({ artifacts: artifacts.map((artifact) => this.#publicSession(artifact)), artifactFiles: files }))),
@@ -5375,7 +5445,7 @@ export class Pim extends DurableAgent<Env> {
 	async remainingData(): Promise<string[]> {
 		const remaining = this.store.remainingData();
 		if (this.memory.store.count() > 0) remaining.push("memories");
-		const own = new Set([SCHEDULED_TASK_CALLBACK, WATCH_REFRESH_CALLBACK]);
+		const own = new Set([SCHEDULED_TASK_CALLBACK, LEGACY_WATCH_REFRESH]);
 		if ((await this.listSchedules()).some((schedule) => own.has(schedule.callback))) remaining.push("schedules");
 		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("connector connections");
 		if (await this.images.any()) remaining.push("images");
@@ -5406,7 +5476,14 @@ export class Pim extends DurableAgent<Env> {
 		const courtesy = async () => {
 			const sessions = await this.harness.sessions.list();
 			await Promise.allSettled(sessions.map((session) => this.harness.session(session.id).abort()));
-			await Promise.allSettled(this.store.watches().map((watch) => this.appEvents.stop(watch.id)));
+			// Connectors' subscriptions are undone as stopping their triggers would; the space reads as closed now, so through the manager it already has.
+			const subscriptions = this.#connectorSubscriptionsKept;
+			if (subscriptions) {
+				for (const trigger of subscriptions.engine.store.list()) {
+					if (trigger.lifecycle !== "deleted" && trigger.spec.source.kind === "connector_event") subscriptions.engine.store.remove({ id: trigger.id });
+				}
+				await subscriptions.manager.tick();
+			}
 			await this.nativeApps.revokeAll();
 		};
 		await Promise.race([courtesy().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ERASE_COURTESY_MS))]);
@@ -6060,9 +6137,8 @@ export class Pim extends DurableAgent<Env> {
 				for (const schedule of await services.listSchedules()) {
 					if (schedule.payload.session === id && !schedule.payload.newChat) await services.cancelSchedule(schedule.id);
 				}
-				for (const watch of this.store.watches()) {
-					if (watch.session === id) await this.appEvents.stop(watch.id);
-				}
+				// A watch delivers to its chat only: it goes with it.
+				await this.#stopConnectorTriggers((_source, destination) => destination.type === "existing_chat" && destination.chatId === id);
 				return { deleted: true };
 			},
 		],
@@ -7557,7 +7633,8 @@ export class Pim extends DurableAgent<Env> {
 			"/mcp/:id",
 			async ({ id }) => {
 				if (!this.apps.servers().some((server) => server.id === id)) throw new HttpError(404, `No connector ${id}`);
-				for (const watch of this.store.watches(id)) await this.appEvents.stop(watch.id);
+				// Unsubscribed while the connector can still be asked.
+				await this.#stopConnectorTriggers((source) => source.connectorId === id);
 				await this.#disconnect(id!);
 				this.catalog.forget(id!);
 				this.#installApps();
@@ -7582,18 +7659,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		// Deliveries from connectors; authenticated by their Standard Webhooks signature, not the API token.
-		["POST", "/mcp/events/:watch", ({ watch }, request) => this.#receiveWatchEvent(watch!, request)],
-
-		// Event watches.
-		["GET", "/watches", () => ({ watches: this.appEvents.list() })],
-		[
-			"DELETE",
-			"/watches/:id",
-			async ({ id }) => {
-				if (!(await this.appEvents.stop(id!))) throw new HttpError(404, `No watch ${id}`);
-				return { deleted: true };
-			},
-		],
+		["POST", "/mcp/events/:key", ({ key }, request) => this.#receiveConnectorEvent(key!, request)],
 
 		// Web Push: the key a browser subscribes with, and the subscription it gets.
 		["GET", "/push/key", async () => ({ publicKey: (await this.#vapidKeys()).publicKey })],

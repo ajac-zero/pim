@@ -246,7 +246,7 @@ describe("connector events handed on by the coordinator", () => {
 
 			// What the agent reads: the event by name, id and time.
 			const text = firingText(submission.instruction, submission.evidence);
-			expect(text).toBe(`[Trigger "Fares" fares] Tell me about cheap fares.\n\n(On ${EVENT} from travel at ${iso(START - MINUTE)}, event evt_1. What the event carried isn't kept or passed on.)`);
+			expect(text).toBe(`[Connector event] travel sent "${EVENT}" (event evt_1 at ${iso(START - MINUTE)}) for trigger "Fares" fares.\nYour instruction for this trigger: Tell me about cheap fares.\nWhat the event carried isn't kept or passed on.`);
 			// Nothing it carried is in the run, the export's record of triggers, the host's calls or a log.
 			const everything = JSON.stringify({ history: triggerHistory(sql), runs: coordinator.runs("fares"), log: host.log, submissions: [...host.submissions.values()], text });
 			expect(everything).toContain("evt_1");
@@ -569,7 +569,7 @@ describe("connector events in Pim, handed on by its own engine", () => {
 			const chat = started.chatId!;
 			expect(await inSpace((pim) => pim.agents.ofSession(chat).id)).toBe(agent);
 			const shown = await inSpace((pim) => pim.store.publicId(chat));
-			expect(await messagesOf(shown, "user")).toEqual([`[Trigger "Fares" fares] Post the fare to the team.\n\n(On ${EVENT} from travel at ${iso(observedAt)}, event evt_1. What the event carried isn't kept or passed on.)`]);
+			expect(await messagesOf(shown, "user")).toEqual([`[Connector event] travel sent "${EVENT}" (event evt_1 at ${iso(observedAt)}) for trigger "Fares" fares.\nYour instruction for this trigger: Post the fare to the team.\nWhat the event carried isn't kept or passed on.`]);
 
 			// The trigger approved nothing: the request waits for the person, and the run holds its trigger meanwhile.
 			await dispatch();

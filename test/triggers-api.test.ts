@@ -533,11 +533,11 @@ describe("triggers' API where triggers are on", () => {
 		await call(`/triggers/${text.body.trigger.id}`, { method: "DELETE" });
 	});
 
-	it("lists sources as they are: time runs, connector events are drafts only, the computer's drafts only until one is paired, files not yet", async () => {
+	it("lists sources as they are: time and connector events run, the computer's drafts only until one is paired, files not yet", async () => {
 		const answered = await tool("list_trigger_sources", {});
 		expect(answered.body.sources).toEqual([
 			{ kind: "time", status: "available", delivers: true, reason: null, schedules: ["once", "cron", "interval"] },
-			{ kind: "connector_event", status: "draft_only", delivers: false, reason: "not_wired", connectors: [] },
+			{ kind: "connector_event", status: "available", delivers: true, reason: null, connectors: [] },
 			{ kind: "poll", status: "draft_only", delivers: false, reason: "computer_not_paired", requiresGrant: true, computerPaired: false },
 			{ kind: "stream", status: "draft_only", delivers: false, reason: "computer_not_paired", requiresGrant: true, computerPaired: false },
 			{ kind: "process", status: "draft_only", delivers: false, reason: "computer_not_paired", requiresGrant: true, computerPaired: false },
@@ -677,17 +677,13 @@ describe("triggers' API where triggers are on", () => {
 			const back = await task("0 10 * * *", { instruction: "BACK-INSTRUCTION", label: "Back" });
 			// A day's name, which triggers would read differently, and no label.
 			const named = await task("0 9 * * MON", { instruction: "NAMED-INSTRUCTION" });
-			// A watch whose deliveries haven't been checked against the adapter's rules yet: shadowed, and waiting.
-			const watchId = crypto.randomUUID();
-			pim.store.addWatch({ id: watchId, serverId: "travel", event: "flight.price_changed", arguments: { route: "JFK-LIS" }, instruction: "WATCH-INSTRUCTION", session: chat, secret, url: `https://pim.test/mcp/events/${OWNER}/${watchId}` });
-			pim.store.updateWatch(watchId, { status: "active", remoteId: "sub_travel_1", cursor: "cursor-kept-77", refreshBefore: Date.now() + HOUR });
 			await pim.runTriggerMigration();
 			expect(pim.cutbackTriggerMigration([{ kind: "schedule", legacyId: back.id }])!.map((item) => item.outcome)).toEqual(["cut_back"]);
 			// Made since the last run: the next one moves it.
 			const fresh = await task("0 11 * * *", { instruction: "FRESH-INSTRUCTION", label: "Fresh" });
-			return { moved, back, named, fresh, watchId };
+			return { moved, back, named, fresh };
 		});
-		const ours = new Set([made.moved.id, made.back.id, made.named.id, made.fresh.id, made.watchId]);
+		const ours = new Set([made.moved.id, made.back.id, made.named.id, made.fresh.id]);
 		const schedule = (scheduled: { id: string; time: number }, rest: Record<string, unknown>) => ({ kind: "schedule", legacyId: scheduled.id, nextFiringAt: scheduled.time * 1000, ...rest });
 		const expected = [
 			schedule(made.moved, { label: "Scout brief", agentId: scout.id, status: "migrated", owner: "trigger", reason: null, triggerId: `legacy:schedule:${made.moved.id}:1` }),
@@ -695,7 +691,6 @@ describe("triggers' API where triggers are on", () => {
 			schedule(made.named, { label: null, agentId: boss, status: "unsupported", owner: "legacy", reason: "cron_syntax", triggerId: null }),
 			schedule(made.fresh, { label: "Fresh", agentId: boss, status: "migratable", owner: "legacy", reason: null, triggerId: null }),
 		].sort((a, b) => (a.legacyId < b.legacyId ? -1 : 1));
-		expected.push({ kind: "watch", legacyId: made.watchId, label: "flight.price_changed", agentId: boss, status: "deferred", owner: "legacy", reason: "stricter_ingress", nextFiringAt: null, triggerId: `legacy:watch:${made.watchId}:1` } as never);
 		try {
 			const before = await everything();
 			const listed = await call("/triggers/migration");
@@ -724,7 +719,6 @@ describe("triggers' API where triggers are on", () => {
 			expect((await tool("list_trigger_migration", {}, scoutChat)).body.items).toEqual([expected.find((item) => item.legacyId === made.moved.id)]);
 		} finally {
 			for (const id of [made.moved.id, made.back.id, made.named.id, made.fresh.id]) await call(`/schedules/${id}`, { method: "DELETE" });
-			await call(`/watches/${made.watchId}`, { method: "DELETE" });
 			await call(`/agents/${scout.id}`, { method: "DELETE" });
 		}
 	});

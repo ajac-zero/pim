@@ -1,19 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useI18n } from "~/components/i18n";
-import { ListChecks } from "~/components/icons";
+import { SlidersHorizontal } from "~/components/icons";
 import { Button } from "~/components/ui/button";
-import { pim } from "~/lib/pim-api";
-import { approvalsQuery, browserQuery, sessionsQuery } from "~/lib/queries";
+import { approvalsQuery, browserQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
-/** Whether the activity box is open: one setting for every chat, kept across visits. */
-const OPEN_KEY = "pim-summary-open";
+/** Whether the options box is open: one setting for every chat, but always closed when a chat opens, and not kept across visits. */
+let summaryOpen = false;
 const listeners = new Set<() => void>();
 
-function writeSummaryOpen(next: boolean) {
-  if (next) localStorage.setItem(OPEN_KEY, "1");
-  else localStorage.removeItem(OPEN_KEY);
+export function writeSummaryOpen(next: boolean) {
+  summaryOpen = next;
   for (const listener of listeners) listener();
 }
 
@@ -23,7 +21,7 @@ export function useSummaryOpen(): [boolean, (open: boolean) => void] {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    () => localStorage.getItem(OPEN_KEY) === "1",
+    () => summaryOpen,
     () => false,
   );
   return [open, writeSummaryOpen];
@@ -47,9 +45,9 @@ export function usePendingApprovals(sessionId: string) {
 }
 
 /**
- * The header button that shows or hides the activity box; a dot says the chat's
+ * The header button that shows or hides the chat's options box; a dot says the chat's
  * browser window is open in it, or an approval waits. The box opens by itself
- * when the browser opens or a task starts while the person is in the chat, not
+ * when the browser opens while the person is in the chat, not
  * for ones the chat already had.
  */
 export function ActivityToggle({
@@ -62,35 +60,20 @@ export function ActivityToggle({
   const { t } = useI18n();
   const [open, setOpen] = useSummaryOpen();
   const { data: browser } = useQuery(browserQuery(sessionId));
-  const { data: sessions } = useQuery(sessionsQuery());
-  const visit = !!sessions?.find((session) => session.id === sessionId)?.visit;
-  const { data: tasks } = useQuery({
-    queryKey: ["tasks", sessionId],
-    queryFn: () => pim.tasks(sessionId),
-    enabled: !visit,
-  });
   const waiting = usePendingApprovals(sessionId).length > 0;
   // What the chat had when its data first arrived; only a change from it opens the box.
-  const seen = useRef<{ session: string; browser: boolean; tasks: number }>(
-    undefined,
-  );
+  const seen = useRef<{ session: string; browser: boolean }>(undefined);
   const hasBrowser = !!browser?.page;
-  const taskCount = tasks?.length;
-  const loaded = browser !== undefined && (visit || taskCount !== undefined);
+  const loaded = browser !== undefined;
   useEffect(() => {
     if (!loaded) return;
-    const now = {
-      session: sessionId,
-      browser: hasBrowser,
-      tasks: taskCount ?? 0,
-    };
+    const now = { session: sessionId, browser: hasBrowser };
     const before = seen.current;
     seen.current = now;
     if (before?.session !== sessionId) return;
-    if ((now.browser && !before.browser) || now.tasks > before.tasks)
-      writeSummaryOpen(true);
-  }, [loaded, sessionId, hasBrowser, taskCount]);
-  const label = t("activity");
+    if (now.browser && !before.browser) writeSummaryOpen(true);
+  }, [loaded, sessionId, hasBrowser]);
+  const label = t("options");
   return (
     <Button
       variant="ghost"
@@ -105,7 +88,7 @@ export function ActivityToggle({
         className,
       )}
     >
-      <ListChecks className="size-4.5" />
+      <SlidersHorizontal className="size-4.5" />
       {(browser?.page || waiting) && (
         <span className="absolute top-1.5 right-1.5 size-2 rounded-full bg-primary" />
       )}

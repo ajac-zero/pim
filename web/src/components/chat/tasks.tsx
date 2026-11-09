@@ -16,11 +16,6 @@ import {
   X,
 } from "~/components/icons";
 import { Button } from "~/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "~/components/ui/collapsible";
 import { type AgentTask, pim, type StartedBy } from "~/lib/pim-api";
 import { sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -180,89 +175,6 @@ export function TaskCard({
   );
 }
 
-/**
- * A chat's tasks in the box beside it, as a tree, so the work it handed out
- * can be followed without scrolling back to each card; a task opens in
- * the canvas beside the chat, as from its card.
- */
-export function TaskList({
-  sessionId,
-  tasks,
-}: {
-  sessionId: string;
-  tasks: readonly AgentTask[];
-}) {
-  const { t, formatDate } = useI18n();
-  const working = tasks.filter((task) => task.state === "working").length;
-  const waiting = tasks.filter((task) => task.state === "auth-required").length;
-  const children = childrenOf(tasks);
-  // Each task's children hang from a line down from its mark, with an elbow to each child's.
-  const branch = (parent: string | null): ReactNode =>
-    children.get(parent)?.map((task) => (
-      <li
-        key={task.id}
-        className={cn(
-          parent !== null &&
-            "relative pl-1.5 before:absolute before:top-0 before:left-0 before:h-full before:border-border before:border-l after:absolute after:top-[18px] after:left-0 after:w-2.5 after:border-border after:border-t first:before:top-[-26px] first:before:h-[calc(100%+26px)] last:before:h-[18px] first:last:before:h-[44px]",
-        )}
-      >
-        <TaskLink
-          sessionId={sessionId}
-          task={task}
-          className="flex w-full items-start gap-2.5 rounded-xl px-2 py-2 text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
-        >
-          <span className="flex h-5 shrink-0 items-center">
-            <TaskState state={task.state} />
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-baseline gap-x-1 text-sm">
-              <span className="max-w-full truncate font-medium">
-                {task.agent.name}
-              </span>
-              <span className="text-muted-foreground">
-                {t(activityKey[task.state])}
-              </span>
-            </span>
-            <span className="block truncate text-muted-foreground text-xs">
-              {task.task}
-            </span>
-          </span>
-          <time
-            className="shrink-0 pt-0.5 text-muted-foreground text-xs tabular-nums"
-            dateTime={new Date(task.createdAt).toISOString()}
-          >
-            {formatDate(new Date(task.createdAt), { timeStyle: "short" })}
-          </time>
-        </TaskLink>
-        {children.has(task.id) && (
-          <ul className="ml-[15px]">{branch(task.id)}</ul>
-        )}
-      </li>
-    ));
-  const counts = [
-    working > 0 && t("tasksWorking", { count: working }),
-    waiting > 0 && t("tasksWaiting", { count: waiting }),
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  return (
-    <Collapsible defaultOpen asChild>
-      <section aria-labelledby="task-list" className="border-t">
-        <h2 id="task-list">
-          <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-3.5 text-left text-[13px] text-muted-foreground hover:text-foreground">
-            <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
-            {t("tasks")}
-            {counts && <span className="ml-auto">{counts}</span>}
-          </CollapsibleTrigger>
-        </h2>
-        <CollapsibleContent className="px-2 pb-2">
-          <ul className="space-y-px">{branch(null)}</ul>
-        </CollapsibleContent>
-      </section>
-    </Collapsible>
-  );
-}
-
 /** Atop a chat another agent started for a task: who started it, from which chat, which it links back to. */
 export function StartedFrom({ startedBy }: { startedBy: StartedBy }) {
   const { t } = useI18n();
@@ -416,14 +328,6 @@ const stateKey = {
   completed: "taskDone",
   failed: "taskDidntFinish",
   canceled: "taskCanceled",
-} as const;
-
-const activityKey = {
-  working: "taskActivityWorking",
-  "auth-required": "taskActivityWaiting",
-  completed: "taskActivityDone",
-  failed: "taskActivityDidntFinish",
-  canceled: "taskActivityCanceled",
 } as const;
 
 function TaskState({ state }: { state: AgentTask["state"] }) {

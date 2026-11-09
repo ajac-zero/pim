@@ -30,7 +30,10 @@ import {
  * outbox in the same transaction as the change it tells of, and the alarm
  * hands it to the notifier and deletes it once delivered; one that fails
  * stays for the next alarm, as do the same thread's later notices, so each
- * thread hears of its changes in order. A notice can arrive twice, such as
+ * thread hears of its changes in order. After 20 failed attempts a notice is
+ * dead: it stays in the outbox for diagnosis but is never tried again, and
+ * no longer holds up the thread's later notices or keeps the alarm set. A
+ * notice can arrive twice, such as
  * when it was delivered but the object restarted before deleting it, so
  * each carries a key that never changes, for its receiver to ignore it the
  * second time.
@@ -179,11 +182,11 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		return admitted.length + released.length + expired.length > 0;
 	}
 
-	/** Hands each notice to the notifier, oldest first, and deletes those delivered. After one fails, the same thread's later notices wait with it. */
+	/** Hands each live notice to the notifier, oldest first, and deletes those delivered. After one fails, the same thread's later notices wait with it, unless that failure was its last attempt and it is now dead. */
 	async #deliver(): Promise<void> {
 		const notifier = this.notifier();
 		const held = new Set<string>();
-		for (const row of this.ctx.storage.sql.exec("SELECT * FROM pim_coding_outbox ORDER BY seq").toArray()) {
+		for (const row of this.ctx.storage.sql.exec("SELECT * FROM pim_coding_outbox WHERE dead = 0 ORDER BY seq").toArray()) {
 			const notice = noticeOf(row);
 			if (held.has(notice.threadId)) continue;
 			try {
@@ -192,22 +195,27 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 				else await notifier.released(notice.released, notice.key);
 				this.ctx.storage.sql.exec("DELETE FROM pim_coding_outbox WHERE seq = ?", row.seq);
 			} catch (error) {
-				held.add(notice.threadId);
-				this.ctx.storage.sql.exec("UPDATE pim_coding_outbox SET attempts = attempts + 1 WHERE seq = ?", row.seq);
-				console.warn(JSON.stringify({ event: "pim.coding.notice_failed", key: notice.key, error: String(error) }));
+				const attempts = Number(row.attempts) + 1;
+				const dead = attempts >= MAX_NOTICE_ATTEMPTS;
+				this.ctx.storage.sql.exec("UPDATE pim_coding_outbox SET attempts = ?, dead = ? WHERE seq = ?", attempts, dead ? 1 : 0, row.seq);
+				if (dead) console.error(JSON.stringify({ event: "pim.coding.notice_dead", key: notice.key, attempts, error: String(error) }));
+				else {
+					held.add(notice.threadId);
+					console.warn(JSON.stringify({ event: "pim.coding.notice_failed", key: notice.key, attempts, error: String(error) }));
+				}
 			}
 		}
 	}
 
 	/**
-	 * Sets the alarm while there is something to do: notices to deliver, a
+	 * Sets the alarm while there is something to do: live notices to deliver, a
 	 * thread queued, or a slot's thread idle or waiting. Notices just posted
 	 * go at once; otherwise the next tick is in 30 seconds, or sooner if the
 	 * alarm is already set sooner. With nothing to do, the alarm is deleted.
 	 * The alarm itself `replace`s its own time, since it has just run.
 	 */
 	async #schedule(urgent: boolean, replace = false): Promise<void> {
-		const pending = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM pim_coding_outbox").one().n !== 0;
+		const pending = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM pim_coding_outbox WHERE dead = 0").one().n !== 0;
 		const { queued, running } = this.#scheduler.snapshot();
 		if (!pending && queued.length === 0 && running.every((slot) => slot.activity === "running")) {
 			await this.ctx.storage.deleteAlarm();
@@ -221,6 +229,9 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 
 /** How often the alarm ticks the scheduler while there is something to do. */
 export const TICK_MS = 30_000;
+
+/** How many times a notice is tried before it is dead. */
+export const MAX_NOTICE_ATTEMPTS = 20;
 
 /**
  * Who hears of what happens to a space's coding threads. Each method gets
@@ -263,7 +274,8 @@ CREATE TABLE IF NOT EXISTS pim_coding_outbox (
 	thread_id TEXT NOT NULL,
 	body TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
-	attempts INTEGER NOT NULL DEFAULT 0
+	attempts INTEGER NOT NULL DEFAULT 0,
+	dead INTEGER NOT NULL DEFAULT 0
 );
 `;
 

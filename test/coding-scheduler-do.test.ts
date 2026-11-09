@@ -1,8 +1,8 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { conditionsFromHealth, type ManagerHealth } from "../src/coding/provider-capacity";
 import type { AdmissionConditions } from "../src/coding/scheduler";
-import { codingScheduler, type SchedulerNotifier, TICK_MS } from "../src/coding/scheduler-do";
+import { codingScheduler, MAX_NOTICE_ATTEMPTS, type SchedulerNotifier, TICK_MS } from "../src/coding/scheduler-do";
 import { CodingSchedulerDO, codingSchedulers } from "./worker";
 
 // Every space's scheduler here goes by a fake clock years ahead, so its alarms never go off on their own: tests run them.
@@ -15,9 +15,9 @@ const alarmOf = (stub: DurableObjectStub<CodingSchedulerDO>) => runInDurableObje
 const outbox = (stub: DurableObjectStub<CodingSchedulerDO>) =>
 	runInDurableObject(stub, (_instance: CodingSchedulerDO, state) =>
 		state.storage.sql
-			.exec("SELECT kind, thread_id, attempts FROM pim_coding_outbox ORDER BY seq")
+			.exec("SELECT kind, thread_id, attempts, dead FROM pim_coding_outbox ORDER BY seq")
 			.toArray()
-			.map((row) => `${row.kind}:${row.thread_id}:${row.attempts}`),
+			.map((row) => `${row.kind}:${row.thread_id}:${row.attempts}${row.dead ? " dead" : ""}`),
 	);
 
 /** What the notifier heard, as `kind:thread`, and each notice's key in the same order. */
@@ -198,6 +198,64 @@ describe("a space's coding scheduler", () => {
 		expect(heard).toEqual(["admitted:b", "released:a:preempted", "released:a:preempted", "admitted:a"]);
 		// A receiver that keeps the keys it has seen takes each notice once.
 		expect([...new Set(keys)]).toHaveLength(3);
+	});
+});
+
+describe("a notice that keeps failing", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("is tried 20 times, then kept dead: never tried again, logged once, holding up neither the thread's later notices nor the alarm", async () => {
+		const stub = space();
+		await stub.setLimit(1);
+		await stub.request("a", { provider: "sandbox" });
+		await stub.request("b", { provider: "sandbox" });
+		await stub.setActivity("a", "waiting");
+		// a is preempted for b and asks again; b ends, and a is admitted: a's release then its admission.
+		codingSchedulers.now = START + 5 * MINUTE;
+		await stub.sweep();
+		await stub.request("a", { provider: "sandbox", priority: 1000 });
+		expect(await stub.release("b")).toEqual(["a"]);
+		// a's thread never takes the news of its release, but takes everything else.
+		let tries = 0;
+		codingSchedulers.notifier = {
+			...recorder,
+			released: () => {
+				tries++;
+				throw new Error("refused");
+			},
+		};
+		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		for (let attempt = 1; attempt < MAX_NOTICE_ATTEMPTS; attempt++) {
+			codingSchedulers.now += TICK_MS;
+			expect(await runDurableObjectAlarm(stub)).toBe(true);
+		}
+		// 19 failures: a's admission still waits behind its release, and the alarm is still set to try again.
+		expect(heard).toEqual(["admitted:b"]);
+		expect(await outbox(stub)).toEqual([`released:a:${MAX_NOTICE_ATTEMPTS - 1}`, "admitted:a:0"]);
+		expect(await alarmOf(stub)).toBe(codingSchedulers.now + TICK_MS);
+		codingSchedulers.now += TICK_MS;
+		await runDurableObjectAlarm(stub);
+		// The 20th failure kills it, and a's admission goes in the same alarm.
+		expect(tries).toBe(MAX_NOTICE_ATTEMPTS);
+		expect(heard).toEqual(["admitted:b", "admitted:a"]);
+		expect(await outbox(stub)).toEqual([`released:a:${MAX_NOTICE_ATTEMPTS} dead`]);
+		const dead = errors.mock.calls.map(([line]) => JSON.parse(String(line)));
+		expect(dead).toEqual([{ event: "pim.coding.notice_dead", key: expect.stringMatching(/^coding:released:a:\d+$/), attempts: MAX_NOTICE_ATTEMPTS, error: "Error: refused" }]);
+		// With only the dead notice left and a running, nothing keeps the alarm set, and running it anyway tries nothing.
+		expect(await alarmOf(stub)).toBeNull();
+		await runInDurableObject(stub, (instance: CodingSchedulerDO) => instance.alarm());
+		expect(tries).toBe(MAX_NOTICE_ATTEMPTS);
+		expect(errors).toHaveBeenCalledTimes(1);
+		expect(await alarmOf(stub)).toBeNull();
+		// a's later notices still go.
+		await stub.setActivity("a", "idle");
+		codingSchedulers.now += 30 * MINUTE;
+		codingSchedulers.notifier = recorder;
+		await runDurableObjectAlarm(stub);
+		expect(heard).toEqual(["admitted:b", "admitted:a", "released:a:idle"]);
+		expect(await outbox(stub)).toEqual([`released:a:${MAX_NOTICE_ATTEMPTS} dead`]);
+		expect(await alarmOf(stub)).toBeNull();
 	});
 });
 

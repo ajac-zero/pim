@@ -132,6 +132,8 @@ What the fence stops, each covered by a test in `test/people.test.ts` ("erasure 
 - **Passkeys.** To try the passkey screens themselves: Chrome, Safari and Edge on a laptop or phone use their own. On a machine without one (a Linux desktop, a headless browser), start Chrome with `--remote-debugging-port=9222` and run `node scripts/virtual-authenticator.mjs 9222`: it gives every tab a virtual passkey that answers at once. Or use DevTools → More tools → WebAuthn.
 - **Models.** Workers AI needs an account, so the preview answers with a stand-in model. It echoes what you say, and calls a tool when told to: `/tool create_goal {"title": "Run a 5k", "steps": ["Run 2k"]}`, or `/tool http_request {"method": "GET", "url": "https://example.com"}` for an approval. After a tool runs, it sends you the result. Connect a ChatGPT plan in Settings to chat with a real model.
 
+Workers Builds' Preview builds run `wrangler preview`, which reads the `previews` block of `wrangler.jsonc`. A Preview gets its own Durable Objects but not `OAUTH_KV`, `BLOBS` or `ARTIFACTS`, so it runs without them until you add test namespaces and buckets there; never bind production's.
+
 ## Known limits
 
 - **Usernames can't change** yet. Nothing about them is tied to an address anymore, so renaming only needs building.

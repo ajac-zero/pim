@@ -32,10 +32,13 @@ import type {
   CodingStreamMessage,
   CodingThreadSummary,
   CodingThreadView,
+  HarnessLoginStatus,
+  HarnessSignIn,
   TranscriptMessage,
 } from "~/lib/coding";
 import { ApiError } from "~/lib/pim-api";
 import { approvalsQuery } from "~/lib/queries";
+import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
 afterEach(cleanup);
 
@@ -102,6 +105,22 @@ const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
   ...(overrides.state ? { status: overrides.state } : {}),
 });
 
+const notConnected = (): HarnessLoginStatus => ({
+  harness: "claude-code",
+  connected: false,
+  updatedAt: null,
+  byteLength: null,
+});
+
+const SIGN_IN_URL = "https://claude.ai/oauth/authorize?code=true&state=s";
+
+const signIn = (state: HarnessSignIn["state"]): HarnessSignIn => ({
+  harness: "claude-code",
+  state,
+  url: state === "waiting_code" ? SIGN_IN_URL : null,
+  error: null,
+});
+
 /** A fake of the API: every route answers from what the test sets, and every live stream is a `Connection`. */
 function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
   const connections: Connection[] = [];
@@ -145,6 +164,21 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
       connections.push(connection);
       return connection.read(signal);
     }),
+    vault: {
+      status: vi.fn<CodingApi["vault"]["status"]>(async () => notConnected()),
+      disconnect: vi.fn<CodingApi["vault"]["disconnect"]>(async () =>
+        notConnected(),
+      ),
+      signIn: vi.fn<CodingApi["vault"]["signIn"]>(async () =>
+        signIn("waiting_code"),
+      ),
+      sendCode: vi.fn<CodingApi["vault"]["sendCode"]>(async () =>
+        signIn("connected"),
+      ),
+      cancelSignIn: vi.fn<CodingApi["vault"]["cancelSignIn"]>(async () =>
+        signIn("none"),
+      ),
+    },
   } satisfies CodingApi;
   return { api, connections };
 }
@@ -704,6 +738,165 @@ describe("the harness", () => {
     expect(within(header).getByText("Claude Code")).toBeTruthy();
     expect(
       header.querySelector("svg[data-harness='claude-code']"),
+    ).toBeTruthy();
+  });
+
+  it("is chosen in the start form, which then offers to connect Claude Code", async () => {
+    const { api } = fakeApi();
+    renderWith(api, CodingPage, "/coding");
+    const pi = await screen.findByRole("radio", { name: "Pi" });
+    expect(pi.getAttribute("aria-checked")).toBe("true");
+    expect(
+      screen.queryByRole("region", { name: "Connect Claude Code" }),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Claude Code" }));
+    expect(
+      await screen.findByRole("region", { name: "Connect Claude Code" }),
+    ).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: /Repository/ }), {
+      target: { value: "https://github.com/acme/widgets" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Task/ }), {
+      target: { value: "Fix it" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start.mock.calls[0]?.[0]).toMatchObject({
+      repo: "https://github.com/acme/widgets",
+      task: "Fix it",
+      harness: "claude-code",
+    });
+  });
+
+  it("asks a Claude Code thread waiting for a login to connect, then continues it", async () => {
+    const { api } = fakeApi(
+      view({
+        harness: "claude-code",
+        state: "waiting_input",
+        stateReason: "login_required",
+      }),
+    );
+    threadPage(api);
+    expect(
+      await screen.findByText("Claude Code needs you to connect your account."),
+    ).toBeTruthy();
+    const panel = await screen.findByRole("region", {
+      name: "Connect Claude Code",
+    });
+    expect(within(panel).getByText("Not connected")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
+  it("shows the text a Claude Code turn is writing as it arrives", async () => {
+    const { api, connections } = fakeApi(
+      view({
+        harness: "claude-code",
+        state: "running",
+        currentOperation: "op",
+      }),
+    );
+    threadPage(api);
+    await waitFor(() => expect(connections).toHaveLength(1));
+    const live = connections[0] as Connection;
+    live.send({ type: "partial", kind: "text", text: "Reading the " });
+    live.send({ type: "partial", kind: "text", text: "date test." });
+    // The streaming text is split into words as it is shown.
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("Reading the date test."),
+    );
+  });
+});
+
+describe("connecting Claude Code", () => {
+  const openPanel = async (api: CodingApi) => {
+    renderWith(api, CodingPage, "/coding");
+    fireEvent.click(await screen.findByRole("radio", { name: "Claude Code" }));
+    return screen.findByRole("region", { name: "Connect Claude Code" });
+  };
+
+  it("says what connecting means, then relays the CLI's sign-in page and code until it's connected", async () => {
+    const { api } = fakeApi();
+    const panel = within(await openPanel(api));
+    expect(await panel.findByText("Not connected")).toBeTruthy();
+    const disclosure = HARNESS_DISCLOSURES["claude-code"];
+    expect(panel.getByText(disclosure.title)).toBeTruthy();
+    for (const paragraph of disclosure.paragraphs) {
+      expect(panel.getByText(paragraph)).toBeTruthy();
+    }
+
+    fireEvent.click(panel.getByRole("button", { name: "Connect Claude Code" }));
+    const link = (await panel.findByRole("link", {
+      name: /Sign in to Claude Code/,
+    })) as HTMLAnchorElement;
+    expect(link.href).toBe(SIGN_IN_URL);
+    expect(link.target).toBe("_blank");
+    expect(link.rel).toBe("noopener noreferrer");
+
+    const send = panel.getByRole("button", { name: "Connect" });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+    vi.mocked(api.vault.status).mockResolvedValue({
+      ...notConnected(),
+      connected: true,
+      updatedAt: 1,
+      byteLength: 10,
+    });
+    fireEvent.change(panel.getByRole("textbox", { name: "Code" }), {
+      target: { value: "  code#state  " },
+    });
+    fireEvent.click(send);
+    await waitFor(() =>
+      expect(api.vault.sendCode).toHaveBeenCalledWith(
+        "claude-code",
+        "code#state",
+      ),
+    );
+    expect(await panel.findByText("Connected")).toBeTruthy();
+    expect(panel.queryByRole("textbox", { name: "Code" })).toBeNull();
+
+    fireEvent.click(panel.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() =>
+      expect(api.vault.disconnect).toHaveBeenCalledWith("claude-code"),
+    );
+    expect(await panel.findByText("Not connected")).toBeTruthy();
+  });
+
+  it("says why a code didn't work and offers to start the sign-in again", async () => {
+    const { api } = fakeApi();
+    vi.mocked(api.vault.sendCode).mockResolvedValue({
+      ...signIn("waiting_code"),
+      state: "failed",
+      error: "Claude Code didn't accept that code.",
+    });
+    const panel = within(await openPanel(api));
+    fireEvent.click(
+      await panel.findByRole("button", { name: "Connect Claude Code" }),
+    );
+    fireEvent.change(await panel.findByRole("textbox", { name: "Code" }), {
+      target: { value: "wrong" },
+    });
+    fireEvent.click(panel.getByRole("button", { name: "Connect" }));
+    expect((await panel.findByRole("alert")).textContent).toBe(
+      "Claude Code didn't accept that code.",
+    );
+    expect(panel.getByText("Not connected")).toBeTruthy();
+    expect(
+      panel.getByRole("button", { name: "Connect Claude Code" }),
+    ).toBeTruthy();
+  });
+
+  it("cancels a sign-in", async () => {
+    const { api } = fakeApi();
+    const panel = within(await openPanel(api));
+    fireEvent.click(
+      await panel.findByRole("button", { name: "Connect Claude Code" }),
+    );
+    fireEvent.click(await panel.findByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(api.vault.cancelSignIn).toHaveBeenCalledWith("claude-code"),
+    );
+    expect(
+      await panel.findByRole("button", { name: "Connect Claude Code" }),
     ).toBeTruthy();
   });
 });

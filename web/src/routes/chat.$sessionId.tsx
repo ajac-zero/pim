@@ -434,38 +434,55 @@ function ChatPage() {
             }}
             className="hidden md:block"
           />
-          {artifact ? (
-            <ArtifactView
-              key={artifact}
-              artifactId={artifact}
-              version={v}
-              tabs={strip}
-              onVersion={(version) =>
-                showCanvas({
-                  artifact,
-                  v: version,
-                  ...(tabs.length > 1 && { tabs }),
-                })
-              }
-              onDeleted={() => showCanvas(closeCanvasTab(tabs, artifact))}
-              onClose={() => showCanvas(closeCanvasTab(tabs, artifact))}
-            />
-          ) : file ? (
-            <FileView
-              key={file}
-              path={file}
-              tabs={strip}
-              onClose={() => showCanvas(closeCanvasTab(tabs, file))}
-            />
-          ) : (
-            task && (
-              <TaskView
-                key={task}
-                sessionId={sessionId}
-                taskId={task}
-                onClose={() => showCanvas({})}
+          {/* Every open file and app stays mounted, hidden while another tab shows, so a PDF keeps its place, a video its time and an app its state. */}
+          {tabs.filter(isFilePath).map((path) => (
+            <div
+              key={path}
+              className={cn(
+                "flex min-h-0 flex-1 flex-col",
+                (artifact || path !== file) && "hidden",
+              )}
+            >
+              <FileView
+                path={path}
+                tabs={strip}
+                onClose={() => showCanvas(closeCanvasTab(tabs, path))}
               />
-            )
+            </div>
+          ))}
+          {tabs
+            .filter((tab) => !isFilePath(tab))
+            .map((id) => (
+              <div
+                key={id}
+                className={cn(
+                  "flex min-h-0 flex-1 flex-col",
+                  id !== artifact && "hidden",
+                )}
+              >
+                <ArtifactView
+                  artifactId={id}
+                  version={id === artifact ? v : undefined}
+                  tabs={strip}
+                  onVersion={(version) =>
+                    showCanvas({
+                      artifact: id,
+                      v: version,
+                      ...(tabs.length > 1 && { tabs }),
+                    })
+                  }
+                  onDeleted={() => showCanvas(closeCanvasTab(tabs, id))}
+                  onClose={() => showCanvas(closeCanvasTab(tabs, id))}
+                />
+              </div>
+            ))}
+          {!artifact && !file && task && (
+            <TaskView
+              key={task}
+              sessionId={sessionId}
+              taskId={task}
+              onClose={() => showCanvas({})}
+            />
           )}
         </aside>
       )}

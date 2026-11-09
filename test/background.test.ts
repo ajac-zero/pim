@@ -62,7 +62,7 @@ describe("scheduled tasks", () => {
 		const made = await toolResult("schedule_task", { instruction: "Check whether the flight price dropped.", label: "Flight check", delay_seconds: 3600 });
 		expect(made.isError).toBe(false);
 		const task = JSON.parse(made.text);
-		expect(task).toEqual({ id: expect.any(String), type: "scheduled", next: expect.any(String), session: ROOT, label: "Flight check", instruction: "Check whether the flight price dropped.", newChat: false });
+		expect(task).toEqual({ id: expect.any(String), type: "delayed", next: expect.any(String), session: ROOT, label: "Flight check", instruction: "Check whether the flight price dropped.", newChat: false });
 		const next = Date.parse(task.next);
 		expect(next).toBeGreaterThanOrEqual(before + 3_599_000);
 		expect(next).toBeLessThanOrEqual(Date.now() + 3_601_000);

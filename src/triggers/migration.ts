@@ -417,8 +417,7 @@ export function mapSchedule(schedule: LegacySchedule, context: MigrationContext,
 
 	const newChat = payload.newChat === true;
 	if (!newChat && !context.chatOpen(payload.session)) return unsupported("chat_unavailable", "its chat is deleted, or isn't one a trigger may deliver to");
-	// The agent as runScheduledTask resolves it now: the majordomo's choice while it exists, else the chat's.
-	const agent = newChat && payload.agent && context.agentExists(payload.agent) ? payload.agent : context.chatAgent(payload.session);
+	const agent = scheduleAgent(payload, context);
 	if (agent === null) return unsupported("agent_unavailable", "the agent of its chat doesn't exist yet");
 	let label = payload.label;
 	if (label === undefined || label === "") {
@@ -445,6 +444,17 @@ export function mapSchedule(schedule: LegacySchedule, context: MigrationContext,
 	if (parsed.spec.source.kind === "time" && !firesFrom(parsed.spec, context.now)) return unsupported("schedule_exhausted", "no firing from now within the supported range");
 	// Its firings' notification is given by a cut-over trigger's host, so nothing blocks a schedule now.
 	return { ...base, status: "migratable", triggerId, spec: parsed.spec, differences, cutoverBlockers: [], binding: null, notificationTitle: legacyNotificationTitle(payload) };
+}
+
+/**
+ * The agent a schedule's work is for, as `runScheduledTask` resolves it
+ * now: for a new-chat task, the agent the majordomo named while it exists;
+ * otherwise, or once that agent is gone, the agent of the chat that
+ * scheduled it, whichever agent that is. Null where that chat's agent
+ * doesn't exist yet.
+ */
+function scheduleAgent(payload: ScheduledTaskPayload, context: MigrationContext): string | null {
+	return payload.newChat === true && payload.agent && context.agentExists(payload.agent) ? payload.agent : context.chatAgent(payload.session);
 }
 
 /** A watch as a trigger on its connector's event, with the binding it would adopt, or why it can't be one. */
@@ -846,6 +856,119 @@ export function migrationCounts(outcomes: readonly MigrateOutcome[]): MigrationC
 	};
 }
 
+/**
+ * What the automatic migration does with an item next, before its bound:
+ * its trigger keeps it (`kept`), it is left with its schedule or watch for
+ * a reason (`left`), or it is written to (`write`): its shadow made where
+ * it has none, then cut over unless `blocker` is unmet. `givenBack` says
+ * whether its owner ever changed, read only where it has a record.
+ */
+function migrateStep(
+	item: PlanItem,
+	record: MigrationRecord | null,
+	givenBack: () => boolean,
+): { readonly step: "kept"; readonly triggerId: string } | { readonly step: "left"; readonly reason: LegacyReason } | { readonly step: "write"; readonly blocker: CutoverBlocker | undefined } {
+	if (record?.phase === "shadow" && record.owner === "trigger") return { step: "kept", triggerId: record.triggerId };
+	if (record?.phase === "rolled_back") return { step: "left", reason: "rolled_back" };
+	// Owned by its schedule or watch again after a cutover: given back by a cutback, which stands.
+	if (record !== null && givenBack()) return { step: "left", reason: "cut_back" };
+	if (item.status === "unsupported") return { step: "left", reason: item.reason };
+	const blocker = item.cutoverBlockers[0];
+	// Shadowed already, with a blocker unmet: nothing to write until it is met.
+	if (record !== null && blocker !== undefined) return { step: "left", reason: blocker };
+	return { step: "write", blocker };
+}
+
+/**
+ * How often the automatic migration sweeps a space that is already
+ * running, at most: Pim's trigger wake runs it on its first tick after a
+ * start, when a schedule or watch was just made, and otherwise once this
+ * long has passed since the last run (`#sweepMigration` in ../pim.ts).
+ */
+export const MIGRATION_SWEEP_INTERVAL_MS = 60 * 60_000;
+
+/** Why a sweep ran: the first tick after a start, a schedule or watch made since the last one, or the hour since the last run. */
+export type MigrationSweepCause = "first_tick" | "asked" | "hourly";
+
+/** Reasons an item left with its schedule or watch may move by itself later, for which the wake comes back for another sweep: the rest last until the item or the space changes. */
+export const MIGRATION_RETRY_REASONS: ReadonlySet<LegacyReason> = new Set<LegacyReason>(["deferred", "refused", "agent_unavailable"]);
+
+/**
+ * Where one schedule or watch stands, as the status route and tool show
+ * it (`migrationStatus`): ids, a short label (the schedule's label, or the
+ * watch's event name) and reasons only, never its instruction, a secret,
+ * a URL or a cursor.
+ *
+ * - `migrated`: its trigger delivers it (`owner: "trigger"`).
+ * - `migratable`: the next run moves it.
+ * - `deferred`: it maps, and a later run moves it: past the next run's
+ *   bound (`deferred`), or until its cutover blocker is met.
+ * - `unsupported`: it can't be represented exactly, with the reason.
+ * - `given_back`: a cutback or a rollback gave it back, which stands.
+ */
+export type MigrationStatusItem = {
+	readonly kind: LegacyKind;
+	readonly legacyId: string;
+	readonly label: string | null;
+	/** The agent whose work it is: its trigger's, or the one its trigger would have. Null where that agent doesn't exist yet. */
+	readonly agentId: string | null;
+	readonly status: "migratable" | "unsupported" | "deferred" | "migrated" | "given_back";
+	readonly owner: "legacy" | "trigger";
+	readonly reason: LegacyReason | null;
+	/** A schedule's next firing, as its alarm has it; null for a watch. */
+	readonly nextFiringAt: number | null;
+	/** Its trigger's id, where it has a live one (its shadow, or the trigger that took it over). */
+	readonly triggerId: string | null;
+};
+
+/** The migration's runs as one instance of the space knows them, for the status route and tool: instants in ms, null where there was none. */
+export type MigrationRuns = {
+	/** When this instance started, which ran the migration as it did. */
+	readonly startedAt: number | null;
+	readonly lastRunAt: number | null;
+	readonly lastRun: "ok" | "failed" | null;
+	/** When the trigger wake comes back to sweep; null where no item waits for one. */
+	readonly nextSweepAt: number | null;
+};
+
+/**
+ * Where each schedule and watch stands, in the plan's order, as the next
+ * automatic migration run would leave it (`migrate`, with its bound).
+ * Pure, like `planMigration`: it reads the same input and writes nothing.
+ * `givenBack` says whether an item's owner ever changed.
+ */
+export function migrationStatus(
+	input: { readonly schedules: readonly LegacySchedule[]; readonly watches: readonly AppWatch[]; readonly records: readonly MigrationRecord[] },
+	context: MigrationContext,
+	givenBack: (kind: LegacyKind, legacyId: string) => boolean,
+): MigrationStatusItem[] {
+	const schedules = new Map(input.schedules.map((schedule) => [schedule.id, schedule]));
+	const watches = new Map(input.watches.map((watch) => [watch.id, watch]));
+	let budget = MIGRATION_ITEMS_PER_START;
+	return planMigration(input, context).items.map((item): MigrationStatusItem => {
+		const schedule = item.kind === "schedule" ? schedules.get(item.legacyId)! : null;
+		const watch = item.kind === "watch" ? watches.get(item.legacyId)! : null;
+		const base = {
+			kind: item.kind,
+			legacyId: item.legacyId,
+			label: schedule ? (schedule.payload.label ?? null) : watch!.event,
+			agentId: item.status === "migratable" ? item.spec.owningAgentId : schedule ? scheduleAgent(schedule.payload, context) : context.chatAgent(watch!.session),
+			nextFiringAt: schedule ? schedule.time * 1000 : null,
+		};
+		const shadow = item.record?.phase === "shadow" ? item.record.triggerId : null;
+		const legacy = (status: MigrationStatusItem["status"], reason: LegacyReason | null): MigrationStatusItem => ({ ...base, status, owner: "legacy", reason, triggerId: shadow });
+		const step = migrateStep(item, item.record, () => givenBack(item.kind, item.legacyId));
+		if (step.step === "kept") return { ...base, status: "migrated", owner: "trigger", reason: null, triggerId: step.triggerId };
+		if (step.step === "left") {
+			if (step.reason === "rolled_back" || step.reason === "cut_back") return legacy("given_back", step.reason);
+			return item.status === "unsupported" ? legacy("unsupported", step.reason) : legacy("deferred", step.reason);
+		}
+		if (budget <= 0) return legacy("deferred", "deferred");
+		budget--;
+		return step.blocker === undefined ? legacy("migratable", null) : legacy("deferred", step.blocker);
+	});
+}
+
 export type TriggerMigrationOptions = {
 	readonly store: Pick<TriggerStore, "create" | "get" | "remove" | "setLifecycle" | "sourceState" | "admitDueTime" | "outbox">;
 	/** The database's transactions (`transactionSync`); they nest. */
@@ -909,14 +1032,10 @@ export class TriggerMigration {
 				return { kind, legacyId, owner: "legacy", reason, triggerId: record?.phase === "shadow" ? record.triggerId : null };
 			};
 			const record = this.#record(kind, legacyId);
-			if (record?.phase === "shadow" && record.owner === "trigger") return { kind, legacyId, owner: "trigger", outcome: "already", triggerId: record.triggerId };
-			if (record?.phase === "rolled_back") return legacy("rolled_back");
-			// Owned by its schedule or watch again after a cutover: given back by a cutback, which stands.
-			if (record !== null && ownershipChanges(this.#sql, kind, legacyId).length > 0) return legacy("cut_back");
-			if (item.status === "unsupported") return legacy(item.reason);
-			const blocker = item.cutoverBlockers[0];
-			// Shadowed already, with a blocker unmet: nothing to write until it is met.
-			if (record !== null && blocker !== undefined) return legacy(blocker);
+			const step = migrateStep(item, record, () => ownershipChanges(this.#sql, kind, legacyId).length > 0);
+			if (step.step === "kept") return { kind, legacyId, owner: "trigger", outcome: "already", triggerId: step.triggerId };
+			if (step.step === "left") return legacy(step.reason);
+			const blocker = step.blocker;
 			if (budget <= 0) return legacy("deferred");
 			budget--;
 			const only: MigrationPlan = { items: [item], orphans: [] };

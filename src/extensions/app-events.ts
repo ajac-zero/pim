@@ -43,6 +43,8 @@ export type AppEventsHost = {
 	scheduleRefresh(watchId: string, at: Date): Promise<void>;
 	submit(session: string, content: string, operationId: string): Promise<void>;
 	notify(title: string, body: string): Promise<void>;
+	/** Told once a new watch is subscribed, so it can be moved to a trigger soon. */
+	watched?(): void;
 	/** Told before a watch is stopped, so whatever delivers in its place stops with it; a throw keeps the watch. */
 	stopping?(watchId: string): void;
 };
@@ -120,12 +122,15 @@ export class AppEvents {
 			secret: newSecret(),
 			url: `${origin.replace(/\/$/, "")}/mcp/events/${this.#host.owner()}/${id}`,
 		});
+		let subscribed: AppWatch;
 		try {
-			return await this.#subscribe(watch);
+			subscribed = await this.#subscribe(watch);
 		} catch (error) {
 			this.#host.store.deleteWatch(id);
 			throw error;
 		}
+		this.#host.watched?.();
+		return subscribed;
 	}
 
 	/** Renews a watch's subscription; called on its schedule. */

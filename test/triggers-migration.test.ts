@@ -25,6 +25,7 @@ import {
 	type MigrationContext,
 	type MigrationRecord,
 	migrationRecordOfItem,
+	migrationRecords,
 	ownershipChanges,
 	type PlanItem,
 	TriggerMigration,
@@ -38,7 +39,7 @@ import {
 } from "../src/triggers/migration";
 import { TriggerStore } from "../src/triggers/store";
 import { api, lastUserText, messagesOf, OWNER, post, ROOT, toolUse, url } from "./helpers";
-import { faux, triggerClock } from "./worker";
+import { faux, sweepClock, triggerClock } from "./worker";
 
 // Moving schedules and watches to triggers: the pure mapping, then the preview, apply, cutover and rollback in a real space,
 // with its own SQLite database and the legacy paths as they are, and the automatic migration a space runs as it starts.
@@ -424,6 +425,7 @@ async function cleanUp() {
 		expect(unsettled()).toBe(0);
 		await pim.disableTriggerEngine();
 		triggerClock.offset = 0;
+		sweepClock.offset = 0;
 		for (const table of MIGRATION_TABLES) {
 			if (sqlOf(pim).exec("SELECT 1 FROM sqlite_master WHERE name = ?", table).toArray().length > 0) sqlOf(pim).exec(`DELETE FROM ${table}`);
 		}
@@ -959,7 +961,13 @@ describe("the automatic migration, as a space starts", () => {
 				for (const [kept, eventId] of [[passing, "ev-g-1"], [silent, "ev-g-2"], [pending, "ev-g-3"], [moved, "ev-g-4"]] as const) {
 					for (let n = 0; n < 2; n++) expect((await send(pim, kept, eventId)).status).toBe(204);
 				}
+				// The wake's first tick since the start sweeps: it moves the watch whose event has now passed the adapter's rules, and nothing else.
 				await settle(pim);
+				expect(owners()).toEqual(["trigger:enabled", "trigger:enabled", null, "trigger:enabled", "trigger:enabled", null, null]);
+				const legacyReasons = { cron_syntax: 1, watch_not_subscribed: 1, callback_changed: 1 };
+				expect(logged(log, "pim.triggers_migration_sweep")).toEqual([
+					{ event: "pim.triggers_migration_sweep", owner, cause: "first_tick", schedules: 3, watches: 4, outcomes: { cut_over: 1, already: 3, legacy: 3 }, reasons: legacyReasons },
+				]);
 				// The first hourly firing: its alarm skips it, and its trigger runs it. The named schedule's alarm, run twice, runs it once.
 				const t1 = hourlyTask.time * 1000;
 				moveTo(t1 + SECOND);
@@ -970,15 +978,12 @@ describe("the automatic migration, as a space starts", () => {
 				await settle(pim);
 				triggerClock.offset = 0;
 
-				// A restart: a new instance on the same storage. Called into, it starts first, as the runtime starts it, and its start moves the watch whose event has now passed the adapter's rules, and nothing else; asked again, it changes nothing.
+				// A restart: a new instance on the same storage. Called into, it starts first, as the runtime starts it, and its start changes nothing, nor does asking again.
 				const restarted = new (pim.constructor as new (ctx: DurableObjectState, env: unknown) => Pim)(stateOf(pim), envOf(pim));
 				await restarted.ensureTriggerEngine();
 				expect(owners()).toEqual(["trigger:enabled", "trigger:enabled", null, "trigger:enabled", "trigger:enabled", null, null]);
-				const legacyReasons = { cron_syntax: 1, watch_not_subscribed: 1, callback_changed: 1 };
-				expect(logged(log, "pim.triggers_migration").slice(1)).toEqual([
-					{ event: "pim.triggers_migration", owner, schedules: 3, watches: 4, outcomes: { cut_over: 1, already: 3, legacy: 3 }, reasons: legacyReasons },
-					{ event: "pim.triggers_migration", owner, schedules: 3, watches: 4, outcomes: { cut_over: 0, already: 4, legacy: 3 }, reasons: legacyReasons },
-				]);
+				const unchanged = { event: "pim.triggers_migration", owner, schedules: 3, watches: 4, outcomes: { cut_over: 0, already: 4, legacy: 3 }, reasons: legacyReasons };
+				expect(logged(log, "pim.triggers_migration").slice(1)).toEqual([unchanged, unchanged]);
 
 				// Each watch's event again, twice, and one the watch ran before its cutover, which its trigger takes in as a duplicate to pi.
 				answerRuns(4, ran);
@@ -1152,6 +1157,177 @@ describe("the automatic migration, as a space starts", () => {
 			expect(await pim.runTriggerMigration()).toEqual([{ kind: "schedule", legacyId: items.scouted[1], owner: "legacy", reason: "cut_back", triggerId: records.scouted!.triggerId }]);
 			await pim.disableTriggerEngine();
 		});
+	});
+});
+
+// The migration's sweep: a space that is already running moves what it can on the trigger wake's ticks, with no start or restart.
+
+/** A new chat with `agentId`, made as the app makes one, by its internal id. */
+async function chatWith(pim: Pim, owner: string, agentId: string): Promise<string> {
+	const made = await pim.fetch(new Request(url("/sessions"), { method: "POST", headers: { "x-pim-owner": owner, "content-type": "application/json" }, body: JSON.stringify({ agent: agentId }) }));
+	expect(made.status).toBe(200);
+	return pim.store.sessionOf(((await made.json()) as { id: string }).id)!;
+}
+
+/** A daily cron at two hours of the day, both at least five hours from the clock, so no test reaches them by moving the clock on. */
+function farCron(minute = 0): string {
+	const hour = new Date(clock()).getUTCHours();
+	return `${minute} ${[(hour + 6) % 24, (hour + 15) % 24].sort((a, b) => a - b).join(",")} * * *`;
+}
+
+describe("the migration's sweep, in a space that is already running", () => {
+	afterEach(cleanUp);
+
+	it("moves a running space's schedules on the wake's next tick, with no restart, and hands each firing to exactly one side across the handover", async () => {
+		// A space of its own, started before its triggers were on, so nothing but the wake's ticks runs the migration in it.
+		const owner = await freshSpace("running");
+		const log = vi.spyOn(console, "log");
+		try {
+			await runInDurableObject(env.Pim.getByName(owner), async (pim: Pim) => {
+				const chat = ROOT_SESSION;
+				pim.agents.majordomo();
+				// As the two scout schedules in production: a cron that starts a new chat each time, scheduled in a chat that is another agent's.
+				const richard = pim.agents.create({ name: "Richard", description: "Scouts.", instructions: "Scout.", apps: [], skills: [], contacts: [] });
+				const richardChat = await chatWith(pim, owner, richard.id);
+				await pim.enableTriggerEngine();
+				const scoutCron = farCron();
+				const scout = await pim.schedule(scoutCron, "runScheduledTask", { session: richardChat, instruction: "Scout the news.", label: "Scout", newChat: true });
+				const hourlyTask = await hourly(pim, chat);
+				const soon = await oneTime(pim, chat, "Book the table.");
+				const items = [scout, hourlyTask, soon];
+				const t1 = hourlyTask.time * 1000;
+				const t2 = t1 + HOUR;
+				const at = soon.time * 1000;
+
+				// The hourly task's first firing is due, and its alarm hasn't run yet, when the wake ticks.
+				moveTo(t1 + 10 * SECOND);
+				await pim.runTriggerTick();
+				const triggerOf = (scheduled: { id: string }) => recordOf(pim, "schedule", scheduled.id)!.triggerId;
+				const engine = engineOf(pim);
+				expect(items.map((scheduled) => [recordOf(pim, "schedule", scheduled.id)?.owner, engine.store.get(triggerOf(scheduled))?.lifecycle])).toEqual(items.map(() => ["trigger", "enabled"]));
+				// Richard's schedule is Richard's trigger, as runScheduledTask would start each chat with the agent of the chat it was scheduled in.
+				expect(engine.store.get(triggerOf(scout))!.spec).toMatchObject({ owningAgentId: richard.id, originChatId: richardChat, destination: { type: "new_chat" }, source: { kind: "time", schedule: "cron", expression: scoutCron, timeZone: "UTC" } });
+				expect(logged(log, "pim.triggers_migration_sweep")).toEqual([
+					{ event: "pim.triggers_migration_sweep", owner, cause: "first_tick", schedules: 3, watches: 0, outcomes: { cut_over: 3, already: 0, legacy: 0 }, reasons: {} },
+				]);
+
+				// The firing due before the cutover is its schedule's: the trigger never fires it, and its alarm, however late, runs it.
+				const ran: Ran[] = [];
+				await settle(pim);
+				expect(engine.coordinator.runs(triggerOf(hourlyTask))).toEqual([]);
+				answerRuns(1, ran);
+				await pim.runScheduledTask(hourlyTask.payload, firingAt(hourlyTask, t1 / 1000));
+				await settle(pim);
+				// The one-time task's time and the hourly task's next firing are the triggers': each alarm skips its own.
+				moveTo(at + SECOND);
+				answerRuns(1, ran);
+				await pim.runScheduledTask(soon.payload, soon);
+				await settle(pim);
+				moveTo(t2 + SECOND);
+				answerRuns(1, ran);
+				await pim.runScheduledTask(hourlyTask.payload, firingAt(hourlyTask, t2 / 1000));
+				await settle(pim);
+
+				expect(ran.map((run) => (run.input.startsWith("[Trigger") ? "trigger" : run.input.startsWith("[Scheduled task") ? "schedule" : run.input))).toEqual(["schedule", "trigger", "trigger"]);
+				const keys = (scheduled: { id: string }, ...times: number[]) => times.map((time) => legacyFiringOperationId(scheduled.id, time)).sort();
+				expect(submittedAnywhere(pim, `schedule:${hourlyTask.id}:`).sort()).toEqual(keys(hourlyTask, t1, t2));
+				expect(submittedAnywhere(pim, `schedule:${soon.id}:`)).toEqual(keys(soon, at));
+				expect(submittedAnywhere(pim, `schedule:${scout.id}:`)).toEqual([]);
+				expect(engine.coordinator.runs(triggerOf(hourlyTask)).map((run) => run.scheduledFor)).toEqual([t2]);
+				expect(engine.coordinator.runs(triggerOf(soon)).map((run) => run.scheduledFor)).toEqual([at]);
+				expect(receiptsOf(pim, "schedule", hourlyTask.id)).toEqual([["skipped_firing", String(t2)]]);
+				expect(receiptsOf(pim, "schedule", soon.id)).toEqual([["skipped_firing", String(at)]]);
+				// Each item changed owner once, by the one sweep.
+				expect(items.map((scheduled) => ownersOf(pim, "schedule", scheduled.id))).toEqual(items.map(() => [["trigger", "cutover"]]));
+				await pim.disableTriggerEngine();
+			});
+		} finally {
+			log.mockRestore();
+		}
+	});
+
+	it("sweeps again only after the hour, or at once for what schedule_task made, moving each item once however often it sweeps", async () => {
+		const owner = await freshSpace("swept");
+		const log = vi.spyOn(console, "log");
+		try {
+			await runInDurableObject(env.Pim.getByName(owner), async (pim: Pim) => {
+				const chat = ROOT_SESSION;
+				pim.agents.majordomo();
+				await pim.enableTriggerEngine();
+				const first = await pim.schedule(farCron(), "runScheduledTask", { session: chat, instruction: "Plan the day.", label: "Day" });
+				await pim.runTriggerTick();
+				expect(recordOf(pim, "schedule", first.id)!.owner).toBe("trigger");
+				const moved = JSON.stringify(migrationRecords(sqlOf(pim)));
+
+				// Made after the start and not through schedule_task, a schedule waits for the hour: ticks within it don't sweep, and its schedule delivers it meanwhile.
+				const later = await pim.schedule(farCron(15), "runScheduledTask", { session: chat, instruction: "Plan the evening.", label: "Evening" });
+				await pim.runTriggerTick();
+				await pim.runTriggerTick();
+				expect(recordOf(pim, "schedule", later.id)).toBeNull();
+				sweepClock.offset = HOUR;
+				await pim.runTriggerTick();
+				expect(recordOf(pim, "schedule", later.id)!.owner).toBe("trigger");
+				expect(JSON.stringify(migrationRecords(sqlOf(pim)).filter((record) => record.legacyId === first.id))).toBe(moved);
+
+				// Another hour with nothing new: the sweep moves nothing and writes nothing. (The tick before lets the coordinator look at the trigger the last sweep enabled.)
+				await pim.runTriggerTick();
+				const settled = deliveryState(pim);
+				sweepClock.offset = 2 * HOUR;
+				await pim.runTriggerTick();
+				expect(deliveryState(pim)).toBe(settled);
+
+				// What schedule_task makes is swept on the wake's next tick, which is set for now, without waiting the hour.
+				const services = (pim as unknown as { services(): { schedule(when: string, payload: Record<string, unknown>): Promise<{ id: string }> } }).services();
+				const asked = await services.schedule(farCron(30), { session: chat, instruction: "Plan the night.", label: "Night" });
+				await pim.wakeTriggers();
+				const [wake] = (await pim.listSchedules()).filter((scheduled) => scheduled.callback === TRIGGER_TICK_CALLBACK);
+				expect(wake!.time * 1000).toBeLessThanOrEqual(Date.now() + 2 * SECOND);
+				await pim.runTriggerTick();
+				expect(recordOf(pim, "schedule", asked.id)!.owner).toBe("trigger");
+
+				expect(logged(log, "pim.triggers_migration_sweep").map(({ cause, outcomes }) => [cause, outcomes])).toEqual([
+					["first_tick", { cut_over: 1, already: 0, legacy: 0 }],
+					["hourly", { cut_over: 1, already: 1, legacy: 0 }],
+					["hourly", { cut_over: 0, already: 2, legacy: 0 }],
+					["asked", { cut_over: 1, already: 2, legacy: 0 }],
+				]);
+				// One change of owner per item, however many sweeps saw it.
+				expect(ownershipChanges(sqlOf(pim)).map((change) => [change.legacyId, change.owner])).toEqual([first.id, later.id, asked.id].map((id) => [id, "trigger"]));
+				await pim.disableTriggerEngine();
+			});
+		} finally {
+			log.mockRestore();
+			sweepClock.offset = 0;
+		}
+	});
+
+	it("logs a sweep that fails, leaves every item with its schedule, and tries again an hour on, which the wake comes back for", async () => {
+		const owner = await freshSpace("failing");
+		const warn = vi.spyOn(console, "warn");
+		try {
+			await runInDurableObject(env.Pim.getByName(owner), async (pim: Pim) => {
+				const chat = ROOT_SESSION;
+				pim.agents.majordomo();
+				await pim.enableTriggerEngine();
+				const scheduled = await pim.schedule(farCron(), "runScheduledTask", { session: chat, instruction: "Plan the day.", label: "Day" });
+				const unreadable = vi.spyOn(pim, "previewTriggerMigration").mockRejectedValueOnce(new Error("No plan today"));
+				await pim.runTriggerTick();
+				unreadable.mockRestore();
+				expect(recordOf(pim, "schedule", scheduled.id)).toBeNull();
+				expect(logged(warn, "pim.triggers_migration_failed")).toEqual([{ event: "pim.triggers_migration_failed", owner, cause: "first_tick", error: "Error: No plan today" }]);
+				// The wake comes back an hour on, though nothing else is due, and that tick moves it.
+				const [wake] = (await pim.listSchedules()).filter((one) => one.callback === TRIGGER_TICK_CALLBACK);
+				expect(wake!.time * 1000).toBeGreaterThan(Date.now() + HOUR - MINUTE);
+				expect(wake!.time * 1000).toBeLessThanOrEqual(Date.now() + HOUR + 2 * SECOND);
+				sweepClock.offset = HOUR;
+				await pim.runTriggerTick();
+				expect(recordOf(pim, "schedule", scheduled.id)!.owner).toBe("trigger");
+				await pim.disableTriggerEngine();
+			});
+		} finally {
+			warn.mockRestore();
+			sweepClock.offset = 0;
+		}
 	});
 });
 

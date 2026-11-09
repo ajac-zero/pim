@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { type Condition, type ConditionState, evaluate, lookup, referencedPaths } from "./condition";
 import { DELIVERY_TTL_MS, type RunPhase, type TriggerRun } from "./coordinator";
 import type { TriggerEngine } from "./engine";
-import { type MigrationRecord, migrationRecordOf } from "./migration";
+import { type MigrationRecord, type MigrationRuns, type MigrationStatusItem, migrationRecordOf } from "./migration";
 import { conditionMode, parseTriggerSpec, runsOnComputer, SOURCE_KINDS, type SourceKind, TRIGGER_LIFECYCLES, type TriggerLifecycle, type TriggerSpec } from "./spec";
 import { ADMISSION_LIMITS, DEFAULT_RETENTION, type Evidence, type Occurrence, type Refusal, type Trigger } from "./store";
 import { previewFirings, TIME_LIMITS } from "./time";
@@ -84,6 +84,8 @@ export type TriggerApiHost = {
 	readonly chatOf: (publicId: string) => string | null;
 	/** The connectors an agent works with (every connected one, for null) and the events their catalogs list. */
 	readonly connectors: (agentId: string | null) => readonly { readonly connectorId: string; readonly name: string; readonly events: readonly string[] }[];
+	/** Where the space's schedules and watches stand in their move to triggers, in the plan's order, and the migration's runs as this instance knows them. Read only. */
+	readonly migration: () => Promise<{ readonly items: readonly MigrationStatusItem[]; readonly runs: MigrationRuns }>;
 	/** Whether a computer is paired, which computer sources run on. */
 	readonly computer: () => { readonly paired: boolean };
 	/** Where a computer source's grant stands, for a trigger whose source runs on the computer. */
@@ -275,6 +277,32 @@ export class TriggerApi {
 			throw new TriggerApiError(404, "not_found", "No such run");
 		}
 		return this.#runView(occurrence);
+	}
+
+	/**
+	 * Where the space's schedules and watches stand in their move to
+	 * triggers (./migration.ts, `migrationStatus`), a page at a time, in a
+	 * stable order, with what this instance knows of the migration's runs.
+	 * An agent other than the majordomo sees only its own items. Writes
+	 * nothing; no instruction, secret, URL or cursor is in it.
+	 */
+	async migration(actor: TriggerActor, query: { cursor?: unknown; limit?: unknown }) {
+		const limit = pageSize(query.limit);
+		const after = query.cursor === undefined ? null : readKeyCursor(query.cursor, "migration");
+		const { items, runs } = await this.#host.migration();
+		const visible = items
+			// An item with a live trigger is that trigger's agent's.
+			.map((item) => ({ ...item, agentId: (item.triggerId === null ? undefined : this.#store.get(item.triggerId)?.spec.owningAgentId) ?? item.agentId }))
+			.filter((item) => actor.kind === "person" || actor.majordomo || item.agentId === actor.agentId);
+		const key = (item: MigrationStatusItem) => `${item.kind}:${item.legacyId}`;
+		const rest = after === null ? visible : visible.filter((item) => key(item) > after);
+		const page = rest.slice(0, limit);
+		const last = page.at(-1);
+		return {
+			runs,
+			items: page,
+			nextCursor: rest.length > limit && last ? writeKeyCursor("migration", key(last)) : null,
+		};
 	}
 
 	/** Every source kind, with what it can do in this space now, and the connector events the agent may use. */
@@ -847,6 +875,24 @@ function revisionOf(value: unknown): number {
 function pageSize(value: unknown): number {
 	if (value === undefined) return API_LIMITS.pageDefault;
 	return field(() => integer(value, "limit", 1, API_LIMITS.pageMax));
+}
+
+/** An opaque cursor for a listing in the order of its items' keys: the key its page ended at. */
+function writeKeyCursor(kind: "migration", key: string): string {
+	return Buffer.from(JSON.stringify([kind, key])).toString("base64url");
+}
+
+function readKeyCursor(value: unknown, kind: "migration"): string {
+	const fail = () => new TriggerApiError(400, "invalid_cursor", "The cursor isn't one this listing gave", { field: "cursor" });
+	if (typeof value !== "string" || value.length === 0 || value.length > 1_024 || !/^[A-Za-z0-9_-]+$/.test(value)) throw fail();
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+	} catch {
+		throw fail();
+	}
+	if (!Array.isArray(parsed) || parsed.length !== 2 || parsed[0] !== kind || typeof parsed[1] !== "string" || parsed[1].length === 0) throw fail();
+	return parsed[1];
 }
 
 /** An opaque cursor: where a page ended, for one listing only. */

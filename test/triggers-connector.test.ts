@@ -156,7 +156,7 @@ function gated(raw: string) {
 const iso = (ms: number) => new Date(ms).toISOString();
 const event = (id: string, over: Record<string, unknown> = {}) => ({ eventId: id, name: EVENT, timestamp: iso(START - MINUTE), data: { route: "JFK-LIS", price: 480 }, cursor: `cursor-${id}`, ...over });
 
-describe("connector events into triggers (an inert ingress adapter)", () => {
+describe("connector events into triggers (the ingress adapter)", () => {
 	it("admits a signed event once into the outbox, at its own time, with its cursor, and keeps nothing it carried", async () => {
 		await withIngress(async (context) => {
 			const { store, triggerId } = context;

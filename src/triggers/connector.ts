@@ -1,15 +1,15 @@
 /**
- * Connector events into triggers: an inert ingress adapter that takes one
+ * Connector events into triggers: the ingress adapter that takes one
  * signed webhook delivery for a trigger on a connector's event and admits
  * it into the trigger store (./store.ts), and the typed contract for
- * keeping the connector's subscription alive. Nothing constructs it: no
- * route, tool, alarm or subscription reaches it, and connector watches
- * (../extensions/app-events.ts) work exactly as before. See "Connector
- * events" in docs/triggers.md.
+ * keeping the connector's subscription alive. Pim's events route
+ * (`/mcp/events/<owner>/<key>`) constructs it for each delivery, and
+ * connector watches (../extensions/app-events.ts) are these triggers. See
+ * "Connector events" in docs/triggers.md.
  *
  * The delivery format is the webhook slice of the draft MCP Events
  * extension (github.com/modelcontextprotocol/experimental-ext-triggers-events),
- * as app-events.ts receives it, held to the draft's stricter rules:
+ * held to the draft's stricter rules:
  * Standard Webhooks headers with `X-MCP-Subscription-Id` on every delivery,
  * an event's `webhook-id` equal to its `eventId`, and `timestamp` as the
  * time the event occurred. Anything else is refused rather than guessed at.

@@ -9,6 +9,8 @@ import type { GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_SPACE_CAP } from "../src/coding/provider-capacity";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type CodingEventSink, codingThread } from "../src/coding/thread-do";
+import { CodingThreadIndex } from "../src/coding/thread-index";
+import { CodingThreadStore } from "../src/coding/thread-store";
 import type { Approval } from "../src/store";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
@@ -154,6 +156,25 @@ describe("the coding threads API", () => {
 		expect((await api<{ threads: unknown[] }>("/coding/threads")).body.threads).toHaveLength(before);
 	});
 
+	it("records its harness, which is pi by default, and the chat a person starts it from", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("One."), fauxAssistantMessage("Two.")]);
+		const plain = await start();
+		expect(plain.harness).toBe("pi");
+		const fromChat = await start({ task: "From a chat", chat: "chat-1", harness: "pi" });
+		const listed = (await api<{ threads: CodingThreadSummary[] }>("/coding/threads")).body.threads;
+		expect(listed.find((thread) => thread.id === plain.id)).toMatchObject({ harness: "pi", chat: null });
+		expect(listed.find((thread) => thread.id === fromChat.id)).toMatchObject({ harness: "pi", chat: "chat-1" });
+		expect((await view(fromChat.id)).harness).toBe("pi");
+		// The other harnesses aren't available yet, and nothing starts for them.
+		for (const harness of ["claude-code", "codex"]) {
+			const refused = await post("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, harness });
+			expect([refused.status, refused.body]).toEqual([400, { error: "harness not yet available", code: "invalid" }]);
+		}
+		const unknown = await post("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, harness: "vim" });
+		expect([unknown.status, unknown.body.code]).toEqual([400, "invalid"]);
+		expect((await api<{ threads: unknown[] }>("/coding/threads")).body.threads).toHaveLength(listed.length);
+	});
+
 	it("answers at once with a queued thread's place, and cancels it out of the queue", async () => {
 		await codingScheduler(env, OWNER).setLimit(1);
 		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
@@ -272,6 +293,8 @@ describe("an agent's coding tools", () => {
 		// The list says which agent started it, from which chat.
 		const listed = (await api<{ threads: CodingThreadSummary[] }>("/coding/threads")).body.threads.find((thread) => thread.id === id);
 		expect(listed?.createdBy).toEqual({ type: "agent", agent: expect.any(String), chat });
+		// And records the chat as the one the thread is a subthread of, with the default harness.
+		expect(listed).toMatchObject({ chat, harness: "pi" });
 		expect((await view(id)).createdBy).toEqual(listed!.createdBy);
 		// The same turn's end told again wakes nobody.
 		await runInDurableObject(codingThread(env, id), (thread: CodingThreadDO) => (thread as unknown as { eventSink(): CodingEventSink }).eventSink().emit(ended!));
@@ -353,3 +376,27 @@ function fakeGitHub() {
 	};
 	return { app, fetch, pushes };
 }
+
+describe("threads from before harnesses", () => {
+	it("become pi threads in the thread's own tables and in the space's list", async () => {
+		await runInDurableObject(env.Pim.getByName("legacy-harness"), async (_pim, state) => {
+			const sql = state.storage.sql;
+			sql.exec(`CREATE TABLE coding_thread (thread_id TEXT PRIMARY KEY, space TEXT NOT NULL, repo_url TEXT NOT NULL, base_ref TEXT NOT NULL, base_sha TEXT, branch TEXT NOT NULL, agent_profile TEXT NOT NULL,
+				provider_id TEXT NOT NULL, workspace_ref TEXT, state TEXT NOT NULL, state_reason TEXT, state_detail TEXT, created_by TEXT NOT NULL, parent_thread TEXT, limits TEXT NOT NULL,
+				budget_usd REAL NOT NULL DEFAULT 3, spent_usd REAL NOT NULL DEFAULT 0, start_operation TEXT NOT NULL, slot TEXT NOT NULL DEFAULT 'none', slot_since INTEGER,
+				resume_priority INTEGER NOT NULL DEFAULT 0, current_operation TEXT, budget_stopped INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+			sql.exec(
+				`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, provider_id, state, created_by, limits, start_operation, created_at, updated_at)
+				VALUES ('old', 's', 'https://github.com/acme/demo', 'main', 'pim/old', '{}', 'p', 'idle', 's', '{}', 'op', 1, 1)`,
+			);
+			sql.exec(`CREATE TABLE pim_coding_threads (thread_id TEXT PRIMARY KEY, created_by TEXT NOT NULL, parent TEXT, task TEXT NOT NULL, repo TEXT NOT NULL, ref TEXT NOT NULL,
+				branch TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'provisioning', state_reason TEXT, spent_usd REAL NOT NULL DEFAULT 0, budget_usd REAL NOT NULL,
+				created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0)`);
+			sql.exec(`INSERT INTO pim_coding_threads (thread_id, created_by, task, repo, ref, budget_usd, created_at) VALUES ('old', '{"type":"person"}', 'Task', 'r', 'main', 3, 1)`);
+			expect(new CodingThreadStore(sql).required().harness).toBe("pi");
+			expect(new CodingThreadIndex(sql).get("old")).toMatchObject({ harness: "pi", chat: null });
+			// Opening them again changes nothing.
+			expect(new CodingThreadStore(sql).required().harness).toBe("pi");
+		});
+	});
+});

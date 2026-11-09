@@ -46,8 +46,9 @@
  * destroying it, and later asks again for the preempted thread with
  * `PREEMPT_RESUME_PRIORITY`.
  *
- * Nothing here knows about providers or starts a workspace. Nothing in Pim
- * constructs a scheduler yet.
+ * Nothing here knows about providers or starts a workspace. Each space's
+ * scheduler lives in its own Durable Object (./scheduler-do.ts), which ticks
+ * it and tells threads what happened to them.
  */
 
 const SCHEMA = `
@@ -333,6 +334,11 @@ export class CodingScheduler {
 			);
 			return this.#admit();
 		});
+	}
+
+	/** The conditions the gates decide from, as `setConditions` last set them: none hold the queue up until it is called. */
+	conditions(): AdmissionConditions {
+		return this.#conditions();
 	}
 
 	/** Takes out of the queue every thread whose deadline is at or before `now`, and returns them, in queue order, for the caller to tell. */

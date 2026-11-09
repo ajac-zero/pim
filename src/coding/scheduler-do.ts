@@ -1,0 +1,278 @@
+import { DurableObject } from "cloudflare:workers";
+import { DEFAULT_SPACE_CAP, type ManagerHealth, ProviderCapacity } from "./provider-capacity";
+import {
+	type AdmissionConditions,
+	CodingScheduler,
+	type QueueEntry,
+	type QueuePlace,
+	type Reconciliation,
+	type Released,
+	type RequestResult,
+	type SchedulerSnapshot,
+	type SlotActivity,
+	type SlotRequest,
+	type Sweep,
+} from "./scheduler";
+
+/**
+ * A space's coding scheduler (./scheduler.ts) in a Durable Object of its
+ * own, one per space and named by its ID (`codingScheduler`). Its methods
+ * are the scheduler's, over RPC, and each runs as one transaction.
+ *
+ * While a thread is queued or a slot's thread is idle or waiting for the
+ * person, an alarm ticks the scheduler every 30 seconds, so deadlines pass
+ * and slots are swept without anyone asking; with nothing to do, there is no
+ * alarm. Requests and reports of activity set it again.
+ *
+ * Threads hear of what happens to them without asking: admitted from the
+ * queue (other than by their own request, which answers them), expired from
+ * it, or their slot taken back by a sweep. Each notice is written to an
+ * outbox in the same transaction as the change it tells of, and the alarm
+ * hands it to the notifier and deletes it once delivered; one that fails
+ * stays for the next alarm, as do the same thread's later notices, so each
+ * thread hears of its changes in order. A notice can arrive twice, such as
+ * when it was delivered but the object restarted before deleting it, so
+ * each carries a key that never changes, for its receiver to ignore it the
+ * second time.
+ */
+export class CodingSchedulerDO extends DurableObject<Env> {
+	readonly #scheduler: CodingScheduler;
+
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		ctx.storage.sql.exec(OUTBOX_SCHEMA);
+		this.#scheduler = new CodingScheduler(ctx.storage.sql, {
+			transaction: (work) => ctx.storage.transactionSync(work),
+			now: () => this.now(),
+			defaultLimit: DEFAULT_SPACE_CAP,
+		});
+	}
+
+	/** The clock the scheduler and its alarm go by. */
+	protected now(): number {
+		return Date.now();
+	}
+
+	/** Who hears of what happens to threads: nobody yet, until coding threads have Durable Objects of their own. */
+	protected notifier(): SchedulerNotifier {
+		return noopNotifier;
+	}
+
+	/** Gives the thread a slot or a place in the queue (`CodingScheduler.request`). */
+	async request(threadId: string, request: SlotRequest): Promise<RequestResult> {
+		const result = this.#scheduler.request(threadId, request);
+		await this.#schedule(false);
+		return result;
+	}
+
+	/** Frees the thread's slot, and tells the threads admitted into it. */
+	async release(threadId: string): Promise<string[]> {
+		return this.#changed(() => {
+			const admitted = this.#scheduler.release(threadId);
+			return { result: admitted, admitted };
+		});
+	}
+
+	async cancel(threadId: string): Promise<boolean> {
+		const cancelled = this.#scheduler.cancel(threadId);
+		await this.#schedule(false);
+		return cancelled;
+	}
+
+	position(threadId: string): QueuePlace | null {
+		return this.#scheduler.position(threadId);
+	}
+
+	snapshot(): SchedulerSnapshot {
+		return this.#scheduler.snapshot();
+	}
+
+	/** Sets how many slots the space has: the space's own cap for a provider without a manager, or `refreshConditions` for one with. */
+	async setLimit(limit: number): Promise<string[]> {
+		return this.#changed(() => {
+			const admitted = this.#scheduler.setLimit(limit);
+			return { result: admitted, admitted };
+		});
+	}
+
+	async setConditions(conditions: AdmissionConditions): Promise<string[]> {
+		return this.#changed(() => {
+			const admitted = this.#scheduler.setConditions(conditions);
+			return { result: admitted, admitted };
+		});
+	}
+
+	/** Sets the conditions and the limit from the workspace manager's `/health`, with the space's cap (./provider-capacity.ts). */
+	async refreshConditions(health: ManagerHealth, spaceCap = DEFAULT_SPACE_CAP): Promise<string[]> {
+		return this.#changed(() => {
+			const admitted = new ProviderCapacity(this.#scheduler, spaceCap).refreshConditions(health);
+			return { result: admitted, admitted };
+		});
+	}
+
+	/** Takes in the workspace manager's refusal of a workspace, by its `code`. */
+	async onManagerError(code: string): Promise<string[]> {
+		return this.#changed(() => {
+			const admitted = new ProviderCapacity(this.#scheduler).onManagerError(code);
+			return { result: admitted, admitted };
+		});
+	}
+
+	async setActivity(threadId: string, activity: SlotActivity): Promise<boolean> {
+		const holds = this.#scheduler.setActivity(threadId, activity);
+		await this.#schedule(false);
+		return holds;
+	}
+
+	/** Sweeps now rather than at the next alarm, and tells the threads whose slots it took back and those it admitted. */
+	async sweep(): Promise<Sweep> {
+		return this.#changed(() => {
+			const sweep = this.#scheduler.sweep();
+			return { result: sweep, admitted: sweep.admitted, released: sweep.released };
+		});
+	}
+
+	/** Brings the slots in line with the workspaces running (`CodingScheduler.reconcile`), and tells the threads admitted. Threads released or adopted aren't told: they aren't running, or already are. */
+	async reconcile(liveThreadIds: readonly string[]): Promise<Reconciliation> {
+		return this.#changed(() => {
+			const reconciliation = this.#scheduler.reconcile(liveThreadIds);
+			return { result: reconciliation, admitted: reconciliation.admitted };
+		});
+	}
+
+	recordDuration(ms: number): void {
+		this.#scheduler.recordDuration(ms);
+	}
+
+	etaMs(position: number): number | null {
+		return this.#scheduler.etaMs(position);
+	}
+
+	/** Ticks the scheduler, delivers the notices waiting, and sets the next alarm if anything is left to do. */
+	override async alarm(): Promise<void> {
+		this.ctx.storage.transactionSync(() => {
+			const tick = this.#scheduler.tick();
+			this.#post({ admitted: tick.admitted, released: tick.released, expired: tick.expired });
+		});
+		await this.#deliver();
+		await this.#schedule(false, true);
+	}
+
+	/** Runs a change and writes the notices it makes, in one transaction, then has the alarm deliver them at once. */
+	async #changed<T>(change: () => { result: T } & Notices): Promise<T> {
+		const { result, posted } = this.ctx.storage.transactionSync(() => {
+			const { result, ...notices } = change();
+			return { result, posted: this.#post(notices) };
+		});
+		await this.#schedule(posted);
+		return result;
+	}
+
+	/** Writes the notices to the outbox, released and expired before admitted, as a slot is taken back before it is given again. Returns whether there were any. */
+	#post({ admitted = [], released = [], expired = [] }: Notices): boolean {
+		const now = this.now();
+		const write = (kind: SchedulerNotice["kind"], threadId: string, body: unknown) =>
+			this.ctx.storage.sql.exec("INSERT INTO pim_coding_outbox (kind, thread_id, body, created_at) VALUES (?, ?, ?, ?)", kind, threadId, JSON.stringify(body), now);
+		for (const entry of released) write("released", entry.threadId, entry);
+		for (const entry of expired) write("expired", entry.threadId, entry);
+		for (const threadId of admitted) write("admitted", threadId, null);
+		return admitted.length + released.length + expired.length > 0;
+	}
+
+	/** Hands each notice to the notifier, oldest first, and deletes those delivered. After one fails, the same thread's later notices wait with it. */
+	async #deliver(): Promise<void> {
+		const notifier = this.notifier();
+		const held = new Set<string>();
+		for (const row of this.ctx.storage.sql.exec("SELECT * FROM pim_coding_outbox ORDER BY seq").toArray()) {
+			const notice = noticeOf(row);
+			if (held.has(notice.threadId)) continue;
+			try {
+				if (notice.kind === "admitted") await notifier.admitted(notice.threadId, notice.key);
+				else if (notice.kind === "expired") await notifier.expired(notice.entry, notice.key);
+				else await notifier.released(notice.released, notice.key);
+				this.ctx.storage.sql.exec("DELETE FROM pim_coding_outbox WHERE seq = ?", row.seq);
+			} catch (error) {
+				held.add(notice.threadId);
+				this.ctx.storage.sql.exec("UPDATE pim_coding_outbox SET attempts = attempts + 1 WHERE seq = ?", row.seq);
+				console.warn(JSON.stringify({ event: "pim.coding.notice_failed", key: notice.key, error: String(error) }));
+			}
+		}
+	}
+
+	/**
+	 * Sets the alarm while there is something to do: notices to deliver, a
+	 * thread queued, or a slot's thread idle or waiting. Notices just posted
+	 * go at once; otherwise the next tick is in 30 seconds, or sooner if the
+	 * alarm is already set sooner. With nothing to do, the alarm is deleted.
+	 * The alarm itself `replace`s its own time, since it has just run.
+	 */
+	async #schedule(urgent: boolean, replace = false): Promise<void> {
+		const pending = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM pim_coding_outbox").one().n !== 0;
+		const { queued, running } = this.#scheduler.snapshot();
+		if (!pending && queued.length === 0 && running.every((slot) => slot.activity === "running")) {
+			await this.ctx.storage.deleteAlarm();
+			return;
+		}
+		const at = this.now() + (urgent ? 0 : TICK_MS);
+		const current = replace ? null : await this.ctx.storage.getAlarm();
+		if (current === null || at < current) await this.ctx.storage.setAlarm(at);
+	}
+}
+
+/** How often the alarm ticks the scheduler while there is something to do. */
+export const TICK_MS = 30_000;
+
+/**
+ * Who hears of what happens to a space's coding threads. Each method gets
+ * the notice's key, the same every time that notice is delivered, and
+ * throws when the notice wasn't taken, to have it delivered again later.
+ * Coding threads' Durable Objects will implement it, each for its own
+ * thread.
+ */
+export interface SchedulerNotifier {
+	/** The thread was admitted from the queue and holds a slot: it may start its workspace. */
+	admitted(threadId: string, key: string): void | Promise<void>;
+	/** The thread waited past its deadline and left the queue; `entry.reason` is what it waited for. */
+	expired(entry: QueueEntry, key: string): void | Promise<void>;
+	/** A sweep took the thread's slot back: it destroys its workspace, after a checkpoint when `why` is `preempted`, and asks again then. */
+	released(released: Released, key: string): void | Promise<void>;
+}
+
+/** Tells nobody: every notice counts as delivered. */
+export const noopNotifier: SchedulerNotifier = { admitted() {}, expired() {}, released() {} };
+
+/** A notice as delivered. */
+export type SchedulerNotice = { readonly key: string; readonly threadId: string } & (
+	| { readonly kind: "admitted" }
+	| { readonly kind: "expired"; readonly entry: QueueEntry }
+	| { readonly kind: "released"; readonly released: Released }
+);
+
+/** The space's coding scheduler. */
+export function codingScheduler(env: Env, spaceId: string): DurableObjectStub<CodingSchedulerDO> {
+	return env.CodingScheduler.getByName(spaceId);
+}
+
+type Notices = { readonly admitted?: readonly string[]; readonly released?: readonly Released[]; readonly expired?: readonly QueueEntry[] };
+
+/** Its `seq` is never reused, even once a notice is deleted, so a notice's key (from it) is never another's. */
+const OUTBOX_SCHEMA = `
+CREATE TABLE IF NOT EXISTS pim_coding_outbox (
+	seq INTEGER PRIMARY KEY AUTOINCREMENT,
+	kind TEXT NOT NULL,
+	thread_id TEXT NOT NULL,
+	body TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	attempts INTEGER NOT NULL DEFAULT 0
+);
+`;
+
+function noticeOf(row: Record<string, SqlStorageValue>): SchedulerNotice {
+	const kind = String(row.kind) as SchedulerNotice["kind"];
+	const threadId = String(row.thread_id);
+	const key = `coding:${kind}:${threadId}:${row.seq}`;
+	const body = JSON.parse(String(row.body));
+	if (kind === "expired") return { key, threadId, kind, entry: body as QueueEntry };
+	if (kind === "released") return { key, threadId, kind, released: body as Released };
+	return { key, threadId, kind };
+}

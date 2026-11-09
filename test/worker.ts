@@ -11,6 +11,7 @@ import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
 import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
+import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } from "../src/coding/scheduler-do";
 
 export { default, Auth, Directory, Gallery } from "../src/index";
 
@@ -287,5 +288,18 @@ export class Pim extends RealPim {
 	/** The deployment's default image model, on the stand-in for Workers AI. */
 	protected override imageModel(): ImageModel {
 		return workersAiImageModel(imageAi, deploymentSettings(this.env).imageModel!);
+	}
+}
+
+/** The coding schedulers' clock and notifier in tests (test/coding-scheduler-do.test.ts): real time and nobody told until a test sets them. */
+export const codingSchedulers: { now: number | null; notifier: SchedulerNotifier | null } = { now: null, notifier: null };
+
+export class CodingSchedulerDO extends RealCodingSchedulerDO {
+	protected override now(): number {
+		return codingSchedulers.now ?? super.now();
+	}
+
+	protected override notifier(): SchedulerNotifier {
+		return codingSchedulers.notifier ?? super.notifier();
 	}
 }

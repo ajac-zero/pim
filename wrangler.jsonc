@@ -28,7 +28,9 @@
       // The accounts: usernames, the admin, invites, and erasing deleted accounts.
       { "name": "Directory", "class_name": "Directory" },
       // Profiles, and agents published for others on this Pim to make their own.
-      { "name": "Gallery", "class_name": "Gallery" }
+      { "name": "Gallery", "class_name": "Gallery" },
+      // Each space's coding scheduler: the queue for its coding workspaces' slots, named by its owner ID.
+      { "name": "CodingScheduler", "class_name": "CodingSchedulerDO" }
     ]
   },
   // SQLite-backed Durable Objects are available on the Workers free plan.
@@ -36,7 +38,8 @@
     { "tag": "v1", "new_sqlite_classes": ["Pim"] },
     { "tag": "v2", "new_sqlite_classes": ["Auth"] },
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
-    { "tag": "v4", "new_sqlite_classes": ["Gallery"] }
+    { "tag": "v4", "new_sqlite_classes": ["Gallery"] },
+    { "tag": "v5", "new_sqlite_classes": ["CodingSchedulerDO"] }
   ],
   // MCP clients' sign-ins to people's spaces: registered clients, grants and hashed tokens
   // (src/mcp-auth.ts). Deploying creates the namespace.

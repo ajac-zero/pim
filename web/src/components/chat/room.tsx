@@ -8,7 +8,7 @@ import {
   useAgentModel,
 } from "~/components/chat/model-menu";
 import { useI18n } from "~/components/i18n";
-import { Lock, X } from "~/components/icons";
+import { Lock, Plus, X } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   DropdownMenu,
@@ -77,8 +77,8 @@ export function MembersWorking({
 }
 
 /**
- * Who is in a chat, as their icons in the header. Each agent but the host
- * can be taken out of the chat from here, and any other agent brought in.
+ * Who is in a chat, as their icons in the options box. Each agent but the host
+ * can be taken out of the chat from here, and any other agent brought in, with the last item.
  */
 export function RoomMenu({ sessionId }: { sessionId: string }) {
   const { t } = useI18n();
@@ -144,7 +144,7 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
           )}
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-72">
+      <DropdownMenuContent align="start" className="w-72">
         <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
           {label}
         </DropdownMenuLabel>
@@ -160,26 +160,29 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
         {absent.length > 0 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
-              {t("addToChat")}
-            </DropdownMenuLabel>
-            {absent.map((agent) => (
-              <DropdownMenuItem
-                key={agent.id}
-                disabled={add.isPending}
-                onSelect={(event) => {
-                  event.preventDefault();
-                  add.mutate(agent.id);
-                }}
-              >
-                <AgentIcon
-                  agent={agent}
-                  tile
-                  className="size-5 shrink-0 rounded-md"
-                />
-                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-              </DropdownMenuItem>
-            ))}
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger disabled={add.isPending}>
+                <Plus />
+                {t("addToChat")}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-64">
+                {absent.map((agent) => (
+                  <DropdownMenuItem
+                    key={agent.id}
+                    onSelect={() => add.mutate(agent.id)}
+                  >
+                    <AgentIcon
+                      agent={agent}
+                      tile
+                      className="size-5 shrink-0 rounded-md"
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {agent.name}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
           </>
         )}
       </DropdownMenuContent>

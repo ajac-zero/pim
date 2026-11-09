@@ -12,17 +12,13 @@ import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { useNewChat } from "~/components/app-sidebar";
 import { ArtifactView } from "~/components/artifact-view";
 import { ActivityBox } from "~/components/chat/activity";
-import { ActivityToggle } from "~/components/chat/activity-toggle";
-import { CanvasTabs } from "~/components/chat/canvas-tabs";
-import { ChatLinkMenu } from "~/components/chat/chat-link";
-import { Composer } from "~/components/chat/composer";
 import {
-  CopyChatId,
-  CopyConversation,
-} from "~/components/chat/copy-conversation";
+  ActivityToggle,
+  writeSummaryOpen,
+} from "~/components/chat/activity-toggle";
+import { CanvasTabs } from "~/components/chat/canvas-tabs";
+import { Composer } from "~/components/chat/composer";
 import { QueuedMessages } from "~/components/chat/queued-messages";
-import { RoomMenu } from "~/components/chat/room";
-import { SessionCostMenu } from "~/components/chat/session-cost";
 import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
@@ -150,6 +146,8 @@ function ChatPage() {
   useLayoutEffect(() => {
     pimClient.open(sessionId);
     showTab(sessionId);
+    // A chat opens with its options box closed, so it doesn't cover the chat.
+    writeSummaryOpen(false);
   }, [sessionId]);
 
   const followed = usePimClient((state) => state.session);
@@ -268,17 +266,12 @@ function ChatPage() {
               {t("connecting")}
             </span>
           )}
-          <RoomMenu sessionId={sessionId} />
-          {shelf && <CopyChatId sessionId={sessionId} />}
-          <CopyConversation sessionId={sessionId} />
-          <SessionCostMenu sessionId={sessionId} />
-          <ChatLinkMenu sessionId={sessionId} />
           <ActivityToggle
             sessionId={sessionId}
             className="shrink-0 self-center"
           />
         </header>
-        {/* The activity box takes a column of its own, so the thread makes room
+        {/* The options box takes a column of its own, so the thread makes room
          * for it rather than sitting under it: at the right, or on top on phones. */}
         <div
           // The box overlays the thread's right side, which keeps its own padding to match,
@@ -414,7 +407,6 @@ function ChatPage() {
               sessionId={sessionId}
               entries={view.entries.length}
               settled={!view.running}
-              visit={!!session?.visit}
             />
           )}
         </div>

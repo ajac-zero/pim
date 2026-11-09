@@ -407,8 +407,6 @@ const translations = {
     comesWithHint:
       "Agents it hands tasks to. Making it your own gives you a copy of each.",
     contactsList: "Hands tasks to {names}",
-    tasksWorking: "{count} working",
-    tasksWaiting: "{count} waiting for you",
     tasks: "Tasks",
     taskDelegated: "Delegated at {time}",
     jumpToCompletion: "Jump to completion",
@@ -754,7 +752,7 @@ const translations = {
     newComputerTokenConfirm:
       "Make a new token? The one the computer has now stops working.",
     browser: "Browser",
-    activity: "Activity",
+    options: "Options",
     browserPicture: "What the browser shows: {title}",
     takeOverBrowser: "Take over",
     closeBrowser: "Turn off browser",
@@ -2089,8 +2087,6 @@ const translations = {
     comesWithHint:
       "Agentes a los que les pasa tareas. Al hacerlo tuyo, recibes una copia de cada uno.",
     contactsList: "Les pasa tareas a {names}",
-    tasksWorking: "{count} trabajando",
-    tasksWaiting: "{count} esperándote",
     tasks: "Tareas",
     taskDelegated: "Encargada a las {time}",
     jumpToCompletion: "Ir al resultado",
@@ -2440,7 +2436,7 @@ const translations = {
     newComputerTokenConfirm:
       "¿Crear un token nuevo? El que tiene la computadora ahora deja de funcionar.",
     browser: "Navegador",
-    activity: "Actividad",
+    options: "Opciones",
     browserPicture: "Lo que muestra el navegador: {title}",
     takeOverBrowser: "Tomar el control",
     closeBrowser: "Apagar el navegador",

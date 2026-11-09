@@ -31,12 +31,6 @@ import {
   useAwaitingApproval,
 } from "~/components/app-sidebar";
 import { ActivityToggle } from "~/components/chat/activity-toggle";
-import { ChatLinkMenu } from "~/components/chat/chat-link";
-import {
-  CopyChatId,
-  CopyConversation,
-} from "~/components/chat/copy-conversation";
-import { SessionCostMenu } from "~/components/chat/session-cost";
 import { CommandPalette } from "~/components/command-palette";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { MeetMajordomo } from "~/components/majordomo-setup";
@@ -421,7 +415,6 @@ function MobileTitle() {
       <span className="truncate">
         {session ? sessionTitle(session, t) : "Pim"}
       </span>
-      {session && <CopyChatId sessionId={session.id} className="size-7" />}
     </span>
   );
 }
@@ -512,12 +505,10 @@ function AppLayout() {
             <div className="flex h-13 shrink-0 items-center gap-2 border-sidebar-border border-b px-4 md:hidden">
               <MobileTitle />
               {sessionId && (
-                <div className="ml-auto flex shrink-0 gap-2">
-                  <CopyConversation sessionId={sessionId} />
-                  <SessionCostMenu sessionId={sessionId} />
-                  <ChatLinkMenu sessionId={sessionId} />
-                  <ActivityToggle sessionId={sessionId} />
-                </div>
+                <ActivityToggle
+                  sessionId={sessionId}
+                  className="ml-auto shrink-0"
+                />
               )}
             </div>
           )

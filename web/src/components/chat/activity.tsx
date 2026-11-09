@@ -4,17 +4,19 @@ import {
   usePendingApprovals,
   useSummaryOpen,
 } from "~/components/chat/activity-toggle";
+import { BoxSection } from "~/components/chat/box-section";
 import { BrowserView } from "~/components/chat/browser-view";
+import { ChatLinkMenu } from "~/components/chat/chat-link";
+import {
+  CopyChatId,
+  CopyConversation,
+} from "~/components/chat/copy-conversation";
 import { ApprovalBlock } from "~/components/chat/items";
 import { Markdown } from "~/components/chat/markdown";
-import { TaskList } from "~/components/chat/tasks";
+import { RoomMenu } from "~/components/chat/room";
+import { SessionCostMenu } from "~/components/chat/session-cost";
 import { useI18n } from "~/components/i18n";
-import { AlertCircle, ChevronRight, Loader2 } from "~/components/icons";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "~/components/ui/collapsible";
+import { AlertCircle, FileText, Loader2 } from "~/components/icons";
 import { pim } from "~/lib/pim-api";
 import { browserQuery } from "~/lib/queries";
 
@@ -22,9 +24,10 @@ import { browserQuery } from "~/lib/queries";
 const BROWSER_REFRESH_MS = 4_000;
 
 /**
- * A box beside a chat (above it on phones) with a quick summary of it and
- * its next steps, from the utility model; below it, the tasks the chat led
- * to, if any, and while it's open, the browser the person's agents share. The thread makes room for it. Approvals the chat
+ * The chat's options, in a box beside it (above it on phones): the agents in
+ * the chat, copying the conversation or its id, its public link, and what it
+ * has cost; then a quick summary of it and its next steps, from the utility
+ * model; below that, while it's open, the browser the person's agents share. The thread makes room for it. Approvals the chat
  * is waiting on come first, and open the box even when it's closed. Nothing is
  * written until the summary dropdown is open. While open, it asks again only
  * when the chat has settled with new entries (`entries`),
@@ -34,13 +37,10 @@ export function ActivityBox({
   sessionId,
   entries,
   settled,
-  visit,
 }: {
   sessionId: string;
   entries: number;
   settled: boolean;
-  /** A conversation with someone else's space, whose tasks aren't yours to see. */
-  visit: boolean;
 }) {
   const { t } = useI18n();
   const [open] = useSummaryOpen();
@@ -53,12 +53,6 @@ export function ActivityBox({
     staleTime: Number.POSITIVE_INFINITY,
     placeholderData: keepPreviousData,
     retry: false,
-  });
-  // The same query as the chat's task cards, which keeps it up to date.
-  const tasks = useQuery({
-    queryKey: ["tasks", sessionId],
-    queryFn: () => pim.tasks(sessionId),
-    enabled: open && !visit,
   });
   const browser = useQuery({
     ...browserQuery(sessionId),
@@ -82,20 +76,32 @@ export function ActivityBox({
           </section>
         )}
         {open && (
-          <Collapsible open={summaryOpen} onOpenChange={setSummaryOpen}>
-            <h2>
-              <CollapsibleTrigger className="group flex w-full items-center gap-2 px-4 py-3.5 text-left text-[13px] text-muted-foreground hover:text-foreground">
-                <ChevronRight className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
-                {t("summary")}
-                {summary.isFetching && summary.data !== undefined && (
-                  <Loader2
-                    className="size-3 animate-spin"
-                    aria-label={t("summarizing")}
-                  />
-                )}
-              </CollapsibleTrigger>
-            </h2>
-            <CollapsibleContent className="px-4 pb-4 text-sm">
+          <>
+            <div className="flex items-center gap-1 border-b px-2 py-1.5">
+              <RoomMenu sessionId={sessionId} />
+              <span className="ml-auto flex gap-0.5">
+                <CopyConversation sessionId={sessionId} />
+                <CopyChatId sessionId={sessionId} />
+                <ChatLinkMenu sessionId={sessionId} />
+                <SessionCostMenu sessionId={sessionId} />
+              </span>
+            </div>
+            <BoxSection
+              open={summaryOpen}
+              onOpenChange={setSummaryOpen}
+              label={
+                <>
+                  <FileText />
+                  {t("summary")}
+                  {summary.isFetching && summary.data !== undefined && (
+                    <Loader2
+                      className="size-3 animate-spin"
+                      aria-label={t("summarizing")}
+                    />
+                  )}
+                </>
+              }
+            >
               {entries === 0 || summary.data === null ? (
                 <p className="text-muted-foreground">
                   {t("nothingToSummarize")}
@@ -117,11 +123,8 @@ export function ActivityBox({
                   {t("summarizing")}
                 </p>
               )}
-            </CollapsibleContent>
-          </Collapsible>
-        )}
-        {open && tasks.data && tasks.data.length > 0 && (
-          <TaskList sessionId={sessionId} tasks={tasks.data} />
+            </BoxSection>
+          </>
         )}
         {open && page && (
           <BrowserView

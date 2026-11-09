@@ -1,13 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { type DragEvent, useEffect, useRef, useState } from "react";
-import { swatchClass } from "~/components/agent-icon";
+import { AgentIcon, swatchClass } from "~/components/agent-icon";
 import {
   AwaitingApprovalMark,
   sessionTitle,
   useAwaitingApproval,
 } from "~/components/app-sidebar";
-import { CopyChatId } from "~/components/chat/copy-conversation";
 import { useI18n } from "~/components/i18n";
 import { AlertCircle, Loader2, X } from "~/components/icons";
 import type { Session } from "~/lib/pim-api";
@@ -128,11 +127,24 @@ export function ChatTabs({ activeId }: { activeId: string }) {
   if (open.length <= 1 && activeId) {
     const session = sessions?.find((candidate) => candidate.id === activeId);
     if (!session) return <div className="flex-1" />;
+    const agent = session.visit
+      ? undefined
+      : agents?.find((candidate) =>
+          session.agent
+            ? candidate.id === session.agent.id
+            : candidate.majordomo,
+        );
     return (
       <div className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-[15px]">
+        {agent && (
+          <AgentIcon
+            agent={agent}
+            tile
+            className="size-6 shrink-0 rounded-md"
+          />
+        )}
         {statusOf(session)}
         <span className="truncate">{sessionTitle(session, t)}</span>
-        <CopyChatId sessionId={session.id} className="size-7" />
       </div>
     );
   }

@@ -113,7 +113,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 
 `CodingEvent` is `{ seq, kind, at, provider, model, input, output, cacheRead, cacheWrite, costUsd, data }`. `kind` is one of:
 
-- `model_call`: one call to the model, with its tokens and cost (`data` null).
+- `model_call`: one call to the model, with its tokens and cost. `data` is null for the thread's own calls; a call a CLI in the workspace made through the model gateway has `data: { via: "gateway", api, pricing, pricedAs?, estimated? }` (see Model gateway for coding threads in [reference.md](reference.md)).
 - `thread.queued`: `data: { position, reason }`, each time the thread waits for a slot.
 - `thread.turn_started`: `data: { operationId }`.
 - `thread.turn_ended`: `data: { type, threadId, space, operationId, outcome, reason?, checkpoint?, at }`, where `outcome` is `completed`, `error`, `cancelled` or `needs_approval`.

@@ -510,6 +510,8 @@ export function HarnessConnectPanel({
   const connected = (next: HarnessSignIn) => {
     setSignIn(next.state === "connected" ? null : next);
     setCode("");
+    // Whatever ended the sign-in, the vault's own status is the truth: ask it again.
+    queryClient.invalidateQueries({ queryKey: statusKey });
     if (next.state === "connected") {
       queryClient.invalidateQueries({ queryKey: statusKey });
       // Threads that waited for the login go on.
@@ -537,6 +539,9 @@ export function HarnessConnectPanel({
     queryFn: () => api.vault.signInStatus(harness),
     enabled: device,
     refetchInterval: SIGN_IN_POLL_MS,
+    // The person is on the vendor's page in another tab meanwhile.
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: "always",
     gcTime: 0,
   });
   const update = polled.data;

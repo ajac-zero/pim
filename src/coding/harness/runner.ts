@@ -288,7 +288,10 @@ export class HarnessRunner {
 			if (result.ok) return { status: "done", sessionId, sessionCostUsd: result.sessionCostUsd, usage: sum(usage), sessionUsage, model, lines: count };
 			if (result.reason === "budget") return ended("budget", "The turn reached its budget");
 			if (result.reason === "max_turns") return ended("max_turns", "The turn reached its most steps");
-			return ended("harness_error", redact([...result.errors, result.text ?? ""].join("\n").trim()).slice(0, 500) || `${harness.name} reported an error`);
+			const text = redact([...result.errors, result.text ?? ""].join("\n").trim()).slice(0, 500);
+			// A subscription's usage cap isn't a fault: say so, keeping the vendor's own words (they name when it resets).
+			if (/usage limit|hit your limit|limit reached|resets? (at|in|on)/i.test(text)) return ended("harness_error", `${harness.name} usage limit reached: ${text}`);
+			return ended("harness_error", text || `${harness.name} reported an error`);
 		}
 		const how = exit === null ? "ended without an exit" : exit.code === null ? "was killed" : `exited ${exit.code}`;
 		return ended("harness_error", `${harness.name} ${how} without a result${stderr.trim() ? `: ${redact(stderr.trim()).slice(-500)}` : ""}`);

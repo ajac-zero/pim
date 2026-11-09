@@ -343,13 +343,18 @@ export class CodingScheduler {
 	/**
 	 * Says what the slot's thread is doing now, from now on: `running` when a
 	 * turn starts, `idle` when it ends, `waiting` when it asks the person or
-	 * waits for an approval. False when the thread holds no slot.
+	 * waits for an approval. Saying what it is already doing changes nothing,
+	 * so repeated reports can't put off its release or preemption. False when
+	 * the thread holds no slot.
 	 */
 	setActivity(threadId: string, activity: SlotActivity): boolean {
 		if (!ACTIVITIES.includes(activity)) throw new RangeError("activity must be running, idle or waiting");
-		return this.#options.transaction(
-			() => this.#sql.exec("UPDATE pim_coding_slots SET activity = ?, activity_since = ? WHERE thread_id = ?", activity, this.#options.now(), threadId).rowsWritten > 0,
-		);
+		return this.#options.transaction(() => {
+			const slot = this.#slot(threadId);
+			if (!slot) return false;
+			if (slot.activity !== activity) this.#sql.exec("UPDATE pim_coding_slots SET activity = ?, activity_since = ? WHERE thread_id = ?", activity, this.#options.now(), threadId);
+			return true;
+		});
 	}
 
 	/**

@@ -34,6 +34,9 @@ type CodingThreadState = "provisioning" | "queued" | "idle" | "running" | "waiti
 /** Who started a thread: the person (web app or API) or one of their agents, from a chat. */
 type CodingCreator = { type: "person" } | { type: "agent"; agent: string; chat: string };
 
+/** The coding agent a thread runs as. Threads started before there was a choice are "pi". */
+type CodingHarness = "pi" | "claude-code" | "codex";
+
 /** Its place in the space's queue, while it waits for a workspace slot. */
 type QueuePlace = { position: number; reason: string; detail?: string };
 
@@ -47,6 +50,7 @@ type CodingThreadSummary = {
   repo: string;             // "https://github.com/<owner>/<name>"
   ref: string;              // what it started from, "main" unless given
   branch: string;           // "pim/<slug>-<id prefix>"
+  harness: CodingHarness;   // "pi" unless started with another
   task: string;             // the task it was started with, at most 2,000 characters
   state: CodingThreadState;
   stateReason: string | null; // such as "budget", "no_backend", "aborted", "cancelled", "queue_expired:slots_full"
@@ -72,6 +76,7 @@ type CodingThreadView = {
   stateReason: string | null;
   stateDetail: string | null; // what to tell the person, such as how to set up a workspace backend
   repo: { url: string; ref: string; branch: string; baseSha: string | null };
+  harness: CodingHarness;
   profile: AgentProfile;
   workspaceProvider: string;
   slot: "none" | "queued" | "held";
@@ -95,7 +100,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 | Method | Path | Body / query | Answers |
 | --- | --- | --- | --- |
 | GET | `/coding/threads` | | `{ threads: CodingThreadSummary[] }`, newest first, archived ones included |
-| POST | `/coding/threads` | `{ repo, ref?, task, profile?, budgetUsd?, parent?, operationId? }` | `201` with `CodingThreadView`, or `200` with the same thread when `operationId` started one already. It returns at once: the thread is `provisioning`, or `queued` with `position` and `reason` when the space's slots are taken |
+| POST | `/coding/threads` | `{ repo, ref?, task, harness?, profile?, budgetUsd?, parent?, operationId? }` | `201` with `CodingThreadView`, or `200` with the same thread when `operationId` started one already. It returns at once: the thread is `provisioning`, or `queued` with `position` and `reason` when the space's slots are taken |
 | GET | `/coding/threads/:id` | | `CodingThreadView` |
 | GET | `/coding/threads/:id/transcript` | | `{ messages: TranscriptMessage[] }`, as `/sessions/:s/messages` has them, with the thread's own notices (a budget stop) as `role: "notice"` |
 | GET | `/coding/threads/:id/diff` | `?since=<sha>` | `{ since, head, diff, truncated }`: `git diff` from `since` (the commit it started from, by default) to its latest checkpoint, at most 256 KiB. From the start it is kept for every checkpoint; from another commit it needs the workspace (`workspace_not_running`) |

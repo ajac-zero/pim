@@ -40,6 +40,7 @@ function brief(view: CodingThreadView) {
 		...(view.queue ? { position: view.queue.position, waiting_for: view.queue.reason } : {}),
 		repo: view.repo.url,
 		branch: view.repo.branch,
+		harness: view.harness,
 		task: view.task.length > 300 ? `${view.task.slice(0, 300)}…` : view.task,
 		turn_under_way: view.currentOperation !== null,
 		inputs_waiting: view.inbox,
@@ -75,6 +76,9 @@ export const coding = definePimExtension({
 					repo: Type.String({ description: "https://github.com/<owner>/<name>" }),
 					ref: Type.Optional(Type.String({ description: "The branch, tag or commit to start from; main by default." })),
 					task: Type.String({ minLength: 1 }),
+					harness: Type.Optional(
+						Type.Union([Type.Literal("pi"), Type.Literal("claude-code"), Type.Literal("codex")], { description: "The coding agent it runs as; pi by default." }),
+					),
 					profile: Type.Optional(
 						Type.Object(
 							{ provider: Type.String(), model: Type.String() },
@@ -85,7 +89,7 @@ export const coding = definePimExtension({
 					parent: Type.Optional(Type.String({ description: "The thread this one continues from, if any." })),
 				}),
 				replay: "safe",
-				async execute({ repo, ref, task, profile, budget, parent }, api, context) {
+				async execute({ repo, ref, task, harness, profile, budget, parent }, api, context) {
 					// The same call run again starts the same thread.
 					const operationId = await api.memo("operation", crypto.randomUUID(), context);
 					const { chat, agent } = conversationOf(String(api.conversationId));
@@ -97,6 +101,7 @@ export const coding = definePimExtension({
 								repo,
 								task,
 								...(ref ? { ref } : {}),
+								...(harness ? { harness } : {}),
 								...(profile ? { profile: { providerId: profile.provider, model: profile.model } } : {}),
 								...(budget !== undefined ? { budgetUsd: budget } : {}),
 								...(parent ? { parent } : {}),
@@ -110,6 +115,7 @@ export const coding = definePimExtension({
 							status: view.state,
 							...(view.queue ? { position: view.queue.position, waiting_for: view.queue.reason } : {}),
 							branch: view.repo.branch,
+							harness: view.harness,
 						});
 					});
 				},
@@ -129,6 +135,7 @@ export const coding = definePimExtension({
 								status: thread.state,
 								repo: thread.repo,
 								branch: thread.branch,
+								harness: thread.harness,
 								task: thread.task.length > 120 ? `${thread.task.slice(0, 120)}…` : thread.task,
 								...(thread.queue ? { position: thread.queue.position } : {}),
 							})),

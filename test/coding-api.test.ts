@@ -9,6 +9,8 @@ import type { GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_SPACE_CAP } from "../src/coding/provider-capacity";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type CodingEventSink, codingThread } from "../src/coding/thread-do";
+import { CodingThreadIndex } from "../src/coding/thread-index";
+import { CodingThreadStore } from "../src/coding/thread-store";
 import type { Approval } from "../src/store";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
@@ -154,6 +156,57 @@ describe("the coding threads API", () => {
 		expect((await api<{ threads: unknown[] }>("/coding/threads")).body.threads).toHaveLength(before);
 	});
 
+	it("keeps each thread's harness, pi unless given, and the thread it continues from", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Done."), fauxAssistantMessage("Done too.")]);
+		const first = await start();
+		expect(first.harness).toBe("pi");
+		const second = await start({ task: "Write the docs", harness: "codex", parent: first.id });
+		expect(second).toMatchObject({ harness: "codex", parentThread: first.id });
+		await turns(first.id, 1);
+		await turns(second.id, 1);
+		const { threads } = (await api<{ threads: CodingThreadSummary[] }>("/coding/threads")).body;
+		expect(threads.find((thread) => thread.id === first.id)).toMatchObject({ harness: "pi", parent: null, createdBy: { type: "person" } });
+		expect(threads.find((thread) => thread.id === second.id)).toMatchObject({ harness: "codex", parent: first.id, createdBy: { type: "person" } });
+		expect((await view(second.id)).harness).toBe("codex");
+		const refused = await post("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, harness: "aider" });
+		expect([refused.status, refused.body]).toEqual([400, { error: "harness must be pi, claude-code, codex", code: "invalid" }]);
+	});
+
+	it("reads threads from before there was a harness as pi's", async () => {
+		/** Makes `table` again as it was before its harness column, with one row. */
+		const asBefore = (sql: SqlStorage, table: string, row: Record<string, SqlStorageValue>) => {
+			const schema = String(sql.exec("SELECT sql FROM sqlite_master WHERE name = ?", table).one().sql);
+			sql.exec(`DROP TABLE ${table}`);
+			sql.exec(schema.replace(/\s*harness TEXT NOT NULL DEFAULT 'pi',/, ""));
+			expect(sql.exec(`PRAGMA table_info(${table})`).toArray().map((column) => column.name)).not.toContain("harness");
+			const names = Object.keys(row);
+			sql.exec(`INSERT INTO ${table} (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")})`, ...Object.values(row));
+		};
+		const id = crypto.randomUUID();
+		await runInDurableObject(codingScheduler(env, `space-${id}`), (_scheduler, state) => {
+			asBefore(state.storage.sql, "pim_coding_threads", { thread_id: id, created_by: '{"type":"person"}', task: "Old", repo: REPO, ref: "main", budget_usd: 3, created_at: 1 });
+			expect(new CodingThreadIndex(state.storage.sql).get(id)).toMatchObject({ threadId: id, harness: "pi" });
+		});
+		await runInDurableObject(codingThread(env, id), (_thread, state) => {
+			asBefore(state.storage.sql, "coding_thread", {
+				thread_id: id,
+				space: "space",
+				repo_url: REPO,
+				base_ref: "main",
+				branch: "pim/old",
+				agent_profile: JSON.stringify(CODER),
+				provider_id: "none",
+				state: "idle",
+				created_by: "space",
+				limits: "{}",
+				start_operation: "op",
+				created_at: 1,
+				updated_at: 1,
+			});
+			expect(new CodingThreadStore(state.storage.sql).required()).toMatchObject({ threadId: id, harness: "pi" });
+		});
+	});
+
 	it("answers at once with a queued thread's place, and cancels it out of the queue", async () => {
 		await codingScheduler(env, OWNER).setLimit(1);
 		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
@@ -262,7 +315,7 @@ describe("an agent's coding tools", () => {
 		const chat = (await post<{ id: string }>("/sessions")).body.id;
 		await say("Add a greeting to acme/demo.", chat);
 		const id = String(started.thread_id);
-		expect(started).toMatchObject({ url: `https://pim.test/coding/${id}`, status: expect.any(String), branch: expect.stringMatching(/^pim\/add-a-greeting-/) });
+		expect(started).toMatchObject({ url: `https://pim.test/coding/${id}`, status: expect.any(String), branch: expect.stringMatching(/^pim\/add-a-greeting-/), harness: "pi" });
 		const [ended] = await turns(id, 1);
 		await vi.waitFor(() => expect(woken).not.toBe(""), { timeout: 10_000 });
 		expect(woken).toContain(`[Coding thread ${id}] It finished its turn.`);
@@ -271,7 +324,7 @@ describe("an agent's coding tools", () => {
 		expect(woken).toContain("It last said:\nAdded the greeting.");
 		// The list says which agent started it, from which chat.
 		const listed = (await api<{ threads: CodingThreadSummary[] }>("/coding/threads")).body.threads.find((thread) => thread.id === id);
-		expect(listed?.createdBy).toEqual({ type: "agent", agent: expect.any(String), chat });
+		expect(listed).toMatchObject({ createdBy: { type: "agent", agent: expect.any(String), chat }, parent: null, harness: "pi" });
 		expect((await view(id)).createdBy).toEqual(listed!.createdBy);
 		// The same turn's end told again wakes nobody.
 		await runInDurableObject(codingThread(env, id), (thread: CodingThreadDO) => (thread as unknown as { eventSink(): CodingEventSink }).eventSink().emit(ended!));
@@ -299,8 +352,8 @@ describe("an agent's coding tools", () => {
 		]);
 		await say("How are the coding threads?");
 		const [list, status, steered, push, missing] = results.map((result) => JSON.parse(result));
-		expect(list.threads[0]).toEqual(expect.objectContaining({ thread_id: thread.id, repo: REPO, status: "idle" }));
-		expect(status).toMatchObject({ thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, budget_usd: 3 });
+		expect(list.threads[0]).toEqual(expect.objectContaining({ thread_id: thread.id, repo: REPO, status: "idle", harness: "pi" }));
+		expect(status).toMatchObject({ thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, harness: "pi", budget_usd: 3 });
 		expect(steered).toMatchObject({ thread_id: thread.id });
 		// Refused before anyone is asked.
 		expect(push).toEqual({ error: "github_app_not_configured", message: "GitHub App not configured: ask the Pim owner to set it up" });

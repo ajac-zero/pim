@@ -23,6 +23,7 @@ import {
 	type AgentProfile,
 	type Checkpoint,
 	type CodingEvent,
+	type CodingHarness,
 	type CodingLimits,
 	type CodingThreadRow,
 	type CodingThreadState,
@@ -259,6 +260,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				repoUrl: `https://github.com/${repo.fullName}`,
 				baseRef: input.ref ?? "main",
 				branch: branchName(task, threadId),
+				harness: input.harness ?? "pi",
 				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },
 				providerId,
 				state: "provisioning",
@@ -287,6 +289,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			stateReason: thread.stateReason,
 			stateDetail: thread.stateDetail,
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch, baseSha: thread.baseSha },
+			harness: thread.harness,
 			profile: thread.profile,
 			workspaceProvider: thread.providerId,
 			slot: thread.slot,
@@ -1226,6 +1229,8 @@ export type StartThread = {
 	/** The branch, tag or commit to start from ("main"). */
 	readonly ref?: string;
 	readonly task: string;
+	/** The coding agent it runs as: pi unless given. */
+	readonly harness?: CodingHarness;
 	/** The model it runs on: the space's default unless given (`defaultProfile`). */
 	readonly profile?: AgentProfile;
 	/** The most the thread may spend on its model, in dollars ($3). */
@@ -1248,6 +1253,7 @@ export type CodingThreadStatus = {
 	/** What to tell the person about the state, such as how to set up a workspace backend. */
 	readonly stateDetail: string | null;
 	readonly repo: { readonly url: string; readonly ref: string; readonly branch: string; readonly baseSha: string | null };
+	readonly harness: CodingHarness;
 	readonly profile: AgentProfile;
 	readonly workspaceProvider: string;
 	readonly slot: CodingThreadRow["slot"];

@@ -1,6 +1,6 @@
 import type { CodingThreadStatus } from "./thread-do";
 import type { QueuePlace } from "./scheduler";
-import type { AgentProfile, CodingThreadState } from "./thread-store";
+import type { AgentProfile, CodingHarness, CodingThreadState } from "./thread-store";
 
 /**
  * The coding threads API, under `/api/coding/threads`: what the web app and
@@ -18,6 +18,8 @@ export type CodingThreadSummary = {
 	readonly repo: string;
 	readonly ref: string;
 	readonly branch: string;
+	/** The coding agent it runs as, which the web app shows its logo for. */
+	readonly harness: CodingHarness;
 	readonly task: string;
 	readonly state: CodingThreadState;
 	readonly stateReason: string | null;
@@ -48,6 +50,8 @@ export type StartCodingThread = {
 	readonly repo: string;
 	readonly ref?: string;
 	readonly task: string;
+	/** `pi` unless given. */
+	readonly harness?: CodingHarness;
 	readonly profile?: AgentProfile;
 	readonly budgetUsd?: number;
 	readonly parent?: string;

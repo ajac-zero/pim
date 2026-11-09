@@ -1,5 +1,5 @@
 import type { CodingCreator } from "./api";
-import type { CodingThreadState } from "./thread-store";
+import type { CodingHarness, CodingThreadState } from "./thread-store";
 
 /**
  * A space's list of its coding threads, in its scheduler's Durable Object
@@ -16,6 +16,7 @@ export type IndexedThread = {
 	readonly threadId: string;
 	readonly createdBy: CodingCreator;
 	readonly parent: string | null;
+	readonly harness: CodingHarness;
 	readonly task: string;
 	readonly repo: string;
 	readonly ref: string;
@@ -29,7 +30,7 @@ export type IndexedThread = {
 };
 
 /** What a thread enters before it starts. */
-export type ThreadRegistration = Pick<IndexedThread, "threadId" | "createdBy" | "parent" | "task" | "repo" | "ref" | "budgetUsd" | "createdAt">;
+export type ThreadRegistration = Pick<IndexedThread, "threadId" | "createdBy" | "parent" | "harness" | "task" | "repo" | "ref" | "budgetUsd" | "createdAt">;
 
 /** What the thread's object says of itself as its state changes. */
 export type ThreadRecord = Pick<IndexedThread, "threadId" | "repo" | "ref" | "branch" | "state" | "stateReason" | "spentUsd" | "budgetUsd" | "createdAt" | "updatedAt">;
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS pim_coding_threads (
 	thread_id TEXT PRIMARY KEY,
 	created_by TEXT NOT NULL,
 	parent TEXT,
+	harness TEXT NOT NULL DEFAULT 'pi',
 	task TEXT NOT NULL,
 	repo TEXT NOT NULL,
 	ref TEXT NOT NULL,
@@ -61,15 +63,19 @@ export class CodingThreadIndex {
 	constructor(sql: SqlStorage) {
 		this.#sql = sql;
 		sql.exec(THREAD_INDEX_SCHEMA);
+		// Lists from before threads had a harness: theirs are pi's.
+		const columns = sql.exec("PRAGMA table_info(pim_coding_threads)").toArray().map((row) => String(row.name));
+		if (!columns.includes("harness")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 	}
 
 	/** Enters a thread about to start; one entered already stays as it is. */
 	register(thread: ThreadRegistration): void {
 		this.#sql.exec(
-			"INSERT INTO pim_coding_threads (thread_id, created_by, parent, task, repo, ref, budget_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (thread_id) DO NOTHING",
+			"INSERT INTO pim_coding_threads (thread_id, created_by, parent, harness, task, repo, ref, budget_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (thread_id) DO NOTHING",
 			thread.threadId,
 			JSON.stringify(thread.createdBy),
 			thread.parent,
+			thread.harness,
 			thread.task.slice(0, MAX_TASK_CHARS),
 			thread.repo,
 			thread.ref,
@@ -118,6 +124,7 @@ function indexedOf(row: Record<string, SqlStorageValue>): IndexedThread {
 		threadId: String(row.thread_id),
 		createdBy: JSON.parse(String(row.created_by)) as CodingCreator,
 		parent: row.parent === null ? null : String(row.parent),
+		harness: String(row.harness) as CodingHarness,
 		task: String(row.task),
 		repo: String(row.repo),
 		ref: String(row.ref),

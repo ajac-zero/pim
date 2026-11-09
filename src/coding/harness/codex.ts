@@ -84,6 +84,7 @@ export const codex: CliHarness = {
 		];
 	},
 	parser: (turn) => new CodexJsonParser(turn),
+	reportsCost: false,
 	shellTool: "shell",
 	env: {},
 	// ChatGPT's Codex backend (chatgpt.com/backend-api/codex), where a ChatGPT login's turns go; the API, where an API key's

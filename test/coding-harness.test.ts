@@ -25,7 +25,7 @@ const parse = (text: string) => {
 	return text.split("\n").flatMap((line) => parser.parseLine(line));
 };
 
-const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, model: null, instructions: "Don't push." };
+const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, maxTokens: null, model: null, instructions: "Don't push." };
 
 describe("Claude Code's stream-json", () => {
 	it("is read into the session, the text as it is written, messages with their tools, retries, refusals and the result", () => {
@@ -571,6 +571,19 @@ describe("a CLI harness run", () => {
 		expect(await running).toMatchObject({ status: "unanswered", reason: "aborted", sessionCostUsd: 0.02 });
 		expect(signals.sent).toEqual(["INT"]);
 		expect(log).toEqual(["lock", "restore", "claude", "signal -INT", "write back", "unlock"]);
+	});
+
+	it("stops a turn with SIGINT once its tokens reach `maxTokens`, the ceiling of a CLI that estimates no cost, and says it reached its budget", async () => {
+		const turn = lines("turn");
+		// The turn's first message, of 2,114 tokens in, 184 out, 13,008 read from the cache and 5,120 written to it: 20,426.
+		const printed = [turn[0]!, turn.find((line) => JSON.parse(line).type === "assistant")!, turn.at(-1)!];
+		const run = async (maxTokens: number) => {
+			const { workspace, log, signals } = scripted(() => prints(printed));
+			const result = await (await prepared(deps(workspace, log).options)).run({ ...TURN, maxTokens }, 60_000);
+			return { result, signals: signals.sent };
+		};
+		expect(await run(20_426)).toEqual({ result: expect.objectContaining({ status: "unanswered", reason: "budget", detail: "The turn reached the thread's token ceiling" }), signals: ["INT"] });
+		expect(await run(20_427)).toEqual({ result: expect.objectContaining({ status: "done" }), signals: [] });
 	});
 
 	it("kills a CLI that ignores SIGINT after the grace, on abort and when the turn runs out of time", async () => {

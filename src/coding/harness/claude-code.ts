@@ -73,6 +73,7 @@ export const claudeCode: CliHarness = {
 		];
 	},
 	parser: () => new ClaudeStreamParser(),
+	reportsCost: true,
 	shellTool: "Bash",
 	// Only what the CLI needs to talk to the model and sign in: no telemetry, error reports, surveys or self-updates.
 	env: {

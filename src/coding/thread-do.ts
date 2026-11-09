@@ -935,7 +935,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	#assertBudget(thread: CodingThreadRow): void {
-		if (thread.spentUsd >= thread.budgetUsd) throw new Error(`This coding thread has spent its $${thread.budgetUsd} budget: continue it with a bigger one`);
+		const spent = this.#budgetSpent(thread);
+		if (spent) throw new Error(`${spent}: continue it with a bigger one`);
+	}
+
+	/**
+	 * Why the thread can't go on until given a bigger budget, or null while
+	 * it has some left: it spent its budget, or, on a CLI harness that
+	 * estimates no cost, used the tokens its budget allows.
+	 */
+	#budgetSpent(thread: CodingThreadRow): string | null {
+		if (thread.spentUsd >= thread.budgetUsd) return `This coding thread has spent its $${thread.budgetUsd} budget`;
+		const ceiling = tokenCeiling(thread);
+		if (ceiling === null) return null;
+		const used = this.store.tokensUsed();
+		return used >= ceiling ? `This coding thread has used ${used.toLocaleString("en-US")} of the ${ceiling.toLocaleString("en-US")} tokens its $${thread.budgetUsd} budget allows, as ${cliHarness(thread.harness)!.name} reports no cost` : null;
 	}
 
 	/** A failed or stopped thread with new input waits for a slot again. Runs in the caller's transaction. */
@@ -1191,8 +1205,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async #startCliTurn(thread: CodingThreadRow, cli: CliHarness, input: { seq: number; operationId: string; text: string }): Promise<void> {
 		// A run readied before a restart, whose turn never started, is finished off first.
 		if (this.store.harnessRun()) await this.#recoverCliRun(thread);
-		if (thread.spentUsd >= thread.budgetUsd) {
-			this.store.update({ state: "failed", stateReason: "budget", stateDetail: null });
+		const spent = this.#budgetSpent(thread);
+		if (spent) {
+			this.store.update({ state: "failed", stateReason: "budget", stateDetail: spent });
 			await this.#giveBack({ keepVolume: true });
 			return;
 		}
@@ -1228,6 +1243,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			sessionId,
 			resume: session !== null,
 			maxBudgetUsd: fresh.budgetUsd - fresh.spentUsd,
+			maxTokens: cli.reportsCost ? null : Math.max(0, tokenCeiling(fresh)! - this.store.tokensUsed()),
 			model: fresh.profile.providerId === cli.id && fresh.profile.model !== "default" ? fresh.profile.model : null,
 			instructions: cliInstructions(fresh),
 		};
@@ -1320,7 +1336,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			else if (result.status !== "done" && result.sessionId === null && result.reason === "harness_error" && before) this.store.setHarnessSession(null);
 			if (result.reason === "budget") this.store.update({ budgetStopped: true });
 		});
-		await this.#endTurn(operation, result);
+		// A turn stopped at the token ceiling says by how much, in place of the dollars it can't name.
+		const spent = result.reason === "budget" && tokenCeiling(thread) !== null ? this.#budgetSpent(this.store.required()) : null;
+		await this.#endTurn(operation, spent ? { ...result, detail: spent } : result);
 	}
 
 	/** What a CLI's output means for the thread: messages into the transcript, retries and refusals into the log, text as it is written to whoever follows live. */
@@ -1394,6 +1412,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const reason = budget ? "budget" : outcome === "error" || login ? (result.reason ?? "error") : null;
 		const state: CodingThreadState = outcome === "error" ? "failed" : login ? "waiting_input" : "idle";
 		const said = await this.#lastSaid().catch(() => null);
+		// A budget stop says what was spent, and on a CLI harness that estimates no cost, the tokens used of its ceiling.
+		const ceiling = tokenCeiling(thread);
+		const stop = budget ? { budgetUsd: thread.budgetUsd, spentUsd: thread.spentUsd, ...(ceiling === null ? {} : { tokens: this.store.tokensUsed(), tokenCeiling: ceiling }) } : null;
 		const event: TurnEndedEvent = {
 			type: "thread.turn_ended",
 			threadId: thread.threadId,
@@ -1411,9 +1432,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		this.ctx.storage.transactionSync(() => {
 			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: outcome === "completed" ? null : (result.detail ?? null) });
 			this.store.recordEvent(event.type, event);
-			if (budget) this.store.recordEvent("app.budget_stop", { budgetUsd: thread.budgetUsd, spentUsd: thread.spentUsd });
+			if (stop) this.store.recordEvent("app.budget_stop", stop);
 		});
-		if (budget) await this.#write("app.budget_stop", { budgetUsd: thread.budgetUsd, spentUsd: thread.spentUsd });
+		if (stop) await this.#write("app.budget_stop", stop);
 		if (state === "failed") await this.#giveBack({ keepVolume: true });
 		else if (state === "waiting_input") await this.#report("waiting");
 		else if (this.store.inboxSize() === 0) await this.#report("idle");
@@ -1819,6 +1840,14 @@ export const BUDGET_MESSAGE = "Coding thread out of budget";
 
 export const DEFAULT_BUDGET_USD = 3;
 
+/**
+ * How many tokens each dollar of a thread's budget allows a CLI harness
+ * that estimates no cost (Codex, Amp), all kinds counted alike. It is a
+ * ceiling that stops a runaway thread, not a price: Pim doesn't know what
+ * the CLI's tokens cost, and doesn't claim to.
+ */
+export const UNPRICED_TOKENS_PER_USD = 1_000_000;
+
 /** What a push needs set up, as the person reads it. */
 export const GITHUB_APP_NOT_CONFIGURED = "GitHub App not configured: ask the Pim owner to set it up";
 
@@ -1879,12 +1908,25 @@ export function branchName(task: string, threadId: string): string {
 	return `pim/${slug}-${id}`;
 }
 
+/** What an `app.budget_stop` entry holds: tokens only for a CLI harness that estimates no cost. */
+type BudgetStop = { budgetUsd?: number; spentUsd?: number; tokens?: number; tokenCeiling?: number };
+
+/** A budget stop as the transcript says it. */
+function budgetStopText(stop: BudgetStop): string {
+	if (stop.tokenCeiling !== undefined) return `Stopped: the thread used ${(stop.tokens ?? 0).toLocaleString("en-US")} of the ${stop.tokenCeiling.toLocaleString("en-US")} tokens its $${stop.budgetUsd ?? 0} budget allows.`;
+	return `Stopped: the thread spent $${(stop.spentUsd ?? 0).toFixed(2)} of its $${stop.budgetUsd ?? 0} budget.`;
+}
+
+/** The tokens a thread's budget allows, for a CLI harness that estimates no cost; null for one that does, and for Pi. */
+function tokenCeiling(thread: CodingThreadRow): number | null {
+	return cliHarness(thread.harness)?.reportsCost === false ? Math.floor(thread.budgetUsd * UNPRICED_TOKENS_PER_USD) : null;
+}
+
 /** The transcript for the UI: pi's messages, with the thread's own entries as notices. */
 function transcriptOf(entries: readonly EntryRecord[]): TranscriptMessage[] {
 	return entries.flatMap((entry): TranscriptMessage[] => {
 		if (entry.kind === "app.budget_stop") {
-			const data = (entry.data ?? {}) as { budgetUsd?: number; spentUsd?: number };
-			return [{ id: String(entry.id), role: "notice", parts: [{ type: "text", text: `Stopped: the thread spent $${(data.spentUsd ?? 0).toFixed(2)} of its $${data.budgetUsd ?? 0} budget.` }], timestamp: 0 }];
+			return [{ id: String(entry.id), role: "notice", parts: [{ type: "text", text: budgetStopText((entry.data ?? {}) as BudgetStop) }], timestamp: 0 }];
 		}
 		return projectEntries([entry]);
 	});

@@ -18,6 +18,13 @@ export type HarnessTurn = {
 	readonly resume: boolean;
 	/** The most the turn may spend, in dollars, as the CLI estimates it; the thread's budget left. */
 	readonly maxBudgetUsd: number;
+	/**
+	 * For a CLI that estimates no cost (`reportsCost: false`), the most
+	 * tokens the turn may use: what is left of the thread's token ceiling,
+	 * which stands in for its budget (../thread-do.ts). Null for a CLI that
+	 * estimates cost.
+	 */
+	readonly maxTokens: number | null;
 	/** The model to ask for, or null for the CLI's own default. */
 	readonly model: string | null;
 	/** Text appended to the CLI's own system prompt: what Pim tells every coding agent. */
@@ -108,6 +115,12 @@ export interface CliHarness {
 	buildCommand(turn: HarnessTurn): string[];
 	/** A parser for one turn's output. */
 	parser(turn?: HarnessTurn): HarnessParser;
+	/**
+	 * Whether the CLI estimates what its session cost in dollars
+	 * (`sessionCostUsd`). One that doesn't has the thread's budget kept as a
+	 * ceiling on its tokens instead (`maxTokens`).
+	 */
+	readonly reportsCost: boolean;
 	/** The name of the CLI's shell tool in the transcript, whose commands may be test runs. */
 	readonly shellTool: string;
 	/** Environment the CLI always runs with, besides its config directory: such as turning its telemetry off. */

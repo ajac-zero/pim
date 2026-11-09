@@ -925,6 +925,21 @@ describe("a Codex thread", () => {
 		expect(calls[1]).toMatchObject({ input: 6000, output: 320, cacheRead: 0, costUsd: 0 });
 	});
 
+	it("keeps its budget as a ceiling on tokens, since Codex estimates no cost, and goes on once given a bigger one", async () => {
+		// $0.02 allows 20,000 tokens; the turn used 25,490 (5,110 in, 1,180 out, 19,200 read from the cache).
+		const { id, stub } = await startCodex({ budgetUsd: 0.02 });
+		const [ended] = await turns(id, 1);
+		// Codex reports its tokens only at the turn's end, so the turn that crossed the ceiling ran to its end.
+		expect(ended).toMatchObject({ outcome: "completed", spentUsd: 0 });
+		const refusal = "This coding thread has used 25,490 of the 20,000 tokens its $0.02 budget allows, as Codex reports no cost: continue it with a bigger one";
+		await expect(inside(stub, (thread) => thread.steer("Go on.", { operationId: "more" }))).rejects.toThrow(refusal);
+		await expect(inside(stub, (thread) => thread.continue({ operationId: "more" }))).rejects.toThrow(refusal);
+		expect(await api(`/coding/threads/${id}/steer`, { method: "POST", body: JSON.stringify({ text: "Go on." }) })).toMatchObject({ status: 409, body: { code: "budget_spent", error: refusal } });
+		await stub.continue({ operationId: "bigger", budgetUsd: 1 });
+		const [, again] = await turns(id, 2);
+		expect(again).toMatchObject({ outcome: "completed", operationId: "bigger", budgetUsd: 1 });
+	});
+
 	it("waits for the person when Codex says its login expired, and goes on once continued", async () => {
 		codexCli = async () => ({ stdout: codexFixture("expired"), code: 1 });
 		const { id, stub } = await startCodex();

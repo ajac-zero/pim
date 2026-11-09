@@ -32,6 +32,20 @@
  * otherwise; `tick` takes out the threads past theirs, each with the reason
  * it was last waiting for, and admits into whatever that frees.
  *
+ * A slot is for work, so the scheduler also knows what each slot's thread is
+ * doing (`setActivity`): `running` a turn, `idle` between turns, or `waiting`
+ * for the person, for an answer or an approval. A slot starts `running`. A
+ * thread idle for 30 minutes gives its slot back. A thread waiting for the
+ * person keeps it for 5 minutes, and after that only until the queue has a
+ * thread that slot would admit: then the thread that has waited longest is
+ * preempted, and only as many as the queue can put to work, so none is
+ * preempted for a queue a gate holds up or for slots still over the limit
+ * after a restart. A running thread is never stopped. `sweep` (and `tick`)
+ * does both and says which threads lost their slot and why; the caller
+ * destroys an idle thread's workspace, checkpoints a preempted one's before
+ * destroying it, and later asks again for the preempted thread with
+ * `PREEMPT_RESUME_PRIORITY`.
+ *
  * Nothing here knows about providers or starts a workspace. Nothing in Pim
  * constructs a scheduler yet.
  */
@@ -51,7 +65,9 @@ CREATE TABLE IF NOT EXISTS pim_coding_slots (
 	thread_id TEXT PRIMARY KEY,
 	provider TEXT,
 	acquired_at INTEGER NOT NULL,
-	state TEXT NOT NULL
+	state TEXT NOT NULL,
+	activity TEXT NOT NULL,
+	activity_since INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_coding_config (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -77,6 +93,20 @@ const ORDER = "ORDER BY priority DESC, queued_at, seq";
 /** How long a thread waits in the queue when neither it nor the options say (6 hours). */
 const DEFAULT_DEADLINE_MS = 6 * 60 * 60 * 1000;
 
+/** How long a slot's thread may be idle before it gives the slot back, and how long one waiting for the person keeps it before it may be preempted, when the options don't say (30 and 5 minutes). */
+const DEFAULT_IDLE_MS = 30 * 60 * 1000;
+const DEFAULT_WAITING_GRACE_MS = 5 * 60 * 1000;
+
+/**
+ * The priority a preempted thread asks again with, to go to the head of the
+ * queue: ahead of every thread at the usual priority 0, and, as threads of
+ * the same priority are first come, first served, behind the threads
+ * preempted before it.
+ */
+export const PREEMPT_RESUME_PRIORITY = 1000;
+
+const ACTIVITIES: readonly string[] = ["running", "idle", "waiting"] satisfies SlotActivity[];
+
 /** How many of the latest sessions' durations an estimate is made from, and how few it needs. */
 const DURATION_WINDOW = 20;
 const MIN_DURATIONS = 5;
@@ -94,6 +124,10 @@ export type CodingSchedulerOptions = {
 	readonly defaultDeadlineMs?: number;
 	/** Asked in order before each admission ([lowDiskGate, budgetCapGate]). */
 	readonly gates?: readonly AdmissionGate[];
+	/** How long a slot's thread may be idle before `sweep` releases the slot (30 minutes). */
+	readonly idleMs?: number;
+	/** How long a thread waiting for the person keeps its slot before `sweep` may preempt it for the queue (5 minutes). */
+	readonly waitingGraceMs?: number;
 };
 
 /** What the caller knows of the world outside the scheduler, from the workspace manager's health and the space's spending caps. */
@@ -132,7 +166,28 @@ export type QueuePlace = { readonly position: number; readonly reason: string; r
 export type RequestResult = { readonly status: "admitted" } | ({ readonly status: "queued" } & QueuePlace);
 
 /** A slot taken: `admitted` from the queue, or `adopted` by `reconcile` from a workspace found running, whose provider may be unknown. */
-export type Slot = { readonly threadId: string; readonly provider: string | null; readonly acquiredAt: number; readonly state: "admitted" | "adopted" };
+export type Slot = {
+	readonly threadId: string;
+	readonly provider: string | null;
+	readonly acquiredAt: number;
+	readonly state: "admitted" | "adopted";
+	/** What its thread is doing, as its caller last said, and since when; `running` since `acquiredAt` until then. */
+	readonly activity: SlotActivity;
+	readonly activitySince: number;
+};
+
+/** What a slot's thread is doing: `running` a turn, `idle` between turns, or `waiting` for the person, for an answer or an approval. */
+export type SlotActivity = "running" | "idle" | "waiting";
+
+/** A slot `sweep` took back: from a thread `idle` too long, or `preempted` from one waiting for the person past its grace, for a queued thread. */
+export type Released = { readonly threadId: string; readonly why: "idle" | "preempted" };
+
+export type Sweep = {
+	/** Idle threads first, then preempted ones, each oldest first. */
+	readonly released: Released[];
+	/** Queued threads admitted into the slots that freed up. */
+	readonly admitted: string[];
+};
 
 export type QueueEntry = {
 	readonly threadId: string;
@@ -161,6 +216,8 @@ export type Tick = {
 	readonly expired: QueueEntry[];
 	/** Queued threads admitted afterwards. */
 	readonly admitted: string[];
+	/** Slots taken back by the sweep, as `sweep` says. */
+	readonly released: Released[];
 };
 
 type Row = Record<string, SqlStorageValue>;
@@ -177,6 +234,8 @@ export class CodingScheduler {
 	constructor(sql: CodingSql, options: CodingSchedulerOptions) {
 		if (options.defaultLimit !== undefined) count(options.defaultLimit, "defaultLimit");
 		if (options.defaultDeadlineMs !== undefined) duration(options.defaultDeadlineMs, "defaultDeadlineMs");
+		if (options.idleMs !== undefined) duration(options.idleMs, "idleMs");
+		if (options.waitingGraceMs !== undefined) duration(options.waitingGraceMs, "waitingGraceMs");
 		this.#sql = sql;
 		this.#options = options;
 		this.#sql.exec(SCHEMA);
@@ -241,6 +300,8 @@ export class CodingScheduler {
 					provider: row.provider === null ? null : String(row.provider),
 					acquiredAt: Number(row.acquired_at),
 					state: String(row.state) as Slot["state"],
+					activity: String(row.activity) as SlotActivity,
+					activitySince: Number(row.activity_since),
 				})),
 			queued: this.#queue(),
 		}));
@@ -280,12 +341,39 @@ export class CodingScheduler {
 	}
 
 	/**
+	 * Says what the slot's thread is doing now, from now on: `running` when a
+	 * turn starts, `idle` when it ends, `waiting` when it asks the person or
+	 * waits for an approval. False when the thread holds no slot.
+	 */
+	setActivity(threadId: string, activity: SlotActivity): boolean {
+		if (!ACTIVITIES.includes(activity)) throw new RangeError("activity must be running, idle or waiting");
+		return this.#options.transaction(
+			() => this.#sql.exec("UPDATE pim_coding_slots SET activity = ?, activity_since = ? WHERE thread_id = ?", activity, this.#options.now(), threadId).rowsWritten > 0,
+		);
+	}
+
+	/**
+	 * Takes back the slots of threads idle for `idleMs` or longer, and of
+	 * threads waiting for the person past `waitingGraceMs` when the queue has
+	 * threads those slots would admit: the longest waiting first, one for each
+	 * such thread. Admits into what it frees. Never touches a running thread.
+	 */
+	sweep(now = this.#options.now()): Sweep {
+		return this.#options.transaction(() => this.#sweep(now));
+	}
+
+	/**
 	 * What the caller runs every so often: expires the threads whose deadline
-	 * has come, then admits whoever can go, such as the threads behind a head
-	 * a gate refused that has just expired or been cancelled. One transaction.
+	 * has come, sweeps, then admits whoever can go, such as the threads behind
+	 * a head a gate refused that has just expired or been cancelled. One
+	 * transaction.
 	 */
 	tick(now = this.#options.now()): Tick {
-		return this.#options.transaction(() => ({ expired: this.#expire(now), admitted: this.#admit() }));
+		return this.#options.transaction(() => {
+			const expired = this.#expire(now);
+			const { released, admitted } = this.#sweep(now);
+			return { expired, admitted, released };
+		});
 	}
 
 	/**
@@ -310,7 +398,13 @@ export class CodingScheduler {
 				if (this.#slot(threadId)) continue;
 				const entry = this.#entry(threadId);
 				this.#sql.exec("DELETE FROM pim_coding_queue WHERE thread_id = ?", threadId);
-				this.#sql.exec("INSERT INTO pim_coding_slots (thread_id, provider, acquired_at, state) VALUES (?, ?, ?, 'adopted')", threadId, entry ? entry.provider : null, now);
+				this.#sql.exec(
+					"INSERT INTO pim_coding_slots (thread_id, provider, acquired_at, state, activity, activity_since) VALUES (?, ?, ?, 'adopted', 'running', ?)",
+					threadId,
+					entry ? entry.provider : null,
+					now,
+					now,
+				);
 				adopted.push(threadId);
 			}
 			return { released, adopted, admitted: this.#admit() };
@@ -354,16 +448,55 @@ export class CodingScheduler {
 		const free = this.#free();
 		if (free <= 0) return [];
 		const now = this.#options.now();
+		return this.#admissible(free).map((entry) => {
+			this.#sql.exec("DELETE FROM pim_coding_queue WHERE thread_id = ?", entry.threadId);
+			this.#sql.exec(
+				"INSERT INTO pim_coding_slots (thread_id, provider, acquired_at, state, activity, activity_since) VALUES (?, ?, ?, 'admitted', 'running', ?)",
+				entry.threadId,
+				entry.provider,
+				now,
+				now,
+			);
+			return entry.threadId;
+		});
+	}
+
+	/** The queue's first `most` entries, up to the first the gates refuse: who would be admitted into that many free slots. */
+	#admissible(most: number): QueueEntry[] {
 		const conditions = this.#conditions();
-		const admitted: string[] = [];
-		for (const row of this.#sql.exec(`SELECT * FROM pim_coding_queue ${ORDER} LIMIT ?`, free).toArray()) {
+		const entries: QueueEntry[] = [];
+		for (const row of this.#sql.exec(`SELECT * FROM pim_coding_queue ${ORDER} LIMIT ?`, most).toArray()) {
 			const entry = entryOf(row);
 			if (refusalOf(this.#gates(), entry, conditions)) break;
-			this.#sql.exec("DELETE FROM pim_coding_queue WHERE thread_id = ?", entry.threadId);
-			this.#sql.exec("INSERT INTO pim_coding_slots (thread_id, provider, acquired_at, state) VALUES (?, ?, ?, 'admitted')", entry.threadId, entry.provider, now);
-			admitted.push(entry.threadId);
+			entries.push(entry);
 		}
-		return admitted;
+		return entries;
+	}
+
+	#sweep(now: number): Sweep {
+		const released: Released[] = [];
+		const idle = this.#sql
+			.exec("SELECT thread_id FROM pim_coding_slots WHERE activity = 'idle' AND activity_since <= ? ORDER BY activity_since, thread_id", now - (this.#options.idleMs ?? DEFAULT_IDLE_MS))
+			.toArray();
+		for (const row of idle) {
+			this.#sql.exec("DELETE FROM pim_coding_slots WHERE thread_id = ?", row.thread_id);
+			released.push({ threadId: String(row.thread_id), why: "idle" });
+		}
+		const admitted = this.#admit();
+		// Admission leaves no slot free with an admissible thread queued, so a preempted slot goes to a queued thread only when the slots are exactly full; over the limit after a restart, it would go to no one.
+		if (this.#free() !== 0) return { released, admitted };
+		const stale = this.#sql
+			.exec(
+				"SELECT thread_id FROM pim_coding_slots WHERE activity = 'waiting' AND activity_since <= ? ORDER BY activity_since, acquired_at, thread_id",
+				now - (this.#options.waitingGraceMs ?? DEFAULT_WAITING_GRACE_MS),
+			)
+			.toArray();
+		if (stale.length === 0) return { released, admitted };
+		for (const row of stale.slice(0, this.#admissible(stale.length).length)) {
+			this.#sql.exec("DELETE FROM pim_coding_slots WHERE thread_id = ?", row.thread_id);
+			released.push({ threadId: String(row.thread_id), why: "preempted" });
+		}
+		return { released, admitted: [...admitted, ...this.#admit()] };
 	}
 
 	#expire(now: number): QueueEntry[] {

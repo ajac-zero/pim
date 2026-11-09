@@ -1,0 +1,7 @@
+{
+  "session_id": "aa2bb910-a052-d3c0-f50e-e44caccb6d0e",
+  "config": {
+    "active_model": "mistral-medium-3.5",
+    "model_name": "mistral-vibe-cli-latest"
+  }
+}

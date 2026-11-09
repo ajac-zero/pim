@@ -3,15 +3,17 @@ import { CLAUDE_CODE_FLAGS, ClaudeStreamParser, claudeCode } from "../src/coding
 import { authEnv } from "../src/coding/harness/auth";
 import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/coding/harness/codex";
 import { cliHarness } from "../src/coding/harness/index";
-import { amp, mistralVibe } from "../src/coding/harness/pending";
+import { amp } from "../src/coding/harness/pending";
 import { type HarnessAuth, HarnessRunner, LineBuffer, type RunRecord, recoverRun, type RunnerDeps } from "../src/coding/harness/runner";
-import type { CliHarness, HarnessEvent, HarnessTurn } from "../src/coding/harness/types";
+import type { CliHarness, HarnessEvent, HarnessFiles, HarnessTurn } from "../src/coding/harness/types";
+import { mistralVibe, VIBE_FLAGS, VIBE_SESSIONS, VibeStreamParser, vibeRunDir } from "../src/coding/harness/vibe";
 import type { CodingThreadRow } from "../src/coding/thread-store";
 import type { TestRun } from "../src/coding/tools";
 import type { Restored } from "../src/coding/vault/inject";
-import type { ExecEvent, ExecOptions, Workspace } from "../src/coding/workspace/types";
+import { type ExecEvent, type ExecOptions, type Workspace, WorkspaceFileError } from "../src/coding/workspace/types";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
+import { VIBE_META, VIBE_SESSION, vibeExport, vibeLines, vibeOutput } from "./fixtures/vibe";
 
 // The CLI harness framework (src/coding/harness/) on its own: Claude Code's command line and stream-json parser against
 // stream-json written from its documented schema (test/fixtures/claude-code/), and the runner against a workspace whose
@@ -25,7 +27,7 @@ const parse = (text: string) => {
 	return text.split("\n").flatMap((line) => parser.parseLine(line));
 };
 
-const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, model: null, instructions: "Don't push." };
+const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, model: null, instructions: "Don't push.", sessionBefore: { costUsd: 0, usage: null } };
 
 describe("Claude Code's stream-json", () => {
 	it("is read into the session, the text as it is written, messages with their tools, retries, refusals and the result", () => {
@@ -354,6 +356,247 @@ describe("Codex's command line", () => {
 	});
 });
 
+/** The turn the Vibe fixtures were captured with: a new session, so Pim's id names its run directory. */
+const VIBE_TURN: HarnessTurn = { ...TURN, sessionId: "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f" };
+const VIBE_DIR = vibeRunDir(VIBE_TURN.sessionId);
+
+/** The workspace's files as `finish` reads them, and what it removed. */
+function vibeFiles(entries: Record<string, string>) {
+	const files = new Map(Object.entries(entries));
+	const removed: string[] = [];
+	const access: HarnessFiles = {
+		read: async (path) => files.get(path) ?? null,
+		remove: async (path) => {
+			removed.push(path);
+			for (const each of [...files.keys()]) if (each === path || each.startsWith(`${path}/`)) files.delete(each);
+		},
+	};
+	return { access, files, removed };
+}
+
+/** A run's export where Vibe writes it, and the journal's meta.json beside it. */
+const exported = (name: Parameters<typeof vibeExport>[0], dir = VIBE_DIR, meta = true): Record<string, string> => ({
+	[`${dir}/out/export.json`]: vibeExport(name),
+	...(meta ? { [`${dir}/out/session/meta.json`]: VIBE_META } : {}),
+});
+
+/** What a run printed and left, as the parser reads it. */
+async function readVibe(name: Parameters<typeof vibeExport>[0], turn: HarnessTurn = VIBE_TURN) {
+	const parser = new VibeStreamParser(turn);
+	const printed = vibeLines(name).flatMap((line) => parser.parseLine(line));
+	const { access, removed } = vibeFiles(exported(name, vibeRunDir(turn.sessionId)));
+	const finished = await parser.finish(access);
+	return { printed, finished, events: [...printed, ...finished], removed };
+}
+
+describe("Mistral Vibe's streaming output", () => {
+	type Of<T extends HarnessEvent["type"]> = Extract<HarnessEvent, { type: T }>;
+	const of = <T extends HarnessEvent["type"]>(events: HarnessEvent[], type: T) => events.filter((event): event is Of<T> => event.type === type);
+	const messagesOf = (events: HarnessEvent[]) =>
+		events.flatMap((event) => (event.type === "assistant" ? [event.message.content.map((part) => (part.type === "toolCall" ? `call:${part.name}` : part.type)).join(",")] : event.type === "tool_result" ? [`result:${event.message.toolName}`] : []));
+
+	it("is read into the session, the transcript's messages with their tools, and, from export.json, the model, the run's tokens and its cost", async () => {
+		const { printed, finished, removed } = await readVibe("turn");
+		expect(of(printed, "unparsed")).toEqual([]);
+		// The session once, from the first entry; Vibe prints whole entries, never deltas.
+		expect(printed[0]).toEqual({ type: "session", sessionId: VIBE_SESSION, model: null });
+		expect(of(printed, "session")).toHaveLength(1);
+		expect(of(printed, "delta")).toEqual([]);
+		// The person's own message isn't the assistant's: the thread wrote it already.
+		expect(messagesOf(printed)).toEqual([
+			"thinking",
+			"text",
+			"call:file_system.bash",
+			"result:file_system.bash",
+			// `grep` run through bash, which Vibe shows as a search.
+			"call:grep",
+			"result:grep",
+			"call:file_system.edit",
+			"result:file_system.edit",
+			"call:file_system.bash",
+			"result:file_system.bash",
+			"text",
+		]);
+		const assistants = of(printed, "assistant");
+		expect(assistants[0]!.message.content).toEqual([{ type: "thinking", thinking: "The greeting test fails; run it first." }]);
+		expect(assistants[2]!.message).toMatchObject({ provider: "mistral-vibe", stopReason: "toolUse", content: [{ type: "toolCall", name: "file_system.bash", arguments: { command: "npm test" } }] });
+		expect(assistants[4]!.message.content[0]).toMatchObject({ name: "file_system.edit", arguments: { filePath: "greet.js", oldString: "Hello, ${name}`", newString: "Hello, ${name}!`" } });
+		expect(assistants.at(-1)!.message).toMatchObject({ stopReason: "stop", content: [{ type: "text", text: "Fixed `greet` to end with an exclamation mark; the greeting test passes now." }] });
+		// Each call's result has the call's id; a failing command is an error, and a file edit, which prints nothing, says what it did.
+		const results = of(printed, "tool_result").map((event) => event.message);
+		expect(results.map((result) => result.toolCallId)).toEqual(assistants.filter((event) => event.message.stopReason === "toolUse").map((event) => event.messageId));
+		expect(results.map((result) => result.isError)).toEqual([true, false, false, false]);
+		expect(results[0]!.content[0]).toMatchObject({ text: expect.stringContaining("Tests  1 failed | 3 passed (4)") });
+		expect(results[1]!.content[0]).toMatchObject({ text: expect.stringContaining("./greet.js:1:") });
+		expect(results[2]!.content).toEqual([{ type: "text", text: "Edited greet.js" }]);
+		expect(results[3]!.content[0]).toMatchObject({ text: expect.stringContaining("Tests  4 passed (4)") });
+		// Vibe reports no tokens per message; the export has the run's, cached input apart, its model and its cost.
+		expect(assistants.every((event) => event.message.usage.input === 0)).toBe(true);
+		expect(finished).toEqual([
+			{ type: "session", sessionId: VIBE_SESSION, model: "mistral-vibe-cli-latest" },
+			{ type: "usage", usage: { input: 15000 - 12500, output: 200, cacheRead: 12500, cacheWrite: 0 } },
+			{ type: "result", ok: true, reason: null, sessionId: VIBE_SESSION, sessionCostUsd: 0.007125, text: null, errors: [] },
+		]);
+		expect(removed).toEqual([VIBE_DIR]);
+	});
+
+	it("adds a resumed run's cost and tokens to what the session cost and used before, as export.json counts that run alone", async () => {
+		const before = { costUsd: 0.007125, usage: { input: 2500, output: 200, cacheRead: 12500, cacheWrite: 0 } };
+		const { printed, finished } = await readVibe("resume", { ...VIBE_TURN, sessionId: VIBE_SESSION, resume: true, sessionBefore: before });
+		// Only the new run is printed.
+		expect(messagesOf(printed)).toEqual(["text"]);
+		expect(of(finished, "usage")).toEqual([{ type: "usage", usage: { input: 2500 + (4000 - 3500), output: 200 + 40, cacheRead: 12500 + 3500, cacheWrite: 0 } }]);
+		const [result] = of(finished, "result");
+		expect(result).toMatchObject({ ok: true, sessionId: VIBE_SESSION });
+		expect(result!.sessionCostUsd).toBeCloseTo(0.007125 + 0.001575, 12);
+		// A session Pim knew no tokens of before counts this run's.
+		const fresh = await readVibe("resume", { ...VIBE_TURN, sessionId: VIBE_SESSION, resume: true, sessionBefore: { costUsd: 0.5, usage: null } });
+		expect(of(fresh.finished, "usage")[0]!.usage).toEqual({ input: 500, output: 40, cacheRead: 3500, cacheWrite: 0 });
+		expect(of(fresh.finished, "result")[0]!.sessionCostUsd).toBeCloseTo(0.501575, 12);
+	});
+
+	it("says when Vibe refused a tool call nobody approved, and the call's result says so", async () => {
+		const parser = new VibeStreamParser(VIBE_TURN);
+		const events = vibeLines("denied").flatMap((line) => parser.parseLine(line));
+		const command = "echo 'Tests: 3 passed'; npm --version >/dev/null 2>&1; echo ok";
+		expect(of(events, "permission_denied")).toEqual([{ type: "permission_denied", tool: "file_system.bash", message: `bash: ${command}` }]);
+		expect(of(events, "tool_result")[0]!.message).toMatchObject({ toolName: "file_system.bash", isError: true, content: [{ type: "text", text: "Tool execution denied by approval callback" }] });
+		expect(messagesOf(events)).toEqual(["text", "call:file_system.bash", "result:file_system.bash", "text"]);
+	});
+
+	it("ends a run stopped by its budget, an API error, a refused key, an interrupt or a session Vibe doesn't have as failed, saying why", async () => {
+		const price = await readVibe("price");
+		expect(of(price.finished, "result")).toEqual([{ type: "result", ok: false, reason: "budget", sessionId: "710915ed-6170-1736-b727-0b03b03e8754", sessionCostUsd: 1.35, text: null, errors: ["Mistral Vibe stopped: price limit"] }]);
+		// The call it stopped before running is cancelled, which its result says.
+		expect(of(price.printed, "tool_result")[0]!.message).toMatchObject({ isError: true, content: [{ type: "text", text: "client interrupt" }] });
+
+		const error = await readVibe("error");
+		expect(of(error.events, "auth_failed")).toEqual([]);
+		expect(of(error.finished, "result")[0]).toMatchObject({ ok: false, reason: "error", sessionCostUsd: 0, errors: [expect.stringContaining("Invalid model: mock-broken")] });
+
+		// What api.mistral.ai said to a made-up key: the thread waits for the person to connect Vibe again.
+		const auth = await readVibe("auth");
+		const message = "Invalid API key (from env var MISTRAL_API_KEY). Please check your API key and try again.";
+		expect(of(auth.finished, "auth_failed")).toEqual([{ type: "auth_failed", message }]);
+		expect(of(auth.finished, "result")[0]).toMatchObject({ ok: false, reason: "error", errors: [message] });
+		const missingKey = new VibeStreamParser(VIBE_TURN);
+		const none = await missingKey.finish(vibeFiles({ [`${VIBE_DIR}/out/export.json`]: JSON.stringify({ outcome: "config_error", error: { message: "Missing MISTRAL_API_KEY environment variable for mistral provider", code: null } }) }).access);
+		expect(of(none, "auth_failed")).toHaveLength(1);
+
+		// SIGINT: the run's cost so far is still counted.
+		const interrupted = await readVibe("interrupted");
+		expect(of(interrupted.finished, "result")[0]).toMatchObject({ ok: false, reason: "error", sessionCostUsd: 0.000714, errors: ["Mistral Vibe stopped: terminated"] });
+		expect(of(interrupted.printed, "tool_result")[0]!.message).toMatchObject({ isError: true, content: [{ type: "text", text: "client interrupt" }] });
+
+		// A session Vibe doesn't have: nothing printed, and no session, so the thread lets it go and starts a new one.
+		const missing = await readVibe("missing", { ...VIBE_TURN, sessionId: "0b0b0b0b-0000-4000-8000-00000000dead", resume: true, sessionBefore: { costUsd: 0.25, usage: null } });
+		expect(vibeOutput("missing")).toBe("");
+		expect(missing.events).toEqual([{ type: "result", ok: false, reason: "error", sessionId: null, sessionCostUsd: null, text: null, errors: ["Session not found: 0b0b0b0b-0000-4000-8000-00000000dead"] }]);
+	});
+
+	it("removes the run's directory whatever it found, and says nothing more without an export", async () => {
+		const parser = new VibeStreamParser(VIBE_TURN);
+		parser.parseLine(vibeLines("turn")[0]!);
+		const empty = vibeFiles({});
+		expect(await parser.finish(empty.access)).toEqual([]);
+		expect(empty.removed).toEqual([VIBE_DIR]);
+		const cut = vibeFiles({ [`${VIBE_DIR}/out/export.json`]: '{"outcome": "fini' });
+		expect(await new VibeStreamParser(VIBE_TURN).finish(cut.access)).toEqual([{ type: "unparsed", line: '{"outcome": "fini' }]);
+		expect(cut.removed).toEqual([VIBE_DIR]);
+		// Without the journal's meta.json, the model is the one the export's config pins, or none.
+		const pinned = JSON.stringify({ ...JSON.parse(vibeExport("turn")), config: { active_model: "devstral", models: { devstral: { name: "devstral-2512" } } } });
+		const alone = await new VibeStreamParser(VIBE_TURN).finish(vibeFiles({ [`${VIBE_DIR}/out/export.json`]: pinned }).access);
+		expect(alone[0]).toEqual({ type: "session", sessionId: VIBE_SESSION, model: "devstral-2512" });
+		const unpinned = await new VibeStreamParser(VIBE_TURN).finish(vibeFiles(exported("turn", VIBE_DIR, false)).access);
+		expect(unpinned[0]).toEqual({ type: "session", sessionId: VIBE_SESSION, model: null });
+	});
+
+	it("keeps a line that isn't JSON as unparsed; skips the person's messages, entries still being written, discarded answers and types it doesn't know", () => {
+		const parser = new VibeStreamParser(VIBE_TURN);
+		const [user, , answer] = vibeLines("turn");
+		const effect = vibeLines("turn")[3]!;
+		expect(parser.parseLine("")).toEqual([]);
+		expect(parser.parseLine("Warning: /workspace/repo is not trusted")).toEqual([{ type: "unparsed", line: "Warning: /workspace/repo is not trusted" }]);
+		expect(parser.parseLine("[1,2]")).toMatchObject([{ type: "unparsed" }]);
+		expect(parser.parseLine(user!)).toEqual([{ type: "session", sessionId: VIBE_SESSION, model: null }]);
+		const entry = JSON.parse(answer!);
+		expect(parser.parseLine(JSON.stringify({ ...entry, generationStatus: "in_progress" }))).toEqual([]);
+		expect(parser.parseLine(JSON.stringify({ ...entry, outcome: { type: "discarded", cause: "output_limit" } }))).toEqual([]);
+		expect(parser.parseLine(JSON.stringify({ ...entry, type: "checkpoint", kind: "turn" }))).toEqual([]);
+		expect(parser.parseLine(JSON.stringify({ ...entry, type: "notice", level: "warning", message: "Context is almost full", detail: { kind: "agent_changed", agentName: "x" } }))).toEqual([{ type: "notice", message: "Context is almost full" }]);
+		// An effect still running is written once it settles, and once only.
+		const running = JSON.parse(effect);
+		expect(parser.parseLine(JSON.stringify({ ...running, state: { status: "running" } }))).toEqual([]);
+		expect(parser.parseLine(effect).map((event) => event.type)).toEqual(["assistant", "tool_result"]);
+		expect(parser.parseLine(effect)).toEqual([]);
+	});
+});
+
+describe("Mistral Vibe's command line", () => {
+	const flag = (command: string[], name: string) => command[command.indexOf(name) + 1];
+
+	it("starts Vibe through a shell that makes the run's directory anew, with Pim's instructions in its new home and the prompt in a file", () => {
+		const command = mistralVibe.buildCommand(VIBE_TURN);
+		expect(command.slice(0, 2)).toEqual(["/bin/sh", "-c"]);
+		const script = command[2]!;
+		expect(script).toContain('rm -rf "$d" && mkdir -p "$d/home"');
+		expect(script).toContain('> "$d/home/AGENTS.md"');
+		expect(script).toContain('VIBE_HOME="$d/home" exec "$@"');
+		// $0, then the directory, the instructions and the prompt, then Vibe's own command line.
+		expect(command.slice(3, 5)).toEqual(["vibe", VIBE_DIR]);
+		expect(command[5]).toMatch(/^Don't push\.\n\nThe repository's own AGENTS\.md files and \.vibe\/ configuration aren't loaded for you/);
+		expect(command[6]).toBe("Fix the greeting test");
+		const vibe = command.slice(7);
+		expect(vibe.slice(0, 1 + VIBE_FLAGS.length)).toEqual(["vibe", "--output", "streaming", "--auto-approve"]);
+		expect(flag(vibe, "--workdir")).toBe("/workspace/repo");
+		expect(flag(vibe, "--output-dir")).toBe(`${VIBE_DIR}/out`);
+		// The budget left, rounded down, so Vibe never stops later than the thread would.
+		expect(flag(vibe, "--max-price")).toBe("2.99");
+		expect(vibe.slice(-2)).toEqual(["--prompt-file", `${VIBE_DIR}/prompt.md`]);
+		// The checkout is never trusted, and a new session runs Vibe's own model.
+		for (const absent of ["--trust", "--resume", "--model", "--yolo", "-p", "--prompt"]) expect(vibe).not.toContain(absent);
+		expect(vibe).not.toContain("Fix the greeting test");
+	});
+
+	it("resumes Vibe's session after the first turn without --model, which Vibe refuses there, and asks for the model on a new session", () => {
+		const resumed = mistralVibe.buildCommand({ ...VIBE_TURN, sessionId: VIBE_SESSION, resume: true, model: "devstral", prompt: "--help me", maxBudgetUsd: -1 });
+		expect(flag(resumed, "--resume")).toBe(VIBE_SESSION);
+		expect(resumed).not.toContain("--model");
+		expect(flag(resumed, "--max-price")).toBe("0.00");
+		expect(flag(resumed, "--output-dir")).toBe(`${vibeRunDir(VIBE_SESSION)}/out`);
+		// A prompt that looks like a flag is only ever the prompt file's text.
+		expect(resumed[6]).toBe("--help me");
+		expect(resumed.slice(7)).not.toContain("--help me");
+		const fresh = mistralVibe.buildCommand({ ...VIBE_TURN, model: "devstral" });
+		expect(flag(fresh, "--model")).toBe("devstral");
+		expect(vibeRunDir("../../etc")).toBe("/workspace/.pim-vibe/______etc");
+	});
+
+	it("signals the turn's process by its run directory, keeps the key off the command line, and turns off what a run doesn't need", () => {
+		const command = mistralVibe.buildCommand(VIBE_TURN);
+		expect(mistralVibe.signalCommand(VIBE_TURN.sessionId, "INT")).toEqual(["pkill", "-INT", "-f", `${VIBE_DIR}/out`]);
+		// Only Vibe's own command line, after the shell's `exec`, carries it.
+		expect(command.slice(7).join(" ")).toContain(`${VIBE_DIR}/out`);
+		expect(mistralVibe).toMatchObject({ id: "mistral-vibe", name: "Mistral Vibe", apiKeyEnv: "MISTRAL_API_KEY", shellTool: "file_system.bash", egress: ["api.mistral.ai"] });
+		expect(mistralVibe.login).toBeUndefined();
+		expect(mistralVibe.env).toEqual({
+			VIBE_SESSION_LOGGING__SAVE_DIR: VIBE_SESSIONS,
+			VIBE_ENABLE_MCP: "false",
+			VIBE_ENABLE_CONNECTORS: "false",
+			VIBE_ENABLE_SUBAGENTS: "false",
+			VIBE_DISABLED_SKILLS: '["*"]',
+			VIBE_ENABLE_TELEMETRY: "false",
+			VIBE_EXPERIMENTS__ENABLE: "false",
+			VIBE_ENABLE_UPDATE_CHECKS: "false",
+			VIBE_ENABLE_AUTO_UPDATE: "false",
+			VIBE_SHOW_GREETING: "false",
+			VIBE_ENABLE_NOTIFICATIONS: "false",
+		});
+		expect(VIBE_SESSIONS).toBe("/workspace/.vibe-sessions");
+		expect(JSON.stringify(command)).not.toContain("MISTRAL_API_KEY");
+	});
+});
+
 /* The runner, with a scripted workspace. */
 
 type Script = (options: ExecOptions, signals: Signals) => AsyncGenerator<ExecEvent>;
@@ -378,8 +621,11 @@ class Signals {
 	}
 }
 
-/** A workspace whose `claude` and `codex` run `script`, and whose `pkill` sends what it is given. Everything it runs is recorded. */
-function scripted(script: Script) {
+/**
+ * A workspace whose `claude`, `codex` and `vibe` (started by `/bin/sh`) run `script`, and whose `pkill` sends what it
+ * is given. Its files are `files`, by path, which a script may write. Everything it runs is recorded.
+ */
+function scripted(script: Script, files = new Map<string, string>()) {
 	const signals = new Signals();
 	const commands: { cmd: string[]; options: ExecOptions }[] = [];
 	const log: string[] = [];
@@ -392,12 +638,24 @@ function scripted(script: Script) {
 				yield { type: "exit", code: 0 };
 				return;
 			}
-			if (cmd[0] !== "claude" && cmd[0] !== "codex") throw new Error(`no ${cmd[0]}`);
-			log.push(cmd[0]);
+			const name = cmd[0] === "/bin/sh" ? cmd[7] : cmd[0];
+			if (name !== "claude" && name !== "codex" && name !== "vibe") throw new Error(`no ${cmd[0]}`);
+			log.push(name);
 			yield* script(options, signals);
 		},
+		async readFile(path: string) {
+			const text = files.get(path);
+			if (text === undefined) throw new WorkspaceFileError(`No such file: ${path}`);
+			return new TextEncoder().encode(text);
+		},
+		async remove(path: string) {
+			const gone = [...files.keys()].filter((each) => each === path || each.startsWith(`${path}/`));
+			if (gone.length === 0) throw new WorkspaceFileError(`No such file: ${path}`);
+			for (const each of gone) files.delete(each);
+			log.push(`remove ${path}`);
+		},
 	} as unknown as Workspace;
-	return { workspace, signals, commands, log };
+	return { workspace, signals, commands, log, files };
 }
 
 /** `lines` as the CLI prints them, then its exit. */
@@ -717,9 +975,88 @@ describe("a Codex run", () => {
 	});
 });
 
+describe("a Mistral Vibe run", () => {
+	const KEY = "TESTMISTRALKEY0123456789abcdef";
+	const auth: HarnessAuth = { mode: "env", env: { MISTRAL_API_KEY: KEY }, secrets: [KEY] };
+	const vibeDeps = (workspace: Workspace, log: string[], overrides: Partial<RunnerDeps> = {}) => deps(workspace, log, { harness: mistralVibe, auth, ...overrides });
+
+	it("hands Vibe the key in its environment alone, reads its transcript, test runs, tokens and cost, and removes the run's directory", async () => {
+		// Vibe printed the key in a test's output and a warning of its export.
+		const output = vibeLines("turn").map((line) => line.replaceAll("> node test.js", `> node test.js ${KEY}`));
+		const files = new Map<string, string>();
+		const { workspace, commands, log } = scripted(async function* () {
+			// What Vibe leaves when it exits.
+			files.set(`${VIBE_DIR}/out/export.json`, JSON.stringify({ ...JSON.parse(vibeExport("turn")), warnings: [{ message: `Ignored ${KEY} in .env` }] }));
+			files.set(`${VIBE_DIR}/out/session/meta.json`, VIBE_META);
+			yield* prints(output);
+		}, files);
+		const { options, events, tests, records } = vibeDeps(workspace, log);
+		const runner = new HarnessRunner(options);
+		expect(await runner.prepare("op-1", { sessionId: VIBE_TURN.sessionId, resume: false })).toEqual({ status: "ready" });
+		const result = await runner.run(VIBE_TURN, 60_000);
+		expect(result).toEqual({
+			status: "done",
+			sessionId: VIBE_SESSION,
+			sessionCostUsd: 0.007125,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			sessionUsage: { input: 2500, output: 200, cacheRead: 12500, cacheWrite: 0 },
+			model: "mistral-vibe-cli-latest",
+			lines: 8,
+		});
+		// No login and no lock, the key only in the environment, and the run's directory gone after.
+		expect(log).toEqual(["vibe", `remove ${VIBE_DIR}`]);
+		expect(files.size).toBe(0);
+		expect(commands[0]!.cmd).toEqual(mistralVibe.buildCommand(VIBE_TURN));
+		expect(commands[0]!.options).toMatchObject({ cwd: "/workspace/repo", env: { HOME: "/workspace", MISTRAL_API_KEY: KEY, VIBE_ENABLE_MCP: "false", VIBE_SESSION_LOGGING__SAVE_DIR: VIBE_SESSIONS } });
+		expect(JSON.stringify(commands.map((command) => command.cmd))).not.toContain(KEY);
+		// Vibe says whether a command succeeded, not its exit code: a failing test run is 1.
+		expect(tests.map((run) => [run.command, run.exitCode, run.summary?.failed])).toEqual([
+			["npm test", 1, 1],
+			["npm test", 0, 0],
+		]);
+		expect(tests[0]!.output).toContain("> node test.js [redacted]");
+		expect(events.find((event) => event.type === "notice")).toEqual({ type: "notice", message: "Ignored [redacted] in .env" });
+		expect(JSON.stringify({ events, tests, records, result })).not.toContain(KEY);
+		expect(records.at(-1)).toBeNull();
+	});
+
+	it("stops on abort with SIGINT to the process its run directory names, and still counts what the run cost", async () => {
+		const files = new Map<string, string>();
+		const [user, said, cancelled] = vibeLines("interrupted");
+		const interruptedTurn = { ...VIBE_TURN, sessionId: "9b1f2c3d-0000-4000-8000-000000000003" };
+		const dir = vibeRunDir(interruptedTurn.sessionId);
+		const { workspace, log, commands } = scripted(async function* (options, signals) {
+			yield { type: "stdout", data: `${user}\n${said}\n` };
+			await signals.wait("INT", options.signal);
+			// Vibe 3.1.0 cancels the running call, writes its export and exits 3.
+			files.set(`${dir}/out/export.json`, vibeExport("interrupted"));
+			yield { type: "stdout", data: `${cancelled}\n` };
+			yield { type: "exit", code: 3 };
+		}, files);
+		const { options } = vibeDeps(workspace, log);
+		const runner = new HarnessRunner(options);
+		await runner.prepare("op-1", { sessionId: interruptedTurn.sessionId, resume: false });
+		const running = runner.run(interruptedTurn, 60_000);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		await runner.abort();
+		expect(await running).toMatchObject({ status: "unanswered", reason: "aborted", sessionId: "16de5c1a-4022-7ca5-0d04-fab0919b1e65", sessionCostUsd: 0.000714 });
+		expect(commands.find((command) => command.cmd[0] === "pkill")!.cmd).toEqual(["pkill", "-INT", "-f", `${dir}/out`]);
+		expect(log).toEqual(["vibe", "signal -INT", `remove ${dir}`]);
+	});
+
+	it("ends without a result when what Vibe left can't be read, keeping the transcript", async () => {
+		const { workspace, log } = scripted(() => prints(vibeLines("turn")));
+		const broken = { ...workspace, exec: workspace.exec, readFile: async () => Promise.reject(new Error("connection reset")) } as unknown as Workspace;
+		const { options, events } = vibeDeps(broken, log);
+		const result = await (await prepared(options)).run(VIBE_TURN, 60_000);
+		expect(result).toMatchObject({ status: "unanswered", reason: "harness_error", detail: "Mistral Vibe exited 0 without a result", sessionId: VIBE_SESSION, sessionCostUsd: null });
+		expect(events.filter((event) => event.type === "assistant")).toHaveLength(7);
+	});
+});
+
 describe("a run signed in with an API key", () => {
-	// Amp's and Mistral Vibe's adapters aren't written yet, so the CLI here is Claude Code's script under Amp's name and
-	// sign-in: what is checked is what the runner does with the key, whatever the CLI.
+	// Amp's adapter isn't written yet, so the CLI here is Claude Code's script under Amp's name and sign-in: what is
+	// checked is what the runner does with the key, whatever the CLI.
 	const KEY = "sgamp_user_TESTKEY0123456789abcdefXYZ";
 	const harness: CliHarness = { ...claudeCode, id: "amp", name: "Amp", login: undefined, apiKeyEnv: "AMP_API_KEY" };
 	const auth: HarnessAuth = { mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] };
@@ -789,17 +1126,14 @@ describe("a run signed in with an API key", () => {
 		expect(asked).toEqual(["amp", "mistral-vibe"]);
 	});
 
-	it("fails closed for Mistral Vibe and Amp, whose adapters aren't written yet, and says which hosts and variable each needs", () => {
+	it("fails closed for Amp, whose adapter isn't written yet, and says which hosts and variable it needs", () => {
 		expect(cliHarness("mistral-vibe")).toBe(mistralVibe);
 		expect(cliHarness("amp")).toBe(amp);
-		expect(mistralVibe).toMatchObject({ name: "Mistral Vibe", apiKeyEnv: "MISTRAL_API_KEY", egress: ["api.mistral.ai"] });
 		expect(amp).toMatchObject({ name: "Amp", apiKeyEnv: "AMP_API_KEY", egress: ["ampcode.com", "*.ampcode.com"] });
-		for (const each of [mistralVibe, amp]) {
-			expect(each.login).toBeUndefined();
-			expect(() => each.buildCommand(TURN)).toThrow(`${each.name} isn't implemented yet`);
-			expect(() => each.parser(TURN)).toThrow("isn't implemented yet");
-			expect(() => each.signalCommand(SESSION, "KILL")).toThrow("isn't implemented yet");
-		}
+		expect(amp.login).toBeUndefined();
+		expect(() => amp.buildCommand(TURN)).toThrow("Amp isn't implemented yet");
+		expect(() => amp.parser(TURN)).toThrow("isn't implemented yet");
+		expect(() => amp.signalCommand(SESSION, "KILL")).toThrow("isn't implemented yet");
 	});
 
 	it("never runs a placeholder's CLI, even with a key", async () => {

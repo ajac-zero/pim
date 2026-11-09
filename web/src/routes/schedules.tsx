@@ -1,8 +1,8 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-/** Schedules are in the sidebar now; the old address shows them there, beside the home page. */
+/** Schedules are among the triggers now, those that moved and those that haven't; the old address shows them there. */
 export const Route = createFileRoute("/schedules")({
   beforeLoad: () => {
-    throw redirect({ to: "/", search: { panel: "schedules" }, replace: true });
+    throw redirect({ to: "/triggers", replace: true });
   },
 });

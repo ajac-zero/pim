@@ -14,7 +14,6 @@ import { useI18n } from "~/components/i18n";
 import {
   Bell,
   Blocks,
-  CalendarClock,
   Compass,
   Contact,
   MessagesSquare,
@@ -38,17 +37,14 @@ import { cn } from "~/lib/utils";
 const noop = () => {};
 
 /** The panels that live under More rather than in the bar. */
-const MORE_PANELS: readonly (SidebarPanel | undefined)[] = [
-  "skills",
-  "schedules",
-];
+const MORE_PANELS: readonly (SidebarPanel | undefined)[] = ["skills"];
 
 /**
  * The navigation on narrow screens, in place of the sidebar: a bar of icons
  * along the bottom of every page, as the rail is beside every page. Chats, notifications and apps fill the screen with
  * their list (`list`), New chat opens over the page with the open chat's agent
  * (your majordomo anywhere else), and More opens
- * a sheet with the rest: skills, schedules, the dialogs (Agents among
+ * a sheet with the rest: skills, triggers, the dialogs (Agents among
  * them) and your profile.
  */
 export function MobileNav({
@@ -310,11 +306,6 @@ function MoreSheet({
           "skills",
           <ScrollText className={ROW_ICON_CLASS} />,
           t("skills"),
-        )}
-        {panelRow(
-          "schedules",
-          <CalendarClock className={ROW_ICON_CLASS} />,
-          t("schedules"),
         )}
         {triggers && (
           <Link

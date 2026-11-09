@@ -6,6 +6,7 @@ import {
 import {
   createRootRouteWithContext,
   Outlet,
+  redirect,
   retainSearchParams,
   useNavigate,
   useParams,
@@ -151,6 +152,12 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     }),
   }),
   search: { middlewares: [retainSearchParams(["panel"])] },
+  // Schedules had a panel of their own; links to it go to Triggers, which lists them now.
+  beforeLoad: ({ location }) => {
+    if ((location.search as { panel?: unknown }).panel === "schedules") {
+      throw redirect({ to: "/triggers", replace: true });
+    }
+  },
   component: Root,
 });
 

@@ -186,6 +186,7 @@ import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, 
 import { type ApprovalPolicy, readSettings, type Settings, updateSettings } from "./settings";
 import {
 	type Approval,
+	type ApprovalStatus,
 	type GoalStatus,
 	type Notification,
 	OWNER,
@@ -446,6 +447,8 @@ const UTILITY_MODEL_KEY = "utility_model";
 const SUGGESTIONS_KEY = "suggestions:";
 /** The numbered title a fork starts with, by session, until the person's first message in it names it anew. */
 const FORK_KEY = "fork:";
+/** Meta marking a coding thread's turn whose end has woken the agent's chat, by the turn's key (`codingTurnEnded`). */
+const CODING_WAKE_KEY = "coding_woken:";
 /** What the utility model reads to suggest prompts: the chat, and how much of it and of memory. */
 const SUGGESTION_CHAT_CHARS = 2_000;
 /** How much of a chat an agent reads with `read_chat`: its latest part. */
@@ -1412,6 +1415,71 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async codingModelProvider(catalogId: string): Promise<CustomProvider | null> {
 		return this.customProviders().find((entry) => entry.catalogId === catalogId)?.provider ?? null;
+	}
+
+	/**
+	 * The model a coding thread started without one runs on: the space's, as
+	 * agents without a model of their own use it, or the deployment's default
+	 * when that is a ChatGPT plan model, which coding threads can't call.
+	 */
+	async codingDefaultProfile(): Promise<{ providerId: string; model: string }> {
+		const chosen = this.chosenModel();
+		const model = chosen.provider === CHATGPT_PROVIDER ? this.defaultModel() : chosen;
+		return { providerId: model.provider, model: model.id };
+	}
+
+	/**
+	 * A coding thread an agent started ended a turn: the chat it started the
+	 * thread from, by its public ID, is woken with `text`, as a scheduled task
+	 * wakes a chat, once for each `key`. A chat that was deleted, or a space
+	 * that can't take it now (erased, suspended, at a limit), is left be. Says
+	 * whether it woke.
+	 */
+	async codingTurnEnded(chat: string, text: string, key: string): Promise<boolean> {
+		const session = this.store.sessionOf(chat);
+		if (this.#closed() || session === undefined || !this.store.sessionInfo(session) || this.store.deletedSessions().has(session)) return false;
+		const woken = `${CODING_WAKE_KEY}${key}`;
+		if (this.store.meta(woken) !== undefined) return false;
+		// Claimed first, so the same turn told twice at once wakes the chat once.
+		this.store.setMeta(woken, "1");
+		try {
+			await this.submitTo(await this.#carriedOn(session), text, { operationId: key, whenBusy: "followUp" }, "pim");
+			return true;
+		} catch (error) {
+			this.store.deleteMeta(woken);
+			if (!(error instanceof HttpError)) throw error;
+			console.warn(JSON.stringify({ event: "pim.coding.wake_skipped", owner: this.name, status: error.status }));
+			return false;
+		}
+	}
+
+	/**
+	 * Asks the person to approve pushing a coding thread's branch, from the
+	 * API (src/coding/api.ts): an approval of the `coding_push` action
+	 * (src/extensions/coding.ts) that no tool call waits for, which runs the
+	 * push once approved. Asking again for the same push is the same approval.
+	 */
+	async codingRequestPush(threadId: string, push: { branch: string; checkpoint: string; head: string; summary: string }): Promise<{ id: string; status: ApprovalStatus }> {
+		this.#assertOpen();
+		const id = `cp-${(await digestHex(`${threadId}\n${push.branch}\n${push.head}`)).slice(0, 32)}`;
+		const known = this.store.approval(id);
+		if (known) return { id, status: known.status };
+		const approval = this.store.requestApproval({
+			id,
+			session: `coding:${threadId}`,
+			callId: null,
+			action: "coding_push",
+			tool: null,
+			args: { thread_id: threadId, branch: push.branch, checkpoint: push.checkpoint, head: push.head },
+			summary: push.summary,
+			createdAt: Date.now(),
+			expiresAt: null,
+			onTimeout: "deny",
+		});
+		this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
+		const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title: "Pim needs your approval", body: approval.summary });
+		await this.deliverNotification(notification, { sockets: false });
+		return { id, status: approval.status };
 	}
 
 	/** Puts the providers as they are now in the catalog, which pi keeps, and takes out those that are gone. */
@@ -3236,7 +3304,8 @@ export class Pim extends DurableAgent<Env> {
 			if (auto) throw new HttpError(400, "This action requires an explicit decision for each request");
 			if (this.#approvalPermission(approval) === "off") throw new HttpError(403, "This capability is turned off");
 		}
-		const call = approval.requestedBy || options.inTurn ? undefined : await this.#waitingCall(approval);
+		// One the person asked for outside any chat, such as a coding thread's push (`codingRequestPush`), has no call to wake.
+		const call = approval.requestedBy || options.inTurn || approval.callId === null ? undefined : await this.#waitingCall(approval);
 		// A bot's guest's call waits in their own space, and runs its tool there once it wakes.
 		const bot = approval.requestedBy?.bot !== undefined;
 		const stopped = call === null || (bot && decision === "approve" && !(await this.#botCallWaits(approval)));
@@ -4596,6 +4665,11 @@ export class Pim extends DurableAgent<Env> {
 					notify: async (title, body) => {
 						const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
 						await this.deliverNotification(notification);
+					},
+					space: this.name,
+					conversationOf: (session) => {
+						const { id, name } = this.agents.ofSession(session);
+						return { chat: this.store.publicId(session), agent: { id, name } };
 					},
 				});
 				return [[extension.id, ability] as const];

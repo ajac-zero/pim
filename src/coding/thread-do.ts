@@ -14,9 +14,11 @@ import { failedResponse, wrapStreams } from "../usage";
 import type { ManagerHealth } from "./provider-capacity";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler } from "./scheduler-do";
-import { issueBrokerToken, parseRepoUrl } from "./git-broker/broker";
-import { brokerPolicy } from "./git-broker/config";
-import { brokerTokenKey, GIT_BROKER_PATH } from "./git-broker/routes";
+import { checkBranch, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult } from "./git-broker/broker";
+import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
+import type { Fetch, GitHubApp } from "./git-broker/github-app";
+import { brokerTokenKey, deploymentGitHubApp, GIT_BROKER_PATH } from "./git-broker/routes";
+import { supervisorSink } from "./supervisor";
 import {
 	type AgentProfile,
 	type Checkpoint,
@@ -56,7 +58,11 @@ import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceP
  * up provisioning, the next input, or the end of the turn where they were.
  */
 export class CodingThreadDO extends DurableObject<Env> {
-	readonly store = new CodingThreadStore(this.ctx.storage.sql, () => this.now());
+	readonly store = new CodingThreadStore(
+		this.ctx.storage.sql,
+		() => this.now(),
+		() => this.#indexChanged(),
+	);
 	readonly registry = createRegistry();
 	/** The catalog the thread's model is resolved against; its provider is added once the thread's profile is known. */
 	readonly #models: MutableModels = createModels();
@@ -88,6 +94,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	readonly #outputListeners = new Set<(event: CodingOutputEvent) => void>();
 	/** Turns being ended, by operation, so two who notice one end it once. */
 	readonly #endings = new Map<string, Promise<void>>();
+	/** The space's list being told of the thread's row, and whether it changed again meanwhile. */
+	#indexing: Promise<void> | null = null;
+	#indexAgain = false;
 
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
@@ -147,9 +156,24 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return { url: `${origin}/api${GIT_BROKER_PATH}/${repo.owner}/${repo.name}.git`, token };
 	}
 
-	/** Who hears of what the thread does: nobody yet (see `CodingEventSink`). */
+	/** Who hears of what the thread does: the chat of the agent that started it, if one did (./supervisor.ts). */
 	protected eventSink(): CodingEventSink {
-		return noCodingEvents;
+		return supervisorSink(this.env);
+	}
+
+	/** The model a thread started without a profile runs on: its space's default (`Pim.codingDefaultProfile`). */
+	protected async defaultProfile(space: string): Promise<AgentProfile> {
+		return (await getAgentByName(this.env.Pim, space)).codingDefaultProfile();
+	}
+
+	/** The deployment's GitHub App, which pushes; null when it isn't configured. */
+	protected githubApp(): GitHubApp | null {
+		return deploymentGitHubApp(this.env);
+	}
+
+	/** How Pim reaches GitHub to push: the Worker's `fetch`, unless given. */
+	protected githubFetch(): Fetch | undefined {
+		return undefined;
 	}
 
 	/**
@@ -176,6 +200,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** Startup: work left mid-way by an eviction goes on. */
 	async onStart(): Promise<void> {
 		const thread = this.store.thread();
+		if (thread) this.#indexChanged();
 		if (thread && thread.state !== "archived") await this.#schedule(Date.now());
 	}
 
@@ -213,8 +238,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const budgetUsd = input.budgetUsd ?? DEFAULT_BUDGET_USD;
 		if (!(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
+		const profile = input.profile ?? (await this.defaultProfile(input.space));
 		// The model is checked before anything is recorded, so a thread never starts on a model it can't call.
-		await this.#loadModel(input.space, input.profile);
+		await this.#loadModel(input.space, profile);
 		const threadId = this.#threadId();
 		this.ctx.storage.transactionSync(() => {
 			this.store.create({
@@ -223,7 +249,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				repoUrl: `https://github.com/${repo.fullName}`,
 				baseRef: input.ref ?? "main",
 				branch: branchName(task, threadId),
-				profile: { providerId: input.profile.providerId, model: input.profile.model, ...(input.profile.thinking ? { thinking: input.profile.thinking } : {}) },
+				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },
 				providerId,
 				state: "provisioning",
 				createdBy: input.createdBy,
@@ -302,6 +328,49 @@ export class CodingThreadDO extends DurableObject<Env> {
 			const now = this.store.required();
 			if (now.state === "provisioning" || now.state === "queued") this.store.update({ state: "idle", stateReason: "aborted" });
 		}
+		return this.status();
+	}
+
+	/**
+	 * Calls off a thread whose next input hasn't started its turn: it leaves
+	 * the queue or gives its slot back, its inputs are withdrawn, and the
+	 * input's turn ends `cancelled`, recorded and emitted as any turn's end.
+	 * The thread is then idle (`cancelled`), and can be steered or continued.
+	 * A thread with nothing waiting changes nothing; one in a turn refuses.
+	 */
+	async cancel(): Promise<CodingThreadStatus> {
+		await this.lifecycle.start();
+		const thread = this.#live();
+		if (thread.currentOperation) throw new Error("This coding thread's turn has started: abort it instead");
+		const input = this.store.nextInput();
+		if (!input) return this.status();
+		this.#killCommands();
+		const event: TurnEndedEvent = {
+			type: "thread.turn_ended",
+			threadId: thread.threadId,
+			space: thread.space,
+			operationId: input.operationId,
+			outcome: "cancelled",
+			reason: "cancelled",
+			state: "idle",
+			spentUsd: thread.spentUsd,
+			budgetUsd: thread.budgetUsd,
+			at: this.now(),
+		};
+		// The slot is let go of here, so an admission that arrives meanwhile finds the thread wanting none and gives it back.
+		this.ctx.storage.transactionSync(() => {
+			this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
+			this.store.update({ state: "idle", stateReason: "cancelled", stateDetail: null, slot: "none", slotSince: null });
+			this.store.recordEvent(event.type, event);
+		});
+		const scheduler = codingScheduler(this.env, thread.space);
+		if (thread.slot === "queued") await scheduler.cancel(thread.threadId);
+		else if (thread.slot === "held") {
+			await this.#dropWorkspace({ keepVolume: true }).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.destroy_failed", thread: thread.threadId, error: String(error) })));
+			await scheduler.release(thread.threadId);
+			this.#recordDuration(thread);
+		}
+		await this.#emit(event);
 		return this.status();
 	}
 
@@ -422,6 +491,88 @@ export class CodingThreadDO extends DurableObject<Env> {
 		});
 	}
 
+	/**
+	 * Readies a push of the thread's latest checkpoint to `branch` (its own,
+	 * unless given), for the person to approve: the GitHub App is set up, the
+	 * branch is one Pim pushes to, and the workspace makes a git bundle of the
+	 * branch, which Pim checks (`preparePush`). Says why not, as a code, when
+	 * it can't: before anything is asked.
+	 */
+	async preparePush(branch?: string): Promise<PushPreparation> {
+		await this.lifecycle.start();
+		const thread = this.store.required();
+		const app = this.githubApp();
+		if (!app) return { ok: false, code: "github_app_not_configured", message: GITHUB_APP_NOT_CONFIGURED };
+		const target = branch ?? thread.branch;
+		const policy = brokerPolicy(this.env);
+		try {
+			checkBranch(target, policy);
+		} catch (error) {
+			return { ok: false, code: "push_refused", message: errorText(error) };
+		}
+		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
+		const checkpoint = this.store.latestCheckpoint();
+		if (!checkpoint) return { ok: false, code: "nothing_to_push", message: "The thread hasn't committed anything yet: each turn's changes are committed when it ends" };
+		if (thread.slot !== "held" || !thread.workspaceRef) {
+			return { ok: false, code: "workspace_not_running", message: "The thread's workspace isn't running: continue or steer the thread, then push once its turn ends" };
+		}
+		try {
+			const bundle = await this.#bundle(target, checkpoint.sha);
+			const prepared = preparePush({ app, policy }, { sessionId: thread.threadId, repo: thread.repoUrl, branch: target, bundle });
+			return { ok: true, request: { ...pushApprovalRequest(prepared), checkpoint: checkpoint.sha } };
+		} catch (error) {
+			if (error instanceof GitBrokerError && error.status === 403) return { ok: false, code: "push_refused", message: error.message };
+			return { ok: false, code: "conflict", message: errorText(error) };
+		}
+	}
+
+	/**
+	 * Pushes what the person approved (`preparePush`'s request): a bundle of
+	 * the same checkpoint, made again, which must name the same commit; Pim
+	 * sends it to GitHub (`pushBranch`), and the log records the push.
+	 */
+	async push(approved: { branch: string; checkpoint: string; head: string }): Promise<{ ok: true; result: PushResult } | { ok: false; message: string }> {
+		await this.lifecycle.start();
+		const thread = this.store.required();
+		const app = this.githubApp();
+		if (!app) return { ok: false, message: GITHUB_APP_NOT_CONFIGURED };
+		if (thread.slot !== "held" || !thread.workspaceRef) return { ok: false, message: "The thread's workspace isn't running now: continue the thread, then ask to push again" };
+		try {
+			const policy = brokerPolicy(this.env);
+			const fetch = this.githubFetch();
+			const request = { sessionId: thread.threadId, repo: thread.repoUrl, branch: approved.branch, bundle: await this.#bundle(approved.branch, approved.checkpoint) };
+			const deps = { app, policy, ...(fetch ? { fetch } : {}) };
+			if (preparePush(deps, request).head !== approved.head) return { ok: false, message: "The branch isn't what was approved any more: ask to push again" };
+			const result = await pushBranch(deps, request);
+			this.store.recordEvent("thread.pushed", { repo: result.repo, branch: result.branch, before: result.before, after: result.after, outcome: result.outcome });
+			return { ok: true, result };
+		} catch (error) {
+			return { ok: false, message: error instanceof GitBrokerNotConfiguredError ? GITHUB_APP_NOT_CONFIGURED : errorText(error) };
+		}
+	}
+
+	/**
+	 * A git bundle of `branch` at the checkpoint `sha`, from the commit the
+	 * thread started from, which GitHub has. The thread's own branch is
+	 * bundled as it is, and must still be at the checkpoint; another branch
+	 * is set to it first.
+	 */
+	async #bundle(branch: string, sha: string): Promise<Uint8Array> {
+		const thread = this.store.required();
+		const workspace = await this.#workspace();
+		const ref = `refs/heads/${branch}`;
+		if (branch === thread.branch) {
+			if ((await git(workspace, ["rev-parse", ref])).trim() !== sha) throw new Error("The thread's branch has moved past its latest checkpoint: push once its turn ends");
+		} else await git(workspace, ["update-ref", ref, sha]);
+		const file = `${WORKSPACE_ROOT}/.pim-push.bundle`;
+		await git(workspace, ["bundle", "create", file, thread.baseSha ? `${thread.baseSha}..${ref}` : ref]);
+		try {
+			return await workspace.readFile(file);
+		} finally {
+			await workspace.remove(file).catch(() => {});
+		}
+	}
+
 	/** The scheduler's notice: the queued thread holds a slot now. */
 	async admitted(key: string): Promise<void> {
 		await this.lifecycle.start();
@@ -460,6 +611,54 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.#dropWorkspace({ keepVolume: true });
 		this.store.update({ slot: "none", slotSince: null, resumePriority: released.why === "preempted" });
 		this.#recordDuration(thread);
+	}
+
+	/**
+	 * Tells the space's list of threads the thread's row as it is now, after
+	 * each change: one telling at a time, and once more if it changed
+	 * meanwhile. Each telling is the whole row, so a repeat changes nothing.
+	 */
+	#indexChanged(): void {
+		if (this.#indexing) {
+			this.#indexAgain = true;
+			return;
+		}
+		this.#indexing = (async () => {
+			try {
+				do {
+					// After the change's transaction, which may still be under way.
+					await Promise.resolve();
+					this.#indexAgain = false;
+					const thread = this.store.thread();
+					if (!thread) return;
+					await codingScheduler(this.env, thread.space).recordThread({
+						threadId: thread.threadId,
+						repo: thread.repoUrl,
+						ref: thread.baseRef,
+						branch: thread.branch,
+						state: thread.state,
+						stateReason: thread.stateReason,
+						spentUsd: thread.spentUsd,
+						budgetUsd: thread.budgetUsd,
+						createdAt: thread.createdAt,
+						updatedAt: thread.updatedAt,
+					});
+				} while (this.#indexAgain);
+			} catch (error) {
+				console.warn(JSON.stringify({ event: "pim.coding.index_failed", error: String(error) }));
+			} finally {
+				this.#indexing = null;
+			}
+		})();
+	}
+
+	/** Hands an event, recorded already, to the sink; best-effort. */
+	async #emit(event: CodingThreadEvent): Promise<void> {
+		try {
+			await this.eventSink().emit(event);
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.sink_failed", operation: event.operationId, error: String(error) }));
+		}
 	}
 
 	/** The thread's ID: this object's name. */
@@ -633,7 +832,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		if (result.status === "admitted") this.#holdSlot();
 		// Admission may have been told meanwhile, by a notice that came while the request was answered.
-		else if (this.store.required().slot === "queued") this.store.update({ state: "queued" });
+		else if (this.store.required().slot === "queued") {
+			this.ctx.storage.transactionSync(() => {
+				this.store.update({ state: "queued" });
+				this.store.recordEvent("thread.queued", { position: result.position, reason: result.reason });
+			});
+		}
 	}
 
 	/** Records that the thread holds a slot: it readies its workspace next. */
@@ -688,6 +892,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		this.ctx.storage.transactionSync(() => {
 			this.store.dequeue(input.seq);
 			this.store.update({ state: "running", stateReason: null, currentOperation: receipt.operationId, budgetStopped: false });
+			this.store.recordEvent("thread.turn_started", { operationId: receipt.operationId });
 		});
 		await this.#report("running");
 		this.#watch(receipt.operationId);
@@ -733,6 +938,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const outcome: TurnOutcome = budget ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : "error";
 		const reason = budget ? "budget" : outcome === "error" ? (result.reason ?? "error") : null;
 		const state: CodingThreadState = outcome === "error" ? "failed" : "idle";
+		const said = await this.#lastSaid().catch(() => null);
 		const event: TurnEndedEvent = {
 			type: "thread.turn_ended",
 			threadId: thread.threadId,
@@ -741,6 +947,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			outcome,
 			...(reason ? { reason } : {}),
 			...(checkpoint ? { checkpoint: checkpoint.sha } : {}),
+			state,
+			spentUsd: thread.spentUsd,
+			budgetUsd: thread.budgetUsd,
+			...(said ? { said } : {}),
 			at: this.now(),
 		};
 		this.ctx.storage.transactionSync(() => {
@@ -752,11 +962,22 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (state === "failed") await this.#giveBack({ keepVolume: true });
 		else if (this.store.inboxSize() === 0) await this.#report("idle");
 		// Last, so whoever hears of the turn's end finds the slot already given back or idle.
-		try {
-			await this.eventSink().emit(event);
-		} catch (error) {
-			console.warn(JSON.stringify({ event: "pim.coding.sink_failed", operation, error: String(error) }));
+		await this.#emit(event);
+	}
+
+	/** The end of what the coding agent last said, for whoever hears of its turn's end. */
+	async #lastSaid(): Promise<string | null> {
+		const messages = projectEntries(await this.harness.messages());
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index]!;
+			if (message.role !== "assistant") continue;
+			const text = message.parts
+				.flatMap((part) => (part.type === "text" ? [part.text] : []))
+				.join("\n")
+				.trim();
+			if (text) return text.length > SAID_CHARS ? `…${text.slice(-SAID_CHARS)}` : text;
 		}
+		return null;
 	}
 
 	/** Stops the turn under way: kills its commands, aborts pi's run and waits for the turn to end. */
@@ -988,7 +1209,8 @@ export type StartThread = {
 	/** The branch, tag or commit to start from ("main"). */
 	readonly ref?: string;
 	readonly task: string;
-	readonly profile: AgentProfile;
+	/** The model it runs on: the space's default unless given (`defaultProfile`). */
+	readonly profile?: AgentProfile;
 	/** The most the thread may spend on its model, in dollars ($3). */
 	readonly budgetUsd?: number;
 	/** The thread that started this one, if any. */
@@ -1042,6 +1264,12 @@ export type TurnEndedEvent = {
 	readonly reason?: string;
 	/** The checkpoint the turn's changes were committed as, if anything changed. */
 	readonly checkpoint?: string;
+	/** The thread's state after the turn, and its spend and budget then. */
+	readonly state: CodingThreadState;
+	readonly spentUsd: number;
+	readonly budgetUsd: number;
+	/** The end of what the coding agent last said, at most 1,000 characters. */
+	readonly said?: string;
 	readonly at: number;
 };
 
@@ -1053,7 +1281,8 @@ export type CodingThreadEvent = TurnEndedEvent;
  * connector events and triggers (./extensions/app-events.ts,
  * ../triggers/), takes signed deliveries from outside services into a
  * space and has no way in for a space's own objects, so a thread hands its
- * events to this narrow sink instead; until something listens, nobody does.
+ * events to this narrow sink instead: by default the one that wakes the
+ * chat of the agent that started the thread (./supervisor.ts).
  *
  * Every event is recorded in the thread's log (`log()`) before it is
  * emitted, and emitting is best-effort: a sink that throws is logged and the
@@ -1082,6 +1311,19 @@ export const CONTINUE_TEXT = "Continue where you left off.";
 export const BUDGET_MESSAGE = "Coding thread out of budget";
 
 export const DEFAULT_BUDGET_USD = 3;
+
+/** What a push needs set up, as the person reads it. */
+export const GITHUB_APP_NOT_CONFIGURED = "GitHub App not configured: ask the Pim owner to set it up";
+
+/** A push readied for the person to approve, with the checkpoint it is of; or why it can't be. */
+export type PushPreparation =
+	| { readonly ok: true; readonly request: PushApprovalRequest & { readonly checkpoint: string } }
+	| { readonly ok: false; readonly code: "github_app_not_configured" | "push_refused" | "archived" | "nothing_to_push" | "workspace_not_running" | "conflict"; readonly message: string };
+
+/** The most of the coding agent's last words a turn's end carries. */
+const SAID_CHARS = 1000;
+
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** The workspace provider of a thread started while the deployment had none. */
 const NO_BACKEND = "none";

@@ -315,7 +315,7 @@ describe("a coding thread", () => {
 		expect(status).toMatchObject({ state: "failed", stateReason: "budget", slot: "none" });
 		// The one call it made cost $1 a token, past the budget; the next was never sent.
 		expect(status.spentUsd).toBeGreaterThanOrEqual(1);
-		expect((await stub.log()).map((event) => event.kind)).toEqual(["model_call", "thread.turn_ended", "app.budget_stop"]);
+		expect((await stub.log()).map((event) => event.kind)).toEqual(["thread.turn_started", "model_call", "thread.turn_ended", "app.budget_stop"]);
 		const transcript = await inside(stub, (thread) => thread.transcript());
 		expect(transcript.at(-1)).toMatchObject({ role: "notice", parts: [{ type: "text", text: expect.stringMatching(/^Stopped: the thread spent \$\d+\.\d\d of its \$0\.5 budget\.$/) }] });
 		expect((await codingScheduler(env, input.space).snapshot()).running).toEqual([]);

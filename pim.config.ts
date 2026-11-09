@@ -1,3 +1,4 @@
+import { coding } from "./src/extensions/coding";
 import { definePimConfig } from "./src/extensions/define";
 import { gmail } from "./src/extensions/gmail";
 import { googleExtension } from "./src/extensions/google";
@@ -19,7 +20,8 @@ export default definePimConfig({
 	// and Spotify once SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are (see src/extensions/spotify.ts).
 	// Gmail and Google Drive each need an OAuth client in a Google Cloud project of its own, and APP_CREDENTIALS_KEY
 	// (see "Connectors" in docs/reference.md); until they are set, nobody is offered them.
-	extensions: [popularApps, spotifyExtension, googleExtension([gmail, googleDrive])],
+	// Coding threads need a workspace backend (see "Workspaces for coding threads" in docs/reference.md) and, to push, a GitHub App.
+	extensions: [popularApps, spotifyExtension, googleExtension([gmail, googleDrive]), coding],
 	// The color theme people see until they pick another: a theme's id, Pim's own (src/extensions/themes) or an extension's.
 	defaultTheme: "tokyo-night",
 });

@@ -18,7 +18,7 @@ Every error is JSON with the HTTP status:
 | `forbidden` | 403 | The deployment doesn't let coding threads use that repository (`PIM_GIT_REPOS`), or a guest asked |
 | `not_found` | 404 | No such thread in this space |
 | `archived` | 409 | The thread is archived: only reading it works |
-| `budget_spent` | 409 | Steering a thread that spent its budget: continue it with a bigger `budgetUsd` |
+| `budget_spent` | 409 | Steering a thread that spent its budget, or continuing it without a bigger `budgetUsd` |
 | `not_cancellable` | 409 | Cancelling a thread whose turn has started: abort it instead |
 | `workspace_not_running` | 409 | A diff from a commit other than the start, or a push, while the thread's workspace isn't running |
 | `nothing_to_push` | 409 | A push before the thread has committed a checkpoint |

@@ -195,10 +195,13 @@ const text = (value: SqlStorageValue | undefined) => (value === null || value ==
 export class CodingThreadStore {
 	readonly #sql: SqlStorage;
 	readonly #now: () => number;
+	readonly #changed: () => void;
 
-	constructor(sql: SqlStorage, now: () => number = Date.now) {
+	/** `changed` hears of each change to the thread's row, its spend included. */
+	constructor(sql: SqlStorage, now: () => number = Date.now, changed: () => void = () => {}) {
 		this.#sql = sql;
 		this.#now = now;
+		this.#changed = changed;
 		this.#sql.exec(SCHEMA);
 		this.#migrate();
 	}
@@ -239,6 +242,7 @@ export class CodingThreadStore {
 			now,
 			now,
 		);
+		this.#changed();
 	}
 
 	/** Sets the given fields of the thread's row. */
@@ -259,6 +263,7 @@ export class CodingThreadStore {
 		const names = Object.keys(columns);
 		if (names.length === 0) return;
 		this.#sql.exec(`UPDATE coding_thread SET ${names.map((name) => `${name} = ?`).join(", ")}, updated_at = ?`, ...Object.values(columns), this.#now());
+		this.#changed();
 	}
 
 	/** Records a scheduler notice by its key; false when it was recorded before, so it is ignored. */
@@ -298,6 +303,7 @@ export class CodingThreadStore {
 			costUsd,
 		);
 		this.#sql.exec("UPDATE coding_thread SET spent_usd = spent_usd + ?", costUsd);
+		this.#changed();
 	}
 
 	recordEvent(kind: string, data: EventData): CodingEvent {

@@ -78,3 +78,9 @@ export type CodingErrorCode =
 	| "conflict";
 
 export type CodingApiError = { readonly error: string; readonly code: CodingErrorCode };
+
+/** The web app's page for a thread. */
+export const threadPath = (threadId: string) => `/coding/${threadId}`;
+
+/** The path the API's routes are under, in `/api`. */
+export const CODING_API_PATH = "/coding/threads";

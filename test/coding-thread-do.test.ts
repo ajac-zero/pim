@@ -7,10 +7,12 @@ import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { CONTINUE_TEXT, codingThread, type StartThread } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
-import { NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends } from "../src/coding/workspace/registry";
-import { fakeClones, fakeRemotes } from "./fake-git";
+import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
+import { NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
+import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
+import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
 import { OWNER, post, toolUse } from "./helpers";
-import { type CodingThreadDO, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
+import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
 // `coding-faux` model, and asks a scheduler of its own space for a slot; the schedulers tell threads what happens to them
@@ -77,6 +79,7 @@ const sql = (stub: Stub, query: string) => runInDurableObject(stub, (_instance: 
 const sent = (context: Context) => JSON.stringify(context);
 
 beforeEach(() => {
+	codingBackends.registry = null;
 	codingSchedulers.notifier = null;
 	codingSchedulers.now = null;
 	codingEvents.length = 0;
@@ -154,13 +157,43 @@ describe("a coding thread", () => {
 		expect(await stub.continue({ operationId: "again" })).toMatchObject({ state: "failed", stateReason: "no_backend" });
 	});
 
+	it("keeps the broker token out of what it says and stores when the clone fails, though git printed it", async () => {
+		const warn = vi.spyOn(console, "warn");
+		const { id, stub } = await startThread({ repo: "https://github.com/acme/missing" });
+		const failed = await vi.waitFor(
+			async () => {
+				const status = await stub.status();
+				expect(status).toMatchObject({ state: "failed", slot: "none" });
+				return status;
+			},
+			{ timeout: 10_000, interval: 50 },
+		);
+		// The fake git printed the header it was given, as a verbose git does.
+		const clone = fakeClones.findLast((each) => each.url === "https://pim.test/api/coding/git/acme/missing.git")!;
+		const token = clone.env.GIT_CONFIG_VALUE_0!.replace(/^Authorization: Bearer /, "");
+		expect(token.length).toBeGreaterThan(20);
+		expect(failed).toMatchObject({ stateReason: "workspace", slot: "none" });
+		expect(failed.stateDetail).toContain("git clone exited 128: > Authorization: Bearer [redacted]\nfatal: repository");
+		expect(failed.stateDetail).not.toContain(token);
+		expect(await everything(stub)).not.toContain(token);
+		const logged = warn.mock.calls.map((call) => call.join(" ")).join("\n");
+		expect(logged).toContain(id);
+		expect(logged).not.toContain(token);
+		warn.mockRestore();
+	});
+
 	it("takes its backends from the deployment's environment", () => {
 		const none = workspaceBackends({});
 		expect(none.defaultId()).toBeNull();
 		expect(() => none.get("compose")).toThrow(new NoWorkspaceBackendError(NO_BACKEND_MESSAGE));
 		expect(() => workspaceBackends({ PIM_CODING_MANAGER_URL: "https://manager.example" }).get("compose")).toThrow("PIM_CODING_MANAGER_TOKEN isn't set");
-		// The Compose provider isn't in this build yet: a configured manager still says so rather than failing later.
-		expect(() => workspaceBackends({ PIM_CODING_MANAGER_URL: "https://manager.example", PIM_CODING_MANAGER_TOKEN: "t" }).get("compose")).toThrow("no Compose workspace provider yet");
+		const compose = workspaceBackends({ PIM_CODING_MANAGER_URL: "https://manager.example", PIM_CODING_MANAGER_TOKEN: "t" });
+		expect(compose.defaultId()).toBe("compose");
+		expect(compose.get("compose")).toBeInstanceOf(ComposeWorkspaceProvider);
+		// A manager URL the provider won't use is said at once, rather than failing a thread later.
+		expect(() => workspaceBackends({ PIM_CODING_MANAGER_URL: "http://manager.example", PIM_CODING_MANAGER_TOKEN: "t" }).get("compose")).toThrow(
+			"PIM_CODING_MANAGER_URL can't be used, so coding threads have no workspace backend: The workspace manager URL must be https",
+		);
 	});
 
 	it("runs the model's calls to the real tools in its workspace, commits a checkpoint, and keeps its diff, tests, journal and output", async () => {
@@ -433,6 +466,99 @@ describe("a coding thread", () => {
 		// The call ran again after the reset found its journal entry, so it told the model it was interrupted rather than running twice.
 		expect(after).toContain("bash was interrupted, state unknown");
 		expect(await codingThread(env, id).status()).toMatchObject({ state: "idle", currentOperation: null });
+	});
+});
+
+describe("a coding thread on the Compose sandbox manager", () => {
+	/** The real Compose provider, talking to a stubbed manager over its routes, whose workspaces have the fake git. */
+	function compose(max = 3) {
+		const manager = fakeManager(max);
+		manager.backing.register("git", fakeGit);
+		codingBackends.registry = workspaceRegistry([new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch })]);
+		const calls = () => manager.requests.map((request) => `${request.method} ${request.path.replace(/\?.*$/, "")}`);
+		return { manager, calls };
+	}
+
+	const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+
+	it("starts, clones, runs tools and is archived through the manager, which sets its space's slots", async () => {
+		const { manager, calls } = compose(1);
+		let listed = "";
+		codingFaux.setResponses([
+			toolUse("write", { path: "hello.txt", content: "Hello!\n" }),
+			toolUse("bash", { command: "cat hello.txt" }),
+			(context) => {
+				const result = context.messages.findLast((each) => each.role === "toolResult");
+				listed = result?.role === "toolResult" ? result.content.map((part) => (part.type === "text" ? part.text : "")).join("") : "";
+				return fauxAssistantMessage("Wrote hello.txt.");
+			},
+		]);
+		const { id, stub, input } = await startThread();
+		const [ended] = await turns(id, 1);
+		expect(ended!.outcome).toBe("completed");
+		expect(listed).toContain("Hello!");
+		// The manager's health went to the scheduler before the slot was asked for: its limit of 1 is under the space's 2.
+		expect(calls()[0]).toBe("GET /health");
+		expect((await codingScheduler(env, input.space).snapshot()).limit).toBe(1);
+		// One workspace for the thread's session, the clone run in it with the broker's header, and every route but /health sent the manager's token.
+		expect(manager.requests.find((request) => request.path === "/sessions" && request.method === "POST")?.body).toMatchObject({ sessionId: id });
+		const clone = manager.requests.find((request) => (request.body as { cmd?: string[] } | undefined)?.cmd?.[1] === "clone")!;
+		expect(clone.body).toMatchObject({ cmd: ["git", "clone", "--no-checkout", BROKER_URL, REPO_DIR], env: { GIT_CONFIG_KEY_0: "http.extraHeader" } });
+		expect(manager.requests.filter((request) => request.path !== "/health").every((request) => request.auth === `Bearer ${TOKEN}`)).toBe(true);
+		const [info] = await manager.backing.list({ sessionId: id });
+		const workspace = (await manager.backing.get(info!.ref))!;
+		expect(new TextDecoder().decode(await workspace.readFile(`${REPO_DIR}/hello.txt`))).toBe("Hello!\n");
+		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", checkpoint: { operationId: input.operationId } });
+		// Archived: the session is deleted without its volume, and the slot is free.
+		expect(await stub.archive()).toMatchObject({ state: "archived", slot: "none" });
+		expect(calls().at(-1)).toBe(`DELETE /sessions/${id}`);
+		expect(manager.requests.at(-1)!.path).not.toContain("keepVolume");
+		expect(await manager.backing.list({ sessionId: id })).toEqual([]);
+		expect((await codingScheduler(env, input.space).snapshot()).running).toEqual([]);
+	});
+
+	it("waits in the queue while the manager's disk is low, and checks its health until there is room", async () => {
+		const { manager } = compose();
+		manager.disk.freeDiskPct = 9;
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const { id, stub, input, status } = await startThread();
+		expect(status).toMatchObject({ state: "queued", slot: "queued", queue: { position: 1, reason: "low_disk", detail: "9% of the disk free" } });
+		// While queued it comes back every heartbeat to check again.
+		expect(await heartbeat(stub)).toEqual({ rescheduleAt: expect.any(Number) });
+		expect(await stub.status()).toMatchObject({ state: "queued" });
+		manager.disk.freeDiskPct = 40;
+		await heartbeat(stub);
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		expect(await codingScheduler(env, input.space).snapshot()).toMatchObject({ queued: [], running: [expect.objectContaining({ threadId: id })] });
+	});
+
+	it("holds its space's queue when the manager refuses its workspace for low disk, and makes it once there is room", async () => {
+		const { manager } = compose();
+		// The disk fills between the health check and the create.
+		const fetch = manager.fetch;
+		const health = { checks: 0 };
+		codingBackends.registry = workspaceRegistry([
+			new ComposeWorkspaceProvider({
+				managerUrl: URL_BASE,
+				token: TOKEN,
+				fetch: async (input, init) => {
+					const response = await fetch(input, init);
+					if (String(input).endsWith("/health") && ++health.checks === 1) manager.disk.freeDiskPct = 9;
+					return response;
+				},
+			}),
+		]);
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const { id, stub, input } = await startThread();
+		await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "provisioning", slot: "held", stateReason: "low_disk" }), { timeout: 10_000, interval: 50 });
+		// Nobody else is let in meanwhile.
+		const other = await startThread({ space: input.space });
+		expect(other.status).toMatchObject({ state: "queued", queue: { reason: "low_disk" } });
+		await other.stub.archive();
+		manager.disk.freeDiskPct = 40;
+		await heartbeat(stub);
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		expect((await codingScheduler(env, input.space).snapshot()).running.map((slot) => slot.threadId)).toEqual([id]);
 	});
 });
 

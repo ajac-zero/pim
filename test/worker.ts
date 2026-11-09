@@ -327,12 +327,15 @@ export const codingFaux = fauxProvider({
 export const codingWorkspaces = new FakeWorkspaceProvider();
 codingWorkspaces.register("git", fakeGit);
 
+/** The workspace backends coding threads have: the in-memory one unless a test sets others, such as the Compose provider on a stubbed manager. */
+export const codingBackends: { registry: WorkspaceProviderRegistry | null } = { registry: null };
+
 /** What coding threads emitted, in order. */
 export const codingEvents: CodingThreadEvent[] = [];
 
 export class CodingThreadDO extends RealCodingThreadDO {
 	protected override workspaceProviders(): WorkspaceProviderRegistry {
-		return workspaceRegistry([codingWorkspaces]);
+		return codingBackends.registry ?? workspaceRegistry([codingWorkspaces]);
 	}
 
 	/** The scripted model besides the space's real providers. */

@@ -11,6 +11,7 @@ import { deploymentSettings } from "../deployment";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
+import type { ManagerHealth } from "./provider-capacity";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler } from "./scheduler-do";
 import { issueBrokerToken, parseRepoUrl } from "./git-broker/broker";
@@ -27,8 +28,9 @@ import {
 	type TestRun,
 } from "./thread-store";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
+import { ComposeManagerError } from "./workspace/compose";
 import { NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
-import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceSpec } from "./workspace/types";
+import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceProvider, type WorkspaceSpec } from "./workspace/types";
 
 /**
  * One coding thread, in a Durable Object of its own named by the thread's
@@ -183,7 +185,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// Bounded, as a job must be: work still going after this goes on outside it.
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
-		const busy = thread !== null && (thread.currentOperation !== null || (thread.slot === "held" && thread.state === "provisioning"));
+		// A queued thread whose backend reports its health checks it again each time, so a queue held for low disk opens once there is room.
+		const busy = thread !== null && (thread.currentOperation !== null || (thread.slot === "held" && thread.state === "provisioning") || (thread.slot === "queued" && this.#healthOf(thread) !== null));
 		return busy ? { rescheduleAt: Date.now() + HEARTBEAT_MS } : undefined;
 	}
 
@@ -535,9 +538,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.slot === "none") {
 			if (!this.#ensureBackend()) return;
 			await this.#requestSlot();
-		}
+		} else if (thread.slot === "queued") await this.#refreshCapacity();
 		thread = this.store.required();
 		if (thread.slot !== "held") return;
+		// The manager refused the workspace for low disk last time: its health now says whether the space's queue may open again.
+		if (thread.stateReason === "low_disk") await this.#refreshCapacity();
 		try {
 			await this.#workspace();
 		} catch (error) {
@@ -580,8 +585,39 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** Asks the scheduler for a slot, unless the thread holds one or waits for one. */
+	/** The backend's health check, for a backend with a manager that reports one (Compose); null for one without, or none. */
+	#healthOf(thread: CodingThreadRow): (() => Promise<ManagerHealth>) | null {
+		let provider: WorkspaceProvider & { managerHealth?: () => Promise<ManagerHealth> };
+		try {
+			provider = this.workspaceProviders().get(thread.providerId);
+		} catch {
+			return null;
+		}
+		return typeof provider.managerHealth === "function" ? provider.managerHealth.bind(provider) : null;
+	}
+
+	/**
+	 * Tells the space's scheduler what the workspace manager's health says
+	 * (./provider-capacity.ts): under 15% of its disk free holds the queue,
+	 * and its limit caps the space's slots. Only for a backend with a
+	 * manager; one that can't be reached changes nothing.
+	 */
+	async #refreshCapacity(): Promise<void> {
+		const thread = this.store.required();
+		const health = this.#healthOf(thread);
+		if (!health) return;
+		try {
+			const { freeDiskPct, maxConcurrent, running, free } = await health();
+			await codingScheduler(this.env, thread.space).refreshConditions({ freeDiskPct, maxConcurrent, running, free });
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.health_failed", thread: thread.threadId, error: String(error) }));
+		}
+	}
+
+	/** Asks the scheduler for a slot, unless the thread holds one or waits for one, after telling it the manager's health. */
 	async #requestSlot(): Promise<void> {
+		if (this.store.required().slot !== "none") return;
+		await this.#refreshCapacity();
 		const thread = this.store.required();
 		if (thread.slot !== "none") return;
 		this.store.update({ slot: "queued" });
@@ -744,9 +780,15 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	async #provisioningFailed(error: unknown): Promise<void> {
 		const thread = this.store.required();
-		if (error instanceof WorkspaceCapacityError) {
-			// The backend is full though the scheduler gave a slot: try again at the next heartbeat.
-			this.store.update({ stateReason: "workspace_capacity" });
+		const lowDisk = error instanceof ComposeManagerError && error.code === "low_disk";
+		if (error instanceof WorkspaceCapacityError || lowDisk) {
+			// The backend is full though the scheduler gave a slot: try again at the next heartbeat. Low disk also holds the space's queue until the manager's health says there is room.
+			if (lowDisk) {
+				await codingScheduler(this.env, thread.space)
+					.onManagerError("low_disk")
+					.catch((failure) => console.warn(JSON.stringify({ event: "pim.coding.capacity_failed", thread: thread.threadId, error: String(failure) })));
+			}
+			this.store.update({ stateReason: lowDisk ? "low_disk" : "workspace_capacity" });
 			await this.#schedule(Date.now() + HEARTBEAT_MS);
 			return;
 		}

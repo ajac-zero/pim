@@ -410,8 +410,8 @@ export type TasksHost = {
 	 * answers, and the space wakes it once all of them are done.
 	 */
 	start(requester: string, batch: string, tasks: { to: Agent; task: string; continues: Task | null }[], options: { call: string; waits: boolean }): Promise<Task[]>;
-	/** Archives the chat a task runs in, as the person's Archive does by hand. */
-	archive(conversation: string): void;
+	/** Archives a chat, as the person's Archive does by hand; one still at work is archived once it stops. */
+	archive(conversation: string): void | Promise<void>;
 	readonly tasks: TaskStore;
 };
 
@@ -526,20 +526,26 @@ export function tasksExtension(host: TasksHost) {
 
 	const archive = defineTool({
 		name: ARCHIVE_TASK_CHATS,
-		description: `Archive the chats of tasks you handed out that are done and whose answers you have used, so the person's chat list isn't full of chats that served their purpose. Nothing is deleted: the chat moves to Archived, and a follow-up that continues the task, or anything said in the chat, lists it again.`,
+		description: `Archive the chats of tasks you handed out that are done and whose answers you have used, and with \`self\` this chat itself once its work is finished, so the person's chat list isn't full of chats that served their purpose. Nothing is deleted: the chat moves to Archived, and a follow-up that continues the task, or anything said in the chat, lists it again.`,
 		parameters: Type.Object({
-			tasks: Type.Array(Type.String({ description: "The id of a task you handed out." }), { minItems: 1, maxItems: MAX_TASKS * 4 }),
+			tasks: Type.Optional(Type.Array(Type.String({ description: "The id of a task you handed out." }), { maxItems: MAX_TASKS * 4 })),
+			self: Type.Optional(Type.Boolean({ description: "Archive this chat itself, when its work is finished." })),
 		}),
 		replay: "safe",
-		async execute({ tasks }, api) {
+		async execute({ tasks = [], self }, api) {
 			const session = String(api.conversationId);
-			const lines = tasks.map((id) => {
+			const lines = await Promise.all(tasks.map(async (id) => {
 				const task = host.tasks.get(id.trim());
 				if (!task || task.requester !== session || !task.chat) return `No task ${id} you handed out.`;
 				if (!TERMINAL_STATES.has(task.state)) return `Task ${task.id} is still going: archive its chat once its answer has come.`;
-				host.archive(task.conversation);
+				await host.archive(task.conversation);
 				return `Archived the chat of task ${task.id}.`;
-			});
+			}));
+			if (self) {
+				await host.archive(session);
+				lines.push("Archived this chat.");
+			}
+			if (lines.length === 0) return text("Name tasks to archive, or set self to archive this chat.", true);
 			return text(lines.join("\n"));
 		},
 	});

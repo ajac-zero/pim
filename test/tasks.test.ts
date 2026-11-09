@@ -424,7 +424,7 @@ describe("the majordomo", () => {
 				() => toolUse("send_to_user", { message: "Asked." }),
 				(context) => {
 					taskId = lastUserText(context.messages).match(/finished task (\S+):/)![1]!;
-					return toolUse("archive_task_chats", { tasks: [taskId, "nope"] });
+					return toolUse("archive_task_chats", { tasks: [taskId, "nope"], self: true });
 				},
 				(context) => {
 					result(context);
@@ -440,7 +440,8 @@ describe("the majordomo", () => {
 		expect(results[0]).toContain(`Archived the chat of task ${taskId}.`);
 		expect(results[0]).toContain("No task nope you handed out.");
 		expect(await archived(task!.session!)).toBe(true);
-		expect(await archived(asker)).toBe(false);
+		expect(results[0]).toContain("Archived this chat.");
+		expect(await archived(asker)).toBe(true);
 		expect(await archived(other)).toBe(false);
 	});
 

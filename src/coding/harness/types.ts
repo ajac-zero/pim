@@ -1,0 +1,106 @@
+import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { Harness } from "../vault/harnesses";
+
+/**
+ * The contract between a coding thread and a vendor's coding agent CLI that
+ * runs inside the thread's workspace (a "CLI harness"), such as Claude Code.
+ * The CLI is the vendor's own, unmodified: Pim only builds its command line,
+ * reads what it prints, line by line, and maps that into the thread's
+ * transcript, log and test runs (./runner.ts, ../thread-do.ts).
+ */
+
+/** What one turn asks of the CLI. */
+export type HarnessTurn = {
+	/** What the person (or the thread's start) said: the turn's prompt. */
+	readonly prompt: string;
+	/** The CLI's session to go on with (`--resume`), or the new one this turn starts (`resume: false`). */
+	readonly sessionId: string;
+	readonly resume: boolean;
+	/** The most the turn may spend, in dollars, as the CLI estimates it; the thread's budget left. */
+	readonly maxBudgetUsd: number;
+	/** The model to ask for, or null for the CLI's own default. */
+	readonly model: string | null;
+	/** Text appended to the CLI's own system prompt: what Pim tells every coding agent. */
+	readonly instructions: string;
+};
+
+/** How a CLI's usage is counted: tokens of one model response. */
+export type HarnessUsage = { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number };
+
+/**
+ * What a CLI's output means to Pim, whatever the CLI: one or more of these
+ * per line it prints. Messages are pi-ai's, so they go into the thread's
+ * transcript as the Pi harness's do.
+ */
+export type HarnessEvent =
+	/** The CLI started (or resumed) a session. */
+	| { readonly type: "session"; readonly sessionId: string; readonly model: string | null }
+	/** Text or thinking being written, before the message it belongs to is complete. */
+	| { readonly type: "delta"; readonly kind: "text" | "thinking"; readonly text: string }
+	/** A complete assistant message, with its usage when the CLI reports one; `messageId` names the model response it is part of. */
+	| { readonly type: "assistant"; readonly message: AssistantMessage; readonly messageId: string | null }
+	/** Results of tool calls the assistant made. */
+	| { readonly type: "tool_result"; readonly message: ToolResultMessage }
+	/** The CLI is retrying a failed model request. */
+	| { readonly type: "retry"; readonly attempt: number; readonly maxRetries: number; readonly delayMs: number; readonly error: string; readonly status: number | null }
+	/** The CLI refused a tool call no rule allowed. */
+	| { readonly type: "permission_denied"; readonly tool: string; readonly message: string }
+	/** The CLI can't reach the model because its login is missing or expired. */
+	| { readonly type: "auth_failed"; readonly message: string }
+	/**
+	 * The turn's end, as the CLI reports it: whether it succeeded, why not
+	 * (`budget`, `max_turns`, `error`), and the session's cost so far as the
+	 * CLI estimates it. `sessionCostUsd` counts every turn of the session.
+	 */
+	| {
+			readonly type: "result";
+			readonly ok: boolean;
+			readonly reason: "budget" | "max_turns" | "error" | null;
+			readonly sessionId: string | null;
+			readonly sessionCostUsd: number;
+			readonly text: string | null;
+			readonly errors: readonly string[];
+	  }
+	/** A line Pim couldn't read; kept for the operator, never shown as the agent's words. */
+	| { readonly type: "unparsed"; readonly line: string };
+
+/** Reads a CLI's output one line at a time. Stateful: it remembers what it needs across lines, such as which tool each call was. */
+export interface HarnessParser {
+	parseLine(line: string): HarnessEvent[];
+}
+
+/**
+ * The CLI's own sign-in, inside a workspace: the command that prints a URL
+ * for the person to open and then reads the code they paste on its standard
+ * input, how to find that URL in what it prints, and the hosts it reaches.
+ */
+export type HarnessLoginFlow = {
+	/** The sign-in command. Its standard input is the code the person pastes, followed by a newline. */
+	readonly command: readonly string[];
+	/** The URL to send the person to, once the command has printed it; null until then. */
+	authorizationUrl(output: string): string | null;
+};
+
+/** One vendor CLI that can run a coding thread's turns. */
+export interface CliHarness {
+	/** The harness's id: the thread's `harness` and the vault's entry. */
+	readonly id: Harness;
+	/** The name people see. */
+	readonly name: string;
+	/** The command line of one turn, run in the repository's checkout. */
+	buildCommand(turn: HarnessTurn): string[];
+	/** A parser for one turn's output. */
+	parser(): HarnessParser;
+	/** Environment the CLI always runs with, besides its config directory: such as turning its telemetry off. */
+	readonly env: Readonly<Record<string, string>>;
+	/** The hosts a workspace running it must reach, besides the git broker and package registries. */
+	readonly egress: readonly string[];
+	/**
+	 * The command that sends `signal` to the turn's CLI process, found by its
+	 * session id on its command line: SIGINT ends the turn the way a person
+	 * pressing Ctrl-C does, so the CLI records it; SIGKILL when it doesn't.
+	 */
+	signalCommand(sessionId: string, signal: "INT" | "KILL"): string[];
+	/** The CLI's own sign-in with a subscription, where it has one Pim can relay. */
+	readonly login?: HarnessLoginFlow;
+}

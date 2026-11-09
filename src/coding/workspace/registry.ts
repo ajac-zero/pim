@@ -14,6 +14,9 @@ export interface WorkspaceProviderRegistry {
 	defaultId(): string | null;
 }
 
+/** The machine image workspaces start from: the sandbox manager's default (sandbox-manager/compose.yaml builds it from workspace-agentd/Dockerfile). */
+export const DEFAULT_WORKSPACE_IMAGE = "pim-workspace:local";
+
 /** Coding threads can't get a workspace: the deployment has no backend for them, or not the one asked for. A state to show the person (`failed(no_backend)`), not a crash. */
 export class NoWorkspaceBackendError extends Error {
 	override readonly name = "NoWorkspaceBackendError";

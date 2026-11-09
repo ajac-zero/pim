@@ -1,0 +1,397 @@
+import { redact } from "../tools/output";
+import { parseTestSummary, type TestRun } from "../tools";
+import type { Restored } from "../vault/inject";
+import { harnessEnv, HARNESS_HOME } from "../vault/inject";
+import type { Workspace } from "../workspace/types";
+import type { CliHarness, HarnessEvent, HarnessTurn, HarnessUsage } from "./types";
+
+/**
+ * Runs one turn of a CLI harness (./types.ts) in a coding thread's
+ * workspace: the CLI's command streamed through `Workspace.exec` in the
+ * repository's checkout, each line it prints parsed and handed on as it
+ * arrives, and how the turn ended said honestly. A turn is complete only
+ * when the CLI itself reported success; an abort, a timeout, a crash, a
+ * missing result or a restart of the thread never counts as one.
+ *
+ * With a subscription (`HarnessAuth`), the person's login is put into the
+ * workspace before the CLI runs (`credentials.restore`) and what the CLI
+ * changed of it is kept afterwards (`credentials.writeBack`, which also
+ * removes it from the workspace), whatever happened in between. Only one
+ * such run per person and harness goes on at a time (`lock`), since two
+ * CLIs refreshing one login would race.
+ *
+ * What the thread keeps of the run while it goes on (`RunRecord`, in its
+ * `journal`) is enough for a thread that restarted mid-run to finish it off
+ * (`recoverRun`): the CLI is killed, the login written back and the lock
+ * let go, and the turn ends `interrupted`. Workspace commands can't be
+ * re-attached to after the stream reading them is gone.
+ */
+
+/**
+ * How the CLI is signed in: with the person's own subscription login, from
+ * the vault, or with environment variables that carry a key (the API-key or
+ * gateway mode, which `authEnv` in ./auth.ts decides).
+ */
+export type HarnessAuth = { readonly mode: "subscription" } | { readonly mode: "env"; readonly env: Readonly<Record<string, string>> };
+
+/** A run as the thread keeps it while it goes on. Plain data, stored as JSON. */
+export type RunRecord = {
+	readonly operationId: string;
+	readonly sessionId: string;
+	readonly resume: boolean;
+	readonly startedAt: number;
+	/** How many lines of the CLI's output were handled. */
+	readonly lines: number;
+	/** The login put into the workspace, to write back; null when none was. */
+	readonly restored: Restored | null;
+	/** Whether the run holds the person's lock for the harness. */
+	readonly locked: boolean;
+};
+
+/** Where the thread keeps its `RunRecord`: written before each step it records is relied on. */
+export interface RunJournal {
+	save(record: RunRecord): void;
+	clear(): void;
+}
+
+export type RunnerDeps = {
+	readonly harness: CliHarness;
+	readonly workspace: Workspace;
+	readonly auth: HarnessAuth;
+	/** The person's login for the harness, put in and written back for this workspace (../vault/inject.ts). */
+	readonly credentials: { restore(): Promise<Restored>; writeBack(restored: Restored): Promise<unknown> };
+	/** The person's one run at a time for the harness; `acquire` is false while another run holds it. */
+	readonly lock: { acquire(): Promise<boolean>; release(): Promise<void> };
+	readonly journal: RunJournal;
+	/** Each event the CLI's output meant, in order. */
+	readonly onEvent?: (event: HarnessEvent) => void | Promise<void>;
+	/** A test command the agent ran, read from its shell tool's call and result. */
+	readonly onTestRun?: (run: TestRun) => void;
+	readonly now?: () => number;
+	/** How long the CLI has to end its turn after SIGINT before it is killed. */
+	readonly graceMs?: number;
+};
+
+/** Why a turn didn't complete. */
+export type RunFailure = "aborted" | "timeout" | "budget" | "max_turns" | "login_required" | "harness_error" | "interrupted";
+
+/** How a turn ended, with what it cost as the CLI reported it. */
+export type RunResult = {
+	readonly status: "done" | "unanswered";
+	readonly reason?: RunFailure;
+	/** What to tell the person about a failure. */
+	readonly detail?: string;
+	/** The session the CLI ran, once it said so. */
+	readonly sessionId: string | null;
+	/** The session's whole cost so far as the CLI estimates it, from its result; null without one. */
+	readonly sessionCostUsd: number | null;
+	/** The turn's tokens: each model response counted once. */
+	readonly usage: HarnessUsage;
+	readonly model: string | null;
+	readonly lines: number;
+};
+
+/** What `prepare` found: ready to run, another run holds the person's lock, or the person has no login for the harness. */
+export type Prepared = { readonly status: "ready" } | { readonly status: "busy" } | { readonly status: "login_required" };
+
+/** The default grace after SIGINT. */
+export const INTERRUPT_GRACE_MS = 15_000;
+
+/** The most of the CLI's error output a failure keeps. */
+const STDERR_TAIL = 2000;
+
+const NO_USAGE: HarnessUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+/** Splits a stream of text into lines, keeping a partial last line until it is completed. */
+export class LineBuffer {
+	#rest = "";
+
+	push(chunk: string): string[] {
+		const text = this.#rest + chunk;
+		const lines = text.split("\n");
+		this.#rest = lines.pop() ?? "";
+		return lines;
+	}
+
+	/** What is left after the stream ended: a last line without its newline. */
+	flush(): string[] {
+		const rest = this.#rest;
+		this.#rest = "";
+		return rest.trim() ? [rest] : [];
+	}
+}
+
+/** Commands that run tests, for the thread's test runs. */
+const TEST_COMMAND = /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|npx\s+(?:vitest|jest|mocha)\b|vitest\b|jest\b|pytest\b|python3?\s+-m\s+(?:pytest|unittest)\b|go\s+test\b|cargo\s+test\b|mvn\s+test\b|gradle\w*\s+test\b|rspec\b|phpunit\b|ctest\b|make\s+test\b|deno\s+test\b)/;
+
+/** The exit code Claude Code's Bash tool writes at the head of a failed command's result ("Exit code 1"). */
+const EXIT_CODE = /^(?:Error:\s*)?Exit code (\d+)/m;
+
+export class HarnessRunner {
+	readonly #deps: RunnerDeps;
+	readonly #now: () => number;
+	#record: RunRecord | null = null;
+	#controller = new AbortController();
+	#aborted = false;
+	#timedOut = false;
+	#running = false;
+	#interrupted: Promise<void> | null = null;
+	/** Resolves when the run under way has ended. */
+	#ended: Promise<void> = Promise.resolve();
+
+	constructor(deps: RunnerDeps) {
+		this.#deps = deps;
+		this.#now = deps.now ?? Date.now;
+	}
+
+	/**
+	 * Gets the run ready, before its turn starts: takes the person's lock for
+	 * the harness and puts their login into the workspace. Without a login
+	 * the workspace is cleared again and the lock let go.
+	 */
+	async prepare(operationId: string, session: { sessionId: string; resume: boolean }): Promise<Prepared> {
+		const { auth, credentials, lock, journal } = this.#deps;
+		const record: RunRecord = { operationId, ...session, startedAt: this.#now(), lines: 0, restored: null, locked: auth.mode === "subscription" };
+		if (auth.mode !== "subscription") {
+			this.#keep(record);
+			return { status: "ready" };
+		}
+		if (!(await lock.acquire())) return { status: "busy" };
+		this.#keep(record);
+		let restored: Restored;
+		try {
+			restored = await credentials.restore();
+		} catch (error) {
+			await this.#finish();
+			throw error;
+		}
+		this.#keep({ ...record, restored });
+		if (!restored.connected) {
+			await this.#finish();
+			return { status: "login_required" };
+		}
+		return { status: "ready" };
+	}
+
+	/** Runs the prepared turn to its end, then writes the login back and lets the lock go, whatever happened. */
+	async run(turn: HarnessTurn, timeoutMs: number): Promise<RunResult> {
+		const record = this.#record;
+		if (!record) throw new Error("The harness run wasn't prepared");
+		this.#running = true;
+		let ended = () => {};
+		this.#ended = new Promise((resolve) => {
+			ended = resolve;
+		});
+		try {
+			return await this.#execute(record, turn, timeoutMs);
+		} finally {
+			this.#running = false;
+			ended();
+			await this.#finish();
+		}
+	}
+
+	/**
+	 * Stops the turn: SIGINT, so the CLI ends it the way it records, then,
+	 * if it still runs after the grace, kills it.
+	 */
+	abort(): Promise<void> {
+		this.#aborted = true;
+		return this.#interrupt();
+	}
+
+	async #execute(record: RunRecord, turn: HarnessTurn, timeoutMs: number): Promise<RunResult> {
+		const { harness, workspace, auth } = this.#deps;
+		const parser = harness.parser();
+		const lines = new LineBuffer();
+		const usage = new Map<string, HarnessUsage>();
+		const calls = new Map<string, { command: string; startedAt: number }>();
+		let unnamed = 0;
+		// What the output said so far: who, what it cost, and how it ended.
+		const seen = {
+			sessionId: null as string | null,
+			model: null as string | null,
+			result: null as Extract<HarnessEvent, { type: "result" }> | null,
+			authFailed: null as string | null,
+			stderr: "",
+			exit: null as { code: number | null; timedOut?: boolean } | null,
+			lines: record.lines,
+		};
+
+		const handle = async (line: string) => {
+			for (const event of parser.parseLine(line)) {
+				switch (event.type) {
+					case "session":
+						seen.sessionId = event.sessionId;
+						seen.model = event.model ?? seen.model;
+						break;
+					case "assistant":
+						usage.set(event.messageId ?? `unnamed-${unnamed++}`, event.message.usage);
+						seen.model = event.message.model;
+						for (const part of event.message.content) {
+							if (part.type === "toolCall" && part.name === "Bash" && typeof part.arguments.command === "string") calls.set(part.id, { command: part.arguments.command, startedAt: this.#now() });
+						}
+						break;
+					case "tool_result":
+						this.#testRun(calls.get(event.message.toolCallId), event.message);
+						break;
+					case "auth_failed":
+						seen.authFailed = event.message;
+						break;
+					case "result":
+						seen.result = event;
+						seen.sessionId = event.sessionId ?? seen.sessionId;
+						break;
+				}
+				try {
+					await this.#deps.onEvent?.(event);
+				} catch (error) {
+					console.warn(JSON.stringify({ event: "pim.coding.harness_event_failed", harness: harness.id, error: String(error) }));
+				}
+			}
+			seen.lines++;
+			this.#keep({ ...this.#record!, lines: seen.lines });
+		};
+
+		if (!this.#aborted) {
+			const env = { HOME: HARNESS_HOME, ...harnessEnv(harness.id), ...harness.env, ...(auth.mode === "env" ? auth.env : {}) };
+			const grace = this.#deps.graceMs ?? INTERRUPT_GRACE_MS;
+			const timer = setTimeout(() => {
+				this.#timedOut = true;
+				void this.#interrupt();
+			}, timeoutMs);
+			try {
+				// The workspace's own timeout is the last resort, past the grace the CLI gets after SIGINT.
+				for await (const event of workspace.exec(harness.buildCommand(turn), { cwd: `${HARNESS_HOME}/repo`, env, timeoutMs: timeoutMs + 2 * grace, signal: this.#controller.signal })) {
+					if (event.type === "stdout") for (const line of lines.push(event.data)) await handle(line);
+					else if (event.type === "stderr") seen.stderr = (seen.stderr + event.data).slice(-STDERR_TAIL);
+					else if (event.type === "exit") seen.exit = event;
+				}
+				for (const line of lines.flush()) await handle(line);
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+
+		const { sessionId, model, result, authFailed, stderr, exit, lines: count } = seen;
+		const ended = (reason: RunFailure, detail: string): RunResult => ({ status: "unanswered", reason, detail, sessionId, sessionCostUsd: result?.sessionCostUsd ?? null, usage: sum(usage), model, lines: count });
+		if (this.#aborted) return ended("aborted", "Stopped");
+		if (this.#timedOut || exit?.timedOut) return ended("timeout", `The turn ran out of time after ${Math.round(timeoutMs / 60_000)} minutes`);
+		if (authFailed !== null) return ended("login_required", `${harness.name} isn't signed in: connect it again`);
+		if (result) {
+			if (result.ok) return { status: "done", sessionId, sessionCostUsd: result.sessionCostUsd, usage: sum(usage), model, lines: count };
+			if (result.reason === "budget") return ended("budget", "The turn reached its budget");
+			if (result.reason === "max_turns") return ended("max_turns", "The turn reached its most steps");
+			return ended("harness_error", redact([...result.errors, result.text ?? ""].join("\n").trim()).slice(0, 500) || `${harness.name} reported an error`);
+		}
+		const how = exit === null ? "ended without an exit" : exit.code === null ? "was killed" : `exited ${exit.code}`;
+		return ended("harness_error", `${harness.name} ${how} without a result${stderr.trim() ? `: ${redact(stderr.trim()).slice(-500)}` : ""}`);
+	}
+
+	/** Records a run of tests: a shell command that runs a test runner, or printed a test summary. */
+	#testRun(call: { command: string; startedAt: number } | undefined, message: { content: readonly { type: string; text?: string }[]; isError: boolean }): void {
+		if (!call || !this.#deps.onTestRun) return;
+		const output = message.content.flatMap((part) => (part.type === "text" && typeof part.text === "string" ? [part.text] : [])).join("\n");
+		const summary = parseTestSummary(output) ?? null;
+		if (!summary && !TEST_COMMAND.test(call.command)) return;
+		const code = EXIT_CODE.exec(output);
+		this.#deps.onTestRun({
+			command: call.command,
+			exitCode: code ? Number(code[1]) : message.isError ? 1 : 0,
+			timedOut: false,
+			startedAt: call.startedAt,
+			durationMs: Math.max(0, this.#now() - call.startedAt),
+			summary,
+			output: redact(output).slice(-8000),
+		});
+	}
+
+	/** SIGINT to the CLI, then, after the grace, the command killed outright. Once per run. */
+	#interrupt(): Promise<void> {
+		this.#interrupted ??= (async () => {
+			const record = this.#record;
+			if (!record || !this.#running) {
+				this.#controller.abort();
+				return;
+			}
+			await signal(this.#deps, record.sessionId, "INT");
+			const grace = this.#deps.graceMs ?? INTERRUPT_GRACE_MS;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			await Promise.race([new Promise((resolve) => (timer = setTimeout(resolve, grace))), this.#ended]);
+			clearTimeout(timer);
+			if (!this.#running) return;
+			this.#controller.abort(new Error("The harness didn't stop after SIGINT"));
+			await signal(this.#deps, record.sessionId, "KILL");
+		})();
+		return this.#interrupted;
+	}
+
+	#keep(record: RunRecord): void {
+		this.#record = record;
+		this.#deps.journal.save(record);
+	}
+
+	/** Writes the login back and lets the lock go, each even if the one before failed, then forgets the run. */
+	async #finish(): Promise<void> {
+		const record = this.#record;
+		if (!record) return;
+		try {
+			await cleanUp(this.#deps, record);
+		} finally {
+			this.#record = null;
+		}
+	}
+}
+
+/**
+ * Finishes a run that a restart of the thread cut off: the CLI, which may
+ * still be running in the workspace, is killed, the login written back and
+ * the lock let go. The turn ended `interrupted`: whatever the CLI did after
+ * the thread stopped reading it isn't known, and isn't claimed.
+ */
+export async function recoverRun(deps: Pick<RunnerDeps, "harness" | "workspace" | "credentials" | "lock" | "journal">, record: RunRecord): Promise<RunResult> {
+	await signal(deps, record.sessionId, "KILL");
+	await cleanUp(deps, record);
+	return {
+		status: "unanswered",
+		reason: "interrupted",
+		detail: `The thread restarted while ${deps.harness.name} ran, after ${record.lines} lines of its output; its turn was stopped`,
+		sessionId: null,
+		sessionCostUsd: null,
+		usage: NO_USAGE,
+		model: null,
+		lines: record.lines,
+	};
+}
+
+async function cleanUp(deps: Pick<RunnerDeps, "harness" | "credentials" | "lock" | "journal">, record: RunRecord): Promise<void> {
+	try {
+		if (record.restored) await deps.credentials.writeBack(record.restored);
+	} catch (error) {
+		console.warn(JSON.stringify({ event: "pim.coding.harness_write_back_failed", harness: deps.harness.id, error: error instanceof Error ? error.name : "unknown" }));
+	} finally {
+		try {
+			if (record.locked) await deps.lock.release();
+		} finally {
+			deps.journal.clear();
+		}
+	}
+}
+
+/** Sends a signal to the CLI by its session id; best-effort, as the process may be gone. */
+async function signal(deps: Pick<RunnerDeps, "harness" | "workspace">, sessionId: string, name: "INT" | "KILL"): Promise<void> {
+	try {
+		for await (const _ of deps.workspace.exec(deps.harness.signalCommand(sessionId, name), { timeoutMs: 10_000 })) {
+		}
+	} catch (error) {
+		console.warn(JSON.stringify({ event: "pim.coding.harness_signal_failed", harness: deps.harness.id, signal: name, error: String(error) }));
+	}
+}
+
+function sum(usage: Map<string, HarnessUsage>): HarnessUsage {
+	let total = NO_USAGE;
+	for (const each of usage.values()) {
+		total = { input: total.input + each.input, output: total.output + each.output, cacheRead: total.cacheRead + each.cacheRead, cacheWrite: total.cacheWrite + each.cacheWrite };
+	}
+	return total;
+}

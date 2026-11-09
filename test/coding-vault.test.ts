@@ -12,7 +12,10 @@ import { MAX_SEALED_BYTES } from "../src/coding/vault/store";
 import { CodingVault, codingVault, type Ownership, spaceVaultBackend, threadOwnership } from "../src/coding/vault/vault";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
+import { fakeRemotes } from "./fake-git";
+import { codesGiven, GOOD_CODE, LOGIN_URL, loginRuns, SAVED_LOGIN } from "./fake-claude-login";
 import { api, apiUrl, OWNER, TOKEN } from "./helpers";
+import { codingLogins } from "./worker";
 
 // The coding vault: the sealed archive of a harness CLI's login, kept in each person's own space and put only into
 // their own workspaces. The login's bytes carry MARKER, which must never reach a response or a log line.
@@ -381,5 +384,88 @@ describe("the API", () => {
 		// No route writes or reads a login's contents.
 		expect((await api("/coding/vault/codex", { method: "PUT", body: "{}" })).status).toBe(405);
 		expect((await api("/coding/vault/codex/blob")).status).toBe(404);
+	});
+});
+
+describe("signing in to Claude Code", () => {
+	// Sign-ins run Claude Code's own `claude auth login` in a workspace of the person's; here a fake of it
+	// (test/fake-claude-login.ts) that prints a URL and saves a login for one code. Neither the code nor the login it
+	// saves may reach a log line, and nothing but the URL of what it prints reaches a response.
+	const login = (path = "", init: RequestInit = {}) => api(`/coding/vault/claude-code/login${path}`, init);
+	const send = (code: unknown) => login("/code", { method: "POST", body: JSON.stringify({ code }) });
+	const loginWorkspaces = () => codingLogins.backing.list();
+
+	afterEach(() => {
+		const said = logged.join("\n");
+		expect(said).not.toContain(GOOD_CODE);
+		expect(said).not.toContain("sk-ant-");
+	});
+
+	it("relays the CLI's sign-in URL and the pasted code, keeps the login the CLI saved, and deletes the workspace", async () => {
+		const runs = loginRuns.length;
+		const started = await login("", { method: "POST" });
+		expect(started).toEqual({ status: 200, body: { harness: "claude-code", state: "waiting_code", url: LOGIN_URL, error: null } });
+		expect((await login()).body).toMatchObject({ state: "waiting_code", url: LOGIN_URL });
+		// The CLI ran wrapped so its standard input is the code once written, with its config directory and no telemetry, in a
+		// workspace that may reach only Anthropic.
+		const run = loginRuns[runs]!;
+		expect(run.cmd.slice(-3)).toEqual(["claude", "auth", "login"]);
+		expect(run.env).toMatchObject({ HOME: "/workspace", CLAUDE_CONFIG_DIR: "/workspace/.claude", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
+		const [workspace] = await loginWorkspaces();
+		expect(workspace!.ref.sessionId).toMatch(/^login-claude-code-/);
+		const spec = (await codingLogins.backing.get(workspace!.ref)) as unknown as { spec: WorkspaceSpec };
+		expect(spec.spec.egress.allow).toEqual(["api.anthropic.com", "claude.ai", "platform.claude.com"]);
+
+		const connected = await send(`  ${GOOD_CODE} `);
+		expect(connected).toEqual({ status: 200, body: { harness: "claude-code", state: "connected", url: LOGIN_URL, error: null } });
+		expect(codesGiven.at(-1)).toBe(`${GOOD_CODE}\n`);
+		expect((await api("/coding/vault/claude-code")).body).toMatchObject({ connected: true });
+		const files = (await codingVault(env).load(OWNER, "claude-code")).files!;
+		expect(files.map((file) => [file.path, file.mode])).toEqual([
+			[".claude.json", 0o600],
+			[".credentials.json", 0o600],
+		]);
+		expect(text(files.find((file) => file.path === ".credentials.json"))).toBe(SAVED_LOGIN);
+		expect(await loginWorkspaces()).toEqual([]);
+		expect(JSON.stringify(connected.body)).not.toContain("sk-ant-");
+	});
+
+	it("fails on a code the CLI refuses, saving nothing, and can start again; a sign-in can be cancelled", async () => {
+		await login("", { method: "POST" });
+		const refused = await send("wrong#code");
+		expect(refused.body).toMatchObject({ state: "failed", url: null, error: expect.stringContaining("check the code") });
+		expect((await api("/coding/vault/claude-code")).body).toMatchObject({ connected: false });
+		expect(await loginWorkspaces()).toEqual([]);
+		// Codes that can't be one never reach the CLI.
+		for (const code of ["", "   ", "two\nlines", 42, "x".repeat(5000)]) expect((await send(code)).status).toBe(400);
+		expect((await send(GOOD_CODE)).body).toMatchObject({ state: "failed" });
+
+		expect((await login("", { method: "POST" })).body).toMatchObject({ state: "waiting_code" });
+		expect(await loginWorkspaces()).toHaveLength(1);
+		expect((await login("", { method: "DELETE" })).body).toEqual({ harness: "claude-code", state: "none", url: null, error: null });
+		expect(await loginWorkspaces()).toEqual([]);
+		expect((await send(GOOD_CODE)).body).toMatchObject({ state: "none", error: expect.stringContaining("start again") });
+		// Codex's sign-in isn't relayed yet, and a guest has no logins.
+		expect((await api("/coding/vault/codex/login", { method: "POST" })).status).toBe(404);
+	});
+
+	it("goes on with the person's threads that waited for the login once they sign in", async () => {
+		fakeRemotes.set("https://pim.test/api/coding/git/acme/demo.git", { "README.md": "# Demo\n" });
+		const { status, body } = await api("/coding/threads", { method: "POST", body: JSON.stringify({ repo: "https://github.com/acme/demo", task: "Fix it", harness: "claude-code" }) });
+		expect(status).toBe(201);
+		const id = (body as { id: string }).id;
+		const view = async () => (await api<{ state: string; stateReason: string | null }>(`/coding/threads/${id}`)).body;
+		await vi.waitFor(async () => expect(await view()).toMatchObject({ state: "waiting_input", stateReason: "login_required" }), { timeout: 10_000, interval: 50 });
+		await login("", { method: "POST" });
+		expect((await send(GOOD_CODE)).body).toMatchObject({ state: "connected" });
+		// It went on: its task started a turn with the login now in the vault.
+		await vi.waitFor(
+			async () => {
+				const log = (await api<{ events: { kind: string }[] }>(`/coding/threads/${id}/log`)).body.events;
+				expect(log.map((event) => event.kind)).toContain("thread.turn_started");
+			},
+			{ timeout: 10_000, interval: 50 },
+		);
+		await api(`/coding/threads/${id}/archive`, { method: "POST" });
 	});
 });

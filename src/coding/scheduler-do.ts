@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { cliHarness } from "./harness";
+import { HarnessLoginFlow, type LoginStatus } from "./harness/login";
 import { DEFAULT_SPACE_CAP, type ManagerHealth, ProviderCapacity } from "./provider-capacity";
 import {
 	type AdmissionConditions,
@@ -14,6 +16,10 @@ import {
 	type Sweep,
 } from "./scheduler";
 import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRegistration } from "./thread-index";
+import type { Harness } from "./vault/harnesses";
+import { codingVault } from "./vault/vault";
+import { DEFAULT_WORKSPACE_IMAGE, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
+import type { WorkspaceRef } from "./workspace/types";
 
 /**
  * A space's coding scheduler (./scheduler.ts) in a Durable Object of its
@@ -40,15 +46,23 @@ import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRe
  * second time.
  *
  * It also keeps the space's list of its threads (./thread-index.ts), which
- * says which threads are the space's.
+ * says which threads are the space's, and the person's lock on each CLI
+ * harness's login (`acquireHarness`), so only one of their threads runs a
+ * harness with their subscription at a time. And it hosts the person's
+ * sign-in to a harness (`harnessLoginStart`, ./harness/login.ts), whose
+ * CLI waits in a workspace between their requests: one per harness, kept
+ * in this object's memory, so a restart ends it and deletes its workspace.
  */
 export class CodingSchedulerDO extends DurableObject<Env> {
 	readonly #scheduler: CodingScheduler;
 	readonly #threads: CodingThreadIndex;
+	/** The person's sign-ins under way, by harness. */
+	readonly #logins = new Map<Harness, HarnessLoginFlow>();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.storage.sql.exec(OUTBOX_SCHEMA);
+		ctx.storage.sql.exec(HARNESS_LOCK_SCHEMA);
 		this.#scheduler = new CodingScheduler(ctx.storage.sql, {
 			transaction: (work) => ctx.storage.transactionSync(work),
 			now: () => this.now(),
@@ -60,6 +74,11 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	/** The clock the scheduler and its alarm go by. */
 	protected now(): number {
 		return Date.now();
+	}
+
+	/** The workspace backends sign-ins make their workspace with: the deployment's, as threads use. */
+	protected loginProviders(): WorkspaceProviderRegistry {
+		return workspaceBackends(this.env);
 	}
 
 	/** Who hears of what happens to threads: each thread's own Durable Object (./thread-do.ts). */
@@ -173,6 +192,109 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	/** The space's threads, newest first, each with its place in the queue while it waits. */
 	threads(): (IndexedThread & { readonly queue: QueuePlace | null })[] {
 		return this.#threads.list().map((thread) => ({ ...thread, queue: this.#scheduler.position(thread.threadId) }));
+	}
+
+	/**
+	 * Takes the space's lock on a harness's login for `holder`, a thread, for
+	 * at most `ttlMs`: true when it is free, expired or already the holder's
+	 * (which renews it), false while another thread holds it.
+	 */
+	acquireHarness(harness: string, holder: string, ttlMs: number): boolean {
+		const now = this.now();
+		const held = this.ctx.storage.sql.exec("SELECT holder, expires_at FROM pim_coding_harness_lock WHERE harness = ?", harness).toArray()[0];
+		if (held && held.holder !== holder && Number(held.expires_at) > now) return false;
+		this.ctx.storage.sql.exec(
+			"INSERT INTO pim_coding_harness_lock (harness, holder, expires_at) VALUES (?, ?, ?) ON CONFLICT (harness) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at",
+			harness,
+			holder,
+			now + ttlMs,
+		);
+		return true;
+	}
+
+	/** Lets the lock go, if `holder` holds it. */
+	releaseHarness(harness: string, holder: string): void {
+		this.ctx.storage.sql.exec("DELETE FROM pim_coding_harness_lock WHERE harness = ? AND holder = ?", harness, holder);
+	}
+
+	/**
+	 * Starts the person's sign-in to `harness` with their subscription, in a
+	 * workspace of theirs, ending one already under way: answers with the URL
+	 * to open once the CLI printed it.
+	 */
+	async harnessLoginStart(userId: string, harness: Harness): Promise<LoginStatus> {
+		await this.#forgetLogin(harness);
+		const cli = cliHarness(harness);
+		if (!cli?.login) return { harness, state: "failed", url: null, error: "This harness has no sign-in Pim can relay" };
+		let provider: ReturnType<WorkspaceProviderRegistry["get"]>;
+		try {
+			const registry = this.loginProviders();
+			provider = registry.get(registry.defaultId() ?? "none");
+		} catch (error) {
+			return { harness, state: "failed", url: null, error: error instanceof Error ? error.message : String(error) };
+		}
+		const flow = new HarnessLoginFlow({
+			harness: cli,
+			userId,
+			provider,
+			image: DEFAULT_WORKSPACE_IMAGE,
+			vault: codingVault(this.env),
+			remember: (ref) => this.#rememberLogin(harness, ref),
+			onConnected: async () => this.#resumeWaiting(harness),
+		});
+		this.#logins.set(harness, flow);
+		return flow.start();
+	}
+
+	/** Where the person's sign-in to `harness` is. */
+	harnessLoginStatus(harness: Harness): LoginStatus {
+		return this.#logins.get(harness)?.status() ?? { harness, state: "none", url: null, error: null };
+	}
+
+	/** Hands the code the person pasted to the sign-in under way. */
+	async harnessLoginCode(harness: Harness, code: string): Promise<LoginStatus> {
+		const flow = this.#logins.get(harness);
+		if (!flow) return { harness, state: "none", url: null, error: "No sign-in is under way: start again" };
+		return flow.submit(code);
+	}
+
+	/** Ends the person's sign-in to `harness`, deleting its workspace. */
+	async harnessLoginCancel(harness: Harness): Promise<LoginStatus> {
+		await this.#forgetLogin(harness);
+		return { harness, state: "none", url: null, error: null };
+	}
+
+	/** Ends a sign-in under way, and deletes a workspace a sign-in left behind when this object restarted. */
+	async #forgetLogin(harness: Harness): Promise<void> {
+		const flow = this.#logins.get(harness);
+		this.#logins.delete(harness);
+		if (flow) await flow.cancel();
+		const left = this.ctx.storage.sql.exec("SELECT ref FROM pim_coding_harness_login WHERE harness = ?", harness).toArray()[0];
+		if (!left) return;
+		const ref = JSON.parse(String(left.ref)) as WorkspaceRef;
+		try {
+			await this.loginProviders().get(ref.providerId).destroy(ref);
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.harness_login_destroy_failed", harness, error: String(error) }));
+		}
+		this.#rememberLogin(harness, null);
+	}
+
+	#rememberLogin(harness: Harness, ref: WorkspaceRef | null): void {
+		if (ref) this.ctx.storage.sql.exec("INSERT INTO pim_coding_harness_login (harness, ref) VALUES (?, ?) ON CONFLICT (harness) DO UPDATE SET ref = excluded.ref", harness, JSON.stringify(ref));
+		else this.ctx.storage.sql.exec("DELETE FROM pim_coding_harness_login WHERE harness = ?", harness);
+	}
+
+	/** Goes on with the person's threads that waited for their login to `harness`, now that they signed in. */
+	#resumeWaiting(harness: Harness): void {
+		const waiting = this.#threads.list().filter((thread) => thread.harness === harness && thread.state === "waiting_input" && thread.stateReason === "login_required");
+		const at = this.now();
+		for (const thread of waiting) {
+			const resumed = this.env.CodingThread.getByName(thread.threadId)
+				.continue({ operationId: `login-${at}` })
+				.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.harness_resume_failed", thread: thread.threadId, error: String(error) })));
+			this.ctx.waitUntil(resumed);
+		}
 	}
 
 	recordDuration(ms: number): void {
@@ -317,6 +439,19 @@ CREATE TABLE IF NOT EXISTS pim_coding_outbox (
 	created_at INTEGER NOT NULL,
 	attempts INTEGER NOT NULL DEFAULT 0,
 	dead INTEGER NOT NULL DEFAULT 0
+);
+`;
+
+/** Which thread holds the person's login for each harness, until when; and the workspace of each sign-in under way, to delete after a restart. */
+const HARNESS_LOCK_SCHEMA = `
+CREATE TABLE IF NOT EXISTS pim_coding_harness_lock (
+	harness TEXT PRIMARY KEY,
+	holder TEXT NOT NULL,
+	expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pim_coding_harness_login (
+	harness TEXT PRIMARY KEY,
+	ref TEXT NOT NULL
 );
 `;
 

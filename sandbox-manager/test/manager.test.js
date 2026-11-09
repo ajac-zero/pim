@@ -613,19 +613,38 @@ describe('with the real workspace-agentd', () => {
 	})
 	test('a client that drops exec/stream kills that command', async () => {
 		const ac = new AbortController()
-		const res = await fetch(`${base}/sessions/abc-1/exec/stream`, { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer t0ken' }, body: JSON.stringify({ cmd: ['sh', '-c', 'echo start; sleep 60 & echo $!; wait'], timeoutMs: 60000 }) })
-		assert.equal(res.headers.get('content-type'), 'application/x-ndjson')
-		const reader = res.body.getReader()
-		let text = ''
-		while (text.split('\n').length < 3) text += new TextDecoder().decode((await reader.read()).value)
-		const lines = text.trim().split('\n').map((l) => JSON.parse(l))
-		assert.deepEqual(lines[0], { type: 'stdout', data: 'start\n' })
-		const pid = Number(lines.map((l) => l.data).join('').split('\n')[1])
-		assert.ok(alive(pid))
-		ac.abort()
+		let pid
+		try {
+			const res = await fetch(`${base}/sessions/abc-1/exec/stream`, { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer t0ken' }, body: JSON.stringify({ cmd: ['sh', '-c', 'echo start; sleep 60 & echo $!; wait'], timeoutMs: 20000 }) })
+			assert.equal(res.headers.get('content-type'), 'application/x-ndjson')
+			// Neither the NDJSON lines nor the stdout events line up with reads: buffer both until the pid line is complete.
+			const decoder = new TextDecoder()
+			let ndjson = ''
+			let stdout = ''
+			for await (const chunk of res.body) {
+				ndjson += decoder.decode(chunk, { stream: true })
+				const lines = ndjson.split('\n')
+				ndjson = lines.pop()
+				for (const line of lines.filter(Boolean)) {
+					const ev = JSON.parse(line)
+					assert.notEqual(ev.type, 'exit', 'the command ended early')
+					if (ev.type === 'stdout') stdout += ev.data
+				}
+				const m = /^start\n(\d+)\n/.exec(stdout)
+				if (m) {
+					pid = Number(m[1])
+					break
+				}
+			}
+			assert.ok(pid && alive(pid), `no live pid in ${JSON.stringify(stdout)}`)
+		} finally {
+			ac.abort()
+		}
 		const end = Date.now() + 8000
 		while (alive(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
-		assert.ok(!alive(pid), 'the command outlived the client')
+		const survived = alive(pid)
+		if (survived) process.kill(pid, 'SIGKILL')
+		assert.ok(!survived, 'the command outlived the client')
 	})
 	test('files round-trip and symlink escapes are refused', async () => {
 		assert.equal((await call('PUT', '/sessions/abc-1/files?path=d/a.txt', 'héllo')).status, 200)

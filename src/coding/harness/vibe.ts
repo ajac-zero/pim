@@ -88,6 +88,7 @@ export const mistralVibe: CliHarness = {
 		];
 	},
 	parser: (turn) => new VibeStreamParser(turn),
+	reportsCost: true,
 	shellTool: "file_system.bash",
 	// Only what a run needs: the model's API. These override any config file, the person's or one the agent wrote.
 	env: {

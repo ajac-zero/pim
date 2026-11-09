@@ -18,6 +18,13 @@ export type HarnessTurn = {
 	readonly resume: boolean;
 	/** The most the turn may spend, in dollars, as the CLI estimates it; the thread's budget left. */
 	readonly maxBudgetUsd: number;
+	/**
+	 * For a CLI that estimates no cost (`reportsCost: false`), the most
+	 * tokens the turn may use: what is left of the thread's token ceiling,
+	 * which stands in for its budget (../thread-do.ts). Null for a CLI that
+	 * estimates cost.
+	 */
+	readonly maxTokens: number | null;
 	/** The model to ask for, or null for the CLI's own default. */
 	readonly model: string | null;
 	/** Text appended to the CLI's own system prompt: what Pim tells every coding agent. */
@@ -131,6 +138,12 @@ export interface CliHarness {
 	buildCommand(turn: HarnessTurn): string[];
 	/** A parser for one turn's output. */
 	parser(turn: HarnessTurn): HarnessParser;
+	/**
+	 * Whether the CLI estimates what its session cost in dollars
+	 * (`sessionCostUsd`). One that doesn't has the thread's budget kept as a
+	 * ceiling on its tokens instead (`maxTokens`).
+	 */
+	readonly reportsCost: boolean;
 	/** The name of the CLI's shell tool in the transcript, whose commands may be test runs. */
 	readonly shellTool: string;
 	/** Environment the CLI always runs with, besides its config directory: such as turning its telemetry off. */
@@ -143,6 +156,12 @@ export interface CliHarness {
 	 * pressing Ctrl-C does, so the CLI records it; SIGKILL when it doesn't.
 	 */
 	signalCommand(sessionId: string, signal: "INT" | "KILL"): string[];
+	/**
+	 * What the CLI prints on its error output when it exits without a result
+	 * because its login or key was refused, for a CLI that says so only
+	 * there (Amp).
+	 */
+	readonly loginFailure?: RegExp;
 	/** The CLI's own sign-in with a subscription, where it has one Pim can relay. */
 	readonly login?: HarnessLoginFlow;
 	/**

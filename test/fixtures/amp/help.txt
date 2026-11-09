@@ -1,0 +1,546 @@
+Amp CLI
+
+Usage: amp [options] [command]
+
+Commands:
+
+  version                              Print the version number and exit
+  logout                               Remove a saved Amp account
+  account                              Manage saved Amp accounts
+    list                               List saved accounts
+    switch                             Choose the account for future CLI commands
+  login                                Log in to Amp
+  orb                                  Commands for Amp-managed orbs
+    provider                           Run self-hosted orbs from inside your network by pulling lifecycle jobs from Amp
+                                       over HTTPS
+      create                           Create a self-hosted orb provider and save its token with your Amp credentials,
+                                       where amp orb provider reads it
+    bootstrap                          Connect this orb to its thread actor
+    system-metrics                     Print historical orb system metrics for a thread URL or ID
+    portal                             Register a portal for an existing process and print its URL; use "amp orb service
+                                       start" for long-lived servers
+      access                           Set portal access
+      list                             List the thread's portals that have a custom hostname or public access
+    service                            [alias: services] Manage long-lived services (dev servers, watchers) as
+                                       supervised processes that survive Amp CLI updates and restart on failure
+      ensure                           Ensure every service declared in .amp/services.yaml is running and exposed at its
+                                       portal URLs
+      start                            Start an undeclared ad-hoc supervised service, e.g.: amp orb service start
+                                       preview --command 'pnpm dev' --portal
+      restart                          Restart a declared service from .amp/services.yaml or reload an existing ad-hoc
+                                       service
+      stop                             Stop a service
+      status                           Show supervisor status for a service
+      logs                             Show recent logs for a service
+      list                             List orb services
+    simulator                          Work with the iOS Simulator on macOS
+      serve                            Serve one booted iOS Simulator as an interactive web page
+    desktop                            Work with the orb Desktop shown in the Desktop tab of the thread
+      ensure                           Start the Desktop and its Google Chrome if needed and print the Chrome DevTools
+                                       endpoint for agent-browser --cdp
+    restart-processes                  Refresh environment variables and restart all processes in an orb thread
+    id-token                           Mint a short-lived OIDC token with a caller-chosen audience and print it to
+                                       stdout
+    redact-output                      Copy stdin to stdout with secrets redacted: known token formats, the thread's
+                                       secret values, and the values of the environment variables named in
+                                       AMP_SECRET_ENV_NAMES (comma-separated)
+  portal                               Commands for accessing Amp portal URLs
+    login-url                          Mint a single-use login URL (valid ~60s) that signs a non-browser client into an
+                                       Amp portal URL; fetching it once sets the portal session cookie and redirects to
+                                       the portal page
+  net                                  Orb Network Routing: send an orb’s outbound traffic through an exit node on your
+                                       own machine (for example a residential connection)
+    exit-node                          Run this machine as an exit node for your orbs: it appears in your runner list
+                                       and any orb thread you own can route through it with `amp net route`
+    route                              In an orb: send this orb’s traffic through one of your exit nodes (by ID or
+                                       hostname). With no argument, list available exit nodes.
+    status                             In an orb: show whether Amp Net is configured and which exit node is connected
+    ping                               In an orb: measure the round trip from this orb to the connected exit node
+    run                                In an orb: run one command with its network traffic sent through the exit node,
+                                       without changing orb-wide configuration
+  profile                              Amp Profiles: the orb Desktop Chrome’s sign-ins, saved passwords, and site data,
+                                       saved by Amp so they follow you across orbs
+    list                               List your profiles with their IDs and mark the one this orb uses
+    create                             Create an empty profile
+    rename                             Rename a profile; threads using it keep using it
+    delete                             [alias: rm] Delete a profile with its saved sign-ins and site data; threads using
+                                       it switch to a clean profile
+    use                                Use a profile in this orb’s Chrome; Chrome restarts with it. Waits until it is
+                                       applied. Only profiles allowed for the agent in Settings › Profiles can be used
+                                       this way.
+    none                               Stop using a profile; Chrome restarts with a clean profile
+    status                             Show which profile this orb uses and when it was last saved
+  runner                               Inspect and change the amp --no-tui runners on this machine
+    list                               List the running runners on this machine and the directories they serve
+    dirs                               Change the directories a running runner serves, without restarting it
+      add                              Start serving one or more directories; they are served again after the runner
+                                       restarts
+      remove                           Stop serving one or more directories added with `amp runner dirs add`
+      list                             List the directories a running runner serves
+    desktop                            Inspect or allow desktop sharing for --no-tui --desktop runners
+      status                           Show desktop sharing readiness (macOS permissions, Linux programs)
+      allow                            Request Screen Recording or Accessibility permission
+  clone                                Clone an Amp-hosted Project, Personal Plugins or Skills repository, or Workspace
+                                       Plugins or Skills repository
+  git-setup                            Configure the Amp Git credential helper
+  files                                Download and unpublish Amp files
+    get                                Download a private Amp attachment
+    delete                             Unpublish a file you published, so its public URL stops working
+  top                                  Show live active threads
+  last                                 [alias: l] Continue the last thread
+  report-bug                           [alias: report, diagnostics] Report a bug with diagnostics from the amp --no-tui
+                                       runner in this directory
+  threads                              [alias: t, thread] Manage threads
+    new                                [alias: n] Create a new thread
+    continue                           [alias: c] Continue an existing thread
+    list                               [alias: l, ls] List all threads
+    usage                              Show usage information for a thread
+    context                            [alias: analyze-context] Analyze the current context for a thread
+    visibility                         [alias: v] Show or set default visibility for this repository (deprecated)
+    search                             [alias: find] Search threads
+    color                              Set a thread color
+    label                              Add labels to a thread
+    share                              [alias: s] Share a thread
+      multiplayer                      Turn multiplayer on or off
+        on                             Turn multiplayer on for the default duration (1 week)
+        off                            Turn multiplayer off
+        ttl                            Turn multiplayer on for a specific duration
+    import                             Import conversations from other coding agents as read-only Amp threads
+      detect                           Show which coding agents have conversations on this machine
+      codex                            Import Codex conversations from this machine
+      claude                           [alias: claude-code] Import Claude Code sessions from this machine
+      opencode                         Import OpenCode sessions from this machine
+      pi                               Import Pi sessions from this machine
+      conductor                        Import Conductor chats from this Mac
+    rename                             [alias: r] Rename a thread
+    archive                            Archive a thread
+    delete                             Delete a thread
+    markdown                           [alias: md] Render thread as markdown
+    export                             Export a thread as JSON
+    raw                                [alias: raw-thread] Export raw actor thread data as JSON
+  tools                                [alias: tool] Tool management commands
+    list                               [alias: ls] List all active tools (including MCP tools)
+    show                               Show details about an active tool
+  plugins                              [alias: plugin] Manage project, system, personal, and workspace plugins
+    add                                Install a plugin from a URL
+    remove                             [alias: rm] Remove an installed plugin
+    update                             Update installed plugins or one imported shared plugin
+    list                               [alias: ls] Load and list plugins in this command, not in a running Amp session
+    import                             Import a shared personal plugin into a plugin repository checkout
+    repositories                       [alias: repos] List available Personal Plugins and Workspace Plugins repositories
+    show-agent-options                 Show models and built-in tool names available to plugin agents
+    exec                               Execute a plugin with a given event
+    show-docs                          Output the plugin API documentation understood by this version of Amp
+  skill                                [alias: skills] Manage skills from shared references, Git repositories, or local
+                                       paths
+    add                                Install skills from a source
+    list                               [alias: ls] List all available skills
+    remove                             [alias: rm] Remove an installed skill
+    info                               Show information about a skill
+    repositories                       [alias: repos] List available Personal Skills and Workspace Skills repositories
+  permissions                          [alias: permission] Manage permissions
+    list                               [alias: ls] List permissions
+    test                               Test permissions
+    edit                               Edit permissions
+    add                                Add permission rule
+  mcp                                  Manage MCP servers
+    add                                Add an MCP server configuration
+    list                               List available MCP servers
+    remove                             Remove an MCP server configuration
+    remote                             Manage MCP servers saved to ampcode.com
+      list                             List stored remote MCP servers
+      add                              Add a stored remote MCP server
+      update                           Update a stored remote MCP server
+      remove                           Remove a stored remote MCP server
+      check                            Check a stored remote MCP server
+      tools                            List tools for a stored remote MCP server
+      login                            Log in to a stored remote MCP server
+      logout                           Log out of a stored remote MCP server
+    oauth                              Manage OAuth credentials for MCP servers in local CLI settings
+      login                            Register OAuth client credentials for an MCP server
+      logout                           Remove OAuth credentials for an MCP server
+      status                           Show OAuth status for an MCP server
+    doctor                             Check MCP server status
+    approve                            Approve a workspace MCP server
+  config                               Manage Amp configuration
+    edit                               Open the Amp settings file in $EDITOR
+    keymap                             List command keymap entries
+    model-providers                    Manage model provider keys and subscriptions
+      list                             List model provider keys and subscriptions in priority order
+      activate                         Activate a model provider key (subscriptions other than ChatGPT replace the
+                                       active connection of the same type)
+      deactivate                       Deactivate a model provider key
+      set-priority                     Change where a connection sits in the model routing precedence order
+      show                             Show complete non-secret model provider connection data as JSON
+      delete                           Delete a model provider key or subscription
+      test                             Test a model provider key or subscription
+      check-access                     Check which model provider serves a model by running a small inference
+      add-router                       Add an AI model router and select the models routed through it
+      edit-router                      Edit an AI model router
+      add-key                          Add an Anthropic or OpenAI API key, or a connection that authenticates with
+                                       workload identity federation instead
+      setup-guide                      Explain how to obtain the credential a provider needs; for anthropic, openai, and
+                                       openrouter, the API key and the workload identity federation alternative
+      edit-key                         Edit a model provider API key: its name, model mapping, or, for anthropic and
+                                       openai, its credential
+      add-chatgpt-subscription         Link your ChatGPT subscription to Amp as a model provider by signing in with
+                                       ChatGPT in your browser
+      add-github-copilot-subscription  Connect your personal GitHub Copilot subscription in the browser
+    vocabulary                         Manage personal dictation vocabulary
+      show                             Show personal dictation vocabulary (default)
+      add                              Add terms without replacing existing vocabulary
+      set                              Replace personal dictation vocabulary; omit terms to clear it
+  domains                              Manage custom domains for sites
+    list                               List custom domains, statuses, and required DNS records
+    add                                Add a custom domain
+    check                              Request an immediate DNS and provisioning status check
+    remove                             [alias: rm] Remove a custom domain
+  projects                             Manage Amp projects
+    create                             Create an Amp-hosted project or map an existing Git repository
+    update                             Update project settings by ID, [@]namespace/name, or repository
+    list                               List projects accessible to you
+    status                             Show the project matched by this directory's git remotes
+    get                                Get a project by ID, [@]namespace/name, or repository
+    snapshots                          Manage a project’s shared orb snapshots
+      list                             List shared orb snapshots by project and orb size
+      delete                           [alias: rm] Delete all shared orb snapshots, or one orb size with --resource
+    gallery-media                      Manage a project’s Amp Store gallery media
+      get                              Print a project’s Amp Store gallery media as JSON
+      set                              Set a project’s Amp Store gallery media from a JSON array of
+                                       {"type":"image"|"video","url":"<Amp artifact URL>","width":N,"height":N} items
+    feedback-widget                    Manage a workspace project’s feedback widget
+      get                              Show whether the widget is on, its script tag, and its allowed origins
+      enable                           Turn the widget on and print its script tag
+      disable                          Turn the widget off; installed script tags stop working
+      add-origin                       Allow websites, such as https://example.com, to show the widget
+      remove-origin                    Stop allowing websites to show the widget
+    delete                             [alias: rm] Delete a project by ID, [@]namespace/name, or repository
+  spaces                               [alias: space] Create Spaces. To start a thread in a Space, run amp -x or amp -ox
+                                       with --space.
+    create                             Create a Space, as New Space does, and print its URL
+  oauth-clients                        Manage workspace External API OAuth clients
+    list                               List OAuth clients and client IDs
+    create                             Create a Sign in with Amp OAuth client
+    edit                               Edit a Sign in with Amp OAuth client
+  secrets                              Manage environment variables and secrets for orbs and boxes
+    list                               List secret and environment variable names
+    history                            Show the change history of secrets and environment variables, including deletions
+                                       (values are never shown)
+    get                                Get an environment variable value (secret values are never returned)
+    set                                Add or update a secret or environment variable
+    delete                             [alias: rm] Delete a secret or environment variable
+  svc                                  Call connected services and MCP servers through Amp
+    gmail                              Call the connected Gmail account
+      search_messages                  Search Gmail messages
+      read_message                     Read one Gmail message
+      list_labels                      List Gmail labels
+      modify_labels                    Modify Gmail message labels
+  usage                                Show your current Amp usage and credit balance
+  update                               [alias: up] Update Amp CLI
+  completions                          Print a shell completion script
+
+Options:
+
+  --visibility <visibility>
+      Set thread visibility (private, unlisted, workspace, group)
+  -V, --version
+      Print the version number and exit
+  -v
+      Alias for --version
+  --notifications
+      Enable notification alerts (audio locally, terminal bell over SSH or with AMP_FORCE_BEL; enabled by default when
+      not in execute mode)
+  --no-notifications
+      Disable notification alerts (audio locally, terminal bell over SSH or with AMP_FORCE_BEL; enabled by default when
+      not in execute mode)
+  --color
+      Enable color output (enabled by default if stdout and stderr are sent to a TTY)
+  --no-color
+      Disable color output (enabled by default if stdout and stderr are sent to a TTY)
+  --settings-file <value>
+      Custom settings file path (overrides the default location /workspace/.config/amp/settings.json)
+  --log-level <value>
+      Set log level (parent, children, category, sinks, parentSinks, filters, lowestLevel, contextLocalStorage)
+  --log-file <value>
+      Set log file location (overrides the default location /workspace/.cache/amp/logs/cli.log)
+  --ide
+      Enable IDE connection (default). When enabled, Amp automatically includes your open IDE's file and text selection
+      with every message.
+  --no-ide
+      Disable IDE connection
+  --mcp-config <value>
+      JSON configuration or file path for MCP servers to merge with existing settings
+  -m, --mode <value>
+      Set the agent mode (low, medium, high, ultra, claude-code, or a plugin mode by key or label, case-insensitive) —
+      controls the model, system prompt, and tool selection
+  --features <value>
+      Enable comma-separated thread features (known: fast, Faster serving for supported models, billed at a premium;
+      plaid, Ultrafast serving for GPT-6 Astra, billed at a steep premium; implies Fast on other models; pro, GPT-5.6
+      Pro mode (OpenAI API only, not supported by ChatGPT subscriptions))
+  --fast
+      Run new threads in Fast mode (faster serving for supported models, billed at a premium); alias for --features fast
+  --executor <value>
+      Run a new thread locally, in an orb, or on a runner (local, orb, runner:<id>)
+  --runner-dir <value>
+      With --executor runner:<id>, select one absolute directory served by the runner for the new thread. Defaults to
+      its starting directory; ignored when continuing a thread.
+  --no-tui
+      Run Amp without a TUI: serve remote thread creation requests for the current directory. Use --runner-id <id> to
+      set a stable runner ID.
+  --share
+      Share this --no-tui runner with your workspace while it is running.
+  --desktop
+      Share a desktop with threads served by this --no-tui runner: this Mac’s display, or a private virtual desktop on
+      Linux.
+  --share-network
+      Let your orbs browse the web through this --no-tui runner’s network connection.
+  --amp-env
+      Inject the Secrets & Env Vars configured on ampcode.com (workspace, project, and personal) into the shell
+      commands, MCP servers, and plugins of threads this --no-tui runner serves. They override variables of the runner
+      process.
+  --remote-control-terminal
+      Enable terminal access from ampcode.com for threads accessed across clients
+  --no-remote-control-terminal
+      Disable terminal access from ampcode.com for threads accessed across clients
+  -x, --execute [message]
+      Use execute mode, optionally with user message. In execute mode, agent will execute provided prompt (either as
+      argument, or via stdin). By default, only the last assistant message is printed. Enabled automatically when
+      redirecting stdout.
+  -ox, --orb-execute
+      When used with -x/--execute, execute in an async orb on the Amp server. The -ox shorthand enables both options.
+      With `threads continue`, sends the message to the existing thread so it runs on that thread’s own remote executor.
+  --attach <path>
+      With remote execute mode (such as -ox), upload a local file and add its URL to the message. Repeat the flag for
+      multiple files.
+  --project [project]
+      With the orb executor, run the new thread on this Amp project (namespace/name, owner/repo, or repository URL)
+      instead of inferring it from the current directory’s Git remotes.
+  --orb-size <size>
+      With the orb executor, use this size instead of the project default: one of a1.tiny, a1.small, a1.medium,
+      a1.large, a1.xxlarge, a1.3xlarge for Amp's orbs, or an orb type name configured on the workspace's self-hosted orb
+      provider.
+  --orb-provider <provider>
+      With --orb-execute, run the new orb on the workspace or personal orb provider with this name (as shown in
+      settings) or config ID, or 'builtin' for Amp's built-in provider. A workspace provider wins a name shared with a
+      personal one.
+  --profile <profile>
+      With --orb-execute, start the new orb's Desktop Chrome with this profile, by name or ID (see `amp profile list`).
+      The profile must allow the agent to select it.
+  --title <title>
+      With --execute, set the title of the new thread before starting the agent.
+  --stream-json
+      When used with --execute, output in Claude Code-compatible stream JSON format instead of plain text.
+  --stream-json-thinking
+      Include thinking blocks in stream JSON output (non-Claude Code extension). Implies --stream-json.
+  --stream-json-input
+      Read JSON Lines user messages from stdin. Requires both --execute and --stream-json.
+  --plugin-ready-timeout [seconds]
+      When used with --execute, how long to wait for plugins to become ready before running the turn, so plugin
+      lifecycle hooks (agent.start/agent.end) are not skipped. Off unless this flag is set; the bare flag uses 10. Max
+      300. Use 0 to disable.
+  --timings
+      With --execute, print startup and execution timings to stderr.
+  --no-archive-after-execute
+      When used with --execute on a new thread or with the review command, leave the thread unarchived after the command
+      finishes.
+  -l, --label <label>
+      Add a label to the thread created or continued by this command. Repeat the flag for multiple labels.
+  --space <space>
+      With --execute, add the thread created or continued by this command to this Space (its URL or ID). You must own
+      the Space or be able to post in it.
+
+Environment variables:
+
+  AMP_API_KEY                  Access token for Amp (see https://ampcode.com/settings/security#access-token)
+  AMP_URL                      URL for the Amp service (default is https://ampcode.com/)
+  AMP_LOG_LEVEL                Set log level (can also use --log-level)
+  AMP_LOG_FILE                 Set log file location (can also use --log-file)
+  AMP_REMOTE_CONTROL_TERMINAL  Enable (1) or disable (0) terminal access from ampcode.com when no CLI flag is supplied
+  AMP_SETTINGS_FILE            Set settings file path (can also use --settings-file, default:
+                               /workspace/.config/amp/settings.json)
+
+Examples:
+
+Start an interactive session:
+
+  $ amp
+
+Start an interactive session with a user message:
+
+  $ echo "commit all my unstaged changes" | amp
+
+Use execute mode (--execute or -x) to send a command to an agent, have it execute it, print only the agent's last message, and then exit:
+
+  $ amp -x "what file in this folder is in markdown format?"
+  All Markdown files in this folder:
+  - README.md (root)
+  - AGENT.md (root)
+  - Documentation (7 files in doc/)
+  - Various README.md files in subdirectories
+  Total: **13 Markdown files** found across the project.
+
+Stream JSON output and extract assistant text blocks with jq:
+
+  $ amp -x "what file in this folder is in markdown format?" --stream-json | jq -r 'select(.type=="assistant") | .message.content[] | select(.type=="text") | .text'
+
+Stream JSON output with thinking blocks and extract them with jq:
+
+  $ amp -x "what file in this folder is in markdown format?" --stream-json-thinking | jq -r 'select(.type=="assistant") | .message.content[] | select(.type=="thinking") | .thinking'
+
+Pipe data to the agent and send along a prompt in execute mode:
+
+  $ cat ~/.zshrc | amp -x "what does the 'beautiful' function do?"
+  The `beautiful` function creates an infinite loop that prints the letter "o" in cycling colors every 0.2 seconds.
+
+Execute a prompt from a file and store final assistant message output in a file (redirecting stdout is equivalent to providing -x/--execute):
+
+  $ amp < prompt.txt > output.txt
+
+Add an MCP server with a local command:
+
+  $ amp mcp add context7 -- npx -y @upstash/context7-mcp
+
+Add an MCP server with environment variables:
+
+  $ amp mcp add postgres --env PGUSER=orb -- npx -y @modelcontextprotocol/server-postgres postgresql://localhost/orbing
+
+Add a remote MCP server:
+
+  $ amp mcp add hugging-face https://huggingface.co/mcp
+
+Configuration:
+
+Amp can be configured using a JSON settings file located at /workspace/.config/amp/settings.json. All settings use the "amp." prefix.
+
+Settings reference:
+
+  amp.dangerouslyAllowAll
+      Disable all command confirmation prompts (agent will execute all commands without asking)
+  amp.defaultVisibility
+      Deprecated. Define default thread visibility per repository origin using mappings like "github.com/org/repo":
+      "workspace". Values: private, workspace, group.
+  amp.experimental.modes
+      Enable experimental agent modes by name
+  amp.fuzzy.alwaysIncludePaths
+      Glob patterns for paths that should always be included in fuzzy file search, even if gitignored
+  amp.git.commit.ampThread.enabled
+      Enable adding Amp-Thread trailer in git commits
+  amp.git.commit.coauthor.enabled
+      Enable adding Amp as co-author in git commits
+  amp.guardedFiles.allowlist
+      Array of file glob patterns that are allowed to be accessed without confirmation. Takes precedence over the
+      built-in denylist.
+  amp.keymap
+      Command shortcuts keyed by command ID. Values can be a shortcut string, an array of shortcuts, or null. User
+      keymap entries override workspace entries. Run "amp config keymap" to list all command IDs, descriptions, and
+      effective keys, with null for unbound commands.
+  amp.mcpServers
+      Model Context Protocol servers to connect to for additional tools
+  amp.network.timeout
+      How many seconds to wait for network requests to the Amp server before timing out
+  amp.notifications.enabled
+      Enable notification alerts when the agent completes tasks. Over SSH, or when AMP_FORCE_BEL is set, this sends a
+      terminal bell.
+  amp.notifications.system.enabled
+      Enable system notifications when terminal is not focused
+  amp.permissions
+      Permission rules for tool calls. See amp permissions --help
+  amp.proxy
+      Proxy URL used for both HTTP and HTTPS requests to the Amp server
+  amp.remoteThreadCreation.enabled
+      Let ampcode.com create new threads that open in the interactive Amp TUI on this machine, in the directory where it
+      was started
+  amp.runner.autoUpdate.enabled
+      Let `amp --no-tui` runners install CLI updates and restart into them once no thread is running there (at most once
+      every 12 hours). "amp.updates.mode": "disabled" also turns this off.
+  amp.runner.env.enabled
+      Inject the Secrets & Env Vars configured on ampcode.com (workspace, project, and personal) into the shell
+      commands, MCP servers, and plugins of threads an `amp --no-tui` runner serves. Same as starting the runner with
+      --amp-env.
+  amp.showCosts
+      Set to false to hide costs while working on a thread
+  amp.skills.disableClaudeCodeSkills
+      Disable skills from .claude/skills/, ~/.claude/skills/, and ~/.claude/plugins/cache/. Local Amp skill directories,
+      custom paths, built-in skills, Personal Skills, and Workspace Skills are not affected.
+  amp.skills.disableGlobalAgentsSkills
+      Disable skills from ~/.config/agents/skills/ and ~/.agents/skills/. ~/.config/amp/skills/, workspace
+      .agents/skills/, Claude Code directories, custom paths, built-in skills, Personal Skills, and Workspace Skills are
+      not affected.
+  amp.skills.path
+      Path to additional directories containing skills. Supports colon-separated paths (semicolon on Windows). Use ~ for
+      home directory. Relative paths resolve against the workspace root.
+  amp.terminal.animation
+      Set to false to disable terminal animations (or use the equivalent NO_ANIMATION=1 env var)
+  amp.terminal.copyOnSelect
+      Automatically copy selection to clipboard.
+  amp.terminal.detailsExpandedByDefault
+      Expand thinking and tool call details by default in the CLI transcript.
+  amp.thread.autoArchiveOnQuit
+      Automatically archive open CLI threads when quitting Amp
+  amp.tools.disable
+      Array of tool names to disable. Use 'builtin:toolname' to disable only the builtin tool with that name (allowing
+      an MCP server to provide a tool by that name).
+  amp.tools.enable
+      Array of tool name patterns to enable. Supports glob patterns (e.g., 'mcp__metabase__*'). If not set, all tools
+      are enabled. If set, only matching tools are enabled.
+  amp.updates.mode
+      Control update checking behavior: "warn" shows update notifications, "disabled" turns off checking, "auto"
+      automatically runs update.
+
+Example configuration:
+
+{
+  "amp.dangerouslyAllowAll": false,
+  "amp.defaultVisibility": {
+    "github.com/ampcode/amp": "workspace"
+  },
+  "amp.experimental.modes": [],
+  "amp.fuzzy.alwaysIncludePaths": [],
+  "amp.git.commit.ampThread.enabled": true,
+  "amp.git.commit.coauthor.enabled": true,
+  "amp.guardedFiles.allowlist": [],
+  "amp.keymap": {},
+  "amp.mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/allowed/dir"
+      ]
+    }
+  },
+  "amp.network.timeout": 30,
+  "amp.notifications.enabled": true,
+  "amp.notifications.system.enabled": true,
+  "amp.permissions": [
+    {
+      "tool": "Bash",
+      "action": "ask",
+      "matches": {
+        "cmd": [
+          "git push*",
+          "git commit*",
+          "git branch -D*",
+          "git checkout HEAD*"
+        ]
+      }
+    }
+  ],
+  "amp.remoteThreadCreation.enabled": false,
+  "amp.runner.autoUpdate.enabled": true,
+  "amp.runner.env.enabled": false,
+  "amp.showCosts": true,
+  "amp.skills.disableClaudeCodeSkills": false,
+  "amp.skills.disableGlobalAgentsSkills": false,
+  "amp.terminal.animation": true,
+  "amp.terminal.copyOnSelect": true,
+  "amp.terminal.detailsExpandedByDefault": false,
+  "amp.thread.autoArchiveOnQuit": false,
+  "amp.tools.disable": [
+    "browser_navigate",
+    "builtin:edit_file"
+  ],
+  "amp.updates.mode": "auto"
+}
+
+

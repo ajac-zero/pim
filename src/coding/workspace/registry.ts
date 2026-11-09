@@ -1,4 +1,5 @@
 import { CloudflareSandboxProvider, type SandboxLike } from "./cloudflare";
+import { ComposeWorkspaceProvider } from "./compose";
 import type { WorkspaceProvider } from "./types";
 
 /**
@@ -65,9 +66,12 @@ export function workspaceBackends(env: object): WorkspaceProviderRegistry {
 	const providers: WorkspaceProvider[] = [];
 	let missing = NO_BACKEND_MESSAGE;
 	if (managerUrl && managerToken) {
-		const compose = composeProvider(managerUrl, managerToken);
-		if (compose) providers.push(compose);
-		else missing = "PIM_CODING_MANAGER_URL is set, but this build of Pim has no Compose workspace provider yet, so coding threads have no workspace backend.";
+		try {
+			providers.push(new ComposeWorkspaceProvider({ managerUrl, token: managerToken }));
+		} catch (error) {
+			// Such as a plain http URL to a public host: the provider says what is wrong, and never with the token.
+			missing = `PIM_CODING_MANAGER_URL can't be used, so coding threads have no workspace backend: ${error instanceof Error ? error.message : String(error)}.`;
+		}
 	} else if (managerUrl || managerToken) {
 		missing = `${managerUrl ? "PIM_CODING_MANAGER_TOKEN" : "PIM_CODING_MANAGER_URL"} isn't set, so coding threads have no workspace backend. Set both to use the sandbox manager.`;
 	}
@@ -78,15 +82,4 @@ export function workspaceBackends(env: object): WorkspaceProviderRegistry {
 	const registry = workspaceRegistry(providers, missing);
 	cached = { signature, registry };
 	return registry;
-}
-
-/**
- * The Compose sandbox manager's provider, or null in a build without it.
- *
- * TODO(coding): `ComposeWorkspaceProvider` (src/coding/workspace/compose.ts)
- * is on `review/coding-p1d1-compose-provider` and not merged yet. Once it is:
- * `return new ComposeWorkspaceProvider({ managerUrl, token });`
- */
-function composeProvider(_managerUrl: string, _token: string): WorkspaceProvider | null {
-	return null;
 }

@@ -8,13 +8,14 @@ import type { Workspace } from "../src/coding/workspace/types";
  * of the working tree. It keeps its
  * commits as files under `.git`, so a workspace's kept volume keeps them.
  * Remotes are `fakeRemotes`, by URL; cloning any other fails as a missing
- * repository does.
+ * repository does, printing the HTTP header it was given, as a verbose git
+ * prints what it sent.
  */
 
 /** The files each remote's default branch has, by URL. */
 export const fakeRemotes = new Map<string, Record<string, string>>();
 
-/** Each clone, with the environment git ran in. */
+/** Each clone tried, with the environment git ran in. */
 export const fakeClones: { url: string; env: Record<string, string> }[] = [];
 
 type Files = Record<string, string>;
@@ -46,8 +47,10 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 	switch (command) {
 		case "clone": {
 			const [url, dir] = rest.filter((arg) => !arg.startsWith("--"));
-			if (!url || !dir || !fakeRemotes.has(url)) return { stderr: `fatal: repository '${url}' not found\n`, code: 128 };
-			fakeClones.push({ url, env });
+			if (url) fakeClones.push({ url, env });
+			// Like git with GIT_CURL_VERBOSE, a failed clone prints the headers it sent, a token among them.
+			const sent = env.GIT_CONFIG_KEY_0 === "http.extraHeader" ? `> ${env.GIT_CONFIG_VALUE_0}\n` : "";
+			if (!url || !dir || !fakeRemotes.has(url)) return { stderr: `${sent}fatal: repository '${url}' not found\n`, code: 128 };
 			const root = dir.startsWith("/") ? dir : `${cwd}/${dir}`;
 			await write(workspace, `${root}/.git/origin`, url);
 			return {};

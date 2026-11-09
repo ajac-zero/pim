@@ -14,6 +14,8 @@ import type { HarnessAuth } from "./runner";
  * its egress needs come from `CodingThreadDO.modelGatewayEnv("claude-code")`
  * (../thread-do.ts), which is async and issues a token, so that task also
  * makes this function async and adds the host to the workspace's egress.
+ * Codex in that mode also needs its `CODEX_HOME` directory made first, which
+ * a restored login otherwise makes (../../../docs/coding-codex.md).
  */
 export function authEnv(_thread: CodingThreadRow): HarnessAuth {
 	return { mode: "subscription" };

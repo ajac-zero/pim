@@ -105,7 +105,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 | GET | `/coding/threads/:id/tests` | | `{ runs: [{ seq, command, exitCode, timedOut, startedAt, durationMs, summary: { format, passed, failed, skipped, total } \| null, output }] }`, oldest first; `output` is the end of what it printed |
 | GET | `/coding/threads/:id/log` | `?since=<seq>` | `{ events: CodingEvent[], next }`: the thread's log after `since` (0), at most 500, and the `since` for the next page. See below |
 | GET | `/coding/threads/:id/events` | `Accept: text/event-stream` for SSE | The live stream, as below, until the client closes it |
-| POST | `/coding/threads/:id/steer` | `{ text, interrupt?, operationId? }` | `CodingThreadView`. During a turn the text joins it after its current tool round, or with `interrupt` stops it and starts a new turn with the text; between turns it starts the next one. A `claude-code` thread takes no input mid-turn: the text is its next turn, which resumes the CLI's session |
+| POST | `/coding/threads/:id/steer` | `{ text, interrupt?, operationId? }` | `CodingThreadView`. During a turn the text joins it after its current tool round, or with `interrupt` stops it and starts a new turn with the text; between turns it starts the next one. A `claude-code` or `codex` thread takes no input mid-turn: the text is its next turn, which resumes the CLI's session |
 | POST | `/coding/threads/:id/abort` | | `CodingThreadView`: stops the turn under way and every command it runs, and withdraws inputs waiting |
 | POST | `/coding/threads/:id/continue` | `{ budgetUsd?, operationId? }` | `CodingThreadView`: goes on after a failure or a stop, with a bigger budget if given. A thread `waiting_input` for a login goes on with the input it waited with |
 | POST | `/coding/threads/:id/cancel` | | `CodingThreadView`: a thread whose task hasn't started yet (`queued` or `provisioning`) leaves the queue or gives its slot back, withdraws its inputs, and ends with `thread.turn_ended`, `outcome: "cancelled"`; it is then `idle` with `stateReason: "cancelled"`. Again, it changes nothing. A thread whose turn started: `not_cancellable` |
@@ -122,15 +122,16 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `thread.turn_ended`: `data: { type, threadId, space, operationId, outcome, reason?, checkpoint?, at }`, where `outcome` is `completed`, `error`, `cancelled` or `needs_approval`.
 - `app.budget_stop`: `data: { budgetUsd, spentUsd }`.
 - `thread.pushed`: `data: { repo, branch, before, after, outcome }`, where `outcome` is `created`, `updated` or `unchanged`.
-- `thread.waiting_input`: `data: { reason, harness, operationId }`: a `claude-code` thread's input waits for the person to connect the harness (`reason: "login_required"`).
+- `thread.waiting_input`: `data: { reason, harness, operationId }`: a `claude-code` or `codex` thread's input waits for the person to connect the harness (`reason: "login_required"`).
 - `harness.api_retry`: `data: { attempt, maxRetries, delayMs, error, status }`: the CLI is retrying a model request.
 - `harness.permission_denied`: `data: { tool, message }`: the CLI refused a tool call nothing allowed.
+- `harness.notice`: `data: { message }`: the CLI warned of something that didn't stop the turn (Codex's error items).
 
-For a `claude-code` thread, each turn is one `model_call` with the turn's tokens and what the CLI estimates it cost (`provider: "claude-code"`).
+For a `claude-code` thread, each turn is one `model_call` with the turn's tokens and what the CLI estimates it cost (`provider: "claude-code"`). For a `codex` thread it is the turn's tokens with no cost (`provider: "codex"`), since Codex estimates none ([coding-codex.md](coding-codex.md)).
 
 ### The live stream
 
-`GET /coding/threads/:id/events` is newline-delimited JSON (`application/x-ndjson`), one object a line; with `Accept: text/event-stream` each object is an SSE `data:` line instead. The first is pi's `snapshot` of the conversation, then one `{ type: "events", events }` per change, and `{ type: "output", … }` for what the `bash` and `test` tools print as they run. A `claude-code` thread's messages arrive as `entry_appended` events once each is complete, and its text and thinking as it writes them as `{ type: "partial", kind: "text" | "thinking", text }`, each a piece to add to what came before.
+`GET /coding/threads/:id/events` is newline-delimited JSON (`application/x-ndjson`), one object a line; with `Accept: text/event-stream` each object is an SSE `data:` line instead. The first is pi's `snapshot` of the conversation, then one `{ type: "events", events }` per change, and `{ type: "output", … }` for what the `bash` and `test` tools print as they run. A `claude-code` or `codex` thread's messages arrive as `entry_appended` events once each is complete, and Claude Code's text and thinking as it writes them as `{ type: "partial", kind: "text" | "thinking", text }`, each a piece to add to what came before. Codex prints each message whole.
 
 ## Starting a thread
 
@@ -147,7 +148,7 @@ POST /api/coding/threads
 - `profile` is the thread's model. Without one, it is the space's default model, the one its chats use when an agent has none of its own (`GET /api/model`'s `model`), unless that is a ChatGPT plan model, which coding threads can't use: then it is the deployment's default.
 - `budgetUsd` is the most it spends on its model, $3 by default; at it, the thread stops, `failed` with `stateReason: "budget"`, until continued with a bigger one.
 - `parent` must be a thread of this space (`not_found`).
-- `harness` is the coding agent that runs it: `pi` by default, or `claude-code`, Anthropic's Claude Code CLI run in the thread's workspace with the person's own subscription ([coding-claude-code.md](coding-claude-code.md)). `codex` is accepted by the types but refused with `invalid` ("harness not yet available") until its adapter lands. A `claude-code` thread's `profile` is `{ providerId: "claude-code", model: "default" }`, the CLI's own model, unless it is given one with that `providerId`, whose `model` the CLI is asked for (`--model`).
+- `harness` is the coding agent that runs it: `pi` by default, `claude-code`, Anthropic's Claude Code CLI ([coding-claude-code.md](coding-claude-code.md)), or `codex`, OpenAI's Codex CLI ([coding-codex.md](coding-codex.md)), each run in the thread's workspace with the person's own subscription. A `claude-code` thread's `profile` is `{ providerId: "claude-code", model: "default" }`, the CLI's own model, unless it is given one with that `providerId`, whose `model` the CLI is asked for (`--model`); a `codex` thread's likewise, with `providerId: "codex"` (`-m`).
 - `chat` is the chat the thread is started from, for the chat list to show it under that chat. A thread an agent starts records its own chat, so it needs none.
 
 ## Agents
@@ -163,13 +164,15 @@ Harnesses run the unmodified vendor CLIs, Claude Code (`claude-code`) and Codex 
 | GET | `/coding/vault` | `{ harnesses: [{ harness, connected, updatedAt, byteLength }] }`, one per harness |
 | GET | `/coding/vault/:harness` | `{ harness, connected, updatedAt, byteLength }`; an unknown harness is `404` |
 | DELETE | `/coding/vault/:harness` | The same, now disconnected: the login is deleted |
-| POST | `/coding/vault/claude-code/login` | `LoginStatus`: starts Claude Code's own sign-in (`claude auth login`) in a short-lived workspace of the person's, ending one already under way, and answers once the CLI printed the URL to sign in at: `state: "waiting_code"` with `url` |
-| GET | `/coding/vault/claude-code/login` | `LoginStatus` of the sign-in under way, `state: "none"` without one |
-| POST | `/coding/vault/claude-code/login/code` | `{ code }`, the code the sign-in page shows. Pim hands it to the CLI on its standard input, waits for the CLI to save its login and keeps that in the vault: `state: "connected"`, or `failed` with `error`. Threads that waited for the login go on |
-| DELETE | `/coding/vault/claude-code/login` | Ends the sign-in and deletes its workspace: `state: "none"` |
+| POST | `/coding/vault/:harness/login` | `LoginStatus`: starts the CLI's own sign-in in a short-lived workspace of the person's, ending one already under way, and answers once the CLI printed what the person needs: `state: "waiting_code"` with `url`, and for `codex` the `userCode` to enter there |
+| GET | `/coding/vault/:harness/login` | `LoginStatus` of the sign-in under way, `state: "none"` without one. A `codex` sign-in ends by itself, so the web app polls this until it is `connected` or `failed` |
+| POST | `/coding/vault/claude-code/login/code` | `{ code }`, the code the sign-in page shows. Pim hands it to the CLI on its standard input, waits for the CLI to save its login and keeps that in the vault: `state: "connected"`, or `failed` with `error`. `codex` takes no code here (`400`) |
+| DELETE | `/coding/vault/:harness/login` | Ends the sign-in and deletes its workspace: `state: "none"` |
 
 ```ts
-type LoginStatus = { harness: "claude-code"; state: "none" | "starting" | "waiting_code" | "completing" | "connected" | "failed"; url: string | null; error: string | null };
+type LoginStatus = { harness: "claude-code" | "codex"; state: "none" | "starting" | "waiting_code" | "completing" | "connected" | "failed"; url: string | null; userCode: string | null; error: string | null };
 ```
 
-No route returns or accepts a login's contents: Pim reads nothing the CLI prints but the URL, and keeps neither the code nor what it prints. A guest's account has none (`403`).
+Claude Code's sign-in is `claude auth login`: the person signs in at `url` and pastes the code the page shows. Codex's is `codex login --device-auth`: the person enters `userCode` at `url` (`https://auth.openai.com/codex/device`), and the CLI, which polls OpenAI meanwhile, exits once they have; Pim then keeps its login, and threads that waited for it go on.
+
+No route returns or accepts a login's contents: Pim reads nothing the CLI prints but the URL and the code to enter, and keeps neither code nor what it prints. A guest's account has none (`403`).

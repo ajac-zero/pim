@@ -22,6 +22,13 @@ export type HarnessTurn = {
 	readonly model: string | null;
 	/** Text appended to the CLI's own system prompt: what Pim tells every coding agent. */
 	readonly instructions: string;
+	/**
+	 * What the session cost, and the tokens it used, before this turn, as the
+	 * thread recorded them; nothing for a new session. A CLI that reports only
+	 * what one run cost and used (Mistral Vibe) adds its run's to these, so its
+	 * `result` and `usage` count the whole session, as the other CLIs' do.
+	 */
+	readonly sessionBefore: { readonly costUsd: number; readonly usage: HarnessUsage | null };
 };
 
 /** How a CLI's usage is counted: tokens of one model response. */
@@ -42,8 +49,9 @@ export type HarnessEvent =
 	/** Results of tool calls the assistant made; `exitCode` when the CLI reports a shell command's own. */
 	| { readonly type: "tool_result"; readonly message: ToolResultMessage; readonly exitCode?: number | null }
 	/**
-	 * The tokens of the CLI's whole session so far, from a CLI that reports
-	 * only that (Codex) rather than each model response's: a turn's usage is
+	 * The tokens of the CLI's whole session so far, from a CLI that doesn't
+	 * report each model response's: Codex reports the session's, Mistral Vibe
+	 * the run's, which its parser adds to `sessionBefore`. A turn's usage is
 	 * how much it grew.
 	 */
 	| { readonly type: "usage"; readonly usage: HarnessUsage }
@@ -76,7 +84,22 @@ export type HarnessEvent =
 /** Reads a CLI's output one line at a time. Stateful: it remembers what it needs across lines, such as which tool each call was. */
 export interface HarnessParser {
 	parseLine(line: string): HarnessEvent[];
+	/**
+	 * Reads what the CLI left in the workspace once it exited, for what its
+	 * output didn't say, such as Mistral Vibe's summary of the run with what
+	 * it cost. Its events come after all of the output's, as if it were the
+	 * output's end. Without it, the output says everything.
+	 */
+	finish?(files: HarnessFiles): Promise<HarnessEvent[]>;
 }
+
+/** The workspace's files, as a parser's `finish` reads them. */
+export type HarnessFiles = {
+	/** A file's text, with the run's secrets taken out as from the CLI's output; null when there is no such file. */
+	read(path: string): Promise<string | null>;
+	/** Removes a file, or a directory with everything in it; nothing when there is no such path. */
+	remove(path: string): Promise<void>;
+};
 
 /**
  * The CLI's own sign-in, inside a workspace, in one of two ways:
@@ -107,7 +130,7 @@ export interface CliHarness {
 	/** The command line of one turn, run in the repository's checkout. */
 	buildCommand(turn: HarnessTurn): string[];
 	/** A parser for one turn's output. */
-	parser(turn?: HarnessTurn): HarnessParser;
+	parser(turn: HarnessTurn): HarnessParser;
 	/** The name of the CLI's shell tool in the transcript, whose commands may be test runs. */
 	readonly shellTool: string;
 	/** Environment the CLI always runs with, besides its config directory: such as turning its telemetry off. */

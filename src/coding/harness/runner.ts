@@ -2,8 +2,8 @@ import { redact } from "../tools/output";
 import { parseTestSummary, type TestRun } from "../tools";
 import type { Restored } from "../vault/inject";
 import { harnessEnv, HARNESS_HOME } from "../vault/inject";
-import type { Workspace } from "../workspace/types";
-import type { CliHarness, HarnessEvent, HarnessTurn, HarnessUsage } from "./types";
+import { type Workspace, WorkspaceFileError } from "../workspace/types";
+import type { CliHarness, HarnessEvent, HarnessFiles, HarnessTurn, HarnessUsage } from "./types";
 
 /**
  * Runs one turn of a CLI harness (./types.ts) in a coding thread's
@@ -235,8 +235,8 @@ export class HarnessRunner {
 			lines: record.lines,
 		};
 
-		const handle = async (line: string) => {
-			for (const event of parser.parseLine(scrub(line))) {
+		const handle = async (events: readonly HarnessEvent[]) => {
+			for (const event of events) {
 				switch (event.type) {
 					case "session":
 						seen.sessionId = event.sessionId;
@@ -269,8 +269,29 @@ export class HarnessRunner {
 					console.warn(JSON.stringify({ event: "pim.coding.harness_event_failed", harness: harness.id, error: String(error) }));
 				}
 			}
+		};
+		const line = async (text: string) => {
+			await handle(parser.parseLine(scrub(text)));
 			seen.lines++;
 			this.#keep({ ...this.#record!, lines: seen.lines });
+		};
+		// What the CLI left in the workspace, read as it reads its output: never with the key in it.
+		const files: HarnessFiles = {
+			read: async (path) => {
+				try {
+					return scrub(new TextDecoder().decode(await workspace.readFile(path)));
+				} catch (error) {
+					if (error instanceof WorkspaceFileError) return null;
+					throw error;
+				}
+			},
+			remove: async (path) => {
+				try {
+					await workspace.remove(path);
+				} catch (error) {
+					if (!(error instanceof WorkspaceFileError)) throw error;
+				}
+			},
 		};
 
 		if (!this.#aborted) {
@@ -283,12 +304,21 @@ export class HarnessRunner {
 			try {
 				// The workspace's own timeout is the last resort, past the grace the CLI gets after SIGINT.
 				for await (const event of workspace.exec(harness.buildCommand(turn), { cwd: `${HARNESS_HOME}/repo`, env, timeoutMs: timeoutMs + 2 * grace, signal: this.#controller.signal })) {
-					if (event.type === "stdout") for (const line of lines.push(event.data)) await handle(line);
+					if (event.type === "stdout") for (const text of lines.push(event.data)) await line(text);
 					// Scrubbed as a whole before it is cut, so a secret split across chunks is found too.
 					else if (event.type === "stderr") seen.stderr = scrub(seen.stderr + event.data).slice(-STDERR_TAIL);
 					else if (event.type === "exit") seen.exit = event;
 				}
-				for (const line of lines.flush()) await handle(line);
+				for (const text of lines.flush()) await line(text);
+				// A failure to read what the CLI left behind loses only what it says: the turn ends as far as the output tells.
+				if (parser.finish) {
+					await handle(
+						await parser.finish(files).catch((error) => {
+							console.warn(JSON.stringify({ event: "pim.coding.harness_finish_failed", harness: harness.id, error: String(error) }));
+							return [];
+						}),
+					);
+				}
 			} finally {
 				clearTimeout(timer);
 			}

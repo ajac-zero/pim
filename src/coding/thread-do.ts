@@ -1230,6 +1230,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			maxBudgetUsd: fresh.budgetUsd - fresh.spentUsd,
 			model: fresh.profile.providerId === cli.id && fresh.profile.model !== "default" ? fresh.profile.model : null,
 			instructions: cliInstructions(fresh),
+			sessionBefore: { costUsd: session?.costUsd ?? 0, usage: session?.usage ?? null },
 		};
 		// Known at once, before anything is awaited, so a stop that comes meanwhile finds the run to stop.
 		let go = () => {};

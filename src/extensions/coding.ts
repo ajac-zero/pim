@@ -81,11 +81,16 @@ export const coding = definePimExtension({
 							{ description: "The model it runs on, by provider and model id. Leave it out for the space's default." },
 						),
 					),
+					harness: Type.Optional(
+						Type.Union([Type.Literal("pi"), Type.Literal("claude-code"), Type.Literal("codex")], {
+							description: "The coding agent that runs it; pi by default. Only pi is available yet.",
+						}),
+					),
 					budget: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "The most it may spend on its model, in US dollars; 3 by default." })),
 					parent: Type.Optional(Type.String({ description: "The thread this one continues from, if any." })),
 				}),
 				replay: "safe",
-				async execute({ repo, ref, task, profile, budget, parent }, api, context) {
+				async execute({ repo, ref, task, profile, harness, budget, parent }, api, context) {
 					// The same call run again starts the same thread.
 					const operationId = await api.memo("operation", crypto.randomUUID(), context);
 					const { chat, agent } = conversationOf(String(api.conversationId));
@@ -98,6 +103,7 @@ export const coding = definePimExtension({
 								task,
 								...(ref ? { ref } : {}),
 								...(profile ? { profile: { providerId: profile.provider, model: profile.model } } : {}),
+								...(harness ? { harness } : {}),
 								...(budget !== undefined ? { budgetUsd: budget } : {}),
 								...(parent ? { parent } : {}),
 								operationId,

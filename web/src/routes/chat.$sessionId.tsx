@@ -270,13 +270,11 @@ function ChatPage() {
             className="shrink-0 self-center"
           />
         </header>
-        {/* The options box takes a column of its own, so the thread makes room
-         * for it rather than sitting under it: at the right, or on top on phones. */}
+        {/* The options box floats over the thread's top right corner. */}
         <div
-          // The box overlays the thread's right side, which keeps its own padding to match,
-          // so the thread's scrollbar stays at the edge of the page, beyond the box.
+          // The box floats clear of the thread's scrollbar, which stays at the edge of the page.
           style={{ "--scrollbar": `${gutter * 2}px` } as CSSProperties}
-          className="relative flex min-h-0 flex-1 flex-col md:has-[>aside]:[--activity-inset:20rem]"
+          className="relative flex min-h-0 flex-1 flex-col"
         >
           <div
             ref={setStage}
@@ -343,7 +341,7 @@ function ChatPage() {
                 // A strip beside the scrollbar is kept free; with an overlay scrollbar
                 // both sides keep it, so the composer stays centered.
                 left: gutter ? 0 : OVERLAY_SCROLLBAR_ROOM,
-                right: `calc(${gutter ? gutter * 2 : OVERLAY_SCROLLBAR_ROOM}px + var(--activity-inset, 0px))`,
+                right: gutter ? gutter * 2 : OVERLAY_SCROLLBAR_ROOM,
               }}
               className="pointer-events-none absolute bottom-0 z-10 flex justify-center bg-background pb-2"
             >

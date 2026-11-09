@@ -642,7 +642,7 @@ describe("triggers' API where triggers are on", () => {
 	it("lists schedules' shadows as owned by their schedule, never enabled or changed through the API, and deleting one cancels its schedule", async () => {
 		const { shadow, scheduleId } = await inSpace(async (pim) => {
 			const chat = pim.store.sessionOf(ROOT)!;
-			const scheduled = await pim.schedule("0 9 * * *", "runScheduledTask", { session: chat, instruction: "Write my brief.", label: "Brief", newChat: true });
+			const scheduled = await pim.schedule("0 9 * * *", "runScheduledTask" as never, { session: chat, instruction: "Write my brief.", label: "Brief", newChat: true });
 			const applied = await pim.applyTriggerMigration();
 			return { shadow: applied!.find((item) => item.outcome === "created")!, scheduleId: scheduled.id };
 		});
@@ -670,7 +670,7 @@ describe("triggers' API where triggers are on", () => {
 		const secret = "whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0LTEyMw==";
 		const made = await inSpace(async (pim) => {
 			const chat = pim.store.sessionOf(ROOT)!;
-			const task = (cron: string, payload: Record<string, unknown>) => pim.schedule(cron, "runScheduledTask", { session: chat, ...payload } as never);
+			const task = (cron: string, payload: Record<string, unknown>) => pim.schedule(cron, "runScheduledTask" as never, { session: chat, ...payload } as never);
 			// Moved: a new-chat task scheduled in Ranger's chat, which is Ranger's work.
 			const moved = await task("0 9 * * *", { session: pim.store.sessionOf(scoutChat)!, instruction: "MOVED-INSTRUCTION", label: "Scout brief", newChat: true });
 			// Given back by a cutback, which stands.

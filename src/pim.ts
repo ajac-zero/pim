@@ -169,8 +169,8 @@ import {
 	UPDATE_AGENT,
 	updateAgentAction,
 } from "./extensions/agents";
-import { describeSchedule, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
-import type { PimServices, ScheduledTaskPayload } from "./extensions/services";
+import { cancelTask, describeTask, type ScheduleHost, ScheduledTasks, scheduledTaskText, scheduledTriggers, scheduleExtension, scheduleWidgets } from "./extensions/schedule";
+import type { PimServices } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { HostedApps, SESSION_COOKIE as HOSTED_SESSION_COOKIE } from "./hosted";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
@@ -208,7 +208,6 @@ import {
 	type ApplyOutcome,
 	type CutbackOutcome,
 	type CutoverOutcome,
-	firingOwner,
 	LegacyEventData,
 	type LegacyKind,
 	type LegacyReason,
@@ -256,7 +255,12 @@ const CONTINUATION_EXTENSION = "pim.continuation";
 /** Starts the operation id of an input that wakes the agent of a finished task. */
 const WAKE = "wake:";
 
-const SCHEDULED_TASK_CALLBACK = "runScheduledTask";
+/**
+ * The agents SDK callback `schedule_task`'s schedules had before it made
+ * triggers. Nothing fires by it now: a schedule of it left in the SDK is
+ * cancelled as the space starts (`#cancelLegacySchedules`).
+ */
+const LEGACY_SCHEDULE_CALLBACK = "runScheduledTask";
 
 /** Pim's own actions that use the person's computer, offered only while one is paired. */
 const COMPUTER_ACTIONS: ReadonlySet<string> = new Set(["file_delete", SHELL, APP_DEPLOY, BROWSER_CLICK, BROWSER_TYPE, BROWSER_UPLOAD, DESKTOP_ACT]);
@@ -493,9 +497,7 @@ const OWN_PROVIDERS_KEY = "own_providers";
 /** The admin's model providers, as last read from the gallery. */
 const SHARED_PROVIDERS_KEY = "shared_providers";
 const AGENT_SECTION_KEY = "pim_section";
-/** The day the person was last told a limit stopped background work. */
-const LIMIT_NOTICE_KEY = "limit_notice";
-/** The chat each new-chat task last started, so a retried firing doesn't start another. */
+/** `pim_meta` key where new-chat schedules kept the chat each firing started, cleared with them. */
 const SCHEDULED_CHATS_KEY = "scheduled_chats";
 /** Accepts any JSON-RPC result: pim checks the shapes of extension results itself. */
 const ANY_RESULT = { "~standard": { version: 1, vendor: "pim", validate: (value: unknown) => ({ value }) } };
@@ -812,7 +814,7 @@ export class Pim extends DurableAgent<Env> {
 			this.registry.install(this.#agentExtension(services));
 			this.registry.install(this.#skillsExtension(services));
 			this.registry.install(goalsExtension(services));
-			this.registry.install(scheduleExtension(services, (session) => this.#roleOf(session), (id) => this.agents.get(id)));
+			this.registry.install(scheduleExtension(this.#scheduleHost()));
 			this.registry.install(messagingExtension(services));
 			this.registry.install(
 				chatsExtension(async (id) => {
@@ -1887,27 +1889,6 @@ export class Pim extends DurableAgent<Env> {
 			get approvalTimeoutMs() {
 				return pim.approvalTimeoutMs();
 			},
-			schedule: async (when, payload) => {
-				const { schedules } = this.limits();
-				if (schedules !== null && (await this.services().listSchedules()).length >= schedules) {
-					throw new Error(`The limit of ${schedules} scheduled tasks is reached. Cancel one first.`);
-				}
-				const made = await this.schedule(when, SCHEDULED_TASK_CALLBACK, payload);
-				// Its schedule delivers it until the wake's next sweep moves it, if it can.
-				this.#askMigrationSweep();
-				return made;
-			},
-			listSchedules: async () =>
-				(await this.listSchedules()).filter(
-					(schedule) => schedule.callback === SCHEDULED_TASK_CALLBACK,
-				) as Schedule<ScheduledTaskPayload>[],
-			cancelSchedule: async (id) => {
-				const schedule = await this.getScheduleById(id);
-				if (schedule?.callback !== SCHEDULED_TASK_CALLBACK) return false;
-				// A trigger made from it ends first, so a failure leaves both as they were.
-				this.#retireMigrated("schedule", id);
-				return this.cancelSchedule(id);
-			},
 			notify: (notification) => this.deliverNotification(notification),
 			get emailEnabled() {
 				return pim.mailer() !== null;
@@ -1981,6 +1962,7 @@ export class Pim extends DurableAgent<Env> {
 		await this.ensureTriggerEngine();
 		// Before the wake ticks the subscriptions, which would otherwise subscribe a trigger that took over a watch anew.
 		await this.#retireWatches();
+		await this.#cancelLegacySchedules();
 		// A tick cut short leaves no wake: the next is set again, where triggers are on.
 		void Promise.resolve()
 			.then(() => (this.triggerEngine() ? this.wakeTriggers() : undefined))
@@ -2176,73 +2158,71 @@ export class Pim extends DurableAgent<Env> {
 
 	// Background work
 
+	#scheduledTasksKept: ScheduledTasks | undefined;
+
+	/** What scheduling (./extensions/schedule.ts) needs of the space: its triggers, as the agent or the person. */
+	#scheduleHost(): ScheduleHost {
+		return {
+			api: () => this.#triggerApi(),
+			tasks: () => {
+				this.#scheduledTasksKept ??= new ScheduledTasks(this.ctx.storage.sql);
+				return this.#scheduledTasksKept;
+			},
+			roleOf: (session) => this.#roleOf(session),
+			agentOf: (id) => this.agents.get(id),
+			limit: () => this.limits().schedules,
+			now: () => this.triggerClock(),
+			chatAgent: (chat) => {
+				const session = this.store.sessionOf(chat);
+				return session === undefined ? null : (this.agents.findOfSession(session)?.id ?? null);
+			},
+			sessionOf: (chat) => this.store.sessionOf(chat) ?? null,
+			// A schedule a trigger took over is that trigger, so an id from before still cancels it.
+			triggerOf: (id) => (this.triggerEngine() ? (migrationRecordOfItem(this.ctx.storage.sql, "schedule", id)?.triggerId ?? id) : id),
+		};
+	}
+
+	/** The scheduled tasks of the space, as the person sees them; none where its triggers are off. */
+	#scheduledTasks() {
+		const api = this.#triggerApi();
+		const host = this.#scheduleHost();
+		return api ? scheduledTriggers(api, PERSON).map((trigger) => describeTask(host, trigger)) : [];
+	}
+
+	/** Cancels a schedule from before `schedule_task` made triggers, without firing it, and the trigger made from it; false where the agents SDK holds no such schedule. */
+	async #cancelLegacySchedule(id: string): Promise<boolean> {
+		if ((await this.getScheduleById(id))?.callback !== LEGACY_SCHEDULE_CALLBACK) return false;
+		// A trigger made from it ends first, so a failure leaves both as they were.
+		this.#retireMigrated("schedule", id);
+		return this.cancelSchedule(id);
+	}
+
 	/**
-	 * Fired by `schedule_task` schedules: hands the instruction to the session
-	 * that made it, or to a new chat with its agent or the agent the majordomo
-	 * scheduled it for, and tells the person it started with a notification
-	 * that links to that chat. A firing a limit or a suspension refuses is
-	 * skipped, not retried; the person hears about the limit once a day.
+	 * Cancels, without firing them, the schedules `schedule_task` made
+	 * before it made triggers that the agents SDK still holds, after the
+	 * start's migration moved what it could: nothing fires them now, and a
+	 * trigger delivers each one it took over. Logs how many there were,
+	 * and how many no trigger delivers. It never throws.
 	 */
-	async runScheduledTask(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<void> {
-		// A firing a trigger took over (./triggers/migration.ts) is the trigger's: skipped here, and the skip recorded.
-		if (firingOwner(this.ctx.storage.sql, "schedule", schedule.id, schedule.time * 1000) === "trigger") {
-			recordReceipt(this.ctx.storage.sql, { kind: "schedule", legacyId: schedule.id, receipt: "skipped_firing", ref: String(schedule.time * 1000), at: this.triggerClock() });
-			return;
-		}
-		const label = payload.label ? ` "${payload.label}"` : "";
-		// The same firing retried is one submission and one notification.
-		const firing = `schedule:${schedule.id}:${schedule.time}`;
-		let started: string | null = null;
-		let target = payload.session;
+	async #cancelLegacySchedules(): Promise<void> {
 		try {
-			if (payload.newChat) started = await this.#scheduledChat(payload, schedule);
-			target = started ?? (await this.#carriedOn(payload.session));
-			await this.submitTo(
-				target,
-				`[Scheduled task${label} ${schedule.id}] ${payload.instruction}`,
-				{ operationId: firing },
-				"pim",
-			);
+			const stray = (await this.listSchedules()).filter((schedule) => schedule.callback === LEGACY_SCHEDULE_CALLBACK);
+			this.store.deleteMeta(SCHEDULED_CHATS_KEY);
+			if (stray.length === 0) return;
+			let dropped = 0;
+			for (const schedule of stray) {
+				const record = migrationRecordOfItem(this.ctx.storage.sql, "schedule", schedule.id);
+				// A trigger that took it over goes on delivering it; any other goes with it.
+				if (record?.phase === "shadow" && record.owner === "trigger") await this.cancelSchedule(schedule.id);
+				else {
+					dropped++;
+					await this.#cancelLegacySchedule(schedule.id);
+				}
+			}
+			console.log(JSON.stringify({ event: "pim.legacy_schedules_cancelled", owner: this.name, cancelled: stray.length, dropped }));
 		} catch (error) {
-			if (!(error instanceof HttpError)) throw error;
-			// A skipped firing leaves no empty chat behind.
-			if (started !== null) this.store.deleteSession(started);
-			if (error.status === 429) await this.#tellLimitOnce(`Skipped scheduled task${label}`, error.message);
-			return;
+			console.warn(JSON.stringify({ event: "pim.legacy_schedules_cancel_failed", owner: this.name, error: String(error) }));
 		}
-		if (this.store.notification(firing)) return;
-		const title = payload.label ?? payload.instruction;
-		const notification = this.store.addNotification({
-			id: firing,
-			kind: "scheduled",
-			session: target,
-			title: title.length > 80 ? `${title.slice(0, 79)}…` : title,
-			// The title names the task; the instruction can be pages long and lives in the chat.
-			body: "",
-		});
-		// The chat's own reply is pushed when it is ready; this one only tells open apps.
-		await this.deliverNotification(notification, { push: false });
-	}
-
-	/** A firing's new chat: started on its first try, and the same one when the firing is retried. */
-	async #scheduledChat(payload: ScheduledTaskPayload, schedule: Schedule<ScheduledTaskPayload>): Promise<string> {
-		const last = this.#scheduledChats()[schedule.id];
-		if (last?.time === schedule.time && !this.store.deletedSessions().has(last.session)) return last.session;
-		// Work scheduled for an agent deleted since goes on with the agent of the chat that scheduled it.
-		const agent = (payload.agent && this.agents.get(payload.agent)) || this.agents.ofSession(payload.session);
-		const id = await this.#startChat(agent, clipTitle(payload.label ?? payload.instruction));
-		const live = new Set((await this.listSchedules()).map((scheduled) => scheduled.id));
-		// Read again after the awaits, and keep only schedules still pending, so the record stays one entry per task.
-		const chats = Object.fromEntries(Object.entries(this.#scheduledChats()).filter(([scheduled]) => live.has(scheduled)));
-		chats[schedule.id] = { time: schedule.time, session: id };
-		this.store.setMeta(SCHEDULED_CHATS_KEY, JSON.stringify(chats));
-		this.broadcastMessage({ type: "sessions" });
-		return id;
-	}
-
-	/** The chat each new-chat task's latest firing started, by schedule. */
-	#scheduledChats(): Record<string, { time: number; session: string }> {
-		return JSON.parse(this.store.meta(SCHEDULED_CHATS_KEY) ?? "{}");
 	}
 
 	// Triggers (docs/triggers.md), built only where turned on.
@@ -2276,11 +2256,12 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * How a trigger that took over a schedule or watch delivers as it did
 	 * (./triggers/migration.ts): a schedule's firing goes in under the
-	 * schedule's key and notifies open apps as `runScheduledTask` does; a
-	 * watch's event goes in under the watch's key. And for every trigger on
-	 * a connector's event, as watches always did: its run is told what the
-	 * event carried, which the events route kept, and which is forgotten
-	 * once pi has it.
+	 * schedule's key and notifies open apps as schedules did, and a watch's
+	 * event goes in under the watch's key. A trigger `schedule_task` made
+	 * reads and notifies as its schedules did (./extensions/schedule.ts).
+	 * And for every trigger on a connector's event, as watches always did:
+	 * its run is told what the event carried, which the events route kept,
+	 * and which is forgotten once pi has it.
 	 */
 	#triggerTakeover(): TriggerTakeover {
 		const sql = this.ctx.storage.sql;
@@ -2288,7 +2269,18 @@ export class Pim extends DurableAgent<Env> {
 			const record = migrationRecordOf(sql, triggerId);
 			return record?.phase === "shadow" ? record : null;
 		};
+		const task = (evidence: { kind: string; triggerId: string }) => (evidence.kind === "time" ? this.#scheduleHost().tasks().of(evidence.triggerId) : undefined);
+		// As schedules notified: once per firing, by its key, to open apps only; the chat's own reply is pushed when it is ready.
+		const notify = async (submissionKey: string, chatId: string, title: string) => {
+			if (this.store.notification(submissionKey)) return;
+			const notification = this.store.addNotification({ id: submissionKey, kind: "scheduled", session: chatId, title: title.length > 80 ? `${title.slice(0, 79)}…` : title, body: "" });
+			await this.deliverNotification(notification, { push: false });
+		};
 		return {
+			text: (instruction, evidence) => {
+				const scheduled = task(evidence);
+				return scheduled ? scheduledTaskText(evidence.triggerId, scheduled.label, instruction) : null;
+			},
 			submissionKey: (evidence) => {
 				const record = taken(evidence.triggerId);
 				if (!record) return null;
@@ -2308,12 +2300,11 @@ export class Pim extends DurableAgent<Env> {
 					new LegacyEventData(sql).forget(evidence.triggerId, evidence.eventId);
 					return;
 				}
+				const scheduled = task(evidence);
+				if (scheduled && evidence.kind === "time") return notify(submissionKey, chatId, scheduled.label ?? evidence.label);
 				const record = taken(evidence.triggerId);
 				if (!record || evidence.kind !== "time" || record.kind !== "schedule" || record.notificationTitle === null) return;
-				// As runScheduledTask notifies: once per firing, by its key, to open apps only.
-				if (this.store.notification(submissionKey)) return;
-				const notification = this.store.addNotification({ id: submissionKey, kind: "scheduled", session: chatId, title: record.notificationTitle, body: "" });
-				await this.deliverNotification(notification, { push: false });
+				await notify(submissionKey, chatId, record.notificationTitle);
 			},
 		};
 	}
@@ -2404,11 +2395,7 @@ export class Pim extends DurableAgent<Env> {
 	 * already going go on.
 	 */
 	async disableTriggerEngine(): Promise<void> {
-		// Schedules a trigger took over go back to their schedules first, since nothing would deliver them otherwise; a firing the trigger admitted and hasn't handed on waits until it owns the item again. Watches are triggers now, with nothing to go back to.
-		const engine = this.triggerEngine();
-		const taken = migrationRecords(this.ctx.storage.sql).filter((record) => record.kind === "schedule" && record.owner === "trigger");
-		if (engine && taken.length > 0) this.#triggerMigration(engine).cutback(taken, { force: true });
-		// Nothing hands an event on while triggers are off, and no wake sweeps: what was kept of connector events goes now. A run handed on later is told it isn't kept.
+		// Nothing hands an event on while triggers are off, and no wake sweeps: what was kept of connector events goes now. A run handed on later is told it isn't kept. Schedules and watches are triggers now, with nothing to go back to.
 		new LegacyEventData(this.ctx.storage.sql).clear();
 		this.store.deleteMeta(ENGINE_KEY);
 		this.#triggerEngine = undefined;
@@ -2476,7 +2463,8 @@ export class Pim extends DurableAgent<Env> {
 
 	/** What the migration's mapping reads of the space: its schedules, watches and records, and the space as the mapping sees it. Writes nothing. */
 	async #migrationInput(): Promise<{ input: Parameters<typeof planMigration>[0]; context: MigrationContext }> {
-		const schedules = (await this.services().listSchedules()) as LegacySchedule[];
+		// Only schedules from before schedule_task made triggers, which the start then cancels (`#cancelLegacySchedules`).
+		const schedules = (await this.listSchedules()).filter((schedule) => schedule.callback === LEGACY_SCHEDULE_CALLBACK) as unknown as LegacySchedule[];
 		// The chats a trigger would deliver to, checked as its host's preflight checks them, before the pure mapping reads them.
 		const chats = new Set(schedules.filter((schedule) => schedule.payload.newChat !== true).map((schedule) => schedule.payload.session));
 		const space = this.#triggerSpace();
@@ -2584,7 +2572,7 @@ export class Pim extends DurableAgent<Env> {
 		const run = this.#migrationRuns;
 		if (!this.triggerEngine()) return null;
 		if (run.asked) return this.migrationSweepClock();
-		const live = schedules.filter((schedule) => schedule.callback === SCHEDULED_TASK_CALLBACK).map((schedule) => `schedule:${schedule.id}`);
+		const live = schedules.filter((schedule) => schedule.callback === LEGACY_SCHEDULE_CALLBACK).map((schedule) => `schedule:${schedule.id}`);
 		if (live.length === 0) return null;
 		const left = run.last?.left;
 		// Settled by its record whatever the last run saw: a trigger delivers it, or it was given back, which stands.
@@ -2719,25 +2707,8 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async #endMigrated(record: MigrationRecord): Promise<void> {
 		// A watch is gone once its trigger took it over (`#retireWatches`): only the trigger is left to end, and its subscription with it.
-		const ended = record.kind === "schedule" && (await this.services().cancelSchedule(record.legacyId));
+		const ended = record.kind === "schedule" && (await this.#cancelLegacySchedule(record.legacyId));
 		if (!ended) this.#retireMigrated(record.kind, record.legacyId);
-	}
-
-	/**
-	 * Gives back to its schedule or watch each item a trigger owned by
-	 * `agentId` delivers, as that agent is deleted: the trigger could no
-	 * longer run it, where the schedule or watch goes on with the chat's
-	 * agent, as it always did. By force, as turning triggers off gives them
-	 * back; the cutback stands.
-	 */
-	#handBackFrom(agentId: string): void {
-		const engine = this.triggerEngine();
-		if (!engine) return;
-		// Schedules only: a watch's trigger has no watch to go back to, and ends its firings as any trigger of a deleted agent does.
-		const owned = migrationRecords(this.ctx.storage.sql).filter(
-			(record) => record.kind === "schedule" && record.phase === "shadow" && record.owner === "trigger" && engine.store.get(record.triggerId)?.spec.owningAgentId === agentId,
-		);
-		if (owned.length > 0) this.#triggerMigration(engine).cutback(owned, { force: true });
 	}
 
 	#connectorSubscriptionsKept: { readonly engine: TriggerEngine; readonly manager: ConnectorSubscriptionManager } | undefined;
@@ -3212,15 +3183,6 @@ export class Pim extends DurableAgent<Env> {
 				}
 			},
 		});
-	}
-
-	/** One notification a day about work a limit stopped, so a frequent schedule doesn't flood the person. */
-	async #tellLimitOnce(title: string, body: string): Promise<void> {
-		const today = new Date().toISOString().slice(0, 10);
-		if (this.store.meta(LIMIT_NOTICE_KEY) === today) return;
-		this.store.setMeta(LIMIT_NOTICE_KEY, today);
-		const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title, body });
-		await this.deliverNotification(notification);
 	}
 
 	/** Tells the person: open apps through the socket, other devices by push. A notification that only repeats what a device already hears, such as a task's own reply, can skip the push. */
@@ -4763,7 +4725,7 @@ export class Pim extends DurableAgent<Env> {
 		this.#extensions ??= new PimExtensions([
 				// Pim's own: every chat can show their widgets.
 				goalsWidgets(this.store),
-				scheduleWidgets(() => this.services().listSchedules()),
+				scheduleWidgets(this.#scheduleHost()),
 				memoryWidgets(this.memory.store, (id) => this.#memoryAccess(this.agents.get(id) ?? this.agents.majordomo()).read.map((scope) => scope.key)),
 			...this.pimConfig().extensions,
 		]);
@@ -5466,7 +5428,7 @@ export class Pim extends DurableAgent<Env> {
 			memory: { scopes: this.memoryScopes(), entries: this.memory.store.page(Number.MAX_SAFE_INTEGER) },
 			goals: this.store.goals().map((goal) => this.#publicSession(goal)),
 			extensions: this.extensionData.export(),
-			schedules: (await this.services().listSchedules()).map((schedule) => describeSchedule(schedule, this.store)),
+			schedules: this.#scheduledTasks(),
 			approvals: this.store.approvals().map((approval) => this.#publicApproval(approval)),
 			permissions: this.store.toolPermissions(),
 			circles: this.#describeCircles(),
@@ -5494,7 +5456,7 @@ export class Pim extends DurableAgent<Env> {
 	async remainingData(): Promise<string[]> {
 		const remaining = this.store.remainingData();
 		if (this.memory.store.count() > 0) remaining.push("memories");
-		const own = new Set([SCHEDULED_TASK_CALLBACK, LEGACY_WATCH_REFRESH]);
+		const own = new Set([LEGACY_SCHEDULE_CALLBACK, LEGACY_WATCH_REFRESH]);
 		if ((await this.listSchedules()).some((schedule) => own.has(schedule.callback))) remaining.push("schedules");
 		if (Object.keys(this.getMcpServers().servers).length > 0) remaining.push("connector connections");
 		if (await this.images.any()) remaining.push("images");
@@ -6181,10 +6143,12 @@ export class Pim extends DurableAgent<Env> {
 				const own = this.#tasks.of(id);
 				if (own?.chat) await this.#cancelTask(own, "The person deleted its chat.");
 				for (const task of this.#tasks.byRequester(id)) await this.#cancelTask(task, "Its chat was deleted.");
-				const services = this.services();
-				// A task that starts new chats goes on without the chat that scheduled it.
-				for (const schedule of await services.listSchedules()) {
-					if (schedule.payload.session === id && !schedule.payload.newChat) await services.cancelSchedule(schedule.id);
+				// A scheduled task that runs in it ends with it, as schedules did; one that starts new chats goes on without the chat that scheduled it.
+				const triggers = this.#triggerApi();
+				for (const trigger of triggers ? scheduledTriggers(triggers, PERSON) : []) {
+					if (trigger.destination.type !== "existing_chat" || trigger.destination.chatId !== session) continue;
+					const scheduled = this.#scheduleHost().tasks().of(trigger.id) !== undefined || migrationRecordOf(this.ctx.storage.sql, trigger.id)?.kind === "schedule";
+					if (scheduled) await triggers?.remove(PERSON, trigger.id);
 				}
 				// A watch delivers to its chat only: it goes with it.
 				await this.#stopConnectorTriggers((_source, destination) => destination.type === "existing_chat" && destination.chatId === id);
@@ -7157,13 +7121,15 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"GET",
 			"/schedules",
-			async () => ({ schedules: (await this.services().listSchedules()).map((schedule) => describeSchedule(schedule, this.store)) }),
+			() => ({ schedules: this.#scheduledTasks() }),
 		],
 		[
 			"DELETE",
 			"/schedules/:id",
 			async ({ id }) => {
-				if (!(await this.services().cancelSchedule(id!))) throw new HttpError(404, `No schedule ${id}`);
+				const api = this.#triggerApi();
+				const cancelled = (api !== null && (await cancelTask(api, PERSON, this.#scheduleHost().triggerOf(id!)))) || (await this.#cancelLegacySchedule(id!));
+				if (!cancelled) throw new HttpError(404, `No schedule ${id}`);
 				return { deleted: true };
 			},
 		],
@@ -7513,8 +7479,6 @@ export class Pim extends DurableAgent<Env> {
 				this.#agent(id!);
 				// Its tasks stop with it: no other agent takes them over. It leaves the contacts of the agents that had it.
 				for (const task of this.#tasks.open()) if (task.agent === id) await this.#cancelTask(task, "Its agent was deleted.");
-				// Schedules and watches its triggers took over go on as they always did, with their chats' agents.
-				this.#handBackFrom(id!);
 				this.agents.delete(id!);
 				this.store.clearAudience(agentAudience(id!));
 				return { deleted: true };

@@ -240,6 +240,14 @@ export class Pim extends RealPim {
 		return Date.now() + triggerClock.offset;
 	}
 
+	/**
+	 * The callback schedules `schedule_task` made before it made triggers
+	 * named, which the agents SDK only schedules for a method it finds: here,
+	 * so tests can make such a schedule as a space may still hold one. Pim
+	 * has no such method, so one fires nothing there; here too.
+	 */
+	async runScheduledTask(): Promise<void> {}
+
 	/** The migration's sweeps' clock, which tests move on to make the hourly sweep due. */
 	protected override migrationSweepClock(): number {
 		return Date.now() + sweepClock.offset;

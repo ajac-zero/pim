@@ -1119,6 +1119,7 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 			.filter(([path]) => !path.startsWith("../src/triggers/"))
 			.filter(([path, source]) => importsTriggers(path, source) || /TriggerCoordinator|TriggerStore|pim_trigger/.test(source))
 			.map(([path]) => path);
-		expect(users).toEqual(["../src/extensions/app-events.ts", "../src/pim.ts", "../src/store.ts"]);
+		// schedule_task makes its tasks through the triggers' API, in Pim's own extension.
+		expect(users).toEqual(["../src/extensions/app-events.ts", "../src/extensions/schedule.ts", "../src/pim.ts", "../src/store.ts"]);
 	});
 });

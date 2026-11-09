@@ -1,19 +1,6 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
-import type { Schedule } from "agents";
 import type { Approval, ApprovalMember, Notification, PimStore, ToolPermission } from "../store";
 import type { ShownWidget, ToolWidget } from "./define";
-
-/** Payload of a schedule created by `schedule_task`. */
-export type ScheduledTaskPayload = {
-	/** The chat that scheduled it: where it fires, or whose agent starts each new chat. */
-	readonly session: string;
-	readonly instruction: string;
-	readonly label?: string;
-	/** Each firing starts a new chat with the scheduling chat's agent instead of continuing that chat. */
-	readonly newChat?: true;
-	/** The agent each new chat is with, when the majordomo scheduled the work for another of the person's agents. */
-	readonly agent?: string;
-};
 
 /**
  * What Pim's extensions need from the Durable Object that hosts them. The
@@ -38,9 +25,6 @@ export type PimServices = {
 	maySkip(session: string, input: string): boolean;
 	/** IANA time zone the user lives in, for reading and writing times; it follows their settings. */
 	readonly timeZone: string;
-	schedule(when: Date | number | string, payload: ScheduledTaskPayload): Promise<Schedule<ScheduledTaskPayload>>;
-	listSchedules(): Promise<Schedule<ScheduledTaskPayload>[]>;
-	cancelSchedule(id: string): Promise<boolean>;
 	/** Deliver a stored notification to the user's connected clients and devices. */
 	notify(notification: Notification): Promise<void>;
 	/** This deployment can send email; each person must also confirm an address. */

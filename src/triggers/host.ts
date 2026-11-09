@@ -135,10 +135,13 @@ const BUSY = "another handoff of this operation is under way here";
 
 /**
  * How a trigger that took over a schedule or watch delivers as it did
- * (./migration.ts). Each is asked with the firing's evidence; for a
- * trigger that took nothing over, each answers null or does nothing.
+ * (./migration.ts), and how a trigger `schedule_task` made reads as its
+ * schedules did. Each is asked with the firing's evidence; for any other
+ * trigger, each answers null or does nothing.
  */
 export interface TriggerTakeover {
+	/** The whole text of the firing, in place of `firingText`'s; null to use that. */
+	text?(instruction: string, evidence: TriggerEvidence): string | null;
 	/** The key the schedule or watch would have submitted this firing under; used only for the operation's first submission, since a recorded key is kept. */
 	submissionKey(evidence: TriggerEvidence): string | null;
 	/** What the watch's run would have been told of the event, to put after the firing's text; null where there is nothing. */
@@ -311,7 +314,7 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 			};
 			// A trigger that took over a schedule or watch goes in under its key, the first time; a key once recorded is kept whatever the takeover says now.
 			const key = row.submissionKey ?? this.#takeover?.submissionKey(input.evidence) ?? operationId;
-			const text = firingText(input.instruction, input.evidence, this.#takeover?.contents(input.evidence) ?? null);
+			const text = this.#takeover?.text?.(input.instruction, input.evidence) ?? firingText(input.instruction, input.evidence, this.#takeover?.contents(input.evidence) ?? null);
 			let receipt: PiReceipt;
 			try {
 				receipt = await this.#space.submit(chatId, text, { operationId: key, stable });

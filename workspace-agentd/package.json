@@ -1,0 +1,9 @@
+{
+	"name": "workspace-agentd",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "In-workspace daemon that provides exec and file operations over authenticated HTTP.",
+	"engines": { "node": ">=20" },
+	"scripts": { "start": "node server.mjs", "test": "node --test" }
+}

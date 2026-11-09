@@ -586,9 +586,12 @@ export function projectCodingEntries(
 ): TranscriptMessage[] {
   return entries.flatMap((entry): TranscriptMessage[] => {
     if (entry.kind === "app.budget_stop") {
+      // Tokens only for a CLI harness that estimates no cost, whose budget is a ceiling on its tokens.
       const data = (entry.data ?? {}) as {
         budgetUsd?: number;
         spentUsd?: number;
+        tokens?: number;
+        tokenCeiling?: number;
       };
       return [
         {
@@ -597,7 +600,10 @@ export function projectCodingEntries(
           parts: [
             {
               type: "text",
-              text: `Stopped: the thread spent $${(data.spentUsd ?? 0).toFixed(2)} of its $${data.budgetUsd ?? 0} budget.`,
+              text:
+                data.tokenCeiling !== undefined
+                  ? `Stopped: the thread used ${(data.tokens ?? 0).toLocaleString("en-US")} of the ${data.tokenCeiling.toLocaleString("en-US")} tokens its $${data.budgetUsd ?? 0} budget allows.`
+                  : `Stopped: the thread spent $${(data.spentUsd ?? 0).toFixed(2)} of its $${data.budgetUsd ?? 0} budget.`,
             },
           ],
           timestamp: 0,

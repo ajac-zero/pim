@@ -120,14 +120,14 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `thread.queued`: `data: { position, reason }`, each time the thread waits for a slot.
 - `thread.turn_started`: `data: { operationId }`.
 - `thread.turn_ended`: `data: { type, threadId, space, operationId, outcome, reason?, checkpoint?, at }`, where `outcome` is `completed`, `error`, `cancelled` or `needs_approval`.
-- `app.budget_stop`: `data: { budgetUsd, spentUsd }`.
+- `app.budget_stop`: `data: { budgetUsd, spentUsd, tokens?, tokenCeiling? }`; `tokens` and `tokenCeiling` for a CLI harness that estimates no cost, whose budget is a ceiling on its tokens (below).
 - `thread.pushed`: `data: { repo, branch, before, after, outcome }`, where `outcome` is `created`, `updated` or `unchanged`.
 - `thread.waiting_input`: `data: { reason, harness, operationId }`: a CLI harness thread's input waits for the person to connect the harness (`reason: "login_required"`): to sign in with their subscription, or to give their API key.
 - `harness.api_retry`: `data: { attempt, maxRetries, delayMs, error, status }`: the CLI is retrying a model request.
 - `harness.permission_denied`: `data: { tool, message }`: the CLI refused a tool call nothing allowed.
 - `harness.notice`: `data: { message }`: the CLI warned of something that didn't stop the turn (Codex's error items).
 
-For a `claude-code` thread, each turn is one `model_call` with the turn's tokens and what the CLI estimates it cost (`provider: "claude-code"`). For a `codex` thread it is the turn's tokens with no cost (`provider: "codex"`), since Codex estimates none ([coding-codex.md](coding-codex.md)).
+For a `claude-code` thread, each turn is one `model_call` with the turn's tokens and what the CLI estimates it cost (`provider: "claude-code"`). For a `codex` thread it is the turn's tokens with no cost (`provider: "codex"`), since Codex estimates none ([coding-codex.md](coding-codex.md)). A thread on a harness that estimates no cost keeps its budget as a ceiling on tokens: each budgeted dollar allows 1,000,000 tokens of every kind, counted from its `model_call`s. It is a ceiling, not a price. At it, the thread stops with `stateReason: "budget"` and the tokens in `stateDetail`, and `steer` and `continue` without a bigger `budgetUsd` are `budget_spent`, as when a thread spent its budget.
 
 ### The live stream
 

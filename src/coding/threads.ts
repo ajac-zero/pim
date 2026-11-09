@@ -183,7 +183,9 @@ export async function liveThread(env: Env, space: string, threadId: string, opti
 /** A refusal the thread made, which got here as an error: a conflict with its state, said as it said it. */
 export function refusal(error: unknown): CodingError {
 	if (error instanceof CodingError) return error;
-	return new CodingError(409, error instanceof Error ? error.message : String(error), "conflict");
+	const message = error instanceof Error ? error.message : String(error);
+	// The thread's own budget refusal, such as a CLI harness's token ceiling, which the route can't check before calling it.
+	return new CodingError(409, message, /: continue it with a bigger one$/.test(message) ? "budget_spent" : "conflict");
 }
 
 /** Wraps `view` for a thread's call: its refusals come back as conflicts. */

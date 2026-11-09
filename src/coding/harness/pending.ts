@@ -13,7 +13,7 @@ function pending(id: ApiKeyHarness, name: string, apiKeyEnv: string, egress: rea
 	const fail = (): never => {
 		throw new Error(`${name} isn't implemented yet: Pim can't run its CLI`);
 	};
-	return { id, name, apiKeyEnv, egress, env: {}, shellTool: "", buildCommand: fail, parser: fail, signalCommand: fail };
+	return { id, name, apiKeyEnv, egress, env: {}, reportsCost: false, shellTool: "", buildCommand: fail, parser: fail, signalCommand: fail };
 }
 
 // Vibe reads its key from MISTRAL_API_KEY and calls Mistral's API.

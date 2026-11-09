@@ -7,7 +7,7 @@ import { brokerPolicy } from "./git-broker/config";
 import { codingScheduler } from "./scheduler-do";
 import { codingThread, DEFAULT_BUDGET_USD } from "./thread-do";
 import type { IndexedThread } from "./thread-index";
-import type { AgentProfile } from "./thread-store";
+import { type AgentProfile, CODING_HARNESSES } from "./thread-store";
 
 /**
  * A space's coding threads as the API (./api.ts) and agents' tools
@@ -49,6 +49,8 @@ export function summaryOf(thread: Listed): CodingThreadSummary {
 		queue: thread.queue,
 		createdBy: thread.createdBy,
 		parent: thread.parent,
+		chat: thread.chat,
+		harness: thread.harness,
 		spentUsd: thread.spentUsd,
 		budgetUsd: thread.budgetUsd,
 		createdAt: thread.createdAt,
@@ -112,6 +114,10 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 	if (typeof ref !== "string" || !ref.trim() || ref.length > 200 || /[\s\u0000-\u001f]/.test(ref)) throw invalid("ref must be a branch, tag or commit");
 	const budgetUsd = input.budgetUsd ?? DEFAULT_BUDGET_USD;
 	if (typeof budgetUsd !== "number" || !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw invalid("budgetUsd must be a positive number of dollars");
+	const harness = input.harness ?? "pi";
+	if (!CODING_HARNESSES.includes(harness)) throw invalid(`harness must be ${CODING_HARNESSES.join(", ")}`);
+	if (harness !== "pi") throw invalid("harness not yet available");
+	if (input.chat !== undefined && (typeof input.chat !== "string" || !input.chat || input.chat.length > 128)) throw invalid("chat must be a chat's ID");
 	const profile = input.profile === undefined ? undefined : profileOf(input.profile);
 	if (input.parent !== undefined && input.parent !== null) await ownedThread(env, space, input.parent);
 	if (input.operationId !== undefined && (typeof input.operationId !== "string" || !input.operationId || input.operationId.length > 200)) {
@@ -122,7 +128,7 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 	const scheduler = codingScheduler(env, space);
 	const known = await scheduler.thread(threadId);
 	if (known) return { view: await threadView(env, space, threadId, known), created: false };
-	await scheduler.registerThread({ threadId, createdBy, parent: input.parent ?? null, task, repo, ref, budgetUsd, createdAt: Date.now() });
+	await scheduler.registerThread({ threadId, createdBy, parent: input.parent ?? null, chat: createdBy.type === "agent" ? createdBy.chat : (input.chat ?? null), harness, task, repo, ref, budgetUsd, createdAt: Date.now() });
 	const stub = codingThread(env, threadId);
 	let status: Awaited<ReturnType<typeof stub.start>>;
 	try {
@@ -132,6 +138,7 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 			ref,
 			task,
 			...(profile ? { profile } : {}),
+			harness,
 			budgetUsd,
 			parent: input.parent ?? null,
 			createdBy: creatorId(space, createdBy),

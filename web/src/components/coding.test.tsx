@@ -22,6 +22,7 @@ import {
   CodingApiProvider,
   CodingPage,
   CodingThreadPage,
+  SIGN_IN_POLL_MS,
 } from "~/components/coding";
 import {
   CodingSubthreadRow,
@@ -118,6 +119,18 @@ const signIn = (state: HarnessSignIn["state"]): HarnessSignIn => ({
   harness: "claude-code",
   state,
   url: state === "waiting_code" ? SIGN_IN_URL : null,
+  userCode: null,
+  error: null,
+});
+
+const DEVICE_URL = "https://auth.openai.com/codex/device";
+
+/** Codex's device-code sign-in, as the API says it. */
+const deviceSignIn = (state: HarnessSignIn["state"]): HarnessSignIn => ({
+  harness: "codex",
+  state,
+  url: state === "waiting_code" ? DEVICE_URL : null,
+  userCode: state === "waiting_code" ? "K7QM-4XT9P" : null,
   error: null,
 });
 
@@ -170,6 +183,9 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
         notConnected(),
       ),
       signIn: vi.fn<CodingApi["vault"]["signIn"]>(async () =>
+        signIn("waiting_code"),
+      ),
+      signInStatus: vi.fn<CodingApi["vault"]["signInStatus"]>(async () =>
         signIn("waiting_code"),
       ),
       sendCode: vi.fn<CodingApi["vault"]["sendCode"]>(async () =>
@@ -897,6 +913,143 @@ describe("connecting Claude Code", () => {
     );
     expect(
       await panel.findByRole("button", { name: "Connect Claude Code" }),
+    ).toBeTruthy();
+  });
+});
+
+describe("connecting Codex", () => {
+  const openPanel = async (api: CodingApi) => {
+    renderWith(api, CodingPage, "/coding");
+    fireEvent.click(await screen.findByRole("radio", { name: "Codex" }));
+    return screen.findByRole("region", { name: "Connect Codex" });
+  };
+  const codexApi = (thread?: CodingThreadView) => {
+    const { api } = fakeApi(thread);
+    vi.mocked(api.vault.status).mockResolvedValue({
+      ...notConnected(),
+      harness: "codex",
+    });
+    vi.mocked(api.vault.signIn).mockResolvedValue(deviceSignIn("waiting_code"));
+    vi.mocked(api.vault.signInStatus).mockResolvedValue(
+      deviceSignIn("waiting_code"),
+    );
+    return api;
+  };
+
+  it("is chosen in the start form, says what connecting means, and starts a Codex thread", async () => {
+    const api = codexApi();
+    const panel = within(await openPanel(api));
+    expect(await panel.findByText("Not connected")).toBeTruthy();
+    const disclosure = HARNESS_DISCLOSURES.codex;
+    expect(panel.getByText(disclosure.title)).toBeTruthy();
+    for (const paragraph of disclosure.paragraphs) {
+      expect(panel.getByText(paragraph)).toBeTruthy();
+    }
+    expect(
+      screen.queryByRole("region", { name: "Connect Claude Code" }),
+    ).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: /Repository/ }), {
+      target: { value: "https://github.com/acme/widgets" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Task/ }), {
+      target: { value: "Fix it" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start.mock.calls[0]?.[0]).toMatchObject({ harness: "codex" });
+  });
+
+  it("shows the page and the code to enter there, with nothing to paste, and polls until Codex is connected", async () => {
+    const api = codexApi();
+    const panel = within(await openPanel(api));
+    fireEvent.click(
+      await panel.findByRole("button", { name: "Connect Codex" }),
+    );
+    const link = (await panel.findByRole("link", {
+      name: /Sign in to Codex/,
+    })) as HTMLAnchorElement;
+    expect(link.href).toBe(DEVICE_URL);
+    expect(link.target).toBe("_blank");
+    expect(link.rel).toBe("noopener noreferrer");
+    expect(panel.getByText("K7QM-4XT9P")).toBeTruthy();
+    expect(panel.getByText("Waiting for you to enter the code…")).toBeTruthy();
+    expect(panel.queryByRole("textbox")).toBeNull();
+    expect(api.vault.sendCode).not.toHaveBeenCalled();
+
+    // The first time it is asked, the sign-in still waits; the next, the CLI has finished.
+    await waitFor(() =>
+      expect(api.vault.signInStatus).toHaveBeenCalledWith("codex"),
+    );
+    vi.mocked(api.vault.status).mockResolvedValue({
+      ...notConnected(),
+      harness: "codex",
+      connected: true,
+      updatedAt: 1,
+      byteLength: 10,
+    });
+    vi.mocked(api.vault.signInStatus).mockResolvedValue(
+      deviceSignIn("connected"),
+    );
+    expect(
+      await panel.findByText("Connected", undefined, {
+        timeout: SIGN_IN_POLL_MS * 2,
+      }),
+    ).toBeTruthy();
+    expect(panel.queryByText("K7QM-4XT9P")).toBeNull();
+    expect(
+      vi.mocked(api.vault.signInStatus).mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
+
+    fireEvent.click(panel.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() =>
+      expect(api.vault.disconnect).toHaveBeenCalledWith("codex"),
+    );
+  });
+
+  it("says why the sign-in failed, offers to start again, and cancels one", async () => {
+    const api = codexApi();
+    vi.mocked(api.vault.signInStatus).mockResolvedValue({
+      ...deviceSignIn("failed"),
+      error: "Codex's sign-in didn't finish (it exited 1): start again",
+    });
+    const panel = within(await openPanel(api));
+    fireEvent.click(
+      await panel.findByRole("button", { name: "Connect Codex" }),
+    );
+    expect((await panel.findByRole("alert")).textContent).toBe(
+      "Codex's sign-in didn't finish (it exited 1): start again",
+    );
+    expect(panel.queryByText("K7QM-4XT9P")).toBeNull();
+
+    vi.mocked(api.vault.signInStatus).mockResolvedValue(
+      deviceSignIn("waiting_code"),
+    );
+    fireEvent.click(panel.getByRole("button", { name: "Connect Codex" }));
+    await panel.findByText("K7QM-4XT9P");
+    fireEvent.click(panel.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(api.vault.cancelSignIn).toHaveBeenCalledWith("codex"),
+    );
+    expect(
+      await panel.findByRole("button", { name: "Connect Codex" }),
+    ).toBeTruthy();
+  });
+
+  it("asks a Codex thread waiting for a login to connect", async () => {
+    threadPage(
+      codexApi(
+        view({
+          harness: "codex",
+          state: "waiting_input",
+          stateReason: "login_required",
+        }),
+      ),
+    );
+    expect(
+      await screen.findByText("Codex needs you to connect your account."),
+    ).toBeTruthy();
+    expect(
+      await screen.findByRole("region", { name: "Connect Codex" }),
     ).toBeTruthy();
   });
 });

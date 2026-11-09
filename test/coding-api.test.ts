@@ -165,31 +165,33 @@ describe("the coding threads API", () => {
 		expect(listed.find((thread) => thread.id === plain.id)).toMatchObject({ harness: "pi", chat: null });
 		expect(listed.find((thread) => thread.id === fromChat.id)).toMatchObject({ harness: "pi", chat: "chat-1" });
 		expect((await view(fromChat.id)).harness).toBe("pi");
-		// Codex isn't available yet, and nothing starts for it.
-		const refused = await post("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, harness: "codex" });
-		expect([refused.status, refused.body]).toEqual([400, { error: "harness not yet available", code: "invalid" }]);
 		const unknown = await post("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, harness: "vim" });
 		expect([unknown.status, unknown.body.code]).toEqual([400, "invalid"]);
 		expect((await api<{ threads: unknown[] }>("/coding/threads")).body.threads).toHaveLength(listed.length);
 	});
 
-	it("starts a Claude Code thread on the CLI's own model, which waits for the person's login while they have none", async () => {
-		const claude = await start({ task: "Fix the date test", harness: "claude-code" });
-		expect(claude).toMatchObject({ harness: "claude-code", profile: { providerId: "claude-code", model: "default" } });
-		const waiting = await vi.waitFor(
-			async () => {
-				const thread = await view(claude.id);
-				expect(thread.state).toBe("waiting_input");
-				return thread;
-			},
-			{ timeout: 10_000, interval: 50 },
-		);
-		// Its task waits with it, unanswered: no turn started, and nothing was spent.
-		expect(waiting).toMatchObject({ stateReason: "login_required", currentOperation: null, inbox: 1, spentUsd: 0 });
-		expect(waiting.stateDetail).toMatch(/Connect Claude Code/);
-		const log = (await api<{ events: { kind: string; data: unknown }[] }>(`/coding/threads/${claude.id}/log`)).body.events;
-		expect(log.map((event) => event.kind)).not.toContain("thread.turn_started");
-		expect(log.find((event) => event.kind === "thread.waiting_input")?.data).toMatchObject({ reason: "login_required", harness: "claude-code" });
+	it("starts a Claude Code or Codex thread on the CLI's own model, which waits for the person's login while they have none", async () => {
+		for (const [harness, name] of [
+			["claude-code", "Claude Code"],
+			["codex", "Codex"],
+		] as const) {
+			const thread = await start({ task: "Fix the date test", harness });
+			expect(thread).toMatchObject({ harness, profile: { providerId: harness, model: "default" } });
+			const waiting = await vi.waitFor(
+				async () => {
+					const current = await view(thread.id);
+					expect(current.state).toBe("waiting_input");
+					return current;
+				},
+				{ timeout: 10_000, interval: 50 },
+			);
+			// Its task waits with it, unanswered: no turn started, and nothing was spent.
+			expect(waiting).toMatchObject({ stateReason: "login_required", currentOperation: null, inbox: 1, spentUsd: 0 });
+			expect(waiting.stateDetail).toMatch(new RegExp(`Connect ${name}`));
+			const log = (await api<{ events: { kind: string; data: unknown }[] }>(`/coding/threads/${thread.id}/log`)).body.events;
+			expect(log.map((event) => event.kind)).not.toContain("thread.turn_started");
+			expect(log.find((event) => event.kind === "thread.waiting_input")?.data).toMatchObject({ reason: "login_required", harness });
+		}
 	});
 
 	it("answers at once with a queued thread's place, and cancels it out of the queue", async () => {

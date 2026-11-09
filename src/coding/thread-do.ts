@@ -66,7 +66,7 @@ import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceProvider, type WorkspaceSpec } from "./workspace/types";
-import type { HarnessEvent as CliEvent } from "./harness/types";
+import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
 
 /**
  * One coding thread, in a Durable Object of its own named by the thread's
@@ -1291,18 +1291,23 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/**
 	 * A CLI turn ended: what it cost is recorded, as the change in the
 	 * session's whole cost the CLI reported, and the session kept for the next
-	 * turn; then the turn ends as any does. A resumed session that the CLI no
-	 * longer has is let go, so the next turn starts a new one.
+	 * turn; then the turn ends as any does. A CLI that reports only the
+	 * session's tokens (Codex) has its turn's tokens counted the same way, and
+	 * no cost. A resumed session that the CLI no longer has is let go, so the
+	 * next turn starts a new one.
 	 */
 	async #endCliTurn(operation: string, result: RunResult): Promise<void> {
 		const thread = this.store.thread();
 		if (!thread || thread.currentOperation !== operation) return;
 		const before = this.store.harnessSession();
 		this.ctx.storage.transactionSync(() => {
-			const cost = result.sessionCostUsd === null ? 0 : Math.max(0, result.sessionCostUsd - (before?.sessionId === result.sessionId ? before.costUsd : 0));
-			const { usage } = result;
+			const same = before !== null && before.sessionId === result.sessionId;
+			const cost = result.sessionCostUsd === null ? 0 : Math.max(0, result.sessionCostUsd - (same ? before.costUsd : 0));
+			const usage = result.sessionUsage ? grown(result.sessionUsage, same ? before.usage : null) : result.usage;
 			if (cost > 0 || usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0) this.store.recordModelCall(thread.harness, result.model ?? "unknown", usage, cost);
-			if (result.sessionId && result.sessionCostUsd !== null) this.store.setHarnessSession({ sessionId: result.sessionId, costUsd: result.sessionCostUsd });
+			if (result.sessionId && (result.sessionCostUsd !== null || result.sessionUsage)) {
+				this.store.setHarnessSession({ sessionId: result.sessionId, costUsd: result.sessionCostUsd ?? (same ? before.costUsd : 0), usage: result.sessionUsage ?? (same ? before.usage : null) });
+			}
 			else if (result.status !== "done" && result.sessionId === null && result.reason === "harness_error" && before) this.store.setHarnessSession(null);
 			if (result.reason === "budget") this.store.update({ budgetStopped: true });
 		});
@@ -1314,7 +1319,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		switch (event.type) {
 			case "session": {
 				const known = this.store.harnessSession();
-				if (known?.sessionId !== event.sessionId) this.store.setHarnessSession({ sessionId: event.sessionId, costUsd: 0 });
+				if (known?.sessionId !== event.sessionId) this.store.setHarnessSession({ sessionId: event.sessionId, costUsd: 0, usage: null });
 				return;
 			}
 			case "delta":
@@ -1329,6 +1334,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 				return;
 			case "permission_denied":
 				this.store.recordEvent("harness.permission_denied", { tool: event.tool, message: event.message.slice(0, 500) });
+				return;
+			case "notice":
+				this.store.recordEvent("harness.notice", { message: event.message.slice(0, 500) });
 				return;
 			case "unparsed":
 				// Its length only: what the CLI printed may hold anything.
@@ -1719,7 +1727,7 @@ export type CodingLiveMessage = ({ readonly type: "output" } & CodingOutputEvent
 const CLI_MESSAGE = "harness.message";
 
 /** A CLI run that ended before it ran. */
-const NO_RUN: RunResult = { status: "unanswered", sessionId: null, sessionCostUsd: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, model: null, lines: 0 };
+const NO_RUN: RunResult = { status: "unanswered", sessionId: null, sessionCostUsd: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, sessionUsage: null, model: null, lines: 0 };
 
 /** How a turn ended. `needs_approval` is for a turn held for the person, such as for a CLI harness's login. */
 export type TurnOutcome = "completed" | "error" | "cancelled" | "needs_approval";
@@ -1774,6 +1782,16 @@ export const CODING_PROMPT = `You are a coding agent working in a git repository
 - Before you say you are done, run the repository's tests (or the ones that cover your change) and its type checks or linters if it has them, and fix what fails. If you can't run them, say why.
 - Your changes are committed for you at the end of each turn; don't push or rewrite history.
 - When you finish, say briefly what you changed, how you checked it, and anything left undone.`;
+
+/**
+ * How many tokens a session used since `before`, its usage when the turn
+ * started. A count that went down, as after the CLI compacted its context,
+ * can't be told apart, so the session's count is taken as it is.
+ */
+function grown(after: HarnessUsage, before: HarnessUsage | null): HarnessUsage {
+	if (!before || (Object.keys(after) as (keyof HarnessUsage)[]).some((key) => after[key] < before[key])) return after;
+	return { input: after.input - before.input, output: after.output - before.output, cacheRead: after.cacheRead - before.cacheRead, cacheWrite: after.cacheWrite - before.cacheWrite };
+}
 
 /** What every CLI harness is told besides its own instructions: the repository, and what Pim does for it. */
 export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branch" | "baseRef">): string {

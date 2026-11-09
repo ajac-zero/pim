@@ -15,6 +15,15 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
 	&& npm cache clean --force \
 	&& claude --version
 
+# OpenAI's Codex CLI, unmodified, for coding threads whose harness is `codex` (docs/coding-codex.md).
+# Pinned the same way: bump it on purpose, after checking `codex exec --help` and its JSONL against
+# src/coding/harness/codex.ts. Its npm package also installs the platform's native binary from an
+# optional dependency.
+ARG CODEX_VERSION=0.167.0
+RUN npm install -g "@openai/codex@${CODEX_VERSION}" \
+	&& npm cache clean --force \
+	&& codex --version
+
 # Node's image already has a uid 1000 user; agentd runs as uid 10001.
 RUN groupadd --gid 10001 workspace \
 	&& useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash workspace \

@@ -2,6 +2,7 @@ import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import {
   type CodingStreamMessage,
+  codingStatus,
   EMPTY_LIVE,
   type LiveTranscript,
   ndjson,
@@ -338,5 +339,26 @@ describe("why a thread stopped", () => {
       reason: "low_disk",
     });
     expect(stateReasonKey(null)).toBeNull();
+  });
+});
+
+describe("a thread's status in the chat list", () => {
+  const place = { position: 1, reason: "slots_full" };
+  it("is queued until it has a slot, running while it starts or works, and done between turns or archived", () => {
+    expect(codingStatus({ state: "queued", queue: place })).toBe("queued");
+    // Starting, it may still wait in the queue: its place says so.
+    expect(codingStatus({ state: "provisioning", queue: place })).toBe(
+      "queued",
+    );
+    expect(codingStatus({ state: "provisioning", queue: null })).toBe(
+      "running",
+    );
+    expect(codingStatus({ state: "running", queue: null })).toBe("running");
+    expect(codingStatus({ state: "waiting_input", queue: null })).toBe(
+      "waiting",
+    );
+    expect(codingStatus({ state: "idle", queue: null })).toBe("done");
+    expect(codingStatus({ state: "failed", queue: null })).toBe("failed");
+    expect(codingStatus({ state: "archived", queue: null })).toBe("done");
   });
 });

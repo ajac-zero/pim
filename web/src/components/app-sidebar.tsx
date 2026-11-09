@@ -9,6 +9,8 @@ import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
+import { CodingStatusMark, TASK_POLL_MS } from "~/components/chat/tasks";
+import { HarnessIcon } from "~/components/harness-icon";
 import { useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -67,7 +69,16 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
-import { flatChats, groupByAge, isInactive, nestChats } from "~/lib/chat-list";
+import {
+  type ChatEntry,
+  type CodingEntry,
+  codingChats,
+  flatChats,
+  groupByAge,
+  isInactive,
+  nestChats,
+} from "~/lib/chat-list";
+import { ACTIVE_STATES, codingApi, codingThreadsQuery } from "~/lib/coding";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -360,12 +371,28 @@ function ChatsPanel({
   const { t } = useI18n();
   const [search, setSearch] = useState("");
   const { data: sessions } = useQuery(sessionsQuery());
-  const params = useParams({ strict: false }) as { sessionId?: string };
-  const activeId = params.sessionId;
+  // Coding threads move on their own: the list looks again while any is at work, besides after each run in a chat.
+  const { data: threads } = useQuery({
+    ...codingThreadsQuery(codingApi),
+    refetchInterval: (query) =>
+      query.state.data?.some((thread) => ACTIVE_STATES.includes(thread.state))
+        ? TASK_POLL_MS
+        : false,
+  });
+  const params = useParams({ strict: false }) as {
+    sessionId?: string;
+    threadId?: string;
+  };
+  const activeId = params.sessionId ?? params.threadId;
   const newChat = useNewChat(onNavigate);
   const current = useMemo(
-    () => flatChats(sessions ?? [], search, t("newChat")),
-    [sessions, search, t],
+    () =>
+      flatChats<ChatEntry>(
+        [...(sessions ?? []), ...codingChats(threads ?? [])],
+        search,
+        t("newChat"),
+      ),
+    [sessions, threads, search, t],
   );
   const archived = current.filter((session) => session.archived);
   const inactive = current.filter((session) => isInactive(session));
@@ -611,8 +638,8 @@ function DatedChats({
   awaitingApproval,
   onNavigate,
 }: {
-  list: Session[];
-  all: Session[];
+  list: ChatEntry[];
+  all: ChatEntry[];
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
@@ -645,7 +672,8 @@ function DatedChats({
  * those started from them, as Amp shows threads started by other threads.
  * Every chat with tasks below it counts how many of them are done and folds
  * them away. The first level starts open and deeper ones start folded; the
- * one open stays in view.
+ * one open stays in view. Coding threads are among them, with rows of their
+ * own.
  */
 function ChatTree({
   session,
@@ -655,39 +683,48 @@ function ChatTree({
   onNavigate,
   depth = 0,
 }: {
-  session: Session;
-  tree: ReadonlyMap<string, Session[]>;
+  session: ChatEntry;
+  tree: ReadonlyMap<string, ChatEntry[]>;
   activeId?: string;
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
   depth?: number;
 }) {
   const [open, setOpen] = useState(depth === 0);
-  const below = (chat: Session): Session[] =>
+  const below = (chat: ChatEntry): ChatEntry[] =>
     (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
   const under = below(session);
   const expanded = open || under.some((chat) => chat.id === activeId);
+  const tasks =
+    under.length > 0
+      ? {
+          done: under.filter(isDone).length,
+          total: under.length,
+          expanded,
+          toggle: () => setOpen(!expanded),
+        }
+      : undefined;
   return (
     <>
-      <SessionRow
-        session={session}
-        depth={depth}
-        active={session.id === activeId}
-        awaitingApproval={awaitingApproval.has(session.id)}
-        onNavigate={onNavigate}
-        tasks={
-          under.length > 0
-            ? {
-                done: under.filter((child) =>
-                  DONE_STATES.has(child.startedBy?.state ?? "completed"),
-                ).length,
-                total: under.length,
-                expanded,
-                toggle: () => setOpen(!expanded),
-              }
-            : undefined
-        }
-      />
+      {session.coding ? (
+        <CodingRow
+          thread={session}
+          coding={session.coding}
+          depth={depth}
+          active={session.id === activeId}
+          onNavigate={onNavigate}
+          tasks={tasks}
+        />
+      ) : (
+        <SessionRow
+          session={session}
+          depth={depth}
+          active={session.id === activeId}
+          awaitingApproval={awaitingApproval.has(session.id)}
+          onNavigate={onNavigate}
+          tasks={tasks}
+        />
+      )}
       {expanded &&
         tree
           .get(session.id)
@@ -708,6 +745,12 @@ function ChatTree({
 
 const DONE_STATES = new Set(["completed", "failed", "canceled"]);
 
+/** Whether a chat's task is over, or a coding thread's turn. */
+const isDone = (chat: ChatEntry) =>
+  chat.coding
+    ? chat.coding.status === "done" || chat.coding.status === "failed"
+    : DONE_STATES.has(chat.startedBy?.state ?? "completed");
+
 /**
  * Chats folded away below the others, such as those inactive for 72 hours or
  * archived. It opens while searching, and when the open chat is one of them.
@@ -722,8 +765,8 @@ function FoldedChats({
   onNavigate,
 }: {
   label: string;
-  list: Session[];
-  all: Session[];
+  list: ChatEntry[];
+  all: ChatEntry[];
   activeId?: string;
   searching: boolean;
   awaitingApproval: ReadonlySet<string>;
@@ -818,12 +861,7 @@ function SessionRow({
   /** How many chats it is below: shown under the chat it was started from, and indented by up to four steps. */
   depth?: number;
   /** The chats started from this one: how many of their tasks are done, and whether they show. */
-  tasks?: {
-    done: number;
-    total: number;
-    expanded: boolean;
-    toggle: () => void;
-  };
+  tasks?: TaskChats;
 }) {
   const { t } = useI18n();
   const { data: agents } = useQuery(agentsQuery());
@@ -1032,20 +1070,7 @@ function SessionRow({
                   />
                 </span>
               ))}
-              {starter && (
-                <span
-                  className="-right-1 -bottom-1 absolute flex rounded-[4px] bg-sidebar ring-1 ring-sidebar"
-                  role="img"
-                  aria-label={t("startedBy", { agent: starter.name })}
-                  title={t("startedBy", { agent: starter.name })}
-                >
-                  <AgentIcon
-                    agent={{ ...starter, majordomo: false }}
-                    tile
-                    className="size-2.5 rounded-[3px]"
-                  />
-                </span>
-              )}
+              {starter && <StarterMark starter={starter} />}
               {chatAgents.length > 4 && (
                 <span className="ml-1 text-muted-foreground text-xs">
                   +{chatAgents.length - 4}
@@ -1074,28 +1099,14 @@ function SessionRow({
         </span>
       </Link>
       {tasks && (
-        <button
-          type="button"
-          onClick={tasks.toggle}
-          aria-expanded={tasks.expanded}
-          aria-label={t(tasks.expanded ? "hideTaskChats" : "showTaskChats", {
-            done: tasks.done,
-            total: tasks.total,
-          })}
-          title={t("taskChatsDone", { done: tasks.done, total: tasks.total })}
+        <TaskChatsToggle
+          tasks={tasks}
+          // Clear of the options button while it shows.
           className={cn(
-            "-translate-y-1/2 absolute top-1/2 right-1.5 flex items-center gap-0.5 rounded-md px-1 py-0.5 text-muted-foreground text-xs tabular-nums hover:bg-sidebar-accent hover:text-foreground group-focus-within/row:right-8 group-hover/row:right-8 pointer-coarse:right-8",
+            "group-focus-within/row:right-8 group-hover/row:right-8 pointer-coarse:right-8",
             active && "right-8",
           )}
-        >
-          <ChevronDown
-            className={cn(
-              "size-3.5 transition-transform",
-              tasks.expanded && "rotate-180",
-            )}
-          />
-          {tasks.done}/{tasks.total}
-        </button>
+        />
       )}
       <DropdownMenu onOpenChange={() => setConfirmingDelete(false)}>
         <DropdownMenuTrigger asChild>
@@ -1177,6 +1188,130 @@ function SessionRow({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+    </li>
+  );
+}
+
+/** The chats started from a row's chat: how many of their tasks are done, and whether they show. */
+type TaskChats = {
+  done: number;
+  total: number;
+  expanded: boolean;
+  toggle: () => void;
+};
+
+/** Shows or hides the chats started from a row's chat, counting how many of them are done. */
+function TaskChatsToggle({
+  tasks,
+  className,
+}: {
+  tasks: TaskChats;
+  className?: string;
+}) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      onClick={tasks.toggle}
+      aria-expanded={tasks.expanded}
+      aria-label={t(tasks.expanded ? "hideTaskChats" : "showTaskChats", {
+        done: tasks.done,
+        total: tasks.total,
+      })}
+      title={t("taskChatsDone", { done: tasks.done, total: tasks.total })}
+      className={cn(
+        "-translate-y-1/2 absolute top-1/2 right-1.5 flex items-center gap-0.5 rounded-md px-1 py-0.5 text-muted-foreground text-xs tabular-nums hover:bg-sidebar-accent hover:text-foreground",
+        className,
+      )}
+    >
+      <ChevronDown
+        className={cn(
+          "size-3.5 transition-transform",
+          tasks.expanded && "rotate-180",
+        )}
+      />
+      {tasks.done}/{tasks.total}
+    </button>
+  );
+}
+
+/** The agent that started a chat or a coding thread, on the bottom right corner of its icon. */
+function StarterMark({
+  starter,
+}: {
+  starter: Parameters<typeof AgentIcon>[0]["agent"] & { name: string };
+}) {
+  const { t } = useI18n();
+  return (
+    <span
+      className="-right-1 -bottom-1 absolute flex rounded-[4px] bg-sidebar ring-1 ring-sidebar"
+      role="img"
+      aria-label={t("startedBy", { agent: starter.name })}
+      title={t("startedBy", { agent: starter.name })}
+    >
+      <AgentIcon
+        agent={{ ...starter, majordomo: false }}
+        tile
+        className="size-2.5 rounded-[3px]"
+      />
+    </span>
+  );
+}
+
+/**
+ * A coding thread in the chat list: its harness's logo, marked with the
+ * agent that started it, its status beside it, and its task. It opens the
+ * thread's page.
+ */
+function CodingRow({
+  thread,
+  coding,
+  active,
+  onNavigate,
+  depth = 0,
+  tasks,
+}: {
+  thread: ChatEntry;
+  coding: CodingEntry;
+  active: boolean;
+  onNavigate?: () => void;
+  depth?: number;
+  tasks?: TaskChats;
+}) {
+  const { t } = useI18n();
+  const { data: agents } = useQuery(agentsQuery());
+  const starter =
+    coding.agent !== null
+      ? agents?.find((candidate) => candidate.id === coding.agent)
+      : undefined;
+  const title = sessionTitle(thread, t);
+  return (
+    <li
+      className="group/row relative"
+      style={{ paddingLeft: `${Math.min(depth, 4) * 0.75}rem` }}
+    >
+      <Link
+        to="/coding/$threadId"
+        params={{ threadId: thread.id }}
+        onClick={onNavigate}
+        title={title}
+        className={cn(
+          "flex items-center gap-2 rounded-lg px-2 py-2 text-sm transition-colors hover:bg-sidebar-accent",
+          active && "bg-sidebar-accent",
+          tasks && "pr-14",
+        )}
+      >
+        {depth > 0 && (
+          <CornerDownRight className="-ml-1 mr-[2px] size-3.5 shrink-0 text-muted-foreground/70" />
+        )}
+        <span className="relative flex shrink-0 items-center">
+          <HarnessIcon harness={coding.harness} />
+          {starter && <StarterMark starter={starter} />}
+        </span>
+        <CodingStatusMark status={coding.status} />
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+      </Link>
+      {tasks && <TaskChatsToggle tasks={tasks} />}
     </li>
   );
 }

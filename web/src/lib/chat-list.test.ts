@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { chatAge, flatChats, isInactive, nestChats } from "~/lib/chat-list";
+import {
+  type ChatEntry,
+  chatAge,
+  codingChats,
+  flatChats,
+  isInactive,
+  nestChats,
+} from "~/lib/chat-list";
+import type { CodingThreadSummary } from "~/lib/coding";
 import type { Session } from "~/lib/pim-api";
 
 const chat = (
@@ -31,7 +39,7 @@ const sessions = [
   }),
   chat("legacy default", 40, { agent: undefined }),
 ];
-const ids = (list: Session[]) => list.map((session) => session.id);
+const ids = (list: readonly ChatEntry[]) => list.map((session) => session.id);
 
 describe("flatChats", () => {
   it("lists every chat, visits included, by activity with unused ones last", () => {
@@ -128,6 +136,84 @@ describe("nestChats", () => {
     ]);
     expect(ids(top)).toEqual(["old"]);
     expect(ids(children.get("old") ?? [])).toEqual(["new"]);
+  });
+});
+
+describe("coding threads in the list", () => {
+  const thread = (
+    id: string,
+    overrides: Partial<CodingThreadSummary> = {},
+  ): CodingThreadSummary => ({
+    id,
+    url: `/coding/${id}`,
+    repo: "https://github.com/acme/widgets",
+    ref: "main",
+    branch: `pim/${id}`,
+    harness: "pi",
+    task: `Task ${id}\nWith details`,
+    state: "idle",
+    stateReason: null,
+    queue: null,
+    createdBy: { type: "person" },
+    parent: null,
+    spentUsd: 0,
+    budgetUsd: 3,
+    createdAt: 10,
+    updatedAt: 20,
+    ...overrides,
+  });
+  const byAgent = (chat: string) => ({
+    createdBy: { type: "agent" as const, agent: "coder", chat },
+  });
+
+  it("are rows with their harness, status and starting agent, titled by their task's first line", () => {
+    const [queued, codex, fresh] = codingChats([
+      thread("q", { state: "queued", queue: { position: 1, reason: "x" } }),
+      thread("c", { harness: "codex", state: "archived", ...byAgent("trip") }),
+      thread("f", { state: "provisioning", updatedAt: 0 }),
+    ]);
+    expect(queued).toMatchObject({
+      id: "q",
+      title: "Task q",
+      busy: true,
+      archived: false,
+      coding: { harness: "pi", status: "queued", agent: null, from: null },
+    });
+    expect(codex).toMatchObject({
+      busy: false,
+      archived: true,
+      coding: {
+        harness: "codex",
+        status: "done",
+        agent: "coder",
+        from: "trip",
+      },
+    });
+    // Until it records a change, it was last active when it started.
+    expect(fresh).toMatchObject({ busy: true, updatedAt: 10 });
+  });
+
+  it("go under the chat an agent started them from, or the thread they continue, and stand on their own when started by you", () => {
+    const list: ChatEntry[] = [
+      chat("trip", 90),
+      ...codingChats([
+        thread("from chat", { createdAt: 2, ...byAgent("trip") }),
+        thread("yours"),
+        thread("follow-up", {
+          createdAt: 3,
+          parent: "from chat",
+          ...byAgent("trip"),
+        }),
+        thread("from a deleted chat", byAgent("gone")),
+      ]),
+    ];
+    const { top, children } = nestChats(list);
+    expect(ids(top)).toEqual(["trip", "yours", "from a deleted chat"]);
+    expect(ids(children.get("trip") ?? [])).toEqual(["from chat"]);
+    expect(ids(children.get("from chat") ?? [])).toEqual(["follow-up"]);
+    // Without the thread it continues listed, it goes under nothing, as a task chat would.
+    const followUp = list.filter((entry) => entry.id === "follow-up");
+    expect(ids(nestChats(followUp).top)).toEqual(["follow-up"]);
   });
 });
 

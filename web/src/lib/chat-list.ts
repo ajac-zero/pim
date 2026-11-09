@@ -1,8 +1,59 @@
+import {
+  type CodingHarness,
+  type CodingStatus,
+  type CodingThreadSummary,
+  codingStatus,
+} from "~/lib/coding";
 import type { Session } from "~/lib/pim-api";
 
+/**
+ * A row of the chat list: a chat, or a coding thread, which the list shows
+ * as a chat of its own kind, with its harness's logo and its status.
+ */
+export type ChatEntry = Session & { coding?: CodingEntry };
+
+export type CodingEntry = {
+  harness: CodingHarness;
+  status: CodingStatus;
+  /** The agent that started it, whose icon marks its logo; null for one you started. */
+  agent: string | null;
+  /** What it is listed under: the thread it continues from, or else the chat an agent started it from. */
+  from: string | null;
+};
+
+/**
+ * Coding threads as rows of the chat list. Each is at work while queued or
+ * running, archived once archived, and active when it last changed.
+ */
+export function codingChats(
+  threads: readonly CodingThreadSummary[],
+): ChatEntry[] {
+  return threads.map((thread) => {
+    const status = codingStatus(thread);
+    const agent = thread.createdBy.type === "agent" ? thread.createdBy : null;
+    return {
+      id: thread.id,
+      title: thread.task.split("\n")[0] || null,
+      busy: status === "queued" || status === "running",
+      createdAt: thread.createdAt,
+      // The list has no change of its own until the thread first records one.
+      updatedAt: thread.updatedAt || thread.createdAt,
+      responseAt: null,
+      unread: false,
+      archived: thread.state === "archived",
+      coding: {
+        harness: thread.harness,
+        status,
+        agent: agent?.agent ?? null,
+        from: thread.parent ?? agent?.chat ?? null,
+      },
+    };
+  });
+}
+
 /** Chats matching a search, most recently active first; one never used goes last. */
-export function flatChats(
-  sessions: readonly Session[],
+export function flatChats<T extends ChatEntry>(
+  sessions: readonly T[],
   search: string,
   untitled: string,
 ) {
@@ -55,8 +106,11 @@ export function chatAge(updatedAt: number | null, now = Date.now()): ChatAge {
 }
 
 /** Consecutive chats under the same age divider, in the order given. */
-export function groupByAge(sessions: readonly Session[], now = Date.now()) {
-  const groups: { age: ChatAge; sessions: Session[] }[] = [];
+export function groupByAge<T extends ChatEntry>(
+  sessions: readonly T[],
+  now = Date.now(),
+) {
+  const groups: { age: ChatAge; sessions: T[] }[] = [];
   for (const session of sessions) {
     const age = chatAge(session.updatedAt, now);
     const last = groups.at(-1);
@@ -78,14 +132,21 @@ export function groupByAge(sessions: readonly Session[], now = Date.now()) {
  * started go under the chat that carries it on, even though the longer one,
  * archived, is listed apart. `all` is every chat, for finding that chat when
  * `list` is only some of them.
+ *
+ * Coding threads go under the thread they continue from, or else the chat an
+ * agent started them from, as task chats do; one you started stands on its
+ * own.
  */
-export function nestChats(list: readonly Session[], all = list) {
+export function nestChats<T extends ChatEntry>(
+  list: readonly T[],
+  all: readonly T[] = list,
+) {
   const byId = new Map(all.map((session) => [session.id, session]));
-  const next = new Map<string, Session>();
+  const next = new Map<string, T>();
   for (const session of all) {
     if (session.continuedFrom) next.set(session.continuedFrom, session);
   }
-  const latest = (session: Session) => {
+  const latest = (session: T) => {
     const seen = new Set([session]);
     let last = session;
     for (let more = next.get(last.id); more && !seen.has(more); ) {
@@ -96,11 +157,13 @@ export function nestChats(list: readonly Session[], all = list) {
     return last;
   };
   const listed = new Set(list);
-  const parentOf = new Map<string, Session>();
-  const top: Session[] = [];
-  const children = new Map<string, Session[]>();
+  const parentOf = new Map<string, T>();
+  const top: T[] = [];
+  const children = new Map<string, T[]>();
   for (const session of list) {
-    const start = byId.get(session.startedBy?.session ?? "");
+    const start = byId.get(
+      session.startedBy?.session ?? session.coding?.from ?? "",
+    );
     const from = byId.get(session.continuedFrom ?? "");
     const parent = start ? latest(start) : from;
     // A link that would close a loop is left out, so every chat is shown.

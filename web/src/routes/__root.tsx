@@ -257,8 +257,9 @@ function usePimEvents() {
     pimClient.handlers = {
       onActivity: () => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
-        // A run may have scheduled work, made an agent, saved a skill, written files, or used the browser.
+        // A run may have scheduled work, made an agent, saved a skill, written files, used the browser, or started a coding thread.
         queryClient.invalidateQueries({ queryKey: ["schedules"] });
+        queryClient.invalidateQueries({ queryKey: ["coding", "threads"] });
         queryClient.invalidateQueries({ queryKey: ["agents"] });
         queryClient.invalidateQueries({ queryKey: ["files"] });
         queryClient.invalidateQueries({ queryKey: ["browser"] });

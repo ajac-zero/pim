@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { HarnessIcon } from "~/components/harness-icon";
 import { Bell } from "~/components/icons";
 
 describe("themed icons", () => {
@@ -20,5 +21,21 @@ describe("themed icons", () => {
     expect(meaningful).toContain('width="18"');
     expect(meaningful).toContain('height="18"');
     expect(meaningful).toContain("text-muted-foreground");
+  });
+});
+
+describe("harness logos", () => {
+  it("draws each harness's own mark, labeled with its name", () => {
+    const marks = (["pi", "claude-code", "codex"] as const).map((harness) =>
+      renderToStaticMarkup(<HarnessIcon harness={harness} />),
+    );
+    expect(marks.map((mark) => /aria-label="([^"]+)"/.exec(mark)?.[1])).toEqual(
+      ["Pi", "Claude Code", "Codex"],
+    );
+    for (const mark of marks) expect(mark).toMatch(/^<svg[^>]*role="img"/);
+    // Each draws something different, not one mark under three names.
+    const drawings = marks.map((mark) => mark.replace(/^<svg[^>]*>/, ""));
+    expect(new Set(drawings).size).toBe(3);
+    expect(marks[1]).toContain('fill="#d97757"');
   });
 });

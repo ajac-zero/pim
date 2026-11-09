@@ -25,6 +25,9 @@ export type CodingThreadState =
   | "failed"
   | "archived";
 
+/** The coding agent a thread runs as. */
+export type CodingHarness = "pi" | "claude-code" | "codex";
+
 export type CodingCreator =
   | { type: "person" }
   | { type: "agent"; agent: string; chat: string };
@@ -43,6 +46,7 @@ export type CodingThreadSummary = {
   repo: string;
   ref: string;
   branch: string;
+  harness: CodingHarness;
   task: string;
   state: CodingThreadState;
   stateReason: string | null;
@@ -75,6 +79,7 @@ export type CodingThreadView = {
   stateReason: string | null;
   stateDetail: string | null;
   repo: { url: string; ref: string; branch: string; baseSha: string | null };
+  harness: CodingHarness;
   profile: AgentProfile;
   workspaceProvider: string;
   slot: "none" | "queued" | "held";
@@ -94,6 +99,7 @@ export type StartCodingThread = {
   repo: string;
   ref?: string;
   task: string;
+  harness?: CodingHarness;
   profile?: AgentProfile;
   budgetUsd?: number;
   parent?: string;
@@ -284,6 +290,31 @@ export const STATE_TEXT: Record<CodingThreadState, TranslationKey> = {
   failed: "codingStateFailed",
   archived: "codingStateArchived",
 };
+
+/** How a thread's work goes, in the words the chat list uses for tasks. */
+export type CodingStatus = "queued" | "running" | "waiting" | "done" | "failed";
+
+/**
+ * A thread's status from its state and its place in the queue: queued until
+ * it has a slot, running while it gets its workspace ready or works, waiting
+ * while it needs the person, and done between turns or once archived.
+ */
+export function codingStatus(
+  thread: Pick<CodingThreadSummary, "state" | "queue">,
+): CodingStatus {
+  if (thread.state === "queued" || thread.queue) return "queued";
+  switch (thread.state) {
+    case "provisioning":
+    case "running":
+      return "running";
+    case "waiting_input":
+      return "waiting";
+    case "failed":
+      return "failed";
+    default:
+      return "done";
+  }
+}
 
 /** What a queued thread waits for, in words. */
 export function queueReasonKey(reason: string): TranslationKey {

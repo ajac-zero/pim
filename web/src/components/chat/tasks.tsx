@@ -8,6 +8,7 @@ import {
   ArrowDownIcon,
   Check,
   ChevronRight,
+  Clock,
   CornerDownRight,
   Loader2,
   ShieldAlert,
@@ -16,6 +17,7 @@ import {
   X,
 } from "~/components/icons";
 import { Button } from "~/components/ui/button";
+import type { CodingStatus } from "~/lib/coding";
 import { type AgentTask, pim, type StartedBy } from "~/lib/pim-api";
 import { sessionsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
@@ -329,6 +331,37 @@ const stateKey = {
   failed: "taskDidntFinish",
   canceled: "taskCanceled",
 } as const;
+
+/** A coding thread's status as a task's state, but queued, which tasks never are. */
+const codingTaskState = {
+  running: "working",
+  waiting: "auth-required",
+  done: "completed",
+  failed: "failed",
+} as const;
+
+const codingStatusKey = {
+  queued: "codingStateQueued",
+  running: stateKey.working,
+  waiting: stateKey["auth-required"],
+  done: stateKey.completed,
+  failed: stateKey.failed,
+} as const;
+
+/** A coding thread's status, marked and named as tasks' are, with a clock while it waits for a slot. */
+export function CodingStatusMark({ status }: { status: CodingStatus }) {
+  const { t } = useI18n();
+  const label = t(codingStatusKey[status]);
+  return (
+    <span role="img" aria-label={label} title={label} className="flex">
+      {status === "queued" ? (
+        <Clock className="size-3.5 shrink-0 text-muted-foreground" />
+      ) : (
+        <TaskState state={codingTaskState[status]} />
+      )}
+    </span>
+  );
+}
 
 function TaskState({ state }: { state: AgentTask["state"] }) {
   if (state === "working") {

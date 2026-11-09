@@ -80,6 +80,7 @@ const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
     branch: "pim/fix-date-test-t1",
     baseSha: "abc",
   },
+  harness: "pi",
   profile: { providerId: "p", model: "m" },
   workspaceProvider: "manager",
   slot: "held",
@@ -180,6 +181,7 @@ const summary = (
   repo: "https://github.com/acme/widgets",
   ref: "main",
   branch: "pim/fix-date-test-t1",
+  harness: "pi",
   task: "Fix the flaky date test",
   state: "idle",
   stateReason: null,
@@ -332,6 +334,34 @@ const snapshot = (entries: EntryRecord[]): CodingStreamMessage =>
   }) as unknown as CodingStreamMessage;
 
 describe("a thread's page", () => {
+  it("shows its harness's logo, and leads back to the chat an agent started it from", async () => {
+    const { api } = fakeApi(
+      view({
+        harness: "claude-code",
+        createdBy: { type: "agent", agent: "coder", chat: "trip-chat" },
+      }),
+    );
+    const router = threadPage(api);
+    expect(
+      await screen.findByRole("img", { name: "Claude Code" }),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("link", { name: "Back to the chat" }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/chat/trip-chat"),
+    );
+  });
+
+  it("leads back to every thread when you started it", async () => {
+    const { api } = fakeApi();
+    threadPage(api);
+    expect(await screen.findByRole("img", { name: "Pi" })).toBeTruthy();
+    expect(
+      screen
+        .getByRole("link", { name: "All coding threads" })
+        .getAttribute("href"),
+    ).toBe("/coding");
+  });
+
   it("shows a queued thread's place and why it waits, and cancels it", async () => {
     const { api } = fakeApi(
       view({

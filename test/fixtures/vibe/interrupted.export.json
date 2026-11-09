@@ -1,0 +1,39 @@
+{
+  "outcome": "terminated",
+  "stop_reason": "interrupted",
+  "error": null,
+  "session_id": "16de5c1a-4022-7ca5-0d04-fab0919b1e65",
+  "usage": {
+    "input_tokens": 1226,
+    "output_tokens": 30,
+    "cached_input_tokens": 1000,
+    "total_tokens": 1256
+  },
+  "cost_usd": 0.000714,
+  "steps": 1,
+  "config": {
+    "active_model": "",
+    "models": {
+      "mistral-medium-3.5": {
+        "name": "mistral-vibe-cli-latest",
+        "provider": "mistral",
+        "alias": "mistral-medium-3.5",
+        "input_price": 1.5,
+        "output_price": 7.5,
+        "cached_input_price": 0.15
+      }
+    }
+  },
+  "schema_version": 1,
+  "vibe_version": "3.1.0",
+  "journal_dir": "session",
+  "started_at": "2026-11-09T19:34:07.761576Z",
+  "ended_at": "2026-11-09T19:34:12.018538Z",
+  "limits": {
+    "max_turns": null,
+    "max_price": 1,
+    "max_tokens": null,
+    "time_limit_s": null
+  },
+  "exit_code": 3
+}

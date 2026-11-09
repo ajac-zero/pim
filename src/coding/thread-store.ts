@@ -1,4 +1,5 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { RunRecord } from "./harness/runner";
 import type { JournalEntry, TestRun as ToolTestRun, TestSummary } from "./tools";
 import type { WorkspaceRef } from "./workspace/types";
 
@@ -181,6 +182,15 @@ CREATE TABLE IF NOT EXISTS coding_notice (
 	key TEXT PRIMARY KEY,
 	received_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS coding_harness_session (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	session_id TEXT NOT NULL,
+	cost_usd REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS coding_harness_run (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	record TEXT NOT NULL
+);
 `;
 
 /** Every table a thread keeps besides pi's. */
@@ -193,7 +203,12 @@ export const CODING_THREAD_TABLES = [
 	"coding_tool_journal",
 	"coding_inbox",
 	"coding_notice",
+	"coding_harness_session",
+	"coding_harness_run",
 ] as const;
+
+/** The CLI harness's session a thread goes on with (./harness/), and its whole cost as the CLI last reported it. */
+export type HarnessSession = { readonly sessionId: string; readonly costUsd: number };
 
 type Row = Record<string, SqlStorageValue>;
 
@@ -415,6 +430,34 @@ export class CodingThreadStore {
 				summary: row.summary === null ? null : (JSON.parse(String(row.summary)) as TestSummary),
 				output: String(row.output),
 			}));
+	}
+
+	/** The CLI harness's session, once the CLI started one. */
+	harnessSession(): HarnessSession | null {
+		const row = this.#sql.exec("SELECT session_id, cost_usd FROM coding_harness_session WHERE id = 1").toArray()[0];
+		return row ? { sessionId: String(row.session_id), costUsd: Number(row.cost_usd) } : null;
+	}
+
+	setHarnessSession(session: HarnessSession | null): void {
+		if (!session) this.#sql.exec("DELETE FROM coding_harness_session");
+		else {
+			this.#sql.exec(
+				"INSERT INTO coding_harness_session (id, session_id, cost_usd) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET session_id = excluded.session_id, cost_usd = excluded.cost_usd",
+				session.sessionId,
+				session.costUsd,
+			);
+		}
+	}
+
+	/** The CLI harness's run under way, as the runner keeps it. */
+	harnessRun(): RunRecord | null {
+		const row = this.#sql.exec("SELECT record FROM coding_harness_run WHERE id = 1").toArray()[0];
+		return row ? (JSON.parse(String(row.record)) as RunRecord) : null;
+	}
+
+	saveHarnessRun(record: RunRecord | null): void {
+		if (!record) this.#sql.exec("DELETE FROM coding_harness_run");
+		else this.#sql.exec("INSERT INTO coding_harness_run (id, record) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET record = excluded.record", JSON.stringify(record));
 	}
 
 	/** What a tool call recorded in the journal, by its key (the call's task id). */

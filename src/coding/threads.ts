@@ -4,6 +4,7 @@ import type { CodingCreator, CodingErrorCode, CodingThreadSummary, CodingThreadV
 import { threadPath } from "./api";
 import { GitBrokerError, parseRepoUrl } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";
+import { cliHarness } from "./harness";
 import { codingScheduler } from "./scheduler-do";
 import { codingThread, DEFAULT_BUDGET_USD } from "./thread-do";
 import type { IndexedThread } from "./thread-index";
@@ -116,7 +117,7 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 	if (typeof budgetUsd !== "number" || !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw invalid("budgetUsd must be a positive number of dollars");
 	const harness = input.harness ?? "pi";
 	if (!CODING_HARNESSES.includes(harness)) throw invalid(`harness must be ${CODING_HARNESSES.join(", ")}`);
-	if (harness !== "pi") throw invalid("harness not yet available");
+	if (harness !== "pi" && !cliHarness(harness)) throw invalid("harness not yet available");
 	if (input.chat !== undefined && (typeof input.chat !== "string" || !input.chat || input.chat.length > 128)) throw invalid("chat must be a chat's ID");
 	const profile = input.profile === undefined ? undefined : profileOf(input.profile);
 	if (input.parent !== undefined && input.parent !== null) await ownedThread(env, space, input.parent);

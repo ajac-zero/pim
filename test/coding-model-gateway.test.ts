@@ -71,6 +71,7 @@ async function makeThread(overrides: Partial<CodingThreadRow> = {}): Promise<{ i
 			repoUrl: "https://github.com/acme/demo",
 			baseRef: "main",
 			branch: "pim/gateway",
+			harness: "pi",
 			profile: { providerId: "own:anthropic", model: "claude-sonnet-4-5" },
 			providerId: "fake",
 			state: "idle",

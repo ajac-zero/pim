@@ -44,6 +44,7 @@ The bucket is the Pim. A write is answered only once it is in the bucket (one no
 | `send_email` | celld has no Email Workers: Pim sends no email |
 | `observability` | The Worker's console, Pim's `pim.*` events among it, goes to celld's log: `journalctl -u celld` |
 | `keep_vars` | No dashboard: variables and secrets come from your files on every deploy ([Variables and secrets](#variables-and-secrets)) |
+| `previews` | Only `wrangler preview` reads it: celld has no Previews |
 | `build` | `build.sh` builds the web app explicitly |
 | `workers_dev`, `preview_urls` | Your proxy gives Pim its address |
 

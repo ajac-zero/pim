@@ -75,5 +75,28 @@
   // after becomes its admin.
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
   // Workers Logs: where setup links show up, to claim a Pim or for the admin's lost passkey.
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+  // What `wrangler preview` (Workers Builds' Preview builds) runs: Previews don't inherit the
+  // settings above. Durable Objects get a new namespace and storage for each Preview, so their
+  // classes and migrations stay at the top level and only the bindings are repeated, as are the
+  // bindings that need no resource. The ratelimits take their own namespace IDs.
+  // OAUTH_KV, BLOBS and ARTIFACTS are left out on purpose: a Preview's KV and R2 bindings are
+  // bound by namespace ID and bucket name, never made for it, and repeating production's would
+  // share its data. Until test resources are added here, a Preview runs without them.
+  "previews": {
+    "ai": { "binding": "AI" },
+    "durable_objects": {
+      "bindings": [
+        { "name": "Pim", "class_name": "Pim" },
+        { "name": "Auth", "class_name": "Auth" },
+        { "name": "Directory", "class_name": "Directory" },
+        { "name": "Gallery", "class_name": "Gallery" }
+      ]
+    },
+    "ratelimits": [
+      { "name": "AUTH_LIMITER", "namespace_id": "71420201", "simple": { "limit": 30, "period": 60 } },
+      { "name": "API_LIMITER", "namespace_id": "71420202", "simple": { "limit": 600, "period": 60 } }
+    ],
+    "version_metadata": { "binding": "CF_VERSION_METADATA" }
+  }
 }

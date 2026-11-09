@@ -19,7 +19,7 @@ const wrangler = parseJsonc(read("../../../wrangler.jsonc"));
 const CELLD_KEYS = ["$schema", "name", "main", "compatibility_date", "compatibility_flags", "durable_objects", "migrations", "assets", "services", "triggers", "vars", "d1_databases", "kv_namespaces", "queues", "workflows", "r2_buckets", "worker_loaders", "containers", "no_bundle", "define", "rules"];
 const CELLD_ASSET_KEYS = ["directory", "binding", "html_handling", "not_found_handling", "run_worker_first"];
 // What the profile leaves out of wrangler.jsonc, each explained at the top of the profile.
-const LEFT_OUT = ["$schema", "workers_dev", "preview_urls", "build", "ai", "ratelimits", "keep_vars", "version_metadata", "observability"];
+const LEFT_OUT = ["$schema", "workers_dev", "preview_urls", "build", "ai", "ratelimits", "keep_vars", "version_metadata", "observability", "previews"];
 
 test("celld v0.6.3 accepts every key of the profile", () => {
 	assert.deepEqual(Object.keys(profile).filter((key) => !CELLD_KEYS.includes(key)), []);

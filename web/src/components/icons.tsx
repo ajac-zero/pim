@@ -131,6 +131,8 @@ export const Dumbbell = themedIcon(
   Lucide.Dumbbell,
   pixelPath("M1 9h4v6H1V9Zm4-4h4v14H5V5Zm4 6h6v2H9m6-8h4v14h-4V5Zm4 4h4v6h-4"),
 );
+export const Pin = themedIcon(Lucide.Pin, Pixel.MapPin);
+export const PinOff = themedIcon(Lucide.PinOff, Pixel.MapPin);
 export const ExternalLink = themedIcon(Lucide.ExternalLink, Pixel.ExternalLink);
 export const Eye = themedIcon(Lucide.Eye, Pixel.Eye);
 export const FileCode2 = themedIcon(Lucide.FileCode2, Pixel.Script);

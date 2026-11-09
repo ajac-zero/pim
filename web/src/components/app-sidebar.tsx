@@ -21,13 +21,14 @@ import {
   Compass,
   Contact,
   CornerDownRight,
-  ExternalLink,
   History,
   Loader2,
   MessagesSquare,
   Monitor,
   MoreHorizontal,
   Pencil,
+  Pin,
+  PinOff,
   RotateCcw,
   ScrollText,
   Search,
@@ -80,7 +81,7 @@ import {
   sessionsQuery,
 } from "~/lib/queries";
 import { newChatSearch } from "~/lib/start-chat";
-import { CHAT_DRAG_TYPE, closeTab, openTab } from "~/lib/tabs";
+import { CHAT_DRAG_TYPE, pinTab, unpinTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 import { version } from "../../../package.json";
 
@@ -877,14 +878,15 @@ function SessionRow({
   });
 
   const navigate = useNavigate();
+  const pinned = useTabs().some((tab) => tab.session === session.id);
   // Delete asks twice: the first click turns the item into a confirmation.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const deleteMutation = useMutation({
     mutationFn: () => pim.deleteSession(session.id),
     onSuccess: async () => {
       if (pimClient.getState().session === session.id) pimClient.close();
-      // The deleted chat's tab closes; the chat next to it takes its place.
-      const next = closeTab(session.id);
+      // A deleted chat is unpinned; the pinned chat next to it takes its place.
+      const next = unpinTab(session.id);
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
       if (active) {
         await navigate(
@@ -1112,15 +1114,14 @@ function SessionRow({
           {/* Tabs show only on wider screens. */}
           <DropdownMenuItem
             className="max-md:hidden"
-            onClick={() => {
-              openTab(session.id);
-              navigate({
-                to: "/chat/$sessionId",
-                params: { sessionId: session.id },
-              });
-            }}
+            onClick={() => (pinned ? unpinTab(session.id) : pinTab(session.id))}
           >
-            <ExternalLink className="size-4" /> {t("openInNewTab")}
+            {pinned ? (
+              <PinOff className="size-4" />
+            ) : (
+              <Pin className="size-4" />
+            )}{" "}
+            {pinned ? t("unpinChat") : t("pinChat")}
           </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => {

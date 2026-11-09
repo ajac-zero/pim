@@ -19,12 +19,12 @@ import {
 import { CanvasTabs } from "~/components/chat/canvas-tabs";
 import { Composer } from "~/components/chat/composer";
 import { QueuedMessages } from "~/components/chat/queued-messages";
-import { ChatTabs, useChatDrop } from "~/components/chat/tabs";
+import { ChatTabs, ChatTitle, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
 import { FileView } from "~/components/file-view";
 import { useI18n } from "~/components/i18n";
-import { ExternalLink, Loader2, Users } from "~/components/icons";
+import { Loader2, Pin, Users } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
@@ -37,7 +37,7 @@ import {
 import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, usePimClient } from "~/lib/pim-client";
 import { agentsQuery, sessionsQuery, suggestionsQuery } from "~/lib/queries";
-import { showTab, useTabs } from "~/lib/tabs";
+import { useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 /** The canvas's width, as a percentage of the page beside the sidebar, which the person can drag. */
@@ -145,7 +145,6 @@ function ChatPage() {
   // Before paint, so a chat shown before appears at once, as it was left.
   useLayoutEffect(() => {
     pimClient.open(sessionId);
-    showTab(sessionId);
     // A chat opens with its options box closed, so it doesn't cover the chat.
     writeSummaryOpen(false);
   }, [sessionId]);
@@ -243,8 +242,8 @@ function ChatPage() {
     pimClient.stop().catch((error: Error) => toast.error(error.message));
   };
 
-  const shelf = useTabs().length > 1;
-  // A chat dragged from the sidebar onto the conversation opens in a new tab.
+  const pinned = useTabs();
+  // A chat dragged from the sidebar onto the conversation is pinned.
   const { dropping, dropZone } = useChatDrop();
 
   return (
@@ -253,14 +252,14 @@ function ChatPage() {
         className="flex h-full min-h-0 min-w-0 flex-1 flex-col"
         {...dropZone}
       >
-        <header
-          className={cn(
-            "hidden h-13 shrink-0 gap-2 pr-4 md:flex",
-            // The tabs sit on a shelf; a lone chat's title sits on the canvas.
-            shelf && "bg-sidebar",
-          )}
-        >
-          <ChatTabs activeId={sessionId} />
+        {/* Pinned chats sit as tabs on a shelf above the header, which is the same for every chat. */}
+        {pinned.length > 0 && (
+          <header className="hidden h-11 shrink-0 bg-sidebar md:flex">
+            <ChatTabs activeId={sessionId} />
+          </header>
+        )}
+        <header className="hidden h-13 shrink-0 gap-2 pr-4 md:flex">
+          <ChatTitle activeId={sessionId} className="flex-1" />
           {reconnecting && (
             <span className="shrink-0 self-center text-muted-foreground text-[13px]">
               {t("connecting")}
@@ -286,8 +285,8 @@ function ChatPage() {
             {dropping && (
               <div className="pointer-events-none absolute inset-0 z-20 flex animate-in items-center justify-center bg-background/60 duration-150 fade-in">
                 <div className="flex animate-in flex-col items-center gap-1.5 rounded-xl border bg-popover px-4 py-3 text-popover-foreground text-sm shadow-[0_8px_30px_-6px_rgb(0_0_0/0.18)] duration-150 zoom-in-95">
-                  <ExternalLink className="size-4 text-muted-foreground" />
-                  {t("openInNewTab")}
+                  <Pin className="size-4 text-muted-foreground" />
+                  {t("pinChat")}
                 </div>
               </div>
             )}

@@ -28,9 +28,9 @@ Every route requires `Authorization: Bearer <token>` (compared in constant time)
 - `GET /status` → `{diskUsedBytes, diskFreeBytes, rootBytes, activeExecs, uptimeSec}`
 - `POST /exec` with `{cmd: string[], cwd?, env?, timeoutMs, stdin?}` → `200 application/x-ndjson`: lines `{"type":"stdout"|"stderr","data":"…"}`, then exactly one `{"type":"exit","code","signal","timedOut"}`. The command runs in its own process group with no shell, with agentd's environment minus `AGENTD_TOKEN`, plus `env`. On timeout, or when the client disconnects, the whole group gets SIGTERM, then SIGKILL after 2 s. Output beyond the cap is cut, `{"type":"stderr","data":"[output truncated]"}` is sent, and the group is killed. If the command cannot start (for example, not found), the response is `400 spawn_failed` instead of a stream. When the main process exits, leftover processes in its group are killed.
 - `GET /file?path=` → raw bytes
-- `PUT /file?path=&mode=0644` → raw body, parent directories created, written to a temp file and renamed
+- `PUT /file?path=&mode=0644` → raw body, parent directories created, written to a temp file and renamed. A full disk or exceeded quota is `507 disk_full`
 - `DELETE /file?path=[&recursive=1]` → files, symlinks (the link itself), and with `recursive=1` directories
-- `GET /list?path=` → `[{name, type: "file"|"dir"|"symlink", size, mtimeMs}]`
+- `GET /list?path=` → `[{name, type: "file"|"dir"|"symlink", size, mode, mtimeMs}]` (`mode` is the permission bits)
 - `GET /stat?path=` → one such record, or 404
 
 Paths are absolute or relative to the root. Anything that resolves outside it, including `..`, absolute paths elsewhere and symlinks pointing out (at any component, and for write targets' parents), gets `400 path_escape`. Writing to a symlink writes its target, which must also be inside the root.

@@ -13,6 +13,7 @@ import {
   useState,
 } from "react";
 import { Markdown } from "~/components/chat/markdown";
+import { HarnessIcon } from "~/components/harness-icon";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   ArrowLeft,
@@ -46,6 +47,7 @@ import {
   codingThreadsQuery,
   codingTranscriptQuery,
   EMPTY_LIVE,
+  HARNESS_NAMES,
   MAX_TASK,
   mergeMessages,
   parseDiff,
@@ -90,7 +92,7 @@ export function CodingApiProvider({
   );
 }
 
-const useCodingApi = () => useContext(CodingApiContext);
+export const useCodingApi = () => useContext(CodingApiContext);
 
 const LINK_RING =
   "rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
@@ -524,6 +526,11 @@ function ThreadHeader({ thread }: { thread: CodingThreadView }) {
           </a>
         </h1>
         <StatePill state={thread.state} />
+        <span className="inline-flex items-center gap-1.5 text-[13px] text-muted-foreground">
+          <span className="sr-only">{t("codingHarness")}: </span>
+          <HarnessIcon harness={thread.harness} />
+          {HARNESS_NAMES[thread.harness]}
+        </span>
       </div>
       <p className="mt-2 line-clamp-3 whitespace-pre-wrap break-words text-[15px]">
         {thread.task}

@@ -7,10 +7,13 @@ import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { CONTINUE_TEXT, codingThread, type StartThread } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
+import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
+import type { FakeCommandHandler, FakeCommandResult } from "../src/coding/workspace/fake";
 import { NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
 import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
 import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
+import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { OWNER, post, toolUse } from "./helpers";
 import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
 
@@ -592,5 +595,222 @@ describe("a coding thread's model", () => {
 		expect(stored).toContain("All done.");
 		expect(stored).not.toContain(key);
 		await stub.archive();
+	});
+});
+
+describe("a Claude Code thread", () => {
+	// The thread runs `claude` in its in-memory workspace, where it is a script that prints the stream-json of
+	// test/fixtures/claude-code/, and `pkill` tells the script the signal it was sent. Its person is the file's account,
+	// `OWNER`, whose space keeps their Claude Code login in the coding vault for real.
+	type Run = { argv: string[]; env: Record<string, string>; cwd: string; login: string };
+	const runs: Run[] = [];
+	const signals: string[][] = [];
+	const waiting: { signal: string; resolve: () => void }[] = [];
+	/** What `claude` does this time, after it is recorded in `runs`. */
+	let claude: (context: Parameters<FakeCommandHandler>[0]) => Promise<FakeCommandResult> = async () => ({ stdout: claudeFixture("turn") });
+	const decoder = new TextDecoder();
+	const encoder = new TextEncoder();
+	const LOGIN = '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-original-login","refreshToken":"sk-ant-ort01-original"}}';
+	const REFRESHED = '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-refreshed-login","refreshToken":"sk-ant-ort01-refreshed"}}';
+	const CREDENTIALS = "/workspace/.claude/.credentials.json";
+	const started: Stub[] = [];
+
+	codingWorkspaces.register("claude", async (context) => {
+		const login = await context.workspace.readFile(`${context.env.CLAUDE_CONFIG_DIR}/.credentials.json`).then(
+			(data) => decoder.decode(data),
+			() => "",
+		);
+		runs.push({ argv: context.argv, env: context.env, cwd: context.cwd, login });
+		return claude(context);
+	});
+	codingWorkspaces.register("pkill", ({ argv }) => {
+		signals.push(argv.slice(1));
+		for (const waiter of waiting.splice(0).filter((each) => each.signal === argv[1] || (waiting.push(each), false))) waiter.resolve();
+		return {};
+	});
+
+	/** Resolves when `pkill` sends `signal`, or the command is killed. */
+	const until = (signal: string, killed: Promise<void>) => Promise.race([new Promise<void>((resolve) => waiting.push({ signal, resolve })), killed]);
+
+	/** The person's login, as Claude Code's own sign-in would have left it, in the vault. */
+	async function signIn(login = LOGIN) {
+		const vault = codingVault(env);
+		const { version } = await vault.load(OWNER, "claude-code");
+		await vault.save(OWNER, "claude-code", [{ path: ".credentials.json", mode: 0o600, data: encoder.encode(login) }], version);
+	}
+
+	const storedLogin = async () => {
+		const files = (await codingVault(env).load(OWNER, "claude-code")).files;
+		return files ? decoder.decode(files.find((file) => file.path === ".credentials.json")!.data) : null;
+	};
+
+	/** Starts a Claude Code thread in `OWNER`'s space, entered in its list as the API enters it. */
+	async function startClaude(overrides: Partial<StartThread> = {}) {
+		const id = crypto.randomUUID();
+		await codingScheduler(env, OWNER).registerThread({ threadId: id, createdBy: { type: "person" }, parent: null, chat: null, harness: "claude-code", task: "Fix the greeting test", repo: REPO, ref: "main", budgetUsd: 3, createdAt: Date.now() });
+		const stub = codingThread(env, id);
+		started.push(stub);
+		await stub.start(startInput(id, { space: OWNER, harness: "claude-code", task: "Fix the greeting test", ...overrides }));
+		return { id, stub };
+	}
+
+	const running = (count: number) => vi.waitFor(() => expect(runs).toHaveLength(count), { timeout: 10_000, interval: 20 });
+
+	beforeEach(async () => {
+		runs.length = 0;
+		signals.length = 0;
+		waiting.length = 0;
+		claude = async () => ({ stdout: claudeFixture("turn") });
+		await signIn();
+	});
+
+	afterEach(async () => {
+		// Its slots and the person's lock are free for the next test.
+		for (const stub of started.splice(0)) await stub.archive().catch(() => {});
+	});
+
+	it("runs a turn with the person's login, and keeps its transcript, cost, tests, checkpoint and refreshed login, then resumes it", async () => {
+		claude = async ({ workspace }) => {
+			await workspace.writeFile(`${REPO_DIR}/greet.ts`, encoder.encode("export const greet = (name: string) => `Hello, ${name}`;\n"));
+			// The CLI refreshed its token, as it does.
+			await workspace.writeFile(CREDENTIALS, encoder.encode(REFRESHED), 0o600);
+			return { stdout: claudeFixture("turn") };
+		};
+		const { id, stub } = await startClaude();
+		const [ended] = await turns(id, 1);
+		const status = await stub.status();
+		expect(ended).toMatchObject({ outcome: "completed", checkpoint: status.checkpoint!.sha, said: "Fixed `greet` to include the name; the greeting test passes now." });
+		expect(status).toMatchObject({ state: "idle", harness: "claude-code", profile: { providerId: "claude-code", model: "default" }, currentOperation: null });
+		// The CLI ran in the checkout, signed in with the person's login, a new session, and no telemetry.
+		const [first] = runs;
+		expect(first).toMatchObject({ cwd: REPO_DIR, login: LOGIN, env: { HOME: "/workspace", CLAUDE_CONFIG_DIR: "/workspace/.claude", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" } });
+		const sessionId = first!.argv[first!.argv.indexOf("--session-id") + 1]!;
+		expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
+		expect(first!.argv.slice(-2)).toEqual(["--", "Fix the greeting test"]);
+		expect(first!.argv[first!.argv.indexOf("--max-budget-usd") + 1]).toBe("3.00");
+		expect(first!.argv[first!.argv.indexOf("--append-system-prompt") + 1]).toContain(`on the branch ${status.repo.branch}`);
+		// Its workspace may reach Anthropic, besides the broker and the registries.
+		const spec = (await workspaceOf(id)) as unknown as { spec: { egress: { allow: string[] } } };
+		expect(spec.spec.egress.allow).toEqual(expect.arrayContaining(["api.anthropic.com", "claude.ai", "platform.claude.com", "registry.npmjs.org"]));
+		// The refreshed login is kept, and none is left in the workspace or anywhere in the thread's tables.
+		expect(await storedLogin()).toBe(REFRESHED);
+		await expect((await workspaceOf(id)).readFile(CREDENTIALS)).rejects.toThrow();
+		expect(await everything(stub)).not.toContain("sk-ant-");
+		// The transcript, as the web app shows it: the task, the agent's text, its tools with their results.
+		const transcript = await inside(stub, (thread) => thread.transcript());
+		expect(transcript.map((message) => message.role)).toEqual(["user", "assistant", "assistant", "assistant", "tool", "assistant", "tool", "assistant", "tool", "assistant"]);
+		expect(transcript[0]!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
+		expect(transcript[3]!.parts).toEqual([{ type: "tool-call", id: "toolu_01Bash", name: "Bash", arguments: { command: "npm test", description: "Run the tests" } }]);
+		expect(transcript[4]!.parts[0]).toMatchObject({ type: "tool-result", id: "toolu_01Bash", name: "Bash", error: true });
+		// What it cost as the CLI estimated it, its test run, its retry and refusal, and its checkpoint's diff.
+		const log = await stub.log();
+		expect(log.filter((event) => event.kind === "model_call")).toEqual([expect.objectContaining({ provider: "claude-code", model: "claude-sonnet-5", costUsd: 0.0841, input: 2569, output: 396 })]);
+		expect(status.spentUsd).toBeCloseTo(0.0841, 10);
+		expect(log.find((event) => event.kind === "harness.api_retry")?.data).toMatchObject({ attempt: 1, error: "overloaded", status: 529 });
+		expect(log.find((event) => event.kind === "harness.permission_denied")?.data).toMatchObject({ tool: "WebFetch" });
+		expect(await stub.tests()).toEqual([expect.objectContaining({ command: "npm test", exitCode: 1, summary: { format: "vitest", passed: 3, failed: 1, skipped: 0, total: 4 } })]);
+		expect((await stub.diff()).diff).toContain("+++ b/greet.ts");
+
+		// A steer is the next turn, which resumes the CLI's session; its cost is what the session's whole cost grew by.
+		const turn = claudeLines("turn");
+		claude = async () => ({ stdout: [turn[0], turn.at(-2), turn.at(-1)!.replace('"total_cost_usd": 0.0841', '"total_cost_usd": 0.1341')].join("\n") });
+		await stub.steer("Also add a test for an empty name", { operationId: "steer-1" });
+		const [, second] = await turns(id, 2);
+		expect(second).toMatchObject({ outcome: "completed", operationId: "steer-1" });
+		expect(runs[1]!.argv[runs[1]!.argv.indexOf("--resume") + 1]).toBe(CLAUDE_SESSION);
+		expect(runs[1]!.argv).not.toContain("--session-id");
+		expect(runs[1]!.login).toBe(REFRESHED);
+		const calls = (await stub.log()).filter((event) => event.kind === "model_call");
+		expect(calls[1]!.costUsd).toBeCloseTo(0.05, 10);
+		expect((await stub.status()).spentUsd).toBeCloseTo(0.1341, 10);
+	});
+
+	it("stops on abort with SIGINT, ending the turn cancelled, and keeps the login", async () => {
+		claude = async ({ killed }) => {
+			await until("-INT", killed);
+			return { stdout: `${claudeLines("turn")[0]}\n{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"${CLAUDE_SESSION}","total_cost_usd":0.01,"errors":["Interrupted"]}\n`, code: 130 };
+		};
+		const { id, stub } = await startClaude();
+		await running(1);
+		await stub.abort();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "cancelled" });
+		expect(await stub.status()).toMatchObject({ state: "idle", currentOperation: null });
+		const sessionId = runs[0]!.argv[runs[0]!.argv.indexOf("--session-id") + 1];
+		expect(signals).toEqual([["-INT", "-f", sessionId]]);
+		expect(await storedLogin()).toBe(LOGIN);
+		await expect((await workspaceOf(id)).readFile(CREDENTIALS)).rejects.toThrow();
+	});
+
+	it("fails a turn that runs out of time, killing a CLI that ignores SIGINT after the grace", async () => {
+		claude = async ({ killed }) => {
+			await until("-KILL", killed);
+			return {};
+		};
+		const { id, stub } = await startClaude({ limits: { wallClockMin: 0.005 } });
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "error", reason: "timeout", state: "failed" });
+		expect((await stub.status()).stateDetail).toContain("ran out of time");
+		await vi.waitFor(() => expect(signals.map((each) => each[0])).toEqual(["-INT", "-KILL"]));
+	});
+
+	it("ends a turn its object's reset cut off as interrupted, never completed, and finishes the run off", async () => {
+		claude = async ({ killed }) => {
+			await until("-KILL", killed);
+			return {};
+		};
+		const { id, stub } = await startClaude();
+		await running(1);
+		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1));
+		await runInDurableObject(stub, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
+		const [ended] = await turns(id, 1, true);
+		expect(ended).toMatchObject({ outcome: "error", reason: "interrupted", state: "failed" });
+		const after = codingThread(env, id);
+		expect((await after.status()).stateDetail).toMatch(/restarted while Claude Code ran/);
+		// The CLI was killed, the login written back and taken out of the workspace, and the person's lock let go.
+		expect(signals.map((each) => each[0])).toContain("-KILL");
+		expect(await sql(after, "SELECT record FROM coding_harness_run")).toEqual([]);
+		expect(await storedLogin()).toBe(LOGIN);
+		const scheduler = codingScheduler(env, OWNER);
+		expect(await scheduler.acquireHarness("claude-code", "probe", 1000)).toBe(true);
+		await scheduler.releaseHarness("claude-code", "probe");
+		started.splice(started.indexOf(stub), 1, after);
+	});
+
+	it("runs one of the person's threads at a time on their login: the next waits for the first to end", async () => {
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		claude = async () => {
+			if (runs.length === 1) await gate;
+			return { stdout: claudeFixture("turn") };
+		};
+		const first = await startClaude();
+		await running(1);
+		const second = await startClaude({ task: "Another task" });
+		const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+		await vi.waitFor(async () => expect(await second.stub.status()).toMatchObject({ stateReason: "harness_busy", currentOperation: null, inbox: 1 }));
+		await heartbeat(second.stub);
+		expect(runs).toHaveLength(1);
+		release();
+		await turns(first.id, 1);
+		await heartbeat(second.stub);
+		const [ended] = await turns(second.id, 1);
+		expect(ended).toMatchObject({ outcome: "completed" });
+		expect(runs.map((run) => run.argv.at(-1))).toEqual(["Fix the greeting test", "Another task"]);
+	});
+
+	it("waits for the person when the CLI says its login is gone, and goes on once continued", async () => {
+		claude = async () => ({ stdout: claudeFixture("login"), code: 1 });
+		const { id, stub } = await startClaude();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "needs_approval", reason: "login_required", state: "waiting_input" });
+		expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", slot: "held" });
+		claude = async () => ({ stdout: claudeFixture("turn") });
+		await stub.continue({ operationId: "after-login" });
+		const [, again] = await turns(id, 2);
+		expect(again).toMatchObject({ outcome: "completed", operationId: "after-login" });
+		expect(runs[1]!.argv.at(-1)).toBe(CONTINUE_TEXT);
 	});
 });

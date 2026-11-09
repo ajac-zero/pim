@@ -40,7 +40,9 @@ import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRe
  * second time.
  *
  * It also keeps the space's list of its threads (./thread-index.ts), which
- * says which threads are the space's.
+ * says which threads are the space's, and the person's lock on each CLI
+ * harness's login (`acquireHarness`), so only one of their threads runs a
+ * harness with their subscription at a time.
  */
 export class CodingSchedulerDO extends DurableObject<Env> {
 	readonly #scheduler: CodingScheduler;
@@ -49,6 +51,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.storage.sql.exec(OUTBOX_SCHEMA);
+		ctx.storage.sql.exec(HARNESS_LOCK_SCHEMA);
 		this.#scheduler = new CodingScheduler(ctx.storage.sql, {
 			transaction: (work) => ctx.storage.transactionSync(work),
 			now: () => this.now(),
@@ -173,6 +176,29 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	/** The space's threads, newest first, each with its place in the queue while it waits. */
 	threads(): (IndexedThread & { readonly queue: QueuePlace | null })[] {
 		return this.#threads.list().map((thread) => ({ ...thread, queue: this.#scheduler.position(thread.threadId) }));
+	}
+
+	/**
+	 * Takes the space's lock on a harness's login for `holder`, a thread, for
+	 * at most `ttlMs`: true when it is free, expired or already the holder's
+	 * (which renews it), false while another thread holds it.
+	 */
+	acquireHarness(harness: string, holder: string, ttlMs: number): boolean {
+		const now = this.now();
+		const held = this.ctx.storage.sql.exec("SELECT holder, expires_at FROM pim_coding_harness_lock WHERE harness = ?", harness).toArray()[0];
+		if (held && held.holder !== holder && Number(held.expires_at) > now) return false;
+		this.ctx.storage.sql.exec(
+			"INSERT INTO pim_coding_harness_lock (harness, holder, expires_at) VALUES (?, ?, ?) ON CONFLICT (harness) DO UPDATE SET holder = excluded.holder, expires_at = excluded.expires_at",
+			harness,
+			holder,
+			now + ttlMs,
+		);
+		return true;
+	}
+
+	/** Lets the lock go, if `holder` holds it. */
+	releaseHarness(harness: string, holder: string): void {
+		this.ctx.storage.sql.exec("DELETE FROM pim_coding_harness_lock WHERE harness = ? AND holder = ?", harness, holder);
 	}
 
 	recordDuration(ms: number): void {
@@ -317,6 +343,15 @@ CREATE TABLE IF NOT EXISTS pim_coding_outbox (
 	created_at INTEGER NOT NULL,
 	attempts INTEGER NOT NULL DEFAULT 0,
 	dead INTEGER NOT NULL DEFAULT 0
+);
+`;
+
+/** Which thread holds the person's login for each harness, until when. */
+const HARNESS_LOCK_SCHEMA = `
+CREATE TABLE IF NOT EXISTS pim_coding_harness_lock (
+	harness TEXT PRIMARY KEY,
+	holder TEXT NOT NULL,
+	expires_at INTEGER NOT NULL
 );
 `;
 

@@ -360,6 +360,11 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return codingGitHub.app;
 	}
 
+	/** A CLI harness that ignores SIGINT is killed quickly. */
+	protected override harnessGraceMs(): number {
+		return 200;
+	}
+
 	protected override githubFetch(): Fetch | undefined {
 		return codingGitHub.fetch ?? undefined;
 	}

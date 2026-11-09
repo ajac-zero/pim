@@ -25,7 +25,6 @@ import { createHash } from "node:crypto";
 import { type Condition, type ConditionState, evaluate, lookup, referencedPaths } from "./condition";
 import { DELIVERY_TTL_MS, type RunPhase, type TriggerRun } from "./coordinator";
 import type { TriggerEngine } from "./engine";
-import { type MigrationRecord, type MigrationRuns, type MigrationStatusItem, migrationRecordOf } from "./migration";
 import { conditionMode, parseTriggerSpec, runsOnComputer, SOURCE_KINDS, type SourceKind, TRIGGER_LIFECYCLES, type TriggerLifecycle, type TriggerSpec } from "./spec";
 import { ADMISSION_LIMITS, DEFAULT_RETENTION, type Evidence, type Occurrence, type Refusal, type Trigger } from "./store";
 import { previewFirings, TIME_LIMITS } from "./time";
@@ -84,8 +83,6 @@ export type TriggerApiHost = {
 	readonly chatOf: (publicId: string) => string | null;
 	/** The connectors an agent works with (every connected one, for null) and the events their catalogs list. */
 	readonly connectors: (agentId: string | null) => readonly { readonly connectorId: string; readonly name: string; readonly events: readonly string[] }[];
-	/** Where the space's schedules and watches stand in their move to triggers, in the plan's order, and the migration's runs as this instance knows them. Read only. */
-	readonly migration: () => Promise<{ readonly items: readonly MigrationStatusItem[]; readonly runs: MigrationRuns }>;
 	/** Whether a computer is paired, which computer sources run on. */
 	readonly computer: () => { readonly paired: boolean };
 	/** Where a computer source's grant stands, for a trigger whose source runs on the computer. */
@@ -103,13 +100,6 @@ export type TriggerApiOptions = {
 	 * change answers; a failure is logged and never fails the change.
 	 */
 	readonly changed: () => Promise<void>;
-	/**
-	 * Ends the schedule or watch a trigger was made from (./migration.ts),
-	 * and the trigger with it: what deleting such a trigger does, since the
-	 * person is stopping that work wherever they see it. Without it, such a
-	 * trigger can't be deleted through the API.
-	 */
-	readonly endMigrated?: (record: MigrationRecord) => Promise<void>;
 };
 
 export type TriggerErrorCode =
@@ -120,7 +110,6 @@ export type TriggerErrorCode =
 	| "revision_conflict"
 	| "invalid_transition"
 	| "trigger_deleted"
-	| "owned_elsewhere"
 	| "grant_required"
 	| "grant_not_current"
 	| "schedule_exhausted"
@@ -279,32 +268,6 @@ export class TriggerApi {
 		return this.#runView(occurrence);
 	}
 
-	/**
-	 * Where the space's schedules and watches stand in their move to
-	 * triggers (./migration.ts, `migrationStatus`), a page at a time, in a
-	 * stable order, with what this instance knows of the migration's runs.
-	 * An agent other than the majordomo sees only its own items. Writes
-	 * nothing; no instruction, secret, URL or cursor is in it.
-	 */
-	async migration(actor: TriggerActor, query: { cursor?: unknown; limit?: unknown }) {
-		const limit = pageSize(query.limit);
-		const after = query.cursor === undefined ? null : readKeyCursor(query.cursor, "migration");
-		const { items, runs } = await this.#host.migration();
-		const visible = items
-			// An item with a live trigger is that trigger's agent's.
-			.map((item) => ({ ...item, agentId: (item.triggerId === null ? undefined : this.#store.get(item.triggerId)?.spec.owningAgentId) ?? item.agentId }))
-			.filter((item) => actor.kind === "person" || actor.majordomo || item.agentId === actor.agentId);
-		const key = (item: MigrationStatusItem) => `${item.kind}:${item.legacyId}`;
-		const rest = after === null ? visible : visible.filter((item) => key(item) > after);
-		const page = rest.slice(0, limit);
-		const last = page.at(-1);
-		return {
-			runs,
-			items: page,
-			nextCursor: rest.length > limit && last ? writeKeyCursor("migration", key(last)) : null,
-		};
-	}
-
 	/** Every source kind, with what it can do in this space now, and the connector events the agent may use. */
 	sources(actor: TriggerActor, query: { agentId?: unknown } = {}) {
 		let agentId: string | null = query.agentId === undefined ? null : field(() => opaqueId(query.agentId, "agentId"));
@@ -433,21 +396,13 @@ export class TriggerApi {
 
 	/**
 	 * Deletes a trigger for good, keeping its history; with
-	 * `expectedRevision`, only at that revision. A trigger made from a
-	 * schedule or watch ends that schedule or watch with it, whichever of
-	 * the two delivers it (`endMigrated`). A stop asked for, not proof
+	 * `expectedRevision`, only at that revision. A stop asked for, not proof
 	 * anything was cancelled.
 	 */
 	async remove(actor: TriggerActor, id: unknown, expectedRevision?: unknown) {
-		const trigger = this.#changeable(actor, id, { migrated: this.#options.endMigrated !== undefined });
-		const record = migrationRecordOf(this.#sql, trigger.id);
-		if (record?.phase === "shadow" && this.#options.endMigrated) {
-			if (expectedRevision !== undefined && revisionOf(expectedRevision) !== trigger.revision) throw conflict(trigger);
-			await this.#options.endMigrated(record);
-		} else {
-			const removed = this.#store.remove({ id: trigger.id, ...(expectedRevision === undefined ? {} : { expectedRevision: revisionOf(expectedRevision) }) });
-			if (!removed.ok) throw refusal(removed);
-		}
+		const trigger = this.#changeable(actor, id);
+		const removed = this.#store.remove({ id: trigger.id, ...(expectedRevision === undefined ? {} : { expectedRevision: revisionOf(expectedRevision) }) });
+		if (!removed.ok) throw refusal(removed);
 		await this.#changed();
 		return { deleted: true, trigger: this.#view(this.#store.get(trigger.id)!) };
 	}
@@ -498,7 +453,6 @@ export class TriggerApi {
 		const grant = runsOnComputer(spec.source) ? (trigger ? this.#host.grant(trigger) : "missing") : "not_required";
 		if (grant === "missing" || grant === "pending_approval") blockers.push("grant_required");
 		if (grant === "not_current") blockers.push("grant_not_current");
-		if (trigger && migrationRecordOf(this.#sql, trigger.id)?.owner === "legacy") blockers.push("owned_elsewhere");
 		const result: Record<string, JsonValue> = {
 			dryRun: true,
 			valid: true,
@@ -535,24 +489,10 @@ export class TriggerApi {
 		return trigger;
 	}
 
-	/**
-	 * A trigger the actor may change: not deleted, and not a shadow, which
-	 * only the migration changes, whichever side owns it; with `migrated`, a
-	 * shadow too, for deleting it with its schedule or watch.
-	 */
-	#changeable(actor: TriggerActor, id: unknown, options: { readonly migrated?: boolean } = {}): Trigger {
+	/** A trigger the actor may change: one not deleted. */
+	#changeable(actor: TriggerActor, id: unknown): Trigger {
 		const trigger = this.#visible(actor, id);
 		if (trigger.lifecycle === "deleted") throw new TriggerApiError(409, "trigger_deleted", "The trigger was deleted");
-		const record = migrationRecordOf(this.#sql, trigger.id);
-		if (record?.phase === "shadow" && options.migrated !== true) {
-			throw new TriggerApiError(
-				409,
-				"owned_elsewhere",
-				record.owner === "trigger"
-					? "This trigger took over a schedule or watch: it can't be changed or paused, only deleted, which ends that schedule or watch too"
-					: "A schedule or watch still delivers this trigger's work: it can't be changed or turned on, only deleted, which ends that schedule or watch too",
-			);
-		}
 		return trigger;
 	}
 
@@ -647,7 +587,6 @@ export class TriggerApi {
 	#view(trigger: Trigger) {
 		const spec = trigger.spec;
 		const now = this.#options.now();
-		const record = migrationRecordOf(this.#sql, trigger.id);
 		const capability = this.#capability(spec.source.kind);
 		const grant = runsOnComputer(spec.source) ? this.#host.grant(trigger) : "not_required";
 		const live = trigger.lifecycle !== "deleted" && trigger.lifecycle !== "ended";
@@ -679,7 +618,6 @@ export class TriggerApi {
 			schedule,
 			capability: { status: capability.status, delivers: capability.status === "available", reason: capability.reason },
 			grant: { required: runsOnComputer(spec.source), state: grant },
-			migration: record === null ? null : { kind: record.kind, legacyId: record.legacyId, owner: record.owner, phase: record.phase, enableable: record.owner === "trigger", ownerSince: record.ownerSince },
 			createdAt: trigger.createdAt,
 			updatedAt: trigger.updatedAt,
 		};
@@ -876,24 +814,6 @@ function pageSize(value: unknown): number {
 	return field(() => integer(value, "limit", 1, API_LIMITS.pageMax));
 }
 
-/** An opaque cursor for a listing in the order of its items' keys: the key its page ended at. */
-function writeKeyCursor(kind: "migration", key: string): string {
-	return Buffer.from(JSON.stringify([kind, key])).toString("base64url");
-}
-
-function readKeyCursor(value: unknown, kind: "migration"): string {
-	const fail = () => new TriggerApiError(400, "invalid_cursor", "The cursor isn't one this listing gave", { field: "cursor" });
-	if (typeof value !== "string" || value.length === 0 || value.length > 1_024 || !/^[A-Za-z0-9_-]+$/.test(value)) throw fail();
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-	} catch {
-		throw fail();
-	}
-	if (!Array.isArray(parsed) || parsed.length !== 2 || parsed[0] !== kind || typeof parsed[1] !== "string" || parsed[1].length === 0) throw fail();
-	return parsed[1];
-}
-
 /** An opaque cursor: where a page ended, for one listing only. */
 function writeCursor(kind: "triggers" | "runs", scope: string, position: number): string {
 	return Buffer.from(JSON.stringify([kind, scope, position])).toString("base64url");
@@ -929,8 +849,6 @@ function refusal(refused: Refusal): TriggerApiError {
 			return refused.current ? conflict(refused.current) : new TriggerApiError(409, "revision_conflict", "The trigger was changed since that revision");
 		case "invalid_transition":
 			return new TriggerApiError(409, "invalid_transition", "The trigger can't go to that state from where it is", refused.current ? { lifecycle: refused.current.lifecycle } : {});
-		case "owned_elsewhere":
-			return new TriggerApiError(409, "owned_elsewhere", "A schedule or watch still delivers this trigger's work");
 		case "authorization_required":
 			return new TriggerApiError(409, "grant_required", "The person must grant this source on their computer first");
 		case "authorization_denied":

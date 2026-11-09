@@ -3,8 +3,9 @@
  * agent of the chat they are called in. Pim installs them only in a space
  * whose trigger engine is on (./engine.ts), which no deployment allows, and
  * never in a guest's space; chats select them (`#selectAbilities` in
- * ../pim.ts), so where triggers are off no chat has them. Schedules'
- * (`schedule_task`) and watches' tools are untouched.
+ * ../pim.ts), so where triggers are off no chat has them. `schedule_task`
+ * (../extensions/schedule.ts) makes time triggers through the same API;
+ * watches' tools are untouched.
  */
 
 import { type TSchema, Type } from "@earendil-works/pi-ai";
@@ -28,7 +29,6 @@ export const TRIGGER_TOOLS = [
 	"list_trigger_runs",
 	"test_trigger",
 	"list_trigger_sources",
-	"list_trigger_migration",
 ] as const;
 
 const Instant = Type.Union([Type.Integer({ description: "Milliseconds since 1970 (UTC)." }), Type.String({ description: "ISO 8601 with an offset, such as 2026-11-09T09:00:00-05:00." })]);
@@ -217,15 +217,6 @@ export function triggersExtension(host: TriggerToolsHost) {
 				"Which kinds of source this space can run now, which only as drafts, and the connector events you may use.",
 				Type.Object({ agentId: Type.Optional(Type.String({ description: "For the majordomo: another agent's connectors." })) }),
 				(api, actor, { agentId }) => api.sources(actor, { agentId }),
-			),
-			tool(
-				"list_trigger_migration",
-				"Where each scheduled task and connector watch stands in its move to triggers (yours; the majordomo: everyone's), a page at a time: migrated, migratable, deferred, unsupported or given back, which side delivers it, why, and its trigger's id. Reads only.",
-				Type.Object({
-					cursor: Type.Optional(Type.String({ description: "nextCursor from the page before." })),
-					limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
-				}),
-				(api, actor, { cursor, limit }) => api.migration(actor, { cursor, limit }),
 			),
 		],
 	});

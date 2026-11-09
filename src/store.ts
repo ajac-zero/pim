@@ -120,29 +120,6 @@ export type Notification = {
 	readonly readAt: number | null;
 };
 
-/** A subscription to one event type of a connector, and what to do when it fires, as watches kept them before they were triggers. */
-export type AppWatch = {
-	readonly id: string;
-	readonly serverId: string;
-	readonly event: string;
-	readonly arguments: Record<string, unknown>;
-	readonly instruction: string;
-	/** The session events are delivered to. */
-	readonly session: string;
-	/** Standard Webhooks secret (`whsec_...`) the connector signs deliveries with. */
-	readonly secret: string;
-	/** The callback URL the connector delivers to. */
-	readonly url: string;
-	readonly remoteId: string | null;
-	readonly cursor: string | null;
-	/** When the subscription must be renewed (ms), or null when it does not expire. */
-	readonly refreshBefore: number | null;
-	readonly status: "pending" | "active" | "ended";
-	readonly lastError: string | null;
-	readonly lastEventAt: number | null;
-	readonly createdAt: number;
-};
-
 /** A session's name and activity, for listing conversations. */
 export type SessionInfo = {
 	readonly id: string;
@@ -157,26 +134,6 @@ export type SessionInfo = {
 };
 
 type Row = Record<string, SqlStorageValue>;
-
-function watchOf(row: Row): AppWatch {
-	return {
-		id: String(row.id),
-		serverId: String(row.server_id),
-		event: String(row.event),
-		arguments: JSON.parse(String(row.arguments)) as Record<string, unknown>,
-		instruction: String(row.instruction),
-		session: String(row.session),
-		secret: String(row.secret),
-		url: String(row.url),
-		remoteId: row.remote_id === null ? null : String(row.remote_id),
-		cursor: row.cursor === null ? null : String(row.cursor),
-		refreshBefore: row.refresh_before === null ? null : Number(row.refresh_before),
-		status: String(row.status) as AppWatch["status"],
-		lastError: row.last_error === null ? null : String(row.last_error),
-		lastEventAt: row.last_event_at === null ? null : Number(row.last_event_at),
-		createdAt: Number(row.created_at),
-	};
-}
 
 /** How many widgets from tool results a chat keeps for its messages. */
 const KEPT_WIDGETS = 20;
@@ -250,23 +207,6 @@ CREATE TABLE IF NOT EXISTS pim_app_catalog (
 	data TEXT NOT NULL,
 	expires_at INTEGER NOT NULL,
 	PRIMARY KEY (server_id, kind)
-);
-CREATE TABLE IF NOT EXISTS pim_app_watches (
-	id TEXT PRIMARY KEY,
-	server_id TEXT NOT NULL,
-	event TEXT NOT NULL,
-	arguments TEXT NOT NULL,
-	instruction TEXT NOT NULL,
-	session TEXT NOT NULL,
-	secret TEXT NOT NULL,
-	url TEXT NOT NULL,
-	remote_id TEXT,
-	cursor TEXT,
-	refresh_before INTEGER,
-	status TEXT NOT NULL,
-	last_error TEXT,
-	last_event_at INTEGER,
-	created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_sessions (
 	id TEXT PRIMARY KEY,
@@ -410,6 +350,7 @@ export class PimStore {
 			pim_agent_sessions: "Agents' chats",
 			pim_shares: "Spaces shared with them",
 			pim_mcp_servers: "connectors",
+			// Left in spaces from before watches were triggers; nothing writes it now.
 			pim_app_watches: "watches",
 			pim_sessions: "chats",
 			pim_session_ids: "chat ids",
@@ -441,10 +382,11 @@ export class PimStore {
 			pim_trigger_subscriptions: "triggers' connector subscriptions",
 			pim_trigger_computer_runtimes: "triggers' sessions with the computer",
 			pim_trigger_computer_grants: "triggers' grants on the computer",
+			pim_trigger_legacy_events: "what connector events carried",
+			// Left in spaces from when schedules and watches moved to triggers; nothing writes these now.
 			pim_trigger_migrations: "schedules and watches moved to triggers",
 			pim_trigger_ownership: "who delivered moved schedules and watches",
 			pim_trigger_cutover_receipts: "what moved schedules and watches skipped or routed",
-			pim_trigger_legacy_events: "what connector events carried",
 			pim_trigger_api_creations: "triggers' creation keys",
 			pi_entries: "conversations",
 		};
@@ -731,16 +673,6 @@ export class PimStore {
 
 	deleteCatalog(serverId: string): void {
 		this.#sql.exec("DELETE FROM pim_app_catalog WHERE server_id = ?", serverId);
-	}
-
-	// Watches kept before watches were triggers: read once, as the space starts, and dropped (`Pim#retireWatches`).
-
-	watches(): AppWatch[] {
-		return this.#sql.exec("SELECT * FROM pim_app_watches ORDER BY created_at, rowid").toArray().map(watchOf);
-	}
-
-	deleteWatch(id: string): boolean {
-		return this.#sql.exec("DELETE FROM pim_app_watches WHERE id = ?", id).rowsWritten > 0;
 	}
 
 	// Sessions: what a sidebar shows. pi owns the conversations; this is their ids, titles and activity.

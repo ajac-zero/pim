@@ -32,12 +32,9 @@
  * or submitting it are answered "not known", so a coordinator that stopped
  * waiting never makes a second chat or a second run.
  *
- * A trigger that took over a schedule or watch (./migration.ts) submits as
- * the schedule or watch did, through a `TriggerTakeover` Pim gives this
- * host: its first submission goes in under the key the schedule or watch
- * would have used, so a firing or event the other side already ran is a
- * duplicate here and the reverse; and once pi has taken it, the takeover
- * is told, to notify as the schedule did. The same takeover gives a
+ * Pim gives this host a `TriggerTakeover`: a trigger `schedule_task` made
+ * reads as its schedules did, and once pi has taken its firing, the
+ * takeover is told, to notify as schedules did. The same takeover gives a
  * connector event's run what the event carried, for any trigger on a
  * connector's event, and forgets it once pi has it.
  */
@@ -135,13 +132,14 @@ export type HostOperation = Row;
 const BUSY = "another handoff of this operation is under way here";
 
 /**
- * How a trigger that took over a schedule or watch delivers as it did
- * (./migration.ts). Each is asked with the firing's evidence; for a
- * trigger that took nothing over, each answers null or does nothing.
+ * How a trigger `schedule_task` made reads and notifies as its schedules
+ * did, and what a connector event's run is told of what the event carried.
+ * Each is asked with the firing's evidence; for any other trigger, each
+ * answers null or does nothing.
  */
 export interface TriggerTakeover {
-	/** The key the schedule or watch would have submitted this firing under; used only for the operation's first submission, since a recorded key is kept. */
-	submissionKey(evidence: TriggerEvidence): string | null;
+	/** The whole text of the firing, in place of `firingText`'s; null to use that. */
+	text?(instruction: string, evidence: TriggerEvidence): string | null;
 	/** What a connector's event carried, as Pim kept it for the run, to put after the firing's text; null where nothing was kept. */
 	contents(evidence: TriggerEvidence): string | null;
 	/** Told once pi has the submission, new or duplicate, with the chat and key it went in under. Must be safe to tell again. */
@@ -310,9 +308,9 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 					);
 				},
 			};
-			// A trigger that took over a schedule or watch goes in under its key, the first time; a key once recorded is kept whatever the takeover says now.
-			const key = row.submissionKey ?? this.#takeover?.submissionKey(input.evidence) ?? operationId;
-			const text = firingText(input.instruction, input.evidence, this.#takeover?.contents(input.evidence) ?? null);
+			// A key once recorded is kept.
+			const key = row.submissionKey ?? operationId;
+			const text = this.#takeover?.text?.(input.instruction, input.evidence) ?? firingText(input.instruction, input.evidence, this.#takeover?.contents(input.evidence) ?? null);
 			let receipt: PiReceipt;
 			try {
 				receipt = await this.#space.submit(chatId, text, { operationId: key, stable });
@@ -331,13 +329,13 @@ export class PimTriggerHost implements TriggerAgentHost<TriggerEvidence> {
 		});
 	}
 
-	/** Tells the takeover pi has the submission. A failure there is logged and not held against the submission, which pi has: the run goes on, as the schedule's or watch's would have. */
+	/** Tells the takeover pi has the submission. A failure there is logged and not held against the submission, which pi has: the run goes on. */
 	async #delivered(evidence: TriggerEvidence, chatId: string, submissionKey: string): Promise<void> {
 		if (!this.#takeover) return;
 		try {
 			await this.#takeover.delivered(evidence, chatId, submissionKey);
 		} catch (error) {
-			console.warn("a trigger's takeover of its schedule or watch failed after its submission", error);
+			console.warn("a trigger's takeover failed after its submission", error);
 		}
 	}
 

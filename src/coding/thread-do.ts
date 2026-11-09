@@ -1151,7 +1151,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// The broker token as an HTTP header for these two commands alone: git keeps no copy of it in the repository.
 		const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
 		await git(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
-		await git(workspace, ["fetch", "origin", thread.baseRef], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+		const fetchOptions = { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token };
+		try {
+			await git(workspace, ["fetch", "origin", thread.baseRef], fetchOptions);
+		} catch (error) {
+			// A repository whose default branch isn't "main" (the ref nobody chose): use the remote's default branch.
+			if (thread.baseRef !== "main") throw error;
+			await git(workspace, ["fetch", "origin", "HEAD"], fetchOptions);
+		}
 		await git(workspace, ["checkout", "-B", thread.branch, "FETCH_HEAD"]);
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
 		if (this.store.required().baseSha === null) this.store.update({ baseSha: sha });

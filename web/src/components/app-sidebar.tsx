@@ -17,6 +17,7 @@ import {
   Blocks,
   Check,
   ChevronDown,
+  Code,
   Compass,
   Contact,
   CornerDownRight,
@@ -253,6 +254,18 @@ export function AppSidebar({
               )}
             </RailItem>
           )}
+          <RailItem icon={<Code className="size-4.5" />} label={t("coding")}>
+            {(content) => (
+              <Link
+                to="/coding"
+                className={cn(RAIL_ITEM_CLASS, RAIL_ACTIVE_CLASS)}
+                activeOptions={{ includeSearch: false }}
+                aria-label={t("coding")}
+              >
+                {content}
+              </Link>
+            )}
+          </RailItem>
           {/* Below, what opens over the chat instead of beside it. */}
           <div className="mt-auto" />
           <RailDialogLink

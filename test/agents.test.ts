@@ -212,6 +212,20 @@ describe("the owner's agents", () => {
 		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session).error).toContain("insufficient_quota");
 	});
 
+	it("moves an agent with no fallbacks of its own on to the space's fallback models, and rejects ones that are not choices", async () => {
+		const put = (models: { provider: string; id: string }[]) => api("/model/fallbacks", { method: "PUT", body: JSON.stringify({ models }) });
+		expect((await put([{ provider: "napper", id: "nope" }])).status).toBe(400);
+		expect((await put([{ provider: "napper", id: "napper-model" }])).body.models).toMatchObject([{ provider: "napper", id: "napper-model" }]);
+		expect((await api("/model/fallbacks")).body.models).toMatchObject([{ id: "napper-model" }]);
+		const agent = (await post("/agents", { name: "Plain planner", instructions: "Plan my week." })).body;
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		const outOfQuota = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "insufficient_quota: you exceeded your current quota" });
+		faux.setResponses([outOfQuota]);
+		napper.setResponses([toolUse("send_to_user", { message: "From the space's fallback." })]);
+		expect(await say("Plan my week", session)).toMatchObject({ status: "done", replies: ["From the space's fallback."] });
+		expect((await put([])).body.models).toEqual([]);
+	});
+
 	it("renames another agent or itself in chat without asking, keeping its identity and settings", async () => {
 		await api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy: "explicit" }) });
 		const creator = (await post("/agents", { name: "Organizer", instructions: "Organize my work." })).body;

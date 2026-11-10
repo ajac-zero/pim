@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { FunctionCallItem } from "~/lib/openresponses";
 import type { AgentTask } from "~/lib/pim-api";
 import {
+  codingNoticeOf,
   conversationMarkdown,
   EMPTY_STREAM,
-  codingNoticeOf,
   layoutThread,
   noticeOf,
   reduceAll,

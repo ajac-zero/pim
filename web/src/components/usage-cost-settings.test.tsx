@@ -103,7 +103,8 @@ describe("UsageCostSection", () => {
   it("shows the summary, series by agent name, and linked tables", async () => {
     mount(report());
     expect(await screen.findByText("$12.50")).toBeTruthy();
-    expect(screen.getByText("340")).toBeTruthy();
+    expect(screen.getByText("338")).toBeTruthy();
+    expect(screen.getByText("Failed calls")).toBeTruthy();
     expect(screen.getByText("$0.0123")).toBeTruthy();
     expect(screen.getByText("62%")).toBeTruthy();
     expect(screen.queryByText(/without a price/)).toBeNull();

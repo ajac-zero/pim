@@ -45,7 +45,12 @@ import type {
   TranscriptMessage,
 } from "~/lib/coding";
 import { startProblems } from "~/lib/coding";
-import { ApiError, type ModelSettings, type Session } from "~/lib/pim-api";
+import {
+  type Account,
+  ApiError,
+  type ModelSettings,
+  type Session,
+} from "~/lib/pim-api";
 import {
   accountQuery,
   agentsQuery,
@@ -917,7 +922,7 @@ describe("the Gitea card", () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: Infinity } },
     });
-    client.setQueryData(accountQuery().queryKey, { role });
+    client.setQueryData(accountQuery().queryKey, { role } as Account);
     renderWith(api, CodingConnectionsSection, "/", client);
     return api;
   };

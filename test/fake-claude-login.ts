@@ -85,5 +85,8 @@ export function loginProvider(): WorkspaceProvider & { readonly backing: FakeWor
 		},
 		destroy: (ref, options) => backing.destroy(ref, options),
 		list: (filter) => backing.list(filter),
+		snapshotEnvironment: (ref, o) => backing.snapshotEnvironment(ref, o),
+		listEnvironments: (owner) => backing.listEnvironments(owner),
+		deleteEnvironment: (userId, key) => backing.deleteEnvironment(userId, key),
 	};
 }

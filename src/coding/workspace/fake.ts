@@ -1,6 +1,8 @@
 // An in-memory workspace provider for tests. It keeps files in a map, runs a tiny scripted shell, and is the first backend the shared conformance suite (conformance.ts) runs against. It is a reference for the contract in types.ts, not a sandbox.
 
 import {
+	type EnvironmentOwner,
+	type EnvironmentSnapshot,
 	type ExecEvent,
 	type ExecOptions,
 	type FileStat,
@@ -362,7 +364,7 @@ function cloneNodes(nodes: Nodes): Nodes {
 	return new Map([...nodes].map(([key, node]) => [key, node.type === "file" ? { ...node, data: node.data.slice() } : { ...node }]));
 }
 
-/** A provider whose workspaces live in memory. Its shell understands `echo`, `cat`, `sleep`, `ln -s`, `curl` (which only reaches hosts in the spec's egress list), and `sh -c` over `;`-separated `echo`, `exit` and those commands, with `>&2` after a command. `register` adds or replaces a command by name. */
+/** A provider whose workspaces live in memory. Its shell understands `echo`, `cat`, `sleep`, `ln -s`, `curl` (which only reaches hosts in the spec's egress list), and `sh -c` over `;`-separated `echo`, `exit` and those commands, with `>&2` after a command. `register` adds or replaces a command by name. Environment snapshots are copies of a workspace's files, kept per person and key as the sandbox manager keeps them. */
 export class FakeWorkspaceProvider implements WorkspaceProvider {
 	readonly id = "fake";
 	readonly capabilities: WorkspaceProvider["capabilities"];
@@ -370,10 +372,12 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 	private workspaces = new Map<string, { workspace: FakeWorkspace; createdAt: number }>();
 	private keptVolumes = new Map<string, Nodes>();
 	private snapshots = new Map<string, Nodes>();
+	/** Environment snapshots by owner and key. A test may mark one `corrupt`: restoring it then fails and deletes it, as the sandbox manager does. */
+	readonly environments = new Map<string, EnvironmentSnapshot & { userId: string; nodes: Nodes; corrupt?: boolean }>();
 	private counter = 0;
 
 	constructor(options: FakeProviderOptions = {}) {
-		this.capabilities = { snapshot: true, egressAllowlist: true, maxConcurrent: options.maxConcurrent };
+		this.capabilities = { snapshot: true, environmentSnapshots: true, egressAllowlist: true, maxConcurrent: options.maxConcurrent };
 	}
 
 	/** Makes `name` run `handler` in every workspace of this provider. */
@@ -386,10 +390,23 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 		if (existing) return existing.workspace.ref;
 		const max = this.capabilities.maxConcurrent;
 		if (max !== undefined && this.workspaces.size >= max) throw new WorkspaceCapacityError();
+		const kept = this.keptVolumes.get(spec.sessionId);
+		const restore = kept ? undefined : spec.environment?.restoreFrom;
+		let restored: Nodes | undefined;
+		if (restore !== undefined && spec.environment) {
+			const id = environmentId(spec.environment.userId, restore);
+			const saved = this.environments.get(id);
+			if (!saved || saved.repo !== spec.environment.repo) throw new WorkspaceNotFoundError(`No such environment snapshot: ${restore}`);
+			if (saved.corrupt) {
+				this.environments.delete(id);
+				throw new Error("The environment snapshot is corrupt and was deleted");
+			}
+			saved.lastUsedAt = Date.now();
+			restored = cloneNodes(saved.nodes);
+		}
 		const ref: WorkspaceRef = { id: `fake-${++this.counter}`, providerId: this.id, sessionId: spec.sessionId };
 		const workspace = new FakeWorkspace(ref, spec, this.handlers, this.snapshots);
-		const kept = this.keptVolumes.get(spec.sessionId);
-		workspace.nodes = kept ?? new Map([[WORKSPACE_ROOT, { type: "dir", mode: 0o755, mtimeMs: Date.now() }]]);
+		workspace.nodes = kept ?? restored ?? new Map([[WORKSPACE_ROOT, { type: "dir", mode: 0o755, mtimeMs: Date.now() }]]);
 		this.keptVolumes.delete(spec.sessionId);
 		this.workspaces.set(spec.sessionId, { workspace, createdAt: Date.now() });
 		return ref;
@@ -413,4 +430,37 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 			.filter(({ workspace }) => (!filter.sessionId || workspace.ref.sessionId === filter.sessionId) && (!filter.state || workspace.state === filter.state))
 			.map(({ workspace, createdAt }) => ({ ref: workspace.ref, state: workspace.state, createdAt }));
 	}
+
+	/** Refuses a workspace that isn't the owner's, as the sandbox manager does. */
+	async snapshotEnvironment(ref: WorkspaceRef, o: EnvironmentOwner & { key: string }): Promise<EnvironmentSnapshot> {
+		const found = this.workspaces.get(ref.sessionId);
+		if (found?.workspace.ref.id !== ref.id || found.workspace.state !== "running") throw new WorkspaceNotFoundError();
+		const owner = found.workspace.spec.environment;
+		if (owner?.userId !== o.userId || owner.repo !== o.repo) throw new Error("The workspace isn't this person's, of this repository");
+		const id = environmentId(o.userId, o.key);
+		const existing = this.environments.get(id);
+		if (existing) {
+			if (existing.repo !== o.repo) throw new Error("A snapshot with this key exists for another repository");
+			return snapshotView(existing);
+		}
+		const now = Date.now();
+		const saved = { userId: o.userId, repo: o.repo, key: o.key, createdAt: now, lastUsedAt: now, nodes: cloneNodes(found.workspace.nodes) };
+		this.environments.set(id, saved);
+		return snapshotView(saved);
+	}
+
+	async listEnvironments(owner: EnvironmentOwner): Promise<EnvironmentSnapshot[]> {
+		return [...this.environments.values()]
+			.filter((saved) => saved.userId === owner.userId && saved.repo === owner.repo)
+			.sort((a, b) => b.createdAt - a.createdAt)
+			.map(snapshotView);
+	}
+
+	async deleteEnvironment(userId: string, key: string): Promise<boolean> {
+		return this.environments.delete(environmentId(userId, key));
+	}
 }
+
+const environmentId = (userId: string, key: string) => `${userId}\0${key}`;
+
+const snapshotView = (saved: EnvironmentSnapshot): EnvironmentSnapshot => ({ key: saved.key, repo: saved.repo, createdAt: saved.createdAt, lastUsedAt: saved.lastUsedAt });

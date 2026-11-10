@@ -3,7 +3,7 @@ import type { Workspace } from "../src/coding/workspace/types";
 
 /**
  * A git for the in-memory workspace (src/coding/workspace/fake.ts), enough
- * for a coding thread and its tools: `clone`, `fetch`, `checkout -B`,
+ * for a coding thread and its tools: `clone`, `remote set-url`, `fetch`, `checkout -B`,
  * `rev-parse HEAD`, `status`, `add`, `commit`, `diff A B` or `diff`
  * of the working tree, and `update-ref` and `bundle create` for pushes. It keeps its
  * commits as files under `.git`, so a workspace's kept volume keeps them.
@@ -58,6 +58,13 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			await write(workspace, `${root}/.git/origin`, url);
 			return {};
 		}
+		case "remote": {
+			// `remote set-url origin <url>`.
+			const url = rest[2];
+			if (rest[0] !== "set-url" || rest[1] !== "origin" || !url) return { stderr: "usage: git remote set-url origin <url>\n", code: 129 };
+			await write(workspace, `${cwd}/.git/origin`, url);
+			return {};
+		}
 		case "fetch": {
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
 			if (!files) return { stderr: "fatal: could not read from remote\n", code: 128 };
@@ -66,6 +73,9 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			return {};
 		}
 		case "checkout": {
+			// `checkout [-f] -B <branch> FETCH_HEAD`: the branch is kept in `.git/branch`.
+			const branch = rest[rest.indexOf("-B") + 1];
+			if (rest.includes("-B") && branch) await write(workspace, `${cwd}/.git/branch`, branch);
 			const sha = await read(workspace, `${cwd}/.git/FETCH_HEAD`);
 			for (const [path, text] of Object.entries(await commit(sha))) await write(workspace, `${cwd}/${path}`, text);
 			await write(workspace, `${cwd}/.git/HEAD`, sha);

@@ -366,6 +366,11 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return 200;
 	}
 
+	/** A thread waiting for another's environment looks for it often. */
+	protected override environmentPollMs(): number {
+		return 50;
+	}
+
 	protected override githubFetch(): Fetch | undefined {
 		return codingGitHub.fetch ?? undefined;
 	}

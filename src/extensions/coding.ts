@@ -44,6 +44,11 @@ function brief(view: CodingThreadView) {
 		turn_under_way: view.currentOperation !== null,
 		inputs_waiting: view.inbox,
 		checkpoint: view.checkpoint ? { sha: view.checkpoint.sha, message: view.checkpoint.message } : null,
+		environment: {
+			state: view.environment.state,
+			...(view.environment.key ? { key: view.environment.key } : {}),
+			...(view.environment.error ? { error: view.environment.error } : {}),
+		},
 		spent_usd: Number(view.spentUsd.toFixed(4)),
 		budget_usd: view.budgetUsd,
 	};
@@ -122,7 +127,7 @@ export const coding = definePimExtension({
 			}),
 			defineTool({
 				name: "coding_status",
-				description: "How a coding thread is doing: its state, its latest checkpoint and what it has spent. Without a thread_id, lists the space's coding threads, newest first.",
+				description: "How a coding thread is doing: its state, its latest checkpoint, its prepared environment (dependencies installed by the repository's setup script, restored from a snapshot when one was kept) and what it has spent. Without a thread_id, lists the space's coding threads, newest first.",
 				parameters: Type.Object({ thread_id: Type.Optional(ThreadId) }),
 				replay: "safe",
 				async execute({ thread_id }) {

@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import type { CodingRepoSettings } from "./api";
+import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
 import { cliHarness } from "./harness";
 import { HarnessLoginFlow, type LoginStatus } from "./harness/login";
 import { DEFAULT_SPACE_CAP, type ManagerHealth, ProviderCapacity } from "./provider-capacity";
@@ -52,6 +54,12 @@ import type { WorkspaceRef } from "./workspace/types";
  * sign-in to a harness (`harnessLoginStart`, ./harness/login.ts), whose
  * CLI waits in a workspace between their requests: one per harness, kept
  * in this object's memory, so a restart ends it and deletes its workspace.
+ *
+ * And it keeps the person's settings for each repository
+ * (`repoSettings`), such as the setup script that readies a thread's
+ * environment, and the lock that has one of their threads at a time build
+ * an environment (`acquireEnvironmentBuild`), so threads that start
+ * together don't each run the same setup.
  */
 export class CodingSchedulerDO extends DurableObject<Env> {
 	readonly #scheduler: CodingScheduler;
@@ -63,6 +71,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		super(ctx, env);
 		ctx.storage.sql.exec(OUTBOX_SCHEMA);
 		ctx.storage.sql.exec(HARNESS_LOCK_SCHEMA);
+		ctx.storage.sql.exec(REPO_SETTINGS_SCHEMA);
 		this.#scheduler = new CodingScheduler(ctx.storage.sql, {
 			transaction: (work) => ctx.storage.transactionSync(work),
 			now: () => this.now(),
@@ -215,6 +224,39 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	/** Lets the lock go, if `holder` holds it. */
 	releaseHarness(harness: string, holder: string): void {
 		this.ctx.storage.sql.exec("DELETE FROM pim_coding_harness_lock WHERE harness = ? AND holder = ?", harness, holder);
+	}
+
+	/** Takes the lock on building the environment with `key` for `holder`, a thread, as `acquireHarness` takes a harness's: true when it is free, expired or the holder's. Keys are hex, so they never meet a harness's name. */
+	acquireEnvironmentBuild(key: string, holder: string, ttlMs: number): boolean {
+		return this.acquireHarness(`environment:${key}`, holder, ttlMs);
+	}
+
+	releaseEnvironmentBuild(key: string, holder: string): void {
+		this.releaseHarness(`environment:${key}`, holder);
+	}
+
+	/** The person's settings for a repository, `owner/name`; empty ones when they set none. */
+	repoSettings(repo: string): CodingRepoSettings {
+		const name = repo.toLowerCase();
+		const row = this.ctx.storage.sql.exec("SELECT setup_script, updated_at FROM pim_coding_repo_settings WHERE repo = ?", name).toArray()[0];
+		return { repo: name, setupScript: row?.setup_script === undefined || row.setup_script === null ? null : String(row.setup_script), updatedAt: row ? Number(row.updated_at) : null };
+	}
+
+	/** Sets the person's settings for a repository. A null or blank setup script clears it, so the repository's own `.pim/setup.sh` is used again. */
+	setRepoSettings(repo: string, settings: { setupScript: string | null }): CodingRepoSettings {
+		const script = settings.setupScript?.trim() ? settings.setupScript : null;
+		if (script !== null && new TextEncoder().encode(script).byteLength > MAX_SETUP_SCRIPT_BYTES) throw new Error(`A setup script may be at most ${MAX_SETUP_SCRIPT_BYTES / 1024} KiB`);
+		const name = repo.toLowerCase();
+		if (script === null) this.ctx.storage.sql.exec("DELETE FROM pim_coding_repo_settings WHERE repo = ?", name);
+		else {
+			this.ctx.storage.sql.exec(
+				"INSERT INTO pim_coding_repo_settings (repo, setup_script, updated_at) VALUES (?, ?, ?) ON CONFLICT (repo) DO UPDATE SET setup_script = excluded.setup_script, updated_at = excluded.updated_at",
+				name,
+				script,
+				this.now(),
+			);
+		}
+		return this.repoSettings(name);
 	}
 
 	/**
@@ -457,6 +499,15 @@ CREATE TABLE IF NOT EXISTS pim_coding_harness_lock (
 CREATE TABLE IF NOT EXISTS pim_coding_harness_login (
 	harness TEXT PRIMARY KEY,
 	ref TEXT NOT NULL
+);
+`;
+
+/** The person's settings for each of their repositories, by lowercase `owner/name`. */
+const REPO_SETTINGS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS pim_coding_repo_settings (
+	repo TEXT PRIMARY KEY,
+	setup_script TEXT,
+	updated_at INTEGER NOT NULL
 );
 `;
 

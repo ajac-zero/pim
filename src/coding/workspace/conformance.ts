@@ -190,6 +190,32 @@ export function runConformanceSuite(name: string, makeProvider: () => WorkspaceP
 			await expect(workspace.readFile("extra.txt")).rejects.toThrow();
 		});
 
+		gated(capabilities.environmentSnapshots, "the provider keeps no environment snapshots", "keeps environment snapshots per person and restores one into a new workspace", async () => {
+			const provider = makeProvider();
+			const repo = "acme/demo";
+			const ada = { userId: "ada", repo };
+			const key = "0123456789abcdef".repeat(4);
+			const { ref, workspace } = await open(provider, { environment: ada });
+			await workspace.writeFile("repo/node_modules/dep/index.js", encode("installed"));
+			expect(await provider.snapshotEnvironment(ref, { ...ada, key })).toMatchObject({ key, repo });
+			// The same key again is the snapshot already kept.
+			expect(await provider.snapshotEnvironment(ref, { ...ada, key })).toMatchObject({ key, repo });
+			expect((await provider.listEnvironments(ada)).map((s) => s.key)).toEqual([key]);
+			// Another person sees none of it, can't snapshot a workspace that isn't theirs, restore from it or delete it.
+			const bob = { userId: "bob", repo };
+			expect(await provider.listEnvironments(bob)).toEqual([]);
+			await expect(provider.snapshotEnvironment(ref, { ...bob, key })).rejects.toThrow();
+			await expect(provider.create(specFor({ environment: { ...bob, restoreFrom: key } }))).rejects.toThrow();
+			expect(await provider.deleteEnvironment("bob", key)).toBe(false);
+			// A new workspace of the same person starts from it; one of another repository can't.
+			const restored = await open(provider, { environment: { ...ada, restoreFrom: key } });
+			expect(decode(await restored.workspace.readFile("repo/node_modules/dep/index.js"))).toBe("installed");
+			await expect(provider.create(specFor({ environment: { userId: "ada", repo: "acme/other", restoreFrom: key } }))).rejects.toThrow();
+			expect(await provider.deleteEnvironment("ada", key)).toBe(true);
+			expect(await provider.listEnvironments(ada)).toEqual([]);
+			await expect(provider.create(specFor({ environment: { ...ada, restoreFrom: key } }))).rejects.toThrow();
+		});
+
 		it("moves between running and stopped, keeping files", async () => {
 			const { workspace } = await open();
 			await workspace.writeFile("kept.txt", encode("still here"));

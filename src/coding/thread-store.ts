@@ -540,6 +540,6 @@ function threadOf(row: Row): CodingThreadRow {
 		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : { ...NO_ENVIRONMENT, ...(JSON.parse(String(row.environment)) as Partial<CodingEnvironment>) },
 		consecutiveInterrupts: Number(row.consecutive_interrupts),
 		createdAt: Number(row.created_at),
-		updatedAt: Number(row.updatedAt),
+		updatedAt: Number(row.updated_at),
 	};
 }

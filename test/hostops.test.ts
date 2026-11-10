@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	AUDIT_ROWS,
 	enqueueHostOp,
@@ -339,6 +339,23 @@ describe("the host daemon's credential", () => {
 		await enqueueHostOp(env, majordomo, "stats", {});
 		expect((await waiting).status).toBe(401);
 		expect((await call("/hostops/status", { cookie })).body.queue).toEqual({ queued: 1, running: 0 });
+	});
+});
+
+describe("a poll that fails inside Pim", () => {
+	it("answers that there is nothing instead of 500, and still refuses a bad credential", async () => {
+		const token = (await call("/hostops/credential", { method: "POST", cookie })).body.token as string;
+		const get = vi.spyOn(env.HostOps, "getByName").mockReturnValue({ poll: () => Promise.reject(new Error("Durable Object reset")) } as never);
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			expect((await poll(token)).status).toBe(204);
+			expect(error).toHaveBeenCalled();
+		} finally {
+			get.mockRestore();
+			error.mockRestore();
+		}
+		expect((await poll(token)).status).toBe(204);
+		expect((await poll(`${token}x`)).status).toBe(401);
 	});
 });
 

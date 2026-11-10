@@ -88,6 +88,7 @@ export function loadConfig(env = process.env) {
 
 // Results Pim rejects for good (unknown or finished op, malformed result) are dropped rather than
 // retried forever; everything else, 401 included, is retried.
+const QUIET_FAILURES = 3
 const PERMANENT = new Set([400, 404, 409, 410, 413, 422])
 
 export function createDaemon(cfg, { log = (m) => console.log(m) } = {}) {
@@ -110,14 +111,24 @@ export function createDaemon(cfg, { log = (m) => console.log(m) } = {}) {
 
 	// How long to wait after a failed request: exponential with jitter, and slowly after a 401,
 	// which means the credential was revoked or is wrong and will not fix itself soon.
-	function backoff(status, what) {
+	// A 5xx or a dropped connection is transient (Pim deploying, a Durable Object resetting, a proxy
+	// closing an idle long poll), so it is retried quietly: only the third failure in a row is logged,
+	// and then the recovery.
+	function backoff(status, what, detail) {
 		if (status === 401) {
 			const ms = jitter(cfg.unauthorizedRetryMs)
 			log(`${what}: Pim rejected HOSTOPS_TOKEN (401); the credential may have been revoked. Retrying in ${Math.round(ms / 1000)} s.`)
 			return ms
 		}
 		failures++
+		if (failures === QUIET_FAILURES) log(`${what}: ${detail ?? 'failing'}, ${QUIET_FAILURES} times in a row; retrying with backoff.`)
 		return jitter(Math.min(cfg.backoffMaxMs, cfg.backoffMinMs * 2 ** Math.min(failures - 1, 16)))
+	}
+
+	// A request got through: forgets earlier failures.
+	function recovered() {
+		if (failures >= QUIET_FAILURES) log('Pim is answering again.')
+		failures = 0
 	}
 
 	async function queue(outcome) {
@@ -135,18 +146,16 @@ export function createDaemon(cfg, { log = (m) => console.log(m) } = {}) {
 		try {
 			;({ status } = await call('/api/hostops/agent/result', r, 30000))
 		} catch (e) {
-			log(`result ${r.id}: ${e.cause?.code ?? e.message}`)
-			return backoff(0)
+			return backoff(0, `result ${r.id}`, e.cause?.code ?? e.message)
 		}
 		if (status >= 200 && status < 300) {
 			log(`result ${r.id}: delivered`)
 		} else if (PERMANENT.has(status)) {
 			log(`result ${r.id}: Pim refused it with ${status}; dropping it`)
 		} else {
-			if (status !== 401) log(`result ${r.id}: Pim answered ${status}`)
-			return backoff(status, `result ${r.id}`)
+			return backoff(status, `result ${r.id}`, `Pim answered ${status}`)
 		}
-		failures = 0
+		recovered()
 		state.pendingResults.shift()
 		await save()
 		return 0
@@ -159,24 +168,21 @@ export function createDaemon(cfg, { log = (m) => console.log(m) } = {}) {
 			const commit = await ops.head().catch(() => null)
 			res = await call('/api/hostops/agent/poll', { agentVersion: VERSION, commit, waitMs: cfg.waitMs }, cfg.waitMs + 15000, stop)
 		} catch (e) {
-			log(`poll: ${e.cause?.code ?? e.message}`)
-			return { waitMs: backoff(0) }
+			return { waitMs: backoff(0, 'poll', e.cause?.code ?? e.message) }
 		}
 		if (res.status === 204) {
-			failures = 0
+			recovered()
 			return {}
 		}
 		if (res.status !== 200) {
-			if (res.status !== 401) log(`poll: Pim answered ${res.status}`)
-			return { waitMs: backoff(res.status, 'poll') }
+			return { waitMs: backoff(res.status, 'poll', `Pim answered ${res.status}`) }
 		}
-		failures = 0
+		recovered()
 		let body
 		try {
 			body = JSON.parse(res.text)
 		} catch {
-			log('poll: the answer is not JSON')
-			return { waitMs: backoff(0) }
+			return { waitMs: backoff(0, 'poll', 'the answer is not JSON') }
 		}
 		return { op: body?.op ?? null }
 	}

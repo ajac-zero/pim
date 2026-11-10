@@ -412,6 +412,24 @@ describe('talking to Pim', () => {
 		assert.ok(e.waitMs <= 40)
 	})
 
+	test('treats 5xx and dropped connections as transient: quiet, jittered backoff, one note on recovery', async () => {
+		const d = await start({ pim: { pollStatus: 500 } })
+		const waits = []
+		for (let i = 0; i < 4; i++) waits.push((await d.step()).waitMs)
+		assert.ok(waits.every((w) => w > 0))
+		assert.ok(waits[3] > waits[0] || waits[3] >= 4)
+		// Two failures are silent; the third is noted once, not on every poll.
+		assert.equal(d.logs.length, 1)
+		assert.match(d.logs[0], /poll: Pim answered 500, 3 times in a row/)
+		h.pim.pollStatus = null
+		assert.equal((await d.step()).waitMs, 0)
+		assert.equal(d.logs.at(-1), 'Pim is answering again.')
+		// A reset connection is handled the same way.
+		const dead = await daemon({ HOSTOPS_URL: 'http://127.0.0.1:1' })
+		assert.ok((await dead.step()).waitMs > 0)
+		assert.deepEqual(dead.logs, [])
+	})
+
 	test('refuses unknown ops and injection attempts without running anything', async () => {
 		const d = await start()
 		const m = path.join(h.tmp, 'pwned')

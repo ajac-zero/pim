@@ -48,6 +48,8 @@ export const EXEC_MAX_TIMEOUT = 300;
 export const EXEC_MAX_OUTPUT = 64 * 1024;
 /** The longest a poll waits for an operation. */
 export const MAX_POLL_WAIT_MS = 25_000;
+/** How long a poll that failed inside Pim pauses before it answers that there is nothing. */
+export const POLL_FAILURE_PAUSE_MS = 1_000;
 export const MAX_SUMMARY = 2000;
 export const MAX_DATA_BYTES = 64 * 1024;
 /** The audit log keeps the newest rows, at most this many. */
@@ -773,7 +775,17 @@ export async function serveHostOpsAgent(request: Request, env: Env, path: string
 		if (path === `${HOSTOPS_AGENT_PATH}/poll`) {
 			const waitMs = body.waitMs ?? MAX_POLL_WAIT_MS;
 			if (!isInt(waitMs, 0, MAX_POLL_WAIT_MS)) return fail(400, `waitMs must be a whole number from 0 to ${MAX_POLL_WAIT_MS}`);
-			const polled = await hostOps(env).poll(token, { agentVersion: text(body.agentVersion, "agentVersion"), commit: text(body.commit, "commit") }, waitMs);
+			const hello = { agentVersion: text(body.agentVersion, "agentVersion"), commit: text(body.commit, "commit") };
+			// A failure of the Durable Object while the daemon waits (it was reset or moved, or its storage hiccuped) is no
+			// reason to answer 500: nothing was handed out, so the daemon is told there is nothing and polls again.
+			const polled = await hostOps(env)
+				.poll(token, hello, waitMs)
+				.catch(async (error): Promise<{ ok: true; op: null }> => {
+					console.error("hostops poll failed", error);
+					// A short pause, so a Durable Object that keeps failing is not polled in a tight loop.
+					await new Promise((resolve) => setTimeout(resolve, POLL_FAILURE_PAUSE_MS));
+					return { ok: true, op: null };
+				});
 			if (!polled.ok) return fail(401, "Unauthorized");
 			return polled.op ? json({ op: polled.op }) : new Response(null, { status: 204 });
 		}

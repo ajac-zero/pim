@@ -8,3 +8,4 @@
 # corepack ignores the egress proxy, so it isn't used. Running it again changes nothing.
 set -euo pipefail
 pnpm install --frozen-lockfile
+# env cache re-measure 2026-11-10

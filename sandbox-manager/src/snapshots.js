@@ -400,11 +400,15 @@ export function createEnvCache({ docker, cfg, now = Date.now, mounted = () => ne
 	}
 
 	// Reads every cache volume's size from Docker, which also finds volumes the index lost and
-	// forgets volumes that are gone.
+	// forgets volumes that are gone. Docker before API 1.52 lists volumes in `Volumes`; 1.52 and
+	// later list them, with `verbose`, in `VolumeUsage.Items`, and are dropping `Volumes`.
 	async function measureCaches() {
-		const df = await docker.request('GET', '/system/df?type=volume')
+		const df = await docker.request('GET', '/system/df?type=volume&verbose=1')
+		// `Items` is left out when there are none.
+		const volumes = df?.VolumeUsage ? (df.VolumeUsage.Items ?? []) : df?.Volumes
+		if (!Array.isArray(volumes)) throw new Error('/system/df listed no volumes')
 		const seen = new Set()
-		for (const v of df?.Volumes ?? []) {
+		for (const v of volumes) {
 			if (!v.Labels?.[LABEL_CACHE]) continue
 			seen.add(v.Name)
 			const c = caches.get(v.Name) ?? { userId: v.Labels[LABEL_CACHE_USER], repo: v.Labels[LABEL_CACHE_REPO], lastUsedAt: now(), bytes: 0 }

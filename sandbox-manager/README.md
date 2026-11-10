@@ -190,16 +190,18 @@ one share a single creation. The session must have been created with the same `u
   delete, so a user never sees another's snapshots; the same key is a different snapshot per user.
 
 **Cache volumes.** A session with `userId` and `repo` mounts the volume `pim-cache-<hash>` of that
-pair at `/caches` and gets `PNPM_STORE_DIR` (and `npm_config_store_dir`) `/caches/pnpm`,
-`npm_config_cache` `/caches/npm`, `CARGO_HOME` `/caches/cargo`, `CARGO_TARGET_DIR`
+pair at `/caches` and gets `pnpm_config_store_dir` (pnpm 11 and later read only `pnpm_config_*`;
+`npm_config_store_dir` for older pnpm) `/caches/pnpm` with `pnpm_config_package_import_method`
+`copy` (the store is on another mount, so pnpm can't hard-link from it, and node_modules shares no
+file with the cache), `npm_config_cache` `/caches/npm`, `CARGO_HOME` `/caches/cargo`, `CARGO_TARGET_DIR`
 `/caches/cargo-target`, `PIP_CACHE_DIR` `/caches/pip` and `UV_CACHE_DIR` `/caches/uv`. Every session
 of one user and repo shares it, and no other user's does. It outlives the sessions (it carries
 `pim.coding.cache`, not the session label) until GC evicts it. The image must ship `/caches` and
 those subdirectories owned by 10001 (the workspace image does), so Docker fills a new volume with
 them.
 
-**Accounting and GC.** Snapshot sizes and cache volume sizes (read from `/system/df`) are reported
-by `/health` and added to the reserved total that `MAX_TOTAL_WORKSPACE_GB` limits. The GC runs with
+**Accounting and GC.** Snapshot sizes and cache volume sizes (read from `/system/df` with `verbose`, as
+`VolumeUsage.Items` from API 1.52 or `Volumes` before it, at each GC pass) are reported by `/health` and added to the reserved total that `MAX_TOTAL_WORKSPACE_GB` limits. The GC runs with
 the reaper every 30 s, and right away when a snapshot is created over the cap. It keeps the newest
 2 snapshots per `(userId, repo)`, deletes snapshots unused (not restored) for 7 days, then, while
 snapshots and caches together exceed `SNAPSHOT_CACHE_PCT` of the total, evicts whichever snapshot

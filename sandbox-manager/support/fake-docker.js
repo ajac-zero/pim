@@ -23,6 +23,9 @@ export async function startFakeDocker({ runtimes = { runc: {}, runsc: {} }, prob
 		calls,
 		// Sizes /system/df reports, by volume name; others report -1 (not measured).
 		volumeSizes: new Map(),
+		// The API version /system/df answers as: before 1.52 volumes are in `Volumes`; 1.52 lists them
+		// in `VolumeUsage.Items` too (only there with `verbose`), and 1.53 only there, with `verbose`.
+		apiVersion: '1.53',
 		// Ends GET archive answers after this many bytes, as a daemon that died would.
 		archiveFailAfter: null,
 		// Awaited before a PUT archive is extracted, so tests can hold a restore open.
@@ -142,7 +145,12 @@ export async function startFakeDocker({ runtimes = { runc: {}, runsc: {} }, prob
 			return r.status === 0 ? out(200) : out(400, { message: r.stderr.toString() })
 		}
 		if (key === 'GET /system/df') {
-			return out(200, { Volumes: [...volumes.values()].map((v) => ({ Name: v.Name, Labels: v.Labels ?? {}, UsageData: { Size: f.volumeSizes.get(v.Name) ?? -1, RefCount: 0 } })) })
+			const items = [...volumes.values()].map((v) => ({ Name: v.Name, Labels: v.Labels ?? {}, UsageData: { Size: f.volumeSizes.get(v.Name) ?? -1, RefCount: 0 } }))
+			const minor = Number(f.apiVersion.split('.')[1])
+			if (minor < 52) return out(200, { Volumes: items })
+			const verbose = url.searchParams.get('verbose') === '1'
+			const usage = { TotalCount: items.length, ...((verbose || minor === 52) && items.length && { Items: items }) }
+			return out(200, { VolumeUsage: usage, ...(minor === 52 && !verbose && { Volumes: items }) })
 		}
 		if ((m = /^POST \/networks\/([^/]+)\/(connect|disconnect)$/.exec(key))) {
 			const x = infra.get(body.Container)

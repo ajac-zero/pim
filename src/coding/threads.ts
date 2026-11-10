@@ -2,8 +2,9 @@ import { digestHex } from "../auth/store";
 import { HttpError } from "../http";
 import type { CodingCreator, CodingErrorCode, CodingThreadSummary, CodingThreadView, StartCodingThread } from "./api";
 import { threadPath } from "./api";
-import { GitBrokerError, parseRepoUrl } from "./git-broker/broker";
+import { GitBrokerError } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";
+import { deploymentProviders } from "./git-broker/routes";
 import { cliHarness } from "./harness";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { codingThread } from "./thread-do";
@@ -108,7 +109,8 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 	if (typeof input.repo !== "string") throw invalid("repo must be https://github.com/<owner>/<name>");
 	let repo: string;
 	try {
-		repo = `https://github.com/${parseRepoUrl(input.repo, brokerPolicy(env)).fullName}`;
+		const resolved = deploymentProviders(env).resolveUrl(input.repo, brokerPolicy(env));
+		repo = resolved.provider.repoUrl(resolved.repo);
 	} catch (error) {
 		if (error instanceof GitBrokerError) throw new CodingError(error.status, error.message, error.status === 403 ? "forbidden" : "invalid");
 		throw error;

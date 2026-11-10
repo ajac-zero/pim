@@ -1,8 +1,10 @@
 import { base64UrlDecode } from "../../auth/encoding";
 import { dispatch, type Route } from "../../http";
-import { type BrokerClaims, brokerKey, GitBrokerError, gitAuth, type RepoRef, repoRef, verifyBrokerToken } from "./broker";
+import { type BrokerClaims, brokerKey, GitBrokerError, type RepoRef, repoRef, verifyBrokerToken } from "./broker";
 import { type BrokerPolicy, brokerPolicy, githubAppConfig, githubAppStatus } from "./config";
-import { type Fetch, GitHubApp, RepoNotInstalledError } from "./github-app";
+import { type Fetch, GitHubApp } from "./github-app";
+import { GitHubProvider } from "./github-provider";
+import { basicAuth, type GitProvider, ProviderRegistry } from "./provider";
 
 /**
  * The broker's one public door, under `/api`: git's smart HTTP protocol for
@@ -65,12 +67,11 @@ async function admit(deps: GitBrokerDeps, params: Readonly<Record<string, string
 }
 
 /** How the broker signs in to GitHub for `repo`: a read-only token when the App is installed on it, else nothing. */
-async function credentials(deps: GitBrokerDeps, repo: RepoRef): Promise<string | null> {
-	if (!deps.app) return null;
+async function credentials(provider: GitProvider, repo: RepoRef): Promise<string | null> {
 	try {
-		return gitAuth((await deps.app.installationToken(repo, "read")).token);
-	} catch (error) {
-		if (error instanceof RepoNotInstalledError) return null;
+		const credential = await provider.credential(repo, "read");
+		return credential && basicAuth(credential);
+	} catch {
 		throw new GitBrokerError(502, `Pim couldn't get access to ${repo.fullName} from GitHub`);
 	}
 }
@@ -112,7 +113,8 @@ async function proxy(
 ): Promise<Response> {
 	const { repo, claims } = admitted;
 	const headers: Record<string, string> = { "User-Agent": "git/pim-git-broker", Accept: init.expected };
-	const authorization = await credentials(deps, repo);
+	const provider = new GitHubProvider(deps.app);
+	const authorization = await credentials(provider, repo);
 	if (authorization) headers.Authorization = authorization;
 	if (init.body) headers["Content-Type"] = init.contentType;
 	const encoding = request.headers.get("Content-Encoding");
@@ -121,7 +123,7 @@ async function proxy(
 	if (protocol && /^[A-Za-z0-9=:. -]{1,100}$/.test(protocol)) headers["Git-Protocol"] = protocol;
 	let answer: Response;
 	try {
-		answer = await (deps.fetch ?? ((input, init) => fetch(input, init)))(`https://github.com/${repo.owner}/${repo.name}.git${path}`, {
+		answer = await (deps.fetch ?? ((input, init) => fetch(input, init)))(`${provider.gitUrl(repo)}${path}`, {
 			method: init.method,
 			headers,
 			...(init.body ? { body: init.body } : {}),
@@ -223,6 +225,11 @@ export function deploymentGitHubApp(env: object): GitHubApp | null {
 	const signature = JSON.stringify(config);
 	if (cachedApp?.signature !== signature) cachedApp = { signature, app: new GitHubApp(config) };
 	return cachedApp.app;
+}
+
+/** The git providers of this deployment: the seeded instances, with GitHub's App when it is configured. */
+export function deploymentProviders(env: object, options: { fetch?: Fetch } = {}): ProviderRegistry {
+	return new ProviderRegistry([new GitHubProvider(deploymentGitHubApp(env), { policy: brokerPolicy(env), ...options })]);
 }
 
 /** The broker, as the Worker serves it at `/api` + `path`. */

@@ -1,4 +1,5 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { GITHUB_INSTANCE_ID } from "./git-broker/provider";
 import { type CodingEnvironment, NO_ENVIRONMENT } from "./environment-cache";
 import type { RunRecord } from "./harness/runner";
 import type { HarnessUsage } from "./harness/types";
@@ -33,6 +34,8 @@ export type CodingThreadRow = {
 	readonly threadId: string;
 	readonly space: string;
 	readonly repoUrl: string;
+	/** The git provider instance `repoUrl` is on (./git-broker/provider.ts); threads stored before instances existed are GitHub's. */
+	readonly providerInstance: string;
 	readonly baseRef: string;
 	/** The commit `baseRef` named when the repository was cloned; diffs start here. Null until then. */
 	readonly baseSha: string | null;
@@ -113,6 +116,7 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	thread_id TEXT PRIMARY KEY,
 	space TEXT NOT NULL,
 	repo_url TEXT NOT NULL,
+	provider_instance TEXT NOT NULL DEFAULT 'github',
 	base_ref TEXT NOT NULL,
 	base_sha TEXT,
 	branch TEXT NOT NULL,
@@ -248,6 +252,8 @@ export class CodingThreadStore {
 		// A CLI harness's session's whole usage, for one that reports only that (Codex).
 		const session = new Set(this.#sql.exec("PRAGMA table_info(coding_harness_session)").toArray().map((row) => String(row.name)));
 		if (!session.has("usage")) this.#sql.exec("ALTER TABLE coding_harness_session ADD COLUMN usage TEXT");
+		// Which git provider instance the repository is on; rows from before instances existed are GitHub's.
+		if (!columns.has("provider_instance")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN provider_instance TEXT NOT NULL DEFAULT 'github'");
 		// Consecutive interruptions counter for auto-resume.
 		if (!columns.has("consecutive_interrupts")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN consecutive_interrupts INTEGER NOT NULL DEFAULT 0");
 	}
@@ -265,15 +271,16 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "createdAt" | "updatedAt"> & { consecutiveInterrupts?: number },
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "createdAt" | "updatedAt" | "providerInstance"> & { consecutiveInterrupts?: number; providerInstance?: string },
 	): void {
 		const now = this.#now();
 		this.#sql.exec(
-			`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, harness, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO coding_thread (thread_id, space, repo_url, provider_instance, base_ref, branch, agent_profile, harness, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			thread.threadId,
 			thread.space,
 			thread.repoUrl,
+			thread.providerInstance ?? GITHUB_INSTANCE_ID,
 			thread.baseRef,
 			thread.branch,
 			JSON.stringify(thread.profile),
@@ -512,6 +519,7 @@ function threadOf(row: Row): CodingThreadRow {
 		threadId: String(row.thread_id),
 		space: String(row.space),
 		repoUrl: String(row.repo_url),
+		providerInstance: text(row.provider_instance) ?? GITHUB_INSTANCE_ID,
 		baseRef: String(row.base_ref),
 		baseSha: text(row.base_sha),
 		branch: String(row.branch),

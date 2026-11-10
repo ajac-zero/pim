@@ -187,6 +187,7 @@ import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, 
 import { type ApprovalPolicy, readSettings, type Settings, updateSettings } from "./settings";
 import {
 	type Approval,
+	type ApprovalDecider,
 	type ApprovalStatus,
 	type GoalStatus,
 	type Notification,
@@ -4743,6 +4744,15 @@ export class Pim extends DurableAgent<Env> {
 				}),
 			],
 		});
+	}
+
+	/** An approval as host operations (./hostops.ts) check it before they run a command: what it was for, and whether and by whom it was decided. Null when there is none. */
+	async hostopsApproval(id: string): Promise<{ action: string; argsJson: string; status: ApprovalStatus; decidedBy: ApprovalDecider | null; decidedAt: number | null; guest: boolean } | null> {
+		if (this.#closed()) return null;
+		const approval = this.store.approval(id);
+		if (!approval) return null;
+		const { action, args, status, decidedBy, decidedAt, requestedBy } = approval;
+		return { action, argsJson: JSON.stringify(args), status, decidedBy, decidedAt, guest: requestedBy !== null };
 	}
 
 	/** The agent a chat talks with; none in a visit, which talks with someone else's. */

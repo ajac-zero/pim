@@ -112,6 +112,7 @@ malformed argument or any extra argument fails it before anything runs.
 | `rollback` | `commit` (7 to 40 hex) | The same checkout, `up.sh` and health check for a commit that is an ancestor of HEAD or one an earlier deploy recorded; no second rollback when it fails |
 | `restart` | `service`: `sandbox-manager`, `egress-proxy`, `docker-socket-proxy` or `hostopsd` | `docker compose restart <service>`; `hostopsd` exits after reporting and systemd restarts it |
 | `logs` | `service` as above, `lines?` 1 to 500 (200) | `docker compose logs --no-color --tail N <service>`, or `journalctl -u hostopsd -n N`; redacted, last 60 KB |
+| `exec` | `command` (1 to 2000 characters), `timeoutSeconds?` 1 to 300 (60), `maxOutputBytes?` 1 to 65536 (the most) | `/bin/sh -c <command>` as hostopsd's own user, in its home directory, with only `PATH`, `HOME` and `LANG`; no stdin, no terminal, no sudo. Stdout and stderr come back together, redacted, cut to their last `maxOutputBytes` (`truncated`). At the timeout the process group is killed. Exit 0 is `succeeded`, anything else (or a timeout) `failed`, with `exitCode`, `timedOut`, `durationMs` and `output` in the data. Pim queues it only under the person's approval for that exact command |
 | `set_slot_limit` | `maxConcurrent` 1 to 16 | `PUT $MANAGER_URL/config {maxConcurrent}` with `MANAGER_TOKEN`, then confirms it in `/health` |
 
 The manager counts as healthy at a commit when `/health` answers 200, its `ok` is true (or, from a
@@ -132,7 +133,10 @@ deploys are kept in `deploys` (the last 50), which `rollback` accepts.
   that group, so it is effectively root on the host. What limits it is the allowlist above, the
   argument checks, and a credential Pim can revoke. It runs no shell: every command is a fixed
   argv array through `spawn` without a shell, from a fixed directory, with a timeout that kills
-  its process group. Refs and commits go to git as single arguments and cannot start with `-`.
+  its process group. The one exception is `exec`, which runs the one command the person approved
+  in Pim, through `/bin/sh -c`; with the docker group above, that command can do anything root
+  can, so Pim asks the person for every one. It never runs as root, and its command is kept out
+  of this daemon's log. Refs and commits go to git as single arguments and cannot start with `-`.
 - The token is never logged or passed to the commands hostopsd runs; `up.sh` and `docker compose`
   get only `PATH`, `HOME`, `BUILD_SHA` and the manager's environment. Log output and command errors
   in results are redacted: known secret values, `Bearer ...`, runs of 32 or more hex characters

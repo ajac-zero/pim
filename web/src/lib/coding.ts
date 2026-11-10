@@ -460,7 +460,7 @@ export const STATE_TEXT: Record<CodingThreadState, TranslationKey> = {
 
 /**
  * A thread's state as the mark on its icon says it, the one a chat's icon
- * has: starting, queued and running threads are working; one waiting for the
+ * has: a running thread is working (the spinner), a queued one waits for a slot, and a provisioning one is setting up its environment; one waiting for the
  * person needs attention; a failed one is an error. Between turns and
  * archived ones show nothing, or the unread mark when the thread has
  * output the person hasn't viewed (`codingUnread`).
@@ -468,10 +468,19 @@ export const STATE_TEXT: Record<CodingThreadState, TranslationKey> = {
 export function codingStateBadge(
   state: CodingThreadState,
   unread = false,
-): "working" | "attention" | "error" | "unread" | null {
+):
+  | "working"
+  | "queued"
+  | "setting-up"
+  | "attention"
+  | "error"
+  | "unread"
+  | null {
   switch (state) {
     case "provisioning":
+      return "setting-up";
     case "queued":
+      return "queued";
     case "running":
       return "working";
     case "waiting_input":

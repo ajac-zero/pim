@@ -402,8 +402,8 @@ describe("why a thread stopped", () => {
 describe("codingStateBadge", () => {
   it("maps each state onto the mark a chat's icon has", () => {
     const states: Record<CodingThreadState, string | null> = {
-      provisioning: "working",
-      queued: "working",
+      provisioning: "setting-up",
+      queued: "queued",
       running: "working",
       waiting_input: "attention",
       failed: "error",

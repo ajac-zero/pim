@@ -21,6 +21,7 @@ import {
   Blocks,
   Check,
   ChevronDown,
+  Clock,
   Code,
   Compass,
   Contact,
@@ -30,6 +31,7 @@ import {
   MessagesSquare,
   Monitor,
   MoreHorizontal,
+  Package,
   Pencil,
   Pin,
   PinOff,
@@ -809,29 +811,55 @@ export function AwaitingApprovalMark({
   );
 }
 
-export type StateBadgeState = "working" | "error" | "attention" | "unread";
+export type StateBadgeState =
+  | "working"
+  | "queued"
+  | "setting-up"
+  | "error"
+  | "attention"
+  | "unread";
 
 /**
  * The state of a chat or coding thread, on the top right corner of its icon,
  * opposite who started it. The icon's wrapper is `relative`. One mark shows at
- * a time; `label` names an error or attention mark for screen readers.
+ * a time; `label` names a queued, setting-up, error or attention mark for screen readers.
  */
 export function StateBadge({
   state,
   label,
+  backed = false,
 }: {
   state: StateBadgeState | null;
   label?: string;
+  /** Sits on a background-colored disc, for an icon with no tile of its own to read against. */
+  backed?: boolean;
 }) {
   const { t } = useI18n();
   if (!state) return null;
   return (
-    <span className="-top-0.5 -right-1 absolute flex size-2.5 items-center justify-center">
+    <span
+      className={cn(
+        "-top-0.5 -right-1 absolute flex size-2.5 items-center justify-center",
+        backed && "-top-1 -right-1.5 size-3.5 rounded-full bg-background",
+      )}
+    >
       {state === "working" ? (
         <Loader2
           className="size-2.5 animate-spin text-primary motion-reduce:animate-none"
           role="img"
           aria-label={t("working")}
+        />
+      ) : state === "queued" ? (
+        <Clock
+          className="size-2.5 text-muted-foreground"
+          role="img"
+          aria-label={label}
+        />
+      ) : state === "setting-up" ? (
+        <Package
+          className="size-2.5 animate-pulse text-primary motion-reduce:animate-none"
+          role="img"
+          aria-label={label}
         />
       ) : state === "error" ? (
         <AlertCircle

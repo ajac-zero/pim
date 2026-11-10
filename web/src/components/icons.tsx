@@ -115,6 +115,7 @@ export const CornerDownRight = themedIcon(
   Pixel.CornerDownRight,
 );
 export const Clock = themedIcon(Lucide.Clock, Pixel.Clock);
+export const Package = themedIcon(Lucide.Package, Pixel.Package);
 export const Code = themedIcon(Lucide.Code, Pixel.Code);
 export const Coffee = themedIcon(Lucide.Coffee, Pixel.Coffee);
 export const Compass = themedIcon(Lucide.Compass, Pixel.Compass);

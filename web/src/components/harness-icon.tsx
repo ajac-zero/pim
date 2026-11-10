@@ -16,9 +16,9 @@ const LOGOS: Record<CodingHarness, string> = {
 };
 
 /**
- * A coding harness's logo on a rounded tile, framed like an agent's icon in
- * the sidebar. The tile stays light in both themes, so the logos, which have
- * fixed brand colors, read the same in each.
+ * A coding harness's logo on its own, sized to fill the icon area. Codex's is
+ * black, so in dark themes it is inverted to white; the others have colors
+ * that read on both.
  */
 export function HarnessIcon({
   harness,
@@ -31,14 +31,17 @@ export function HarnessIcon({
     <span
       data-harness={harness}
       className={cn(
-        "flex size-5 shrink-0 items-center justify-center rounded-lg bg-white ring-1 ring-black/10",
+        "flex size-5 shrink-0 items-center justify-center",
         className,
       )}
     >
       <img
         src={LOGOS[harness]}
         alt={HARNESS_NAMES[harness]}
-        className="size-[68%] object-contain"
+        className={cn(
+          "size-[90%] object-contain",
+          harness === "codex" && "dark:invert",
+        )}
       />
     </span>
   );

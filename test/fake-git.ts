@@ -5,7 +5,10 @@ import type { Workspace } from "../src/coding/workspace/types";
  * A git for the in-memory workspace (src/coding/workspace/fake.ts), enough
  * for a coding thread and its tools: `clone`, `remote set-url`, `fetch`, `checkout -B`,
  * `rev-parse HEAD`, `status`, `add`, `commit`, `diff A B` or `diff`
- * of the working tree, and `update-ref` and `bundle create` for pushes. It keeps its
+ * of the working tree, and `update-ref` and `bundle create` for pushes, and for merges
+ * `fetch origin +<ref>:<ref>`, `merge-base`, `checkout --detach` and `rebase <base>`
+ * (which takes the thread's changes onto the base, or conflicts where both
+ * changed a file differently). It keeps its
  * commits as files under `.git`, so a workspace's kept volume keeps them.
  * Remotes are `fakeRemotes`, by URL; cloning any other fails as a missing
  * repository does, printing the HTTP header it was given, as a verbose git
@@ -46,6 +49,11 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 	while (args[0] === "-c" || args[0] === "--no-pager") args.splice(0, args[0] === "-c" ? 2 : 1);
 	const [command, ...rest] = args;
 	const objects = (sha: string) => `${cwd}/.git/objects/${sha}`;
+	const lineage = async (sha: string) => {
+		const chain: string[] = [];
+		for (let at: string | null = sha; at; at = await read(workspace, `${objects(at)}.parent`).catch(() => null)) chain.push(at);
+		return chain;
+	};
 	const commit = async (sha: string) => JSON.parse(await read(workspace, objects(sha))) as Files;
 	switch (command) {
 		case "clone": {
@@ -68,6 +76,19 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 		case "fetch": {
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
 			if (!files) return { stderr: "fatal: could not read from remote\n", code: 128 };
+			const dest = rest.find((arg) => arg.includes(":"))?.split(":")[1];
+			if (dest) {
+				// A merge's fetch of the default branch: the clone's own commit while it hasn't moved, else a commit on top of it.
+				const base = JSON.parse(await read(workspace, objects("base0000"))) as Files;
+				const moved = JSON.stringify(Object.entries(files).sort()) !== JSON.stringify(Object.entries(base).sort());
+				const sha = moved ? `m${[...JSON.stringify(Object.entries(files).sort())].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 1_000_003, 7)}` : "base0000";
+				if (moved) {
+					await write(workspace, objects(sha), JSON.stringify(files));
+					await write(workspace, `${objects(sha)}.parent`, "base0000");
+				}
+				await write(workspace, `${cwd}/.git/${dest}`, sha);
+				return {};
+			}
 			await write(workspace, objects("base0000"), JSON.stringify(files));
 			await write(workspace, `${cwd}/.git/FETCH_HEAD`, "base0000");
 			return {};
@@ -76,13 +97,49 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			// `checkout [-f] -B <branch> FETCH_HEAD`: the branch is kept in `.git/branch`.
 			const branch = rest[rest.indexOf("-B") + 1];
 			if (rest.includes("-B") && branch) await write(workspace, `${cwd}/.git/branch`, branch);
-			const sha = await read(workspace, `${cwd}/.git/FETCH_HEAD`);
-			for (const [path, text] of Object.entries(await commit(sha))) await write(workspace, `${cwd}/${path}`, text);
+			const target = rest.at(-1)!;
+			const sha = target === "FETCH_HEAD" || target === branch ? await read(workspace, `${cwd}/.git/FETCH_HEAD`) : target;
+			const files = await commit(sha);
+			if (target !== "FETCH_HEAD") for (const path of Object.keys(await readFiles(workspace, cwd))) if (!(path in files)) await workspace.remove(`${cwd}/${path}`);
+			for (const [path, text] of Object.entries(files)) await write(workspace, `${cwd}/${path}`, text);
 			await write(workspace, `${cwd}/.git/HEAD`, sha);
 			return {};
 		}
-		case "rev-parse":
-			return { stdout: `${await read(workspace, `${cwd}/.git/HEAD`)}\n` };
+		case "rev-parse": {
+			// HEAD and the current branch are the commit last made; another ref is what `update-ref` or a fetch set, if anything.
+			const ref = rest[0] ?? "HEAD";
+			const current = await read(workspace, `${cwd}/.git/branch`).catch(() => "");
+			const named = ref === "HEAD" || ref === `refs/heads/${current}` ? null : await read(workspace, `${cwd}/.git/${ref}`).catch(() => null);
+			return { stdout: `${named ?? (await read(workspace, `${cwd}/.git/HEAD`))}\n` };
+		}
+		case "merge-base": {
+			// `merge-base A B`: the nearest commit each descends from, where commits made here follow the one before.
+			const [a, b] = rest as [string, string];
+			const [chainA, chainB] = [await lineage(a), await lineage(b)];
+			const common = chainA.find((sha) => chainB.includes(sha));
+			return common ? { stdout: `${common}\n` } : { code: 1 };
+		}
+		case "rebase": {
+			// `rebase <base>` of the detached HEAD: the base's files, with what the thread changed since the two diverged.
+			if (rest[0] === "--abort") return {};
+			const base = rest[0]!;
+			const head = await read(workspace, `${cwd}/.git/HEAD`);
+			const baseChain = await lineage(base);
+			const root = (await lineage(head)).find((sha) => baseChain.includes(sha))!;
+			const [theirs, ours, original] = [await commit(base), await commit(head), await commit(root)];
+			const merged = { ...theirs };
+			for (const path of new Set([...Object.keys(original), ...Object.keys(ours)])) {
+				if (ours[path] === original[path]) continue;
+				if (theirs[path] !== original[path] && theirs[path] !== ours[path]) return { stdout: `CONFLICT (content): Merge conflict in ${path}\n`, stderr: `error: could not apply ${head}\n`, code: 1 };
+				if (ours[path] === undefined) delete merged[path];
+				else merged[path] = ours[path];
+			}
+			const sha = `c${String(++commits).padStart(7, "0")}`;
+			await write(workspace, objects(sha), JSON.stringify(merged));
+			await write(workspace, `${objects(sha)}.parent`, base);
+			await write(workspace, `${cwd}/.git/HEAD`, sha);
+			return {};
+		}
 		case "update-ref": {
 			const [ref, sha] = rest;
 			await write(workspace, `${cwd}/.git/${ref}`, sha!);
@@ -117,6 +174,7 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			if (JSON.stringify(Object.entries(head).sort()) === JSON.stringify(Object.entries(now).sort())) return { stdout: "nothing to commit\n", code: 1 };
 			const sha = `c${String(++commits).padStart(7, "0")}`;
 			await write(workspace, objects(sha), JSON.stringify(now));
+			await write(workspace, `${objects(sha)}.parent`, await read(workspace, `${cwd}/.git/HEAD`));
 			await write(workspace, `${cwd}/.git/HEAD`, sha);
 			return { stdout: `[${sha}] ${rest[rest.indexOf("-m") + 1]}\n` };
 		}

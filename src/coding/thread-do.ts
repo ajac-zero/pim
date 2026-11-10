@@ -51,7 +51,7 @@ import {
 import type { ManagerHealth } from "./provider-capacity";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
-import { checkBranch, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult } from "./git-broker/broker";
+import { BranchMovedError, checkBranch, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
 import type { Fetch, GitHubApp } from "./git-broker/github-app";
 import { brokerTokenKey, deploymentGitHubApp, GIT_BROKER_PATH } from "./git-broker/routes";
@@ -728,12 +728,114 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * A git bundle of `branch` at the checkpoint `sha`, from the commit the
-	 * thread started from, which GitHub has. The thread's own branch is
-	 * bundled as it is, and must still be at the checkpoint; another branch
-	 * is set to it first.
+	 * Readies a merge of the thread's latest checkpoint into the repository's
+	 * default branch, for the person to approve: the GitHub App is set up, the
+	 * workspace runs, and there is a checkpoint. Nothing is fetched or changed
+	 * yet. Says why not, as a code, when it can't.
 	 */
-	async #bundle(branch: string, sha: string): Promise<Uint8Array> {
+	async prepareMerge(): Promise<MergePreparation> {
+		await this.lifecycle.start();
+		const thread = this.store.required();
+		const app = this.githubApp();
+		if (!app) return { ok: false, code: "github_app_not_configured", message: GITHUB_APP_NOT_CONFIGURED };
+		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
+		const checkpoint = this.store.latestCheckpoint();
+		if (!checkpoint) return { ok: false, code: "nothing_to_push", message: "The thread hasn't committed anything yet: each turn's changes are committed when it ends" };
+		if (thread.slot !== "held" || !thread.workspaceRef) {
+			return { ok: false, code: "workspace_not_running", message: "The thread's workspace isn't running: continue or steer the thread, then merge once its turn ends" };
+		}
+		try {
+			const fetch = this.githubFetch();
+			const defaultBranch = await repoDefaultBranch({ app, policy: brokerPolicy(this.env), ...(fetch ? { fetch } : {}) }, thread.repoUrl);
+			const repo = parseRepoUrl(thread.repoUrl).fullName;
+			return { ok: true, request: { checkpoint: checkpoint.sha, summary: `Merge ${thread.branch} (${checkpoint.sha.slice(0, 12)}) into ${defaultBranch} of github.com/${repo}, with no force push` } };
+		} catch (error) {
+			return { ok: false, code: "conflict", message: errorText(error) };
+		}
+	}
+
+	/**
+	 * Merges what the person approved (`prepareMerge`'s checkpoint) into the
+	 * repository's default branch: fetches it into the workspace; if the
+	 * checkpoint already descends from it, that is the new head, and if not,
+	 * the checkpoint is rebased onto it, and a rebase that conflicts is
+	 * aborted and reported, the thread's branch as it was. Pim then moves the
+	 * default branch forward to the head (never a force push); if it moved
+	 * meanwhile, the rebase is made once more. The thread's own branch is
+	 * pushed to the same head as well, when GitHub lets it.
+	 */
+	async merge(approved: { checkpoint: string }): Promise<{ ok: true; result: MergeResult } | { ok: false; message: string }> {
+		await this.lifecycle.start();
+		const thread = this.store.required();
+		const app = this.githubApp();
+		if (!app) return { ok: false, message: GITHUB_APP_NOT_CONFIGURED };
+		if (thread.slot !== "held" || !thread.workspaceRef) return { ok: false, message: "The thread's workspace isn't running now: continue the thread, then ask to merge again" };
+		if (this.store.latestCheckpoint()?.sha !== approved.checkpoint) return { ok: false, message: "The thread has a newer checkpoint than the one approved: ask to merge again" };
+		try {
+			const fetch = this.githubFetch();
+			const deps = { app, policy: brokerPolicy(this.env), ...(fetch ? { fetch } : {}) };
+			const defaultBranch = await repoDefaultBranch(deps, thread.repoUrl);
+			const workspace = await this.#workspace();
+			const identity = ["-c", "user.name=Pim", "-c", "user.email=coding@pim.invalid"];
+			if ((await git(workspace, ["rev-parse", `refs/heads/${thread.branch}`])).trim() !== approved.checkpoint) throw new Error("The thread's branch has moved past its latest checkpoint: merge once its turn ends");
+			let head = approved.checkpoint;
+			let rebased = false;
+			for (let attempt = 0; ; attempt++) {
+				await git(workspace, ["fetch", "origin", `+refs/heads/${defaultBranch}:refs/pim/merge-base`]);
+				const base = (await git(workspace, ["rev-parse", "refs/pim/merge-base"])).trim();
+				const common = (await git(workspace, ["merge-base", base, head]).catch(() => "")).trim();
+				if (common === head) return { ok: true, result: { repo: parseRepoUrl(thread.repoUrl).fullName, branch: defaultBranch, before: base, after: base, outcome: "unchanged", rebased, threadBranch: null } };
+				if (common !== base) {
+					// The default branch has commits the thread doesn't: put the thread's commits on top of them, aside from the thread's branch.
+					try {
+						await git(workspace, ["checkout", "-f", "--detach", head]);
+						await git(workspace, [...identity, "rebase", base]);
+					} catch (error) {
+						await git(workspace, ["rebase", "--abort"]).catch(() => {});
+						await git(workspace, ["checkout", "-f", "-B", thread.branch, head]).catch(() => {});
+						return { ok: false, message: `The thread's changes conflict with ${defaultBranch} (${base.slice(0, 12)}); nothing was pushed and the thread's branch is as it was. Steer the thread to rebase onto origin/${defaultBranch} and resolve the conflicts, then merge again. ${errorText(error)}` };
+					}
+					head = (await git(workspace, ["rev-parse", "HEAD"])).trim();
+					rebased = true;
+					await git(workspace, ["checkout", "-f", "-B", thread.branch, head]);
+					const checkpoint = this.store.addCheckpoint(head, `Rebased onto ${defaultBranch}`, null);
+					const since = this.store.required().baseSha;
+					if (since) await this.#makeDiff(since, checkpoint.sha);
+				}
+				try {
+					const request = { sessionId: thread.threadId, repo: thread.repoUrl, branch: defaultBranch, toDefault: true, bundle: await this.#bundle(defaultBranch, head, base) };
+					const result = await pushBranch(deps, request);
+					this.store.recordEvent("thread.merged", { repo: result.repo, branch: result.branch, before: result.before, after: result.after, outcome: result.outcome, rebased });
+					return { ok: true, result: { ...result, rebased, threadBranch: await this.#pushOwnBranch(deps, head) } };
+				} catch (error) {
+					if (!(error instanceof BranchMovedError)) throw error;
+					if (attempt > 0) return { ok: false, message: `${defaultBranch} moved again while merging; nothing was pushed to it. Ask to merge again.` };
+				}
+			}
+		} catch (error) {
+			return { ok: false, message: error instanceof GitBrokerNotConfiguredError ? GITHUB_APP_NOT_CONFIGURED : errorText(error) };
+		}
+	}
+
+	/** Pushes the thread's own branch at `head` after a merge, so it matches what was merged; null when GitHub wouldn't move it (its branch has other commits). */
+	async #pushOwnBranch(deps: Parameters<typeof pushBranch>[0], head: string): Promise<string | null> {
+		const thread = this.store.required();
+		try {
+			const result = await pushBranch(deps, { sessionId: thread.threadId, repo: thread.repoUrl, branch: thread.branch, bundle: await this.#bundle(thread.branch, head) });
+			this.store.recordEvent("thread.pushed", { repo: result.repo, branch: result.branch, before: result.before, after: result.after, outcome: result.outcome });
+			return thread.branch;
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * A git bundle of `branch` at the checkpoint `sha`, from the commit the
+	 * thread started from (or `since`), which GitHub has. The thread's own
+	 * branch is bundled as it is, and must still be at the checkpoint; another
+	 * branch is set to it first.
+	 */
+	async #bundle(branch: string, sha: string, since = this.store.required().baseSha): Promise<Uint8Array> {
 		const thread = this.store.required();
 		const workspace = await this.#workspace();
 		const ref = `refs/heads/${branch}`;
@@ -741,7 +843,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if ((await git(workspace, ["rev-parse", ref])).trim() !== sha) throw new Error("The thread's branch has moved past its latest checkpoint: push once its turn ends");
 		} else await git(workspace, ["update-ref", ref, sha]);
 		const file = `${WORKSPACE_ROOT}/.pim-push.bundle`;
-		await git(workspace, ["bundle", "create", file, thread.baseSha ? `${thread.baseSha}..${ref}` : ref]);
+		await git(workspace, ["bundle", "create", file, since ? `${since}..${ref}` : ref]);
 		try {
 			return await workspace.readFile(file);
 		} finally {
@@ -2167,6 +2269,14 @@ export const GITHUB_APP_NOT_CONFIGURED = "GitHub App not configured: ask the Pim
 export type PushPreparation =
 	| { readonly ok: true; readonly request: PushApprovalRequest & { readonly checkpoint: string } }
 	| { readonly ok: false; readonly code: "github_app_not_configured" | "push_refused" | "archived" | "nothing_to_push" | "workspace_not_running" | "conflict"; readonly message: string };
+
+/** A merge readied for the person to approve, with the checkpoint it is of; or why it can't be. */
+export type MergePreparation =
+	| { readonly ok: true; readonly request: { readonly checkpoint: string; readonly summary: string } }
+	| { readonly ok: false; readonly code: "github_app_not_configured" | "archived" | "nothing_to_push" | "workspace_not_running" | "conflict"; readonly message: string };
+
+/** What a merge did: the default branch's move, whether the thread's commits were rebased, and the thread's own branch if it was pushed too. */
+export type MergeResult = PushResult & { readonly rebased: boolean; readonly threadBranch: string | null };
 
 /** The most of the coding agent's last words a turn's end carries. */
 const SAID_CHARS = 1000;

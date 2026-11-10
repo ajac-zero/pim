@@ -23,7 +23,7 @@ Every error is JSON with the HTTP status:
 | `workspace_not_running` | 409 | A diff from a commit other than the start, or a push, while the thread's workspace isn't running |
 | `nothing_to_push` | 409 | A push before the thread has committed a checkpoint |
 | `github_app_not_configured` | 409 | A push on a Pim whose GitHub App isn't set up; nothing was asked |
-| `push_refused` | 403 | A push to `main`, `master`, the default branch, or a branch outside the deployment's prefix (`pim/`) |
+| `push_refused` | 403 | A push (a merge is `coding_merge`'s) to `main`, `master`, the default branch, or a branch outside the deployment's prefix (`pim/`) |
 | `conflict` | 409 | The thread refused the call as it is now; `error` says why |
 
 ## Types
@@ -160,6 +160,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `thread.turn_ended`: `data: { type, threadId, space, operationId, outcome, reason?, checkpoint?, at }`, where `outcome` is `completed`, `error`, `cancelled` or `needs_approval`.
 - `app.budget_stop`: `data: { budgetUsd, spentUsd, tokens?, tokenCeiling? }`; `tokens` and `tokenCeiling` for a CLI harness that estimates no cost, whose budget is a ceiling on its tokens (below).
 - `thread.pushed`: `data: { repo, branch, before, after, outcome }`, where `outcome` is `created`, `updated` or `unchanged`.
+- `thread.merged`: `data: { repo, branch, before, after, outcome, rebased }`, a merge into the default branch (`branch`); `rebased` says whether the thread's commits were rebased onto it first. A rebase also adds a checkpoint, `Rebased onto <branch>`.
 - `environment.built`, `environment.restored`: `data: { key, setupMs?, snapshotKept? }`, the environment was set up (and its snapshot kept, unless `snapshotKept` is false), or restored from the person's snapshot.
 - `environment.failed`: `data: { key, error }`; `environment.restore_failed`: `data: { key, error }`, a snapshot that couldn't be restored, after which the thread cloned as usual.
 - `thread.waiting_input`: `data: { reason, harness, operationId }`: a CLI harness thread's input waits for the person to connect the harness (`reason: "login_required"`): to sign in with their subscription, or to give their API key.
@@ -193,7 +194,7 @@ POST /api/coding/threads
 
 ## Agents
 
-Every agent can start and follow threads with the `coding_*` tools ([`src/extensions/coding.ts`](../src/extensions/coding.ts)): `coding_start`, `coding_status` (with the thread's `environment`: every field of its `CodingEnvironment` that isn't null, its timings included), `coding_steer`, `coding_diff`, `coding_tests`, `coding_abort`, `coding_push` and `coding_archive`. A thread an agent starts is `createdBy: { type: "agent", agent, chat }`, and when each of its turns ends that chat is woken with a message saying how it went. `coding_push` asks the person first, every time, as an approval like `POST …/push` files.
+Every agent can start and follow threads with the `coding_*` tools ([`src/extensions/coding.ts`](../src/extensions/coding.ts)): `coding_start`, `coding_status` (with the thread's `environment`: every field of its `CodingEnvironment` that isn't null, its timings included), `coding_steer`, `coding_diff`, `coding_tests`, `coding_abort`, `coding_push`, `coding_merge` and `coding_archive`. A thread an agent starts is `createdBy: { type: "agent", agent, chat }`, and when each of its turns ends that chat is woken with a message saying how it went. `coding_push` asks the person first, every time, as an approval like `POST …/push` files. `coding_merge` ships a thread's latest checkpoint to the repository's default branch, and asks first, every time, too: Pim fetches the default branch into the thread's workspace, fast-forwards the checkpoint onto it or rebases it, and moves the default branch forward through the GitHub App, never with a force push. If the thread's changes conflict, the rebase is aborted, nothing is pushed, and the agent is told to `coding_steer` the thread to rebase onto `origin/<default branch>` and resolve them; if the default branch moves while merging, the rebase is made once more, and then it fails. The thread's own `pim/` branch is updated to the same commit when GitHub lets it, and the result says the default branch's new commit.
 
 ## Harness logins
 

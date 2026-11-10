@@ -107,7 +107,13 @@ export function CostReportView({ report }: { report: CostReport }) {
           label={t("usageTotalCost")}
           value={dollars(report.totalCostUsd, formatNumber)}
         />
-        <Stat label={t("usageCalls")} value={formatNumber(report.calls)} />
+        <Stat
+          label={t("usageCalls")}
+          value={formatNumber(Math.max(0, report.calls - report.errors))}
+        />
+        {report.errors > 0 && (
+          <Stat label={t("usageErrors")} value={formatNumber(report.errors)} />
+        )}
         <Stat
           label={t("usageCostPer1k")}
           value={

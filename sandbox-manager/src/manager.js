@@ -337,7 +337,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		if (!b || typeof b !== 'object') throw new HttpError(400, 'body must be an object')
 		for (const k of Object.keys(b)) if (!['cmd', 'cwd', 'timeoutMs', 'stdin', 'env'].includes(k)) throw new HttpError(400, `unknown field ${k}`)
 		if (!Array.isArray(b.cmd) || !b.cmd.length || b.cmd.length > 256 || !b.cmd.every((c) => typeof c === 'string')) throw new HttpError(400, 'cmd must be a non-empty string array')
-		if (!Number.isInteger(b.timeoutMs) || b.timeoutMs < 1 || b.timeoutMs > 600000) throw new HttpError(400, 'timeoutMs must be an integer in [1, 600000]')
+		if (!Number.isInteger(b.timeoutMs) || b.timeoutMs < 1 || b.timeoutMs > 900000) throw new HttpError(400, 'timeoutMs must be an integer in [1, 900000]')
 		if (b.stdin !== undefined && typeof b.stdin !== 'string') throw new HttpError(400, 'stdin must be a string')
 		const env = b.env ?? {}
 		if (typeof env !== 'object' || Array.isArray(env) || Object.keys(env).length > 256 || !Object.entries(env).every(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && typeof v === 'string')) {

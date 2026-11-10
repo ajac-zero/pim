@@ -59,7 +59,7 @@ export class ComposeManagerError extends Error {
 }
 
 /** The manager's own exec timeout ceiling, and how long past a command's timeout the client waits for the manager's answer before giving up on it. */
-const MAX_TIMEOUT_MS = 600_000;
+const MAX_TIMEOUT_MS = 900_000;
 const GRACE_MS = 15_000;
 const READLINK_TIMEOUT_MS = 10_000;
 

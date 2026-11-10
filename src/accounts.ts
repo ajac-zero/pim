@@ -714,14 +714,31 @@ async function builtinApps(env: Env) {
 }
 
 /**
+ * The admin's own majordomo calling `/api/admin/*` (../extensions/meta-admin.ts),
+ * the admin area's whole surface, as the app does. Checked here, not trusted
+ * from the caller: `agentId` must be the majordomo of an active admin's space.
+ * Anyone else gets the 403 a token gets.
+ */
+export async function adminAsMajordomo(env: Env, ownerId: string, agentId: string, request: Request): Promise<Response> {
+	const refused = fail(403, "Only the admin's majordomo can do that.");
+	const account = await directory(env).account(ownerId);
+	if (!account || account.status !== "active" || account.role !== "admin") return refused;
+	const majordomo = await (await pimOf(env, ownerId)).majordomoId();
+	if (majordomo === null || majordomo !== agentId) return refused;
+	const path = new URL(request.url).pathname.slice("/api".length);
+	return (await adminApi(env, account, request, false, true)(path, request)) ?? fail(404, "Not found");
+}
+
+/**
  * `/api/admin/*`: the admin's view of everyone, and which sign-in providers
  * are on, with a signed-in browser only. An API token can't run the instance.
+ * The one other way in is `byMajordomo`, which only `adminAsMajordomo` sets.
  */
-export function adminApi(env: Env, admin: Account, request: Request, viaSession: boolean): ApiExtension {
+export function adminApi(env: Env, admin: Account, request: Request, viaSession: boolean, byMajordomo = false): ApiExtension {
 	return async (path) => {
 		if (path !== "/admin" && !path.startsWith("/admin/")) return undefined;
 		if (admin.role !== "admin") return fail(403, "Only the admin can do that.");
-		if (!viaSession) return fail(403, "Running this Pim needs you signed in to the app.");
+		if (!viaSession && !byMajordomo) return fail(403, "Running this Pim needs you signed in to the app.");
 		const url = new URL(request.url);
 		const route = `${request.method} ${path.slice("/admin".length)}`;
 		const dir = directory(env);

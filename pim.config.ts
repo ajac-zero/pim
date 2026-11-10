@@ -4,6 +4,7 @@ import { gmail } from "./src/extensions/gmail";
 import { googleExtension } from "./src/extensions/google";
 import { googleDrive } from "./src/extensions/google-drive";
 import { hostOps } from "./src/extensions/hostops";
+import { metaAdmin } from "./src/extensions/meta-admin";
 import { popularApps } from "./src/extensions/popular-apps";
 import { spotifyExtension } from "./src/extensions/spotify";
 
@@ -23,7 +24,7 @@ export default definePimConfig({
 	// (see "Connectors" in docs/reference.md); until they are set, nobody is offered them.
 	// Coding threads need a workspace backend (see "Workspaces for coding threads" in docs/reference.md) and, to push, a GitHub App.
 	// Host operations are offered only to the admin's majordomo, and need the host daemon (see docs/host-ops.md).
-	extensions: [popularApps, spotifyExtension, googleExtension([gmail, googleDrive]), coding, hostOps],
+	extensions: [popularApps, spotifyExtension, googleExtension([gmail, googleDrive]), coding, hostOps, metaAdmin],
 	// The color theme people see until they pick another: a theme's id, Pim's own (src/extensions/themes) or an extension's.
 	defaultTheme: "tokyo-night",
 });

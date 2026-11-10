@@ -91,6 +91,8 @@ export async function setup({ fake = {}, pim = {}, manager = {} } = {}) {
 			if (!mgr.ignoreConfig) mgr.maxConcurrent = b.maxConcurrent
 			return send(200, { maxConcurrent: b.maxConcurrent, source: 'override' })
 		}
+		// The listing: `sessionList` is what GET /sessions answers; a function is called on each request.
+		if (req.method === 'GET' && req.url === '/sessions' && !mgr.noSessions) return send(200, typeof mgr.sessionList === 'function' ? mgr.sessionList() : (mgr.sessionList ?? []))
 		send(404, { error: 'not found' })
 	})
 	const managerUrl = await listen(mgrServer)
@@ -135,6 +137,8 @@ export async function setup({ fake = {}, pim = {}, manager = {} } = {}) {
 		HOME: tmp,
 		HOSTOPSD_HEALTH_TIMEOUT_MS: '800',
 		HOSTOPSD_HEALTH_INTERVAL_MS: '50',
+		HOSTOPSD_SESSIONS_TIMEOUT_MS: '600',
+		HOSTOPSD_SESSIONS_INTERVAL_MS: '40',
 		HOSTOPSD_IDLE_TIMEOUT_MS: '600',
 		HOSTOPSD_IDLE_INTERVAL_MS: '40',
 		HOSTOPSD_BACKOFF_MIN_MS: '10',

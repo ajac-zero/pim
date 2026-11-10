@@ -380,6 +380,48 @@ describe('deploying while sessions run', () => {
 	})
 })
 
+describe('sessions across a deploy', () => {
+	const sess = (...ids) => ids.map((sessionId) => ({ sessionId, state: 'running' }))
+
+	test('reports that every session survived', async () => {
+		const d = await start({ manager: { sessionList: sess('aaaaaaaa-1', 'bbbbbbbb-2', 'cccccccc-3') } })
+		const r = await op(d, 'deploy', {})
+		assert.equal(r.state, 'succeeded', r.summary)
+		assert.deepEqual(r.data.sessions, { runningBefore: 3, runningAfter: 3, survived: true, lost: [] })
+		assert.match(r.summary, /3 sessions running before, 3 after, all survived/)
+	})
+
+	test('names a session that did not come back, ignoring stopped ones', async () => {
+		const d = await start()
+		h.mgr.sessionList = () => [...sess('aaaaaaaa-1', ...(h.deployed() === h.short(h.repo.c3) ? [] : ['bbbbbbbb-2'])), { sessionId: 'dddddddd-4', state: 'stopped' }]
+		const r = await op(d, 'deploy', {})
+		assert.equal(r.state, 'succeeded', r.summary)
+		assert.deepEqual(r.data.sessions, { runningBefore: 2, runningAfter: 1, survived: false, lost: ['bbbbbbbb-2'] })
+		assert.match(r.summary, /2 sessions running before, 1 after; lost 1: bbbbbbbb/)
+	})
+
+	test('says so when the manager did not list its sessions before', async () => {
+		const d = await start({ manager: { noSessions: true } })
+		const r = await op(d, 'deploy', {})
+		assert.equal(r.state, 'succeeded', r.summary)
+		assert.equal(r.data.sessions.survived, null)
+		assert.equal(r.data.sessions.runningBefore, null)
+		assert.match(r.summary, /did not list its sessions before or after/)
+	})
+
+	test('waits for sessions to reconnect after the manager is healthy', async () => {
+		const d = await start()
+		let polls = 0
+		h.mgr.sessionList = () => {
+			if (h.deployed() !== h.short(h.repo.c3)) return sess('aaaaaaaa-1', 'bbbbbbbb-2')
+			return ++polls < 4 ? sess('aaaaaaaa-1') : sess('aaaaaaaa-1', 'bbbbbbbb-2')
+		}
+		const r = await op(d, 'deploy', {})
+		assert.ok(polls >= 4)
+		assert.deepEqual(r.data.sessions, { runningBefore: 2, runningAfter: 2, survived: true, lost: [] })
+	})
+})
+
 describe('talking to Pim', () => {
 	test('polls with its version and commit, and retries a result until Pim accepts it', async () => {
 		const d = await start({ pim: { resultFailures: 3 } })

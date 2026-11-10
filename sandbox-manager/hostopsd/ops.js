@@ -178,6 +178,44 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 		}
 	}
 
+	// The ids of the sessions the manager runs, from its authenticated listing, or null when it does
+	// not answer.
+	async function runningSessions() {
+		try {
+			const r = await manager('GET', '/sessions')
+			if (r.status !== 200 || !Array.isArray(r.json)) return null
+			return r.json.filter((s) => s.state === 'running').map((s) => String(s.sessionId))
+		} catch {
+			return null
+		}
+	}
+
+	// After a deploy, waits up to cfg.sessionsTimeoutMs for the sessions that ran before it to be
+	// listed as running again (the manager reattaches them after it starts). Returns the sessions
+	// part of the result and its sentence for the summary. The listing has no count of commands in
+	// flight, so that is not reported.
+	async function compareSessions(before) {
+		const until = Date.now() + cfg.sessionsTimeoutMs
+		let after
+		for (;;) {
+			after = await runningSessions()
+			if (after && (!before || before.every((id) => after.includes(id)))) break
+			if (Date.now() + cfg.sessionsIntervalMs > until) break
+			await sleep(cfg.sessionsIntervalMs)
+		}
+		const runningBefore = before ? before.length : null
+		const runningAfter = after ? after.length : null
+		const lost = before && after ? before.filter((id) => !after.includes(id)) : []
+		const survived = before && after ? lost.length === 0 : null
+		let text
+		if (!before && !after) text = 'The manager did not list its sessions before or after, so whether they survived is unknown.'
+		else if (!before) text = `The manager did not list its sessions before the deploy; ${runningAfter} running after.`
+		else if (!after) text = `${runningBefore} sessions were running before; the manager did not list its sessions afterwards, so whether they survived is unknown.`
+		else if (survived) text = `${runningBefore} sessions running before, ${runningAfter} after${runningBefore ? ', all survived' : ''}.`
+		else text = `${runningBefore} sessions running before, ${runningAfter} after; lost ${lost.length}: ${lost.map((id) => id.slice(0, 8)).join(', ')}.`
+		return { sessions: { runningBefore, runningAfter, survived, lost }, text }
+	}
+
 	// Checks out a commit, rebuilds the stack with up.sh and waits for the manager to report it.
 	async function checkoutAndUp(sha) {
 		const co = await git(['checkout', '--detach', '--quiet', sha], t.git)
@@ -340,7 +378,12 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 				if (a.code !== 0) return fail(op, failText('git merge-base', a))
 			}
 			const waited = await waitIdle(op)
+			const before = await runningSessions()
 			const out = await changeCheckout(op, { kind: 'deploy', previous, target, revert: true })
+			if (out.result.state === 'succeeded') {
+				const c = await compareSessions(before)
+				out.result = done(op.id, 'succeeded', `${out.result.summary} ${c.text}`, { ...out.result.data, sessions: c.sessions })
+			}
 			if (waited) out.result = done(op.id, out.result.state, `${waited} ${out.result.summary}`, out.result.data)
 			return out
 		},

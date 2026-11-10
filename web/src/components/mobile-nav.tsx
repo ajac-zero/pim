@@ -14,7 +14,6 @@ import { useI18n } from "~/components/i18n";
 import {
   Bell,
   Blocks,
-  Code,
   Compass,
   Contact,
   MessagesSquare,
@@ -321,17 +320,6 @@ function MoreSheet({
             {t("triggers")}
           </Link>
         )}
-        <Link
-          to="/coding"
-          onClick={() => {
-            close();
-            onHideList();
-          }}
-          className={ROW_CLASS}
-        >
-          <Code className={ROW_ICON_CLASS} />
-          {t("coding")}
-        </Link>
         <div className="mx-3 my-1 h-px bg-border" />
         {hasDesktop &&
           dialogRow(

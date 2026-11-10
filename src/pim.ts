@@ -4659,7 +4659,9 @@ export class Pim extends DurableAgent<Env> {
 		const grants = this.registry.snapshot().extension(COMPUTER_GRANT_EXTENSION) ? [COMPUTER_GRANT_EXTENSION] : [];
 		// Triggers' tools last of all, only while the space's triggers are on: elsewhere the selection is as it was without them.
 		const triggers = this.registry.snapshot().extension(TRIGGERS_EXTENSION) && this.#triggerApi() ? [TRIGGERS_EXTENSION] : [];
-		const wanted = [...this.#appExtensionsOf(agent), ...grants, ...triggers];
+		// The abilities offered to this agent come first, named so that a chat whose stored selection lacks one installed since gets it now.
+		const offered = [...this.abilities].flatMap(([id, ability]) => (ability.offeredTo?.(agent) === false ? [] : [id]));
+		const wanted = [...offered, ...this.#appExtensionsOf(agent), ...grants, ...triggers];
 		const off = [...this.#switchedOff(agent)];
 		const key = [...wanted, ...off.map((name) => `-${name}`)].join(" ");
 		if ((this.agents.abilities(session) ?? "") === key) return;

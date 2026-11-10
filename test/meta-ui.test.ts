@@ -1,3 +1,4 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { classOf, routeFor } from "../src/extensions/meta-ui";
@@ -141,5 +142,67 @@ describe("the app's routes for the majordomo", () => {
 			await say("Do it", ROOT);
 			expect(JSON.parse(told), JSON.stringify(args)).toMatchObject({ status: expect.any(Number) });
 		}
+	});
+});
+
+describe("which chats are offered the app's routes", () => {
+	const OFFERED = ["ui_routes", "ui_read", "ui_write", "ui_write_destructive", "ui_audit"];
+	const OTHER_META = ["admin_read", "admin_write", "admin_audit", "admin_write_approved", "pim_diagnostics", "pim_health"];
+
+	async function offered(chat: string): Promise<{ tools: string[]; key: string | null }> {
+		return runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const pim = instance as any;
+			const session = pim.store.sessionOf(chat)!;
+			const agent = await (await pim.harness.conversation(session)).agent(BACKGROUND_CONTEXT);
+			return { tools: (agent.tools as { name: string }[]).map((tool) => tool.name), key: pim.agents.abilities(session) as string | null };
+		});
+	}
+
+	it("offers them to the admin's majordomo and no other agent", async () => {
+		faux.setResponses([toolUse("send_to_user", { message: "hi" })]);
+		await say("Hello", ROOT);
+		faux.setResponses([toolUse("send_to_user", { message: "hi" })]);
+		await say("Hello", helperChat);
+		const majordomo = (await offered(ROOT)).tools;
+		for (const name of [...OFFERED, ...OTHER_META]) expect(majordomo, name).toContain(name);
+		const helper = (await offered(helperChat)).tools;
+		for (const name of [...OFFERED, ...OTHER_META]) expect(helper, name).not.toContain(name);
+	});
+
+	it("gives a chat started before an extension was installed its tools on the next run, once", async () => {
+		const stale = await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+			const pim = instance as any;
+			const session = pim.store.sessionOf(ROOT)!;
+			const key = pim.agents.abilities(session) as string;
+			const abilities = [...pim.abilities.keys()] as string[];
+			const pinned = pim.registry.snapshot().installed().filter((extension: { name: string }) => !abilities.includes(extension.name));
+			const conversation = await pim.harness.conversation(session);
+			await conversation.configure({ extensions: pinned }, BACKGROUND_CONTEXT);
+			pim.agents.setAbilities(session, key.split(" ").filter((part) => !abilities.includes(part)).join(" "));
+			return (await conversation.agent(BACKGROUND_CONTEXT)).tools.map((tool: { name: string }) => tool.name) as string[];
+		});
+		expect(stale).not.toContain("ui_routes");
+		faux.setResponses([toolUse("send_to_user", { message: "hi" })]);
+		await say("Hello again", ROOT);
+		const after = await offered(ROOT);
+		for (const name of [...OFFERED, ...OTHER_META]) expect(after.tools, name).toContain(name);
+		expect(new Set(after.tools).size).toBe(after.tools.length);
+		faux.setResponses([toolUse("send_to_user", { message: "hi" })]);
+		await say("Once more", ROOT);
+		const again = await offered(ROOT);
+		expect(again.key).toBe(after.key);
+		expect(again.tools).toEqual(after.tools);
+	});
+});
+
+describe("the appearance settings through the app's routes", () => {
+	it("classes PUT /settings as a write, and ui_write changes color mode, theme and language", async () => {
+		const { routes } = (await run("ui_routes", {})).body as { routes: { method: string; path: string; class: string }[] };
+		expect(routes.find((route) => route.method === "PUT" && route.path === "/settings")?.class).toBe("write");
+		expect(classOf("PUT", "/settings")).toBe("write");
+		const saved = await run("ui_write", { method: "PUT", path: "/settings", body: { colorMode: "dark", colorTheme: "dracula", locale: "es" } });
+		expect(saved.error).toBe(false);
+		expect(saved.body).toMatchObject({ status: 200, body: { colorMode: "dark", colorTheme: "dracula", locale: "es" } });
+		await run("ui_write", { method: "PUT", path: "/settings", body: { colorMode: null, colorTheme: null, locale: null } });
 	});
 });

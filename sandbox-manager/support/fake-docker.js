@@ -58,6 +58,12 @@ export async function startFakeDocker({ runtimes = { runc: {}, runsc: {} }, prob
 		})
 	}
 
+	const networksOf = (c) => {
+		const hidden = c.hideIp > 0
+		if (hidden) c.hideIp--
+		return { Networks: { [c.body.HostConfig?.NetworkMode]: { IPAddress: hidden || c.state !== 'running' ? '' : c.ip } } }
+	}
+
 	const workspaceOf = (c) => f.volumeDir(c.body.HostConfig.Mounts.find((m) => m.Target === '/workspace').Source)
 
 	const server = http.createServer(async (req, res) => {
@@ -90,7 +96,9 @@ export async function startFakeDocker({ runtimes = { runc: {}, runsc: {} }, prob
 		if (key === 'POST /containers/create') {
 			const name = url.searchParams.get('name')
 			if (containers.has(name)) return out(409, { message: 'conflict' })
-			containers.set(name, { id: `id-${name}`, body, ip: nextIp(), name, state: 'created' })
+			// `hideIp` answers that many lookups of the container without an address, as Docker does
+			// for a moment while it sets up the container's network.
+			containers.set(name, { id: `id-${name}`, body, ip: nextIp(), name, state: 'created', created: Date.now(), hideIp: 0 })
 			return out(201, { Id: `id-${name}` })
 		}
 		if ((m = /^POST \/containers\/([^/]+)\/start$/.exec(key))) {
@@ -103,13 +111,20 @@ export async function startFakeDocker({ runtimes = { runc: {}, runsc: {} }, prob
 		if ((m = /^GET \/containers\/([^/]+)\/json$/.exec(key))) {
 			const x = infra.get(m[1])
 			if (x) return out(200, { State: { StartedAt: x.startedAt }, NetworkSettings: { Networks: Object.fromEntries([...x.nets].map((net) => [net, { IPAddress: x.ip }])) } })
-			const c = containers.get(m[1])
+			const c = containers.get(m[1]) ?? [...containers.values()].find((x) => x.id === m[1])
 			if (!c) return out(404, { message: 'no such container' })
-			return out(200, { NetworkSettings: { Networks: { [c.body.HostConfig.NetworkMode]: { IPAddress: c.ip } } } })
+			return out(200, {
+				Id: c.id,
+				Name: `/${c.name}`,
+				Created: new Date(c.created ?? 0).toISOString(),
+				State: { Status: c.state, Running: c.state === 'running' },
+				Config: { Env: c.body.Env, Labels: c.body.Labels },
+				NetworkSettings: networksOf(c),
+			})
 		}
 		if (key === 'GET /containers/json') {
 			const list = [...containers.values()].filter((c) => byLabel(url.searchParams, c.body.Labels))
-			return out(200, list.map((c) => ({ Id: c.id, State: c.state, Created: 1, Labels: c.body.Labels, NetworkSettings: { Networks: { [c.body.HostConfig.NetworkMode]: { IPAddress: c.ip } } } })))
+			return out(200, list.map((c) => ({ Id: c.id, Names: [`/${c.name}`], State: c.state, Created: Math.floor((c.created ?? 0) / 1000), Labels: c.body.Labels, NetworkSettings: networksOf(c) })))
 		}
 		if ((m = /^DELETE \/containers\/([^/]+)$/.exec(key))) {
 			const name = m[1].replace(/^id-/, '')

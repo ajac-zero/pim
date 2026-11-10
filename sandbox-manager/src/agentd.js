@@ -64,9 +64,10 @@ export async function ready(target, ms) {
 
 // Starts a command through agentd and returns its events: {type: 'stdout'|'stderr', data}, then
 // one {type: 'exit', code, signal, timedOut}. agentd kills the command's process group on timeout
-// and when the connection closes, so aborting `signal` kills the command. If agentd goes silent
-// past the timeout plus `graceMs`, the connection is dropped and the exit reports a timeout.
-// Throws HttpError when agentd refuses the request.
+// and when the connection closes, so aborting `signal` kills the command; a command started with
+// `spec.id` instead outlives the connection for a while (see `resumeExec` and `killExec`). If agentd
+// goes silent past the timeout plus `graceMs`, the connection is dropped and the exit reports a
+// timeout. Throws HttpError when agentd refuses the request.
 export async function startExec(target, spec, graceMs, signal) {
 	const body = JSON.stringify(spec)
 	// The socket's idle timeout is longer than the guard in `events`, so the guard decides.
@@ -79,6 +80,28 @@ export async function startExec(target, spec, graceMs, signal) {
 	}
 	if (res.statusCode !== 200) await fail(res)
 	return events(res, spec.timeoutMs + graceMs, signal)
+}
+
+// The longest an exec can run (the API's timeoutMs bound), which bounds a resumed stream.
+const MAX_EXEC_MS = 604800000
+
+// Reads on the events of the command started with `id`, after the first `after`, from an agentd
+// that kept it. Throws HttpError 404 `exec_not_found` when agentd has no such command (or does not
+// keep commands at all).
+export async function resumeExec(target, id, after, graceMs, signal) {
+	const res = await request(target, 'GET', `/exec/${encodeURIComponent(id)}?after=${after}`, { idleMs: MAX_EXEC_MS + 2 * graceMs, signal })
+	if (res.statusCode === 404) {
+		res.resume()
+		throw new HttpError(404, 'no such command in the workspace: it ended too long ago, or the workspace cannot keep commands', { code: 'exec_not_found' })
+	}
+	if (res.statusCode !== 200) await fail(res)
+	return events(res, MAX_EXEC_MS + graceMs, signal)
+}
+
+// Kills the command started with `id` now.
+export async function killExec(target, id) {
+	const res = await request(target, 'DELETE', `/exec/${encodeURIComponent(id)}`, { idleMs: 5000 })
+	res.resume()
 }
 
 async function* events(res, guardMs, signal) {

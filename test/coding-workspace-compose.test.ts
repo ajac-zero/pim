@@ -226,7 +226,9 @@ describe("ComposeWorkspaceProvider", () => {
 				fetch: (async (url: string) =>
 					String(url).endsWith("/exec/stream")
 						? new Response(new ReadableStream({ start: (c) => (parts.forEach((x) => c.enqueue(encoder.encode(x))), c.close()) }), { status: 200 })
-						: json(200, { sessionId: "c", state: "running" })) as unknown as typeof fetch,
+						: String(url).includes("/exec/")
+							? json(404, { error: "not found" }) // a manager that cannot read on
+							: json(200, { sessionId: "c", state: "running" })) as unknown as typeof fetch,
 			});
 		};
 		const run = async (parts: string[]) => {
@@ -241,6 +243,53 @@ describe("ComposeWorkspaceProvider", () => {
 			{ type: "exit", code: 3 },
 		]);
 		await expect(run(['{"type":"stdout","data":"x"}\n'])).rejects.toBeInstanceOf(ComposeManagerError);
+	});
+
+	it("reads on through a manager restart from the event the broken stream stopped at", async () => {
+		const encoder = new TextEncoder();
+		const requests: { method: string; url: string; execId: string | null }[] = [];
+		const resumes: (() => Response)[] = [
+			() => {
+				throw new TypeError("fetch failed"); // the manager is down
+			},
+			() => json(503, { error: "starting" }),
+			() => new Response('\n{"type":"stdout","data":"c"}\n{"type":"exit","code":0,"signal":null}\n', { status: 200 }),
+		];
+		const p = new ComposeWorkspaceProvider({
+			managerUrl: URL_BASE,
+			token: TOKEN,
+			fetch: (async (url: string, init: RequestInit) => {
+				const headers = new Headers(init.headers);
+				requests.push({ method: init.method!, url: String(url), execId: headers.get("x-exec-id") });
+				if (String(url).endsWith("/exec/stream")) {
+					// Two events and part of a third, then the connection breaks.
+					let pulls = 0;
+					const body = new ReadableStream({ pull: (c) => (pulls++ === 0 ? c.enqueue(encoder.encode('{"type":"stdout","data":"a"}\n{"type":"stdout","data":"b"}\n{"type":"std')) : c.error(new TypeError("terminated"))) });
+					return new Response(body, { status: 200 });
+				}
+				if (String(url).includes("/exec/")) return resumes.shift()!();
+				return json(200, { sessionId: "r", state: "running" });
+			}) as unknown as typeof fetch,
+		});
+		const ws = (await p.get({ id: "r", providerId: "compose", sessionId: "r" }))!;
+		const out: ExecEvent[] = [];
+		for await (const e of ws.exec(["turn"], { timeoutMs: 60_000 })) out.push(e);
+		expect(out).toEqual([
+			{ type: "stdout", data: "a" },
+			{ type: "stdout", data: "b" },
+			{ type: "stdout", data: "c" },
+			{ type: "exit", code: 0 },
+		]);
+		const [post, ...gets] = requests.filter((r) => r.url.includes("/exec"));
+		expect(post!.execId).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
+		expect(gets.map((g) => [g.method, g.url])).toEqual(Array(3).fill(["GET", `${URL_BASE}/sessions/r/exec/${post!.execId}/stream?after=2`]));
+		// A manager or workspace that no longer has the command fails the exec as before.
+		resumes.push(() => json(404, { error: "no such command", code: "exec_not_found" }));
+		await expect(
+			(async () => {
+				for await (const _ of ws.exec(["turn"], { timeoutMs: 60_000 })) void _;
+			})(),
+		).rejects.toThrow("terminated");
 	});
 
 	it("accepts https, and http only to loopback or private hosts", () => {

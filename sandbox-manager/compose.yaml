@@ -35,8 +35,9 @@ services:
     networks: [control]
 
   sandbox-manager:
-    build: &manager-build
+    build:
       context: .
+      target: manager
       args:
         BUILD_SHA: ${BUILD_SHA:?run ./up.sh, which sets BUILD_SHA}
     image: pim-sandbox-manager
@@ -82,13 +83,16 @@ services:
     networks: [control, api]
 
   egress-proxy:
-    # Same image tag as the manager, so it must be built with the same args: a build without
-    # BUILD_SHA would replace the manager's image with one that reports "unknown".
-    build: *manager-build
-    image: pim-sandbox-manager
+    # An image of its own, tagged by a hash of what goes into it (up.sh sets EGRESS_PROXY_TAG), so
+    # a deploy that does not change the proxy leaves its image, and so its container, as they are.
+    # Recreating it would cut every session's open connections and drop its allowlists until the
+    # manager registers them again.
+    build:
+      context: .
+      target: egress-proxy
+    image: pim-egress-proxy:${EGRESS_PROXY_TAG:-local}
     container_name: egress-proxy # the manager connects it to every session network by this name
     restart: unless-stopped
-    command: ["node", "src/proxy-main.js"]
     environment:
       PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set PROXY_ADMIN_TOKEN}
     networks: [control, outbound]

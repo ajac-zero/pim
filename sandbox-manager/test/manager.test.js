@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { promises as fs, mkdtempSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -669,9 +669,10 @@ describe('reconcile after a restart', () => {
 		await setup()
 		await call('POST', '/sessions', good)
 		await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })
-		// The host restarted: Docker kept the containers, stopped. One has an unreadable spec, and goes with its volume.
+		// The host restarted: Docker kept the containers, stopped. One has an unreadable spec, and goes with its volume
+		// once it is past the grace a create in flight gets.
 		fake.containers.get('pim-s-abc-1').state = 'exited'
-		fake.containers.get('pim-s-abc-2').state = 'exited'
+		Object.assign(fake.containers.get('pim-s-abc-2'), { state: 'exited', created: Date.now() - 120000 })
 		fake.containers.get('pim-s-abc-2').body.Labels['pim.coding.spec'] = '{'
 		const fresh = make()
 		await fresh.reconcile()
@@ -732,6 +733,128 @@ describe('reconcile after a restart', () => {
 		assert.ok(fake.infra.get('egress-proxy').nets.has('pim-net-abc-1'))
 		assert.deepEqual(Object.values(proxy.map), [good.egressAllow])
 	})
+	// Calls since `from` that would stop or remove anything of these sessions.
+	const destroying = (from, ids) => {
+		const own = new Set(ids.flatMap((id) => [`pim-s-${id}`, `id-pim-s-${id}`, `pim-ws-${id}`, `pim-net-${id}`]))
+		return fake.calls.slice(from).filter((c) => (c.method === 'DELETE' || /\/(stop|kill|pause|restart)$/.test(c.path) || c.path.endsWith('/disconnect')) && c.path.split('/').some((p) => own.has(p)))
+	}
+	const swap = async (next) => {
+		mgr.server.close()
+		mgr = next
+		await new Promise((r) => mgr.server.listen(0, '127.0.0.1', r))
+	}
+	const execOk = async (id) => {
+		fake.agentd(`pim-s-${id}`).onExec = () => [{ type: 'stdout', data: id }, exit(0)]
+		return (await call('POST', `/sessions/${id}/exec`, { cmd: ['true'], timeoutMs: 1000 })).json?.stdout === id
+	}
+
+	test('a restarted manager takes over every live session and removes or stops nothing of theirs', async () => {
+		await setup({ maxConcurrent: 3, managerContainer: 'sandbox-manager' })
+		const ids = ['s-1', 's-2', 's-3']
+		for (const id of ids) assert.equal((await call('POST', '/sessions', { ...good, sessionId: id })).status, 201)
+		const before = fake.calls.length
+		const fresh = make({ maxConcurrent: 3, managerContainer: 'sandbox-manager' })
+		await fresh.reconcile()
+		assert.deepEqual([...fresh.sessions.keys()].sort(), ids)
+		for (const id of ids) assert.deepEqual(fresh.sessions.get(id).params, { ...good, sessionId: id })
+		assert.deepEqual(destroying(before, ids), [])
+		assert.equal(fake.containers.size + fake.networks.size + fake.volumes.size, 9)
+		await swap(fresh)
+		for (const id of ids) assert.ok(await execOk(id), `exec in ${id} through the new manager`)
+		// A manager restarted with another AGENTD_TOKEN_SECRET still reaches them: the token is read back from the container.
+		await swap(make({ maxConcurrent: 3, agentdSecret: 'rotated' }))
+		await mgr.reconcile()
+		for (const id of ids) assert.ok(await execOk(id), `exec in ${id} after the secret changed`)
+		assert.deepEqual(destroying(before, ids), [])
+	})
+	test('a session without an address at restart is kept, waited for, and taken over once it has one', async () => {
+		await setup()
+		await call('POST', '/sessions', good)
+		const c = fake.containers.get('pim-s-abc-1')
+		// Briefly: the restart waits for it.
+		c.hideIp = 3
+		const before = fake.calls.length
+		const fresh = make({ ipWaitMs: 3000 })
+		await fresh.reconcile()
+		assert.equal(fresh.sessions.get('abc-1').ip, c.ip)
+		// For longer than the restart waits: registered, refused for now, never removed.
+		c.hideIp = 1e9
+		proxy.map = {}
+		const slow = make({ ipWaitMs: 300 })
+		await slow.reconcile()
+		await swap(slow)
+		assert.deepEqual(slow.list().map((x) => [x.sessionId, x.state]), [['abc-1', 'running']])
+		const r = await call('POST', '/sessions/abc-1/exec', { cmd: ['true'], timeoutMs: 1000 })
+		assert.deepEqual([r.status, r.json.code], [503, 'session_reconnecting'])
+		assert.equal((await call('POST', '/sessions', good)).status, 200, 'creating it again finds it')
+		await slow.reattach()
+		assert.deepEqual(destroying(before, ['abc-1']), [])
+		assert.ok(fake.containers.has('pim-s-abc-1') && fake.volumes.has('pim-ws-abc-1') && fake.networks.has('pim-net-abc-1'))
+		// The periodic reattach finishes the job: address, allowlist and commands.
+		c.hideIp = 0
+		await slow.reattach()
+		assert.equal(slow.sessions.get('abc-1').ip, c.ip)
+		assert.deepEqual(proxy.map[c.ip], good.egressAllow)
+		assert.ok(await execOk('abc-1'))
+	})
+	test('a restarted or recreated proxy gets every allowlist back, even when one network cannot be joined', async () => {
+		await setup({ maxConcurrent: 3 })
+		for (const id of ['p-1', 'p-2']) await call('POST', '/sessions', { ...good, sessionId: id, egressAllow: [`${id}.example.com`] })
+		const ip = (id) => fake.containers.get(`pim-s-${id}`).ip
+		await mgr.reattach()
+		// Restarted in place: still on the session networks, allowlists gone.
+		fake.infra.get('egress-proxy').startedAt += '+'
+		proxy.map = {}
+		await mgr.reattach()
+		assert.deepEqual(proxy.map, { [ip('p-1')]: ['p-1.example.com'], [ip('p-2')]: ['p-2.example.com'] })
+		// Recreated, and one session's network refuses it: the other one gets its allowlist anyway.
+		fake.recreate('egress-proxy', '10.9.103.2')
+		const net = fake.networks.get('pim-net-p-1')
+		fake.networks.delete('pim-net-p-1')
+		proxy.map = {}
+		await mgr.reattach()
+		assert.deepEqual(proxy.map, { [ip('p-2')]: ['p-2.example.com'] })
+		assert.equal(mgr.sessions.get('p-1').egress, false)
+		fake.networks.set('pim-net-p-1', net)
+		await mgr.reattach()
+		assert.deepEqual(proxy.map, { [ip('p-1')]: ['p-1.example.com'], [ip('p-2')]: ['p-2.example.com'] })
+		assert.ok(fake.infra.get('egress-proxy').nets.has('pim-net-p-1'))
+	})
+	test('only containers that are not running are cleaned up, half-created ones after a grace period', async () => {
+		await setup({ maxConcurrent: 4 })
+		for (const id of ['dead-1', 'young-1', 'paused-1', 'kept-1']) await call('POST', '/sessions', { ...good, sessionId: id })
+		await call('POST', '/sessions/kept-1/stop')
+		const c = (id) => fake.containers.get(`pim-s-${id}`)
+		Object.assign(c('dead-1'), { state: 'exited', created: Date.now() - 120000 })
+		Object.assign(c('young-1'), { state: 'created' })
+		c('paused-1').state = 'paused'
+		// A resume of kept-1 that the old manager left half-done.
+		const labels = { 'pim.coding.session': 'kept-1', 'pim.coding.spec': JSON.stringify({ ...good, sessionId: 'kept-1' }), 'pim.coding.nonce': 'n' }
+		const body = { Env: [], Labels: labels, HostConfig: { NetworkMode: 'pim-net-kept-1', Mounts: [{ Type: 'volume', Source: 'pim-ws-kept-1', Target: '/workspace' }] } }
+		fake.containers.set('pim-s-kept-1', { id: 'id-pim-s-kept-1', name: 'pim-s-kept-1', body, ip: '10.9.0.99', state: 'created', created: Date.now(), hideIp: 0 })
+		fake.networks.set('pim-net-kept-1', { Name: 'pim-net-kept-1', Labels: labels })
+		const fresh = make({ maxConcurrent: 4 })
+		await fresh.reconcile()
+		// A container that ran and died goes with its network, and its workspace is kept as `crashed`, for a create to resume.
+		assert.ok(!fake.containers.has('pim-s-dead-1') && !fake.networks.has('pim-net-dead-1') && fake.volumes.has('pim-ws-dead-1'))
+		assert.deepEqual([(await fresh.status('dead-1')).state, (await fresh.status('dead-1')).reason], ['gone', 'crashed'])
+		// A kept workspace loses only the leftover container.
+		assert.ok(!fake.containers.has('pim-s-kept-1') && !fake.networks.has('pim-net-kept-1') && fake.volumes.has('pim-ws-kept-1'))
+		assert.equal((await fresh.status('kept-1')).state, 'stopped')
+		// Young and paused ones are left as they are, and their ids cannot be created over.
+		for (const id of ['young-1', 'paused-1']) {
+			assert.ok(fake.containers.has(`pim-s-${id}`) && fake.volumes.has(`pim-ws-${id}`))
+			await assert.rejects(fresh.createSession({ ...good, sessionId: id }), { status: 409, extra: { code: 'session_unsettled' } })
+		}
+		// Once past the grace period the half-created one goes; the paused one stays until it runs again.
+		c('young-1').created -= 120000
+		c('paused-1').state = 'running'
+		await fresh.reattach()
+		assert.ok(!fake.containers.has('pim-s-young-1') && !fake.volumes.has('pim-ws-young-1'))
+		assert.equal((await fresh.createSession({ ...good, sessionId: 'young-1' })).created, true)
+		assert.ok(fresh.sessions.has('paused-1'))
+		assert.deepEqual(proxy.map[c('paused-1').ip], good.egressAllow)
+	})
 	test('requests that arrive on the manager address inside a session network are refused', async () => {
 		fake = await startFakeDocker()
 		fake.infra.get('sandbox-manager').ip = '127.0.0.2'
@@ -771,40 +894,93 @@ describe('with the real workspace-agentd', () => {
 		const missing = await call('POST', '/sessions/abc-1/exec', { cmd: ['definitely-not-a-command'], timeoutMs: 1000 })
 		assert.equal(missing.json.exitCode, 127)
 	})
-	test('a client that drops exec/stream kills that command', async () => {
-		const ac = new AbortController()
-		let pid
-		try {
-			const res = await fetch(`${base}/sessions/abc-1/exec/stream`, { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer t0ken' }, body: JSON.stringify({ cmd: ['sh', '-c', 'echo start; sleep 60 & echo $!; wait'], timeoutMs: 20000 }) })
-			assert.equal(res.headers.get('content-type'), 'application/x-ndjson')
-			// Neither the NDJSON lines nor the stdout events line up with reads: buffer both until the pid line is complete.
-			const decoder = new TextDecoder()
-			let ndjson = ''
-			let stdout = ''
-			for await (const chunk of res.body) {
-				ndjson += decoder.decode(chunk, { stream: true })
-				const lines = ndjson.split('\n')
-				ndjson = lines.pop()
-				for (const line of lines.filter(Boolean)) {
-					const ev = JSON.parse(line)
-					assert.notEqual(ev.type, 'exit', 'the command ended early')
-					if (ev.type === 'stdout') stdout += ev.data
+	test('a client that drops exec/stream kills that command, also one with an id that agentd would keep', async () => {
+		for (const headers of [{}, { 'x-exec-id': 'dropped-by-client' }]) {
+			const ac = new AbortController()
+			let pid
+			try {
+				const res = await fetch(`${base}/sessions/abc-1/exec/stream`, { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer t0ken', ...headers }, body: JSON.stringify({ cmd: ['sh', '-c', 'echo start; sleep 60 & echo $!; wait'], timeoutMs: 20000 }) })
+				assert.equal(res.headers.get('content-type'), 'application/x-ndjson')
+				// Neither the NDJSON lines nor the stdout events line up with reads: buffer both until the pid line is complete.
+				const decoder = new TextDecoder()
+				let ndjson = ''
+				let stdout = ''
+				for await (const chunk of res.body) {
+					ndjson += decoder.decode(chunk, { stream: true })
+					const lines = ndjson.split('\n')
+					ndjson = lines.pop()
+					for (const line of lines.filter(Boolean)) {
+						const ev = JSON.parse(line)
+						assert.notEqual(ev.type, 'exit', 'the command ended early')
+						if (ev.type === 'stdout') stdout += ev.data
+					}
+					const m = /^start\n(\d+)\n/.exec(stdout)
+					if (m) {
+						pid = Number(m[1])
+						break
+					}
 				}
-				const m = /^start\n(\d+)\n/.exec(stdout)
-				if (m) {
-					pid = Number(m[1])
-					break
-				}
+				assert.ok(pid && alive(pid), `no live pid in ${JSON.stringify(stdout)}`)
+			} finally {
+				ac.abort()
 			}
-			assert.ok(pid && alive(pid), `no live pid in ${JSON.stringify(stdout)}`)
-		} finally {
-			ac.abort()
+			const end = Date.now() + 8000
+			while (alive(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
+			const survived = alive(pid)
+			if (survived) process.kill(pid, 'SIGKILL')
+			assert.ok(!survived, `the command outlived the client (${JSON.stringify(headers)})`)
 		}
-		const end = Date.now() + 8000
-		while (alive(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
-		const survived = alive(pid)
-		if (survived) process.kill(pid, 'SIGKILL')
-		assert.ok(!survived, 'the command outlived the client')
+	})
+	test('a command with an id keeps running when the manager process dies, and its client reads on through the next manager', async () => {
+		// The first manager runs in a process of its own and is killed, as Docker kills a replaced container.
+		const addresses = Object.fromEntries([...fake.containers.values()].map((c) => [c.ip, fake.agentdAddress(c.ip)]))
+		const src = (f) => new URL(`../src/${f}`, import.meta.url).href
+		const child = spawn(process.execPath, ['--input-type=module', '-e', `
+			import { createManager } from '${src('manager.js')}'
+			import { Docker } from '${src('docker.js')}'
+			const addresses = ${JSON.stringify(addresses)}
+			const m = createManager({ docker: new Docker(${JSON.stringify(fake.path)}), cfg: ${JSON.stringify(cfg)}, proxyAdmin: { set: async () => {}, del: async () => {} }, statfsFn: async () => ({ bavail: 50, blocks: 100 }), agentdAddress: (ip) => addresses[ip] })
+			await m.reconcile()
+			m.server.listen(0, '127.0.0.1', () => console.log(m.server.address().port))
+		`], { stdio: ['ignore', 'pipe', 'inherit'] })
+		const port = Number(await new Promise((r) => child.stdout.once('data', (d) => r(String(d).trim()))))
+		const dir = path.join(root, 'pim-s-abc-1')
+		const cmd = ['sh', '-c', 'echo $$; while [ ! -f go ]; do sleep 0.05; done; echo finished']
+		const startTurn = async (headers) => {
+			const res = await fetch(`http://127.0.0.1:${port}/sessions/abc-1/exec/stream`, { method: 'POST', headers: { authorization: 'Bearer t0ken', ...headers }, body: JSON.stringify({ cmd, timeoutMs: 20000 }) })
+			const reader = res.body.getReader()
+			const got = []
+			let buf = ''
+			while (!got.length) {
+				buf += new TextDecoder().decode((await reader.read()).value)
+				const lines = buf.split('\n')
+				buf = lines.pop()
+				for (const l of lines) if (l) got.push(JSON.parse(l))
+			}
+			return { pid: Number(got[0].data), got, reader }
+		}
+		const kept = await startTurn({ 'x-exec-id': 'turn-through-restart' })
+		const legacy = await startTurn({}) // an older client, which sends no id
+		child.kill('SIGKILL')
+		await new Promise((r) => child.once('exit', r))
+		await assert.rejects(kept.reader.read(), 'the stream broke with the manager')
+		await new Promise((r) => setTimeout(r, 500))
+		assert.ok(alive(kept.pid), 'the command with an id is still running')
+		assert.ok(!alive(legacy.pid), 'the command without an id died with the manager, as before')
+		// It finishes while no manager is there; the next manager hands its client the rest.
+		await fs.writeFile(path.join(dir, 'go'), '')
+		await new Promise((r) => setTimeout(r, 200))
+		const fresh = make()
+		await fresh.reconcile()
+		mgr.server.close()
+		mgr = fresh
+		await new Promise((r) => mgr.server.listen(0, '127.0.0.1', r))
+		const r = await call('GET', `/sessions/abc-1/exec/turn-through-restart/stream?after=${kept.got.length}`)
+		assert.equal(r.status, 200)
+		const rest = r.text.split('\n').filter(Boolean).map((l) => JSON.parse(l))
+		assert.deepEqual(rest, [{ type: 'stdout', data: 'finished\n' }, { type: 'exit', code: 0, signal: null, timedOut: false }])
+		const gone = await call('GET', '/sessions/abc-1/exec/no-such-exec/stream?after=0')
+		assert.deepEqual([gone.status, gone.json.code], [404, 'exec_not_found'])
 	})
 	test('files round-trip and symlink escapes are refused', async () => {
 		assert.equal((await call('PUT', '/sessions/abc-1/files?path=d/a.txt', 'héllo')).status, 200)
@@ -853,11 +1029,19 @@ describe('gVisor self-check', () => {
 })
 
 describe('build stamping', () => {
-	test('manager and egress-proxy share one image tag, so they are built with the same BUILD_SHA arg', async () => {
+	test('a deploy rebuilds the manager with BUILD_SHA and leaves an unchanged egress proxy running', async () => {
 		const { readFile } = await import('node:fs/promises')
-		const compose = await readFile(new URL('../compose.yaml', import.meta.url), 'utf8')
-		assert.match(compose, /build: &manager-build[\s\S]*BUILD_SHA: \$\{BUILD_SHA:\?/)
-		assert.match(compose, /build: \*manager-build/)
+		const read = (f) => readFile(new URL(`../${f}`, import.meta.url), 'utf8')
+		const [compose, dockerfile, up] = await Promise.all([read('compose.yaml'), read('Dockerfile'), read('up.sh')])
+		const service = (name) => compose.slice(compose.indexOf(`\n  ${name}:\n`)).split(/\n {2}(?=\S)/)[1]
+		assert.match(service('sandbox-manager'), /target: manager\n\s+args:\n\s+BUILD_SHA: \$\{BUILD_SHA:\?/)
 		assert.doesNotMatch(compose, /BUILD_SHA:-unknown/)
+		// The proxy's image has no build stamp and is tagged by its inputs, which up.sh hashes.
+		assert.match(service('egress-proxy'), /target: egress-proxy\n\s+image: pim-egress-proxy:\$\{EGRESS_PROXY_TAG/)
+		assert.doesNotMatch(service('egress-proxy'), /BUILD_SHA/)
+		assert.doesNotMatch(dockerfile.slice(dockerfile.indexOf('AS egress-proxy'), dockerfile.indexOf('AS manager')), /BUILD_SHA/)
+		// `up --build` would recreate the proxy on every deploy.
+		assert.match(up, /docker compose up -d --no-build/)
+		assert.doesNotMatch(up, /up -d --build/)
 	})
 })

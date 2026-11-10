@@ -1,5 +1,15 @@
-# One small image for both services; compose picks the entrypoint.
-FROM node:22-alpine
+# The egress proxy's image holds only the proxy and no build stamp, so rebuilding the stack for a
+# new commit leaves it unchanged unless the proxy itself changed, and compose does not recreate the
+# running proxy (which would cut every session's open connections).
+FROM node:22-alpine AS egress-proxy
+WORKDIR /app
+COPY package.json ./
+COPY src/proxy.js src/proxy-main.js ./src/
+USER node
+CMD ["node", "src/proxy-main.js"]
+
+# The manager, the default target.
+FROM node:22-alpine AS manager
 ARG BUILD_SHA=unknown
 WORKDIR /app
 COPY package.json ./

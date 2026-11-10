@@ -23,6 +23,9 @@ export const fakeRemotes = new Map<string, Record<string, string>>();
 /** Each clone tried, with the environment git ran in. */
 export const fakeClones: { url: string; env: Record<string, string> }[] = [];
 
+/** Clones of a URL that fail with the given error output, this many more times, before it clones as usual: a rate limited host. */
+export const fakeCloneFailures = new Map<string, { times: number; stderr: string }>();
+
 type Files = Record<string, string>;
 
 let commits = 0;
@@ -67,6 +70,13 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 		case "clone": {
 			const [url, dir] = rest.filter((arg) => !arg.startsWith("--"));
 			if (url) fakeClones.push({ url, env });
+			const failing = url ? fakeCloneFailures.get(url) : undefined;
+			if (failing && failing.times > 0) {
+				failing.times--;
+				// A failed clone leaves its directory behind, as git does until it cleans up after itself.
+				if (dir) await write(workspace, `${dir.startsWith("/") ? dir : `${cwd}/${dir}`}/partial`, "x");
+				return { stderr: failing.stderr, code: 128 };
+			}
 			// Like git with GIT_CURL_VERBOSE, a failed clone prints the headers it sent, a token among them.
 			const sent = env.GIT_CONFIG_KEY_0 === "http.extraHeader" ? `> ${env.GIT_CONFIG_VALUE_0}\n` : "";
 			if (!url || !dir || !fakeRemotes.has(url)) return { stderr: `${sent}fatal: repository '${url}' not found\n`, code: 128 };

@@ -138,6 +138,60 @@ describe('exec', () => {
 		assert.ok(await until(() => !alive(pid)), 'grandchild survived disconnect')
 		assert.ok(await until(async () => (await (await api('/status')).json()).activeExecs === 0))
 	})
+	// Reads NDJSON events from a stream until `stop(events)` says so, and returns them.
+	const readUntil = async (res, stop) => {
+		const reader = res.body.getReader()
+		const got = []
+		let buf = ''
+		while (!stop(got)) {
+			const { value, done } = await reader.read()
+			if (done) break
+			buf += new TextDecoder().decode(value)
+			const lines = buf.split('\n')
+			buf = lines.pop()
+			for (const l of lines) if (l) got.push(JSON.parse(l))
+		}
+		return { got, reader }
+	}
+	test('an exec with an id outlives its client, which reads on from where it was', async () => {
+		const id = 'exec-outlives-1'
+		const res = await exec({ id, cmd: ['sh', '-c', 'echo $$; echo one; while [ ! -f go ]; do sleep 0.05; done; echo two'], cwd: '.', timeoutMs: 20000 })
+		const { got, reader } = await readUntil(res, (ev) => ev.map((e) => e.data).join('').includes('one\n'))
+		const pid = Number(got[0].data.split('\n')[0])
+		await reader.cancel()
+		await new Promise((r) => setTimeout(r, 300))
+		assert.ok(alive(pid), 'the command survived its client')
+		await fs.writeFile(path.join(root, 'go'), '')
+		const rest = await events(await api(`/exec/${id}?after=${got.length}`))
+		assert.deepEqual(rest.map((e) => e.type), ['stdout', 'exit'])
+		assert.equal(rest[0].data, 'two\n')
+		assert.equal(rest[1].code, 0)
+		// Every event is still there for a client that lost them all.
+		assert.deepEqual(await events(await api(`/exec/${id}`)), [...got, ...rest])
+		await fs.rm(path.join(root, 'go'))
+	})
+	test('a detached exec is killed after the grace period, a DELETE kills one at once, and ids are checked', async () => {
+		const { s, url } = await start({ detachGraceMs: 300 })
+		const call = (p, init = {}) => fetch(url + p, { ...init, headers: auth })
+		const run = (id, cmd) => call('/exec', { method: 'POST', body: JSON.stringify({ id, cmd, timeoutMs: 60000 }) })
+		try {
+			const sleeper = ['sh', '-c', 'sleep 63 & echo $!; wait']
+			const { got, reader } = await readUntil(await run('detached-1', sleeper), (ev) => ev.length > 0)
+			const pid = Number(got[0].data)
+			await reader.cancel()
+			assert.ok(await until(() => !alive(pid)), 'killed once nobody came back')
+			assert.equal((await events(await call('/exec/detached-1'))).at(-1).signal, 'SIGTERM')
+			const second = await readUntil(await run('deleted-1', sleeper), (ev) => ev.length > 0)
+			assert.equal((await call('/exec/deleted-1', { method: 'DELETE' })).status, 200)
+			assert.ok(await until(() => !alive(Number(second.got[0].data))))
+			assert.equal((await run('deleted-1', ['true'])).status, 409, 'an id is not reused while it is kept')
+			assert.equal((await call('/exec/nope-nope-1')).status, 404)
+			assert.equal((await call('/exec/deleted-1?after=99')).status, 400)
+			assert.equal((await run('bad id!', ['true'])).status, 400)
+		} finally {
+			s.close()
+		}
+	})
 	test('output is capped, truncated and killed', async () => {
 		const { s, url } = await start({ maxOutputBytes: 1000 })
 		try {

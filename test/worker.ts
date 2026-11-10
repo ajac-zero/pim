@@ -388,6 +388,11 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return 200;
 	}
 
+	/** A rate limited clone is tried again after a moment, not seconds. */
+	protected override gitRetryDelaysMs(): readonly number[] {
+		return [5, 5, 5];
+	}
+
 	protected override harnessStallMs(): number {
 		return codingTimings.stallMs;
 	}

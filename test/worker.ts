@@ -351,7 +351,14 @@ export const codingBackends: { registry: WorkspaceProviderRegistry | null } = { 
 /** What coding threads emitted, in order. */
 export const codingEvents: CodingThreadEvent[] = [];
 
+/** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
+export const codingThreadClock: { now: number | null } = { now: null };
+
 export class CodingThreadDO extends RealCodingThreadDO {
+	protected override now(): number {
+		return codingThreadClock.now ?? super.now();
+	}
+
 	protected override workspaceProviders(): WorkspaceProviderRegistry {
 		return codingBackends.registry ?? workspaceRegistry([codingWorkspaces]);
 	}

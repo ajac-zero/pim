@@ -9,10 +9,12 @@ import type { GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_SPACE_CAP } from "../src/coding/provider-capacity";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type CodingEventSink, codingThread } from "../src/coding/thread-do";
+import { turnEndedMessage } from "../src/coding/supervisor";
 import { CodingThreadIndex } from "../src/coding/thread-index";
 import { CodingThreadStore } from "../src/coding/thread-store";
 import type { Pim } from "../src/pim";
 import type { Approval } from "../src/store";
+import { CODING_EVENT } from "../src/transcript";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
 import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, codingWorkspaces, faux } from "./worker";
@@ -672,5 +674,23 @@ describe("threads from before harnesses", () => {
 			// Opening them again changes nothing.
 			expect(new CodingThreadStore(sql).required().harness).toBe("pi");
 		});
+	});
+});
+
+describe("what an agent hears of a coding thread's failure", () => {
+	const ended = { type: "thread.turn_ended", threadId: "T-9", space: "s", operationId: "failed-workspace-1", outcome: "error", reason: "workspace", state: "failed", spentUsd: 0, budgetUsd: 1, at: 1 } as const;
+
+	it("says what went wrong and to retry once if it looks transient", () => {
+		const message = turnEndedMessage({ ...ended, detail: "manager answered 502" }, "https://pim.test");
+		expect(message.startsWith("[Coding thread T-9] It stopped with an error (workspace).")).toBe(true);
+		expect(CODING_EVENT.test(message)).toBe(true);
+		expect(message).toContain("Detail: manager answered 502");
+		expect(message).toContain("retry once by starting a fresh thread with the same task");
+	});
+
+	it("has neither for a turn that didn't fail", () => {
+		const message = turnEndedMessage({ ...ended, outcome: "completed", state: "idle" }, null);
+		expect(message).not.toContain("Detail:");
+		expect(message).not.toContain("retry once");
 	});
 });

@@ -289,6 +289,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return STALL_MS;
 	}
 
+	/** How long a thread may sit queued or provisioning with no change before it is failed as stuck. */
+	protected stuckMs(): number {
+		return STUCK_MS;
+	}
+
 	/** Who hears of what the thread does: the chat of the agent that started it, if one did (./supervisor.ts). */
 	protected eventSink(): CodingEventSink {
 		return supervisorSink(this.env);
@@ -378,13 +383,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome | void> {
 		if (job.fn !== ADVANCE_JOB) return;
 		// Bounded, as a job must be: work still going after this goes on outside it.
+		await this.#failIfStuck();
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
 		// A queued thread whose backend reports its health checks it again each time, so a queue held for low disk opens once there is room.
 		const busy =
 			thread !== null &&
 			(thread.currentOperation !== null ||
-				(thread.slot === "held" && (thread.state === "provisioning" || thread.environment.rebuildRequested)) ||
+				thread.state === "provisioning" ||
+				thread.state === "queued" ||
+				(thread.slot === "held" && thread.environment.rebuildRequested) ||
 				(thread.slot === "queued" && this.#healthOf(thread) !== null));
 		return busy ? { rescheduleAt: Date.now() + HEARTBEAT_MS } : undefined;
 	}
@@ -445,7 +453,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
 			}
 		});
-		if (this.#ensureBackend()) {
+		if (await this.#ensureBackend()) {
 			await this.#requestSlot();
 			this.#kick();
 		}
@@ -1124,7 +1132,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.store.thread();
 		if (!thread || !this.store.firstNotice(key) || thread.slot !== "queued") return;
-		this.store.update({ slot: "none", state: "failed", stateReason: `queue_expired:${entry.reason}` });
+		this.store.update({ slot: "none" });
+		await this.#fail(`queue_expired:${entry.reason}`, `The thread waited in the queue too long (${entry.reason}) and left it`, false);
 	}
 
 	/** The scheduler's notice: it took the thread's slot back, after the thread was idle or waited for the person too long. */
@@ -1288,7 +1297,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return;
 		}
 		if (thread.slot === "none") {
-			if (!this.#ensureBackend()) return;
+			if (!(await this.#ensureBackend())) return;
 			await this.#requestSlot();
 		} else if (thread.slot === "queued") await this.#refreshCapacity();
 		thread = this.store.required();
@@ -1315,8 +1324,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			// Such as a model provider removed from the space since: the thread can't go on until it is continued.
 			console.warn(JSON.stringify({ event: "pim.coding.turn_not_started", thread: thread.threadId, error: String(error) }));
 			if (this.store.required().currentOperation !== null) return;
-			this.store.update({ state: "failed", stateReason: "turn", stateDetail: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
-			await this.#giveBack({ keepVolume: true });
+			await this.#fail("turn", error instanceof Error ? error.message : String(error), true);
 		}
 	}
 
@@ -1326,7 +1334,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * one the thread fails with `no_backend` and says what to set up; it can
 	 * be continued once that's done.
 	 */
-	#ensureBackend(): boolean {
+	async #ensureBackend(): Promise<boolean> {
 		const thread = this.store.required();
 		const registry = this.workspaceProviders();
 		let id = thread.providerId;
@@ -1340,7 +1348,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return true;
 		} catch (error) {
 			if (!(error instanceof NoWorkspaceBackendError)) throw error;
-			this.store.update({ state: "failed", stateReason: error.code, stateDetail: error.message });
+			await this.#fail(error.code, error.message, false);
 			return false;
 		}
 	}
@@ -1489,8 +1497,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (this.store.harnessRun()) await this.#recoverCliRun(thread);
 		const spent = this.#budgetSpent(thread);
 		if (spent) {
-			this.store.update({ state: "failed", stateReason: "budget", stateDetail: spent });
-			await this.#giveBack({ keepVolume: true });
+			await this.#fail("budget", spent, true);
 			return;
 		}
 		const workspace = await this.#workspace();
@@ -1761,6 +1768,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				: null;
 		const state: CodingThreadState = outcome === "error" ? "failed" : login ? "waiting_input" : "idle";
 		const said = await this.#lastSaid().catch(() => null);
+		const detail = outcome === "completed" ? null : (result.detail ?? thread.stateDetail)?.slice(0, DETAIL_MAX);
 		const stop = budget ? { budgetUsd: thread.budgetUsd ?? 0, spentUsd: thread.spentUsd } : null;
 		const event: TurnEndedEvent = {
 			type: "thread.turn_ended",
@@ -1775,6 +1783,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			budgetUsd: thread.budgetUsd,
 			...(cliHarness(thread.harness)?.reportsCost === false ? { unmetered: true as const } : {}),
 			...(said ? { said } : {}),
+			...(detail ? { detail } : {}),
 			at: this.now(),
 		};
 		this.ctx.storage.transactionSync(() => {
@@ -1844,7 +1853,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 					.onManagerError("low_disk")
 					.catch((failure) => console.warn(JSON.stringify({ event: "pim.coding.capacity_failed", thread: thread.threadId, error: String(failure) })));
 			}
-			this.store.update({ stateReason: lowDisk ? "low_disk" : "workspace_capacity" });
+			// Not rewritten while it holds, so the wait counts toward the thread being stuck.
+			const waiting = lowDisk ? "low_disk" : "workspace_capacity";
+			if (thread.stateReason !== waiting) this.store.update({ stateReason: waiting });
 			await this.#schedule(Date.now() + HEARTBEAT_MS);
 			return;
 		}
@@ -1852,14 +1863,51 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.state === "archived") return;
 		const aborted = error instanceof Error && / was stopped:/.test(error.message);
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
-		this.store.update(
-			aborted
-				? { state: "idle", stateReason: "aborted" }
-				: error instanceof NoWorkspaceBackendError
-					? { state: "failed", stateReason: error.code, stateDetail: error.message }
-					: { state: "failed", stateReason: "workspace", stateDetail: (error instanceof Error ? error.message : String(error)).slice(0, 500) },
-		);
-		if (!aborted) await this.#giveBack({ keepVolume: true });
+		if (aborted) {
+			this.store.update({ state: "idle", stateReason: "aborted" });
+			return;
+		}
+		if (error instanceof NoWorkspaceBackendError) await this.#fail(error.code, error.message, true);
+		else await this.#fail("workspace", error instanceof Error ? error.message : String(error), true);
+	}
+
+	/**
+	 * Fails the thread outside a turn's end, such as for a workspace that
+	 * couldn't be made, and tells whoever hears of the thread as a failed turn
+	 * does. The event's key is of its own, so each failure is heard of once.
+	 */
+	async #fail(reason: string, detail: string | null, giveBack: boolean): Promise<void> {
+		const thread = this.store.required();
+		const clipped = detail ? detail.slice(0, DETAIL_MAX) : null;
+		const now = this.now();
+		const event: TurnEndedEvent = {
+			type: "thread.turn_ended",
+			threadId: thread.threadId,
+			space: thread.space,
+			operationId: `failed-${reason}-${now}`,
+			outcome: "error",
+			reason,
+			...(clipped ? { detail: clipped } : {}),
+			state: "failed",
+			spentUsd: thread.spentUsd,
+			budgetUsd: thread.budgetUsd,
+			at: now,
+		};
+		this.ctx.storage.transactionSync(() => {
+			this.store.update({ state: "failed", stateReason: reason, stateDetail: clipped });
+			this.store.recordEvent(event.type, event);
+		});
+		if (giveBack) await this.#giveBack({ keepVolume: true });
+		await this.#emit(event);
+	}
+
+	/** A thread that has sat queued or provisioning, unchanged, for too long fails as stuck; one in a turn or waiting for the person is left be. */
+	async #failIfStuck(): Promise<void> {
+		const thread = this.store.thread();
+		if (!thread || (thread.state !== "provisioning" && thread.state !== "queued") || thread.currentOperation) return;
+		const waited = this.now() - thread.updatedAt;
+		if (waited < this.stuckMs()) return;
+		await this.#fail("stuck", `The thread was ${thread.state} for ${Math.round(waited / 60_000)} minutes without moving on`, true);
 	}
 
 	/** Makes the thread's model resolvable: its provider in the catalog pi resolves models against. */
@@ -2432,6 +2480,8 @@ export type TurnEndedEvent = {
 	readonly unmetered?: true;
 	/** The end of what the coding agent last said, at most 1,000 characters. */
 	readonly said?: string;
+	/** What went wrong, at most 500 characters, for a turn that didn't complete. */
+	readonly detail?: string;
 	readonly at: number;
 };
 
@@ -2556,6 +2606,9 @@ const MAX_DIFF_CHARS = 256 * 1024;
 
 const ADVANCE_JOB = "advance";
 const HEARTBEAT_MS = 30_000;
+/** How long a thread may sit queued or provisioning with no change before it is failed as stuck. */
+const STUCK_MS = 20 * 60_000;
+const DETAIL_MAX = 500;
 const ADVANCE_WAIT_MS = 20_000;
 const GIT_TIMEOUT_MS = 120_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;

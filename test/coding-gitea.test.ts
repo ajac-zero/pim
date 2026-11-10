@@ -43,6 +43,9 @@ function fakeGitea() {
 		updates: [] as { command: string; packBytes: number }[],
 		/** A branch that another push moves while the update is in flight. */
 		movesBeforeUpdate: null as { ref: string; to: string } | null,
+		/** The open pull requests of acme/widgets, and the status Gitea gives a new one when it isn't made (409: one is open from the branch already). */
+		pulls: [] as { number: number; html_url: string; head: { ref: string }; base: { ref: string } }[],
+		pullStatus: null as number | null,
 	};
 	const issue = (code: string) => {
 		state.issued += 1;
@@ -100,6 +103,14 @@ function fakeGitea() {
 				}
 			}
 			return new Response(joined(...report.map((line) => pktLine(`${line}\n`)), encoder.encode("0000")), { headers: { "content-type": "application/x-git-receive-pack-result" } });
+		}
+		if (url.pathname === "/api/v1/repos/acme/widgets/pulls") {
+			if (call.method === "GET") return Response.json(state.pulls);
+			const { head, base } = JSON.parse(decoder.decode(call.body)) as { head: string; base: string };
+			if (state.pullStatus) return Response.json({ message: "pull request already exists" }, { status: state.pullStatus });
+			const made = { number: state.pulls.length + 1, html_url: `${BASE}/acme/widgets/pulls/${state.pulls.length + 1}`, head: { ref: head }, base: { ref: base } };
+			state.pulls.push(made);
+			return Response.json(made, { status: 201 });
 		}
 		throw new Error(`unexpected request ${call.method} ${call.url}`);
 	};
@@ -552,6 +563,65 @@ describe("pushing to Gitea", () => {
 		const prepared = preparePush({ app: {} as never, policy: POLICY, providers }, { sessionId: "T-1", repo: "https://github.com/acme/widgets", branch: "pim/fix", bundle: bundle({ "refs/heads/pim/fix": SHA("b") }) });
 		expect(prepared.instance.id).toBe("github");
 		expect(pushApprovalRequest(prepared).summary).toMatch(/ to github\.com\/acme\/widgets$/);
+	});
+});
+
+describe("opening pull requests", () => {
+	const input = { repo: WIDGETS, head: "pim/fix", base: "trunk", title: "Fix it", body: "Body" };
+
+	it("creates one on Gitea with the account's token, from head into base", async () => {
+		const gitea = fakeGitea();
+		const provider = new GiteaProvider(giteaInstance(ID, BASE), await connected(gitea), { fetch: gitea.fetch });
+		expect(await provider.createPullRequest(input)).toEqual({ url: `${BASE}/acme/widgets/pulls/1`, number: 1 });
+		const call = gitea.calls.find((candidate) => candidate.method === "POST" && candidate.url.endsWith("/pulls"))!;
+		expect(call.url).toBe(`${BASE}/api/v1/repos/acme/widgets/pulls`);
+		expect(call.headers.get("authorization")).toBe("Bearer access-1");
+		expect(JSON.parse(decoder.decode(call.body))).toEqual({ head: "pim/fix", base: "trunk", title: "Fix it", body: "Body" });
+	});
+
+	it("answers with the open pull request when Gitea says one exists (409 or 422), and not with one of another branch", async () => {
+		for (const status of [409, 422]) {
+			const gitea = fakeGitea();
+			gitea.state.pullStatus = status;
+			gitea.state.pulls.push(
+				{ number: 4, html_url: `${BASE}/acme/widgets/pulls/4`, head: { ref: "pim/other" }, base: { ref: "trunk" } },
+				{ number: 7, html_url: `${BASE}/acme/widgets/pulls/7`, head: { ref: "pim/fix" }, base: { ref: "trunk" } },
+			);
+			const provider = new GiteaProvider(giteaInstance(ID, BASE), await connected(gitea), { fetch: gitea.fetch });
+			expect(await provider.createPullRequest(input)).toEqual({ url: `${BASE}/acme/widgets/pulls/7`, number: 7 });
+			expect(gitea.calls.some((call) => call.method === "GET" && call.url.includes("/pulls?state=open"))).toBe(true);
+		}
+	});
+
+	it("fails when Gitea refuses and there is no open pull request from the branch", async () => {
+		const gitea = fakeGitea();
+		gitea.state.pullStatus = 422;
+		const provider = new GiteaProvider(giteaInstance(ID, BASE), await connected(gitea), { fetch: gitea.fetch });
+		await expect(provider.createPullRequest(input)).rejects.toThrow("Gitea answered HTTP 422 when opening a pull request on acme/widgets");
+	});
+
+	it("fails with 'Gitea not connected' and sends nothing while it isn't connected", async () => {
+		const unconnected = fakeGitea();
+		const error = await new GiteaProvider(giteaInstance(ID, BASE), connectionTo(unconnected), { fetch: unconnected.fetch }).createPullRequest(input).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(GiteaNotConnectedError);
+		expect(unconnected.calls).toHaveLength(0);
+	});
+
+	it("creates one on GitHub as before, and finds the open one when GitHub answers 422", async () => {
+		const requests: { method: string; url: string; body: unknown }[] = [];
+		let created = true;
+		const fetch = async (url: RequestInfo | URL, init?: RequestInit) => {
+			requests.push({ method: init?.method ?? "GET", url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+			if (init?.method === "POST") return created ? Response.json({ html_url: "https://github.com/acme/widgets/pull/3", number: 3 }, { status: 201 }) : new Response("{}", { status: 422 });
+			return Response.json([{ html_url: "https://github.com/acme/widgets/pull/2", number: 2 }]);
+		};
+		const app = { installationToken: async () => ({ token: "ghs_x", expiresAt: Date.now() + HOUR }) } as never;
+		const provider = new GitHubProvider(app, { fetch });
+		expect(await provider.createPullRequest(input)).toEqual({ url: "https://github.com/acme/widgets/pull/3", number: 3 });
+		expect(requests).toEqual([{ method: "POST", url: "https://api.github.com/repos/acme/widgets/pulls", body: { head: "pim/fix", base: "trunk", title: "Fix it", body: "Body" } }]);
+		created = false;
+		expect(await provider.createPullRequest(input)).toEqual({ url: "https://github.com/acme/widgets/pull/2", number: 2 });
+		expect(requests.at(-1)!.url).toBe("https://api.github.com/repos/acme/widgets/pulls?state=open&head=acme%3Apim%2Ffix&base=trunk");
 	});
 });
 

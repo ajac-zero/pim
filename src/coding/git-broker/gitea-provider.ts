@@ -96,11 +96,28 @@ export class GiteaProvider implements GitProvider {
 		return total === 0;
 	}
 
+	/**
+	 * Opens a pull request, or finds the open one from `head` into `base` when
+	 * Gitea says there is one already (409, or 422 for some versions), so asking
+	 * again for the same branch answers with the same pull request.
+	 */
 	async createPullRequest({ repo, head, base, title, body }: PullRequestInput): Promise<{ url: string; number: number }> {
 		const response = await this.#api(repo, "/pulls", { method: "POST", body: JSON.stringify({ head, base, title, body }) });
-		if (!response.ok) throw new GitBrokerError(502, `Gitea answered HTTP ${response.status} when opening a pull request on ${repo.fullName}`);
-		const made = (await response.json()) as { html_url?: unknown; number?: unknown };
-		if (typeof made.html_url !== "string" || typeof made.number !== "number") throw new GitBrokerError(502, "Gitea's pull request answer was malformed");
-		return { url: made.html_url, number: made.number };
+		if (response.ok) return pullRequestOf(await response.json());
+		if (response.status === 409 || response.status === 422) {
+			const listed = await this.#api(repo, "/pulls?state=open&limit=50");
+			if (listed.ok) {
+				const open = (await listed.json()) as { head?: { ref?: unknown }; base?: { ref?: unknown }; html_url?: unknown; number?: unknown }[];
+				const existing = Array.isArray(open) ? open.find((pull) => pull.head?.ref === head && pull.base?.ref === base) : undefined;
+				if (existing) return pullRequestOf(existing);
+			}
+		}
+		throw new GitBrokerError(502, `Gitea answered HTTP ${response.status} when opening a pull request on ${repo.fullName}`);
 	}
+}
+
+function pullRequestOf(made: unknown): { url: string; number: number } {
+	const { html_url: url, number } = (made ?? {}) as { html_url?: unknown; number?: unknown };
+	if (typeof url !== "string" || typeof number !== "number") throw new GitBrokerError(502, "Gitea's pull request answer was malformed");
+	return { url, number };
 }

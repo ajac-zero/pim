@@ -1,9 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
-import { useCodingApi } from "~/components/coding";
-import { HarnessIcon } from "~/components/harness-icon";
-import { useI18n } from "~/components/i18n";
+import { CodingHarnessMark, useCodingApi } from "~/components/coding";
 import { CornerDownRight } from "~/components/icons";
 import {
   ACTIVE_STATES,
@@ -12,26 +10,8 @@ import {
   codingThreadsQuery,
   HARNESS_NAMES,
   repoName,
-  type SubthreadStatus,
-  subthreadStatus,
 } from "~/lib/coding";
 import { cn } from "~/lib/utils";
-
-const BADGE_TEXT = {
-  queued: "codingBadgeQueued",
-  running: "codingBadgeRunning",
-  waiting: "codingBadgeWaiting",
-  done: "codingBadgeDone",
-  failed: "codingBadgeFailed",
-} as const;
-
-const BADGE_CLASS: Record<SubthreadStatus, string> = {
-  queued: "bg-muted text-muted-foreground",
-  running: "bg-primary/10 text-primary motion-safe:animate-pulse",
-  waiting: "bg-link/10 text-link",
-  done: "bg-success/10 text-success",
-  failed: "bg-destructive/10 text-destructive",
-};
 
 /** The coding threads started from each chat, kept live while any is queued or running. */
 export function useCodingByChat() {
@@ -67,8 +47,6 @@ export function CodingSubthreadRow({
   active?: boolean;
   onNavigate?: () => void;
 }) {
-  const { t } = useI18n();
-  const status = subthreadStatus(thread.state);
   return (
     <li
       className="group/row relative"
@@ -85,18 +63,13 @@ export function CodingSubthreadRow({
         )}
       >
         <CornerDownRight className="-ml-1 mr-[2px] size-3.5 shrink-0 text-muted-foreground/70" />
-        <HarnessIcon harness={thread.harness} className="size-5" />
+        <CodingHarnessMark
+          harness={thread.harness}
+          state={thread.state}
+          className="size-5"
+        />
         <span className="min-w-0 flex-1 truncate">
           {subthreadTitle(thread)}
-        </span>
-        <span
-          data-status={status}
-          className={cn(
-            "shrink-0 rounded-full px-1.5 py-0.5 text-[11px] leading-none",
-            BADGE_CLASS[status],
-          )}
-        >
-          {t(BADGE_TEXT[status])}
         </span>
       </Link>
     </li>

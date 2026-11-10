@@ -5,6 +5,7 @@ import {
   type CodingThreadState,
   type CodingThreadSummary,
   codingByChat,
+  codingStateBadge,
   EMPTY_LIVE,
   type LiveTranscript,
   ndjson,
@@ -13,7 +14,6 @@ import {
   startInput,
   startProblems,
   stateReasonKey,
-  subthreadStatus,
   transcriptRows,
   writingMessage,
 } from "~/lib/coding";
@@ -398,19 +398,19 @@ describe("why a thread stopped", () => {
   });
 });
 
-describe("subthreadStatus", () => {
-  it("maps each state to the badge the chat list shows", () => {
-    const states: Record<CodingThreadState, string> = {
-      provisioning: "queued",
-      queued: "queued",
-      running: "running",
-      waiting_input: "waiting",
-      idle: "done",
-      archived: "done",
-      failed: "failed",
+describe("codingStateBadge", () => {
+  it("maps each state onto the mark a chat's icon has", () => {
+    const states: Record<CodingThreadState, string | null> = {
+      provisioning: "working",
+      queued: "working",
+      running: "working",
+      waiting_input: "attention",
+      failed: "error",
+      idle: null,
+      archived: null,
     };
-    for (const [state, badge] of Object.entries(states)) {
-      expect(subthreadStatus(state as CodingThreadState)).toBe(badge);
+    for (const [state, mark] of Object.entries(states)) {
+      expect(codingStateBadge(state as CodingThreadState)).toBe(mark);
     }
   });
 });

@@ -72,7 +72,6 @@ import {
   TooltipTrigger,
 } from "~/components/ui/tooltip";
 import { flatChats, groupByAge, isInactive, nestChats } from "~/lib/chat-list";
-import { subthreadStatus } from "~/lib/coding";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -689,7 +688,7 @@ function ChatTree({
                     DONE_STATES.has(child.startedBy?.state ?? "completed"),
                   ).length +
                   coding.filter((thread) =>
-                    ["done", "failed"].includes(subthreadStatus(thread.state)),
+                    ["idle", "archived", "failed"].includes(thread.state),
                   ).length,
                 total: under.length + coding.length,
                 expanded,
@@ -793,14 +792,63 @@ function FoldedChats({
 }
 
 /** A chat holds an action waiting for the user's approval. */
-export function AwaitingApprovalMark({ className }: { className?: string }) {
+export function AwaitingApprovalMark({
+  className,
+  label,
+}: {
+  className?: string;
+  label?: string;
+}) {
   const { t } = useI18n();
   return (
     <ShieldCheck
       className={cn("ml-auto size-3.5 shrink-0 text-primary", className)}
       role="img"
-      aria-label={t("awaitingApproval")}
+      aria-label={label ?? t("awaitingApproval")}
     />
+  );
+}
+
+export type StateBadgeState = "working" | "error" | "attention" | "unread";
+
+/**
+ * The state of a chat or coding thread, on the top right corner of its icon,
+ * opposite who started it. The icon's wrapper is `relative`. One mark shows at
+ * a time; `label` names an error or attention mark for screen readers.
+ */
+export function StateBadge({
+  state,
+  label,
+}: {
+  state: StateBadgeState | null;
+  label?: string;
+}) {
+  const { t } = useI18n();
+  if (!state) return null;
+  return (
+    <span className="-top-0.5 -right-1 absolute flex size-2.5 items-center justify-center">
+      {state === "working" ? (
+        <Loader2
+          className="size-2.5 animate-spin text-primary motion-reduce:animate-none"
+          role="img"
+          aria-label={t("working")}
+        />
+      ) : state === "error" ? (
+        <AlertCircle
+          className="size-2.5 text-destructive"
+          role="img"
+          aria-label={label}
+        />
+      ) : state === "attention" ? (
+        <AwaitingApprovalMark className="ml-0 size-2.5" label={label} />
+      ) : (
+        <span
+          className="size-1.5 rounded-full bg-link"
+          role="img"
+          aria-label={t("unreadResponse")}
+        />
+      )}
+    </span>
   );
 }
 
@@ -953,32 +1001,21 @@ function SessionRow({
     );
   }
 
-  // The state sits on the icon's top right corner, opposite who started the chat. Working takes priority: one mark shows at a time.
-  const stateMark = session.busy ? (
-    <Loader2
-      className="size-2.5 animate-spin text-primary motion-reduce:animate-none"
-      role="img"
-      aria-label={t("working")}
+  const stateBadge = (
+    <StateBadge
+      state={
+        session.busy
+          ? "working"
+          : session.held
+            ? "error"
+            : awaitingApproval
+              ? "attention"
+              : session.unread
+                ? "unread"
+                : null
+      }
+      label={session.held ? t("waitingToTryAgain") : undefined}
     />
-  ) : session.held ? (
-    <AlertCircle
-      className="size-2.5 text-destructive"
-      role="img"
-      aria-label={t("waitingToTryAgain")}
-    />
-  ) : awaitingApproval ? (
-    <AwaitingApprovalMark className="ml-0 size-2.5" />
-  ) : session.unread ? (
-    <span
-      className="size-1.5 rounded-full bg-link"
-      role="img"
-      aria-label={t("unreadResponse")}
-    />
-  ) : null;
-  const stateBadge = stateMark && (
-    <span className="-top-0.5 -right-1 absolute flex size-2.5 items-center justify-center">
-      {stateMark}
-    </span>
   );
 
   // Top left of the icon, clear of the state mark at the top right.

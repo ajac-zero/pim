@@ -1106,7 +1106,7 @@ describe("a coding subthread in the chat list", () => {
       </ul>
     ));
 
-  it("shows the harness mark, the task's first line, a status badge and a link to its page", async () => {
+  it("shows the harness mark, the task's first line, a state mark and a link to its page", async () => {
     row({
       harness: "codex",
       task: "Fix the flaky date test\nIt fails on Sundays.",
@@ -1116,14 +1116,14 @@ describe("a coding subthread in the chat list", () => {
     expect(link.getAttribute("href")).toBe("/coding/t1");
     expect(within(link).getByText("Fix the flaky date test")).toBeTruthy();
     expect(link.querySelector("svg[data-harness='codex']")).toBeTruthy();
-    expect(within(link).getByText("Running")).toBeTruthy();
+    expect(within(link).getByRole("img", { name: "Working" })).toBeTruthy();
   });
 
-  it("falls back to the repository for a title, and names each state's badge", async () => {
+  it("falls back to the repository for a title, and marks a thread waiting for the person", async () => {
     row({ task: "  ", state: "waiting_input" });
     const link = await screen.findByRole("link");
     expect(within(link).getByText("acme/widgets")).toBeTruthy();
-    expect(within(link).getByText("Waiting")).toBeTruthy();
+    expect(within(link).getByRole("img", { name: "Needs input" })).toBeTruthy();
   });
 
   it("is listed under the chat it was started from, by the list's own query", async () => {

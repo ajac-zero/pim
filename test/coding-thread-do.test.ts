@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyBrokerToken } from "../src/coding/git-broker/broker";
 import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
-import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, SNAPSHOT_MIN_SETUP_MS, snapshotWorthKeeping } from "../src/coding/environment-cache";
+import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, snapshotWorthKeeping } from "../src/coding/environment-cache";
 import { CONTINUE_TEXT, codingThread, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
@@ -529,6 +529,8 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		const { manager } = compose();
 		manager.backing.register("bash", async ({ cwd, workspace }) => {
 			await workspace.writeFile(`${cwd}/node_modules/.modules.yaml`, new TextEncoder().encode("installed\n"));
+			// Longer than the fake manager's 1-byte snapshot takes to restore, so it is kept (the clock stands still without a wait).
+			await new Promise((resolve) => setTimeout(resolve, 10));
 			return {};
 		});
 		const name = `Env-${crypto.randomUUID().slice(0, 8)}`;
@@ -807,15 +809,15 @@ describe("a coding thread's environment", () => {
 		expect((await stub.log()).find((event) => event.kind === "environment.failed")?.data).toMatchObject({ error: environment.error });
 	});
 
-	it("keeps a snapshot only when the setup was long or restoring it is expected to be quicker than the setup was", () => {
+	it("keeps a snapshot only when restoring it is expected to be quicker than the setup was", () => {
 		// 8 MB a second: 400 MB takes 50 s to restore.
 		expect(estimatedRestoreMs(400_000_000)).toBe(50_000);
 		expect(snapshotWorthKeeping(50_001, 400_000_000)).toBe(true);
 		expect(snapshotWorthKeeping(50_000, 400_000_000)).toBe(false);
 		expect(snapshotWorthKeeping(10_000, 355_000_000)).toBe(false);
-		// A long setup does more than install from the cache: kept whatever its size.
-		expect(snapshotWorthKeeping(SNAPSHOT_MIN_SETUP_MS, 4_000_000_000)).toBe(true);
-		expect(snapshotWorthKeeping(SNAPSHOT_MIN_SETUP_MS - 1, 4_000_000_000)).toBe(false);
+		// However long the setup, a restore that would take longer isn't kept.
+		expect(snapshotWorthKeeping(120_000, 4_000_000_000)).toBe(false);
+		expect(snapshotWorthKeeping(500_001, 4_000_000_000)).toBe(true);
 		// A backend that doesn't say how big it is keeps it, as before.
 		expect(snapshotWorthKeeping(0, null)).toBe(true);
 	});

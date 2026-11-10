@@ -79,9 +79,6 @@ export const MAX_SETUP_SCRIPT_BYTES = 64 * 1024;
 /** How long a setup script may run: as long as the coding tools' longest command. */
 export const SETUP_TIMEOUT_MS = 15 * 60_000;
 
-/** A setup that took at least this long is worth a snapshot whatever its size: such a setup does more than install from the dependency cache. */
-export const SNAPSHOT_MIN_SETUP_MS = 60_000;
-
 /** How fast a snapshot is taken to restore, in MB (10^6 bytes) of the stored snapshot a second: about what the first live restores did. */
 export const SNAPSHOT_RESTORE_MB_PER_S = 8;
 
@@ -91,14 +88,14 @@ export function estimatedRestoreMs(bytes: number): number {
 }
 
 /**
- * Whether a snapshot is worth keeping for the threads after it: when the
- * setup took `SNAPSHOT_MIN_SETUP_MS` or more, or restoring the snapshot is
- * expected to take less time than the setup did. A cheap setup is otherwise
- * run again by each thread, from the warm dependency cache. A snapshot of
- * unknown size is kept.
+ * Whether a snapshot is worth keeping for the threads after it: only when
+ * restoring it is expected to take less time than the setup did, so a
+ * restore is never slower than running the setup again (from the warm
+ * dependency cache). A snapshot whose backend doesn't report its size is
+ * kept, as before sizes were known.
  */
 export function snapshotWorthKeeping(setupMs: number, snapshotBytes: number | null): boolean {
-	return setupMs >= SNAPSHOT_MIN_SETUP_MS || snapshotBytes === null || estimatedRestoreMs(snapshotBytes) < setupMs;
+	return snapshotBytes === null || estimatedRestoreMs(snapshotBytes) < setupMs;
 }
 
 /** The most of a failure kept on the thread. */

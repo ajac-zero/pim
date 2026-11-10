@@ -117,12 +117,12 @@ It was built on an orb with Docker: `docker build -t pim-workspace:local workspa
 To roll it out on the sandbox host, from the repository's checkout there (here `~/pim-src`) with this change in it, in the same environment the stack was first started with (`MANAGER_TOKEN`, `PROXY_ADMIN_TOKEN` and `AGENTD_TOKEN_SECRET` exported or in `sandbox-manager/.env`):
 
 ```sh
-cd ~/pim-src && git pull && cd sandbox-manager && docker compose up -d --build
+cd ~/pim-src && git pull && sandbox-manager/up.sh
 docker run --rm --entrypoint vibe pim-workspace:local --version     # vibe 3.1.0
 docker run --rm --entrypoint codex pim-workspace:local --version    # codex-cli 0.167.0
 ```
 
-`up -d --build` rebuilds `pim-workspace:local` from `../workspace-agentd` (the `workspace-image` service) and recreates the containers whose image changed. `git pull` brings the change once it is on the branch the checkout follows; before that, `git fetch origin && git checkout review/coding-h2-vibe`. Workspaces that already exist keep the image they were made with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there.
+`up.sh` rebuilds `pim-workspace:local` from `../workspace-agentd` (the `workspace-image` service) and recreates the containers whose image changed, leaving the egress proxy alone unless it changed. `git pull` brings the change once it is on the branch the checkout follows; before that, `git fetch origin && git checkout review/coding-h2-vibe`. Workspaces that already exist keep the image they were made with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there.
 
 To move to a newer Vibe, change `VIBE_VERSION`, rebuild, and check `vibe --help` for the flags above, the untrusted checkout (a repository's hooks must not run), the `VIBE_*` settings (`vibe config schema`), and a run's output and export against `src/coding/harness/vibe.ts` and `test/fixtures/vibe/`.
 
@@ -136,4 +136,4 @@ The fixtures in `test/fixtures/vibe/` are real: the real `vibe` in the image, ru
 - Whether `cost_usd` counts compaction, which Vibe does on long sessions; the export says that `steps` doesn't.
 - Vibe under gVisor with the workspace's limits (`/tmp` is a 64 MiB `noexec` tmpfs there), and the egress proxy refusing `chat.mistral.ai` (checked only with a local proxy that refuses).
 - Tools reached through `run_typescript`, and their entries.
-- `docker compose up -d --build` on the sandbox host.
+- `sandbox-manager/up.sh` on the sandbox host.

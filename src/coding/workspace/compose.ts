@@ -4,6 +4,7 @@
 //
 // Routes used are the manager's own (sandbox-manager/README.md). What is worth knowing:
 // - Exec uses `/exec/stream`, so output arrives as the command prints it; aborting drops the connection, which makes the manager kill the command.
+// - Each exec has an id (`x-exec-id`). A stream that breaks without an exit, as when the manager restarts for a deploy, is read on from the event it stopped at (`GET /sessions/:id/exec/:execId/stream?after=n`) while the command keeps running; a manager or workspace that cannot do that answers 404, and the exec fails as before.
 // - The create body carries no repository, git auth or wall-clock limit, so the caller checks the repository out with exec and the manager's idle reaper bounds the lifetime. It carries `spec.environment`'s person and repository (`userId`, `repo`), which give the session its dependency cache volume and let it be snapshotted, and `restoreFrom`. It never says `hasRuntimeSecrets`: Pim puts no secrets in a workspace beyond a harness run, which removes them again, and snapshots one only before its first run.
 // - Environment snapshots are the manager's `/snapshots` (V1 environment caching), keyed by the caller.
 // - The manager's `stat` describes a symlink itself, while `Workspace.stat` follows it, so a symlink is resolved with `readlink -f` run through exec and its target is stat'ed, provided the target is inside /workspace. The workspace image ships coreutils.
@@ -98,6 +99,9 @@ export class ComposeManagerError extends Error {
 const MAX_TIMEOUT_MS = 7 * 24 * 60 * 60_000;
 const GRACE_MS = 15_000;
 const READLINK_TIMEOUT_MS = 10_000;
+/** How long a broken exec stream is retried for while the manager restarts; agentd keeps the command running for 10 minutes without a client. */
+const RESUME_MS = 5 * 60_000;
+const RESUME_BACKOFF_MS = [500, 1000, 2000, 5000];
 
 /** Whether a host is one where plain http is acceptable. */
 function isLocalHost(host: string): boolean {
@@ -175,7 +179,7 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	}
 
 	/** One request to the manager, tried again with exponential backoff and jitter when the manager can't be reached or answers 502, 503, 504, 408 or a rate limit, as it does while restarting; any other answer is returned at once, and after the last attempt so is the last answer or error. Network failures become an error that names no header. A request aborted through `signal` throws what `fetch` throws, for the caller to recognize. `retry: false` makes one attempt. */
-	async call(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean; retry?: boolean } = {}): Promise<Response> {
+	async call(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean; retry?: boolean; headers?: Record<string, string> } = {}): Promise<Response> {
 		const attempts = init.retry === false ? 1 : ATTEMPTS;
 		// A command may have run before its answer was lost, so exec is tried again only when the manager surely never took it: a refused connection or a gateway answer.
 		const exec = /\/exec(\/stream)?$/.test(path);
@@ -191,8 +195,8 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 		}
 	}
 
-	async #once(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean }): Promise<Response> {
-		const headers: Record<string, string> = {};
+	async #once(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean; headers?: Record<string, string> }): Promise<Response> {
+		const headers: Record<string, string> = { ...init.headers };
 		if (init.auth !== false) headers.authorization = `Bearer ${this.#token}`;
 		if (init.json !== undefined) headers["content-type"] = "application/json";
 		try {
@@ -320,22 +324,19 @@ class ComposeWorkspace implements Workspace {
 			silent = true;
 			controller.abort();
 		}, timeoutMs + GRACE_MS);
-		try {
-			const res = await this.provider.call("POST", `${this.base}/exec/stream`, {
-				json: { cmd, cwd: o.cwd ? absolute(o.cwd) : undefined, timeoutMs, stdin: o.stdin, env: o.env },
-				signal: controller.signal,
-			});
-			await this.provider.check(res);
+		const execId = crypto.randomUUID();
+		let received = 0;
+		let exited = false;
+		const parse = (line: string): ExecEvent | null => {
+			if (!line.trim()) return null;
+			const e = JSON.parse(line) as ExecEvent;
+			return e.type === "exit" ? { type: "exit", code: e.code, ...(e.signal ? { signal: e.signal } : {}), ...(e.timedOut ? { timedOut: true } : {}) } : e;
+		};
+		const read = async function* (res: Response): AsyncGenerator<ExecEvent> {
 			if (!res.body) throw new ComposeManagerError("The workspace manager sent no exec stream", 502);
 			const decoder = new TextDecoder();
 			const reader = res.body.getReader();
 			let buffer = "";
-			let exited = false;
-			const parse = (line: string): ExecEvent | null => {
-				if (!line.trim()) return null;
-				const e = JSON.parse(line) as ExecEvent;
-				return e.type === "exit" ? { type: "exit", code: e.code, ...(e.signal ? { signal: e.signal } : {}), ...(e.timedOut ? { timedOut: true } : {}) } : e;
-			};
 			for (;;) {
 				const { done, value } = await reader.read();
 				buffer += decoder.decode(value, { stream: !done });
@@ -345,12 +346,35 @@ class ComposeWorkspace implements Workspace {
 				for (const line of lines) {
 					const event = parse(line);
 					if (!event) continue;
+					received++;
 					if (event.type === "exit") exited = true;
 					yield event;
 				}
 				if (done) break;
 			}
-			if (!exited) throw new ComposeManagerError("The workspace manager's exec stream ended without an exit", 502);
+		};
+		try {
+			let res = await this.provider.call("POST", `${this.base}/exec/stream`, {
+				json: { cmd, cwd: o.cwd ? absolute(o.cwd) : undefined, timeoutMs, stdin: o.stdin, env: o.env },
+				headers: { "x-exec-id": execId },
+				signal: controller.signal,
+			});
+			await this.provider.check(res);
+			const retry = { until: 0, attempt: 0 };
+			for (;;) {
+				const before = received;
+				let broken: unknown = new ComposeManagerError("The workspace manager's exec stream ended without an exit", 502);
+				try {
+					yield* read(res);
+				} catch (error) {
+					if (controller.signal.aborted) throw error;
+					broken = error;
+				}
+				if (exited) return;
+				// A stream that got further starts the retries afresh; one that got nowhere waits longer each time.
+				if (received > before || retry.until === 0) Object.assign(retry, { until: Date.now() + RESUME_MS, attempt: 0 });
+				res = await this.#resume(execId, received, controller.signal, broken, retry);
+			}
 		} catch (error) {
 			if (silent) yield { type: "exit", code: null, signal: "SIGKILL", timedOut: true };
 			else if (o.signal?.aborted) yield aborted;
@@ -358,6 +382,30 @@ class ComposeWorkspace implements Workspace {
 		} finally {
 			clearTimeout(timer);
 			o.signal?.removeEventListener("abort", onAbort);
+		}
+	}
+
+	/** Reads on an exec whose stream broke after `after` events, through a manager that may be restarting: retried with a growing wait while the manager can't be reached or answers 5xx, until `retry.until`. Throws `cause` when the manager or the workspace no longer has the command. */
+	async #resume(execId: string, after: number, signal: AbortSignal, cause: unknown, retry: { until: number; attempt: number }): Promise<Response> {
+		for (;;) {
+			if (retry.attempt > 0) {
+				const wait = RESUME_BACKOFF_MS[Math.min(retry.attempt - 1, RESUME_BACKOFF_MS.length - 1)]!;
+				if (Date.now() + wait > retry.until) throw cause;
+				await new Promise<void>((resolve, reject) => {
+					const t = setTimeout(resolve, wait);
+					signal.addEventListener("abort", () => (clearTimeout(t), reject(signal.reason)), { once: true });
+				});
+			}
+			retry.attempt++;
+			let res: Response | null = null;
+			try {
+				res = await this.provider.call("GET", `${this.base}/exec/${execId}/stream?after=${after}`, { signal });
+			} catch (error) {
+				if (signal.aborted) throw error;
+			}
+			if (res?.ok) return res;
+			await res?.body?.cancel().catch(() => {});
+			if (res && res.status < 500) throw cause;
 		}
 	}
 

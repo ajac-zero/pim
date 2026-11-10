@@ -10,8 +10,15 @@ if [ -z "$BUILD_SHA" ] || [ "$BUILD_SHA" = unknown ]; then
   echo "up.sh: cannot determine the git commit to stamp into the image (set BUILD_SHA or run from a git checkout)" >&2
   exit 1
 fi
-export BUILD_SHA
-docker compose up -d --build "$@"
+# The egress proxy's image is tagged by a hash of its inputs and built only when that tag is new.
+# `docker compose up --build` would recreate it on every deploy, even from an identical image, which
+# cuts every running session's connections; `up --no-build` recreates only what changed.
+EGRESS_PROXY_TAG=$(sha256sum Dockerfile package.json src/proxy.js src/proxy-main.js | sha256sum | cut -c1-16)
+export BUILD_SHA EGRESS_PROXY_TAG
+# shellcheck disable=SC2046 # service names are single words
+docker compose build $(docker compose config --services | grep -vx egress-proxy)
+docker image inspect "pim-egress-proxy:$EGRESS_PROXY_TAG" >/dev/null 2>&1 || docker compose build egress-proxy
+docker compose up -d --no-build "$@"
 
 # Installs or updates hostopsd when it is missing or stale. The manager stack is already up, so
 # nothing here may fail the script: problems are warnings.

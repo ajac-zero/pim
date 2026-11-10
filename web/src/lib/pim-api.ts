@@ -12,6 +12,8 @@ export type Session = {
   busy: boolean;
   /** Its run waits for you to try again after a model error: not at work. */
   held?: boolean;
+  /** What failed, when `held`. */
+  error?: string | null;
   createdAt: number | null;
   updatedAt: number | null;
   responseAt: number | null;

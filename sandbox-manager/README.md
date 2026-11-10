@@ -221,7 +221,7 @@ starting session are never deleted.
   validated numbers. Request bodies with any other field (binds, privileged, capAdd,
   networkMode, devices, ...) are rejected, and the image must be in `ALLOWED_IMAGES`. The
   container runs the image's entrypoint (agentd) as 10001 with a read-only rootfs, all
-  capabilities dropped, no-new-privileges, pid, memory and CPU limits, a 64 MiB `/tmp` tmpfs, a
+  capabilities dropped, no-new-privileges, pid, memory and CPU limits, a 64 MiB `/tmp` tmpfs (exec allowed: Bun single-file CLIs such as Amp dlopen an addon they unpack there; nosuid, nodev), a
   per-session labelled volume at `/workspace`, no binds and no published ports.
 - **agentd tokens.** Each container gets its own `AGENTD_TOKEN`:
   HMAC-SHA256(`AGENTD_TOKEN_SECRET`, sessionId + a random nonce). The nonce is a container

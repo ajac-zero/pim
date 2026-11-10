@@ -36,6 +36,9 @@ export const AMP_FLAGS: readonly string[] = ["--stream-json", "--no-ide", "--no-
 /** Amp's own modes, which pick its model, prompt and tools; a thread's model names one, or is Amp's default. */
 export const AMP_MODES = ["low", "medium", "high", "ultra"] as const;
 
+/** Where Amp (a Bun binary) may unpack and dlopen its addon: the sandbox's /tmp is noexec, the workspace volume is not. Outside the checkout (`repo/`). */
+export const AMP_TMPDIR = `${HARNESS_HOME}/.cache/amp-tmp`;
+
 /** The CLI's log, named by the session so the turn's process can be found by it. */
 export const ampLogFile = (sessionId: string) => `${HARNESS_HOME}/.cache/amp/logs/pim-${sessionId}.log`;
 
@@ -49,6 +52,13 @@ export const amp: CliHarness = {
 		const mode = turn.model?.toLowerCase() ?? null;
 		if (mode !== null && !(AMP_MODES as readonly string[]).includes(mode)) throw new Error(`Amp has no mode "${turn.model}": ask for ${AMP_MODES.join(", ")}`);
 		return [
+			// The `amp` binary is a Bun single-file executable that unpacks a native addon into the temp dir and dlopens
+			// it; the sandbox's /tmp is `noexec`, so that fails (ERR_DLOPEN_FAILED). AMP_TMPDIR (below) is an exec-allowed
+			// directory on the workspace volume, outside the checkout, created here.
+			"sh",
+			"-c",
+			'mkdir -p "$TMPDIR" && exec "$@"',
+			"amp",
 			"amp",
 			...(turn.resume ? ["threads", "continue", turn.sessionId] : []),
 			...AMP_FLAGS,
@@ -68,7 +78,7 @@ export const amp: CliHarness = {
 	reportsCost: false,
 	shellTool: "shell_command",
 	// The managed settings turn update checks off too; this also stops the check `amp update` would make.
-	env: { AMP_SKIP_UPDATE_CHECK: "1" },
+	env: { AMP_SKIP_UPDATE_CHECK: "1", TMPDIR: AMP_TMPDIR, BUN_TMPDIR: AMP_TMPDIR },
 	// ampcode.com: the API, its threads and inference; `*.ampcode.com` (subdomains only, as the egress proxy reads it):
 	// static.ampcode.com and Amp's other hosts.
 	egress: ["ampcode.com", "*.ampcode.com"],

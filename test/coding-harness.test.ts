@@ -639,7 +639,7 @@ function scripted(script: Script, files = new Map<string, string>()) {
 				yield { type: "exit", code: 0 };
 				return;
 			}
-			const name = cmd[0] === "/bin/sh" ? cmd[7] : cmd[0];
+			const name = cmd[0] === "/bin/sh" ? cmd[7] : cmd[0] === "sh" ? cmd[4] : cmd[0];
 			if (name !== "claude" && name !== "codex" && name !== "amp" && name !== "vibe") throw new Error(`no ${cmd[0]}`);
 			log.push(name);
 			yield* script(options, signals);
@@ -1206,6 +1206,10 @@ describe("Amp's command line", () => {
 	it("starts a private thread in execute mode with stream-json, Pim's instructions opening its first message, and nothing past the workspace", () => {
 		const cmd = amp.buildCommand({ ...TURN, sessionId: NEW });
 		expect(cmd).toEqual([
+			"sh",
+			"-c",
+			'mkdir -p "$TMPDIR" && exec "$@"',
+			"amp",
 			"amp",
 			"--stream-json",
 			"--no-ide",
@@ -1223,10 +1227,16 @@ describe("Amp's command line", () => {
 		expect(help).toContain("continue                           [alias: c] Continue an existing thread");
 		expect(help).toContain("AMP_API_KEY");
 		expect(ampLogFile(NEW)).toContain(NEW);
+		// Bun unpacks its addon into the temp dir and dlopens it: not the noexec /tmp.
+		expect(amp.env).toMatchObject({ TMPDIR: "/workspace/.cache/amp-tmp", BUN_TMPDIR: "/workspace/.cache/amp-tmp" });
 	});
 
 	it("goes on with Amp's thread after the first turn, asks for one of Amp's modes, and keeps a prompt that looks like a flag a prompt", () => {
 		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true, prompt: "--help me" })).toEqual([
+			"sh",
+			"-c",
+			'mkdir -p "$TMPDIR" && exec "$@"',
+			"amp",
 			"amp",
 			"threads",
 			"continue",

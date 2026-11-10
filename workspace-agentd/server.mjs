@@ -4,7 +4,7 @@ import { createReadStream, mkdirSync, promises as fs } from 'node:fs'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { HttpError } from './errors.mjs'
-import { runExec, parseExec } from './exec.mjs'
+import { attach, EXEC_ID, runExec, parseExec } from './exec.mjs'
 import * as files from './files.mjs'
 import { makeResolver } from './paths.mjs'
 
@@ -40,7 +40,7 @@ function parseMode(value) {
 	return Number.parseInt(value, 8)
 }
 
-// Builds the HTTP server. `config` is { token, root, maxOutputBytes, maxBodyBytes }.
+// Builds the HTTP server. `config` is { token, root, maxOutputBytes, maxBodyBytes, detachGraceMs }.
 export async function createAgentd(config) {
 	if (!config.token) throw new Error('AGENTD_TOKEN is required')
 	const resolver = await makeResolver(config.root ?? '/workspace')
@@ -51,6 +51,9 @@ export async function createAgentd(config) {
 	// Commands never inherit the token, so it cannot end up in their output or logs.
 	const { AGENTD_TOKEN: _, ...baseEnv } = process.env
 	let activeExecs = 0
+	// Execs started with an id, by id: running ones, and finished ones for a while (see exec.mjs).
+	const execs = new Map()
+	const detachMs = config.detachGraceMs ?? 10 * 60_000
 
 	async function handle(req, res) {
 		const given = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1] ?? ''
@@ -62,6 +65,18 @@ export async function createAgentd(config) {
 		const needPath = () => {
 			if (p === null) throw new HttpError(400, 'bad_request', 'path is required')
 			return p
+		}
+
+		const em = /^\/exec\/([^/]+)$/.exec(url.pathname)
+		if (em) {
+			const run = EXEC_ID.test(em[1]) && execs.get(em[1])
+			if (!run) throw new HttpError(404, 'exec_not_found', 'no such exec, or it ended too long ago')
+			if (req.method === 'GET') return attach(run, res, Number(url.searchParams.get('after') ?? 0))
+			if (req.method === 'DELETE') {
+				if (!run.finished) run.kill()
+				return sendJson(res, 200, { ok: true })
+			}
+			throw new HttpError(405, 'method_not_allowed', `no route ${route}`)
 		}
 
 		switch (route) {
@@ -91,6 +106,8 @@ export async function createAgentd(config) {
 					maxOutputBytes,
 					onStart: () => activeExecs++,
 					onEnd: () => activeExecs--,
+					execs,
+					detachMs,
 				})
 			}
 			case 'GET /file': {
@@ -151,6 +168,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		root: env.AGENTD_ROOT || '/workspace',
 		maxOutputBytes: env.AGENTD_MAX_OUTPUT_BYTES ? Number(env.AGENTD_MAX_OUTPUT_BYTES) : undefined,
 		maxBodyBytes: env.AGENTD_MAX_BODY_BYTES ? Number(env.AGENTD_MAX_BODY_BYTES) : undefined,
+		detachGraceMs: env.AGENTD_DETACH_GRACE_MS ? Number(env.AGENTD_DETACH_GRACE_MS) : undefined,
 	})
 	const port = Number(env.AGENTD_PORT || 8787)
 	server.listen(port, '0.0.0.0', () => console.log(`agentd ${VERSION} listening on :${port}`))

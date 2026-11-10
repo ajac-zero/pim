@@ -360,7 +360,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				state: "provisioning",
 				createdBy: input.createdBy,
 				parentThread: input.parent ?? null,
-				limits: { ...DEFAULT_LIMITS, ...input.limits },
+				limits: threadLimits(repo.fullName, input.limits),
 				budgetUsd,
 				startOperation: input.operationId,
 			});
@@ -1866,6 +1866,18 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 const NO_BACKEND = "none";
 
 const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 10_240, pids: 1024, wallClockMin: 240 };
+
+/** Limits for repositories that need more than the defaults, keyed by lowercase `owner/name`. */
+const REPO_LIMIT_OVERRIDES: Record<string, Partial<CodingLimits>> = {
+	"ajac-zero/pim": { memMiB: 6144 },
+};
+
+/** A thread's limits: the defaults, then its repository's overrides, then what the caller asked for. */
+export const threadLimits = (repoFullName: string, requested?: Partial<CodingLimits>): CodingLimits => ({
+	...DEFAULT_LIMITS,
+	...REPO_LIMIT_OVERRIDES[repoFullName.toLowerCase()],
+	...requested,
+});
 
 /** The most tokens one model answer may have: the model's own limit, up to this. */
 const MAX_OUTPUT_TOKENS = 32_000;

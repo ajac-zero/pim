@@ -136,6 +136,14 @@ needs `recursive=1` (otherwise 409). `stat` describes a symlink itself rather th
 
 Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–2048.
 
+Coding threads start from the defaults in `src/coding/thread-do.ts` (4096 MiB of memory), then apply
+per-repository overrides (`REPO_LIMIT_OVERRIDES`, keyed by lowercase `owner/name`; `ajac-zero/pim` gets
+6144 MiB), then any limits the caller passed.
+
+The workspace image has pnpm preinstalled (pinned by `PNPM_VERSION`), and `npm install -g` writes to
+`/home/workspace/.npm-global`. npm and pnpm honor the egress proxy environment; corepack does not, so
+it is not used.
+
 ## Security model
 
 - **gVisor is mandatory.** Startup checks that `/info` lists `runsc` and that a probe container

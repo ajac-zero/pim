@@ -18,8 +18,15 @@ RUN UV_PYTHON_INSTALL_DIR=/opt/vibe/python UV_TOOL_DIR=/opt/vibe/tools UV_TOOL_B
 FROM node:22-bookworm-slim
 
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends git ripgrep build-essential ca-certificates tini procps \
+	&& apt-get install -y --no-install-recommends git ripgrep build-essential ca-certificates tini procps time \
 	&& rm -rf /var/lib/apt/lists/*
+
+# pnpm, pinned to the repository's `packageManager` field, so large pnpm repositories build without corepack:
+# corepack ignores the egress proxy, and /usr/local/bin is read-only at run time.
+ARG PNPM_VERSION=12.0.0
+RUN npm install -g "pnpm@${PNPM_VERSION}" \
+	&& npm cache clean --force \
+	&& pnpm --version
 
 # Claude Code's CLI, unmodified, for coding threads whose harness is `claude-code` (docs/coding-claude-code.md).
 # Pinned: bump the version on purpose, after checking its flags and stream-json against src/coding/harness/claude-code.ts.
@@ -61,6 +68,10 @@ RUN groupadd --gid 10001 workspace \
 	&& useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash workspace \
 	&& mkdir -p /workspace /opt/agentd \
 	&& chown workspace:workspace /workspace
+
+# A global prefix the runtime user can write, so `npm install -g` works at run time; the pinned CLIs above stay in /usr/local/bin.
+RUN mkdir -p /home/workspace/.npm-global && chown 10001:10001 /home/workspace/.npm-global
+ENV NPM_CONFIG_PREFIX=/home/workspace/.npm-global PATH=/home/workspace/.npm-global/bin:$PATH
 
 COPY --chown=root:root *.mjs package.json /opt/agentd/
 

@@ -39,6 +39,11 @@ export const AMP_MODES = ["low", "medium", "high", "ultra"] as const;
 export const AMP_DEFAULT_MODE = "medium";
 
 /** Where Amp (a Bun binary) may unpack and dlopen its addon: the sandbox's /tmp is noexec, the workspace volume is not. Outside the checkout (`repo/`). */
+/** Makes a thread continuable again; its failure (not archived, unknown) is ignored by the `;` that follows it. */
+const unarchive = (id: string) => {
+	if (!/^[\w-]+$/.test(id)) throw new Error("Amp thread ids are letters, digits and dashes");
+	return `amp threads archive ${id} --unarchive >/dev/null 2>&1`;
+};
 export const AMP_TMPDIR = `${HARNESS_HOME}/.cache/amp-tmp`;
 
 /** The CLI's log, named by the session so the turn's process can be found by it. */
@@ -59,7 +64,9 @@ export const amp: CliHarness = {
 			// directory on the workspace volume, outside the checkout, created here.
 			"sh",
 			"-c",
-			'mkdir -p "$TMPDIR" && exec "$@"',
+			// A continued thread may be archived (an older run, or Amp's own default after `--execute`): unarchive it
+			// first, ignoring failure (it may not be archived), so `continue` never stops at "archived and cannot be continued".
+			turn.resume ? `mkdir -p "$TMPDIR" && ${unarchive(turn.sessionId)}; exec "$@"` : 'mkdir -p "$TMPDIR" && exec "$@"',
 			"amp",
 			"amp",
 			...(turn.resume ? ["threads", "continue", turn.sessionId] : []),

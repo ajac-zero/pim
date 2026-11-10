@@ -1282,7 +1282,7 @@ describe("Amp's command line", () => {
 		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true, prompt: "--help me" })).toEqual([
 			"sh",
 			"-c",
-			'mkdir -p "$TMPDIR" && exec "$@"',
+			`mkdir -p "$TMPDIR" && amp threads archive ${AMP_SESSION} --unarchive >/dev/null 2>&1; exec "$@"`,
 			"amp",
 			"amp",
 			"threads",
@@ -1293,6 +1293,9 @@ describe("Amp's command line", () => {
 			`/workspace/.cache/amp/logs/pim-${AMP_SESSION}.log`,
 			"--execute=--help me",
 		]);
+		// A thread Amp archived ("This thread is archived and cannot be continued") is unarchived first, whatever that command says; the continue also carries --no-archive-after-execute.
+		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true })).toContain("--no-archive-after-execute");
+		expect(() => amp.buildCommand({ ...TURN, sessionId: "x; rm -rf /", resume: true })).toThrow();
 		// A new thread with a mode in its profile uses that mode.
 		expect(amp.buildCommand({ ...TURN, sessionId: NEW, model: "High" })).toEqual(expect.arrayContaining(["--mode", "high"]));
 		// A new thread without a mode gets medium explicitly.

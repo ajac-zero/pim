@@ -1850,8 +1850,10 @@ describe("an Amp thread", () => {
 		// A steer is the next turn, which goes on with Amp's thread.
 		await stub.steer("Also add a test for an empty name", { operationId: "steer-1" });
 		await turns(id, 2);
-		expect(runs[1]!.argv.slice(0, 4)).toEqual(["amp", "threads", "continue", AMP_SESSION]);
-		expect(runs[1]!.argv.at(-1)).toBe("--execute=Also add a test for an empty name");
+		// Amp's thread is unarchived first (it may have archived itself after `--execute`), then continued.
+		expect(runs[1]!.argv.slice(0, 5)).toEqual(["amp", "threads", "archive", AMP_SESSION, "--unarchive"]);
+		expect(runs[2]!.argv.slice(0, 4)).toEqual(["amp", "threads", "continue", AMP_SESSION]);
+		expect(runs[2]!.argv.at(-1)).toBe("--execute=Also add a test for an empty name");
 		// The key is nowhere in the thread's tables, its log or its transcript.
 		expect(await everything(stub)).not.toContain("THREADKEY");
 		expect(JSON.stringify(await stub.log())).not.toContain("THREADKEY");

@@ -163,6 +163,33 @@ describe("A person's own model providers", () => {
 		expect(roles.every((role: string, index: number) => role !== "system" || roles[index + 1] === undefined || roles[index + 1] === "assistant" || roles[index + 1] === "system")).toBe(true);
 	});
 
+	it.each(["a custom Claude endpoint", "the built-in Anthropic provider"])("keeps a system update off the user's turn when an empty Claude answer followed it, on %s", async (where) => {
+		const models = createModels();
+		let model;
+		if (where === "a custom Claude endpoint") {
+			models.setProvider(piProvider("own:proxy", await prepareProvider({ name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set())));
+			model = models.getModel("own:proxy", "claude-sonnet-5-5")!;
+		} else {
+			models.setProvider(piProvider("own:anthropic", await prepareProvider({ builtin: "anthropic", key: "sk-test", models: ["claude-opus-4-8"] } as never, null, new Set())));
+			model = models.getModel("own:anthropic", "claude-opus-4-8")!;
+		}
+		const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
+		const update = { role: "system" as const, content: "The tools changed.", timestamp: 1 };
+		// Both answers came from Claude itself, so nothing about them is converted on the way.
+		const claude = (message: ReturnType<typeof fauxAssistantMessage>) => ({ ...message, provider: model.provider, api: "anthropic-messages" as const, model: model.id });
+		const answer = claude(fauxAssistantMessage("Hello"));
+		for (const empty of [fauxAssistantMessage([], { stopReason: "error", errorMessage: "overloaded" }), fauxAssistantMessage([{ type: "text", text: "  " }]), fauxAssistantMessage([{ type: "thinking", thinking: "", thinkingSignature: " " }])].map(claude)) {
+			await models.completeSimple(model, { systemPrompt: "Be helpful.", messages: [user("Hi"), answer, update, empty, user("Again")] });
+			const sent: { role: string; content: unknown }[] = calls.at(-1)!.body.messages;
+			sent.forEach((message, index) => {
+				if (message.role === "system") expect(sent[index + 1]?.role).not.toBe("user");
+			});
+			// A system update may end the array, and then a user message must still be there.
+			expect(sent.some((message) => message.role === "user")).toBe(true);
+			expect(sent.filter((message) => message.role === "user")).toHaveLength(2);
+		}
+	});
+
 	it.each(BUILTINS)("connects %s with a key and chosen models, and delivers messages through its native API (%s)", async (builtin, id, endpoint, header) => {
 		const catalog = await api("/providers/built-in");
 		expect(catalog.status).toBe(200);

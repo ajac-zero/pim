@@ -368,20 +368,30 @@ function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>
 	return (model, context, options) => lazyStream(model, async () => {
 		const known = (await knownModels()).get(model.id);
 		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : model;
-		return stream(catalogued, withoutEmptyAnswers(context), withoutThinkingMidToolRound(context, options));
+		return stream(catalogued, withoutEmptyAnswers(context, catalogued), withoutThinkingMidToolRound(context, options));
 	});
 }
 
 /**
- * Another provider's answer that is only encrypted reasoning says nothing once sent to Claude, so the request drops it.
- * Left in, it comes out as an empty turn, and the system message pi-ai holds back for the next answer lands before a
- * user message instead, which Claude refuses: "role 'system' must precede an 'assistant' message or end the array".
+ * An answer that says nothing is dropped from a request, because it comes out as an empty turn and the system message
+ * pi-ai holds back for the next answer then lands before a user message instead, which Claude refuses: "role 'system'
+ * must precede an 'assistant' message or end the array". Another provider's answer that is only encrypted reasoning is
+ * one; an errored or aborted turn, or one of blank text, is another, whichever provider made it. For Claude's own API
+ * the test is pi-ai's: an answer is kept when it has a tool call, text, or reasoning that is redacted, signed or not blank.
+ * Other APIs keep the answers they always did, which are Claude's own.
  */
-function withoutEmptyAnswers<C extends { messages: Context["messages"] }>(context: C): C {
-	const says = (message: Context["messages"][number]) =>
-		message.role !== "assistant" ||
-		message.api === "anthropic-messages" ||
-		message.content.some((block) => block.type === "toolCall" || (block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : "").trim() !== "");
+function withoutEmptyAnswers<C extends { messages: Context["messages"] }>(context: C, model: Model<Api>): C {
+	const says = (message: Context["messages"][number]) => {
+		if (message.role !== "assistant") return true;
+		if (model.api !== "anthropic-messages") return message.api === "anthropic-messages" || message.content.some((block) => block.type === "toolCall" || (block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : "").trim() !== "");
+		// Reasoning is only sent back, signed or redacted, to the model that made it; another model's is sent as text.
+		const same = message.provider === model.provider && message.api === model.api && message.model === model.id;
+		return message.content.some(
+			(block) =>
+				block.type === "toolCall" ||
+				(block.type === "text" ? block.text.trim() !== "" : (same && (block.redacted === true || !!block.thinkingSignature?.trim())) || block.thinking.trim() !== ""),
+		);
+	};
 	return context.messages.every(says) ? context : { ...context, messages: context.messages.filter(says) };
 }
 
@@ -419,7 +429,7 @@ function nativeStream<T extends StreamOptions>(stream: StreamFunction<Api, T>, b
 				return message.provider === builtin ? { ...message, provider: `other:${builtin}` } : message;
 			}),
 		};
-		for await (const event of stream(native, transcript, options)) {
+		for await (const event of stream(native, model.api === "anthropic-messages" ? withoutEmptyAnswers(transcript, native) : transcript, options)) {
 			if (event.type === "done") yield { ...event, message: { ...event.message, provider: model.provider } };
 			else if (event.type === "error") yield { ...event, error: { ...event.error, provider: model.provider } };
 			else yield { ...event, partial: { ...event.partial, provider: model.provider } };

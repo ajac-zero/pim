@@ -1500,6 +1500,35 @@ export class Pim extends DurableAgent<Env> {
 		return { id, status: approval.status };
 	}
 
+	/**
+	 * Asks the person to approve opening a pull request from a coding thread's
+	 * pushed branch, from the API: an approval of the `coding_open_pull_request`
+	 * action (src/extensions/coding.ts), as `codingRequestPush` files one for a
+	 * push. Asking again for the same pull request is the same approval.
+	 */
+	async codingRequestPullRequest(threadId: string, pull: { title: string; body: string; base: string; summary: string }): Promise<{ id: string; status: ApprovalStatus }> {
+		this.#assertOpen();
+		const id = `cpr-${(await digestHex(`${threadId}\n${pull.base}\n${pull.title}\n${pull.body}`)).slice(0, 32)}`;
+		const known = this.store.approval(id);
+		if (known) return { id, status: known.status };
+		const approval = this.store.requestApproval({
+			id,
+			session: `coding:${threadId}`,
+			callId: null,
+			action: "coding_open_pull_request",
+			tool: null,
+			args: { thread_id: threadId, title: pull.title, body: pull.body, base: pull.base },
+			summary: pull.summary,
+			createdAt: Date.now(),
+			expiresAt: null,
+			onTimeout: "deny",
+		});
+		this.broadcastMessage({ type: "approval", approval: this.#publicApproval(approval) });
+		const notification = this.store.addNotification({ id: crypto.randomUUID(), session: null, title: "Pim needs your approval", body: approval.summary });
+		await this.deliverNotification(notification, { sockets: false });
+		return { id, status: approval.status };
+	}
+
 	/** The space's coding harness logins (src/coding/vault), made on first use. */
 	#codingVaultStore: VaultStore | null = null;
 

@@ -295,10 +295,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return deploymentGitHubApp(this.env);
 	}
 
-	/** The deployment's git providers, which reach their hosts with `githubFetch`. */
+	/** The deployment's git providers, which reach their hosts with `githubFetch`, and GitHub with `githubApp`. */
 	#providers() {
 		const fetch = this.githubFetch();
-		return deploymentProviders(this.env, fetch ? { fetch } : {});
+		return deploymentProviders(this.env, { app: this.githubApp(), ...(fetch ? { fetch } : {}) });
 	}
 
 	/**
@@ -469,6 +469,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			createdAt: thread.createdAt,
 			updatedAt: thread.updatedAt,
 			consecutiveInterrupts: thread.consecutiveInterrupts,
+			pullRequest: thread.pullRequest,
 		};
 	}
 
@@ -852,6 +853,59 @@ export class CodingThreadDO extends DurableObject<Env> {
 					if (attempt > 0) return { ok: false, message: `${defaultBranch} moved again while merging; nothing was pushed to it. Ask to merge again.` };
 				}
 			}
+		} catch (error) {
+			return { ok: false, message: error instanceof GitBrokerNotConfiguredError ? GITHUB_APP_NOT_CONFIGURED : errorText(error) };
+		}
+	}
+
+	/**
+	 * Readies a pull request from the thread's pushed branch into its base
+	 * branch (the one it started from, or the default branch when it started
+	 * from a commit), for the person to approve: the provider is set up
+	 * (GitHub's App, or the connected Gitea account) and Pim has pushed the
+	 * branch. `title` and `body` default to the thread's task. Nothing is
+	 * opened yet. Says why not, as a code, when it can't.
+	 */
+	async preparePullRequest(input: { title?: string; body?: string } = {}): Promise<PullRequestPreparation> {
+		await this.lifecycle.start();
+		const thread = this.store.required();
+		const blocker = await this.#pushBlocker(thread);
+		if (blocker) return { ok: false, ...blocker };
+		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
+		if (!this.store.hasPushed(thread.branch)) return { ok: false, code: "not_pushed", message: `${thread.branch} hasn't been pushed: push the thread's branch first, then open the pull request` };
+		try {
+			const provider = this.#providers().get(thread.providerInstance);
+			const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env)).fullName;
+			const base = /^[0-9a-f]{40}$/i.test(thread.baseRef) || thread.baseRef === "main" ? await this.#defaultBranch(thread) : thread.baseRef;
+			const task = (await codingScheduler(this.env, thread.space).thread(thread.threadId))?.task ?? thread.branch;
+			const title = input.title?.trim() || (task.split("\n")[0]!.trim().slice(0, 100) || thread.branch);
+			const body = input.body ?? `${task.length > 2000 ? `${task.slice(0, 2000)}…` : task}\n\n---\nOpened by Pim from a coding thread.`;
+			return { ok: true, request: { title, body, base, summary: `Open a pull request from ${thread.branch} into ${base} of ${new URL(provider.instance.baseUrl).host}/${repo}: ${title}` } };
+		} catch (error) {
+			return { ok: false, code: "conflict", message: errorText(error) };
+		}
+	}
+
+	/**
+	 * Opens what the person approved (`preparePullRequest`'s request) through
+	 * the thread's provider, which answers with the open pull request from the
+	 * branch if there is one already. The URL and number are kept on the
+	 * thread, and the log records it.
+	 */
+	async openPullRequest(approved: { title: string; body: string; base: string }): Promise<{ ok: true; result: { repo: string; url: string; number: number; base: string; head: string } } | { ok: false; message: string }> {
+		await this.lifecycle.start();
+		const thread = this.store.required();
+		const blocker = await this.#pushBlocker(thread);
+		if (blocker) return { ok: false, message: blocker.message };
+		if (thread.state === "archived") return { ok: false, message: "This coding thread is archived" };
+		if (!this.store.hasPushed(thread.branch)) return { ok: false, message: `${thread.branch} hasn't been pushed: push the thread's branch first, then open the pull request` };
+		try {
+			const provider = this.#providers().get(thread.providerInstance);
+			const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
+			const { url, number } = await provider.createPullRequest({ repo, head: thread.branch, base: approved.base, title: approved.title, body: approved.body });
+			this.store.update({ pullRequest: { url, number } });
+			this.store.recordEvent("thread.pull_request", { repo: repo.fullName, branch: thread.branch, base: approved.base, url, number });
+			return { ok: true, result: { repo: repo.fullName, url, number, base: approved.base, head: thread.branch } };
 		} catch (error) {
 			return { ok: false, message: error instanceof GitBrokerNotConfiguredError ? GITHUB_APP_NOT_CONFIGURED : errorText(error) };
 		}
@@ -2268,6 +2322,8 @@ export type CodingThreadStatus = {
 	readonly updatedAt: number;
 	/** How many consecutive interruptions have been auto-resumed for this thread. */
 	readonly consecutiveInterrupts: number;
+	/** The pull request opened from its branch; null until one is. */
+	readonly pullRequest: { readonly url: string; readonly number: number } | null;
 };
 
 export type CodingDiff = { readonly since: string | null; readonly head: string | null; readonly diff: string; readonly truncated: boolean };
@@ -2373,6 +2429,11 @@ export const GITHUB_APP_NOT_CONFIGURED = "GitHub App not configured: ask the Pim
 export type PushPreparation =
 	| { readonly ok: true; readonly request: PushApprovalRequest & { readonly checkpoint: string } }
 	| { readonly ok: false; readonly code: "github_app_not_configured" | "push_refused" | "archived" | "nothing_to_push" | "workspace_not_running" | "conflict"; readonly message: string };
+
+/** A pull request readied for the person to approve; or why it can't be. */
+export type PullRequestPreparation =
+	| { readonly ok: true; readonly request: { readonly title: string; readonly body: string; readonly base: string; readonly summary: string } }
+	| { readonly ok: false; readonly code: "github_app_not_configured" | "archived" | "not_pushed" | "conflict"; readonly message: string };
 
 /** A merge readied for the person to approve, with the checkpoint it is of; or why it can't be. */
 export type MergePreparation =

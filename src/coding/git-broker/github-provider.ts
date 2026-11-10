@@ -65,9 +65,24 @@ export class GitHubProvider implements GitProvider {
 		} catch {
 			throw new GitBrokerError(502, "GitHub couldn't be reached");
 		}
-		if (!response.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${response.status} when opening a pull request on ${repo.fullName}`);
-		const made = (await response.json()) as { html_url?: unknown; number?: unknown };
-		if (typeof made.html_url !== "string" || typeof made.number !== "number") throw new GitBrokerError(502, "GitHub's pull request answer was malformed");
-		return { url: made.html_url, number: made.number };
+		let made: unknown;
+		if (response.ok) made = await response.json();
+		else {
+			// 422 is also GitHub's answer when a pull request from the branch is open already: find it, so asking again is the same pull request.
+			if (response.status === 422) {
+				try {
+					const listed = await this.#fetch(`${GITHUB_API}/repos/${repo.owner}/${repo.name}/pulls?state=open&head=${encodeURIComponent(`${repo.owner}:${head}`)}&base=${encodeURIComponent(base)}`, {
+						headers: apiHeaders(`Bearer ${credential.token}`),
+						redirect: "manual",
+						signal: AbortSignal.timeout(30_000),
+					});
+					if (listed.ok) made = ((await listed.json()) as unknown[])[0];
+				} catch {}
+			}
+			if (!made) throw new GitBrokerError(502, `GitHub answered HTTP ${response.status} when opening a pull request on ${repo.fullName}`);
+		}
+		const { html_url: url, number } = made as { html_url?: unknown; number?: unknown };
+		if (typeof url !== "string" || typeof number !== "number") throw new GitBrokerError(502, "GitHub's pull request answer was malformed");
+		return { url, number };
 	}
 }

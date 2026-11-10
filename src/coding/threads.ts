@@ -106,7 +106,7 @@ const creatorId = (space: string, creator: CodingCreator) => (creator.type === "
 export async function startThread(env: Env, space: string, input: Partial<StartCodingThread>, createdBy: CodingCreator): Promise<{ view: CodingThreadView; created: boolean }> {
 	const task = typeof input.task === "string" ? input.task.trim() : "";
 	if (!task) throw invalid("A coding thread needs a task");
-	if (typeof input.repo !== "string") throw invalid("repo must be https://github.com/<owner>/<name>");
+	if (typeof input.repo !== "string") throw invalid("repo must be a repository address, such as https://github.com/<owner>/<name>");
 	let repo: string;
 	try {
 		const resolved = deploymentProviders(env).resolveUrl(input.repo, brokerPolicy(env));

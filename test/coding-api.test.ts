@@ -17,6 +17,7 @@ import type { Approval } from "../src/store";
 import { CODING_EVENT } from "../src/transcript";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
+import { installed } from "./fixtures/repos";
 import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, codingWorkspaces, faux } from "./worker";
 
 // The API and the agents' tools over real coding threads: each works in the in-memory workspace with a fake git and the
@@ -299,7 +300,7 @@ describe("the coding threads API", () => {
 		const environment = (await view(thread.id)).environment;
 		expect(environment).toMatchObject({ state: "cached", source: "settings", key: expect.stringMatching(/^[0-9a-f]{64}$/) });
 		expect((await api<CodingEnvironment>(`/coding/threads/${thread.id}/environment`)).body).toEqual(environment);
-		expect(scripts).toEqual(["mise use --global --yes go@1.22", "pnpm install --frozen-lockfile\n"]);
+		expect(scripts).toEqual([installed("go@1.22"), "pnpm install --frozen-lockfile\n"]);
 		// An agent's coding_status shows every field that says something, its timings, toolchains and check commands included, and whether it came from a cached snapshot.
 		let told = "";
 		faux.setResponses([

@@ -318,10 +318,34 @@ export function provisionPlan(profile: RepoProfile): ProvisionStep[] {
 	for (const each of profile.toolchains) {
 		const id = stepOf(each);
 		if (id === null || id === "mise") continue;
-		steps.push({ id, kind: "toolchain", tool: each.tool, script: `mise use --global --yes ${miseName(each.tool, each.version!)}@${each.version}`, needs: [] });
+		const install = `mise use --global --yes ${miseName(each.tool, each.version!)}@${each.version}`;
+		steps.push({ id, kind: "toolchain", tool: each.tool, script: [install, ...(each.tool === "pnpm" ? [pnpmPostinstall(each.version!)] : []), verifyTool(each.tool)].join(" && "), needs: [] });
 	}
 	for (const each of profile.dependencies) steps.push({ id: stepOf(each)!, kind: "dependencies", tool: each.tool, script: each.command, needs: each.needs });
 	return steps;
+}
+
+/**
+ * mise installs npm packages without running their install scripts. pnpm 12 ships its executable as a placeholder text
+ * file, `pnpm` in the package's root, that its `preinstall` script (`install.js`) replaces with the native binary, so
+ * the shim would make Node parse the placeholder as JavaScript and crash. This runs that script when the placeholder is
+ * still there, points mise's \`.bin\` entries at the package's own executables (they would otherwise run the native binary
+ * with Node), and rebuilds mise's shims. Earlier pnpm versions have no placeholder and are left alone.
+ */
+export function pnpmPostinstall(version: string): string {
+	return `dir=$(mise where npm:pnpm@${version}) && pkg=$(find "$dir" -type f -path '*/node_modules/pnpm/package.json' | head -n 1 | sed 's|/package.json$||') && if [ -n "$pkg" ] && grep -qs "This is a placeholder" "$pkg/pnpm"; then (cd "$pkg" && node install.js) && for n in pnpm pn pnpx pnx; do ln -sf "$pkg/$n" "$dir/node_modules/.bin/$n"; done && mise reshim; fi`;
+}
+
+/** What each toolchain is asked, once installed, to show that it runs; `<tool> --version` for the rest. */
+const VERSION_COMMANDS: Readonly<Record<string, string>> = { go: "go version", rust: "rustc --version", java: "java -version" };
+
+/**
+ * A command that fails, saying which tool and how, unless the installed tool runs. An install that exits 0 can still leave
+ * a binary that crashes, such as pnpm's placeholder, and the toolchain is then failed instead of reported as installed.
+ */
+export function verifyTool(tool: string): string {
+	const command = VERSION_COMMANDS[tool] ?? `${tool} --version`;
+	return `{ ${command} >/dev/null || { echo "${command} failed: the installed ${tool} doesn't run" >&2; exit 1; }; }`;
 }
 
 /** What mise calls a tool: pnpm and Yarn 1 are npm packages, and Yarn 2 and later is `@yarnpkg/cli-dist`. */

@@ -1,5 +1,6 @@
 // Small repositories, as their files, for detecting what a repository needs (src/coding/repo-environment.ts). Each is
 // written the way such a repository usually is, with the files that matter and a few that don't.
+import { verifyTool } from "../../src/coding/repo-environment";
 
 /** A Go module pinned by its toolchain directive, with a Makefile, a GitHub workflow that starts Postgres, and a Dockerfile. */
 export const GO_REPO: Record<string, string> = {
@@ -133,3 +134,9 @@ run = "go build ./..."
 `,
 	"mise-tasks/check": "#!/bin/sh\ngo vet ./...\n",
 };
+
+/** The script that installs the mise tool `spec` (such as `go@1.22`) and then checks that it runs, as provisioning builds it; `between` runs after the install. */
+export function installed(spec: string, ...between: string[]): string {
+	const tool = spec.replace(/^npm:/, "").replace(/@.*/, "");
+	return [`mise use --global --yes ${spec}`, ...between, verifyTool(tool)].join(" && ");
+}

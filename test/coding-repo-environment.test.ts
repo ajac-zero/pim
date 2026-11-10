@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { environmentKey } from "../src/coding/environment-cache";
-import { detectRepository, environmentBrief, makeTargets, nodeRange, pendingItems, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
-import { GO_REPO, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./fixtures/repos";
+import { detectRepository, environmentBrief, makeTargets, nodeRange, pendingItems, pnpmPostinstall, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
+import { GO_REPO, installed, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./fixtures/repos";
 
 // What a coding thread reads from a repository's checkout to provision its workspace and tell its agent how to check
 // its work, over small repositories in test/fixtures/repos.ts. The thread's own tests (coding-thread-do.test.ts) run
@@ -32,7 +32,7 @@ describe("what a repository needs", () => {
 	it("pins Go to go.mod's toolchain over its go directive and the Dockerfile's image, and finds its checks in the Makefile and CI", async () => {
 		const profile = await detect(GO_REPO);
 		expect(profile.toolchains).toEqual([{ tool: "go", version: "1.22.5", source: "manifest", from: "go.mod" }]);
-		expect(scripts(profile)).toEqual(["mise use --global --yes go@1.22.5", "go mod download"]);
+		expect(scripts(profile)).toEqual([installed("go@1.22.5"), "go mod download"]);
 		// The Makefile's test and lint targets (not build or deploy), then the workflow's checks: its continued line joined, `make test` once, and no install, echo or secret-using lines.
 		expect(commands(profile)).toEqual(["make test", "make lint", "go vet ./...", "go test -race -count=1 ./..."]);
 		expect(profile.testCommands[2]).toEqual({ command: "go vet ./...", source: "ci", from: ".github/workflows/ci.yml" });
@@ -44,7 +44,7 @@ describe("what a repository needs", () => {
 		expect(profile.toolchains).toEqual([{ tool: "go", version: "1.21.3", source: "manifest", from: "go.mod" }]);
 		// Nothing but go.mod: Go's own checks, as no file names others. No go.sum, no download.
 		expect(commands(profile)).toEqual(["go vet ./...", "go test ./..."]);
-		expect(scripts(profile)).toEqual(["mise use --global --yes go@1.21.3"]);
+		expect(scripts(profile)).toEqual([installed("go@1.21.3")]);
 	});
 
 	it("pins Node to .nvmrc over engines and pnpm to packageManager, and runs package.json's checks with pnpm", async () => {
@@ -53,7 +53,7 @@ describe("what a repository needs", () => {
 			{ tool: "node", version: "20.11.1", source: "manifest", from: ".nvmrc" },
 			{ tool: "pnpm", version: "9.15.0", source: "manifest", from: "package.json" },
 		]);
-		expect(scripts(profile)).toEqual(["mise use --global --yes node@20.11.1", "mise use --global --yes npm:pnpm@9.15.0", "pnpm install --frozen-lockfile"]);
+		expect(scripts(profile)).toEqual([installed("node@20.11.1"), installed("npm:pnpm@9.15.0", pnpmPostinstall("9.15.0")), "pnpm install --frozen-lockfile"]);
 		expect(profile.dependencies).toEqual([{ tool: "pnpm", command: "pnpm install --frozen-lockfile", from: "pnpm-lock.yaml", needs: ["node", "pnpm"] }]);
 		// test, lint and typecheck, but not test:watch, lint:fix, build or dev; then the Gitea workflow's own spelling of the test.
 		expect(commands(profile)).toEqual(["pnpm run test", "pnpm run lint", "pnpm run typecheck", "pnpm test"]);
@@ -63,7 +63,7 @@ describe("what a repository needs", () => {
 	it("takes Node from engines when nothing else pins it, runs npm ci, and passes over npm's placeholder test script", async () => {
 		const profile = await detect(NPM_REPO);
 		expect(profile.toolchains).toEqual([{ tool: "node", version: "20", source: "manifest", from: "package.json" }]);
-		expect(scripts(profile)).toEqual(["mise use --global --yes node@20", "npm ci"]);
+		expect(scripts(profile)).toEqual([installed("node@20"), "npm ci"]);
 		expect(commands(profile)).toEqual(["npm run lint"]);
 	});
 
@@ -87,23 +87,23 @@ describe("what a repository needs", () => {
 			{ tool: "python", version: "3.11", source: "manifest", from: "pyproject.toml" },
 			{ tool: "uv", version: "latest", source: "default", from: "uv.lock" },
 		]);
-		expect(scripts(profile)).toEqual(["mise use --global --yes python@3.11", "mise use --global --yes uv@latest", "uv sync --frozen"]);
+		expect(scripts(profile)).toEqual([installed("python@3.11"), installed("uv@latest"), "uv sync --frozen"]);
 		expect(profile.testCommands).toEqual([{ command: "uv run pytest", source: "default", from: "pyproject.toml" }]);
 	});
 
 	it("pins Python to .python-version and installs requirements into a virtual environment", async () => {
 		const profile = await detect(PIP_REPO);
 		expect(profile.toolchains[0]).toEqual({ tool: "python", version: "3.12.4", source: "manifest", from: ".python-version" });
-		expect(scripts(profile)).toEqual(["mise use --global --yes python@3.12.4", "mise use --global --yes uv@latest", "uv venv --allow-existing && uv pip install -r requirements-dev.txt -r requirements.txt"]);
+		expect(scripts(profile)).toEqual([installed("python@3.12.4"), installed("uv@latest"), "uv venv --allow-existing && uv pip install -r requirements-dev.txt -r requirements.txt"]);
 		expect(profile.testCommands).toEqual([{ command: ".venv/bin/python -m pytest", source: "default", from: "requirements-dev.txt" }]);
 		// A Python repository that pins nothing gets the default Python, and no uv when there is nothing to install.
-		expect(scripts(await detect({ "setup.py": "" }))).toEqual(["mise use --global --yes python@3.13"]);
+		expect(scripts(await detect({ "setup.py": "" }))).toEqual([installed("python@3.13")]);
 	});
 
 	it("pins Rust to rust-toolchain.toml's channel, not Cargo.toml's rust-version, and fetches the locked crates", async () => {
 		const profile = await detect(RUST_REPO);
 		expect(profile.toolchains).toEqual([{ tool: "rust", version: "1.79.0", source: "manifest", from: "rust-toolchain.toml" }]);
-		expect(scripts(profile)).toEqual(["mise use --global --yes rust@1.79.0", "cargo fetch --locked"]);
+		expect(scripts(profile)).toEqual([installed("rust@1.79.0"), "cargo fetch --locked"]);
 		expect(commands(profile)).toEqual(["cargo test"]);
 		// Without a toolchain file, stable; the legacy plain rust-toolchain file is read too.
 		expect((await detect({ "Cargo.toml": "" })).toolchains).toEqual([{ tool: "rust", version: "stable", source: "default", from: "Cargo.toml" }]);
@@ -120,7 +120,7 @@ describe("what a repository needs", () => {
 			{ tool: "python", version: "3.12", source: "devcontainer", from: ".devcontainer/devcontainer.json" },
 		]);
 		// One `mise install` for mise's tools; Go isn't installed again from go.mod or the dev container.
-		expect(scripts(profile)).toEqual(["mise trust --yes --quiet && mise install --yes", "mise use --global --yes python@3.12"]);
+		expect(scripts(profile)).toEqual(["mise trust --yes --quiet && mise install --yes", installed("python@3.12")]);
 		expect(commands(profile)).toEqual(["mise run test", "mise run lint:go", "mise run check"]);
 		expect(profile.notes).toEqual(["The dev container feature docker-in-docker (.devcontainer/devcontainer.json) isn't installed"]);
 		// .tool-versions, with asdf's names for tools.
@@ -136,7 +136,7 @@ describe("what a repository needs", () => {
 			"pnpm-lock.yaml": "",
 			Makefile: "test$(shell id):\n\ttrue\n",
 		});
-		expect(scripts(profile)).toEqual(["mise use --global --yes go@1.22", "pnpm install --frozen-lockfile"]);
+		expect(scripts(profile)).toEqual([installed("go@1.22"), "pnpm install --frozen-lockfile"]);
 		expect(commands(profile)).toEqual(["go vet ./...", "go test ./..."]);
 	});
 

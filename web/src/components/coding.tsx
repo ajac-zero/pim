@@ -13,7 +13,8 @@ import {
   useState,
 } from "react";
 import { StateBadge } from "~/components/app-sidebar";
-import { Markdown } from "~/components/chat/markdown";
+import { Composer } from "~/components/chat/composer";
+import { AssistantMessage, UserMessage } from "~/components/chat/items";
 import { EnvironmentSection } from "~/components/coding-environment";
 import { HarnessIcon } from "~/components/harness-icon";
 import { type TranslationKey, useI18n } from "~/components/i18n";
@@ -32,6 +33,11 @@ import {
 import { EmptyState, Page } from "~/components/page";
 import { Confirm } from "~/components/triggers";
 import { Button } from "~/components/ui/button";
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton,
+} from "~/components/ui/conversation";
 import { Input } from "~/components/ui/input";
 import {
   ACTIVE_STATES,
@@ -78,6 +84,7 @@ import {
   writingMessage,
 } from "~/lib/coding";
 import { ApiError, pim, SignInRequired } from "~/lib/pim-api";
+import { textOf } from "~/lib/pim-client";
 import { approvalsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 import {
@@ -963,6 +970,9 @@ function SubscriptionConnectPanel({
 
 /* A thread's page. */
 
+/** The chat view's content width and side padding, so a thread lines up with a chat. */
+const FRAME = "mx-auto w-full max-w-4xl px-4 md:px-8";
+
 function BackLink() {
   const { t } = useI18n();
   return (
@@ -995,7 +1005,7 @@ export function CodingThreadPage({ id }: { id: string }) {
   useMarkSeen(id, thread.data?.updatedAt);
   if (thread.isError && !thread.data) {
     return (
-      <main className="mx-auto w-full max-w-[768px] px-4 py-8 sm:px-6">
+      <main className={cn(FRAME, "py-8")}>
         <BackLink />
         <p role="alert" className="mt-6 text-sm">
           {codingErrorCode(thread.error) === "not_found"
@@ -1007,7 +1017,7 @@ export function CodingThreadPage({ id }: { id: string }) {
   }
   if (!thread.data) {
     return (
-      <main className="mx-auto w-full max-w-[768px] px-4 py-8 sm:px-6">
+      <main className={cn(FRAME, "py-8")}>
         <p role="status" className="text-muted-foreground text-sm">
           {t("loading")}
         </p>
@@ -1028,45 +1038,79 @@ function useMarkSeen(id: string, updatedAt: number | undefined) {
 function ThreadView({ thread }: { thread: CodingThreadView }) {
   const { t } = useI18n();
   const [tab, setTab] = useState("conversation");
+  // Above the panels: what the thread works on, why it waits, its environment and what can be done with it.
+  const top = (
+    <>
+      <ThreadHeader thread={thread} />
+      <StateNotice thread={thread} />
+      <EnvironmentSection thread={thread} />
+      <ThreadActions thread={thread} />
+    </>
+  );
   return (
-    <main className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-[768px] px-4 py-6 sm:px-6 md:py-10">
-        <BackLink />
-        <ThreadHeader thread={thread} />
-        <StateNotice thread={thread} />
-        <EnvironmentSection thread={thread} />
-        <ThreadActions thread={thread} />
-        <Tabs.Root value={tab} onValueChange={setTab} className="mt-6">
-          <Tabs.List
-            aria-label={t("codingPanels")}
-            className="flex gap-1 border-b"
-          >
-            {(
-              [
-                ["conversation", "codingConversation"],
-                ["changes", "codingChanges"],
-                ["tests", "codingTests"],
-              ] as const
-            ).map(([value, label]) => (
-              <Tabs.Trigger
-                key={value}
-                value={value}
-                className="-mb-px rounded-t-xl border-transparent border-b-2 px-3 py-2 text-muted-foreground text-sm outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:border-foreground data-[state=active]:text-foreground"
-              >
-                {t(label)}
-              </Tabs.Trigger>
-            ))}
-          </Tabs.List>
-          <Tabs.Content value="conversation" className="pt-4 outline-none">
-            <Conversation thread={thread} />
-          </Tabs.Content>
-          <Tabs.Content value="changes" className="pt-4 outline-none">
-            <DiffPanel id={thread.id} />
-          </Tabs.Content>
-          <Tabs.Content value="tests" className="pt-4 outline-none">
-            <TestsPanel id={thread.id} />
-          </Tabs.Content>
-        </Tabs.Root>
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <Tabs.Root
+        value={tab}
+        onValueChange={setTab}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <div className="shrink-0">
+          <div className={cn(FRAME, "flex h-13 items-center gap-3")}>
+            <BackLink />
+            <Tabs.List
+              aria-label={t("codingPanels")}
+              className="ml-auto flex gap-1"
+            >
+              {(
+                [
+                  ["conversation", "codingConversation"],
+                  ["changes", "codingChanges"],
+                  ["tests", "codingTests"],
+                ] as const
+              ).map(([value, label]) => (
+                <Tabs.Trigger
+                  key={value}
+                  value={value}
+                  className="rounded-full px-3 py-1.5 text-[15px] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-muted data-[state=active]:text-foreground"
+                >
+                  {t(label)}
+                </Tabs.Trigger>
+              ))}
+            </Tabs.List>
+          </div>
+        </div>
+        {tab === "conversation" ? (
+          <Conversation className="scrollbar-thin" initial="instant">
+            <ConversationContent
+              scrollClassName="overflow-auto"
+              className={cn(FRAME, "min-h-full gap-5 pt-2 pb-4")}
+            >
+              {top}
+              <Tabs.Content value="conversation" className="outline-none">
+                <Transcript thread={thread} />
+              </Tabs.Content>
+            </ConversationContent>
+            <ConversationScrollButton />
+          </Conversation>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+            <div className={cn(FRAME, "pt-2 pb-8")}>
+              {top}
+              <Tabs.Content value="changes" className="pt-4 outline-none">
+                <DiffPanel id={thread.id} />
+              </Tabs.Content>
+              <Tabs.Content value="tests" className="pt-4 outline-none">
+                <TestsPanel id={thread.id} />
+              </Tabs.Content>
+            </div>
+          </div>
+        )}
+      </Tabs.Root>
+      {/* The message box sits under every panel, as a chat's does. */}
+      <div className="shrink-0 bg-background pb-2">
+        <div className={cn("mx-auto w-full max-w-4xl px-4")}>
+          <SteerForm thread={thread} />
+        </div>
       </div>
     </main>
   );
@@ -1077,7 +1121,7 @@ function ThreadHeader({ thread }: { thread: CodingThreadView }) {
   const money = useMoney();
   const date = useDate();
   return (
-    <header className="mt-6">
+    <header>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h1 className="min-w-0 truncate font-semibold text-xl">
           <a
@@ -1639,11 +1683,11 @@ function useLiveTranscript(id: string, follow: boolean) {
   };
 }
 
-function Conversation({ thread }: { thread: CodingThreadView }) {
+function Transcript({ thread }: { thread: CodingThreadView }) {
   const { t } = useI18n();
   const live = useLiveTranscript(thread.id, thread.state !== "archived");
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       {live.reconnecting && (
         <p
           role="status"
@@ -1664,7 +1708,7 @@ function Conversation({ thread }: { thread: CodingThreadView }) {
       ) : (
         <ol
           aria-label={t("codingConversation")}
-          className="flex flex-col gap-4"
+          className="flex flex-col gap-5"
         >
           {live.rows.map((row) => (
             <li key={row.key}>
@@ -1696,28 +1740,31 @@ function Conversation({ thread }: { thread: CodingThreadView }) {
       {!live.loading && live.rows.length === 0 && live.tools.length === 0 && (
         <p className="text-muted-foreground text-sm">{t("codingNoMessages")}</p>
       )}
-      <SteerForm thread={thread} />
     </div>
   );
 }
 
 function Row({ row }: { row: TranscriptRow }) {
-  const { t } = useI18n();
   switch (row.kind) {
     case "task":
     case "steer":
       return (
-        <div className="ml-auto flex max-w-[85%] flex-col items-end gap-1">
-          <span className="text-[13px] text-muted-foreground">
-            {t(row.kind === "task" ? "codingTaskLabel" : "codingSteerLabel")}
-          </span>
-          <div className="rounded-[18px] bg-bubble px-4 py-2.5 text-bubble-foreground">
-            <Markdown text={row.text} bubble />
-          </div>
-        </div>
+        <UserMessage
+          item={{ type: "message", role: "user", content: row.text }}
+        />
       );
     case "text":
-      return <Markdown text={row.text} untrusted streaming={row.writing} />;
+      return (
+        <AssistantMessage
+          item={{
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: row.text }],
+          }}
+          untrusted
+          streaming={row.writing}
+        />
+      );
     case "notice":
       return (
         <p
@@ -1808,69 +1855,44 @@ function ToolRow({ row }: { row: Extract<TranscriptRow, { kind: "tool" }> }) {
   );
 }
 
-/** Tells the thread what to do next: into the turn under way, or, with Interrupt, in place of it. */
+/** Tells the thread what to do next, in the chat's message box: into the turn under way, or, with Interrupt, in place of it. */
 function SteerForm({ thread }: { thread: CodingThreadView }) {
   const { t } = useI18n();
   const api = useCodingApi();
   const update = useThreadUpdate(thread.id);
-  const [text, setText] = useState("");
   const [interrupt, setInterrupt] = useState(false);
-  const id = useId();
+  // What failed to send goes back in the box, to send again.
+  const [fill, setFill] = useState<{ text: string; id: number }>();
   const steer = useMutation({
-    mutationFn: () =>
+    mutationFn: (text: string) =>
       api.steer(thread.id, {
-        text: text.trim(),
+        text,
         ...(interrupt ? { interrupt: true } : {}),
         operationId: crypto.randomUUID(),
       }),
     onSuccess: (next) => {
-      setText("");
       setInterrupt(false);
       update(next);
     },
+    onError: (_error, text) => setFill({ text, id: Date.now() }),
   });
   if (thread.state === "archived" || thread.state === "failed") return null;
   const working =
     thread.state === "running" || thread.currentOperation !== null;
-  const send = () => {
-    if (text.trim() && !steer.isPending) steer.mutate();
-  };
   return (
-    <form
-      className="mt-2 flex flex-col gap-2 rounded-[18px] border px-3 py-3"
-      onSubmit={(event) => {
-        event.preventDefault();
-        send();
+    <Composer
+      draftKey={thread.id}
+      fill={fill}
+      busy={false}
+      onSend={(content) => {
+        const text = textOf(content).trim();
+        if (text && !steer.isPending) steer.mutate(text);
       }}
-    >
-      <label htmlFor={id} className="sr-only">
-        {t("codingSteer")}
-      </label>
-      <textarea
-        id={id}
-        rows={2}
-        value={text}
-        placeholder={t(
-          working ? "codingSteerPlaceholderWorking" : "codingSteerPlaceholder",
-        )}
-        className="max-h-60 min-h-12 w-full resize-y bg-transparent px-1 text-[15px] outline-none placeholder:text-muted-foreground"
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            send();
-          }
-        }}
-      />
-      {steer.error && (
-        <p role="alert" className="px-1 text-destructive text-sm">
-          {codingErrorCode(steer.error) === "budget_spent"
-            ? t("codingBudgetSpent")
-            : problemText(steer.error)}
-        </p>
+      placeholder={t(
+        working ? "codingSteerPlaceholderWorking" : "codingSteerPlaceholder",
       )}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {working ? (
+      controls={
+        working ? (
           <label className="flex items-center gap-2 px-1 text-[13px] text-muted-foreground">
             <input
               type="checkbox"
@@ -1880,14 +1902,19 @@ function SteerForm({ thread }: { thread: CodingThreadView }) {
             />
             {t("codingInterrupt")}
           </label>
-        ) : (
-          <span />
-        )}
-        <Button type="submit" disabled={!text.trim() || steer.isPending}>
-          {t("codingSend")}
-        </Button>
-      </div>
-    </form>
+        ) : undefined
+      }
+      disclaimer={
+        steer.error ? (
+          <span role="alert" className="text-destructive">
+            {codingErrorCode(steer.error) === "budget_spent"
+              ? t("codingBudgetSpent")
+              : problemText(steer.error)}
+          </span>
+        ) : undefined
+      }
+      autoFocus
+    />
   );
 }
 

@@ -246,8 +246,8 @@ export const UserMessage = memo(function UserMessage({
   status,
 }: {
   item: MessageItem;
-  /** When it was sent, in ms. */
-  at: number;
+  /** When it was sent, in ms; without it no time shows. */
+  at?: number;
   /** Sends the message again changed, in a fork of the chat up to it (by the message's id); without it, it can't be edited. */
   onEdit?: (id: string, content: UserContent) => Promise<void>;
   /** For a message not in the transcript yet, how sending it goes, in place of its time. */
@@ -331,7 +331,7 @@ export const UserMessage = memo(function UserMessage({
             )}
           </MessageActions>
         )}
-        {status ?? <MessageTime at={at} />}
+        {status ?? (at !== undefined && <MessageTime at={at} />)}
       </div>
     </div>
   );
@@ -360,8 +360,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   speaker?: ReactNode;
   /** Set when the message mentions the person: what the chat's button to mentions finds it by. */
   mention?: string;
-  /** When it was sent, in ms. */
-  at: number;
+  /** When it was sent, in ms; without it no time shows. */
+  at?: number;
   streaming?: boolean;
   /** Shown outside the person's own app, as a public link's copy is: as `Markdown`'s untrusted text. */
   untrusted?: boolean;
@@ -391,10 +391,12 @@ export const AssistantMessage = memo(function AssistantMessage({
       <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">
         {!streaming && (
           <>
-            <MessageTime
-              at={at}
-              className={pinned ? "opacity-100" : undefined}
-            />
+            {at !== undefined && (
+              <MessageTime
+                at={at}
+                className={pinned ? "opacity-100" : undefined}
+              />
+            )}
             <MessageActions
               text={text}
               label={t("copyResponse")}

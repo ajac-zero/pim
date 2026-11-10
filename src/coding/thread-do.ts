@@ -221,9 +221,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return 5_000;
 	}
 
-	/** Hosts the workspace may reach through the egress proxy: Pim's git broker, the common package registries, and where mise downloads toolchains (./repo-environment.ts). */
+	/** Hosts the workspace may reach through the egress proxy: Pim's git broker, the common package registries (Go's proxy redirects module zips to storage.googleapis.com; the CONNECT proxy filters by host only, so no path scoping), and where mise downloads toolchains (./repo-environment.ts). */
 	protected egressAllow(): string[] {
-		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org", ...TOOLCHAIN_HOSTS];
+		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org", "storage.googleapis.com", ...TOOLCHAIN_HOSTS];
 		try {
 			const origin = deploymentSettings(this.env).publicUrl;
 			if (origin) hosts.unshift(new URL(origin).hostname);

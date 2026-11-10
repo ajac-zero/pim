@@ -573,6 +573,7 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		const creates = () => manager.requests.filter((request) => request.method === "POST" && request.path === "/sessions").map((request) => request.body as Record<string, unknown>);
 		// The session is the person's, of the repository, and says nothing of secrets: it never has any while it is snapshotted.
 		expect(creates()[0]).toEqual({ sessionId: first.id, image: "pim-workspace:local", limits: expect.any(Object), egressAllow: expect.any(Array), userId: space, repo: fullName });
+		expect(creates()[0]?.egressAllow).toEqual(expect.arrayContaining(["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "index.crates.io", "static.crates.io", "proxy.golang.org", "sum.golang.org", "storage.googleapis.com"]));
 		expect(manager.requests.filter((request) => request.method === "POST" && request.path === "/snapshots").map((request) => request.body)).toEqual([{ userId: space, repo: fullName, key, sessionId: first.id }]);
 		const second = await startThread({ repo, space });
 		await turns(second.id, 1);

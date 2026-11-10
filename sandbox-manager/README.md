@@ -15,7 +15,7 @@ manager refuses to start.
 ```sh
 MANAGER_TOKEN=$(openssl rand -hex 24) PROXY_ADMIN_TOKEN=$(openssl rand -hex 24) \
 AGENTD_TOKEN_SECRET=$(openssl rand -hex 32) \
-docker compose up -d --build
+BUILD_SHA=$(git rev-parse --short HEAD) docker compose up -d --build
 ```
 
 The compose file builds `pim-workspace:local` from `../workspace-agentd` (the default and only

@@ -35,7 +35,10 @@ services:
     networks: [control]
 
   sandbox-manager:
-    build: .
+    build:
+      context: .
+      args:
+        BUILD_SHA: ${BUILD_SHA:-unknown}
     image: pim-sandbox-manager
     container_name: sandbox-manager # it attaches itself to session networks by this name
     restart: unless-stopped

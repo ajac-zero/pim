@@ -58,7 +58,7 @@ import type { Fetch, GitHubApp } from "./git-broker/github-app";
 import { brokerTokenKey, deploymentGitHubApp, GIT_BROKER_PATH } from "./git-broker/routes";
 import { authEnv } from "./harness/auth";
 import { type CliHarness, cliHarness } from "./harness";
-import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun } from "./harness/runner";
+import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
 import { supervisorSink } from "./supervisor";
 import {
 	type AgentProfile,
@@ -269,6 +269,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** How long a CLI harness has to end its turn after SIGINT. */
 	protected harnessGraceMs(): number {
 		return INTERRUPT_GRACE_MS;
+	}
+
+	/** How long a CLI harness's turn may print nothing before it is stopped as stalled. */
+	protected harnessStallMs(): number {
+		return STALL_MS;
 	}
 
 	/** Who hears of what the thread does: the chat of the agent that started it, if one did (./supervisor.ts). */
@@ -786,7 +791,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			let head = approved.checkpoint;
 			let rebased = false;
 			for (let attempt = 0; ; attempt++) {
-				await git(workspace, ["fetch", "origin", `+refs/heads/${defaultBranch}:refs/pim/merge-base`]);
+				// Fetching goes through Pim's git broker, so it carries a broker token as a header for this command alone, as the clone does.
+				const { token } = await this.cloneSource(thread);
+				const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+				await git(workspace, ["fetch", "origin", `+refs/heads/${defaultBranch}:refs/pim/merge-base`], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
 				const base = (await git(workspace, ["rev-parse", "refs/pim/merge-base"])).trim();
 				const common = (await git(workspace, ["merge-base", base, head]).catch(() => "")).trim();
 				if (common === head) return { ok: true, result: { repo: parseRepoUrl(thread.repoUrl).fullName, branch: defaultBranch, before: base, after: base, outcome: "unchanged", rebased, threadBranch: null } };
@@ -859,7 +867,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/**
 	 * A token for the model gateway (./model-gateway.ts) for this thread and
 	 * `families`, to give a CLI in its workspace instead of a key. It lasts
-	 * the thread's wall clock and a margin, and every token of the thread is
+	 * the thread's time limit and a margin (a week, with none), and every token of the thread is
 	 * revoked when it is aborted or archived (`revokeGatewayTokens`); one
 	 * minted after that carries a new nonce.
 	 */
@@ -872,7 +880,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			nonce = newGatewayNonce();
 			this.store.setGatewayNonce(nonce);
 		}
-		const expiresAt = this.now() + thread.limits.wallClockMin * 60_000 + GATEWAY_TOKEN_MARGIN_MS;
+		const expiresAt = this.now() + (thread.limits.wallClockMin === null ? UNLIMITED_TOKEN_MS : thread.limits.wallClockMin * 60_000) + GATEWAY_TOKEN_MARGIN_MS;
 		const token = await issueGatewayToken(await gatewayTokenKey(this.env), { threadId: thread.threadId, space: thread.space, families: [...new Set(families)], nonce, expiresAt });
 		return { token, expiresAt };
 	}
@@ -1390,7 +1398,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const workspace = await this.#workspace();
 		const session = this.store.harnessSession();
 		const sessionId = session?.sessionId ?? crypto.randomUUID();
-		const timeoutMs = thread.limits.wallClockMin * 60_000;
+		const timeoutMs = wallClockMs(thread);
 		const runner = new HarnessRunner(this.#cliDeps(thread, cli, workspace, timeoutMs, await this.harnessAuth(thread, cli)));
 		const prepared = await runner.prepare(input.operationId, { sessionId, resume: session !== null });
 		if (prepared.status === "busy") {
@@ -1447,7 +1455,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** What a CLI run needs from the thread: its workspace, how it signs in, the person's login and lock, and where its record and events go. */
-	#cliDeps(thread: CodingThreadRow, cli: CliHarness, workspace: Workspace, timeoutMs: number, auth: HarnessAuth): RunnerDeps {
+	#cliDeps(thread: CodingThreadRow, cli: CliHarness, workspace: Workspace, timeoutMs: number | null, auth: HarnessAuth): RunnerDeps {
 		const scheduler = codingScheduler(this.env, thread.space);
 		const grace = this.harnessGraceMs();
 		return {
@@ -1455,13 +1463,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 			workspace,
 			auth,
 			credentials: this.harnessCredentials(thread, cli, workspace),
-			// Held at most as long as a run can last, so a thread that is gone can't keep it.
-			lock: { acquire: () => scheduler.acquireHarness(cli.id, thread.threadId, timeoutMs + 4 * grace + 60_000), release: () => scheduler.releaseHarness(cli.id, thread.threadId) },
+			// Leased for a while at a time and renewed as the run goes on, so a thread that is gone can't keep it for long, however long a run lasts.
+			lock: { acquire: () => scheduler.acquireHarness(cli.id, thread.threadId, HARNESS_LOCK_LEASE_MS), release: () => scheduler.releaseHarness(cli.id, thread.threadId) },
 			journal: { save: (record) => this.store.saveHarnessRun(record), clear: () => this.store.saveHarnessRun(null) },
 			onEvent: (event) => this.#onCliEvent(event),
 			onTestRun: (run) => this.store.addTestRun(run),
 			now: () => this.now(),
 			graceMs: grace,
+			stallMs: this.harnessStallMs(),
 		};
 	}
 
@@ -1484,7 +1493,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return interrupted;
 		}
 		// Finishing a run off signs nothing in: only its record says what to undo.
-		const result = await recoverRun(this.#cliDeps(thread, cli, workspace, thread.limits.wallClockMin * 60_000, { mode: "signed_out" }), record);
+		const result = await recoverRun(this.#cliDeps(thread, cli, workspace, wallClockMs(thread), { mode: "signed_out" }), record);
 		console.warn(JSON.stringify({ event: "pim.coding.harness_interrupted", thread: thread.threadId, operation: record.operationId, lines: record.lines }));
 		return result;
 	}
@@ -1513,6 +1522,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (result.reason === "budget") this.store.update({ budgetStopped: true });
 		});
 		await this.#endTurn(operation, result);
+		if (result.status !== "done" && result.reason === "stalled") await this.#continueStalled(operation);
+	}
+
+	/**
+	 * A turn that stalled goes on once by itself, resuming the CLI's session; a turn begun that way that stalls
+	 * too is left failed, for the person to continue.
+	 */
+	async #continueStalled(operation: string): Promise<void> {
+		const thread = this.store.thread();
+		if (!thread || thread.state !== "failed" || thread.stateReason !== "stalled" || operation.startsWith(AUTO_CONTINUE_PREFIX) || this.store.harnessSession() === null) return;
+		this.ctx.storage.transactionSync(() => {
+			this.store.enqueue(`${AUTO_CONTINUE_PREFIX}${operation}`, STALLED_CONTINUE_TEXT);
+			this.#reopen();
+		});
+		this.#kick();
 	}
 
 	/** What a CLI's output means for the thread: messages into the transcript, retries and refusals into the log, text as it is written to whoever follows live. */
@@ -2225,8 +2249,8 @@ const CLI_MESSAGE = "harness.message";
 /** A CLI run that ended before it ran. */
 const NO_RUN: RunResult = { status: "unanswered", sessionId: null, sessionCostUsd: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, sessionUsage: null, model: null, lines: 0 };
 
-/** How a turn ended. `needs_approval` is for a turn held for the person, such as for a CLI harness's login. */
-export type TurnOutcome = "completed" | "error" | "cancelled" | "needs_approval";
+/** How a turn ended. `needs_approval` is for a turn held for the person, such as for a CLI harness's login. `interrupted` is for a turn that was interrupted by a restart and auto-resumed. */
+export type TurnOutcome = "completed" | "error" | "cancelled" | "needs_approval" | "interrupted";
 
 export type TurnEndedEvent = {
 	readonly type: "thread.turn_ended";
@@ -2302,6 +2326,7 @@ export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branc
 
 /** What `continue` tells the model. */
 export const CONTINUE_TEXT = "Continue where you left off.";
+const STALLED_CONTINUE_TEXT = "Your last turn was stopped because it made no progress for a long while, so a command of yours may have hung. Check where you were, and continue where you left off.";
 
 /** A refused model call's error. "out of budget" is wording pi-ai never retries. */
 export const BUDGET_MESSAGE = "Coding thread out of budget";
@@ -2330,7 +2355,19 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 /** The workspace provider of a thread started while the deployment had none. */
 const NO_BACKEND = "none";
 
-const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: 240 };
+/** A thread's own time limit for a turn, in milliseconds, or null when it has none: turns have no default limit, and are stopped only when they stall. */
+const wallClockMs = (thread: CodingThreadRow): number | null => (thread.limits.wallClockMin === null ? null : thread.limits.wallClockMin * 60_000);
+
+/** How long a harness's lock is leased before it must be renewed (`HarnessRunner` renews it as a turn goes on). */
+const HARNESS_LOCK_LEASE_MS = 60 * 60_000;
+
+/** How long a gateway token lasts for a thread with no time limit; revoking the thread's nonce ends it sooner. */
+const UNLIMITED_TOKEN_MS = 7 * 24 * 60 * 60_000;
+
+/** Marks the operation of a turn the thread began itself, after one stalled. */
+const AUTO_CONTINUE_PREFIX = "auto-continue:";
+
+const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: null };
 
 /** Limits for repositories that need more than the defaults, keyed by lowercase `owner/name`. */
 const REPO_LIMIT_OVERRIDES: Record<string, Partial<CodingLimits>> = {

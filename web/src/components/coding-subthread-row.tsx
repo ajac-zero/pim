@@ -14,7 +14,7 @@ import {
 } from "~/lib/coding";
 import { cn } from "~/lib/utils";
 
-/** The coding threads started from each chat, kept live while any is queued or running. */
+/** The coding threads started from each chat, kept live while any is queued or running. Archived ones are left out, as the chat list leaves out what is archived. */
 export function useCodingByChat() {
   const { data } = useQuery({
     ...codingThreadsQuery(useCodingApi()),
@@ -23,7 +23,13 @@ export function useCodingByChat() {
         ? 5000
         : false,
   });
-  return useMemo(() => codingByChat(data ?? []), [data]);
+  return useMemo(
+    () =>
+      codingByChat(
+        (data ?? []).filter((thread) => thread.state !== "archived"),
+      ),
+    [data],
+  );
 }
 
 /** The row's title: the first line of the task, or the repository when there is none. */

@@ -23,8 +23,8 @@ export const CODING_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code", 
 /** Which model a thread runs on, by the space's provider id (such as `own:anthropic`) and the model's id there. */
 export type AgentProfile = { readonly providerId: string; readonly model: string; readonly thinking?: ModelThinkingLevel };
 
-/** How far a thread's workspace may go, as the workspace spec takes it. */
-export type CodingLimits = { readonly cpu: number; readonly memMiB: number; readonly diskMiB: number; readonly pids: number; readonly wallClockMin: number };
+/** How far a thread's workspace may go, as the workspace spec takes it. `wallClockMin` is a turn's time limit in minutes, null for none: threads have none unless given one. */
+export type CodingLimits = { readonly cpu: number; readonly memMiB: number; readonly diskMiB: number; readonly pids: number; readonly wallClockMin: number | null };
 
 /** Whether the thread holds a slot of its space's scheduler, waits in its queue for one, or neither. */
 export type SlotHold = "none" | "queued" | "held";
@@ -524,7 +524,7 @@ function threadOf(row: Row): CodingThreadRow {
 		stateDetail: text(row.state_detail),
 		createdBy: String(row.created_by),
 		parentThread: text(row.parent_thread),
-		limits: JSON.parse(String(row.limits)) as CodingLimits,
+		limits: readLimits(String(row.limits)),
 		budgetUsd: Number(row.budget_usd) || null,
 		spentUsd: Number(row.spent_usd),
 		startOperation: String(row.start_operation),
@@ -538,4 +538,10 @@ function threadOf(row: Row): CodingThreadRow {
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 	};
+}
+
+/** A thread's stored limits. Threads made while turns were limited to 240 minutes by default carry that as their limit; it is read as none. */
+function readLimits(json: string): CodingLimits {
+	const limits = JSON.parse(json) as Omit<CodingLimits, "wallClockMin"> & { wallClockMin?: number | null };
+	return { ...limits, wallClockMin: limits.wallClockMin === 240 ? null : (limits.wallClockMin ?? null) };
 }

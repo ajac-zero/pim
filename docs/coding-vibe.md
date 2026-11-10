@@ -87,7 +87,7 @@ An abort or a timeout ends the turn `aborted` or `timeout` whatever the export s
 
 ## Stopping a turn
 
-Abort and the wall clock send SIGINT with `pkill -INT -f /workspace/.pim-vibe/<session>/out`: the output directory is on Vibe's command line, and only there, once the shell has `exec`ed Vibe. Its Python app server, which Vibe starts, names itself `vibe-app-server`. SIGINT during a long shell command stopped Vibe in under half a second on the orb, and in the image well within the runner's 15 s grace: it cancelled the command, killed it, wrote its export (`terminated`, with what the run had cost) and exited 3.
+Abort, a time limit and a stall send SIGINT with `pkill -INT -f /workspace/.pim-vibe/<session>/out`: the output directory is on Vibe's command line, and only there, once the shell has `exec`ed Vibe. Its Python app server, which Vibe starts, names itself `vibe-app-server`. SIGINT during a long shell command stopped Vibe in under half a second on the orb, and in the image well within the runner's 15 s grace: it cancelled the command, killed it, wrote its export (`terminated`, with what the run had cost) and exited 3.
 
 **Steering** is the next turn, as for the other CLIs: one process per turn, resuming the session.
 

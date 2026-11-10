@@ -346,6 +346,10 @@ describe('exec and files through agentd', () => {
 		}
 		assert.equal(execCalls().length, 0)
 	})
+	test('exec takes a timeout of up to a week, so a long coding turn is not cut off at 15 minutes', async () => {
+		assert.equal((await call('POST', '/sessions/abc-1/exec', { cmd: ['true'], timeoutMs: 604800000 })).status, 200)
+		assert.equal((await call('POST', '/sessions/abc-1/exec', { cmd: ['true'], timeoutMs: 604800001 })).status, 400)
+	})
 	test('file paths are confined: lexical escapes never reach agentd, symlink escapes it finds are 403', async () => {
 		for (const p of ['/etc/passwd', '../etc/passwd', 'a/../../etc', '/workspace/../etc', '/workspaceevil/x']) {
 			assert.equal((await call('GET', `/sessions/abc-1/files?path=${encodeURIComponent(p)}`)).status, 403, p)

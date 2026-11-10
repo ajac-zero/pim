@@ -17,6 +17,7 @@ import {
 	hook,
 	type HarnessSettings,
 	InboxDoc,
+	LiveDoc,
 	type ModelRef,
 	type TaskId,
 	ROOT_CONVERSATION_ID,
@@ -213,7 +214,8 @@ import { Progress } from "./progress";
 import { HARNESSES, type Harness as CodingHarness, isHarness } from "./coding/vault/harnesses";
 import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
-import { forkPoint, fromPerson, projectEntries } from "./transcript";
+import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcript";
+import { Stalls, stoppable } from "./run-guard";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
@@ -401,6 +403,11 @@ export type GuestBot = {
 	readonly tools?: readonly BotTool[];
 };
 
+/** How long Stop waits for a chat's work to end before it answers anyway: the work was told to stop, and ends when it can. */
+const STOP_WAIT_MS = 5_000;
+/** How long an agent's run may go without any progress before it is stopped, with a note: a call that never returns can't hold a chat's events for good. A wait for the person, or for a retry, is not a stall. */
+const STALL_MS = 30 * 60 * 1000;
+const WATCHDOG_CALLBACK = "watchRuns";
 /** How long an erasure waits for runs to stop and connectors to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
@@ -650,7 +657,7 @@ export class Pim extends DurableAgent<Env> {
 		},
 		idOf: (conversation) => this.store.publicId(conversation),
 	});
-	readonly registry = this.telemetry.instrument(createRegistry());
+	readonly registry = this.telemetry.instrument(stoppable(createRegistry()));
 	/** What agents are doing, in a few words, for those who have their chats open (see ./progress.ts). */
 	readonly #progress = new Progress({
 		watched: (session) => this.#watchers(session).length > 0,
@@ -1985,6 +1992,8 @@ export class Pim extends DurableAgent<Env> {
 			}
 		}
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
+		void this.#resumeDecided().catch((error) => console.warn("resuming decided approvals failed", error));
+		void this.#armWatchdog().catch((error) => console.warn("arming the run watchdog failed", error));
 		// Before any request, so the first one already finds them. It never throws: a failure is logged and tried again at the next start.
 		await this.ensureTriggerEngine();
 		// A tick cut short leaves no wake: the next is set again, where triggers are on.
@@ -2076,6 +2085,7 @@ export class Pim extends DurableAgent<Env> {
 			this.store.deleteMeta(`${ARCHIVE_WHEN_IDLE_KEY}${session}`);
 		}
 		if (receipt.accepted) {
+			void this.#armWatchdog().catch((error) => console.warn("arming the run watchdog failed", error));
 			void this.keepAliveWhile(async () => {
 				await this.harness.wait(receipt.operationId, { session });
 				const key = `${ARCHIVE_WHEN_IDLE_KEY}${session}`;
@@ -3049,12 +3059,15 @@ export class Pim extends DurableAgent<Env> {
 		if (decision === "approve" && !bot) {
 			const action = this.actions.find((candidate) => candidate.name === approval.action);
 			let result: string;
+			this.#running.add(id);
 			try {
 				result = action
 					? await this.keepAliveWhile(() => action.run(approval.args as never, { session: approval.session, approval: approval.id }))
 					: `The action ${approval.action} is no longer available.`;
 			} catch (error) {
 				result = `The action failed: ${errorMessage(error)}`;
+			} finally {
+				this.#running.delete(id);
 			}
 			this.store.recordApprovalResult(id, result);
 		}
@@ -3081,6 +3094,9 @@ export class Pim extends DurableAgent<Env> {
 		}
 		return decided;
 	}
+
+	/** Approved actions running now, by approval: after a restart, an approved action not in it was cut short. */
+	readonly #running = new Set<string>();
 
 	/** The task of the tool call waiting for `approval`'s decision, or null when none is. */
 	async #waitingCall(approval: Pick<Approval, "session" | "callId">): Promise<TaskId | null> {
@@ -4255,11 +4271,8 @@ export class Pim extends DurableAgent<Env> {
 		this.#rooms.unseat(seat);
 		this.store.deleteSession(seat.conversation);
 		const reason = "It was taken out of the chat.";
-		for (const approval of this.store.approvals("pending")) {
-			if (approval.session !== seat.conversation || !this.store.decideApproval(approval.id, "denied", reason, "user")) continue;
-			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(this.store.approval(approval.id)!) });
-		}
-		await this.harness.session(seat.conversation).abort();
+		this.#denyPending(seat.conversation, reason);
+		await this.#abort(seat.conversation);
 		for (const task of this.#tasks.byRequester(seat.conversation)) await this.#cancelTask(task, reason);
 		const name = this.agents.get(seat.agent)?.name ?? "An agent";
 		for (const other of this.#rooms.seats(seat.room)) await this.#write(other.conversation, `${ROOM_NOTICE} ${name} left the chat.`, `left:${seat.conversation}:${other.agent}`);
@@ -4315,13 +4328,130 @@ export class Pim extends DurableAgent<Env> {
 	async #cancelTask(task: Task, reason: string): Promise<void> {
 		if (!this.#tasks.finish(task.id, "canceled", reason)) return;
 		for (const handed of this.#tasks.byRequester(task.conversation)) await this.#cancelTask(handed, "The task it was part of was canceled.");
-		for (const approval of this.store.approvals("pending")) {
-			if (approval.session !== task.conversation || !this.store.decideApproval(approval.id, "denied", reason, "user")) continue;
-			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(this.store.approval(approval.id)!) });
-		}
-		await this.harness.session(task.conversation).abort();
+		this.#denyPending(task.conversation, reason);
+		await this.#abort(task.conversation);
 		this.#tasksChanged(task.root);
 		await this.#deliver(task.batch);
+	}
+
+	/** Denies the requests a conversation's agent is waiting on, as its chat is put away. */
+	#denyPending(conversation: string, reason: string): void {
+		for (const approval of this.store.approvals("pending")) {
+			if (approval.session !== conversation || !this.store.decideApproval(approval.id, "denied", reason, "user")) continue;
+			this.broadcastMessage({ type: "approval", approval: this.#publicApproval(this.store.approval(approval.id)!) });
+		}
+	}
+
+	/**
+	 * Tells a conversation's work to stop, and waits for it to end, but not
+	 * for long: work that is slow to stop ends when it can, and the person,
+	 * the deletion or the cancellation asking is not held up by it.
+	 */
+	async #abort(conversation: string): Promise<void> {
+		await within(this.harness.session(conversation).abort(), STOP_WAIT_MS);
+	}
+
+	/**
+	 * Stops what an agent is doing in a conversation, as Stop does: its calls
+	 * and the waits of its calls for the person end, and its run with them.
+	 * Pi withdraws what was queued behind the run, which is how the person
+	 * takes back their own messages, but the events queued for the agent
+	 * (a coding thread's turn ended, a task answered) are no one's to take
+	 * back: they are given again, to the agent's next run. `note` says why the
+	 * agent was stopped, when it was not the person.
+	 */
+	async #stop(session: string, note?: string): Promise<void> {
+		const conversation = await this.harness.conversation(session);
+		const queued = (await (await this.harness.pi()).snapshot(InboxDoc, conversation.id, BACKGROUND_CONTEXT))?.items ?? [];
+		const events = queued.flatMap((item) => {
+			if (item.mode === "write") return [];
+			const text = textOf(item.content as UserInput);
+			return fromPerson(text) && !CODING_EVENT.test(text) ? [] : [{ id: item.id, content: item.content as UserInput }];
+		});
+		await this.#abort(session);
+		const again: [UserInput, string][] = events.map((event) => [event.content, `requeued:${session}:${event.id}`]);
+		if (note !== undefined) again.unshift([note, `stopped:${session}:${Date.now()}`]);
+		for (const [content, operationId] of again) {
+			await this.submitTo(session, content, { operationId, whenBusy: "followUp" }, "pim").catch((error) => {
+				if (!(error instanceof HttpError)) throw error;
+				console.warn(JSON.stringify({ event: "pim.stop.requeue_skipped", owner: this.name, status: error.status }));
+			});
+		}
+	}
+
+	/** How long a run may make no progress before it is stopped. */
+	protected stallMs(): number {
+		return STALL_MS;
+	}
+
+	readonly #stalls = new Stalls();
+
+	/**
+	 * Looks at the runs again in a while, once, whoever asks: a space with no
+	 * run at work has nothing to watch, and sleeps. A look arms the next with
+	 * the other kind of timing than its own: the schedule running is still
+	 * there, and arming the same kind would only find it.
+	 */
+	async #armWatchdog(via: "delayed" | "scheduled" = "scheduled"): Promise<void> {
+		const ms = Math.max(1_000, Math.min(60_000, this.stallMs() / 2));
+		await this.schedule(via === "scheduled" ? new Date(Date.now() + ms) : Math.ceil(ms / 1000), WATCHDOG_CALLBACK, { via }, { idempotent: true });
+	}
+
+	/**
+	 * Stops the run of an agent that has made no progress for a long while,
+	 * with a note to the agent, so that one call that never returns can't hold
+	 * a chat and what is queued behind it for good. A run waiting for the
+	 * person's decision, or for a retry, makes none by design, and is left be:
+	 * Stop ends those.
+	 */
+	async watchRuns(look?: { via: "delayed" | "scheduled" }): Promise<void> {
+		if (this.#closed()) return;
+		const pi = await this.harness.pi();
+		const { tasks } = await pi.inspect(BACKGROUND_CONTEXT);
+		const byConversation = new Map<string, typeof tasks[number][]>();
+		for (const task of tasks) if (!task.record.background) byConversation.set(String(task.record.conversationId), [...(byConversation.get(String(task.record.conversationId)) ?? []), task]);
+		const watched = new Set<string>();
+		const stalled: string[] = [];
+		for (const [session, group] of byConversation) {
+			if (group.some((task) => task.state.kind === "suspended")) continue;
+			const live = await pi.snapshot(LiveDoc, Number(session) as ConversationId, BACKGROUND_CONTEXT);
+			if (live?.run === undefined || live.generation?.retry !== undefined || live.generation?.deferred !== undefined || live.compactions?.some((compaction) => compaction.retry !== undefined)) continue;
+			watched.add(session);
+			const fingerprint = JSON.stringify([group.map((task) => [task.record.id, task.state.kind]), live]);
+			if (this.#stalls.observe(session, fingerprint, Date.now()) >= this.stallMs()) stalled.push(session);
+		}
+		this.#stalls.keepOnly(new Set([...watched].filter((session) => !stalled.includes(session))));
+		for (const session of stalled) {
+			console.warn(JSON.stringify({ event: "pim.run_stalled", owner: this.name, session, ms: this.stallMs() }));
+			await this.#stop(session, `[Pim] Your last turn was stopped: it made no progress for ${describeWait(this.stallMs())}, so a call of yours may be stuck. Look at what you were doing, and carry on or tell the person.`).catch((error) => console.warn("stopping a stalled run failed", error));
+		}
+		// Watching goes on while anything is at work.
+		if (watched.size > 0) await this.#armWatchdog(look?.via === "scheduled" ? "delayed" : "scheduled");
+	}
+
+	/**
+	 * After a restart: wakes the tool calls whose approval was decided but
+	 * never woke them, because the space restarted in between. Such a call
+	 * waits suspended for a wake that won't come, holding its chat's run, and
+	 * everything queued behind it, for good. An approved action that was
+	 * running when the space restarted may have partly run: its result says
+	 * so, and it isn't run again.
+	 */
+	async #resumeDecided(): Promise<void> {
+		const pi = await this.harness.pi();
+		const { tasks } = await pi.inspect(BACKGROUND_CONTEXT);
+		for (const { record, state } of tasks) {
+			if (record.kind !== "pi.tool" || state.kind !== "suspended") continue;
+			const session = String(record.conversationId);
+			const callId = (record.input as { callId?: unknown }).callId;
+			const approval = this.store.approvals().find((candidate) => candidate.session === session && candidate.callId === callId && !candidate.requestedBy);
+			if (!approval || approval.status === "pending" || this.#running.has(approval.id)) continue;
+			if (approval.status === "approved" && approval.result === null) {
+				this.store.recordApprovalResult(approval.id, "The space restarted while this was running, so it may have partly run, and it was not run again. Check before asking again.");
+			}
+			console.warn(JSON.stringify({ event: "pim.approval_resumed", owner: this.name, session, approval: approval.id, status: approval.status }));
+			await this.harness.resumeTask(session, record.id);
+		}
 	}
 
 	/** Open apps show a chat's tasks anew. */
@@ -5056,7 +5186,7 @@ export class Pim extends DurableAgent<Env> {
 		if (status === "active") this.store.deleteMeta(STATUS_KEY);
 		else this.store.setMeta(STATUS_KEY, status);
 		if (status === "suspended") {
-			for (const session of await this.harness.sessions.list()) await this.harness.session(session.id).abort();
+			for (const session of await this.harness.sessions.list()) await this.#abort(session.id);
 			for (const connection of this.getConnections()) connection.close(4003, "Suspended");
 		}
 	}
@@ -5821,13 +5951,15 @@ export class Pim extends DurableAgent<Env> {
 				if (visit) this.visits.setSession(visit.ownerId, null);
 				// Nothing keeps working in a chat the user can no longer see, nor in the tasks it handed out, nor do the other agents in it.
 				for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) {
-					await this.harness.session(seat.conversation).abort();
+					await this.#abort(seat.conversation);
 					for (const task of this.#tasks.byRequester(seat.conversation)) await this.#cancelTask(task, "Its chat was deleted.");
 				}
-				await this.harness.session(id).abort();
+				// A task's chat is canceled before its run is stopped, so that the run ending doesn't fail the task first: its requester hears it was canceled.
+				this.#denyPending(id, "Its chat was deleted.");
 				const own = this.#tasks.of(id);
 				if (own?.chat) await this.#cancelTask(own, "The person deleted its chat.");
 				for (const task of this.#tasks.byRequester(id)) await this.#cancelTask(task, "Its chat was deleted.");
+				await this.#abort(id);
 				// A scheduled task that runs in it ends with it, as schedules did; one that starts new chats goes on without the chat that scheduled it.
 				const triggers = this.#triggerApi();
 				for (const trigger of triggers ? scheduledTriggers(triggers, PERSON) : []) {
@@ -5958,12 +6090,11 @@ export class Pim extends DurableAgent<Env> {
 			async ({ session }, request) => {
 				const id = await this.#session(session!);
 				const { operationId } = await readJson<{ operationId: string }>(request);
+				if (operationId !== undefined) return { aborted: await this.harness.session(id).abort(operationId) };
 				// Stopping a group chat stops every agent at work in it.
-				let others = false;
-				if (operationId === undefined) {
-					for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) others = (await this.harness.session(seat.conversation).abort()) || others;
-				}
-				return { aborted: (await this.harness.session(id).abort(operationId)) || others };
+				for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) await this.#stop(seat.conversation);
+				await this.#stop(id);
+				return { aborted: true };
 			},
 		],
 		// The person's messages queued behind the work in a chat, by their `id` in pi's inbox, before the agent reads them.

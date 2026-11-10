@@ -127,6 +127,9 @@ describe("ComposeWorkspaceProvider", () => {
 		await ws!.writeFile("sub/x", new Uint8Array());
 		for await (const _ of ws!.exec(["echo", "hi"], { timeoutMs: 1234, env: { A: "1" }, cwd: "sub" })) void _;
 		expect(m.requests.at(-1)?.body).toMatchObject({ cmd: ["echo", "hi"], env: { A: "1" }, cwd: "/workspace/sub", timeoutMs: 1234 });
+		// A turn's four-hour timeout reaches the manager whole: it was once cut to 15 minutes on the way.
+		for await (const _ of ws!.exec(["true"], { timeoutMs: 240 * 60_000 })) void _;
+		expect(m.requests.at(-1)?.body).toMatchObject({ timeoutMs: 240 * 60_000 });
 	});
 
 	it("maps the manager's health for ProviderCapacity and refreshes capabilities", async () => {

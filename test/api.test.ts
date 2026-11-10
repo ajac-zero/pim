@@ -922,6 +922,35 @@ describe("conversation", () => {
 
 });
 
+describe("appearance settings", () => {
+	const put = (body: Record<string, unknown>) => api("/settings", { method: "PUT", body: JSON.stringify(body) });
+
+	it("keeps the look of the app only when it is valid, tells open clients, and goes back to unset on null", async () => {
+		expect((await api("/settings")).body).not.toHaveProperty("colorMode");
+		const { socket, received } = await connect();
+		try {
+			const saved = await put({ colorMode: "dark", colorTheme: "dracula", locale: "es" });
+			expect(saved.body).toMatchObject({ colorMode: "dark", colorTheme: "dracula", locale: "es" });
+			await vi.waitFor(() => expect(received.some((message) => message.type === "settings")).toBe(true));
+			expect((await api("/settings")).body).toMatchObject({ colorMode: "dark", colorTheme: "dracula", locale: "es" });
+
+			for (const bad of [{ colorMode: "blue" }, { colorTheme: "no-such-theme" }, { colorTheme: 3 }, { locale: "xx" }, { locale: "es-ES" }]) {
+				expect((await put(bad)).status).toBe(400);
+			}
+			// A refused update changes nothing, even beside a valid field.
+			expect((await put({ colorMode: "light", locale: "xx" })).status).toBe(400);
+			expect((await api("/settings")).body).toMatchObject({ colorMode: "dark", locale: "es" });
+
+			const cleared = await put({ colorMode: null, colorTheme: null, locale: null });
+			expect(cleared.body).not.toHaveProperty("colorMode");
+			expect(cleared.body).not.toHaveProperty("colorTheme");
+			expect(cleared.body).not.toHaveProperty("locale");
+		} finally {
+			socket.close();
+		}
+	});
+});
+
 describe("a slow or restarted space", () => {
 	/** The structured lines the space logged with `method`, of one event. */
 	const logged = (spy: { mock: { calls: unknown[][] } }, event: string) =>

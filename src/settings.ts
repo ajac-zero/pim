@@ -1,5 +1,6 @@
 import { HttpError } from "./http";
 import type { PimStore } from "./store";
+import { LOCALES, type Locale } from "./locales";
 
 /**
  * The person's own settings, kept in their space's database. Until the person
@@ -29,12 +30,25 @@ export type DeviceAlerts = "important" | "all";
 
 export const DEVICE_ALERTS: readonly DeviceAlerts[] = ["important", "all"];
 
+/** Light, dark, or following the device. */
+export type ColorMode = "light" | "dark" | "system";
+
+export const COLOR_MODES: readonly ColorMode[] = ["light", "dark", "system"];
+
 export type Settings = {
 	/** IANA time zone the person lives in. */
 	readonly timeZone: string;
 	readonly approvalPolicy: ApprovalPolicy;
 	readonly deviceAlerts: DeviceAlerts;
+	/** How the app looks, on every device. Unset: each browser keeps its own choice, and then the system's mode, the deployment's default theme and the browser's language. */
+	readonly colorMode?: ColorMode;
+	/** The id of one of the deployment's themes (src/themes.ts). */
+	readonly colorTheme?: string;
+	readonly locale?: Locale;
 };
+
+/** The settings that have no default: unset until the person sets them. */
+const OPTIONAL_SETTINGS = ["colorMode", "colorTheme", "locale"];
 
 const SETTINGS_KEY = "settings";
 
@@ -54,7 +68,7 @@ function stored(store: PimStore): Partial<Settings> {
 
 /** The person's settings, over `defaults` for those they never set. A setting Pim no longer has is ignored. */
 export function readSettings(store: PimStore, defaults: Settings): Settings {
-	const own = Object.entries(stored(store)).filter(([key]) => key in defaults);
+	const own = Object.entries(stored(store)).filter(([key]) => key in defaults || OPTIONAL_SETTINGS.includes(key));
 	return { ...defaults, ...Object.fromEntries(own) };
 }
 
@@ -62,7 +76,7 @@ export function readSettings(store: PimStore, defaults: Settings): Settings {
  * Applies a partial update from the API. `null` for a field goes back to the
  * default; anything invalid is refused before anything changes.
  */
-export function updateSettings(store: PimStore, defaults: Settings, update: Record<string, unknown>): Settings {
+export function updateSettings(store: PimStore, defaults: Settings, update: Record<string, unknown>, themeIds: readonly string[]): Settings {
 	const next: Record<string, unknown> = { ...stored(store) };
 	for (const [key, value] of Object.entries(update)) {
 		if (value === null) {
@@ -78,6 +92,15 @@ export function updateSettings(store: PimStore, defaults: Settings, update: Reco
 				break;
 			case "deviceAlerts":
 				if (!DEVICE_ALERTS.includes(value as DeviceAlerts)) throw new HttpError(400, `deviceAlerts must be one of ${DEVICE_ALERTS.join(", ")}`);
+				break;
+			case "colorMode":
+				if (!COLOR_MODES.includes(value as ColorMode)) throw new HttpError(400, `colorMode must be one of ${COLOR_MODES.join(", ")}`);
+				break;
+			case "colorTheme":
+				if (typeof value !== "string" || !themeIds.includes(value)) throw new HttpError(400, `colorTheme must be one of ${themeIds.join(", ")}`);
+				break;
+			case "locale":
+				if (!LOCALES.includes(value as Locale)) throw new HttpError(400, `locale must be one of ${LOCALES.join(", ")}`);
 				break;
 			default:
 				throw new HttpError(400, `Unknown setting ${key}`);

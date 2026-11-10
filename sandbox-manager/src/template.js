@@ -1,6 +1,7 @@
 // Everything that reaches Docker's create calls is built here from a fixed template plus
 // validated numbers. Request bodies never contribute raw Docker fields: unknown keys are
 // rejected, so a caller cannot ask for binds, privileged mode, capabilities or host networking.
+import { createHash } from 'node:crypto'
 import { HttpError } from './errors.js'
 
 export const LABEL = 'pim.coding.session'
@@ -11,6 +12,23 @@ export const LABEL_NONCE = 'pim.coding.nonce'
 // Marks the small marker volume that records a kept workspace volume (see `names().marker`).
 export const LABEL_KEPT = 'pim.coding.kept'
 export const LABEL_KEPT_INFO = 'pim.coding.kept-info'
+// Marks a dependency cache volume, shared by one user's sessions of one repo (see `cacheVolume`).
+// Session cleanup filters on LABEL, which these volumes do not carry, so they outlive sessions.
+export const LABEL_CACHE = 'pim.coding.cache'
+export const LABEL_CACHE_USER = 'pim.coding.cache-user'
+export const LABEL_CACHE_REPO = 'pim.coding.cache-repo'
+export const SANDBOX_UID = 10001
+// Where the cache volume is mounted, and the variables that point package managers at it.
+export const CACHE_ROOT = '/caches'
+export const CACHE_ENV = {
+	PNPM_STORE_DIR: '/caches/pnpm',
+	npm_config_store_dir: '/caches/pnpm',
+	npm_config_cache: '/caches/npm',
+	CARGO_HOME: '/caches/cargo',
+	CARGO_TARGET_DIR: '/caches/cargo-target',
+	PIP_CACHE_DIR: '/caches/pip',
+	UV_CACHE_DIR: '/caches/uv',
+}
 export const AGENTD_PORT = 8787
 // The API caps each of stdout and stderr at 10 MiB; agentd caps their sum, so it gets twice that.
 export const MAX_OUTPUT = 10 * 1024 * 1024
@@ -26,16 +44,21 @@ export const DEFAULT_DISK_MIB = 5120
 
 const SESSION_ID = /^[a-z0-9][a-z0-9-]{0,62}$/
 const HOST = /^(\*\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/
+export const USER_ID = /^[\w.:@-]{1,128}$/
+export const REPO = /^[\x21-\x7e]{1,512}$/
 
 function onlyKeys(obj, allowed, what) {
 	for (const k of Object.keys(obj)) if (!allowed.includes(k)) throw new HttpError(400, `unknown field ${what}${k}`)
 }
 
-// `image` defaults to the first allowed image and `limits.diskMiB` to `defaultDiskMiB`.
+// `image` defaults to the first allowed image and `limits.diskMiB` to `defaultDiskMiB`. `userId` and
+// `repo` give the session its dependency cache volume and are needed to take or restore snapshots;
+// `hasRuntimeSecrets` says the caller gives the session secrets, which keeps it from snapshots.
+// `restoreFrom` is read by the manager and is not one of the parameters.
 export function parseCreate(body, allowedImages, defaultDiskMiB = DEFAULT_DISK_MIB) {
 	if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'body must be an object')
-	onlyKeys(body, ['sessionId', 'image', 'limits', 'egressAllow'], '')
-	const { sessionId, image = allowedImages[0], limits, egressAllow = [] } = body
+	onlyKeys(body, ['sessionId', 'image', 'limits', 'egressAllow', 'userId', 'repo', 'hasRuntimeSecrets', 'restoreFrom'], '')
+	const { sessionId, image = allowedImages[0], limits, egressAllow = [], userId, repo, hasRuntimeSecrets = false } = body
 	if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new HttpError(400, 'invalid sessionId')
 	if (typeof image !== 'string' || !allowedImages.includes(image)) throw new HttpError(403, 'image is not allowed')
 	if (!limits || typeof limits !== 'object') throw new HttpError(400, 'limits required')
@@ -49,10 +72,29 @@ export function parseCreate(body, allowedImages, defaultDiskMiB = DEFAULT_DISK_M
 	if (!Array.isArray(egressAllow) || egressAllow.length > 64 || !egressAllow.every((h) => typeof h === 'string' && HOST.test(h))) {
 		throw new HttpError(400, 'egressAllow must be an array of hostnames (optionally *.suffix)')
 	}
-	return { sessionId, image, limits: { cpu: filled.cpu, memMiB: filled.memMiB, diskMiB: filled.diskMiB, pids: filled.pids }, egressAllow: [...new Set(egressAllow)] }
+	if (userId !== undefined && (typeof userId !== 'string' || !USER_ID.test(userId))) throw new HttpError(400, 'userId must be 1-128 letters, digits or ._:@-')
+	if (repo !== undefined && (typeof repo !== 'string' || !REPO.test(repo))) throw new HttpError(400, 'repo must be 1-512 printable characters without spaces')
+	if (typeof hasRuntimeSecrets !== 'boolean') throw new HttpError(400, 'hasRuntimeSecrets must be a boolean')
+	return {
+		sessionId,
+		image,
+		limits: { cpu: filled.cpu, memMiB: filled.memMiB, diskMiB: filled.diskMiB, pids: filled.pids },
+		egressAllow: [...new Set(egressAllow)],
+		...(userId !== undefined && { userId }),
+		...(repo !== undefined && { repo }),
+		...(hasRuntimeSecrets && { hasRuntimeSecrets }),
+	}
 }
 
 export const names = (id) => ({ container: `pim-s-${id}`, volume: `pim-ws-${id}`, network: `pim-net-${id}`, marker: `pim-kept-${id}` })
+
+// The dependency cache volume of a session's (userId, repo), or null for a session without both.
+// The name is a hash, so no user's id or repo can name another's volume.
+export function cacheVolume(params) {
+	if (params.userId === undefined || params.repo === undefined) return null
+	const hash = createHash('sha256').update(JSON.stringify([params.userId, params.repo])).digest('hex').slice(0, 32)
+	return { Name: `pim-cache-${hash}`, Labels: { [LABEL_CACHE]: hash, [LABEL_CACHE_USER]: params.userId, [LABEL_CACHE_REPO]: params.repo } }
+}
 
 // The proxy variables a session's commands get. The manager also passes them with every exec,
 // because the proxy's address changes when it is re-attached to the session network.
@@ -69,9 +111,11 @@ export function buildSpec(params, opts) {
 		// Enforces diskMiB too, but is memory-backed.
 		tmpfs: { type: 'tmpfs', device: 'tmpfs', o: `size=${limits.diskMiB}m,uid=10001,gid=10001,mode=0755` },
 	}[opts.quotaMode]
+	const cache = cacheVolume(params)
 	const env = {
 		HOME: '/workspace',
 		...proxyEnv(opts.proxyUrl),
+		...(cache && CACHE_ENV),
 		// Visible to Docker API clients (docker inspect) and to the session's own user; agentd keeps
 		// it out of the commands it runs, and the manager never logs it. See the README.
 		AGENTD_TOKEN: opts.token,
@@ -81,12 +125,13 @@ export function buildSpec(params, opts) {
 	}
 	return {
 		volume: { Name: n.volume, Labels: labels, ...(driverOpts && { Driver: 'local', DriverOpts: driverOpts }) },
+		cache,
 		network: { Name: n.network, Driver: 'bridge', Internal: true, Labels: labels },
 		container: {
 			name: n.container,
 			body: {
 				Image: image,
-				User: '10001',
+				User: String(SANDBOX_UID),
 				// The image's own entrypoint runs workspace-agentd.
 				WorkingDir: '/workspace',
 				Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
@@ -103,7 +148,11 @@ export function buildSpec(params, opts) {
 					MemorySwap: limits.memMiB * MiB,
 					NanoCpus: Math.round(limits.cpu * 1e9),
 					Tmpfs: { '/tmp': 'rw,noexec,nosuid,nodev,size=64m' },
-					Mounts: [{ Type: 'volume', Source: n.volume, Target: '/workspace', VolumeOptions: { Labels: labels } }],
+					Mounts: [
+						{ Type: 'volume', Source: n.volume, Target: '/workspace', VolumeOptions: { Labels: labels } },
+						// Images must ship /caches owned by 10001, so Docker fills a new cache volume with it.
+						...(cache ? [{ Type: 'volume', Source: cache.Name, Target: CACHE_ROOT, VolumeOptions: { Labels: cache.Labels } }] : []),
+					],
 					NetworkMode: n.network,
 					PublishAllPorts: false,
 					RestartPolicy: { Name: 'no' },

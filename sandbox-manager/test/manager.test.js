@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { promises as fs, readFileSync } from 'node:fs'
+import { promises as fs, mkdtempSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'node:test'
@@ -14,7 +14,7 @@ const IMAGE = 'registry.example/sandbox@sha256:abc'
 const MiB = 1024 * 1024
 const limits = { cpu: 1.5, memMiB: 512, diskMiB: 1024, pids: 128 }
 const good = { sessionId: 'abc-1', image: IMAGE, limits, egressAllow: ['github.com', '*.npmjs.org'] }
-const cfg = { token: 't0ken', agentdSecret: 's3cret', allowedImages: [IMAGE], dockerRoot: '/', minFreePct: 15, maxConcurrent: 2, idleMin: 30, proxyUrl: 'http://egress-proxy:3128', proxyContainer: 'egress-proxy', quotaMode: 'measure', agentdReadyMs: 2000, execGraceMs: 200 }
+const cfg = { dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-data-')), token: 't0ken', agentdSecret: 's3cret', allowedImages: [IMAGE], dockerRoot: '/', minFreePct: 15, maxConcurrent: 2, idleMin: 30, proxyUrl: 'http://egress-proxy:3128', proxyContainer: 'egress-proxy', quotaMode: 'measure', agentdReadyMs: 2000, execGraceMs: 200 }
 
 let fake, mgr, proxy, base
 const statfsFn = async () => ({ bavail: 50, blocks: 100 })
@@ -236,10 +236,37 @@ describe('sessions', () => {
 		assert.equal(mgr.sessions.size, 0)
 		assert.equal(fake.containers.size, 0)
 	})
+	test('each (user, repo) gets its own cache volume at /caches, with the package managers pointed at it', async () => {
+		const ada = { ...good, userId: 'ada', repo: 'github.com/ada/app' }
+		await call('POST', '/sessions', ada)
+		const c = fake.containers.get('pim-s-abc-1').body
+		const [, cache] = c.HostConfig.Mounts.map((m) => m.Source)
+		assert.deepEqual(c.HostConfig.Mounts.map((m) => [m.Type, m.Target]), [['volume', '/workspace'], ['volume', '/caches']])
+		assert.match(cache, /^pim-cache-[0-9a-f]{32}$/)
+		const env = envOf('pim-s-abc-1')
+		assert.deepEqual([env.PNPM_STORE_DIR, env.npm_config_cache, env.CARGO_HOME, env.CARGO_TARGET_DIR, env.PIP_CACHE_DIR, env.UV_CACHE_DIR], ['/caches/pnpm', '/caches/npm', '/caches/cargo', '/caches/cargo-target', '/caches/pip', '/caches/uv'])
+		assert.deepEqual(fake.volumes.get(cache).Labels, { 'pim.coding.cache': cache.slice(10), 'pim.coding.cache-user': 'ada', 'pim.coding.cache-repo': ada.repo })
+		const cacheOf = (id) => fake.containers.get(`pim-s-${id}`).body.HostConfig.Mounts.find((m) => m.Target === '/caches')?.Source
+		const many = make({ maxConcurrent: 5 })
+		await many.reconcile()
+		await many.createSession({ ...ada, sessionId: 'abc-2' })
+		await many.createSession({ ...ada, sessionId: 'bob-1', userId: 'bob' })
+		await many.createSession({ ...ada, sessionId: 'other-1', repo: 'github.com/ada/other' })
+		await many.createSession({ ...good, sessionId: 'anon' })
+		assert.equal(cacheOf('abc-2'), cache, 'the same user and repo share it')
+		assert.notEqual(cacheOf('bob-1'), cache, 'never shared across users')
+		assert.notEqual(cacheOf('other-1'), cache)
+		assert.equal(cacheOf('anon'), undefined)
+		assert.equal(envOf('pim-s-anon').CARGO_HOME, undefined)
+		// It outlives its sessions and a restart, which removes only sessions' own leftovers.
+		for (const id of ['abc-1', 'abc-2']) await many.remove(id)
+		await make().reconcile()
+		assert.ok(fake.volumes.has(cache))
+	})
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.deepEqual(r.json, { runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1 })
+		assert.deepEqual(r.json, { runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
 	})
 })
 

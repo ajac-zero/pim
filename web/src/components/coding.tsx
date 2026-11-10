@@ -171,6 +171,13 @@ function problemText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const CONNECTABLE_HARNESSES: ConnectableHarness[] = [
+  "claude-code",
+  "codex",
+  "amp",
+  "mistral-vibe",
+];
+
 /** A harness's mark with the thread's state on its corner, as a chat's icon has; the state is named for screen readers. */
 export function CodingHarnessMark({
   harness,
@@ -519,6 +526,26 @@ function HarnessChooser({
         {t("codingHarnessHint")}
       </p>
     </div>
+  );
+}
+
+/** Settings' Coding tab: which coding agents this person has signed in to, to connect or disconnect them. Never the threads. */
+export function CodingConnectionsSection() {
+  const { t } = useI18n();
+  return (
+    <section className="mt-10 space-y-3">
+      <h2 className="font-medium text-muted-foreground text-sm">
+        {t("coding")}
+      </h2>
+      <p className="text-[13px] text-muted-foreground">
+        {t("codingConnectionsDescription")}
+      </p>
+      <div className="flex flex-col gap-3">
+        {CONNECTABLE_HARNESSES.map((harness) => (
+          <HarnessConnectPanel key={harness} harness={harness} />
+        ))}
+      </div>
+    </section>
   );
 }
 

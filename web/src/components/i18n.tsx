@@ -1742,6 +1742,8 @@ const translations = {
     codingHarnessHint:
       "Pi uses this space's models. Claude Code and Codex use your own Claude or ChatGPT subscription; Mistral Vibe and Amp use an API key of yours.",
     codingConnectTitle: "Connect {harness}",
+    codingConnectionsDescription:
+      "The coding agents you have signed in to. Pi runs on your space's own models and needs no sign-in.",
     codingConnected: "Connected",
     codingNotConnected: "Not connected",
     codingConnectedNote:
@@ -3608,6 +3610,8 @@ const translations = {
     codingHarnessHint:
       "Pi usa los modelos de este espacio. Claude Code y Codex usan tu propia suscripción de Claude o ChatGPT; Mistral Vibe y Amp usan una clave de API tuya.",
     codingConnectTitle: "Conectar {harness}",
+    codingConnectionsDescription:
+      "Los agentes de código en los que has iniciado sesión. Pi usa los modelos de tu espacio y no necesita iniciar sesión.",
     codingConnected: "Conectado",
     codingNotConnected: "No conectado",
     codingConnectedNote:

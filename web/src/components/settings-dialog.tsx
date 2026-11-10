@@ -11,6 +11,7 @@ import {
 } from "~/components/account-settings";
 import { AddDevice } from "~/components/add-device";
 import { ChatGPTLogo } from "~/components/chatgpt-logo";
+import { CodingConnectionsSection } from "~/components/coding";
 import {
   ComputerHostSection,
   ComputerSection,
@@ -22,6 +23,7 @@ import {
   AlertCircle,
   Bell,
   Check,
+  Code,
   KeyRound,
   Loader2,
   LogOut,
@@ -87,6 +89,7 @@ export const SETTINGS_TABS = [
   "general",
   "model",
   "computer",
+  "coding",
   "permissions",
   "memory",
   "account",
@@ -99,6 +102,7 @@ const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   general: ["settingsGeneral", SlidersHorizontal],
   model: ["settingsModel", Sparkles],
   computer: ["settingsComputer", Server],
+  coding: ["coding", Code],
   permissions: ["settingsPermissions", ShieldCheck],
   memory: ["memory", MessageCircle],
   account: ["settingsAccount", UserRound],
@@ -208,6 +212,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
           </>
         )}
         {tab === "computer" && <ComputerSection />}
+        {tab === "coding" && <CodingConnectionsSection />}
         {tab === "memory" && <MemorySection />}
         {tab === "permissions" && <ToolPermissionsSection />}
         {tab === "account" && (

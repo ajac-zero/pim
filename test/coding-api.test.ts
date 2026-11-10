@@ -332,7 +332,7 @@ describe("the coding threads API", () => {
 		// Without the App, nothing is asked.
 		const unset = await post(`/coding/threads/${thread.id}/push`);
 		expect([unset.status, unset.body]).toEqual([409, { error: "GitHub App not configured: ask the Pim owner to set it up", code: "github_app_not_configured" }]);
-		const pending = async () => (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.filter((approval) => approval.action === "coding_push");
+		const pending = async () => (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.filter((approval) => approval.action === "coding_push_for_approval");
 		expect(await pending()).toEqual([]);
 		// With it, never main, nor a branch outside pim/.
 		const github = fakeGitHub();
@@ -376,18 +376,22 @@ describe("merging a coding thread into the default branch", () => {
 		codingGitHub.fetch = github.fetch;
 		if (options.remote) fakeRemotes.set(MAIN_REMOTE, options.remote);
 		try {
-			faux.setResponses([toolUse("coding_merge", { thread_id: thread.id }), toolUse("send_to_user", { message: "Merged." })]);
+			let told = "";
+			faux.setResponses([
+				toolUse("coding_merge", { thread_id: thread.id }),
+				(context) => {
+					const result = context.messages.findLast((message) => message.role === "toolResult");
+					told = result?.role === "toolResult" && result.content[0]?.type === "text" ? result.content[0].text : "";
+					return toolUse("send_to_user", { message: "Merged." });
+				},
+			]);
 			const chat = (await post<{ id: string }>("/sessions")).body.id;
-			const saying = say("Ship it.", chat);
-			const pending = async () => (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.filter((candidate) => candidate.action === "coding_merge");
-			await vi.waitFor(async () => expect(await pending()).toHaveLength(1));
-			const [approval] = await pending();
-			expect(approval!.summary).toBe(`Merge ${thread.repo.branch} (${ended!.checkpoint!.slice(0, 12)}) into main of github.com/acme/demo, with no force push`);
-			expect(github.pushes).toEqual([]);
-			const decided = (await post<Approval>(`/approvals/${approval!.id}/approve`)).body;
-			await saying;
+			// No approval is asked: the tool runs at once.
+			await say("Ship it.", chat);
+			expect((await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.filter((candidate) => candidate.action === "coding_merge")).toEqual([]);
+			const decided = { result: told };
 			const log = (await api<{ events: { kind: string; data: Record<string, unknown> }[] }>(`/coding/threads/${thread.id}/log`)).body.events;
-			return { thread, ended: ended!, github, result: String(decided.result), log };
+			return { thread, ended: ended!, github, result: decided.result, log };
 		} finally {
 			fakeRemotes.set(MAIN_REMOTE, { "README.md": "# Demo\n" });
 		}
@@ -396,7 +400,7 @@ describe("merging a coding thread into the default branch", () => {
 	it("fast-forwards the default branch to the thread's checkpoint and updates its own branch, never by force", async () => {
 		const { thread, ended, github, result, log } = await merged();
 		const head = hex40(ended.checkpoint!);
-		expect(result).toBe(`Merged into main on github.com/acme/demo as a fast-forward: main is now at ${head}. ${thread.repo.branch} was updated to it.`);
+		expect(JSON.parse(result)).toEqual({ message: `Merged into main on github.com/acme/demo as a fast-forward: main is now at ${head}. ${thread.repo.branch} was updated to it.`, sha: head, tests: "It hasn't run any tests." });
 		// The default branch is moved by the API without force, after the objects went to a staging ref; nothing is sent to it directly.
 		expect(github.moves).toEqual([{ ref: "refs/heads/main", sha: head, force: false }]);
 		expect(github.pushes.filter((command) => command.includes("refs/heads/main"))).toEqual([]);
@@ -406,7 +410,7 @@ describe("merging a coding thread into the default branch", () => {
 
 	it("rebases the thread onto a default branch that has moved, and records the rebased commit as a checkpoint", async () => {
 		const { ended, github, result, log } = await merged({ remote: { "README.md": "# Demo\n", "CHANGELOG.md": "v2\n" } });
-		expect(result).toMatch(new RegExp(`^Merged into main on github.com/acme/demo after rebasing onto it: main is now at [0-9a-f]{40}\\.`));
+		expect(JSON.parse(result).message).toMatch(/^Merged into main on github.com\/acme\/demo after rebasing onto it: main is now at [0-9a-f]{40}\./);
 		const after = github.moves[0]!.sha as string;
 		expect(after).not.toBe(hex40(ended.checkpoint!));
 		expect(github.moves).toEqual([{ ref: "refs/heads/main", sha: after, force: false }]);
@@ -415,7 +419,8 @@ describe("merging a coding thread into the default branch", () => {
 
 	it("stops at a conflict with nothing pushed, and tells the agent to steer the thread", async () => {
 		const { result, github, log } = await merged({ remote: { "README.md": "# Demo\n", "hello.txt": "Hi from main\n" } });
-		expect(result).toContain("The merge failed: The thread's changes conflict with main");
+		expect(JSON.parse(result)).toMatchObject({ error: "merge_failed", tests: "It hasn't run any tests." });
+		expect(result).toContain("The thread's changes conflict with main");
 		expect(result).toContain("Steer the thread to rebase onto origin/main");
 		expect(github.pushes).toEqual([]);
 		expect(github.moves).toEqual([]);
@@ -424,12 +429,12 @@ describe("merging a coding thread into the default branch", () => {
 
 	it("retries the rebase once when the default branch moves meanwhile, and then gives up", async () => {
 		const once = await merged({ patchAnswers: [422] });
-		expect(once.result).toContain("Merged into main");
+		expect(JSON.parse(once.result).message).toContain("Merged into main");
 		expect(once.github.moves).toHaveLength(2);
 		expect(once.github.moves.every((move) => move.force === false)).toBe(true);
 		await post(`/coding/threads/${once.thread.id}/archive`);
 		const twice = await merged({ patchAnswers: [422, 422] });
-		expect(twice.result).toBe("The merge failed: main moved again while merging; nothing was pushed to it. Ask to merge again.");
+		expect(JSON.parse(twice.result)).toMatchObject({ error: "merge_failed", message: "main moved again while merging; nothing was pushed to it. Ask to merge again." });
 		expect(twice.github.moves).toHaveLength(2);
 		expect(twice.github.moves.every((move) => move.force === false)).toBe(true);
 	});

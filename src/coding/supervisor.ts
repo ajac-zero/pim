@@ -40,6 +40,6 @@ export function turnEndedMessage(event: TurnEndedEvent, origin: string | null): 
 	];
 	if (event.checkpoint) lines.push(`Its changes are committed as ${event.checkpoint.slice(0, 12)}.`);
 	if (event.said) lines.push("It last said:", event.said);
-	lines.push("Look with coding_status, coding_diff or coding_tests; tell it more with coding_steer; push its branch with coding_push, or ship it to the default branch with coding_merge. Tell the person what matters.");
+	lines.push("Look with coding_status, coding_diff or coding_tests; tell it more with coding_steer; push its branch with coding_push, or ship it to the default branch with coding_merge (no approval needed: check its diff and tests first). Tell the person what matters.");
 	return lines.join("\n");
 }

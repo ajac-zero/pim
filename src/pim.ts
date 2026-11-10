@@ -1458,7 +1458,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * Asks the person to approve pushing a coding thread's branch, from the
-	 * API (src/coding/api.ts): an approval of the `coding_push` action
+	 * API (src/coding/api.ts): an approval of the `coding_push_for_approval` action
 	 * (src/extensions/coding.ts) that no tool call waits for, which runs the
 	 * push once approved. Asking again for the same push is the same approval.
 	 */
@@ -1471,7 +1471,7 @@ export class Pim extends DurableAgent<Env> {
 			id,
 			session: `coding:${threadId}`,
 			callId: null,
-			action: "coding_push",
+			action: "coding_push_for_approval",
 			tool: null,
 			args: { thread_id: threadId, branch: push.branch, checkpoint: push.checkpoint, head: push.head },
 			summary: push.summary,

@@ -16,7 +16,7 @@ import { apiHeaders, type Fetch, GITHUB_API, type GitHubApp } from "./github-app
  * GitHub App isn't installed on it (public repositories). It never pushes:
  * GitHub's receive-pack is not proxied.
  *
- * Pushing is Pim's to do, after the person approves it (`pushBranch`). The
+ * Pushing is Pim's to do (`pushBranch`), when the person approves it or an agent's coding tool runs. The
  * workspace hands Pim a git bundle (`git bundle create <file>
  * origin/<branch>..<branch>`, or the whole branch for a new one): one file,
  * made with git's own tools, that names the branch's new commit and holds
@@ -29,8 +29,7 @@ import { apiHeaders, type Fetch, GITHUB_API, type GitHubApp } from "./github-app
  * ref, GitHub's API moves the branch with `force: false`, and the staging
  * ref is deleted. Pim pushes to the repository's default branch, `main` or
  * `master` in most, only for a merge (`toDefault`, for a merge by `coding_merge`),
- * which is as safe as any push: the person approves it and the branch moves
- * only forward. Any other push is to a branch inside the policy's prefix
+ * which moves the branch only forward. Any other push is to a branch inside the policy's prefix
  * (`pim/`).
  */
 
@@ -296,12 +295,12 @@ export type PreparedPush = {
 };
 
 /**
- * What the approval-gated `coding_push` tool files for the person to decide
+ * What the approval-gated `coding_push_for_approval` action files for the person to decide
  * (a later change wires it, through `fileApproval` in
  * ../../extensions/approvals.ts): JSON, with no bundle and no secret.
  */
 export type PushApprovalRequest = {
-	readonly action: "coding_push";
+	readonly action: "coding_push_for_approval";
 	readonly sessionId: string;
 	readonly repo: string;
 	readonly branch: string;
@@ -343,7 +342,7 @@ export function preparePush(deps: PushDeps, request: PushRequest): PreparedPush 
 export function pushApprovalRequest(push: PreparedPush): PushApprovalRequest {
 	const { sessionId, repo, branch, head, bytes } = push;
 	const summary = `Push ${branch} (${head.slice(0, 12)}, ${size(bytes)}) to github.com/${repo.fullName}`;
-	return { action: "coding_push", sessionId, repo: repo.fullName, branch, head, bytes, summary };
+	return { action: "coding_push_for_approval", sessionId, repo: repo.fullName, branch, head, bytes, summary };
 }
 
 /** How Pim signs in to github.com's git with an installation token. */

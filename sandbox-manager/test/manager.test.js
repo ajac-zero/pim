@@ -270,7 +270,11 @@ describe('sessions', () => {
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.deepEqual(r.json, { runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
+		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
+	})
+	test('health includes version from BUILD_SHA env', async () => {
+		const r = await call('GET', '/health', undefined, { authorization: '' })
+		assert.equal(r.json.version, 'unknown')
 	})
 })
 

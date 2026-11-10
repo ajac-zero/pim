@@ -2,8 +2,10 @@
 // Commands and files go to the workspace-agentd running inside each container.
 import http from 'node:http'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { statfs } from 'node:fs/promises'
+import { statfs, readFile } from 'node:fs/promises'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
 import * as agentd from './agentd.js'
 import { DockerError } from './docker.js'
 import { HttpError } from './errors.js'
@@ -16,6 +18,19 @@ const notFound = (e) => e instanceof DockerError && e.status === 404
 const sha = (s) => createHash('sha256').update(s).digest()
 const q = (s) => encodeURIComponent(s)
 const labelFilter = (label) => q(JSON.stringify({ label: [label] }))
+
+// Returns the build SHA from BUILD_SHA env var, or from .build-sha file next to src/, or 'unknown'.
+async function getBuildSha() {
+	const envSha = process.env.BUILD_SHA
+	if (envSha) return envSha
+	const __dirname = path.dirname(fileURLToPath(import.meta.url))
+	const buildShaPath = path.resolve(__dirname, '../.build-sha')
+	try {
+		return (await readFile(buildShaPath, 'utf8')).trim()
+	} catch {
+		return 'unknown'
+	}
+}
 
 export const RUNSC_REQUIRED = 'gVisor (runsc) is required: register the runsc runtime with Docker and make sure `docker run --runtime=runsc` works'
 
@@ -487,6 +502,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	async function health() {
 		const running = sessions.size + creating.size
 		return {
+			version: await getBuildSha(),
 			runsc: await hasRunsc(docker).catch(() => false),
 			freeDiskPct: Math.round((await freeDiskPct().catch(() => NaN)) * 10) / 10,
 			maxConcurrent: cfg.maxConcurrent,

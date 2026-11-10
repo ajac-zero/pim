@@ -8,6 +8,7 @@ import type { AgentProfile, CodingHarness, CodingThreadState } from "./thread-st
  */
 
 export type { CodingHarness };
+export type { CodingEnvironment, EnvironmentState } from "./environment-cache";
 
 /** Who started a thread: the person (the web app or the API), or one of their agents, from a chat. */
 export type CodingCreator = { readonly type: "person" } | { readonly type: "agent"; readonly agent: string; readonly chat: string };
@@ -73,6 +74,15 @@ export type CodingPushRequested = {
 	readonly summary: string;
 };
 
+/** `GET`/`PUT /api/coding/repos/:owner/:name/settings`: the person's settings for one repository. */
+export type CodingRepoSettings = {
+	/** `owner/name`, in lowercase. */
+	readonly repo: string;
+	/** The script that readies the repository's environment for new threads, run in place of the repository's own `.pim/setup.sh`; null to use that. */
+	readonly setupScript: string | null;
+	readonly updatedAt: number | null;
+};
+
 export type CodingErrorCode =
 	| "invalid"
 	| "forbidden"
@@ -93,3 +103,6 @@ export const threadPath = (threadId: string) => `/coding/${threadId}`;
 
 /** The path the API's routes are under, in `/api`. */
 export const CODING_API_PATH = "/coding/threads";
+
+/** The path the person's repository settings are under, in `/api`. */
+export const CODING_REPOS_PATH = "/coding/repos";

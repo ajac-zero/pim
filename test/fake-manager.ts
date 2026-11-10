@@ -1,6 +1,6 @@
 import { posix } from "node:path";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import { WorkspaceCapacityError, WorkspaceFileError, WorkspaceLimitError, WorkspacePathError, type WorkspaceRef, type WorkspaceSpec } from "../src/coding/workspace/types";
+import { WorkspaceCapacityError, WorkspaceFileError, WorkspaceLimitError, WorkspaceNotFoundError, WorkspacePathError, type WorkspaceRef, type WorkspaceSpec } from "../src/coding/workspace/types";
 
 /** The sandbox-manager's bearer token and address in tests. */
 export const TOKEN = "s3cret-manager-token";
@@ -69,6 +69,7 @@ export function fakeManager(max = 3) {
 				limits: { ...body.limits, wallClockMin: 1 },
 				egress: { allow: body.egressAllow },
 				gitAuth: { mode: "none" },
+				...(body.userId !== undefined ? { environment: { userId: body.userId, repo: body.repo, ...(body.restoreFrom ? { restoreFrom: body.restoreFrom.key } : {}) } } : {}),
 			} as WorkspaceSpec;
 			const existed = refs.has(spec.sessionId);
 			if (!existed && disk.freeDiskPct < 15) return json(507, { error: `free disk ${disk.freeDiskPct}% is below 15%`, code: "low_disk", freeDiskPct: disk.freeDiskPct, minFreePct: 15 });
@@ -79,8 +80,31 @@ export function fakeManager(max = 3) {
 				return json(existed ? 200 : 201, { sessionId: spec.sessionId, state: "running", createdAt: 1 });
 			} catch (error) {
 				if (error instanceof WorkspaceCapacityError) return json(429, { error: "at capacity", code: "capacity", limit: max, running: refs.size });
+				if (error instanceof WorkspaceNotFoundError) return json(404, { error: "no such snapshot", code: "snapshot_not_found" });
+				if (spec.environment?.restoreFrom) return json(422, { error: "the snapshot is corrupt (sha256 mismatch) and was deleted", code: "snapshot_corrupt" });
 				throw error;
 			}
+		}
+		// Environment snapshots, as the V1 manager keeps them per user (sandbox-manager/src/snapshots.js).
+		if (url.pathname === "/snapshots" && method === "POST") {
+			const ref = refs.get(body.sessionId);
+			if (!ref) return json(404, { error: "no such session" });
+			const known = await backing.listEnvironments({ userId: body.userId, repo: body.repo });
+			try {
+				const snapshot = await backing.snapshotEnvironment(ref, { userId: body.userId, repo: body.repo, key: body.key });
+				return json(known.some((each) => each.key === body.key) ? 200 : 201, { ...snapshot, size: 1 });
+			} catch (error) {
+				return json(403, { error: String(error), code: "forbidden" });
+			}
+		}
+		if (url.pathname === "/snapshots" && method === "GET") {
+			const userId = url.searchParams.get("userId") ?? "";
+			return json(200, await backing.listEnvironments({ userId, repo: url.searchParams.get("repo") ?? "" }));
+		}
+		const snap = /^\/snapshots\/([0-9a-f]+)$/.exec(url.pathname);
+		if (snap && method === "DELETE") {
+			const deleted = await backing.deleteEnvironment(url.searchParams.get("userId") ?? "", snap[1]!);
+			return deleted ? json(200, { deleted: snap[1] }) : json(404, { error: "no such snapshot", code: "snapshot_not_found" });
 		}
 		const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec\/stream|exec|file|list|stat|stop|start))?$/.exec(url.pathname);
 		if (!m) return json(404, { error: "not found" });

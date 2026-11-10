@@ -3,7 +3,7 @@ import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CodingThreadSummary, CodingThreadView } from "../src/coding/api";
+import type { CodingEnvironment, CodingRepoSettings, CodingThreadSummary, CodingThreadView } from "../src/coding/api";
 import { pktLine } from "../src/coding/git-broker/broker";
 import type { GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_SPACE_CAP } from "../src/coding/provider-capacity";
@@ -14,7 +14,7 @@ import { CodingThreadStore } from "../src/coding/thread-store";
 import type { Approval } from "../src/store";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
-import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, faux } from "./worker";
+import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, codingWorkspaces, faux } from "./worker";
 
 // The API and the agents' tools over real coding threads: each works in the in-memory workspace with a fake git and the
 // scripted `coding-faux` model, in the space of the file's account (`OWNER`), whose chats talk to the scripted `faux`.
@@ -242,6 +242,40 @@ describe("the coding threads API", () => {
 		expect((await view(thread.id)).state).toBe("archived");
 	});
 
+	it("keeps the person's setup script for a repository, which its threads run, and shows and rebuilds a thread's environment", async () => {
+		// The repository has no .pim/setup.sh of its own; the person's setting gives it one. `bash` runs it.
+		fakeRemotes.set("https://pim.test/api/coding/git/acme/configured.git", { "README.md": "# Configured\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" });
+		const scripts: string[] = [];
+		codingWorkspaces.register("bash", ({ argv }) => (scripts.push(argv[2]!), {}));
+		const path = "/coding/repos/Acme/Configured/settings";
+		const put = (body: unknown, as = api) => as(path, { method: "PUT", body: JSON.stringify(body) });
+		expect((await api<CodingRepoSettings>(path)).body).toEqual({ repo: "acme/configured", setupScript: null, updatedAt: null });
+		expect(await put({ setupScript: 5 })).toMatchObject({ status: 400, body: { code: "invalid" } });
+		expect(await put({ setupScript: "x".repeat(64 * 1024 + 1) })).toMatchObject({ status: 400, body: { code: "invalid" } });
+		expect(await api("/coding/repos/acme/..%2Fx/settings")).toMatchObject({ status: 400, body: { code: "invalid" } });
+		const saved = await put({ setupScript: "pnpm install --frozen-lockfile\n" });
+		expect(saved).toMatchObject({ status: 200, body: { repo: "acme/configured", setupScript: "pnpm install --frozen-lockfile\n", updatedAt: expect.any(Number) } });
+		// Another person's settings are their own.
+		expect(await (await asOther(path)).json()).toMatchObject({ setupScript: null });
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const thread = await start({ repo: "https://github.com/acme/configured" });
+		expect(thread.environment).toMatchObject({ state: expect.any(String) });
+		await turns(thread.id, 1);
+		const environment = (await view(thread.id)).environment;
+		expect(environment).toMatchObject({ state: "cached", source: "settings", key: expect.stringMatching(/^[0-9a-f]{64}$/) });
+		expect((await api<CodingEnvironment>(`/coding/threads/${thread.id}/environment`)).body).toEqual(environment);
+		expect(scripts).toEqual(["pnpm install --frozen-lockfile\n"]);
+		// A rebuild runs it again, between turns.
+		expect(await post(`/coding/threads/${thread.id}/environment/rebuild`)).toMatchObject({ status: 200, body: { state: "building", rebuildRequested: true } });
+		await vi.waitFor(async () => expect((await view(thread.id)).environment).toMatchObject({ state: "cached", rebuildRequested: false }), { timeout: 10_000, interval: 50 });
+		expect(scripts).toHaveLength(2);
+		expect((await asOther(`/coding/threads/${thread.id}/environment`)).status).toBe(404);
+		// A blank script clears the setting.
+		expect((await put({ setupScript: null })).body).toEqual({ repo: "acme/configured", setupScript: null, updatedAt: null });
+		await post(`/coding/threads/${thread.id}/archive`);
+		expect(await post(`/coding/threads/${thread.id}/environment/rebuild`)).toMatchObject({ status: 409, body: { code: "archived" } });
+	});
+
 	it("asks the person before it pushes, and only when the GitHub App is set up and the branch is one Pim pushes to", async () => {
 		codingFaux.setResponses([toolUse("write", { path: "hello.txt", content: "Hello!\n" }), fauxAssistantMessage("Added hello.txt.")]);
 		const thread = await start();
@@ -342,7 +376,7 @@ describe("an agent's coding tools", () => {
 		await say("How are the coding threads?");
 		const [list, status, steered, push, missing] = results.map((result) => JSON.parse(result));
 		expect(list.threads[0]).toEqual(expect.objectContaining({ thread_id: thread.id, repo: REPO, status: "idle" }));
-		expect(status).toMatchObject({ thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, budget_usd: 3 });
+		expect(status).toMatchObject({ thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, budget_usd: 3, environment: { state: "none" } });
 		expect(steered).toMatchObject({ thread_id: thread.id });
 		// Refused before anyone is asked.
 		expect(push).toEqual({ error: "github_app_not_configured", message: "GitHub App not configured: ask the Pim owner to set it up" });

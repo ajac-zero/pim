@@ -5,7 +5,6 @@ import { googleExtension } from "./src/extensions/google";
 import { googleDrive } from "./src/extensions/google-drive";
 import { hostOps } from "./src/extensions/hostops";
 import { metaAdmin } from "./src/extensions/meta-admin";
-import { metaAdmin } from "./src/extensions/meta-admin";
 import { metaDiagnostics } from "./src/extensions/meta-diagnostics";
 import { metaUi } from "./src/extensions/meta-ui";
 import { popularApps } from "./src/extensions/popular-apps";

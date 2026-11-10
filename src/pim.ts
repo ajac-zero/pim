@@ -74,6 +74,7 @@ import {
 	type Member,
 } from "./circles";
 import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
+import { Cooldowns } from "./plan-quota";
 import { CodexImages } from "./codex-images";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
@@ -1728,7 +1729,11 @@ export class Pim extends DurableAgent<Env> {
 	 * Never the chosen model, so background work does not spend a ChatGPT plan.
 	 */
 	protected memoryModel(): ModelRef | undefined {
-		if (!this.#hasWorkersAi()) return undefined;
+		if (!this.#hasWorkersAi()) {
+			// The conversation's own model, unless it is the plan, which is out of quota: then a custom provider's.
+			const alternative = this.#planCooledDown() || this.chosenModel().provider === CHATGPT_PROVIDER ? this.#customFallback() : undefined;
+			return alternative ? { provider: alternative.provider, modelId: alternative.id } : undefined;
+		}
 		const { memoryModel, model: fallback } = this.deployment();
 		const model = this.ai(memoryModel ?? fallback);
 		return { provider: model.provider, modelId: model.id };
@@ -1758,6 +1763,29 @@ export class Pim extends DurableAgent<Env> {
 	 * model whose provider no longer answers in a schema is skipped.
 	 */
 	async utilityModel(): Promise<Model<Api> | undefined> {
+		const model = await this.#chosenUtilityModel();
+		// The plan said it is out of quota: side jobs use the default or a custom provider's model until it has had time to recover.
+		if (model?.provider === CHATGPT_PROVIDER && this.#planCooledDown()) return this.defaultUtilityModel() ?? this.#customFallback() ?? model;
+		return model;
+	}
+
+	/** Whether the ChatGPT plan failed lately, so side jobs leave it alone. */
+	#planCooledDown(): boolean {
+		return this.#cooldowns.blocked(CHATGPT_PROVIDER);
+	}
+
+	readonly #cooldowns = new Cooldowns();
+
+	/** A custom provider's model that answers in a JSON schema, the chosen model's provider first, for when the plan can't be asked. */
+	#customFallback(): Model<Api> | undefined {
+		const chosen = this.chosenModel().provider;
+		const entries = this.customProviders().filter((entry) => answersInSchema(entry.provider));
+		const entry = entries.find((candidate) => candidate.catalogId === chosen) ?? entries[0];
+		const first = entry?.provider.models[0];
+		return entry && first ? this.modelCatalog().getModel(entry.catalogId, first.id) : undefined;
+	}
+
+	async #chosenUtilityModel(): Promise<Model<Api> | undefined> {
 		const json = this.store.meta(UTILITY_MODEL_KEY);
 		if (json !== undefined) {
 			const { provider, id } = JSON.parse(json) as { provider: string; id: string };
@@ -1805,12 +1833,19 @@ export class Pim extends DurableAgent<Env> {
 		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
 		const model = await this.utilityModel();
 		if (!model) throw new HttpError(503, "This space has no utility model");
-		return this.modelCatalog().completeSimple(
-			model,
-			{ systemPrompt: instructions, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
-			// A reasoning model thinks as little as it can; a cap on its tokens could cut off the answer.
-			{ ...(model.reasoning ? { reasoning: "minimal" } : { maxTokens }), ...(onPayload && { onPayload }), signal: AbortSignal.timeout(60_000) },
-		);
+		const ask = (asked: Model<Api>) =>
+			this.modelCatalog().completeSimple(
+				asked,
+				{ systemPrompt: instructions, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
+				// A reasoning model thinks as little as it can; a cap on its tokens could cut off the answer.
+				{ ...(asked.reasoning ? { reasoning: "minimal" } : { maxTokens }), ...(onPayload && { onPayload }), signal: AbortSignal.timeout(60_000) },
+			);
+		const answer = await ask(model);
+		if (answer.stopReason !== "error" || model.provider !== CHATGPT_PROVIDER) return answer;
+		// The plan failed, most likely out of quota: leave it alone for a while, and answer this once from another provider.
+		this.#cooldowns.failed(CHATGPT_PROVIDER, answer.errorMessage);
+		const other = this.defaultUtilityModel() ?? this.#customFallback();
+		return other ? ask(other) : answer;
 	}
 
 	/** A session's conversation as the utility model reads it; 409 when there is nothing in it yet. */

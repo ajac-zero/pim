@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Tabs } from "radix-ui";
-import { toast } from "sonner";
 import {
   createContext,
   type ReactNode,
@@ -13,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { StateBadge } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
 import { ChatHeader } from "~/components/chat/header";
@@ -76,16 +76,16 @@ import {
   codingTranscriptQuery,
   codingUnread,
   EMPTY_LIVE,
+  GITEA_AUTHORIZE_PATH,
   HARNESS_NAMES,
   type HarnessSignIn,
   isApiKeyHarness,
+  isGiteaRepo,
   MAX_TASK,
   mergeMessages,
   parseDiff,
   queueReasonKey,
   reduceLive,
-  GITEA_AUTHORIZE_PATH,
-  isGiteaRepo,
   repoName,
   resultText,
   START_HARNESSES,
@@ -566,6 +566,8 @@ export function CodingConnectionsSection() {
   );
 }
 
+const GITEA_STATUS_KEY = ["coding", "gitea"];
+
 /** Where Gitea sends the browser back to Pim, which the OAuth application must list. */
 const giteaRedirectUri = () =>
   `${window.location.origin}/api/coding/gitea/callback`;
@@ -583,22 +585,22 @@ export function GiteaConnectPanel() {
   const titleId = useId();
   const { data: account } = useQuery(accountQuery());
   const isAdmin = account?.role === "admin";
-  const statusKey = ["coding", "gitea"];
   const status = useQuery({
-    queryKey: statusKey,
+    queryKey: GITEA_STATUS_KEY,
     queryFn: () => api.gitea.status(),
   });
   const disconnect = useMutation({
     mutationFn: () => api.gitea.disconnect(),
-    onSuccess: (next) => queryClient.setQueryData(statusKey, next),
+    onSuccess: (next) => queryClient.setQueryData(GITEA_STATUS_KEY, next),
   });
   useEffect(() => {
     const result = new URLSearchParams(window.location.search).get("gitea");
     if (result === "connected") toast.success(t("giteaJustConnected"));
     else if (result === "denied") toast.error(t("giteaDenied"));
     else if (result === "failed") toast.error(t("giteaFailed"));
-    if (result) void queryClient.invalidateQueries({ queryKey: statusKey });
-  }, []);
+    if (result)
+      void queryClient.invalidateQueries({ queryKey: GITEA_STATUS_KEY });
+  }, [queryClient, t]);
   const current = status.data;
   const state = !current?.configured
     ? null
@@ -760,9 +762,9 @@ function ApiKeyConnectPanel({ harness }: { harness: ApiKeyHarness }) {
   const name = HARNESS_NAMES[harness];
   const disclosure = HARNESS_DISCLOSURES[harness];
   const text = API_KEY_TEXT[harness];
-  const statusKey = ["coding", "vault", harness];
+  const GITEA_STATUS_KEY = ["coding", "vault", harness];
   const status = useQuery({
-    queryKey: statusKey,
+    queryKey: GITEA_STATUS_KEY,
     queryFn: () => api.vault.status(harness),
   });
   const [apiKey, setApiKey] = useState("");
@@ -772,7 +774,7 @@ function ApiKeyConnectPanel({ harness }: { harness: ApiKeyHarness }) {
       // The key leaves the page as soon as it is saved.
       setApiKey("");
       // The answer is the vault's own status: the panel says connected at once.
-      queryClient.setQueryData(statusKey, next);
+      queryClient.setQueryData(GITEA_STATUS_KEY, next);
       // Threads that waited for the key go on.
       queryClient.invalidateQueries({ queryKey: ["coding", "thread"] });
       queryClient.invalidateQueries({ queryKey: ["coding", "threads"] });
@@ -782,7 +784,7 @@ function ApiKeyConnectPanel({ harness }: { harness: ApiKeyHarness }) {
     mutationFn: () => api.vault.disconnect(harness),
     onSuccess: (next) => {
       save.reset();
-      queryClient.setQueryData(statusKey, next);
+      queryClient.setQueryData(GITEA_STATUS_KEY, next);
     },
   });
   const isConnected = status.data?.connected === true;
@@ -900,9 +902,9 @@ function SubscriptionConnectPanel({
   const codeId = useId();
   const name = HARNESS_NAMES[harness];
   const disclosure = HARNESS_DISCLOSURES[harness];
-  const statusKey = ["coding", "vault", harness];
+  const GITEA_STATUS_KEY = ["coding", "vault", harness];
   const status = useQuery({
-    queryKey: statusKey,
+    queryKey: GITEA_STATUS_KEY,
     queryFn: () => api.vault.status(harness),
   });
   const [signIn, setSignIn] = useState<HarnessSignIn | null>(null);
@@ -911,9 +913,9 @@ function SubscriptionConnectPanel({
     setSignIn(next.state === "connected" ? null : next);
     setCode("");
     // Whatever ended the sign-in, the vault's own status is the truth: ask it again.
-    queryClient.invalidateQueries({ queryKey: statusKey });
+    queryClient.invalidateQueries({ queryKey: GITEA_STATUS_KEY });
     if (next.state === "connected") {
-      queryClient.invalidateQueries({ queryKey: statusKey });
+      queryClient.invalidateQueries({ queryKey: GITEA_STATUS_KEY });
       // Threads that waited for the login go on.
       queryClient.invalidateQueries({ queryKey: ["coding", "thread"] });
       queryClient.invalidateQueries({ queryKey: ["coding", "threads"] });
@@ -940,7 +942,7 @@ function SubscriptionConnectPanel({
   const device = signIn?.state === "waiting_code" && signIn.userCode !== null;
   const polled = useQuery({
     // Each sign-in's own key, so one never reads what an earlier one ended with, even one that got the same code and whose old answer isn't collected yet.
-    queryKey: [...statusKey, "sign-in", attempt, signIn?.userCode],
+    queryKey: [...GITEA_STATUS_KEY, "sign-in", attempt, signIn?.userCode],
     queryFn: () => api.vault.signInStatus(harness),
     enabled: device,
     refetchInterval: SIGN_IN_POLL_MS,
@@ -955,7 +957,7 @@ function SubscriptionConnectPanel({
   });
   const disconnect = useMutation({
     mutationFn: () => api.vault.disconnect(harness),
-    onSuccess: (next) => queryClient.setQueryData(statusKey, next),
+    onSuccess: (next) => queryClient.setQueryData(GITEA_STATUS_KEY, next),
   });
   const isConnected = status.data?.connected === true;
   const waiting = signIn?.state === "waiting_code" && signIn.url;

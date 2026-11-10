@@ -28,7 +28,7 @@ export const HOSTOPS_NAME = "hostops";
 /** The daemon's routes under `/api`, opened by its credential only. */
 export const HOSTOPS_AGENT_PATH = "/hostops/agent";
 
-export const HOST_OPS = ["stats", "deploy", "rollback", "restart", "logs", "set_slot_limit"] as const;
+export const HOST_OPS = ["stats", "deploy", "rollback", "restart", "logs", "set_slot_limit", "exec"] as const;
 export type HostOpName = (typeof HOST_OPS)[number];
 
 export const HOST_SERVICES = ["sandbox-manager", "egress-proxy", "docker-socket-proxy", "hostopsd"] as const;
@@ -38,14 +38,23 @@ const FINISHED: readonly HostOpState[] = ["succeeded", "failed", "rolled_back", 
 
 /** How long an operation waits for the daemon to take it before it expires. */
 export const QUEUED_MS = 10 * 60_000;
-/** How long the daemon has to report an operation it took: a deploy builds, so it has longer. */
-export const deadlineOf = (op: HostOpName) => (op === "deploy" ? 15 * 60_000 : 2 * 60_000);
+/** How long the daemon has to report an operation it took: a deploy builds, so it has longer, and a command has its own timeout and a little more. */
+export const deadlineOf = (op: HostOpName, args?: HostOpArgs) =>
+	op === "deploy" ? 15 * 60_000 : op === "exec" ? Number(args?.timeoutSeconds ?? EXEC_MAX_TIMEOUT) * 1000 + 30_000 : 2 * 60_000;
+/** A command's limits: its length, how long it may run (60 seconds unless given), and how much output comes back, which the daemon cuts to its last part. */
+export const EXEC_MAX_COMMAND = 2000;
+export const EXEC_DEFAULT_TIMEOUT = 60;
+export const EXEC_MAX_TIMEOUT = 300;
+export const EXEC_MAX_OUTPUT = 64 * 1024;
 /** The longest a poll waits for an operation. */
 export const MAX_POLL_WAIT_MS = 25_000;
 export const MAX_SUMMARY = 2000;
 export const MAX_DATA_BYTES = 64 * 1024;
 /** The audit log keeps the newest rows, at most this many. */
 export const AUDIT_ROWS = 10_000;
+/** How much of a row's arguments the audit log keeps, and how much of a command's output. */
+const AUDIT_ARGS_CHARS = 8000;
+const AUDIT_OUTPUT_CHARS = 3000;
 
 /**
  * Who asks for an operation, as the Worker's code that took the request knows
@@ -122,13 +131,27 @@ const ARG_KEYS: Record<HostOpName, readonly string[]> = {
 	restart: ["service"],
 	logs: ["service", "lines"],
 	set_slot_limit: ["maxConcurrent"],
+	exec: ["command", "timeoutSeconds", "maxOutputBytes", "approval"],
 };
+/** What the daemon is not told of an operation: which approval it ran under, and who approved. */
+const NOT_FOR_DAEMON = ["approval", "approver"];
 
 /** A ref git takes as a revision and never as an option. */
 const REF = /^[A-Za-z0-9._/-]{1,100}$/;
 const COMMIT = /^[0-9a-f]{7,40}$/i;
 
-/** The operation and its arguments with their defaults, if `op` is one of the allowed operations and `args` are exactly its arguments; a 400 otherwise. */
+/** A command with its limits, or the 400 to answer with: what `hostops_exec` asks to run, before the person is asked. */
+export function checkExecArgs(given: Record<string, unknown>): { command: string; timeoutSeconds: number; maxOutputBytes: number } {
+	const bad = (message: string) => new HttpError(400, message);
+	const { command, timeoutSeconds = EXEC_DEFAULT_TIMEOUT, maxOutputBytes = EXEC_MAX_OUTPUT } = given;
+	if (typeof command !== "string" || command.trim() === "" || command.length > EXEC_MAX_COMMAND || command.includes("\0"))
+		throw bad(`command must be 1 to ${EXEC_MAX_COMMAND} characters, without a NUL byte`);
+	if (!isInt(timeoutSeconds, 1, EXEC_MAX_TIMEOUT)) throw bad(`timeoutSeconds must be a whole number from 1 to ${EXEC_MAX_TIMEOUT}`);
+	if (!isInt(maxOutputBytes, 1, EXEC_MAX_OUTPUT)) throw bad(`maxOutputBytes must be a whole number from 1 to ${EXEC_MAX_OUTPUT}`);
+	return { command, timeoutSeconds, maxOutputBytes };
+}
+
+/** The operation and its arguments with their defaults, if `op` is one of the allowed operations and `args` are exactly its arguments; a 400 otherwise. `exec` also takes the id of the approval it runs under. */
 export function checkHostOp(op: unknown, args: unknown): { op: HostOpName; args: HostOpArgs } {
 	const bad = (message: string) => new HttpError(400, message);
 	if (typeof op !== "string" || !(HOST_OPS as readonly string[]).includes(op)) throw bad(`op must be one of ${HOST_OPS.join(", ")}`);
@@ -162,6 +185,10 @@ export function checkHostOp(op: unknown, args: unknown): { op: HostOpName; args:
 		case "set_slot_limit":
 			if (!isInt(given.maxConcurrent, 1, 16)) throw bad("maxConcurrent must be a whole number from 1 to 16");
 			return { op: name, args: { maxConcurrent: given.maxConcurrent } };
+		case "exec": {
+			if (typeof given.approval !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/.test(given.approval)) throw bad("exec needs the id of the approval it runs under");
+			return { op: name, args: { ...checkExecArgs(given), approval: given.approval } };
+		}
 	}
 }
 
@@ -174,11 +201,14 @@ export function redactSecrets(text: string): string {
 	return text.replace(/\bBearer\s+\S+/gi, "Bearer [redacted]").replace(TOKEN_LIKE, (run) => (looksSecret(run) ? "[redacted]" : run));
 }
 
+/** Fields of the audit log's arguments that are ids Pim made, which look like tokens but are the point of the row: which approval a command ran under, and who approved it. */
+const PLAIN_FIELDS = ["approval", "approver"];
+
 /** `value` with every string in it redacted, for the audit log. */
 export function redactValue(value: unknown): unknown {
 	if (typeof value === "string") return redactSecrets(value);
 	if (Array.isArray(value)) return value.map(redactValue);
-	if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item)]));
+	if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, PLAIN_FIELDS.includes(key) ? item : redactValue(item)]));
 	return value;
 }
 
@@ -245,6 +275,20 @@ export type HostdHello = { agentVersion: string | null; commit: string | null };
 export type HostdResult = { id: string; ok: boolean; state: "succeeded" | "failed" | "rolled_back"; summary: string; data: HostOpData };
 export type PolledOp = { id: string; name: HostOpName; args: HostOpArgs; deadlineMs: number };
 
+/** What the audit log keeps of a command that ran: what it was, who approved it, how it ended, and the end of its output. */
+function execAudit(args: HostOpArgs, data: HostOpData) {
+	const output = typeof data.output === "string" ? data.output : "";
+	return {
+		command: args.command,
+		approver: args.approver,
+		exitCode: data.exitCode ?? null,
+		timedOut: data.timedOut === true,
+		durationMs: data.durationMs ?? null,
+		truncated: data.truncated === true || output.length > AUDIT_OUTPUT_CHARS,
+		output: output.length > AUDIT_OUTPUT_CHARS ? `…${output.slice(-AUDIT_OUTPUT_CHARS)}` : output,
+	};
+}
+
 export class HostOps extends DurableObject<Env> {
 	/** Polls waiting for an operation, woken when one is queued. */
 	readonly #pollers = new Set<() => void>();
@@ -262,7 +306,7 @@ export class HostOps extends DurableObject<Env> {
 
 	#audit(actor: Actor, action: string, outcome: string, opId: string | null = null, args: unknown = undefined, detail: string | null = null): void {
 		const full = args === undefined ? null : JSON.stringify(redactValue(args) ?? null);
-		const redacted = full === null || full.length <= 4000 ? full : JSON.stringify({ truncated: full.slice(0, 4000) });
+		const redacted = full === null || full.length <= AUDIT_ARGS_CHARS ? full : JSON.stringify({ truncated: full.slice(0, AUDIT_ARGS_CHARS) });
 		this.#sql(
 			"INSERT INTO audit (ts, actor_kind, actor_id, action, op_id, args_redacted_json, outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			Date.now(),
@@ -296,6 +340,10 @@ export class HostOps extends DurableObject<Env> {
 		return this.#sql("SELECT * FROM ops WHERE id = ?", id).toArray()[0];
 	}
 
+	#deadline(row: Record<string, SqlStorageValue>): number {
+		return deadlineOf(row.op as HostOpName, JSON.parse(String(row.args_json)));
+	}
+
 	#wake(waiters: Set<() => void>): void {
 		for (const wake of [...waiters]) wake();
 	}
@@ -322,8 +370,8 @@ export class HostOps extends DurableObject<Env> {
 			this.#audit(SYSTEM, "expire", "expired", String(row.id), undefined, "not taken by the host within 10 minutes");
 			changed = true;
 		}
-		for (const row of this.#sql("SELECT id, op, started_at FROM ops WHERE state = 'running'").toArray()) {
-			if (Number(row.started_at) + deadlineOf(row.op as HostOpName) > now) continue;
+		for (const row of this.#sql("SELECT id, op, args_json, started_at FROM ops WHERE state = 'running'").toArray()) {
+			if (Number(row.started_at) + this.#deadline(row) > now) continue;
 			this.#sql("UPDATE ops SET state = 'failed', finished_at = ?, summary = 'timed out' WHERE id = ?", now, row.id);
 			this.#audit(SYSTEM, "timeout", "failed", String(row.id), undefined, "timed out");
 			changed = true;
@@ -333,9 +381,9 @@ export class HostOps extends DurableObject<Env> {
 			...this.#sql("SELECT created_at FROM ops WHERE state = 'queued'")
 				.toArray()
 				.map((row) => Number(row.created_at) + QUEUED_MS),
-			...this.#sql("SELECT op, started_at FROM ops WHERE state = 'running'")
+			...this.#sql("SELECT op, args_json, started_at FROM ops WHERE state = 'running'")
 				.toArray()
-				.map((row) => Number(row.started_at) + deadlineOf(row.op as HostOpName)),
+				.map((row) => Number(row.started_at) + this.#deadline(row)),
 		];
 		if (due.length === 0) await this.ctx.storage.deleteAlarm();
 		else await this.ctx.storage.setAlarm(Math.min(...due));
@@ -358,6 +406,31 @@ export class HostOps extends DurableObject<Env> {
 		}
 	}
 
+	/**
+	 * Who approved a command, as the audit log keeps it, if the approval it names is the person's, for exactly this
+	 * command and limits, and no earlier command ran under it; otherwise the refusal. Pim's own record of the approval
+	 * is what counts, not what the caller says of it.
+	 */
+	async #approver(caller: Extract<HostOpsCaller, { kind: "agent" }>, args: HostOpArgs): Promise<string | { status: number; error: string }> {
+		const id = String(args.approval);
+		const approval = await (await getAgentByName(this.env.Pim, caller.accountId)).hostopsApproval(id);
+		const asked = approval ? (JSON.parse(approval.argsJson) as Record<string, unknown>) : undefined;
+		if (
+			!approval ||
+			approval.action !== "hostops_exec" ||
+			approval.status !== "approved" ||
+			approval.decidedBy !== "user" ||
+			approval.guest ||
+			asked?.command !== args.command ||
+			asked?.timeoutSeconds !== args.timeoutSeconds ||
+			asked?.maxOutputBytes !== args.maxOutputBytes
+		)
+			return { status: 403, error: "A command runs only after the person approves exactly it." };
+		if (this.#sql("SELECT 1 FROM ops WHERE op = 'exec' AND json_extract(args_json, '$.approval') = ?", id).toArray().length > 0)
+			return { status: 409, error: "That approval already ran its command: each command needs its own approval." };
+		return `${caller.accountId} (approval ${id}, ${new Date(approval.decidedAt ?? 0).toISOString()})`;
+	}
+
 	/** Queues an operation for the host, if the caller may ask for it and it is allowed; the audit log keeps the request either way. */
 	async enqueue(caller: HostOpsCaller, op: unknown, args: unknown): Promise<{ ok: true; op: HostOpView } | Refusal> {
 		const actor = actorOf(caller);
@@ -373,6 +446,16 @@ export class HostOps extends DurableObject<Env> {
 			return { ok: false, status: 400, error: message };
 		}
 		await this.sweep();
+		let stored: HostOpArgs = checked.args;
+		if (checked.op === "exec") {
+			// A command runs only under an approval the person gave for exactly it, and only once.
+			const approver = await this.#approver(caller as Extract<HostOpsCaller, { kind: "agent" }>, checked.args);
+			if (typeof approver !== "string") {
+				this.#audit(actor, "enqueue", "rejected", null, checked, approver.error);
+				return { ok: false, status: approver.status, error: approver.error };
+			}
+			stored = { ...checked.args, approver };
+		}
 		// No awaits from here to the insert: checking for another deploy and queueing this one is one step.
 		if (checked.op === "deploy" || checked.op === "rollback") {
 			const busy = this.#sql("SELECT id FROM ops WHERE op IN ('deploy', 'rollback') AND state IN ('queued', 'running') LIMIT 1").toArray()[0];
@@ -392,9 +475,9 @@ export class HostOps extends DurableObject<Env> {
 			agent.chatId,
 			agent.accountId,
 			checked.op,
-			JSON.stringify(checked.args),
+			JSON.stringify(stored),
 		);
-		this.#audit(actor, "enqueue", "queued", id, checked);
+		this.#audit(actor, "enqueue", "queued", id, { op: checked.op, args: stored });
 		this.#wake(this.#pollers);
 		await this.sweep();
 		return { ok: true, op: this.#view(this.#row(id)!) };
@@ -525,7 +608,8 @@ export class HostOps extends DurableObject<Env> {
 				this.#audit(HOSTD, "claim", "running", op.id);
 				this.#wake(this.#watchers);
 				await this.sweep();
-				return { ok: true, op: { id: op.id, name: op.op, args: op.args, deadlineMs: deadlineOf(op.op) } };
+				const args = Object.fromEntries(Object.entries(op.args).filter(([key]) => !NOT_FOR_DAEMON.includes(key)));
+				return { ok: true, op: { id: op.id, name: op.op, args, deadlineMs: deadlineOf(op.op, op.args) } };
 			}
 			if (Date.now() >= until) return { ok: true, op: null };
 			await this.#sleep(until - Date.now(), this.#pollers);
@@ -553,7 +637,7 @@ export class HostOps extends DurableObject<Env> {
 			JSON.stringify(result.data),
 			result.id,
 		);
-		this.#audit(HOSTD, "result", result.state, result.id, undefined, result.summary);
+		this.#audit(HOSTD, "result", result.state, result.id, row.op === "exec" ? execAudit(JSON.parse(String(row.args_json)), result.data) : undefined, result.summary);
 		this.#wake(this.#watchers);
 		await this.sweep();
 		return { status: 200, op: this.#view(this.#row(result.id)!) };

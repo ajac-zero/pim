@@ -17,6 +17,10 @@ function ref(v) {
 	if (v.startsWith('-') || v.startsWith('/') || v.endsWith('/') || v.endsWith('.') || v.includes('..') || v.includes('//') || v.endsWith('.lock')) return 'is not a valid ref name'
 	return null
 }
+// One command for a non-interactive shell: any text, but not empty, not huge, and no NUL byte (a
+// shell would cut the command there, so the person would approve something other than what runs).
+export const EXEC_MAX_COMMAND = 2000
+const command = (v) => (typeof v === 'string' && v.trim() !== '' && v.length <= EXEC_MAX_COMMAND && !v.includes('\0') ? null : `must be 1 to ${EXEC_MAX_COMMAND} characters, without NUL`)
 const commit = (v) => (typeof v === 'string' && COMMIT.test(v) ? null : 'must be 7 to 40 hex characters')
 
 // name -> { arg: [check, required, default] }
@@ -27,6 +31,7 @@ const OPS = {
 	restart: { service: [oneOf(SERVICES), true] },
 	logs: { service: [oneOf(SERVICES), true], lines: [int(1, 500), false, 200] },
 	set_slot_limit: { maxConcurrent: [int(1, 16), true] },
+	exec: { command: [command, true], timeoutSeconds: [int(1, 300), false, 60], maxOutputBytes: [int(1, 65536), false, 65536] },
 }
 export const OP_NAMES = Object.keys(OPS)
 

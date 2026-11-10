@@ -411,6 +411,186 @@ describe('talking to Pim', () => {
 	})
 })
 
+describe('exec', () => {
+	const exec = (d, command, extra = {}) => op(d, 'exec', { command, ...extra })
+	const alive = (pid) => {
+		try {
+			process.kill(pid, 0)
+			return true
+		} catch {
+			return false
+		}
+	}
+
+	test('runs one command in a non-interactive shell with stdout and stderr together, as the daemon user', async () => {
+		const d = await start()
+		const r = await exec(d, 'echo out; echo err >&2; test -t 0 || echo no-tty; cat; id -u; echo "$HOME"; exit 0')
+		assert.equal(r.state, 'succeeded', r.summary)
+		assert.equal(r.ok, true)
+		assert.equal(r.data.exitCode, 0)
+		assert.equal(r.data.timedOut, false)
+		assert.equal(r.data.truncated, false)
+		assert.equal(typeof r.data.durationMs, 'number')
+		// No stdin (cat saw end of file), no terminal, and the daemon's own user: no sudo, no root.
+		assert.equal(r.data.output, `out\nerr\nno-tty\n${process.getuid()}\n${h.tmp}\n`)
+		assert.match(r.summary, /^Exited with 0 in [\d.]+ s\.$/)
+	})
+
+	test('reports a failing command as failed, with its exit code and output', async () => {
+		const d = await start()
+		const r = await exec(d, 'echo partial; echo boom >&2; exit 7')
+		assert.equal(r.state, 'failed')
+		assert.equal(r.ok, false)
+		assert.equal(r.data.exitCode, 7)
+		assert.equal(r.data.output, 'partial\nboom\n')
+		assert.match(r.summary, /^Exited with 7 in /)
+		const nf = await exec(d, 'no-such-command-here')
+		assert.equal(nf.data.exitCode, 127)
+	})
+
+	test('runs with a minimal environment: no credential of hostopsd or the manager', async () => {
+		const d = await start()
+		const r = await exec(d, 'env | sort')
+		const names = r.data.output.split('\n').map((l) => l.split('=')[0])
+		for (const name of ['HOSTOPS_TOKEN', 'MANAGER_TOKEN', 'PROXY_ADMIN_TOKEN', 'HOSTOPS_URL', 'PIM_CHECKOUT']) assert.ok(!names.includes(name), name)
+		assert.ok(names.includes('PATH'))
+	})
+
+	test('kills the whole process group at the timeout', async () => {
+		const d = await start()
+		const pidFile = path.join(h.tmp, 'child.pid')
+		const started = Date.now()
+		const r = await exec(d, `sleep 60 & echo $! > ${pidFile}; echo started; wait`, { timeoutSeconds: 1 })
+		assert.ok(Date.now() - started < 10000)
+		assert.equal(r.state, 'failed')
+		assert.equal(r.data.timedOut, true)
+		assert.equal(r.data.output, 'started\n')
+		assert.match(r.summary, /^Timed out after 1 s and was killed with its process group\.$/)
+		const child = Number(readFileSync(pidFile, 'utf8'))
+		await new Promise((resolve) => setTimeout(resolve, 200))
+		assert.equal(alive(child), false, 'the background child of the shell is gone')
+	})
+
+	test('does not wait for what a finished command left running in the background', async () => {
+		const d = await start()
+		const pidFile = path.join(h.tmp, 'bg.pid')
+		const started = Date.now()
+		const r = await exec(d, `sleep 60 & echo $! > ${pidFile}; echo done`, { timeoutSeconds: 30 })
+		assert.ok(Date.now() - started < 5000)
+		assert.equal(r.state, 'succeeded')
+		assert.equal(r.data.timedOut, false)
+		assert.equal(r.data.output, 'done\n')
+		await new Promise((resolve) => setTimeout(resolve, 200))
+		assert.equal(alive(Number(readFileSync(pidFile, 'utf8'))), false)
+	})
+
+	test('cuts the output to its last maxOutputBytes and says so', async () => {
+		const d = await start()
+		const r = await exec(d, "printf 'HEAD'; head -c 3000 /dev/zero | tr '\\0' x; printf 'TAIL'", { maxOutputBytes: 100 })
+		assert.equal(r.state, 'succeeded')
+		assert.equal(Buffer.byteLength(r.data.output), 100)
+		assert.ok(r.data.output.endsWith('xxTAIL'))
+		assert.ok(!r.data.output.includes('HEAD'))
+		assert.equal(r.data.truncated, true)
+		assert.equal(r.data.outputBytes, 3008)
+		assert.match(r.summary, /the output was cut/)
+		// Within the cap, nothing is cut: exactly at the cap is not truncated.
+		const exact = await exec(d, "printf 'abcde'", { maxOutputBytes: 5 })
+		assert.deepEqual([exact.data.output, exact.data.truncated], ['abcde', false])
+	})
+
+	test('keeps a result under 64 KB at the default cap and a multi-megabyte flood flagged', async () => {
+		const d = await start()
+		const r = await exec(d, "head -c 3000000 /dev/zero | tr '\\0' 'y'")
+		assert.equal(r.state, 'succeeded')
+		assert.equal(r.data.truncated, true)
+		assert.ok(Buffer.byteLength(JSON.stringify(r.data)) <= 64 * 1024)
+		assert.equal(r.data.outputBytes, 3000000)
+	})
+
+	test('redacts known secrets, bearer tokens and key-like values from the output and the command', async () => {
+		const d = await start()
+		const bearer = 'abc.def-ghi_jkl'
+		const command = [
+			`echo ${MANAGER_TOKEN}`,
+			`echo "token ${HOSTOPS_TOKEN}"`,
+			'echo proxy-admin-secret-value',
+			`echo "Authorization: Bearer ${bearer}"`,
+			'echo sk-test1234567890abcdefgh',
+			'echo AKIAIOSFODNN7EXAMPLE',
+			'echo ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+			'echo "API_KEY=hunter2hunter2"',
+			'echo \'{"password": "p4ss w0rd"}\'',
+			'echo eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl',
+			'echo plain words stay',
+		].join('; ')
+		const r = await exec(d, command)
+		const reported = JSON.stringify(r)
+		for (const secret of [MANAGER_TOKEN, HOSTOPS_TOKEN, 'proxy-admin-secret-value', bearer, 'sk-test1234567890abcdefgh', 'AKIAIOSFODNN7EXAMPLE', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'hunter2hunter2', 'p4ss w0rd', 'c2lnbmF0dXJl']) {
+			assert.ok(!reported.includes(secret), `${secret} reached Pim`)
+			assert.ok(!d.logs.join('\n').includes(secret), `${secret} reached the log`)
+		}
+		assert.match(r.data.output, /plain words stay/)
+		assert.match(r.data.output, /Bearer \[redacted\]/)
+		assert.match(r.data.output, /API_KEY=\[redacted\]/)
+	})
+
+	test('redacts the secrets of its own environment file as it reads them', async () => {
+		const d = await start({}, { SOME_API_KEY: 'k3y-value-0123456789' })
+		const r = await exec(d, 'echo k3y-value-0123456789')
+		assert.equal(r.data.output, '[redacted]\n')
+	})
+
+	test('refuses what the allowlist does not take, running nothing', async () => {
+		const d = await start()
+		const m = path.join(h.tmp, 'marker')
+		const attempts = [
+			{ command: `touch ${m}`, timeoutSeconds: 301 },
+			{ command: `touch ${m}`, timeoutSeconds: 0 },
+			{ command: `touch ${m}`, timeoutSeconds: '5' },
+			{ command: `touch ${m}`, maxOutputBytes: 65537 },
+			{ command: `touch ${m}`, asRoot: true },
+			{ command: `touch ${m}`, sudo: true },
+			{ command: `touch ${m}`, approval: 'x' },
+			{ command: `touch ${m}\0 true` },
+			{ command: 'x'.repeat(2001) },
+			{ command: '   ' },
+			{ command: ['touch', m] },
+			{},
+		]
+		for (const args of attempts) {
+			const r = await op(d, 'exec', args)
+			assert.equal(r.state, 'failed', JSON.stringify(args).slice(0, 80))
+			assert.match(r.summary, /^Refused: .*Nothing ran\.$/)
+		}
+		assert.equal(existsSync(m), false)
+	})
+
+	test('runs nothing while Pim does not accept its credential', async () => {
+		const d = await start()
+		const m = path.join(h.tmp, 'marker')
+		h.pim.ops.push({ id: 'exec-unauth', name: 'exec', args: { command: `touch ${m}` } })
+		h.pim.pollStatus = 401
+		const s = await d.step()
+		assert.ok(s.waitMs > 0)
+		assert.equal(existsSync(m), false)
+		assert.equal(h.pim.results.length, 0)
+		h.pim.pollStatus = null
+		// With the wrong credential Pim answers 401 too, and the op stays queued at Pim.
+		const wrong = createDaemon(loadConfig({ ...h.env, HOSTOPS_TOKEN: 'not-the-credential' }), { log: () => {} })
+		await wrong.start()
+		assert.ok((await wrong.step()).waitMs > 0)
+		assert.equal(existsSync(m), false)
+		assert.equal(h.pim.ops.length, 1)
+	})
+
+	test('cannot start without a credential', async () => {
+		h = await setup()
+		const { HOSTOPS_TOKEN: _, ...rest } = h.env
+		assert.throws(() => loadConfig(rest), /HOSTOPS_TOKEN is not set/)
+	})
+})
+
 describe('the hostopsd process', () => {
 	test('runs from its env file, takes an op and exits 0 to restart itself', async () => {
 		h = await setup()

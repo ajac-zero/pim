@@ -72,7 +72,9 @@ export function loadConfig(env = process.env) {
 		path: e.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
 		home: e.HOME || os.homedir(),
 		version: VERSION,
-		secrets: [token, managerToken, ...Object.entries(managerEnv).filter(([k]) => /TOKEN|SECRET|PASSWORD|KEY/.test(k)).map(([, v]) => v)],
+		// Values replaced wherever they appear in anything reported to Pim: the credentials above, and
+		// the value of every secret-looking variable in the manager's environment and this daemon's.
+		secrets: [token, managerToken, ...Object.entries({ ...managerEnv, ...e }).filter(([k]) => /TOKEN|SECRET|PASSWORD|KEY/.test(k)).map(([, v]) => v)],
 		waitMs: 25000,
 		healthTimeoutMs: num('HOSTOPSD_HEALTH_TIMEOUT_MS', 120000),
 		healthIntervalMs: num('HOSTOPSD_HEALTH_INTERVAL_MS', 2000),
@@ -187,7 +189,9 @@ export function createDaemon(cfg, { log = (m) => console.log(m) } = {}) {
 			await queue({ result: { id: v.id, ok: false, state: 'failed', summary: `Refused: ${v.error}. Nothing ran.`, data: {} } })
 			return
 		}
-		log(`op ${v.id}: ${v.op.name} ${JSON.stringify(v.op.args)}`)
+		// A command stays out of the log: it is in Pim's audit log, and it may hold a secret no pattern knows.
+		const args = v.op.name === 'exec' ? `a command of ${v.op.args.command.length} characters` : JSON.stringify(v.op.args)
+		log(`op ${v.id}: ${v.op.name} ${args}`)
 		await queue(await ops.run(v.op))
 	}
 

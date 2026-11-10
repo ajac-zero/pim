@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useState } from "react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import { useCodingApi } from "~/components/coding";
 import { useI18n } from "~/components/i18n";
 import { Loader2, TriangleAlert } from "~/components/icons";
@@ -12,6 +12,7 @@ import {
 } from "~/components/ui/popover";
 import {
   type CodingEnvironment,
+  type CodingProvisionStatus,
   type CodingThreadView,
   codingErrorCode,
   formatAgo,
@@ -23,8 +24,10 @@ import { cn } from "~/lib/utils";
 
 /*
  * A coding thread's prepared environment (docs/coding-api.md): a chip below
- * the thread's header with the timings and a rebuild in a popover, and the
- * repository's setup script, which the person can edit from there.
+ * the thread's header with, in a popover, the toolchains and dependencies
+ * set up from the repository's files and how each went, the commands it
+ * checks itself with, the timings and a rebuild, and the repository's setup
+ * script, which the person can edit from there.
  */
 
 const FIELD =
@@ -81,16 +84,24 @@ function EnvironmentChip({
     }
   })();
   const pending = env.state === "building" || env.state === "restoring";
+  const items = [...env.toolchains, ...env.dependencies];
+  const failed = items.filter(broken).length;
+  const steps = items.filter((item) => item.status !== "present").length;
+  const failedText =
+    failed > 0 ? t("codingEnvSteps", { failed, total: steps }) : null;
+  const warn = env.state === "failed" || failedText !== null;
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label={t("codingEnvDetails", { state: label })}
+          aria-label={t("codingEnvDetails", {
+            state: failedText ? `${label} · ${failedText}` : label,
+          })}
           className={cn(
             "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring",
             env.state === "none" && "text-muted-foreground",
-            env.state === "failed" && "border-destructive/50 text-destructive",
+            warn && "border-destructive/50 text-destructive",
           )}
         >
           {pending && (
@@ -99,15 +110,13 @@ function EnvironmentChip({
               className="size-3.5 shrink-0 motion-safe:animate-spin"
             />
           )}
-          {env.state === "failed" && (
-            <TriangleAlert aria-hidden className="size-3.5 shrink-0" />
-          )}
+          {warn && <TriangleAlert aria-hidden className="size-3.5 shrink-0" />}
           <span className="truncate">{label}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="w-96 max-w-[calc(100vw-2rem)] text-sm"
+        className="max-h-[min(36rem,80vh)] w-96 max-w-[calc(100vw-2rem)] overflow-y-auto text-sm"
       >
         <p className="font-medium">{t("codingEnvTitle")}</p>
         {env.error && (
@@ -124,6 +133,53 @@ function EnvironmentChip({
               ? t("codingEnvSourceSettings")
               : t("codingEnvSourceRepository")}
           </p>
+        )}
+        {env.readyFrom && (
+          <p className="mt-2 text-muted-foreground">
+            {env.readyFrom === "snapshot"
+              ? t("codingEnvFromCache")
+              : t("codingEnvBuiltHere")}
+          </p>
+        )}
+        {failedText && <p className="mt-2 text-destructive">{failedText}</p>}
+        <ProvisionList
+          title={t("codingEnvToolchains")}
+          items={env.toolchains.map((item) => ({
+            ...item,
+            name: item.version ? `${item.tool} ${item.version}` : item.tool,
+            code: false,
+          }))}
+        />
+        <ProvisionList
+          title={t("codingEnvDependencies")}
+          items={env.dependencies.map((item) => ({
+            ...item,
+            name: item.command,
+            code: true,
+          }))}
+        />
+        {env.testCommands.length > 0 && (
+          <EnvSection title={t("codingEnvChecks")}>
+            {env.testCommands.map((each) => (
+              <li key={each.command} className="min-w-0">
+                <code className="break-all font-mono text-[13px]">
+                  {each.command}
+                </code>{" "}
+                <span className="text-muted-foreground text-xs">
+                  {t("codingEnvFrom", { file: each.from })}
+                </span>
+              </li>
+            ))}
+          </EnvSection>
+        )}
+        {env.notes.length > 0 && (
+          <EnvSection title={t("codingEnvNotProvisioned")}>
+            {env.notes.map((note) => (
+              <li key={note} className="text-muted-foreground text-xs">
+                {note}
+              </li>
+            ))}
+          </EnvSection>
         )}
         <dl className="mt-2 grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 text-muted-foreground">
           {TIMINGS.map(([field, key]) => {
@@ -156,6 +212,77 @@ function EnvironmentChip({
         </Button>
       </PopoverContent>
     </Popover>
+  );
+}
+
+const broken = (item: { status: CodingProvisionStatus }) =>
+  item.status === "failed" || item.status === "skipped";
+
+function EnvSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="mt-3">
+      <h3 className="text-muted-foreground text-xs">{title}</h3>
+      <ul className="mt-1 space-y-1">{children}</ul>
+    </section>
+  );
+}
+
+/** Toolchains or dependencies: each with where it came from and how its install went, and why it failed as text. */
+function ProvisionList({
+  title,
+  items,
+}: {
+  title: string;
+  items: {
+    name: string;
+    code: boolean;
+    from: string;
+    status: CodingProvisionStatus;
+    error?: string;
+  }[];
+}) {
+  const { t } = useI18n();
+  if (items.length === 0) return null;
+  return (
+    <EnvSection title={title}>
+      {items.map((item) => (
+        <li key={item.name} className="min-w-0">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className="min-w-0">
+              {item.code ? (
+                <code className="break-all font-mono text-[13px]">
+                  {item.name}
+                </code>
+              ) : (
+                item.name
+              )}{" "}
+              <span className="text-muted-foreground text-xs">
+                {t("codingEnvFrom", { file: item.from })}
+              </span>
+            </span>
+            <span
+              className={cn(
+                "shrink-0 rounded-full bg-muted px-2 text-xs",
+                broken(item) ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              {t(`codingEnvStatus_${item.status}`)}
+            </span>
+          </div>
+          {item.error && (
+            <p className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-muted px-2 py-1 font-mono text-destructive text-xs">
+              {item.error}
+            </p>
+          )}
+        </li>
+      ))}
+    </EnvSection>
   );
 }
 

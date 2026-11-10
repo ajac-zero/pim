@@ -754,9 +754,14 @@ function SubscriptionConnectPanel({
       queryClient.invalidateQueries({ queryKey: ["coding", "threads"] });
     }
   };
+  // Counts the sign-ins started, to tell one's polling from the last one's.
+  const [attempt, setAttempt] = useState(0);
   const start = useMutation({
     mutationFn: () => api.vault.signIn(harness),
-    onSuccess: setSignIn,
+    onSuccess: (next) => {
+      setAttempt((count) => count + 1);
+      setSignIn(next);
+    },
   });
   const send = useMutation({
     mutationFn: () => api.vault.sendCode(harness, code.trim()),
@@ -769,8 +774,8 @@ function SubscriptionConnectPanel({
   // A device-code sign-in ends without the person sending anything here: it is asked where it is until it does.
   const device = signIn?.state === "waiting_code" && signIn.userCode !== null;
   const polled = useQuery({
-    // Each sign-in's own code in the key, so one never reads what an earlier one ended with.
-    queryKey: [...statusKey, "sign-in", signIn?.userCode],
+    // Each sign-in's own key, so one never reads what an earlier one ended with, even one that got the same code and whose old answer isn't collected yet.
+    queryKey: [...statusKey, "sign-in", attempt, signIn?.userCode],
     queryFn: () => api.vault.signInStatus(harness),
     enabled: device,
     refetchInterval: SIGN_IN_POLL_MS,

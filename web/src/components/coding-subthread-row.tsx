@@ -8,6 +8,7 @@ import {
   type CodingThreadSummary,
   codingByChat,
   codingThreadsQuery,
+  codingUnread,
   HARNESS_NAMES,
   repoName,
 } from "~/lib/coding";
@@ -66,6 +67,7 @@ export function CodingSubthreadRow({
         <CodingHarnessMark
           harness={thread.harness}
           state={thread.state}
+          unread={codingUnread(thread)}
           className="size-5"
         />
         <span className="min-w-0 flex-1 truncate">

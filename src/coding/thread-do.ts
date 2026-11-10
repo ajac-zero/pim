@@ -961,6 +961,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 						budgetUsd: thread.budgetUsd,
 						createdAt: thread.createdAt,
 						updatedAt: thread.updatedAt,
+						lastTurnEndedAt: this.store.lastTurnEndedAt(),
 					});
 					await codingThreadsChanged(this.env, thread.space);
 				} while (this.#indexAgain);

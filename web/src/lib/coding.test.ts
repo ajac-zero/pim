@@ -6,6 +6,7 @@ import {
   type CodingThreadSummary,
   codingByChat,
   codingStateBadge,
+  codingUnread,
   EMPTY_LIVE,
   type LiveTranscript,
   ndjson,
@@ -412,6 +413,28 @@ describe("codingStateBadge", () => {
     for (const [state, mark] of Object.entries(states)) {
       expect(codingStateBadge(state as CodingThreadState)).toBe(mark);
     }
+  });
+});
+
+describe("unread coding threads", () => {
+  it("marks an idle thread whose last turn ended after it was last viewed", () => {
+    expect(codingStateBadge("idle", true)).toBe("unread");
+    expect(codingStateBadge("idle", false)).toBeNull();
+    expect(codingStateBadge("archived", true)).toBeNull();
+    // Working, attention and error keep priority.
+    expect(codingStateBadge("running", true)).toBe("working");
+    expect(codingStateBadge("waiting_input", true)).toBe("attention");
+    expect(codingStateBadge("failed", true)).toBe("error");
+  });
+
+  it("is unread only when the last turn ended after the last view", () => {
+    expect(codingUnread({ lastTurnEndedAt: null, lastSeenAt: null })).toBe(
+      false,
+    );
+    expect(codingUnread({ lastTurnEndedAt: 5, lastSeenAt: null })).toBe(true);
+    expect(codingUnread({ lastTurnEndedAt: 5, lastSeenAt: 4 })).toBe(true);
+    expect(codingUnread({ lastTurnEndedAt: 5, lastSeenAt: 5 })).toBe(false);
+    expect(codingUnread({ lastTurnEndedAt: 5, lastSeenAt: 9 })).toBe(false);
   });
 });
 

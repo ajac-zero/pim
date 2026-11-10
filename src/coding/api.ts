@@ -34,6 +34,10 @@ export type CodingThreadSummary = {
 	readonly budgetUsd: number;
 	readonly createdAt: number;
 	readonly updatedAt: number;
+	/** When its latest turn ended; null before its first. */
+	readonly lastTurnEndedAt: number | null;
+	/** When the person last viewed it; null if never. */
+	readonly lastSeenAt: number | null;
 };
 
 /** One thread in full: its status, with what the list says of it. */

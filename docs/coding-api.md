@@ -59,6 +59,8 @@ type CodingThreadSummary = {
   budgetUsd: number;
   createdAt: number;
   updatedAt: number;
+  lastTurnEndedAt: number | null; // when its latest turn ended; null before its first
+  lastSeenAt: number | null;      // when the person last viewed it (`POST …/seen`); null if never
 };
 
 /** One thread in full: what the routes below answer with unless they say otherwise. */
@@ -140,6 +142,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 | POST | `/coding/threads/:id/abort` | | `CodingThreadView`: stops the turn under way and every command it runs, and withdraws inputs waiting |
 | POST | `/coding/threads/:id/continue` | `{ budgetUsd?, operationId? }` | `CodingThreadView`: goes on after a failure or a stop, with a bigger budget if given. A thread `waiting_input` for a login goes on with the input it waited with |
 | POST | `/coding/threads/:id/cancel` | | `CodingThreadView`: a thread whose task hasn't started yet (`queued` or `provisioning`) leaves the queue or gives its slot back, withdraws its inputs, and ends with `thread.turn_ended`, `outcome: "cancelled"`; it is then `idle` with `stateReason: "cancelled"`. Again, it changes nothing. A thread whose turn started: `not_cancellable` |
+| POST | `/coding/threads/:id/seen` | | `{ seen: true }`: says the person has viewed the thread, setting its `lastSeenAt` to now. A thread is unread while its `lastTurnEndedAt` is later than its `lastSeenAt`; the web app marks it on the icon, and every open page hears of the change on the chat list's socket |
 | POST | `/coding/threads/:id/archive` | | `CodingThreadView`: ends the thread, deleting its workspace. Reading it still works |
 | GET | `/coding/threads/:id/environment` | | `CodingEnvironment` |
 | POST | `/coding/threads/:id/environment/rebuild` | | `CodingEnvironment`, now `building` with `rebuildRequested`: deletes the person's snapshot of its key, then runs the setup script again in the thread's workspace between turns and keeps a new snapshot. A thread without a slot asks for one; a failed one rebuilds once continued. During a turn: `conflict` |

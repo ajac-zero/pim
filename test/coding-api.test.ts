@@ -91,6 +91,7 @@ describe("the coding threads API", () => {
 			["POST", "/steer"],
 			["POST", "/cancel"],
 			["POST", "/archive"],
+			["POST", "/seen"],
 			["POST", "/push"],
 		] as const) {
 			const answer = await asOther(`/coding/threads/${thread.id}${path}`, { method, ...(method === "POST" ? { body: JSON.stringify({ text: "Hi" }) } : {}) });
@@ -165,6 +166,25 @@ describe("the coding threads API", () => {
 		const afterStart = lists();
 		expect((await post(`/coding/threads/${view.id}/archive`)).status).toBe(200);
 		await vi.waitFor(() => expect(lists()).toBeGreaterThan(afterStart));
+		socket.close();
+	});
+
+	it("lists a thread as unread once a turn ends after the person last viewed it, until they mark it seen", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const { socket, received } = await connect();
+		const lists = () => received.filter((message) => message.type === "sessions").length;
+		const view = await start();
+		const row = async () => (await api<{ threads: CodingThreadSummary[] }>("/coding/threads")).body.threads.find((thread) => thread.id === view.id)!;
+		await vi.waitFor(async () => expect(await row()).toMatchObject({ state: "idle", lastSeenAt: null }));
+		const ended = await row();
+		expect(ended.lastTurnEndedAt).toBeGreaterThan(0);
+		await settled();
+		const before = lists();
+		expect((await post(`/coding/threads/${view.id}/seen`)).status).toBe(200);
+		const seen = await row();
+		expect(seen.lastSeenAt).toBeGreaterThanOrEqual(ended.lastTurnEndedAt!);
+		expect(seen.lastTurnEndedAt).toBe(ended.lastTurnEndedAt);
+		await vi.waitFor(() => expect(lists()).toBeGreaterThan(before));
 		socket.close();
 	});
 

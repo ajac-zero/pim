@@ -71,6 +71,10 @@ export type CodingThreadSummary = {
   budgetUsd: number;
   createdAt: number;
   updatedAt: number;
+  /** When its latest turn ended; null before its first. */
+  lastTurnEndedAt: number | null;
+  /** When the person last viewed it; null if never. */
+  lastSeenAt: number | null;
 };
 
 export type CodingCheckpoint = {
@@ -307,6 +311,8 @@ export type CodingApi = {
   ) => Promise<CodingThreadView>;
   cancel: (id: string) => Promise<CodingThreadView>;
   archive: (id: string) => Promise<CodingThreadView>;
+  /** Says the person has viewed the thread, so it is no longer unread. */
+  seen: (id: string) => Promise<{ seen: true }>;
   push: (
     id: string,
     body?: { branch?: string },
@@ -347,6 +353,7 @@ export const codingApi: CodingApi = {
   continue: (id, body) => call(path(id, "/continue"), post(body)),
   cancel: (id) => call(path(id, "/cancel"), post()),
   archive: (id) => call(path(id, "/archive"), post()),
+  seen: (id) => call(path(id, "/seen"), post()),
   push: (id, body) => call(path(id, "/push"), post(body)),
   rebuildEnvironment: (id) => call(path(id, "/environment/rebuild"), post()),
   repoSettings: (repoUrl) => call(repoSettingsPath(repoUrl)),
@@ -455,11 +462,13 @@ export const STATE_TEXT: Record<CodingThreadState, TranslationKey> = {
  * A thread's state as the mark on its icon says it, the one a chat's icon
  * has: starting, queued and running threads are working; one waiting for the
  * person needs attention; a failed one is an error. Between turns and
- * archived ones show nothing.
+ * archived ones show nothing, or the unread mark when the thread has
+ * output the person hasn't viewed (`codingUnread`).
  */
 export function codingStateBadge(
   state: CodingThreadState,
-): "working" | "attention" | "error" | null {
+  unread = false,
+): "working" | "attention" | "error" | "unread" | null {
   switch (state) {
     case "provisioning":
     case "queued":
@@ -470,9 +479,20 @@ export function codingStateBadge(
     case "failed":
       return "error";
     case "idle":
+      return unread ? "unread" : null;
     case "archived":
       return null;
   }
+}
+
+/** Whether a thread's last turn ended after the person last viewed it. */
+export function codingUnread(
+  thread: Pick<CodingThreadSummary, "lastTurnEndedAt" | "lastSeenAt">,
+): boolean {
+  return (
+    thread.lastTurnEndedAt !== null &&
+    thread.lastTurnEndedAt > (thread.lastSeenAt ?? 0)
+  );
 }
 
 /** The threads started from each chat, oldest first, for the chat list to nest under it. */

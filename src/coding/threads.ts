@@ -56,6 +56,8 @@ export function summaryOf(thread: Listed): CodingThreadSummary {
 		budgetUsd: thread.budgetUsd,
 		createdAt: thread.createdAt,
 		updatedAt: thread.updatedAt,
+		lastTurnEndedAt: thread.lastTurnEndedAt,
+		lastSeenAt: thread.lastSeenAt,
 	};
 }
 

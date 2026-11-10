@@ -702,6 +702,127 @@ describe('reconcile after a restart', () => {
 		assert.ok(fake.infra.get('egress-proxy').nets.has('pim-net-abc-1'))
 		assert.deepEqual(Object.values(proxy.map), [good.egressAllow])
 	})
+	// Calls since `from` that would stop or remove anything of these sessions.
+	const destroying = (from, ids) => {
+		const own = new Set(ids.flatMap((id) => [`pim-s-${id}`, `id-pim-s-${id}`, `pim-ws-${id}`, `pim-net-${id}`]))
+		return fake.calls.slice(from).filter((c) => (c.method === 'DELETE' || /\/(stop|kill|pause|restart)$/.test(c.path) || c.path.endsWith('/disconnect')) && c.path.split('/').some((p) => own.has(p)))
+	}
+	const swap = async (next) => {
+		mgr.server.close()
+		mgr = next
+		await new Promise((r) => mgr.server.listen(0, '127.0.0.1', r))
+	}
+	const execOk = async (id) => {
+		fake.agentd(`pim-s-${id}`).onExec = () => [{ type: 'stdout', data: id }, exit(0)]
+		return (await call('POST', `/sessions/${id}/exec`, { cmd: ['true'], timeoutMs: 1000 })).json?.stdout === id
+	}
+
+	test('a restarted manager takes over every live session and removes or stops nothing of theirs', async () => {
+		await setup({ maxConcurrent: 3, managerContainer: 'sandbox-manager' })
+		const ids = ['s-1', 's-2', 's-3']
+		for (const id of ids) assert.equal((await call('POST', '/sessions', { ...good, sessionId: id })).status, 201)
+		const before = fake.calls.length
+		const fresh = make({ maxConcurrent: 3, managerContainer: 'sandbox-manager' })
+		await fresh.reconcile()
+		assert.deepEqual([...fresh.sessions.keys()].sort(), ids)
+		for (const id of ids) assert.deepEqual(fresh.sessions.get(id).params, { ...good, sessionId: id })
+		assert.deepEqual(destroying(before, ids), [])
+		assert.equal(fake.containers.size + fake.networks.size + fake.volumes.size, 9)
+		await swap(fresh)
+		for (const id of ids) assert.ok(await execOk(id), `exec in ${id} through the new manager`)
+		// A manager restarted with another AGENTD_TOKEN_SECRET still reaches them: the token is read back from the container.
+		await swap(make({ maxConcurrent: 3, agentdSecret: 'rotated' }))
+		await mgr.reconcile()
+		for (const id of ids) assert.ok(await execOk(id), `exec in ${id} after the secret changed`)
+		assert.deepEqual(destroying(before, ids), [])
+	})
+	test('a session without an address at restart is kept, waited for, and taken over once it has one', async () => {
+		await setup()
+		await call('POST', '/sessions', good)
+		const c = fake.containers.get('pim-s-abc-1')
+		// Briefly: the restart waits for it.
+		c.hideIp = 3
+		const before = fake.calls.length
+		const fresh = make({ ipWaitMs: 3000 })
+		await fresh.reconcile()
+		assert.equal(fresh.sessions.get('abc-1').ip, c.ip)
+		// For longer than the restart waits: registered, refused for now, never removed.
+		c.hideIp = 1e9
+		proxy.map = {}
+		const slow = make({ ipWaitMs: 300 })
+		await slow.reconcile()
+		await swap(slow)
+		assert.deepEqual(slow.list().map((x) => [x.sessionId, x.state]), [['abc-1', 'running']])
+		const r = await call('POST', '/sessions/abc-1/exec', { cmd: ['true'], timeoutMs: 1000 })
+		assert.deepEqual([r.status, r.json.code], [503, 'session_reconnecting'])
+		assert.equal((await call('POST', '/sessions', good)).status, 200, 'creating it again finds it')
+		await slow.reattach()
+		assert.deepEqual(destroying(before, ['abc-1']), [])
+		assert.ok(fake.containers.has('pim-s-abc-1') && fake.volumes.has('pim-ws-abc-1') && fake.networks.has('pim-net-abc-1'))
+		// The periodic reattach finishes the job: address, allowlist and commands.
+		c.hideIp = 0
+		await slow.reattach()
+		assert.equal(slow.sessions.get('abc-1').ip, c.ip)
+		assert.deepEqual(proxy.map[c.ip], good.egressAllow)
+		assert.ok(await execOk('abc-1'))
+	})
+	test('a restarted or recreated proxy gets every allowlist back, even when one network cannot be joined', async () => {
+		await setup({ maxConcurrent: 3 })
+		for (const id of ['p-1', 'p-2']) await call('POST', '/sessions', { ...good, sessionId: id, egressAllow: [`${id}.example.com`] })
+		const ip = (id) => fake.containers.get(`pim-s-${id}`).ip
+		await mgr.reattach()
+		// Restarted in place: still on the session networks, allowlists gone.
+		fake.infra.get('egress-proxy').startedAt += '+'
+		proxy.map = {}
+		await mgr.reattach()
+		assert.deepEqual(proxy.map, { [ip('p-1')]: ['p-1.example.com'], [ip('p-2')]: ['p-2.example.com'] })
+		// Recreated, and one session's network refuses it: the other one gets its allowlist anyway.
+		fake.recreate('egress-proxy', '10.9.103.2')
+		const net = fake.networks.get('pim-net-p-1')
+		fake.networks.delete('pim-net-p-1')
+		proxy.map = {}
+		await mgr.reattach()
+		assert.deepEqual(proxy.map, { [ip('p-2')]: ['p-2.example.com'] })
+		assert.equal(mgr.sessions.get('p-1').egress, false)
+		fake.networks.set('pim-net-p-1', net)
+		await mgr.reattach()
+		assert.deepEqual(proxy.map, { [ip('p-1')]: ['p-1.example.com'], [ip('p-2')]: ['p-2.example.com'] })
+		assert.ok(fake.infra.get('egress-proxy').nets.has('pim-net-p-1'))
+	})
+	test('only containers that are not running are cleaned up, half-created ones after a grace period', async () => {
+		await setup({ maxConcurrent: 4 })
+		for (const id of ['dead-1', 'young-1', 'paused-1', 'kept-1']) await call('POST', '/sessions', { ...good, sessionId: id })
+		await call('POST', '/sessions/kept-1/stop')
+		const c = (id) => fake.containers.get(`pim-s-${id}`)
+		Object.assign(c('dead-1'), { state: 'exited', created: Date.now() - 120000 })
+		Object.assign(c('young-1'), { state: 'created' })
+		c('paused-1').state = 'paused'
+		// A resume of kept-1 that the old manager left half-done.
+		const labels = { 'pim.coding.session': 'kept-1', 'pim.coding.spec': JSON.stringify({ ...good, sessionId: 'kept-1' }), 'pim.coding.nonce': 'n' }
+		const body = { Env: [], Labels: labels, HostConfig: { NetworkMode: 'pim-net-kept-1', Mounts: [{ Type: 'volume', Source: 'pim-ws-kept-1', Target: '/workspace' }] } }
+		fake.containers.set('pim-s-kept-1', { id: 'id-pim-s-kept-1', name: 'pim-s-kept-1', body, ip: '10.9.0.99', state: 'created', created: Date.now(), hideIp: 0 })
+		fake.networks.set('pim-net-kept-1', { Name: 'pim-net-kept-1', Labels: labels })
+		const fresh = make({ maxConcurrent: 4 })
+		await fresh.reconcile()
+		// As before: a stopped container goes with its network and workspace.
+		assert.ok(!fake.containers.has('pim-s-dead-1') && !fake.networks.has('pim-net-dead-1') && !fake.volumes.has('pim-ws-dead-1'))
+		// A kept workspace loses only the leftover container.
+		assert.ok(!fake.containers.has('pim-s-kept-1') && !fake.networks.has('pim-net-kept-1') && fake.volumes.has('pim-ws-kept-1'))
+		assert.equal((await fresh.status('kept-1')).state, 'stopped')
+		// Young and paused ones are left as they are, and their ids cannot be created over.
+		for (const id of ['young-1', 'paused-1']) {
+			assert.ok(fake.containers.has(`pim-s-${id}`) && fake.volumes.has(`pim-ws-${id}`))
+			await assert.rejects(fresh.createSession({ ...good, sessionId: id }), { status: 409, extra: { code: 'session_unsettled' } })
+		}
+		// Once past the grace period the half-created one goes; the paused one stays until it runs again.
+		c('young-1').created -= 120000
+		c('paused-1').state = 'running'
+		await fresh.reattach()
+		assert.ok(!fake.containers.has('pim-s-young-1') && !fake.volumes.has('pim-ws-young-1'))
+		assert.equal((await fresh.createSession({ ...good, sessionId: 'young-1' })).created, true)
+		assert.ok(fresh.sessions.has('paused-1'))
+		assert.deepEqual(proxy.map[c('paused-1').ip], good.egressAllow)
+	})
 	test('requests that arrive on the manager address inside a session network are refused', async () => {
 		fake = await startFakeDocker()
 		fake.infra.get('sandbox-manager').ip = '127.0.0.2'

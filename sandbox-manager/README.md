@@ -45,7 +45,7 @@ usual update, `git pull && sandbox-manager/up.sh`, is the only step; see
 | --- | --- | --- |
 | `MANAGER_TOKEN` | required | Bearer token for the API (compared in constant time) |
 | `PROXY_ADMIN_TOKEN` | required | Shared with the egress-proxy admin endpoint |
-| `AGENTD_TOKEN_SECRET` | `MANAGER_TOKEN` | Key the per-session agentd tokens are derived from. Set it, so rotating `MANAGER_TOKEN` does not cut a restarted manager off from running sessions |
+| `AGENTD_TOKEN_SECRET` | `MANAGER_TOKEN` | Key the per-session agentd tokens are derived from. A restarted manager reads running sessions' tokens back from their containers, so changing it (or `MANAGER_TOKEN` while it is unset) affects new sessions only |
 | `ALLOWED_IMAGES` | `pim-workspace:local` | Comma-separated exact image references; the first is the default. Each must run workspace-agentd as its entrypoint (build `FROM` the workspace image). Digest-pin them in production |
 | `DOCKER_HOST` / `DOCKER_SOCKET` | `/var/run/docker.sock` | Daemon address |
 | `DOCKER_ROOT` | `/var/lib/docker` | Directory whose filesystem is checked for free space |
@@ -232,7 +232,8 @@ starting session are never deleted.
   per-session labelled volume at `/workspace`, no binds and no published ports.
 - **agentd tokens.** Each container gets its own `AGENTD_TOKEN`:
   HMAC-SHA256(`AGENTD_TOKEN_SECRET`, sessionId + a random nonce). The nonce is a container
-  label; the token is in no label, never logged, and recomputed after a restart. The token
+  label; the token is in no label and never logged; after a restart the manager reads it back
+  from the container (see Restarts). The token
   reaches agentd as a container environment variable, the only way agentd takes it, so anyone
   with Docker API access (`docker inspect`) can read it, as can code in the session through
   `/proc/1/environ` (the same user as agentd, so it gains nothing). agentd keeps it out of the
@@ -296,14 +297,28 @@ starting session are never deleted.
 
 ## Restarts
 
-At start the manager rebuilds its registry from the `pim.coding.session` labels: running
-containers become sessions again (their agentd tokens recomputed from the nonce label), marker
-volumes become kept workspaces, and anything else labelled (a stopped container, a half-created
-session's volume or network) is removed. It then attaches the egress proxy, and itself when it
-runs in a container, to every live session network they are not on: a recreated container (for
-example after `docker compose up` with a new image) has lost them. It re-registers every
-allowlist with the proxy. Every 30 s it does that again, so a proxy that was recreated or
-restarted while the manager kept running gets its networks and allowlists back too.
+Restarting, rebuilding or redeploying the manager never stops or removes a running session: each
+session is a container of its own, and on SIGTERM the manager exits at once without touching any.
+
+At start the manager rebuilds its registry from the `pim.coding.session` labels. Marker volumes
+become kept workspaces. Every running container becomes a session again, with the agentd token
+read back from its environment (or, failing that, recomputed from the nonce label), so a changed
+`AGENTD_TOKEN_SECRET` does not cut it off. A running container without an address yet is waited
+for a few seconds, then registered anyway: its commands answer 503 `session_reconnecting` until
+the address shows up. Only containers that are not running are cleaned up: one with a kept
+workspace loses its container and network, and any other (with its volume and network) once it
+is older than a minute, so a create still in flight is never mistaken for a leftover. A paused or
+otherwise unusable container is left alone, and its `sessionId` is refused with 409
+`session_unsettled` until the manager can take it over or clean it up. A labelled volume or
+network with no container (a half-created session's) is removed, unless it is a kept workspace.
+
+The manager then attaches the egress proxy, and itself when it runs in a container, to every
+live session network they are not on: a recreated container has lost them. It re-registers every
+allowlist with the proxy. Every 5 s it does that again (and looks again at what it could not take
+over), so a proxy that was recreated or restarted while the manager kept running gets its
+networks and allowlists back within seconds; a network the proxy cannot join does not hold up the
+others. Image and configuration changes apply to new sessions only: a running container keeps
+the image and settings it was created with.
 
 ## Known gaps
 
@@ -329,7 +344,8 @@ restarted while the manager kept running gets its networks and allowlists back t
 - Sessions can reach each other's proxy, but not each other's containers (separate networks).
   A session shares the proxy's CPU and file descriptors with all others; there is no rate limit.
 - A container that is stopped or OOM-killed is not restarted; its session (volume included) is
-  removed at the next start of the manager. The manager has no per-session ownership check
+  removed at the next start of the manager, as is every session when the Docker daemon restarts
+  without `live-restore`. The manager has no per-session ownership check
   beyond the single bearer token.
 - Image pulls have no timeout, and the manager does not verify digests itself.
 - No TTY and no metrics.

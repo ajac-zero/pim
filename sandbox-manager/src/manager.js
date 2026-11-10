@@ -106,9 +106,15 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	const sessions = new Map() // id -> {params, createdAt, lastUsed, ip, proxyIp, token, egress, disk}
 	const creating = new Map() // id -> {params, promise}
 	const kept = new Map() // id -> {params, keptAt, reason, diskBytes}: the volume outlives the container
+	// Session containers a restarted manager found but could not take over or clean up yet: running
+	// without an address, paused, half-created and still young, or unreadable. Nothing of theirs is
+	// removed while they are here; the periodic reattach looks at them again.
+	const unsettled = new Set()
 	const selfIps = new Map() // session network -> this manager's address on it
 	const agentdPort = cfg.agentdPort ?? AGENTD_PORT
 	const graceMs = cfg.execGraceMs ?? 5000
+	const leftoverGraceMs = cfg.leftoverGraceMs ?? 60000
+	const ipWaitMs = cfg.ipWaitMs ?? 5000
 	const address = agentdAddress ?? ((ip) => ({ host: ip, port: agentdPort }))
 	let proxyStartedAt
 	// The slot limit: cfg.maxConcurrent (MAX_CONCURRENT or derived) until PUT /config sets one.
@@ -141,9 +147,13 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	const mounted = () => new Set([...sessions.values(), ...creating.values()].map((x) => cacheVolume(x.params)?.Name).filter(Boolean))
 	const env = createEnvCache({ docker, cfg, now, mounted })
 
-	// The token is derived, not stored, so a restarted manager can still reach every agentd.
+	// The token is derived, not stored in a label. A restarted manager reads it back from the
+	// container's environment, so it reaches every agentd even when the secret has changed since.
 	const tokenFor = (id, nonce) => createHmac('sha256', cfg.agentdSecret).update(`${id}.${nonce}`).digest('hex')
-	const target = (s) => ({ ...address(s.ip), token: s.token })
+	const target = (s) => {
+		if (!s.ip) throw new HttpError(503, 'the session is reconnecting; try again shortly', { code: 'session_reconnecting' })
+		return { ...address(s.ip), token: s.token }
+	}
 
 	async function freeDiskPct() {
 		const s = await statfsFn(cfg.dockerRoot)
@@ -176,24 +186,29 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	// Connects `container` to each network it is not on yet (a recreated container has lost them)
-	// and returns its address on every network it is on.
+	// and returns its address on every network it is on. A network it cannot join is in `failed`
+	// and does not keep it from joining the others.
 	async function attach(container, networks, alias) {
 		let info = await docker.request('GET', `/containers/${container}/json`)
 		const missing = networks.filter((n) => !info.NetworkSettings?.Networks?.[n])
-		const errors = []
+		const failed = new Map()
 		for (const n of missing) {
-			await docker.request('POST', `/networks/${n}/connect`, { Container: container, ...(alias && { EndpointConfig: { Aliases: [container] } }) }).catch((e) => errors.push(e))
+			await docker.request('POST', `/networks/${n}/connect`, { Container: container, ...(alias && { EndpointConfig: { Aliases: [container] } }) }).catch((e) => failed.set(n, e))
 		}
 		if (missing.length) info = await docker.request('GET', `/containers/${container}/json`)
-		if (errors.length) throw errors[0]
 		const ips = Object.fromEntries(Object.entries(info.NetworkSettings?.Networks ?? {}).map(([n, v]) => [n, v.IPAddress]))
-		return { ips, startedAt: info.State?.StartedAt, connected: missing }
+		return { ips, startedAt: info.State?.StartedAt, connected: missing.filter((n) => !failed.has(n)), failed }
+	}
+	const joined = (r) => {
+		for (const e of r.failed.values()) throw e
+		return r
 	}
 
 	async function attachSelf(networks) {
-		if (!cfg.managerContainer) return
-		const { ips } = await attach(cfg.managerContainer, networks)
-		for (const n of networks) if (ips[n]) selfIps.set(n, ips[n])
+		if (!cfg.managerContainer) return { ips: {}, failed: new Map() }
+		const r = await attach(cfg.managerContainer, networks)
+		for (const n of networks) if (r.ips[n]) selfIps.set(n, r.ips[n])
+		return r
 	}
 
 	// Removes what exists of a session. `keep` leaves the workspace volume; `keep.info` also
@@ -209,6 +224,12 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			}
 		}
 		if (ip) await proxyAdmin.del(ip).catch(() => {})
+		// The marker goes first, so a manager stopped halfway leaves a marked volume, never an
+		// unmarked one that the next start would take for a leftover.
+		if (keep?.info) {
+			await step(() => docker.request('DELETE', `/volumes/${n.marker}`))
+			await step(() => docker.request('POST', '/volumes/create', { Name: n.marker, Labels: { [LABEL_KEPT]: id, [LABEL_KEPT_INFO]: JSON.stringify(keep.info) } }))
+		}
 		await step(() => docker.request('DELETE', `/containers/${n.container}?force=true&v=true`))
 		// A container that is not on the network (a recreated one) fails to disconnect; removing the
 		// network below reports anything still attached.
@@ -217,10 +238,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		}
 		selfIps.delete(n.network)
 		await step(() => docker.request('DELETE', `/networks/${n.network}`))
-		if (keep?.info) {
-			await step(() => docker.request('DELETE', `/volumes/${n.marker}`))
-			await step(() => docker.request('POST', '/volumes/create', { Name: n.marker, Labels: { [LABEL_KEPT]: id, [LABEL_KEPT_INFO]: JSON.stringify(keep.info) } }))
-		} else if (!keep) {
+		if (!keep) {
 			await step(() => docker.request('DELETE', `/volumes/${n.volume}?force=true`))
 			await step(() => docker.request('DELETE', `/volumes/${n.marker}`))
 		}
@@ -248,8 +266,8 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			await docker.request('POST', '/networks/create', network)
 			// Docker's embedded DNS does not work under gVisor, so the session reaches the proxy by
 			// IP: attach the proxy first, read its address on the session network, then create.
-			const proxyIp = (await attach(cfg.proxyContainer, [n.network], true)).ips[n.network]
-			await attachSelf([n.network])
+			const proxyIp = joined(await attach(cfg.proxyContainer, [n.network], true)).ips[n.network]
+			joined(await attachSelf([n.network]))
 			const container = buildSpec(params, { ...base, proxyUrl: proxyUrlFor(proxyIp) }).container
 			await docker.request('POST', `/containers/create?name=${container.name}`, container.body)
 			// A resumed workspace keeps its own files.
@@ -351,6 +369,8 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			s.lastUsed = now()
 			return { created: false, session: view(s) }
 		}
+		// Creating it now would fail on its container and remove what is there.
+		if (unsettled.has(id)) throw new HttpError(409, 'the session has a container the manager has not taken over yet; try again shortly', { code: 'session_unsettled' })
 		if (restoreFrom) await env.find(params.userId, params.repo, restoreFrom.key)
 		return { created: true, session: view(await launch(params, restoreFrom)) }
 	}
@@ -397,6 +417,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 
 	// Removes the container and network and keeps the volume, recording why in a marker volume.
 	async function keep(id, reason) {
+		unsettled.delete(id)
 		const s = sessions.get(id)
 		const k = kept.get(id)
 		if (s) await measure(s).catch(() => {})
@@ -423,8 +444,9 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	// Each exec runs in its own process group inside agentd, so a timeout kills only that exec.
-	// The proxy variables are passed each time because a re-attached proxy can change address.
-	const execSpec = (s, opts) => ({ ...opts, cwd: agentdPath(opts.cwd), env: { ...proxyEnv(proxyUrlFor(s.proxyIp)), ...opts.env } })
+	// The proxy variables are passed each time because a re-attached proxy can change address. Until
+	// a restarted manager has read the proxy's address, commands keep the container's own.
+	const execSpec = (s, opts) => ({ ...opts, cwd: agentdPath(opts.cwd), env: { ...(s.proxyIp && proxyEnv(proxyUrlFor(s.proxyIp))), ...opts.env } })
 
 	function parseExec(b) {
 		if (!b || typeof b !== 'object') throw new HttpError(400, 'body must be an object')
@@ -450,6 +472,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		}
 		const s = sessions.get(id)
 		sessions.delete(id)
+		unsettled.delete(id)
 		kept.delete(id)
 		await teardown(id, { ip: s?.ip })
 		return { deleted: id }
@@ -518,54 +541,116 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	// session network, and re-registers allowlists the proxy may have lost. A recreated container
 	// has lost its network attachments and a restarted proxy has lost its allowlists.
 	async function reattach() {
+		await settle()
 		const nets = [...sessions.values()].map((s) => names(s.params.sessionId).network)
 		const proxy = await attach(cfg.proxyContainer, nets, true)
 		const restarted = proxy.startedAt !== proxyStartedAt
 		proxyStartedAt = proxy.startedAt
-		await attachSelf(nets)
+		const self = await attachSelf(nets).catch((e) => ({ failed: new Map([['its own container', e]]) }))
+		for (const [n, e] of [...proxy.failed, ...self.failed]) console.error(`re-attaching ${n}:`, e.message)
 		for (const s of sessions.values()) {
 			const net = names(s.params.sessionId).network
 			s.proxyIp = proxy.ips[net] ?? s.proxyIp
-			if (restarted || proxy.connected.includes(net) || !s.egress) {
+			if (!s.ip || proxy.failed.has(net)) s.egress = false
+			else if (restarted || proxy.connected.includes(net) || !s.egress) {
 				s.egress = await proxyAdmin.set(s.ip, s.params.egressAllow).then(() => true, () => false)
 			}
 		}
 	}
 
-	// Rebuilds the registry from labels after a restart and removes half-created leftovers.
+	const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+	const inspect = (n) => docker.request('GET', `/containers/${n.container}/json`)
+	const ipOf = (info, n) => info.NetworkSettings?.Networks?.[n.network]?.IPAddress || null
+
+	// Takes over a session container Docker reports, or removes it when it is a half-created
+	// leftover. Returns whether the id is settled; an unsettled one is looked at again later. A
+	// container that runs is never removed: it is registered even before it has an address, with
+	// the agentd token from its environment (or derived from its nonce). Only a container that
+	// never started or has stopped is a leftover: with a kept workspace it loses only its container
+	// and network, and without one it goes entirely once it is older than leftoverGraceMs.
+	async function adopt(id, waitMs = 0) {
+		const n = names(id)
+		let info
+		try {
+			info = await inspect(n)
+			for (const end = Date.now() + waitMs; info.State?.Status === 'running' && !ipOf(info, n) && Date.now() < end; ) {
+				await sleep(250)
+				info = await inspect(n)
+			}
+		} catch (e) {
+			return notFound(e) // gone: what is left of it is cleaned up with the orphans
+		}
+		const state = info.State?.Status
+		if (state === 'running') {
+			const ip = ipOf(info, n)
+			const known = sessions.get(id)
+			if (known) return Boolean((known.ip ??= ip))
+			let params
+			try {
+				params = JSON.parse(info.Config.Labels[LABEL_SPEC])
+			} catch {
+				return false
+			}
+			const fromEnv = info.Config.Env?.find((e) => e.startsWith('AGENTD_TOKEN='))?.slice('AGENTD_TOKEN='.length)
+			const nonce = info.Config.Labels[LABEL_NONCE]
+			const token = fromEnv || (nonce && tokenFor(id, nonce))
+			if (!token) return false
+			if (fromEnv && nonce && fromEnv !== tokenFor(id, nonce)) console.warn(`session ${id}: its agentd token is not the one AGENTD_TOKEN_SECRET derives; using the container's`)
+			const createdAt = Date.parse(info.Created) || now()
+			sessions.set(id, { params, createdAt, lastUsed: now(), ip, proxyIp: null, token, egress: false, disk: null })
+			return Boolean(ip)
+		}
+		if (!['created', 'exited', 'dead'].includes(state)) return false // paused, restarting, removing
+		if (kept.has(id)) {
+			await teardown(id, { keep: true })
+			return true
+		}
+		if (now() - (Date.parse(info.Created) || 0) < leftoverGraceMs) return false
+		await teardown(id)
+		return true
+	}
+
+	// Looks again at what a restart left unsettled.
+	async function settle() {
+		for (const id of [...unsettled]) {
+			if (creating.has(id)) continue
+			const done = await adopt(id).catch(() => false)
+			// A session deleted meanwhile is no longer unsettled, and is not brought back.
+			if (!unsettled.has(id)) sessions.delete(id)
+			else if (done) unsettled.delete(id)
+		}
+	}
+
+	// Rebuilds the registry from Docker after a restart and removes half-created leftovers. Nothing
+	// of a running session is ever removed here (see adopt).
 	async function reconcile() {
 		await env.ready()
-		const containers = await docker.request('GET', `/containers/json?all=true&filters=${labelFilter(LABEL)}`)
-		const live = new Set()
-		for (const c of containers) {
-			const id = c.Labels[LABEL]
+		// Kept workspaces first, so a leftover of a resume keeps its volume.
+		const markers = (await docker.request('GET', `/volumes?filters=${labelFilter(LABEL_KEPT)}`)).Volumes ?? []
+		for (const v of markers) {
 			try {
-				const params = JSON.parse(c.Labels[LABEL_SPEC])
-				const nonce = c.Labels[LABEL_NONCE]
-				const ip = c.NetworkSettings?.Networks?.[names(id).network]?.IPAddress
-				if (c.State !== 'running' || !nonce || !ip) throw new Error('not running')
-				sessions.set(id, { params, createdAt: c.Created * 1000, lastUsed: now(), ip, proxyIp: null, token: tokenFor(id, nonce), egress: false, disk: null })
-				live.add(id)
+				kept.set(v.Labels[LABEL_KEPT], JSON.parse(v.Labels[LABEL_KEPT_INFO]))
 			} catch {
-				await teardown(id).catch(() => {})
+				await docker.request('DELETE', `/volumes/${v.Name}`).catch(() => {})
 			}
 		}
-		for (const v of (await docker.request('GET', `/volumes?filters=${labelFilter(LABEL_KEPT)}`)).Volumes ?? []) {
-			const id = v.Labels[LABEL_KEPT]
-			if (live.has(id)) await docker.request('DELETE', `/volumes/${v.Name}`).catch(() => {}) // a resume that finished
-			else {
-				try {
-					kept.set(id, JSON.parse(v.Labels[LABEL_KEPT_INFO]))
-				} catch {
-					await docker.request('DELETE', `/volumes/${v.Name}`).catch(() => {})
-				}
-			}
+		const containers = await docker.request('GET', `/containers/json?all=true&filters=${labelFilter(LABEL)}`)
+		for (const c of containers) {
+			const id = c.Labels[LABEL]
+			if (!(await adopt(id, ipWaitMs).catch(() => false))) unsettled.add(id)
+		}
+		// A marker of a session that runs is a resume (or a stop) that did not finish.
+		for (const id of [...kept.keys()]) {
+			if (!sessions.has(id)) continue
+			kept.delete(id)
+			await docker.request('DELETE', `/volumes/${names(id).marker}`).catch(() => {})
 		}
 		const vols = (await docker.request('GET', `/volumes?filters=${labelFilter(LABEL)}`)).Volumes ?? []
 		const nets = await docker.request('GET', `/networks?filters=${labelFilter(LABEL)}`)
 		for (const id of new Set([...vols, ...nets].map((o) => o.Labels?.[LABEL]).filter(Boolean))) {
-			if (!live.has(id)) await teardown(id, { keep: kept.has(id) }).catch(() => {})
+			if (!sessions.has(id) && !unsettled.has(id) && !creating.has(id)) await teardown(id, { keep: kept.has(id) }).catch(() => {})
 		}
+		if (unsettled.size) console.warn(`sessions not taken over yet, left as they are: ${[...unsettled].join(', ')}`)
 		// The periodic reattach retries if the proxy is not up yet.
 		await reattach().catch((e) => console.error('re-attaching session networks:', e.message))
 		await env.gc().catch((e) => console.error('collecting snapshots and caches:', e.message))

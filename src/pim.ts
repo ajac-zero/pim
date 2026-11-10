@@ -6356,21 +6356,46 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions/:session/model",
 			async ({ session }, request) => {
 				const id = await this.#session(session!);
-				const { model } = await readJson<{ model: string }>(request);
-				if (typeof model !== "string") throw new HttpError(400, "model must be a string");
-				const allowed = this.#allowedModels();
-				if (allowed && model !== this.defaultModel().id && !allowed.includes(model)) {
-					throw new HttpError(403, `${model} is not available here. Choose one of GET /model's choices.`);
+				const body = await readJson<{ provider?: unknown; id?: unknown; model?: unknown }>(request);
+				const hint = `Send {provider, id} of one of GET /model's choices (for example {"provider":"own:ai-gateway","id":"claude-sonnet-5-5"}), or {model:"<provider>/<id>"}.`;
+				let provider: string | undefined;
+				let modelId: string | undefined;
+				if (typeof body.provider === "string" && typeof body.id === "string") {
+					provider = body.provider;
+					modelId = body.id;
+				} else if (typeof body.model === "string") {
+					// The longest provider id the string starts with, since a model id may hold "/" too.
+					const text = body.model;
+					const known = [this.defaultModel().provider, CHATGPT_PROVIDER, ...this.customProviders().map(({ catalogId }) => catalogId)];
+					provider = known.filter((candidate) => text.startsWith(`${candidate}/`)).sort((a, b) => b.length - a.length)[0];
+					if (provider) modelId = text.slice(provider.length + 1);
+				} else {
+					throw new HttpError(400, hint);
 				}
 				let resolved: PiModel;
-				try {
-					if (!this.#hasWorkersAi()) throw new Error("This Pim has no Workers AI");
-					resolved = this.ai(model);
-				} catch (error) {
-					throw new HttpError(400, errorMessage(error));
+				if (provider && modelId !== undefined) {
+					try {
+						resolved = await this.#choice(provider, modelId);
+					} catch (error) {
+						if (error instanceof HttpError && error.status === 400) throw new HttpError(400, `${error.message}. ${hint}`);
+						throw error;
+					}
+				} else {
+					// A bare Workers AI id, as sessions have always taken.
+					const bare = body.model as string;
+					const allowed = this.#allowedModels();
+					if (allowed && bare !== this.defaultModel().id && !allowed.includes(bare)) {
+						throw new HttpError(403, `${bare} is not available here. ${hint}`);
+					}
+					try {
+						if (!this.#hasWorkersAi()) throw new Error("This Pim has no Workers AI");
+						resolved = this.ai(bare);
+					} catch (error) {
+						throw new HttpError(400, `${errorMessage(error)}. ${hint}`);
+					}
 				}
 				await this.harness.session(id).setModel(resolved);
-				return { model };
+				return { model: describeModel(resolved) };
 			},
 		],
 

@@ -293,6 +293,30 @@ describe("A person's own model providers", () => {
 		expect((await say("Still there?", writerChat)).text).toBe("Back on the default.");
 	});
 
+	it("changes one session's model by {provider, id}, by {model: \"<provider>/<id>\"} with the longest provider prefix, or by a bare default id", async () => {
+		expect((await post("/providers", { builtin: "openrouter", key: "k", models: ["anthropic/claude-sonnet-4.6"] })).status).toBe(200);
+		expect((await post("/providers", { name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" })).status).toBe(200);
+		const session = (await post("/sessions")).body.id;
+		const set = (body: unknown) => put(`/sessions/${session}/model`, body);
+		const proxy = { provider: "own:proxy", id: "claude-sonnet-5-5" };
+		expect(await set(proxy)).toMatchObject({ status: 200, body: { model: proxy } });
+		expect((await say("Hello?", session)).text).toBe("Hello from claude.test");
+		// A model id with "/" in it keeps its whole id after the provider.
+		expect((await set({ model: "own:openrouter/anthropic/claude-sonnet-4.6" })).body.model).toMatchObject({ provider: "own:openrouter", id: "anthropic/claude-sonnet-4.6" });
+		expect((await set({ model: "own:proxy/claude-sonnet-5-5" })).body.model).toMatchObject(proxy);
+		// A bare id is the legacy Workers AI form; this test Pim does not offer that one.
+		const legacy = await set({ model: "faux-model" });
+		expect(legacy.status).toBe(400);
+		expect(legacy.body.error ?? JSON.stringify(legacy.body)).toContain("is not a model this");
+		// Errors say what to send.
+		for (const body of [{ provider: "own:proxy", id: "nope" }, { model: "own:proxy/nope" }, { model: "faux-model" }, {}]) {
+			const bad = await set(body);
+			expect(bad.status).toBe(400);
+			expect(bad.body.error ?? JSON.stringify(bad.body)).toContain(`Send {provider, id} of one of GET /model's choices (for example {"provider":"own:ai-gateway","id":"claude-sonnet-5-5"}), or {model:"<provider>/<id>"}.`);
+		}
+		for (const id of ["openrouter", "proxy"]) await api(`/providers/${id}`, { method: "DELETE" });
+	});
+
 	it("speaks the Anthropic Messages API to a custom endpoint that is set to", async () => {
 		expect((await post("/providers", { name: "Proxy", url: "https://claude.test", api: "gpt" })).status).toBe(400);
 		const added = await post("/providers", { name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" });

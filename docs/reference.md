@@ -332,7 +332,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | PUT | `/sessions/:s/queue/:id` | `{ text }` | Rewrites a queued message's text, keeping its images; `409` once the agent has it |
 | DELETE | `/sessions/:s/queue/:id` | | Takes a queued message back before the agent reads it; `409` once the agent has it |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
-| PUT | `/sessions/:s/model` | `{ model }` | Changes one session's model: a Workers AI or AI Gateway id |
+| PUT | `/sessions/:s/model` | `{ provider, id }`, one of `GET /model`'s `choices`; or `{ model: "<provider>/<id>" }`, or `{ model }` with a bare Workers AI id | Changes one session's model; answers `{ model: { provider, id, name, images } }` |
 | GET | `/settings` | | `{ timeZone, approvalPolicy, deviceAlerts, approvalTimeoutSeconds }`, and `colorMode` (`light`, `dark` or `system`), `colorTheme` (a theme's id) and `locale` (`en` or `es`) once set, which every device shows; `approvalTimeoutSeconds` is null when approvals wait however long |
 | PUT | `/settings` | Any of `{ timeZone, approvalPolicy, deviceAlerts, colorMode, colorTheme, locale }`; `null` goes back to the deployment's | The settings |
 | GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart), runs and tool calls by UTC day |

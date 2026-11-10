@@ -1,3 +1,4 @@
+import type { Message } from "@earendil-works/pi-ai";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
@@ -12,7 +13,9 @@ import {
 	redactSecrets,
 	waitForHostOp,
 } from "../src/hostops";
-import { api, OWNER, post, signedIn, TOKEN, url } from "./helpers";
+import type { Pim } from "../src/pim";
+import { api, OWNER, post, ROOT, signedIn, systemPrompt, TOKEN, toolUse, url } from "./helpers";
+import { faux } from "./worker";
 
 const MINUTE = 60_000;
 const stub = () => env.HostOps.getByName(HOSTOPS_NAME);
@@ -424,5 +427,123 @@ describe("the audit log", () => {
 		expect(newest[1]!.outcome).toBe(String(AUDIT_ROWS - 1));
 		expect(await auditLog()).toHaveLength(100);
 		expect((await call("/hostops/audit", { cookie })).body.audit).toHaveLength(100);
+	});
+});
+
+describe("the majordomo's host operation tools", () => {
+	const HOSTOPS_TOOLS = ["hostops_stats", "hostops_deploy", "hostops_rollback", "hostops_restart", "hostops_logs", "hostops_set_slot_limit", "hostops_status", "hostops_op"];
+	let offered: string[] = [];
+	let prompt = "";
+	let told = "";
+	/** The model's last step: it reads the tools it was offered, its prompt and the last tool result, then answers. */
+	const record = (context: { messages: Message[] }) => {
+		const tools = new Set<string>();
+		for (const message of context.messages) {
+			if (message.role !== "system") continue;
+			for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
+			for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
+		}
+		offered = [...tools];
+		prompt = systemPrompt(context.messages);
+		const result = context.messages.findLast((message) => message.role === "toolResult");
+		told = result?.role === "toolResult" && result.content[0]?.type === "text" ? result.content[0].text : "";
+		return toolUse("send_to_user", { message: "ok" });
+	};
+	/** Says something in a chat with `token`'s space, and waits for the answer. */
+	const sayAs = async (token: string, chat: string, content: string) => {
+		const { status } = await call(`/sessions/${chat}/messages`, { method: "POST", token, body: { content, wait: true } });
+		expect(status).toBe(200);
+	};
+	const agentId = () => (majordomo as { agentId: string }).agentId;
+	let other = "";
+	let otherChat = "";
+
+	beforeAll(async () => {
+		other = (await post("/agents", { name: "Helper", instructions: "Helps." })).body.id;
+		otherChat = (await post("/sessions", { agent: other })).body.id;
+	});
+
+	it("are offered, with their prompt section, only to the admin's majordomo", async () => {
+		faux.setResponses([record]);
+		await sayAs(TOKEN, ROOT, "Hi");
+		expect(offered).toEqual(expect.arrayContaining(HOSTOPS_TOOLS));
+		expect(prompt).toContain("You run this Pim's host");
+
+		faux.setResponses([record]);
+		await sayAs(TOKEN, otherChat, "Hi");
+		expect(offered.filter((name) => name.startsWith("hostops_"))).toEqual([]);
+		expect(offered).toContain("send_to_user");
+		expect(prompt).not.toContain("You run this Pim's host");
+
+		// A member's majordomo is no admin's.
+		const memberRoot = (await call("/", { token: memberToken })).body.rootSession as string;
+		faux.setResponses([record]);
+		await sayAs(memberToken, memberRoot, "Hi");
+		expect(offered.filter((name) => name.startsWith("hostops_"))).toEqual([]);
+		expect(offered).toContain("send_to_user");
+		expect(prompt).not.toContain("You run this Pim's host");
+	});
+
+	it("refuse and audit any other agent that reaches them", async () => {
+		const results = await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			const session = pim.store.sessionOf(otherChat)!;
+			const tools = pim.abilities.get("hostops")!.tools!;
+			const run = (name: string, args: Record<string, unknown>) =>
+				tools.find((tool) => tool.name === name)!.execute(args as never, { conversationId: session } as never, {} as never) as Promise<{ content: { text: string }[]; isError?: boolean }>;
+			return [await run("hostops_restart", { service: "egress-proxy" }), await run("hostops_status", {}), await run("hostops_op", { id: "some-op" })];
+		});
+		for (const result of results) {
+			expect(result.isError).toBe(true);
+			expect(JSON.parse(result.content[0]!.text)).toEqual({ error: "Only the admin's majordomo can run operations on this Pim's host.", status: 403 });
+		}
+		const rejected = (await auditLog()).filter((row) => row.outcome === "rejected").reverse();
+		expect(rejected.map((row) => [row.action, row.actorKind, row.actorId, row.args])).toEqual([
+			["enqueue", "agent", `${OWNER}/${other}`, { op: "restart", args: { service: "egress-proxy" } }],
+			["status", "agent", `${OWNER}/${other}`, null],
+			["read", "agent", `${OWNER}/${other}`, { id: "some-op" }],
+		]);
+		expect((await call("/hostops/status", { cookie })).body.queue).toEqual({ queued: 0, running: 0 });
+	});
+
+	it("run an operation end to end for the majordomo, through the daemon", async () => {
+		const token = (await call("/hostops/credential", { method: "POST", cookie })).body.token as string;
+		faux.setResponses([toolUse("hostops_logs", { service: "egress-proxy", lines: 20 }), record]);
+		const turn = sayAs(TOKEN, ROOT, "Show me the proxy's logs");
+		const polled = await poll(token, 10_000);
+		expect(polled.body.op).toMatchObject({ name: "logs", args: { service: "egress-proxy", lines: 20 } });
+		const id = polled.body.op.id as string;
+		expect((await report(token, succeeded(id, { summary: "20 lines", data: { lines: ["started", "listening on :3128"] } }))).status).toBe(200);
+		await turn;
+		expect(JSON.parse(told)).toMatchObject({ id, op: "logs", state: "succeeded", summary: "20 lines", data: { lines: ["started", "listening on :3128"] } });
+		expect(await getHostOp(env, id)).toMatchObject({ caller: { accountId: OWNER, agentId: agentId(), chatId: ROOT } });
+		expect((await auditLog()).reverse().map((row) => [row.action, row.outcome, row.actorKind, row.actorId])).toEqual([
+			["credential.issue", "ok", "admin", OWNER],
+			["enqueue", "queued", "agent", `${OWNER}/${agentId()}`],
+			["claim", "running", "hostd", null],
+			["result", "succeeded", "hostd", null],
+		]);
+
+		// The daemon's status, as the majordomo reads it.
+		faux.setResponses([toolUse("hostops_status", {}), record]);
+		await sayAs(TOKEN, ROOT, "Is the daemon there?");
+		expect(JSON.parse(told)).toMatchObject({ credential: "issued", version: "1.2.3", commit: "abc1234", queue: { queued: 0, running: 0 }, last_seen_at: expect.any(String) });
+	});
+
+	it("answer a deploy that is still running with its id, which hostops_op then follows to the end", async () => {
+		const token = (await call("/hostops/credential", { method: "POST", cookie })).body.token as string;
+		faux.setResponses([toolUse("hostops_deploy", {}), record]);
+		const turn = sayAs(TOKEN, ROOT, "Deploy main");
+		const polled = await poll(token, 10_000);
+		expect(polled.body.op).toMatchObject({ name: "deploy", args: { ref: "origin/main" } });
+		const id = polled.body.op.id as string;
+		// The daemon doesn't report within the tool's wait.
+		await turn;
+		expect(JSON.parse(told)).toMatchObject({ id, op: "deploy", state: "running", finished_at: null, note: expect.stringContaining(id) });
+
+		await report(token, { id, ok: false, state: "rolled_back", summary: "health check failed; back on abc1234", data: { from: "abc1234" } });
+		faux.setResponses([toolUse("hostops_op", { id }), record]);
+		await sayAs(TOKEN, ROOT, "How did it go?");
+		expect(JSON.parse(told)).toMatchObject({ id, op: "deploy", state: "rolled_back", summary: "health check failed; back on abc1234", data: { from: "abc1234" } });
+		expect(JSON.parse(told).note).toBeUndefined();
 	});
 });

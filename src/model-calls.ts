@@ -243,7 +243,26 @@ export class ModelCallLedger {
 		this.#sql = options.sql;
 		this.#prices = options.prices ?? PRICE_TABLE;
 		this.#sql.exec(SCHEMA);
+		this.#repriceCustomEndpointCalls();
 		this.#dirty = this.#unrolled();
+	}
+
+	/**
+	 * Calls on a custom endpoint (`own:` providers) were once recorded as plan calls, which cost nothing, so their rows have no price.
+	 * Prices them from their tokens and drops the rollup, which then recomputes from the calls; nothing is left to do once none remain.
+	 */
+	#repriceCustomEndpointCalls(): void {
+		const stale = this.#sql
+			.exec("SELECT id, model, input, output, cache_read, cache_write_5m, cache_write_1h FROM pim_model_calls WHERE plan = 1 AND provider LIKE 'own:%' AND cost_usd IS NULL")
+			.toArray();
+		if (stale.length === 0) return;
+		for (const row of stale) {
+			const price = priceOf(String(row.model), this.#prices);
+			const tokens: Tokens = { input: Number(row.input), output: Number(row.output), cacheRead: Number(row.cache_read), cacheWrite5m: Number(row.cache_write_5m), cacheWrite1h: Number(row.cache_write_1h) };
+			this.#sql.exec("UPDATE pim_model_calls SET plan = 0, cost_usd = ?, price_version = ? WHERE id = ?", costOf(tokens, price), price ? this.#prices.version : null, row.id);
+		}
+		this.#sql.exec("DELETE FROM pim_usage_daily");
+		this.#sql.exec("DELETE FROM pim_usage_rollup");
 	}
 
 	/** Records a settled call, and says whether it made a rollup due that wasn't. Never throws. */

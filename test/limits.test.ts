@@ -8,6 +8,7 @@ import {
 import type { Models } from "@earendil-works/pi-ai/models";
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ModelCallLedger } from "../src/model-calls";
 import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
 import { api, apiUrl, OWNER, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
@@ -344,6 +345,24 @@ describe("model call ledger", () => {
 			const report = instance.usageCosts(1);
 			expect(report.totalCostUsd).toBeGreaterThan(2);
 			expect(report.unpricedCalls).toBe(0);
+		});
+	});
+
+	it("prices the custom endpoint calls recorded before they were priced, and rebuilds the rollup", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const sql = (instance as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql;
+			// A row as the first release wrote it: the gateway counted as a plan, so no price, and a rollup that says so.
+			sql.exec(
+				`INSERT INTO pim_model_calls (ts, provider, model, input, output, cache_read, cache_write_5m, cache_write_1h, stop_reason, cost_usd, price_version, plan)
+				VALUES (?, 'own:ai-gateway', 'claude-sonnet-5-5', 1000000, 0, 0, 0, 0, 'stop', NULL, NULL, 1)`,
+				Date.now() - 1000,
+			);
+			instance.usage.calls.rollup(Date.now());
+			expect(instance.usageCosts(1).totalCostUsd).toBe(0);
+			new ModelCallLedger({ sql });
+			const [row] = sql.exec("SELECT cost_usd, plan, price_version FROM pim_model_calls WHERE model = 'claude-sonnet-5-5' AND input = 1000000").toArray();
+			expect(row).toMatchObject({ cost_usd: 2, plan: 0 });
+			expect(instance.usageCosts(1).totalCostUsd).toBe(2);
 		});
 	});
 

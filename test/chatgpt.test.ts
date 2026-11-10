@@ -101,6 +101,8 @@ let stranger: KeyPair;
 /** What OpenAI's token endpoint answers next; a function sees the request's form. */
 let tokenAnswer: (form: URLSearchParams) => Promise<Record<string, unknown>>;
 let calls: Call[];
+/** How many of the next chat requests to the Responses API find the plan's usage limit, and when it resets. */
+let limit = { requests: 0, resetsInSeconds: 3600 };
 
 const callsTo = (path: string) => calls.filter((call) => new URL(call.url).pathname === path);
 const forms = (path: string) => callsTo(path).map((call) => new URLSearchParams(call.body));
@@ -112,6 +114,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
 	calls = [];
+	limit = { requests: 0, resetsInSeconds: 3600 };
 	tokenAnswer = async () => {
 		throw new Error("unexpected token request");
 	};
@@ -135,6 +138,15 @@ beforeEach(() => {
 					],
 				});
 			case "/v1/responses":
+				// Chats find the limit; naming them is a side job with its own way around it.
+				if (limit.requests > 0 && !calls.at(-1)!.body.includes("You name chats")) {
+					limit.requests--;
+					return Response.json(
+						// As Sign in with ChatGPT says it, which pi-ai doesn't retry.
+						{ error: { type: "subscription_sharing_usage_limit_exceeded", message: "You've hit your usage limit.", resets_in_seconds: limit.resetsInSeconds } },
+						{ status: 429 },
+					);
+				}
 				return calls.at(-1)!.body.includes("You name chats")
 					? textStream("Weekly Plan")
 					: responseStream("Hello from Sol");
@@ -325,6 +337,23 @@ describe("Sign in with ChatGPT", () => {
 		const naming = callsTo("/v1/responses").find((call) => call.body.includes("You name chats"));
 		expect(naming!.headers.authorization).toBe("Bearer access-2");
 		expect(naming!.body).toContain("three deadlines");
+	});
+
+	it("fails a chat over to the default model when the plan's usage limit is reached, and sends the next ones there until it resets", async () => {
+		const asked = (words: string) => callsTo("/v1/responses").filter((call) => call.body.includes(words)).length;
+		limit = { requests: Number.POSITIVE_INFINITY, resetsInSeconds: 3600 };
+		faux.setResponses([toolUse("send_to_user", { message: "From the default." }), toolUse("send_to_user", { message: "Still the default." })]);
+		const sent = Date.now();
+		expect(await say("First of the day?")).toMatchObject({ status: "done", text: "From the default." });
+		expect(asked("First of the day?")).toBe(1);
+		const cooldown = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.providerCooldowns.active("openai"));
+		expect(cooldown).toMatchObject({ provider: "openai", failures: 1, resetFrom: "provider", reason: expect.stringContaining("subscription_sharing_usage_limit_exceeded") });
+		expect(cooldown!.until).toBeGreaterThanOrEqual(sent + 3_600_000);
+		expect(cooldown!.until).toBeLessThan(Date.now() + 3_601_000);
+
+		// While it cools down, chats go to the default model without asking the plan first.
+		expect(await say("And the second?")).toMatchObject({ status: "done", text: "Still the default." });
+		expect(asked("And the second?")).toBe(0);
 	});
 
 	it("goes back to the default model when ChatGPT is disconnected", async () => {

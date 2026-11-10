@@ -265,6 +265,20 @@ describe("the coding threads API", () => {
 		expect(environment).toMatchObject({ state: "cached", source: "settings", key: expect.stringMatching(/^[0-9a-f]{64}$/) });
 		expect((await api<CodingEnvironment>(`/coding/threads/${thread.id}/environment`)).body).toEqual(environment);
 		expect(scripts).toEqual(["pnpm install --frozen-lockfile\n"]);
+		// An agent's coding_status shows every field that says something, its timings included.
+		let told = "";
+		faux.setResponses([
+			toolUse("coding_status", { thread_id: thread.id }),
+			(context: Parameters<FauxResponseFactory>[0]) => {
+				const result = context.messages.findLast((message) => message.role === "toolResult");
+				told = result?.role === "toolResult" && result.content[0]?.type === "text" ? result.content[0].text : "";
+				return toolUse("send_to_user", { message: "It's ready." });
+			},
+		]);
+		await say("Is its environment ready?");
+		const { builtAt, provisionMs, setupMs, snapshotMs, preparedAt } = environment;
+		for (const value of [builtAt, provisionMs, setupMs, snapshotMs, preparedAt]) expect(value).toEqual(expect.any(Number));
+		expect(JSON.parse(told).environment).toEqual({ state: "cached", key: environment.key, source: "settings", builtAt, provisionMs, setupMs, snapshotMs, preparedAt, rebuildRequested: false });
 		// A rebuild runs it again, between turns.
 		expect(await post(`/coding/threads/${thread.id}/environment/rebuild`)).toMatchObject({ status: 200, body: { state: "building", rebuildRequested: true } });
 		await vi.waitFor(async () => expect((await view(thread.id)).environment).toMatchObject({ state: "cached", rebuildRequested: false }), { timeout: 10_000, interval: 50 });

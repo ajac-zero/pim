@@ -106,6 +106,7 @@ type CodingEnvironment = {
   restoreMs: number | null;
   setupMs: number | null;
   snapshotMs: number | null;
+  snapshotBytes: number | null; // the snapshot taken or restored, compressed, as the backend stores it
   preparedAt: number | null;    // when the thread last readied it; null before its first turn
   rebuildRequested: boolean;
   error?: string;               // why it failed, at most 500 characters; the end of the script's output is the repository's
@@ -187,7 +188,7 @@ POST /api/coding/threads
 
 ## Agents
 
-Every agent can start and follow threads with the `coding_*` tools ([`src/extensions/coding.ts`](../src/extensions/coding.ts)): `coding_start`, `coding_status` (with the thread's `environment`: its `state`, `key` and `error`), `coding_steer`, `coding_diff`, `coding_tests`, `coding_abort`, `coding_push` and `coding_archive`. A thread an agent starts is `createdBy: { type: "agent", agent, chat }`, and when each of its turns ends that chat is woken with a message saying how it went. `coding_push` asks the person first, every time, as an approval like `POST …/push` files.
+Every agent can start and follow threads with the `coding_*` tools ([`src/extensions/coding.ts`](../src/extensions/coding.ts)): `coding_start`, `coding_status` (with the thread's `environment`: every field of its `CodingEnvironment` that isn't null, its timings included), `coding_steer`, `coding_diff`, `coding_tests`, `coding_abort`, `coding_push` and `coding_archive`. A thread an agent starts is `createdBy: { type: "agent", agent, chat }`, and when each of its turns ends that chat is woken with a message saying how it went. `coding_push` asks the person first, every time, as an approval like `POST …/push` files.
 
 ## Harness logins
 

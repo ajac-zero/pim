@@ -524,7 +524,7 @@ function threadOf(row: Row): CodingThreadRow {
 		resumePriority: row.resume_priority === 1,
 		currentOperation: text(row.current_operation),
 		budgetStopped: row.budget_stopped === 1,
-		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : (JSON.parse(String(row.environment)) as CodingEnvironment),
+		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : { ...NO_ENVIRONMENT, ...(JSON.parse(String(row.environment)) as Partial<CodingEnvironment>) },
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 	};

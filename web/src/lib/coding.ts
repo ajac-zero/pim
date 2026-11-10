@@ -92,6 +92,7 @@ export type CodingEnvironment = {
   restoreMs: number | null;
   setupMs: number | null;
   snapshotMs: number | null;
+  snapshotBytes: number | null;
   preparedAt: number | null;
   rebuildRequested: boolean;
   error?: string;

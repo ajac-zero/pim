@@ -144,6 +144,14 @@ export interface CliHarness {
 	 * ceiling on its tokens instead (`maxTokens`).
 	 */
 	readonly reportsCost: boolean;
+	/**
+	 * Set for a CLI whose spend can't be measured at all: it reports no cost,
+	 * and its tokens (which count the whole context again on every response)
+	 * say too little about what it charges for a ceiling on them to mean
+	 * anything. Its thread's dollar budget isn't enforced, and its spend reads
+	 * as unmetered, not $0.
+	 */
+	readonly unmetered?: true;
 	/** The name of the CLI's shell tool in the transcript, whose commands may be test runs. */
 	readonly shellTool: string;
 	/** Environment the CLI always runs with, besides its config directory: such as turning its telemetry off. */

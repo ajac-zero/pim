@@ -1315,7 +1315,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			sessionId,
 			resume: session !== null,
 			maxBudgetUsd: fresh.budgetUsd - fresh.spentUsd,
-			maxTokens: cli.reportsCost ? null : Math.max(0, tokenCeiling(fresh)! - this.store.tokensUsed()),
+			maxTokens: cli.reportsCost || cli.unmetered ? null : Math.max(0, tokenCeiling(fresh)! - this.store.tokensUsed()),
 			model: fresh.profile.providerId === cli.id && fresh.profile.model !== "default" ? fresh.profile.model : null,
 			instructions: cliInstructions(fresh),
 			sessionBefore: { costUsd: session?.costUsd ?? 0, usage: session?.usage ?? null },
@@ -1499,6 +1499,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			state,
 			spentUsd: thread.spentUsd,
 			budgetUsd: thread.budgetUsd,
+			...(cliHarness(thread.harness)?.unmetered ? { unmetered: true as const } : {}),
 			...(said ? { said } : {}),
 			at: this.now(),
 		};
@@ -2086,6 +2087,8 @@ export type TurnEndedEvent = {
 	readonly state: CodingThreadState;
 	readonly spentUsd: number;
 	readonly budgetUsd: number;
+	/** Set when the thread's harness reports no spend, so `spentUsd` is not a measure and the budget is not enforced. */
+	readonly unmetered?: true;
 	/** The end of what the coding agent last said, at most 1,000 characters. */
 	readonly said?: string;
 	readonly at: number;
@@ -2264,7 +2267,8 @@ function budgetStopText(stop: BudgetStop): string {
 
 /** The tokens a thread's budget allows, for a CLI harness that estimates no cost; null for one that does, and for Pi. */
 function tokenCeiling(thread: CodingThreadRow): number | null {
-	return cliHarness(thread.harness)?.reportsCost === false ? Math.floor(thread.budgetUsd * UNPRICED_TOKENS_PER_USD) : null;
+	const cli = cliHarness(thread.harness);
+	return cli?.reportsCost === false && !cli.unmetered ? Math.floor(thread.budgetUsd * UNPRICED_TOKENS_PER_USD) : null;
 }
 
 /** The transcript for the UI: pi's messages, with the thread's own entries as notices. */

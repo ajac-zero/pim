@@ -258,10 +258,12 @@ function ThreadRow({ thread }: { thread: CodingThreadSummary }) {
             </span>
           )}
           <span>
-            {t("codingSpent", {
-              spent: money(thread.spentUsd),
-              budget: money(thread.budgetUsd),
-            })}
+            {thread.harness === "amp"
+              ? t("codingSpentUnmetered")
+              : t("codingSpent", {
+                  spent: money(thread.spentUsd),
+                  budget: money(thread.budgetUsd),
+                })}
           </span>
           <span>{date(thread.createdAt)}</span>
         </span>
@@ -1094,10 +1096,12 @@ function ThreadHeader({ thread }: { thread: CodingThreadView }) {
           <dt className="sr-only">{t("codingSpend")}</dt>
           <DollarSign className="size-3.5 shrink-0" />
           <dd>
-            {t("codingSpent", {
-              spent: money(thread.spentUsd),
-              budget: money(thread.budgetUsd),
-            })}
+            {thread.harness === "amp"
+              ? t("codingSpentUnmetered")
+              : t("codingSpent", {
+                  spent: money(thread.spentUsd),
+                  budget: money(thread.budgetUsd),
+                })}
           </dd>
         </div>
         <div>

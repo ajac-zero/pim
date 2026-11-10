@@ -1554,18 +1554,14 @@ describe("an Amp thread", () => {
 		expect(JSON.stringify(await inside(stub, (thread) => thread.transcript()))).not.toContain("THREADKEY");
 	});
 
-	it("stops at the tokens its budget allows, as Amp reports no cost, saying so in tokens", async () => {
+	it("doesn't enforce its dollar budget against Amp's tokens, which are not a cost and recount the whole context every response", async () => {
 		await saveKey();
-		// $0.03 allows 30,000 tokens; the turn's second model response passes them, and the turn is stopped there.
+		// $0.03 would have allowed 30,000 tokens; the turn counts 102,363, mostly cache reads. It finishes: Amp's spend is unmetered, not exceeded.
 		const { id, stub } = await startAmp({ budgetUsd: 0.03 });
 		const [ended] = await turns(id, 1);
-		expect(ended).toMatchObject({ outcome: "error", reason: "budget", state: "failed", spentUsd: 0, budgetUsd: 0.03 });
-		// The fake CLI printed its whole turn at once, so every token of it was counted before the turn was stopped.
-		const status = await stub.status();
-		expect(status).toMatchObject({ state: "failed", stateReason: "budget", stateDetail: "This coding thread has used 102,363 of the 30,000 tokens its $0.03 budget allows, as Amp reports no cost" });
-		expect((await stub.log()).find((event) => event.kind === "app.budget_stop")?.data).toEqual({ budgetUsd: 0.03, spentUsd: 0, tokens: 102_363, tokenCeiling: 30_000 });
-		const transcript = await inside(stub, (thread) => thread.transcript());
-		expect(transcript.at(-1)).toMatchObject({ role: "notice", parts: [{ type: "text", text: "Stopped: the thread used 102,363 of the 30,000 tokens its $0.03 budget allows." }] });
+		expect(ended).toMatchObject({ outcome: "completed", state: "idle", spentUsd: 0, unmetered: true });
+		expect((await stub.status()).stateReason).toBeNull();
+		expect((await stub.log()).some((event) => event.kind === "app.budget_stop")).toBe(false);
 	});
 });
 

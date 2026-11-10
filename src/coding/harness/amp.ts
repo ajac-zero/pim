@@ -78,6 +78,7 @@ export const amp: CliHarness = {
 	},
 	parser: (turn) => new StreamJsonParser({ provider: "amp", model: turn.model ?? "amp", loginFailure: LOGIN_FAILURE }),
 	reportsCost: false,
+	unmetered: true,
 	shellTool: "shell_command",
 	// The managed settings turn update checks off too; this also stops the check `amp update` would make.
 	env: { AMP_SKIP_UPDATE_CHECK: "1", TMPDIR: AMP_TMPDIR, BUN_TMPDIR: AMP_TMPDIR },

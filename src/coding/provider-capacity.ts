@@ -5,7 +5,7 @@ import type { AdmissionConditions, CodingScheduler } from "./scheduler";
  * configured otherwise. A provider with no manager of its own, such as
  * Cloudflare Sandbox, has only this cap, set through `setLimit`.
  */
-export const DEFAULT_SPACE_CAP = 2;
+export const DEFAULT_SPACE_CAP = 3;
 
 /** Below this percentage of free disk the workspace manager refuses new workspaces with `low_disk`, so the queue waits instead. */
 export const LOW_DISK_PCT = 15;

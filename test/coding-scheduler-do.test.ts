@@ -42,8 +42,14 @@ afterEach(() => {
 });
 
 describe("a space's coding scheduler", () => {
-	it("answers every method over RPC, with a limit of 2 until it is set", async () => {
+	it("starts with a limit of 3 until it is set", async () => {
 		const stub = space();
+		expect((await stub.snapshot()).limit).toBe(3);
+	});
+
+	it("answers every method over RPC, with a limit of 2 set", async () => {
+		const stub = space();
+		await stub.setLimit(2);
 		expect(await stub.request("a", { provider: "sandbox" })).toEqual({ status: "admitted" });
 		expect(await stub.request("b", { provider: "sandbox" })).toEqual({ status: "admitted" });
 		expect(await stub.request("c", { provider: "sandbox", reason: "resume" })).toEqual({ status: "queued", position: 1, reason: "resume" });
@@ -73,6 +79,7 @@ describe("a space's coding scheduler", () => {
 
 	it("sets its alarm 30 seconds on while a thread is queued or a slot's thread is idle or waiting, and none with nothing to do", async () => {
 		const stub = space();
+		await stub.setLimit(2);
 		await stub.request("a", { provider: "sandbox" });
 		await stub.request("b", { provider: "sandbox" });
 		// Two threads running: nothing for a tick to do.
@@ -291,7 +298,7 @@ describe("the workspace manager's capacity", () => {
 			expect((await stub.snapshot()).limit, `cap ${spaceCap}, manager ${maxConcurrent}`).toBe(limit);
 		}
 		await stub.refreshConditions(health(80, 4));
-		expect((await stub.snapshot()).limit).toBe(2);
+		expect((await stub.snapshot()).limit).toBe(3);
 	});
 
 	it("admits no one the new limit and the new conditions together wouldn't, whichever way they change", async () => {
@@ -312,6 +319,7 @@ describe("the workspace manager's capacity", () => {
 
 	it("holds the queue on the manager's low_disk refusal until its health says the disk has room, and ignores capacity", async () => {
 		const stub = space();
+		await stub.setLimit(2);
 		await stub.setConditions({ lowDisk: false, budgetCapped: false, detail: "kept" });
 		for (const id of ["a", "b", "c"]) await stub.request(id, { provider: "sandbox" });
 		expect(await stub.onManagerError("capacity")).toEqual([]);

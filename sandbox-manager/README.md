@@ -120,6 +120,7 @@ gone, `reason`, `keptAt` and `keptVolume`:
 | `stopped` | `stopped` | Stopped through `/stop`: container and network removed, volume kept. `/start` (or a create with the same id) brings it back with the same files |
 | `stopped` | `over_disk_quota` | Stopped by the manager in `measure` mode; start it again the same way |
 | `gone` | `kept_volume` | Deleted with `keepVolume`: only in the list and in status; `GET /sessions/:id`, stop and start give 404; a create with the same id reuses the volume |
+| `gone` | `crashed` | Its container had died when the manager restarted (it crashed, or the host restarted): kept as for `kept_volume`, so a create with the same id resumes it with its files |
 
 Stop removes the container (its processes die) and frees its `MAX_CONCURRENT` slot; its disk
 quota stays reserved. The state survives a manager restart (see Kept volumes).
@@ -298,8 +299,9 @@ starting session are never deleted.
 
 At start the manager rebuilds its registry from the `pim.coding.session` labels: running
 containers become sessions again (their agentd tokens recomputed from the nonce label), marker
-volumes become kept workspaces, and anything else labelled (a stopped container, a half-created
-session's volume or network) is removed. It then attaches the egress proxy, and itself when it
+volumes become kept workspaces, a session whose container died (crashed, or stopped with its
+host) keeps its volume as a kept workspace (`crashed`), and anything else labelled (a container
+whose spec can't be read, a half-created session's volume or network) is removed. It then attaches the egress proxy, and itself when it
 runs in a container, to every live session network they are not on: a recreated container (for
 example after `docker compose up` with a new image) has lost them. It re-registers every
 allowlist with the proxy. Every 30 s it does that again, so a proxy that was recreated or

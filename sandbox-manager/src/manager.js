@@ -152,8 +152,8 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 
 	const view = (s) => ({ ...s.params, state: 'running', createdAt: s.createdAt, lastUsedAt: s.lastUsed, ...(s.restoredFrom && { restoredFrom: s.restoredFrom }) })
 	// A kept workspace is 'stopped' (stop, or over its disk quota) or 'gone' (deleted with
-	// keepVolume: the session no longer exists, only its volume does).
-	const keptState = (k) => (k.reason === 'kept_volume' ? 'gone' : 'stopped')
+	// keepVolume, or its container died: the session no longer exists, only its volume does).
+	const keptState = (k) => (k.reason === 'kept_volume' || k.reason === 'crashed' ? 'gone' : 'stopped')
 	const keptView = (id, k) => ({ ...k.params, state: keptState(k), reason: k.reason, createdAt: k.createdAt ?? null, keptAt: k.keptAt, keptVolume: names(id).volume })
 
 	// The session as GET /sessions/:id shows it: running, starting or stopped. 404 otherwise.
@@ -539,15 +539,20 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		const live = new Set()
 		for (const c of containers) {
 			const id = c.Labels[LABEL]
+			let params
 			try {
-				const params = JSON.parse(c.Labels[LABEL_SPEC])
+				params = JSON.parse(c.Labels[LABEL_SPEC])
 				const nonce = c.Labels[LABEL_NONCE]
 				const ip = c.NetworkSettings?.Networks?.[names(id).network]?.IPAddress
 				if (c.State !== 'running' || !nonce || !ip) throw new Error('not running')
 				sessions.set(id, { params, createdAt: c.Created * 1000, lastUsed: now(), ip, proxyIp: null, token: tokenFor(id, nonce), egress: false, disk: null })
 				live.add(id)
 			} catch {
-				await teardown(id).catch(() => {})
+				// A container that died (its host restarted, or it crashed) leaves its workspace volume: kept, so creating
+				// the session again resumes it with the work and harness sessions on it. Only an unreadable one is removed.
+				const info = params && { params, createdAt: c.Created * 1000, keptAt: now(), reason: 'crashed', diskBytes: null }
+				if (info) kept.set(id, info)
+				await teardown(id, info ? { keep: { info } } : {}).catch(() => {})
 			}
 		}
 		for (const v of (await docker.request('GET', `/volumes?filters=${labelFilter(LABEL_KEPT)}`)).Volumes ?? []) {

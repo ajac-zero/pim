@@ -1,3 +1,4 @@
+import { getAgentByName } from "agents";
 import { DurableObject } from "cloudflare:workers";
 import type { CodingRepoSettings } from "./api";
 import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
@@ -485,6 +486,15 @@ export type SchedulerNotice = { readonly key: string; readonly threadId: string 
 /** The space's coding scheduler. */
 export function codingScheduler(env: Env, spaceId: string): DurableObjectStub<CodingSchedulerDO> {
 	return env.CodingScheduler.getByName(spaceId);
+}
+
+/** Tells the space's open pages its list of coding threads changed, on the socket that refreshes the chat list. Best-effort: the list is right on the next fetch. */
+export async function codingThreadsChanged(env: Env, spaceId: string): Promise<void> {
+	try {
+		await (await getAgentByName(env.Pim, spaceId)).codingThreadsChanged();
+	} catch (error) {
+		console.warn(JSON.stringify({ event: "pim.coding.broadcast_failed", error: String(error) }));
+	}
 }
 
 type Notices = { readonly admitted?: readonly string[]; readonly released?: readonly Released[]; readonly expired?: readonly QueueEntry[] };

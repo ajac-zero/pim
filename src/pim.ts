@@ -406,7 +406,7 @@ export type GuestBot = {
 /** How long Stop waits for a chat's work to end before it answers anyway: the work was told to stop, and ends when it can. */
 const STOP_WAIT_MS = 5_000;
 /** How long an agent's run may go without any progress before it is stopped, with a note: a call that never returns can't hold a chat's events for good. A wait for the person, or for a retry, is not a stall. */
-const STALL_MS = 10 * 60 * 1000;
+const STALL_MS = 30 * 60 * 1000;
 const WATCHDOG_CALLBACK = "watchRuns";
 /** How long an erasure waits for runs to stop and connectors to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;

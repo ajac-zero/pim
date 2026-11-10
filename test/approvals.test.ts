@@ -1,9 +1,9 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
 import type { Message } from "@earendil-works/pi-ai";
-import { api, OWNER, pendingApproval, post, ROOT, say, toolUse } from "./helpers";
+import { api, lastUserText, OWNER, pendingApproval, post, ROOT, say, settled, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
 
 const toolResult = (messages: readonly Message[]) =>
@@ -185,6 +185,129 @@ describe("approvals", () => {
 			expect((await said).status).toBe("unanswered");
 			const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
 			expect(decided.body).toMatchObject({ status: "denied", note: "Its chat stopped before the decision, so nothing ran." });
+			expect(hook).not.toHaveBeenCalled();
+		} finally {
+			await policy(null);
+		}
+	});
+});
+
+describe("a chat that can't be held up", () => {
+	/** Answers every fetch of the stuck page with a request that never ends and ignores being cancelled, as a Durable Object that never answers does. */
+	function stuckPage() {
+		const realFetch = globalThis.fetch;
+		const started = vi.fn();
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			if (!request.url.startsWith("https://stuck.example.test/")) return realFetch(input, init);
+			started();
+			return new Promise<Response>(() => {});
+		});
+		return started;
+	}
+
+	/** Sets how long a run may go without progress, and forgets a look at the runs due later than that, so the next is set by it. */
+	const setStall = (ms: string | null) =>
+		runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			if (ms === null) pim.store.deleteMeta("test:stall-ms");
+			else pim.store.setMeta("test:stall-ms", ms);
+			for (const schedule of pim.getSchedules()) if (schedule.callback === "watchRuns") await pim.cancelSchedule(schedule.id);
+		});
+	afterEach(() => setStall(null));
+
+	const send = (content: string) => post(`/sessions/${ROOT}/messages`, { content });
+	const busy = async () => (await api<{ sessions: { id: string; busy: boolean }[] }>("/sessions")).body.sessions.find((info) => info.id === ROOT)?.busy;
+	const wakeFromCodingThread = (text: string, key: string) => runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.codingTurnEnded(ROOT, text, key));
+
+	it("stops a call that ignores being stopped, and gives the agent the events that waited behind it", async () => {
+		const started = stuckPage();
+		let heard = "";
+		faux.setResponses([
+			toolUse("fetch_url", { url: "https://stuck.example.test/page" }),
+			(context) => {
+				heard = lastUserText(context.messages);
+				return toolUse("send_to_user", { message: "Noted." });
+			},
+		]);
+		expect((await send("Read the page.")).status).toBe(202);
+		await vi.waitFor(() => expect(started).toHaveBeenCalled());
+		expect(await wakeFromCodingThread("[Coding thread T-1] It finished its turn.", "coding:T-1:a")).toBe(true);
+
+		const stopped = Date.now();
+		expect((await post(`/sessions/${ROOT}/abort`)).status).toBe(200);
+		// The Stop answers when the call has ended, not when the page does.
+		expect(Date.now() - stopped).toBeLessThan(4_000);
+		await settled();
+		expect(await busy()).toBe(false);
+		// The event queued behind the run was not lost with it: the agent's next run read it.
+		expect(heard).toContain("[Coding thread T-1] It finished its turn.");
+	});
+
+	it("stops a run that makes no progress, tells the agent, and goes on with what was queued", async () => {
+		const started = stuckPage();
+		await setStall("1500");
+		const heard: string[] = [];
+		faux.setResponses([
+			toolUse("fetch_url", { url: "https://stuck.example.test/page" }),
+			(context) => {
+				heard.push(lastUserText(context.messages));
+				return toolUse("send_to_user", { message: "Noted the stop." });
+			},
+			(context) => {
+				heard.push(lastUserText(context.messages));
+				return toolUse("send_to_user", { message: "Noted the event." });
+			},
+		]);
+		expect((await send("Read the page.")).status).toBe(202);
+		await vi.waitFor(() => expect(started).toHaveBeenCalled());
+		expect(await wakeFromCodingThread("[Coding thread T-2] It finished its turn.", "coding:T-2:a")).toBe(true);
+		expect(await busy()).toBe(true);
+		// Nothing stops it but the watchdog, after the test agent's 1.5 seconds without progress.
+		await settled();
+		expect(heard[0]).toMatch(/^\[Pim\] Your last turn was stopped: it made no progress for 1.5 seconds/);
+		expect(heard[1]).toContain("[Coding thread T-2] It finished its turn.");
+	});
+
+	it("leaves a run waiting for the person's decision alone, until Stop", async () => {
+		await policy("explicit");
+		await setStall("1500");
+		try {
+			faux.setResponses([toolUse("http_request", { method: "POST", url: "https://hooks.example.test/waiting" })]);
+			expect((await send("Go.")).status).toBe(202);
+			const approval = await pendingApproval();
+			// Well past the stall: a wait for the person is no stall.
+			await new Promise((resolve) => setTimeout(resolve, 4_000));
+			expect(await busy()).toBe(true);
+			expect((await api<Approval>(`/approvals/${approval.id}`)).body.status).toBe("pending");
+			expect((await post(`/sessions/${ROOT}/abort`)).status).toBe(200);
+			await settled();
+			expect(await busy()).toBe(false);
+		} finally {
+			await policy(null);
+		}
+	});
+
+	it("wakes a call whose approval was decided as the space restarted, and does not run its action again", async () => {
+		const hook = mockHook();
+		await policy("explicit");
+		try {
+			let result = "";
+			faux.setResponses([
+				toolUse("http_request", { method: "POST", url: "https://hooks.example.test/cut-off" }),
+				(context) => {
+					result = toolResult(context.messages);
+					return toolUse("send_to_user", { message: "Carried on." });
+				},
+			]);
+			const said = say("Go.");
+			const approval = await pendingApproval();
+			// Approved, and the space restarted before the action ran and the call woke: nothing is left to wake it.
+			await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+				pim.store.decideApproval(approval.id, "approved", null, "user");
+				await pim.onStart();
+			});
+			expect(await said).toMatchObject({ status: "done", replies: ["Carried on."] });
+			expect(result).toContain("it may have partly run, and it was not run again");
 			expect(hook).not.toHaveBeenCalled();
 		} finally {
 			await policy(null);

@@ -16,6 +16,9 @@ export const NOTICE_PREFIXES = [
 	[/^\[Room\]\s*/, "room"],
 ] as const;
 
+/** How a message starts that tells an agent a coding thread it started ended a turn (see ./coding/supervisor.ts). */
+export const CODING_EVENT = /^\[Coding thread /;
+
 /** How a message starts that another agent in a group chat said, with its name (see ./rooms.ts). */
 export const ROOM_POST = /^\[From ([^\]\n]+)\]\n?/;
 

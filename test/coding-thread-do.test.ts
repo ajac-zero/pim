@@ -15,7 +15,7 @@ import { type FakeCommandHandler, type FakeCommandResult, FakeWorkspaceProvider 
 import { DEFAULT_WORKSPACE_IMAGE, NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { fakeCloneFailures, fakeClones, fakeGit, fakeRemotes } from "./fake-git";
-import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
+import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
@@ -546,7 +546,7 @@ describe("a coding thread on the Compose sandbox manager", () => {
 	function compose(max = 3) {
 		const manager = fakeManager(max);
 		manager.backing.register("git", fakeGit);
-		codingBackends.registry = workspaceRegistry([new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch })]);
+		codingBackends.registry = workspaceRegistry([new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch, sleep: async () => {} })]);
 		const calls = () => manager.requests.map((request) => `${request.method} ${request.path.replace(/\?.*$/, "")}`);
 		return { manager, calls };
 	}
@@ -705,6 +705,34 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
 		expect((await codingScheduler(env, input.space).snapshot()).running.map((slot) => slot.threadId)).toEqual([id]);
 	});
+	it("rides out a manager that answers 502 while it restarts, and takes up the workspace it left running instead of making another", async () => {
+		const { manager, calls } = compose();
+		// The manager made the thread's container, then went down before the thread saved it; it is back after three failures.
+		let down = 0;
+		codingBackends.registry = workspaceRegistry([
+			new ComposeWorkspaceProvider({
+				managerUrl: URL_BASE,
+				token: TOKEN,
+				sleep: async () => {},
+				fetch: async (input, init) => (String(input).endsWith("/health") || down-- <= 0 ? manager.fetch(input, init) : json(502, {})),
+			}),
+		]);
+		const id = crypto.randomUUID();
+		await manager.fetch(`${URL_BASE}/sessions`, {
+			method: "POST",
+			headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+			body: JSON.stringify({ sessionId: id, image: "pim-workspace:local", limits: { cpu: 1, memMiB: 256, diskMiB: 64, pids: 64 }, egressAllow: [] }),
+		});
+		down = 3;
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const stub = codingThread(env, id);
+		await stub.start(startInput(id, {}));
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held" });
+		expect(manager.requests.filter((request) => request.method === "POST" && request.path === "/sessions")).toHaveLength(1);
+		expect(calls()).toContain(`GET /sessions/${id}`);
+	});
+
 });
 
 describe("a coding thread's model", () => {
@@ -1454,7 +1482,7 @@ describe("a Claude Code thread", () => {
 			manager.backing.register("git", fakeGit);
 			manager.backing.register("claude", claudeCommand);
 			manager.backing.register("pkill", pkillCommand);
-			codingBackends.registry = workspaceRegistry([new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch })]);
+			codingBackends.registry = workspaceRegistry([new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch, sleep: async () => {} })]);
 			const creates = () => manager.requests.filter((request) => request.method === "POST" && request.path === "/sessions").length;
 			const deletes = () => manager.requests.filter((request) => request.method === "DELETE" && /^\/sessions\/[^/?]+(\?|$)/.test(request.path)).map((request) => request.path);
 			return { manager, creates, deletes };

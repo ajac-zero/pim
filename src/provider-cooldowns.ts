@@ -264,7 +264,7 @@ export type FailoverOptions = {
 	/** Whether a provider is a subscription whose usage limit sends its runs elsewhere, such as the ChatGPT plan. */
 	readonly subscription: (provider: string) => boolean;
 	/** The model a subscription's runs go to while it cools down, or none, when there is no other to use. */
-	readonly fallback: (provider: string) => Model<Api> | undefined;
+	readonly fallback: (provider: string, sessionId?: string) => Model<Api> | undefined;
 	/** Told when a provider starts cooling down, or its cooldown grows. */
 	readonly cooled?: (cooldown: Cooldown) => void;
 	readonly now?: () => number;
@@ -281,7 +281,7 @@ export function failingOver(models: Models, options: FailoverOptions): Models {
 	const now = options.now ?? Date.now;
 	return wrapStreams(models, (stream) => (model, context, streamOptions) => {
 		if (!options.subscription(model.provider)) return stream(model, context, streamOptions);
-		const fallback = options.cooldowns.active(model.provider, now()) ? options.fallback(model.provider) : undefined;
+		const fallback = options.cooldowns.active(model.provider, now()) ? options.fallback(model.provider, (streamOptions as StreamOptions | undefined)?.sessionId) : undefined;
 		if (fallback) return stream(fallback, context, streamOptions);
 		const given = streamOptions as StreamOptions | undefined;
 		let response: ProviderResponse | undefined;
@@ -327,7 +327,7 @@ export function failingOver(models: Models, options: FailoverOptions): Models {
 				const before = options.cooldowns.active(model.provider, now());
 				const cooldown = options.cooldowns.failed(model.provider, { message: message.errorMessage, status: response?.status, headers: response?.headers }, now());
 				if (cooldown && cooldown !== before) options.cooled?.(cooldown);
-				const other = cooldown && !forwarded && !given?.signal?.aborted ? options.fallback(model.provider) : undefined;
+				const other = cooldown && !forwarded && !given?.signal?.aborted ? options.fallback(model.provider, given?.sessionId) : undefined;
 				if (other) {
 					try {
 						const second = stream(other, context, streamOptions);

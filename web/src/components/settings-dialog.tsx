@@ -10,6 +10,7 @@ import {
   TokensSection,
 } from "~/components/account-settings";
 import { AddDevice } from "~/components/add-device";
+import { ModelOrderList } from "~/components/agent-settings";
 import { ChatGPTLogo } from "~/components/chatgpt-logo";
 import { CodingConnectionsSection } from "~/components/coding";
 import {
@@ -22,6 +23,7 @@ import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   AlertCircle,
   Bell,
+  ChartColumn,
   Check,
   Code,
   KeyRound,
@@ -35,7 +37,6 @@ import {
   Server,
   Settings,
   ShieldCheck,
-  ChartColumn,
   SlidersHorizontal,
   Sparkles,
   Sun,
@@ -82,7 +83,12 @@ import {
   pim,
 } from "~/lib/pim-api";
 import { enablePush, pushEnabled, pushSupported } from "~/lib/push";
-import { accountQuery, emailQuery, modelQuery } from "~/lib/queries";
+import {
+  accountQuery,
+  emailQuery,
+  modelFallbacksQuery,
+  modelQuery,
+} from "~/lib/queries";
 import { cn, modelName } from "~/lib/utils";
 
 /** Shown once, the first time Pim is connected to a ChatGPT plan. */
@@ -208,6 +214,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
               </h2>
               <ModelChoices settings={model} />
               <UtilityModelSelect settings={model} />
+              <WorkspaceFallbacks settings={model} />
             </section>
             <ProvidersSection
               settings={model}
@@ -380,6 +387,34 @@ function UtilityModelSelect({ settings }: { settings: ModelSettings }) {
         {t("utilityModelHint")}
       </span>
     </label>
+  );
+}
+
+/** The models every agent moves on to, in order, when its own and its fallbacks fail for good. */
+export function WorkspaceFallbacks({ settings }: { settings: ModelSettings }) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data } = useQuery(modelFallbacksQuery());
+  const save = useMutation({
+    mutationFn: (models: ModelInfo[]) => pim.putModelFallbacks(models),
+    onSuccess: ({ models }) =>
+      queryClient.setQueryData(modelFallbacksQuery().queryKey, { models }),
+    onError: (error) => toast.error(error.message),
+  });
+  if (!data) return null;
+  return (
+    <section className="space-y-2 pt-3" aria-label={t("spaceFallbacks")}>
+      <h3 className="font-medium text-sm">{t("spaceFallbacks")}</h3>
+      <p className="text-muted-foreground text-xs">{t("spaceFallbacksHint")}</p>
+      <ModelOrderList
+        settings={settings}
+        models={data.models}
+        minimum={0}
+        defaultTag={false}
+        pending={save.isPending}
+        onChange={(next) => save.mutate(next)}
+      />
+    </section>
   );
 }
 

@@ -13,10 +13,11 @@ The admin's majordomo can look after the machine a self-hosted Pim runs on: read
 | `hostops_deploy` | Deploy a git ref (`ref`, `origin/main` by default). The daemon checks the new version and rolls back on its own when it fails, which reports `rolled_back` |
 | `hostops_rollback` | Go back to a commit (`commit`, 7 to 40 hex digits) |
 | `hostops_status` | Whether the daemon has a credential, when it was last seen, its version and commit, and its queue |
+| `hostops_audit` | The audit log, newest first, read-only (`limit`, 1 to 200, 50 by default; `since`, an ISO time; `op`, an operation or action): when, what, a short summary of its arguments, which agent and chat asked, the approval for a command and how it ended. Never secrets or a command's output |
 | `hostops_op` | An operation by its id, once it ends |
 | `hostops_exec` | One shell command, with your approval for that call: see [Running a command](#running-a-command) |
 
-The services are `sandbox-manager`, `egress-proxy`, `docker-socket-proxy` and `hostopsd`. Each call waits up to 100 seconds for its operation to end. A deploy or rollback can take longer: the call then answers with the operation's id, and the majordomo follows it with `hostops_op`. One deploy or rollback runs at a time.
+The services are `sandbox-manager`, `egress-proxy`, `docker-socket-proxy` and `hostopsd`. Each call waits up to 100 seconds for its operation to end. A deploy or rollback can take longer: the call then answers with the operation's id, and the majordomo follows it with `hostops_op`. One deploy or rollback runs at a time. A deploy, or a restart of the sandbox-manager, waits up to 10 minutes for the manager to have no running sessions before it recreates it, so a scheduled deploy doesn't kill coding threads that are working; after that it goes ahead and the result says so.
 
 Except `hostops_exec`, nothing asks first: there is no approval to wait for, so the majordomo can run them from a schedule at night. What keeps them safe is that only these operations and arguments exist, that a failed deploy rolls back, and that every request, refused or not, is in the audit log.
 

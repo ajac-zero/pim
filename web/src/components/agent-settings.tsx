@@ -62,6 +62,7 @@ import {
   MAJORDOMO_TONES,
   type MajordomoPreferences,
   type ModelInfo,
+  type ModelSettings,
   pim,
   type ToolPermissionInfo,
 } from "~/lib/pim-api";
@@ -761,10 +762,6 @@ function AgentModels({ agent }: { agent: Agent }) {
     onError: (error) => toast.error(error.message),
   });
   if (!settings || !current) return null;
-  const same = (
-    a: { provider: string; id: string },
-    b: { provider: string; id: string },
-  ) => a.provider === b.provider && a.id === b.id;
   const models = [
     current,
     ...agent.fallbacks.flatMap(
@@ -772,22 +769,63 @@ function AgentModels({ agent }: { agent: Agent }) {
         settings.choices.find((choice) => same(choice, fallback)) ?? [],
     ),
   ];
-  const unused = settings.choices.filter(
-    (choice) => !models.some((used) => same(used, choice)),
-  );
   return (
     <section className="mt-8 space-y-2" aria-label={t("agentModels")}>
       <h2 className="text-[13px] text-muted-foreground">{t("agentModels")}</h2>
       <p className="text-muted-foreground text-xs">
         {t("fallbackModelsHint", { name: agent.name })}
       </p>
-      <ol className="divide-y overflow-hidden rounded-xl border">
+      <ModelOrderList
+        settings={settings}
+        models={models}
+        minimum={1}
+        defaultTag={!pinned}
+        pending={save.isPending}
+        onChange={(next) => save.mutate(next)}
+      />
+    </section>
+  );
+}
+
+const same = (
+  a: { provider: string; id: string },
+  b: { provider: string; id: string },
+) => a.provider === b.provider && a.id === b.id;
+
+/**
+ * Models in the order they are tried, each of which can be moved or taken off,
+ * with the choices not yet in it to add. An agent's list starts with the model
+ * it runs on and always keeps one; the space's holds only fallbacks, so it can
+ * be empty.
+ */
+export function ModelOrderList({
+  settings,
+  models,
+  minimum,
+  defaultTag,
+  pending,
+  onChange,
+}: {
+  settings: ModelSettings;
+  models: ModelInfo[];
+  minimum: number;
+  defaultTag: boolean;
+  pending: boolean;
+  onChange: (models: ModelInfo[]) => void;
+}) {
+  const { t } = useI18n();
+  const unused = settings.choices.filter(
+    (choice) => !models.some((used) => same(used, choice)),
+  );
+  return (
+    <>
+      <ol className="divide-y overflow-hidden rounded-xl border empty:hidden">
         {models.map((model, index) => {
           const name = modelName(model.name);
           const move = (to: number) => {
             const next = [...models];
             next.splice(to, 0, ...next.splice(index, 1));
-            save.mutate(next);
+            onChange(next);
           };
           const button = "size-6 text-muted-foreground [&_svg]:size-3.5";
           return (
@@ -805,7 +843,7 @@ function AgentModels({ agent }: { agent: Agent }) {
               />
               <span className="min-w-0 flex-1 truncate">
                 {name}
-                {index === 0 && !pinned && (
+                {index === 0 && defaultTag && (
                   <span className="ml-2 text-muted-foreground text-xs">
                     {t("defaultModelTag")}
                   </span>
@@ -817,7 +855,7 @@ function AgentModels({ agent }: { agent: Agent }) {
                 className={button}
                 aria-label={t("moveFallbackUp", { model: name })}
                 title={t("moveFallbackUp", { model: name })}
-                disabled={save.isPending || index === 0}
+                disabled={pending || index === 0}
                 onClick={() => move(index - 1)}
               >
                 <ChevronUpIcon />
@@ -828,7 +866,7 @@ function AgentModels({ agent }: { agent: Agent }) {
                 className={button}
                 aria-label={t("moveFallbackDown", { model: name })}
                 title={t("moveFallbackDown", { model: name })}
-                disabled={save.isPending || index === models.length - 1}
+                disabled={pending || index === models.length - 1}
                 onClick={() => move(index + 1)}
               >
                 <ChevronDown />
@@ -839,9 +877,9 @@ function AgentModels({ agent }: { agent: Agent }) {
                 className={button}
                 aria-label={t("removeFallback", { model: name })}
                 title={t("removeFallback", { model: name })}
-                disabled={save.isPending || models.length === 1}
+                disabled={pending || models.length <= minimum}
                 onClick={() =>
-                  save.mutate(models.filter((other) => other !== model))
+                  onChange(models.filter((other) => other !== model))
                 }
               >
                 <X />
@@ -858,9 +896,9 @@ function AgentModels({ agent }: { agent: Agent }) {
             const added = unused.find(
               (choice) => `${choice.provider}/${choice.id}` === value,
             );
-            if (added) save.mutate([...models, added]);
+            if (added) onChange([...models, added]);
           }}
-          disabled={save.isPending}
+          disabled={pending}
         >
           <SelectTrigger className="w-full" aria-label={t("addFallback")}>
             <SelectValue placeholder={t("addFallback")} />
@@ -877,7 +915,7 @@ function AgentModels({ agent }: { agent: Agent }) {
           </SelectContent>
         </Select>
       )}
-    </section>
+    </>
   );
 }
 

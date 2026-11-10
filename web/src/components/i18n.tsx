@@ -593,6 +593,9 @@ const translations = {
     fallbackModelsHint:
       "{name} runs on the first model. If it fails, such as when its quota runs out, it moves on to the next, in order.",
     addFallback: "Add a fallback model",
+    spaceFallbacks: "Fallback models for every agent",
+    spaceFallbacksHint:
+      "When an agent's model, and the fallbacks it has of its own, fail for good, it moves on to these, in order.",
     removeFallback: "Remove fallback {model}",
     moveFallbackUp: "Move {model} up",
     moveFallbackDown: "Move {model} down",
@@ -1904,9 +1907,9 @@ const translations = {
     codingToolFailed: "Failed",
     codingToolNoResult: "No result",
     codingSteer: "Steer the thread",
-    codingSteerPlaceholder: "Tell it what to do next",
-    codingSteerPlaceholderWorking: "Steer it: joins after its current step",
-    codingInterrupt: "Interrupt: stop the current step and start with this",
+    codingSteerPlaceholder: "Tell the coding agent what to do next…",
+    codingSteerPlaceholderWorking:
+      "Steer the coding agent: joins after its current step…",
     codingSend: "Send",
     codingBudgetSpent:
       "It spent its budget. Continue it with a bigger budget first.",
@@ -2507,6 +2510,9 @@ const translations = {
     fallbackModelsHint:
       "{name} usa el primer modelo. Si falla, por ejemplo al agotarse su cuota, pasa al siguiente, en orden.",
     addFallback: "Añadir un modelo de respaldo",
+    spaceFallbacks: "Modelos de respaldo para todos los agentes",
+    spaceFallbacksHint:
+      "Cuando falla para siempre el modelo de un agente y los respaldos que tiene, pasa a estos, en orden.",
     removeFallback: "Quitar el respaldo {model}",
     moveFallbackUp: "Subir {model}",
     moveFallbackDown: "Bajar {model}",
@@ -3841,9 +3847,9 @@ const translations = {
     codingToolFailed: "Falló",
     codingToolNoResult: "Sin resultado",
     codingSteer: "Guiar el hilo",
-    codingSteerPlaceholder: "Dile qué hacer ahora",
-    codingSteerPlaceholderWorking: "Guíalo: se suma tras su paso actual",
-    codingInterrupt: "Interrumpir: detener el paso actual y empezar con esto",
+    codingSteerPlaceholder: "Dile al agente de programación qué hacer ahora…",
+    codingSteerPlaceholderWorking:
+      "Guía al agente de programación: se suma tras su paso actual…",
     codingSend: "Enviar",
     codingBudgetSpent:
       "Gastó su presupuesto. Primero continúalo con un presupuesto mayor.",

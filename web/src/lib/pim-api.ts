@@ -2013,6 +2013,13 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify({ models }),
     }),
+  /** The models every agent moves on to, in order, after its own fallbacks. */
+  getModelFallbacks: () => call<{ models: ModelInfo[] }>("/model/fallbacks"),
+  putModelFallbacks: (models: Pick<ModelInfo, "provider" | "id">[]) =>
+    call<{ models: ModelInfo[] }>("/model/fallbacks", {
+      method: "PUT",
+      body: JSON.stringify({ models }),
+    }),
   chooseUtilityModel: (model: Pick<ModelInfo, "provider" | "id">) =>
     call<{ model: ModelInfo | null }>("/model/utility", {
       method: "PUT",

@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	AUDIT_ROWS,
 	enqueueHostOp,
@@ -342,6 +342,23 @@ describe("the host daemon's credential", () => {
 	});
 });
 
+describe("a poll that fails inside Pim", () => {
+	it("answers that there is nothing instead of 500, and still refuses a bad credential", async () => {
+		const token = (await call("/hostops/credential", { method: "POST", cookie })).body.token as string;
+		const get = vi.spyOn(env.HostOps, "getByName").mockReturnValue({ poll: () => Promise.reject(new Error("Durable Object reset")) } as never);
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			expect((await poll(token)).status).toBe(204);
+			expect(error).toHaveBeenCalled();
+		} finally {
+			get.mockRestore();
+			error.mockRestore();
+		}
+		expect((await poll(token)).status).toBe(204);
+		expect((await poll(`${token}x`)).status).toBe(401);
+	});
+});
+
 describe("the daemon's queue", () => {
 	let token = "";
 	beforeEach(async () => {
@@ -508,8 +525,10 @@ describe("the audit log", () => {
 	});
 });
 
+const requestedBy = (row: { requested_by: { kind: string } }) => row.requested_by.kind;
+
 describe("the majordomo's host operation tools", () => {
-	const HOSTOPS_TOOLS = ["hostops_stats", "hostops_deploy", "hostops_rollback", "hostops_restart", "hostops_logs", "hostops_set_slot_limit", "hostops_status", "hostops_op", "hostops_exec"];
+	const HOSTOPS_TOOLS = ["hostops_stats", "hostops_deploy", "hostops_rollback", "hostops_restart", "hostops_logs", "hostops_set_slot_limit", "hostops_status", "hostops_audit", "hostops_op", "hostops_exec"];
 	let offered: string[] = [];
 	let prompt = "";
 	let told = "";
@@ -605,6 +624,41 @@ describe("the majordomo's host operation tools", () => {
 		faux.setResponses([toolUse("hostops_status", {}), record]);
 		await sayAs(TOKEN, ROOT, "Is the daemon there?");
 		expect(JSON.parse(told)).toMatchObject({ credential: "issued", version: "1.2.3", commit: "abc1234", queue: { queued: 0, running: 0 }, last_seen_at: expect.any(String) });
+	});
+
+	it("read the audit log with hostops_audit: who asked, filtered, and no secrets", async () => {
+		const token = (await call("/hostops/credential", { method: "POST", cookie })).body.token as string;
+		faux.setResponses([toolUse("hostops_restart", { service: "egress-proxy" }), record]);
+		const turn = sayAs(TOKEN, ROOT, "Restart the proxy");
+		const id = (await poll(token, 10_000)).body.op.id as string;
+		const secret = `tok_${"9fQ2xLmA7".repeat(3)}`;
+		await report(token, succeeded(id, { summary: `restarted with ${secret}` }));
+		await turn;
+		await enqueueHostOp(env, majordomo, "deploy", { ref: "main" });
+
+		faux.setResponses([toolUse("hostops_audit", {}), record]);
+		await sayAs(TOKEN, ROOT, "What happened on the host?");
+		const rows = JSON.parse(told).audit as any[];
+		expect(told).not.toContain(secret);
+		expect(told).not.toContain(token);
+		const queued = rows.find((row) => row.action === "enqueue" && row.operation === "restart");
+		expect(queued).toMatchObject({ args: "service=egress-proxy", requested_by: { kind: "agent", agent: agentId(), chat: ROOT }, approval: "not_required", outcome: "queued", op_id: id });
+		expect(queued.at).toMatch(/^\d{4}-\d\d-\d\dT/);
+		// The daemon's own rows carry the chat that asked for their operation, and the reads of the audit log are audited too.
+		expect(rows.find((row) => row.action === "result")).toMatchObject({ operation: "restart", outcome: "succeeded", requested_by: { kind: "hostd", chat: ROOT } });
+		expect(rows.find((row) => row.action === "audit")).toBeUndefined();
+
+		faux.setResponses([toolUse("hostops_audit", { op: "deploy", limit: 5 }), record]);
+		await sayAs(TOKEN, ROOT, "Only deploys");
+		expect(JSON.parse(told).audit.map((row: any) => [row.operation, requestedBy(row)])).toEqual([["deploy", "agent"]]);
+
+		faux.setResponses([toolUse("hostops_audit", { since: "2999-01-01T00:00:00Z" }), record]);
+		await sayAs(TOKEN, ROOT, "Anything later?");
+		expect(JSON.parse(told).audit).toEqual([]);
+
+		faux.setResponses([toolUse("hostops_audit", { limit: 1 }), record]);
+		await sayAs(TOKEN, ROOT, "Just the latest");
+		expect(JSON.parse(told).audit).toHaveLength(1);
 	});
 
 	it("answer a deploy that is still running with its id, which hostops_op then follows to the end", async () => {

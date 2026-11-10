@@ -206,3 +206,18 @@ describe("the appearance settings through the app's routes", () => {
 		await run("ui_write", { method: "PUT", path: "/settings", body: { colorMode: null, colorTheme: null, locale: null } });
 	});
 });
+
+describe("the space's fallback models through the app's routes", () => {
+	it("classes PUT /model/fallbacks as a write, and ui_write sets and clears the list", async () => {
+		const { routes } = (await run("ui_routes", {})).body as { routes: { method: string; path: string; class: string }[] };
+		expect(routes.find((route) => route.method === "PUT" && route.path === "/model/fallbacks")?.class).toBe("write");
+		expect(routes.find((route) => route.method === "GET" && route.path === "/model/fallbacks")?.class).toBe("read");
+		const models = [{ provider: "napper", id: "napper-model" }];
+		const saved = await run("ui_write", { method: "PUT", path: "/model/fallbacks", body: { models } });
+		expect(saved.error).toBe(false);
+		expect(saved.body).toMatchObject({ status: 200, body: { models: [{ provider: "napper", id: "napper-model" }] } });
+		expect((await api("/model/fallbacks")).body.models).toMatchObject(models);
+		const cleared = await run("ui_write", { method: "PUT", path: "/model/fallbacks", body: { models: [] } });
+		expect(cleared.body).toMatchObject({ status: 200, body: { models: [] } });
+	});
+});

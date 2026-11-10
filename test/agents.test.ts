@@ -9,7 +9,7 @@ import { CREATE_AGENT, UPDATE_AGENT } from "../src/extensions/agents";
 import { INSTALL_SKILL, WRITE_SKILL } from "../src/extensions/skills";
 import { api, apiUrl, OWNER, pairTestComputer, pendingApproval, post, ROOT, say, TOKEN, toolUse } from "./helpers";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { faux, napper, type Pim } from "./worker";
+import { faux, napper, type Pim, utility } from "./worker";
 
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
 const system = (messages: readonly Message[]) => JSON.stringify(messages.filter((message) => message.role === "system").at(-1));
@@ -210,6 +210,70 @@ describe("the owner's agents", () => {
 		await vi.waitFor(async () => expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session).held).toBe(true));
 		// The list says what failed, so a chat opened later can show it.
 		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session).error).toContain("insufficient_quota");
+	});
+
+	it("moves an agent with no fallbacks of its own on to the space's fallback models, and rejects ones that are not choices", async () => {
+		const put = (models: { provider: string; id: string }[]) => api("/model/fallbacks", { method: "PUT", body: JSON.stringify({ models }) });
+		expect((await put([{ provider: "napper", id: "nope" }])).status).toBe(400);
+		expect((await put([{ provider: "napper", id: "napper-model" }])).body.models).toMatchObject([{ provider: "napper", id: "napper-model" }]);
+		expect((await api("/model/fallbacks")).body.models).toMatchObject([{ id: "napper-model" }]);
+		const agent = (await post("/agents", { name: "Plain planner", instructions: "Plan my week." })).body;
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		const outOfQuota = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "insufficient_quota: you exceeded your current quota" });
+		faux.setResponses([outOfQuota]);
+		napper.setResponses([toolUse("send_to_user", { message: "From the space's fallback." })]);
+		expect(await say("Plan my week", session)).toMatchObject({ status: "done", replies: ["From the space's fallback."] });
+		expect((await put([])).body.models).toEqual([]);
+	});
+
+	it("tries the agent's own fallbacks before the space's, each model once", async () => {
+		const put = (models: { provider: string; id: string }[]) => api("/model/fallbacks", { method: "PUT", body: JSON.stringify({ models }) });
+		const utilityModel = { provider: "utility", id: "utility-model" };
+		const napperModel = { provider: "napper", id: "napper-model" };
+		// The space lists the agent's own fallback first, and again after another, which only counts once.
+		await put([napperModel, utilityModel, napperModel]);
+		const agent = (await post("/agents", { name: "Ordered planner", instructions: "Plan my week." })).body;
+		await api(`/agents/${agent.id}/fallbacks`, { method: "PUT", body: JSON.stringify({ models: [utilityModel] }) });
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		// The first message also has its chat named, which takes a response of the utility model.
+		const named = utility.state.callCount;
+		utility.setResponses([fauxAssistantMessage("Plan")]);
+		faux.setResponses([toolUse("send_to_user", { message: "Hello." })]);
+		await say("Hi", session);
+		await vi.waitFor(() => expect(utility.state.callCount).toBeGreaterThan(named));
+
+		const outOfQuota = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "insufficient_quota: you exceeded your current quota" });
+		const napperCalls = napper.state.callCount;
+		faux.setResponses([outOfQuota]);
+		utility.setResponses([toolUse("send_to_user", { message: "From the agent's fallback." })]);
+		expect(await say("Plan my week", session)).toMatchObject({ status: "done", replies: ["From the agent's fallback."] });
+		expect(napper.state.callCount).toBe(napperCalls);
+
+		faux.setResponses([outOfQuota]);
+		utility.setResponses([outOfQuota]);
+		napper.setResponses([toolUse("send_to_user", { message: "From the space's." })]);
+		expect(await say("And next week", session)).toMatchObject({ status: "done", replies: ["From the space's."] });
+		await put([]);
+	});
+
+	it("sends runs held on a cooling provider to the agent's fallback, then the space's, then the deployment's default", async () => {
+		const napperModel = { provider: "napper", id: "napper-model" };
+		const utilityModel = { provider: "utility", id: "utility-model" };
+		const agent = (await post("/agents", { name: "Cooling planner", instructions: "Plan my week." })).body;
+		const chat = (await post("/sessions", { agent: agent.id })).body.id;
+		const bare = (await post("/sessions", { agent: (await post("/agents", { name: "Bare planner", instructions: "Plan." })).body.id })).body.id;
+		await api(`/agents/${agent.id}/fallbacks`, { method: "PUT", body: JSON.stringify({ models: [napperModel] }) });
+		await api("/model/fallbacks", { method: "PUT", body: JSON.stringify({ models: [utilityModel] }) });
+		const goesTo = (session: string) =>
+			runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+				const model = (instance as unknown as { fallbackModel(provider: string, session: string): { provider: string } | undefined }).fallbackModel("openai", instance.store.sessionOf(session)!);
+				return model?.provider;
+			});
+		expect(await goesTo(chat)).toBe("napper");
+		expect(await goesTo(bare)).toBe("utility");
+		// A fallback on the cooling provider's own is no way out of it.
+		await api("/model/fallbacks", { method: "PUT", body: JSON.stringify({ models: [] }) });
+		expect(await goesTo(bare)).toBe("faux");
 	});
 
 	it("renames another agent or itself in chat without asking, keeping its identity and settings", async () => {

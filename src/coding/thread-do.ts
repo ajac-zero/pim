@@ -2034,6 +2034,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const provider = this.workspaceProviders().get(thread.providerId);
 		if (this.#open && thread.workspaceRef?.id === this.#open.id) return this.#open.workspace;
 		let workspace = thread.workspaceRef ? await provider.get(thread.workspaceRef) : null;
+		// A restart between the manager making the container and this thread saving its ref, or the manager's own restart, leaves the session running: it is taken up again, and only a session that is not there is provisioned.
+		if (!workspace && !thread.workspaceRef) {
+			const ref = { id: thread.threadId, providerId: thread.providerId, sessionId: thread.threadId };
+			workspace = await provider.get(ref);
+			if (workspace) this.store.update({ workspaceRef: ref });
+		}
 		const started = workspace ? null : performance.now();
 		if (!workspace) {
 			// Creating twice for one session is one workspace, so a restart mid-create makes no second one.

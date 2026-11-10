@@ -88,6 +88,7 @@ file when hostopsd is run by hand):
 | `HOSTOPSD_STATE_FILE` | Default `/var/lib/hostopsd/state.json` |
 
 `HOSTOPSD_HEALTH_TIMEOUT_MS` (120000), `HOSTOPSD_HEALTH_INTERVAL_MS` (2000),
+`HOSTOPSD_IDLE_TIMEOUT_MS` (600000) and `HOSTOPSD_IDLE_INTERVAL_MS` (5000),
 `HOSTOPSD_BACKOFF_MIN_MS` (1000), `HOSTOPSD_BACKOFF_MAX_MS` (60000) and
 `HOSTOPSD_UNAUTHORIZED_RETRY_MS` (300000) tune timing; the tests shorten them.
 
@@ -114,7 +115,7 @@ malformed argument or any extra argument fails it before anything runs.
 | Op | Args | What it does |
 | --- | --- | --- |
 | `stats` | none | CPUs, load, memory, swap, free disk of `/` and of Docker's data root (`docker info`), `docker system df`, containers and their states, the manager's `/health`, the checkout's commit, uptimes, hostopsd's version |
-| `deploy` | `ref?` (`^[A-Za-z0-9._/-]{1,100}$`, default `origin/main`) | `git fetch origin`, resolves `ref`, requires a fast-forward from the current commit unless `ref` is a commit hash, checks it out detached, runs `up.sh`, then waits up to 120 s for `/health` to be ok at the new commit. On failure it checks out the previous commit, runs `up.sh` and checks health again: `rolled_back`, or `failed` if that fails too |
+| `deploy` | `ref?` (`^[A-Za-z0-9._/-]{1,100}$`, default `origin/main`) | `git fetch origin`, resolves `ref`, requires a fast-forward from the current commit unless `ref` is a commit hash, checks it out detached, runs `up.sh`, then waits up to 120 s for `/health` to be ok at the new commit. Before it recreates the manager it waits, polling `/health`, until the manager runs no sessions (up to 10 minutes, then goes ahead and says so), because recreating it kills the threads in them; `restart` of `sandbox-manager` waits the same way On failure it checks out the previous commit, runs `up.sh` and checks health again: `rolled_back`, or `failed` if that fails too |
 | `rollback` | `commit` (7 to 40 hex) | The same checkout, `up.sh` and health check for a commit that is an ancestor of HEAD or one an earlier deploy recorded; no second rollback when it fails |
 | `restart` | `service`: `sandbox-manager`, `egress-proxy`, `docker-socket-proxy` or `hostopsd` | `docker compose restart <service>`; `hostopsd` exits after reporting and systemd restarts it |
 | `logs` | `service` as above, `lines?` 1 to 500 (200) | `docker compose logs --no-color --tail N <service>`, or `journalctl -u hostopsd -n N`; redacted, last 60 KB |

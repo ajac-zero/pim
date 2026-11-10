@@ -328,6 +328,7 @@ describe('restart, logs, slots, stats', () => {
 
 	test('stats reports the host, docker and the manager', async () => {
 		const d = await start()
+		h.mgr.running = 1
 		const r = await op(d, 'stats', {})
 		assert.equal(r.state, 'succeeded', r.summary)
 		assert.equal(r.data.errors, undefined)
@@ -339,6 +340,43 @@ describe('restart, logs, slots, stats', () => {
 		assert.equal(r.data.containers.length, 3)
 		assert.equal(r.data.dockerDf[0].type, 'Images')
 		assert.match(r.summary, /2 containers running; manager \w+ with 1 of 4 slots in use/)
+	})
+})
+
+describe('deploying while sessions run', () => {
+	test('waits for the manager to be idle, then deploys, logging both', async () => {
+		const d = await start({ manager: { running: 2 } })
+		const t = setInterval(() => d.logs.some((l) => /deferring/.test(l)) && ((h.mgr.running = 0), clearInterval(t)), 20)
+		const r = await op(d, 'deploy', {})
+		assert.equal(r.state, 'succeeded', r.summary)
+		assert.match(r.summary, /^Waited for the manager to be idle\. Deployed/)
+		assert.ok(d.logs.some((l) => /deploy: deferring, the manager runs 2 sessions/.test(l)))
+		assert.ok(d.logs.some((l) => /deploy: the manager is idle, proceeding/.test(l)))
+		assert.deepEqual(upCalls(), [h.short(h.repo.c3)])
+	})
+
+	test('goes ahead after the timeout when sessions are still running, and says so', async () => {
+		const d = await start({ manager: { running: 1 } })
+		const started = Date.now()
+		const r = await op(d, 'deploy', {})
+		assert.ok(Date.now() - started >= 500)
+		assert.equal(r.state, 'succeeded', r.summary)
+		assert.match(r.summary, /Went ahead with 1 sessions still running after waiting 1 s/)
+		assert.ok(d.logs.some((l) => /proceeding anyway/.test(l)))
+	})
+
+	test('does not wait when it is idle, for a rollback, or for a restart of another service', async () => {
+		const d = await start({ manager: { running: 1 } })
+		await op(d, 'restart', { service: 'egress-proxy' })
+		assert.equal((await op(d, 'rollback', { commit: h.repo.c1 })).state, 'succeeded')
+		assert.equal(d.logs.filter((l) => /deferring/.test(l)).length, 0)
+	})
+
+	test('waits before restarting the manager itself', async () => {
+		const d = await start({ manager: { running: 1 } })
+		const t = setInterval(() => d.logs.some((l) => /deferring/.test(l)) && ((h.mgr.running = 0), clearInterval(t)), 20)
+		const r = await op(d, 'restart', { service: 'sandbox-manager' })
+		assert.match(r.summary, /^Waited for the manager to be idle\. Restarted sandbox-manager/)
 	})
 })
 
@@ -372,6 +410,24 @@ describe('talking to Pim', () => {
 		h.pim.pollStatus = 503
 		const e = await d.step()
 		assert.ok(e.waitMs <= 40)
+	})
+
+	test('treats 5xx and dropped connections as transient: quiet, jittered backoff, one note on recovery', async () => {
+		const d = await start({ pim: { pollStatus: 500 } })
+		const waits = []
+		for (let i = 0; i < 4; i++) waits.push((await d.step()).waitMs)
+		assert.ok(waits.every((w) => w > 0))
+		assert.ok(waits[3] > waits[0] || waits[3] >= 4)
+		// Two failures are silent; the third is noted once, not on every poll.
+		assert.equal(d.logs.length, 1)
+		assert.match(d.logs[0], /poll: Pim answered 500, 3 times in a row/)
+		h.pim.pollStatus = null
+		assert.equal((await d.step()).waitMs, 0)
+		assert.equal(d.logs.at(-1), 'Pim is answering again.')
+		// A reset connection is handled the same way.
+		const dead = await daemon({ HOSTOPS_URL: 'http://127.0.0.1:1' })
+		assert.ok((await dead.step()).waitMs > 0)
+		assert.deepEqual(dead.logs, [])
 	})
 
 	test('refuses unknown ops and injection attempts without running anything', async () => {

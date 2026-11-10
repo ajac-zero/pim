@@ -81,6 +81,55 @@ export type CodingCheckpoint = {
   createdAt: number;
 };
 
+/** The repository's prepared environment in a thread's workspace (docs/coding-api.md). Durations are milliseconds. */
+export type CodingEnvironment = {
+  state: "none" | "restoring" | "cached" | "building" | "failed";
+  key: string | null;
+  source: "settings" | "repository" | null;
+  builtAt: number | null;
+  restoredFromKey: string | null;
+  provisionMs: number | null;
+  restoreMs: number | null;
+  setupMs: number | null;
+  snapshotMs: number | null;
+  preparedAt: number | null;
+  rebuildRequested: boolean;
+  error?: string;
+};
+
+/** The person's settings for one repository. */
+export type CodingRepoSettings = {
+  repo: string;
+  setupScript: string | null;
+  updatedAt: number | null;
+};
+
+/** The most a setup script may be, as the API enforces it. */
+export const MAX_SETUP_SCRIPT_BYTES = 64 * 1024;
+
+export const setupScriptBytes = (script: string) =>
+  new TextEncoder().encode(script).byteLength;
+
+/** `acme/widgets` from a repository's address, in the form the settings routes take. */
+export const repoSettingsPath = (url: string) =>
+  `/coding/repos/${repoName(url).split("/").map(encodeURIComponent).join("/")}/settings`;
+
+/** How long ago `at` was, in the locale's words ("3 hours ago"). */
+export function formatAgo(at: number, now: number, locale: string): string {
+  const seconds = Math.round((at - now) / 1000);
+  const units = [
+    ["day", 86400],
+    ["hour", 3600],
+    ["minute", 60],
+  ] as const;
+  const format = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+  for (const [unit, size] of units) {
+    if (Math.abs(seconds) >= size)
+      return format.format(Math.round(seconds / size), unit);
+  }
+  return format.format(Math.min(seconds, 0), "second");
+}
+
 export type CodingThreadView = {
   id: string;
   threadId: string;
@@ -105,6 +154,7 @@ export type CodingThreadView = {
   checkpoint: CodingCheckpoint | null;
   createdBy: CodingCreator;
   parentThread: string | null;
+  environment: CodingEnvironment;
   createdAt: number;
   updatedAt: number;
 };
@@ -258,6 +308,12 @@ export type CodingApi = {
     id: string,
     body?: { branch?: string },
   ) => Promise<CodingPushRequested>;
+  rebuildEnvironment: (id: string) => Promise<CodingEnvironment>;
+  repoSettings: (repoUrl: string) => Promise<CodingRepoSettings>;
+  setRepoSettings: (
+    repoUrl: string,
+    setupScript: string | null,
+  ) => Promise<CodingRepoSettings>;
   /** The live stream until `signal` aborts or Pim closes it. */
   events: (
     id: string,
@@ -289,6 +345,13 @@ export const codingApi: CodingApi = {
   cancel: (id) => call(path(id, "/cancel"), post()),
   archive: (id) => call(path(id, "/archive"), post()),
   push: (id, body) => call(path(id, "/push"), post(body)),
+  rebuildEnvironment: (id) => call(path(id, "/environment/rebuild"), post()),
+  repoSettings: (repoUrl) => call(repoSettingsPath(repoUrl)),
+  setRepoSettings: (repoUrl, setupScript) =>
+    call(repoSettingsPath(repoUrl), {
+      method: "PUT",
+      body: JSON.stringify({ setupScript }),
+    }),
   events: async function* (id, signal) {
     const response = await fetch(`/api${path(id, "/events")}`, {
       signal,

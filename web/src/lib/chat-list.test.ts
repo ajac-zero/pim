@@ -121,6 +121,27 @@ describe("nestChats", () => {
     // The old chat stands on its own in its own list.
     expect(ids(nestChats([old], [...open, second, old]).top)).toEqual(["trip"]);
   });
+  it("puts a chat that carries on an unlisted task chat under the chat that started that task", () => {
+    const old = chat("task", 1, { archived: true, ...started("trip", 2) });
+    const open = [
+      chat("task, continued", 3, { continuedFrom: "task" }),
+      chat("trip", 2),
+    ];
+    const { top, children } = nestChats(open, [...open, old]);
+    expect(ids(top)).toEqual(["trip"]);
+    expect(ids(children.get("trip") ?? [])).toEqual(["task, continued"]);
+  });
+  it("puts a chat whose parent is archived under the nearest listed chat above it", () => {
+    const parent = chat("parent", 1, { archived: true, ...started("trip", 2) });
+    const open = [
+      chat("child", 3, started("parent", 3)),
+      chat("trip", 2),
+      chat("lone", 1, started("gone", 1)),
+    ];
+    const { top, children } = nestChats(open, [...open, parent]);
+    expect(ids(top)).toEqual(["trip", "lone"]);
+    expect(ids(children.get("trip") ?? [])).toEqual(["child"]);
+  });
   it("keeps a chat under the one it carries on when both are listed", () => {
     const { top, children } = nestChats([
       chat("new", 2, { continuedFrom: "old" }),

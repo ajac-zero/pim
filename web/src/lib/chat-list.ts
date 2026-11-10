@@ -70,9 +70,9 @@ export function groupByAge(sessions: readonly Session[], now = Date.now()) {
  * Chats your agents started for tasks under the chat they were started from,
  * however deep the chain goes: the chats with none above them in the list, in
  * its order, and for each chat the ones directly under it, oldest first. A
- * chat whose starting chat isn't in the list, such as one deleted or left out
- * by a search, stands on its own, and so does a chat that carries on one that
- * isn't in the list.
+ * chat whose starting chat isn't in the list, such as one archived, folded
+ * away or left out by a search, goes under the nearest chat above it that is;
+ * with none, such as when the starting chat was deleted, it stands on its own.
  *
  * A chat that carries on a longer one takes its place: chats the longer one
  * started go under the chat that carries it on, even though the longer one,
@@ -96,13 +96,26 @@ export function nestChats(list: readonly Session[], all = list) {
     return last;
   };
   const listed = new Set(list);
+  // A chat whose own parent is listed elsewhere, such as an archived or folded one, stands under the nearest one above it that is listed.
+  const parentFor = (session: Session) => {
+    const seen = new Set([session]);
+    const above = (chat: Session) => {
+      const start = byId.get(chat.startedBy?.session ?? "");
+      return start ? latest(start) : byId.get(chat.continuedFrom ?? "");
+    };
+    let up = above(session);
+    while (up && !listed.has(up) && !seen.has(up)) {
+      seen.add(up);
+      up = above(up) ?? up;
+      if (seen.has(up)) break;
+    }
+    return up;
+  };
   const parentOf = new Map<string, Session>();
   const top: Session[] = [];
   const children = new Map<string, Session[]>();
   for (const session of list) {
-    const start = byId.get(session.startedBy?.session ?? "");
-    const from = byId.get(session.continuedFrom ?? "");
-    const parent = start ? latest(start) : from;
+    const parent = parentFor(session);
     // A link that would close a loop is left out, so every chat is shown.
     let loops = false;
     for (let up = parent; up && !loops; up = parentOf.get(up.id)) {

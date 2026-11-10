@@ -1242,3 +1242,27 @@ describe("tasks whose model can't answer", () => {
 		expect(update).not.toContain("subscription_sharing");
 	});
 });
+
+describe("archiving a chat", () => {
+	it("archives and restores the chats of the tasks it handed out, at any depth", async () => {
+		const inner = await agent({ name: "Inner", instructions: "Answer." });
+		const middle = await agent({ name: "Middle", instructions: "Delegate.", contacts: [inner.id] });
+		await agent({ name: "Outer", instructions: "Delegate.", contacts: [middle.id] });
+		const session = (await post("/sessions", { agent: (await agents()).find((other) => other.name === "Outer")!.id })).body.id;
+		scripts({
+			Outer: [() => toolUse("delegate", { tasks: [{ to: "Middle", task: "one" }] }), () => answer("Asked."), () => answer("Done.")],
+			Middle: [() => toolUse("delegate", { tasks: [{ to: "Inner", task: "two" }] }), () => answer("Asked."), () => answer("Done.")],
+			Inner: [() => answer("Done.")],
+		});
+		await say("go", session);
+		await settled();
+		const middleChat = (await tasksOf(session))[0]!.session!;
+		const innerChat = (await tasksOf(middleChat))[0]!.session!;
+		const archived = async (id: string) => (await api<{ sessions: { id: string; archived: boolean }[] }>("/sessions")).body.sessions.find((chat) => chat.id === id)?.archived;
+		expect([await archived(session), await archived(middleChat), await archived(innerChat)]).toEqual([false, false, false]);
+		expect((await post(`/sessions/${session}/archive`, {})).status).toBe(200);
+		expect([await archived(session), await archived(middleChat), await archived(innerChat)]).toEqual([true, true, true]);
+		expect((await post(`/sessions/${session}/unarchive`, {})).status).toBe(200);
+		expect([await archived(session), await archived(middleChat), await archived(innerChat)]).toEqual([false, false, false]);
+	});
+});

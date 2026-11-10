@@ -2030,9 +2030,26 @@ export class Pim extends DurableAgent<Env> {
 		return receipt;
 	}
 
-	/** Archives a chat as the person's Archive does by hand. */
+	/** Archives a chat as the person's Archive does by hand, with the chats of the tasks it handed out, and theirs: a chat is only done once its tasks are. */
 	#archive(session: string): void {
-		this.store.archiveSession(session);
+		this.#setArchived(session, true);
+	}
+
+	/** Lists a chat again, with the chats of the tasks it handed out, and theirs, as archiving it took them away together. */
+	#unarchive(session: string): void {
+		this.#setArchived(session, false);
+	}
+
+	#setArchived(session: string, archive: boolean): void {
+		const archived = new Set<string>();
+		for (const pending = [session]; pending.length > 0; ) {
+			const chat = pending.pop()!;
+			if (archived.has(chat)) continue;
+			archived.add(chat);
+			if (archive) this.store.archiveSession(chat);
+			else this.store.unarchiveSession(chat);
+			for (const task of this.#tasks.byRequester(chat)) if (task.chat && task.kind !== "review") pending.push(task.conversation);
+		}
 		this.broadcastMessage({ type: "sessions" });
 	}
 
@@ -5546,8 +5563,7 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions/:session/archive",
 			async ({ session }) => {
 				const id = await this.#session(session!);
-				this.store.archiveSession(id);
-				this.broadcastMessage({ type: "sessions" });
+				this.#archive(id);
 				return this.#sessionInfo(id);
 			},
 		],
@@ -5556,8 +5572,7 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions/:session/unarchive",
 			async ({ session }) => {
 				const id = await this.#session(session!);
-				this.store.unarchiveSession(id);
-				this.broadcastMessage({ type: "sessions" });
+				this.#unarchive(id);
 				return this.#sessionInfo(id);
 			},
 		],

@@ -7,8 +7,8 @@ const need = (k) => env[k] || (console.error(`${k} is required`), process.exit(1
 const token = need('MANAGER_TOKEN')
 const cfg = {
 	token,
-	// Rotating MANAGER_TOKEN without setting this changes every derived agentd token, and a
-	// restarted manager can then no longer reach the sessions that were running.
+	// Changing it changes the tokens of new sessions only: a restarted manager reads the tokens of
+	// running ones back from their containers.
 	agentdSecret: env.AGENTD_TOKEN_SECRET || token,
 	allowedImages: (env.ALLOWED_IMAGES || 'pim-workspace:local').split(',').map((s) => s.trim()).filter(Boolean),
 	defaultDiskMiB: Number(env.DEFAULT_DISK_MIB || DEFAULT_DISK_MIB),
@@ -46,10 +46,25 @@ try {
 	console.error(e.message)
 	process.exit(1)
 }
+// Sessions are containers of their own and outlive the manager: stopping it (a deploy, a restart)
+// exits at once and touches none of them. Node, as a container's PID 1, would otherwise ignore
+// SIGTERM until Docker kills it after the stop timeout.
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => process.exit(0))
 const manager = createManager({ docker, cfg, proxyAdmin })
 await manager.reconcile()
-const every = (sec, fn) => setInterval(() => fn().catch((e) => console.error(e)), sec * 1000).unref()
+// A run that is still going when the next is due is not overlapped.
+const every = (sec, fn) => {
+	let running = false
+	setInterval(() => {
+		if (running) return
+		running = true
+		fn()
+			.catch((e) => console.error(e))
+			.finally(() => (running = false))
+	}, sec * 1000).unref()
+}
 every(30, manager.reap)
-every(30, manager.reattach)
+// Often, so a restarted egress proxy gets its allowlists back within seconds.
+every(5, manager.reattach)
 every(Number(env.DISK_CHECK_SEC || 60), manager.checkDisk)
 manager.server.listen(Number(env.PORT ?? 8080), env.HOST ?? '0.0.0.0', () => console.log(`sandbox-manager ready (runsc verified, disk quota: ${cfg.quotaMode})`))

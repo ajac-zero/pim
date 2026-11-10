@@ -15,8 +15,14 @@ manager refuses to start.
 ```sh
 MANAGER_TOKEN=$(openssl rand -hex 24) PROXY_ADMIN_TOKEN=$(openssl rand -hex 24) \
 AGENTD_TOKEN_SECRET=$(openssl rand -hex 32) \
-./up.sh   # = docker compose up -d --build with the git sha baked in (/health "version")
+./up.sh   # builds the images with the git sha baked in (/health "version"), then docker compose up -d --no-build
 ```
+
+Deploy with `up.sh`, not `docker compose up --build`: compose recreates every service it builds
+with `--build`, even from an identical image, and recreating `egress-proxy` cuts the open
+connections of every running session. `up.sh` tags the proxy's image by a hash of its inputs and
+rebuilds it only when they change, so a deploy recreates the manager alone. Running sessions keep
+going through a manager restart (see Restarts).
 
 The compose file builds `pim-workspace:local` from `../workspace-agentd` (the default and only
 allowed sandbox image unless `ALLOWED_IMAGES` says otherwise) and runs three services:
@@ -45,7 +51,7 @@ usual update, `git pull && sandbox-manager/up.sh`, is the only step; see
 | --- | --- | --- |
 | `MANAGER_TOKEN` | required | Bearer token for the API (compared in constant time) |
 | `PROXY_ADMIN_TOKEN` | required | Shared with the egress-proxy admin endpoint |
-| `AGENTD_TOKEN_SECRET` | `MANAGER_TOKEN` | Key the per-session agentd tokens are derived from. Set it, so rotating `MANAGER_TOKEN` does not cut a restarted manager off from running sessions |
+| `AGENTD_TOKEN_SECRET` | `MANAGER_TOKEN` | Key the per-session agentd tokens are derived from. A restarted manager reads running sessions' tokens back from their containers, so changing it (or `MANAGER_TOKEN` while it is unset) affects new sessions only |
 | `ALLOWED_IMAGES` | `pim-workspace:local` | Comma-separated exact image references; the first is the default. Each must run workspace-agentd as its entrypoint (build `FROM` the workspace image). Digest-pin them in production |
 | `DOCKER_HOST` / `DOCKER_SOCKET` | `/var/run/docker.sock` | Daemon address |
 | `DOCKER_ROOT` | `/var/lib/docker` | Directory whose filesystem is checked for free space |
@@ -95,7 +101,8 @@ All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors 
 | `POST /sessions/:id/start` | | The session, now `running`; does nothing if running already |
 | `GET /sessions/:id/status` | | `{sessionId, state, reason, diskBytes, diskQuotaBytes, diskFreeBytes, activeExecs, quotaMode, measuredAt}` |
 | `POST /sessions/:id/exec` | `{cmd:[...], cwd?, timeoutMs, stdin?, env?}` | `{stdout, stderr, exitCode, timedOut, truncated}` |
-| `POST /sessions/:id/exec/stream` | same as exec | `application/x-ndjson` ExecEvents |
+| `POST /sessions/:id/exec/stream` | same as exec; optional header `x-exec-id` | `application/x-ndjson` ExecEvents |
+| `GET /sessions/:id/exec/:execId/stream?after=n` | | The same stream of the command started with `x-exec-id: execId`, from its event `n` on; 404 `exec_not_found` when the workspace no longer has it |
 | `PUT /sessions/:id/file` | `?path=&mode=0644`, raw body | `{ok: true}` |
 | `GET /sessions/:id/file` | `?path=` | raw bytes |
 | `DELETE /sessions/:id/file` | `?path=&recursive=1` | `{ok: true}` |
@@ -134,7 +141,14 @@ exit code 127, one killed by a signal 128 + its number, a timeout `exitCode: nul
 `{type: "stdout"|"stderr", data}` as output arrives, then exactly one
 `{type: "exit", code, signal, timedOut}`. A command that cannot start gives a stderr line and
 `{type: "exit", code: 127}`. If the client disconnects, the manager closes its request to agentd,
-which kills the command's process group. If agentd goes silent past the timeout plus 5 s, the
+which kills the command's process group. A command started with an `x-exec-id` header (8–128
+letters, digits, `-` or `_`, unique per session) also survives the manager itself: when the manager
+stops (a deploy, a restart), agentd keeps the command running and its output buffered, and the
+client reads on through the restarted manager with `GET /sessions/:id/exec/:execId/stream?after=n`,
+where `n` is the number of events it already has. A client that disconnects on purpose still
+kills it: the manager then sends agentd a kill for that id. agentd kills a command nobody has read
+on from within 10 minutes. Workspaces created before agentd could keep commands answer 404
+`exec_not_found`, and their commands still die with the manager. If agentd goes silent past the timeout plus 5 s, the
 stream ends with `{type: "exit", code: null, signal: "SIGKILL", timedOut: true}`. Execs run
 concurrently. Exec and file routes on a stopped session give 409 `session_stopped` or
 `over_disk_quota`.
@@ -232,7 +246,8 @@ starting session are never deleted.
   per-session labelled volume at `/workspace`, no binds and no published ports.
 - **agentd tokens.** Each container gets its own `AGENTD_TOKEN`:
   HMAC-SHA256(`AGENTD_TOKEN_SECRET`, sessionId + a random nonce). The nonce is a container
-  label; the token is in no label, never logged, and recomputed after a restart. The token
+  label; the token is in no label and never logged; after a restart the manager reads it back
+  from the container (see Restarts). The token
   reaches agentd as a container environment variable, the only way agentd takes it, so anyone
   with Docker API access (`docker inspect`) can read it, as can code in the session through
   `/proc/1/environ` (the same user as agentd, so it gains nothing). agentd keeps it out of the
@@ -261,7 +276,8 @@ starting session are never deleted.
   reach agentd. agentd resolves every path (each component, and a write target's parent)
   inside the container and refuses symlink escapes. It needs no shell or coreutils.
 - **Exec timeouts.** agentd runs each command in its own process group and on timeout (or when
-  the manager drops the connection) kills that group only. If agentd itself stops answering, the
+  the manager drops the connection, or after the detach grace for a command with an id) kills
+  that group only. If agentd itself stops answering, the
   manager drops the connection after the timeout plus 5 s.
 
 ## Disk governance
@@ -296,14 +312,28 @@ starting session are never deleted.
 
 ## Restarts
 
-At start the manager rebuilds its registry from the `pim.coding.session` labels: running
-containers become sessions again (their agentd tokens recomputed from the nonce label), marker
-volumes become kept workspaces, and anything else labelled (a stopped container, a half-created
-session's volume or network) is removed. It then attaches the egress proxy, and itself when it
-runs in a container, to every live session network they are not on: a recreated container (for
-example after `docker compose up` with a new image) has lost them. It re-registers every
-allowlist with the proxy. Every 30 s it does that again, so a proxy that was recreated or
-restarted while the manager kept running gets its networks and allowlists back too.
+Restarting, rebuilding or redeploying the manager never stops or removes a running session: each
+session is a container of its own, and on SIGTERM the manager exits at once without touching any.
+
+At start the manager rebuilds its registry from the `pim.coding.session` labels. Marker volumes
+become kept workspaces. Every running container becomes a session again, with the agentd token
+read back from its environment (or, failing that, recomputed from the nonce label), so a changed
+`AGENTD_TOKEN_SECRET` does not cut it off. A running container without an address yet is waited
+for a few seconds, then registered anyway: its commands answer 503 `session_reconnecting` until
+the address shows up. Only containers that are not running are cleaned up: one with a kept
+workspace loses its container and network, and any other (with its volume and network) once it
+is older than a minute, so a create still in flight is never mistaken for a leftover. A paused or
+otherwise unusable container is left alone, and its `sessionId` is refused with 409
+`session_unsettled` until the manager can take it over or clean it up. A labelled volume or
+network with no container (a half-created session's) is removed, unless it is a kept workspace.
+
+The manager then attaches the egress proxy, and itself when it runs in a container, to every
+live session network they are not on: a recreated container has lost them. It re-registers every
+allowlist with the proxy. Every 5 s it does that again (and looks again at what it could not take
+over), so a proxy that was recreated or restarted while the manager kept running gets its
+networks and allowlists back within seconds; a network the proxy cannot join does not hold up the
+others. Image and configuration changes apply to new sessions only: a running container keeps
+the image and settings it was created with.
 
 ## Known gaps
 
@@ -329,7 +359,8 @@ restarted while the manager kept running gets its networks and allowlists back t
 - Sessions can reach each other's proxy, but not each other's containers (separate networks).
   A session shares the proxy's CPU and file descriptors with all others; there is no rate limit.
 - A container that is stopped or OOM-killed is not restarted; its session (volume included) is
-  removed at the next start of the manager. The manager has no per-session ownership check
+  removed at the next start of the manager, as is every session when the Docker daemon restarts
+  without `live-restore`. The manager has no per-session ownership check
   beyond the single bearer token.
 - Image pulls have no timeout, and the manager does not verify digests itself.
 - No TTY and no metrics.

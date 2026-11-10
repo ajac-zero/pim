@@ -73,6 +73,8 @@ beforeEach(() => {
 	const checkout = `${tmp}/checkout`
 	mkdirSync(`${checkout}/sandbox-manager`, { recursive: true })
 	cpSync(`${REAL}/up.sh`, `${checkout}/sandbox-manager/up.sh`)
+	// up.sh tags the egress proxy's image by a hash of these.
+	for (const f of ['Dockerfile', 'package.json', 'src/proxy.js', 'src/proxy-main.js']) cpSync(`${REAL}/${f}`, `${checkout}/sandbox-manager/${f}`)
 	cpSync(`${REAL}/hostopsd`, `${checkout}/sandbox-manager/hostopsd`, { recursive: true, filter: (s) => !s.includes('/test') && !s.includes('/support') })
 	writeFileSync(`${checkout}/sandbox-manager/.env`, `MANAGER_TOKEN=${MANAGER_TOKEN}\n`)
 	spawnSync('git', ['init', '-q'], { cwd: checkout })
@@ -153,7 +155,10 @@ describe('up.sh ensures hostopsd', () => {
 	test('first install enrolls through sudo and stores the credential only in /etc/hostopsd/env', () => {
 		const r = up()
 		assert.equal(r.status, 0, r.stderr)
-		assert.match(log(), /docker compose up -d --build/)
+		// The proxy's image exists at its tag (the fake docker finds every image), so only the rest is built.
+		assert.match(log(), /^docker image inspect pim-egress-proxy:[0-9a-f]{16}$/m)
+		assert.doesNotMatch(log(), /compose build egress-proxy/)
+		assert.match(log(), /docker compose up -d --no-build/)
 		assert.match(log(), /sudo -n .*install\.sh --url https:\/\/pim\.test/)
 		assert.match(log(), /--node \S+\/node(\s|$)/)
 		assert.deepEqual(pimCalls(), ['enroll'])

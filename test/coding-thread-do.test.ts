@@ -19,7 +19,7 @@ import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
-import { GO_REPO, MISE_REPO } from "./fixtures/repos";
+import { GO_REPO, installed, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
 import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingThreadClock, codingWorkspaces } from "./worker";
@@ -834,9 +834,9 @@ describe("a coding thread's environment", () => {
 			{ ...base, repo: "acme/other" },
 			{ ...base, setupScript: `${SCRIPT}pnpm build\n` },
 			{ ...base, setupScript: null },
-			{ ...base, provision: ["mise use --global --yes go@1.22"] },
-			{ ...base, provision: ["mise use --global --yes go@1.23"] },
-			{ ...base, provision: ["mise use --global --yes go@1.22", "go mod download"] },
+			{ ...base, provision: [installed("go@1.22")] },
+			{ ...base, provision: [installed("go@1.23")] },
+			{ ...base, provision: [installed("go@1.22"), "go mod download"] },
 			{ ...base, lockfiles: { ...base.lockfiles, "pnpm-lock.yaml": "c".repeat(64) } },
 			{ ...base, lockfiles: { ...base.lockfiles, "web/package-lock.json": "c".repeat(64) } },
 			{ ...base, lockfiles: { "pnpm-lock.yaml": "a".repeat(64) } },
@@ -1164,7 +1164,7 @@ describe("a coding thread's environment", () => {
 		const first = await startThread({ repo, space });
 		await turns(first.id, 1);
 		// Go from go.mod's toolchain directive with mise, then its modules, each with bash in the checkout and mise's shims on the PATH.
-		expect(scriptsRun()).toEqual(["mise use --global --yes go@1.22.5", "go mod download"]);
+		expect(scriptsRun()).toEqual([installed("go@1.22.5"), "go mod download"]);
 		expect(setups[0]).toMatchObject({ argv: ["bash", "-c", expect.stringMatching(/^export PATH="\$HOME\/\.local\/share\/mise\/shims:\$PATH"\n/)], cwd: REPO_DIR, env: { ...SETUP_ENV, ...PROVISION_ENV } });
 		const { environment } = await first.stub.status();
 		expect(environment).toMatchObject({ state: "cached", source: null, readyFrom: "setup", snapshotKept: true });
@@ -1208,9 +1208,9 @@ describe("a coding thread's environment", () => {
 		// The thread went on in its workspace as it was, and says what failed and why.
 		expect(environment).toMatchObject({ state: "cached", readyFrom: "setup", snapshotKept: false, builtAt: null });
 		expect(environment.error).toBeUndefined();
-		expect(environment.toolchains).toEqual([expect.objectContaining({ tool: "go", status: "failed", error: expect.stringMatching(/^`mise use --global --yes go@1\.22\.5` exited 1: mise ERROR failed to install core:go@1\.22\.5/) })]);
+		expect(environment.toolchains).toEqual([expect.objectContaining({ tool: "go", status: "failed", error: expect.stringMatching(/^`mise use --global --yes go@1\.22\.5 && .*` exited 1: mise ERROR failed to install core:go@1\.22\.5/) })]);
 		expect(environment.dependencies).toEqual([expect.objectContaining({ command: "go mod download", status: "skipped" })]);
-		expect(scriptsRun()).toEqual(["mise use --global --yes go@1.22.5"]);
+		expect(scriptsRun()).toEqual([installed("go@1.22.5")]);
 		expect(await codingWorkspaces.listEnvironments({ userId: space, repo: fullName })).toEqual([]);
 		expect((await first.stub.log()).find((event) => event.kind === "environment.provision_failed")?.data).toMatchObject({ step: "toolchain:go" });
 		expect(prompt).toContain("go 1.22.5 (from go.mod) failed while the workspace was set up");
@@ -1223,7 +1223,7 @@ describe("a coding thread's environment", () => {
 		const retried = (await second.stub.status()).environment;
 		expect(retried).toMatchObject({ key: environment.key, readyFrom: "setup", snapshotKept: true });
 		expect(retried.toolchains.map((each) => each.status)).toEqual(["installed"]);
-		expect(scriptsRun()).toEqual(["mise use --global --yes go@1.22.5", "mise use --global --yes go@1.22.5", "go mod download"]);
+		expect(scriptsRun()).toEqual([installed("go@1.22.5"), installed("go@1.22.5"), "go mod download"]);
 	});
 
 	it("installs a mise repository's tools before its own setup script, and keys the environment by both", async () => {
@@ -1232,11 +1232,11 @@ describe("a coding thread's environment", () => {
 		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
 		const { id, stub } = await startThread({ repo, space });
 		await turns(id, 1);
-		expect(scriptsRun()).toEqual(["mise trust --yes --quiet && mise install --yes", "mise use --global --yes python@3.12", SCRIPT]);
+		expect(scriptsRun()).toEqual(["mise trust --yes --quiet && mise install --yes", installed("python@3.12"), SCRIPT]);
 		const { environment } = await stub.status();
 		expect(environment).toMatchObject({ state: "cached", source: "repository" });
 		expect(environment.toolchains.map(({ tool, source, status }) => `${tool}:${source}:${status}`)).toEqual(["go:mise:installed", "node:mise:installed", "npm:prettier:mise:installed", "python:devcontainer:installed"]);
-		const key = await environmentKey({ userId: space, repo: fullName, provision: ["mise trust --yes --quiet && mise install --yes", "mise use --global --yes python@3.12"], setupScript: SCRIPT, lockfiles: { "mise.toml": await sha256(MISE_REPO["mise.toml"]!) }, image: DEFAULT_WORKSPACE_IMAGE });
+		const key = await environmentKey({ userId: space, repo: fullName, provision: ["mise trust --yes --quiet && mise install --yes", installed("python@3.12")], setupScript: SCRIPT, lockfiles: { "mise.toml": await sha256(MISE_REPO["mise.toml"]!) }, image: DEFAULT_WORKSPACE_IMAGE });
 		expect(environment.key).toBe(key);
 	});
 });

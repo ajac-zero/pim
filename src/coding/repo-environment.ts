@@ -319,7 +319,7 @@ export function provisionPlan(profile: RepoProfile): ProvisionStep[] {
 		const id = stepOf(each);
 		if (id === null || id === "mise") continue;
 		const install = `mise use --global --yes ${miseName(each.tool, each.version!)}@${each.version}`;
-		steps.push({ id, kind: "toolchain", tool: each.tool, script: each.tool === "pnpm" ? `${install} && ${pnpmPostinstall(each.version!)}` : install, needs: [] });
+		steps.push({ id, kind: "toolchain", tool: each.tool, script: [install, ...(each.tool === "pnpm" ? [pnpmPostinstall(each.version!)] : []), verifyTool(each.tool)].join(" && "), needs: [] });
 	}
 	for (const each of profile.dependencies) steps.push({ id: stepOf(each)!, kind: "dependencies", tool: each.tool, script: each.command, needs: each.needs });
 	return steps;
@@ -332,6 +332,18 @@ export function provisionPlan(profile: RepoProfile): ProvisionStep[] {
  */
 export function pnpmPostinstall(version: string): string {
 	return `dir=$(mise where npm:pnpm@${version}) && pkg=$(find "$dir" -type f -path '*/node_modules/pnpm/package.json' | head -n 1 | xargs dirname) && if grep -rqs "This is a placeholder" "$pkg/bin"; then (cd "$pkg" && npm run postinstall --if-present) && mise reshim; fi`;
+}
+
+/** What each toolchain is asked, once installed, to show that it runs; `<tool> --version` for the rest. */
+const VERSION_COMMANDS: Readonly<Record<string, string>> = { go: "go version", rust: "rustc --version", java: "java -version" };
+
+/**
+ * A command that fails, saying which tool and how, unless the installed tool runs. An install that exits 0 can still leave
+ * a binary that crashes, such as pnpm's placeholder, and the toolchain is then failed instead of reported as installed.
+ */
+export function verifyTool(tool: string): string {
+	const command = VERSION_COMMANDS[tool] ?? `${tool} --version`;
+	return `{ ${command} >/dev/null || { echo "${command} failed: the installed ${tool} doesn't run" >&2; exit 1; }; }`;
 }
 
 /** What mise calls a tool: pnpm and Yarn 1 are npm packages, and Yarn 2 and later is `@yarnpkg/cli-dist`. */

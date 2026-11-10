@@ -75,6 +75,7 @@ export type ClientHandlers = {
   onTasks?: (session: string) => void;
   /** Your computer was connected or removed, came online or went offline. */
   onComputer?: () => void;
+  onSettings?: () => void;
 };
 
 const MAX_BACKOFF_MS = 15_000;
@@ -395,6 +396,9 @@ export class PimClient {
         return;
       case "computer":
         this.handlers.onComputer?.();
+        return;
+      case "settings":
+        this.handlers.onSettings?.();
         return;
       default:
         return;

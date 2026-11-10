@@ -500,6 +500,10 @@ export type PimSettings = {
   timeZone: string;
   approvalPolicy: ApprovalPolicy;
   deviceAlerts: DeviceAlerts;
+  /** How the app looks on every device; unset until chosen. */
+  colorMode?: "light" | "dark" | "system";
+  colorTheme?: string;
+  locale?: "en" | "es";
   /** Null: approvals wait for an answer however long. */
   approvalTimeoutSeconds: number | null;
 };
@@ -1427,6 +1431,7 @@ export type ServerMessage =
   | { type: "sessions" }
   | { type: "tasks"; session: string }
   | { type: "computer" }
+  | { type: "settings" }
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
@@ -2060,7 +2065,11 @@ export const pim = {
   removeEmail: () => call<EmailState>("/email", { method: "DELETE" }),
   settings: () => call<PimSettings>("/settings"),
   updateSettings: (
-    update: Partial<Omit<PimSettings, "approvalTimeoutSeconds">>,
+    update: {
+      [K in keyof Omit<PimSettings, "approvalTimeoutSeconds">]?:
+        | PimSettings[K]
+        | null;
+    },
   ) =>
     call<PimSettings>("/settings", {
       method: "PUT",

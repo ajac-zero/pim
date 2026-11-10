@@ -628,13 +628,7 @@ function ApiKeyConnectPanel({ harness }: { harness: ApiKeyHarness }) {
               <p key={paragraph}>{paragraph}</p>
             ))}
           </div>
-          <form
-            className="flex flex-col gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (apiKey.trim()) save.mutate();
-            }}
-          >
+          <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1.5">
               <label
                 htmlFor={keyId}
@@ -649,6 +643,11 @@ function ApiKeyConnectPanel({ harness }: { harness: ApiKeyHarness }) {
                 spellCheck={false}
                 value={apiKey}
                 onChange={(event) => setApiKey(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  if (apiKey.trim() && !save.isPending) save.mutate();
+                }}
               />
               <p className="text-[13px] text-muted-foreground">
                 {t(text.where)}{" "}
@@ -668,16 +667,17 @@ function ApiKeyConnectPanel({ harness }: { harness: ApiKeyHarness }) {
             </div>
             <div>
               <Button
-                type="submit"
+                type="button"
                 size="sm"
                 disabled={save.isPending || !apiKey.trim()}
+                onClick={() => save.mutate()}
               >
                 {save.isPending
                   ? t("codingApiKeySaving")
                   : t("codingApiKeySave")}
               </Button>
             </div>
-          </form>
+          </div>
         </>
       )}
       {failed && (
@@ -839,13 +839,7 @@ function SubscriptionConnectPanel({
           </div>
         </div>
       ) : waiting ? (
-        <form
-          className="flex flex-col gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (code.trim()) send.mutate();
-          }}
-        >
+        <div className="flex flex-col gap-3">
           <ol className="list-decimal space-y-1 pl-5 text-sm">
             <li>
               <a
@@ -876,13 +870,19 @@ function SubscriptionConnectPanel({
               spellCheck={false}
               value={code}
               onChange={(event) => setCode(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                if (code.trim() && !send.isPending) send.mutate();
+              }}
             />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
-              type="submit"
+              type="button"
               size="sm"
               disabled={send.isPending || !code.trim()}
+              onClick={() => send.mutate()}
             >
               {send.isPending ? t("codingConnecting") : t("codingConnectSend")}
             </Button>
@@ -896,7 +896,7 @@ function SubscriptionConnectPanel({
               {t("codingCancel")}
             </Button>
           </div>
-        </form>
+        </div>
       ) : (
         <>
           <div className="flex flex-col gap-2 text-muted-foreground text-sm">

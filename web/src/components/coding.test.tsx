@@ -1196,6 +1196,34 @@ describe("connecting with an API key", () => {
     });
   });
 
+  it("saves the key with Save or Enter without submitting the start form, and nests no form in a form", async () => {
+    const api = keyApi("mistral-vibe");
+    renderWith(api, CodingPage, "/coding");
+    fireEvent.click(await screen.findByRole("radio", { name: "Mistral Vibe" }));
+    const panel = within(
+      await screen.findByRole("region", { name: "Connect Mistral Vibe" }),
+    );
+    expect(document.querySelector("form form")).toBeNull();
+    const startForm = document.querySelector("form") as HTMLFormElement;
+    const submitted = vi.fn((event: Event) => event.preventDefault());
+    startForm.addEventListener("submit", submitted);
+
+    const field = await panel.findByLabelText("API key");
+    fireEvent.change(field, { target: { value: VIBE_KEY } });
+    fireEvent.click(panel.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.vault.saveApiKey).toHaveBeenCalledTimes(1));
+    expect(await panel.findByText("Connected")).toBeTruthy();
+    expect(submitted).not.toHaveBeenCalled();
+
+    fireEvent.click(panel.getByRole("button", { name: "Disconnect" }));
+    const again = await panel.findByLabelText("API key");
+    fireEvent.change(again, { target: { value: VIBE_KEY } });
+    fireEvent.keyDown(again, { key: "Enter" });
+    await waitFor(() => expect(api.vault.saveApiKey).toHaveBeenCalledTimes(2));
+    expect(submitted).not.toHaveBeenCalled();
+    expect(api.start).not.toHaveBeenCalled();
+  });
+
   it("asks an Amp thread waiting for its token to connect, goes on with it once saved, and disconnects", async () => {
     const api = keyApi(
       "amp",

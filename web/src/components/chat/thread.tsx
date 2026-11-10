@@ -55,6 +55,7 @@ import {
   type StartedBy,
   type UserContent,
 } from "~/lib/pim-api";
+import { type PendingSend, pimClient } from "~/lib/pim-client";
 import {
   layoutThread,
   type ModelProblem,
@@ -225,6 +226,7 @@ export const Thread = memo(function Thread({
   continuedFrom,
   view,
   pending,
+  onDiscard,
   composerHeight,
   composerCardHeight,
   footer,
@@ -242,8 +244,10 @@ export const Thread = memo(function Thread({
   startedBy?: StartedBy | null;
   continuedFrom?: string | null;
   view: SessionView;
-  /** A message sent but not yet in the transcript, shown right away. */
-  pending: UserContent | null;
+  /** Messages sent but not yet in the transcript, shown right away. */
+  pending: readonly PendingSend[];
+  /** Given what a discarded message said, so it can be written again. */
+  onDiscard?: (content: UserContent) => void;
   composerHeight?: number;
   composerCardHeight?: number;
   /** Shown under the last message, such as suggested replies. */
@@ -274,12 +278,12 @@ export const Thread = memo(function Thread({
 
   const entries = useMemo<ThreadEntry[]>(() => {
     const all = [...view.entries];
-    if (pending !== null) {
+    for (const send of pending) {
       all.push({
-        key: "pending",
+        key: `pending:${send.operationId}`,
         kind: "item",
         source: "user",
-        item: userItem(pending),
+        item: userItem(send.content),
         // Sent just now; Pim's own time replaces it once it places the message.
         at: Date.now(),
       });
@@ -602,12 +606,20 @@ export const Thread = memo(function Thread({
           }
           const { item } = entry;
           if (item.type === "message") {
+            const send = pending.find(
+              (send) => `pending:${send.operationId}` === entry.key,
+            );
             return (
               <UserMessage
                 key={entry.key}
                 item={item as MessageItem}
                 at={entry.at}
                 onEdit={forkable && !liveKeys.has(entry.key) ? edit : undefined}
+                status={
+                  send && send.status !== "sent" ? (
+                    <SendStatus send={send} onDiscard={onDiscard} />
+                  ) : undefined
+                }
               />
             );
           }
@@ -710,7 +722,7 @@ export const Thread = memo(function Thread({
       </ConversationContent>
       {/* After the content, whose scroller its effects need. */}
       <ScrollMemory sessionId={sessionId} loaded={rows.length > 0} />
-      <FollowOwnMessage sent={pending !== null} />
+      <FollowOwnMessage sent={pending.length > 0} />
 
       <ConversationScrollButton
         bottomOffset={
@@ -727,6 +739,51 @@ export const Thread = memo(function Thread({
     </Conversation>
   );
 });
+
+/** How sending a message goes: quietly while it does, and with Retry and Discard once it fails. */
+function SendStatus({
+  send,
+  onDiscard,
+}: {
+  send: PendingSend;
+  onDiscard?: (content: UserContent) => void;
+}) {
+  const { t } = useI18n();
+  if (send.status !== "failed") {
+    // Late, so a message that goes at once doesn't flash it.
+    return (
+      <span className="animate-in delay-1000 duration-300 fade-in fill-mode-backwards">
+        {t("sending")}
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-center gap-1">
+      <span className="text-destructive">{t("notSent")}</span>
+      <Button
+        variant="ghost"
+        size="xs"
+        onClick={() =>
+          pimClient
+            .retry(send.operationId)
+            .catch((error: Error) => toast.error(error.message))
+        }
+      >
+        {t("retry")}
+      </Button>
+      <Button
+        variant="ghost"
+        size="xs"
+        onClick={() => {
+          const content = pimClient.discard(send.operationId);
+          if (content !== null) onDiscard?.(content);
+        }}
+      >
+        {t("discard")}
+      </Button>
+    </span>
+  );
+}
 
 /** Sending a message goes to the bottom and follows the reply, even from further up the chat. */
 function FollowOwnMessage({ sent }: { sent: boolean }) {

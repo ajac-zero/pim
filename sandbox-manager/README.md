@@ -45,7 +45,7 @@ Live check: `scripts/live-smoke.sh` (needs a Docker daemon with runsc, `curl`, `
 | `DOCKER_HOST` / `DOCKER_SOCKET` | `/var/run/docker.sock` | Daemon address |
 | `DOCKER_ROOT` | `/var/lib/docker` | Directory whose filesystem is checked for free space |
 | `MIN_FREE_DISK_PCT` | 15 | Refuse create (507, `low_disk`) below this free-disk percentage |
-| `MAX_CONCURRENT` | derived | Refuse create (429, `capacity`) at this many live sessions. Default `clamp(min(cpus, floor((memGiB - 1) / 1.5)), 1, 8)`: 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4 |
+| `MAX_CONCURRENT` | derived | Overridden by a value set with `PUT /config`, which is kept in `DATA_DIR/config.json`. Refuse create (429, `capacity`) at this many live sessions. Default `clamp(min(cpus, floor((memGiB - 1) / 1.5)), 1, 8)`: 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4 |
 | `DEFAULT_DISK_MIB` | 5120 | Workspace quota when a create leaves out `limits.diskMiB` |
 | `MAX_TOTAL_WORKSPACE_GB` | 100 | Refuse create (507, `workspace_quota`) when the quotas of live and starting workspaces, the bytes kept workspaces use, and snapshots and caches, plus the new quota, exceed this many GiB. Before refusing, the manager collects snapshots and caches and removes kept workspaces (deleted sessions first, then the longest stopped). The error lists what holds the space. `0` turns it off |
 | `DISK_QUOTA_MODE` | `auto` | `volume`, `measure` or `auto` (probe at start); see Disk governance |
@@ -76,7 +76,9 @@ All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors 
 
 | Route | Body / query | Answer |
 | --- | --- | --- |
-| `GET /health` | (no token) | `{runsc, freeDiskPct, maxConcurrent, running, free, sessions, snapshotBytes, cacheBytes, snapshotCount}` |
+| `GET /health` | (no token) | `{runsc, freeDiskPct, maxConcurrent, maxConcurrentSource, running, free, sessions, snapshotBytes, cacheBytes, snapshotCount}` |
+| `GET /config` | | `{maxConcurrent, source: "env"\|"default"\|"runtime", envValue}`: the live-session limit in force and where it comes from; `envValue` is `MAX_CONCURRENT` or `null` |
+| `PUT /config` | `{maxConcurrent}` (integer 1–16) | The same shape, 200. Persisted in `DATA_DIR/config.json`, wins over `MAX_CONCURRENT` (also after a restart) and applies to the next create; running sessions are never stopped. Other keys or values: 400 |
 | `GET /sessions` | | Every known session, sorted by id: `[{sessionId, image, limits, egressAllow, state, ...}]` |
 | `POST /sessions` | `{sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow?, userId?, repo?, hasRuntimeSecrets?, restoreFrom?:{key}}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
 | `POST /snapshots` | `{userId, repo, key, sessionId, exclude?}` | 201 the new snapshot, 200 the one already there for `key` |

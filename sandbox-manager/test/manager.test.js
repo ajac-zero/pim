@@ -49,6 +49,73 @@ async function teardown() {
 	await fake.close()
 }
 
+describe('runtime config', () => {
+	let dir
+	beforeEach(async () => {
+		dir = mkdtempSync(path.join(os.tmpdir(), 'mgr-cfg-'))
+		await setup({ dataDir: dir, maxConcurrent: 2, maxConcurrentSource: 'env' })
+	})
+	afterEach(() => teardown())
+	const create = (id) => call('POST', '/sessions', { ...good, sessionId: id })
+
+	test('GET and PUT roundtrip, shown by /health', async () => {
+		assert.deepEqual((await call('GET', '/config')).json, { maxConcurrent: 2, source: 'env', envValue: 2 })
+		const put = await call('PUT', '/config', { maxConcurrent: 5 })
+		assert.equal(put.status, 200)
+		assert.deepEqual(put.json, { maxConcurrent: 5, source: 'runtime', envValue: 2 })
+		assert.deepEqual((await call('GET', '/config')).json, put.json)
+		const h = (await call('GET', '/health')).json
+		assert.deepEqual([h.maxConcurrent, h.maxConcurrentSource, h.free], [5, 'runtime', 5])
+	})
+	test('rejects bad bodies and leaves the value alone', async () => {
+		for (const body of [{}, { maxConcurrent: 0 }, { maxConcurrent: 17 }, { maxConcurrent: 1.5 }, { maxConcurrent: '3' }, { maxConcurrent: null }, { maxConcurrent: 3, extra: 1 }, { other: 3 }, [3], null])
+			assert.equal((await call('PUT', '/config', body)).status, 400, JSON.stringify(body))
+		assert.equal((await call('PUT', '/config', 'nope')).status, 400)
+		assert.equal((await call('PUT', '/config', { maxConcurrent: 16 })).status, 200)
+		assert.equal((await call('PUT', '/config', { maxConcurrent: 1 })).status, 200)
+		assert.equal((await call('GET', '/config')).json.maxConcurrent, 1)
+	})
+	test('needs the bearer token', async () => {
+		assert.equal((await call('GET', '/config', undefined, { authorization: 'Bearer nope' })).status, 401)
+		assert.equal((await call('PUT', '/config', { maxConcurrent: 3 }, { authorization: '' })).status, 401)
+		assert.equal((await call('GET', '/config')).json.source, 'env')
+	})
+	test('applies at once to new creates', async () => {
+		await call('PUT', '/config', { maxConcurrent: 1 })
+		assert.equal((await create('abc-1')).status, 201)
+		const full = await create('abc-2')
+		assert.equal(full.status, 429)
+		assert.equal(full.json.code, 'capacity')
+		await call('PUT', '/config', { maxConcurrent: 2 })
+		assert.equal((await create('abc-2')).status, 201)
+	})
+	test('lowering it keeps existing sessions', async () => {
+		await create('abc-1')
+		await create('abc-2')
+		await call('PUT', '/config', { maxConcurrent: 1 })
+		assert.deepEqual((await call('GET', '/sessions')).json.map((s) => s.state), ['running', 'running'])
+		assert.equal(fake.containers.size, 2)
+		assert.equal((await create('abc-3')).status, 429)
+		assert.equal((await create('abc-1')).status, 200)
+	})
+	test('survives a restart and beats the env value', async () => {
+		await call('PUT', '/config', { maxConcurrent: 1 })
+		assert.deepEqual(JSON.parse(readFileSync(path.join(dir, 'config.json'), 'utf8')), { maxConcurrent: 1 })
+		assert.deepEqual((await fs.readdir(dir)).filter((f) => f.endsWith('.tmp')), [])
+		await teardown()
+		await setup({ dataDir: dir, maxConcurrent: 4, maxConcurrentSource: 'env' })
+		assert.deepEqual((await call('GET', '/config')).json, { maxConcurrent: 1, source: 'runtime', envValue: 4 })
+		assert.equal((await create('abc-1')).status, 201)
+		assert.equal((await create('abc-2')).status, 429)
+	})
+	test('without MAX_CONCURRENT the source is default and a broken file is ignored', async () => {
+		await teardown()
+		await fs.writeFile(path.join(dir, 'config.json'), '{"maxConcurrent": 99}')
+		await setup({ dataDir: dir, maxConcurrent: 3, maxConcurrentSource: undefined })
+		assert.deepEqual((await call('GET', '/config')).json, { maxConcurrent: 3, source: 'default', envValue: null })
+	})
+})
+
 describe('template validation', () => {
 	beforeEach(() => setup())
 	afterEach(() => teardown())
@@ -270,7 +337,7 @@ describe('sessions', () => {
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, reserved: { liveMiB: 1024, live: 1, keptMiB: 0, kept: 0, envMiB: 0, totalMiB: 1024 }, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
+		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, maxConcurrentSource: 'default', running: 1, free: 1, sessions: 1, reserved: { liveMiB: 1024, live: 1, keptMiB: 0, kept: 0, envMiB: 0, totalMiB: 1024 }, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
 	})
 	test('health includes version from BUILD_SHA env', async () => {
 		process.env.BUILD_SHA = 'abc1234'

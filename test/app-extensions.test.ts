@@ -285,7 +285,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		let results = "";
 		faux.setResponses([
 			toolUse("watch_connector_event", {
-				connector: "Travel",
+				connector: "test.ledger/travel",
 				event: "flight.price_changed",
 				arguments: { route: "JFK-LIS" },
 				instruction: "Tell me if it drops below $500.",
@@ -329,7 +329,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		const [listed] = JSON.parse(JSON.parse(results)[0].content[0].text);
 		expect(listed).toMatchObject({
 			id: watchId,
-			app: "Travel",
+			app: "test.ledger/travel",
 			event: "flight.price_changed",
 			arguments: { route: "JFK-LIS" },
 			instruction: "Tell me if it drops below $500.",
@@ -424,7 +424,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		// Ask, chosen before watching stopped asking, no longer asks.
 		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => instance.store.setToolPermission("", "", "watch_connector_event", "ask", null));
 		expect(await row()).toMatchObject({ permission: "on" });
-		const results = await toolsSay([["watch_connector_event", { connector: "Travel", event: "flight.price_changed", instruction: "legacy ask" }]]);
+		const results = await toolsSay([["watch_connector_event", { connector: "test.ledger/travel", event: "flight.price_changed", instruction: "legacy ask" }]]);
 		expect(results).toContain("Watching Travel for");
 		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
 		const legacy = (await connectorTriggers()).find((trigger) => trigger.instruction === "legacy ask")!;
@@ -490,14 +490,14 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		let results = "";
 		faux.setResponses([
 			toolUse("list_connector_events", {}),
-			toolUse("watch_connector_event", { connector: "Travel", event: "flight.price_changed", instruction: "outside" }),
+			toolUse("watch_connector_event", { connector: "test.ledger/travel", event: "flight.price_changed", instruction: "outside" }),
 			(context) => {
 				results = toolResults(context.messages);
 				return toolUse("send_to_user", { message: "no" });
 			},
 		]);
 		await say("Watch Travel.", session);
-		expect(results).toContain("No connector named Travel among the connectors you work with.");
+		expect(results).toContain("No connector named test.ledger/travel among the connectors you work with.");
 		expect(subscribes.length).toBe(before);
 	});
 
@@ -506,11 +506,11 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 		let results = "";
 		faux.setResponses([
 			toolUse("watch_connector_event", { connector: "Nowhere", event: "flight.price_changed", instruction: "x" }),
-			toolUse("watch_connector_event", { connector: "Travel", event: "no.such_event", instruction: "x" }),
+			toolUse("watch_connector_event", { connector: "test.ledger/travel", event: "no.such_event", instruction: "x" }),
 			(context) => {
 				results = toolResults(context.messages);
 				refuseSubscribe = -32012;
-				return toolUse("watch_connector_event", { connector: "Travel", event: "flight.price_changed", instruction: "x" });
+				return toolUse("watch_connector_event", { connector: "test.ledger/travel", event: "flight.price_changed", instruction: "x" });
 			},
 			(context) => {
 				refuseSubscribe = undefined;
@@ -567,7 +567,7 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 
 	it("records a termination, and unsubscribes when a watch is stopped, its chat deleted or its app removed", async () => {
 		const watchOnce = async (session = ROOT_SESSION) => {
-			const said = await toolsSay([["watch_connector_event", { connector: "Travel", event: "flight.price_changed", instruction: "Tell me." }]], session);
+			const said = await toolsSay([["watch_connector_event", { connector: "test.ledger/travel", event: "flight.price_changed", instruction: "Tell me." }]], session);
 			const id = /\(watch ([^)]+)\)/.exec(said)![1]!;
 			return { id, ...(await subscriptionOf(id)) };
 		};
@@ -613,8 +613,8 @@ describe("events from apps (draft MCP Events, webhook delivery)", () => {
 
 	it("cannot watch an app the agent lists but that is no longer connected", async () => {
 		const before = subscribes.length;
-		const results = await toolsSay([["watch_connector_event", { connector: "Travel", event: "flight.price_changed", instruction: "gone" }]]);
-		expect(results).toMatch(/No connector named Travel|is not connected/);
+		const results = await toolsSay([["watch_connector_event", { connector: "test.ledger/travel", event: "flight.price_changed", instruction: "gone" }]]);
+		expect(results).toMatch(/No connector named test.ledger\/travel|is not connected/);
 		expect(subscribes.length).toBe(before);
 	});
 });

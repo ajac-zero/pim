@@ -94,13 +94,15 @@ export function eventTools(
 	switchedOff: () => boolean,
 	host: WatchHost,
 ) {
-	/** The connected servers of the connectors this conversation's agent works with. */
-	const servers = (session: string) => appsOf(session).flatMap((app) => serverFor(bridge.servers(), app) ?? []);
-	const app = (name: string, session: string) => {
-		const wanted = name.toLowerCase();
-		return servers(session).find((server) => server.id === wanted || server.name.toLowerCase() === wanted);
-	};
-	const nameOf = (connectorId: string) => bridge.servers().find((server) => server.id === connectorId)?.name ?? connectorId;
+	/** The connected connectors this conversation's agent works with, each with its server. */
+	const connected = (session: string) => 
+		appsOf(session).flatMap((app) => {
+			const server = serverFor(bridge.servers(), app);
+			return server ? [{ ref: app.ref, server }] : [];
+		});
+	/** A connector's server by the id the prompt shows (`custom/notes`), the only name the watch tools take. */
+	const app = (ref: string, session: string) => connected(session).find((candidate) => candidate.ref === ref.trim())?.server;
+	const refOf = (connectorId: string, session: string) => connected(session).find((candidate) => candidate.server.id === connectorId)?.ref ?? connectorId;
 	const iso = (at: number | null) => (at === null ? null : new Date(at).toISOString());
 
 	const listAppEvents = defineTool({
@@ -110,9 +112,9 @@ export function eventTools(
 		replay: "safe",
 		async execute(_args, api) {
 			return json(
-				servers(String(api.conversationId)).flatMap((server) =>
+				connected(String(api.conversationId)).flatMap(({ ref, server }) =>
 					catalog.events(server.id).map((event) => ({
-						connector: server.name,
+						connector: ref,
 						event: event.name,
 						description: event.description,
 						arguments: event.inputSchema ?? {},
@@ -126,7 +128,7 @@ export function eventTools(
 		name: "watch_connector_event",
 		description: `Have a connected connector notify you whenever an event happens (see list_connector_events), and say what to do each time. Each event arrives as a message starting with "[Connector event]". Subscribing needs no approval; what you do when an event arrives is still subject to the usual approvals.`,
 		parameters: Type.Object({
-			connector: Type.String(),
+			connector: Type.String({ description: "The connector's id, as list_connector_events shows it." }),
 			event: Type.String(),
 			arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Filters the event accepts." })),
 			instruction: Type.String({ minLength: 1, description: "What to do each time it fires, written to your future self." }),
@@ -200,7 +202,7 @@ export function eventTools(
 					const subscription = host.subscription(view.id);
 					return {
 						id: view.id,
-						app: nameOf(source.connectorId),
+						app: refOf(source.connectorId, String(api.conversationId)),
 						event: source.event,
 						arguments: source.arguments,
 						instruction: view.instruction,

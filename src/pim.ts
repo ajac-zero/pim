@@ -1488,7 +1488,7 @@ export class Pim extends DurableAgent<Env> {
 		// The agent's own fallbacks come first, then the space's, then the deployment's default.
 		const agent = session === undefined ? undefined : this.agents.findOfSession(session);
 		const listed = [...(agent ? this.#fallbackModels(agent) : []), ...this.#workspaceFallbacks()].find((model) => model.provider !== provider);
-		if (listed) return listed;
+		if (listed) return this.modelCatalog().getModel(listed.provider, listed.id);
 		const model = this.defaultModel();
 		if (model.provider === provider) return undefined;
 		// Without Workers AI, the default is the first custom provider's model; with none, there is nothing to run.

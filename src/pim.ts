@@ -75,6 +75,7 @@ import {
 } from "./circles";
 import { CHATGPT_PROVIDER, ChatGPT, chatgptCredentials } from "./chatgpt";
 import { Cooldowns } from "./plan-quota";
+import { type Cooldown, failingOver, ProviderCooldowns } from "./provider-cooldowns";
 import { CodexImages } from "./codex-images";
 import { SqlCredentialStore } from "./credentials";
 import { AppCatalog } from "./extensions/app-catalog";
@@ -686,13 +687,15 @@ export class Pim extends DurableAgent<Env> {
 		// The person's own plan and providers: their tokens are theirs, not the deployment's.
 		ownProvider: (provider) => provider === CHATGPT_PROVIDER || provider.startsWith(OWN_PROVIDER),
 		// Only the ChatGPT subscription is free per call: a custom endpoint bills per token, so its calls are priced.
-		subscription: (provider) => provider === CHATGPT_PROVIDER,
+		subscription: (provider) => this.#subscription(provider),
 		tags: (call) => this.#callTags(call),
 		// The hourly rollup of model calls rides the triggers' wake.
 		rollupDue: () => void this.wakeTriggers().catch((error) => console.warn("setting the usage rollup wake failed", error)),
 	});
 	/** The last events that were only logged before, for the majordomo's diagnostics (./diagnostics.ts). */
 	readonly diagnosticEvents = new DiagnosticEvents(this.ctx.storage.sql);
+	/** Subscriptions cooling down after their usage limit, whose runs go to the deployment's default model meanwhile. */
+	readonly providerCooldowns = new ProviderCooldowns(this.ctx.storage.sql);
 	/** The conversation each provider session id names; a conversation's id never changes. */
 	readonly #providerSessions = new Map<string, string>();
 	/** The person's connections to connectors extensions implement themselves, with their sign-ins. */
@@ -1392,14 +1395,49 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * One catalog for pi and the API, so a token refresh is never run twice at
 	 * once. Every request through it is metered, and gets the chat's images.
+	 * A request to the ChatGPT plan while it cools down after its usage limit,
+	 * or one that finds the limit, goes to the deployment's default model.
 	 */
 	modelCatalog(): Models {
 		if (!this.#modelCatalog) {
 			this.#models = this.models();
 			this.#syncProviders();
-			this.#modelCatalog = this.images.resolving(this.usage.meter(this.#models));
+			this.#ownCatalog = this.images.resolving(this.usage.meter(this.#models));
+			this.#modelCatalog = failingOver(this.#ownCatalog, {
+				cooldowns: this.providerCooldowns,
+				subscription: (provider) => this.#subscription(provider),
+				fallback: (provider) => this.fallbackModel(provider),
+				cooled: (cooldown) => this.#cooled(cooldown),
+			});
 		}
 		return this.#modelCatalog;
+	}
+
+	/** Notes a subscription's cooldown, in the diagnostics' log. */
+	#cooled({ provider, until, failures, resetFrom }: Cooldown): void {
+		this.#note("provider_cooldown", { provider, until: new Date(until).toISOString(), failures, resetFrom });
+	}
+
+	/** The catalog without failing over, for side jobs, which choose their own model when the plan can't answer (see `#askUtility`). */
+	#ownCatalog: Models | undefined;
+
+	/** Whether a provider is a subscription: one that is free per call and has a usage limit, which is only the ChatGPT plan. */
+	#subscription(provider: string): boolean {
+		return provider === CHATGPT_PROVIDER;
+	}
+
+	/**
+	 * The model a subscription's runs go to while it cools down: the
+	 * deployment's default, when that is another provider's and can run here;
+	 * else none, and the runs wait for the limit to reset.
+	 */
+	protected fallbackModel(provider: string): Model<Api> | undefined {
+		const model = this.defaultModel();
+		if (model.provider === provider) return undefined;
+		// Without Workers AI, the default is the first custom provider's model; with none, there is nothing to run.
+		if (!this.#hasWorkersAi() && !this.customProviders().some((entry) => entry.provider.models.length > 0)) return undefined;
+		// As pi resolves a session's model.
+		return this.modelCatalog().getModel(model.provider, model.id);
 	}
 
 	/** The catalog before metering, which providers are added to and taken from as they change. */
@@ -1770,9 +1808,15 @@ export class Pim extends DurableAgent<Env> {
 		return model;
 	}
 
-	/** Whether the ChatGPT plan failed lately, so side jobs leave it alone. */
+	/** Whether the ChatGPT plan is cooling down after its usage limit, or failed otherwise a moment ago, so side jobs leave it alone. */
 	#planCooledDown(): boolean {
-		return this.#cooldowns.blocked(CHATGPT_PROVIDER);
+		return this.providerCooldowns.active(CHATGPT_PROVIDER) !== undefined || this.#cooldowns.blocked(CHATGPT_PROVIDER);
+	}
+
+	/** Leaves the plan alone after a side job's failure: until its limit resets, when it says it is out, else for a minute. */
+	#planFailed(message: string | undefined): void {
+		const cooldown = this.providerCooldowns.failed(CHATGPT_PROVIDER, { message });
+		if (!cooldown) this.#cooldowns.failed(CHATGPT_PROVIDER);
 	}
 
 	readonly #cooldowns = new Cooldowns();
@@ -1834,24 +1878,30 @@ export class Pim extends DurableAgent<Env> {
 		if (this.status() !== "active") throw new HttpError(403, "This space is suspended");
 		const model = await this.utilityModel();
 		if (!model) throw new HttpError(503, "This space has no utility model");
+		this.modelCatalog();
 		const ask = (asked: Model<Api>) =>
-			this.modelCatalog().completeSimple(
+			this.#ownCatalog!.completeSimple(
 				asked,
 				{ systemPrompt: instructions, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
 				// A reasoning model thinks as little as it can; a cap on its tokens could cut off the answer.
 				{ ...(asked.reasoning ? { reasoning: "minimal" } : { maxTokens }), ...(onPayload && { onPayload }), signal: AbortSignal.timeout(60_000) },
 			);
 		let answer: Awaited<ReturnType<typeof ask>>;
+		const sentAt = Date.now();
 		try {
 			answer = await ask(model);
 		} catch (error) {
 			// A request that throws instead of answering with an error counts as a failure too.
-			if (model.provider === CHATGPT_PROVIDER) this.#cooldowns.failed(CHATGPT_PROVIDER, errorMessage(error));
+			if (model.provider === CHATGPT_PROVIDER) this.#planFailed(errorMessage(error));
 			throw error;
 		}
-		if (answer.stopReason !== "error" || model.provider !== CHATGPT_PROVIDER) return answer;
+		if (model.provider !== CHATGPT_PROVIDER) return answer;
+		if (answer.stopReason !== "error") {
+			if (answer.stopReason !== "aborted") this.providerCooldowns.succeeded(CHATGPT_PROVIDER, sentAt);
+			return answer;
+		}
 		// The plan failed, most likely out of quota: leave it alone for a while, and answer this once from another provider.
-		this.#cooldowns.failed(CHATGPT_PROVIDER, answer.errorMessage);
+		this.#planFailed(answer.errorMessage);
 		const other = this.defaultUtilityModel() ?? this.#customFallback();
 		return other ? ask(other) : answer;
 	}

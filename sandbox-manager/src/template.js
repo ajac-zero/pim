@@ -52,11 +52,13 @@ function onlyKeys(obj, allowed, what) {
 }
 
 // `image` defaults to the first allowed image and `limits.diskMiB` to `defaultDiskMiB`. `userId` and
-// `repo` give the session its dependency cache volume.
+// `repo` give the session its dependency cache volume and are needed to take or restore snapshots;
+// `hasRuntimeSecrets` says the caller gives the session secrets, which keeps it from snapshots.
+// `restoreFrom` is read by the manager and is not one of the parameters.
 export function parseCreate(body, allowedImages, defaultDiskMiB = DEFAULT_DISK_MIB) {
 	if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'body must be an object')
-	onlyKeys(body, ['sessionId', 'image', 'limits', 'egressAllow', 'userId', 'repo'], '')
-	const { sessionId, image = allowedImages[0], limits, egressAllow = [], userId, repo } = body
+	onlyKeys(body, ['sessionId', 'image', 'limits', 'egressAllow', 'userId', 'repo', 'hasRuntimeSecrets', 'restoreFrom'], '')
+	const { sessionId, image = allowedImages[0], limits, egressAllow = [], userId, repo, hasRuntimeSecrets = false } = body
 	if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) throw new HttpError(400, 'invalid sessionId')
 	if (typeof image !== 'string' || !allowedImages.includes(image)) throw new HttpError(403, 'image is not allowed')
 	if (!limits || typeof limits !== 'object') throw new HttpError(400, 'limits required')
@@ -72,6 +74,7 @@ export function parseCreate(body, allowedImages, defaultDiskMiB = DEFAULT_DISK_M
 	}
 	if (userId !== undefined && (typeof userId !== 'string' || !USER_ID.test(userId))) throw new HttpError(400, 'userId must be 1-128 letters, digits or ._:@-')
 	if (repo !== undefined && (typeof repo !== 'string' || !REPO.test(repo))) throw new HttpError(400, 'repo must be 1-512 printable characters without spaces')
+	if (typeof hasRuntimeSecrets !== 'boolean') throw new HttpError(400, 'hasRuntimeSecrets must be a boolean')
 	return {
 		sessionId,
 		image,
@@ -79,6 +82,7 @@ export function parseCreate(body, allowedImages, defaultDiskMiB = DEFAULT_DISK_M
 		egressAllow: [...new Set(egressAllow)],
 		...(userId !== undefined && { userId }),
 		...(repo !== undefined && { repo }),
+		...(hasRuntimeSecrets && { hasRuntimeSecrets }),
 	}
 }
 

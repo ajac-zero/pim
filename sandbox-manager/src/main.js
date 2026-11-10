@@ -23,6 +23,9 @@ const cfg = {
 	managerContainer: env.MANAGER_CONTAINER || undefined,
 	agentdPort: Number(env.AGENTD_PORT || 8787),
 	agentdReadyMs: Number(env.AGENTD_READY_MS || 30000),
+	dataDir: env.DATA_DIR || '/data',
+	snapshotMaxBytes: Number(env.SNAPSHOT_MAX_GB || 4) * 2 ** 30,
+	envCachePct: Number(env.SNAPSHOT_CACHE_PCT ?? 20),
 }
 const adminUrl = env.EGRESS_PROXY_ADMIN_URL ?? 'http://egress-proxy:3129'
 const adminToken = need('PROXY_ADMIN_TOKEN')

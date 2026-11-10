@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { promises as fs, readFileSync } from 'node:fs'
+import { promises as fs, mkdtempSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'node:test'
@@ -14,7 +14,7 @@ const IMAGE = 'registry.example/sandbox@sha256:abc'
 const MiB = 1024 * 1024
 const limits = { cpu: 1.5, memMiB: 512, diskMiB: 1024, pids: 128 }
 const good = { sessionId: 'abc-1', image: IMAGE, limits, egressAllow: ['github.com', '*.npmjs.org'] }
-const cfg = { token: 't0ken', agentdSecret: 's3cret', allowedImages: [IMAGE], dockerRoot: '/', minFreePct: 15, maxConcurrent: 2, idleMin: 30, proxyUrl: 'http://egress-proxy:3128', proxyContainer: 'egress-proxy', quotaMode: 'measure', agentdReadyMs: 2000, execGraceMs: 200 }
+const cfg = { dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-data-')), token: 't0ken', agentdSecret: 's3cret', allowedImages: [IMAGE], dockerRoot: '/', minFreePct: 15, maxConcurrent: 2, idleMin: 30, proxyUrl: 'http://egress-proxy:3128', proxyContainer: 'egress-proxy', quotaMode: 'measure', agentdReadyMs: 2000, execGraceMs: 200 }
 
 let fake, mgr, proxy, base
 const statfsFn = async () => ({ bavail: 50, blocks: 100 })
@@ -266,7 +266,7 @@ describe('sessions', () => {
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.deepEqual(r.json, { runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1 })
+		assert.deepEqual(r.json, { runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
 	})
 })
 

@@ -144,6 +144,7 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 			parent: input.parent ?? null,
 			createdBy: creatorId(space, createdBy),
 			operationId,
+			...(input.rebuildEnvironment !== undefined ? { rebuildEnvironment: input.rebuildEnvironment } : {}),
 		});
 	} catch (error) {
 		// Such as a model the space doesn't have: the thread recorded nothing, so the list keeps nothing either.

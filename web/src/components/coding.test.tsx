@@ -41,7 +41,7 @@ import type {
   HarnessSignIn,
   TranscriptMessage,
 } from "~/lib/coding";
-import { ApiError } from "~/lib/pim-api";
+import { ApiError, type Session } from "~/lib/pim-api";
 import { approvalsQuery, sessionsQuery } from "~/lib/queries";
 import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
@@ -1215,6 +1215,47 @@ describe("archived coding threads in the chat list", () => {
       "/coding/old",
     );
     expect(screen.queryByText("Still going")).toBeNull();
+  });
+
+  it("starts every nested subthread list folded", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({ threads: [] });
+    const chat = (id: string, overrides: Partial<Session> = {}): Session => ({
+      id,
+      title: id,
+      createdAt: 1,
+      updatedAt: 1,
+      busy: false,
+      responseAt: null,
+      unread: false,
+      archived: true,
+      agent: { id: "majordomo", name: "Pim" },
+      ...overrides,
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    client.setQueryData(sessionsQuery().queryKey, [
+      chat("parent"),
+      chat("child", {
+        startedBy: {
+          session: "parent",
+          agent: { id: "majordomo", name: "Pim" },
+          task: "t",
+          state: "completed",
+        },
+      }),
+    ]);
+    renderWith(
+      api,
+      () => <ChatsPanel awaitingApproval={new Set()} />,
+      "/",
+      client,
+    );
+    const archived = await screen.findByRole("region", { name: "Archived" });
+    fireEvent.click(within(archived).getByRole("button", { name: /Archived/ }));
+    expect(within(archived).getByText("parent")).toBeTruthy();
+    expect(within(archived).queryByText("child")).toBeNull();
   });
 });
 

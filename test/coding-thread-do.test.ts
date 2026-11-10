@@ -22,7 +22,7 @@ import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { GO_REPO, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
-import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
+import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingThreadClock, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
 // `coding-faux` model, and asks a scheduler of its own space for a slot; the schedulers tell threads what happens to them
@@ -92,6 +92,7 @@ beforeEach(() => {
 	codingBackends.registry = null;
 	codingSchedulers.notifier = null;
 	codingSchedulers.now = null;
+	codingThreadClock.now = null;
 	codingEvents.length = 0;
 });
 
@@ -160,9 +161,13 @@ describe("a coding thread", () => {
 	});
 
 	it("fails with no_backend, saying why, when the deployment has no workspace backend for it", async () => {
-		const { stub, input, status } = await startThread({ workspaceProvider: "compose" });
+		const { id, stub, input, status } = await startThread({ workspaceProvider: "compose" });
 		expect(status).toMatchObject({ state: "failed", stateReason: "no_backend", stateDetail: 'This Pim has no workspace backend "compose" for coding threads.', slot: "none", inbox: 1 });
 		expect(await codingScheduler(env, input.space).snapshot()).toMatchObject({ running: [], queued: [] });
+		// The agent that started it hears of it, once.
+		expect(codingEvents.filter((event) => event.threadId === id)).toEqual([
+			expect.objectContaining({ outcome: "error", reason: "no_backend", state: "failed", detail: 'This Pim has no workspace backend "compose" for coding threads.' }),
+		]);
 		// Continuing doesn't help until there is one.
 		expect(await stub.continue({ operationId: "again" })).toMatchObject({ state: "failed", stateReason: "no_backend" });
 	});
@@ -185,6 +190,12 @@ describe("a coding thread", () => {
 		expect(failed).toMatchObject({ stateReason: "workspace", slot: "none" });
 		expect(failed.stateDetail).toContain("git clone exited 128: > Authorization: Bearer [redacted]\nfatal: repository");
 		expect(failed.stateDetail).not.toContain(token);
+		// The failure is told once, as an error turn's end is, with its detail.
+		const [told, ...more] = await turns(id, 1);
+		expect(more).toEqual([]);
+		expect(told).toMatchObject({ outcome: "error", reason: "workspace", state: "failed", operationId: expect.stringMatching(/^failed-workspace-/) });
+		expect(told!.detail).toContain("git clone exited 128");
+		expect(told!.detail).not.toContain(token);
 		expect(await everything(stub)).not.toContain(token);
 		const logged = warn.mock.calls.map((call) => call.join(" ")).join("\n");
 		expect(logged).toContain(id);
@@ -358,6 +369,9 @@ describe("a coding thread", () => {
 		const { id, stub, input } = await startThread();
 		const [failed] = await turns(id, 1);
 		expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });
+		// Told once: the turn's end is the only event for it.
+		await stub.status();
+		expect(codingEvents.filter((event) => event.threadId === id)).toHaveLength(1);
 		expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "model_error", slot: "none" });
 		expect((await codingScheduler(env, input.space).snapshot()).running).toEqual([]);
 		// Its workspace is gone, its files kept for the next one.
@@ -486,7 +500,42 @@ describe("a coding thread", () => {
 		expect(await second.stub.status()).toMatchObject({ state: "failed", stateReason: "queue_expired:slots_full", slot: "none", inbox: 1 });
 		expect(await first.stub.status()).toMatchObject({ state: "idle", slot: "none" });
 		expect(await scheduler.snapshot()).toMatchObject({ running: [], queued: [] });
-		expect(codingEvents.filter((event) => event.threadId === second.id)).toEqual([]);
+		expect(codingEvents.filter((event) => event.threadId === second.id)).toEqual([expect.objectContaining({ outcome: "error", reason: "queue_expired:slots_full", state: "failed" })]);
+	});
+
+	it("fails a thread stuck provisioning for too long, once, and leaves queued, and waiting threads be", async () => {
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		await scheduler.setLimit(1);
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Other done."), fauxAssistantMessage("Queued done.")]);
+		const first = await startThread({ space });
+		await turns(first.id, 1);
+		// A queued thread may wait for hours: it is the scheduler's to expire, not stuck.
+		const queued = await startThread({ space });
+		expect(queued.status.state).toBe("queued");
+		const waiting = await startThread();
+		await turns(waiting.id, 1);
+		const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+		const force = (stub: Stub, state: "provisioning" | "waiting_input") => inside(stub, async (thread) => thread.store.update({ state }));
+		await force(first.stub, "provisioning");
+		await force(waiting.stub, "waiting_input");
+		// Within its time, nothing happens.
+		await heartbeat(first.stub);
+		expect((await first.stub.status()).state).toBe("provisioning");
+		codingThreadClock.now = Date.now() + 21 * 60_000;
+		for (const each of [queued, waiting]) await heartbeat(each.stub);
+		expect((await queued.stub.status()).state).toBe("queued");
+		expect((await waiting.stub.status()).state).toBe("waiting_input");
+		await heartbeat(first.stub);
+		await heartbeat(first.stub);
+		expect(await first.stub.status()).toMatchObject({ state: "failed", stateReason: "stuck", slot: "none" });
+		// Its slot went to the queued thread, which runs on.
+		await turns(queued.id, 1);
+		expect(codingEvents.filter((event) => event.threadId === first.id)).toEqual([
+			expect.objectContaining({ outcome: "completed" }),
+			expect.objectContaining({ outcome: "error", reason: "stuck", state: "failed", detail: expect.stringMatching(/provisioning for 21 minutes/) }),
+		]);
+		for (const each of [queued, waiting]) expect(codingEvents.filter((event) => event.threadId === each.id && event.outcome === "error")).toEqual([]);
 	});
 
 	it("caps a diff at 256 KiB, and diffs from any checkpoint while its workspace runs", async () => {

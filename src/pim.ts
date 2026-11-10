@@ -4120,7 +4120,22 @@ export class Pim extends DurableAgent<Env> {
 		void this.harness
 			.wait(operation, { session: conversation })
 			.then((result) => this.#taskSettled(conversation, result))
-			.catch((error) => console.warn(`waiting for ${operation} failed`, error));
+			.catch((error) => this.#taskWaitFailed(conversation, operation, error));
+	}
+
+	/** A wait that threw, as when the task's run crashed: the task fails and its requester is told, rather than it staying at work for good. */
+	async #taskWaitFailed(conversation: string, operation: string, error: unknown): Promise<void> {
+		console.warn(`waiting for ${operation} failed`, error);
+		try {
+			const task = this.#tasks.of(conversation);
+			if (!task || task.kind === "review" || TERMINAL_STATES.has(task.state)) return;
+			const reason = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+			if (!this.#tasks.finish(task.id, "failed", `It didn't finish: ${reason}.`)) return;
+			this.#tasksChanged(task.root);
+			await this.#deliver(task.batch);
+		} catch (failure) {
+			console.warn(`failing the task of ${conversation} failed`, failure);
+		}
 	}
 
 	/**
@@ -4225,7 +4240,14 @@ export class Pim extends DurableAgent<Env> {
 	async #resumeTasks(): Promise<void> {
 		for (const task of this.#tasks.open()) {
 			// Giving the same operation again is a no-op: this gives a task only if the restart came between recording and giving it.
-			if (task.operation === `task:${task.id}`) await this.#submit(task.conversation, this.#taskInput(task), { operationId: task.operation, whenBusy: "followUp" }, "task");
+			if (task.operation === `task:${task.id}`) {
+				try {
+					await this.#submit(task.conversation, this.#taskInput(task), { operationId: task.operation, whenBusy: "followUp" }, "task");
+				} catch (error) {
+					await this.#taskWaitFailed(task.conversation, task.operation, error);
+					continue;
+				}
+			}
 			this.#watchTask(task.conversation, task.operation);
 		}
 		for (const { batch, operation } of this.#tasks.beingGiven()) {

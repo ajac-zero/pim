@@ -181,7 +181,8 @@ import { byteRange, FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES 
 import { LegacyFiles } from "./legacy-files";
 import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "./notes";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
-import { type DeploymentSettings, deploymentSettings } from "./deployment";
+import { type DeploymentSettings, deploymentSettings, readDeployment } from "./deployment";
+import { DiagnosticEvents, diagnose, scrubValue } from "./diagnostics";
 import { dispatch, HttpError, readJson, type Route, routeOf } from "./http";
 import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
@@ -202,6 +203,7 @@ import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessag
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
 import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAnswer, TriggerApi, TriggerApiError, triggerBody } from "./triggers/api";
+import { triggerFailures } from "./triggers/failures";
 import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
 import { ENGINE_KEY, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
@@ -213,6 +215,7 @@ import { TRIGGERS_EXTENSION, triggersExtension } from "./triggers/tools";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
+import { codingScheduler } from "./coding/scheduler-do";
 import { HARNESSES, type Harness as CodingHarness, isHarness } from "./coding/vault/harnesses";
 import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
@@ -686,6 +689,8 @@ export class Pim extends DurableAgent<Env> {
 		// The hourly rollup of model calls rides the triggers' wake.
 		rollupDue: () => void this.wakeTriggers().catch((error) => console.warn("setting the usage rollup wake failed", error)),
 	});
+	/** The last events that were only logged before, for the majordomo's diagnostics (./diagnostics.ts). */
+	readonly diagnosticEvents = new DiagnosticEvents(this.ctx.storage.sql);
 	/** The conversation each provider session id names; a conversation's id never changes. */
 	readonly #providerSessions = new Map<string, string>();
 	/** The person's connections to connectors extensions implement themselves, with their sign-ins. */
@@ -1142,7 +1147,7 @@ export class Pim extends DurableAgent<Env> {
 		// A read that kept one request waiting as long as it may keeps no other waiting.
 		if (current?.slow || (await within(read, CUSTOM_APPS_WAIT_MS))) return;
 		if (this.#customAppsRead) this.#customAppsRead.slow = true;
-		console.warn(JSON.stringify({ event: "pim.slow_refresh", owner: this.name, ms: CUSTOM_APPS_WAIT_MS, done: false }));
+		this.#note("slow_refresh", { ms: CUSTOM_APPS_WAIT_MS, done: false });
 	}
 
 	#startCustomAppsRead(): { readonly done: Promise<void>; slow: boolean } {
@@ -1152,7 +1157,7 @@ export class Pim extends DurableAgent<Env> {
 			done: this.#readCustomApps().finally(() => {
 				this.#customAppsRead = undefined;
 				const ms = Date.now() - started;
-				if (ms > CUSTOM_APPS_WAIT_MS) console.warn(JSON.stringify({ event: "pim.slow_refresh", owner: this.name, ms, done: true }));
+				if (ms > CUSTOM_APPS_WAIT_MS) this.#note("slow_refresh", { ms, done: true });
 			}),
 		};
 		this.#customAppsRead = read;
@@ -1346,7 +1351,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Moves a held run onto `model` and runs it again there. */
 	async #failOver(conversation: string, model: PiModel): Promise<void> {
-		console.warn(JSON.stringify({ event: "pim.failover", owner: this.name, conversation, provider: model.provider, model: model.id }));
+		this.#note("failover", { conversation, provider: model.provider, model: model.id });
 		await this.harness.session(conversation).setModel(model);
 		// The run is held just after its hook answers.
 		for (let attempt = 0; attempt < 20; attempt++) {
@@ -1591,6 +1596,12 @@ export class Pim extends DurableAgent<Env> {
 	#defaultSettings(): Settings {
 		const { timeZone, approvalPolicy } = this.deployment();
 		return { timeZone, approvalPolicy, deviceAlerts: "important" };
+	}
+
+	/** Logs something worth a look, and keeps it in the diagnostics' log, which the admin's majordomo reads. */
+	#note(event: string, fields: Record<string, unknown>): void {
+		console.warn(JSON.stringify({ event: `pim.${event}`, owner: this.name, ...fields }));
+		if (!this.#closed()) this.diagnosticEvents.record(event, fields);
 	}
 
 	/** How this deployment runs for everyone, from its variables (see ./deployment.ts). */
@@ -2443,13 +2454,13 @@ export class Pim extends DurableAgent<Env> {
 			await this.enableTriggerEngine();
 			console.log(JSON.stringify({ event: "pim.triggers_on", owner: this.name }));
 		} catch (error) {
-			console.warn(JSON.stringify({ event: "pim.triggers_on_failed", owner: this.name, error: String(error) }));
+			this.#note("triggers_on_failed", { error: String(error) });
 			try {
 				this.store.deleteMeta(ENGINE_KEY);
 				this.#triggerEngine = undefined;
 				if (this.registry.snapshot().extension(TRIGGERS_EXTENSION)) this.#installTriggerTools();
 			} catch (undoing) {
-				console.warn(JSON.stringify({ event: "pim.triggers_on_failed", owner: this.name, error: String(undoing) }));
+				this.#note("triggers_on_failed", { error: String(undoing) });
 			}
 		}
 	}
@@ -4439,7 +4450,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		this.#stalls.keepOnly(new Set([...watched].filter((session) => !stalled.includes(session))));
 		for (const session of stalled) {
-			console.warn(JSON.stringify({ event: "pim.run_stalled", owner: this.name, session, ms: this.stallMs() }));
+			this.#note("run_stalled", { session, ms: this.stallMs() });
 			await this.#stop(session, `[Pim] Your last turn was stopped: it made no progress for ${describeWait(this.stallMs())}, so a call of yours may be stuck. Look at what you were doing, and carry on or tell the person.`).catch((error) => console.warn("stopping a stalled run failed", error));
 		}
 		// Watching goes on while anything is at work.
@@ -4561,6 +4572,7 @@ export class Pim extends DurableAgent<Env> {
 						const { id, name, majordomo } = this.agents.ofSession(session);
 						return { chat: this.store.publicId(session), agent: { id, name, majordomo } };
 					},
+					diagnostics: { report: (query) => this.diagnosticsReport(query), health: () => this.healthReport() },
 				});
 				return [[extension.id, ability] as const];
 			}),
@@ -4764,6 +4776,66 @@ export class Pim extends DurableAgent<Env> {
 		if (!approval) return null;
 		const { action, args, status, decidedBy, decidedAt, requestedBy } = approval;
 		return { action, argsJson: JSON.stringify(args), status, decidedBy, decidedAt, guest: requestedBy !== null };
+	}
+
+	/** What went wrong in this space lately, by kind, for the admin's majordomo (see ./diagnostics.ts). */
+	diagnosticsReport(query: { since?: string; kind?: string; limit?: number }) {
+		this.#assertOpen();
+		return diagnose(
+			{
+				sql: this.ctx.storage.sql,
+				events: this.diagnosticEvents,
+				now: Date.now(),
+				heldRuns: async () => {
+					const held = await this.#heldSessions();
+					const errors = await this.#heldErrors(held);
+					return [...held].map((conversation) => ({ chat: this.store.publicId(conversation), agent: this.#roleOf(conversation).agent.name, error: errors.get(conversation) ?? "" }));
+				},
+				chatId: (session) => this.store.publicId(session),
+				triggerFailures: (since, limit) => (this.triggerEngine() ? triggerFailures(this.ctx.storage.sql, since, limit) : null),
+				connectors: () => this.apps.servers(),
+				codingThreads: async () => (await codingScheduler(this.env, this.name).threads()).map((thread) => ({ ...thread })),
+			},
+			query,
+		);
+	}
+
+	/** How this Pim is doing: its version, its Durable Object, what it holds and how the deployment is set, for the admin's majordomo. Addresses and keys are left out. */
+	async healthReport() {
+		this.#assertOpen();
+		const sql = this.ctx.storage.sql;
+		const count = (query: string) => Number(sql.exec(query).one().n);
+		const has = (table: string) => sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table).toArray().length > 0;
+		const grouped = (query: string) => Object.fromEntries(sql.exec(query).toArray().map((row) => [String(row.k), Number(row.n)]));
+		const servers = this.apps.servers();
+		const version = this.env.CF_VERSION_METADATA;
+		const { settings, variables } = readDeployment(this.env);
+		const { publicUrl, contentOrigin, appsOrigin, emailFrom, ...shown } = settings;
+		const alarm = await this.ctx.storage.getAlarm();
+		const threads = await codingScheduler(this.env, this.name)
+			.threads()
+			.then((all) => all.reduce<Record<string, number>>((byState, thread) => ({ ...byState, [thread.state]: (byState[thread.state] ?? 0) + 1 }), {}))
+			.catch(() => null);
+		return scrubValue({
+			generated_at: new Date().toISOString(),
+			version: { id: version?.id ?? null, tag: version?.tag || null, deployed_at: version?.timestamp ?? null, note: "The host daemon's commit is in hostops_status." },
+			durable_object: { status: "open", triggers_engine: this.triggerEngine() ? "on" : "off", next_alarm_at: alarm === null ? null : new Date(alarm).toISOString() },
+			counts: {
+				agents: this.agents.list().length,
+				chats: count("SELECT COUNT(*) AS n FROM pim_sessions WHERE deleted_at IS NULL"),
+				triggers: has("pim_triggers") ? grouped("SELECT lifecycle AS k, COUNT(*) AS n FROM pim_triggers WHERE lifecycle != 'deleted' GROUP BY lifecycle") : {},
+				schedules: this.#scheduledTasks().length,
+				pending_approvals: count("SELECT COUNT(*) AS n FROM pim_approvals WHERE status = 'pending'"),
+				connectors: { total: servers.length, not_ready: servers.filter((server) => server.state !== "ready").length },
+				coding_threads: threads,
+				diagnostic_events: this.diagnosticEvents.count(),
+			},
+			deployment: {
+				...shown,
+				configured: { public_url: publicUrl !== null, content_origin: contentOrigin !== null, apps_origin: appsOrigin !== null, email_from: emailFrom !== null },
+				problems: variables.flatMap((variable) => (variable.problem ? [variable.problem] : [])),
+			},
+		});
 	}
 
 	/** The agent a chat talks with; none in a visit, which talks with someone else's. */
@@ -5140,7 +5212,7 @@ export class Pim extends DurableAgent<Env> {
 	override async fetch(request: Request): Promise<Response> {
 		const started = Date.now();
 		const slow = (fields: Record<string, unknown>) =>
-			console.warn(JSON.stringify({ event: "pim.slow_request", owner: this.name, method: request.method, path: this.#routeOf(request.url), ...fields }));
+			this.#note("slow_request", { method: request.method, path: this.#routeOf(request.url), ...fields });
 		const timer = setTimeout(() => slow({ ms: Date.now() - started, status: null }), SLOW_REQUEST_MS);
 		let status: number | "error" = "error";
 		try {
@@ -8414,9 +8486,9 @@ export class Pim extends DurableAgent<Env> {
 			// Chats only say that a request failed; the provider's own words are for whoever runs the deployment.
 			for (const event of events) {
 				if (event.type === "task_failed") {
-					console.warn(JSON.stringify({ event: "pim.task_failed", kind: event.kind, error: event.message.slice(0, 1000) }));
+					this.#note("task_failed", { kind: event.kind, error: event.message.slice(0, 1000) });
 				} else if (event.type === "submission" && event.record.status === "unanswered" && event.record.reason === "model_error") {
-					console.warn(JSON.stringify({ event: "pim.model_error", error: String(event.record.detail ?? "").slice(0, 1000) }));
+					this.#note("model_error", { error: String(event.record.detail ?? "").slice(0, 1000) });
 				}
 			}
 			if (connection.readyState !== WebSocket.OPEN) {
@@ -8429,7 +8501,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Closes a socket whose watch failed or ended, so the app connects again and resyncs. */
 	#watchLost(connection: Connection<SocketState>, reason: string, cause: unknown): void {
-		console.warn(JSON.stringify({ event: "pim.watch_lost", owner: this.name, reason, cause: errorMessage(cause).slice(0, 500) }));
+		this.#note("watch_lost", { reason, cause: errorMessage(cause).slice(0, 500) });
 		this.#watchRequests.delete(connection.id);
 		try {
 			connection.close(WATCH_LOST, reason);

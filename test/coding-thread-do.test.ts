@@ -984,6 +984,43 @@ describe("a coding thread's environment", () => {
 		expect(setups).toEqual([]);
 		expect(snapshotsOf(input.space)).toEqual([]);
 	});
+
+	it("starts with a freshly rebuilt environment when rebuildEnvironment is true", async () => {
+		const { repo, fullName } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const { id, stub } = await startThread({ repo, space, rebuildEnvironment: true });
+		await turns(id, 1);
+		const status = await stub.status();
+		// When rebuildEnvironment is true, the rebuild path in #prepareEnvironment runs: skip restore, run setup, ignore existing snapshot
+		// After the environment is prepared, rebuildRequested is cleared, but it was built from setup
+		expect(status.environment.state).toBe("cached");
+		expect(status.environment.readyFrom).toBe("setup");
+		// It should not have restored from a snapshot
+		expect(status.environment.restoredFromKey).toBeNull();
+		expect(status.environment.rebuildRequested).toBe(false);
+	});
+
+	it("starts with cached environment when rebuildEnvironment is false or not set", async () => {
+		const { repo, fullName } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		// First thread creates a snapshot
+		const { id: firstId, stub: firstStub } = await startThread({ repo, space });
+		await turns(firstId, 1);
+		const firstStatus = await firstStub.status();
+		const key = firstStatus.environment.key;
+		expect(key).not.toBeNull();
+		// Second thread with rebuildEnvironment false/undefined should use the cached snapshot
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const { id: secondId, stub: secondStub } = await startThread({ repo, space, rebuildEnvironment: false });
+		await turns(secondId, 1);
+		const secondStatus = await secondStub.status();
+		// Should have restored from the first thread's snapshot
+		expect(secondStatus.environment.restoredFromKey).toBe(key);
+		expect(secondStatus.environment.readyFrom).toBe("snapshot");
+		expect(secondStatus.environment.rebuildRequested).toBe(false);
+	});
 });
 
 describe("a Claude Code thread", () => {

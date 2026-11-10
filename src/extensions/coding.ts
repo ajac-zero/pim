@@ -92,9 +92,10 @@ export const coding = definePimExtension({
 					),
 					budget: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "The most it may spend on its model, in US dollars. None by default: a thread runs until it finishes. Only Pi, Claude Code and Mistral Vibe report what they spend; for Codex and Amp the budget is ignored." })),
 					parent: Type.Optional(Type.String({ description: "The thread this one continues from, if any." })),
+					rebuildEnvironment: Type.Optional(Type.Boolean({ description: "When true, start with a freshly rebuilt environment, skipping any cached snapshot. Default false." })),
 				}),
 				replay: "safe",
-				async execute({ repo, ref, task, profile, harness, budget, parent }, api, context) {
+				async execute({ repo, ref, task, profile, harness, budget, parent, rebuildEnvironment }, api, context) {
 					// The same call run again starts the same thread.
 					const operationId = await api.memo("operation", crypto.randomUUID(), context);
 					const { chat, agent } = conversationOf(String(api.conversationId));
@@ -110,6 +111,7 @@ export const coding = definePimExtension({
 								...(harness ? { harness } : {}),
 								...(budget !== undefined ? { budgetUsd: budget } : {}),
 								...(parent ? { parent } : {}),
+								...(rebuildEnvironment !== undefined ? { rebuildEnvironment } : {}),
 								operationId,
 							},
 							{ type: "agent", agent: agent.id, chat },

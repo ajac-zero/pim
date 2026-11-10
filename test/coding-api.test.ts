@@ -360,6 +360,24 @@ describe("the coding threads API", () => {
 		const log = (await api<{ events: { kind: string; data: unknown }[] }>(`/coding/threads/${thread.id}/log`)).body.events;
 		expect(log.at(-1)).toMatchObject({ kind: "thread.pushed", data: { repo: "acme/demo", branch: thread.repo.branch, before: null, after: head, outcome: "created" } });
 	});
+
+	it("starts a thread with rebuildEnvironment=true", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const thread = await start({ rebuildEnvironment: true });
+		await turns(thread.id, 1);
+		const status = await view(thread.id);
+		// When rebuildEnvironment is true, the flag should be cleared after the environment is prepared
+		expect(status.environment.rebuildRequested).toBe(false);
+	});
+
+	it("starts a thread with rebuildEnvironment=false (default)", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const thread = await start({ rebuildEnvironment: false });
+		await turns(thread.id, 1);
+		const status = await view(thread.id);
+		// Default behavior: rebuildRequested should be false
+		expect(status.environment.rebuildRequested).toBe(false);
+	});
 });
 
 describe("merging a coding thread into the default branch", () => {

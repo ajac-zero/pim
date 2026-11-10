@@ -80,11 +80,11 @@ export async function setup({ fake = {}, pim = {}, manager = {} } = {}) {
 
 	// The fake manager: /health reports the commit up.sh last "started", and not ok for commits in
 	// `unhealthy`; PUT /config sets maxConcurrent.
-	const mgr = { unhealthy: [], maxConcurrent: 4, noConfig: false, ignoreConfig: false, ...manager }
+	const mgr = { unhealthy: [], maxConcurrent: 4, running: 0, noConfig: false, ignoreConfig: false, ...manager }
 	const mgrServer = createServer(async (req, res) => {
 		const send = (code, b) => res.writeHead(code, { 'content-type': 'application/json' }).end(JSON.stringify(b))
 		const deployed = readFileSync(path.join(fakeDir, 'deployed'), 'utf8').trim()
-		if (req.method === 'GET' && req.url === '/health') return send(200, { ok: !mgr.unhealthy.some((p) => deployed.startsWith(p) || p.startsWith(deployed)), runsc: true, commit: deployed, maxConcurrent: mgr.maxConcurrent, running: 1, free: mgr.maxConcurrent - 1, sessions: 1 })
+		if (req.method === 'GET' && req.url === '/health') return send(200, { ok: !mgr.unhealthy.some((p) => deployed.startsWith(p) || p.startsWith(deployed)), runsc: true, commit: deployed, maxConcurrent: mgr.maxConcurrent, running: mgr.running, free: mgr.maxConcurrent - mgr.running, sessions: mgr.running })
 		if (req.headers.authorization !== `Bearer ${MANAGER_TOKEN}`) return send(401, { error: 'unauthorized' })
 		if (req.method === 'PUT' && req.url === '/config' && !mgr.noConfig) {
 			const b = await body(req)
@@ -135,6 +135,8 @@ export async function setup({ fake = {}, pim = {}, manager = {} } = {}) {
 		HOME: tmp,
 		HOSTOPSD_HEALTH_TIMEOUT_MS: '800',
 		HOSTOPSD_HEALTH_INTERVAL_MS: '50',
+		HOSTOPSD_IDLE_TIMEOUT_MS: '600',
+		HOSTOPSD_IDLE_INTERVAL_MS: '40',
 		HOSTOPSD_BACKOFF_MIN_MS: '10',
 		HOSTOPSD_BACKOFF_MAX_MS: '40',
 		HOSTOPSD_UNAUTHORIZED_RETRY_MS: '60000',

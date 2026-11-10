@@ -148,6 +148,36 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 		}
 	}
 
+	// Before the manager is recreated, which kills every session it runs and so the threads in them,
+	// waits for it to have none, polling /health. It gives up after cfg.idleTimeoutMs and goes ahead,
+	// so a manager that is never idle can still be deployed to; a manager that doesn't answer has
+	// nothing to protect. Both outcomes are logged and returned for the operation's summary.
+	async function waitIdle(op) {
+		const until = Date.now() + cfg.idleTimeoutMs
+		let running = 0
+		let deferred = false
+		for (;;) {
+			try {
+				const r = await manager('GET', '/health')
+				running = Number(r.json?.running) || 0
+			} catch {
+				if (deferred) log(`${op.name}: the manager does not answer, so proceeding`)
+				return deferred ? 'The manager stopped answering while waiting, so it went ahead.' : ''
+			}
+			if (running === 0) {
+				if (deferred) log(`${op.name}: the manager is idle, proceeding`)
+				return deferred ? 'Waited for the manager to be idle.' : ''
+			}
+			if (Date.now() + cfg.idleIntervalMs > until) {
+				log(`${op.name}: the manager still runs ${running} sessions after ${Math.round(cfg.idleTimeoutMs / 1000)} s, proceeding anyway`)
+				return `Went ahead with ${running} sessions still running after waiting ${Math.round(cfg.idleTimeoutMs / 1000)} s; their threads were interrupted.`
+			}
+			if (!deferred) log(`${op.name}: deferring, the manager runs ${running} sessions; waiting up to ${Math.round(cfg.idleTimeoutMs / 1000)} s for it to be idle`)
+			deferred = true
+			await sleep(cfg.idleIntervalMs)
+		}
+	}
+
 	// Checks out a commit, rebuilds the stack with up.sh and waits for the manager to report it.
 	async function checkoutAndUp(sha) {
 		const co = await git(['checkout', '--detach', '--quiet', sha], t.git)
@@ -309,7 +339,10 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 				if (a.code === 1) return fail(op, `Not deploying ${ref} (${short(target)}): it is not a fast-forward of the current commit ${short(previous)}. Deploy it by its commit hash to go there anyway.`, { previous, target })
 				if (a.code !== 0) return fail(op, failText('git merge-base', a))
 			}
-			return changeCheckout(op, { kind: 'deploy', previous, target, revert: true })
+			const waited = await waitIdle(op)
+			const out = await changeCheckout(op, { kind: 'deploy', previous, target, revert: true })
+			if (waited) out.result = done(op.id, out.result.state, `${waited} ${out.result.summary}`, out.result.data)
+			return out
 		},
 
 		async rollback(op) {
@@ -339,9 +372,10 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 			} catch (e) {
 				return fail(op, `Cannot read the current commit: ${e.message}`)
 			}
+			const waited = service === 'sandbox-manager' ? await waitIdle(op) : ''
 			const r = await run('docker', ['compose', 'restart', service], { cwd: smDir, env: composeEnv(buildSha), timeoutMs: t.compose })
 			if (r.code !== 0) return fail(op, failText(`docker compose restart ${service}`, r), { service })
-			return { result: done(op.id, 'succeeded', `Restarted ${service}.`, { service }) }
+			return { result: done(op.id, 'succeeded', `${waited ? `${waited} ` : ''}Restarted ${service}.`, { service }) }
 		},
 
 		async logs(op) {

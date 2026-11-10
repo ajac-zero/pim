@@ -15,7 +15,7 @@ import { type FakeCommandHandler, type FakeCommandResult, FakeWorkspaceProvider 
 import { DEFAULT_WORKSPACE_IMAGE, NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
-import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
+import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";

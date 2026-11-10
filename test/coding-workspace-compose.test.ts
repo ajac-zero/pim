@@ -75,6 +75,7 @@ describe("ComposeWorkspaceProvider", () => {
 		const leaky = new ComposeWorkspaceProvider({
 			managerUrl: URL_BASE,
 			token: TOKEN,
+			sleep: async () => {},
 			fetch: (async () => {
 				throw new Error(`connect refused with Bearer ${TOKEN}`);
 			}) as typeof fetch,

@@ -78,6 +78,8 @@ export function loadConfig(env = process.env) {
 		waitMs: 25000,
 		healthTimeoutMs: num('HOSTOPSD_HEALTH_TIMEOUT_MS', 120000),
 		healthIntervalMs: num('HOSTOPSD_HEALTH_INTERVAL_MS', 2000),
+		idleTimeoutMs: num('HOSTOPSD_IDLE_TIMEOUT_MS', 10 * 60000),
+		idleIntervalMs: num('HOSTOPSD_IDLE_INTERVAL_MS', 5000),
 		backoffMinMs: num('HOSTOPSD_BACKOFF_MIN_MS', 1000),
 		backoffMaxMs: num('HOSTOPSD_BACKOFF_MAX_MS', 60000),
 		unauthorizedRetryMs: num('HOSTOPSD_UNAUTHORIZED_RETRY_MS', 5 * 60000),

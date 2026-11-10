@@ -382,9 +382,7 @@ describe("the coding threads API", () => {
 });
 
 describe("opening a pull request from a coding thread", () => {
-	const approvals = async () => (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.filter((approval) => approval.action === "coding_open_pull_request");
-
-	it("is refused until the provider is set up and the branch pushed, then asks the person, and opens it once approved", async () => {
+	it("is refused until the provider is set up and the branch pushed, then opens the pull request at once, with no approval", async () => {
 		codingFaux.setResponses([toolUse("write", { path: "hello.txt", content: "Hello!\n" }), fauxAssistantMessage("Added hello.txt.")]);
 		const thread = await start();
 		await turns(thread.id, 1);
@@ -396,45 +394,32 @@ describe("opening a pull request from a coding thread", () => {
 		codingGitHub.fetch = github.fetch;
 		const unpushed = await open();
 		expect([unpushed.status, unpushed.body.code]).toEqual([409, "not_pushed"]);
-		expect(await approvals()).toEqual([]);
-		// Pushed (the person approves), it asks, and nothing is opened until they approve.
 		const push = await post(`/coding/threads/${thread.id}/push`);
 		await post(`/approvals/${push.body.approval}/approve`);
 		expect(github.pushes).toHaveLength(1);
-		const asked = await open();
-		expect(asked.status).toBe(202);
-		expect(asked.body).toMatchObject({ approval: expect.any(String), status: "pending", title: "Add a greeting", base: "main", summary: `Open a pull request from ${thread.repo.branch} into main of github.com/acme/demo: Add a greeting` });
-		expect((await open()).body.approval).toBe(asked.body.approval);
-		expect(await approvals()).toEqual([expect.objectContaining({ id: asked.body.approval, tool: null })]);
-		expect(github.pulls).toEqual([]);
-		const approved = await post<Approval>(`/approvals/${asked.body.approval}/approve`);
-		expect(approved.body).toMatchObject({ status: "approved", result: `Pull request #1 from ${thread.repo.branch} into main: https://github.com/acme/demo/pull/1` });
+		const opened = await open();
+		expect(opened.status).toBe(200);
+		expect(opened.body).toEqual({ title: "Add a greeting", base: "main", url: "https://github.com/acme/demo/pull/1", number: 1 });
+		expect((await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals).toEqual([]);
 		expect(github.pulls).toEqual([{ head: thread.repo.branch, base: "main", title: "Add a greeting", body: "Add a greeting\n\n---\nOpened by Pim from a coding thread." }]);
 		expect((await view(thread.id)).pullRequest).toEqual({ url: "https://github.com/acme/demo/pull/1", number: 1 });
-		// A title and body given are used as they are, in a request of their own.
 		const custom = await open({ title: "Greet the world", body: "Says hello." });
-		expect(custom.body).toMatchObject({ title: "Greet the world" });
-		expect(custom.body.approval).not.toBe(asked.body.approval);
-		await post(`/approvals/${custom.body.approval}/approve`);
+		expect(custom.body).toMatchObject({ title: "Greet the world", number: 2 });
 		expect(github.pulls.at(-1)).toEqual({ head: thread.repo.branch, base: "main", title: "Greet the world", body: "Says hello." });
 		const log = (await api<{ events: { kind: string; data: unknown }[] }>(`/coding/threads/${thread.id}/log`)).body.events;
 		expect(log.at(-1)).toMatchObject({ kind: "thread.pull_request", data: { repo: "acme/demo", branch: thread.repo.branch, base: "main", number: 2 } });
 	});
 
-	it("is an approval-gated tool with a title and body of its own, which refuses a thread that wasn't pushed", async () => {
-		codingFaux.setResponses([fauxAssistantMessage("Nothing to change.")]);
-		const thread = await start();
-		await turns(thread.id, 1);
+	it("is a tool that needs no approval, with a title and body of its own", async () => {
 		await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
-			const action = pim.abilities.get("coding")!.actions!.find((candidate) => candidate.name === "coding_open_pull_request")!;
-			expect(action.explicitApproval).toBe(true);
-			expect(action.description).not.toMatch(/github\.com/i);
-			const schema = action.parameters as unknown as { properties: Record<string, unknown>; required: string[] };
+			const ability = pim.abilities.get("coding")!;
+			expect(ability.actions!.map((action) => action.name)).not.toContain("coding_open_pull_request");
+			const tool = ability.tools!.find((candidate) => candidate.name === "coding_open_pull_request")!;
+			expect(tool.description).toMatch(/no approval/);
+			expect(tool.description).not.toMatch(/github\.com/i);
+			const schema = tool.parameters as unknown as { properties: Record<string, unknown>; required: string[] };
 			expect(Object.keys(schema.properties).sort()).toEqual(["body", "thread_id", "title"]);
 			expect(schema.required).toEqual(["thread_id"]);
-			codingGitHub.app = fakeGitHub().app;
-			const refused = await action.prepare!({ thread_id: thread.id } as never, { session: pim.store.sessionOf((await post<{ id: string }>("/sessions")).body.id)! });
-			expect(JSON.parse((refused as { refused: string }).refused)).toMatchObject({ error: "not_pushed" });
 		});
 	});
 });

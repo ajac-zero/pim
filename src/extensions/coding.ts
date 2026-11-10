@@ -74,7 +74,7 @@ export const coding = definePimExtension({
 			defineTool({
 				name: "coding_start",
 				description:
-					"Start a coding thread: a coding agent that works on a Git repository (GitHub or Gitea) in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read its work with coding_diff and coding_tests, say more with coding_steer, and push it with coding_push or ship it to the default branch with coding_merge, which need no approval: check its diff and tests first. After a push, coding_open_pull_request opens a pull request once the person approves.",
+					"Start a coding thread: a coding agent that works on a Git repository (GitHub or Gitea) in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read its work with coding_diff and coding_tests, say more with coding_steer, and push it with coding_push or ship it to the default branch with coding_merge, which need no approval: check its diff and tests first. After a push, coding_open_pull_request opens a pull request, also with no approval.",
 				parameters: Type.Object({
 					repo: Type.String({ description: "The repository's address, such as https://github.com/<owner>/<name> or the same on the deployment's Gitea." }),
 					ref: Type.Optional(Type.String({ description: "The branch, tag or commit to start from; main by default." })),
@@ -277,6 +277,30 @@ export const coding = definePimExtension({
 					});
 				},
 			}),
+			defineTool({
+				name: "coding_open_pull_request",
+				description:
+					"Open a pull request on the thread's git host (GitHub or Gitea) right away, with no approval, from its pushed pim/… branch into the branch it started from (the default branch when it started from a commit). Push the branch first with coding_push. The title defaults to the thread's task, and the body to the task with a note that Pim opened it. If a pull request from the branch is open already, that one is the answer. Returns the pull request's URL and number.",
+				parameters: Type.Object({
+					thread_id: ThreadId,
+					title: Type.Optional(Type.String({ description: "The pull request's title; the thread's task by default." })),
+					body: Type.Optional(Type.String({ description: "The pull request's description; the thread's task by default." })),
+				}),
+				// Run again, it finds the pull request already open.
+				replay: "safe",
+				async execute({ thread_id, title, body }) {
+					return answer(async () => {
+						const { threadId } = await ownedThread(env, space, thread_id);
+						const stub = codingThread(env, threadId);
+						const prepared = await stub.preparePullRequest({ title, body });
+						if (!prepared.ok) return json({ error: prepared.code, message: prepared.message });
+						const opened = await stub.openPullRequest(prepared.request);
+						if (!opened.ok) return json({ error: "pull_request_failed", message: opened.message });
+						const { url, number, base, head } = opened.result;
+						return json({ message: `Pull request #${number} from ${head} into ${base}: ${url}`, url, number });
+					});
+				},
+			}),
 		],
 		actions: [
 			// The app's Push button asks the person (POST /coding/threads/:id/push files this action's approval); the agent's own tools above push at once.
@@ -305,39 +329,6 @@ export const coding = definePimExtension({
 					const pushed = await codingThread(env, threadId).push({ branch, checkpoint, head });
 					if (!pushed.ok) return `The push failed: ${pushed.message}`;
 					return pushedMessage(await repoUrlOf(env, space, threadId), pushed.result, branch);
-				},
-			}),
-			defineGatedAction({
-				name: "coding_open_pull_request",
-				description:
-					"Open a pull request on the thread's git host (GitHub or Gitea) from its pushed pim/… branch into the branch it started from (the default branch when it started from a commit), after the person approves. Push the branch first with coding_push. The title defaults to the thread's task, and the body to the task with a note that Pim opened it. If a pull request from the branch is open already, that one is the answer. Returns the pull request's URL and number.",
-				parameters: Type.Object({
-					thread_id: ThreadId,
-					title: Type.Optional(Type.String({ description: "The pull request's title; the thread's task by default." })),
-					body: Type.Optional(Type.String({ description: "The pull request's description; the thread's task by default." })),
-				}),
-				explicitApproval: true,
-				summarize: ({ thread_id, title }) => `Open a pull request for coding thread ${thread_id}${title ? `: ${title}` : ""}`,
-				async prepare(args) {
-					try {
-						const { threadId } = await ownedThread(env, space, args.thread_id);
-						const prepared = await codingThread(env, threadId).preparePullRequest({ title: args.title, body: args.body });
-						if (!prepared.ok) return { refused: JSON.stringify({ error: prepared.code, message: prepared.message }) };
-						const { title, body, base, summary } = prepared.request;
-						return { args: { thread_id: threadId, title, body, base } as typeof args, summary };
-					} catch (error) {
-						if (error instanceof CodingError) return { refused: JSON.stringify({ error: error.code, message: error.message }) };
-						throw error;
-					}
-				},
-				async run(args) {
-					const { thread_id, title, body, base } = args as typeof args & { base?: string };
-					if (!title || body === undefined || !base) return "This pull request wasn't readied: ask to open it again.";
-					const { threadId } = await ownedThread(env, space, thread_id);
-					const opened = await codingThread(env, threadId).openPullRequest({ title, body, base });
-					if (!opened.ok) return `The pull request wasn't opened: ${opened.message}`;
-					const { url, number, base: into, head } = opened.result;
-					return `Pull request #${number} from ${head} into ${into}: ${url}`;
 				},
 			}),
 		],

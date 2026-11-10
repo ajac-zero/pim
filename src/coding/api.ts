@@ -81,13 +81,12 @@ export type CodingPushRequested = {
 	readonly summary: string;
 };
 
-/** `POST /api/coding/threads/:id/pull-request`: the approval the person decides. */
-export type CodingPullRequestRequested = {
-	readonly approval: string;
-	readonly status: "pending" | "approved" | "denied";
+/** `POST /api/coding/threads/:id/pull-request`: the pull request opened, with no approval. */
+export type CodingPullRequestOpened = {
 	readonly title: string;
 	readonly base: string;
-	readonly summary: string;
+	readonly url: string;
+	readonly number: number;
 };
 
 /** `GET`/`PUT /api/coding/repos/:owner/:name/settings`: the person's settings for one repository. */

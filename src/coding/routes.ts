@@ -3,7 +3,7 @@ import type { Account } from "../directory";
 import type { ApiExtension } from "../gateway";
 import { dispatch, HttpError, readJson, type Route } from "../http";
 import type { TranscriptMessage } from "../transcript";
-import { CODING_API_PATH, CODING_REPOS_PATH, type CodingErrorCode, type CodingPullRequestRequested, type CodingPushRequested, type StartCodingThread } from "./api";
+import { CODING_API_PATH, CODING_REPOS_PATH, type CodingErrorCode, type CodingPullRequestOpened, type CodingPushRequested, type StartCodingThread } from "./api";
 import { GitBrokerError, repoRef } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";
 import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
@@ -188,10 +188,10 @@ function codingRoutes(env: Env, space: string): Route[] {
 			const listed = await thread(id!);
 			const prepared = await codingThread(env, listed.threadId).preparePullRequest({ title: optionalString(body, "title"), body: optionalString(body, "body") });
 			if (!prepared.ok) throw new CodingError(409, prepared.message, prepared.code);
-			const { title, base, summary } = prepared.request;
-			const approval = await (await getAgentByName(env.Pim, space)).codingRequestPullRequest(listed.threadId, prepared.request);
-			const answer: CodingPullRequestRequested = { approval: approval.id, status: approval.status, title, base, summary };
-			return Response.json(answer, { status: 202 });
+			const opened = await codingThread(env, listed.threadId).openPullRequest(prepared.request);
+			if (!opened.ok) throw new CodingError(409, opened.message, "conflict");
+			const answer: CodingPullRequestOpened = { title: prepared.request.title, base: opened.result.base, url: opened.result.url, number: opened.result.number };
+			return Response.json(answer);
 		}),
 	];
 }

@@ -432,6 +432,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			parentThread: thread.parentThread,
 			createdAt: thread.createdAt,
 			updatedAt: thread.updatedAt,
+			consecutiveInterrupts: thread.consecutiveInterrupts,
 		};
 	}
 
@@ -1577,8 +1578,61 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const budget = thread.budgetStopped;
 		// A CLI harness whose login is missing or expired waits for the person to connect it again, and goes on when continued.
 		const login = result.status !== "done" && result.reason === "login_required";
-		const outcome: TurnOutcome = budget ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : login ? "needs_approval" : "error";
-		const reason = budget ? "budget" : outcome === "error" || login ? (result.reason ?? "error") : null;
+		
+		// Handle auto-resume for interrupted turns (restart)
+		const isInterrupted = result.reason === "interrupted";
+		const maxInterrupts = 3;
+		const shouldAutoResume = isInterrupted && thread.consecutiveInterrupts < maxInterrupts && thread.state !== "archived";
+		
+		if (shouldAutoResume) {
+			// Increment the counter and enqueue a continuation turn
+			const attempt = thread.consecutiveInterrupts + 1;
+			const cli = cliHarness(thread.harness);
+			const resumeText = cli 
+				? `Your previous run was interrupted by a platform restart; check git status and the repo, then continue the task where you left off.`
+				: CONTINUE_TEXT;
+			
+			// Record the interruption in the log and transcript
+			this.ctx.storage.transactionSync(() => {
+				this.store.update({ consecutiveInterrupts: attempt });
+				this.store.recordEvent("thread.resumed", { attempt, reason: "interrupted_by_restart" });
+			});
+			
+			// Add transcript notice
+			void this.#write("thread.resumed", { attempt, max: maxInterrupts, reason: "interrupted_by_restart" });
+			
+			// For CLI harnesses, enqueue the resume text for the next turn (which will resume the session)
+			// For Pi harness, we enqueue CONTINUE_TEXT which tells it to continue
+			const resumeOperationId = `resume-${attempt}-${operation}`;
+			this.ctx.storage.transactionSync(() => {
+				this.store.enqueue(resumeOperationId, resumeText);
+				this.store.update({ currentOperation: null, state: "idle", stateReason: null, stateDetail: null });
+			});
+			
+			// Report idle since we're continuing - but do NOT emit thread.turn_ended to supervisor
+			await this.#report("idle");
+			
+			// Kick to start the continuation turn
+			this.#kick();
+			return;
+		}
+		
+		// Reset counter on normal completion
+		if (result.status === "done" && !budget && !login) {
+			this.ctx.storage.transactionSync(() => {
+				this.store.update({ consecutiveInterrupts: 0 });
+			});
+		}
+		
+		// For interrupted turns that exceed the limit, mark as failed with the interruption detail
+		const outcome: TurnOutcome = budget ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : login ? "needs_approval" : isInterrupted && thread.consecutiveInterrupts >= maxInterrupts ? "error" : "error";
+		const reason = budget 
+			? "budget"
+			: outcome === "error" || login 
+				? (isInterrupted && thread.consecutiveInterrupts >= maxInterrupts 
+					? "interrupted_too_many_times"
+					: (result.reason ?? "error"))
+				: null;
 		const state: CodingThreadState = outcome === "error" ? "failed" : login ? "waiting_input" : "idle";
 		const said = await this.#lastSaid().catch(() => null);
 		const stop = budget ? { budgetUsd: thread.budgetUsd ?? 0, spentUsd: thread.spentUsd } : null;
@@ -2147,6 +2201,8 @@ export type CodingThreadStatus = {
 	readonly parentThread: string | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
+	/** How many consecutive interruptions have been auto-resumed for this thread. */
+	readonly consecutiveInterrupts: number;
 };
 
 export type CodingDiff = { readonly since: string | null; readonly head: string | null; readonly diff: string; readonly truncated: boolean };

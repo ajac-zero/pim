@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { BranchMovedError, brokerKey, issueBrokerToken, pktLine, preparePush, pushApprovalRequest, pushBranch, type RepoRef } from "../src/coding/git-broker/broker";
-import { GITEA_DEFAULT_BASE_URL, giteaBaseUrl, giteaConfig } from "../src/coding/git-broker/config";
+import { giteaBaseUrl, giteaConfig } from "../src/coding/git-broker/config";
 import { GiteaConnection, GiteaNotConnectedError, giteaKeyFrom, REFRESH_MARGIN_MS } from "../src/coding/git-broker/gitea-connection";
 import { giteaInstance, GiteaProvider } from "../src/coding/git-broker/gitea-provider";
 import { GitHubProvider } from "../src/coding/git-broker/github-provider";
@@ -11,7 +11,7 @@ import { api } from "./helpers";
 
 // Gitea is always a fake one here: nothing reaches the network. The instance is the one Pim is deployed with.
 
-const BASE = "https://gitea.example.com";
+const BASE = "https://gitea.example.test";
 const ID = "gitea";
 const CLIENT = { baseUrl: BASE, clientId: "client-id-123", clientSecret: "CLIENT-SECRET-xyz" };
 const REDIRECT = "https://pim.ajac-zero.com/api/coding/gitea/callback";
@@ -160,12 +160,14 @@ beforeEach(async () => {
 });
 
 describe("Gitea settings", () => {
-	it("is not configured until both the client ID and secret are set, and defaults the instance", () => {
+	it("is not configured until both the client ID and secret are set, and the base URL are set", () => {
 		expect(giteaConfig({})).toBeNull();
 		expect(giteaConfig({ PIM_GITEA_CLIENT_ID: "id" })).toBeNull();
-		expect(giteaConfig({ PIM_GITEA_CLIENT_ID: "id", PIM_GITEA_CLIENT_SECRET: "s" })).toEqual({ baseUrl: GITEA_DEFAULT_BASE_URL, clientId: "id", clientSecret: "s" });
+		expect(giteaConfig({ PIM_GITEA_CLIENT_ID: "id", PIM_GITEA_CLIENT_SECRET: "s" })).toBeNull();
+		expect(giteaConfig({ PIM_GITEA_CLIENT_ID: "id", PIM_GITEA_CLIENT_SECRET: "s", PIM_GITEA_BASE_URL: "https://git.example.test" })).toEqual({ baseUrl: "https://git.example.test", clientId: "id", clientSecret: "s" });
+		expect(giteaBaseUrl({})).toBeNull();
 		expect(giteaBaseUrl({ PIM_GITEA_BASE_URL: "https://git.example.test/path" })).toBe("https://git.example.test");
-		expect(giteaBaseUrl({ PIM_GITEA_BASE_URL: "http://git.example.test" })).toBe(GITEA_DEFAULT_BASE_URL);
+		expect(giteaBaseUrl({ PIM_GITEA_BASE_URL: "http://git.example.test" })).toBeNull();
 	});
 
 	it("reports not configured as a state, never a crash", async () => {
@@ -192,18 +194,18 @@ describe("Gitea repository URLs", () => {
 
 	it.each([
 		"https://github.com/acme/widgets",
-		"http://gitea.example.com/acme/widgets",
-		"https://gitea.example.com:8443/acme/widgets",
-		"https://user:pw@gitea.example.com/acme/widgets",
-		"https://gitea.example.com/acme/widgets?x=1",
-		"https://gitea.example.com/acme/widgets#frag",
-		"https://gitea.example.com/acme",
-		"https://gitea.example.com/acme/widgets/issues",
-		"https://gitea.example.com/acme/%2e%2e",
-		"https://gitea.example.com/acme/..",
-		"https://gitea.example.com.evil.test/acme/widgets",
+		"http://gitea.example.test/acme/widgets",
+		"https://gitea.example.test:8443/acme/widgets",
+		"https://user:pw@gitea.example.test/acme/widgets",
+		"https://gitea.example.test/acme/widgets?x=1",
+		"https://gitea.example.test/acme/widgets#frag",
+		"https://gitea.example.test/acme",
+		"https://gitea.example.test/acme/widgets/issues",
+		"https://gitea.example.test/acme/%2e%2e",
+		"https://gitea.example.test/acme/..",
+		"https://gitea.example.test.evil.test/acme/widgets",
 	])("refuse %s", (input) => {
-		expect(() => provider.parseRepoUrl(input)).toThrow("A repository must be https://gitea.example.com/<owner>/<name>");
+		expect(() => provider.parseRepoUrl(input)).toThrow("A repository must be https://gitea.example.test/<owner>/<name>");
 	});
 
 	it("hold to the policy's repositories", () => {
@@ -478,7 +480,7 @@ describe("pushing to Gitea", () => {
 	it("needs no GitHub App, and asks the person about a push in Gitea's terms", async () => {
 		const { deps, request } = await pushing();
 		const prepared = preparePush(deps, request());
-		expect(pushApprovalRequest(prepared).summary).toBe(`Push pim/fix (${SHA("b").slice(0, 12)}, 1 KB) to gitea.example.com/acme/widgets`);
+		expect(pushApprovalRequest(prepared).summary).toBe(`Push pim/fix (${SHA("b").slice(0, 12)}, 1 KB) to gitea.example.test/acme/widgets`);
 	});
 
 	it("moves an existing branch only forward: stage, compare, update from the commit seen, delete the stage", async () => {
@@ -626,8 +628,9 @@ describe("opening pull requests", () => {
 });
 
 describe("the deployment's providers", () => {
-	it("always register Gitea, which is unconfigured until the secrets are set", async () => {
-		const registry = deploymentProviders(env);
+	it("register Gitea only once its base URL is set, unconnected until the secrets are", async () => {
+		expect(deploymentProviders(env).instances().map((instance) => instance.id)).toEqual(["github"]);
+		const registry = deploymentProviders({ ...env, PIM_GITEA_BASE_URL: BASE } as typeof env);
 		expect(registry.instances().map((instance) => instance.id)).toEqual(["github", "gitea"]);
 		expect(registry.resolveUrl(`${BASE}/acme/widgets`).provider.instance).toMatchObject({ kind: "gitea", baseUrl: BASE });
 		await expect(registry.get(ID).credential(WIDGETS, "read")).rejects.toThrow("Gitea not configured");

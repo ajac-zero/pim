@@ -259,6 +259,9 @@ export function directoryGiteaBackend(env: Env): GiteaBackend {
 	};
 }
 
+/** Stands in for the base URL while `PIM_GITEA_BASE_URL` is unset: reserved, never reachable, and the provider is then not registered. */
+const UNSET_GITEA_URL = "https://gitea.invalid";
+
 /** The deployment's Gitea: always registered, and not connected until the owner signs in (./gitea-connection.ts). */
 export function deploymentGitea(env: Env, options: { fetch?: Fetch } = {}): GiteaProvider {
 	const connection = new GiteaConnection({
@@ -268,13 +271,13 @@ export function deploymentGitea(env: Env, options: { fetch?: Fetch } = {}): Gite
 		key: async () => giteaKeyFrom(await env.Directory.getByName("directory").cookieKey()),
 		...options,
 	});
-	return new GiteaProvider(giteaInstance(GITEA_INSTANCE_ID, giteaBaseUrl(env)), connection, options);
+	return new GiteaProvider(giteaInstance(GITEA_INSTANCE_ID, giteaBaseUrl(env) ?? UNSET_GITEA_URL), connection, options);
 }
 
 /** The git providers of this deployment: GitHub, with its App when it is configured, and Gitea. */
 export function deploymentProviders(env: Env, options: { fetch?: Fetch; app?: GitHubApp | null } = {}): ProviderRegistry {
 	const { app = deploymentGitHubApp(env), ...rest } = options;
-	return new ProviderRegistry([new GitHubProvider(app, { policy: brokerPolicy(env), ...rest }), deploymentGitea(env, rest)]);
+	return new ProviderRegistry([new GitHubProvider(app, { policy: brokerPolicy(env), ...rest }), ...(giteaBaseUrl(env) === null ? [] : [deploymentGitea(env, rest)])]);
 }
 
 /** The broker, as the Worker serves it at `/api` + `path`. */

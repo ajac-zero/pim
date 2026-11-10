@@ -595,9 +595,9 @@ export function repoName(url: string): string {
   return url.replace(/^https:\/\/[^/]+\//, "").replace(/\/$/, "");
 }
 
-/** Whether a repository's address is on Gitea (this Pim's, by host) rather than GitHub. */
+/** Whether a repository's address is on Gitea (any host but GitHub's). */
 export const isGiteaRepo = (url: string) =>
-  new URL(url).hostname === GITEA_HOST;
+  new URL(url).hostname !== "github.com";
 
 export type StartForm = {
   repo: string;
@@ -619,10 +619,7 @@ export const START_HARNESSES: readonly CodingHarness[] = [
 
 export type StartProblems = Partial<Record<keyof StartForm, TranslationKey>>;
 
-export const GITEA_HOST = "gitea.example.com";
-const REPO_URL = new RegExp(
-  `^https://(github\\.com|${GITEA_HOST.replaceAll(".", "\\.")})/[\\w.-]+/[\\w.-]+/?$`,
-);
+const REPO_URL = /^https:\/\/[a-z0-9.-]+(:\d+)?\/[\w.-]+\/[\w.-]+\/?$/;
 export const MAX_TASK = 2000;
 
 /** What's wrong with the start form, by field; empty when it can be sent. */

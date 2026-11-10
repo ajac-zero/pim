@@ -131,28 +131,27 @@ export function brokerPolicy(env: object): BrokerPolicy {
  *
  * - `PIM_GITEA_CLIENT_ID` and `PIM_GITEA_CLIENT_SECRET`: the application's.
  *   Its redirect URI is `<PIM_PUBLIC_URL>/api/coding/gitea/callback`.
- * - `PIM_GITEA_BASE_URL` (optional): the instance's origin, which is
- *   `https://gitea.example.com` unless set.
+ * - `PIM_GITEA_BASE_URL`: the instance's `https` origin. There is no default.
  *
- * Until both the ID and secret are set, Gitea is not configured: that is a
- * state to show, and GitHub is unaffected.
+ * Until the base URL, ID and secret are all set, Gitea is not configured:
+ * that is a state to show, and GitHub is unaffected.
  */
 export const GITEA_INSTANCE_ID = "gitea";
-export const GITEA_DEFAULT_BASE_URL = "https://gitea.example.com";
 
 /** The OAuth client, with its secret: only ./gitea-connection.ts reads it. */
 export type GiteaConfig = { readonly baseUrl: string; readonly clientId: string; readonly clientSecret: string };
 
-/** The instance's origin: `PIM_GITEA_BASE_URL` if it is an `https` origin, else the default. */
-export function giteaBaseUrl(env: object): string {
+/** The instance's origin: `PIM_GITEA_BASE_URL` if it is an `https` origin, else null. */
+export function giteaBaseUrl(env: object): string | null {
 	const given = value(env, "PIM_GITEA_BASE_URL");
 	const url = given === null ? null : URL.parse(given);
-	return url && url.protocol === "https:" && url.username === "" && url.password === "" ? url.origin : GITEA_DEFAULT_BASE_URL;
+	return url && url.protocol === "https:" && url.username === "" && url.password === "" ? url.origin : null;
 }
 
 /** The OAuth client's settings, or null while Gitea isn't configured. */
 export function giteaConfig(env: object): GiteaConfig | null {
 	const clientId = value(env, "PIM_GITEA_CLIENT_ID");
 	const clientSecret = value(env, "PIM_GITEA_CLIENT_SECRET");
-	return clientId === null || clientSecret === null ? null : { baseUrl: giteaBaseUrl(env), clientId, clientSecret };
+	const baseUrl = giteaBaseUrl(env);
+	return clientId === null || clientSecret === null || baseUrl === null ? null : { baseUrl, clientId, clientSecret };
 }

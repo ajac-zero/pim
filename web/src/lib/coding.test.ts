@@ -333,7 +333,6 @@ describe("the start form", () => {
     });
     for (const repo of [
       "acme/widgets",
-      "https://gitlab.com/acme/widgets",
       "http://github.com/acme/widgets",
       "https://github.com/acme",
       "https://github.com/acme/widgets/tree/main",

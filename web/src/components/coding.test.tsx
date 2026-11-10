@@ -443,7 +443,7 @@ describe("the start form", () => {
     expect(field(/Repository/).getAttribute("aria-invalid")).toBe("true");
 
     fireEvent.change(field(/Repository/), {
-      target: { value: "https://gitlab.com/acme/widgets" },
+      target: { value: "http://github.com/acme/widgets" },
     });
     fireEvent.change(field(/Task/), { target: { value: "Fix it" } });
     fireEvent.change(field(/Budget/), { target: { value: "0" } });
@@ -986,16 +986,14 @@ describe("the Gitea card", () => {
 
 describe("the repository address", () => {
   const form = { repo: "", ref: "", task: "x", budget: "" };
-  it("takes GitHub and Gitea repositories, and nothing else", () => {
+  it("takes an https repository address, and the server decides which hosts it serves", () => {
     const bad = (repo: string) => startProblems({ ...form, repo }).repo;
     expect(bad("https://github.com/acme/widgets")).toBeUndefined();
     expect(
-      bad("https://gitea.example.com/acme/widgets"),
+      bad("https://gitea.example.test/acme/widgets"),
     ).toBeUndefined();
-    expect(bad("https://gitea.example.com.evil.com/a/b")).toBe(
-      "codingRepoInvalid",
-    );
-    expect(bad("https://gitlab.com/acme/widgets")).toBe("codingRepoInvalid");
+    expect(bad("http://gitea.example.test/a/b")).toBe("codingRepoInvalid");
+    expect(bad("https://gitea.example.test/a")).toBe("codingRepoInvalid");
   });
 });
 

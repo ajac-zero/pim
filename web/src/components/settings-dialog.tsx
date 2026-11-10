@@ -22,6 +22,7 @@ import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   AlertCircle,
   Bell,
+  ChartColumn,
   Check,
   Code,
   KeyRound,
@@ -35,7 +36,6 @@ import {
   Server,
   Settings,
   ShieldCheck,
-  ChartColumn,
   SlidersHorizontal,
   Sparkles,
   Sun,

@@ -27,6 +27,7 @@ import { EnvironmentSection } from "~/components/coding-environment";
 import { HarnessIcon } from "~/components/harness-icon";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
+  Archive,
   ArrowLeft,
   ChevronRight,
   Code,
@@ -35,8 +36,9 @@ import {
   GitFork,
   ListChecks,
   Loader2,
-  MoreHorizontal,
+  Play,
   TriangleAlert,
+  Upload,
 } from "~/components/icons";
 import { EmptyState, Page } from "~/components/page";
 import { Confirm } from "~/components/triggers";
@@ -47,12 +49,6 @@ import {
   ConversationContent,
   ConversationScrollButton,
 } from "~/components/ui/conversation";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
 import {
   ACTIVE_STATES,
@@ -1210,40 +1206,39 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
   );
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <ChatHeader
-        title={<ThreadTitle thread={thread} />}
-        actions={<ThreadControls thread={thread} controls={controls} />}
-      />
       <Tabs.Root
         value={tab}
         onValueChange={setTab}
         className="flex min-h-0 flex-1 flex-col"
       >
-        <div className="shrink-0">
-          <div className={cn(FRAME, "flex h-13 items-center gap-3")}>
-            <BackLink />
-            <Tabs.List
-              aria-label={t("codingPanels")}
-              className="ml-auto flex gap-1"
-            >
-              {(
-                [
-                  ["conversation", "codingConversation"],
-                  ["changes", "codingChanges"],
-                  ["tests", "codingTests"],
-                ] as const
-              ).map(([value, label]) => (
-                <Tabs.Trigger
-                  key={value}
-                  value={value}
-                  className="rounded-full px-3 py-1.5 text-[15px] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-muted data-[state=active]:text-foreground"
-                >
-                  {t(label)}
-                </Tabs.Trigger>
-              ))}
-            </Tabs.List>
-          </div>
-        </div>
+        <ChatHeader
+          title={<ThreadTitle thread={thread} />}
+          actions={
+            <>
+              <Tabs.List
+                aria-label={t("codingPanels")}
+                className="flex shrink-0 gap-1"
+              >
+                {(
+                  [
+                    ["conversation", "codingConversation"],
+                    ["changes", "codingChanges"],
+                    ["tests", "codingTests"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Tabs.Trigger
+                    key={value}
+                    value={value}
+                    className="rounded-full px-2.5 py-1.5 text-[15px] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-muted data-[state=active]:text-foreground md:px-3"
+                  >
+                    {t(label)}
+                  </Tabs.Trigger>
+                ))}
+              </Tabs.List>
+              <ThreadControls thread={thread} controls={controls} />
+            </>
+          }
+        />
         {tab === "conversation" ? (
           <Conversation className="scrollbar-thin" initial="instant">
             <ConversationContent
@@ -1274,7 +1269,7 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
       {/* The message box sits under every panel, as a chat's does. */}
       <div className="shrink-0 bg-background pb-2">
         <div className={cn("mx-auto w-full max-w-4xl px-4")}>
-          <SteerForm thread={thread} />
+          <SteerForm thread={thread} abort={controls.abort} />
         </div>
       </div>
     </main>
@@ -1457,7 +1452,6 @@ function useThreadUpdate(id: string) {
   };
 }
 
-/** Stop, Continue, Push and Archive, each where the thread's state allows it. */
 /** What can be done with the thread now, and where each action stands. */
 function useThreadControls(thread: CodingThreadView) {
   const api = useCodingApi();
@@ -1489,7 +1483,7 @@ function useThreadControls(thread: CodingThreadView) {
 
 type ThreadControlsState = ReturnType<typeof useThreadControls>;
 
-/** The thread's actions in its header: stop, continue and push, with archive in a menu. */
+/** The thread's icon actions in its header: continue, push and archive; Stop is in the message box. */
 function ThreadControls({
   thread,
   controls,
@@ -1498,10 +1492,8 @@ function ThreadControls({
   controls: ThreadControlsState;
 }) {
   const { t } = useI18n();
-  const { abort, push, continuing, setConfirming, setContinuing } = controls;
+  const { push, continuing, setConfirming, setContinuing } = controls;
   if (thread.state === "archived") return null;
-  const working =
-    thread.state === "running" || thread.currentOperation !== null;
   const waiting = thread.state === "queued" || thread.state === "provisioning";
   const stopped =
     thread.state === "failed" ||
@@ -1509,40 +1501,22 @@ function ThreadControls({
     (thread.state === "idle" &&
       (thread.stateReason === "aborted" || thread.stateReason === "cancelled"));
   return (
-    <div className="flex shrink-0 items-center gap-2 self-center">
-      {working && (
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          disabled={abort.isPending}
-          onClick={() => abort.mutate()}
-        >
-          {t("codingStop")}
-        </Button>
-      )}
+    <div className="flex shrink-0 items-center self-center">
       {stopped && !continuing && (
         <ContinueButton thread={thread} onExpand={() => setContinuing(true)} />
       )}
       {!waiting && <PushButton thread={thread} push={push} />}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={t("more")}
-            title={t("more")}
-          >
-            <MoreHorizontal className="size-4.5" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={() => setConfirming(true)}>
-            {t("codingArchive")}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label={t("codingArchive")}
+        title={t("codingArchive")}
+        className="rounded-full"
+        onClick={() => setConfirming(true)}
+      >
+        <Archive className="size-4.5" />
+      </Button>
     </div>
   );
 }
@@ -1612,12 +1586,17 @@ function ContinueButton({
     <>
       <Button
         type="button"
+        variant="ghost"
+        size="icon"
+        aria-label={t("codingContinue")}
+        title={t("codingContinue")}
+        className="rounded-full"
         disabled={go.isPending}
         onClick={() =>
           thread.stateReason === "budget" ? onExpand() : go.mutate()
         }
       >
-        {t("codingContinue")}
+        <Play className="size-4.5" />
       </Button>
       {go.error && (
         <p role="alert" className="basis-full text-destructive text-sm">
@@ -1721,12 +1700,17 @@ function PushButton({
   return (
     <Button
       type="button"
-      variant="secondary"
+      variant="ghost"
+      size="icon"
+      aria-label={t("codingPush")}
+      title={
+        thread.checkpoint === null ? t("codingNothingToPush") : t("codingPush")
+      }
+      className="rounded-full"
       disabled={push.isPending || notConfigured || thread.checkpoint === null}
-      title={thread.checkpoint === null ? t("codingNothingToPush") : undefined}
       onClick={() => push.mutate()}
     >
-      {t("codingPush")}
+      <Upload className="size-4.5" />
     </Button>
   );
 }
@@ -2079,25 +2063,26 @@ function ToolRow({ row }: { row: Extract<TranscriptRow, { kind: "tool" }> }) {
   );
 }
 
-/** Tells the thread what to do next, in the chat's message box: into the turn under way, or, with Interrupt, in place of it. */
-function SteerForm({ thread }: { thread: CodingThreadView }) {
+/** Tells the thread what to do next, in the chat's message box: into the turn under way; its Stop button ends the turn. */
+function SteerForm({
+  thread,
+  abort,
+}: {
+  thread: CodingThreadView;
+  abort: ThreadControlsState["abort"];
+}) {
   const { t } = useI18n();
   const api = useCodingApi();
   const update = useThreadUpdate(thread.id);
-  const [interrupt, setInterrupt] = useState(false);
   // What failed to send goes back in the box, to send again.
   const [fill, setFill] = useState<{ text: string; id: number }>();
   const steer = useMutation({
     mutationFn: (text: string) =>
       api.steer(thread.id, {
         text,
-        ...(interrupt ? { interrupt: true } : {}),
         operationId: crypto.randomUUID(),
       }),
-    onSuccess: (next) => {
-      setInterrupt(false);
-      update(next);
-    },
+    onSuccess: update,
     onError: (_error, text) => setFill({ text, id: Date.now() }),
   });
   if (thread.state === "archived" || thread.state === "failed") return null;
@@ -2107,7 +2092,8 @@ function SteerForm({ thread }: { thread: CodingThreadView }) {
     <Composer
       draftKey={thread.id}
       fill={fill}
-      busy={false}
+      busy={working && !abort.isPending}
+      onStop={() => abort.mutate()}
       hideAttach
       onSend={(content) => {
         const text = textOf(content).trim();
@@ -2116,19 +2102,6 @@ function SteerForm({ thread }: { thread: CodingThreadView }) {
       placeholder={t(
         working ? "codingSteerPlaceholderWorking" : "codingSteerPlaceholder",
       )}
-      controls={
-        working ? (
-          <label className="flex items-center gap-2 px-1 text-[13px] text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={interrupt}
-              onChange={(event) => setInterrupt(event.target.checked)}
-              className="size-4 accent-primary"
-            />
-            {t("codingInterrupt")}
-          </label>
-        ) : undefined
-      }
       disclaimer={
         steer.error ? (
           <span role="alert" className="text-destructive">

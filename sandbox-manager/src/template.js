@@ -152,7 +152,7 @@ export function buildSpec(params, opts) {
 					Memory: limits.memMiB * MiB,
 					MemorySwap: limits.memMiB * MiB,
 					NanoCpus: Math.round(limits.cpu * 1e9),
-					Tmpfs: { '/tmp': 'rw,noexec,nosuid,nodev,size=64m' },
+					Tmpfs: { '/tmp': 'rw,nosuid,nodev,size=64m' },
 					Mounts: [
 						{ Type: 'volume', Source: n.volume, Target: '/workspace', VolumeOptions: { Labels: labels } },
 						// Images must ship /caches owned by 10001, so Docker fills a new cache volume with it.

@@ -208,6 +208,8 @@ describe("the owner's agents", () => {
 		napper.setResponses([outOfQuota]);
 		await post(`/sessions/${session}/messages`, { content: "Once more" });
 		await vi.waitFor(async () => expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session).held).toBe(true));
+		// The list says what failed, so a chat opened later can show it.
+		expect((await api("/sessions")).body.sessions.find((info: { id: string }) => info.id === session).error).toContain("insufficient_quota");
 	});
 
 	it("renames another agent or itself in chat without asking, keeping its identity and settings", async () => {

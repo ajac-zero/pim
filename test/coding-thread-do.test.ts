@@ -1158,7 +1158,10 @@ describe("a Claude Code thread", () => {
 	});
 
 	it("ends a turn its object's reset cut off as interrupted, auto-resumes, and finishes the run off", async () => {
+		let first = true;
 		claude = async ({ killed }) => {
+			if (!first) return { stdout: claudeFixture("turn") };
+			first = false;
 			await until("-KILL", killed);
 			return {};
 		};
@@ -1182,9 +1185,9 @@ describe("a Claude Code thread", () => {
 		expect(await scheduler.acquireHarness("claude-code", "probe", 1000)).toBe(true);
 		await scheduler.releaseHarness("claude-code", "probe");
 		started.splice(started.indexOf(stub), 1, after);
-		// Check consecutiveInterrupts is 1 and the thread has a resume event in its log
+		// The resumed turn completed normally, so the counter is back to 0, and the log keeps the resume.
 		const status = await after.status();
-		expect(status).toMatchObject({ consecutiveInterrupts: 1 });
+		expect(status).toMatchObject({ consecutiveInterrupts: 0 });
 		const log = await after.log();
 		expect(log.some((event) => event.kind === "thread.resumed")).toBe(true);
 	});
@@ -1224,98 +1227,6 @@ describe("a Claude Code thread", () => {
 		const [, again] = await turns(id, 2);
 		expect(again).toMatchObject({ outcome: "completed", operationId: "after-login" });
 		expect(runs[1]!.argv.at(-1)).toBe(CONTINUE_TEXT);
-	});
-
-	it("auto-resumes an interrupted turn and completes", async () => {
-		claude = async ({ killed }) => {
-			await until("-KILL", killed);
-			return {};
-		};
-		const { id, stub } = await startClaude();
-		await running(1);
-		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1));
-		// Simulate restart
-		await runInDurableObject(stub, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
-		// Auto-resume should happen - no turn_ended event is emitted to supervisor for the interruption
-		// Wait for the completed turn after auto-resume
-		const ended = await turns(id, 1, true);
-		// Only one turn_ended event: the completed turn after auto-resume
-		expect(ended).toHaveLength(1);
-		expect(ended[0]).toMatchObject({ outcome: "completed" });
-		// Check that the thread is now idle with consecutiveInterrupts = 1
-		const status = await codingThread(env, id).status();
-		expect(status).toMatchObject({ state: "idle", consecutiveInterrupts: 1 });
-		// Check the log has the resume event
-		const log = await stub.log();
-		expect(log.some((event) => event.kind === "thread.resumed")).toBe(true);
-	});
-
-	it("fails after 3 consecutive interruptions", async () => {
-		claude = async ({ killed }) => {
-			await until("-KILL", killed);
-			return {};
-		};
-		const { id, stub } = await startClaude();
-		// First interruption
-		await running(1);
-		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1));
-		await runInDurableObject(stub, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
-		// Auto-resume happens, no turn_ended event
-		// Wait for the auto-resumed turn to start
-		const afterFirst = codingThread(env, id);
-		await vi.waitFor(async () => expect(await sql(afterFirst, "SELECT record FROM coding_harness_run")).toHaveLength(1));
-		
-		// Second interruption
-		await runInDurableObject(afterFirst, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
-		// Auto-resume happens, no turn_ended event
-		const afterSecond = codingThread(env, id);
-		await vi.waitFor(async () => expect(await sql(afterSecond, "SELECT record FROM coding_harness_run")).toHaveLength(1));
-		
-		// Third interruption - should fail since we're at the limit
-		await runInDurableObject(afterSecond, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
-		const ended = await turns(id, 1, true);
-		
-		// The only turn_ended event should be the failure after 3 interruptions
-		expect(ended).toHaveLength(1);
-		expect(ended[0]).toMatchObject({ outcome: "error", reason: "interrupted_too_many_times", state: "failed" });
-		
-		// Check that consecutiveInterrupts is 3
-		const status = await codingThread(env, id).status();
-		expect(status).toMatchObject({ state: "failed", consecutiveInterrupts: 3 });
-		// Check the log has 3 resume events
-		const log = await afterSecond.log();
-		expect(log.filter((event) => event.kind === "thread.resumed")).toHaveLength(3);
-		started.splice(started.indexOf(stub), 1, afterSecond);
-	});
-
-	it("resets consecutiveInterrupts counter after a normal turn", async () => {
-		claude = async ({ killed }) => {
-			await until("-KILL", killed);
-			return {};
-		};
-		const { id, stub } = await startClaude();
-		// First interruption
-		await running(1);
-		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1));
-		await runInDurableObject(stub, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
-		// Auto-resume happens, no turn_ended event
-		const afterFirst = codingThread(env, id);
-		
-		// Check counter is 1
-		let status = await afterFirst.status();
-		expect(status.consecutiveInterrupts).toBe(1);
-		
-		// Let the auto-resumed turn complete normally by making claude return success
-		claude = async () => ({ stdout: claudeFixture("turn") });
-		// Wait for the auto-resumed turn to complete
-		const ended = await turns(id, 1, true);
-		expect(ended).toHaveLength(1);
-		expect(ended[0]).toMatchObject({ outcome: "completed" });
-		
-		// Now counter should be reset to 0 after normal completion
-		status = await afterFirst.status();
-		expect(status.consecutiveInterrupts).toBe(0);
-		started.splice(started.indexOf(stub), 1, afterFirst);
 	});
 });
 

@@ -237,6 +237,7 @@ const actorOf = (caller: HostOpsCaller): Actor => {
 	}
 };
 const HOSTD: Actor = { kind: "hostd", id: null };
+const HOST: Actor = { kind: "host", id: null };
 const SYSTEM: Actor = { kind: "system", id: null };
 
 /** What the daemon reports, as it reports it. */
@@ -464,12 +465,27 @@ export class HostOps extends DurableObject<Env> {
 
 	/** A new credential for the daemon, in place of any other, which stops working now. It is returned only here; only its digest is kept. */
 	async issueCredential(adminId: string): Promise<{ token: string; rotated: boolean }> {
+		return this.#mint({ kind: "admin", id: adminId }, "credential.issue", "credential.rotate");
+	}
+
+	/** The host enrolling its own daemon: a new credential as `issueCredential` makes one, unless the admin revoked the newest, which stays revoked until the admin issues another. Null then. */
+	async enrollCredential(): Promise<{ token: string } | null> {
+		const newest = this.#sql("SELECT revoked_at FROM credential ORDER BY created_at DESC, rowid DESC LIMIT 1").toArray()[0];
+		if (newest !== undefined && newest.revoked_at !== null) {
+			this.#audit(HOST, "credential.enroll", "revoked", null, undefined, "refused: the admin revoked the credential");
+			return null;
+		}
+		const { token } = await this.#mint(HOST, "credential.enroll", "credential.enroll");
+		return { token };
+	}
+
+	async #mint(actor: Actor, issueAction: string, rotateAction: string): Promise<{ token: string; rotated: boolean }> {
 		const token = `${CREDENTIAL_PREFIX}${base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))}`;
 		const hash = hex(await sha256(token));
 		const now = Date.now();
 		const rotated = this.#sql("UPDATE credential SET revoked_at = ? WHERE revoked_at IS NULL", now).rowsWritten > 0;
 		this.#sql("INSERT INTO credential (hash, created_at) VALUES (?, ?)", hash, now);
-		this.#audit({ kind: "admin", id: adminId }, rotated ? "credential.rotate" : "credential.issue", "ok");
+		this.#audit(actor, rotated ? rotateAction : issueAction, "ok");
 		return { token, rotated };
 	}
 
@@ -631,10 +647,31 @@ export async function hostOpsApi(
 	}
 }
 
+/**
+ * `POST /api/hostops/agent/enroll`: the host, which shares the sandbox manager's
+ * token with Pim (`PIM_CODING_MANAGER_TOKEN`), asks for the daemon's credential
+ * so nobody has to copy one from Settings. Without that secret there is nothing
+ * to enroll with. The new credential is returned here and kept nowhere else.
+ */
+async function enrollHostOpsAgent(request: Request, env: Env, token: string, address: string): Promise<Response> {
+	const secret = String((env as unknown as Record<string, unknown>).PIM_CODING_MANAGER_TOKEN ?? "");
+	if (!secret) return fail(404, "Not found");
+	if (request.method !== "POST") return fail(405, "/api/hostops/agent/enroll takes POST");
+	// Both sides are hashed, so the comparison takes the same time whatever the token's length.
+	if (!token || !crypto.subtle.timingSafeEqual(await sha256(token), await sha256(secret))) {
+		// Failed guesses are slowed down per address, as sign-in attempts are.
+		if (await limited(env, "auth", address)) return fail(429, "Too many attempts. Wait a minute and try again.");
+		return fail(401, "Unauthorized");
+	}
+	const enrolled = await hostOps(env).enrollCredential();
+	return enrolled ? json(enrolled, 201) : fail(403, "revoked");
+}
+
 /** `/api/hostops/agent/*`: the daemon polling for work and reporting results, with its credential as a bearer token and nothing else. */
-export async function serveHostOpsAgent(request: Request, env: Env, path: string): Promise<Response> {
+export async function serveHostOpsAgent(request: Request, env: Env, path: string, address: string): Promise<Response> {
 	const header = request.headers.get("Authorization");
 	const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
+	if (path === `${HOSTOPS_AGENT_PATH}/enroll`) return enrollHostOpsAgent(request, env, token, address);
 	if (!token) return fail(401, "Unauthorized");
 	if (request.method !== "POST") return fail(405, `/api${path} takes POST`);
 	let body: Record<string, unknown>;

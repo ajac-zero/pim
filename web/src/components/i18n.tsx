@@ -740,7 +740,7 @@ const translations = {
     computerHostPair: "Pair a computer host",
     hostOps: "Host operations",
     hostOpsDescription:
-      "Your majordomo runs a few fixed operations on this Pim's host through its daemon, hostopsd: stats, logs, restarts, the sandbox limit, deploys and rollbacks. It doesn't ask first; a deploy that fails rolls itself back. Every request, and what came of it, is in the audit log.",
+      "Your majordomo runs a few fixed operations on this Pim's host through its daemon, hostopsd: stats, logs, restarts, the sandbox limit, deploys and rollbacks. It doesn't ask first; a deploy that fails rolls itself back. Every request, and what came of it, is in the audit log. The host enrolls its daemon by itself when up.sh runs, so Issue credential is only for turning it back on after a revoke, or for rotating the credential.",
     hostOpsNotSeen: "Not seen yet",
     hostOpsSeen: "last seen {date}",
     hostOpsCredentialIssued: "credential issued {date}",
@@ -2589,7 +2589,7 @@ const translations = {
     computerHostPair: "Vincular un host de computadoras",
     hostOps: "Operaciones del host",
     hostOpsDescription:
-      "Tu majordomo ejecuta unas pocas operaciones fijas en el host de este Pim a través de su daemon, hostopsd: estadísticas, registros, reinicios, el límite de sandboxes, despliegues y reversiones. No pregunta antes; un despliegue que falla se revierte solo. Cada solicitud, y lo que resultó de ella, queda en el registro de auditoría.",
+      "Tu majordomo ejecuta unas pocas operaciones fijas en el host de este Pim a través de su daemon, hostopsd: estadísticas, registros, reinicios, el límite de sandboxes, despliegues y reversiones. No pregunta antes; un despliegue que falla se revierte solo. Cada solicitud, y lo que resultó de ella, queda en el registro de auditoría. El host inscribe su daemon solo cuando se ejecuta up.sh, así que Emitir credencial solo sirve para reactivarlo tras una revocación o para rotar la credencial.",
     hostOpsNotSeen: "Aún no se ha visto",
     hostOpsSeen: "visto por última vez {date}",
     hostOpsCredentialIssued: "credencial emitida {date}",

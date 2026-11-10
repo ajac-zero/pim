@@ -253,6 +253,84 @@ describe("the host daemon's credential", () => {
 		]);
 	});
 
+	describe("enrolled by the host", () => {
+		const SECRET = "manager-secret";
+		const enroll = (token?: string) => call("/hostops/agent/enroll", { method: "POST", token });
+		const withSecret = async <T>(value: string, work: () => Promise<T>) => {
+			const mutable = env as unknown as Record<string, string | undefined>;
+			const before = mutable.PIM_CODING_MANAGER_TOKEN;
+			mutable.PIM_CODING_MANAGER_TOKEN = value;
+			try {
+				return await work();
+			} finally {
+				if (before === undefined) delete mutable.PIM_CODING_MANAGER_TOKEN;
+				else mutable.PIM_CODING_MANAGER_TOKEN = before;
+			}
+		};
+		beforeEach(() => inHostOps((sql) => sql.exec("DELETE FROM credential")));
+
+		it("gets a working credential, and the one before stops", async () => {
+			await withSecret(SECRET, async () => {
+				const first = await enroll(SECRET);
+				expect(first).toMatchObject({ status: 201, body: { token: expect.stringMatching(/^pimhostops_[\w-]{43}$/) } });
+				expect((await poll(first.body.token)).status).toBe(204);
+				expect((await call("/hostops/status", { cookie })).body.credential).toMatchObject({ present: true, revoked: false });
+
+				const second = await enroll(SECRET);
+				expect(second.status).toBe(201);
+				expect((await poll(first.body.token)).status).toBe(401);
+				expect((await poll(second.body.token)).status).toBe(204);
+				// The admin can still revoke it.
+				expect((await call("/hostops/credential", { method: "DELETE", cookie })).body).toEqual({ revoked: true });
+				expect((await poll(second.body.token)).status).toBe(401);
+			});
+		});
+
+		it("refuses a wrong or missing token, and does nothing without the secret", async () => {
+			await withSecret(SECRET, async () => {
+				expect((await enroll(`${SECRET}x`)).status).toBe(401);
+				expect((await enroll()).status).toBe(401);
+				expect((await enroll(TOKEN)).status).toBe(401);
+			});
+			expect(await inHostOps((sql) => sql.exec("SELECT hash FROM credential").toArray())).toHaveLength(0);
+			await withSecret("", async () => expect((await enroll("")).status).toBe(404));
+			await withSecret("", async () => expect((await enroll("anything")).status).toBe(404));
+		});
+
+		it("stays refused after the admin revokes, until the admin issues again", async () => {
+			await withSecret(SECRET, async () => {
+				expect((await enroll(SECRET)).status).toBe(201);
+				await call("/hostops/credential", { method: "DELETE", cookie });
+				expect(await enroll(SECRET)).toEqual({ status: 403, body: { error: "revoked" } });
+				expect((await call("/hostops/status", { cookie })).body.credential).toMatchObject({ present: false, revoked: true });
+				const issued = await call("/hostops/credential", { method: "POST", cookie });
+				expect((await poll(issued.body.token)).status).toBe(204);
+				const enrolled = await enroll(SECRET);
+				expect(enrolled.status).toBe(201);
+				expect((await poll(issued.body.token)).status).toBe(401);
+				expect((await poll(enrolled.body.token)).status).toBe(204);
+			});
+		});
+
+		it("keeps only the digest, and no secret in the audit log", async () => {
+			await withSecret(SECRET, async () => {
+				const { token } = (await enroll(SECRET)).body;
+				await call("/hostops/credential", { method: "DELETE", cookie });
+				await enroll(SECRET);
+				const rows = await inHostOps((sql) => sql.exec("SELECT hash FROM credential").toArray().map((row) => String(row.hash)));
+				expect(rows).toHaveLength(1);
+				expect(rows[0]).toMatch(/^[0-9a-f]{64}$/);
+				const log = await auditLog();
+				expect(log.filter((row) => row.action === "credential.enroll").map((row) => [row.actorKind, row.outcome])).toEqual([
+					["host", "revoked"],
+					["host", "ok"],
+				]);
+				const everything = JSON.stringify(log) + JSON.stringify(await inHostOps((sql) => sql.exec("SELECT * FROM audit").toArray()));
+				for (const secret of [token, SECRET]) expect(everything).not.toContain(secret);
+			});
+		});
+	});
+
 	it("stops a poll that is waiting when it is revoked", async () => {
 		const token = (await call("/hostops/credential", { method: "POST", cookie })).body.token as string;
 		const waiting = poll(token, 3000);

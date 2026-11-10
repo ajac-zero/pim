@@ -25,6 +25,16 @@ Only the majordomo of the admin's space. Other agents, the admin's included, are
 
 ## Setting up the daemon
 
+The host enrolls its daemon by itself. The host shares a secret with Pim, `MANAGER_TOKEN` there and the secret `PIM_CODING_MANAGER_TOKEN` here. When `up.sh` runs, it sends that token to `POST /api/hostops/agent/enroll` and gets a new credential for the daemon, in return for no click in Settings:
+
+- The token is compared in constant time. A wrong or missing one is refused with 401, and counted against the sign-in attempts limit of its address. A Pim without the secret answers 404.
+- The credential is made as the admin's is: random, shown only in the answer (201, `{ "token": ... }`), with only its digest kept, and the one before it stops working. The audit log keeps the enrollment as `credential.enroll` by the `host`, and never the token.
+- Enrolling again rotates the credential, so the host can do it on every run. The new credential shows in Settings, where the admin can revoke it.
+
+**A revoke sticks.** While the newest credential was revoked in Settings, enrollment is refused with 403 `{ "error": "revoked" }`, and the audit log keeps the refusal. The admin turns it back on with **Issue credential**; after that the host can enroll again.
+
+To do it by hand instead, say for a host that isn't set up with `up.sh`:
+
 1. In Settings → Deployment → Host operations, choose **Issue credential**. The credential is shown once, with a copy button, and with the installer's command for this Pim.
 2. On the host, in Pim's checkout, run the installer with this Pim's URL, and give it the credential:
 
@@ -34,4 +44,4 @@ Only the majordomo of the admin's space. Other agents, the admin's included, are
 
 3. Once the daemon polls, the section shows when it was last seen, its version and its commit.
 
-**Rotate credential** issues a new one in place of the old, which stops working at once; **Revoke credential** stops it with none in its place, and operations then wait, and expire after 10 minutes. The audit log below lists the newest 100 rows: when, who (the majordomo, the daemon, the admin, or a refused caller), the operation and its arguments, and how it went.
+**Rotate credential** issues a new one in place of the old, which stops working at once; **Revoke credential** stops it with none in its place, and operations then wait, and expire after 10 minutes. The audit log below lists the newest 100 rows: when, who (the majordomo, the daemon, the host, the admin, or a refused caller), the operation and its arguments, and how it went.

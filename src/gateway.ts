@@ -619,7 +619,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	// A coding workspace's CLI calling its model, opened by its gateway token only.
 	if (under(path, MODEL_GATEWAY_PATH)) return serveModelGateway(request, env, path);
 	// The host daemon polling for operations, opened by its own credential only.
-	if (under(path, HOSTOPS_AGENT_PATH)) return serveHostOpsAgent(request, env, path);
+	if (under(path, HOSTOPS_AGENT_PATH)) return serveHostOpsAgent(request, env, path, address);
 	const caller = await admit(request, env);
 	if (caller instanceof Response) return withCors(under(path, "/hostops") ? await hostOpsApi(env, request, path, { refused: caller, address }) : caller);
 	const { account, viaSession } = caller;

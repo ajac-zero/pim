@@ -1218,6 +1218,42 @@ describe("archived coding threads in the chat list", () => {
   });
 });
 
+describe("unread marks in the chat list", () => {
+  it("show on active chats but not on archived ones", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({ threads: [] });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    const chat = (id: string, archived: boolean) => ({
+      id,
+      title: id,
+      busy: false,
+      createdAt: 1,
+      updatedAt: 2,
+      responseAt: 2,
+      unread: true,
+      archived,
+      visit: { username: "ada", available: true },
+    });
+    client.setQueryData(sessionsQuery().queryKey, [
+      chat("live-chat", false),
+      chat("old-chat", true),
+    ]);
+    renderWith(
+      api,
+      () => <ChatsPanel awaitingApproval={new Set()} />,
+      "/",
+      client,
+    );
+    const archived = await screen.findByRole("region", { name: "Archived" });
+    fireEvent.click(within(archived).getByRole("button"));
+    expect(within(archived).getByText("old-chat")).toBeTruthy();
+    expect(within(archived).queryByLabelText("Unread response")).toBeNull();
+    expect(screen.getAllByLabelText("Unread response")).toHaveLength(1);
+  });
+});
+
 describe("connecting with an API key", () => {
   const VIBE_KEY = "mistral-SECRET-0123456789abcdef";
   const AMP_KEY = "sgamp_user_SECRET_0123456789";

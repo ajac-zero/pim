@@ -72,7 +72,7 @@ export const coding = definePimExtension({
 			defineTool({
 				name: "coding_start",
 				description:
-					"Start a coding thread: a coding agent that works on a GitHub repository in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read its work with coding_diff and coding_tests, say more with coding_steer, and ask the person to push it with coding_push.",
+					"Start a coding thread: a coding agent that works on a GitHub repository in a workspace of its own, on a new branch (pim/…), on the task you give it. Use it for changes to a codebase: fixing a bug, adding a feature, writing tests. Write the task as you would for a capable engineer who knows nothing of this conversation: what to change, why, and how to check it. It returns at once, often queued while a workspace is made ready; don't wait for it. You are told in this chat when each of its turns ends. Then read its work with coding_diff and coding_tests, say more with coding_steer, and ask the person to push it with coding_push, or to ship it to the default branch with coding_merge.",
 				parameters: Type.Object({
 					repo: Type.String({ description: "https://github.com/<owner>/<name>" }),
 					ref: Type.Optional(Type.String({ description: "The branch, tag or commit to start from; main by default." })),
@@ -230,7 +230,7 @@ export const coding = definePimExtension({
 			defineGatedAction({
 				name: "coding_push",
 				description:
-					"Push a coding thread's work to GitHub: its latest checkpoint, to its own branch (pim/…) unless you name another, never main or the default branch. Then the person can open a pull request. Its workspace must be running: push soon after its turn ends.",
+					"Push a coding thread's work to GitHub: its latest checkpoint, to its own branch (pim/…) unless you name another, never main or the default branch (to ship to it, use coding_merge). Then the person can open a pull request. Its workspace must be running: push soon after its turn ends.",
 				parameters: Type.Object({ thread_id: ThreadId, branch: Type.Optional(Type.String({ description: "A branch starting with pim/; the thread's own by default." })) }),
 				explicitApproval: true,
 				summarize: ({ thread_id, branch }) => `Push ${branch ?? "the branch"} of coding thread ${thread_id} to GitHub`,
@@ -256,6 +256,35 @@ export const coding = definePimExtension({
 					return outcome === "unchanged"
 						? `${branch} on github.com/${repo} was already at ${after.slice(0, 12)}.`
 						: `Pushed ${branch} (${after.slice(0, 12)}) to github.com/${repo}: https://github.com/${repo}/compare/${encodeURIComponent(branch)}?expand=1`;
+				},
+			}),
+			defineGatedAction({
+				name: "coding_merge",
+				description:
+					"Ship a coding thread's work: merge its latest checkpoint into the repository's default branch on GitHub, once the person approves. Pim fetches the default branch into the thread's workspace, fast-forwards or rebases the checkpoint onto it, and moves the default branch forward (never a force push; if it moves meanwhile, the rebase is retried once), and updates the thread's own pim/… branch to the same commit. If the thread's changes conflict with the default branch, nothing is pushed and the error says so: coding_steer the thread to rebase onto origin/<default branch> and resolve the conflicts, then merge again after its turn ends. Its workspace must be running. Returns the default branch's new commit.",
+				parameters: Type.Object({ thread_id: ThreadId }),
+				explicitApproval: true,
+				summarize: ({ thread_id }) => `Merge coding thread ${thread_id} into the default branch on GitHub`,
+				async prepare(args) {
+					try {
+						const { threadId } = await ownedThread(env, space, args.thread_id);
+						const prepared = await codingThread(env, threadId).prepareMerge();
+						if (!prepared.ok) return { refused: JSON.stringify({ error: prepared.code, message: prepared.message }) };
+						return { args: { thread_id: threadId, checkpoint: prepared.request.checkpoint } as typeof args, summary: prepared.request.summary };
+					} catch (error) {
+						if (error instanceof CodingError) return { refused: JSON.stringify({ error: error.code, message: error.message }) };
+						throw error;
+					}
+				},
+				async run(args) {
+					const { thread_id, checkpoint } = args as typeof args & { checkpoint?: string };
+					if (!checkpoint) return "This merge wasn't readied: ask to merge again.";
+					const { threadId } = await ownedThread(env, space, thread_id);
+					const merged = await codingThread(env, threadId).merge({ checkpoint });
+					if (!merged.ok) return `The merge failed: ${merged.message}`;
+					const { repo, branch, outcome, after, rebased, threadBranch } = merged.result;
+					if (outcome === "unchanged") return `${branch} on github.com/${repo} already has this work, at ${after.slice(0, 12)}.`;
+					return `Merged into ${branch} on github.com/${repo}${rebased ? " after rebasing onto it" : " as a fast-forward"}: ${branch} is now at ${after}.${threadBranch ? ` ${threadBranch} was updated to it.` : " The thread's own branch was left as it was on GitHub."}`;
 				},
 			}),
 		],

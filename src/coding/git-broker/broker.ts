@@ -27,8 +27,11 @@ import { apiHeaders, type Fetch, GITHUB_API, type GitHubApp } from "./github-app
  * a new branch is created only if it still doesn't exist, and an existing
  * one is moved only forward, which GitHub checks: the pack goes to a staging
  * ref, GitHub's API moves the branch with `force: false`, and the staging
- * ref is deleted. Pim never pushes to the repository's default branch, to
- * `main` or `master`, or to a branch outside the policy's prefix (`pim/`).
+ * ref is deleted. Pim pushes to the repository's default branch, `main` or
+ * `master` in most, only for a merge (`toDefault`, for a merge by `coding_merge`),
+ * which is as safe as any push: the person approves it and the branch moves
+ * only forward. Any other push is to a branch inside the policy's prefix
+ * (`pim/`).
  */
 
 export type RepoRef = { readonly owner: string; readonly name: string; readonly fullName: string };
@@ -37,6 +40,9 @@ export type RepoRef = { readonly owner: string; readonly name: string; readonly 
 export class GitBrokerError extends HttpError {
 	override readonly name = "GitBrokerError";
 }
+
+/** A push GitHub refused because the branch has commits the push doesn't: it moved while the push was made. */
+export class BranchMovedError extends GitBrokerError {}
 
 const encoder = new TextEncoder();
 const latin1 = (bytes: Uint8Array) => String.fromCharCode(...bytes);
@@ -100,6 +106,20 @@ export const PROTECTED_BRANCHES = ["main", "master"] as const;
  * `master` or the repository's default branch (when known).
  */
 export function checkBranch(branch: string, policy: Pick<BrokerPolicy, "branchPrefix">, defaultBranch: string | null = null): string {
+	checkBranchName(branch);
+	const lower = branch.toLowerCase();
+	if ((PROTECTED_BRANCHES as readonly string[]).includes(lower) || (defaultBranch !== null && lower === defaultBranch.toLowerCase())) {
+		throw new GitBrokerError(403, `Pim never pushes to ${branch} except to merge a coding thread into it (coding_merge): push to a branch of its own and open a pull request`);
+	}
+	const prefix = policy.branchPrefix;
+	if (prefix !== null && (!branch.startsWith(prefix) || branch.length === prefix.length)) {
+		throw new GitBrokerError(403, `Pim pushes only branches whose names start with ${prefix}`);
+	}
+	return branch;
+}
+
+/** `branch`, if it is a name git allows, as `git check-ref-format` checks it. */
+export function checkBranchName(branch: string): string {
 	const invalid =
 		typeof branch !== "string" ||
 		branch.length === 0 ||
@@ -108,14 +128,6 @@ export function checkBranch(branch: string, policy: Pick<BrokerPolicy, "branchPr
 		/\.\.|@\{|\/\/|^\/|\/$|\.$|^-|^refs\/|^HEAD$|^@$/.test(branch) ||
 		branch.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock"));
 	if (invalid) throw new GitBrokerError(400, "That isn't a branch name git allows");
-	const lower = branch.toLowerCase();
-	if ((PROTECTED_BRANCHES as readonly string[]).includes(lower) || (defaultBranch !== null && lower === defaultBranch.toLowerCase())) {
-		throw new GitBrokerError(403, `Pim never pushes to ${branch}: push to a branch of its own and open a pull request`);
-	}
-	const prefix = policy.branchPrefix;
-	if (prefix !== null && (!branch.startsWith(prefix) || branch.length === prefix.length)) {
-		throw new GitBrokerError(403, `Pim pushes only branches whose names start with ${prefix}`);
-	}
 	return branch;
 }
 
@@ -262,7 +274,14 @@ export function parseBundle(bytes: Uint8Array): Bundle {
 export const MAX_PUSH_BYTES = 64 * 1024 * 1024;
 
 /** A push, as the workspace hands it to Pim: its session, the repository's URL, the branch, and a bundle that names `refs/heads/<branch>`. */
-export type PushRequest = { readonly sessionId: string; readonly repo: string; readonly branch: string; readonly bundle: Uint8Array };
+export type PushRequest = {
+	readonly sessionId: string;
+	readonly repo: string;
+	readonly branch: string;
+	readonly bundle: Uint8Array;
+	/** A merge: `branch` must be the repository's default branch, which is then moved forward and never rewritten. */
+	readonly toDefault?: boolean;
+};
 
 /** A push Pim checked all it can before asking the person and reaching GitHub. */
 export type PreparedPush = {
@@ -273,6 +292,7 @@ export type PreparedPush = {
 	readonly head: string;
 	readonly bytes: number;
 	readonly pack: Uint8Array;
+	readonly toDefault: boolean;
 };
 
 /**
@@ -310,13 +330,13 @@ export function preparePush(deps: PushDeps, request: PushRequest): PreparedPush 
 	if (!deps.app) throw new GitBrokerNotConfiguredError();
 	if (!SESSION_ID.test(request.sessionId)) throw new GitBrokerError(400, "That isn't a coding session's ID");
 	const repo = parseRepoUrl(request.repo, deps.policy);
-	const branch = checkBranch(request.branch, deps.policy);
+	const branch = request.toDefault ? checkBranchName(request.branch) : checkBranch(request.branch, deps.policy);
 	const max = deps.maxBundleBytes ?? MAX_PUSH_BYTES;
 	if (request.bundle.length > max) throw new GitBrokerError(413, `The push is ${size(request.bundle.length)}; Pim pushes at most ${size(max)} at once`);
 	const bundle = parseBundle(request.bundle);
 	const head = bundle.refs.get(`refs/heads/${branch}`);
 	if (!head) throw new GitBrokerError(400, `The bundle doesn't name refs/heads/${branch}`);
-	return { sessionId: request.sessionId, repo, branch, head, bytes: request.bundle.length, pack: bundle.pack };
+	return { sessionId: request.sessionId, repo, branch, head, bytes: request.bundle.length, pack: bundle.pack, toDefault: request.toDefault === true };
 }
 
 /** The approval request for a prepared push. */
@@ -355,7 +375,9 @@ export async function pushBranch(deps: PushDeps, request: PushRequest): Promise<
 	const about = await call(api, { headers: apiHeaders(`Bearer ${token}`) });
 	if (!about.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${about.status} when asked about ${repo.fullName}`);
 	const { default_branch: defaultBranch } = (await about.json()) as { default_branch?: unknown };
-	checkBranch(branch, deps.policy, typeof defaultBranch === "string" ? defaultBranch : null);
+	if (push.toDefault) {
+		if (branch !== defaultBranch) throw new GitBrokerError(409, `${branch} isn't ${repo.fullName}'s default branch${typeof defaultBranch === "string" ? `, ${defaultBranch}` : ""}`);
+	} else checkBranch(branch, deps.policy, typeof defaultBranch === "string" ? defaultBranch : null);
 
 	const advertised = await call(`${git}/info/refs?service=git-receive-pack`, { headers: gitHeaders });
 	if (!advertised.ok || advertised.headers.get("content-type") !== "application/x-git-receive-pack-advertisement") {
@@ -407,7 +429,7 @@ export async function pushBranch(deps: PushDeps, request: PushRequest): Promise<
 			body: JSON.stringify({ sha: head, force: false }),
 		});
 		if (moved.status === 422) {
-			throw new GitBrokerError(409, `${branch} on GitHub has commits this push doesn't: fetch it, rebase onto it, and push again`);
+			throw new BranchMovedError(409, `${branch} on GitHub has commits this push doesn't: fetch it, rebase onto it, and push again`);
 		}
 		if (!moved.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${moved.status} when moving ${branch}`);
 	} finally {
@@ -417,4 +439,22 @@ export async function pushBranch(deps: PushDeps, request: PushRequest): Promise<
 	}
 	log("updated");
 	return { repo: repo.fullName, branch, before, after: head, outcome: "updated" };
+}
+
+/** The name of the repository's default branch, from GitHub, for a merge. */
+export async function repoDefaultBranch(deps: PushDeps, repoUrl: string): Promise<string> {
+	if (!deps.app) throw new GitBrokerNotConfiguredError();
+	const repo = parseRepoUrl(repoUrl, deps.policy);
+	const { token } = await deps.app.installationToken(repo, "write");
+	const send = deps.fetch ?? ((input, init) => fetch(input, init));
+	let about: Response;
+	try {
+		about = await send(`${GITHUB_API}/repos/${repo.owner}/${repo.name}`, { headers: apiHeaders(`Bearer ${token}`), redirect: "manual", signal: AbortSignal.timeout(120_000) });
+	} catch {
+		throw new GitBrokerError(502, "GitHub couldn't be reached");
+	}
+	if (!about.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${about.status} when asked about ${repo.fullName}`);
+	const { default_branch: name } = (await about.json()) as { default_branch?: unknown };
+	if (typeof name !== "string") throw new GitBrokerError(502, `GitHub didn't say ${repo.fullName}'s default branch`);
+	return checkBranchName(name);
 }

@@ -362,6 +362,79 @@ describe("the coding threads API", () => {
 	});
 });
 
+describe("merging a coding thread into the default branch", () => {
+	const MAIN = hex40("m-main");
+	const MAIN_REMOTE = "https://pim.test/api/coding/git/acme/demo.git";
+
+	/** A thread that added hello.txt, and the agent merging it: what the tool answered once the person approved, and the log's merge events. */
+	async function merged(options: { remote?: Record<string, string>; patchAnswers?: number[]; refs?: Record<string, string> } = {}) {
+		codingFaux.setResponses([toolUse("write", { path: "hello.txt", content: "Hello!\n" }), fauxAssistantMessage("Added hello.txt.")]);
+		const thread = await start();
+		const [ended] = await turns(thread.id, 1);
+		const github = fakeGitHub({ "refs/heads/main": MAIN, ...options.refs }, options.patchAnswers);
+		codingGitHub.app = github.app;
+		codingGitHub.fetch = github.fetch;
+		if (options.remote) fakeRemotes.set(MAIN_REMOTE, options.remote);
+		try {
+			faux.setResponses([toolUse("coding_merge", { thread_id: thread.id }), toolUse("send_to_user", { message: "Merged." })]);
+			const chat = (await post<{ id: string }>("/sessions")).body.id;
+			const saying = say("Ship it.", chat);
+			const pending = async () => (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.filter((candidate) => candidate.action === "coding_merge");
+			await vi.waitFor(async () => expect(await pending()).toHaveLength(1));
+			const [approval] = await pending();
+			expect(approval!.summary).toBe(`Merge ${thread.repo.branch} (${ended!.checkpoint!.slice(0, 12)}) into main of github.com/acme/demo, with no force push`);
+			expect(github.pushes).toEqual([]);
+			const decided = (await post<Approval>(`/approvals/${approval!.id}/approve`)).body;
+			await saying;
+			const log = (await api<{ events: { kind: string; data: Record<string, unknown> }[] }>(`/coding/threads/${thread.id}/log`)).body.events;
+			return { thread, ended: ended!, github, result: String(decided.result), log };
+		} finally {
+			fakeRemotes.set(MAIN_REMOTE, { "README.md": "# Demo\n" });
+		}
+	}
+
+	it("fast-forwards the default branch to the thread's checkpoint and updates its own branch, never by force", async () => {
+		const { thread, ended, github, result, log } = await merged();
+		const head = hex40(ended.checkpoint!);
+		expect(result).toBe(`Merged into main on github.com/acme/demo as a fast-forward: main is now at ${head}. ${thread.repo.branch} was updated to it.`);
+		// The default branch is moved by the API without force, after the objects went to a staging ref; nothing is sent to it directly.
+		expect(github.moves).toEqual([{ ref: "refs/heads/main", sha: head, force: false }]);
+		expect(github.pushes.filter((command) => command.includes("refs/heads/main"))).toEqual([]);
+		expect(github.pushes.map((command) => command.split(" ")[2]!.replace(/[0-9a-f-]{36}$/, "<id>"))).toEqual(["refs/pim-staging/<id>", "refs/pim-staging/<id>", `refs/heads/${thread.repo.branch}`]);
+		expect(log.filter((event) => event.kind === "thread.merged").map((event) => event.data)).toEqual([{ repo: "acme/demo", branch: "main", before: MAIN, after: head, outcome: "updated", rebased: false }]);
+	});
+
+	it("rebases the thread onto a default branch that has moved, and records the rebased commit as a checkpoint", async () => {
+		const { ended, github, result, log } = await merged({ remote: { "README.md": "# Demo\n", "CHANGELOG.md": "v2\n" } });
+		expect(result).toMatch(new RegExp(`^Merged into main on github.com/acme/demo after rebasing onto it: main is now at [0-9a-f]{40}\\.`));
+		const after = github.moves[0]!.sha as string;
+		expect(after).not.toBe(hex40(ended.checkpoint!));
+		expect(github.moves).toEqual([{ ref: "refs/heads/main", sha: after, force: false }]);
+		expect(log.filter((event) => event.kind === "thread.merged")[0]!.data).toMatchObject({ rebased: true, outcome: "updated" });
+	});
+
+	it("stops at a conflict with nothing pushed, and tells the agent to steer the thread", async () => {
+		const { result, github, log } = await merged({ remote: { "README.md": "# Demo\n", "hello.txt": "Hi from main\n" } });
+		expect(result).toContain("The merge failed: The thread's changes conflict with main");
+		expect(result).toContain("Steer the thread to rebase onto origin/main");
+		expect(github.pushes).toEqual([]);
+		expect(github.moves).toEqual([]);
+		expect(log.some((event) => event.kind === "thread.merged")).toBe(false);
+	});
+
+	it("retries the rebase once when the default branch moves meanwhile, and then gives up", async () => {
+		const once = await merged({ patchAnswers: [422] });
+		expect(once.result).toContain("Merged into main");
+		expect(once.github.moves).toHaveLength(2);
+		expect(once.github.moves.every((move) => move.force === false)).toBe(true);
+		await post(`/coding/threads/${once.thread.id}/archive`);
+		const twice = await merged({ patchAnswers: [422, 422] });
+		expect(twice.result).toBe("The merge failed: main moved again while merging; nothing was pushed to it. Ask to merge again.");
+		expect(twice.github.moves).toHaveLength(2);
+		expect(twice.github.moves.every((move) => move.force === false)).toBe(true);
+	});
+});
+
 describe("an agent's coding tools", () => {
 	it("start a thread from a chat, which is woken once when its turn ends", async () => {
 		let started: Record<string, unknown> = {};
@@ -442,10 +515,16 @@ describe("an agent's coding tools", () => {
 	});
 });
 
-/** GitHub as a push to a new branch of acme/demo sees it: the repository, its branches (none), and receive-pack, which takes every update. */
-function fakeGitHub() {
+/**
+ * GitHub as a push to acme/demo sees it: the repository, its branches (`refs`, none unless given),
+ * and receive-pack, which takes every update. It moves a branch through the API as GitHub does
+ * without force: the answers in `patchAnswers`, one for each, are the status it gives (422 as if
+ * the branch had moved), and 200 once they run out. Every move of a branch is kept in `moves`.
+ */
+function fakeGitHub(refs: Record<string, string> = {}, patchAnswers: number[] = []) {
 	const encoder = new TextEncoder();
 	const pushes: string[] = [];
+	const moves: { ref: string; sha: unknown; force: unknown }[] = [];
 	const lines = (...payloads: string[]) => {
 		const parts = payloads.map((payload) => (payload === "" ? encoder.encode("0000") : pktLine(payload)));
 		const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
@@ -461,9 +540,15 @@ function fakeGitHub() {
 		const url = String(input);
 		if (url === "https://api.github.com/repos/acme/demo") return Response.json({ default_branch: "main" });
 		if (url === "https://github.com/acme/demo.git/info/refs?service=git-receive-pack") {
-			return new Response(lines("# service=git-receive-pack\n", "", `${"0".repeat(40)} capabilities^{}\0report-status delete-refs ofs-delta quiet\n`, ""), {
+			const listed = Object.entries(refs).map(([ref, sha], index) => `${sha} ${ref}${index === 0 ? "\0report-status delete-refs ofs-delta quiet" : ""}\n`);
+			return new Response(lines("# service=git-receive-pack\n", "", ...(listed.length ? listed : [`${"0".repeat(40)} capabilities^{}\0report-status delete-refs ofs-delta quiet\n`]), ""), {
 				headers: { "content-type": "application/x-git-receive-pack-advertisement" },
 			});
+		}
+		if (init?.method === "PATCH" && url.startsWith("https://api.github.com/repos/acme/demo/git/")) {
+			const { sha, force } = JSON.parse(String(init.body)) as { sha: unknown; force: unknown };
+			moves.push({ ref: url.slice("https://api.github.com/repos/acme/demo/git/".length), sha, force });
+			return new Response("{}", { status: patchAnswers.shift() ?? 200 });
 		}
 		if (url === "https://github.com/acme/demo.git/git-receive-pack") {
 			const body = new TextDecoder("latin1").decode(init!.body as Uint8Array);
@@ -473,7 +558,7 @@ function fakeGitHub() {
 		}
 		return new Response("Not found", { status: 404 });
 	};
-	return { app, fetch, pushes };
+	return { app, fetch, pushes, moves };
 }
 
 describe("threads from before harnesses", () => {

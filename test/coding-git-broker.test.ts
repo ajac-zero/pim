@@ -3,6 +3,7 @@ import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { base64UrlDecode } from "../src/auth/encoding";
 import {
+	BranchMovedError,
 	brokerKey,
 	checkBranch,
 	GitBrokerError,
@@ -503,6 +504,19 @@ describe("pushing", () => {
 		await expect(pushBranch(pushDeps(github, { policy: anyBranch }), pushRequest("main"))).rejects.toThrow("never pushes to main");
 		await expect(pushBranch(pushDeps(github), pushRequest("feature"))).rejects.toThrow("start with pim/");
 		expect(github.calls.some((call) => call.url === `${GIT}/git-receive-pack`)).toBe(false);
+	});
+
+	it("pushes to the default branch only as a merge, which moves it forward without force and never to another branch", async () => {
+		const github = pushingGitHub({ "refs/heads/trunk": SHA("a") }, { [`PATCH ${API}/git/refs/heads/trunk`]: () => Response.json({}) });
+		await expect(pushBranch(pushDeps(github), pushRequest("pim/fix", SHA("b"), { toDefault: true }))).rejects.toThrow("isn't acme/widgets's default branch, trunk");
+		const result = await pushBranch(pushDeps(github), pushRequest("trunk", SHA("b"), { toDefault: true }));
+		expect(result).toMatchObject({ branch: "trunk", before: SHA("a"), after: SHA("b"), outcome: "updated" });
+		const patches = github.calls.filter((call) => call.method === "PATCH");
+		expect(patches.map((call) => [call.url, JSON.parse(new TextDecoder().decode(call.body))])).toEqual([[`${API}/git/refs/heads/trunk`, { sha: SHA("b"), force: false }]]);
+		expect(github.calls.filter((call) => call.url === `${GIT}/git-receive-pack`).every((call) => !receivePackRequest(call.body).commands[0]!.includes("refs/heads/trunk"))).toBe(true);
+		// A branch that moved on GitHub is a BranchMovedError, not a rewrite.
+		const moved = pushingGitHub({ "refs/heads/trunk": SHA("a") }, { [`PATCH ${API}/git/refs/heads/trunk`]: () => new Response("{}", { status: 422 }) });
+		await expect(pushBranch(pushDeps(moved), pushRequest("trunk", SHA("b"), { toDefault: true }))).rejects.toBeInstanceOf(BranchMovedError);
 	});
 
 	it("refuses a bundle past the size cap, or one that doesn't name the branch, before asking anyone", async () => {

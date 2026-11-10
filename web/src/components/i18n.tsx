@@ -1,3 +1,4 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -6,8 +7,15 @@ import {
   useState,
 } from "react";
 
-export const locales = ["en", "es"] as const;
-export type Locale = (typeof locales)[number];
+import {
+  appearanceQueries,
+  saveAppearance,
+  signedInQuery,
+} from "~/lib/appearance";
+import { LOCALES, type Locale } from "../../../src/locales";
+
+export const locales = LOCALES;
+export type { Locale };
 
 const STORAGE_KEY = "pim-locale";
 
@@ -3875,6 +3883,17 @@ const I18nContext = createContext<I18nContextValue>(i18nFor("en"));
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(initialLocale);
+  const queryClient = useQueryClient();
+  const { data: signedIn } = useQuery(signedInQuery());
+  const { data: settings } = useQuery(appearanceQueries(signedIn === true));
+
+  // The language the person chose on any device wins over this browser's own.
+  const serverLocale = settings?.locale;
+  useEffect(() => {
+    if (!serverLocale) return;
+    setLocaleState(serverLocale);
+    window.localStorage.setItem(STORAGE_KEY, serverLocale);
+  }, [serverLocale]);
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -3883,6 +3902,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const setLocale = (nextLocale: Locale) => {
     setLocaleState(nextLocale);
     window.localStorage.setItem(STORAGE_KEY, nextLocale);
+    saveAppearance(queryClient, { locale: nextLocale });
   };
 
   const value: I18nContextValue = { ...i18nFor(locale), setLocale };

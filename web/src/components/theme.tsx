@@ -1,3 +1,4 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -7,6 +8,11 @@ import {
   useMemo,
   useState,
 } from "react";
+import {
+  appearanceQueries,
+  saveAppearance,
+  signedInQuery,
+} from "~/lib/appearance";
 import { type ColorTheme, loadThemes } from "~/lib/themes";
 import type { ThemeList } from "../../../src/themes";
 
@@ -60,6 +66,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [resolved, setResolved] = useState<"light" | "dark">("light");
   const [list, setList] = useState<ThemeList | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const { data: signedIn } = useQuery(signedInQuery());
+  const { data: settings } = useQuery(appearanceQueries(signedIn === true));
 
   // Sync from storage after hydration (the root inline script already applied
   // the right class and theme, so there is no flash).
@@ -99,7 +108,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       );
   }, [picked, resolved]);
 
-  const setPreference = useCallback((next: ThemePreference) => {
+  const applyPreference = useCallback((next: ThemePreference) => {
     setPreferenceState(next);
     window.localStorage.setItem(STORAGE_KEY, next);
     const applied = next === "system" ? systemTheme() : next;
@@ -107,10 +116,37 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.classList.toggle("dark", applied === "dark");
   }, []);
 
-  const setColorTheme = useCallback((id: string) => {
+  const applyColorTheme = useCallback((id: string) => {
     window.localStorage.setItem(COLOR_THEME_KEY, id);
     setPicked(id);
   }, []);
+
+  const setPreference = useCallback(
+    (next: ThemePreference) => {
+      applyPreference(next);
+      saveAppearance(queryClient, { colorMode: next });
+    },
+    [applyPreference, queryClient],
+  );
+
+  const setColorTheme = useCallback(
+    (id: string) => {
+      applyColorTheme(id);
+      saveAppearance(queryClient, { colorTheme: id });
+    },
+    [applyColorTheme, queryClient],
+  );
+
+  // What the person chose on another device, or an agent for them, wins over
+  // what this browser kept; storage is only what paints first.
+  const serverMode = settings?.colorMode;
+  const serverTheme = settings?.colorTheme;
+  useEffect(() => {
+    if (serverMode) applyPreference(serverMode);
+  }, [serverMode, applyPreference]);
+  useEffect(() => {
+    if (serverTheme) applyColorTheme(serverTheme);
+  }, [serverTheme, applyColorTheme]);
 
   const value = useMemo(() => {
     const themes = list?.themes ?? [];

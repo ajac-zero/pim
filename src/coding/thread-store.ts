@@ -371,6 +371,12 @@ export class CodingThreadStore {
 	}
 
 	/** The log after `since`, oldest first. */
+	/** When the latest turn ended, or null if none has. */
+	lastTurnEndedAt(): number | null {
+		const at = this.#sql.exec("SELECT MAX(at) AS at FROM coding_event WHERE kind = 'thread.turn_ended'").one().at;
+		return at === null ? null : Number(at);
+	}
+
 	events(since = 0, limit = 500): CodingEvent[] {
 		return this.#sql
 			.exec("SELECT * FROM coding_event WHERE seq > ? ORDER BY seq LIMIT ?", since, limit)

@@ -181,6 +181,7 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
     cancel: vi.fn<CodingApi["cancel"]>(async () =>
       view({ state: "idle", stateReason: "cancelled" }),
     ),
+    seen: vi.fn<CodingApi["seen"]>(async () => ({ seen: true as const })),
     archive: vi.fn<CodingApi["archive"]>(async () =>
       view({ state: "archived" }),
     ),
@@ -291,6 +292,8 @@ const summary = (
   budgetUsd: 3,
   createdAt: Date.UTC(2026, 10, 9, 10),
   updatedAt: Date.UTC(2026, 10, 9, 10),
+  lastTurnEndedAt: null,
+  lastSeenAt: null,
   ...overrides,
 });
 

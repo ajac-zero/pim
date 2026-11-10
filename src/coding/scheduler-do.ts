@@ -194,6 +194,11 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		this.#threads.record(thread);
 	}
 
+	/** The person viewed a thread now; false for one that isn't the space's. */
+	markThreadSeen(threadId: string): boolean {
+		return this.#threads.markSeen(threadId, this.now());
+	}
+
 	/** One of the space's threads, with its place in the queue while it waits; null for a thread that isn't the space's. */
 	thread(threadId: string): (IndexedThread & { readonly queue: QueuePlace | null }) | null {
 		const thread = this.#threads.get(threadId);

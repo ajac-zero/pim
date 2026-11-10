@@ -53,6 +53,7 @@ import {
   codingThreadQuery,
   codingThreadsQuery,
   codingTranscriptQuery,
+  codingUnread,
   EMPTY_LIVE,
   HARNESS_NAMES,
   type HarnessSignIn,
@@ -146,10 +147,12 @@ function problemText(error: unknown): string {
 export function CodingHarnessMark({
   harness,
   state,
+  unread = false,
   className,
 }: {
   harness: CodingHarness;
   state: CodingThreadState;
+  unread?: boolean;
   className?: string;
 }) {
   const { t } = useI18n();
@@ -157,7 +160,7 @@ export function CodingHarnessMark({
   return (
     <span className="relative flex shrink-0">
       <HarnessIcon harness={harness} className={className} />
-      <StateBadge state={codingStateBadge(state)} label={label} />
+      <StateBadge state={codingStateBadge(state, unread)} label={label} />
       <span className="sr-only">
         {t("codingState")}: <span>{label}</span>
       </span>
@@ -234,6 +237,7 @@ function ThreadRow({ thread }: { thread: CodingThreadSummary }) {
           <CodingHarnessMark
             harness={thread.harness}
             state={thread.state}
+            unread={codingUnread(thread)}
             className="size-5"
           />
           <span className="min-w-0 flex-1 truncate text-[15px]">
@@ -968,6 +972,7 @@ export function CodingThreadPage({ id }: { id: string }) {
         ? 4000
         : false,
   });
+  useMarkSeen(id, thread.data?.updatedAt);
   if (thread.isError && !thread.data) {
     return (
       <main className="mx-auto w-full max-w-[768px] px-4 py-8 sm:px-6">
@@ -990,6 +995,14 @@ export function CodingThreadPage({ id }: { id: string }) {
     );
   }
   return <ThreadView thread={thread.data} />;
+}
+
+/** Tells Pim the person is viewing the thread when its page opens and as new turns end, so the list doesn't mark it unread. */
+function useMarkSeen(id: string, updatedAt: number | undefined) {
+  const api = useCodingApi();
+  useEffect(() => {
+    if (updatedAt !== undefined) api.seen(id).catch(() => {});
+  }, [api, id, updatedAt]);
 }
 
 function ThreadView({ thread }: { thread: CodingThreadView }) {

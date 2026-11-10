@@ -7,7 +7,7 @@ import { CODING_API_PATH, CODING_REPOS_PATH, type CodingErrorCode, type CodingPu
 import { GitBrokerError, repoRef } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";
 import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
-import { codingScheduler } from "./scheduler-do";
+import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { codingThread } from "./thread-do";
 import { calling, CodingError, listThreads, liveThread, ownedThread, startThread, threadView, viewOf } from "./threads";
 
@@ -93,6 +93,12 @@ function codingRoutes(env: Env, space: string): Route[] {
 			return Response.json(view, { status: created ? 201 : 200 });
 		}),
 		route("GET", "/:id", ({ id }) => threadView(env, space, id!)),
+		route("POST", "/:id/seen", async ({ id }) => {
+			const listed = await thread(id!);
+			await codingScheduler(env, space).markThreadSeen(listed.threadId);
+			await codingThreadsChanged(env, space);
+			return { seen: true };
+		}),
 		route("GET", "/:id/transcript", async ({ id }) => {
 			// Typed by hand: the transcript's type is too deep for the RPC stub's.
 			const stub = codingThread(env, (await thread(id!)).threadId) as unknown as { transcript(): Promise<TranscriptMessage[]> };

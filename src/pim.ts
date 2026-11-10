@@ -180,7 +180,7 @@ import { LegacyFiles } from "./legacy-files";
 import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "./notes";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
 import { type DeploymentSettings, deploymentSettings } from "./deployment";
-import { dispatch, HttpError, readJson, type Route } from "./http";
+import { dispatch, HttpError, readJson, type Route, routeOf } from "./http";
 import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
 import { type ApprovalPolicy, readSettings, type Settings, updateSettings } from "./settings";
@@ -453,6 +453,12 @@ const CUSTOM_APPS_KEY = "custom_apps";
 const OWNER_ADMIN_KEY = "owner_admin";
 /** How long what the admin shares through the gallery (connectors and model providers) is used before it's read again. */
 const CUSTOM_APPS_TTL_MS = 60_000;
+/** How long a request waits for that read: a slow or stuck gallery leaves what was read before, and the read goes on without the request. */
+const CUSTOM_APPS_WAIT_MS = 2_000;
+/** A request to the space slower than this is logged (`pim.slow_request`). */
+const SLOW_REQUEST_MS = 5_000;
+/** The close code of a socket whose chat's events stopped coming, so the app connects again and resyncs. */
+const WATCH_LOST = 4010;
 /** The built-in apps (./builtin-apps.ts) the admin turned off, as last read from the gallery with their connectors. */
 const DISABLED_BUILTIN_APPS_KEY = "disabled_builtin_apps";
 /** The person's own model providers (./providers.ts), keys included. */
@@ -479,6 +485,19 @@ const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "aband
 type SocketState = { readonly session: string; readonly channel?: number };
 /** A socket editing a note: which one. */
 type NoteSocketState = { readonly note: string };
+
+/** Whether `work` settled within `ms`; it goes on either way. */
+async function within(work: Promise<unknown>, ms: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const late = new Promise<false>((resolve) => {
+		timer = setTimeout(() => resolve(false), ms);
+	});
+	try {
+		return await Promise.race([work.then(() => true, () => true), late]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 function clipTitle(text: string): string {
 	const line = text.trim().split(/\r?\n/)[0]!.trim();
@@ -1078,15 +1097,53 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	#customAppsReadAt = 0;
+	/** The read of the gallery in flight, if any, and whether a request has waited for it as long as one waits. */
+	#customAppsRead: { readonly done: Promise<void>; slow: boolean } | undefined;
+	/** The read that starts once the one in flight ends, for callers that need what the gallery says from now on. */
+	#customAppsNext: Promise<void> | undefined;
 
 	/**
 	 * Reads the admin's connectors and model providers from the gallery again, and
 	 * whether the owner is the admin from the directory, at most once a minute
-	 * unless `now`.
+	 * unless `now`. It waits for the read at most `CUSTOM_APPS_WAIT_MS`: a slow
+	 * gallery leaves what was read before until the read ends.
 	 */
 	async #refreshCustomApps(now = false): Promise<void> {
 		if (!now && Date.now() - this.#customAppsReadAt < CUSTOM_APPS_TTL_MS) return;
 		this.#customAppsReadAt = Date.now();
+		// One read at a time, so a stuck gallery holds one read rather than one per request.
+		// A read asked for `now` may need a change made after the one in flight began: it reads again after it.
+		const current = this.#customAppsRead;
+		const read = !current
+			? this.#startCustomAppsRead().done
+			: !now
+				? current.done
+				: (this.#customAppsNext ??= current.done.then(() => {
+						this.#customAppsNext = undefined;
+						return (this.#customAppsRead ?? this.#startCustomAppsRead()).done;
+					}));
+		// A read that kept one request waiting as long as it may keeps no other waiting.
+		if (current?.slow || (await within(read, CUSTOM_APPS_WAIT_MS))) return;
+		if (this.#customAppsRead) this.#customAppsRead.slow = true;
+		console.warn(JSON.stringify({ event: "pim.slow_refresh", owner: this.name, ms: CUSTOM_APPS_WAIT_MS, done: false }));
+	}
+
+	#startCustomAppsRead(): { readonly done: Promise<void>; slow: boolean } {
+		const started = Date.now();
+		const read = {
+			slow: false,
+			done: this.#readCustomApps().finally(() => {
+				this.#customAppsRead = undefined;
+				const ms = Date.now() - started;
+				if (ms > CUSTOM_APPS_WAIT_MS) console.warn(JSON.stringify({ event: "pim.slow_refresh", owner: this.name, ms, done: true }));
+			}),
+		};
+		this.#customAppsRead = read;
+		return read;
+	}
+
+	/** The read itself, which never throws: a failure leaves what was read before. */
+	async #readCustomApps(): Promise<void> {
 		try {
 			const gallery = this.env.Gallery.getByName("gallery");
 			// The directory failing to answer leaves what it said before.
@@ -1906,6 +1963,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	async onStart(): Promise<void> {
+		const started = Date.now();
 		this.mcp.configureOAuthCallback({
 			customHandler: (result) => signInResultPage(result.authSuccess, this.deployment().publicUrl ?? undefined, String(result.authError ?? "")),
 		});
@@ -1913,9 +1971,12 @@ export class Pim extends DurableAgent<Env> {
 		// are restored without holding up startup, which answers no request
 		// until it ends: each loads its chat's events, which takes long for a
 		// long chat. A watch the socket asks for meanwhile replaces its restored one.
+		// One that fails closes its socket (`#watch`), so the app connects again.
+		let watches = 0;
 		for (const connection of this.getConnections<SocketState>()) {
 			if (connection.state?.session) {
-				void this.#watch(connection, connection.state.session).catch((error) => console.warn("restoring a watch failed", error));
+				watches++;
+				void this.#watch(connection, connection.state.session, "watch restore failed").catch(() => undefined);
 			}
 		}
 		void this.#resumeTasks().catch((error) => console.warn("resuming tasks failed", error));
@@ -1928,6 +1989,7 @@ export class Pim extends DurableAgent<Env> {
 		// A Sprite Pim started before it kept computers with a host is out of reach: the space has no computer until it gets another.
 		const sprite = this.computer.forgetSprite();
 		if (sprite) console.warn(JSON.stringify({ event: "pim.sprite_forgotten", owner: this.name, sprite }));
+		console.log(JSON.stringify({ event: "pim.do_start", owner: this.name, ms: Date.now() - started, watches }));
 	}
 
 	/**
@@ -4902,8 +4964,38 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#closed()) throw new HttpError(410, "This space was erased");
 	}
 
-	/** Every request comes through the Worker, which names the owner it resolved: it must be this space's. */
+	/**
+	 * Every request comes through the Worker, which names the owner it
+	 * resolved: it must be this space's. One slower than `SLOW_REQUEST_MS` is
+	 * logged when it passes that, in case it never ends, and when it ends.
+	 */
 	override async fetch(request: Request): Promise<Response> {
+		const started = Date.now();
+		const slow = (fields: Record<string, unknown>) =>
+			console.warn(JSON.stringify({ event: "pim.slow_request", owner: this.name, method: request.method, path: this.#routeOf(request.url), ...fields }));
+		const timer = setTimeout(() => slow({ ms: Date.now() - started, status: null }), SLOW_REQUEST_MS);
+		let status: number | "error" = "error";
+		try {
+			const response = await this.#fetch(request);
+			status = response.status;
+			return response;
+		} finally {
+			clearTimeout(timer);
+			const ms = Date.now() - started;
+			if (ms > SLOW_REQUEST_MS) slow({ ms, status });
+		}
+	}
+
+	/** A request's route, as logs name it: its pattern, or its first segment where no route of the space's own answers it. */
+	#routeOf(url: string): string {
+		const path = new URL(url).pathname;
+		const route = routeOf(this.#routes, path) ?? routeOf(this.#triggerRoutes, path);
+		if (route) return route;
+		const [first, ...rest] = path.split("/").filter(Boolean);
+		return `/${first ?? ""}${rest.length > 0 ? "/…" : ""}`;
+	}
+
+	async #fetch(request: Request): Promise<Response> {
 		if (request.headers.get(OWNER_HEADER) !== this.name) {
 			console.error(JSON.stringify({ event: "pim.misrouted", agent: this.name }));
 			return Response.json({ error: "This request is not for this space" }, { status: 421 });
@@ -8063,18 +8155,31 @@ export class Pim extends DurableAgent<Env> {
 	 * what the socket followed. A socket can switch quickly, as someone flips
 	 * through chats: only its latest request is kept.
 	 */
-	async #watch(connection: Connection<SocketState>, which: string | Promise<string>): Promise<void> {
+	async #watch(connection: Connection<SocketState>, which: string | Promise<string>, failure = "watch failed"): Promise<void> {
 		const request = {};
 		this.#watchRequests.set(connection.id, request);
 		const session = await which;
-		await this.#unwatch(connection.id);
-		const stream = await this.harness.session(session).events();
+		let stream: AgentEventStream;
+		try {
+			await this.#unwatch(connection.id);
+			stream = await this.harness.session(session).events();
+		} catch (error) {
+			// The socket follows nothing now: waiting for events that never come, the app would show the chat as it was.
+			if (this.#watchRequests.get(connection.id) === request) this.#watchLost(connection, failure, error);
+			throw error;
+		}
 		if (this.#watchRequests.get(connection.id) !== request) {
 			await stream.stop();
 			return;
 		}
 		connection.setState({ session });
 		this.#watches.set(connection.id, stream);
+		// A watch that ends but not by `#unwatch` (the chat's session closed, or the listener failed) leaves the socket following nothing too.
+		void stream.closed.then((end) => {
+			if (this.#watches.get(connection.id) !== stream) return;
+			this.#watches.delete(connection.id);
+			this.#watchLost(connection, "watch ended", end.reason === "listener_error" ? end.error : end.reason);
+		});
 		const id = this.store.publicId(session);
 		this.#send(connection, { type: "events", session: id, events: [stream.snapshot] });
 		stream.start(async (events) => {
@@ -8092,6 +8197,17 @@ export class Pim extends DurableAgent<Env> {
 			}
 			this.#send(connection, { type: "events", session: id, events });
 		});
+	}
+
+	/** Closes a socket whose watch failed or ended, so the app connects again and resyncs. */
+	#watchLost(connection: Connection<SocketState>, reason: string, cause: unknown): void {
+		console.warn(JSON.stringify({ event: "pim.watch_lost", owner: this.name, reason, cause: errorMessage(cause).slice(0, 500) }));
+		this.#watchRequests.delete(connection.id);
+		try {
+			connection.close(WATCH_LOST, reason);
+		} catch {
+			// Closed already.
+		}
 	}
 
 	async #unwatch(connectionId: string): Promise<void> {

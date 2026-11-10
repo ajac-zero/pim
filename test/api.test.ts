@@ -921,3 +921,91 @@ describe("conversation", () => {
 	});
 
 });
+
+describe("a slow or restarted space", () => {
+	/** The structured lines the space logged with `method`, of one event. */
+	const logged = (spy: { mock: { calls: unknown[][] } }, event: string) =>
+		spy.mock.calls.flatMap(([line]) => (typeof line === "string" && line.startsWith("{") ? [JSON.parse(line)] : [])).filter((line) => line.event === event);
+
+	it("answers while the gallery is stuck, with what it read before, reading it once", async () => {
+		const before = (await api("/builtin-apps")).body;
+		const warn = vi.spyOn(console, "warn");
+		try {
+			// The gallery answers nothing for 6 s, as a busy or stuck Durable Object would.
+			let stuck = false;
+			const unstuck = runInDurableObject(env.Gallery.getByName("gallery"), (_gallery, state) => {
+				stuck = true;
+				return state.blockConcurrencyWhile(() => new Promise((resolve) => setTimeout(resolve, 6_000)));
+			});
+			await vi.waitFor(() => expect(stuck).toBe(true));
+			// Each request reads it again; none waits more than the 2 s bound, and after the first, none waits at all.
+			const waited: number[] = [];
+			for (let request = 0; request < 3; request++) {
+				const started = Date.now();
+				const { status, body } = await api("/builtin-apps");
+				waited.push(Date.now() - started);
+				expect(status).toBe(200);
+				expect(body).toEqual(before);
+			}
+			expect(waited[0]).toBeGreaterThanOrEqual(1_900);
+			expect(Math.max(...waited)).toBeLessThan(3_000);
+			expect(waited[1]! + waited[2]!).toBeLessThan(1_000);
+			expect(logged(warn, "pim.slow_refresh")).toEqual([{ event: "pim.slow_refresh", owner: OWNER, ms: 2_000, done: false }]);
+			// The one read in flight ends once the gallery answers; the requests made no others meanwhile.
+			await unstuck;
+			await vi.waitFor(() => expect(logged(warn, "pim.slow_refresh").filter((line) => line.done)).toHaveLength(1), { timeout: 8_000 });
+			expect(logged(warn, "pim.slow_refresh").find((line) => line.done).ms).toBeGreaterThan(2_000);
+			expect((await api("/builtin-apps")).body).toEqual(before);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("logs a request that takes more than 5 s, by its route, as it passes 5 s and as it ends", async () => {
+		const { body: created } = await post("/sessions");
+		const warn = vi.spyOn(console, "warn");
+		try {
+			faux.setResponses([
+				async () => {
+					await new Promise((resolve) => setTimeout(resolve, 5_500));
+					return toolUse("send_to_user", { message: "Slowly." });
+				},
+			]);
+			await say("Take your time.", created.id);
+			const slow = logged(warn, "pim.slow_request");
+			expect(slow).toEqual([
+				{ event: "pim.slow_request", owner: OWNER, method: "POST", path: "/sessions/:session/messages", ms: expect.any(Number), status: null },
+				{ event: "pim.slow_request", owner: OWNER, method: "POST", path: "/sessions/:session/messages", ms: expect.any(Number), status: 200 },
+			]);
+			expect(slow[1].ms).toBeGreaterThan(5_000);
+			// Quick requests aren't logged.
+			await api("/sessions");
+			expect(logged(warn, "pim.slow_request")).toHaveLength(2);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("closes a socket whose watch can't be restored as the space starts, so the app connects again", async () => {
+		const { body: created } = await post("/sessions");
+		const { socket, received } = await connect(created.id);
+		await vi.waitFor(() => expect(received.some((message) => message.type === "events")).toBe(true));
+		const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
+		const log = vi.spyOn(console, "log");
+		try {
+			await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
+				const session = instance.store.sessionOf(created.id);
+				// The socket follows a chat whose events can't be read: its watch fails as the space starts again.
+				for (const connection of instance.getConnections<{ session: string }>()) {
+					if (connection.state?.session === session) connection.setState({ session: "999999" });
+				}
+				await instance.onStart();
+			});
+			expect(await closed).toMatchObject({ code: 4010, reason: "watch restore failed" });
+			expect(logged(log, "pim.do_start")).toEqual([{ event: "pim.do_start", owner: OWNER, ms: expect.any(Number), watches: expect.any(Number) }]);
+			expect(logged(log, "pim.do_start")[0].watches).toBeGreaterThanOrEqual(1);
+		} finally {
+			log.mockRestore();
+		}
+	});
+});

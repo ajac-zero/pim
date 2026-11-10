@@ -14,7 +14,7 @@ import {
 	waitForHostOp,
 } from "../src/hostops";
 import type { Pim } from "../src/pim";
-import { api, OWNER, post, ROOT, signedIn, systemPrompt, TOKEN, toolUse, url } from "./helpers";
+import { api, OWNER, pendingApproval, post, ROOT, say, signedIn, systemPrompt, TOKEN, toolUse, url } from "./helpers";
 import { faux } from "./worker";
 
 const MINUTE = 60_000;
@@ -509,7 +509,7 @@ describe("the audit log", () => {
 });
 
 describe("the majordomo's host operation tools", () => {
-	const HOSTOPS_TOOLS = ["hostops_stats", "hostops_deploy", "hostops_rollback", "hostops_restart", "hostops_logs", "hostops_set_slot_limit", "hostops_status", "hostops_op"];
+	const HOSTOPS_TOOLS = ["hostops_stats", "hostops_deploy", "hostops_rollback", "hostops_restart", "hostops_logs", "hostops_set_slot_limit", "hostops_status", "hostops_op", "hostops_exec"];
 	let offered: string[] = [];
 	let prompt = "";
 	let told = "";
@@ -623,5 +623,174 @@ describe("the majordomo's host operation tools", () => {
 		await sayAs(TOKEN, ROOT, "How did it go?");
 		expect(JSON.parse(told)).toMatchObject({ id, op: "deploy", state: "rolled_back", summary: "health check failed; back on abc1234", data: { from: "abc1234" } });
 		expect(JSON.parse(told).note).toBeUndefined();
+	});
+});
+
+describe("hostops_exec", () => {
+	const COMMAND = "df -h /; echo 'done'";
+	let daemon = "";
+	/** What the model was told by the last tool result. */
+	let told = "";
+	const note = (context: { messages: Message[] }) => {
+		const result = context.messages.findLast((message) => message.role === "toolResult");
+		told = result?.role === "toolResult" && result.content[0]?.type === "text" ? result.content[0].text : "";
+		return toolUse("send_to_user", { message: "ok" });
+	};
+
+	beforeAll(async () => {
+		daemon = "";
+	});
+	beforeEach(async () => {
+		daemon = (await call("/hostops/credential", { method: "POST", cookie })).body.token as string;
+	});
+
+	/** The majordomo asks to run `args`; resolves with its approval, once filed, and the turn that waits for the decision. */
+	async function ask(args: Record<string, unknown>) {
+		faux.setResponses([toolUse("hostops_exec", args as never), note]);
+		const turn = say("Run it", ROOT);
+		return { approval: await pendingApproval(), turn };
+	}
+	/** Approves, lets the daemon take the command and report `result`, and returns the operation and the turn's end. */
+	async function approveAndRun(approval: { id: string }, turn: Promise<unknown>, result: Record<string, unknown>) {
+		const approving = post(`/approvals/${approval.id}/approve`);
+		const polled = await poll(daemon, 10_000);
+		const id = polled.body.op.id as string;
+		await report(daemon, { id, ...result });
+		expect((await approving).status).toBe(200);
+		await turn;
+		return { op: polled.body.op, id };
+	}
+	const exit3 = { ok: false, state: "failed", summary: "Exited with 3 in 0.2 s.", data: { command: COMMAND, exitCode: 3, signal: null, timedOut: false, durationMs: 210, output: "Filesystem\nno such file\n", truncated: false, outputBytes: 25 } };
+
+	it("asks the person on every call, with the exact command, and queues nothing until they approve", async () => {
+		const { approval, turn } = await ask({ command: COMMAND });
+		expect(approval).toMatchObject({
+			action: "hostops_exec",
+			tool: null,
+			expiresAt: null,
+			onTimeout: "deny",
+			summary: `Run on the host as the unprivileged hostopsd user: ${COMMAND}`,
+			args: { command: COMMAND, timeoutSeconds: 60, maxOutputBytes: 65536 },
+		});
+		expect((await call("/hostops/status", { cookie })).body.queue).toEqual({ queued: 0, running: 0 });
+		// No always-approve, no permission that skips asking, and no timeout that approves.
+		expect((await post(`/approvals/${approval.id}/approve`, { always: true })).status).toBe(400);
+		expect((await api("/permissions", { method: "PUT", body: JSON.stringify({ tool: "hostops_exec", permission: "on" }) })).status).toBe(400);
+		expect((await api("/permissions")).body.tools.find((info: { tool: string }) => info.tool === "hostops_exec")).toMatchObject({ permission: "ask", choices: ["off", "ask"] });
+
+		expect((await post(`/approvals/${approval.id}/deny`)).status).toBe(200);
+		await turn;
+		expect(told).toContain("denied");
+		expect((await call("/hostops/status", { cookie })).body.queue).toEqual({ queued: 0, running: 0 });
+		expect((await auditLog()).filter((row) => row.action === "enqueue")).toEqual([]);
+
+		// The next call asks again.
+		const again = await ask({ command: "uptime" });
+		expect(again.approval.id).not.toBe(approval.id);
+		await post(`/approvals/${again.approval.id}/deny`);
+		await again.turn;
+	});
+
+	it("runs the approved command through the daemon, which is told nothing of the approval, and audits it with the approver, exit code, duration and output", async () => {
+		const { approval, turn } = await ask({ command: COMMAND, timeoutSeconds: 20, maxOutputBytes: 4096 });
+		const { op, id } = await approveAndRun(approval, turn, {
+			...exit3,
+			data: { ...exit3.data, output: `Authorization: Bearer abcdef123456.ghijkl-7890\n${"z".repeat(5000)}\nlast line`, truncated: true },
+		});
+		expect(op).toMatchObject({ name: "exec", args: { command: COMMAND, timeoutSeconds: 20, maxOutputBytes: 4096 }, deadlineMs: 50_000 });
+		expect(Object.keys(op.args).sort()).toEqual(["command", "maxOutputBytes", "timeoutSeconds"]);
+		// The model reads the result: failed, with its exit code and output.
+		expect(told).toContain("The user approved");
+		expect(JSON.parse(told.split("Result:\n")[1]!)).toMatchObject({ id, op: "exec", state: "failed", summary: "Exited with 3 in 0.2 s.", data: { exitCode: 3, truncated: true } });
+		const result = (await auditLog()).find((row) => row.action === "result")!;
+		expect(result).toMatchObject({ actorKind: "hostd", opId: id, outcome: "failed" });
+		expect(result.args).toMatchObject({ command: COMMAND, approver: expect.stringContaining(`${OWNER} (approval ${approval.id}, `), exitCode: 3, timedOut: false, durationMs: 210, truncated: true });
+		// The output in the audit log is redacted and capped at 3000 characters, keeping the end.
+		expect(result.args.output).not.toContain("abcdef123456");
+		expect(result.args.output).toHaveLength(3001);
+		expect(result.args.output.endsWith("last line")).toBe(true);
+		const queued = (await auditLog()).find((row) => row.action === "enqueue" && row.opId === id)!;
+		expect(queued).toMatchObject({ actorKind: "agent", outcome: "queued", args: { op: "exec", args: { command: COMMAND, approval: approval.id } } });
+	});
+
+	it("fails a command the daemon does not report within its timeout and a little more", async () => {
+		const { approval, turn } = await ask({ command: "sleep 100", timeoutSeconds: 5 });
+		const approving = post(`/approvals/${approval.id}/approve`);
+		const polled = await poll(daemon, 10_000);
+		expect(polled.body.op.deadlineMs).toBe(35_000);
+		const id = polled.body.op.id as string;
+		await age(id, 36_000);
+		expect(await getHostOp(env, id)).toMatchObject({ state: "failed", summary: "timed out" });
+		await approving;
+		await turn;
+	});
+
+	it("runs a command once per approval, and only exactly the one approved", async () => {
+		const { approval, turn } = await ask({ command: COMMAND });
+		const { id } = await approveAndRun(approval, turn, { ok: true, state: "succeeded", summary: "Exited with 0 in 0.1 s.", data: { exitCode: 0, output: "" } });
+		const args = { command: COMMAND, timeoutSeconds: 60, maxOutputBytes: 65536, approval: approval.id };
+		const refused = (extra: Record<string, unknown>) => enqueueHostOp(env, majordomo, "exec", { ...args, ...extra }).then(() => 201, (error) => [error.status, error.message]);
+		expect(await refused({})).toEqual([409, expect.stringContaining("already ran")]);
+		expect(await refused({ command: "rm -rf /" })).toEqual([403, expect.stringContaining("exactly it")]);
+		expect(await refused({ timeoutSeconds: 300 })).toEqual([403, expect.stringContaining("exactly it")]);
+		expect(await refused({ approval: "no-such-approval" })).toEqual([403, expect.stringContaining("exactly it")]);
+		// An approval for anything else is no approval for a command.
+		const other = (await api<{ approvals: { id: string; action: string }[] }>("/approvals")).body.approvals.find((candidate) => candidate.action !== "hostops_exec");
+		if (other) expect(await refused({ approval: other.id })).toEqual([403, expect.stringContaining("exactly it")]);
+		expect((await getHostOp(env, id))!.args).toMatchObject({ approval: approval.id });
+		expect((await call("/hostops/status", { cookie })).body.queue).toEqual({ queued: 0, running: 0 });
+	});
+
+	it("checks the command's arguments before anyone is asked, or anything is queued", async () => {
+		const approval = "a1";
+		const cases: Record<string, unknown>[] = [
+			{},
+			{ command: "" },
+			{ command: "   " },
+			{ command: "id\0; true" },
+			{ command: "x".repeat(2001) },
+			{ command: "id", timeoutSeconds: 301 },
+			{ command: "id", timeoutSeconds: 0 },
+			{ command: "id", timeoutSeconds: "5" },
+			{ command: "id", maxOutputBytes: 65537 },
+			{ command: "id", maxOutputBytes: 0 },
+			{ command: "id", sudo: true },
+			{ command: "id", user: "root" },
+			{ command: "id", stdin: "x" },
+		];
+		for (const args of cases) {
+			expect(await enqueueHostOp(env, majordomo, "exec", { approval, ...args }).then(() => 201, (error) => error.status), JSON.stringify(args)).toBe(400);
+		}
+		expect(await enqueueHostOp(env, majordomo, "exec", { command: "id" }).then(() => 201, (error) => error.status)).toBe(400);
+		expect((await auditLog(100)).filter((row) => row.outcome === "invalid")).toHaveLength(cases.length + 1);
+		// The model's own call is refused the same way, with nothing filed: by the tool's schema, or by the checks.
+		faux.setResponses([toolUse("hostops_exec", { command: "id", timeoutSeconds: 301 }), note]);
+		await say("Run it", ROOT);
+		expect(told).toContain("timeoutSeconds");
+		faux.setResponses([toolUse("hostops_exec", { command: "   " }), note]);
+		await say("Run it", ROOT);
+		expect(JSON.parse(told)).toMatchObject({ status: 400 });
+		expect((await api("/approvals?status=pending")).body.approvals).toEqual([]);
+	});
+
+	it("is refused, audited and never put to the person for any agent but the admin's majordomo", async () => {
+		const helper = (await post("/agents", { name: "Exec helper", instructions: "Helps." })).body.id as string;
+		const chat = (await post("/sessions", { agent: helper })).body.id as string;
+		const outcome = await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			const session = pim.store.sessionOf(chat)!;
+			const action = pim.abilities.get("hostops")!.actions!.find((candidate) => candidate.name === "hostops_exec")!;
+			expect(action.explicitApproval).toBe(true);
+			return action.prepare!({ command: "id" } as never, { session });
+		});
+		expect(outcome).toEqual({ refused: JSON.stringify({ error: "Only the admin's majordomo can run operations on this Pim's host.", status: 403 }) });
+		const refused = await enqueueHostOp(env, { kind: "agent", accountId: OWNER, agentId: helper, chatId: chat }, "exec", { command: "id", approval: "a1" }).then(() => 201, (error) => error.status);
+		expect(refused).toBe(403);
+		for (const other of [{ kind: "session", accountId: OWNER }, { kind: "token", accountId: OWNER }, { kind: "anonymous" }] as const) {
+			expect(await enqueueHostOp(env, other, "exec", { command: "id", approval: "a1" }).then(() => 201, (error) => error.status)).toBe(other.kind === "anonymous" ? 401 : 403);
+		}
+		// Not over the API either: the admin's own token and session are refused.
+		expect((await call("/hostops/ops", { method: "POST", cookie, body: { op: "exec", args: { command: "id", approval: "a1" } } })).status).toBe(403);
+		expect((await call("/hostops/ops", { method: "POST", token: TOKEN, body: { op: "exec", args: { command: "id", approval: "a1" } } })).status).toBe(403);
+		expect((await call("/hostops/status", { cookie })).body.queue).toEqual({ queued: 0, running: 0 });
 	});
 });

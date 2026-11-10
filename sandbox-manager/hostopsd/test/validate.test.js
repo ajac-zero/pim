@@ -80,3 +80,18 @@ test('deadlineMs is passed through when it is a number', () => {
 	assert.equal(v('stats', {}, { deadlineMs: 123 }).op.deadlineMs, 123)
 	assert.equal(v('stats', {}, { deadlineMs: 'soon' }).op.deadlineMs, null)
 })
+
+test('exec takes a command, a timeout of 1 to 300 seconds (60) and an output cap up to 64 KB, and nothing else', () => {
+	ok('exec', { command: 'id' }, { command: 'id', timeoutSeconds: 60, maxOutputBytes: 65536 })
+	ok('exec', { command: 'a; b | c', timeoutSeconds: 300, maxOutputBytes: 1 }, { command: 'a; b | c', timeoutSeconds: 300, maxOutputBytes: 1 })
+	bad('exec', {}, /needs command/)
+	bad('exec', { command: '' }, /command/)
+	bad('exec', { command: 'a\0b' }, /command/)
+	bad('exec', { command: 'x'.repeat(2001) }, /command/)
+	bad('exec', { command: 'id', timeoutSeconds: 301 }, /timeoutSeconds/)
+	bad('exec', { command: 'id', timeoutSeconds: 0 }, /timeoutSeconds/)
+	bad('exec', { command: 'id', timeoutSeconds: 1.5 }, /timeoutSeconds/)
+	bad('exec', { command: 'id', maxOutputBytes: 65537 }, /maxOutputBytes/)
+	bad('exec', { command: 'id', sudo: true }, /takes no argument "sudo"/)
+	bad('exec', { command: 'id', approval: 'a1' }, /takes no argument "approval"/)
+})

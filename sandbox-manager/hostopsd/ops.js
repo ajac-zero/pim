@@ -25,11 +25,26 @@ function bootId() {
 	}
 }
 
+// Credentials with a recognizable shape, which the generic runs below would miss when short: vendor
+// key prefixes, JWTs, private key blocks, hostopsd's own credentials, and the value of an assignment
+// to a variable named like a secret (TOKEN=..., "password": "...", api_key: ...).
+const KEY_LIKE = [
+	/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,8000}?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+	/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g,
+	/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g,
+	/\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+	/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+	/\bpimhostops_[A-Za-z0-9_-]+/g,
+	/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g,
+	/((?:token|secret|passw(?:or)?d|api[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]{0,40})["']?\s*[=:]\s*(?!\[redacted\])(?:"[^"\n]*"|'[^'\n]*'|[^\s"',;]+)/gi,
+]
+
 // Log output and command errors can carry credentials. Known secret values are replaced wherever
 // they appear; in command output, so are bearer tokens and long runs of hex or base64.
 export function redact(text, secrets = []) {
 	let s = scrub(String(text), secrets)
 	s = s.replace(/Bearer\s+[^\s"',;]+/gi, 'Bearer [redacted]')
+	for (const pattern of KEY_LIKE) s = s.replace(pattern, (_, name) => (typeof name === 'string' ? `${name}=[redacted]` : '[redacted]'))
 	s = s.replace(/[0-9a-fA-F]{32,}/g, '[redacted]')
 	// Base64 (and base64url) runs of 32 or more characters. A path or a hyphenated name such as
 	// "sandbox-manager-docker-socket-proxy-1" is also made of these characters; a token differs in
@@ -202,6 +217,8 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 		return { id, ok: st === 'succeeded', state: st, summary: text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text, data: fitData(scrubDeep(data, cfg.secrets)) }
 	}
 	const fail = (op, summary, data) => ({ result: done(op.id, 'failed', summary, data) })
+	// What the exec operation's command runs with: no credential of hostopsd's, nor the manager's environment.
+	const execEnv = { PATH: cfg.path, HOME: cfg.home, LANG: 'C.UTF-8' }
 
 	function deployBlocked() {
 		const d = state.deploy
@@ -339,6 +356,39 @@ export function createOps(cfg, { state, save, log = () => {} }) {
 			if (truncated) text = Buffer.from(text).subarray(-LOG_TEXT_MAX).toString('utf8').replace(/^[^\n]*\n/, '')
 			const count = text.split('\n').filter(Boolean).length
 			return { result: done(op.id, 'succeeded', `${count} lines of ${service} logs${truncated ? ' (cut to the last 60 KB)' : ''}.`, { service, lines, text, truncated }) }
+		},
+
+		// Runs one command for the admin's majordomo, whom the admin approved for this call in Pim, as
+		// the unprivileged hostopsd user: this daemon never runs as root and never uses sudo. The shell
+		// is non-interactive, with no stdin and no terminal; the timeout kills its whole process group.
+		// The output (stdout and stderr together) is redacted first, then cut to its last maxOutputBytes.
+		async exec(op) {
+			const { command, timeoutSeconds, maxOutputBytes } = op.args
+			const started = Date.now()
+			// `exec 2>&1` makes stderr share stdout's pipe, so the output is in the order the command wrote it.
+			const r = await run('/bin/sh', ['-c', `exec 2>&1\n${command}`], { cwd: cfg.home, env: execEnv, timeoutMs: timeoutSeconds * 1000, reap: true })
+			const durationMs = Date.now() - started
+			const bytes = Buffer.from(redact(r.stdout + r.stderr, cfg.secrets))
+			const capped = bytes.length > maxOutputBytes
+			const output = (capped ? bytes.subarray(-maxOutputBytes) : bytes).toString('utf8').replace(/^\uFFFD+/, '')
+			const took = `${(durationMs / 1000).toFixed(1)} s`
+			const ended = r.timedOut
+				? `Timed out after ${timeoutSeconds} s and was killed with its process group`
+				: r.code === null
+					? `Was killed by ${r.signal} after ${took}`
+					: `Exited with ${r.code} in ${took}`
+			const data = {
+				command: redact(command, cfg.secrets),
+				exitCode: r.code,
+				signal: r.signal ?? null,
+				timedOut: r.timedOut,
+				durationMs,
+				output,
+				truncated: capped || r.droppedBytes > 0,
+				outputBytes: r.outputBytes,
+			}
+			const ok = r.code === 0 && !r.timedOut
+			return { result: done(op.id, ok ? 'succeeded' : 'failed', `${ended}${data.truncated ? '; the output was cut to its last part' : ''}.`, data) }
 		},
 
 		async set_slot_limit(op) {

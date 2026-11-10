@@ -1,8 +1,19 @@
 import { env } from "cloudflare:workers";
 import { type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineTool, section } from "@earendil-works/pi-durable";
-import { enqueueHostOp, HOST_SERVICES, type HostOpName, type HostOpView, hostOpsStatus, readHostOp, waitForHostOp } from "../hostops";
+import {
+	assertHostOpsCaller,
+	checkExecArgs,
+	enqueueHostOp,
+	HOST_SERVICES,
+	type HostOpName,
+	type HostOpView,
+	hostOpsStatus,
+	readHostOp,
+	waitForHostOp,
+} from "../hostops";
 import { HttpError } from "../http";
+import { defineGatedAction } from "./approvals";
 import { definePimExtension } from "./define";
 import { json, text } from "./services";
 
@@ -12,7 +23,9 @@ import { json, text } from "./services";
  * operations and wait for the result, and a prompt section saying what they
  * do. They aren't actions that ask first, so they run overnight too: the
  * allowlist of operations and their arguments, the audit log, and the daemon
- * rolling back a deploy that fails are what keep them safe.
+ * rolling back a deploy that fails are what keep them safe. The one exception
+ * is `hostops_exec`, which runs any command: it is a risky action that asks the
+ * person, with the command in the request, on every call.
  *
  * Only the majordomo of the admin's space is offered them. That only keeps
  * them out of other agents' prompts: the HostOps Durable Object checks every
@@ -40,11 +53,14 @@ function brief(op: HostOpView) {
 	};
 }
 
-/** An operation as a tool's answer: what came of it, or, while it still runs, its id to follow it with. */
-function result(op: HostOpView) {
-	if (FINISHED.includes(op.state)) return json(brief(op));
-	return json({ ...brief(op), note: `Still ${op.state}. Follow it with hostops_op and id ${op.id}.` });
+/** What came of an operation, or, while it still runs, its id to follow it with. */
+function outcome(op: HostOpView) {
+	if (FINISHED.includes(op.state)) return brief(op);
+	return { ...brief(op), note: `Still ${op.state}. Follow it with hostops_op and id ${op.id}.` };
 }
+
+/** An operation as a tool's answer. */
+const result = (op: HostOpView) => json(outcome(op));
 
 /** A refusal or a bad argument, as a tool error the model can act on. */
 async function answer(work: () => Promise<ReturnType<typeof text>>) {
@@ -70,7 +86,8 @@ const PROMPT = `You run this Pim's host for the person, who is its admin, throug
 - hostops_rollback: go back to an earlier commit.
 - hostops_status: whether the daemon is connected, its version, and what waits in its queue.
 - hostops_op: an operation by its id, once it finishes.
-The services are ${HOST_SERVICES.join(", ")}. One deploy or rollback runs at a time. Nothing else runs on the host: there is no shell. These run without asking, so run only what the person asked for, or what a schedule they set says to; every call is in the audit log they read in Settings → Deployment. If the daemon hasn't been seen, operations wait and expire after 10 minutes: tell them to install it from there. Report each result briefly: what ran, how it ended, and anything they need to do.`;
+- hostops_exec: one shell command, run as the daemon's unprivileged user. It asks the person to approve every call, showing them the command, so give the exact command and say why in your message. No root or sudo, no stdin or terminal: one non-interactive command, killed after its timeout (60 seconds unless given, 300 at most), and its output (stdout and stderr together, secrets taken out) cut to its last part, flagged as truncated. Prefer the fixed operations above where one does the job.
+The services are ${HOST_SERVICES.join(", ")}. One deploy or rollback runs at a time. Apart from hostops_exec, nothing else runs on the host: there is no shell. The others run without asking, so run only what the person asked for, or what a schedule they set says to; every call is in the audit log they read in Settings → Deployment, hostops_exec's with the command, who approved it and its output. If the daemon hasn't been seen, operations wait and expire after 10 minutes: tell them to install it from there. Report each result briefly: what ran, how it ended, and anything they need to do.`;
 
 /**
  * The extension, waiting `waitMs` for an operation before answering with it
@@ -102,6 +119,39 @@ export function hostOpsExtension({ waitMs = HOSTOPS_WAIT_MS }: { waitMs?: number
 				});
 			return {
 				offeredTo: (agent) => context.admin && agent.majordomo,
+				actions: [
+					defineGatedAction({
+						name: "hostops_exec",
+						description:
+							"Run one shell command on the host, as the host daemon's unprivileged user (never root, no sudo), and get its exit code and its output (stdout and stderr together, with secrets taken out and cut to its last part). One non-interactive command: no stdin, no terminal, killed with its process group after timeoutSeconds. Prefer the other hostops tools where one does the job.",
+						parameters: Type.Object({
+							command: Type.String({ minLength: 1, maxLength: 2000, description: "The command, run with /bin/sh -c. The person reads it exactly as you give it." }),
+							timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 300, description: "How long it may run, 60 unless given, 300 at most." })),
+							maxOutputBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 65536, description: "How much of the end of its output to keep, 65536 (the most) unless given." })),
+						}),
+						explicitApproval: true,
+						summarize: ({ command }) => `Run on the host as the unprivileged hostopsd user: ${command}`,
+						async prepare(args, { session }) {
+							try {
+								await assertHostOpsCaller(env, caller(session));
+								const checked = checkExecArgs(args);
+								return { args: checked, summary: `Run on the host as the unprivileged hostopsd user: ${checked.command}` };
+							} catch (error) {
+								if (error instanceof HttpError) return { refused: JSON.stringify({ error: error.message, status: error.status }) };
+								throw error;
+							}
+						},
+						async run(args, { session, approval }) {
+							try {
+								const queued = await enqueueHostOp(env, caller(session), "exec", { ...args, approval });
+								return JSON.stringify(outcome((await waitForHostOp(env, queued.id, waitMs)) ?? queued));
+							} catch (error) {
+								if (error instanceof HttpError) return JSON.stringify({ error: error.message, status: error.status });
+								throw error;
+							}
+						},
+					}),
+				],
 				sections: [
 					section("host_operations", ({ conversationId }) =>
 						context.admin && conversationOf(String(conversationId)).agent.majordomo ? PROMPT : undefined,

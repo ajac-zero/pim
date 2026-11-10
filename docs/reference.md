@@ -464,6 +464,8 @@ Connect to `wss://<host>/api/ws?session=<id>` (add `&token=...` without a passke
   - `result` and `error`: replies to commands that carried an `id`.
 - Client → server: `submit`, `abort`, `reset`, `resync`, `follow`, `snapshot`.
 
+A socket whose session's events stop coming (its watch couldn't be set up, couldn't be restored as the space started again, or ended) closes with `4010`: connect again to get a fresh snapshot.
+
 To fold events into a chat view, see the reducer in Cloudflare's [pi harness example](https://github.com/cloudflare/agents/tree/main/examples/next/harnesses/pi/src/view.ts).
 
 ## Memory

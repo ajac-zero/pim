@@ -38,18 +38,8 @@ export async function dispatch(routes: readonly Route[], request: Request, path:
 	const segments = path.split("/").filter(Boolean).map(decodeURIComponent);
 	let pathMatched = false;
 	for (const [method, pattern, handler] of routes) {
-		const parts = pattern.split("/").filter(Boolean);
-		if (parts.length !== segments.length) continue;
-		const params: Record<string, string> = {};
-		const matches = parts.every((part, index) => {
-			const segment = segments[index]!;
-			if (part.startsWith(":")) {
-				params[part.slice(1)] = segment;
-				return true;
-			}
-			return part === segment;
-		});
-		if (!matches) continue;
+		const params = match(pattern, segments);
+		if (!params) continue;
 		pathMatched = true;
 		if (method !== request.method) continue;
 		try {
@@ -62,4 +52,22 @@ export async function dispatch(routes: readonly Route[], request: Request, path:
 		}
 	}
 	return pathMatched ? json({ error: "Method not allowed" }, 405) : json({ error: "Not found" }, 404);
+}
+
+/** The params `segments` give `pattern`'s, or null when they don't match it. */
+function match(pattern: string, segments: readonly string[]): Record<string, string> | null {
+	const parts = pattern.split("/").filter(Boolean);
+	if (parts.length !== segments.length) return null;
+	const params: Record<string, string> = {};
+	for (const [index, part] of parts.entries()) {
+		if (part.startsWith(":")) params[part.slice(1)] = segments[index]!;
+		else if (part !== segments[index]) return null;
+	}
+	return params;
+}
+
+/** The pattern of the route `path` is for, such as `/sessions/:session/messages`: the path without what it names, for logs. */
+export function routeOf(routes: readonly Route[], path: string): string | undefined {
+	const segments = path.split("/").filter(Boolean);
+	return routes.find(([, pattern]) => match(pattern, segments) !== null)?.[1];
 }

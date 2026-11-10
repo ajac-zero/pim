@@ -1424,8 +1424,10 @@ describe("a Claude Code thread", () => {
 			return { manager, creates, deletes };
 		}
 
+		const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
 		/** Runs `what` in the thread's object, as what a workspace does reaches the thread from its own requests: a stream the object reads may only be moved on from there. */
 		const within = (stub: Stub, what: () => unknown) => inside(stub, async () => void (await what()));
+		const kinds = async (stub: Stub) => (await stub.log()).map((event) => event.kind);
 		const SESSION_FILE = `/workspace/.claude/projects/repo/${CLAUDE_SESSION}.jsonl`;
 
 		/** A run that writes half its work, then works on until `release` is called: when its container dies, or when the test lets it finish with `then`. */
@@ -1447,7 +1449,7 @@ describe("a Claude Code thread", () => {
 		});
 
 		afterEach(() => {
-			Object.assign(codingTimings, { stallMs: 300, lostGraceMs: 1_000 });
+			Object.assign(codingTimings, { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000 });
 		});
 
 		it("makes the workspace again from its kept volume when its container dies mid-turn, and resumes the CLI's session there", async () => {
@@ -1519,6 +1521,86 @@ describe("a Claude Code thread", () => {
 			expect((await stub.log()).filter((event) => event.kind === "thread.resumed")).toHaveLength(3);
 		});
 
+		it("loses nothing when the manager restarts while the workspace lives on", async () => {
+			const { manager, creates, deletes } = compose();
+			const cut = halfway(() => ({ stdout: claudeFixture("turn") }));
+			claude = async (context) => (runs.length === 1 ? { stdout: claudeFixture("turn") } : cut.command(context));
+			const warn = vi.spyOn(console, "warn");
+			const { id, stub } = await startClaude();
+			await turns(id, 1);
+			await stub.steer("Add a farewell too", { operationId: "steer-1" });
+			await cut.started();
+			codingTimings.autosaveMs = 0;
+			// For a moment nothing reaches the manager: the autosave the heartbeat starts fails, and waits to see whether the workspace answers again.
+			manager.outage.down = true;
+			setTimeout(() => {
+				manager.outage.down = false;
+			}, 300);
+			await heartbeat(stub);
+			await vi.waitFor(() => expect(warn.mock.calls.some((call) => String(call[0]).includes("pim.coding.autosave_failed"))).toBe(true), { timeout: 10_000, interval: 50 });
+			// It does, so the turn goes on in it, and its work is autosaved once the manager is back.
+			await vi.waitFor(
+				async () => {
+					await heartbeat(stub);
+					expect(await sql(stub, "SELECT commit_sha FROM coding_autosave")).toHaveLength(1);
+				},
+				{ timeout: 10_000, interval: 100 },
+			);
+			await within(stub, cut.run.release!);
+			const [, ended] = await turns(id, 2);
+			expect(ended).toMatchObject({ outcome: "completed", operationId: "steer-1" });
+			expect(await kinds(stub)).not.toEqual(expect.arrayContaining(["workspace.lost"]));
+			expect(await kinds(stub)).not.toEqual(expect.arrayContaining(["thread.resumed"]));
+			expect(runs).toHaveLength(2);
+			expect([creates(), deletes()]).toEqual([1, []]);
+			expect(await stub.status()).toMatchObject({ state: "idle", consecutiveInterrupts: 0 });
+			// The autosave is a commit the workspace keeps under a ref of Pim's, pushed nowhere, its checkout untouched.
+			const [info] = await manager.backing.list({ sessionId: id });
+			const workspace = (await manager.backing.get(info!.ref))!;
+			const saved = (await sql(stub, "SELECT commit_sha, bundle FROM coding_autosave"))[0]!;
+			expect(decoder.decode(await workspace.readFile(`${REPO_DIR}/.git/refs/pim/autosave`))).toBe(saved.commit_sha);
+			expect((saved.bundle as ArrayBuffer).byteLength).toBeGreaterThan(0);
+			warn.mockRestore();
+		});
+
+		it("starts again from the work it autosaved when the workspace's volume was lost with its host", async () => {
+			const { manager, creates } = compose();
+			const cut = halfway();
+			let restored: string | null = null;
+			claude = async (context) => {
+				if (runs.length === 1) return { stdout: claudeFixture("turn") };
+				if (runs.length === 2) return cut.command(context);
+				restored = decoder.decode(await context.workspace.readFile(`${context.cwd}/wip.txt`));
+				return { stdout: claudeFixture("turn") };
+			};
+			const { id, stub } = await startClaude();
+			await turns(id, 1);
+			await stub.steer("Add a farewell too", { operationId: "steer-1" });
+			await cut.started();
+			codingTimings.autosaveMs = 0;
+			await vi.waitFor(
+				async () => {
+					await heartbeat(stub);
+					expect(await sql(stub, "SELECT commit_sha FROM coding_autosave")).toHaveLength(1);
+				},
+				{ timeout: 10_000, interval: 100 },
+			);
+			// The host dies, and comes back without the workspace's volume.
+			await within(stub, () => manager.crash(id, { restart: true, volume: "lost" }));
+			await within(stub, cut.run.release!);
+			const [, ended] = await turns(id, 2);
+			expect(ended).toMatchObject({ outcome: "completed", operationId: "resume-1-steer-1" });
+			// A new workspace, cloned again, with the run's work put back from the autosave, uncommitted as it was.
+			expect(creates()).toBe(2);
+			expect(restored).toBe("half done\n");
+			expect((await stub.log()).find((event) => event.kind === "workspace.restored")?.data).toMatchObject({ from: "autosave" });
+			expect((await stub.diff()).diff).toContain("+half done");
+			// Claude Code's session went with the volume: the turn went on in a new one, told what it was doing.
+			expect(runs[2]!.argv).not.toContain("--resume");
+			expect(runs[2]!.argv).toContain("--session-id");
+			expect(runs[2]!.argv.at(-1)).toContain(LOST_RESUME_TEXT);
+			expect(runs[2]!.argv.at(-1)).toContain("The task you were given:\n\nFix the greeting test");
+		});
 	});
 
 	it("runs one of the person's threads at a time on their login: the next waits for the first to end", async () => {

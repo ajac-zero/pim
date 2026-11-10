@@ -145,7 +145,10 @@ import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
  * this object, Amp's on its servers). A CLI turn cut off that way ends
  * `workspace_lost` and goes on by itself in the new workspace, resuming the
  * CLI's session, a few times in a row at most; a pi turn goes on as it
- * was, its command reported lost.
+ * was, its command reported lost. While a turn runs, its work is autosaved
+ * every few minutes, without touching the checkout, as a commit the
+ * workspace keeps and a bundle this object keeps, so a workspace whose
+ * volume was lost too starts again from it.
  */
 export class CodingThreadDO extends DurableObject<Env> {
 	readonly store = new CodingThreadStore(
@@ -195,6 +198,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	readonly #lost = new WeakSet<Workspace>();
 	/** Checks under way of whether a workspace still answers, so calls that fail together wait for one. */
 	readonly #probing = new WeakMap<Workspace, Promise<boolean>>();
+	/** When the work in the workspace was last autosaved in this isolate, and the autosave under way. */
+	#autosavedAt = 0;
+	#autosaving: Promise<void> | null = null;
 
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
@@ -310,6 +316,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return LOST_GRACE_MS;
 	}
 
+	/** How often the work of a running turn is autosaved. */
+	protected autosaveMs(): number {
+		return AUTOSAVE_MS;
+	}
+
 	/** Who hears of what the thread does: the chat of the agent that started it, if one did (./supervisor.ts). */
 	protected eventSink(): CodingEventSink {
 		return supervisorSink(this.env);
@@ -401,6 +412,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// Bounded, as a job must be: work still going after this goes on outside it.
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
+		if (thread?.currentOperation && Date.now() - this.#autosavedAt >= this.autosaveMs()) void this.#autosave();
 		// A queued thread whose backend reports its health checks it again each time, so a queue held for low disk opens once there is room.
 		const busy =
 			thread !== null &&
@@ -1483,6 +1495,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ state: "running", stateReason: null, currentOperation: receipt.operationId, budgetStopped: false });
 			this.store.recordEvent("thread.turn_started", { operationId: receipt.operationId });
 		});
+		this.#autosavedAt = Date.now();
 		await this.#report("running");
 		this.#watch(receipt.operationId);
 	}
@@ -1545,9 +1558,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ state: "running", stateReason: null, stateDetail: null, currentOperation: operation, budgetStopped: false });
 			this.store.recordEvent("thread.turn_started", { operationId: operation });
 		});
+		this.#autosavedAt = Date.now();
 		const fresh = this.store.required();
 		const turn = {
-			prompt: input.text,
+			// A thread going on by itself in a new session, its last one lost with the workspace's volume, says what it was doing.
+			prompt: session === null && operation.startsWith(RESUME_PREFIX) ? await this.#lostSessionPrompt(input.text) : input.text,
 			sessionId,
 			resume: session !== null,
 			maxBudgetUsd: fresh.budgetUsd === null ? null : fresh.budgetUsd - fresh.spentUsd,
@@ -1725,6 +1740,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) }));
 			return null;
 		});
+		// The bundle kept of the work, so it outlives the workspace's volume.
+		if (checkpoint) await this.#autosave();
 		const thread = this.store.required();
 		if (thread.currentOperation !== operation) return;
 		const budget = thread.budgetStopped;
@@ -2083,7 +2100,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * workspace (or its kept volume) has it already. Until the thread first
 	 * checked out (`baseSha` is null), a workspace with a clone, such as one
 	 * restored from another thread's snapshot, fetches and checks out the
-	 * thread's branch over it.
+	 * thread's branch over it. A thread that had checked out before and finds
+	 * no clone lost its workspace's volume: it starts again from its base and
+	 * the work it last saved (`#restoreWork`).
 	 */
 	async #ensureRepository(workspace: Workspace, thread: CodingThreadRow): Promise<void> {
 		// Only a missing file means there is no clone: a workspace that doesn't answer throws.
@@ -2110,9 +2129,45 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (thread.baseRef !== "main") throw error;
 			await git(workspace, ["fetch", "origin", "HEAD"], fetchOptions);
 		}
+		if (!cloned && base !== null) return this.#restoreWork(workspace, thread, base);
 		await git(workspace, ["checkout", "-f", "-B", thread.branch, "FETCH_HEAD"]);
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
 		if (this.store.required().baseSha === null) this.store.update({ baseSha: sha });
+	}
+
+	/**
+	 * Puts the thread's work back in a new clone, after its workspace's volume
+	 * was lost: the branch as it was when last autosaved, its checkpoints
+	 * included, with the changes not committed then left uncommitted, from the
+	 * bundle this object keeps (`#autosave`); without one, the thread's base.
+	 * A CLI's session went with the volume, unless the CLI keeps its sessions
+	 * elsewhere, so the next turn starts a new one.
+	 */
+	async #restoreWork(workspace: Workspace, thread: CodingThreadRow, base: string): Promise<void> {
+		const saved = this.store.autosave();
+		let from: "autosave" | "base" = "base";
+		if (saved?.bundle) {
+			const file = `${WORKSPACE_ROOT}/.pim-autosave.bundle`;
+			try {
+				await workspace.writeFile(file, saved.bundle);
+				await git(workspace, ["fetch", file, `+${AUTOSAVE_REF}:${AUTOSAVE_REF}`]);
+				await git(workspace, ["checkout", "-f", "-B", thread.branch, saved.commit]);
+				await git(workspace, ["reset", "--mixed", saved.head]);
+				from = "autosave";
+			} catch (error) {
+				if (error instanceof WorkspaceLostError) throw error;
+				console.warn(JSON.stringify({ event: "pim.coding.autosave_restore_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+			} finally {
+				await workspace.remove(file).catch(() => {});
+			}
+		}
+		if (from === "base") await git(workspace, ["checkout", "-f", "-B", thread.branch, base]);
+		const cli = cliHarness(thread.harness);
+		this.ctx.storage.transactionSync(() => {
+			if (cli && !cli.remoteSessions) this.store.setHarnessSession(null);
+			this.store.recordEvent("workspace.restored", { from, ...(from === "autosave" && saved ? { savedAt: saved.savedAt } : {}) });
+		});
+		console.warn(JSON.stringify({ event: "pim.coding.workspace_restored", thread: thread.threadId, from }));
 	}
 
 	/**
@@ -2489,6 +2544,67 @@ export class CodingThreadDO extends DurableObject<Env> {
 			console.warn(JSON.stringify({ event: "pim.coding.destroy_failed", thread: thread.threadId, error: errorText(failure).slice(0, 300) }));
 		}
 	}
+
+	/**
+	 * Saves the work in the open workspace, committed or not, without
+	 * touching the checkout: what git would add goes into a tree through an
+	 * index of its own, which a commit on top of the branch holds, kept as
+	 * `refs/pim/autosave` and pushed nowhere, and a bundle of everything
+	 * since the thread's base is kept in this object, so the work outlives
+	 * the workspace's volume. Nothing is saved when nothing changed; a bundle
+	 * too big to keep leaves the last one kept. One asked for while another
+	 * runs follows it, so it sees what changed meanwhile.
+	 */
+	#autosave(): Promise<void> {
+		if (this.#autosaving) return this.#autosaving.then(() => this.#autosave());
+		this.#autosaving = this.#saveWork()
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.autosave_failed", thread: this.store.thread()?.threadId, error: errorText(error).slice(0, 300) })))
+			.finally(() => {
+				this.#autosaving = null;
+			});
+		return this.#autosaving;
+	}
+
+	async #saveWork(): Promise<void> {
+		const thread = this.store.required();
+		const open = this.#open;
+		if (!open || thread.slot !== "held" || thread.workspaceRef?.id !== open.id || thread.baseSha === null) return;
+		this.#autosavedAt = Date.now();
+		const workspace = open.workspace;
+		const index = { env: { GIT_INDEX_FILE: AUTOSAVE_INDEX } };
+		await git(workspace, ["add", "-A"], index);
+		const tree = (await git(workspace, ["write-tree"], index)).trim();
+		const head = (await git(workspace, ["rev-parse", "HEAD"])).trim();
+		const last = this.store.autosave();
+		if (last?.tree === tree && last.head === head) return;
+		const commit = (await git(workspace, ["-c", "user.name=Pim", "-c", "user.email=coding@pim.invalid", "commit-tree", tree, "-p", head, "-m", "Autosave"])).trim();
+		await git(workspace, ["update-ref", AUTOSAVE_REF, commit]);
+		const file = `${WORKSPACE_ROOT}/.pim-autosave.bundle`;
+		let bundle: Uint8Array;
+		try {
+			await git(workspace, ["bundle", "create", file, `${thread.baseSha}..${AUTOSAVE_REF}`]);
+			bundle = await workspace.readFile(file);
+		} finally {
+			await workspace.remove(file).catch(() => {});
+		}
+		if (bundle.length > MAX_AUTOSAVE_BYTES) {
+			console.warn(JSON.stringify({ event: "pim.coding.autosave_too_big", thread: thread.threadId, bytes: bundle.length }));
+			return;
+		}
+		this.store.saveAutosave({ head, tree, commit, bundle, savedAt: this.now() });
+	}
+
+	/** A resume's prompt for a CLI that starts a new session, its last one lost with the workspace's volume: what it was asked first and what it last said. */
+	async #lostSessionPrompt(text: string): Promise<string> {
+		const messages = projectEntries(await this.harness.messages());
+		const task = messages
+			.find((message) => message.role === "user")
+			?.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))
+			.join("\n")
+			.trim();
+		const said = await this.#lastSaid().catch(() => null);
+		return [text, "Your earlier session was lost with the workspace, so this is a new one; the repository holds your work as it was last saved.", ...(task ? ["The task you were given:", task] : []), ...(said ? ["What you last said:", said] : [])].join("\n\n");
+	}
 }
 
 /** The thread's Durable Object. */
@@ -2705,6 +2821,12 @@ const LOST_GRACE_MS = 60_000;
 const LOST_RETRY_MS = 60_000;
 
 const lostTooOften = (times: number) => `The workspace went down ${times + 1} times in a row: its container, the workspace manager or its host died, and it was made again from its files ${times} times. Continue the thread to try again.`;
+
+/** How often a running turn's work is autosaved, where it is kept in the workspace, the index it is added with, and the most of it this object keeps. */
+const AUTOSAVE_MS = 3 * 60_000;
+const AUTOSAVE_REF = "refs/pim/autosave";
+const AUTOSAVE_INDEX = ".git/pim-autosave-index";
+const MAX_AUTOSAVE_BYTES = 1024 * 1024;
 
 const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: null };
 

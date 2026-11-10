@@ -8,7 +8,9 @@ import type { Workspace } from "../src/coding/workspace/types";
  * of the working tree, and `update-ref` and `bundle create` for pushes, and for merges
  * `fetch origin +<ref>:<ref>`, `merge-base`, `checkout --detach` and `rebase <base>`
  * (which takes the thread's changes onto the base, or conflicts where both
- * changed a file differently). It keeps its
+ * changed a file differently), and for autosaves `write-tree` (of the working
+ * tree, whatever the index), `commit-tree`, `reset --mixed` and a fetch from
+ * a bundle, whose commits follow its pack as JSON. It keeps its
  * commits as files under `.git`, so a workspace's kept volume keeps them.
  * Remotes are `fakeRemotes`, by URL; cloning any other fails as a missing
  * repository does, printing the HTTP header it was given, as a verbose git
@@ -42,6 +44,12 @@ async function readFiles(workspace: Workspace, root: string, dir = root): Promis
 export const hex40 = (sha: string) => [...encoder.encode(sha)].map((byte) => byte.toString(16).padStart(2, "0")).join("").padEnd(40, "0").slice(0, 40);
 
 const write = (workspace: Workspace, path: string, text: string) => workspace.writeFile(path, encoder.encode(text));
+
+/** Where a fake bundle's commits start, after its pack. */
+const BUNDLE_COMMITS = "\n#commits ";
+
+/** A short name for what `text` holds. */
+const digest = (text: string) => [...text].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) % 1_000_003, 7);
 const read = async (workspace: Workspace, path: string) => decoder.decode(await workspace.readFile(path));
 
 export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace }) => {
@@ -74,6 +82,20 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			return {};
 		}
 		case "fetch": {
+			// `fetch <file>.bundle +<ref>:<ref>`: the bundle's commits, and the ref set to its tip.
+			if (rest[0]?.endsWith(".bundle")) {
+				const text = decoder.decode(await workspace.readFile(rest[0]));
+				const at = text.indexOf(BUNDLE_COMMITS);
+				if (at < 0) return { stderr: `fatal: '${rest[0]}' does not look like a v2 or v3 bundle file\n`, code: 128 };
+				const { tip, commits: carried } = JSON.parse(text.slice(at + BUNDLE_COMMITS.length)) as { tip: string; commits: Record<string, { files: Files; parent: string | null }> };
+				for (const [sha, each] of Object.entries(carried)) {
+					await write(workspace, objects(sha), JSON.stringify(each.files));
+					if (each.parent) await write(workspace, `${objects(sha)}.parent`, each.parent);
+				}
+				const dest = rest[1]?.replace(/^\+/, "").split(":")[1];
+				if (dest) await write(workspace, `${cwd}/.git/${dest}`, tip);
+				return {};
+			}
 			// Like git against the broker, a fetch without its bearer header is refused.
 			if (!env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Bearer ")) return { stderr: "fatal: could not read Username for 'https://pim.invalid': terminal prompts disabled\n", code: 128 };
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
@@ -156,12 +178,36 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			const pack = new Uint8Array(32);
 			pack.set(encoder.encode("PACK"));
 			pack[7] = 2;
-			const bytes = new Uint8Array([...encoder.encode(header), ...pack]);
+			// The commits since the base follow the pack, for a fetch from the bundle to read.
+			const carried: Record<string, { files: Files; parent: string | null }> = {};
+			for (const each of await lineage(sha)) {
+				if (each === base) break;
+				carried[each] = { files: await commit(each), parent: await read(workspace, `${objects(each)}.parent`).catch(() => null) };
+			}
+			const bytes = new Uint8Array([...encoder.encode(header), ...pack, ...encoder.encode(`${BUNDLE_COMMITS}${JSON.stringify({ tip: sha, commits: carried })}`)]);
 			await workspace.writeFile(file!.startsWith("/") ? file! : `${cwd}/${file}`, bytes);
 			return {};
 		}
 		case "add":
 			return {};
+		case "write-tree": {
+			const files = await readFiles(workspace, cwd);
+			const sha = `t${digest(JSON.stringify(Object.entries(files).sort()))}`;
+			await write(workspace, objects(sha), JSON.stringify(files));
+			return { stdout: `${sha}\n` };
+		}
+		case "commit-tree": {
+			// `commit-tree <tree> -p <parent> -m <message>`.
+			const sha = `c${String(++commits).padStart(7, "0")}`;
+			await write(workspace, objects(sha), await read(workspace, objects(rest[0]!)));
+			await write(workspace, `${objects(sha)}.parent`, rest[rest.indexOf("-p") + 1]!);
+			return { stdout: `${sha}\n` };
+		}
+		case "reset": {
+			// `reset --mixed <commit>`: the branch moves, the files stay.
+			await write(workspace, `${cwd}/.git/HEAD`, rest.at(-1)!);
+			return {};
+		}
 		case "status": {
 			const head = await commit(await read(workspace, `${cwd}/.git/HEAD`));
 			const now = await readFiles(workspace, cwd);

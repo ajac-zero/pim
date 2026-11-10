@@ -92,6 +92,7 @@ export const amp: CliHarness = {
 	// static.ampcode.com and Amp's other hosts.
 	egress: ["ampcode.com", "*.ampcode.com"],
 	signalCommand: (sessionId, signal) => ["pkill", `-${signal}`, "-f", sessionId],
+	remoteSessions: true,
 	loginFailure: LOGIN_FAILURE,
 	apiKeyEnv: "AMP_API_KEY",
 };

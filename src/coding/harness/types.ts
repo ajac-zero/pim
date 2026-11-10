@@ -152,6 +152,12 @@ export interface CliHarness {
 	 */
 	signalCommand(sessionId: string, signal: "INT" | "KILL"): string[];
 	/**
+	 * Whether the CLI keeps its sessions on its vendor's servers (Amp's
+	 * threads) rather than in files under its home in the workspace, which
+	 * go with the workspace's volume if that is lost.
+	 */
+	readonly remoteSessions?: boolean;
+	/**
 	 * What the CLI prints on its error output when it exits without a result
 	 * because its login or key was refused, for a CLI that says so only
 	 * there (Amp).

@@ -467,7 +467,7 @@ function ChatPage() {
               </div>
             </div>
           </div>
-          {ready && !artifact && !file && !task && (
+          {ready && (
             <ActivityBox
               sessionId={sessionId}
               entries={view.entries.length}

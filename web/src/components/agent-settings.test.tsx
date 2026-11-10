@@ -3,8 +3,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it } from "vitest";
 import { AgentSkills } from "~/components/agent-settings";
 import { ContactMap } from "~/components/contact-map";
-import type { Agent } from "~/lib/pim-api";
-import { agentSkillsPermissionQuery, agentsQuery } from "~/lib/queries";
+import { WorkspaceFallbacks } from "~/components/settings-dialog";
+import type { Agent, ModelSettings } from "~/lib/pim-api";
+import {
+  agentSkillsPermissionQuery,
+  agentsQuery,
+  modelFallbacksQuery,
+} from "~/lib/queries";
 
 const rowan = { id: "p_rowan", name: "Rowan", majordomo: false } as Agent;
 
@@ -79,4 +84,34 @@ it("draws every contact and brings out the chosen agent's", () => {
   expect(html).toContain('aria-label="Have Rowan hand tasks to Ash"');
   // Only Ash, with no line to or from Rowan, is greyed out.
   expect(html.match(/opacity-40/g)).toHaveLength(1);
+});
+
+it("draws the space's fallback models in order, each with a way to move or remove it", () => {
+  const model = (id: string, name: string) => ({
+    provider: "napper",
+    id,
+    name,
+    images: false,
+  });
+  const settings = {
+    providers: [],
+    choices: [model("a", "Alpha"), model("b", "Beta"), model("c", "Gamma")],
+  } as unknown as ModelSettings;
+  const client = new QueryClient();
+  client.setQueryData(modelFallbacksQuery().queryKey, {
+    models: [model("b", "Beta"), model("a", "Alpha")],
+  });
+  const html = renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <WorkspaceFallbacks settings={settings} />
+    </QueryClientProvider>,
+  );
+  expect(html.indexOf("Beta")).toBeLessThan(html.indexOf("Alpha"));
+  // The first can't move up and the last can't move down; an only fallback may still be removed.
+  expect(html).toMatch(/aria-label="Move Beta up"[^>]*disabled/);
+  expect(html).toMatch(/aria-label="Move Alpha down"[^>]*disabled/);
+  expect(html).not.toMatch(/aria-label="Remove fallback Beta"[^>]*disabled/);
+  // Only Gamma is left to add, and nothing is marked as the default.
+  expect(html).toContain('aria-label="Add a fallback model"');
+  expect(html).not.toContain("Default");
 });

@@ -66,8 +66,9 @@ RUN ln -s /opt/vibe/bin/vibe /usr/local/bin/vibe \
 # Node's image already has a uid 1000 user; agentd runs as uid 10001.
 RUN groupadd --gid 10001 workspace \
 	&& useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash workspace \
-	&& mkdir -p /workspace /opt/agentd \
-	&& chown workspace:workspace /workspace
+	&& mkdir -p /workspace /opt/agentd /caches/pnpm /caches/npm /caches/cargo /caches/cargo-target /caches/pip /caches/uv \
+	&& chown workspace:workspace /workspace \
+	&& chown -R workspace:workspace /caches
 
 # A global prefix the runtime user can write, so `npm install -g` works at run time; the pinned CLIs above stay in /usr/local/bin.
 RUN mkdir -p /home/workspace/.npm-global && chown 10001:10001 /home/workspace/.npm-global

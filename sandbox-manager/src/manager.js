@@ -7,7 +7,8 @@ import os from 'node:os'
 import * as agentd from './agentd.js'
 import { DockerError } from './docker.js'
 import { HttpError } from './errors.js'
-import { AGENTD_PORT, LABEL, LABEL_KEPT, LABEL_KEPT_INFO, LABEL_NONCE, LABEL_SPEC, agentdPath, buildSpec, names, parseCreate, proxyEnv, workspacePath } from './template.js'
+import { checkKey, checkOwner, createEnvCache, parseSnapshot } from './snapshots.js'
+import { AGENTD_PORT, LABEL, LABEL_KEPT, LABEL_KEPT_INFO, LABEL_NONCE, LABEL_SPEC, agentdPath, buildSpec, cacheVolume, names, parseCreate, proxyEnv, workspacePath } from './template.js'
 
 const MAX_FILE = 32 * 1024 * 1024
 const MiB = 1024 * 1024
@@ -78,7 +79,8 @@ export function defaultMaxConcurrent(cpus = os.cpus().length, totalMem = os.tota
 
 // cfg: { token, agentdSecret, allowedImages, defaultDiskMiB, dockerRoot, minFreePct, maxConcurrent,
 //        maxTotalWorkspaceMiB, idleMin, keptVolumeDays, quotaMode, proxyUrl, proxyContainer,
-//        managerContainer, agentdPort, agentdReadyMs, execGraceMs }.
+//        managerContainer, agentdPort, agentdReadyMs, execGraceMs, dataDir, snapshotMaxBytes,
+//        envCachePct }.
 // proxyAdmin: { set(ip, hosts), del(ip) }. agentdAddress maps a container IP to {host, port};
 // tests point it at local fake daemons.
 export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now = Date.now, agentdAddress }) {
@@ -90,6 +92,9 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	const graceMs = cfg.execGraceMs ?? 5000
 	const address = agentdAddress ?? ((ip) => ({ host: ip, port: agentdPort }))
 	let proxyStartedAt
+	// The cache volumes of live and starting sessions, which the env cache's GC never evicts.
+	const mounted = () => new Set([...sessions.values(), ...creating.values()].map((x) => cacheVolume(x.params)?.Name).filter(Boolean))
+	const env = createEnvCache({ docker, cfg, now, mounted })
 
 	// The token is derived, not stored, so a restarted manager can still reach every agentd.
 	const tokenFor = (id, nonce) => createHmac('sha256', cfg.agentdSecret).update(`${id}.${nonce}`).digest('hex')
@@ -100,7 +105,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		return (Number(s.bavail) / Number(s.blocks)) * 100
 	}
 
-	const view = (s) => ({ ...s.params, state: 'running', createdAt: s.createdAt, lastUsedAt: s.lastUsed })
+	const view = (s) => ({ ...s.params, state: 'running', createdAt: s.createdAt, lastUsedAt: s.lastUsed, ...(s.restoredFrom && { restoredFrom: s.restoredFrom }) })
 	// A kept workspace is 'stopped' (stop, or over its disk quota) or 'gone' (deleted with
 	// keepVolume: the session no longer exists, only its volume does).
 	const keptState = (k) => (k.reason === 'kept_volume' ? 'gone' : 'stopped')
@@ -177,7 +182,8 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		if (errors.length) throw errors[0]
 	}
 
-	async function doCreate(params) {
+	// `restoreFrom` ({key}) fills a new workspace from the user's snapshot before the container starts.
+	async function doCreate(params, restoreFrom) {
 		const id = params.sessionId
 		const n = names(id)
 		const resuming = kept.has(id)
@@ -189,6 +195,11 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			// Creating a volume that exists returns it, so a kept workspace is reused as it is.
 			const { volume, network } = buildSpec(params, { ...base, proxyUrl: cfg.proxyUrl })
 			await docker.request('POST', '/volumes/create', volume)
+			const cache = cacheVolume(params)
+			if (cache) {
+				await docker.request('POST', '/volumes/create', cache)
+				await env.useCache(cache)
+			}
 			await docker.request('POST', '/networks/create', network)
 			// Docker's embedded DNS does not work under gVisor, so the session reaches the proxy by
 			// IP: attach the proxy first, read its address on the session network, then create.
@@ -196,11 +207,13 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			await attachSelf([n.network])
 			const container = buildSpec(params, { ...base, proxyUrl: proxyUrlFor(proxyIp) }).container
 			await docker.request('POST', `/containers/create?name=${container.name}`, container.body)
+			// A resumed workspace keeps its own files.
+			const restored = restoreFrom && !resuming && (await env.restore({ userId: params.userId, repo: params.repo, key: restoreFrom.key }, container.name))
 			await docker.request('POST', `/containers/${container.name}/start`)
 			const info = await docker.request('GET', `/containers/${container.name}/json`)
 			const ip = info.NetworkSettings.Networks[n.network].IPAddress
 			await proxyAdmin.set(ip, params.egressAllow)
-			const s = { params, createdAt: kept.get(id)?.createdAt ?? now(), lastUsed: now(), ip, proxyIp, token, egress: true, disk: null }
+			const s = { params, createdAt: kept.get(id)?.createdAt ?? now(), lastUsed: now(), ip, proxyIp, token, egress: true, disk: null, ...(restored && { restoredFrom: restored.key }) }
 			await agentd.ready(target(s), cfg.agentdReadyMs ?? 30000)
 			if (resuming) {
 				await docker.request('DELETE', `/volumes/${n.marker}`).catch(() => {})
@@ -220,15 +233,27 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		return u.origin
 	}
 
-	// Disk promised to workspaces: the quota of every live, starting and kept workspace.
+	// Disk promised to workspaces: the quota of every live, starting and kept workspace, plus what
+	// snapshots and cache volumes use.
 	function reservedMiB(except) {
-		let sum = 0
+		let sum = Math.ceil(env.bytes() / MiB)
 		for (const [id, x] of [...sessions, ...creating, ...kept]) if (id !== except) sum += x.params.limits.diskMiB
 		return sum
 	}
 
+	const lowDisk = (free) => new HttpError(507, `free disk ${free.toFixed(1)}% is below ${cfg.minFreePct}%`, { code: 'low_disk', freeDiskPct: Math.round(free * 10) / 10, minFreePct: cfg.minFreePct })
+
+	function parseRestore(r, params) {
+		if (r === undefined) return undefined
+		if (!r || typeof r !== 'object' || Array.isArray(r) || Object.keys(r).some((k) => k !== 'key')) throw new HttpError(400, 'restoreFrom must be {key}')
+		checkKey(r.key)
+		checkOwner(params.userId, params.repo)
+		return { key: r.key }
+	}
+
 	async function createSession(body) {
 		const params = parseCreate(body, cfg.allowedImages, cfg.defaultDiskMiB)
+		const restoreFrom = parseRestore(body.restoreFrom, params)
 		const id = params.sessionId
 		const existing = sessions.get(id)
 		const pending = creating.get(id)
@@ -238,11 +263,12 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			s.lastUsed = now()
 			return { created: false, session: view(s) }
 		}
-		return { created: true, session: view(await launch(params)) }
+		if (restoreFrom) await env.find(params.userId, params.repo, restoreFrom.key)
+		return { created: true, session: view(await launch(params, restoreFrom)) }
 	}
 
 	// Starts a container for `params`, reusing a kept volume of the same session.
-	async function launch(params) {
+	async function launch(params, restoreFrom) {
 		const id = params.sessionId
 		// Check and reserve the slot in one synchronous step (no await in between), so concurrent
 		// creates cannot pass the checks together. Existing sessions over the limit are left alone.
@@ -254,8 +280,8 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		}
 		const promise = (async () => {
 			const free = await freeDiskPct()
-			if (free < cfg.minFreePct) throw new HttpError(507, `free disk ${free.toFixed(1)}% is below ${cfg.minFreePct}%`, { code: 'low_disk', freeDiskPct: Math.round(free * 10) / 10, minFreePct: cfg.minFreePct })
-			return doCreate(params)
+			if (free < cfg.minFreePct) throw lowDisk(free)
+			return doCreate(params, restoreFrom)
 		})()
 		creating.set(id, { params, promise })
 		try {
@@ -336,6 +362,20 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		return { deleted: id }
 	}
 
+	// Takes a snapshot of a running session's workspace for its user. The session must be that user's
+	// and repo's, and must not hold run-time secrets.
+	async function snapshot(body) {
+		const req = parseSnapshot(body)
+		const s = get(req.sessionId)
+		if (s.params.userId !== req.userId) throw new HttpError(403, 'the session belongs to another user', { code: 'forbidden' })
+		if (s.params.repo !== req.repo) throw new HttpError(409, 'the session is for another repo', { code: 'repo_mismatch' })
+		if (s.params.hasRuntimeSecrets) throw new HttpError(409, 'the session was given run-time secrets, so it cannot be snapshotted', { code: 'runtime_secrets' })
+		return env.create(req, names(req.sessionId).container, async () => {
+			const free = await freeDiskPct()
+			if (free < cfg.minFreePct) throw lowDisk(free)
+		})
+	}
+
 	async function measure(s) {
 		const st = await agentd.json(target(s), 'GET', '/status', { idleMs: 10000 })
 		s.disk = { rootBytes: st.rootBytes, diskFreeBytes: st.diskFreeBytes, activeExecs: st.activeExecs, measuredAt: now() }
@@ -401,6 +441,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 
 	// Rebuilds the registry from labels after a restart and removes half-created leftovers.
 	async function reconcile() {
+		await env.ready()
 		const containers = await docker.request('GET', `/containers/json?all=true&filters=${labelFilter(LABEL)}`)
 		const live = new Set()
 		for (const c of containers) {
@@ -434,12 +475,13 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		}
 		// The periodic reattach retries if the proxy is not up yet.
 		await reattach().catch((e) => console.error('re-attaching session networks:', e.message))
+		await env.gc().catch((e) => console.error('collecting snapshots and caches:', e.message))
 	}
 
 	async function reap() {
 		for (const [id, s] of [...sessions]) if (now() - s.lastUsed > cfg.idleMin * 60000) await remove(id).catch(() => {})
-		if (!cfg.keptVolumeDays) return
-		for (const [id, k] of [...kept]) if (now() - k.keptAt > cfg.keptVolumeDays * 86400000) await remove(id).catch(() => {})
+		if (cfg.keptVolumeDays) for (const [id, k] of [...kept]) if (now() - k.keptAt > cfg.keptVolumeDays * 86400000) await remove(id).catch(() => {})
+		await env.gc().catch((e) => console.error('collecting snapshots and caches:', e.message))
 	}
 
 	async function health() {
@@ -451,6 +493,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			running,
 			free: Math.max(0, cfg.maxConcurrent - running),
 			sessions: sessions.size,
+			...(await env.ready().then(env.stats, () => ({ snapshotBytes: null, cacheBytes: null, snapshotCount: null }))),
 		}
 	}
 
@@ -483,6 +526,17 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		try {
 			if (req.method === 'GET' && url.pathname === '/health') return send(200, await health())
 			if (!authorized(req)) throw new HttpError(401, 'unauthorized')
+			if (url.pathname === '/snapshots') {
+				if (req.method === 'GET') return send(200, await env.list(url.searchParams.get('userId'), url.searchParams.get('repo')))
+				if (req.method !== 'POST') throw new HttpError(405, 'method not allowed')
+				const r = await snapshot(await json())
+				return send(r.created ? 201 : 200, r.snapshot)
+			}
+			const sm = /^\/snapshots\/([^/]+)$/.exec(url.pathname)
+			if (sm) {
+				if (req.method !== 'DELETE') throw new HttpError(405, 'method not allowed')
+				return send(200, await env.remove(url.searchParams.get('userId'), sm[1]))
+			}
 			if (url.pathname === '/sessions') {
 				if (req.method === 'GET') return send(200, list())
 				if (req.method !== 'POST') throw new HttpError(405, 'method not allowed')
@@ -561,5 +615,5 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	const server = http.createServer(handle)
-	return { server, createSession, start, stop, list, reconcile, reattach, reap, checkDisk, status, health, remove, sessions, kept }
+	return { server, createSession, start, stop, list, reconcile, reattach, reap, checkDisk, status, health, remove, snapshot, env, sessions, kept }
 }

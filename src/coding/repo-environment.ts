@@ -326,12 +326,14 @@ export function provisionPlan(profile: RepoProfile): ProvisionStep[] {
 }
 
 /**
- * mise installs npm packages without running their install scripts, and pnpm ships its executable as a placeholder
- * script that its postinstall replaces with the native binary, so Node would try to run the placeholder as JavaScript and
- * crash. This runs the postinstall when the placeholder is still there, then rebuilds mise's shims.
+ * mise installs npm packages without running their install scripts. pnpm 12 ships its executable as a placeholder text
+ * file, `pnpm` in the package's root, that its `preinstall` script (`install.js`) replaces with the native binary, so
+ * the shim would make Node parse the placeholder as JavaScript and crash. This runs that script when the placeholder is
+ * still there, points mise's \`.bin\` entries at the package's own executables (they would otherwise run the native binary
+ * with Node), and rebuilds mise's shims. Earlier pnpm versions have no placeholder and are left alone.
  */
 export function pnpmPostinstall(version: string): string {
-	return `dir=$(mise where npm:pnpm@${version}) && pkg=$(find "$dir" -type f -path '*/node_modules/pnpm/package.json' | head -n 1 | xargs dirname) && if grep -rqs "This is a placeholder" "$pkg/bin"; then (cd "$pkg" && npm run postinstall --if-present) && mise reshim; fi`;
+	return `dir=$(mise where npm:pnpm@${version}) && pkg=$(find "$dir" -type f -path '*/node_modules/pnpm/package.json' | head -n 1 | sed 's|/package.json$||') && if [ -n "$pkg" ] && grep -qs "This is a placeholder" "$pkg/pnpm"; then (cd "$pkg" && node install.js) && for n in pnpm pn pnpx pnx; do ln -sf "$pkg/$n" "$dir/node_modules/.bin/$n"; done && mise reshim; fi`;
 }
 
 /** What each toolchain is asked, once installed, to show that it runs; `<tool> --version` for the rest. */

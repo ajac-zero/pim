@@ -381,6 +381,11 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return 200;
 	}
 
+	/** A rate limited clone is tried again after a moment, not seconds. */
+	protected override gitRetryDelaysMs(): readonly number[] {
+		return [5, 5, 5];
+	}
+
 	/** A CLI turn with no output is stalled after a moment, which a test waits out. */
 	protected override harnessStallMs(): number {
 		return 300;

@@ -1,6 +1,8 @@
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Extension } from "@earendil-works/pi-durable";
 import type { Theme } from "../themes";
+import type { Route } from "../http";
+import type { UiAuditEntry } from "../store";
 import type { GatedAction } from "./approvals";
 
 export { defineGatedAction, type GatedAction } from "./approvals";
@@ -70,6 +72,19 @@ export type AbilityContext = {
 	readonly space: string;
 	/** Whether the space's owner runs this Pim, as the space last read it from the directory. */
 	readonly admin: boolean;
+	/**
+	 * The routes the app itself uses, in this space: for the abilities that give
+	 * the admin's majordomo what the app gives the person. A request runs
+	 * in-process, as no one signed in to a browser; the ability decides who may make it.
+	 */
+	readonly ui: {
+		routes(): readonly Route[];
+		request(request: Request): Promise<Response>;
+		/** Keeps a write: its method, path, status and the keys of its body. */
+		audit(entry: UiAuditEntry): void;
+		/** The latest kept writes, newest first. */
+		audited(limit: number): UiAuditEntry[];
+	};
 	/**
 	 * A conversation, by its ID (a tool's `api.conversationId`), as the
 	 * person and the API know it: its chat's ID, which links and the API take,

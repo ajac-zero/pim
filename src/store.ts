@@ -250,7 +250,21 @@ CREATE TABLE IF NOT EXISTS pim_push_subscriptions (
 	auth TEXT NOT NULL,
 	created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_ui_audit (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	at TEXT NOT NULL,
+	agent TEXT NOT NULL,
+	method TEXT NOT NULL,
+	path TEXT NOT NULL,
+	status INTEGER NOT NULL,
+	keys TEXT NOT NULL
+);
 `;
+
+/** How many of the majordomo's writes through the app's routes are kept. */
+export const UI_AUDIT_ROWS = 10_000;
+
+export type UiAuditEntry = { at: string; agent: string; method: string; path: string; status: number; keys: string[] };
 
 function goalOf(row: Row): Goal {
 	return {
@@ -363,6 +377,7 @@ export class PimStore {
 			pim_notifications: "notifications",
 			pim_emails: "emails sent",
 			pim_push_subscriptions: "push subscriptions",
+			pim_ui_audit: "writes the majordomo made through the app's routes",
 			pim_artifacts: "apps",
 			pim_artifact_versions: "app versions",
 			pim_artifact_deleted: "deleted app ids",
@@ -923,6 +938,22 @@ export class PimStore {
 
 	deletePushSubscription(endpoint: string): void {
 		this.#sql.exec("DELETE FROM pim_push_subscriptions WHERE endpoint = ?", endpoint);
+	}
+
+	// Writes the admin's majordomo made through the app's routes (./extensions/meta-ui.ts)
+
+	/** Keeps one write: its method, path, status and the keys of its body, never the values. Only the latest `UI_AUDIT_ROWS` stay. */
+	addUiAudit(entry: UiAuditEntry): void {
+		this.#sql.exec("INSERT INTO pim_ui_audit (at, agent, method, path, status, keys) VALUES (?, ?, ?, ?, ?, ?)", entry.at, entry.agent, entry.method, entry.path, entry.status, JSON.stringify(entry.keys));
+		this.#sql.exec("DELETE FROM pim_ui_audit WHERE id <= (SELECT MAX(id) FROM pim_ui_audit) - ?", UI_AUDIT_ROWS);
+	}
+
+	/** The latest writes, newest first. */
+	uiAudit(limit: number): UiAuditEntry[] {
+		return this.#sql
+			.exec("SELECT * FROM pim_ui_audit ORDER BY id DESC LIMIT ?", limit)
+			.toArray()
+			.map((row) => ({ at: String(row.at), agent: String(row.agent), method: String(row.method), path: String(row.path), status: Number(row.status), keys: JSON.parse(String(row.keys)) as string[] }));
 	}
 
 	// Notifications

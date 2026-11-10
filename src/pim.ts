@@ -4569,6 +4569,12 @@ export class Pim extends DurableAgent<Env> {
 					get admin() {
 						return pim.store.meta(OWNER_ADMIN_KEY) === "1";
 					},
+					ui: {
+						routes: () => this.#routes,
+						request: (request) => dispatch(this.#routes, request, new URL(request.url).pathname),
+						audit: (entry) => this.store.addUiAudit(entry),
+						audited: (limit) => this.store.uiAudit(limit),
+					},
 					conversationOf: (session) => {
 						const { id, name, majordomo } = this.agents.ofSession(session);
 						return { chat: this.store.publicId(session), agent: { id, name, majordomo } };

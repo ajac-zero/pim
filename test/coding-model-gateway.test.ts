@@ -77,7 +77,7 @@ async function makeThread(overrides: Partial<CodingThreadRow> = {}): Promise<{ i
 			state: "idle",
 			createdBy: "tester",
 			parentThread: null,
-			limits: { cpu: 2, memMiB: 4096, diskMiB: 10_240, pids: 1024, wallClockMin: 240 },
+			limits: { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: 240 },
 			budgetUsd: 3,
 			startOperation: `start-${id}`,
 			...overrides,

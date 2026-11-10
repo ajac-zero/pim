@@ -166,6 +166,8 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 			if (typeof body.limit === "number") this.#capabilities.maxConcurrent = body.limit;
 			throw new WorkspaceCapacityError(message);
 		}
+		// The manager's total workspace disk is promised out, though it frees stopped workspaces first: wait for room as for a full backend.
+		if (res.status === 507 && body.code === "workspace_quota") throw new WorkspaceCapacityError(message);
 		if (body.code === "path_escape") throw new WorkspacePathError(what.path ?? message);
 		if (res.status === 507 && body.code === "disk_full") throw new WorkspaceLimitError(message);
 		if (res.status === 413 && what.write) throw new WorkspaceLimitError(message);

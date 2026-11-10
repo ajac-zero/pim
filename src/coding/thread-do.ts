@@ -2176,7 +2176,7 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 /** The workspace provider of a thread started while the deployment had none. */
 const NO_BACKEND = "none";
 
-const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 10_240, pids: 1024, wallClockMin: 240 };
+const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: 240 };
 
 /** Limits for repositories that need more than the defaults, keyed by lowercase `owner/name`. */
 const REPO_LIMIT_OVERRIDES: Record<string, Partial<CodingLimits>> = {

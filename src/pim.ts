@@ -423,6 +423,8 @@ const COOLDOWN_CALLBACK = "retryAfterCooldown";
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
 const MODEL_KEY = "model";
+/** The models every agent moves on to, after its own fallbacks, when its model fails for good. */
+const MODEL_FALLBACKS_KEY = "model_fallbacks";
 /** What a deployment without the `AI` binding has for Workers AI: it fails every request with a way forward. */
 type AiEnv = { readonly AI?: Ai };
 const NO_WORKERS_AI = {
@@ -1384,10 +1386,20 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The model after the one that failed in the agent's own and fallback models; none when it was the last, or isn't one of them. */
 	#nextModel(conversation: string, failed: { provider?: string; model?: string }): PiModel | undefined {
-		const agent = this.agents.ofSession(conversation);
-		const chain = [this.agentModel(agent), ...this.#fallbackModels(agent)];
+		const chain = this.#chain(this.agents.ofSession(conversation));
 		const at = chain.findIndex((model) => model.provider === failed.provider && model.id === failed.model);
-		return at < 0 ? undefined : chain[at + 1];
+		if (at < 0) return undefined;
+		// Models of the provider that failed, or is cooling down, are skipped.
+		return chain.slice(at + 1).find((model) => model.provider !== failed.provider && !this.providerCooldowns.active(model.provider));
+	}
+
+	/** The models a run of an agent tries, in order: its own, its fallbacks, then the space's, each once. */
+	#chain(agent: Agent): PiModel[] {
+		const chain: PiModel[] = [];
+		for (const model of [this.agentModel(agent), ...this.#fallbackModels(agent), ...this.#workspaceFallbacks()]) {
+			if (!chain.some((known) => sameModel(known, model))) chain.push(model);
+		}
+		return chain;
 	}
 
 	/** Moves a held run onto `model` and runs it again there. */
@@ -1446,7 +1458,7 @@ export class Pim extends DurableAgent<Env> {
 			this.#modelCatalog = failingOver(this.#ownCatalog, {
 				cooldowns: this.providerCooldowns,
 				subscription: (provider) => this.#subscription(provider),
-				fallback: (provider) => this.fallbackModel(provider),
+				fallback: (provider, sessionId) => this.fallbackModel(provider, sessionId === undefined ? undefined : this.#providerSessions.get(sessionId)),
 				cooled: (cooldown) => this.#cooled(cooldown),
 			});
 		}
@@ -1472,7 +1484,11 @@ export class Pim extends DurableAgent<Env> {
 	 * deployment's default, when that is another provider's and can run here;
 	 * else none, and the runs wait for the limit to reset.
 	 */
-	protected fallbackModel(provider: string): Model<Api> | undefined {
+	protected fallbackModel(provider: string, session?: string): Model<Api> | undefined {
+		// The agent's own fallbacks come first, then the space's, then the deployment's default.
+		const agent = session === undefined ? undefined : this.agents.findOfSession(session);
+		const listed = [...(agent ? this.#fallbackModels(agent) : []), ...this.#workspaceFallbacks()].find((model) => model.provider !== provider);
+		if (listed) return listed;
 		const model = this.defaultModel();
 		if (model.provider === provider) return undefined;
 		// Without Workers AI, the default is the first custom provider's model; with none, there is nothing to run.
@@ -1747,6 +1763,26 @@ export class Pim extends DurableAgent<Env> {
 		return this.chosenModel();
 	}
 
+	/** The model a new run starts on: the agent's own, or while its subscription cools down, the first model of its chain on another provider. */
+	#runModel(agent: Agent): PiModel {
+		const own = this.agentModel(agent);
+		if (!this.#subscription(own.provider) || !this.providerCooldowns.active(own.provider)) return own;
+		return this.#chain(agent).find((model) => model.provider !== own.provider && !this.providerCooldowns.active(model.provider)) ?? own;
+	}
+
+	/** The models the space moves on to, in order, after an agent's own fallbacks; ones that are gone are not read: see `#dropModels`. */
+	#workspaceFallbacks(): PiModel[] {
+		const list = JSON.parse(this.store.meta(MODEL_FALLBACKS_KEY) ?? "[]") as AgentModel[];
+		return list.flatMap(({ provider, id }) => this.modelCatalog().getModel(provider, id) ?? []);
+	}
+
+	/** Sets the models every agent moves on to after its own fallbacks, from `GET /model`'s choices. */
+	chooseModelFallbacks(models: PiModel[]): PiModel[] {
+		if (models.length === 0) this.store.deleteMeta(MODEL_FALLBACKS_KEY);
+		else this.store.setMeta(MODEL_FALLBACKS_KEY, JSON.stringify(models.map(({ provider, id }) => ({ provider, id }))));
+		return this.#workspaceFallbacks();
+	}
+
 	/** The models an agent moves on to, in order, when its own fails for good; ones that are gone are not read: see `#dropModels`. */
 	#fallbackModels(agent: Agent): PiModel[] {
 		return agent.fallbacks.flatMap((fallback) => this.modelCatalog().getModel(fallback.provider, fallback.id) ?? []);
@@ -1797,6 +1833,12 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Agents whose model `gone` says can't be used any more go back to following the space's. */
 	#dropModels(gone: (model: AgentModel) => boolean): void {
+		const shared = JSON.parse(this.store.meta(MODEL_FALLBACKS_KEY) ?? "[]") as AgentModel[];
+		if (shared.some(gone)) {
+			const kept = shared.filter((model) => !gone(model));
+			if (kept.length === 0) this.store.deleteMeta(MODEL_FALLBACKS_KEY);
+			else this.store.setMeta(MODEL_FALLBACKS_KEY, JSON.stringify(kept));
+		}
 		for (const agent of this.agents.list()) {
 			if (agent.model && gone(agent.model)) this.agents.setModel(agent.id, null);
 			if (agent.fallbacks.some(gone)) this.agents.setFallbacks(agent.id, agent.fallbacks.filter((model) => !gone(model)));
@@ -2291,7 +2333,7 @@ export class Pim extends DurableAgent<Env> {
 		const withdraw = this.telemetry.submitting(session, content, from);
 		// A conversation that moved on to a fallback model tries the agent's own again.
 		const agent = this.agents.ofSession(session);
-		if (agent.fallbacks.length > 0) await this.harness.session(session).setModel(this.agentModel(agent));
+		if (agent.fallbacks.length > 0 || this.#workspaceFallbacks().length > 0) await this.harness.session(session).setModel(this.#runModel(agent));
 		let receipt: PiReceipt;
 		try {
 			receipt = await this.harness.submit(content, { session, ...options });
@@ -6549,6 +6591,19 @@ export class Pim extends DurableAgent<Env> {
 					return { model: describeModel(await this.chooseModel(null)) };
 				}
 				return { model: describeModel(await this.chooseModel(await this.#choice(provider, id))) };
+			},
+		],
+		// The models runs move on to, in order, when an agent's own and its fallbacks fail, from `GET /model`'s choices.
+		["GET", "/model/fallbacks", () => ({ models: this.#workspaceFallbacks().map(describeModel) })],
+		[
+			"PUT",
+			"/model/fallbacks",
+			async (_params, request) => {
+				const { models } = (await readJson<{ models: { provider: string; id: string }[] }>(request)) ?? {};
+				if (!Array.isArray(models) || models.some((model) => typeof model?.provider !== "string" || typeof model.id !== "string")) {
+					throw new HttpError(400, "models must be a list of provider and id");
+				}
+				return { models: this.chooseModelFallbacks(await Promise.all(models.map((model) => this.#choice(model.provider, model.id)))).map(describeModel) };
 			},
 		],
 		[

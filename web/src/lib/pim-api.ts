@@ -1705,10 +1705,19 @@ export const pim = {
       method: "POST",
       body: JSON.stringify({ text }),
     }).then((body) => body.text),
-  send: (session: string, content: UserContent) =>
+  /** Sent again with the same `operationId`, a message is placed once. */
+  send: (
+    session: string,
+    content: UserContent,
+    options: { operationId?: string; signal?: AbortSignal } = {},
+  ) =>
     call<{ operationId: string; accepted: boolean }>(
       `/sessions/${session}/messages`,
-      { method: "POST", body: JSON.stringify({ content }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ content, operationId: options.operationId }),
+        signal: options.signal,
+      },
     ),
   addToRoom: (session: string, agent: string) =>
     call<{ room: Room | null }>(`/sessions/${session}/room/members`, {

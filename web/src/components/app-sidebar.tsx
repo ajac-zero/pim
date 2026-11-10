@@ -673,6 +673,7 @@ function ChatTree({
   awaitingApproval,
   onNavigate,
   depth = 0,
+  folded = false,
 }: {
   session: Session;
   tree: ReadonlyMap<string, Session[]>;
@@ -680,8 +681,10 @@ function ChatTree({
   awaitingApproval: ReadonlySet<string>;
   onNavigate?: () => void;
   depth?: number;
+  /** Every level starts folded, as in the folded lists. */
+  folded?: boolean;
 }) {
-  const [open, setOpen] = useState(depth === 0);
+  const [open, setOpen] = useState(depth === 0 && !folded);
   const below = (chat: Session): Session[] =>
     (tree.get(chat.id) ?? []).flatMap((child) => [child, ...below(child)]);
   const coding = useCodingByChat().get(session.id) ?? [];
@@ -733,6 +736,7 @@ function ChatTree({
               awaitingApproval={awaitingApproval}
               onNavigate={onNavigate}
               depth={depth + 1}
+              folded={folded}
             />
           ))}
     </>
@@ -801,6 +805,7 @@ function FoldedChats({
               activeId={activeId}
               awaitingApproval={awaitingApproval}
               onNavigate={onNavigate}
+              folded
             />
           ))}
           {coding.map((thread) => (

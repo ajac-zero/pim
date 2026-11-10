@@ -70,5 +70,7 @@ export type ServerMessage =
 	| { readonly type: "tasks"; readonly session: string }
 	/** The person's computer was paired or removed, connected or dropped off, or its files changed under the app. */
 	| { readonly type: "computer" }
+	/** The person's settings changed, such as the look of the app. */
+	| { readonly type: "settings" }
 	| { readonly type: "result"; readonly id: string; readonly result: JsonValue }
 	| { readonly type: "error"; readonly id?: string; readonly message: string };

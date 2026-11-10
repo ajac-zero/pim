@@ -327,8 +327,8 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | DELETE | `/sessions/:s/queue/:id` | | Takes a queued message back before the agent reads it; `409` once the agent has it |
 | POST | `/sessions/:s/reset` | `{ handoff? }` | Starts a fresh context; history stays stored |
 | PUT | `/sessions/:s/model` | `{ model }` | Changes one session's model: a Workers AI or AI Gateway id |
-| GET | `/settings` | | `{ timeZone, approvalPolicy, approvalTimeoutSeconds }`; `approvalTimeoutSeconds` is null when approvals wait however long |
-| PUT | `/settings` | Any of `{ timeZone, approvalPolicy }`; `null` goes back to the deployment's | The settings |
+| GET | `/settings` | | `{ timeZone, approvalPolicy, deviceAlerts, approvalTimeoutSeconds }`, and `colorMode` (`light`, `dark` or `system`), `colorTheme` (a theme's id) and `locale` (`en` or `es`) once set, which every device shows; `approvalTimeoutSeconds` is null when approvals wait however long |
+| PUT | `/settings` | Any of `{ timeZone, approvalPolicy, deviceAlerts, colorMode, colorTheme, locale }`; `null` goes back to the deployment's | The settings |
 | GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart), runs and tool calls by UTC day |
 | GET | `/usage/costs` | `?days=30` (1 to 400) | What model calls cost: `byDay` (cost, calls and cache hit ratio, with the cost by agent, model and `run_kind`), `topChats` and `topCodingThreads` (top 20 by cost, with calls, turns and average prompt size, from the calls themselves, kept 90 days), `unpricedCalls`, `cacheHitRatio` (cache read / (input + cache read + cache writes)) and `costPer1kOutputTokens`. See [Who spends](#who-spends) |
 | GET | `/export` | | Everything as one JSON download, without credentials |

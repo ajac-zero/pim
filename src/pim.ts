@@ -185,6 +185,7 @@ import { type DeploymentSettings, deploymentSettings } from "./deployment";
 import { dispatch, HttpError, readJson, type Route, routeOf } from "./http";
 import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
+import { themes as ownThemes } from "./extensions/themes";
 import { type ApprovalPolicy, readSettings, type Settings, updateSettings } from "./settings";
 import {
 	type Approval,
@@ -5209,9 +5210,12 @@ export class Pim extends DurableAgent<Env> {
 	async applySettings(update: Record<string, unknown>): Promise<Settings> {
 		this.#assertOpen();
 		const before = this.settings().approvalPolicy;
-		const settings = updateSettings(this.store, this.#defaultSettings(), update);
+		const themeIds = [ownThemes, ...this.pimConfig().extensions].flatMap((extension) => extension.themes?.map((theme) => theme.id) ?? []);
+		const settings = updateSettings(this.store, this.#defaultSettings(), update, themeIds);
 		// The approval tools say how a request is decided: they must say it the new way.
 		if (settings.approvalPolicy !== before) this.#reinstallApprovals();
+		// Open clients show what changed, such as the look of the app, whether the person or an agent changed it.
+		this.broadcastMessage({ type: "settings" });
 		return settings;
 	}
 

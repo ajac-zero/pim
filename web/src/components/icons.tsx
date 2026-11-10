@@ -202,6 +202,7 @@ export const Pause = themedIcon(Lucide.Pause, Pixel.Pause);
 export const PenLine = themedIcon(Lucide.PenLine, Pixel.Pencil);
 export const Pencil = themedIcon(Lucide.Pencil, Pixel.Pencil);
 export const Printer = themedIcon(Lucide.Printer, Pixel.Printer);
+export const ChartColumn = themedIcon(Lucide.ChartColumn, Pixel.Chart);
 export const Presentation = themedIcon(Lucide.Presentation, Pixel.Chart);
 export const Plane = themedIcon(
   Lucide.Plane,

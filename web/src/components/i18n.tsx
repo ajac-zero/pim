@@ -917,6 +917,7 @@ const translations = {
     settingsModel: "Model",
     settingsPermissions: "Permissions",
     settingsAccount: "Account",
+    settingsUsage: "Usage",
     settingsMembers: "Members",
     settingsDeployment: "Deployment",
     deploymentDescription:
@@ -2814,6 +2815,7 @@ const translations = {
     settingsModel: "Modelo",
     settingsPermissions: "Permisos",
     settingsAccount: "Cuenta",
+    settingsUsage: "Uso",
     settingsMembers: "Miembros",
     settingsDeployment: "Despliegue",
     deploymentDescription:

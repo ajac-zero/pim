@@ -35,6 +35,7 @@ import {
   Server,
   Settings,
   ShieldCheck,
+  ChartColumn,
   SlidersHorizontal,
   Sparkles,
   Sun,
@@ -93,6 +94,7 @@ export const SETTINGS_TABS = [
   "coding",
   "permissions",
   "memory",
+  "usage",
   "account",
   "members",
   "deployment",
@@ -106,6 +108,7 @@ const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   coding: ["coding", Code],
   permissions: ["settingsPermissions", ShieldCheck],
   memory: ["memory", MessageCircle],
+  usage: ["settingsUsage", ChartColumn],
   account: ["settingsAccount", UserRound],
   members: ["settingsMembers", Users],
   deployment: ["settingsDeployment", Settings],
@@ -216,10 +219,10 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
         {tab === "coding" && <CodingConnectionsSection />}
         {tab === "memory" && <MemorySection />}
         {tab === "permissions" && <ToolPermissionsSection />}
+        {tab === "usage" && <UsageCostSection />}
         {tab === "account" && (
           <>
             <AccountSection />
-            <UsageCostSection />
             <SignInSection />
             <McpSection />
             <TokensSection />

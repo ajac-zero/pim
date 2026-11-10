@@ -36,3 +36,21 @@ it("renders an artifact prefix by title while leaving the request editable, and 
     client.clear();
   }
 });
+
+it("hides the attach buttons only when asked", () => {
+  const client = new QueryClient();
+  vi.stubGlobal("window", { matchMedia: () => ({ matches: false }) });
+  const render = (hideAttach?: boolean) =>
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <Composer busy={false} onSend={() => {}} hideAttach={hideAttach} />
+      </QueryClientProvider>,
+    );
+  try {
+    expect(render()).toMatch(/aria-label="Attach images"/);
+    expect(render(true)).not.toMatch(/aria-label="Attach/);
+  } finally {
+    vi.unstubAllGlobals();
+    client.clear();
+  }
+});

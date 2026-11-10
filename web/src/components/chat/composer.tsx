@@ -100,6 +100,8 @@ export interface ComposerProps {
    * computer: there only images go, to a model that sees them.
    */
   uploads?: boolean;
+  /** Hides the attach and camera buttons, for a composer whose destination takes only text. */
+  hideAttach?: boolean;
 }
 
 /** The mention being typed just before the caret: an @ at the start of a word, and what follows it. */
@@ -288,6 +290,7 @@ function ComposerInner({
   agent,
   controls,
   uploads = false,
+  hideAttach = false,
 }: ComposerProps) {
   const { t } = useI18n();
   const controller = usePromptInputController();
@@ -807,27 +810,31 @@ function ComposerInner({
           />
         </div>
         <div className="flex items-center gap-1.5 p-2.5 pt-1">
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            aria-label={t(saves ? "attachFiles" : "attachImages")}
-            title={t(saves ? "attachFiles" : "attachImages")}
-            disabled={disabled}
-            onClick={() =>
-              saves || seesImages
-                ? controller.attachments.openFileDialog()
-                : cantSeeImages()
-            }
-            className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
-          >
-            <Paperclip className="size-4.5" />
-          </Button>
-          <CameraButton
-            disabled={disabled}
-            onBlocked={cantSeeImages}
-            allowed={saves || seesImages}
-          />
+          {!hideAttach && (
+            <>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                aria-label={t(saves ? "attachFiles" : "attachImages")}
+                title={t(saves ? "attachFiles" : "attachImages")}
+                disabled={disabled}
+                onClick={() =>
+                  saves || seesImages
+                    ? controller.attachments.openFileDialog()
+                    : cantSeeImages()
+                }
+                className="size-9 shrink-0 rounded-full bg-muted text-muted-foreground"
+              >
+                <Paperclip className="size-4.5" />
+              </Button>
+              <CameraButton
+                disabled={disabled}
+                onBlocked={cantSeeImages}
+                allowed={saves || seesImages}
+              />
+            </>
+          )}
           {controls}
           <div className="ml-auto flex items-center gap-1.5">
             {(hasText || improve.isPending) && (

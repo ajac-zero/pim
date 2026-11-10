@@ -1884,6 +1884,7 @@ function SteerForm({ thread }: { thread: CodingThreadView }) {
       draftKey={thread.id}
       fill={fill}
       busy={false}
+      hideAttach
       onSend={(content) => {
         const text = textOf(content).trim();
         if (text && !steer.isPending) steer.mutate(text);

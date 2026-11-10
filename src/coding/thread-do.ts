@@ -52,8 +52,10 @@ import {
 import type { ManagerHealth } from "./provider-capacity";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
-import { BranchMovedError, checkBranch, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
+import { BranchMovedError, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
+import { GiteaNotConnectedError } from "./git-broker/gitea-connection";
+import { GITHUB_INSTANCE_ID } from "./git-broker/provider";
 import type { Fetch, GitHubApp } from "./git-broker/github-app";
 import { brokerTokenKey, deploymentGitHubApp, deploymentProviders, GIT_BROKER_PATH } from "./git-broker/routes";
 import { authEnv } from "./harness/auth";
@@ -233,11 +235,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * down or logs it.
 	 */
 	protected async cloneSource(thread: CodingThreadRow): Promise<{ url: string; token: string }> {
-		const repo = parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
+		const provider = this.#providers().get(thread.providerInstance);
+		const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
 		const origin = deploymentSettings(this.env).publicUrl;
 		if (!origin) throw new Error("PIM_PUBLIC_URL isn't set, so the workspace can't reach Pim's git broker");
-		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo });
-		return { url: `${origin}/api${GIT_BROKER_PATH}/${repo.owner}/${repo.name}.git`, token };
+		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo, instance: provider.instance.id });
+		const instance = provider.instance.id === GITHUB_INSTANCE_ID ? "" : `/${provider.instance.id}`;
+		return { url: `${origin}/api${GIT_BROKER_PATH}${instance}/${repo.owner}/${repo.name}.git`, token };
 	}
 
 	/** How a CLI harness signs in for the thread, as `authEnv` says (./harness/auth.ts): the person's subscription, or their API key from the coding vault. */
@@ -289,6 +293,28 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The deployment's GitHub App, which pushes; null when it isn't configured. */
 	protected githubApp(): GitHubApp | null {
 		return deploymentGitHubApp(this.env);
+	}
+
+	/** The deployment's git providers, which reach their hosts with `githubFetch`. */
+	#providers() {
+		const fetch = this.githubFetch();
+		return deploymentProviders(this.env, fetch ? { fetch } : {});
+	}
+
+	/**
+	 * Why the thread's repository can't be pushed to, if it can't: GitHub's App isn't
+	 * configured, or the Gitea account isn't connected (`conflict`, with Gitea's own message).
+	 */
+	async #pushBlocker(thread: CodingThreadRow): Promise<{ code: "github_app_not_configured" | "conflict"; message: string } | null> {
+		const provider = this.#providers().get(thread.providerInstance);
+		if (provider.instance.kind === "github") return this.githubApp() ? null : { code: "github_app_not_configured", message: GITHUB_APP_NOT_CONFIGURED };
+		try {
+			await provider.credential(provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env)), "write");
+			return null;
+		} catch (error) {
+			if (error instanceof GiteaNotConnectedError) return { code: "conflict", message: error.message };
+			throw error;
+		}
 	}
 
 	/** How Pim reaches GitHub to push: the Worker's `fetch`, unless given. */
@@ -688,8 +714,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async preparePush(branch?: string): Promise<PushPreparation> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
-		const app = this.githubApp();
-		if (!app) return { ok: false, code: "github_app_not_configured", message: GITHUB_APP_NOT_CONFIGURED };
+		const blocker = await this.#pushBlocker(thread);
+		if (blocker) return { ok: false, ...blocker };
 		const target = branch ?? thread.branch;
 		const policy = brokerPolicy(this.env);
 		try {
@@ -705,7 +731,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		try {
 			const bundle = await this.#bundle(target, checkpoint.sha);
-			const prepared = preparePush({ app, policy }, { sessionId: thread.threadId, repo: thread.repoUrl, branch: target, bundle });
+			const prepared = preparePush({ app: this.githubApp(), policy, providers: this.#providers() }, { sessionId: thread.threadId, repo: thread.repoUrl, branch: target, bundle });
 			return { ok: true, request: { ...pushApprovalRequest(prepared), checkpoint: checkpoint.sha } };
 		} catch (error) {
 			if (error instanceof GitBrokerError && error.status === 403) return { ok: false, code: "push_refused", message: error.message };
@@ -721,14 +747,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async push(approved: { branch: string; checkpoint: string; head: string }): Promise<{ ok: true; result: PushResult } | { ok: false; message: string }> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
-		const app = this.githubApp();
-		if (!app) return { ok: false, message: GITHUB_APP_NOT_CONFIGURED };
+		const blocker = await this.#pushBlocker(thread);
+		if (blocker) return { ok: false, message: blocker.message };
 		if (thread.slot !== "held" || !thread.workspaceRef) return { ok: false, message: "The thread's workspace isn't running now: continue the thread, then ask to push again" };
 		try {
 			const policy = brokerPolicy(this.env);
 			const fetch = this.githubFetch();
 			const request = { sessionId: thread.threadId, repo: thread.repoUrl, branch: approved.branch, bundle: await this.#bundle(approved.branch, approved.checkpoint) };
-			const deps = { app, policy, ...(fetch ? { fetch } : {}) };
+			const deps = { app: this.githubApp(), policy, providers: this.#providers(), ...(fetch ? { fetch } : {}) };
 			if (preparePush(deps, request).head !== approved.head) return { ok: false, message: "The branch isn't what was approved any more: ask to push again" };
 			const result = await pushBranch(deps, request);
 			this.store.recordEvent("thread.pushed", { repo: result.repo, branch: result.branch, before: result.before, after: result.after, outcome: result.outcome });
@@ -747,8 +773,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async prepareMerge(): Promise<MergePreparation> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
-		const app = this.githubApp();
-		if (!app) return { ok: false, code: "github_app_not_configured", message: GITHUB_APP_NOT_CONFIGURED };
+		const blocker = await this.#pushBlocker(thread);
+		if (blocker) return { ok: false, ...blocker };
 		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
 		const checkpoint = this.store.latestCheckpoint();
 		if (!checkpoint) return { ok: false, code: "nothing_to_push", message: "The thread hasn't committed anything yet: each turn's changes are committed when it ends" };
@@ -756,10 +782,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return { ok: false, code: "workspace_not_running", message: "The thread's workspace isn't running: continue or steer the thread, then merge once its turn ends" };
 		}
 		try {
-			const fetch = this.githubFetch();
-			const defaultBranch = await repoDefaultBranch({ app, policy: brokerPolicy(this.env), ...(fetch ? { fetch } : {}) }, thread.repoUrl);
-			const repo = parseRepoUrl(thread.repoUrl).fullName;
-			return { ok: true, request: { checkpoint: checkpoint.sha, summary: `Merge ${thread.branch} (${checkpoint.sha.slice(0, 12)}) into ${defaultBranch} of github.com/${repo}, with no force push` } };
+			const defaultBranch = await this.#defaultBranch(thread);
+			const provider = this.#providers().get(thread.providerInstance);
+			const repo = provider.parseRepoUrl(thread.repoUrl).fullName;
+			return { ok: true, request: { checkpoint: checkpoint.sha, summary: `Merge ${thread.branch} (${checkpoint.sha.slice(0, 12)}) into ${defaultBranch} of ${new URL(provider.instance.baseUrl).host}/${repo}, with no force push` } };
 		} catch (error) {
 			return { ok: false, code: "conflict", message: errorText(error) };
 		}
@@ -778,14 +804,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async merge(approved: { checkpoint: string }): Promise<{ ok: true; result: MergeResult } | { ok: false; message: string }> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
-		const app = this.githubApp();
-		if (!app) return { ok: false, message: GITHUB_APP_NOT_CONFIGURED };
+		const blocker = await this.#pushBlocker(thread);
+		if (blocker) return { ok: false, message: blocker.message };
 		if (thread.slot !== "held" || !thread.workspaceRef) return { ok: false, message: "The thread's workspace isn't running now: continue the thread, then ask to merge again" };
 		if (this.store.latestCheckpoint()?.sha !== approved.checkpoint) return { ok: false, message: "The thread has a newer checkpoint than the one approved: ask to merge again" };
 		try {
 			const fetch = this.githubFetch();
-			const deps = { app, policy: brokerPolicy(this.env), ...(fetch ? { fetch } : {}) };
-			const defaultBranch = await repoDefaultBranch(deps, thread.repoUrl);
+			const deps = { app: this.githubApp(), policy: brokerPolicy(this.env), providers: this.#providers(), ...(fetch ? { fetch } : {}) };
+			const defaultBranch = await this.#defaultBranch(thread);
 			const workspace = await this.#workspace();
 			const identity = ["-c", "user.name=Pim", "-c", "user.email=coding@pim.invalid"];
 			if ((await git(workspace, ["rev-parse", `refs/heads/${thread.branch}`])).trim() !== approved.checkpoint) throw new Error("The thread's branch has moved past its latest checkpoint: merge once its turn ends");
@@ -798,7 +824,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				await git(workspace, ["fetch", "origin", `+refs/heads/${defaultBranch}:refs/pim/merge-base`], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
 				const base = (await git(workspace, ["rev-parse", "refs/pim/merge-base"])).trim();
 				const common = (await git(workspace, ["merge-base", base, head]).catch(() => "")).trim();
-				if (common === head) return { ok: true, result: { repo: parseRepoUrl(thread.repoUrl).fullName, branch: defaultBranch, before: base, after: base, outcome: "unchanged", rebased, threadBranch: null } };
+				if (common === head) return { ok: true, result: { repo: this.#providers().get(thread.providerInstance).parseRepoUrl(thread.repoUrl).fullName, branch: defaultBranch, before: base, after: base, outcome: "unchanged", rebased, threadBranch: null } };
 				if (common !== base) {
 					// The default branch has commits the thread doesn't: put the thread's commits on top of them, aside from the thread's branch.
 					try {
@@ -829,6 +855,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		} catch (error) {
 			return { ok: false, message: error instanceof GitBrokerNotConfiguredError ? GITHUB_APP_NOT_CONFIGURED : errorText(error) };
 		}
+	}
+
+	/** The name of the thread's repository's default branch, from its provider. */
+	async #defaultBranch(thread: CodingThreadRow): Promise<string> {
+		const provider = this.#providers().get(thread.providerInstance);
+		if (provider.instance.kind !== "github") return checkBranchName(await provider.defaultBranch(provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env))));
+		const fetch = this.githubFetch();
+		return repoDefaultBranch({ app: this.githubApp(), policy: brokerPolicy(this.env), ...(fetch ? { fetch } : {}) }, thread.repoUrl);
 	}
 
 	/** Pushes the thread's own branch at `head` after a merge, so it matches what was merged; null when GitHub wouldn't move it (its branch has other commits). */
@@ -2402,6 +2436,8 @@ const ENVIRONMENT_STOPPED = "Readying the environment was stopped: the thread wa
 
 /** Whose the thread's environments are: the person whose space it is, and the repository as `owner/name` in lowercase. */
 function environmentOwner(thread: CodingThreadRow): EnvironmentOwner {
+	// Another instance's repositories are told apart from GitHub's by the instance's id.
+	if (thread.providerInstance !== GITHUB_INSTANCE_ID) return { userId: thread.space, repo: `${thread.providerInstance}/${new URL(thread.repoUrl).pathname.slice(1)}`.toLowerCase() };
 	return { userId: thread.space, repo: parseRepoUrl(thread.repoUrl).fullName.toLowerCase() };
 }
 

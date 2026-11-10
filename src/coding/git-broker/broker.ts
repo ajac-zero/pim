@@ -2,6 +2,7 @@ import { base64UrlDecode, base64UrlEncode } from "../../auth/encoding";
 import { HttpError } from "../../http";
 import { type BrokerPolicy, GitBrokerNotConfiguredError } from "./config";
 import { apiHeaders, type Fetch, GITHUB_API, type GitHubApp } from "./github-app";
+import { GITHUB_INSTANCE, type GitProvider, type ProviderInstance, type ProviderRegistry, basicAuth } from "./provider";
 
 /**
  * The git broker: how a coding thread's workspace works with a GitHub
@@ -138,7 +139,7 @@ export const MAX_BROKER_TOKEN_TTL_MS = 12 * 60 * 60_000;
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** What a broker token lets its holder do: fetch `repo` (`owner/name`, lowercase) for `sessionId` until `expiresAt`. */
-export type BrokerClaims = { readonly sessionId: string; readonly repo: string; readonly expiresAt: number };
+export type BrokerClaims = { readonly sessionId: string; readonly repo: string; readonly expiresAt: number; readonly instance: string };
 
 /** The key broker tokens are signed with, derived from `secret` for this use alone. */
 export async function brokerKey(secret: string | Uint8Array): Promise<CryptoKey> {
@@ -151,12 +152,12 @@ export async function brokerKey(secret: string | Uint8Array): Promise<CryptoKey>
 /** A token for the workspace of coding session `sessionId` to fetch `repo` with, for `ttlMs` (an hour unless given, 12 hours at most). */
 export async function issueBrokerToken(
 	key: CryptoKey,
-	grant: { sessionId: string; repo: RepoRef; ttlMs?: number; now?: number },
+	grant: { sessionId: string; repo: RepoRef; /** A git provider instance's id; GitHub unless given. */ instance?: string; ttlMs?: number; now?: number },
 ): Promise<string> {
 	const ttl = grant.ttlMs ?? BROKER_TOKEN_TTL_MS;
 	if (!SESSION_ID.test(grant.sessionId)) throw new GitBrokerError(400, "That isn't a coding session's ID");
 	if (!Number.isFinite(ttl) || ttl <= 0 || ttl > MAX_BROKER_TOKEN_TTL_MS) throw new GitBrokerError(400, "A broker token lasts from a moment to 12 hours");
-	const claims = { v: 1, sid: grant.sessionId, repo: grant.repo.fullName.toLowerCase(), exp: (grant.now ?? Date.now()) + ttl };
+	const claims = { v: 1, sid: grant.sessionId, repo: grant.repo.fullName.toLowerCase(), exp: (grant.now ?? Date.now()) + ttl, ...(grant.instance && grant.instance !== GITHUB_INSTANCE.id ? { inst: grant.instance } : {}) };
 	const signed = `${TOKEN_PREFIX}${base64UrlEncode(encoder.encode(JSON.stringify(claims)))}`;
 	const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(signed)));
 	return `${signed}.${base64UrlEncode(mac)}`;
@@ -170,9 +171,9 @@ export async function verifyBrokerToken(key: CryptoKey, token: string, now = Dat
 	try {
 		if (!(await crypto.subtle.verify("HMAC", key, base64UrlDecode(mac), encoder.encode(`${TOKEN_PREFIX}${payload}`)))) return null;
 		const claims = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload))) as Record<string, unknown>;
-		const { v, sid, repo, exp } = claims;
-		if (v !== 1 || typeof sid !== "string" || typeof repo !== "string" || typeof exp !== "number") return null;
-		return exp > now ? { sessionId: sid, repo, expiresAt: exp } : null;
+		const { v, sid, repo, exp, inst } = claims;
+		if (v !== 1 || typeof sid !== "string" || typeof repo !== "string" || typeof exp !== "number" || (inst !== undefined && typeof inst !== "string")) return null;
+		return exp > now ? { sessionId: sid, repo, expiresAt: exp, instance: inst ?? GITHUB_INSTANCE.id } : null;
 	} catch {
 		return null;
 	}
@@ -286,6 +287,8 @@ export type PushRequest = {
 export type PreparedPush = {
 	readonly sessionId: string;
 	readonly repo: RepoRef;
+	/** The git provider instance the repository is on. */
+	readonly instance: ProviderInstance;
 	readonly branch: string;
 	/** The commit the branch is to point at. */
 	readonly head: string;
@@ -318,6 +321,8 @@ export type PushDeps = {
 	/** The deployment's GitHub App; null when it isn't configured. */
 	readonly app: GitHubApp | null;
 	readonly policy: BrokerPolicy;
+	/** The deployment's git providers: without them, every repository is on GitHub. */
+	readonly providers?: ProviderRegistry;
 	readonly fetch?: Fetch;
 	readonly maxBundleBytes?: number;
 };
@@ -326,22 +331,24 @@ const size = (bytes: number) => (bytes < 1024 * 1024 ? `${Math.max(1, Math.round
 
 /** Checks a push without reaching GitHub: the App, the session, the repository, the branch (but for the default one, which GitHub knows), the size and the bundle. */
 export function preparePush(deps: PushDeps, request: PushRequest): PreparedPush {
-	if (!deps.app) throw new GitBrokerNotConfiguredError();
+	const resolved = deps.providers?.resolveUrl(request.repo, deps.policy);
+	const instance = resolved?.provider.instance ?? GITHUB_INSTANCE;
+	if (instance.kind === "github" && !deps.app) throw new GitBrokerNotConfiguredError();
 	if (!SESSION_ID.test(request.sessionId)) throw new GitBrokerError(400, "That isn't a coding session's ID");
-	const repo = parseRepoUrl(request.repo, deps.policy);
+	const repo = resolved?.repo ?? parseRepoUrl(request.repo, deps.policy);
 	const branch = request.toDefault ? checkBranchName(request.branch) : checkBranch(request.branch, deps.policy);
 	const max = deps.maxBundleBytes ?? MAX_PUSH_BYTES;
 	if (request.bundle.length > max) throw new GitBrokerError(413, `The push is ${size(request.bundle.length)}; Pim pushes at most ${size(max)} at once`);
 	const bundle = parseBundle(request.bundle);
 	const head = bundle.refs.get(`refs/heads/${branch}`);
 	if (!head) throw new GitBrokerError(400, `The bundle doesn't name refs/heads/${branch}`);
-	return { sessionId: request.sessionId, repo, branch, head, bytes: request.bundle.length, pack: bundle.pack, toDefault: request.toDefault === true };
+	return { sessionId: request.sessionId, repo, instance, branch, head, bytes: request.bundle.length, pack: bundle.pack, toDefault: request.toDefault === true };
 }
 
 /** The approval request for a prepared push. */
 export function pushApprovalRequest(push: PreparedPush): PushApprovalRequest {
 	const { sessionId, repo, branch, head, bytes } = push;
-	const summary = `Push ${branch} (${head.slice(0, 12)}, ${size(bytes)}) to github.com/${repo.fullName}`;
+	const summary = `Push ${branch} (${head.slice(0, 12)}, ${size(bytes)}) to ${new URL(push.instance.baseUrl).host}/${repo.fullName}`;
 	return { action: "coding_push_for_approval", sessionId, repo: repo.fullName, branch, head, bytes, summary };
 }
 
@@ -350,22 +357,17 @@ export const gitAuth = (token: string) => `Basic ${btoa(`x-access-token:${token}
 const clean = (reason: string) => reason.replace(/[^\x20-\x7e]/g, " ").slice(0, 200);
 
 /**
- * Pushes a branch from a coding session's bundle, with an installation
- * token that may write to that one repository. Call it only after the
- * person approved `pushApprovalRequest(preparePush(...))`. It never
- * rewrites the branch: see the top of this file.
+ * Pushes a branch from a coding session's bundle, with the provider's
+ * credential for that one repository: an installation token on GitHub, the
+ * connected account's OAuth token on Gitea. Call it only after the person
+ * approved `pushApprovalRequest(preparePush(...))`. It never rewrites the
+ * branch: see the top of this file.
  */
 export async function pushBranch(deps: PushDeps, request: PushRequest): Promise<PushResult> {
 	const push = preparePush(deps, request);
+	if (push.instance.kind === "gitea") return pushToGitProvider(deps, push);
 	const { repo, branch, head, pack } = push;
-	const send = deps.fetch ?? ((input, init) => fetch(input, init));
-	const call = async (url: string, init: RequestInit) => {
-		try {
-			return await send(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(120_000) });
-		} catch {
-			throw new GitBrokerError(502, "GitHub couldn't be reached");
-		}
-	};
+	const call = callWith(deps, "GitHub");
 	const { token } = await deps.app!.installationToken(repo, "write");
 	const api = `${GITHUB_API}/repos/${repo.owner}/${repo.name}`;
 	const git = `https://github.com/${repo.owner}/${repo.name}.git`;
@@ -378,32 +380,8 @@ export async function pushBranch(deps: PushDeps, request: PushRequest): Promise<
 		if (branch !== defaultBranch) throw new GitBrokerError(409, `${branch} isn't ${repo.fullName}'s default branch${typeof defaultBranch === "string" ? `, ${defaultBranch}` : ""}`);
 	} else checkBranch(branch, deps.policy, typeof defaultBranch === "string" ? defaultBranch : null);
 
-	const advertised = await call(`${git}/info/refs?service=git-receive-pack`, { headers: gitHeaders });
-	if (!advertised.ok || advertised.headers.get("content-type") !== "application/x-git-receive-pack-advertisement") {
-		throw new GitBrokerError(502, `GitHub answered HTTP ${advertised.status} when asked for ${repo.fullName}'s branches`);
-	}
-	const { refs, capabilities } = parseAdvertisement(new Uint8Array(await advertised.arrayBuffer()));
-	for (const needed of ["report-status", "delete-refs", "ofs-delta"]) {
-		if (!capabilities.has(needed)) throw new GitBrokerError(502, `GitHub's receive-pack lacks ${needed}`);
-	}
-	const caps = ["report-status", ...(capabilities.has("quiet") ? ["quiet"] : []), "agent=pim-git-broker"].join(" ");
-
-	/** Sends ref updates (old, new, ref) and a pack to receive-pack, and checks that each was made. */
-	const receivePack = async (commands: [string, string, string][], body: Uint8Array | null) => {
-		const lines = commands.map(([old, next, ref], index) => pktLine(`${old} ${next} ${ref}${index === 0 ? `\0${caps}` : ""}\n`));
-		const response = await call(`${git}/git-receive-pack`, {
-			method: "POST",
-			headers: { ...gitHeaders, "Content-Type": "application/x-git-receive-pack-request", Accept: "application/x-git-receive-pack-result" },
-			body: concat(...lines, FLUSH, body ?? new Uint8Array(0)),
-		});
-		if (!response.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${response.status} to the push`);
-		const report = readPktLines(new Uint8Array(await response.arrayBuffer())).filter((line): line is string => line !== null).map((line) => line.replace(/\n$/, ""));
-		if (report[0] !== "unpack ok") throw new GitBrokerError(502, `GitHub couldn't unpack the push: ${clean(report[0] ?? "no report")}`);
-		for (const [, , ref] of commands) {
-			const line = report.find((entry) => entry === `ok ${ref}` || entry.startsWith(`ng ${ref} `));
-			if (line !== `ok ${ref}`) throw new GitBrokerError(409, `GitHub refused to update ${ref}: ${clean(line?.slice(`ng ${ref} `.length) ?? "no report")}`);
-		}
-	};
+	const { refs, caps } = await advertise(call, git, gitHeaders, repo, "GitHub");
+	const receivePack = (commands: [string, string, string][], body: Uint8Array | null) => sendReceivePack(call, git, gitHeaders, caps, "GitHub", commands, body);
 
 	const ref = `refs/heads/${branch}`;
 	const before = refs.get(ref) ?? null;
@@ -432,9 +410,121 @@ export async function pushBranch(deps: PushDeps, request: PushRequest): Promise<
 		}
 		if (!moved.ok) throw new GitBrokerError(502, `GitHub answered HTTP ${moved.status} when moving ${branch}`);
 	} finally {
-		await receivePack([[head, ZERO, staging]], null).catch((error: unknown) => {
-			console.error(JSON.stringify({ event: "pim.git_broker.staging_left", repo: repo.fullName, ref: staging, error: error instanceof Error ? error.message : String(error) }));
-		});
+		await deleteStaging(receivePack, repo, head, staging);
+	}
+	log("updated");
+	return { repo: repo.fullName, branch, before, after: head, outcome: "updated" };
+}
+
+/** `fetch` for a provider's answers: no redirects, a time limit, and a refusal of its own when the host can't be reached. */
+function callWith(deps: PushDeps, name: string) {
+	const send = deps.fetch ?? ((input, init) => fetch(input, init));
+	return async (url: string, init: RequestInit) => {
+		try {
+			return await send(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(120_000) });
+		} catch {
+			throw new GitBrokerError(502, `${name} couldn't be reached`);
+		}
+	};
+}
+
+type Call = ReturnType<typeof callWith>;
+
+/** What the host's receive-pack says of the repository's branches, and the capabilities Pim asks for. */
+async function advertise(call: Call, git: string, gitHeaders: Record<string, string>, repo: RepoRef, name: string) {
+	const advertised = await call(`${git}/info/refs?service=git-receive-pack`, { headers: gitHeaders });
+	if (!advertised.ok || advertised.headers.get("content-type") !== "application/x-git-receive-pack-advertisement") {
+		throw new GitBrokerError(502, `${name} answered HTTP ${advertised.status} when asked for ${repo.fullName}'s branches`);
+	}
+	const { refs, capabilities } = parseAdvertisement(new Uint8Array(await advertised.arrayBuffer()));
+	for (const needed of ["report-status", "delete-refs", "ofs-delta"]) {
+		if (!capabilities.has(needed)) throw new GitBrokerError(502, `${name}'s receive-pack lacks ${needed}`);
+	}
+	return { refs, caps: ["report-status", ...(capabilities.has("quiet") ? ["quiet"] : []), "agent=pim-git-broker"].join(" ") };
+}
+
+/** Sends ref updates (old, new, ref) and a pack to receive-pack, and checks that each was made. */
+async function sendReceivePack(call: Call, git: string, gitHeaders: Record<string, string>, caps: string, name: string, commands: [string, string, string][], body: Uint8Array | null) {
+	const lines = commands.map(([old, next, ref], index) => pktLine(`${old} ${next} ${ref}${index === 0 ? `\0${caps}` : ""}\n`));
+	const response = await call(`${git}/git-receive-pack`, {
+		method: "POST",
+		headers: { ...gitHeaders, "Content-Type": "application/x-git-receive-pack-request", Accept: "application/x-git-receive-pack-result" },
+		body: concat(...lines, FLUSH, body ?? new Uint8Array(0)),
+	});
+	if (!response.ok) throw new GitBrokerError(502, `${name} answered HTTP ${response.status} to the push`);
+	const report = readPktLines(new Uint8Array(await response.arrayBuffer())).filter((line): line is string => line !== null).map((line) => line.replace(/\n$/, ""));
+	if (report[0] !== "unpack ok") throw new GitBrokerError(502, `${name} couldn't unpack the push: ${clean(report[0] ?? "no report")}`);
+	for (const [, , ref] of commands) {
+		const line = report.find((entry) => entry === `ok ${ref}` || entry.startsWith(`ng ${ref} `));
+		if (line !== `ok ${ref}`) throw new GitBrokerError(409, `${name} refused to update ${ref}: ${clean(line?.slice(`ng ${ref} `.length) ?? "no report")}`);
+	}
+}
+
+async function deleteStaging(receivePack: (commands: [string, string, string][], body: Uint8Array | null) => Promise<void>, repo: RepoRef, head: string, staging: string) {
+	await receivePack([[head, ZERO, staging]], null).catch((error: unknown) => {
+		console.error(JSON.stringify({ event: "pim.git_broker.staging_left", repo: repo.fullName, ref: staging, error: error instanceof Error ? error.message : String(error) }));
+	});
+}
+
+/** A pack with no objects, which receive-pack takes when the commit it is to point a ref at is already there. */
+async function emptyPack(): Promise<Uint8Array> {
+	const header = Uint8Array.from([0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 0]);
+	return concat(header, new Uint8Array(await crypto.subtle.digest("SHA-1", header as BufferSource)));
+}
+
+/**
+ * The push for a provider with no API to move a branch forward only
+ * (Gitea): receive-pack alone, with its credential. A new branch is created
+ * only if it still doesn't exist. An existing one is moved in three steps:
+ * the pack goes to a staging branch, which makes the objects reachable; the
+ * provider says whether the branch's commit is an ancestor of the new one,
+ * so that it only moves forward; and the branch is updated from the commit
+ * seen to the new one, which receive-pack refuses if the branch moved since.
+ */
+async function pushToGitProvider(deps: PushDeps, push: PreparedPush): Promise<PushResult> {
+	const { repo, branch, head, pack } = push;
+	const provider: GitProvider = deps.providers!.get(push.instance.id);
+	const name = provider.instance.label;
+	const call = callWith(deps, name);
+	const credential = await provider.credential(repo, "write");
+	if (!credential) throw new GitBrokerNotConfiguredError();
+	const git = provider.gitUrl(repo).replace(/\.git$/, "");
+	const gitHeaders = { Authorization: basicAuth(credential), "User-Agent": "git/pim-git-broker" };
+
+	const defaultBranch = await provider.defaultBranch(repo);
+	if (push.toDefault) {
+		if (branch !== defaultBranch) throw new GitBrokerError(409, `${branch} isn't ${repo.fullName}'s default branch, ${defaultBranch}`);
+	} else checkBranch(branch, deps.policy, defaultBranch);
+
+	const { refs, caps } = await advertise(call, git, gitHeaders, repo, name);
+	const receivePack = (commands: [string, string, string][], body: Uint8Array | null) => sendReceivePack(call, git, gitHeaders, caps, name, commands, body);
+	const ref = `refs/heads/${branch}`;
+	const before = refs.get(ref) ?? null;
+	const log = (outcome: string) => console.log(JSON.stringify({ event: "pim.git_broker.push", session: push.sessionId, repo: repo.fullName, branch, instance: push.instance.id, outcome }));
+	if (before === head) {
+		log("unchanged");
+		return { repo: repo.fullName, branch, before, after: head, outcome: "unchanged" };
+	}
+	if (before === null) {
+		await receivePack([[ZERO, head, ref]], pack);
+		log("created");
+		return { repo: repo.fullName, branch, before, after: head, outcome: "created" };
+	}
+	if (!provider.isAncestor) throw new GitBrokerError(502, `${name} can't tell whether a push only moves ${branch} forward`);
+	const moved = () => new BranchMovedError(409, `${branch} on ${name} has commits this push doesn't: fetch it, rebase onto it, and push again`);
+	const staging = `refs/heads/pim-staging/${crypto.randomUUID()}`;
+	await receivePack([[ZERO, head, staging]], pack);
+	try {
+		if (!(await provider.isAncestor(repo, before, head))) throw moved();
+		try {
+			await receivePack([[before, head, ref]], await emptyPack());
+		} catch (error) {
+			// Refused: if the branch is no longer where it was, it moved meanwhile.
+			if (error instanceof GitBrokerError && error.status === 409 && (await advertise(call, git, gitHeaders, repo, name)).refs.get(ref) !== before) throw moved();
+			throw error;
+		}
+	} finally {
+		await deleteStaging(receivePack, repo, head, staging);
 	}
 	log("updated");
 	return { repo: repo.fullName, branch, before, after: head, outcome: "updated" };

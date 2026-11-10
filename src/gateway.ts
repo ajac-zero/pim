@@ -17,6 +17,7 @@ import {
 } from "./accounts";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
+import { giteaApi } from "./coding/git-broker/gitea-api";
 import { GIT_BROKER_PATH, serveGitBroker } from "./coding/git-broker/routes";
 import { MODEL_GATEWAY_PATH, serveModelGateway } from "./coding/model-gateway";
 import { codingApi } from "./coding/routes";
@@ -636,6 +637,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 		socialApi(env, account, request),
 		codingApi(env, account, request),
 		codingVaultApi(env, account, request),
+		giteaApi(env, account, request),
 	];
 	for (const extension of extensions) {
 		const answered = await extension(path, request);

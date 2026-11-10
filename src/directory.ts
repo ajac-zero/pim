@@ -2,6 +2,7 @@ import { getAgentByName } from "agents";
 import { DurableObject } from "cloudflare:workers";
 import { base64UrlEncode } from "./auth/encoding";
 import { digestHex } from "./auth/store";
+import { GiteaStore, type GiteaRecord, type GiteaWriteResult } from "./coding/git-broker/gitea-store";
 import { HOST_SEEN_MS, HOST_TOKEN_PREFIX, type HostRequest, type HostStatus, type HostSync, RETAKE_MS } from "./computer-host";
 
 /**
@@ -207,10 +208,13 @@ function log(event: string, fields: Record<string, unknown>): void {
 export class Directory extends DurableObject<Env> {
 	/** Cleanups running in this instance, so the alarm and a request don't run one twice at once. */
 	readonly #running = new Map<string, Promise<CleanupResult>>();
+	/** The deployment's Gitea connection, sealed (../coding/git-broker/gitea-store.ts). */
+	readonly #gitea: GiteaStore;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.storage.sql.exec(SCHEMA);
+		this.#gitea = new GiteaStore(ctx.storage.sql);
 		const columns = ctx.storage.sql.exec("PRAGMA table_info(accounts)").toArray().map((row) => String(row.name));
 		if (!columns.includes("bot")) ctx.storage.sql.exec("ALTER TABLE accounts ADD COLUMN bot TEXT");
 	}
@@ -234,6 +238,40 @@ export class Directory extends DurableObject<Env> {
 		let key = this.#meta("cookie_key");
 		if (!key) this.#setMeta("cookie_key", (key = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))));
 		return key;
+	}
+
+	giteaRead(instance: string): GiteaRecord {
+		return this.#gitea.read(instance);
+	}
+
+	giteaWrite(instance: string, sealed: Uint8Array, login: string, expectedVersion: number): GiteaWriteResult {
+		return this.#gitea.write(instance, sealed, login, expectedVersion, Date.now());
+	}
+
+	giteaClaimRefresh(instance: string, version: number, leaseMs: number): boolean {
+		const now = Date.now();
+		return this.#gitea.claimRefresh(instance, version, now, now + leaseMs);
+	}
+
+	giteaReleaseRefresh(instance: string, version: number): void {
+		this.#gitea.releaseRefresh(instance, version);
+	}
+
+	giteaMarkNeedsReconnect(instance: string, expectedVersion: number): GiteaWriteResult {
+		return this.#gitea.markNeedsReconnect(instance, expectedVersion, Date.now());
+	}
+
+	giteaDisconnect(instance: string): void {
+		this.#gitea.disconnect(instance, Date.now());
+	}
+
+	giteaCreateState(hash: string, ownerId: string, ttlMs: number): void {
+		const now = Date.now();
+		this.#gitea.createState(hash, ownerId, now + ttlMs, now);
+	}
+
+	giteaConsumeState(hash: string): string | null {
+		return this.#gitea.consumeState(hash, Date.now());
 	}
 
 	/** Whose a linked identity is, if anyone's. */

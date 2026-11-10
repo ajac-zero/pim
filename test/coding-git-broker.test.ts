@@ -236,7 +236,7 @@ describe("broker tokens", () => {
 		const key = await brokerKey("directory-secret");
 		const token = await issueBrokerToken(key, { sessionId: "T-123", repo: { owner: "Acme", name: "Widgets", fullName: "Acme/Widgets" }, ttlMs: 60_000, now: NOW });
 		expect(token).toMatch(/^pimgit_[\w-]+\.[\w-]+$/);
-		expect(await verifyBrokerToken(key, token, NOW)).toEqual({ sessionId: "T-123", repo: "acme/widgets", expiresAt: NOW + 60_000 });
+		expect(await verifyBrokerToken(key, token, NOW)).toEqual({ sessionId: "T-123", repo: "acme/widgets", expiresAt: NOW + 60_000, instance: "github" });
 		expect(await verifyBrokerToken(key, token, NOW + 59_999)).not.toBeNull();
 		expect(await verifyBrokerToken(key, token, NOW + 60_000)).toBeNull();
 	});

@@ -145,8 +145,6 @@ export class HarnessRunner {
 	#controller = new AbortController();
 	#aborted = false;
 	#timedOut = false;
-	/** The turn used the tokens it was allowed (`maxTokens`) and was stopped. */
-	#overTokens = false;
 	#running = false;
 	#interrupted: Promise<void> | null = null;
 	/** Resolves when the run under way has ended. */
@@ -247,11 +245,6 @@ export class HarnessRunner {
 					case "assistant":
 						usage.set(event.messageId ?? `unnamed-${unnamed++}`, event.message.usage);
 						seen.model = event.message.model;
-						// A CLI that estimates no cost is stopped once its turn's tokens reach the thread's ceiling.
-						if (turn.maxTokens !== null && !this.#overTokens && tokens(sum(usage)) >= turn.maxTokens) {
-							this.#overTokens = true;
-							void this.#interrupt();
-						}
 						for (const part of event.message.content) {
 							if (part.type === "toolCall" && part.name === harness.shellTool && typeof part.arguments.command === "string") calls.set(part.id, { command: part.arguments.command, startedAt: this.#now() });
 						}
@@ -334,7 +327,6 @@ export class HarnessRunner {
 		const { sessionId, model, result, authFailed, stderr, exit, sessionUsage, lines: count } = seen;
 		const ended = (reason: RunFailure, detail: string): RunResult => ({ status: "unanswered", reason, detail, sessionId, sessionCostUsd: result?.sessionCostUsd ?? null, usage: sum(usage), sessionUsage, model, lines: count });
 		if (this.#aborted) return ended("aborted", "Stopped");
-		if (this.#overTokens) return ended("budget", "The turn reached the thread's token ceiling");
 		if (this.#timedOut || exit?.timedOut) return ended("timeout", `The turn ran out of time after ${Math.round(timeoutMs / 60_000)} minutes`);
 		if (authFailed !== null || (!result && harness.loginFailure?.test(stderr))) return ended("login_required", `${harness.name} isn't signed in: connect it again`);
 		if (result) {
@@ -451,7 +443,6 @@ async function signal(deps: Pick<RunnerDeps, "harness" | "workspace">, sessionId
 	}
 }
 
-const tokens = (usage: HarnessUsage) => usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 
 function sum(usage: Map<string, HarnessUsage>): HarnessUsage {
 	let total = NO_USAGE;

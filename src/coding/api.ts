@@ -31,7 +31,8 @@ export type CodingThreadSummary = {
 	readonly chat: string | null;
 	readonly harness: CodingHarness;
 	readonly spentUsd: number;
-	readonly budgetUsd: number;
+	/** The most it may spend on its model; null when none was set. */
+	readonly budgetUsd: number | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 	/** When its latest turn ended; null before its first. */

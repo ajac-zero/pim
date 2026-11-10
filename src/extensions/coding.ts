@@ -3,6 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { deploymentSettings } from "../deployment";
 import { type CodingThreadView, threadPath } from "../coding/api";
+import { cliHarness } from "../coding/harness";
 import { codingThread } from "../coding/thread-do";
 import { CodingError, calling, listThreads, liveThread, ownedThread, startThread, threadView } from "../coding/threads";
 import { defineGatedAction, definePimExtension } from "./define";
@@ -46,7 +47,8 @@ function brief(view: CodingThreadView) {
 		checkpoint: view.checkpoint ? { sha: view.checkpoint.sha, message: view.checkpoint.message } : null,
 		// Every field that says something, so the model can tell where the time to readiness went: durations in ms, times in ms since the epoch.
 		environment: Object.fromEntries(Object.entries(view.environment).filter(([, value]) => value !== null && value !== undefined)),
-		spent_usd: Number(view.spentUsd.toFixed(4)),
+		// Null for a CLI that reports no cost (Codex, Amp): its spend is unmetered, not $0.
+		spent_usd: cliHarness(view.harness)?.reportsCost === false ? null : Number(view.spentUsd.toFixed(4)),
 		budget_usd: view.budgetUsd,
 	};
 }
@@ -88,7 +90,7 @@ export const coding = definePimExtension({
 							description: "The coding agent that runs it; pi by default. The others run the vendor's own CLI signed in as the person, who connects it on the coding page first.",
 						}),
 					),
-					budget: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "The most it may spend on its model, in US dollars; 3 by default." })),
+					budget: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "The most it may spend on its model, in US dollars. None by default: a thread runs until it finishes. Only Pi, Claude Code and Mistral Vibe report what they spend; for Codex and Amp the budget is ignored." })),
 					parent: Type.Optional(Type.String({ description: "The thread this one continues from, if any." })),
 				}),
 				replay: "safe",

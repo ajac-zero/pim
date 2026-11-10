@@ -56,7 +56,7 @@ type CodingThreadSummary = {
   chat: string | null;      // the chat it was started from, which the chat list shows it under as a subthread
   harness: "pi" | "claude-code" | "codex" | "mistral-vibe" | "amp"; // the coding agent that runs it
   spentUsd: number;
-  budgetUsd: number;
+  budgetUsd: number | null; // null when none was set
   createdAt: number;
   updatedAt: number;
   lastTurnEndedAt: number | null; // when its latest turn ended; null before its first
@@ -80,7 +80,7 @@ type CodingThreadView = {
   workspaceProvider: string;
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
-  budgetUsd: number;
+  budgetUsd: number | null; // null when none was set
   spentUsd: number;
   currentOperation: string | null; // the turn under way, null between turns
   inbox: number;            // inputs waiting for a turn
@@ -158,7 +158,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `thread.queued`: `data: { position, reason }`, each time the thread waits for a slot.
 - `thread.turn_started`: `data: { operationId }`.
 - `thread.turn_ended`: `data: { type, threadId, space, operationId, outcome, reason?, checkpoint?, at }`, where `outcome` is `completed`, `error`, `cancelled` or `needs_approval`.
-- `app.budget_stop`: `data: { budgetUsd, spentUsd, tokens?, tokenCeiling? }`; `tokens` and `tokenCeiling` for a CLI harness that estimates no cost, whose budget is a ceiling on its tokens (below).
+- `app.budget_stop`: `data: { budgetUsd, spentUsd }`. Threads stopped before 2026-11-10 at a token ceiling also have `tokens` and `tokenCeiling`.
 - `thread.pushed`: `data: { repo, branch, before, after, outcome }`, where `outcome` is `created`, `updated` or `unchanged`.
 - `thread.merged`: `data: { repo, branch, before, after, outcome, rebased }`, a merge into the default branch (`branch`); `rebased` says whether the thread's commits were rebased onto it first. A rebase also adds a checkpoint, `Rebased onto <branch>`.
 - `environment.built`, `environment.restored`: `data: { key, setupMs?, snapshotKept? }`, the environment was set up (and its snapshot kept, unless `snapshotKept` is false), or restored from the person's snapshot.
@@ -168,7 +168,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `harness.permission_denied`: `data: { tool, message }`: the CLI refused a tool call nothing allowed.
 - `harness.notice`: `data: { message }`: the CLI warned of something that didn't stop the turn (Codex's error items, an Amp background subagent that failed).
 
-For a `claude-code` thread, each turn is one `model_call` with the turn's tokens and what the CLI estimates it cost (`provider: "claude-code"`). For a `codex` or `amp` thread it is the turn's tokens with no cost (`provider: "codex"`, `"amp"`), since neither CLI reports one in dollars ([coding-codex.md](coding-codex.md), [coding-amp.md](coding-amp.md)). A thread on a harness that estimates no cost keeps its budget as a ceiling on tokens: each budgeted dollar allows 1,000,000 tokens of every kind, counted from its `model_call`s. It is a ceiling, not a price. At it, the thread stops with `stateReason: "budget"` and the tokens in `stateDetail`, and `steer` and `continue` without a bigger `budgetUsd` are `budget_spent`, as when a thread spent its budget.
+For a `claude-code` thread, each turn is one `model_call` with the turn's tokens and what the CLI estimates it cost (`provider: "claude-code"`). For a `codex` or `amp` thread it is the turn's tokens with no cost (`provider: "codex"`, `"amp"`), since neither CLI reports one in dollars ([coding-codex.md](coding-codex.md), [coding-amp.md](coding-amp.md)). Their spend is unmetered: `spentUsd` stays 0 and a budget is not enforced against them, as tokens are no price (Amp counts its whole context again on every response).
 
 ### The live stream
 
@@ -187,7 +187,7 @@ POST /api/coding/threads
 
 - `repo` must be `https://github.com/<owner>/<name>` (`invalid`), and one the deployment allows (`forbidden`).
 - `profile` is the thread's model. Without one, it is the space's default model, the one its chats use when an agent has none of its own (`GET /api/model`'s `model`), unless that is a ChatGPT plan model, which coding threads can't use: then it is the deployment's default.
-- `budgetUsd` is the most it spends on its model, $3 by default; at it, the thread stops, `failed` with `stateReason: "budget"`, until continued with a bigger one.
+- `budgetUsd` is the most it spends on its model; without it a thread has no budget and runs until it finishes. With one, at it the thread stops, `failed` with `stateReason: "budget"`, until continued with a bigger one. Not enforced for Codex and Amp, which report no cost.
 - `parent` must be a thread of this space (`not_found`).
 - `harness` is the coding agent that runs it: `pi` by default, `claude-code`, Anthropic's Claude Code CLI ([coding-claude-code.md](coding-claude-code.md)), or `codex`, OpenAI's Codex CLI ([coding-codex.md](coding-codex.md)), each run in the thread's workspace with the person's own subscription, or `mistral-vibe`, Mistral's Vibe CLI ([coding-vibe.md](coding-vibe.md)), or `amp`, Amp's CLI ([coding-amp.md](coding-amp.md)), each run with the person's own API key. A `claude-code` thread's `profile` is `{ providerId: "claude-code", model: "default" }`, the CLI's own model, unless it is given one with that `providerId`, whose `model` the CLI is asked for (`--model`); a `codex` thread's likewise, with `providerId: "codex"` (`-m`), and a `mistral-vibe` thread's with `providerId: "mistral-vibe"` and one of Vibe's model aliases (`--model`, on a new session only). An `amp` thread's `model` is one of Amp's modes, `low`, `medium`, `high` or `ultra` (`--mode`), or `default` for Amp's; another fails its turn.
 - `chat` is the chat the thread is started from, for the chat list to show it under that chat. A thread an agent starts records its own chat, so it needs none.

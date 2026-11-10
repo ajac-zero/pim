@@ -6,7 +6,13 @@ import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { Download, Trash2, X } from "~/components/icons";
-import { PdfView, PdfZoomControls } from "~/components/pdf-view";
+import {
+  PdfPageControls,
+  PdfView,
+  PdfZoomControls,
+  savedPdfPage,
+  savePdfPage,
+} from "~/components/pdf-view";
 import { Button } from "~/components/ui/button";
 import { CodeBlock } from "~/components/ui/code-block";
 import { baseName, parentOf, previewOf } from "~/lib/files";
@@ -52,6 +58,12 @@ export function FileView({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [zoom, setZoom] = useState(1);
+  const [page, setPage] = useState(() => savedPdfPage(path));
+  const [pageCount, setPageCount] = useState(0);
+  const turnPage = (next: number) => {
+    setPage(next);
+    savePdfPage(path, next);
+  };
   const preview = previewOf(baseName(path));
   const textual = ["markdown", "code", "text"].includes(preview.kind);
   // The folder's listing says whether the file is there, and its size.
@@ -103,7 +115,16 @@ export function FileView({
           <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
         )}
         {preview.kind === "pdf" && (
-          <PdfZoomControls zoom={zoom} onZoom={setZoom} />
+          <>
+            <PdfPageControls
+              page={page}
+              pages={pageCount}
+              onPage={(next) =>
+                turnPage(Math.min(pageCount, Math.max(1, next)))
+              }
+            />
+            <PdfZoomControls zoom={zoom} onZoom={setZoom} />
+          </>
         )}
         <Button asChild size="icon" variant="ghost" className="size-8 shrink-0">
           <a
@@ -163,7 +184,16 @@ export function FileView({
           // biome-ignore lint/a11y/useMediaCaption: the person's own video, with no captions to give.
           <video src={url} controls className="max-h-full max-w-full" />
         ) : preview.kind === "pdf" ? (
-          <PdfView url={url} name={name} zoom={zoom} onZoom={setZoom} />
+          <PdfView
+            url={url}
+            name={name}
+            version={entry.updatedAt}
+            zoom={zoom}
+            onZoom={setZoom}
+            page={page}
+            onPage={turnPage}
+            onPages={setPageCount}
+          />
         ) : !showText ? (
           <p className="m-auto text-muted-foreground text-sm">
             {t("noFilePreview")}

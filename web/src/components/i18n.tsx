@@ -767,6 +767,8 @@ const translations = {
     browserGone: "This window closed. Reload this page to open it again.",
     zoomIn: "Zoom in",
     zoomOut: "Zoom out",
+    previousPage: "Previous page",
+    nextPage: "Next page",
     noFilePreview: "There's no preview for this file. Download it to open it.",
     deleteFileNamed: "Delete {name}",
     deleteFileConfirm:
@@ -2552,6 +2554,8 @@ const translations = {
       "Esta ventana se cerró. Recarga esta página para abrirla de nuevo.",
     zoomIn: "Acercar",
     zoomOut: "Alejar",
+    previousPage: "Página anterior",
+    nextPage: "Página siguiente",
     noFilePreview:
       "Este archivo no tiene vista previa. Descárgalo para abrirlo.",
     deleteFileNamed: "Eliminar {name}",

@@ -1,6 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { type DragEvent, useEffect, useRef, useState } from "react";
+import {
+  type DragEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { AgentIcon, swatchClass } from "~/components/agent-icon";
 import {
   AwaitingApprovalMark,
@@ -259,6 +265,25 @@ export function ChatTabs({ activeId }: { activeId: string }) {
         })}
       </ul>
     </nav>
+  );
+}
+
+/**
+ * A page other than a chat's, with the pinned chats as tabs above it so they
+ * stay in view; none is open, so none is selected. Without pinned chats the
+ * page has the room to itself.
+ */
+export function WithChatTabs({ children }: { children: ReactNode }) {
+  const pinned = useTabs();
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+      {pinned.length > 0 && (
+        <header className="hidden h-11 shrink-0 bg-sidebar md:flex">
+          <ChatTabs activeId="" />
+        </header>
+      )}
+      {children}
+    </div>
   );
 }
 

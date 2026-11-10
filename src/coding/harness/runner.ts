@@ -79,10 +79,14 @@ export type RunnerDeps = {
 	readonly now?: () => number;
 	/** How long the CLI has to end its turn after SIGINT before it is killed. */
 	readonly graceMs?: number;
+	/** How long a turn may go without any output before it is stopped as stalled (`STALL_MS`). While a tool call is under way, which prints nothing until it ends, it may be silent four times as long. */
+	readonly stallMs?: number;
+	/** How often the person's lock is renewed while the turn runs (`LOCK_RENEW_MS`). */
+	readonly lockRenewMs?: number;
 };
 
 /** Why a turn didn't complete. */
-export type RunFailure = "aborted" | "timeout" | "budget" | "max_turns" | "login_required" | "harness_error" | "interrupted";
+export type RunFailure = "aborted" | "timeout" | "stalled" | "budget" | "max_turns" | "login_required" | "harness_error" | "interrupted";
 
 /** How a turn ended, with what it cost as the CLI reported it. */
 export type RunResult = {
@@ -107,6 +111,15 @@ export type Prepared = { readonly status: "ready" } | { readonly status: "busy" 
 
 /** The default grace after SIGINT. */
 export const INTERRUPT_GRACE_MS = 15_000;
+
+/** How long a turn may make no progress, with no output at all, before it is stopped. A turn that is working is never cut off, however long it runs. */
+export const STALL_MS = 30 * 60_000;
+
+/** How often a running turn renews the person's lock, which is leased for a while at a time so a thread that is gone can't keep it. */
+export const LOCK_RENEW_MS = 10 * 60_000;
+
+/** What a turn with no time limit asks of the workspace as its command's timeout: a week, which no turn reaches. */
+export const UNLIMITED_EXEC_MS = 7 * 24 * 60 * 60_000;
 
 /** The most of the CLI's error output a failure keeps. */
 const STDERR_TAIL = 2000;
@@ -145,6 +158,7 @@ export class HarnessRunner {
 	#controller = new AbortController();
 	#aborted = false;
 	#timedOut = false;
+	#stalled = false;
 	#running = false;
 	#interrupted: Promise<void> | null = null;
 	/** Resolves when the run under way has ended. */
@@ -187,7 +201,7 @@ export class HarnessRunner {
 	}
 
 	/** Runs the prepared turn to its end, then writes the login back and lets the lock go, whatever happened. */
-	async run(turn: HarnessTurn, timeoutMs: number): Promise<RunResult> {
+	async run(turn: HarnessTurn, timeoutMs: number | null): Promise<RunResult> {
 		const record = this.#record;
 		if (!record) throw new Error("The harness run wasn't prepared");
 		this.#running = true;
@@ -213,7 +227,7 @@ export class HarnessRunner {
 		return this.#interrupt();
 	}
 
-	async #execute(record: RunRecord, turn: HarnessTurn, timeoutMs: number): Promise<RunResult> {
+	async #execute(record: RunRecord, turn: HarnessTurn, timeoutMs: number | null): Promise<RunResult> {
 		const { harness, workspace, auth } = this.#deps;
 		const parser = harness.parser(turn);
 		// A key the CLI was given never goes further than its process: what it prints is read without it.
@@ -223,6 +237,8 @@ export class HarnessRunner {
 		const usage = new Map<string, HarnessUsage>();
 		const calls = new Map<string, { command: string; startedAt: number }>();
 		let unnamed = 0;
+		// Tool calls the CLI made that haven't ended: it prints nothing while one runs.
+		const pending = new Set<string>();
 		// What the output said so far: who, what it cost, and how it ended.
 		const seen = {
 			sessionId: null as string | null,
@@ -246,10 +262,12 @@ export class HarnessRunner {
 						usage.set(event.messageId ?? `unnamed-${unnamed++}`, event.message.usage);
 						seen.model = event.message.model;
 						for (const part of event.message.content) {
+							if (part.type === "toolCall") pending.add(part.id);
 							if (part.type === "toolCall" && part.name === harness.shellTool && typeof part.arguments.command === "string") calls.set(part.id, { command: part.arguments.command, startedAt: this.#now() });
 						}
 						break;
 					case "tool_result":
+						pending.delete(event.message.toolCallId);
 						this.#testRun(calls.get(event.message.toolCallId), event.message, event.exitCode);
 						break;
 					case "usage":
@@ -297,17 +315,36 @@ export class HarnessRunner {
 		if (!this.#aborted) {
 			const env = { HOME: HARNESS_HOME, ...harnessEnv(harness.id), ...harness.env, ...(auth.mode === "env" ? auth.env : {}) };
 			const grace = this.#deps.graceMs ?? INTERRUPT_GRACE_MS;
-			const timer = setTimeout(() => {
-				this.#timedOut = true;
-				void this.#interrupt();
-			}, timeoutMs);
+			// The turn's own time limit, only when the thread has one.
+			const timer =
+				timeoutMs === null
+					? undefined
+					: setTimeout(() => {
+							this.#timedOut = true;
+							void this.#interrupt();
+						}, timeoutMs);
+			// A turn that prints nothing for too long is stalled, and stopped; any output starts the wait again.
+			const stallMs = this.#deps.stallMs ?? STALL_MS;
+			let stall: ReturnType<typeof setTimeout> | undefined;
+			const watch = () => {
+				clearTimeout(stall);
+				stall = setTimeout(() => {
+					this.#stalled = true;
+					void this.#interrupt();
+				}, pending.size > 0 ? 4 * stallMs : stallMs);
+			};
+			watch();
+			// The person's lock is leased, and renewed for as long as the turn runs.
+			const renew = record.locked ? setInterval(() => void this.#deps.lock.acquire().catch(() => {}), this.#deps.lockRenewMs ?? LOCK_RENEW_MS) : undefined;
 			try {
 				// The workspace's own timeout is the last resort, past the grace the CLI gets after SIGINT.
-				for await (const event of workspace.exec(harness.buildCommand(turn), { cwd: `${HARNESS_HOME}/repo`, env, timeoutMs: timeoutMs + 2 * grace, signal: this.#controller.signal })) {
+				const execMs = timeoutMs === null ? UNLIMITED_EXEC_MS : timeoutMs + 2 * grace;
+				for await (const event of workspace.exec(harness.buildCommand(turn), { cwd: `${HARNESS_HOME}/repo`, env, timeoutMs: execMs, signal: this.#controller.signal })) {
 					if (event.type === "stdout") for (const text of lines.push(event.data)) await line(text);
 					// Scrubbed as a whole before it is cut, so a secret split across chunks is found too.
 					else if (event.type === "stderr") seen.stderr = scrub(seen.stderr + event.data).slice(-STDERR_TAIL);
 					else if (event.type === "exit") seen.exit = event;
+					watch();
 				}
 				for (const text of lines.flush()) await line(text);
 				// A failure to read what the CLI left behind loses only what it says: the turn ends as far as the output tells.
@@ -321,13 +358,16 @@ export class HarnessRunner {
 				}
 			} finally {
 				clearTimeout(timer);
+				clearTimeout(stall);
+				clearInterval(renew);
 			}
 		}
 
 		const { sessionId, model, result, authFailed, stderr, exit, sessionUsage, lines: count } = seen;
 		const ended = (reason: RunFailure, detail: string): RunResult => ({ status: "unanswered", reason, detail, sessionId, sessionCostUsd: result?.sessionCostUsd ?? null, usage: sum(usage), sessionUsage, model, lines: count });
 		if (this.#aborted) return ended("aborted", "Stopped");
-		if (this.#timedOut || exit?.timedOut) return ended("timeout", `The turn ran out of time after ${Math.round(timeoutMs / 60_000)} minutes`);
+		if (this.#timedOut || (exit?.timedOut && timeoutMs !== null)) return ended("timeout", `The turn ran out of time after ${Math.round((timeoutMs ?? 0) / 60_000)} minutes`);
+		if (this.#stalled) return ended("stalled", `The turn made no progress for ${Math.round((this.#deps.stallMs ?? STALL_MS) / 60_000)} minutes, so it was stopped`);
 		if (authFailed !== null || (!result && harness.loginFailure?.test(stderr))) return ended("login_required", `${harness.name} isn't signed in: connect it again`);
 		if (result) {
 			if (result.ok) return { status: "done", sessionId, sessionCostUsd: result.sessionCostUsd, usage: sum(usage), sessionUsage, model, lines: count };

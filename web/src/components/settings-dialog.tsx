@@ -60,6 +60,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
+import { UsageCostSection } from "~/components/usage-cost-settings";
 import {
   auth,
   authError,
@@ -218,6 +219,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
         {tab === "account" && (
           <>
             <AccountSection />
+            <UsageCostSection />
             <SignInSection />
             <McpSection />
             <TokensSection />

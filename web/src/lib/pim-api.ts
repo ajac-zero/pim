@@ -911,6 +911,42 @@ export type UsageReport = {
   storageBytes: number;
 };
 
+/** What one agent, model or kind of run cost; a null key is a call with no tag. */
+export type Spend = { key: string | null; costUsd: number };
+
+export type TopSpender = {
+  id: string;
+  costUsd: number;
+  calls: number;
+  turns: number;
+  avgPromptBytes: number;
+};
+
+/** What model calls cost over the last `days` days (`GET /usage/costs`). */
+export type CostReport = {
+  days: number;
+  since: string;
+  priceVersion: string;
+  totalCostUsd: number;
+  /** Calls on a model with no price, whose cost is counted in no dollars. */
+  unpricedCalls: number;
+  calls: number;
+  errors: number;
+  costPer1kOutputTokens: number | null;
+  cacheHitRatio: number | null;
+  byDay: {
+    day: string;
+    costUsd: number;
+    calls: number;
+    cacheHitRatio: number | null;
+    byAgent: Spend[];
+    byModel: Spend[];
+    byRunKind: Spend[];
+  }[];
+  topChats: TopSpender[];
+  topCodingThreads: TopSpender[];
+};
+
 /** Your account on this Pim. */
 export type Account = {
   username: string;
@@ -2177,6 +2213,7 @@ export const pim = {
       method: "DELETE",
     }),
   account: () => call<Account>("/account"),
+  usageCosts: (days: number) => call<CostReport>(`/usage/costs?days=${days}`),
   /** `deleted: false`: the account is closed, and erasing its data is still being retried. */
   deleteAccount: (username: string) =>
     call<{ deleted: boolean; nextAttemptAt?: string }>("/account", {

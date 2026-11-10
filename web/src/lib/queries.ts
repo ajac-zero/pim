@@ -72,6 +72,12 @@ export const settingsQuery = () =>
 export const accountQuery = () =>
   queryOptions({ queryKey: ["account"], queryFn: pim.account });
 
+export const usageCostsQuery = (days: number) =>
+  queryOptions({
+    queryKey: ["usage-costs", days],
+    queryFn: () => pim.usageCosts(days),
+  });
+
 /** Everyone on this Pim: the admin's view. */
 export const membersQuery = () =>
   queryOptions({ queryKey: ["members"], queryFn: admin.members });

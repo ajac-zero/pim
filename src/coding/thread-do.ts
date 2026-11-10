@@ -781,7 +781,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			let head = approved.checkpoint;
 			let rebased = false;
 			for (let attempt = 0; ; attempt++) {
-				await git(workspace, ["fetch", "origin", `+refs/heads/${defaultBranch}:refs/pim/merge-base`]);
+				// Fetching goes through Pim's git broker, so it carries a broker token as a header for this command alone, as the clone does.
+				const { token } = await this.cloneSource(thread);
+				const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+				await git(workspace, ["fetch", "origin", `+refs/heads/${defaultBranch}:refs/pim/merge-base`], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
 				const base = (await git(workspace, ["rev-parse", "refs/pim/merge-base"])).trim();
 				const common = (await git(workspace, ["merge-base", base, head]).catch(() => "")).trim();
 				if (common === head) return { ok: true, result: { repo: parseRepoUrl(thread.repoUrl).fullName, branch: defaultBranch, before: base, after: base, outcome: "unchanged", rebased, threadBranch: null } };

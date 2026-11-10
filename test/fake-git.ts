@@ -74,6 +74,8 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			return {};
 		}
 		case "fetch": {
+			// Like git against the broker, a fetch without its bearer header is refused.
+			if (!env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Bearer ")) return { stderr: "fatal: could not read Username for 'https://pim.invalid': terminal prompts disabled\n", code: 128 };
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
 			if (!files) return { stderr: "fatal: could not read from remote\n", code: 128 };
 			const dest = rest.find((arg) => arg.includes(":"))?.split(":")[1];

@@ -5,6 +5,7 @@ import type { AgentTask } from "~/lib/pim-api";
 import {
   conversationMarkdown,
   EMPTY_STREAM,
+  codingNoticeOf,
   layoutThread,
   noticeOf,
   reduceAll,
@@ -1176,5 +1177,63 @@ describe("noticeOf", () => {
     const title = noticeOf(`[Connector event] ${"x".repeat(200)}`)?.title ?? "";
     expect(title).toHaveLength(120);
     expect(title.endsWith("…")).toBe(true);
+  });
+});
+
+describe("a coding thread's turn ending", () => {
+  const FULL = [
+    "[Coding thread abc123] It finished its turn.",
+    "State: idle. Its spend isn't metered, so its budget isn't enforced.",
+    "Link: https://pim.example/coding/abc123",
+    "Its changes are committed as 0123456789abcdef.",
+    "It last said:",
+    "Fixed the bug.",
+    "",
+    "Tests pass.",
+    "Look with coding_status, coding_diff or coding_tests; tell it more with coding_steer.",
+  ].join("\n");
+
+  it("is a notice with its parts, not the person's message", () => {
+    const notice = noticeOf(FULL);
+    expect(notice?.kind).toBe("coding");
+    expect(notice?.text).toBe(FULL);
+    expect(notice?.coding).toEqual({
+      threadId: "abc123",
+      outcome: "finished its turn",
+      state: "idle",
+      link: "https://pim.example/coding/abc123",
+      commit: "0123456",
+      said: "Fixed the bug.\n\nTests pass.",
+    });
+    const entries = run([snapshot({ entries: [user(1, FULL)] })]).view.entries;
+    expect(entries.map((entry) => entry.kind)).toEqual(["notice"]);
+  });
+
+  it("reads a message without a commit or what it said", () => {
+    const text =
+      "[Coding thread t9] It stopped with an error (boom).\nState: failed. Spent $0.40 of its $5 budget.\nLink: /coding/t9\nLook with coding_status.";
+    expect(codingNoticeOf(text)).toEqual({
+      threadId: "t9",
+      outcome: "stopped with an error (boom)",
+      state: "failed",
+      link: "/coding/t9",
+    });
+  });
+
+  it("reads what it said when no instructions follow, and a message with no details", () => {
+    expect(
+      codingNoticeOf(
+        "[Coding thread t1] It was cancelled.\nIt last said:\nBye",
+      ),
+    ).toEqual({ threadId: "t1", outcome: "was cancelled", said: "Bye" });
+    expect(codingNoticeOf("[Coding thread t2] It finished its turn.")).toEqual({
+      threadId: "t2",
+      outcome: "finished its turn",
+    });
+  });
+
+  it("leaves other text alone", () => {
+    expect(codingNoticeOf("[Coding thread")).toBeNull();
+    expect(noticeOf("I started a [Coding thread x] today")).toBeNull();
   });
 });

@@ -36,14 +36,68 @@ import {
 
 /** Something Pim fed itself: an approval decision, a scheduled task, a connector event, tasks' answers, who joined a group chat, a reset. */
 export type PimNotice = {
-  kind: "approval" | "schedule" | "event" | "task" | "room" | "reset";
+  kind:
+    | "approval"
+    | "schedule"
+    | "event"
+    | "task"
+    | "room"
+    | "coding"
+    | "reset";
   /** One line, without the machine prefix. */
   title: string;
   /** The full text Pim received. */
   text: string;
   /** For an approval decision, the approval's id. */
   approval?: string;
+  /** For a coding thread's turn ending, what the message says (see `codingNoticeOf`). */
+  coding?: CodingNotice;
 };
+
+/** What the message that tells an agent a coding thread it started ended a turn says (see turnEndedMessage in src/coding/supervisor.ts). Parts an older or shorter message lacks are absent. */
+export type CodingNotice = {
+  threadId: string;
+  /** How the turn ended, such as "finished its turn". */
+  outcome: string;
+  state?: string;
+  /** The link, as the message gave it: a path when the deployment has no public URL. */
+  link?: string;
+  /** The short commit its changes are committed as. */
+  commit?: string;
+  said?: string;
+};
+
+/** Reads the text of a coding thread's turn-ended message; null when it isn't one. */
+export function codingNoticeOf(text: string): CodingNotice | null {
+  const head = /^\[Coding thread ([^\]\n]+)\] It ([^\n]*?)\.?(?:\n|$)/.exec(
+    text,
+  );
+  if (!head) return null;
+  const rest = text.slice(head[0].length);
+  const saidAt = rest.search(/^It last said:\n/m);
+  const said =
+    saidAt < 0
+      ? undefined
+      : rest
+          .slice(saidAt)
+          .replace(/^It last said:\n/, "")
+          .replace(/\nLook with coding_[^\n]*$/, "")
+          .trim();
+  const before = saidAt < 0 ? rest : rest.slice(0, saidAt);
+  const state = /^State: ([^\s.]+)\./m.exec(before)?.[1];
+  const link = /^Link: (\S+)/m.exec(before)?.[1];
+  const commit = /^Its changes are committed as ([0-9a-f]+)\./m.exec(
+    before,
+  )?.[1];
+  return {
+    threadId: head[1] as string,
+    outcome: head[2] as string,
+    ...(state ? { state } : {}),
+    ...(link ? { link } : {}),
+    ...(commit ? { commit: commit.slice(0, 7) } : {}),
+    ...(said ? { said } : {}),
+  };
+}
 
 export type ThreadEntry =
   | {
@@ -261,6 +315,14 @@ export function noticeOf(text: string): PimNotice | null {
   for (const [prefix, kind] of NOTICE_PREFIXES) {
     const match = prefix.exec(text);
     if (match) {
+      const coding = kind === "coding" ? codingNoticeOf(text) : null;
+      if (coding)
+        return {
+          kind,
+          title: `Coding thread ${coding.threadId} ${coding.outcome}`,
+          text,
+          coding,
+        };
       const line = text.slice(match[0].length).split("\n")[0]?.trim() ?? "";
       return {
         kind,

@@ -1248,7 +1248,7 @@ describe("tasks whose model can't answer", () => {
 		await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
 			const wait = pim.harness.wait.bind(pim.harness) as (...args: unknown[]) => Promise<unknown>;
 			vi.spyOn(pim.harness, "wait").mockImplementation(((operation: string, ...rest: unknown[]) =>
-				operation.startsWith("task:") ? Promise.reject(new Error("The run crashed.")) : wait(operation, ...rest)) as never);
+				operation.startsWith("task:") && new Error().stack?.includes("watchTask") ? Promise.reject(new Error("The run crashed.")) : wait(operation, ...rest)) as never);
 		});
 		let update = "";
 		scripts({
@@ -1266,7 +1266,7 @@ describe("tasks whose model can't answer", () => {
 		await settled(session);
 		expect((await tasksOf(session)).map((task) => task.state)).toEqual(["failed"]);
 		expect((await tasksOf(session))[0]!.result).toBe("It didn't finish: The run crashed..");
-		expect(update).toContain("didn't finish: The run crashed.");
+		await vi.waitFor(async () => expect(await updatesIn(session)).toEqual([expect.stringContaining("didn't finish: The run crashed.")]));
 		vi.restoreAllMocks();
 	});
 });

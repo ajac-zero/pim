@@ -312,6 +312,7 @@ export class HarnessRunner {
 			},
 		};
 
+		const startedAt = Date.now();
 		if (!this.#aborted) {
 			const env = { HOME: HARNESS_HOME, ...harnessEnv(harness.id), ...harness.env, ...(auth.mode === "env" ? auth.env : {}) };
 			const grace = this.#deps.graceMs ?? INTERRUPT_GRACE_MS;
@@ -366,7 +367,9 @@ export class HarnessRunner {
 		const { sessionId, model, result, authFailed, stderr, exit, sessionUsage, lines: count } = seen;
 		const ended = (reason: RunFailure, detail: string): RunResult => ({ status: "unanswered", reason, detail, sessionId, sessionCostUsd: result?.sessionCostUsd ?? null, usage: sum(usage), sessionUsage, model, lines: count });
 		if (this.#aborted) return ended("aborted", "Stopped");
-		if (this.#timedOut || (exit?.timedOut && timeoutMs !== null)) return ended("timeout", `The turn ran out of time after ${Math.round((timeoutMs ?? 0) / 60_000)} minutes`);
+		if (this.#timedOut) return ended("timeout", `The turn ran out of time after ${Math.round((timeoutMs ?? 0) / 60_000)} minutes`);
+		// A command the workspace itself cut off, short of any limit of the turn's: say how long it really ran, not what the turn's limit was.
+		if (exit?.timedOut) return ended("timeout", `The workspace stopped the turn's command after ${Math.max(1, Math.round((Date.now() - startedAt) / 60_000))} minutes, short of any limit of the turn's`);
 		if (this.#stalled) return ended("stalled", `The turn made no progress for ${Math.round((this.#deps.stallMs ?? STALL_MS) / 60_000)} minutes, so it was stopped`);
 		if (authFailed !== null || (!result && harness.loginFailure?.test(stderr))) return ended("login_required", `${harness.name} isn't signed in: connect it again`);
 		if (result) {

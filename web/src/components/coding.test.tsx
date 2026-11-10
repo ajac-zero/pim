@@ -740,6 +740,8 @@ describe("a thread's page", () => {
     threadPage(api);
     const bash = (await screen.findByText("ls src")).closest("details");
     expect(bash?.getAttribute("data-kind")).toBe("tool");
+    // Tool calls are steps of the chat's step list.
+    expect(bash?.closest("ol > li")).toBeTruthy();
     expect(bash?.open).toBe(false);
     const test = screen.getByText("pnpm test").closest("details");
     expect(test?.getAttribute("data-kind")).toBe("test");

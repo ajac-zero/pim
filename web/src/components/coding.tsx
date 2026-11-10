@@ -14,7 +14,13 @@ import {
 } from "react";
 import { StateBadge } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
-import { AssistantMessage, UserMessage } from "~/components/chat/items";
+import {
+  AssistantMessage,
+  StepList,
+  StepRow,
+  stepView,
+  UserMessage,
+} from "~/components/chat/items";
 import { EnvironmentSection } from "~/components/coding-environment";
 import { HarnessIcon } from "~/components/harness-icon";
 import { type TranslationKey, useI18n } from "~/components/i18n";
@@ -28,7 +34,6 @@ import {
   ListChecks,
   Loader2,
   TriangleAlert,
-  Wrench,
 } from "~/components/icons";
 import { EmptyState, Page } from "~/components/page";
 import { Confirm } from "~/components/triggers";
@@ -1785,73 +1790,67 @@ function Row({ row }: { row: TranscriptRow }) {
   }
 }
 
-/** A tool call and its result, folded: one line until opened. Tests show how they went on that line. */
+/** A tool call and its result as a step of the chat's step list, which opens to its input and output. Tests show how they went on the step. */
 function ToolRow({ row }: { row: Extract<TranscriptRow, { kind: "tool" }> }) {
   const { t } = useI18n();
   const summary = toolSummary(row.args);
   const output = row.result ? resultText(row.result) : "";
   const test = row.name === "test";
   const outcome = test && row.result ? (output.split("\n")[0] ?? "") : "";
+  const view = stepView({ tool: row.name, text: null }, new Map(), t);
+  const icon = test ? (
+    <ListChecks className="mt-[3px] size-3.5 shrink-0" />
+  ) : (
+    view.icon
+  );
   return (
-    <details
-      data-kind={test ? "test" : "tool"}
-      className={cn(
-        "group text-[13px]",
-        test && "rounded-[18px] bg-muted px-4 py-3",
-      )}
-    >
-      <summary
-        className={cn(
-          "flex cursor-pointer list-none items-center gap-2 rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden",
-          test && "text-foreground",
-        )}
-      >
-        <ChevronRight className="size-3.5 shrink-0 transition-transform group-open:rotate-90" />
-        {test ? (
-          <ListChecks className="size-3.5 shrink-0" />
-        ) : (
-          <Wrench className="size-3.5 shrink-0" />
-        )}
-        <span className="shrink-0">
-          {test ? t("codingRanTests") : row.name}
-        </span>
-        {summary && (
-          <span className="min-w-0 truncate font-mono text-muted-foreground">
-            {summary}
-          </span>
-        )}
-        {row.result?.error && (
-          <span className="ml-auto shrink-0 text-destructive">
-            {t("codingToolFailed")}
-          </span>
-        )}
-        {!row.result && (
-          <span className="ml-auto shrink-0">{t("codingToolNoResult")}</span>
-        )}
-      </summary>
-      {test && outcome && (
-        <p
-          className={cn(
-            "mt-1 pl-11",
-            row.result?.error ? "text-destructive" : "text-muted-foreground",
-          )}
+    <StepList live>
+      <StepRow icon={icon}>
+        <details
+          data-kind={test ? "test" : "tool"}
+          className="group min-w-0 flex-1"
         >
-          {outcome}
-        </p>
-      )}
-      <div className="mt-2 flex flex-col gap-2 pl-5">
-        {row.args !== null && (
-          <pre className="max-h-64 overflow-auto rounded-xl bg-muted px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap break-all">
-            {JSON.stringify(row.args, null, 2)}
-          </pre>
-        )}
-        {output && (
-          <pre className="max-h-96 overflow-auto rounded-xl bg-muted px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap break-all">
-            {output}
-          </pre>
-        )}
-      </div>
-    </details>
+          <summary className="flex cursor-pointer list-none items-start gap-2 rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+            <span className="min-w-0 [overflow-wrap:anywhere]">
+              {test ? t("codingRanTests") : view.text}
+              {summary && (
+                <span className="ml-2 line-clamp-1 font-mono text-[12px]">
+                  {summary}
+                </span>
+              )}
+            </span>
+            {row.result?.error && (
+              <span className="ml-auto shrink-0 text-destructive">
+                {t("codingToolFailed")}
+              </span>
+            )}
+            {!row.result && (
+              <span className="ml-auto shrink-0">
+                {t("codingToolNoResult")}
+              </span>
+            )}
+            <ChevronRight className="mt-[3px] size-3.5 shrink-0 transition-transform group-open:rotate-90" />
+          </summary>
+          {test && outcome && (
+            <p className={cn(row.result?.error && "text-destructive")}>
+              {outcome}
+            </p>
+          )}
+          <div className="mt-2 flex flex-col gap-2">
+            {row.args !== null && (
+              <pre className="max-h-64 overflow-auto rounded-xl bg-muted px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap break-all">
+                {JSON.stringify(row.args, null, 2)}
+              </pre>
+            )}
+            {output && (
+              <pre className="max-h-96 overflow-auto rounded-xl bg-muted px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap break-all">
+                {output}
+              </pre>
+            )}
+          </div>
+        </details>
+      </StepRow>
+    </StepList>
   );
 }
 

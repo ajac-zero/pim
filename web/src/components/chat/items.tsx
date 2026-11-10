@@ -926,7 +926,7 @@ export type ToolApps = ReadonlyMap<
  * A step as the person reads it, and its mark: a lightbulb for a heading of
  * the agent's reasoning, a connector's own icon for its tools, a symbol for Pim's.
  */
-function stepView(
+export function stepView(
   step: WorkStep,
   apps: ToolApps,
   t: (key: TranslationKey, values?: Record<string, string>) => string,
@@ -991,6 +991,43 @@ function ApprovalMark({ status }: { status: ApprovalStatus }) {
   );
 }
 
+/** The list the steps are in: bare while live, indented under its fold otherwise. */
+export function StepList({
+  live,
+  children,
+}: {
+  live: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <ol
+      aria-live={live ? "polite" : undefined}
+      className={cn(
+        "space-y-1.5 text-muted-foreground text-[13px]",
+        !live && "mt-2 border-l pl-3",
+      )}
+    >
+      {children}
+    </ol>
+  );
+}
+
+/** One step of the list: its mark, then what it says. */
+export function StepRow({
+  icon,
+  children,
+}: {
+  icon: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <li className="flex gap-2 duration-300 animate-in fade-in-0 motion-reduce:animate-none">
+      {icon}
+      {children}
+    </li>
+  );
+}
+
 /**
  * The agent's work as a list of its steps: growing as it goes (`live`),
  * then folded before the message it led to into one line with how long it
@@ -1021,20 +1058,13 @@ export const WorkedSteps = memo(function WorkedSteps({
   // A call waiting for its answer stays in view, so it isn't lost in a folded list.
   const waiting = steps.some((step) => step.approval === "pending");
   const list = (
-    <ol
-      aria-live={live ? "polite" : undefined}
-      className={cn(
-        "space-y-1.5 text-muted-foreground text-[13px]",
-        !live && "mt-2 border-l pl-3",
-      )}
-    >
+    <StepList live={live}>
       {views.map((view, index) => (
-        <li
+        <StepRow
           // biome-ignore lint/suspicious/noArrayIndexKey: the steps only grow, in order.
           key={index}
-          className="flex gap-2 duration-300 animate-in fade-in-0 motion-reduce:animate-none"
+          icon={view.icon}
         >
-          {view.icon}
           <span
             className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]"
             title={view.text}
@@ -1042,9 +1072,9 @@ export const WorkedSteps = memo(function WorkedSteps({
             {view.text}
           </span>
           {view.approval && <ApprovalMark status={view.approval} />}
-        </li>
+        </StepRow>
       ))}
-    </ol>
+    </StepList>
   );
   if (live) {
     return (

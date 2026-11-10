@@ -293,6 +293,8 @@ function usePimEvents() {
       },
       onSessions: () => {
         queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        // Coding threads sit under their chats in the same list.
+        queryClient.invalidateQueries({ queryKey: ["coding", "threads"] });
         // Reading a chat reads what mentioned you in it.
         queryClient.invalidateQueries({ queryKey: ["notifications"] });
       },

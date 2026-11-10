@@ -13,7 +13,7 @@ import { CodingThreadIndex } from "../src/coding/thread-index";
 import { CodingThreadStore } from "../src/coding/thread-store";
 import type { Approval } from "../src/store";
 import { fakeRemotes, hex40 } from "./fake-git";
-import { api, apiUrl, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
 import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, codingWorkspaces, faux } from "./worker";
 
 // The API and the agents' tools over real coding threads: each works in the in-memory workspace with a fake git and the
@@ -154,6 +154,18 @@ describe("the coding threads API", () => {
 		expect(await refused({ profile: { providerId: "coding-faux" } })).toEqual([400, "invalid"]);
 		expect(await refused({ parent: "nobody" })).toEqual([404, "not_found"]);
 		expect((await api<{ threads: unknown[] }>("/coding/threads")).body.threads).toHaveLength(before);
+	});
+
+	it("tells open pages on the chat list's socket when a thread starts, changes state or is archived", async () => {
+		const { socket, received } = await connect();
+		const lists = () => received.filter((message) => message.type === "sessions").length;
+		const view = await start();
+		await vi.waitFor(() => expect(lists()).toBeGreaterThan(0));
+		await settled();
+		const afterStart = lists();
+		expect((await post(`/coding/threads/${view.id}/archive`)).status).toBe(200);
+		await vi.waitFor(() => expect(lists()).toBeGreaterThan(afterStart));
+		socket.close();
 	});
 
 	it("records its harness, which is pi by default, and the chat a person starts it from", async () => {

@@ -5,7 +5,7 @@ import { threadPath } from "./api";
 import { GitBrokerError, parseRepoUrl } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";
 import { cliHarness } from "./harness";
-import { codingScheduler } from "./scheduler-do";
+import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { codingThread, DEFAULT_BUDGET_USD } from "./thread-do";
 import type { IndexedThread } from "./thread-index";
 import { type AgentProfile, CODING_HARNESSES } from "./thread-store";
@@ -150,6 +150,7 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 		await scheduler.forgetThread(threadId);
 		throw new CodingError(400, error instanceof Error ? error.message : String(error), "invalid");
 	}
+	await codingThreadsChanged(env, space);
 	const listed = (await scheduler.thread(threadId))!;
 	return { view: viewOf(listed, status), created: true };
 }

@@ -1426,6 +1426,11 @@ export class Pim extends DurableAgent<Env> {
 		return { providerId: model.provider, model: model.id };
 	}
 
+	/** The space's coding threads changed (one started, changed state or archived): open pages refresh their lists, as for a chat. */
+	codingThreadsChanged(): void {
+		this.broadcastMessage({ type: "sessions" });
+	}
+
 	/**
 	 * A coding thread an agent started ended a turn: the chat it started the
 	 * thread from, by its public ID, is woken with `text`, as a scheduled task

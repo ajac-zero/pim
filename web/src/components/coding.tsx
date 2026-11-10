@@ -116,6 +116,22 @@ const FIELD_CLASS =
 
 const isActive = (state: CodingThreadState) => ACTIVE_STATES.includes(state);
 
+/** What a thread has spent: nothing is known of what a CLI that reports no cost spends, and a thread without a budget has no "of". */
+function spendText(
+  thread: Pick<CodingThreadSummary, "harness" | "spentUsd" | "budgetUsd">,
+  t: ReturnType<typeof useI18n>["t"],
+  money: (usd: number) => string,
+) {
+  if (thread.harness === "amp" || thread.harness === "codex")
+    return t("codingSpentUnmetered");
+  if (thread.budgetUsd === null)
+    return t("codingSpentNoBudget", { spent: money(thread.spentUsd) });
+  return t("codingSpent", {
+    spent: money(thread.spentUsd),
+    budget: money(thread.budgetUsd),
+  });
+}
+
 function useMoney() {
   const { formatNumber } = useI18n();
   return (usd: number) =>
@@ -261,14 +277,7 @@ function ThreadRow({ thread }: { thread: CodingThreadSummary }) {
               {t("codingQueuePosition", { position: thread.queue.position })}
             </span>
           )}
-          <span>
-            {thread.harness === "amp"
-              ? t("codingSpentUnmetered")
-              : t("codingSpent", {
-                  spent: money(thread.spentUsd),
-                  budget: money(thread.budgetUsd),
-                })}
-          </span>
+          <span>{spendText(thread, t, money)}</span>
           <span>{date(thread.createdAt)}</span>
         </span>
       </Link>
@@ -1099,14 +1108,7 @@ function ThreadHeader({ thread }: { thread: CodingThreadView }) {
         <div className="inline-flex items-center gap-1">
           <dt className="sr-only">{t("codingSpend")}</dt>
           <DollarSign className="size-3.5 shrink-0" />
-          <dd>
-            {thread.harness === "amp"
-              ? t("codingSpentUnmetered")
-              : t("codingSpent", {
-                  spent: money(thread.spentUsd),
-                  budget: money(thread.budgetUsd),
-                })}
-          </dd>
+          <dd>{spendText(thread, t, money)}</dd>
         </div>
         <div>
           <dt className="sr-only">{t("codingCreated")}</dt>
@@ -1204,7 +1206,7 @@ function StateNotice({ thread }: { thread: CodingThreadView }) {
         {t(why.key, {
           reason: why.reason ?? "",
           spent: money(thread.spentUsd),
-          budget: money(thread.budgetUsd),
+          budget: thread.budgetUsd === null ? "" : money(thread.budgetUsd),
           harness: HARNESS_NAMES[thread.harness],
         })}
       </p>
@@ -1358,7 +1360,9 @@ function ContinueForm({
   const { t } = useI18n();
   const api = useCodingApi();
   const update = useThreadUpdate(thread.id);
-  const [budget, setBudget] = useState(String(thread.budgetUsd * 2));
+  const [budget, setBudget] = useState(
+    String((thread.budgetUsd ?? thread.spentUsd) * 2),
+  );
   const value = Number(budget);
   const valid = budget.trim() !== "" && value > thread.spentUsd;
   const go = useMutation({

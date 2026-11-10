@@ -50,7 +50,8 @@ export type CodingThreadRow = {
 	readonly createdBy: string;
 	readonly parentThread: string | null;
 	readonly limits: CodingLimits;
-	readonly budgetUsd: number;
+	/** The most the thread may spend on its model; null when none was set. Stored as 0, which an explicit budget never is. */
+	readonly budgetUsd: number | null;
 	readonly spentUsd: number;
 	/** The `start` operation that made the thread, which repeats of it are recognized by. */
 	readonly startOperation: string;
@@ -123,7 +124,7 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	created_by TEXT NOT NULL,
 	parent_thread TEXT,
 	limits TEXT NOT NULL,
-	budget_usd REAL NOT NULL DEFAULT 3,
+	budget_usd REAL NOT NULL DEFAULT 0,
 	spent_usd REAL NOT NULL DEFAULT 0,
 	start_operation TEXT NOT NULL,
 	slot TEXT NOT NULL DEFAULT 'none',
@@ -277,7 +278,7 @@ export class CodingThreadStore {
 			thread.createdBy,
 			thread.parentThread,
 			JSON.stringify(thread.limits),
-			thread.budgetUsd,
+			thread.budgetUsd ?? 0,
 			thread.startOperation,
 			now,
 			now,
@@ -301,7 +302,7 @@ export class CodingThreadStore {
 		if (change.resumePriority !== undefined) columns.resume_priority = change.resumePriority ? 1 : 0;
 		if (change.currentOperation !== undefined) columns.current_operation = change.currentOperation;
 		if (change.budgetStopped !== undefined) columns.budget_stopped = change.budgetStopped ? 1 : 0;
-		if (change.budgetUsd !== undefined) columns.budget_usd = change.budgetUsd;
+		if (change.budgetUsd !== undefined) columns.budget_usd = change.budgetUsd ?? 0;
 		if (change.environment !== undefined) columns.environment = JSON.stringify(change.environment);
 		const names = Object.keys(columns);
 		if (names.length === 0) return;
@@ -348,11 +349,6 @@ export class CodingThreadStore {
 		);
 		this.#sql.exec("UPDATE coding_thread SET spent_usd = spent_usd + ?", costUsd);
 		this.#changed();
-	}
-
-	/** The tokens of every model call the thread made, of all kinds. */
-	tokensUsed(): number {
-		return Number(this.#sql.exec("SELECT COALESCE(SUM(input + output + cache_read + cache_write), 0) AS n FROM coding_event WHERE kind = 'model_call'").one().n);
 	}
 
 	/** The nonce the thread's live gateway tokens carry, or null when none are. */
@@ -522,7 +518,7 @@ function threadOf(row: Row): CodingThreadRow {
 		createdBy: String(row.created_by),
 		parentThread: text(row.parent_thread),
 		limits: JSON.parse(String(row.limits)) as CodingLimits,
-		budgetUsd: Number(row.budget_usd),
+		budgetUsd: Number(row.budget_usd) || null,
 		spentUsd: Number(row.spent_usd),
 		startOperation: String(row.start_operation),
 		slot: String(row.slot) as SlotHold,

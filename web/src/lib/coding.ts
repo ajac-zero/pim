@@ -68,7 +68,8 @@ export type CodingThreadSummary = {
   chat: string | null;
   harness: CodingHarness;
   spentUsd: number;
-  budgetUsd: number;
+  /** The most it may spend; null when none was set. */
+  budgetUsd: number | null;
   createdAt: number;
   updatedAt: number;
   /** When its latest turn ended; null before its first. */
@@ -154,7 +155,7 @@ export type CodingThreadView = {
   workspaceProvider: string;
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
-  budgetUsd: number;
+  budgetUsd: number | null;
   spentUsd: number;
   currentOperation: string | null;
   inbox: number;
@@ -677,7 +678,7 @@ export function projectCodingEntries(
 ): TranscriptMessage[] {
   return entries.flatMap((entry): TranscriptMessage[] => {
     if (entry.kind === "app.budget_stop") {
-      // Tokens only for a CLI harness that estimates no cost, whose budget is a ceiling on its tokens.
+      // Tokens only in the entries of older threads, stopped at a token ceiling Pim no longer sets.
       const data = (entry.data ?? {}) as {
         budgetUsd?: number;
         spentUsd?: number;

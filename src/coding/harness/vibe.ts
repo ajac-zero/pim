@@ -81,8 +81,7 @@ export const mistralVibe: CliHarness = {
 			`${dir}/out`,
 			// Vibe refuses `--model` on a resumed session, which keeps the model it started with.
 			...(turn.resume ? ["--resume", turn.sessionId] : turn.model ? ["--model", turn.model] : []),
-			"--max-price",
-			(Math.floor(Math.max(0, turn.maxBudgetUsd) * 100) / 100).toFixed(2),
+			...(turn.maxBudgetUsd === null ? [] : ["--max-price", (Math.floor(Math.max(0, turn.maxBudgetUsd) * 100) / 100).toFixed(2)]),
 			"--prompt-file",
 			`${dir}/prompt.md`,
 		];

@@ -495,7 +495,7 @@ describe("an agent's coding tools", () => {
 		await say("How are the coding threads?");
 		const [list, status, steered, push, missing] = results.map((result) => JSON.parse(result));
 		expect(list.threads[0]).toEqual(expect.objectContaining({ thread_id: thread.id, repo: REPO, status: "idle" }));
-		expect(status).toMatchObject({ thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, budget_usd: 3, environment: { state: "none" } });
+		expect(status).toMatchObject({ thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, budget_usd: null, environment: { state: "none" } });
 		expect(steered).toMatchObject({ thread_id: thread.id });
 		// Refused before anyone is asked.
 		expect(push).toEqual({ error: "github_app_not_configured", message: "GitHub App not configured: ask the Pim owner to set it up" });

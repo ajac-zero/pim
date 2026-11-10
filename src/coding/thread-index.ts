@@ -26,7 +26,8 @@ export type IndexedThread = {
 	readonly state: CodingThreadState;
 	readonly stateReason: string | null;
 	readonly spentUsd: number;
-	readonly budgetUsd: number;
+	/** The thread's budget; null when none was set. Stored as 0. */
+	readonly budgetUsd: number | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 	/** When its latest turn ended, the last time it had new output; null before its first. */
@@ -92,7 +93,7 @@ export class CodingThreadIndex {
 			thread.task.slice(0, MAX_TASK_CHARS),
 			thread.repo,
 			thread.ref,
-			thread.budgetUsd,
+			thread.budgetUsd ?? 0,
 			thread.createdAt,
 		);
 	}
@@ -113,7 +114,7 @@ export class CodingThreadIndex {
 			thread.state,
 			thread.stateReason,
 			thread.spentUsd,
-			thread.budgetUsd,
+			thread.budgetUsd ?? 0,
 			thread.createdAt,
 			thread.updatedAt,
 			thread.lastTurnEndedAt,
@@ -153,7 +154,7 @@ function indexedOf(row: Record<string, SqlStorageValue>): IndexedThread {
 		state: String(row.state) as CodingThreadState,
 		stateReason: row.state_reason === null ? null : String(row.state_reason),
 		spentUsd: Number(row.spent_usd),
-		budgetUsd: Number(row.budget_usd),
+		budgetUsd: Number(row.budget_usd) || null,
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 		lastTurnEndedAt: row.last_turn_ended_at === null ? null : Number(row.last_turn_ended_at),

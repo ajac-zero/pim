@@ -110,7 +110,7 @@ describe("a coding thread", () => {
 		const { id, stub, input, status } = await startThread();
 		expect(status.state).toMatch(/^(provisioning|running)$/);
 		expect(status.repo).toMatchObject({ url: REPO, ref: "main", branch: `pim/add-a-greeting-${id.replaceAll("-", "").slice(0, 8)}` });
-		expect(status.budgetUsd).toBe(3);
+		expect(status.budgetUsd).toBeNull();
 		const again = await stub.start(input);
 		expect(again.createdAt).toBe(status.createdAt);
 		await expect(inside(stub, (thread) => thread.start({ ...input, operationId: "another" }))).rejects.toThrow(/already started/);
@@ -346,6 +346,15 @@ describe("a coding thread", () => {
 		expect((await codingScheduler(env, input.space).snapshot()).running).toEqual([]);
 		await expect(inside(stub, (thread) => thread.continue({ operationId: "more" }))).rejects.toThrow(/spent its \$0\.5 budget/);
 		await expect(inside(stub, (thread) => thread.steer("Go on.", { operationId: "more" }))).rejects.toThrow(/budget/);
+	});
+
+	it("has no budget unless one is given, so no spend stops it", async () => {
+		codingFaux.setResponses([toolUse("bash", { command: "echo hi" }), fauxAssistantMessage("Done.")]);
+		const { id, stub } = await startThread({ profile: { providerId: "coding-faux", model: "pricey" } });
+		const [ended] = await turns(id, 1);
+		// The same $1-a-token calls that stop a thread with a $0.5 budget.
+		expect(ended).toMatchObject({ outcome: "completed", state: "idle", budgetUsd: null });
+		expect((await stub.status()).spentUsd).toBeGreaterThanOrEqual(1);
 	});
 
 	it("gives its workspace up when its idle slot is taken back, and gets both again, files kept, for its next turn", async () => {
@@ -1080,7 +1089,8 @@ describe("a Claude Code thread", () => {
 		const sessionId = first!.argv[first!.argv.indexOf("--session-id") + 1]!;
 		expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
 		expect(first!.argv.slice(-2)).toEqual(["--", "Fix the greeting test"]);
-		expect(first!.argv[first!.argv.indexOf("--max-budget-usd") + 1]).toBe("3.00");
+		// A thread has no budget unless one is given, so the CLI is given no ceiling either.
+		expect(first!.argv).not.toContain("--max-budget-usd");
 		expect(first!.argv[first!.argv.indexOf("--append-system-prompt") + 1]).toContain(`on the branch ${status.repo.branch}`);
 		// Its workspace may reach Anthropic, besides the broker and the registries.
 		const spec = (await workspaceOf(id)) as unknown as { spec: { egress: { allow: string[] } } };
@@ -1317,19 +1327,14 @@ describe("a Codex thread", () => {
 		expect(calls[1]).toMatchObject({ input: 6000, output: 320, cacheRead: 0, costUsd: 0 });
 	});
 
-	it("keeps its budget as a ceiling on tokens, since Codex estimates no cost, and goes on once given a bigger one", async () => {
-		// $0.02 allows 20,000 tokens; the turn used 25,490 (5,110 in, 1,180 out, 19,200 read from the cache).
+	it("doesn't hold Codex to a dollar budget, since it reports no cost: its spend is unmetered", async () => {
+		// $0.02 against a turn that used 25,490 tokens: tokens are no price, so it neither stops nor refuses more.
 		const { id, stub } = await startCodex({ budgetUsd: 0.02 });
 		const [ended] = await turns(id, 1);
-		// Codex reports its tokens only at the turn's end, so the turn that crossed the ceiling ran to its end.
-		expect(ended).toMatchObject({ outcome: "completed", spentUsd: 0 });
-		const refusal = "This coding thread has used 25,490 of the 20,000 tokens its $0.02 budget allows, as Codex reports no cost: continue it with a bigger one";
-		await expect(inside(stub, (thread) => thread.steer("Go on.", { operationId: "more" }))).rejects.toThrow(refusal);
-		await expect(inside(stub, (thread) => thread.continue({ operationId: "more" }))).rejects.toThrow(refusal);
-		expect(await api(`/coding/threads/${id}/steer`, { method: "POST", body: JSON.stringify({ text: "Go on." }) })).toMatchObject({ status: 409, body: { code: "budget_spent", error: refusal } });
-		await stub.continue({ operationId: "bigger", budgetUsd: 1 });
+		expect(ended).toMatchObject({ outcome: "completed", spentUsd: 0, unmetered: true });
+		await stub.steer("Go on.", { operationId: "more" });
 		const [, again] = await turns(id, 2);
-		expect(again).toMatchObject({ outcome: "completed", operationId: "bigger", budgetUsd: 1 });
+		expect(again).toMatchObject({ outcome: "completed", operationId: "more" });
 	});
 
 	it("waits for the person when Codex says its login expired, and goes on once continued", async () => {

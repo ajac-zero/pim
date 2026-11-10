@@ -16,15 +16,8 @@ export type HarnessTurn = {
 	/** The CLI's session to go on with (`--resume`), or the new one this turn starts (`resume: false`). */
 	readonly sessionId: string;
 	readonly resume: boolean;
-	/** The most the turn may spend, in dollars, as the CLI estimates it; the thread's budget left. */
-	readonly maxBudgetUsd: number;
-	/**
-	 * For a CLI that estimates no cost (`reportsCost: false`), the most
-	 * tokens the turn may use: what is left of the thread's token ceiling,
-	 * which stands in for its budget (../thread-do.ts). Null for a CLI that
-	 * estimates cost.
-	 */
-	readonly maxTokens: number | null;
+	/** The most the turn may spend, in dollars, as the CLI estimates it: the thread's budget left. Null when the thread has no budget, and for a CLI that estimates no cost, which can't be held to one. */
+	readonly maxBudgetUsd: number | null;
 	/** The model to ask for, or null for the CLI's own default. */
 	readonly model: string | null;
 	/** Text appended to the CLI's own system prompt: what Pim tells every coding agent. */
@@ -140,18 +133,12 @@ export interface CliHarness {
 	parser(turn: HarnessTurn): HarnessParser;
 	/**
 	 * Whether the CLI estimates what its session cost in dollars
-	 * (`sessionCostUsd`). One that doesn't has the thread's budget kept as a
-	 * ceiling on its tokens instead (`maxTokens`).
+	 * (`sessionCostUsd`). One that doesn't has its spend unmetered: it reads
+	 * as not metered, not $0, and a budget isn't enforced against it. Its
+	 * tokens are no stand-in: they say too little about what it charges (Amp
+	 * counts the whole context again on every response).
 	 */
 	readonly reportsCost: boolean;
-	/**
-	 * Set for a CLI whose spend can't be measured at all: it reports no cost,
-	 * and its tokens (which count the whole context again on every response)
-	 * say too little about what it charges for a ceiling on them to mean
-	 * anything. Its thread's dollar budget isn't enforced, and its spend reads
-	 * as unmetered, not $0.
-	 */
-	readonly unmetered?: true;
 	/** The name of the CLI's shell tool in the transcript, whose commands may be test runs. */
 	readonly shellTool: string;
 	/** Environment the CLI always runs with, besides its config directory: such as turning its telemetry off. */

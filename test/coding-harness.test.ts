@@ -28,7 +28,7 @@ const parse = (text: string) => {
 	return text.split("\n").flatMap((line) => parser.parseLine(line));
 };
 
-const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, maxTokens: null, model: null, instructions: "Don't push.", sessionBefore: { costUsd: 0, usage: null } };
+const TURN: HarnessTurn = { prompt: "Fix the greeting test", sessionId: SESSION, resume: false, maxBudgetUsd: 2.999, model: null, instructions: "Don't push.", sessionBefore: { costUsd: 0, usage: null } };
 
 describe("Claude Code's stream-json", () => {
 	it("is read into the session, the text as it is written, messages with their tools, retries, refusals and the result", () => {
@@ -559,6 +559,11 @@ describe("Mistral Vibe's command line", () => {
 		expect(vibe).not.toContain("Fix the greeting test");
 	});
 
+	it("asks Claude Code and Vibe for no budget flag when the thread has none", () => {
+		expect(claudeCode.buildCommand({ ...TURN, maxBudgetUsd: null })).not.toContain("--max-budget-usd");
+		expect(mistralVibe.buildCommand({ ...VIBE_TURN, maxBudgetUsd: null })).not.toContain("--max-price");
+	});
+
 	it("resumes Vibe's session after the first turn without --model, which Vibe refuses there, and asks for the model on a new session", () => {
 		const resumed = mistralVibe.buildCommand({ ...VIBE_TURN, sessionId: VIBE_SESSION, resume: true, model: "devstral", prompt: "--help me", maxBudgetUsd: -1 });
 		expect(flag(resumed, "--resume")).toBe(VIBE_SESSION);
@@ -830,19 +835,6 @@ describe("a CLI harness run", () => {
 		expect(await running).toMatchObject({ status: "unanswered", reason: "aborted", sessionCostUsd: 0.02 });
 		expect(signals.sent).toEqual(["INT"]);
 		expect(log).toEqual(["lock", "restore", "claude", "signal -INT", "write back", "unlock"]);
-	});
-
-	it("stops a turn with SIGINT once its tokens reach `maxTokens`, the ceiling of a CLI that estimates no cost, and says it reached its budget", async () => {
-		const turn = lines("turn");
-		// The turn's first message, of 2,114 tokens in, 184 out, 13,008 read from the cache and 5,120 written to it: 20,426.
-		const printed = [turn[0]!, turn.find((line) => JSON.parse(line).type === "assistant")!, turn.at(-1)!];
-		const run = async (maxTokens: number) => {
-			const { workspace, log, signals } = scripted(() => prints(printed));
-			const result = await (await prepared(deps(workspace, log).options)).run({ ...TURN, maxTokens }, 60_000);
-			return { result, signals: signals.sent };
-		};
-		expect(await run(20_426)).toEqual({ result: expect.objectContaining({ status: "unanswered", reason: "budget", detail: "The turn reached the thread's token ceiling" }), signals: ["INT"] });
-		expect(await run(20_427)).toEqual({ result: expect.objectContaining({ status: "done" }), signals: [] });
 	});
 
 	it("kills a CLI that ignores SIGINT after the grace, on abort and when the turn runs out of time", async () => {
@@ -1270,7 +1262,7 @@ describe("Amp's command line", () => {
 describe("an Amp run", () => {
 	const KEY = "sgamp_user_AMPRUNKEY0123456789abcdef";
 	const auth: HarnessAuth = { mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] };
-	const AMP_TURN: HarnessTurn = { ...TURN, sessionId: "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f", maxTokens: 3_000_000 };
+	const AMP_TURN: HarnessTurn = { ...TURN, sessionId: "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f" };
 	const ampDeps = (workspace: Workspace, log: string[]) => deps(workspace, log, { harness: amp, auth });
 	const ready = async (options: RunnerDeps) => {
 		const runner = new HarnessRunner(options);
@@ -1316,19 +1308,5 @@ describe("an Amp run", () => {
 			const { workspace, log } = scripted(script);
 			expect(await (await ready(ampDeps(workspace, log).options)).run(AMP_TURN, 60_000)).toMatchObject(expected);
 		}
-	});
-
-	it("is stopped with SIGINT, by the id on its command line, once its tokens reach what is left of the thread's ceiling", async () => {
-		const { workspace, log, commands, signals } = scripted(async function* (options, signals) {
-			// The first model response's 16,365 tokens, then the CLI waits, as one mid-turn does.
-			for (const line of ampLines("turn.jsonl").slice(0, 3)) yield { type: "stdout", data: `${line}\n` };
-			await signals.wait("INT", options.signal);
-			yield { type: "exit", code: 130 };
-		});
-		const result = await (await ready(ampDeps(workspace, log).options)).run({ ...AMP_TURN, maxTokens: 16_000 }, 60_000);
-		expect(result).toMatchObject({ status: "unanswered", reason: "budget", sessionId: AMP_SESSION, usage: { input: 10, output: 99, cacheRead: 0, cacheWrite: 16256 } });
-		expect(commands.find((command) => command.cmd[0] === "pkill")!.cmd).toEqual(["pkill", "-INT", "-f", AMP_TURN.sessionId]);
-		expect(commands[0]!.cmd.join(" ")).toContain(AMP_TURN.sessionId);
-		expect(signals.sent).toEqual(["INT"]);
 	});
 });

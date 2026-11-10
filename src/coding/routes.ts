@@ -146,7 +146,8 @@ function codingRoutes(env: Env, space: string): Route[] {
 			}
 			const operationId = optionalString(body, "operationId") ?? crypto.randomUUID();
 			const { listed, stub, status } = await liveThread(env, space, id!);
-			if ((budgetUsd ?? status.budgetUsd) <= status.spentUsd) {
+			const budget = budgetUsd ?? status.budgetUsd;
+			if (budget !== null && budget <= status.spentUsd) {
 				throw new CodingError(409, `This coding thread has spent $${status.spentUsd.toFixed(2)}: continue it with a bigger budget`, "budget_spent");
 			}
 			return viewOf(listed, await calling(() => stub.continue({ operationId, ...(budgetUsd !== undefined ? { budgetUsd } : {}) })));

@@ -6,7 +6,7 @@ import { GitBrokerError, parseRepoUrl } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";
 import { cliHarness } from "./harness";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
-import { codingThread, DEFAULT_BUDGET_USD } from "./thread-do";
+import { codingThread } from "./thread-do";
 import type { IndexedThread } from "./thread-index";
 import { type AgentProfile, CODING_HARNESSES } from "./thread-store";
 
@@ -115,8 +115,8 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 	}
 	const ref = input.ref ?? "main";
 	if (typeof ref !== "string" || !ref.trim() || ref.length > 200 || /[\s\u0000-\u001f]/.test(ref)) throw invalid("ref must be a branch, tag or commit");
-	const budgetUsd = input.budgetUsd ?? DEFAULT_BUDGET_USD;
-	if (typeof budgetUsd !== "number" || !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw invalid("budgetUsd must be a positive number of dollars");
+	const budgetUsd = input.budgetUsd ?? null;
+	if (budgetUsd !== null && (typeof budgetUsd !== "number" || !(Number.isFinite(budgetUsd) && budgetUsd > 0))) throw invalid("budgetUsd must be a positive number of dollars");
 	const harness = input.harness ?? "pi";
 	if (!CODING_HARNESSES.includes(harness)) throw invalid(`harness must be ${CODING_HARNESSES.join(", ")}`);
 	if (harness !== "pi" && !cliHarness(harness)) throw invalid("harness not yet available");
@@ -177,7 +177,7 @@ export async function liveThread(env: Env, space: string, threadId: string, opti
 	const stub = codingThread(env, listed.threadId);
 	const status = await stub.status();
 	if (status.state === "archived") throw new CodingError(409, "This coding thread is archived", "archived");
-	if (options.budget && status.spentUsd >= status.budgetUsd) {
+	if (options.budget && status.budgetUsd !== null && status.spentUsd >= status.budgetUsd) {
 		throw new CodingError(409, `This coding thread has spent its $${status.budgetUsd} budget: continue it with a bigger one`, "budget_spent");
 	}
 	return { listed, stub, status };

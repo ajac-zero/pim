@@ -369,6 +369,9 @@ describe("a coding thread", () => {
 		const { id, stub, input } = await startThread();
 		const [failed] = await turns(id, 1);
 		expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });
+		// Told once: the turn's end is the only event for it.
+		await stub.status();
+		expect(codingEvents.filter((event) => event.threadId === id)).toHaveLength(1);
 		expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "model_error", slot: "none" });
 		expect((await codingScheduler(env, input.space).snapshot()).running).toEqual([]);
 		// Its workspace is gone, its files kept for the next one.
@@ -500,30 +503,39 @@ describe("a coding thread", () => {
 		expect(codingEvents.filter((event) => event.threadId === second.id)).toEqual([expect.objectContaining({ outcome: "error", reason: "queue_expired:slots_full", state: "failed" })]);
 	});
 
-	it("fails a thread stuck queued for too long, once, and leaves one that is only idle be", async () => {
+	it("fails a thread stuck provisioning for too long, once, and leaves queued, and waiting threads be", async () => {
 		const space = `space-${crypto.randomUUID()}`;
 		const scheduler = codingScheduler(env, space);
 		await scheduler.setLimit(1);
-		codingFaux.setResponses([fauxAssistantMessage("First done.")]);
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Other done."), fauxAssistantMessage("Queued done.")]);
 		const first = await startThread({ space });
 		await turns(first.id, 1);
-		const second = await startThread({ space });
-		expect(second.status.state).toBe("queued");
+		// A queued thread may wait for hours: it is the scheduler's to expire, not stuck.
+		const queued = await startThread({ space });
+		expect(queued.status.state).toBe("queued");
+		const waiting = await startThread();
+		await turns(waiting.id, 1);
 		const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+		const force = (stub: Stub, state: "provisioning" | "waiting_input") => inside(stub, async (thread) => thread.store.update({ state }));
+		await force(first.stub, "provisioning");
+		await force(waiting.stub, "waiting_input");
 		// Within its time, nothing happens.
-		await heartbeat(second.stub);
-		expect((await second.stub.status()).state).toBe("queued");
-		codingThreadClock.now = Date.now() + 21 * 60_000;
 		await heartbeat(first.stub);
-		await heartbeat(second.stub);
-		await heartbeat(second.stub);
-		expect(await second.stub.status()).toMatchObject({ state: "failed", stateReason: "stuck", slot: "none" });
-		expect(await first.stub.status()).toMatchObject({ state: "idle", slot: "held" });
-		expect(await scheduler.snapshot()).toMatchObject({ queued: [] });
-		expect(codingEvents.filter((event) => event.threadId === second.id)).toEqual([
-			expect.objectContaining({ outcome: "error", reason: "stuck", state: "failed", detail: expect.stringMatching(/queued for 21 minutes/) }),
+		expect((await first.stub.status()).state).toBe("provisioning");
+		codingThreadClock.now = Date.now() + 21 * 60_000;
+		for (const each of [queued, waiting]) await heartbeat(each.stub);
+		expect((await queued.stub.status()).state).toBe("queued");
+		expect((await waiting.stub.status()).state).toBe("waiting_input");
+		await heartbeat(first.stub);
+		await heartbeat(first.stub);
+		expect(await first.stub.status()).toMatchObject({ state: "failed", stateReason: "stuck", slot: "none" });
+		// Its slot went to the queued thread, which runs on.
+		await turns(queued.id, 1);
+		expect(codingEvents.filter((event) => event.threadId === first.id)).toEqual([
+			expect.objectContaining({ outcome: "completed" }),
+			expect.objectContaining({ outcome: "error", reason: "stuck", state: "failed", detail: expect.stringMatching(/provisioning for 21 minutes/) }),
 		]);
-		expect(codingEvents.filter((event) => event.threadId === first.id)).toHaveLength(1);
+		for (const each of [queued, waiting]) expect(codingEvents.filter((event) => event.threadId === each.id && event.outcome === "error")).toEqual([]);
 	});
 
 	it("caps a diff at 256 KiB, and diffs from any checkpoint while its workspace runs", async () => {

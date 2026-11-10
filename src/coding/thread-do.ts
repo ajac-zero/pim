@@ -289,7 +289,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return STALL_MS;
 	}
 
-	/** How long a thread may sit queued or provisioning with no change before it is failed as stuck. */
+	/** How long a thread may sit provisioning with no change before it is failed as stuck. */
 	protected stuckMs(): number {
 		return STUCK_MS;
 	}
@@ -391,7 +391,6 @@ export class CodingThreadDO extends DurableObject<Env> {
 			thread !== null &&
 			(thread.currentOperation !== null ||
 				thread.state === "provisioning" ||
-				thread.state === "queued" ||
 				(thread.slot === "held" && thread.environment.rebuildRequested) ||
 				(thread.slot === "queued" && this.#healthOf(thread) !== null));
 		return busy ? { rescheduleAt: Date.now() + HEARTBEAT_MS } : undefined;
@@ -1901,13 +1900,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.#emit(event);
 	}
 
-	/** A thread that has sat queued or provisioning, unchanged, for too long fails as stuck; one in a turn or waiting for the person is left be. */
+	/** A thread that has sat provisioning, unchanged, for too long fails as stuck. One in a turn, waiting for the person or queued is left be: the scheduler expires a queued one itself. */
 	async #failIfStuck(): Promise<void> {
 		const thread = this.store.thread();
-		if (!thread || (thread.state !== "provisioning" && thread.state !== "queued") || thread.currentOperation) return;
+		if (!thread || thread.state !== "provisioning" || thread.currentOperation) return;
 		const waited = this.now() - thread.updatedAt;
 		if (waited < this.stuckMs()) return;
-		await this.#fail("stuck", `The thread was ${thread.state} for ${Math.round(waited / 60_000)} minutes without moving on`, true);
+		await this.#fail("stuck", `The thread was provisioning for ${Math.round(waited / 60_000)} minutes without moving on`, true);
 	}
 
 	/** Makes the thread's model resolvable: its provider in the catalog pi resolves models against. */

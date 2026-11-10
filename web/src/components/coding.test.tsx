@@ -569,35 +569,48 @@ describe("a thread's page", () => {
     ).toBeTruthy();
   });
 
-  it("stops a running thread, and steers it with or without interrupting", async () => {
+  it("steers a running thread from the message box, whose one Stop button aborts it", async () => {
     const { api } = fakeApi(view({ state: "running", currentOperation: "op" }));
     threadPage(api);
-    const steer = await screen.findByPlaceholderText(/^Steer it/);
+    const steer = await screen.findByPlaceholderText(/^Steer the coding agent/);
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    // Stop is only in the message box, not the header.
+    const stops = screen.getAllByRole("button", { name: "Stop generating" });
+    expect(stops).toHaveLength(1);
+    expect(
+      within(screen.getByRole("banner")).queryByRole("button", {
+        name: "Stop",
+      }),
+    ).toBeNull();
 
     fireEvent.change(steer, { target: { value: "Only touch src/date.ts" } });
-    fireEvent.click(screen.getByRole("checkbox", { name: /Interrupt/ }));
+    expect(
+      screen.queryByRole("button", { name: "Stop generating" }),
+    ).toBeNull();
     fireEvent.keyDown(steer, { key: "Enter" });
     await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(1));
     expect(api.steer.mock.calls[0]).toEqual([
       "t1",
-      {
-        text: "Only touch src/date.ts",
-        interrupt: true,
-        operationId: expect.any(String),
-      },
+      { text: "Only touch src/date.ts", operationId: expect.any(String) },
     ]);
     await waitFor(() => expect((steer as HTMLTextAreaElement).value).toBe(""));
 
-    fireEvent.change(steer, { target: { value: "Also run lint" } });
-    fireEvent.keyDown(steer, { key: "Enter" });
-    await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2));
-    expect(api.steer.mock.calls[1]?.[1]).toEqual({
-      text: "Also run lint",
-      operationId: expect.any(String),
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop generating" }));
     await waitFor(() => expect(api.abort).toHaveBeenCalledWith("t1"));
+  });
+
+  it("asks what to do next in an idle thread, with no Stop", async () => {
+    const { api } = fakeApi();
+    threadPage(api);
+    expect(
+      await screen.findByPlaceholderText(
+        "Tell the coding agent what to do next…",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Stop generating" }),
+    ).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
   it("says a failed thread has no workspace backend and who must set one up", async () => {
@@ -737,13 +750,7 @@ describe("a thread's page", () => {
   it("archives only once confirmed, and an archived thread can only be read", async () => {
     const { api } = fakeApi();
     threadPage(api);
-    // Archive is in the header's menu, not among its buttons.
-    expect(screen.queryByRole("button", { name: "Archive" })).toBeNull();
-    fireEvent.pointerDown(await screen.findByRole("button", { name: "More" }), {
-      button: 0,
-      ctrlKey: false,
-    });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
     expect(api.archive).not.toHaveBeenCalled();
     const confirm = screen.getByRole("group");
     fireEvent.click(within(confirm).getByRole("button", { name: "Archive" }));
@@ -1010,6 +1017,12 @@ describe("the harness", () => {
       within(header).getByRole("link", { name: "acme/widgets" }),
     ).toBeTruthy();
     expect(within(header).getByRole("button", { name: "Push" })).toBeTruthy();
+    // One header: no second bar, and no way back to the list in it.
+    expect(screen.getAllByRole("banner")).toHaveLength(1);
+    expect(
+      within(header).queryByRole("link", { name: /All coding threads/ }),
+    ).toBeNull();
+    expect(within(header).getByRole("tab", { name: "Changes" })).toBeTruthy();
     expect(header.querySelector("[data-harness='claude-code']")).toBeTruthy();
   });
 

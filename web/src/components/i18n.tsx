@@ -1904,9 +1904,9 @@ const translations = {
     codingToolFailed: "Failed",
     codingToolNoResult: "No result",
     codingSteer: "Steer the thread",
-    codingSteerPlaceholder: "Tell it what to do next",
-    codingSteerPlaceholderWorking: "Steer it: joins after its current step",
-    codingInterrupt: "Interrupt: stop the current step and start with this",
+    codingSteerPlaceholder: "Tell the coding agent what to do next…",
+    codingSteerPlaceholderWorking:
+      "Steer the coding agent: joins after its current step…",
     codingSend: "Send",
     codingBudgetSpent:
       "It spent its budget. Continue it with a bigger budget first.",
@@ -3841,9 +3841,9 @@ const translations = {
     codingToolFailed: "Falló",
     codingToolNoResult: "Sin resultado",
     codingSteer: "Guiar el hilo",
-    codingSteerPlaceholder: "Dile qué hacer ahora",
-    codingSteerPlaceholderWorking: "Guíalo: se suma tras su paso actual",
-    codingInterrupt: "Interrumpir: detener el paso actual y empezar con esto",
+    codingSteerPlaceholder: "Dile al agente de programación qué hacer ahora…",
+    codingSteerPlaceholderWorking:
+      "Guía al agente de programación: se suma tras su paso actual…",
     codingSend: "Enviar",
     codingBudgetSpent:
       "Gastó su presupuesto. Primero continúalo con un presupuesto mayor.",

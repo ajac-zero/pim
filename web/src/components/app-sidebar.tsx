@@ -1062,7 +1062,7 @@ function SessionRow({
             ? "error"
             : awaitingApproval
               ? "attention"
-              : session.unread
+              : session.unread && !session.archived
                 ? "unread"
                 : null
       }

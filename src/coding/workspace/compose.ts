@@ -39,7 +39,32 @@ export type ComposeOptions = {
 	token: string;
 	/** Stands in for the global `fetch`, for tests. */
 	fetch?: typeof fetch;
+	/** Stands in for the wait between attempts at a request the manager answered transiently, for tests. */
+	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 };
+
+/** A request the manager failed transiently is tried up to this many times, waiting 4 s, 8 s, 16 s, 32 s and 64 s (each varied by up to a quarter either way) between them: about two minutes for a manager that is restarting. */
+const ATTEMPTS = 6;
+const BACKOFF_MS = 4_000;
+
+const wait = (ms: number, signal?: AbortSignal) =>
+	new Promise<void>((resolve) => {
+		const timer = setTimeout(done, ms);
+		function done() {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", done);
+			resolve();
+		}
+		signal?.addEventListener("abort", done);
+	});
+
+/** Whether the manager's answer says to try again later: a gateway failure or timeout, or a rate limit that is not the manager's capacity, which queues the thread instead. */
+async function transientStatus(res: Response): Promise<boolean> {
+	if (res.status === 502 || res.status === 503 || res.status === 504 || res.status === 408) return true;
+	if (res.status !== 429) return false;
+	const body = (await res.clone().json().catch(() => ({}))) as { code?: string };
+	return body.code !== "capacity";
+}
 
 /** What `managerHealth` reports: the fields `ProviderCapacity` reads, and what an operator also wants to see. */
 export type ComposeManagerHealth = ManagerHealth & {
@@ -121,11 +146,13 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	readonly #base: string;
 	readonly #token: string;
 	readonly #fetch: typeof fetch;
+	readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 
 	constructor(opts: ComposeOptions & { maxConcurrent?: number }) {
 		this.#base = checkManagerUrl(opts.managerUrl);
 		this.#token = opts.token;
 		this.#fetch = opts.fetch ?? ((input, init) => fetch(input, init));
+		this.#sleep = opts.sleep ?? wait;
 		this.#capabilities.maxConcurrent = opts.maxConcurrent;
 	}
 
@@ -139,8 +166,22 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 		return this.#token ? text.split(this.#token).join("[token]") : text;
 	}
 
-	/** One request to the manager. Network failures become an error that names no header. A request aborted through `signal` throws what `fetch` throws, for the caller to recognize. */
-	async call(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean } = {}): Promise<Response> {
+	/** One request to the manager, tried again with exponential backoff and jitter when the manager can't be reached or answers 502, 503, 504, 408 or a rate limit, as it does while restarting; any other answer is returned at once, and after the last attempt so is the last answer or error. Network failures become an error that names no header. A request aborted through `signal` throws what `fetch` throws, for the caller to recognize. `retry: false` makes one attempt. */
+	async call(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean; retry?: boolean } = {}): Promise<Response> {
+		const attempts = init.retry === false ? 1 : ATTEMPTS;
+		for (let attempt = 1; ; attempt++) {
+			try {
+				const res = await this.#once(method, path, init);
+				if (attempt >= attempts || !(await transientStatus(res))) return res;
+			} catch (error) {
+				if (init.signal?.aborted || attempt >= attempts) throw error;
+			}
+			await this.#sleep(BACKOFF_MS * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5), init.signal);
+			if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
+		}
+	}
+
+	async #once(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean }): Promise<Response> {
 		const headers: Record<string, string> = {};
 		if (init.auth !== false) headers.authorization = `Bearer ${this.#token}`;
 		if (init.json !== undefined) headers["content-type"] = "application/json";
@@ -238,7 +279,7 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 
 	/** Reads the manager's `/health`, which needs no token, and refreshes `capabilities.maxConcurrent`. `freeDiskPct` is NaN when the manager couldn't read its disk, which `ProviderCapacity` counts as low. */
 	async managerHealth(): Promise<ComposeManagerHealth> {
-		const res = await this.call("GET", "/health", { auth: false });
+		const res = await this.call("GET", "/health", { auth: false, retry: false });
 		await this.check(res);
 		const h = (await res.json()) as { runsc?: boolean; freeDiskPct?: number | null; maxConcurrent: number; running: number; free: number; sessions?: number };
 		this.#capabilities.maxConcurrent = h.maxConcurrent;

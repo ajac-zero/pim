@@ -248,4 +248,52 @@ describe("ComposeWorkspaceProvider", () => {
 		for (const ok of ["https://manager.example", "http://localhost:8080", "http://127.0.0.1", "http://[::1]:8080", "http://10.1.2.3", "http://172.20.0.5:8080", "http://192.168.1.9"]) expect(make(ok), ok).not.toThrow();
 		for (const bad of ["http://manager.example", "http://8.8.8.8", "http://172.32.0.1", "http://192.169.0.1", "ftp://127.0.0.1", "not a url", "https://user:pw@manager.example"]) expect(make(bad), bad).toThrow();
 	});
+
+	describe("when the manager is unavailable", () => {
+		const flaky = (manager: ReturnType<typeof fakeManager>, fail: (n: number) => Response | Error | null) => {
+			let n = 0;
+			const sleeps: number[] = [];
+			const p = new ComposeWorkspaceProvider({
+				managerUrl: URL_BASE,
+				token: TOKEN,
+				sleep: async (ms) => void sleeps.push(ms),
+				fetch: (async (input, init) => {
+					if (String(input).endsWith("/health")) return manager.fetch(input, init);
+					const failure = fail(++n);
+					if (failure instanceof Error) throw failure;
+					return failure ?? manager.fetch(input, init);
+				}) as typeof fetch,
+			});
+			return { p, sleeps, attempts: () => n };
+		};
+
+		it("retries a 502 or a network error with growing, jittered waits until the manager answers", async () => {
+			const { p, sleeps, attempts } = flaky(fakeManager(), (n) => (n <= 2 ? json(502, { error: "bad gateway" }) : n === 3 ? new TypeError("connection refused") : n === 4 ? json(503, {}) : null));
+			await p.create(spec("retry-1"));
+			expect(attempts()).toBe(5);
+			expect(sleeps).toHaveLength(4);
+			sleeps.forEach((ms, i) => {
+				expect(ms).toBeGreaterThanOrEqual(4_000 * 2 ** i * 0.75);
+				expect(ms).toBeLessThanOrEqual(4_000 * 2 ** i * 1.25);
+			});
+		});
+
+		it("fails with the manager's answer after six attempts when it never recovers", async () => {
+			const down = flaky(fakeManager(), () => json(502, {}));
+			await expect(down.p.create(spec("retry-2"))).rejects.toMatchObject({ name: "ComposeManagerError", status: 502, message: "The workspace manager answered 502" });
+			expect(down.attempts()).toBe(6);
+			expect(down.sleeps).toHaveLength(5);
+			const unreachable = flaky(fakeManager(), () => new TypeError("connection refused"));
+			await expect(unreachable.p.create(spec("retry-3"))).rejects.toThrow("Cannot reach the workspace manager: connection refused");
+			expect(unreachable.attempts()).toBe(6);
+		});
+
+		it("fails at once on an answer that retrying won't change", async () => {
+			for (const [status, body] of [[400, {}], [401, {}], [404, {}], [409, {}], [422, {}], [429, { code: "capacity", limit: 1 }], [507, { code: "low_disk" }]] as const) {
+				const { p, attempts } = flaky(fakeManager(), () => json(status, body));
+				await expect(p.create(spec("once")), String(status)).rejects.toThrow();
+				expect(attempts(), String(status)).toBe(1);
+			}
+		});
+	});
 });

@@ -593,6 +593,9 @@ const translations = {
     fallbackModelsHint:
       "{name} runs on the first model. If it fails, such as when its quota runs out, it moves on to the next, in order.",
     addFallback: "Add a fallback model",
+    spaceFallbacks: "Fallback models for every agent",
+    spaceFallbacksHint:
+      "When an agent's model, and the fallbacks it has of its own, fail for good, it moves on to these, in order.",
     removeFallback: "Remove fallback {model}",
     moveFallbackUp: "Move {model} up",
     moveFallbackDown: "Move {model} down",
@@ -2507,6 +2510,9 @@ const translations = {
     fallbackModelsHint:
       "{name} usa el primer modelo. Si falla, por ejemplo al agotarse su cuota, pasa al siguiente, en orden.",
     addFallback: "Añadir un modelo de respaldo",
+    spaceFallbacks: "Modelos de respaldo para todos los agentes",
+    spaceFallbacksHint:
+      "Cuando falla para siempre el modelo de un agente y los respaldos que tiene, pasa a estos, en orden.",
     removeFallback: "Quitar el respaldo {model}",
     moveFallbackUp: "Subir {model}",
     moveFallbackDown: "Bajar {model}",

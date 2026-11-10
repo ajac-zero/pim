@@ -66,6 +66,12 @@ export const notificationsQuery = () =>
 export const modelQuery = () =>
   queryOptions({ queryKey: ["model"], queryFn: pim.model });
 
+export const modelFallbacksQuery = () =>
+  queryOptions({
+    queryKey: ["model", "fallbacks"],
+    queryFn: pim.getModelFallbacks,
+  });
+
 export const settingsQuery = () =>
   queryOptions({ queryKey: ["settings"], queryFn: pim.settings });
 

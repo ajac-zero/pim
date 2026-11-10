@@ -452,10 +452,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
 			}
 		});
-		if (await this.#ensureBackend()) {
+		const backend = this.#ensureBackend();
+		if (backend === true) {
 			await this.#requestSlot();
 			this.#kick();
-		}
+		} else await backend;
 		return this.status();
 	}
 
@@ -1296,7 +1297,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return;
 		}
 		if (thread.slot === "none") {
-			if (!(await this.#ensureBackend())) return;
+			const backend = this.#ensureBackend();
+			if (backend !== true) {
+				await backend;
+				return;
+			}
 			await this.#requestSlot();
 		} else if (thread.slot === "queued") await this.#refreshCapacity();
 		thread = this.store.required();
@@ -1333,7 +1338,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * one the thread fails with `no_backend` and says what to set up; it can
 	 * be continued once that's done.
 	 */
-	async #ensureBackend(): Promise<boolean> {
+	#ensureBackend(): true | Promise<false> {
 		const thread = this.store.required();
 		const registry = this.workspaceProviders();
 		let id = thread.providerId;
@@ -1347,8 +1352,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return true;
 		} catch (error) {
 			if (!(error instanceof NoWorkspaceBackendError)) throw error;
-			await this.#fail(error.code, error.message, false);
-			return false;
+			// Only a failure awaits, so a thread with its backend takes no extra turn of the event loop.
+			return this.#fail(error.code, error.message, false).then(() => false as const);
 		}
 	}
 

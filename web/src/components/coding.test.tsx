@@ -30,6 +30,8 @@ import {
 } from "~/components/coding-subthread-row";
 import type {
   CodingApi,
+  CodingEnvironment,
+  CodingRepoSettings,
   CodingStreamMessage,
   CodingThreadSummary,
   CodingThreadView,
@@ -73,6 +75,20 @@ class Connection {
   }
 }
 
+const noEnvironment: CodingEnvironment = {
+  state: "none",
+  key: null,
+  source: null,
+  builtAt: null,
+  restoredFromKey: null,
+  provisionMs: null,
+  restoreMs: null,
+  setupMs: null,
+  snapshotMs: null,
+  preparedAt: null,
+  rebuildRequested: false,
+};
+
 const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
   id: "t1",
   threadId: "t1",
@@ -100,6 +116,7 @@ const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
   checkpoint: null,
   createdBy: { type: "person" },
   parentThread: null,
+  environment: noEnvironment,
   createdAt: Date.UTC(2026, 10, 9, 10),
   updatedAt: Date.UTC(2026, 10, 9, 10),
   ...overrides,
@@ -172,6 +189,24 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
       bytes: 100,
       summary: "",
     })),
+    rebuildEnvironment: vi.fn<CodingApi["rebuildEnvironment"]>(async () => ({
+      ...thread.environment,
+      state: "building" as const,
+    })),
+    repoSettings: vi.fn<CodingApi["repoSettings"]>(
+      async (): Promise<CodingRepoSettings> => ({
+        repo: "acme/widgets",
+        setupScript: null,
+        updatedAt: null,
+      }),
+    ),
+    setRepoSettings: vi.fn<CodingApi["setRepoSettings"]>(
+      async (_url, setupScript): Promise<CodingRepoSettings> => ({
+        repo: "acme/widgets",
+        setupScript,
+        updatedAt: 1,
+      }),
+    ),
     events: vi.fn<CodingApi["events"]>((_id, signal) => {
       const connection = new Connection();
       connections.push(connection);
@@ -1296,5 +1331,198 @@ describe("connecting with an API key", () => {
     expect(panel.getByText("Not connected")).toBeTruthy();
     expect(panel.getByLabelText("Access token")).toBeTruthy();
     expect(document.body.textContent).not.toContain("SECRET");
+  });
+});
+
+describe("the environment", () => {
+  const env = (overrides: Partial<CodingEnvironment>): CodingEnvironment => ({
+    ...noEnvironment,
+    ...overrides,
+  });
+  const chip = async (environment: CodingEnvironment, thread = {}) => {
+    const fake = fakeApi(view({ environment, ...thread }));
+    threadPage(fake.api);
+    const button = await screen.findByRole("button", {
+      name: /^Environment: .*Show details$/,
+    });
+    return { ...fake, button };
+  };
+
+  it("names each state in the chip", async () => {
+    const ago = Date.now() - 3 * 3600_000;
+    expect(
+      (await chip(env({ state: "cached", builtAt: ago }))).button.textContent,
+    ).toBe("Environment: cached · 3 hours ago");
+    cleanup();
+    expect((await chip(env({ state: "building" }))).button.textContent).toBe(
+      "Environment: building…",
+    );
+    cleanup();
+    expect((await chip(env({ state: "restoring" }))).button.textContent).toBe(
+      "Environment: restoring…",
+    );
+    cleanup();
+    expect((await chip(env({ state: "failed" }))).button.textContent).toBe(
+      "Environment: setup failed",
+    );
+    cleanup();
+    const none = await chip(env({ state: "none" }));
+    expect(none.button.textContent).toBe("Environment: none");
+    expect(none.button.className).toContain("text-muted-foreground");
+  });
+
+  it("shows the timings and the failure as text, never as markup", async () => {
+    const { button } = await chip(
+      env({
+        state: "failed",
+        source: "settings",
+        provisionMs: 1500,
+        setupMs: 42000,
+        error: "<img src=x onerror=alert(1)> npm ERR!",
+      }),
+    );
+    fireEvent.click(button);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("<img src=x onerror=alert(1)> npm ERR!");
+    expect(alert.querySelector("img")).toBeNull();
+    expect(
+      screen.getByText("Workspace and checkout").nextSibling?.textContent,
+    ).toBe("1.5 s");
+    expect(screen.getByText("Setup script").nextSibling?.textContent).toBe(
+      "42 s",
+    );
+    expect(screen.queryByText("Restore")).toBeNull();
+  });
+
+  it("rebuilds only after the person confirms, and shows the new state", async () => {
+    const { api, button } = await chip(env({ state: "cached", builtAt: 1 }));
+    fireEvent.click(button);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Rebuild environment" }),
+    );
+    expect(
+      screen.getByText(
+        "Re-runs the setup script and replaces the cached environment.",
+      ),
+    ).toBeTruthy();
+    expect(api.rebuildEnvironment).not.toHaveBeenCalled();
+    const group = screen.getByRole("group");
+    fireEvent.click(
+      within(group).getByRole("button", { name: "Rebuild environment" }),
+    );
+    await waitFor(() =>
+      expect(api.rebuildEnvironment).toHaveBeenCalledWith("t1"),
+    );
+    await waitFor(() =>
+      expect(button.textContent).toBe("Environment: building…"),
+    );
+  });
+
+  it("says a turn in progress is why it can't rebuild, and explains a 409", async () => {
+    const running = await chip(env({ state: "cached", builtAt: 1 }), {
+      state: "running",
+      currentOperation: "op",
+    });
+    fireEvent.click(running.button);
+    expect(
+      (
+        (await screen.findByRole("button", {
+          name: "Rebuild environment",
+        })) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    cleanup();
+
+    const building = await chip(env({ state: "building" }));
+    fireEvent.click(building.button);
+    expect(
+      (
+        (await screen.findByRole("button", {
+          name: "Rebuild environment",
+        })) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    cleanup();
+
+    const idle = await chip(env({ state: "cached", builtAt: 1 }));
+    idle.api.rebuildEnvironment.mockRejectedValue(
+      new ApiError(409, "A turn is running", { code: "conflict" }),
+    );
+    fireEvent.click(idle.button);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Rebuild environment" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("group")).getByRole("button", {
+        name: "Rebuild environment",
+      }),
+    );
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "A turn is running, so it can't be rebuilt now",
+    );
+  });
+
+  describe("the setup script", () => {
+    const open = async (script: string | null) => {
+      const fake = await chip(env({ state: "none" }));
+      fake.api.repoSettings.mockResolvedValue({
+        repo: "acme/widgets",
+        setupScript: script,
+        updatedAt: script === null ? null : 1,
+      });
+      fireEvent.click(fake.button);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Edit setup script" }),
+      );
+      const box = (await screen.findByRole("textbox", {
+        name: "Setup script",
+      })) as HTMLTextAreaElement;
+      await waitFor(() => expect(box.value).toBe(script ?? ""));
+      return { ...fake, box };
+    };
+
+    it("loads, saves and clears the repository's script", async () => {
+      const { api, box } = await open("npm ci");
+      expect(api.repoSettings).toHaveBeenCalledWith(
+        "https://github.com/acme/widgets",
+      );
+      expect(screen.getByText(/\.pim\/setup\.sh is used/)).toBeTruthy();
+      fireEvent.change(box, { target: { value: "pnpm i" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() =>
+        expect(api.setRepoSettings).toHaveBeenCalledWith(
+          "https://github.com/acme/widgets",
+          "pnpm i",
+        ),
+      );
+      expect((await screen.findByRole("status")).textContent).toBe("Saved");
+      fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+      await waitFor(() =>
+        expect(api.setRepoSettings).toHaveBeenLastCalledWith(
+          "https://github.com/acme/widgets",
+          null,
+        ),
+      );
+      await waitFor(() => expect(box.value).toBe(""));
+    });
+
+    it("refuses a script over 64 KiB, counting bytes", async () => {
+      const { api, box } = await open(null);
+      // 40,000 characters of 2 bytes each is over the limit, though under it as characters.
+      fireEvent.change(box, { target: { value: "é".repeat(40000) } });
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "at most 64 KiB",
+      );
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(true);
+      fireEvent.change(box, { target: { value: "é".repeat(32768) } });
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false);
+      expect(api.setRepoSettings).not.toHaveBeenCalled();
+    });
   });
 });

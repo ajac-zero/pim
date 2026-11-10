@@ -13,6 +13,7 @@ import {
   useState,
 } from "react";
 import { Markdown } from "~/components/chat/markdown";
+import { EnvironmentSection } from "~/components/coding-environment";
 import { HarnessIcon } from "~/components/harness-icon";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
@@ -954,7 +955,11 @@ export function CodingThreadPage({ id }: { id: string }) {
   const thread = useQuery({
     ...codingThreadQuery(api, id),
     refetchInterval: (query) =>
-      query.state.data && isActive(query.state.data.state) ? 4000 : false,
+      query.state.data &&
+      (isActive(query.state.data.state) ||
+        ["building", "restoring"].includes(query.state.data.environment.state))
+        ? 4000
+        : false,
   });
   if (thread.isError && !thread.data) {
     return (
@@ -989,6 +994,7 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
         <BackLink />
         <ThreadHeader thread={thread} />
         <StateNotice thread={thread} />
+        <EnvironmentSection thread={thread} />
         <ThreadActions thread={thread} />
         <Tabs.Root value={tab} onValueChange={setTab} className="mt-6">
           <Tabs.List

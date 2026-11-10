@@ -533,7 +533,7 @@ describe("pushing", () => {
 		const github = pushingGitHub({});
 		const approval = pushApprovalRequest(preparePush(pushDeps(github), pushRequest()));
 		expect(approval).toEqual({
-			action: "coding_push",
+			action: "coding_push_for_approval",
 			sessionId: "T-123",
 			repo: "acme/widgets",
 			branch: "pim/fix",

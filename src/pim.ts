@@ -680,6 +680,8 @@ export class Pim extends DurableAgent<Env> {
 		limits: () => this.limits(),
 		// The person's own plan and providers: their tokens are theirs, not the deployment's.
 		ownProvider: (provider) => provider === CHATGPT_PROVIDER || provider.startsWith(OWN_PROVIDER),
+		// Only the ChatGPT subscription is free per call: a custom endpoint bills per token, so its calls are priced.
+		subscription: (provider) => provider === CHATGPT_PROVIDER,
 		tags: (call) => this.#callTags(call),
 		// The hourly rollup of model calls rides the triggers' wake.
 		rollupDue: () => void this.wakeTriggers().catch((error) => console.warn("setting the usage rollup wake failed", error)),

@@ -37,9 +37,22 @@ export type PriceTable = { readonly version: string; readonly effectiveFrom: str
 
 export const PRICE_TABLE: PriceTable = PRICES;
 
-/** The price of a model by the id Pim sees it under: exactly, or without a gateway prefix such as `anthropic/` or `@cf/`. */
+/** Ids compared loosely: case, a gateway prefix (`anthropic/`, `@cf/`), a `:tag`, a date or `-latest` suffix, and `.`/`-`/`_` in version numbers don't matter. */
+const canonical = (id: string) =>
+	id
+		.toLowerCase()
+		.slice(id.lastIndexOf("/") + 1)
+		.replace(/:[^:]*$/, "")
+		.replace(/-(latest|\d{8}|\d{4}-\d{2}-\d{2})$/, "")
+		.replace(/[._]/g, "-");
+
+/** The price of a model by the id Pim sees it under: exactly, or by its normalised id (see `canonical`). */
 export function priceOf(model: string, table: PriceTable = PRICE_TABLE): PriceEntry | undefined {
-	return table.models[model] ?? table.models[model.slice(model.lastIndexOf("/") + 1)];
+	const exact = table.models[model] ?? table.models[model.slice(model.lastIndexOf("/") + 1)];
+	if (exact) return exact;
+	const want = canonical(model);
+	for (const [id, price] of Object.entries(table.models)) if (canonical(id) === want) return price;
+	return undefined;
 }
 
 /** The tokens of one call by billing tier: `cacheWrite` of pi-ai's usage holds the 1h writes too, which are billed apart. */
@@ -90,7 +103,7 @@ export type ModelCall = {
 	readonly stopReason: string;
 	readonly latencyMs: number;
 	readonly shape: RequestShape | undefined;
-	/** The call ran on the person's own plan or provider, which costs the deployment nothing. */
+	/** The call ran on a subscription (the ChatGPT plan), which bills nothing per call. A custom endpoint is not one: it is priced by model id. */
 	readonly plan: boolean;
 };
 

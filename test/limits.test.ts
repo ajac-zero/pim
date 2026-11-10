@@ -327,6 +327,26 @@ describe("model call ledger", () => {
 		});
 	});
 
+	it("prices a custom endpoint's calls, and matches ids by alias", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			// A custom gateway (the person's own provider) bills per token: Anthropic-shaped usage with cache reads and writes.
+			await call(instance, modelOf("claude-opus-5-5", "own:gw"), { usage: usage(1000, 500, 2000, 300, 100) });
+			const [row] = rows(instance, "claude-opus-5-5");
+			expect(row).toMatchObject({ input: 1000, output: 500, plan: 0 });
+			expect(row!.cost_usd).toBeCloseTo(0.0162, 10);
+			// OpenAI-shaped usage, with the id as a gateway spells it: prefix, case, dots, date suffix.
+			await call(instance, modelOf("OpenAI/GPT-5.5-20261101", "own:gw"), { usage: usage(1_000_000, 0) });
+			expect(rows(instance, "OpenAI/GPT-5.5-20261101")[0]).toMatchObject({ input: 1_000_000, plan: 0 });
+			expect(rows(instance, "OpenAI/GPT-5.5-20261101")[0]!.cost_usd).toBeGreaterThan(0);
+			await call(instance, modelOf("claude_sonnet_5.5:beta", "own:gw"), { usage: usage(1_000_000, 0) });
+			expect(rows(instance, "claude_sonnet_5.5:beta")[0]!.cost_usd).toBe(2);
+			instance.usage.calls.rollup(Date.now());
+			const report = instance.usageCosts(1);
+			expect(report.totalCostUsd).toBeGreaterThan(2);
+			expect(report.unpricedCalls).toBe(0);
+		});
+	});
+
 	it("records errored and aborted calls with the usage they reported", async () => {
 		await runInDurableObject(agent(), async (instance: Pim) => {
 			await call(instance, modelOf("claude-haiku-5-5"), { stopReason: "aborted", usage: usage(1000, 10) });

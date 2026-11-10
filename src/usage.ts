@@ -191,6 +191,7 @@ export class UsageMeter {
 	readonly #limits: () => Limits;
 	/** Whether a provider bills the person, such as their own plan, not the deployment. */
 	readonly #ownProvider: (provider: string) => boolean;
+	readonly #subscription: (provider: string) => boolean;
 	readonly #now: () => number;
 	readonly #tags: ((call: CallInfo) => RunTags | Promise<RunTags>) | undefined;
 	readonly #rollupDue: (() => void) | undefined;
@@ -206,6 +207,8 @@ export class UsageMeter {
 		sql: SqlStorage;
 		limits: () => Limits;
 		ownProvider: (provider: string) => boolean;
+		/** Providers that bill nothing per call, such as a subscription; a custom endpoint is metered per token, so its calls are priced. Defaults to `ownProvider`. */
+		subscription?: (provider: string) => boolean;
 		now?: () => number;
 		tags?: (call: CallInfo) => RunTags | Promise<RunTags>;
 		rollupDue?: () => void;
@@ -213,6 +216,7 @@ export class UsageMeter {
 		this.#sql = options.sql;
 		this.#limits = options.limits;
 		this.#ownProvider = options.ownProvider;
+		this.#subscription = options.subscription ?? options.ownProvider;
 		this.#now = options.now ?? Date.now;
 		this.#tags = options.tags;
 		this.#rollupDue = options.rollupDue;
@@ -247,7 +251,7 @@ export class UsageMeter {
 					stopReason: message?.stopReason ?? "error",
 					latencyMs: ts - started,
 					shape,
-					plan: this.#ownProvider(model.provider),
+					plan: this.#subscription(model.provider),
 				});
 				if (due) this.#rollupDue?.();
 			} catch (error) {

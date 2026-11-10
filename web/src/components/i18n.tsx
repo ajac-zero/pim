@@ -738,6 +738,33 @@ const translations = {
     computerHostNewTokenConfirm:
       "Make a new token? The one the host has now stops working.",
     computerHostPair: "Pair a computer host",
+    hostOps: "Host operations",
+    hostOpsDescription:
+      "Your majordomo runs a few fixed operations on this Pim's host through its daemon, hostopsd: stats, logs, restarts, the sandbox limit, deploys and rollbacks. It doesn't ask first; a deploy that fails rolls itself back. Every request, and what came of it, is in the audit log.",
+    hostOpsNotSeen: "Not seen yet",
+    hostOpsSeen: "last seen {date}",
+    hostOpsCredentialIssued: "credential issued {date}",
+    hostOpsCredentialRevoked: "credential revoked {date}",
+    hostOpsNoCredential: "no credential",
+    hostOpsQueue: "queued: {queued} · running: {running}",
+    hostOpsIssue: "Issue credential",
+    hostOpsRotate: "Rotate credential",
+    hostOpsRotateConfirm:
+      "Issue a new credential? The one the daemon has now stops working.",
+    hostOpsRevoke: "Revoke credential",
+    hostOpsRevokeConfirm:
+      "Revoke the daemon's credential? It stops working at once, and operations wait until you issue a new one.",
+    hostOpsTokenOnce:
+      "The daemon's credential, shown only now. Run the installer on the host from Pim's checkout, and give it the credential when it asks.",
+    hostOpsCredential: "Credential:",
+    hostOpsCommand: "On the host, in Pim's checkout:",
+    hostOpsAudit: "Audit log",
+    hostOpsAuditEmpty: "Nothing yet",
+    hostOpsTime: "Time",
+    hostOpsActor: "Actor",
+    hostOpsOp: "Operation",
+    hostOpsArgs: "Arguments",
+    hostOpsOutcome: "Outcome",
     removeComputer: "Remove computer",
     removeComputerConfirm:
       "Remove this computer? Its token stops working, and your agents can't use it anymore. Your files stay on it.",
@@ -2560,6 +2587,33 @@ const translations = {
     computerHostNewTokenConfirm:
       "¿Crear un token nuevo? El que tiene el host ahora deja de funcionar.",
     computerHostPair: "Vincular un host de computadoras",
+    hostOps: "Operaciones del host",
+    hostOpsDescription:
+      "Tu majordomo ejecuta unas pocas operaciones fijas en el host de este Pim a través de su daemon, hostopsd: estadísticas, registros, reinicios, el límite de sandboxes, despliegues y reversiones. No pregunta antes; un despliegue que falla se revierte solo. Cada solicitud, y lo que resultó de ella, queda en el registro de auditoría.",
+    hostOpsNotSeen: "Aún no se ha visto",
+    hostOpsSeen: "visto por última vez {date}",
+    hostOpsCredentialIssued: "credencial emitida {date}",
+    hostOpsCredentialRevoked: "credencial revocada {date}",
+    hostOpsNoCredential: "sin credencial",
+    hostOpsQueue: "en cola: {queued} · en curso: {running}",
+    hostOpsIssue: "Emitir credencial",
+    hostOpsRotate: "Rotar credencial",
+    hostOpsRotateConfirm:
+      "¿Emitir una credencial nueva? La que tiene el daemon ahora deja de funcionar.",
+    hostOpsRevoke: "Revocar credencial",
+    hostOpsRevokeConfirm:
+      "¿Revocar la credencial del daemon? Deja de funcionar de inmediato, y las operaciones esperan hasta que emitas una nueva.",
+    hostOpsTokenOnce:
+      "La credencial del daemon, que solo se muestra ahora. Ejecuta el instalador en el host desde la copia de Pim, y dale la credencial cuando la pida.",
+    hostOpsCredential: "Credencial:",
+    hostOpsCommand: "En el host, en la copia de Pim:",
+    hostOpsAudit: "Registro de auditoría",
+    hostOpsAuditEmpty: "Nada todavía",
+    hostOpsTime: "Hora",
+    hostOpsActor: "Quién",
+    hostOpsOp: "Operación",
+    hostOpsArgs: "Argumentos",
+    hostOpsOutcome: "Resultado",
     removeComputer: "Quitar computadora",
     removeComputerConfirm:
       "¿Quitar esta computadora? Su token deja de funcionar y tus agentes ya no pueden usarla. Tus archivos se quedan en ella.",

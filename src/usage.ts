@@ -10,6 +10,7 @@ import {
 import type { Models } from "@earendil-works/pi-ai/models";
 import type { UsageState } from "@earendil-works/pi-durable";
 import { HttpError } from "./http";
+import { ModelCallLedger, type RunTags, shapeOf } from "./model-calls";
 
 /**
  * What this space has used, by UTC day, and the limits on it. Members have
@@ -176,6 +177,9 @@ export const utcDay = (now: number) => new Date(now).toISOString().slice(0, 10);
 /** Wording pi-ai classifies as a non-retryable quota error, so a run stops at once instead of retrying. */
 export const QUOTA_MESSAGE = "Space usage quota exceeded";
 
+/** What a metered call tells the tagger: the provider session the request carries, which names its conversation, and what it sends. */
+export type CallInfo = { readonly sessionId: string | undefined; readonly context: unknown };
+
 /** A model request, counted on the UTC day it was sent; its tokens are added to that day when it ends. */
 export type ModelReservation = { readonly day: string; readonly provider: string; readonly model: string };
 
@@ -188,14 +192,68 @@ export class UsageMeter {
 	/** Whether a provider bills the person, such as their own plan, not the deployment. */
 	readonly #ownProvider: (provider: string) => boolean;
 	readonly #now: () => number;
+	readonly #tags: ((call: CallInfo) => RunTags | Promise<RunTags>) | undefined;
+	readonly #rollupDue: (() => void) | undefined;
+	/** Every model call, one row each, and what they add up to by day (see ./model-calls.ts). */
+	readonly calls: ModelCallLedger;
 	#pruned: string | undefined;
 
-	constructor(options: { sql: SqlStorage; limits: () => Limits; ownProvider: (provider: string) => boolean; now?: () => number }) {
+	/**
+	 * `tags` says what a call is for, from what it carries; `rollupDue` is told when the first call
+	 * since the last rollup is recorded, for the host to wake at the next hour.
+	 */
+	constructor(options: {
+		sql: SqlStorage;
+		limits: () => Limits;
+		ownProvider: (provider: string) => boolean;
+		now?: () => number;
+		tags?: (call: CallInfo) => RunTags | Promise<RunTags>;
+		rollupDue?: () => void;
+	}) {
 		this.#sql = options.sql;
 		this.#limits = options.limits;
 		this.#ownProvider = options.ownProvider;
 		this.#now = options.now ?? Date.now;
+		this.#tags = options.tags;
+		this.#rollupDue = options.rollupDue;
 		this.#sql.exec(SCHEMA);
+		this.calls = new ModelCallLedger({ sql: this.#sql });
+	}
+
+	/**
+	 * Writes a settled call to the ledger without holding up its caller: its tags may take a lookup,
+	 * and nothing here may fail the call, so what goes wrong is logged and the call is left unrecorded.
+	 */
+	#recordCall(model: Model<Api>, call: CallInfo, started: number, message: { usage?: ModelUsage; stopReason: string } | undefined): void {
+		const ts = this.#now();
+		void (async () => {
+			try {
+				let tags: RunTags = {};
+				try {
+					tags = (await this.#tags?.(call)) ?? {};
+				} catch (error) {
+					console.warn(JSON.stringify({ event: "pim.model_call_tags_failed", error: String(error).slice(0, 500) }));
+				}
+				let shape: ReturnType<typeof shapeOf> | undefined;
+				try {
+					shape = shapeOf(call.context);
+				} catch {}
+				const due = this.calls.record({
+					ts,
+					tags,
+					provider: model.provider,
+					model: model.id,
+					usage: message?.usage,
+					stopReason: message?.stopReason ?? "error",
+					latencyMs: ts - started,
+					shape,
+					plan: this.#ownProvider(model.provider),
+				});
+				if (due) this.#rollupDue?.();
+			} catch (error) {
+				console.warn(JSON.stringify({ event: "pim.model_call_record_failed", error: String(error).slice(0, 500) }));
+			}
+		})();
 	}
 
 	#today(): string {
@@ -372,6 +430,8 @@ export class UsageMeter {
 					events.end(message);
 					return events;
 				}
+				const started = this.#now();
+				const info = { sessionId: (options as StreamOptions | undefined)?.sessionId, context };
 				// What was sent, for a failure's log: the request without its content.
 				let sent: Record<string, unknown> | undefined;
 				const logged = { ...(options as StreamOptions | undefined) };
@@ -393,12 +453,16 @@ export class UsageMeter {
 				events.result().then(
 					(message) => {
 						this.settleModel(reserved.reservation, message.usage);
+						this.#recordCall(model, info, started, message);
 						// The chat only says that a request failed; the provider's own words are for whoever runs the deployment.
 						if (message.stopReason !== "stop" && message.stopReason !== "toolUse" && message.stopReason !== "length") {
 							console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, stopReason: message.stopReason, error: (message.errorMessage ?? "").slice(0, 1000) }));
 						}
 					},
-					(error) => console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, error: String(error).slice(0, 1000) })),
+					(error) => {
+						this.#recordCall(model, info, started, undefined);
+						console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, error: String(error).slice(0, 1000) }));
+					},
 				);
 				return events;
 			},

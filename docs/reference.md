@@ -249,6 +249,29 @@ The majordomo asks through the `hostops` extension's tools ([`src/extensions/hos
 
 The daemon needs no open port: it long-polls `/api/hostops/agent/poll` with its credential for the oldest queued operation, runs it, and reports how it went to `/api/hostops/agent/result`. An operation nobody takes within 10 minutes expires; one the daemon took and didn't report by its deadline (15 minutes for a deploy, 2 for the others) fails as timed out. Only one deploy or rollback is queued or running at a time. The queue and an audit log of every request, refused or not, and of every change of an operation's state, are in one Durable Object, `HostOps`; the log keeps the newest 10,000 rows, with bearer credentials and long token-like strings taken out.
 
+### Who spends
+
+Every model call a space makes is one row in `pim_model_calls` once it settles, errored and aborted calls included with whatever usage they reported: when, which agent and chat, why it ran (`run_kind`), the model, tokens by billing tier (input, output, cache read, cache writes of 5 minutes and of 1 hour; a provider that reports no split has all its cache writes in 5 minutes), how it ended, how long it took, the size of the prompt and of the tool schemas sent, and its cost in dollars. Calls are recorded after they end, apart from the call, and a failure to record is logged and never reaches it ([`src/model-calls.ts`](../src/model-calls.ts), wired in [`src/usage.ts`](../src/usage.ts)).
+
+A call finds its tags from the provider session id pi sends with it, which names its conversation:
+
+| `run_kind` | Which calls | Tagged |
+| --- | --- | --- |
+| `interactive` | A chat's runs, including those a person's message, an approval or a coding thread's wake started | agent, chat |
+| `scheduled` | A chat a trigger whose source is a time (a scheduled task) is running in | agent, chat, trigger id |
+| `trigger` | The same for any other source | agent, chat, trigger id |
+| `delegated` | A task's conversation | agent, the chat the work began in, the task id as `parent_run_id` |
+| `background` | Calls with no conversation (naming a chat, the utility model, memory compression) and compaction summaries | nothing else |
+| `coding_thread` | Not recorded yet | |
+
+A call whose conversation can't be found has no tags, and a null `run_kind`. A call's `turn_index` is the number of assistant turns already in what it sent.
+
+**TODO: coding threads.** A coding thread's model calls don't reach the space's Worker: its `ThreadDO` records them in its own log and spend (`coding_*` tables, `recordModelCall` in [`src/coding/thread-store.ts`](../src/coding/thread-store.ts)), and nothing reports them to the space. Rows with `run_kind = 'coding_thread'` and `coding_thread_id` need that report added; the columns and the top coding threads in the costs report are ready for them.
+
+Prices are in [`config/model-prices.json`](../config/model-prices.json), in dollars per million tokens by model id (an id with a gateway prefix such as `anthropic/` matches the model without it). A call is priced when it is recorded, and keeps the table's `version`; a model with no price has a null cost and counts as unpriced, and calls on the person's own plans and providers have a null cost and are marked `plan`. Prices the catalog flags as estimated are `estimated` there, as are the 1-hour cache write prices, which the catalog doesn't have and which are twice the input price. To change a price, edit the file and bump `version`.
+
+The triggers' wake, an alarm, rolls the calls up each hour into `pim_usage_daily` (a day recomputed from the calls and replaced, so doing it twice changes nothing), and drops calls older than 90 days and rollups older than 400. `GET /usage/costs?days=30` reads the rollup and the calls since it.
+
 ### Traces
 
 Pim sends [OpenTelemetry](https://opentelemetry.io/) traces of what the agents do to any backend that takes OTLP over HTTP as JSON: Langfuse, Arize Phoenix, Honeycomb, Grafana, Jaeger, or an OpenTelemetry Collector. They follow the [semantic conventions for generative AI](https://github.com/open-telemetry/semantic-conventions-genai): each run of a conversation is an `invoke_agent` span, each model request in it a `chat` span with the model, finish reason and tokens, and each tool call an `execute_tool` span. Work a tool call starts in another conversation is that call's child, so one trace holds everything a message led to: the tasks it handed out, and the majordomo's review of an approval request, with its decision.
@@ -305,6 +328,7 @@ The API lives under `/api`: `GET /api/sessions`, and so on; the table leaves out
 | GET | `/settings` | | `{ timeZone, approvalPolicy, approvalTimeoutSeconds }`; `approvalTimeoutSeconds` is null when approvals wait however long |
 | PUT | `/settings` | Any of `{ timeZone, approvalPolicy }`; `null` goes back to the deployment's | The settings |
 | GET | `/usage` | | `{ limits, today, history, storageBytes }`: model requests, tokens (the ChatGPT plan's apart), runs and tool calls by UTC day |
+| GET | `/usage/costs` | `?days=30` (1 to 400) | What model calls cost: `byDay` (cost, calls and cache hit ratio, with the cost by agent, model and `run_kind`), `topChats` and `topCodingThreads` (top 20 by cost, with calls, turns and average prompt size, from the calls themselves, kept 90 days), `unpricedCalls`, `cacheHitRatio` (cache read / (input + cache read + cache writes)) and `costPer1kOutputTokens`. See [Who spends](#who-spends) |
 | GET | `/export` | | Everything as one JSON download, without credentials |
 | GET | `/model` | | `{ model, default, choices, utility: { model, default, choices }, chatgpt: { connected, email, error }, chatgptImages: { connected, email }, providers }`: the default model, for agents that have none of their own, and the ones you can choose. Each says whether it sees images (`images`); a model that doesn't is told an image was left out. `utility` is the utility model: `PIM_UTILITY_MODEL` unless you chose another, and the deployment's default again while a chosen ChatGPT model's plan is disconnected. `providers` are the [model providers](#model-providers) you can use, the admin's (`shared`) then yours, each with its models and `hasKey`, never the key |
 | PUT | `/model` | `{ provider, id }`, one of `choices` | Moves every session, and new ones, to that model |

@@ -1788,10 +1788,23 @@ describe("an Amp thread", () => {
 	const KEY = "sgamp_user_THREADKEY_0123456789abcdef";
 	const started: Stub[] = [];
 	const runs: { argv: string[]; env: Record<string, string> }[] = [];
+	// What the next `amp` turn or `amp threads archive` does, set by the test that needs a failure.
+	let behavior: { turn: "ok" | "crash" | "max-turns"; archive: "ok" | "fail" | "throw" } = { turn: "ok", archive: "ok" };
+	const unarchives: string[][] = [];
 	codingWorkspaces.register("amp", ({ argv, env }) => {
+		if (argv.includes("--unarchive")) {
+			unarchives.push(argv);
+			return {};
+		}
 		runs.push({ argv, env });
-		return { stdout: ampFixture("turn.jsonl") };
+		if (argv[1] === "threads" && argv[2] === "archive") {
+			if (behavior.archive === "throw") throw new Error("amp is not installed");
+			return behavior.archive === "fail" ? { stderr: "boom", exitCode: 1 } : {};
+		}
+		if (behavior.turn === "max-turns") return { stdout: ampFixture("max-turns.jsonl") };
+		return behavior.turn === "crash" ? { stderr: "crashed", exitCode: 1 } : { stdout: ampFixture("turn.jsonl") };
 	});
+	const archiveRuns = () => runs.filter((run) => run.argv[1] === "threads" && run.argv[2] === "archive");
 
 	async function startAmp(overrides: Partial<StartThread> = {}) {
 		const id = crypto.randomUUID();
@@ -1806,6 +1819,8 @@ describe("an Amp thread", () => {
 
 	beforeEach(async () => {
 		runs.length = 0;
+		unarchives.length = 0;
+		behavior = { turn: "ok", archive: "ok" };
 		await codingVault(env).delete(OWNER, "amp");
 	});
 
@@ -1858,6 +1873,58 @@ describe("an Amp thread", () => {
 		expect(await everything(stub)).not.toContain("THREADKEY");
 		expect(JSON.stringify(await stub.log())).not.toContain("THREADKEY");
 		expect(JSON.stringify(await inside(stub, (thread) => thread.transcript()))).not.toContain("THREADKEY");
+	});
+
+	it("keeps an idle thread's Amp thread open, then archives it with the person's key when the Pim thread is archived", async () => {
+		await saveKey();
+		const { id, stub } = await startAmp();
+		await turns(id, 1);
+		expect(await stub.status()).toMatchObject({ state: "idle" });
+		expect(archiveRuns()).toEqual([]);
+		expect(await stub.archive()).toMatchObject({ state: "archived", slot: "none" });
+		expect(archiveRuns().map((run) => run.argv)).toEqual([["amp", "threads", "archive", AMP_SESSION]]);
+		expect(archiveRuns()[0]!.env).toMatchObject({ AMP_API_KEY: KEY });
+		// Archiving again changes nothing.
+		await stub.archive();
+		expect(archiveRuns()).toHaveLength(1);
+	});
+
+	it("archives its Amp thread when a turn fails, and a thread that never started one has nothing to archive", async () => {
+		await saveKey();
+		behavior.turn = "crash";
+		const never = await startAmp();
+		expect((await turns(never.id, 1))[0]).toMatchObject({ outcome: "error", state: "failed" });
+		await never.stub.archive();
+		expect(archiveRuns()).toEqual([]);
+
+		behavior.turn = "ok";
+		const { id, stub } = await startAmp();
+		await turns(id, 1);
+		behavior.turn = "max-turns";
+		await stub.steer("Again", { operationId: "steer-fail" });
+		await turns(id, 2);
+		expect(await stub.status()).toMatchObject({ state: "failed" });
+		expect(archiveRuns().map((run) => run.argv)).toEqual([["amp", "threads", "archive", AMP_SESSION]]);
+
+		// The failed thread goes on with the same Amp thread, which is unarchived first.
+		behavior.turn = "ok";
+		await stub.continue({ operationId: "continue-1" });
+		await turns(id, 3);
+		expect(runs.at(-1)!.argv.slice(0, 4)).toEqual(["amp", "threads", "continue", AMP_SESSION]);
+		expect(unarchives.at(-1)).toEqual(["amp", "threads", "archive", AMP_SESSION, "--unarchive", ">/dev/null", "2>&1"]);
+		expect(await stub.status()).toMatchObject({ state: "idle" });
+	});
+
+	it("never fails the thread when archiving its Amp thread fails", async () => {
+		await saveKey();
+		for (const archive of ["fail", "throw"] as const) {
+			runs.length = 0;
+			behavior.archive = archive;
+			const { id, stub } = await startAmp();
+			await turns(id, 1);
+			expect(await stub.archive()).toMatchObject({ state: "archived", slot: "none" });
+			expect(archiveRuns()).toHaveLength(1);
+		}
 	});
 
 	it("doesn't enforce its dollar budget against Amp's tokens, which are not a cost and recount the whole context every response", async () => {

@@ -77,7 +77,7 @@ import {
 } from "./thread-store";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
 import { isLoginHarness } from "./vault/harnesses";
-import { restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
+import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
@@ -632,6 +632,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		this.#killCommands();
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
 		this.store.update({ state: "archived", stateReason: null });
+		await this.#archiveHarnessSession(thread);
 		await this.#giveBack({ keepVolume: false });
 		await this.lifecycle.jobs.cancel(ADVANCE_JOB);
 		return this.status();
@@ -1426,6 +1427,30 @@ export class CodingThreadDO extends DurableObject<Env> {
 		this.store.update({ slot: "none" });
 	}
 
+	/**
+	 * Closes the CLI harness's session on the vendor's site (Amp's thread on ampcode.com) when the coding thread
+	 * is archived or fails, so the person's list there doesn't fill with finished threads; a later turn reopens it.
+	 * It needs the running workspace and the person's key, so a thread without either leaves its session be. Best-effort:
+	 * a failure is logged and never fails the thread.
+	 */
+	async #archiveHarnessSession(thread: CodingThreadRow): Promise<void> {
+		const cli = cliHarness(thread.harness);
+		const session = this.store.harnessSession();
+		if (!cli?.archiveCommand || !session || thread.slot !== "held" || !thread.workspaceRef) return;
+		try {
+			const auth = await this.harnessAuth(thread, cli);
+			if (auth.mode !== "env") return;
+			const workspace = await this.#workspace();
+			let exit: number | null = 0;
+			for await (const event of workspace.exec(cli.archiveCommand(session.sessionId), { cwd: REPO_DIR, env: { HOME: HARNESS_HOME, ...harnessEnv(cli.id), ...cli.env, ...auth.env }, timeoutMs: 20_000 })) {
+				if (event.type === "exit") exit = event.timedOut ? null : event.code;
+			}
+			if (exit !== 0) console.warn(JSON.stringify({ event: "pim.coding.harness_archive_failed", thread: thread.threadId, harness: cli.id, exit }));
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.harness_archive_failed", thread: thread.threadId, harness: cli.id, error: String(error).slice(0, 300) }));
+		}
+	}
+
 	/** Gives the slot back (or leaves the queue) and deletes the workspace, as a thread does when it fails or is archived. */
 	async #giveBack(options: { keepVolume: boolean }): Promise<void> {
 		const thread = this.store.required();
@@ -1796,8 +1821,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (stop) this.store.recordEvent("app.budget_stop", stop);
 		});
 		if (stop) await this.#write("app.budget_stop", stop);
-		if (state === "failed") await this.#giveBack({ keepVolume: true });
-		else if (state === "waiting_input") await this.#report("waiting");
+		if (state === "failed") {
+			// A stalled turn that is about to be continued once by itself keeps its session open.
+			if (!(reason === "stalled" && !operation.startsWith(AUTO_CONTINUE_PREFIX))) await this.#archiveHarnessSession(thread);
+			await this.#giveBack({ keepVolume: true });
+		} else if (state === "waiting_input") await this.#report("waiting");
 		else if (this.store.inboxSize() === 0) await this.#report("idle");
 		// Last, so whoever hears of the turn's end finds the slot already given back or idle.
 		await this.#emit(event);
@@ -1901,7 +1929,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ state: "failed", stateReason: reason, stateDetail: clipped });
 			this.store.recordEvent(event.type, event);
 		});
-		if (giveBack) await this.#giveBack({ keepVolume: true });
+		if (giveBack) {
+			await this.#archiveHarnessSession(thread);
+			await this.#giveBack({ keepVolume: true });
+		}
 		await this.#emit(event);
 	}
 

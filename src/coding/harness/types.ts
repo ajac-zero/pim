@@ -152,6 +152,13 @@ export interface CliHarness {
 	 */
 	signalCommand(sessionId: string, signal: "INT" | "KILL"): string[];
 	/**
+	 * For a CLI that keeps its sessions open on the vendor's site (Amp): the
+	 * command that closes the session's there, run in the workspace with the
+	 * CLI's usual environment when the coding thread ends. Best-effort; a later
+	 * turn reopens the session itself.
+	 */
+	archiveCommand?(sessionId: string): string[];
+	/**
 	 * What the CLI prints on its error output when it exits without a result
 	 * because its login or key was refused, for a CLI that says so only
 	 * there (Amp).

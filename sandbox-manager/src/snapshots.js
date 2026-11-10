@@ -14,7 +14,7 @@ import { finished, pipeline } from 'node:stream/promises'
 import zlib from 'node:zlib'
 import { DockerError } from './docker.js'
 import { HttpError } from './errors.js'
-import { TarError, transformTar } from './tar.js'
+import { TarError, coalesce, transformTar } from './tar.js'
 import { LABEL_CACHE, LABEL_CACHE_REPO, LABEL_CACHE_USER, REPO, SANDBOX_UID, USER_ID } from './template.js'
 
 const MiB = 1024 * 1024
@@ -92,8 +92,9 @@ function linkEscapes(rel, target) {
 // earlier file, and any device, fifo or other special file. Snapshotting (`fromDocker`) reads
 // Docker's archive of /workspace, whose names start with `workspace/`, and leaves out credentials,
 // special files and escaping links instead, counting them in `stats.excluded`. Every entry kept is
-// owned by the sandbox user and loses setuid, setgid and sticky bits.
-export function entryPolicy({ fromDocker = false, stats = { excluded: 0 } } = {}) {
+// owned by the sandbox user and loses setuid, setgid and sticky bits. `omit` is a set of names: a
+// snapshot leaves out every file or directory so named, at any depth, counting them in `stats.omitted`.
+export function entryPolicy({ fromDocker = false, stats = { excluded: 0, omitted: 0 }, omit = new Set() } = {}) {
 	const links = new Set()
 	const files = new Set()
 	const strip = (name) => {
@@ -106,6 +107,10 @@ export function entryPolicy({ fromDocker = false, stats = { excluded: 0 } } = {}
 		const rel = strip(e.name)
 		if (!rel) return null // /workspace itself, which the image owns
 		const parts = rel.split('/')
+		if (fromDocker && parts.some((p) => omit.has(p))) {
+			stats.omitted++
+			return null
+		}
 		for (let i = 1; i <= parts.length; i++) if (links.has(parts.slice(0, i).join('/'))) throw new TarError(`entry beneath or replacing a symlink: ${rel}`)
 		const refuse = (why) => {
 			if (!fromDocker) throw new TarError(`${why}: ${rel}`)
@@ -132,14 +137,23 @@ export function entryPolicy({ fromDocker = false, stats = { excluded: 0 } } = {}
 	}
 }
 
-// Checks a POST /snapshots body.
+// A name `exclude` may list: one path component, no glob, not `.` or `..`.
+const EXCLUDE_NAME = /^(?!\.\.?$)[\w.@+-]{1,255}$/
+const MAX_EXCLUDE = 16
+
+// Checks a POST /snapshots body. `exclude` lists names of files and directories to leave out
+// wherever they are, such as `node_modules`, for a caller that rebuilds them after a restore.
 export function parseSnapshot(b) {
 	if (!b || typeof b !== 'object' || Array.isArray(b)) throw new HttpError(400, 'body must be an object')
-	for (const k of Object.keys(b)) if (!['userId', 'repo', 'key', 'sessionId'].includes(k)) throw new HttpError(400, `unknown field ${k}`)
+	for (const k of Object.keys(b)) if (!['userId', 'repo', 'key', 'sessionId', 'exclude'].includes(k)) throw new HttpError(400, `unknown field ${k}`)
 	checkOwner(b.userId, b.repo)
 	checkKey(b.key)
 	if (typeof b.sessionId !== 'string') throw new HttpError(400, 'sessionId required')
-	return { userId: b.userId, repo: b.repo, key: b.key, sessionId: b.sessionId }
+	const exclude = b.exclude ?? []
+	if (!Array.isArray(exclude) || exclude.length > MAX_EXCLUDE || !exclude.every((n) => typeof n === 'string' && EXCLUDE_NAME.test(n))) {
+		throw new HttpError(400, `exclude must be at most ${MAX_EXCLUDE} file or directory names, without slashes or wildcards`)
+	}
+	return { userId: b.userId, repo: b.repo, key: b.key, sessionId: b.sessionId, exclude: [...new Set(exclude)].sort() }
 }
 
 export function checkOwner(userId, repo, repoOptional = false) {
@@ -171,7 +185,7 @@ export function createEnvCache({ docker, cfg, now = Date.now, mounted = () => ne
 	const idOf = (userId, key) => `${userId}\0${key}`
 	const userDir = (userId) => path.join(root, createHash('sha256').update(`user:${userId}`).digest('hex').slice(0, 32))
 	const filesOf = (m) => ({ data: path.join(userDir(m.userId), `${m.key}${FORMATS[m.format].ext}`), meta: path.join(userDir(m.userId), `${m.key}.json`) })
-	const view = (m) => ({ key: m.key, repo: m.repo, size: m.size, sha256: m.sha256, format: m.format, contentBytes: m.contentBytes, excluded: m.excluded, createdAt: m.createdAt, lastUsedAt: m.lastUsedAt })
+	const view = (m) => ({ key: m.key, repo: m.repo, size: m.size, sha256: m.sha256, format: m.format, contentBytes: m.contentBytes, excluded: m.excluded, exclude: m.exclude ?? [], omitted: m.omitted ?? 0, createdAt: m.createdAt, lastUsedAt: m.lastUsedAt })
 	const notFound = () => new HttpError(404, 'no such snapshot', { code: 'snapshot_not_found' })
 
 	async function writeAtomic(file, text) {
@@ -245,13 +259,13 @@ export function createEnvCache({ docker, cfg, now = Date.now, mounted = () => ne
 		await fs.rm(f.data, { force: true })
 	}
 
-	async function build({ userId, repo, key }, container) {
+	async function build({ userId, repo, key, exclude = [] }, container) {
 		const dir = userDir(userId)
 		await fs.mkdir(dir, { recursive: true, mode: 0o700 })
 		const m = { userId, repo, key, format: FORMAT }
 		const f = filesOf(m)
 		const tmp = path.join(dir, `.tmp-${randomBytes(6).toString('hex')}`)
-		const policy = { fromDocker: true, stats: { excluded: 0 } }
+		const policy = { fromDocker: true, stats: { excluded: 0, omitted: 0 }, omit: new Set(exclude) }
 		const hash = createHash('sha256')
 		let size = 0
 		let content = 0
@@ -261,7 +275,7 @@ export function createEnvCache({ docker, cfg, now = Date.now, mounted = () => ne
 			await pipeline(
 				archive,
 				async function* (src) {
-					for await (const b of transformTar(src, entryPolicy(policy))) {
+					for await (const b of coalesce(transformTar(src, entryPolicy(policy)))) {
 						content += b.length
 						if (content > maxBytes) throw new HttpError(413, `the workspace snapshot is larger than ${maxBytes} bytes`, { code: 'snapshot_too_large', maxBytes })
 						yield b
@@ -279,7 +293,7 @@ export function createEnvCache({ docker, cfg, now = Date.now, mounted = () => ne
 			)
 			await fs.rename(tmp, f.data)
 			const t = now()
-			Object.assign(m, { size, sha256: hash.digest('hex'), contentBytes: content, excluded: policy.stats.excluded, createdAt: t, lastUsedAt: t })
+			Object.assign(m, { size, sha256: hash.digest('hex'), contentBytes: content, excluded: policy.stats.excluded, exclude, omitted: policy.stats.omitted, createdAt: t, lastUsedAt: t })
 			await writeAtomic(f.meta, JSON.stringify(m))
 			committed = true
 			await syncDir(dir)
@@ -365,7 +379,7 @@ export function createEnvCache({ docker, cfg, now = Date.now, mounted = () => ne
 			const body = Readable.from(
 				(async function* () {
 					try {
-						yield* transformTar(dec, entryPolicy())
+						yield* coalesce(transformTar(dec, entryPolicy()))
 					} catch (e) {
 						invalid = e
 						throw e
@@ -400,11 +414,15 @@ export function createEnvCache({ docker, cfg, now = Date.now, mounted = () => ne
 	}
 
 	// Reads every cache volume's size from Docker, which also finds volumes the index lost and
-	// forgets volumes that are gone.
+	// forgets volumes that are gone. Docker before API 1.52 lists volumes in `Volumes`; 1.52 and
+	// later list them, with `verbose`, in `VolumeUsage.Items`, and are dropping `Volumes`.
 	async function measureCaches() {
-		const df = await docker.request('GET', '/system/df?type=volume')
+		const df = await docker.request('GET', '/system/df?type=volume&verbose=1')
+		// `Items` is left out when there are none.
+		const volumes = df?.VolumeUsage ? (df.VolumeUsage.Items ?? []) : df?.Volumes
+		if (!Array.isArray(volumes)) throw new Error('/system/df listed no volumes')
 		const seen = new Set()
-		for (const v of df?.Volumes ?? []) {
+		for (const v of volumes) {
 			if (!v.Labels?.[LABEL_CACHE]) continue
 			seen.add(v.Name)
 			const c = caches.get(v.Name) ?? { userId: v.Labels[LABEL_CACHE_USER], repo: v.Labels[LABEL_CACHE_REPO], lastUsedAt: now(), bytes: 0 }

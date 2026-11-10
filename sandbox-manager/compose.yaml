@@ -28,7 +28,7 @@ services:
       POST: 1 # the default is read-only
       # Everything else stays at the image default of 0, including EXEC: commands run through
       # workspace-agentd, not Docker exec. Also BUILD, SWARM, SECRETS, PLUGINS, SERVICES, TASKS,
-      # NODES, CONFIGS, SYSTEM, AUTH, COMMIT, DISTRIBUTION, EVENTS...
+      # NODES, CONFIGS, AUTH, COMMIT, DISTRIBUTION, EVENTS...
     volumes:
       # DOCKER_SOCKET is the daemon's socket path on the host (rootless or non-default installs).
       - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro

@@ -244,7 +244,11 @@ describe('sessions', () => {
 		assert.deepEqual(c.HostConfig.Mounts.map((m) => [m.Type, m.Target]), [['volume', '/workspace'], ['volume', '/caches']])
 		assert.match(cache, /^pim-cache-[0-9a-f]{32}$/)
 		const env = envOf('pim-s-abc-1')
-		assert.deepEqual([env.PNPM_STORE_DIR, env.npm_config_cache, env.CARGO_HOME, env.CARGO_TARGET_DIR, env.PIP_CACHE_DIR, env.UV_CACHE_DIR], ['/caches/pnpm', '/caches/npm', '/caches/cargo', '/caches/cargo-target', '/caches/pip', '/caches/uv'])
+		assert.deepEqual([env.npm_config_cache, env.CARGO_HOME, env.CARGO_TARGET_DIR, env.PIP_CACHE_DIR, env.UV_CACHE_DIR], ['/caches/npm', '/caches/cargo', '/caches/cargo-target', '/caches/pip', '/caches/uv'])
+		// pnpm 11 and later read only pnpm_config_* variables (the image's pnpm is 12), earlier ones npm_config_*;
+		// the store is on another mount than node_modules, so pnpm copies from it.
+		assert.deepEqual([env.pnpm_config_store_dir, env.npm_config_store_dir, env.pnpm_config_package_import_method], ['/caches/pnpm', '/caches/pnpm', 'copy'])
+		assert.equal(env.PNPM_STORE_DIR, undefined, 'no pnpm reads it')
 		assert.deepEqual(fake.volumes.get(cache).Labels, { 'pim.coding.cache': cache.slice(10), 'pim.coding.cache-user': 'ada', 'pim.coding.cache-repo': ada.repo })
 		const cacheOf = (id) => fake.containers.get(`pim-s-${id}`).body.HostConfig.Mounts.find((m) => m.Target === '/caches')?.Source
 		const many = make({ maxConcurrent: 5 })

@@ -79,8 +79,8 @@ All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors 
 | `GET /health` | (no token) | `{runsc, freeDiskPct, maxConcurrent, running, free, sessions, snapshotBytes, cacheBytes, snapshotCount}` |
 | `GET /sessions` | | Every known session, sorted by id: `[{sessionId, image, limits, egressAllow, state, ...}]` |
 | `POST /sessions` | `{sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow?, userId?, repo?, hasRuntimeSecrets?, restoreFrom?:{key}}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
-| `POST /snapshots` | `{userId, repo, key, sessionId}` | 201 the new snapshot, 200 the one already there for `key` |
-| `GET /snapshots` | `?userId=&repo=` (`repo` optional) | The user's snapshots, newest first: `[{key, repo, size, sha256, format, contentBytes, excluded, createdAt, lastUsedAt}]` |
+| `POST /snapshots` | `{userId, repo, key, sessionId, exclude?}` | 201 the new snapshot, 200 the one already there for `key` |
+| `GET /snapshots` | `?userId=&repo=` (`repo` optional) | The user's snapshots, newest first: `[{key, repo, size, sha256, format, contentBytes, excluded, exclude, omitted, createdAt, lastUsedAt}]` |
 | `DELETE /snapshots/:key` | `?userId=` | `{deleted}`; 409 `snapshot_in_use` while it is being restored |
 | `GET /sessions/:id` | | The session: `state` `running`, `creating` or `stopped`; 404 otherwise |
 | `DELETE /sessions/:id` | `?keepVolume=1` | `{deleted}`; with `keepVolume` also `keptVolume`, and the volume stays |
@@ -171,6 +171,10 @@ one share a single creation. The session must have been created with the same `u
   `.env*` in the home directory and its dot-directories (not in a checkout), devices, fifos, and
   symlinks that point outside `/workspace`. Every `.git/config` is rewritten without the user and
   password of http(s) URLs and without `extraheader` lines. `excluded` counts the entries left out.
+  `exclude` (up to 16 names, such as `["node_modules", ".venv"]`; no slashes or wildcards) also
+  leaves out every file or directory with one of those names, at any depth, for a caller that
+  rebuilds them after a restore; `omitted` counts those entries. It doesn't change the key: a
+  snapshot already there for the key is returned whatever it left out.
   The manager never adds secrets to a session; a caller that gives one secrets says so with
   `hasRuntimeSecrets: true` at create, which is kept in the session's labels.
 - **Writes are atomic:** the tarball is written to a temporary file, flushed and renamed, then its
@@ -190,16 +194,18 @@ one share a single creation. The session must have been created with the same `u
   delete, so a user never sees another's snapshots; the same key is a different snapshot per user.
 
 **Cache volumes.** A session with `userId` and `repo` mounts the volume `pim-cache-<hash>` of that
-pair at `/caches` and gets `PNPM_STORE_DIR` (and `npm_config_store_dir`) `/caches/pnpm`,
-`npm_config_cache` `/caches/npm`, `CARGO_HOME` `/caches/cargo`, `CARGO_TARGET_DIR`
+pair at `/caches` and gets `pnpm_config_store_dir` (pnpm 11 and later read only `pnpm_config_*`;
+`npm_config_store_dir` for older pnpm) `/caches/pnpm` with `pnpm_config_package_import_method`
+`copy` (the store is on another mount, so pnpm can't hard-link from it, and node_modules shares no
+file with the cache), `npm_config_cache` `/caches/npm`, `CARGO_HOME` `/caches/cargo`, `CARGO_TARGET_DIR`
 `/caches/cargo-target`, `PIP_CACHE_DIR` `/caches/pip` and `UV_CACHE_DIR` `/caches/uv`. Every session
 of one user and repo shares it, and no other user's does. It outlives the sessions (it carries
 `pim.coding.cache`, not the session label) until GC evicts it. The image must ship `/caches` and
 those subdirectories owned by 10001 (the workspace image does), so Docker fills a new volume with
 them.
 
-**Accounting and GC.** Snapshot sizes and cache volume sizes (read from `/system/df`) are reported
-by `/health` and added to the reserved total that `MAX_TOTAL_WORKSPACE_GB` limits. The GC runs with
+**Accounting and GC.** Snapshot sizes and cache volume sizes (read from `/system/df` with `verbose`, as
+`VolumeUsage.Items` from API 1.52 or `Volumes` before it, at each GC pass) are reported by `/health` and added to the reserved total that `MAX_TOTAL_WORKSPACE_GB` limits. The GC runs with
 the reaper every 30 s, and right away when a snapshot is created over the cap. It keeps the newest
 2 snapshots per `(userId, repo)`, deletes snapshots unused (not restored) for 7 days, then, while
 snapshots and caches together exceed `SNAPSHOT_CACHE_PCT` of the total, evicts whichever snapshot

@@ -65,6 +65,8 @@ export type CodingThreadRow = {
 	readonly budgetStopped: boolean;
 	/** The repository's prepared environment in the thread's workspace (./environment-cache.ts). */
 	readonly environment: CodingEnvironment;
+	/** How many consecutive interruptions (restarts) have been auto-resumed for this thread. Resets to 0 when a turn completes normally. */
+	readonly consecutiveInterrupts: number;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	resume_priority INTEGER NOT NULL DEFAULT 0,
 	current_operation TEXT,
 	budget_stopped INTEGER NOT NULL DEFAULT 0,
+	consecutive_interrupts INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );
@@ -245,6 +248,8 @@ export class CodingThreadStore {
 		// A CLI harness's session's whole usage, for one that reports only that (Codex).
 		const session = new Set(this.#sql.exec("PRAGMA table_info(coding_harness_session)").toArray().map((row) => String(row.name)));
 		if (!session.has("usage")) this.#sql.exec("ALTER TABLE coding_harness_session ADD COLUMN usage TEXT");
+		// Consecutive interruptions counter for auto-resume.
+		if (!columns.has("consecutive_interrupts")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN consecutive_interrupts INTEGER NOT NULL DEFAULT 0");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -260,12 +265,12 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "createdAt" | "updatedAt">,
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "createdAt" | "updatedAt"> & { consecutiveInterrupts?: number },
 	): void {
 		const now = this.#now();
 		this.#sql.exec(
-			`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, harness, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, harness, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			thread.threadId,
 			thread.space,
 			thread.repoUrl,
@@ -280,6 +285,7 @@ export class CodingThreadStore {
 			JSON.stringify(thread.limits),
 			thread.budgetUsd ?? 0,
 			thread.startOperation,
+			thread.consecutiveInterrupts ?? 0,
 			now,
 			now,
 		);
@@ -288,7 +294,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
@@ -304,6 +310,7 @@ export class CodingThreadStore {
 		if (change.budgetStopped !== undefined) columns.budget_stopped = change.budgetStopped ? 1 : 0;
 		if (change.budgetUsd !== undefined) columns.budget_usd = change.budgetUsd ?? 0;
 		if (change.environment !== undefined) columns.environment = JSON.stringify(change.environment);
+		if (change.consecutiveInterrupts !== undefined) columns.consecutive_interrupts = change.consecutiveInterrupts;
 		const names = Object.keys(columns);
 		if (names.length === 0) return;
 		this.#sql.exec(`UPDATE coding_thread SET ${names.map((name) => `${name} = ?`).join(", ")}, updated_at = ?`, ...Object.values(columns), this.#now());
@@ -527,6 +534,7 @@ function threadOf(row: Row): CodingThreadRow {
 		currentOperation: text(row.current_operation),
 		budgetStopped: row.budget_stopped === 1,
 		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : { ...NO_ENVIRONMENT, ...(JSON.parse(String(row.environment)) as Partial<CodingEnvironment>) },
+		consecutiveInterrupts: Number(row.consecutive_interrupts),
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 	};

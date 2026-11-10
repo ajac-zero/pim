@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { timingSafeEqual, createHash } from 'node:crypto'
-import { createReadStream, promises as fs } from 'node:fs'
+import { createReadStream, mkdirSync, promises as fs } from 'node:fs'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { HttpError } from './errors.mjs'
@@ -144,6 +144,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		console.error('agentd: AGENTD_TOKEN is required')
 		process.exit(1)
 	}
+	// The session's temp directory (TMPDIR, GOTMPDIR) is on the workspace volume: make sure it exists.
+	for (const dir of new Set([env.TMPDIR, env.GOTMPDIR])) if (dir?.startsWith('/workspace/')) mkdirSync(dir, { recursive: true })
 	const server = await createAgentd({
 		token: env.AGENTD_TOKEN,
 		root: env.AGENTD_ROOT || '/workspace',

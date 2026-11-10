@@ -175,6 +175,8 @@ describe('template validation', () => {
 		assert.equal(h.Memory, 512 * 1024 * 1024)
 		assert.equal(h.NanoCpus, 1.5e9)
 		assert.match(h.Tmpfs['/tmp'], /size=\d+m/)
+		// Go and every other tool get a roomy temp directory on the workspace volume, not the 64m /tmp.
+		for (const k of ['TMPDIR', 'GOTMPDIR']) assert.ok(c.Env.includes(`${k}=/workspace/.pim-tmp`), k)
 		assert.equal(h.Binds, undefined)
 		assert.equal(h.PortBindings, undefined)
 		assert.equal(h.PublishAllPorts, false)

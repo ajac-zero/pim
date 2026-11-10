@@ -34,6 +34,11 @@ export const CACHE_ENV = {
 	PIP_CACHE_DIR: '/caches/pip',
 	UV_CACHE_DIR: '/caches/uv',
 }
+// The container's /tmp is a small noexec tmpfs, too small for `go build` or `go vet`. Every process in
+// the session (harness CLIs, setup scripts, the agent's own commands) gets a roomy temp directory on
+// the workspace volume instead; agentd creates it when it starts.
+export const WORKSPACE_TMP = '/workspace/.pim-tmp'
+export const TMP_ENV = { TMPDIR: WORKSPACE_TMP, GOTMPDIR: WORKSPACE_TMP }
 export const AGENTD_PORT = 8787
 // The API caps each of stdout and stderr at 10 MiB; agentd caps their sum, so it gets twice that.
 export const MAX_OUTPUT = 10 * 1024 * 1024
@@ -120,6 +125,7 @@ export function buildSpec(params, opts) {
 	const env = {
 		HOME: '/workspace',
 		...proxyEnv(opts.proxyUrl),
+		...TMP_ENV,
 		...(cache && CACHE_ENV),
 		// Visible to Docker API clients (docker inspect) and to the session's own user; agentd keeps
 		// it out of the commands it runs, and the manager never logs it. See the README.

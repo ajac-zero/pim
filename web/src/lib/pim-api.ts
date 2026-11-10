@@ -819,6 +819,36 @@ export type ComputerHostStatus = {
   pending: number;
 };
 
+/** The host daemon (hostopsd) as the admin sees it: its credential, when it last asked for work, and its queue. */
+export type HostOpsStatus = {
+  credential: {
+    present: boolean;
+    revoked: boolean;
+    createdAt: number | null;
+    revokedAt: number | null;
+  };
+  agent: {
+    lastSeenAt: number | null;
+    version: string | null;
+    commit: string | null;
+  };
+  queue: { queued: number; running: number };
+};
+
+/** One row of the host operations' audit log: a request, refused or not, or a change of an operation's state. */
+export type HostOpsAuditRow = {
+  id: number;
+  ts: number;
+  actorKind: string;
+  actorId: string | null;
+  action: string;
+  opId: string | null;
+  /** What was asked, with anything like a secret taken out. */
+  args: Record<string, unknown> | null;
+  outcome: string;
+  detail: string | null;
+};
+
 /** The browser your agents share: whether this Pim has one, and the page a chat's window shows when it's open. */
 export type BrowserStatus = {
   available: boolean;
@@ -2208,6 +2238,20 @@ export const admin = {
     }),
   forgetComputerHost: () =>
     call<ComputerHostStatus>("/admin/computer-host", { method: "DELETE" }),
+  /** The host daemon, which runs the majordomo's host operations. */
+  hostOpsStatus: () => call<HostOpsStatus>("/hostops/status"),
+  /** The host operations' audit log, newest first. */
+  hostOpsAudit: () =>
+    call<{ audit: HostOpsAuditRow[] }>("/hostops/audit?limit=100").then(
+      (body) => body.audit,
+    ),
+  /** A new credential for the host daemon, in place of any other; shown only now. */
+  issueHostOpsCredential: () =>
+    call<{ token: string; rotated: boolean }>("/hostops/credential", {
+      method: "POST",
+    }),
+  revokeHostOpsCredential: () =>
+    call<{ revoked: boolean }>("/hostops/credential", { method: "DELETE" }),
   /** How this deployment runs, and the variables that say so. */
   deployment: () =>
     call<{ settings: DeploymentSettings; variables: DeploymentVariable[] }>(

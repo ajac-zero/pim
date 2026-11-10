@@ -41,8 +41,13 @@ import type {
   HarnessSignIn,
   TranscriptMessage,
 } from "~/lib/coding";
-import { ApiError, type Session } from "~/lib/pim-api";
-import { approvalsQuery, sessionsQuery } from "~/lib/queries";
+import { ApiError, type ModelSettings, type Session } from "~/lib/pim-api";
+import {
+  agentsQuery,
+  approvalsQuery,
+  modelQuery,
+  sessionsQuery,
+} from "~/lib/queries";
 import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
 afterEach(cleanup);
@@ -246,6 +251,18 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
   return { api, connections };
 }
 
+const model = { provider: "test", id: "model", name: "Model", images: false };
+const modelSettings: ModelSettings = {
+  model,
+  default: model,
+  choices: [model],
+  workersAi: false,
+  utility: { model: null, default: null, choices: [] },
+  chatgpt: { connected: false, email: null, error: null },
+  chatgptImages: { connected: false, email: null },
+  providers: [],
+};
+
 function renderWith(
   api: CodingApi,
   page: () => ReactNode,
@@ -256,6 +273,9 @@ function renderWith(
 ) {
   // A push asks for an approval; the approvals Pim has are none here.
   client.setQueryData(approvalsQuery().queryKey, []);
+  // The steer form's composer reads the model and the agents for its model menu.
+  client.setQueryData(agentsQuery().queryKey, []);
+  client.setQueryData(modelQuery().queryKey, modelSettings);
   const root = createRootRoute({ component: page });
   const router = createRouter({
     routeTree: root.addChildren(

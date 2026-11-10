@@ -33,6 +33,8 @@ type Subscription = { name: string; arguments: Record<string, unknown>; delivery
 const subscribes: Subscription[] = [];
 const unsubscribes: unknown[] = [];
 let refuseSubscribe: number | undefined;
+/** Callback URLs that echoed the app's verification challenge. */
+const verifiedCallbacks = new Set<string>();
 
 async function digest(text: string): Promise<string> {
 	const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
@@ -92,6 +94,16 @@ function travel() {
 	}) as never);
 	server.server.setRequestHandler("events/subscribe", anyParams, async (params) => {
 		if (refuseSubscribe !== undefined) throw new ProtocolError(refuseSubscribe, "Forbidden");
+		const { delivery } = params as unknown as Subscription;
+		// As the draft asks, a callback must echo a challenge before its first subscription is answered.
+		if (!verifiedCallbacks.has(delivery.url)) {
+			const challenge = crypto.randomUUID();
+			const response = await deliver(new URL(delivery.url).pathname, delivery.secret!, { type: "verification", challenge });
+			if (response.status !== 200 || (await response.json<{ challenge?: string }>()).challenge !== challenge) {
+				throw new ProtocolError(-32015, "CallbackEndpointError");
+			}
+			verifiedCallbacks.add(delivery.url);
+		}
 		subscribes.push(params as unknown as Subscription);
 		return {
 			id: "sub_travel_1",

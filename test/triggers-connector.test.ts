@@ -231,6 +231,10 @@ describe("connector events into triggers (the ingress adapter)", () => {
 			expect(context.count("pim_trigger_inbox")).toBe(0);
 			expect(context.store.occurrences(context.triggerId)).toEqual([]);
 			expect(context.store.sourceState(context.triggerId)).toMatchObject({ position: null, cursor: null });
+			// Its verification comes before the subscribe answers, so it is echoed, if signed with the binding's secret.
+			const verification = { type: "verification", challenge: "nonce-early" };
+			expect(await context.receive(await signed(context, verification))).toMatchObject({ disposition: "accepted", status: 200, reason: "verified", challenge: "nonce-early" });
+			expect(await context.receive(await signed(context, verification, { signWith: newSecret() }))).toMatchObject({ disposition: "reject", status: 401, reason: "unauthenticated" });
 			const refused = ingressResponse({ disposition: "retry", status: 503, reason: "not_ready", retryAfterSeconds: 5 });
 			expect([refused.status, refused.headers.get("retry-after"), await refused.text()]).toEqual([503, "5", "not_ready"]);
 		});

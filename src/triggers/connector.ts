@@ -261,8 +261,8 @@ export class ConnectorIngress {
 		const headers = request.headers;
 		const subscriptionId = headers.get("x-mcp-subscription-id");
 		if (subscriptionId === null || subscriptionId.length === 0 || subscriptionId.length > CONNECTOR_INGRESS_LIMITS.subscriptionIdLength) return reject("bad_headers");
-		if (binding.providerSubscriptionId === null) return retry("not_ready");
-		if (subscriptionId !== binding.providerSubscriptionId) return reject("wrong_subscription");
+		// Until the subscribe answers, its id isn't known: the signature alone says the delivery is for this binding.
+		if (binding.providerSubscriptionId !== null && subscriptionId !== binding.providerSubscriptionId) return reject("wrong_subscription");
 		const webhookId = headers.get("webhook-id");
 		const timestamp = headers.get("webhook-timestamp");
 		const signatures = headers.get("webhook-signature");
@@ -311,6 +311,8 @@ export class ConnectorIngress {
 		if ("disposition" in again) return again;
 		if (!sameBinding(again.binding, binding)) return retry("subscription_changed");
 		const { trigger } = again;
+		// A connector verifies the callback before it answers the first subscribe, so only a verification is taken without the subscription's id.
+		if (binding.providerSubscriptionId === null && envelope.type !== "verification") return retry("not_ready");
 
 		switch (envelope.type) {
 			case "verification":

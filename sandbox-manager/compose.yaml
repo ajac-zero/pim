@@ -24,6 +24,7 @@ services:
       NETWORKS: 1 # create, remove, connect/disconnect the egress-proxy and the manager
       IMAGES: 1 # inspect and pull
       INFO: 1 # the runsc check reads /info
+      SYSTEM: 1 # GET /system/df, which measures the dependency cache volumes
       POST: 1 # the default is read-only
       # Everything else stays at the image default of 0, including EXEC: commands run through
       # workspace-agentd, not Docker exec. Also BUILD, SWARM, SECRETS, PLUGINS, SERVICES, TASKS,
@@ -66,8 +67,13 @@ services:
       # dedicated data disk for Docker, set DOCKER_ROOT_HOST to a directory on that disk.
       DOCKER_ROOT: /docker-root
       WORKSPACE_TMPFS: ${WORKSPACE_TMPFS:-0}
+      DATA_DIR: /data
+      SNAPSHOT_MAX_GB: ${SNAPSHOT_MAX_GB:-4}
+      SNAPSHOT_CACHE_PCT: ${SNAPSHOT_CACHE_PCT:-20}
     volumes:
       - ${DOCKER_ROOT_HOST:-/var/lib/pim-sandbox}:/docker-root:ro
+      # Workspace snapshots, on Docker's data-root like the workspaces they count against.
+      - manager-data:/data
     ports:
       - "127.0.0.1:${MANAGER_PORT:-8080}:8080"
     networks: [control, api]
@@ -81,6 +87,9 @@ services:
     environment:
       PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set PROXY_ADMIN_TOKEN}
     networks: [control, outbound]
+
+volumes:
+  manager-data: {}
 
 networks:
   api: {} # only so the manager's port can be published on localhost; replace with your Pim network

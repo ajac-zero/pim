@@ -21,7 +21,9 @@ docker compose up -d --build
 The compose file builds `pim-workspace:local` from `../workspace-agentd` (the default and only
 allowed sandbox image unless `ALLOWED_IMAGES` says otherwise) and runs three services:
 `docker-socket-proxy` (the only one with the Docker socket, allowing containers, volumes,
-networks, images and info, but not exec), `sandbox-manager`, and `egress-proxy`.
+networks, images, info and system (`/system/df`, which sizes the cache volumes), but not exec),
+`sandbox-manager`, and `egress-proxy`. The manager keeps workspace snapshots in the
+`manager-data` volume at `/data`.
 
 Run it without compose: `DOCKER_HOST=unix:///var/run/docker.sock MANAGER_TOKEN=... PROXY_ADMIN_TOKEN=... HOST=127.0.0.1 node src/main.js`
 (`DOCKER_SOCKET=/path` also works; `tcp://host:port` is accepted for the socket proxy). On the
@@ -57,6 +59,9 @@ Live check: `scripts/live-smoke.sh` (needs a Docker daemon with runsc, `curl`, `
 | `AGENTD_READY_MS` | 30000 | How long create waits for a new session's agentd to answer |
 | `EGRESS_PROXY_CONTAINER`, `EGRESS_PROXY_URL`, `EGRESS_PROXY_ADMIN_URL` | `egress-proxy`, `http://egress-proxy:3128`, `http://egress-proxy:3129` | Where the proxy lives |
 | `PORT`, `HOST` | 8080, `0.0.0.0` | Where the API listens |
+| `DATA_DIR` | `/data` | Where snapshots and the cache index are kept. Put it on Docker's data-root filesystem (compose uses a named volume), so free-disk gating sees it |
+| `SNAPSHOT_MAX_GB` | 4 | Largest snapshot, measured as the uncompressed tar; a bigger one fails with 413 `snapshot_too_large` |
+| `SNAPSHOT_CACHE_PCT` | 20 | Share of `MAX_TOTAL_WORKSPACE_GB` that snapshots and cache volumes together may use before the least recently used are evicted |
 
 `DOCKER_SOCKET` (compose only, default `/var/run/docker.sock`) is the host path of the Docker
 socket mounted into `docker-socket-proxy`; set it for rootless or non-default installs.
@@ -71,9 +76,12 @@ All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors 
 
 | Route | Body / query | Answer |
 | --- | --- | --- |
-| `GET /health` | (no token) | `{runsc, freeDiskPct, maxConcurrent, running, free, sessions}` |
+| `GET /health` | (no token) | `{runsc, freeDiskPct, maxConcurrent, running, free, sessions, snapshotBytes, cacheBytes, snapshotCount}` |
 | `GET /sessions` | | Every known session, sorted by id: `[{sessionId, image, limits, egressAllow, state, ...}]` |
-| `POST /sessions` | `{sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow?}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
+| `POST /sessions` | `{sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow?, userId?, repo?, hasRuntimeSecrets?, restoreFrom?:{key}}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
+| `POST /snapshots` | `{userId, repo, key, sessionId}` | 201 the new snapshot, 200 the one already there for `key` |
+| `GET /snapshots` | `?userId=&repo=` (`repo` optional) | The user's snapshots, newest first: `[{key, repo, size, sha256, format, contentBytes, excluded, createdAt, lastUsedAt}]` |
+| `DELETE /snapshots/:key` | `?userId=` | `{deleted}`; 409 `snapshot_in_use` while it is being restored |
 | `GET /sessions/:id` | | The session: `state` `running`, `creating` or `stopped`; 404 otherwise |
 | `DELETE /sessions/:id` | `?keepVolume=1` | `{deleted}`; with `keepVolume` also `keptVolume`, and the volume stays |
 | `POST /sessions/:id/stop` | | The session, now `stopped`; does nothing if stopped already |
@@ -135,6 +143,60 @@ needs `recursive=1` (otherwise 409). `stat` describes a symlink itself rather th
 `type` is `file`, `dir` or `symlink`.
 
 Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–2048.
+
+**Environment caching.** A create with `userId` and `repo` mounts that pair's dependency cache
+volume and can restore a snapshot; see Environment caching.
+
+## Environment caching
+
+**Snapshots.** `POST /snapshots` archives a running session's `/workspace` (HOME is `/workspace`,
+so the tools' own directories such as `~/.cache` and `~/.local` are in it) through Docker's
+archive API into `DATA_DIR/snapshots/<hash of userId>/<key>.tar.zst` (`.tar.gz` where Node has no
+zstd). `key` is 16-128 lowercase hex characters, computed by the caller (for example from the
+lockfiles); the same `(userId, key)` returns the snapshot already there, and concurrent requests for
+one share a single creation. The session must have been created with the same `userId` and `repo`
+(otherwise 403 `forbidden` or 409 `repo_mismatch`) and without `hasRuntimeSecrets` (409
+`runtime_secrets`), and free disk must be above `MIN_FREE_DISK_PCT` (507 `low_disk`).
+- **What is left out:** credentials in the home directory (`.npmrc`, `.netrc`, `.git-credentials`,
+  `.pypirc`, `.yarnrc.yml`, `.ssh`, `.aws`, `.docker`, `.kube`, `.gnupg`, `.azure`, `.config/gh`,
+  `.config/gcloud`, cargo credentials, the coding harnesses' sign-ins, shell histories), every
+  `.env*` in the home directory and its dot-directories (not in a checkout), devices, fifos, and
+  symlinks that point outside `/workspace`. Every `.git/config` is rewritten without the user and
+  password of http(s) URLs and without `extraheader` lines. `excluded` counts the entries left out.
+  The manager never adds secrets to a session; a caller that gives one secrets says so with
+  `hasRuntimeSecrets: true` at create, which is kept in the session's labels.
+- **Writes are atomic:** the tarball is written to a temporary file, flushed and renamed, then its
+  metadata (`<key>.json`, with `sha256`) is written the same way and makes it exist. A failure
+  removes both; after a crash the next start removes temporary files and tarballs without
+  metadata.
+- **Restore:** `POST /sessions` with `restoreFrom: {key}` (and `userId`, `repo`) checks the snapshot
+  is that user's for that repo (404 `snapshot_not_found`), verifies its sha256 (422
+  `snapshot_corrupt`, and the snapshot is deleted), and extracts it through Docker's archive API
+  into the new, not yet started container with `copyUIDGID`, so every file belongs to the sandbox
+  user. Each entry is checked first: no absolute path, no `..`, no symlink out of `/workspace`, no
+  entry beneath a symlink, no hardlink except to an earlier file, no device or other special file,
+  and no setuid, setgid or sticky bit (422 `snapshot_invalid`). A failed restore removes the new
+  workspace. A resumed session keeps its own files and ignores `restoreFrom`. The session shows
+  `restoredFrom`.
+- **Isolation:** every lookup is by `(userId, key)`, and `userId` is required to list, restore and
+  delete, so a user never sees another's snapshots; the same key is a different snapshot per user.
+
+**Cache volumes.** A session with `userId` and `repo` mounts the volume `pim-cache-<hash>` of that
+pair at `/caches` and gets `PNPM_STORE_DIR` (and `npm_config_store_dir`) `/caches/pnpm`,
+`npm_config_cache` `/caches/npm`, `CARGO_HOME` `/caches/cargo`, `CARGO_TARGET_DIR`
+`/caches/cargo-target`, `PIP_CACHE_DIR` `/caches/pip` and `UV_CACHE_DIR` `/caches/uv`. Every session
+of one user and repo shares it, and no other user's does. It outlives the sessions (it carries
+`pim.coding.cache`, not the session label) until GC evicts it. The image must ship `/caches` and
+those subdirectories owned by 10001 (the workspace image does), so Docker fills a new volume with
+them.
+
+**Accounting and GC.** Snapshot sizes and cache volume sizes (read from `/system/df`) are reported
+by `/health` and added to the reserved total that `MAX_TOTAL_WORKSPACE_GB` limits. The GC runs with
+the reaper every 30 s, and right away when a snapshot is created over the cap. It keeps the newest
+2 snapshots per `(userId, repo)`, deletes snapshots unused (not restored) for 7 days, then, while
+snapshots and caches together exceed `SNAPSHOT_CACHE_PCT` of the total, evicts whichever snapshot
+or cache was used least recently. A snapshot being restored and the cache volume of a live or
+starting session are never deleted.
 
 ## Security model
 
@@ -207,7 +269,8 @@ Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–204
   a marker volume (`pim-kept-<id>`, labels `pim.coding.kept` and `pim.coding.kept-info`), so a
   restarted manager knows about them. A plain `DELETE`, or the reaper after `KEPT_VOLUME_DAYS`,
   removes the volume and its marker.
-- **Reaper.** Every 30 s it removes sessions idle beyond `IDLE_MIN` and expired kept volumes.
+- **Reaper.** Every 30 s it removes sessions idle beyond `IDLE_MIN` and expired kept volumes,
+  and collects snapshots and cache volumes (see Environment caching).
 
 ## Restarts
 
@@ -231,8 +294,14 @@ restarted while the manager kept running gets its networks and allowlists back t
   `DISK_CHECK_SEC` (and as fast as the disk allows) before it is stopped; `MIN_FREE_DISK_PCT`
   is the backstop. The measure walks the whole workspace each time, which costs I/O on large
   trees. Resuming a kept volume in `volume` mode keeps the quota it was created with.
-- Images must ship `/workspace` owned by 10001 (the workspace image does), so the new volume,
-  which Docker fills from the image, is writable.
+- Images must ship `/workspace` and `/caches` owned by 10001 (the workspace image does), so the
+  new volumes, which Docker fills from the image, are writable.
+- A cache volume has no quota of its own: a session can fill it past its `diskMiB`. Its size counts
+  toward the total and is evicted once no session mounts it; `MIN_FREE_DISK_PCT` is the backstop.
+- Snapshots leave out symlinks that point outside `/workspace`, such as a virtualenv's
+  `bin/python -> /usr/bin/python3`, so a restored virtualenv has to be recreated.
+- Only a running session can be snapshotted. Snapshot sizes count once written; one being written
+  can take free disk below `MIN_FREE_DISK_PCT`, up to `SNAPSHOT_MAX_GB`.
 - The proxy supports HTTPS (CONNECT :443) only; plain `http://` returns 405. The admin port is
   reachable from session networks and is protected only by its token.
 - Sessions can reach each other's proxy, but not each other's containers (separate networks).

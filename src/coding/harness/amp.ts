@@ -31,7 +31,7 @@ import type { CliHarness, HarnessTurn } from "./types";
  */
 
 /** The CLI's flags that are the same every turn: stream-json, and nothing that reaches past the workspace's own process. */
-export const AMP_FLAGS: readonly string[] = ["--stream-json", "--no-ide", "--no-notifications", "--no-color", "--no-remote-control-terminal"];
+export const AMP_FLAGS: readonly string[] = ["--stream-json", "--no-ide", "--no-notifications", "--no-color", "--no-remote-control-terminal", "--no-archive-after-execute"];
 
 /** Amp's own modes, which pick its model, prompt and tools; a thread's model names one, otherwise AMP_DEFAULT_MODE applies. */
 export const AMP_MODES = ["low", "medium", "high", "ultra"] as const;

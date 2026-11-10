@@ -1260,6 +1260,7 @@ describe("Amp's command line", () => {
 			"--no-notifications",
 			"--no-color",
 			"--no-remote-control-terminal",
+			"--no-archive-after-execute",
 			"--log-file",
 			`/workspace/.cache/amp/logs/pim-${NEW}.log`,
 			"--visibility",

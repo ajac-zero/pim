@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { environmentKey } from "../src/coding/environment-cache";
-import { detectRepository, environmentBrief, makeTargets, nodeRange, pendingItems, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
+import { detectRepository, environmentBrief, makeTargets, nodeRange, pendingItems, pnpmPostinstall, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
 import { GO_REPO, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./fixtures/repos";
 
 // What a coding thread reads from a repository's checkout to provision its workspace and tell its agent how to check
@@ -53,7 +53,7 @@ describe("what a repository needs", () => {
 			{ tool: "node", version: "20.11.1", source: "manifest", from: ".nvmrc" },
 			{ tool: "pnpm", version: "9.15.0", source: "manifest", from: "package.json" },
 		]);
-		expect(scripts(profile)).toEqual(["mise use --global --yes node@20.11.1", "mise use --global --yes npm:pnpm@9.15.0", "pnpm install --frozen-lockfile"]);
+		expect(scripts(profile)).toEqual(["mise use --global --yes node@20.11.1", "mise use --global --yes npm:pnpm@9.15.0 && " + pnpmPostinstall("9.15.0"), "pnpm install --frozen-lockfile"]);
 		expect(profile.dependencies).toEqual([{ tool: "pnpm", command: "pnpm install --frozen-lockfile", from: "pnpm-lock.yaml", needs: ["node", "pnpm"] }]);
 		// test, lint and typecheck, but not test:watch, lint:fix, build or dev; then the Gitea workflow's own spelling of the test.
 		expect(commands(profile)).toEqual(["pnpm run test", "pnpm run lint", "pnpm run typecheck", "pnpm test"]);

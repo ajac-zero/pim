@@ -318,10 +318,20 @@ export function provisionPlan(profile: RepoProfile): ProvisionStep[] {
 	for (const each of profile.toolchains) {
 		const id = stepOf(each);
 		if (id === null || id === "mise") continue;
-		steps.push({ id, kind: "toolchain", tool: each.tool, script: `mise use --global --yes ${miseName(each.tool, each.version!)}@${each.version}`, needs: [] });
+		const install = `mise use --global --yes ${miseName(each.tool, each.version!)}@${each.version}`;
+		steps.push({ id, kind: "toolchain", tool: each.tool, script: each.tool === "pnpm" ? `${install} && ${pnpmPostinstall(each.version!)}` : install, needs: [] });
 	}
 	for (const each of profile.dependencies) steps.push({ id: stepOf(each)!, kind: "dependencies", tool: each.tool, script: each.command, needs: each.needs });
 	return steps;
+}
+
+/**
+ * mise installs npm packages without running their install scripts, and pnpm ships its executable as a placeholder
+ * script that its postinstall replaces with the native binary, so Node would try to run the placeholder as JavaScript and
+ * crash. This runs the postinstall when the placeholder is still there, then rebuilds mise's shims.
+ */
+export function pnpmPostinstall(version: string): string {
+	return `dir=$(mise where npm:pnpm@${version}) && pkg=$(find "$dir" -type f -path '*/node_modules/pnpm/package.json' | head -n 1 | xargs dirname) && if grep -rqs "This is a placeholder" "$pkg/bin"; then (cd "$pkg" && npm run postinstall --if-present) && mise reshim; fi`;
 }
 
 /** What mise calls a tool: pnpm and Yarn 1 are npm packages, and Yarn 2 and later is `@yarnpkg/cli-dist`. */

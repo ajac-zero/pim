@@ -204,6 +204,23 @@ describe("a coding thread", () => {
 		);
 	});
 
+	it("checkpoints work the coding agent committed itself, leaving a clean tree", async () => {
+		codingFaux.setResponses([
+			toolUse("write", { path: "own.txt", content: "mine\n" }),
+			toolUse("bash", { command: "git commit -m own" }),
+			fauxAssistantMessage("Committed it myself."),
+		]);
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		await stub.start(startInput(id));
+		const [ended] = await turns(id, 1);
+		const status = await stub.status();
+		expect(status.checkpoint).not.toBeNull();
+		expect(ended).toMatchObject({ outcome: "completed", checkpoint: status.checkpoint!.sha });
+		expect((await stub.diff()).diff).toContain("+++ b/own.txt");
+		expect(await stub.checkpoints()).toHaveLength(1);
+	});
+
 	it("runs the model's calls to the real tools in its workspace, commits a checkpoint, and keeps its diff, tests, journal and output", async () => {
 		const results: string[] = [];
 		const lastResult = (context: Context) => {

@@ -1940,15 +1940,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return own === null ? null : { script: own, source: "repository" };
 	}
 
-	/** Commits whatever changed in the workspace as a checkpoint, and keeps its diff from the start. Null when nothing changed or there is no workspace. */
+	/** Commits whatever changed in the workspace as a checkpoint, and keeps its diff from the start. Null when nothing changed (no edits and no new commits) or there is no workspace. */
 	async #checkpoint(operation: string | null): Promise<Checkpoint | null> {
 		const thread = this.store.required();
 		if (thread.slot !== "held" || !thread.workspaceRef) return null;
 		const workspace = await this.#workspace();
-		if (!(await git(workspace, ["status", "--porcelain"])).trim()) return null;
+		const dirty = (await git(workspace, ["status", "--porcelain"])).trim() !== "";
+		// The coding agent may have committed its work itself, leaving the tree clean: that is a change too, whenever HEAD is past the last checkpoint (or the base).
+		const head = (await git(workspace, ["rev-parse", "HEAD"])).trim();
+		const last = this.store.latestCheckpoint()?.sha ?? this.store.required().baseSha;
+		if (!dirty && (head === last || last === null)) return null;
 		const message = `Checkpoint ${this.store.checkpoints().length + 1}${operation ? ` (${operation})` : ""}`;
-		await git(workspace, ["add", "-A"]);
-		await git(workspace, ["-c", "user.name=Pim", "-c", "user.email=coding@pim.invalid", "commit", "--no-verify", "-m", message]);
+		if (dirty) {
+			await git(workspace, ["add", "-A"]);
+			await git(workspace, ["-c", "user.name=Pim", "-c", "user.email=coding@pim.invalid", "commit", "--no-verify", "-m", message]);
+		}
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
 		const checkpoint = this.store.addCheckpoint(sha, message, operation);
 		const base = this.store.required().baseSha;

@@ -31,7 +31,7 @@ export function CopyConversation({ sessionId }: { sessionId: string }) {
         state.session !== sessionId ||
         !state.synced ||
         state.view.running ||
-        state.pending !== null ||
+        state.pending.length > 0 ||
         state.view.entries.length === 0 ||
         !agent
       }

@@ -243,12 +243,15 @@ export const UserMessage = memo(function UserMessage({
   item,
   at,
   onEdit,
+  status,
 }: {
   item: MessageItem;
   /** When it was sent, in ms. */
   at: number;
   /** Sends the message again changed, in a fork of the chat up to it (by the message's id); without it, it can't be edited. */
   onEdit?: (id: string, content: UserContent) => Promise<void>;
+  /** For a message not in the transcript yet, how sending it goes, in place of its time. */
+  status?: ReactNode;
 }) {
   const { t } = useI18n();
   const [editing, setEditing] = useState(false);
@@ -328,7 +331,7 @@ export const UserMessage = memo(function UserMessage({
             )}
           </MessageActions>
         )}
-        <MessageTime at={at} />
+        {status ?? <MessageTime at={at} />}
       </div>
     </div>
   );

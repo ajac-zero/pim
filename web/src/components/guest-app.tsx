@@ -49,7 +49,7 @@ import {
   pim,
   type UserContent,
 } from "~/lib/pim-api";
-import { pimClient, usePimClient } from "~/lib/pim-client";
+import { pimClient, textOf, usePimClient } from "~/lib/pim-client";
 import {
   accountQuery,
   agentsQuery,
@@ -479,6 +479,8 @@ function GuestChat({
   const synced = usePimClient((state) => state.synced);
   const pending = usePimClient((state) => state.pending);
   const ready = followed === sessionId;
+  // Text a discarded message puts back in the message box.
+  const [fill, setFill] = useState<{ text: string; id: number }>();
   // A reply read on screen is read, as in the app's own chats.
   const queryClient = useQueryClient();
   const session = sessions?.find((candidate) => candidate.id === sessionId);
@@ -498,13 +500,16 @@ function GuestChat({
 
   return (
     <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-      {ready && (loaded || pending !== null) ? (
+      {ready && (loaded || pending.length > 0) ? (
         <Thread
           sessionId={sessionId}
           synced={synced}
           host={{ id: agent.id, name: agent.name }}
           view={view}
           pending={pending}
+          onDiscard={(content) =>
+            setFill({ text: textOf(content), id: Date.now() })
+          }
           composerHeight={composerHeight}
           composerCardHeight={composerCardHeight}
         />
@@ -528,6 +533,7 @@ function GuestChat({
           <QueuedMessages sessionId={sessionId} queue={view.queue} />
           <Composer
             key={sessionId}
+            fill={fill}
             draftKey={sessionId}
             onSend={(content) =>
               pimClient

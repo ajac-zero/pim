@@ -451,31 +451,27 @@ export const STATE_TEXT: Record<CodingThreadState, TranslationKey> = {
   archived: "codingStateArchived",
 };
 
-export type SubthreadStatus =
-  | "queued"
-  | "running"
-  | "waiting"
-  | "done"
-  | "failed";
-
 /**
- * A thread's state as the badge on its row in the chat list says it: starting
- * and queued threads are queued; between turns and archived ones are done.
+ * A thread's state as the mark on its icon says it, the one a chat's icon
+ * has: starting, queued and running threads are working; one waiting for the
+ * person needs attention; a failed one is an error. Between turns and
+ * archived ones show nothing.
  */
-export function subthreadStatus(state: CodingThreadState): SubthreadStatus {
+export function codingStateBadge(
+  state: CodingThreadState,
+): "working" | "attention" | "error" | null {
   switch (state) {
     case "provisioning":
     case "queued":
-      return "queued";
     case "running":
-      return "running";
+      return "working";
     case "waiting_input":
-      return "waiting";
+      return "attention";
     case "failed":
-      return "failed";
+      return "error";
     case "idle":
     case "archived":
-      return "done";
+      return null;
   }
 }
 

@@ -12,6 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { StateBadge } from "~/components/app-sidebar";
 import { Markdown } from "~/components/chat/markdown";
 import { EnvironmentSection } from "~/components/coding-environment";
 import { HarnessIcon } from "~/components/harness-icon";
@@ -47,6 +48,7 @@ import {
   codingApi,
   codingDiffQuery,
   codingErrorCode,
+  codingStateBadge,
   codingTestsQuery,
   codingThreadQuery,
   codingThreadsQuery,
@@ -140,24 +142,25 @@ function problemText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const DOT: Record<CodingThreadState, string> = {
-  provisioning: "bg-muted-foreground/60",
-  queued: "bg-muted-foreground/60",
-  idle: "bg-success",
-  running: "bg-foreground/70 motion-safe:animate-pulse",
-  waiting_input: "bg-link",
-  failed: "bg-destructive",
-  archived: "bg-muted-foreground/40",
-};
-
-/** A thread's state as a status pill, named for screen readers. */
-export function StatePill({ state }: { state: CodingThreadState }) {
+/** A harness's mark with the thread's state on its corner, as a chat's icon has; the state is named for screen readers. */
+export function CodingHarnessMark({
+  harness,
+  state,
+  className,
+}: {
+  harness: CodingHarness;
+  state: CodingThreadState;
+  className?: string;
+}) {
   const { t } = useI18n();
+  const label = t(STATE_TEXT[state]);
   return (
-    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[13px] text-foreground">
-      <span aria-hidden className={cn("size-1.5 rounded-full", DOT[state])} />
-      <span className="sr-only">{t("codingState")}: </span>
-      {t(STATE_TEXT[state])}
+    <span className="relative flex shrink-0">
+      <HarnessIcon harness={harness} className={className} />
+      <StateBadge state={codingStateBadge(state)} label={label} />
+      <span className="sr-only">
+        {t("codingState")}: <span>{label}</span>
+      </span>
     </span>
   );
 }
@@ -228,10 +231,14 @@ function ThreadRow({ thread }: { thread: CodingThreadSummary }) {
         className="-mx-3 flex flex-col gap-1 rounded-xl px-3 py-3.5 outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
       >
         <span className="flex min-w-0 items-center gap-2">
+          <CodingHarnessMark
+            harness={thread.harness}
+            state={thread.state}
+            className="size-5"
+          />
           <span className="min-w-0 flex-1 truncate text-[15px]">
             {repoName(thread.repo)}
           </span>
-          <StatePill state={thread.state} />
         </span>
         <span className="truncate text-[13px] text-muted-foreground">
           {thread.task}
@@ -1049,10 +1056,9 @@ function ThreadHeader({ thread }: { thread: CodingThreadView }) {
             {repoName(thread.repo.url)}
           </a>
         </h1>
-        <StatePill state={thread.state} />
         <span className="inline-flex items-center gap-1.5 text-[13px] text-muted-foreground">
           <span className="sr-only">{t("codingHarness")}: </span>
-          <HarnessIcon harness={thread.harness} />
+          <CodingHarnessMark harness={thread.harness} state={thread.state} />
           {HARNESS_NAMES[thread.harness]}
         </span>
       </div>

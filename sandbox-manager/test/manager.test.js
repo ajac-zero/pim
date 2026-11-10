@@ -752,3 +752,13 @@ describe('gVisor self-check', () => {
 		assert.notEqual(r.status, 0)
 	})
 })
+
+describe('build stamping', () => {
+	test('manager and egress-proxy share one image tag, so they are built with the same BUILD_SHA arg', async () => {
+		const { readFile } = await import('node:fs/promises')
+		const compose = await readFile(new URL('../compose.yaml', import.meta.url), 'utf8')
+		assert.match(compose, /build: &manager-build[\s\S]*BUILD_SHA: \$\{BUILD_SHA:\?/)
+		assert.match(compose, /build: \*manager-build/)
+		assert.doesNotMatch(compose, /BUILD_SHA:-unknown/)
+	})
+})

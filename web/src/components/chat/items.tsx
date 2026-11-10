@@ -17,6 +17,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Code,
   Contact,
   Copy,
   Folder,
@@ -72,7 +73,7 @@ import {
   pim,
   type UserContent,
 } from "~/lib/pim-api";
-import type { PimNotice, WorkStep } from "~/lib/pim-view";
+import type { CodingNotice, PimNotice, WorkStep } from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -465,6 +466,7 @@ const NOTICE_ICONS = {
   event: Zap,
   task: Workflow,
   room: Users,
+  coding: Code,
   reset: RotateCcw,
 } as const;
 
@@ -486,6 +488,16 @@ export const EventNotice = memo(function EventNotice({
 }) {
   const [open, setOpen] = useState(false);
   const Icon = NOTICE_ICONS[notice.kind];
+  if (notice.coding) {
+    return (
+      <CodingNoticeCard
+        coding={notice.coding}
+        title={notice.title}
+        id={id}
+        Icon={Icon}
+      />
+    );
+  }
   return (
     <div
       id={id}
@@ -531,6 +543,72 @@ export const EventNotice = memo(function EventNotice({
     </div>
   );
 });
+
+/** A coding thread's turn ending, as a card: what happened and where, with what it last said folded away. */
+function CodingNoticeCard({
+  coding,
+  title,
+  id,
+  Icon,
+}: {
+  coding: CodingNotice;
+  title: string;
+  id?: string;
+  Icon: typeof Code;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const facts = [coding.state, coding.commit].filter(Boolean);
+  return (
+    <div
+      id={id}
+      data-notice="coding"
+      className="w-full rounded-xl border bg-muted/50 px-3 py-2 text-[13px]"
+    >
+      <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+        <Icon className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+        {coding.link && (
+          <a
+            href={coding.link}
+            className="shrink-0 underline-offset-2 hover:text-foreground hover:underline"
+          >
+            {t("codingOpenThread")}
+          </a>
+        )}
+      </div>
+      {facts.length > 0 && (
+        <div className="mt-1 flex gap-2 font-mono text-muted-foreground text-xs">
+          {coding.state && <span data-part="state">{coding.state}</span>}
+          {coding.commit && <span data-part="commit">{coding.commit}</span>}
+        </div>
+      )}
+      {coding.said && (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpen((value) => !value)}
+            aria-expanded={open}
+            className="mt-1 inline-flex items-center gap-1 text-muted-foreground text-xs hover:text-foreground"
+          >
+            <ChevronRight
+              className={cn(
+                "size-3 shrink-0 transition-transform",
+                open && "rotate-90",
+              )}
+            />
+            {t("codingLastSaid")}
+          </button>
+          {open && (
+            <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed [overflow-wrap:anywhere]">
+              {coding.said}
+            </pre>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 /* -------------------------------- approvals ------------------------------ */
 

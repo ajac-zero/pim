@@ -14,6 +14,7 @@ export const NOTICE_PREFIXES = [
 	[/^\[(?:Connector|App) event\]\s*/, "event"],
 	[/^\[Task update\]\s*/, "task"],
 	[/^\[Room\]\s*/, "room"],
+	[/^\[Coding thread [^\]\n]+\]\s*/, "coding"],
 ] as const;
 
 /** How a message starts that tells an agent a coding thread it started ended a turn (see ./coding/supervisor.ts). */

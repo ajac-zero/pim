@@ -12,7 +12,7 @@ export type WorkspaceSpec = {
 	/** The repository checked out into the workspace: where it comes from, the ref to start at, the branch to work on, and optionally how many commits of history to fetch. */
 	repo: { url: string; ref: string; branch: string; depth?: number };
 	/** The most the workspace may use: CPU cores, memory and disk in MiB, process count, and minutes of wall clock before it is stopped. */
-	limits: { cpu: number; memMiB: number; diskMiB: number; pids: number; wallClockMin: number };
+	limits: { cpu: number; memMiB: number; diskMiB: number; pids: number; wallClockMin: number | null };
 	/** The hosts the workspace may reach over the network; everything else is refused, on backends that can enforce it. */
 	egress: { allow: string[] };
 	/** How git authenticates: "none" for public repositories, "broker" for credentials a broker supplies outside the workspace so the machine never holds them. */

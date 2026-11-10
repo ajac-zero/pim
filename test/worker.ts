@@ -371,6 +371,11 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return 200;
 	}
 
+	/** A CLI turn with no output is stalled after a moment, which a test waits out. */
+	protected override harnessStallMs(): number {
+		return 300;
+	}
+
 	/** A thread waiting for another's environment looks for it often. */
 	protected override environmentPollMs(): number {
 		return 50;

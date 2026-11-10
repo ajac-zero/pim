@@ -120,7 +120,7 @@ quota stays reserved. The state survives a manager restart (see Kept volumes).
 count as use for the idle reaper.
 
 **Exec.** Each command runs in its own process group with agentd's environment, the proxy
-variables and `env` (names `[A-Za-z_][A-Za-z0-9_]*`, string values). `timeoutMs` is 1–900000 (15 minutes: a repository's setup script and the coding tools' longest command).
+variables and `env` (names `[A-Za-z_][A-Za-z0-9_]*`, string values). `timeoutMs` is 1–604800000 (a week): a repository's setup script and the coding tools' commands take minutes, and a coding agent's turn, which has no time limit of its own, takes as long as it works. A host runs this manager from `sandbox-manager`, so it needs rebuilding (`git pull && ./up.sh`) for a change here to apply.
 The buffered `/exec` caps each stream at 10 MiB (`truncated`); a command that cannot start gives
 exit code 127, one killed by a signal 128 + its number, a timeout `exitCode: null`.
 `/exec/stream` answers as soon as the command starts, with one JSON object per line:

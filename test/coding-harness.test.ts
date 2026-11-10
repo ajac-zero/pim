@@ -857,6 +857,45 @@ describe("a CLI harness run", () => {
 		}
 	});
 
+	it("never cuts off a turn with no time limit that keeps working, past the stall window, and keeps its lock renewed", async () => {
+		const out = lines("turn");
+		const { workspace, commands, log } = scripted(async function* () {
+			// Output every 40 ms for 400 ms, longer than the stall window, though no silence in it is.
+			for (const text of out.slice(0, 10)) {
+				await new Promise((resolve) => setTimeout(resolve, 40));
+				yield { type: "stdout", data: `${text}\n` };
+			}
+			for (const text of out.slice(10)) yield { type: "stdout", data: `${text}\n` };
+			yield { type: "exit", code: 0 };
+		});
+		const { options } = deps(workspace, log, { stallMs: 120, lockRenewMs: 50 });
+		const runner = await prepared(options);
+		const started = Date.now();
+		const result = await runner.run(TURN, null);
+		expect(Date.now() - started).toBeGreaterThan(350);
+		expect(result).toMatchObject({ status: "done" });
+		expect(commands[0]!.options.timeoutMs).toBeGreaterThan(24 * 60 * 60_000);
+		// The lock was taken once to start and renewed while it ran.
+		expect(log.filter((entry) => entry === "lock").length).toBeGreaterThan(2);
+		expect(log.at(-1)).toBe("unlock");
+	});
+
+	it("stops a turn that prints nothing for the stall window as stalled, with SIGINT", async () => {
+		const { workspace, log, signals } = scripted(async function* (options, signals) {
+			yield { type: "stdout", data: `${lines("turn")[0]}\n` };
+			await signals.wait("INT", options.signal);
+			yield { type: "exit", code: 130 };
+		});
+		const { options } = deps(workspace, log, { stallMs: 80 });
+		const runner = await prepared(options);
+		const started = Date.now();
+		const result = await runner.run(TURN, null);
+		expect(result).toMatchObject({ status: "unanswered", reason: "stalled", sessionId: SESSION });
+		expect(result.detail).toContain("no progress");
+		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(signals.sent).toEqual(["INT"]);
+	});
+
 	it("stops before running when aborted while getting ready", async () => {
 		const { workspace, commands, log } = scripted(() => prints(lines("turn")));
 		const { options } = deps(workspace, log);

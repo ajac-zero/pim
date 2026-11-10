@@ -9,7 +9,7 @@ import { base64UrlDecode, base64UrlEncode } from "../auth/encoding";
  * (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, see `sandboxModelEnv`) and signs
  * in with a gateway token instead of a key: signed by Pim, bound to one
  * thread, its space and the provider families it may call, good until the
- * thread's wall clock runs out (and a margin), and revoked when the thread
+ * thread's time limit runs out (and a margin), and revoked when the thread
  * is aborted or archived. Pim checks the token, the thread's budget and its
  * request caps, adds the space's own key for that family, sends the request
  * on, and passes the answer back as the provider sent it, server-sent events
@@ -40,7 +40,7 @@ export const HARNESS_FAMILY: Readonly<Record<GatewayHarness, GatewayFamily>> = {
 /** The gateway's routes, under `/api`. */
 export const MODEL_GATEWAY_PATH = "/coding/gateway";
 
-/** How long a token outlives the thread's wall clock. */
+/** How long a token outlives the thread's time limit. */
 export const GATEWAY_TOKEN_MARGIN_MS = 15 * 60_000;
 
 /** The caps on one thread's use of the gateway. */

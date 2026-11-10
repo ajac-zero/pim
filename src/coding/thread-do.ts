@@ -50,7 +50,7 @@ import {
 } from "./model-gateway";
 import type { ManagerHealth } from "./provider-capacity";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
-import { codingScheduler } from "./scheduler-do";
+import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { checkBranch, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult } from "./git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
 import type { Fetch, GitHubApp } from "./git-broker/github-app";
@@ -962,6 +962,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 						createdAt: thread.createdAt,
 						updatedAt: thread.updatedAt,
 					});
+					await codingThreadsChanged(this.env, thread.space);
 				} while (this.#indexAgain);
 			} catch (error) {
 				console.warn(JSON.stringify({ event: "pim.coding.index_failed", error: String(error) }));

@@ -55,7 +55,7 @@ import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { BranchMovedError, checkBranch, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
 import type { Fetch, GitHubApp } from "./git-broker/github-app";
-import { brokerTokenKey, deploymentGitHubApp, GIT_BROKER_PATH } from "./git-broker/routes";
+import { brokerTokenKey, deploymentGitHubApp, deploymentProviders, GIT_BROKER_PATH } from "./git-broker/routes";
 import { authEnv } from "./harness/auth";
 import { type CliHarness, cliHarness } from "./harness";
 import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
@@ -372,8 +372,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const task = input.task?.trim();
 		if (!task) throw new Error("A coding thread needs a task");
 		if (!input.space || !input.createdBy || !input.operationId) throw new Error("space, createdBy and operationId are required");
-		// Only GitHub repositories, through the git broker: no workspace ever clones from anywhere else.
-		const repo = parseRepoUrl(input.repo, brokerPolicy(this.env));
+		// Only repositories of a known git provider instance, through the git broker: no workspace ever clones from anywhere else.
+		const { provider, repo } = deploymentProviders(this.env).resolveUrl(input.repo, brokerPolicy(this.env));
 		const budgetUsd = input.budgetUsd ?? null;
 		if (budgetUsd !== null && !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
@@ -391,7 +391,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.create({
 				threadId,
 				space: input.space,
-				repoUrl: `https://github.com/${repo.fullName}`,
+				repoUrl: provider.repoUrl(repo),
+				providerInstance: provider.instance.id,
 				baseRef: input.ref ?? "main",
 				branch: branchName(task, threadId),
 				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },

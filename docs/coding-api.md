@@ -94,27 +94,41 @@ type CodingThreadView = {
 };
 
 /**
- * The repository's prepared environment in the thread's workspace: its dependencies installed by the repository's setup
- * script, restored from the person's snapshot when one was kept (see Coding threads in reference.md). Durations are
- * milliseconds; times are ms since the epoch.
+ * The repository's prepared environment in the thread's workspace: the toolchains and dependencies its files pin,
+ * provisioned, then its setup script run, restored from the person's snapshot when one was kept (see Coding threads in
+ * reference.md, and coding-environment.md). Durations are milliseconds; times are ms since the epoch.
  */
 type CodingEnvironment = {
-  state: "none" | "restoring" | "cached" | "building" | "failed"; // none: no setup script, or a backend that keeps no environments
-  key: string | null;           // 64 hex digits: the person, the repository, the script, its lockfiles and the workspace image
-  source: "settings" | "repository" | null; // the person's setting, or the repository's .pim/setup.sh
+  state: "none" | "restoring" | "cached" | "building" | "failed"; // none: nothing to provision and no setup script, or a backend that keeps no environments; failed: the setup script failed (a failed provisioning step is on its item)
+  key: string | null;           // 64 hex digits: the person, the repository, the provisioning steps, the script, its lockfiles and the workspace image
+  source: "settings" | "repository" | null; // the person's setting, or the repository's .pim/setup.sh; null without a script
   builtAt: number | null;       // when the snapshot the thread has was made
   restoredFromKey: string | null; // the snapshot the workspace started from, an older key's when the repository moved on
   provisionMs: number | null;   // making the workspace and checking the repository out, restore included
   restoreMs: number | null;
-  setupMs: number | null;
+  setupMs: number | null;       // provisioning and the setup script together
   snapshotMs: number | null;
   snapshotBytes: number | null; // the snapshot taken or restored, compressed, as the backend stores it
-  snapshotKept: boolean | null; // false: restoring it was expected to take longer than the setup, so it was deleted, or not taken
-  readyFrom: "snapshot" | "setup" | null; // restored from a snapshot, or the setup script ran in this workspace
+  snapshotKept: boolean | null; // false: restoring it was expected to take longer than the setup, so it was deleted, or a provisioning step failed, so none was taken
+  readyFrom: "snapshot" | "setup" | null; // restored from a snapshot (a cache hit), or provisioned and set up in this workspace
   preparedAt: number | null;    // when the thread last readied it; null before its first turn
   rebuildRequested: boolean;
   error?: string;               // why it failed, at most 500 characters; the end of the script's output is the repository's
+  toolchains: {                 // what the repository's files pin, strongest source first, and the image's own Node, pnpm and Yarn
+    tool: string;               // "go", "node", "pnpm", "python", "uv", "rust", or a name from mise's configuration such as "npm:prettier"
+    version: string | null;     // as mise takes it ("1.22.5", "20", "lts", "stable"); null for the image's own
+    source: "mise" | "devcontainer" | "manifest" | "dockerfile" | "default" | "image";
+    from: string;               // the file it was read from, such as "go.mod"
+    status: ProvisionStatus;
+    error?: string;             // the step's command, how it ended and the end of what it printed
+  }[];
+  dependencies: { tool: string; command: string; from: string; status: ProvisionStatus; error?: string }[]; // such as "go mod download" from "go.sum"
+  testCommands: { command: string; source: "mise" | "make" | "package.json" | "ci" | "default"; from: string }[]; // the checks the coding agent is told
+  notes: string[];              // what was found and isn't provisioned, such as a CI workflow's services
 };
+
+// pending: not run yet; installed: in this workspace; cached: came with the snapshot; failed; skipped: a toolchain it needs failed; present: the image has it
+type ProvisionStatus = "pending" | "installed" | "cached" | "failed" | "skipped" | "present";
 
 /** The person's settings for one of their repositories. */
 type CodingRepoSettings = {
@@ -145,7 +159,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 | POST | `/coding/threads/:id/seen` | | `{ seen: true }`: says the person has viewed the thread, setting its `lastSeenAt` to now. A thread is unread while its `lastTurnEndedAt` is later than its `lastSeenAt`; the web app marks it on the icon, and every open page hears of the change on the chat list's socket |
 | POST | `/coding/threads/:id/archive` | | `CodingThreadView`: ends the thread, deleting its workspace. Reading it still works |
 | GET | `/coding/threads/:id/environment` | | `CodingEnvironment` |
-| POST | `/coding/threads/:id/environment/rebuild` | | `CodingEnvironment`, now `building` with `rebuildRequested`: deletes the person's snapshot of its key, then runs the setup script again in the thread's workspace between turns and keeps a new snapshot. A thread without a slot asks for one; a failed one rebuilds once continued. During a turn: `conflict` |
+| POST | `/coding/threads/:id/environment/rebuild` | | `CodingEnvironment`, now `building` with `rebuildRequested`: deletes the person's snapshot of its key, then provisions the toolchains and dependencies and runs the setup script again in the thread's workspace between turns and keeps a new snapshot. A thread without a slot asks for one; a failed one rebuilds once continued. During a turn: `conflict` |
 | GET | `/coding/repos/:owner/:name/settings` | | `CodingRepoSettings`, the person's own; empty when they set none |
 | PUT | `/coding/repos/:owner/:name/settings` | `{ setupScript: string \| null }` | `CodingRepoSettings`. A null or blank script clears it. A repository the deployment doesn't allow is `forbidden`; a script over 64 KiB, `invalid` |
 | POST | `/coding/threads/:id/push` | `{ branch? }` | `202` with `{ approval, status, branch, head, bytes, summary }`: asks the person to approve pushing the thread's latest checkpoint to `branch` (its own branch by default) on GitHub. `approval` is the id of the approval to decide with `POST /approvals/:id/approve` or `/deny`, as any other; `status` is `pending` until then. The same push asked again is the same approval. Pushing needs the thread's workspace running. Errors: `github_app_not_configured`, `push_refused`, `nothing_to_push`, `workspace_not_running` |
@@ -164,6 +178,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `thread.merged`: `data: { repo, branch, before, after, outcome, rebased }`, a merge into the default branch (`branch`); `rebased` says whether the thread's commits were rebased onto it first. A rebase also adds a checkpoint, `Rebased onto <branch>`.
 - `environment.built`, `environment.restored`: `data: { key, setupMs?, snapshotKept? }`, the environment was set up (and its snapshot kept, unless `snapshotKept` is false), or restored from the person's snapshot.
 - `environment.failed`: `data: { key, error }`; `environment.restore_failed`: `data: { key, error }`, a snapshot that couldn't be restored, after which the thread cloned as usual.
+- `environment.provision_failed`: `data: { step, error }`, a provisioning step that failed (`step` is `mise`, `toolchain:<tool>` or `dependencies:<tool>`); the thread went on, and `environment.built` has `provisionFailures`.
 - `thread.waiting_input`: `data: { reason, harness, operationId }`: a CLI harness thread's input waits for the person to connect the harness (`reason: "login_required"`): to sign in with their subscription, or to give their API key.
 - `harness.api_retry`: `data: { attempt, maxRetries, delayMs, error, status }`: the CLI is retrying a model request.
 - `harness.permission_denied`: `data: { tool, message }`: the CLI refused a tool call nothing allowed.
@@ -196,7 +211,7 @@ POST /api/coding/threads
 
 ## Agents
 
-Every agent can start and follow threads with the `coding_*` tools ([`src/extensions/coding.ts`](../src/extensions/coding.ts)): `coding_start`, `coding_status` (with the thread's `environment`: every field of its `CodingEnvironment` that isn't null, its timings included), `coding_steer`, `coding_diff`, `coding_tests`, `coding_abort`, `coding_push`, `coding_merge`, `coding_open_pull_request` and `coding_archive`. A thread an agent starts is `createdBy: { type: "agent", agent, chat }`, and when each of its turns ends that chat is woken with a message saying how it went. `coding_push` pushes the thread's latest checkpoint to its own `pim/` branch (or another `pim/` branch) at once, with no approval, and says the thread's latest test runs; the person's `POST …/push` still asks first. `coding_open_pull_request` opens a pull request from the pushed branch at once, with no approval, as `POST …/pull-request` does,, with `title` and `body` if given, and answers with its URL and number. `coding_merge` ships a thread's latest checkpoint to the repository's default branch, also at once and with no approval, and says the new commit and the latest test runs: Pim fetches the default branch into the thread's workspace, fast-forwards the checkpoint onto it or rebases it, and moves the default branch forward through the GitHub App, never with a force push. If the thread's changes conflict, the rebase is aborted, nothing is pushed, and the agent is told to `coding_steer` the thread to rebase onto `origin/<default branch>` and resolve them; if the default branch moves while merging, the rebase is made once more, and then it fails. The thread's own `pim/` branch is updated to the same commit when GitHub lets it, and the result says the default branch's new commit.
+Every agent can start and follow threads with the `coding_*` tools ([`src/extensions/coding.ts`](../src/extensions/coding.ts)): `coding_start`, `coding_status` (with the thread's `environment`: every field of its `CodingEnvironment` that isn't null or empty, its timings, toolchains and check commands included, and `cache_hit`, true when it was restored from a snapshot), `coding_steer`, `coding_diff`, `coding_tests`, `coding_abort`, `coding_push`, `coding_merge`, `coding_open_pull_request` and `coding_archive`. A thread an agent starts is `createdBy: { type: "agent", agent, chat }`, and when each of its turns ends that chat is woken with a message saying how it went. `coding_push` pushes the thread's latest checkpoint to its own `pim/` branch (or another `pim/` branch) at once, with no approval, and says the thread's latest test runs; the person's `POST …/push` still asks first. `coding_open_pull_request` opens a pull request from the pushed branch at once, with no approval, as `POST …/pull-request` does,, with `title` and `body` if given, and answers with its URL and number. `coding_merge` ships a thread's latest checkpoint to the repository's default branch, also at once and with no approval, and says the new commit and the latest test runs: Pim fetches the default branch into the thread's workspace, fast-forwards the checkpoint onto it or rebases it, and moves the default branch forward through the GitHub App, never with a force push. If the thread's changes conflict, the rebase is aborted, nothing is pushed, and the agent is told to `coding_steer` the thread to rebase onto `origin/<default branch>` and resolve them; if the default branch moves while merging, the rebase is made once more, and then it fails. The thread's own `pim/` branch is updated to the same commit when GitHub lets it, and the result says the default branch's new commit.
 
 ## Harness logins
 

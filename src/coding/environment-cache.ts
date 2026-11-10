@@ -1,14 +1,17 @@
+import type { EnvironmentDependencies, EnvironmentToolchain, TestCommand } from "./repo-environment";
 import type { ExecEvent, Workspace } from "./workspace/types";
 
 /**
  * A repository's prepared environment for coding threads: the checkout with
- * its dependencies installed by the repository's setup script, kept by the
+ * the toolchains and dependencies its files pin (./repo-environment.ts)
+ * provisioned, then its setup script run, kept by the
  * workspace backend as a snapshot (`WorkspaceProvider.snapshotEnvironment`)
  * under a key, so a new thread starts from it instead of installing again.
  *
  * The key is a digest of everything the environment is made from: whose it
  * is (the person and the repository, so no one else's thread ever finds it),
- * the setup script, the repository's lockfiles and the workspace image. A
+ * the provisioning steps (with the versions they install), the setup
+ * script, the repository's lockfiles and the workspace image. A
  * change to any of them is another key, so a snapshot is never stale; old
  * ones are left for the backend to collect.
  *
@@ -34,7 +37,7 @@ export type CodingEnvironment = {
 	readonly provisionMs: number | null;
 	/** Restoring the snapshot, as part of making the workspace. */
 	readonly restoreMs: number | null;
-	/** Running the setup script. */
+	/** Provisioning the toolchains and dependencies, and running the setup script. */
 	readonly setupMs: number | null;
 	/** Keeping the snapshot after setup. */
 	readonly snapshotMs: number | null;
@@ -50,6 +53,14 @@ export type CodingEnvironment = {
 	readonly rebuildRequested: boolean;
 	/** Why it failed, briefly; the setup script's own words are untrusted and cut short. */
 	readonly error?: string;
+	/** The toolchains the repository's files pin, where each version came from, and how its install went. */
+	readonly toolchains: readonly EnvironmentToolchain[];
+	/** The dependency installs run for its lockfiles, and how each went. */
+	readonly dependencies: readonly EnvironmentDependencies[];
+	/** The commands the repository checks itself with, found in its files; the coding agent is told them. */
+	readonly testCommands: readonly TestCommand[];
+	/** What was found and isn't provisioned, such as the services its CI starts. */
+	readonly notes: readonly string[];
 };
 
 /** A thread whose environment nothing has happened to yet. */
@@ -68,6 +79,10 @@ export const NO_ENVIRONMENT: CodingEnvironment = {
 	readyFrom: null,
 	preparedAt: null,
 	rebuildRequested: false,
+	toolchains: [],
+	dependencies: [],
+	testCommands: [],
+	notes: [],
 };
 
 /** The setup script a repository can carry, relative to its root. */
@@ -104,9 +119,9 @@ export const MAX_ENVIRONMENT_ERROR_CHARS = 500;
 /** The most of the setup script's output looked at when it fails: its end. */
 const OUTPUT_TAIL_CHARS = 4096;
 
-const LOCKFILE_NAMES = new Set(["pnpm-lock.yaml", "package-lock.json", "yarn.lock", "Cargo.lock", "uv.lock", "poetry.lock"]);
+const LOCKFILE_NAMES = new Set(["pnpm-lock.yaml", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", "Cargo.lock", "uv.lock", "poetry.lock", "go.sum", "mise.toml", ".mise.toml", ".tool-versions", "mise.lock"]);
 
-/** Whether a file of this name pins dependencies: the lockfiles the key covers, and `requirements*.txt`. */
+/** Whether a file of this name pins what the environment installs: the lockfiles the key covers, `requirements*.txt`, and mise's configuration, which `mise install` installs as it is. */
 export function isLockfile(name: string): boolean {
 	return LOCKFILE_NAMES.has(name) || /^requirements[^/]*\.txt$/.test(name);
 }
@@ -115,7 +130,10 @@ export function isLockfile(name: string): boolean {
 export type EnvironmentKeyInput = {
 	readonly userId: string;
 	readonly repo: string;
-	readonly setupScript: string;
+	/** The provisioning steps' scripts, in order (./repo-environment.ts): they name the versions they install. */
+	readonly provision: readonly string[];
+	/** The setup script; null without one. */
+	readonly setupScript: string | null;
 	readonly lockfiles: Readonly<Record<string, string>>;
 	/** The workspace image as the backend names it; a digest-pinned reference changes with the image. */
 	readonly image: string;
@@ -124,7 +142,8 @@ export type EnvironmentKeyInput = {
 /** The environment's key: 64 hex digits of SHA-256 over every input, in an order that doesn't depend on how `lockfiles` was listed. */
 export async function environmentKey(input: EnvironmentKeyInput): Promise<string> {
 	const lockfiles = Object.entries(input.lockfiles).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-	const parts = ["pim-environment/1", input.userId, input.repo, await sha256Hex(new TextEncoder().encode(input.setupScript)), lockfiles, input.image];
+	const script = input.setupScript === null ? null : await sha256Hex(new TextEncoder().encode(input.setupScript));
+	const parts = ["pim-environment/2", input.userId, input.repo, input.provision, script, lockfiles, input.image];
 	return sha256Hex(new TextEncoder().encode(JSON.stringify(parts)));
 }
 

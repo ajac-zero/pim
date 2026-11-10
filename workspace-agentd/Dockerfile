@@ -7,7 +7,12 @@
 # installs it with a Python of its own, both under /opt/vibe, in a stage of its own: the image keeps
 # /opt/vibe and not uv.
 ARG UV_VERSION=0.12.9
+# mise, which provisions the toolchains a repository pins (src/coding/repo-environment.ts), copied as its static binary
+# from its release image. Pinned: bump it on purpose, after checking that `mise use --global`, `mise install` and
+# `mise trust` still work as that file runs them.
+ARG MISE_VERSION=2026.10.4
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+FROM ghcr.io/jdx/mise:${MISE_VERSION} AS mise
 
 FROM node:22-bookworm-slim AS vibe
 ARG VIBE_VERSION=3.1.0
@@ -73,6 +78,14 @@ RUN groupadd --gid 10001 workspace \
 # A global prefix the runtime user can write, so `npm install -g` works at run time; the pinned CLIs above stay in /usr/local/bin.
 RUN mkdir -p /home/workspace/.npm-global && chown 10001:10001 /home/workspace/.npm-global
 ENV NPM_CONFIG_PREFIX=/home/workspace/.npm-global PATH=/home/workspace/.npm-global/bin:$PATH
+
+# mise keeps what it installs, its shims and its global configuration under the home directory at run time, /workspace,
+# so an environment snapshot keeps the toolchains a thread provisioned. Its shims come first on the PATH, so every
+# command, the agent's included, runs the versions the repository pins rather than the image's own Node and pnpm. It
+# answers yes and trusts the checkout's mise.toml: the checkout's code runs in the workspace anyway.
+COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
+RUN mise --version
+ENV MISE_YES=1 MISE_TRUSTED_CONFIG_PATHS=/workspace PATH=/workspace/.local/share/mise/shims:$PATH
 
 COPY --chown=root:root *.mjs package.json /opt/agentd/
 

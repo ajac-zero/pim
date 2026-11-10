@@ -6,7 +6,8 @@ import { verifyBrokerToken } from "../src/coding/git-broker/broker";
 import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, snapshotWorthKeeping } from "../src/coding/environment-cache";
-import { CONTINUE_TEXT, codingThread, type StartThread, threadLimits } from "../src/coding/thread-do";
+import { PROVISION_ENV } from "../src/coding/repo-environment";
+import { CONTINUE_TEXT, cliInstructions, codingThread, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
@@ -18,6 +19,7 @@ import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
+import { GO_REPO, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
 import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
@@ -706,7 +708,7 @@ describe("a coding thread's environment", () => {
 	});
 
 	it("is keyed by everything it is made from, however its lockfiles are listed", async () => {
-		const base = { userId: "ada", repo: "acme/env", setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": "a".repeat(64), "web/package-lock.json": "b".repeat(64) }, image: "pim-workspace@sha256:1" };
+		const base: EnvironmentKeyInput = { userId: "ada", repo: "acme/env", provision: [], setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": "a".repeat(64), "web/package-lock.json": "b".repeat(64) }, image: "pim-workspace@sha256:1" };
 		const key = await environmentKey(base);
 		expect(key).toMatch(/^[0-9a-f]{64}$/);
 		expect(await environmentKey({ ...base })).toBe(key);
@@ -717,6 +719,10 @@ describe("a coding thread's environment", () => {
 			{ ...base, userId: "ad", repo: "aacme/env" },
 			{ ...base, repo: "acme/other" },
 			{ ...base, setupScript: `${SCRIPT}pnpm build\n` },
+			{ ...base, setupScript: null },
+			{ ...base, provision: ["mise use --global --yes go@1.22"] },
+			{ ...base, provision: ["mise use --global --yes go@1.23"] },
+			{ ...base, provision: ["mise use --global --yes go@1.22", "go mod download"] },
 			{ ...base, lockfiles: { ...base.lockfiles, "pnpm-lock.yaml": "c".repeat(64) } },
 			{ ...base, lockfiles: { ...base.lockfiles, "web/package-lock.json": "c".repeat(64) } },
 			{ ...base, lockfiles: { "pnpm-lock.yaml": "a".repeat(64) } },
@@ -767,7 +773,7 @@ describe("a coding thread's environment", () => {
 		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
 		expect(keptBeforeTurn).toBe(true);
 		const { environment } = await stub.status();
-		const key = await environmentKey({ userId: space, repo: fullName, setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": await sha256(LOCK), "web/package-lock.json": await sha256(WEB_LOCK) }, image: DEFAULT_WORKSPACE_IMAGE });
+		const key = await environmentKey({ userId: space, repo: fullName, provision: [], setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": await sha256(LOCK), "web/package-lock.json": await sha256(WEB_LOCK) }, image: DEFAULT_WORKSPACE_IMAGE });
 		expect(environment).toMatchObject({ state: "cached", key, source: "repository", restoredFromKey: null, rebuildRequested: false, readyFrom: "setup", snapshotKept: true });
 		for (const field of ["builtAt", "preparedAt", "provisionMs", "setupMs", "snapshotMs"] as const) expect(environment[field]).toEqual(expect.any(Number));
 		expect(environment.error).toBeUndefined();
@@ -1020,6 +1026,104 @@ describe("a coding thread's environment", () => {
 		expect(secondStatus.environment.restoredFromKey).toBe(key);
 		expect(secondStatus.environment.readyFrom).toBe("snapshot");
 		expect(secondStatus.environment.rebuildRequested).toBe(false);
+	});
+
+	/** A repository of its own for the test with `files` and no setup script, as most repositories are. */
+	function toolRepo(files: Record<string, string>) {
+		const name = `Tools-${crypto.randomUUID().slice(0, 8)}`;
+		fakeRemotes.set(`https://pim.test/api/coding/git/Acme/${name}.git`, files);
+		return { repo: `https://github.com/Acme/${name}`, fullName: `acme/${name.toLowerCase()}` };
+	}
+	const scriptsRun = () => setups.map((each) => each.argv[2]!.replace(/^export PATH=.*\n/, ""));
+
+	it("provisions what a Go repository pins without a setup script, tells the agent how it checks itself, and starts the next thread from the snapshot", async () => {
+		const { repo } = toolRepo(GO_REPO);
+		const space = `space-${crypto.randomUUID()}`;
+		let prompt = "";
+		codingFaux.setResponses([
+			(context) => {
+				prompt = sent(context);
+				return fauxAssistantMessage("Ready.");
+			},
+			fauxAssistantMessage("Again."),
+		]);
+		const first = await startThread({ repo, space });
+		await turns(first.id, 1);
+		// Go from go.mod's toolchain directive with mise, then its modules, each with bash in the checkout and mise's shims on the PATH.
+		expect(scriptsRun()).toEqual(["mise use --global --yes go@1.22.5", "go mod download"]);
+		expect(setups[0]).toMatchObject({ argv: ["bash", "-c", expect.stringMatching(/^export PATH="\$HOME\/\.local\/share\/mise\/shims:\$PATH"\n/)], cwd: REPO_DIR, env: { ...SETUP_ENV, ...PROVISION_ENV } });
+		const { environment } = await first.stub.status();
+		expect(environment).toMatchObject({ state: "cached", source: null, readyFrom: "setup", snapshotKept: true });
+		expect(environment.error).toBeUndefined();
+		expect(environment.toolchains).toEqual([{ tool: "go", version: "1.22.5", source: "manifest", from: "go.mod", status: "installed" }]);
+		expect(environment.dependencies).toEqual([{ tool: "go", command: "go mod download", from: "go.sum", status: "installed" }]);
+		expect(environment.testCommands.map((each) => each.command)).toEqual(["make test", "make lint", "go vet ./...", "go test -race -count=1 ./..."]);
+		expect(environment.notes).toEqual([expect.stringContaining("starts the services postgres, redis")]);
+		expect(snapshotsOf(space)).toHaveLength(1);
+		// The agent was told before its first turn: its toolchain, and the commands to check its work with.
+		expect(prompt).toContain("go 1.22.5 (from go.mod)");
+		expect(prompt).toContain("- `make test` (Makefile)");
+		expect(cliInstructions({ repoUrl: repo, branch: "b", baseRef: "main", environment })).toContain("- `go vet ./...` (.github/workflows/ci.yml)");
+
+		// The next thread starts from the snapshot: nothing runs, and what it has came with it.
+		const second = await startThread({ repo, space });
+		await turns(second.id, 1);
+		const restored = (await second.stub.status()).environment;
+		expect(restored).toMatchObject({ state: "cached", key: environment.key, readyFrom: "snapshot" });
+		expect(restored.toolchains.map((each) => each.status)).toEqual(["cached"]);
+		expect(restored.dependencies.map((each) => each.status)).toEqual(["cached"]);
+		expect(restored.testCommands).toEqual(environment.testCommands);
+		expect(setups).toHaveLength(2);
+	});
+
+	it("records a provisioning step that fails and goes on, skipping what needs it, keeping no snapshot, and trying again on the next thread", async () => {
+		const { repo, fullName } = toolRepo(GO_REPO);
+		const space = `space-${crypto.randomUUID()}`;
+		setup = async ({ argv }) => (argv[2]!.includes("mise use") ? { stderr: "mise ERROR failed to install core:go@1.22.5: error sending request for url (https://dl.google.com/go/go1.22.5.linux-amd64.tar.gz)\n", code: 1 } : {});
+		let prompt = "";
+		codingFaux.setResponses([
+			(context) => {
+				prompt = sent(context);
+				return fauxAssistantMessage("Went on.");
+			},
+			fauxAssistantMessage("Second."),
+		]);
+		const first = await startThread({ repo, space });
+		expect((await turns(first.id, 1))[0]!.outcome).toBe("completed");
+		const { environment } = await first.stub.status();
+		// The thread went on in its workspace as it was, and says what failed and why.
+		expect(environment).toMatchObject({ state: "cached", readyFrom: "setup", snapshotKept: false, builtAt: null });
+		expect(environment.error).toBeUndefined();
+		expect(environment.toolchains).toEqual([expect.objectContaining({ tool: "go", status: "failed", error: expect.stringMatching(/^`mise use --global --yes go@1\.22\.5` exited 1: mise ERROR failed to install core:go@1\.22\.5/) })]);
+		expect(environment.dependencies).toEqual([expect.objectContaining({ command: "go mod download", status: "skipped" })]);
+		expect(scriptsRun()).toEqual(["mise use --global --yes go@1.22.5"]);
+		expect(await codingWorkspaces.listEnvironments({ userId: space, repo: fullName })).toEqual([]);
+		expect((await first.stub.log()).find((event) => event.kind === "environment.provision_failed")?.data).toMatchObject({ step: "toolchain:go" });
+		expect(prompt).toContain("go 1.22.5 (from go.mod) failed while the workspace was set up");
+		expect(prompt).toContain("`go mod download` (from go.sum) wasn't run");
+
+		// Once the network is back, the next thread provisions it all and keeps the snapshot.
+		setup = install;
+		const second = await startThread({ repo, space });
+		await turns(second.id, 1);
+		const retried = (await second.stub.status()).environment;
+		expect(retried).toMatchObject({ key: environment.key, readyFrom: "setup", snapshotKept: true });
+		expect(retried.toolchains.map((each) => each.status)).toEqual(["installed"]);
+		expect(scriptsRun()).toEqual(["mise use --global --yes go@1.22.5", "mise use --global --yes go@1.22.5", "go mod download"]);
+	});
+
+	it("installs a mise repository's tools before its own setup script, and keys the environment by both", async () => {
+		const { repo, fullName } = toolRepo({ ...MISE_REPO, ".pim/setup.sh": SCRIPT });
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const { id, stub } = await startThread({ repo, space });
+		await turns(id, 1);
+		expect(scriptsRun()).toEqual(["mise trust --yes --quiet && mise install --yes", "mise use --global --yes python@3.12", SCRIPT]);
+		const { environment } = await stub.status();
+		expect(environment).toMatchObject({ state: "cached", source: "repository" });
+		expect(environment.toolchains.map(({ tool, source, status }) => `${tool}:${source}:${status}`)).toEqual(["go:mise:installed", "node:mise:installed", "npm:prettier:mise:installed", "python:devcontainer:installed"]);
+		const key = await environmentKey({ userId: space, repo: fullName, provision: ["mise trust --yes --quiet && mise install --yes", "mise use --global --yes python@3.12"], setupScript: SCRIPT, lockfiles: { "mise.toml": await sha256(MISE_REPO["mise.toml"]!) }, image: DEFAULT_WORKSPACE_IMAGE });
+		expect(environment.key).toBe(key);
 	});
 });
 

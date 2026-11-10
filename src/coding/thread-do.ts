@@ -16,9 +16,11 @@ import {
 	lockfileHashes,
 	repositorySetupScript,
 	runSetup,
+	SETUP_ENV,
 	SETUP_TIMEOUT_MS,
 	snapshotWorthKeeping,
 } from "./environment-cache";
+import { detectRepository, environmentBrief, type ProvisionStep, pendingItems, provisionPlan, runProvisionStep, stepOf, workspaceFiles } from "./repo-environment";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
@@ -116,8 +118,10 @@ import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
  *
  * Before its first turn a thread readies the repository's environment
  * (./environment-cache.ts): it starts its workspace from the person's
- * snapshot of the repository where there is one, and otherwise runs the
- * repository's setup script and keeps a snapshot for the threads after it.
+ * snapshot of the repository where there is one, and otherwise provisions
+ * the toolchains and dependencies the repository's files pin
+ * (./repo-environment.ts), runs its setup script and keeps a snapshot for
+ * the threads after it.
  * The environment never stops a thread: without one it goes on as before.
  *
  * A thread whose `harness` is a vendor's CLI, such as Claude Code, runs each
@@ -217,9 +221,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return 5_000;
 	}
 
-	/** Hosts the workspace may reach through the egress proxy: Pim's git broker and the common package registries. */
+	/** Hosts the workspace may reach through the egress proxy: Pim's git broker, the common package registries, and where mise downloads toolchains (./repo-environment.ts). */
 	protected egressAllow(): string[] {
-		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org"];
+		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org", ...TOOLCHAIN_HOSTS];
 		try {
 			const origin = deploymentSettings(this.env).publicUrl;
 			if (origin) hosts.unshift(new URL(origin).hostname);
@@ -1909,7 +1913,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#repositorySection(): string | undefined {
 		const thread = this.store.thread();
 		if (!thread) return undefined;
-		return `The repository ${thread.repoUrl} is checked out at ${REPO_DIR}, on the branch ${thread.branch} made from ${thread.baseRef}. Work in that directory.`;
+		const brief = environmentBrief(thread.environment);
+		return `The repository ${thread.repoUrl} is checked out at ${REPO_DIR}, on the branch ${thread.branch} made from ${thread.baseRef}. Work in that directory.${brief ? `\n\n${brief}` : ""}`;
 	}
 
 	/** The thread's workspace, made and cloned on first use, with its commands killed when the thread is stopped. A new one starts from `restoreFrom`, the person's environment snapshot, when given. */
@@ -2032,8 +2037,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * out after it; the git broker's token and the model gateway's are only
 	 * ever in a command's environment), so what is snapshotted holds none.
 	 *
-	 * With a setup script (the person's setting for the repository, else
-	 * its `.pim/setup.sh`) the environment's key is computed. A workspace
+	 * The repository's files say what it needs (./repo-environment.ts): the
+	 * toolchains and dependencies to provision, and the commands it checks
+	 * itself with, which the thread keeps whatever happens next. With
+	 * something to provision or a setup script (the person's setting for
+	 * the repository, else its `.pim/setup.sh`) the environment's key is
+	 * computed. A workspace
 	 * restored from that key's snapshot is ready. Otherwise one of the
 	 * person's snapshots with the key is restored into a new workspace, or,
 	 * when there is none, the thread takes the person's lock on building it,
@@ -2058,24 +2067,28 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const signal = this.#kill.signal;
 		const owner = environmentOwner(thread);
 		let workspace = await this.#workspace();
-		let setup: { script: string; source: "settings" | "repository" } | null;
+		let setup: Setup | null;
+		let plan: ProvisionStep[];
 		let key: string;
 		try {
+			const profile = await detectRepository(workspaceFiles(workspace, REPO_DIR));
+			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
+			plan = provisionPlan(profile);
+			this.#setEnvironment({ ...pendingItems(profile), testCommands: profile.testCommands, notes: profile.notes });
 			setup = await this.#setupScript(workspace, thread, owner);
-			if (setup === null) {
+			if (setup === null && plan.length === 0) {
 				this.#setEnvironment({ state: "none", key: null, source: null, rebuildRequested: false, preparedAt: this.now(), error: undefined });
 				return;
 			}
-			key = await environmentKey({ ...owner, setupScript: setup.script, lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage() });
+			key = await environmentKey({ ...owner, provision: plan.map((step) => step.script), setupScript: setup?.script ?? null, lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage() });
 		} catch (error) {
 			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
 			this.#environmentFailed(null, environmentError("The environment's setup script couldn't be read", errorText(error)));
 			return;
 		}
-		const { source } = setup;
+		const source = setup?.source ?? null;
 		if (!rebuild && current.state === "restoring" && current.restoredFromKey === key) {
-			this.#setEnvironment({ state: "cached", key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined });
-			this.store.recordEvent("environment.restored", { key });
+			this.#restored(key, source);
 			return;
 		}
 		// A rebuild runs the script in the thread's own workspace; a new thread may start over from someone's snapshot.
@@ -2091,8 +2104,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				workspace = await this.#workspace({ restoreFrom: snapshot });
 				const now = this.store.required().environment;
 				if (now.state === "restoring" && now.restoredFromKey === key) {
-					this.#setEnvironment({ state: "cached", key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined });
-					this.store.recordEvent("environment.restored", { key });
+					this.#restored(key, source);
 					return;
 				}
 				// The restore failed and the workspace is a plain clone: build it here instead.
@@ -2100,12 +2112,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 			}
 			// An environment whose snapshot wasn't worth keeping is set up by each thread, so there is nothing to wait for.
 			if (!rebuild && (await scheduler.environmentSnapshotSkipped(key))) {
-				await this.#buildEnvironment(provider, workspace, owner, key, setup, { snapshot: false });
+				await this.#buildEnvironment(provider, workspace, owner, key, setup, plan, { snapshot: false });
 				return;
 			}
 			if (await scheduler.acquireEnvironmentBuild(key, thread.threadId, BUILD_LOCK_MS)) {
 				try {
-					await this.#buildEnvironment(provider, workspace, owner, key, setup, { snapshot: true });
+					await this.#buildEnvironment(provider, workspace, owner, key, setup, plan, { snapshot: true });
 				} finally {
 					await scheduler.releaseEnvironmentBuild(key, thread.threadId).catch(() => {});
 				}
@@ -2124,17 +2136,29 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
+	/** A workspace restored from the snapshot with the environment's key: what the snapshot's build installed came with it. */
+	#restored(key: string, source: Setup["source"] | null): void {
+		const env = this.store.required().environment;
+		const cached = <T extends { status: string }>(item: T): T => (item.status === "pending" ? { ...item, status: "cached" } : item);
+		this.#setEnvironment({ state: "cached", key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined, toolchains: env.toolchains.map(cached), dependencies: env.dependencies.map(cached) });
+		this.store.recordEvent("environment.restored", { key });
+	}
+
 	/**
-	 * Runs the setup script in the workspace, then, with `o.snapshot`, takes
-	 * a snapshot and keeps it if it is worth keeping (`snapshotWorthKeeping`),
-	 * recording the finding for the person's next threads. Its size is known
-	 * only once it is taken, so one that isn't is deleted again. A failure is
-	 * recorded, and the thread goes on.
+	 * Provisions the toolchains and dependencies in the workspace and runs
+	 * the setup script, then, with `o.snapshot`, takes a snapshot and keeps
+	 * it if it is worth keeping (`snapshotWorthKeeping`), recording the
+	 * finding for the person's next threads. Its size is known only once it
+	 * is taken, so one that isn't is deleted again. A provisioning step that
+	 * fails is recorded and the rest go on; no snapshot is taken then, so
+	 * the next thread tries again. A failure is recorded, and the thread
+	 * goes on.
 	 */
-	async #buildEnvironment(provider: WorkspaceProvider, workspace: Workspace, owner: EnvironmentOwner, key: string, setup: { script: string; source: "settings" | "repository" }, o: { snapshot: boolean }): Promise<void> {
-		this.#setEnvironment({ state: "building", key, source: setup.source, error: undefined });
+	async #buildEnvironment(provider: WorkspaceProvider, workspace: Workspace, owner: EnvironmentOwner, key: string, setup: Setup | null, plan: readonly ProvisionStep[], o: { snapshot: boolean }): Promise<void> {
+		this.#setEnvironment({ state: "building", key, source: setup?.source ?? null, error: undefined });
 		const started = performance.now();
-		const result = await runSetup(workspace, setup.script, { cwd: REPO_DIR });
+		const provisionFailures = await this.#provision(workspace, plan);
+		const result = setup ? await runSetup(workspace, setup.script, { cwd: REPO_DIR }) : ({ outcome: "ok" } as const);
 		const setupMs = Math.round(performance.now() - started);
 		if (result.outcome === "stopped") throw new Error(ENVIRONMENT_STOPPED);
 		if (result.outcome === "failed") {
@@ -2143,9 +2167,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return;
 		}
 		const ready = { state: "cached", key, setupMs, readyFrom: "setup", rebuildRequested: false, error: undefined } as const;
-		if (!o.snapshot) {
+		if (!o.snapshot || provisionFailures > 0) {
 			this.#setEnvironment({ ...ready, builtAt: null, snapshotMs: null, snapshotBytes: null, snapshotKept: false, preparedAt: this.now() });
-			this.store.recordEvent("environment.built", { key, setupMs, snapshotKept: false });
+			this.store.recordEvent("environment.built", { key, setupMs, snapshotKept: false, ...(provisionFailures > 0 ? { provisionFailures } : {}) });
 			return;
 		}
 		const snapshotStarted = performance.now();
@@ -2181,6 +2205,44 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
+	/**
+	 * Runs the provisioning steps one after another, recording how each
+	 * went on the items it installs. A step that fails doesn't stop the
+	 * others, but the dependencies that need a toolchain it was to install
+	 * are skipped. Returns how many failed or were skipped; only a stop is
+	 * thrown.
+	 */
+	async #provision(workspace: Workspace, plan: readonly ProvisionStep[]): Promise<number> {
+		let failures = 0;
+		const missing = new Set<string>();
+		for (const step of plan) {
+			if (step.needs.some((tool) => missing.has(tool))) {
+				failures++;
+				this.#setItems(step.id, { status: "skipped" });
+				continue;
+			}
+			const result = await runProvisionStep(workspace, step, { cwd: REPO_DIR, env: SETUP_ENV, signal: this.#kill.signal });
+			if (result.outcome === "stopped") throw new Error(ENVIRONMENT_STOPPED);
+			if (result.outcome === "ok") {
+				this.#setItems(step.id, { status: "installed" });
+				continue;
+			}
+			failures++;
+			const error = environmentError(`\`${step.script}\` ${result.how}`, result.output);
+			for (const each of this.store.required().environment.toolchains) if (stepOf(each) === step.id) missing.add(each.tool);
+			this.#setItems(step.id, { status: "failed", error });
+			this.store.recordEvent("environment.provision_failed", { step: step.id, error });
+		}
+		return failures;
+	}
+
+	/** Sets how the step `id` went on the toolchains and dependencies it installs. */
+	#setItems(id: string, change: { status: "installed" | "failed" | "skipped"; error?: string }): void {
+		const env = this.store.required().environment;
+		const apply = <T extends { tool: string; status: string }>(item: T): T => (stepOf(item) === id ? { ...item, ...change } : item);
+		this.#setEnvironment({ toolchains: env.toolchains.map(apply), dependencies: env.dependencies.map(apply) });
+	}
+
 	#environmentFailed(key: string | null, error: string): void {
 		this.#setEnvironment({ state: "failed", key, error, rebuildRequested: false, preparedAt: this.now() });
 		this.store.recordEvent("environment.failed", { key, error });
@@ -2201,7 +2263,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** The repository's setup script: the person's setting for it, else its own `.pim/setup.sh`; null without either. */
-	async #setupScript(workspace: Workspace, thread: CodingThreadRow, owner: EnvironmentOwner): Promise<{ script: string; source: "settings" | "repository" } | null> {
+	async #setupScript(workspace: Workspace, thread: CodingThreadRow, owner: EnvironmentOwner): Promise<Setup | null> {
 		const setting = (await codingScheduler(this.env, thread.space).repoSettings(owner.repo)).setupScript;
 		if (setting !== null) return { script: setting, source: "settings" };
 		const own = await repositorySetupScript(workspace, REPO_DIR);
@@ -2407,12 +2469,13 @@ function grown(after: HarnessUsage, before: HarnessUsage | null): HarnessUsage {
 }
 
 /** What every CLI harness is told besides its own instructions: the repository, and what Pim does for it. */
-export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branch" | "baseRef">): string {
+export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branch" | "baseRef"> & { readonly environment?: CodingEnvironment }): string {
+	const brief = thread.environment ? environmentBrief(thread.environment) : null;
 	return `You are working for a person who will review your work as a diff. The repository ${thread.repoUrl} is checked out in the current directory, on the branch ${thread.branch} made from ${thread.baseRef}.
 
 - Your changes are committed for you at the end of each turn: don't commit, push or rewrite history.
 - Before you say you are done, run the repository's tests (or the ones that cover your change) and its type checks or linters if it has them, and fix what fails. If you can't run them, say why.
-- When you finish, say briefly what you changed, how you checked it, and anything left undone.`;
+- When you finish, say briefly what you changed, how you checked it, and anything left undone.${brief ? `\n\n${brief}` : ""}`;
 }
 
 /** What `continue` tells the model. */
@@ -2489,8 +2552,18 @@ const ADVANCE_WAIT_MS = 20_000;
 const GIT_TIMEOUT_MS = 120_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 
-/** How long a thread holds the lock on building an environment, and waits for another thread's build: the setup script's time, and the snapshot's. */
-const BUILD_LOCK_MS = SETUP_TIMEOUT_MS + 10 * 60_000;
+/** How long a thread holds the lock on building an environment, and waits for another thread's build: the provisioning's and setup script's time, and the snapshot's. */
+const BUILD_LOCK_MS = 2 * SETUP_TIMEOUT_MS + 10 * 60_000;
+
+/** A repository's setup script and where it came from. */
+type Setup = { readonly script: string; readonly source: "settings" | "repository" };
+
+/**
+ * Where mise downloads the toolchains a repository pins: its version lists,
+ * Go, Node and Rust from their projects' own sites, Go's checksum database,
+ * and GitHub's releases for Python, uv, Bun and the rest.
+ */
+const TOOLCHAIN_HOSTS = ["mise-versions.jdx.dev", "dl.google.com", "go.dev", "sum.golang.org", "nodejs.org", "static.rust-lang.org", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
 
 /** An abort while the environment is readied: `#provisioningFailed` takes " was stopped:" as one. */
 const ENVIRONMENT_STOPPED = "Readying the environment was stopped: the thread was aborted";

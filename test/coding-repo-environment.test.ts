@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { environmentKey } from "../src/coding/environment-cache";
 import { detectRepository, environmentBrief, makeTargets, nodeRange, pendingItems, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
 import { GO_REPO, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./fixtures/repos";
 
@@ -144,6 +145,16 @@ describe("what a repository needs", () => {
 		expect(profile).toEqual({ toolchains: [], dependencies: [], testCommands: [], notes: [], mise: null });
 		expect(provisionPlan(profile)).toEqual([]);
 		expect(environmentBrief({ ...pendingItems(profile), testCommands: [], notes: [] })).toBeNull();
+	});
+
+	it("keys the environment by the versions it detects, so a new pin is a new environment and an unrelated change isn't", async () => {
+		const keyOf = async (repo: Record<string, string>) => environmentKey({ userId: "ada", repo: "acme/widgets", provision: scripts(await detect(repo)), setupScript: null, lockfiles: {}, image: "pim-workspace:local" });
+		const key = await keyOf(GO_REPO);
+		expect(await keyOf({ ...GO_REPO, "main.go": "package main\n\n// changed\nfunc main() {}\n", Makefile: "test:\n\tgo test ./...\n" })).toBe(key);
+		expect(await keyOf({ ...GO_REPO, "go.mod": GO_REPO["go.mod"]!.replace("go1.22.5", "go1.22.6") })).not.toBe(key);
+		expect(await keyOf({ ...GO_REPO, "go.sum": undefined } as unknown as Record<string, string>)).not.toBe(key);
+		expect(await keyOf({ ...PNPM_REPO, ".nvmrc": "20.12.0\n" })).not.toBe(await keyOf(PNPM_REPO));
+		expect(await keyOf({ ...PNPM_REPO, "package.json": PNPM_REPO["package.json"]!.replace("pnpm@9.15.0", "pnpm@9.15.1") })).not.toBe(await keyOf(PNPM_REPO));
 	});
 
 	it("tells the agent its toolchains, what failed, and the commands to check its work with", async () => {

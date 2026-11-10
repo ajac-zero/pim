@@ -562,6 +562,72 @@ async function brokerFor(github: ReturnType<typeof fakeGitHub>, overrides: Parti
 
 const REFS = "/coding/git/acme/widgets.git/info/refs?service=git-upload-pack";
 
+describe("the clone and fetch proxy under rate limits", () => {
+	const pause = () => {
+		const waits: number[] = [];
+		return { waits, sleep: async (ms: number) => void waits.push(ms), random: () => 0 };
+	};
+	const advertisement = () => new Response("refs", { headers: { "content-type": UPLOAD_ADVERTISEMENT } });
+	const refsUrl = `GET ${GIT}/info/refs?service=git-upload-pack`;
+
+	it("asks again after a 429 and passes on the answer that follows, waiting as long as Retry-After said", async () => {
+		let asked = 0;
+		const github = fakeGitHub({ [refsUrl]: () => (++asked < 3 ? new Response("slow down", { status: 429, headers: { "Retry-After": "7" } }) : advertisement()) });
+		const { waits, ...timing } = pause();
+		const { ask } = await brokerFor(github, timing);
+		const response = await ask(REFS);
+		expect(response.status).toBe(200);
+		expect(await bodyText(response)).toBe("refs");
+		expect(github.calls).toHaveLength(3);
+		expect(waits).toEqual([7000, 7000]);
+	});
+
+	it("backs off exponentially without a Retry-After, and retries 502s and rate limit 403s but not other 403s", async () => {
+		const answers = [new Response("", { status: 502 }), new Response("You have exceeded a secondary rate limit", { status: 403 }), advertisement()];
+		const github = fakeGitHub({ [refsUrl]: () => answers.shift()! });
+		const { waits, ...timing } = pause();
+		const { ask } = await brokerFor(github, timing);
+		expect((await ask(REFS)).status).toBe(200);
+		expect(waits).toEqual([1000, 2000]);
+		const forbidden = fakeGitHub({ [refsUrl]: () => new Response("Repository access blocked", { status: 403 }) });
+		expect((await (await brokerFor(forbidden, timing)).ask(REFS)).status).toBe(404);
+		expect(forbidden.calls).toHaveLength(1);
+	});
+
+	it("caps a long Retry-After, and gives 429 with Retry-After once the attempts are used", async () => {
+		const github = fakeGitHub({ [refsUrl]: () => new Response("", { status: 429, headers: { "Retry-After": "3600" } }) });
+		const { waits, ...timing } = pause();
+		const { ask } = await brokerFor(github, timing);
+		const response = await ask(REFS);
+		expect(response.status).toBe(429);
+		expect(response.headers.get("retry-after")).toBe("20");
+		expect(github.calls).toHaveLength(4);
+		expect(waits).toEqual([20_000, 20_000, 20_000]);
+	});
+
+	it("retries an upload-pack request with the same body, and a persistent 503 stays a 502", async () => {
+		let asked = 0;
+		const url = `POST ${GIT}/git-upload-pack`;
+		const github = fakeGitHub({ [url]: () => (++asked < 2 ? new Response("", { status: 503 }) : new Response("pack", { headers: { "content-type": UPLOAD_RESULT } })) });
+		const { ask } = await brokerFor(github, pause());
+		const response = await ask("/coding/git/acme/widgets.git/git-upload-pack", { method: "POST", body: "0032want abc\n", headers: { "Content-Type": "application/x-git-upload-pack-request" } });
+		expect(response.status).toBe(200);
+		expect(github.calls.map((call) => new TextDecoder().decode(call.body))).toEqual(["0032want abc\n", "0032want abc\n"]);
+		const down = fakeGitHub({ [refsUrl]: () => new Response("", { status: 503 }) });
+		expect((await (await brokerFor(down, pause())).ask(REFS)).status).toBe(502);
+		expect(down.calls).toHaveLength(4);
+	});
+
+	it("never serves, so never retries, receive-pack", async () => {
+		const github = fakeGitHub({});
+		const { ask } = await brokerFor(github, pause());
+		const response = await ask("/coding/git/acme/widgets.git/info/refs?service=git-receive-pack");
+		expect(response.status).toBe(403);
+		expect((await ask("/coding/git/acme/widgets.git/git-receive-pack", { method: "POST", body: "x" })).status).toBeGreaterThanOrEqual(400);
+		expect(github.calls).toHaveLength(0);
+	});
+});
+
 describe("the clone and fetch proxy", () => {
 	it("asks for the broker token, the way git understands", async () => {
 		const github = fakeGitHub({});

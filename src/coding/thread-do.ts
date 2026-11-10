@@ -274,6 +274,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		};
 	}
 
+	/** How long the workspace waits before each new try of a clone or fetch that failed for a rate limit or a brief outage; one entry per retry. */
+	protected gitRetryDelaysMs(): readonly number[] {
+		return GIT_RETRY_DELAYS_MS;
+	}
+
 	/** How long a CLI harness has to end its turn after SIGINT. */
 	protected harnessGraceMs(): number {
 		return INTERRUPT_GRACE_MS;
@@ -2013,16 +2018,19 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const { url, token } = await this.cloneSource(thread);
 		// The broker token as an HTTP header for these commands alone: git keeps no copy of it in the repository.
 		const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
-		if (!cloned) await git(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+		const delays = this.gitRetryDelaysMs();
+		if (!cloned) {
+			await gitWithRetries(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token }, delays, () => workspace.remove(REPO_DIR).catch(() => undefined));
+		}
 		// A snapshot's clone may come from this Pim at another address.
 		else await git(workspace, ["remote", "set-url", "origin", url]);
 		const fetchOptions = { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token };
 		try {
-			await git(workspace, ["fetch", "origin", thread.baseRef], fetchOptions);
+			await gitWithRetries(workspace, ["fetch", "origin", thread.baseRef], fetchOptions, delays);
 		} catch (error) {
 			// A repository whose default branch isn't "main" (the ref nobody chose): use the remote's default branch.
 			if (thread.baseRef !== "main") throw error;
-			await git(workspace, ["fetch", "origin", "HEAD"], fetchOptions);
+			await gitWithRetries(workspace, ["fetch", "origin", "HEAD"], fetchOptions, delays);
 		}
 		await git(workspace, ["checkout", "-f", "-B", thread.branch, "FETCH_HEAD"]);
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
@@ -2551,6 +2559,8 @@ const HEARTBEAT_MS = 30_000;
 const ADVANCE_WAIT_MS = 20_000;
 const GIT_TIMEOUT_MS = 120_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
+/** The pauses before the retries of a clone or fetch the git host rate limited: 5 s, 15 s, then 45 s. */
+const GIT_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000];
 
 /** How long a thread holds the lock on building an environment, and waits for another thread's build: the provisioning's and setup script's time, and the snapshot's. */
 const BUILD_LOCK_MS = 2 * SETUP_TIMEOUT_MS + 10 * 60_000;
@@ -2635,6 +2645,24 @@ function transcriptOf(entries: readonly EntryRecord[]): TranscriptMessage[] {
 		}
 		return projectEntries([entry]);
 	});
+}
+
+/** Whether git's error says the host rate limited the request or was briefly unavailable, which is worth another try. */
+function isTransientGitError(message: string): boolean {
+	return /error: (429|502|503|504)\b|HTTP (429|502|503|504)\b|RPC failed|rate limit|Too Many Requests|\b(502|503|504)\b.*(Bad Gateway|Unavailable|Timeout)/i.test(message);
+}
+
+/** `git`, tried again after each of `delays` (ms) while it fails with a rate limit or a brief outage; `cleanUp` runs before each retry, to remove what a failed attempt left. Any other failure, and the last, is thrown. */
+async function gitWithRetries(workspace: Workspace, args: string[], options: Parameters<typeof git>[2], delays: readonly number[], cleanUp?: () => Promise<unknown>): Promise<string> {
+	for (let retry = 0; ; retry++) {
+		try {
+			return await git(workspace, args, options);
+		} catch (error) {
+			if (retry >= delays.length || !(error instanceof Error) || !isTransientGitError(error.message)) throw error;
+			await cleanUp?.();
+			await new Promise((resolve) => setTimeout(resolve, delays[retry]));
+		}
+	}
 }
 
 /** Runs git in the repository (or `cwd`) and returns its output; throws with its error output when it fails. */

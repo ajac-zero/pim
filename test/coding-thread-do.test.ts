@@ -14,7 +14,7 @@ import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
 import { type FakeCommandHandler, type FakeCommandResult, FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { DEFAULT_WORKSPACE_IMAGE, NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
-import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
+import { fakeCloneFailures, fakeClones, fakeGit, fakeRemotes } from "./fake-git";
 import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
@@ -190,6 +190,41 @@ describe("a coding thread", () => {
 		expect(logged).toContain(id);
 		expect(logged).not.toContain(token);
 		warn.mockRestore();
+	});
+
+	it("tries a rate limited clone again, and clones once the host lets it", async () => {
+		const url = "https://pim.test/api/coding/git/acme/limited.git";
+		fakeRemotes.set(url, { "README.md": "# Limited\n" });
+		fakeCloneFailures.set(url, { times: 2, stderr: "fatal: unable to access: The requested URL returned error: 429\n" });
+		const { id } = await startThread({ repo: "https://github.com/acme/limited" });
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "completed" });
+		expect(fakeClones.filter((each) => each.url === url)).toHaveLength(3);
+		fakeCloneFailures.delete(url);
+	});
+
+	it("gives up on a clone the host keeps rate limiting after three retries, reporting the last error, and fails other errors at once", async () => {
+		const url = "https://pim.test/api/coding/git/acme/blocked.git";
+		fakeRemotes.set(url, { "README.md": "# Blocked\n" });
+		fakeCloneFailures.set(url, { times: 10, stderr: "error: RPC failed; HTTP 503 curl 22\nfatal: the remote end hung up\n" });
+		const { stub } = await startThread({ repo: "https://github.com/acme/blocked" });
+		const failed = await vi.waitFor(
+			async () => {
+				const status = await stub.status();
+				expect(status).toMatchObject({ state: "failed", slot: "none" });
+				return status;
+			},
+			{ timeout: 10_000, interval: 50 },
+		);
+		expect(failed.stateDetail).toContain("git clone exited 128: error: RPC failed; HTTP 503");
+		expect(fakeClones.filter((each) => each.url === url)).toHaveLength(4);
+		fakeCloneFailures.delete(url);
+		// A missing repository is not retried.
+		const clones = fakeClones.length;
+		await startThread({ repo: "https://github.com/acme/nowhere" });
+		await vi.waitFor(() => expect(fakeClones.length).toBeGreaterThan(clones), { timeout: 10_000 });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(fakeClones.length).toBe(clones + 1);
 	});
 
 	it("takes its backends from the deployment's environment", () => {

@@ -39,12 +39,69 @@ export type GitBrokerDeps = {
 	readonly providers?: ProviderRegistry;
 	readonly fetch?: Fetch;
 	readonly now?: () => number;
+	/** Waits `ms` between attempts at the git host; the Worker's timer unless given. */
+	readonly sleep?: (ms: number) => Promise<void>;
+	/** A number in [0, 1) for jitter; `Math.random` unless given. */
+	readonly random?: () => number;
 	readonly maxRequestBytes?: number;
 	readonly maxResponseBytes?: number;
 };
 
 const text = (status: number, message: string, headers: Record<string, string> = {}) =>
 	new Response(`${message}\n`, { status, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", ...headers } });
+
+/** How many times the broker asks the git host for one answer, counting the first. */
+export const UPSTREAM_ATTEMPTS = 4;
+/** The longest the broker waits before one more attempt, and in all: well inside a request's limits. */
+export const UPSTREAM_MAX_WAIT_MS = 20_000;
+export const UPSTREAM_MAX_TOTAL_WAIT_MS = 60_000;
+const UPSTREAM_BASE_WAIT_MS = 1_000;
+
+/** Whether the host's answer says "try again later": rate limited (429, or 403 saying so) or briefly unavailable. */
+async function transient(answer: Response): Promise<{ rateLimited: boolean } | null> {
+	if (answer.status === 429) return { rateLimited: true };
+	if ([502, 503, 504].includes(answer.status)) return { rateLimited: false };
+	if (answer.status !== 403) return null;
+	const said = await answer.clone().text().catch(() => "");
+	return /rate limit|secondary limit|abuse detection/i.test(said.slice(0, 4096)) ? { rateLimited: true } : null;
+}
+
+/** How long the host asked to wait, in ms: its Retry-After (seconds or a date), or until its rate limit resets; null when it didn't say. */
+function askedWaitMs(answer: Response, now: number): number | null {
+	const after = answer.headers.get("Retry-After");
+	if (after) {
+		const seconds = Number(after);
+		if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+		const date = Date.parse(after);
+		if (!Number.isNaN(date)) return Math.max(0, date - now);
+	}
+	const reset = Number(answer.headers.get("x-ratelimit-reset"));
+	if (answer.headers.get("x-ratelimit-remaining") === "0" && Number.isFinite(reset) && reset > 0) return Math.max(0, reset * 1000 - now);
+	return null;
+}
+
+/**
+ * Asks the host, again after a pause (exponential with jitter, or as long as
+ * the host asked, within the caps) while it answers that it is rate limited or
+ * briefly down. Only for requests that are safe to repeat: the broker's are,
+ * since it only reads and its request body is held in memory.
+ */
+async function askWithRetries(deps: GitBrokerDeps, ask: () => Promise<Response>): Promise<{ answer: Response; retryAfterSeconds: number; rateLimited: boolean }> {
+	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+	const random = deps.random ?? Math.random;
+	let waited = 0;
+	for (let attempt = 1; ; attempt++) {
+		const answer = await ask();
+		const why = await transient(answer);
+		if (!why) return { answer, retryAfterSeconds: 0, rateLimited: false };
+		const wanted = askedWaitMs(answer, (deps.now ?? Date.now)()) ?? UPSTREAM_BASE_WAIT_MS * 2 ** (attempt - 1) * (1 + random() * 0.5);
+		const wait = Math.min(wanted, UPSTREAM_MAX_WAIT_MS);
+		if (attempt >= UPSTREAM_ATTEMPTS || waited + wait > UPSTREAM_MAX_TOTAL_WAIT_MS) return { answer, retryAfterSeconds: Math.max(1, Math.ceil(wait / 1000)), rateLimited: why.rateLimited };
+		await answer.body?.cancel();
+		await sleep(wait);
+		waited += wait;
+	}
+}
 
 /** The token git presented: the password of basic auth, or a bearer token. */
 function presentedToken(request: Request): string | null {
@@ -134,15 +191,20 @@ async function proxy(
 	if (init.body && encoding === "gzip") headers["Content-Encoding"] = encoding;
 	const protocol = request.headers.get("Git-Protocol");
 	if (protocol && /^[A-Za-z0-9=:. -]{1,100}$/.test(protocol)) headers["Git-Protocol"] = protocol;
+	const send = deps.fetch ?? ((input, init) => fetch(input, init));
 	let answer: Response;
+	let retryAfterSeconds: number;
+	let rateLimited: boolean;
 	try {
-		answer = await (deps.fetch ?? ((input, init) => fetch(input, init)))(`${provider.gitUrl(repo)}${path}`, {
-			method: init.method,
-			headers,
-			...(init.body ? { body: init.body } : {}),
-			// A redirect could lead anywhere; the broker reaches its providers' hosts only.
-			redirect: "manual",
-		});
+		({ answer, retryAfterSeconds, rateLimited } = await askWithRetries(deps, () =>
+			send(`${provider.gitUrl(repo)}${path}`, {
+				method: init.method,
+				headers,
+				...(init.body ? { body: init.body } : {}),
+				// A redirect could lead anywhere; the broker reaches its providers' hosts only.
+				redirect: "manual",
+			}),
+		));
 	} catch {
 		return text(502, `${name} couldn't be reached`);
 	}
@@ -150,6 +212,8 @@ async function proxy(
 	if (!ok) {
 		console.log(JSON.stringify({ event: "pim.git_broker.fetch", session: claims.sessionId, repo: repo.fullName, status: answer.status }));
 		await answer.body?.cancel();
+		// Still rate limited after the retries: say so, with when to come back, rather than blaming Pim.
+		if (rateLimited) return text(429, `${name} is rate limiting Pim's requests for ${repo.fullName}; try again shortly`, { "Retry-After": String(retryAfterSeconds) });
 		if ([301, 302, 307, 308, 401, 403, 404].includes(answer.status)) {
 			const why = provider.instance.kind === "gitea" ? "Pim's Gitea account can't read it" : deps.app ? "the GitHub App isn't installed on it" : "this Pim's GitHub App isn't configured";
 			return text(404, `Pim can't read ${repo.fullName} on ${name}: it is private, moved or gone, or ${why}`);

@@ -28,7 +28,6 @@ const OUTCOMES: Record<TurnEndedEvent["outcome"], string> = {
 	error: "stopped with an error",
 	cancelled: "was cancelled",
 	needs_approval: "waits for an approval",
-	interrupted: "was interrupted by a restart",
 };
 
 /** What the agent reads when a thread it started ends a turn. */

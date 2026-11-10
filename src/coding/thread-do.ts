@@ -1496,7 +1496,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				? `Your previous run was interrupted by a platform restart; check git status and the repo, then continue the task where you left off.`
 				: CONTINUE_TEXT;
 			
-			// Record the interruption in the log
+			// Record the interruption in the log and transcript
 			this.ctx.storage.transactionSync(() => {
 				this.store.update({ consecutiveInterrupts: attempt });
 				this.store.recordEvent("thread.resumed", { attempt, reason: "interrupted_by_restart" });
@@ -1513,31 +1513,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.update({ currentOperation: null, state: "idle", stateReason: null, stateDetail: null });
 			});
 			
-			// Create a special event for the auto-resume (not a final turn_ended)
-			const resumeEvent: TurnEndedEvent = {
-				type: "thread.turn_ended",
-				threadId: thread.threadId,
-				space: thread.space,
-				operationId: operation,
-				outcome: "interrupted",
-				reason: "interrupted",
-				...(checkpoint ? { checkpoint: checkpoint.sha } : {}),
-				state: "idle",
-				spentUsd: thread.spentUsd,
-				budgetUsd: thread.budgetUsd,
-				said: `Interrupted by restart, resumed automatically (attempt ${attempt}/${maxInterrupts})`,
-				at: this.now(),
-			};
-			
-			this.ctx.storage.transactionSync(() => {
-				this.store.recordEvent(resumeEvent.type, resumeEvent);
-			});
-			
-			// Emit the resume event (but don't wake supervisor with a failure)
-			// The supervisor will only be woken when the final outcome is reached
-			await this.#emit(resumeEvent);
-			
-			// Report idle since we're continuing
+			// Report idle since we're continuing - but do NOT emit thread.turn_ended to supervisor
 			await this.#report("idle");
 			
 			// Kick to start the continuation turn
@@ -2148,8 +2124,8 @@ const CLI_MESSAGE = "harness.message";
 /** A CLI run that ended before it ran. */
 const NO_RUN: RunResult = { status: "unanswered", sessionId: null, sessionCostUsd: null, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, sessionUsage: null, model: null, lines: 0 };
 
-/** How a turn ended. `needs_approval` is for a turn held for the person, such as for a CLI harness's login. `interrupted` is for a turn that was interrupted by a restart and auto-resumed. */
-export type TurnOutcome = "completed" | "error" | "cancelled" | "needs_approval" | "interrupted";
+/** How a turn ended. `needs_approval` is for a turn held for the person, such as for a CLI harness's login. */
+export type TurnOutcome = "completed" | "error" | "cancelled" | "needs_approval";
 
 export type TurnEndedEvent = {
 	readonly type: "thread.turn_ended";

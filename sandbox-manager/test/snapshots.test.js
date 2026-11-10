@@ -370,6 +370,24 @@ describe('garbage collection and disk accounting', () => {
 		assert.deepEqual((await call('GET', '/health')).json.cacheBytes, 0)
 	})
 
+	test('cache volumes are measured whichever /system/df shape the daemon answers with', async () => {
+		await setup()
+		await call('POST', '/sessions', session('a-1'))
+		const cache = fake.containers.get('pim-s-a-1').body.HostConfig.Mounts.find((m) => m.Target === '/caches').Source
+		fake.volumeSizes.set(cache, 300 * KiB)
+		for (const [apiVersion, size] of [['1.51', 300 * KiB], ['1.52', 400 * KiB], ['1.53', 500 * KiB]]) {
+			fake.apiVersion = apiVersion
+			fake.volumeSizes.set(cache, size)
+			await mgr.reap()
+			assert.equal((await call('GET', '/health')).json.cacheBytes, size, apiVersion)
+		}
+		// A cache volume that is gone is forgotten, even when Docker leaves out an empty list.
+		await call('DELETE', '/sessions/a-1')
+		fake.volumes.delete(cache)
+		await mgr.reap()
+		assert.equal((await call('GET', '/health')).json.cacheBytes, 0)
+	})
+
 	test('a snapshot being restored is never collected or deleted', async () => {
 		await setup()
 		await call('POST', '/sessions', session('a-1'))

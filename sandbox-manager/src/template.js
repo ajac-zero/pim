@@ -19,9 +19,14 @@ export const LABEL_CACHE_USER = 'pim.coding.cache-user'
 export const LABEL_CACHE_REPO = 'pim.coding.cache-repo'
 export const SANDBOX_UID = 10001
 // Where the cache volume is mounted, and the variables that point package managers at it.
+// pnpm 11 and later read only `pnpm_config_*` variables; pnpm 10 and earlier read `npm_config_*`.
+// The store is on another mount than /workspace, so pnpm can't hard-link from it: `copy` says so
+// up front instead of after a failed hard link and a failed clone, and keeps node_modules from
+// sharing a single inode with the cache volume the user's other sessions use.
 export const CACHE_ROOT = '/caches'
 export const CACHE_ENV = {
-	PNPM_STORE_DIR: '/caches/pnpm',
+	pnpm_config_store_dir: '/caches/pnpm',
+	pnpm_config_package_import_method: 'copy',
 	npm_config_store_dir: '/caches/pnpm',
 	npm_config_cache: '/caches/npm',
 	CARGO_HOME: '/caches/cargo',

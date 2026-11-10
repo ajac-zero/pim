@@ -50,11 +50,18 @@ function giteaRoutes(env: Env, account: Account): Route[] {
 			`${GITEA_API_PATH}/callback`,
 			async (_params, _request, url) => {
 				admin();
+				// The browser lands on the coding settings, which say how it went.
+				const back = (result: string) => new Response(null, { status: 302, headers: { Location: `/?dialog=settings&tab=coding&gitea=${result}`, "Cache-Control": "no-store" } });
 				// Gitea says why when the person said no.
-				if (url.searchParams.has("error")) throw new HttpError(400, "Gitea didn't let Pim in");
-				const login = await gitea().complete(account.ownerId, url.searchParams.get("state") ?? "", url.searchParams.get("code") ?? "", redirectUri());
-				console.info(JSON.stringify({ event: "pim.gitea.connected", user: account.ownerId, login }));
-				return new Response(null, { status: 302, headers: { Location: "/?gitea=connected", "Cache-Control": "no-store" } });
+				if (url.searchParams.has("error")) return back("denied");
+				try {
+					const login = await gitea().complete(account.ownerId, url.searchParams.get("state") ?? "", url.searchParams.get("code") ?? "", redirectUri());
+					console.info(JSON.stringify({ event: "pim.gitea.connected", user: account.ownerId, login }));
+				} catch (error) {
+					console.warn(JSON.stringify({ event: "pim.gitea.connect_failed", user: account.ownerId, error: String(error).slice(0, 300) }));
+					return back("failed");
+				}
+				return back("connected");
 			},
 		],
 		[

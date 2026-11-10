@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Tabs } from "radix-ui";
+import { toast } from "sonner";
 import {
   createContext,
   type ReactNode,
@@ -39,6 +40,7 @@ import {
 } from "~/components/icons";
 import { EmptyState, Page } from "~/components/page";
 import { Confirm } from "~/components/triggers";
+import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import {
   Conversation,
@@ -82,6 +84,8 @@ import {
   parseDiff,
   queueReasonKey,
   reduceLive,
+  GITEA_AUTHORIZE_PATH,
+  isGiteaRepo,
   repoName,
   resultText,
   START_HARNESSES,
@@ -98,7 +102,7 @@ import {
 } from "~/lib/coding";
 import { ApiError, pim, SignInRequired } from "~/lib/pim-api";
 import { textOf } from "~/lib/pim-client";
-import { approvalsQuery } from "~/lib/queries";
+import { accountQuery, approvalsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 import {
   HARNESS_API_KEYS,
@@ -412,7 +416,11 @@ export function StartThreadForm() {
       <h2 id="coding-start-title" className="text-[15px]">
         {t("codingStartTitle")}
       </h2>
-      <Field label={t("codingRepo")} problem={problems.repo}>
+      <Field
+        label={t("codingRepo")}
+        hint={t("codingRepoHint")}
+        problem={problems.repo}
+      >
         {(props) => (
           <Input
             {...props}
@@ -552,7 +560,117 @@ export function CodingConnectionsSection() {
         {CONNECTABLE_HARNESSES.map((harness) => (
           <HarnessConnectPanel key={harness} harness={harness} />
         ))}
+        <GiteaConnectPanel />
       </div>
+    </section>
+  );
+}
+
+/** Where Gitea sends the browser back to Pim, which the OAuth application must list. */
+const giteaRedirectUri = () =>
+  `${window.location.origin}/api/coding/gitea/callback`;
+
+/**
+ * Pim's own Gitea sign-in, which the whole deployment shares: whether it is
+ * set up, and who it is connected as. Only the admin connects it; the
+ * OAuth client's ID and secret are Worker secrets, never entered here. The
+ * callback sends the browser back with `?gitea=` saying how it went.
+ */
+export function GiteaConnectPanel() {
+  const { t } = useI18n();
+  const api = useCodingApi();
+  const queryClient = useQueryClient();
+  const titleId = useId();
+  const { data: account } = useQuery(accountQuery());
+  const isAdmin = account?.role === "admin";
+  const statusKey = ["coding", "gitea"];
+  const status = useQuery({
+    queryKey: statusKey,
+    queryFn: () => api.gitea.status(),
+  });
+  const disconnect = useMutation({
+    mutationFn: () => api.gitea.disconnect(),
+    onSuccess: (next) => queryClient.setQueryData(statusKey, next),
+  });
+  useEffect(() => {
+    const result = new URLSearchParams(window.location.search).get("gitea");
+    if (result === "connected") toast.success(t("giteaJustConnected"));
+    else if (result === "denied") toast.error(t("giteaDenied"));
+    else if (result === "failed") toast.error(t("giteaFailed"));
+    if (result) void queryClient.invalidateQueries({ queryKey: statusKey });
+  }, []);
+  const current = status.data;
+  const state = !current?.configured
+    ? null
+    : current.needsReconnect
+      ? "reconnect"
+      : current.connected
+        ? "connected"
+        : "disconnected";
+  const connect = (label: TranslationKey) =>
+    isAdmin ? (
+      <Button size="sm" asChild>
+        <a href={GITEA_AUTHORIZE_PATH}>{t(label)}</a>
+      </Button>
+    ) : (
+      <p className="text-muted-foreground text-sm">{t("giteaOwnerOnly")}</p>
+    );
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="flex flex-col gap-3 rounded-2xl border px-4 py-4"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 id={titleId} className="min-w-0 flex-1 text-[15px]">
+          {t("giteaTitle")}
+        </h3>
+        {current && (
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[13px]">
+            {t(
+              state === "connected" ? "codingConnected" : "codingNotConnected",
+            )}
+          </span>
+        )}
+      </div>
+      {current &&
+        (state === null ? (
+          <p className="text-muted-foreground text-sm">
+            {t("giteaNotConfigured", { redirect: giteaRedirectUri() })}
+          </p>
+        ) : state === "connected" ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="min-w-0 flex-1 text-muted-foreground text-sm">
+              {t("giteaConnectedAs", { login: current.login ?? "" })}
+            </p>
+            {isAdmin && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={disconnect.isPending}
+                onClick={() => disconnect.mutate()}
+              >
+                {t("codingDisconnect")}
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="min-w-0 flex-1 text-muted-foreground text-sm">
+              {t(
+                state === "reconnect"
+                  ? "giteaNeedsReconnect"
+                  : "giteaNotConnected",
+              )}
+            </p>
+            {connect(state === "reconnect" ? "giteaReconnect" : "giteaConnect")}
+          </div>
+        ))}
+      {disconnect.error && (
+        <p role="alert" className="text-destructive text-sm">
+          {disconnect.error.message}
+        </p>
+      )}
     </section>
   );
 }
@@ -1180,6 +1298,11 @@ function ThreadTitle({ thread }: { thread: CodingThreadView }) {
       >
         {repoName(thread.repo.url)}
       </a>
+      {isGiteaRepo(thread.repo.url) && (
+        <Badge variant="secondary" className="text-[11px]">
+          {t("giteaTitle")}
+        </Badge>
+      )}
     </>
   );
 }

@@ -39,12 +39,15 @@ import type {
   CodingStreamMessage,
   CodingThreadSummary,
   CodingThreadView,
+  GiteaStatus,
   HarnessLoginStatus,
   HarnessSignIn,
   TranscriptMessage,
 } from "~/lib/coding";
+import { startProblems } from "~/lib/coding";
 import { ApiError, type ModelSettings, type Session } from "~/lib/pim-api";
 import {
+  accountQuery,
   agentsQuery,
   approvalsQuery,
   modelQuery,
@@ -226,6 +229,20 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
       connections.push(connection);
       return connection.read(signal);
     }),
+    gitea: {
+      status: vi.fn<CodingApi["gitea"]["status"]>(async () => ({
+        configured: true,
+        connected: false,
+        login: null,
+        needsReconnect: false,
+      })),
+      disconnect: vi.fn<CodingApi["gitea"]["disconnect"]>(async () => ({
+        configured: true,
+        connected: false,
+        login: null,
+        needsReconnect: false,
+      })),
+    },
     vault: {
       status: vi.fn<CodingApi["vault"]["status"]>(async () => notConnected()),
       disconnect: vi.fn<CodingApi["vault"]["disconnect"]>(async () =>
@@ -426,7 +443,7 @@ describe("the start form", () => {
     fireEvent.change(field(/Task/), { target: { value: "Fix it" } });
     fireEvent.change(field(/Budget/), { target: { value: "0" } });
     fireEvent.click(start);
-    expect(screen.getByText(/Use a GitHub address/)).toBeTruthy();
+    expect(screen.getByText(/Use a GitHub or Gitea address/)).toBeTruthy();
     expect(screen.getByText("Enter an amount above zero.")).toBeTruthy();
     expect(screen.queryByText("Say what the thread should do.")).toBeNull();
     expect(api.start).not.toHaveBeenCalled();
@@ -883,6 +900,97 @@ describe("the settings tab", () => {
     ).toBeTruthy();
     expect(api.list).not.toHaveBeenCalled();
     expect(screen.queryByText("Fix the flaky date test")).toBeNull();
+  });
+});
+
+describe("the Gitea card", () => {
+  const status = (over: Partial<GiteaStatus>): GiteaStatus => ({
+    configured: true,
+    connected: false,
+    login: null,
+    needsReconnect: false,
+    ...over,
+  });
+  const render = (role: "admin" | "member", given: GiteaStatus) => {
+    const { api } = fakeApi();
+    api.gitea.status.mockResolvedValue(given);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    client.setQueryData(accountQuery().queryKey, { role });
+    renderWith(api, CodingConnectionsSection, "/", client);
+    return api;
+  };
+  const card = () => screen.findByRole("region", { name: "Gitea" });
+
+  it("names the redirect URI and the secrets when Gitea isn't configured, with no input", async () => {
+    render("admin", status({ configured: false }));
+    const region = await card();
+    expect(
+      await within(region).findByText(/PIM_GITEA_CLIENT_SECRET/),
+    ).toBeTruthy();
+    expect(
+      within(region).getByText(/\/api\/coding\/gitea\/callback/),
+    ).toBeTruthy();
+    expect(region.querySelector("input")).toBeNull();
+    expect(within(region).queryByRole("link")).toBeNull();
+  });
+
+  it("sends the admin to Gitea to connect, or to reconnect", async () => {
+    render("admin", status({}));
+    const link = await within(await card()).findByRole("link", {
+      name: "Connect Gitea",
+    });
+    expect(link.getAttribute("href")).toBe("/api/coding/gitea/authorize");
+    cleanup();
+    render(
+      "admin",
+      status({ connected: true, login: "ada", needsReconnect: true }),
+    );
+    expect(
+      (
+        await within(await card()).findByRole("link", {
+          name: "Reconnect Gitea",
+        })
+      ).getAttribute("href"),
+    ).toBe("/api/coding/gitea/authorize");
+  });
+
+  it("shows the login, and the admin disconnects", async () => {
+    const api = render("admin", status({ connected: true, login: "ada" }));
+    const region = await card();
+    expect(await within(region).findByText("Connected as ada.")).toBeTruthy();
+    fireEvent.click(within(region).getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(api.gitea.disconnect).toHaveBeenCalledTimes(1));
+    expect(await within(region).findByText("Not connected")).toBeTruthy();
+  });
+
+  it("gives a member no way to connect or disconnect", async () => {
+    render("member", status({}));
+    const region = await card();
+    expect(await within(region).findByText(/Only the Pim owner/)).toBeTruthy();
+    expect(within(region).queryByRole("link")).toBeNull();
+    cleanup();
+    render("member", status({ connected: true, login: "ada" }));
+    expect(
+      await within(await card()).findByText("Connected as ada."),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+  });
+});
+
+describe("the repository address", () => {
+  const form = { repo: "", ref: "", task: "x", budget: "" };
+  it("takes GitHub and Gitea repositories, and nothing else", () => {
+    const bad = (repo: string) => startProblems({ ...form, repo }).repo;
+    expect(bad("https://github.com/acme/widgets")).toBeUndefined();
+    expect(
+      bad("https://gitea.example.com/acme/widgets"),
+    ).toBeUndefined();
+    expect(bad("https://gitea.example.com.evil.com/a/b")).toBe(
+      "codingRepoInvalid",
+    );
+    expect(bad("https://gitlab.com/acme/widgets")).toBe("codingRepoInvalid");
   });
 });
 

@@ -1696,7 +1696,7 @@ const translations = {
     codingRepo: "Repository",
     codingRepoMissing: "Enter the repository's address.",
     codingRepoInvalid:
-      "Use a GitHub address, such as https://github.com/owner/name.",
+      "Use a GitHub or Gitea address, such as https://github.com/owner/name.",
     codingRepoForbidden:
       "This Pim doesn't let coding threads use that repository.",
     codingRef: "Branch, tag or commit",
@@ -1778,6 +1778,22 @@ const translations = {
     codingConnectedNote:
       "Coding threads that use {harness} run with your account.",
     codingDisconnect: "Disconnect",
+    codingRepoHint:
+      "A GitHub or Gitea repository, such as https://gitea.example.com/owner/name.",
+    giteaTitle: "Gitea",
+    giteaNotConfigured:
+      "Gitea isn't set up on this Pim. The owner creates an OAuth2 application in Gitea with the redirect URI {redirect}, then sets its client ID and secret as the Worker secrets PIM_GITEA_CLIENT_ID and PIM_GITEA_CLIENT_SECRET.",
+    giteaNotConnected:
+      "Coding threads on Gitea repositories need this Pim to be signed in to Gitea.",
+    giteaConnectedAs: "Connected as {login}.",
+    giteaNeedsReconnect:
+      "Gitea stopped accepting Pim's sign-in. Sign in again to go on.",
+    giteaConnect: "Connect Gitea",
+    giteaReconnect: "Reconnect Gitea",
+    giteaOwnerOnly: "Only the Pim owner can connect or disconnect Gitea.",
+    giteaJustConnected: "Gitea is connected.",
+    giteaDenied: "Gitea didn't let Pim in.",
+    giteaFailed: "Pim couldn't finish signing in to Gitea. Try again.",
     codingConnect: "Connect {harness}",
     codingConnectStarting: "Starting sign-in…",
     codingConnectOpen: "Sign in to {harness}",
@@ -3593,7 +3609,7 @@ const translations = {
     codingRepo: "Repositorio",
     codingRepoMissing: "Escribe la dirección del repositorio.",
     codingRepoInvalid:
-      "Usa una dirección de GitHub, como https://github.com/dueño/nombre.",
+      "Usa una dirección de GitHub o Gitea, como https://github.com/dueño/nombre.",
     codingRepoForbidden:
       "Este Pim no deja que los hilos de programación usen ese repositorio.",
     codingRef: "Rama, etiqueta o commit",
@@ -3675,6 +3691,24 @@ const translations = {
     codingConnectedNote:
       "Los hilos de código que usan {harness} se ejecutan con tu cuenta.",
     codingDisconnect: "Desconectar",
+    codingRepoHint:
+      "Un repositorio de GitHub o Gitea, como https://gitea.example.com/dueño/nombre.",
+    giteaTitle: "Gitea",
+    giteaNotConfigured:
+      "Gitea no está configurado en este Pim. El propietario crea una aplicación OAuth2 en Gitea con la URI de redirección {redirect} y define su ID y su secreto como los secretos del Worker PIM_GITEA_CLIENT_ID y PIM_GITEA_CLIENT_SECRET.",
+    giteaNotConnected:
+      "Los hilos de programación sobre repositorios de Gitea necesitan que este Pim haya iniciado sesión en Gitea.",
+    giteaConnectedAs: "Conectado como {login}.",
+    giteaNeedsReconnect:
+      "Gitea dejó de aceptar el inicio de sesión de Pim. Inicia sesión de nuevo para seguir.",
+    giteaConnect: "Conectar Gitea",
+    giteaReconnect: "Reconectar Gitea",
+    giteaOwnerOnly:
+      "Solo el propietario de Pim puede conectar o desconectar Gitea.",
+    giteaJustConnected: "Gitea está conectado.",
+    giteaDenied: "Gitea no dejó entrar a Pim.",
+    giteaFailed:
+      "Pim no pudo terminar de iniciar sesión en Gitea. Inténtalo de nuevo.",
     codingConnect: "Conectar {harness}",
     codingConnectStarting: "Iniciando el acceso…",
     codingConnectOpen: "Inicia sesión en {harness}",

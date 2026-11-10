@@ -291,6 +291,14 @@ export type CodingVaultApi = {
   ) => Promise<HarnessLoginStatus>;
 };
 
+/** The deployment's Gitea connection, as `GET /api/coding/gitea/status` says it; never a token. */
+export type GiteaStatus = {
+  configured: boolean;
+  connected: boolean;
+  login: string | null;
+  needsReconnect: boolean;
+};
+
 export type { MessagePart, TranscriptMessage };
 
 /** Every route of the coding threads API the web app uses. Tests give the pages a fake. */
@@ -330,7 +338,15 @@ export type CodingApi = {
     signal: AbortSignal,
   ) => AsyncIterable<CodingStreamMessage>;
   vault: CodingVaultApi;
+  gitea: {
+    status: () => Promise<GiteaStatus>;
+    /** Admin only. */
+    disconnect: () => Promise<GiteaStatus>;
+  };
 };
+
+/** Where the admin's browser goes to sign Pim in to Gitea. */
+export const GITEA_AUTHORIZE_PATH = "/api/coding/gitea/authorize";
 
 const vaultPath = (harness: string, rest = "") =>
   `/coding/vault/${encodeURIComponent(harness)}${rest}`;
@@ -386,6 +402,10 @@ export const codingApi: CodingApi = {
       );
     }
     yield* ndjson<CodingStreamMessage>(response.body);
+  },
+  gitea: {
+    status: () => call("/coding/gitea/status"),
+    disconnect: () => call("/coding/gitea/connection", { method: "DELETE" }),
   },
   vault: {
     status: (harness) => call(vaultPath(harness)),
@@ -570,10 +590,14 @@ export function stateReasonKey(
   }
 }
 
-/** `https://github.com/acme/widgets` as `acme/widgets`. */
+/** `https://github.com/acme/widgets` as `acme/widgets`, whichever host it is on. */
 export function repoName(url: string): string {
-  return url.replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
+  return url.replace(/^https:\/\/[^/]+\//, "").replace(/\/$/, "");
 }
+
+/** Whether a repository's address is on Gitea (this Pim's, by host) rather than GitHub. */
+export const isGiteaRepo = (url: string) =>
+  new URL(url).hostname === GITEA_HOST;
 
 export type StartForm = {
   repo: string;
@@ -595,7 +619,10 @@ export const START_HARNESSES: readonly CodingHarness[] = [
 
 export type StartProblems = Partial<Record<keyof StartForm, TranslationKey>>;
 
-const GITHUB_REPO = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/?$/;
+export const GITEA_HOST = "gitea.example.com";
+const REPO_URL = new RegExp(
+  `^https://(github\\.com|${GITEA_HOST.replaceAll(".", "\\.")})/[\\w.-]+/[\\w.-]+/?$`,
+);
 export const MAX_TASK = 2000;
 
 /** What's wrong with the start form, by field; empty when it can be sent. */
@@ -603,7 +630,7 @@ export function startProblems(form: StartForm): StartProblems {
   const problems: StartProblems = {};
   const repo = form.repo.trim();
   if (!repo) problems.repo = "codingRepoMissing";
-  else if (!GITHUB_REPO.test(repo)) problems.repo = "codingRepoInvalid";
+  else if (!REPO_URL.test(repo)) problems.repo = "codingRepoInvalid";
   const task = form.task.trim();
   if (!task) problems.task = "codingTaskMissing";
   else if (task.length > MAX_TASK) problems.task = "codingTaskTooLong";

@@ -273,8 +273,13 @@ describe('sessions', () => {
 		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
 	})
 	test('health includes version from BUILD_SHA env', async () => {
-		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.equal(r.json.version, 'unknown')
+		process.env.BUILD_SHA = 'abc1234'
+		try {
+			const r = await call('GET', '/health', undefined, { authorization: '' })
+			assert.equal(r.json.version, 'abc1234')
+		} finally {
+			delete process.env.BUILD_SHA
+		}
 	})
 })
 

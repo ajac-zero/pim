@@ -272,6 +272,11 @@ export class Pim extends RealPim {
 		return policy === "auto" ? 1_500 : null;
 	}
 
+	/** What a test sets, as a number of milliseconds, to have a run with no progress for that long stopped; the deployment's otherwise, which no test waits out. */
+	protected override stallMs(): number {
+		return Number(this.store.meta("test:stall-ms") ?? super.stallMs());
+	}
+
 	/** Compactions keep almost nothing, so a test can compact a short conversation. */
 	protected override harnessSettings(): HarnessSettings {
 		return { ...super.harnessSettings(), compaction: { keepRecentTokens: 1 } };

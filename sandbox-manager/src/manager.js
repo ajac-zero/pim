@@ -2,7 +2,8 @@
 // Commands and files go to the workspace-agentd running inside each container.
 import http from 'node:http'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { statfs, readFile } from 'node:fs/promises'
+import { mkdir, rename, statfs, readFile, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -87,6 +88,8 @@ export async function detectQuotaMode(docker) {
 
 // The default MAX_CONCURRENT: one session per CPU, each assumed to need 1.5 GiB of memory after
 // reserving 1 GiB for the host, clamped to 1..8. For example 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4.
+const validLimit = (n) => Number.isInteger(n) && n >= 1 && n <= 16
+
 export function defaultMaxConcurrent(cpus = os.cpus().length, totalMem = os.totalmem()) {
 	const memGiB = totalMem / 2 ** 30
 	return Math.min(8, Math.max(1, Math.min(cpus, Math.floor((memGiB - 1) / 1.5))))
@@ -95,7 +98,8 @@ export function defaultMaxConcurrent(cpus = os.cpus().length, totalMem = os.tota
 // cfg: { token, agentdSecret, allowedImages, defaultDiskMiB, dockerRoot, minFreePct, maxConcurrent,
 //        maxTotalWorkspaceMiB, idleMin, keptVolumeDays, quotaMode, proxyUrl, proxyContainer,
 //        managerContainer, agentdPort, agentdReadyMs, execGraceMs, dataDir, snapshotMaxBytes,
-//        envCachePct }.
+//        envCachePct, maxConcurrentSource ('env' or 'default', default 'default') }.
+// A maxConcurrent set through PUT /config is kept in DATA_DIR/config.json and wins over cfg.
 // proxyAdmin: { set(ip, hosts), del(ip) }. agentdAddress maps a container IP to {host, port};
 // tests point it at local fake daemons.
 export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now = Date.now, agentdAddress }) {
@@ -107,6 +111,32 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	const graceMs = cfg.execGraceMs ?? 5000
 	const address = agentdAddress ?? ((ip) => ({ host: ip, port: agentdPort }))
 	let proxyStartedAt
+	// The slot limit: cfg.maxConcurrent (MAX_CONCURRENT or derived) until PUT /config sets one.
+	const configFile = path.join(cfg.dataDir, 'config.json')
+	let runtimeMax
+	try {
+		runtimeMax = JSON.parse(readFileSync(configFile, 'utf8')).maxConcurrent
+		if (!validLimit(runtimeMax)) throw new Error('maxConcurrent must be an integer from 1 to 16')
+	} catch (e) {
+		if (e.code !== 'ENOENT') console.error(`ignoring ${configFile}:`, e.message)
+		runtimeMax = undefined
+	}
+	const limit = () => runtimeMax ?? cfg.maxConcurrent
+	const configView = () => ({
+		maxConcurrent: limit(),
+		source: runtimeMax !== undefined ? 'runtime' : (cfg.maxConcurrentSource ?? 'default'),
+		envValue: cfg.maxConcurrentSource === 'env' ? cfg.maxConcurrent : null,
+	})
+	async function setConfig(body) {
+		if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((k) => k !== 'maxConcurrent')) throw new HttpError(400, 'body must be {maxConcurrent}')
+		if (!validLimit(body.maxConcurrent)) throw new HttpError(400, 'maxConcurrent must be an integer from 1 to 16')
+		await mkdir(cfg.dataDir, { recursive: true })
+		const tmp = `${configFile}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
+		await writeFile(tmp, JSON.stringify({ maxConcurrent: body.maxConcurrent }), { flush: true })
+		await rename(tmp, configFile)
+		runtimeMax = body.maxConcurrent
+		return configView()
+	}
 	// The cache volumes of live and starting sessions, which the env cache's GC never evicts.
 	const mounted = () => new Set([...sessions.values(), ...creating.values()].map((x) => cacheVolume(x.params)?.Name).filter(Boolean))
 	const env = createEnvCache({ docker, cfg, now, mounted })
@@ -333,7 +363,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		// Check and reserve the slot in one synchronous step (no await in between), so concurrent
 		// creates cannot pass the checks together. Existing sessions over the limit are left alone.
 		const running = sessions.size + creating.size
-		if (running >= cfg.maxConcurrent) throw new HttpError(429, 'at capacity', { code: 'capacity', limit: cfg.maxConcurrent, running })
+		if (running >= limit()) throw new HttpError(429, 'at capacity', { code: 'capacity', limit: limit(), running })
 		const held = reservation(id)
 		if (cfg.maxTotalWorkspaceMiB && held.totalMiB + need > cfg.maxTotalWorkspaceMiB) {
 			const { totalMiB, ...by } = held
@@ -554,9 +584,10 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			version: await getBuildSha(),
 			runsc: await hasRunsc(docker).catch(() => false),
 			freeDiskPct: Math.round((await freeDiskPct().catch(() => NaN)) * 10) / 10,
-			maxConcurrent: cfg.maxConcurrent,
+			maxConcurrent: limit(),
+			maxConcurrentSource: configView().source,
 			running,
-			free: Math.max(0, cfg.maxConcurrent - running),
+			free: Math.max(0, limit() - running),
 			sessions: sessions.size,
 			reserved: reservation(),
 			...(await env.ready().then(env.stats, () => ({ snapshotBytes: null, cacheBytes: null, snapshotCount: null }))),
@@ -592,6 +623,11 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		try {
 			if (req.method === 'GET' && url.pathname === '/health') return send(200, await health())
 			if (!authorized(req)) throw new HttpError(401, 'unauthorized')
+			if (url.pathname === '/config') {
+				if (req.method === 'GET') return send(200, configView())
+				if (req.method !== 'PUT') throw new HttpError(405, 'method not allowed')
+				return send(200, await setConfig(await json()))
+			}
 			if (url.pathname === '/snapshots') {
 				if (req.method === 'GET') return send(200, await env.list(url.searchParams.get('userId'), url.searchParams.get('repo')))
 				if (req.method !== 'POST') throw new HttpError(405, 'method not allowed')

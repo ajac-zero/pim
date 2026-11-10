@@ -1,10 +1,12 @@
 import { base64UrlDecode } from "../../auth/encoding";
 import { dispatch, type Route } from "../../http";
 import { type BrokerClaims, brokerKey, GitBrokerError, type RepoRef, repoRef, verifyBrokerToken } from "./broker";
-import { type BrokerPolicy, brokerPolicy, githubAppConfig, githubAppStatus } from "./config";
+import { type BrokerPolicy, brokerPolicy, GITEA_INSTANCE_ID, giteaBaseUrl, giteaConfig, githubAppConfig, githubAppStatus } from "./config";
+import { GiteaConnection, type GiteaBackend, giteaKeyFrom, GiteaNotConnectedError } from "./gitea-connection";
+import { giteaInstance, GiteaProvider } from "./gitea-provider";
 import { type Fetch, GitHubApp } from "./github-app";
 import { GitHubProvider } from "./github-provider";
-import { basicAuth, type GitProvider, ProviderRegistry } from "./provider";
+import { basicAuth, GITHUB_INSTANCE_ID, type GitProvider, ProviderRegistry } from "./provider";
 
 /**
  * The broker's one public door, under `/api`: git's smart HTTP protocol for
@@ -33,6 +35,8 @@ export type GitBrokerDeps = {
 	/** The deployment's GitHub App; null when it isn't configured. */
 	readonly app: GitHubApp | null;
 	readonly policy: BrokerPolicy;
+	/** The deployment's git providers; without them, only GitHub's. */
+	readonly providers?: ProviderRegistry;
 	readonly fetch?: Fetch;
 	readonly now?: () => number;
 	readonly maxRequestBytes?: number;
@@ -57,13 +61,21 @@ function presentedToken(request: Request): string | null {
 }
 
 /** The repository a request is for, if its broker token is for it; else the answer that makes git ask for credentials, or refuses. */
-async function admit(deps: GitBrokerDeps, params: Readonly<Record<string, string>>, request: Request): Promise<{ repo: RepoRef; claims: BrokerClaims } | Response> {
+async function admit(deps: GitBrokerDeps, params: Readonly<Record<string, string>>, request: Request): Promise<{ repo: RepoRef; claims: BrokerClaims; provider: GitProvider } | Response> {
 	const token = presentedToken(request);
 	const claims = token ? await verifyBrokerToken(deps.key, token, (deps.now ?? Date.now)()) : null;
 	if (!claims) return text(401, "This needs the coding session's broker token", { "WWW-Authenticate": 'Basic realm="Pim git broker"' });
-	const repo = repoRef(params.owner!, params.repo!, deps.policy);
+	const instance = params.instance ?? GITHUB_INSTANCE_ID;
+	if (claims.instance !== instance) throw new GitBrokerError(403, "This broker token is for another repository");
+	const provider = providerOf(deps, instance);
+	const repo = instance === GITHUB_INSTANCE_ID ? repoRef(params.owner!, params.repo!, deps.policy) : provider.parseRepoUrl(`${provider.instance.baseUrl}/${params.owner}/${params.repo}`, deps.policy);
 	if (claims.repo !== repo.fullName.toLowerCase()) throw new GitBrokerError(403, "This broker token is for another repository");
-	return { repo, claims };
+	return { repo, claims, provider };
+}
+
+/** The provider of an instance: GitHub's, made from the App, unless the deployment has its own providers. */
+function providerOf(deps: GitBrokerDeps, instance: string): GitProvider {
+	return deps.providers ? deps.providers.get(instance) : new GitHubProvider(deps.app);
 }
 
 /** How the broker signs in to GitHub for `repo`: a read-only token when the App is installed on it, else nothing. */
@@ -71,8 +83,9 @@ async function credentials(provider: GitProvider, repo: RepoRef): Promise<string
 	try {
 		const credential = await provider.credential(repo, "read");
 		return credential && basicAuth(credential);
-	} catch {
-		throw new GitBrokerError(502, `Pim couldn't get access to ${repo.fullName} from GitHub`);
+	} catch (error) {
+		if (error instanceof GiteaNotConnectedError) throw error;
+		throw new GitBrokerError(502, `Pim couldn't get access to ${repo.fullName} from ${provider.instance.label}`);
 	}
 }
 
@@ -106,14 +119,14 @@ async function readCapped(request: Request, max: number): Promise<Uint8Array> {
 /** Asks GitHub for `path` of `repo`'s smart HTTP service and passes the answer on, up to the size cap. */
 async function proxy(
 	deps: GitBrokerDeps,
-	admitted: { repo: RepoRef; claims: BrokerClaims },
+	admitted: { repo: RepoRef; claims: BrokerClaims; provider: GitProvider },
 	request: Request,
 	path: string,
 	init: { method: string; body?: Uint8Array; contentType: string; expected: string },
 ): Promise<Response> {
-	const { repo, claims } = admitted;
+	const { repo, claims, provider } = admitted;
+	const name = provider.instance.label;
 	const headers: Record<string, string> = { "User-Agent": "git/pim-git-broker", Accept: init.expected };
-	const provider = new GitHubProvider(deps.app);
 	const authorization = await credentials(provider, repo);
 	if (authorization) headers.Authorization = authorization;
 	if (init.body) headers["Content-Type"] = init.contentType;
@@ -127,21 +140,21 @@ async function proxy(
 			method: init.method,
 			headers,
 			...(init.body ? { body: init.body } : {}),
-			// A redirect could lead anywhere; the broker reaches github.com only.
+			// A redirect could lead anywhere; the broker reaches its providers' hosts only.
 			redirect: "manual",
 		});
 	} catch {
-		return text(502, "GitHub couldn't be reached");
+		return text(502, `${name} couldn't be reached`);
 	}
-	const ok = answer.status === 200 && answer.headers.get("Content-Type") === init.expected && answer.body !== null;
+	const ok = answer.status === 200 && answer.headers.get("Content-Type")?.split(";")[0]!.trim() === init.expected && answer.body !== null;
 	if (!ok) {
 		console.log(JSON.stringify({ event: "pim.git_broker.fetch", session: claims.sessionId, repo: repo.fullName, status: answer.status }));
 		await answer.body?.cancel();
 		if ([301, 302, 307, 308, 401, 403, 404].includes(answer.status)) {
-			const why = deps.app ? "the GitHub App isn't installed on it" : "this Pim's GitHub App isn't configured";
-			return text(404, `Pim can't read ${repo.fullName} on GitHub: it is private, moved or gone, or ${why}`);
+			const why = provider.instance.kind === "gitea" ? "Pim's Gitea account can't read it" : deps.app ? "the GitHub App isn't installed on it" : "this Pim's GitHub App isn't configured";
+			return text(404, `Pim can't read ${repo.fullName} on ${name}: it is private, moved or gone, or ${why}`);
 		}
-		return text(502, `GitHub answered HTTP ${answer.status}`);
+		return text(502, `${name} answered HTTP ${answer.status}`);
 	}
 	const max = deps.maxResponseBytes ?? MAX_FETCH_RESPONSE_BYTES;
 	let seen = 0;
@@ -157,12 +170,16 @@ async function proxy(
 	return new Response(body, { status: 200, headers: { "Content-Type": init.expected, "Cache-Control": "no-cache" } });
 }
 
-/** The broker's routes, under `/api`. Nothing else is public. */
+/**
+ * The broker's routes, under `/api`. Nothing else is public. GitHub's
+ * repositories are at `<owner>/<name>.git`; another instance's at
+ * `<instance>/<owner>/<name>.git`.
+ */
 export function gitBrokerRoutes(deps: GitBrokerDeps): Route[] {
-	return [
+	return ["/:owner/:repo", "/:instance/:owner/:repo"].flatMap((repoPath): Route[] => [
 		[
 			"GET",
-			`${GIT_BROKER_PATH}/:owner/:repo/info/refs`,
+			`${GIT_BROKER_PATH}${repoPath}/info/refs`,
 			async (params, request, url) => {
 				const admitted = await admit(deps, params, request);
 				if (admitted instanceof Response) return admitted;
@@ -178,7 +195,7 @@ export function gitBrokerRoutes(deps: GitBrokerDeps): Route[] {
 		],
 		[
 			"POST",
-			`${GIT_BROKER_PATH}/:owner/:repo/git-upload-pack`,
+			`${GIT_BROKER_PATH}${repoPath}/git-upload-pack`,
 			async (params, request) => {
 				const admitted = await admit(deps, params, request);
 				if (admitted instanceof Response) return admitted;
@@ -192,7 +209,7 @@ export function gitBrokerRoutes(deps: GitBrokerDeps): Route[] {
 				});
 			},
 		],
-	];
+	]);
 }
 
 /** Answers a request for `path` (under `/api`) with the broker's routes. */
@@ -227,12 +244,39 @@ export function deploymentGitHubApp(env: object): GitHubApp | null {
 	return cachedApp.app;
 }
 
-/** The git providers of this deployment: the seeded instances, with GitHub's App when it is configured. */
-export function deploymentProviders(env: object, options: { fetch?: Fetch } = {}): ProviderRegistry {
-	return new ProviderRegistry([new GitHubProvider(deploymentGitHubApp(env), { policy: brokerPolicy(env), ...options })]);
+/** The Directory's Gitea connection store, which holds only sealed tokens. */
+export function directoryGiteaBackend(env: Env): GiteaBackend {
+	const directory = () => env.Directory.getByName("directory");
+	return {
+		read: async (instance) => directory().giteaRead(instance),
+		write: async (instance, sealed, login, expectedVersion) => directory().giteaWrite(instance, sealed, login, expectedVersion),
+		claimRefresh: async (instance, version, leaseMs) => directory().giteaClaimRefresh(instance, version, leaseMs),
+		releaseRefresh: async (instance, version) => directory().giteaReleaseRefresh(instance, version),
+		markNeedsReconnect: async (instance, expectedVersion) => directory().giteaMarkNeedsReconnect(instance, expectedVersion),
+		disconnect: async (instance) => directory().giteaDisconnect(instance),
+		createState: async (hash, ownerId, ttlMs) => directory().giteaCreateState(hash, ownerId, ttlMs),
+		consumeState: async (hash) => directory().giteaConsumeState(hash),
+	};
+}
+
+/** The deployment's Gitea: always registered, and not connected until the owner signs in (./gitea-connection.ts). */
+export function deploymentGitea(env: Env, options: { fetch?: Fetch } = {}): GiteaProvider {
+	const connection = new GiteaConnection({
+		instanceId: GITEA_INSTANCE_ID,
+		config: giteaConfig(env),
+		backend: directoryGiteaBackend(env),
+		key: async () => giteaKeyFrom(await env.Directory.getByName("directory").cookieKey()),
+		...options,
+	});
+	return new GiteaProvider(giteaInstance(GITEA_INSTANCE_ID, giteaBaseUrl(env)), connection, options);
+}
+
+/** The git providers of this deployment: GitHub, with its App when it is configured, and Gitea. */
+export function deploymentProviders(env: Env, options: { fetch?: Fetch } = {}): ProviderRegistry {
+	return new ProviderRegistry([new GitHubProvider(deploymentGitHubApp(env), { policy: brokerPolicy(env), ...options }), deploymentGitea(env, options)]);
 }
 
 /** The broker, as the Worker serves it at `/api` + `path`. */
 export async function serveGitBroker(request: Request, env: Env, path: string): Promise<Response> {
-	return handleGitBroker(request, path, { key: await brokerTokenKey(env), app: deploymentGitHubApp(env), policy: brokerPolicy(env) });
+	return handleGitBroker(request, path, { key: await brokerTokenKey(env), app: deploymentGitHubApp(env), policy: brokerPolicy(env), providers: deploymentProviders(env) });
 }

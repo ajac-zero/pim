@@ -58,6 +58,11 @@ export interface GitProvider {
 	credential(repo: RepoRef, access: GitAccess): Promise<GitCredential | null>;
 	/** The name of the repository's default branch. */
 	defaultBranch(repo: RepoRef): Promise<string>;
+	/**
+	 * Whether `ancestor` is reachable from `descendant`, a commit the host already has. A provider whose
+	 * host can't move a branch forward only (GitHub does, in its API) answers this, so that the broker can.
+	 */
+	isAncestor?(repo: RepoRef, ancestor: string, descendant: string): Promise<boolean>;
 	/** Opens a pull request from `head` into `base`. */
 	createPullRequest(input: PullRequestInput): Promise<{ readonly url: string; readonly number: number }>;
 }

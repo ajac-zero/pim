@@ -4269,14 +4269,12 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * What failed for each agent of a group chat whose run is held: its last error, which the chat classifies as it does a
-	 * held chat's own. An agent in a room has no chat of its own to show it in.
+	 * What failed for each conversation whose run is held: its last error, which the chat classifies. An agent in a room has no
+	 * chat of its own to show it in, and a chat opened after Pim restarted has lost the live error, so the list carries it.
 	 */
 	async #heldErrors(held: ReadonlySet<string>): Promise<Map<string, string>> {
 		const errors = new Map<string, string>();
 		for (const conversation of held) {
-			const seat = this.#rooms.of(conversation);
-			if (!seat || seat.conversation === seat.room) continue;
 			const failed = projectEntries(await this.harness.session(conversation).messages()).findLast((message) => message.role === "assistant" && message.error !== undefined);
 			errors.set(conversation, failed && "error" in failed && failed.error ? failed.error : "");
 		}
@@ -5585,6 +5583,7 @@ export class Pim extends DurableAgent<Env> {
 						id: this.store.publicId(session.id),
 						busy: session.busy,
 						held: held.has(session.id),
+						error: heldErrors.get(session.id) ?? null,
 						title: info?.title ?? null,
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,

@@ -9,6 +9,7 @@ import {
   type CSSProperties,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -41,6 +42,7 @@ import {
 } from "~/lib/canvas";
 import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, textOf, usePimClient } from "~/lib/pim-client";
+import { modelError } from "~/lib/pim-view";
 import { agentsQuery, sessionsQuery, suggestionsQuery } from "~/lib/queries";
 import { useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
@@ -218,12 +220,26 @@ function ChatPage() {
   }, [sessionId]);
 
   const followed = usePimClient((state) => state.session);
-  const view = usePimClient((state) => state.view);
+  const followedView = usePimClient((state) => state.view);
   const loaded = usePimClient((state) => state.loaded);
   const synced = usePimClient((state) => state.synced);
   const pending = usePimClient((state) => state.pending);
   const connection = usePimClient((state) => state.connection);
   const ready = followed === sessionId;
+
+  // A run held after a model error carries its error only while Pim has it
+  // live. Opened after Pim restarted, the chat would look like it is working,
+  // so the chat list's word that it is held stands in for it.
+  const view = useMemo(
+    () =>
+      ready && session?.held && followedView.retry === null
+        ? {
+            ...followedView,
+            retry: { at: 0, ...modelError(session.error ?? "") },
+          }
+        : followedView,
+    [ready, session?.held, session?.error, followedView],
+  );
 
   // What to say next, after a response of an agent's own chat.
   const alone =

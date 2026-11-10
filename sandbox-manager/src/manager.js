@@ -164,8 +164,8 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 
 	const view = (s) => ({ ...s.params, state: 'running', createdAt: s.createdAt, lastUsedAt: s.lastUsed, ...(s.restoredFrom && { restoredFrom: s.restoredFrom }) })
 	// A kept workspace is 'stopped' (stop, or over its disk quota) or 'gone' (deleted with
-	// keepVolume: the session no longer exists, only its volume does).
-	const keptState = (k) => (k.reason === 'kept_volume' ? 'gone' : 'stopped')
+	// keepVolume, or its container died: the session no longer exists, only its volume does).
+	const keptState = (k) => (k.reason === 'kept_volume' || k.reason === 'crashed' ? 'gone' : 'stopped')
 	const keptView = (id, k) => ({ ...k.params, state: keptState(k), reason: k.reason, createdAt: k.createdAt ?? null, keptAt: k.keptAt, keptVolume: names(id).volume })
 
 	// The session as GET /sessions/:id shows it: running, starting or stopped. 404 otherwise.
@@ -568,8 +568,9 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	// leftover. Returns whether the id is settled; an unsettled one is looked at again later. A
 	// container that runs is never removed: it is registered even before it has an address, with
 	// the agentd token from its environment (or derived from its nonce). Only a container that
-	// never started or has stopped is a leftover: with a kept workspace it loses only its container
-	// and network, and without one it goes entirely once it is older than leftoverGraceMs.
+	// never started or has stopped is a leftover, and loses only its container and network when it
+	// has a kept workspace or ran and died (which keeps its workspace as `crashed`); one that never
+	// started, or whose spec can't be read, goes entirely once it is older than leftoverGraceMs.
 	async function adopt(id, waitMs = 0) {
 		const n = names(id)
 		let info
@@ -606,6 +607,20 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		if (kept.has(id)) {
 			await teardown(id, { keep: true })
 			return true
+		}
+		// One that ran and died (it crashed, or its host restarted) keeps its workspace volume, as a kept
+		// workspace (`crashed`), so creating the session again resumes it with its work and harness sessions.
+		if (state !== 'created') {
+			let params
+			try {
+				params = JSON.parse(info.Config.Labels[LABEL_SPEC])
+			} catch {}
+			if (params) {
+				const k = { params, createdAt: Date.parse(info.Created) || null, keptAt: now(), reason: 'crashed', diskBytes: null }
+				kept.set(id, k)
+				await teardown(id, { keep: { info: k } })
+				return true
+			}
 		}
 		if (now() - (Date.parse(info.Created) || 0) < leftoverGraceMs) return false
 		await teardown(id)

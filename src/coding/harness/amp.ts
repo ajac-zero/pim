@@ -94,6 +94,7 @@ export const amp: CliHarness = {
 	signalCommand: (sessionId, signal) => ["pkill", `-${signal}`, "-f", sessionId],
 	// When Pim's coding thread ends, the Amp thread leaves the person's list on ampcode.com; a later turn unarchives it (above).
 	archiveCommand: (sessionId) => ["amp", "threads", "archive", sessionId],
+	remoteSessions: true,
 	loginFailure: LOGIN_FAILURE,
 	apiKeyEnv: "AMP_API_KEY",
 };

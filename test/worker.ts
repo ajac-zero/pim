@@ -351,6 +351,13 @@ export const codingBackends: { registry: WorkspaceProviderRegistry | null } = { 
 /** What coding threads emitted, in order. */
 export const codingEvents: CodingThreadEvent[] = [];
 
+/**
+ * Coding threads' waits in tests: a CLI turn with no output is stalled after a moment, which a test waits out; a
+ * workspace that fails and doesn't answer for a second counts as down; a running turn's work is autosaved every three
+ * minutes, which a test may set to 0, to autosave at each heartbeat.
+ */
+export const codingTimings = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000 };
+
 /** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
 export const codingThreadClock: { now: number | null } = { now: null };
 
@@ -393,9 +400,16 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return [5, 5, 5];
 	}
 
-	/** A CLI turn with no output is stalled after a moment, which a test waits out. */
 	protected override harnessStallMs(): number {
-		return 300;
+		return codingTimings.stallMs;
+	}
+
+	protected override workspaceLostGraceMs(): number {
+		return codingTimings.lostGraceMs;
+	}
+
+	protected override autosaveMs(): number {
+		return codingTimings.autosaveMs;
 	}
 
 	/** A thread waiting for another's environment looks for it often. */

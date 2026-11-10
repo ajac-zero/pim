@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS coding_harness_run (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
 	record TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS coding_autosave (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	head TEXT NOT NULL,
+	tree TEXT NOT NULL,
+	commit_sha TEXT NOT NULL,
+	bundle BLOB,
+	saved_at INTEGER NOT NULL
+);
 `;
 
 /** Every table a thread keeps besides pi's. */
@@ -220,7 +228,18 @@ export const CODING_THREAD_TABLES = [
 	"coding_notice",
 	"coding_harness_session",
 	"coding_harness_run",
+	"coding_autosave",
 ] as const;
+
+/**
+ * The thread's latest autosave of its work (./thread-do.ts): the branch's
+ * commit then (`head`), the tree of everything in the checkout, committed
+ * or not, and the commit on top of `head` that holds it, which the workspace
+ * keeps as `refs/pim/autosave`. `bundle` is a git bundle of everything from
+ * the thread's base to that commit, kept here so the work outlives the
+ * workspace's volume; null when it was too big to keep.
+ */
+export type Autosave = { readonly head: string; readonly tree: string; readonly commit: string; readonly bundle: Uint8Array | null; readonly savedAt: number };
 
 /** The CLI harness's session a thread goes on with (./harness/), and its whole cost, or its whole usage for a CLI that reports only that, as the CLI last reported it. */
 export type HarnessSession = { readonly sessionId: string; readonly costUsd: number; readonly usage: HarnessUsage | null };
@@ -501,6 +520,23 @@ export class CodingThreadStore {
 				session.usage === null ? null : JSON.stringify(session.usage),
 			);
 		}
+	}
+
+	autosave(): Autosave | null {
+		const row = this.#sql.exec("SELECT head, tree, commit_sha, bundle, saved_at FROM coding_autosave WHERE id = 1").toArray()[0];
+		if (!row) return null;
+		return { head: String(row.head), tree: String(row.tree), commit: String(row.commit_sha), bundle: row.bundle === null ? null : new Uint8Array(row.bundle as ArrayBuffer), savedAt: Number(row.saved_at) };
+	}
+
+	saveAutosave(autosave: Autosave): void {
+		this.#sql.exec(
+			"INSERT INTO coding_autosave (id, head, tree, commit_sha, bundle, saved_at) VALUES (1, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET head = excluded.head, tree = excluded.tree, commit_sha = excluded.commit_sha, bundle = excluded.bundle, saved_at = excluded.saved_at",
+			autosave.head,
+			autosave.tree,
+			autosave.commit,
+			autosave.bundle,
+			autosave.savedAt,
+		);
 	}
 
 	/** The CLI harness's run under way, as the runner keeps it. */

@@ -665,6 +665,37 @@ describe('disk governance', () => {
 describe('reconcile after a restart', () => {
 	afterEach(() => teardown())
 
+	test('keeps the volume of a session whose container died, and creating the session again resumes it', async () => {
+		await setup()
+		await call('POST', '/sessions', good)
+		await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })
+		// The host restarted: Docker kept the containers, stopped. One has an unreadable spec, and goes with its volume
+		// once it is past the grace a create in flight gets.
+		fake.containers.get('pim-s-abc-1').state = 'exited'
+		Object.assign(fake.containers.get('pim-s-abc-2'), { state: 'exited', created: Date.now() - 120000 })
+		fake.containers.get('pim-s-abc-2').body.Labels['pim.coding.spec'] = '{'
+		const fresh = make()
+		await fresh.reconcile()
+		assert.ok(fake.volumes.has('pim-ws-abc-1'), 'the dead session keeps its workspace')
+		assert.ok(!fake.containers.has('pim-s-abc-1') && !fake.networks.has('pim-net-abc-1'))
+		assert.ok(!fake.volumes.has('pim-ws-abc-2'))
+		const st = await fresh.status('abc-1')
+		assert.deepEqual([st.state, st.reason], ['gone', 'crashed'])
+		// It survives another restart before it is resumed.
+		const again = make()
+		await again.reconcile()
+		assert.equal((await again.status('abc-1')).reason, 'crashed')
+		mgr.server.close()
+		mgr = again
+		await new Promise((res) => mgr.server.listen(0, '127.0.0.1', res))
+		// The session is gone, so its client creates it again, on the same volume.
+		assert.equal((await call('GET', '/sessions/abc-1')).status, 404)
+		assert.equal((await call('POST', '/sessions', good)).status, 201)
+		assert.equal(fake.calls.filter((c) => c.path === '/volumes/create' && c.body.Name === 'pim-ws-abc-1').length, 2, 'the same volume')
+		assert.ok(!fake.volumes.has('pim-kept-abc-1'))
+		assert.equal((await call('GET', '/sessions/abc-1')).json.state, 'running')
+	})
+
 	test('re-attaches recreated proxy and manager containers and keeps agentd reachable', async () => {
 		await setup({ managerContainer: 'sandbox-manager' })
 		await call('POST', '/sessions', good)
@@ -804,8 +835,9 @@ describe('reconcile after a restart', () => {
 		fake.networks.set('pim-net-kept-1', { Name: 'pim-net-kept-1', Labels: labels })
 		const fresh = make({ maxConcurrent: 4 })
 		await fresh.reconcile()
-		// As before: a stopped container goes with its network and workspace.
-		assert.ok(!fake.containers.has('pim-s-dead-1') && !fake.networks.has('pim-net-dead-1') && !fake.volumes.has('pim-ws-dead-1'))
+		// A container that ran and died goes with its network, and its workspace is kept as `crashed`, for a create to resume.
+		assert.ok(!fake.containers.has('pim-s-dead-1') && !fake.networks.has('pim-net-dead-1') && fake.volumes.has('pim-ws-dead-1'))
+		assert.deepEqual([(await fresh.status('dead-1')).state, (await fresh.status('dead-1')).reason], ['gone', 'crashed'])
 		// A kept workspace loses only the leftover container.
 		assert.ok(!fake.containers.has('pim-s-kept-1') && !fake.networks.has('pim-net-kept-1') && fake.volumes.has('pim-ws-kept-1'))
 		assert.equal((await fresh.status('kept-1')).state, 'stopped')

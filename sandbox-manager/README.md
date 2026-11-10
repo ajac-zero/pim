@@ -127,6 +127,7 @@ gone, `reason`, `keptAt` and `keptVolume`:
 | `stopped` | `stopped` | Stopped through `/stop`: container and network removed, volume kept. `/start` (or a create with the same id) brings it back with the same files |
 | `stopped` | `over_disk_quota` | Stopped by the manager in `measure` mode; start it again the same way |
 | `gone` | `kept_volume` | Deleted with `keepVolume`: only in the list and in status; `GET /sessions/:id`, stop and start give 404; a create with the same id reuses the volume |
+| `gone` | `crashed` | Its container had died when the manager restarted (it crashed, or the host restarted): kept as for `kept_volume`, so a create with the same id resumes it with its files |
 
 Stop removes the container (its processes die) and frees its `MAX_CONCURRENT` slot; its disk
 quota stays reserved. The state survives a manager restart (see Kept volumes).
@@ -321,8 +322,11 @@ read back from its environment (or, failing that, recomputed from the nonce labe
 `AGENTD_TOKEN_SECRET` does not cut it off. A running container without an address yet is waited
 for a few seconds, then registered anyway: its commands answer 503 `session_reconnecting` until
 the address shows up. Only containers that are not running are cleaned up: one with a kept
-workspace loses its container and network, and any other (with its volume and network) once it
-is older than a minute, so a create still in flight is never mistaken for a leftover. A paused or
+workspace loses its container and network; one that ran and died (it crashed, or stopped with
+its host) loses the same and keeps its volume as a kept workspace (`crashed`), so creating the
+session again resumes it; and any other (one that never started, or whose spec can't be read)
+goes with its volume and network once it is older than a minute, so a create still in flight is
+never mistaken for a leftover. A paused or
 otherwise unusable container is left alone, and its `sessionId` is refused with 409
 `session_unsettled` until the manager can take it over or clean it up. A labelled volume or
 network with no container (a half-created session's) is removed, unless it is a kept workspace.

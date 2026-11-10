@@ -84,8 +84,13 @@ import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, ty
 import {
 	type EnvironmentOwner,
 	type EnvironmentSnapshot,
+	type ExecEvent,
 	WORKSPACE_ROOT,
 	WorkspaceCapacityError,
+	WorkspaceFileError,
+	WorkspaceLimitError,
+	WorkspaceLostError,
+	WorkspacePathError,
 	type Workspace,
 	type WorkspaceProvider,
 	type WorkspaceRef,
@@ -129,6 +134,21 @@ import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
  * (./harness/): what it prints goes into the same transcript, log, test runs
  * and checkpoints. A CLI run can't outlive this object: after an eviction
  * the turn ends `interrupted`, and the next turn resumes the CLI's session.
+ *
+ * The workspace can go down under a turn: its container, the manager or
+ * the host dies. A call on it that fails as such a workspace's would makes
+ * the thread check whether it still answers, for a while
+ * (`workspaceLostGraceMs`), so a manager that restarts with the workspace
+ * alive loses nothing. One that doesn't answer is let go, its volume kept,
+ * and made again from it on its next use; every harness keeps its session
+ * on that volume, under the workspace's home, or off the machine (pi's in
+ * this object, Amp's on its servers). A CLI turn cut off that way ends
+ * `workspace_lost` and goes on by itself in the new workspace, resuming the
+ * CLI's session, a few times in a row at most; a pi turn goes on as it
+ * was, its command reported lost. While a turn runs, its work is autosaved
+ * every few minutes, without touching the checkout, as a commit the
+ * workspace keeps and a bundle this object keeps, so a workspace whose
+ * volume was lost too starts again from it.
  */
 export class CodingThreadDO extends DurableObject<Env> {
 	readonly store = new CodingThreadStore(
@@ -174,6 +194,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#indexAgain = false;
 	/** The model gateway's caps on this thread's requests. */
 	readonly #gate = new GatewayGate();
+	/** Workspaces found to be down, so later calls on them fail at once instead of waiting for them again. */
+	readonly #lost = new WeakSet<Workspace>();
+	/** Checks under way of whether a workspace still answers, so calls that fail together wait for one. */
+	readonly #probing = new WeakMap<Workspace, Promise<boolean>>();
+	/** When the work in the workspace was last autosaved in this isolate, and the autosave under way. */
+	#autosavedAt = 0;
+	#autosaving: Promise<void> | null = null;
 
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
@@ -289,6 +316,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return STALL_MS;
 	}
 
+	/** How long a workspace whose calls fail may not answer before it counts as down: a manager that restarts within it, with the workspace alive, loses nothing. */
+	protected workspaceLostGraceMs(): number {
+		return LOST_GRACE_MS;
+	}
+
+	/** How often the work of a running turn is autosaved. */
+	protected autosaveMs(): number {
+		return AUTOSAVE_MS;
+	}
+
 	/** How long a thread may sit provisioning with no change before it is failed as stuck. */
 	protected stuckMs(): number {
 		return STUCK_MS;
@@ -386,6 +423,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.#failIfStuck();
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
+		if (thread?.currentOperation && Date.now() - this.#autosavedAt >= this.autosaveMs()) void this.#autosave();
 		// A queued thread whose backend reports its health checks it again each time, so a queue held for low disk opens once there is room.
 		const busy =
 			thread !== null &&
@@ -1326,6 +1364,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		try {
 			await this.#startTurn();
 		} catch (error) {
+			// The workspace went down as the turn was readied: it is made again, as when it is found down while being readied.
+			if (error instanceof WorkspaceLostError && this.store.required().currentOperation === null) {
+				await this.#provisioningFailed(error);
+				return;
+			}
 			// Such as a model provider removed from the space since: the thread can't go on until it is continued.
 			console.warn(JSON.stringify({ event: "pim.coding.turn_not_started", thread: thread.threadId, error: String(error) }));
 			if (this.store.required().currentOperation !== null) return;
@@ -1494,6 +1537,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ state: "running", stateReason: null, currentOperation: receipt.operationId, budgetStopped: false });
 			this.store.recordEvent("thread.turn_started", { operationId: receipt.operationId });
 		});
+		this.#autosavedAt = Date.now();
 		await this.#report("running");
 		this.#watch(receipt.operationId);
 	}
@@ -1555,9 +1599,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ state: "running", stateReason: null, stateDetail: null, currentOperation: operation, budgetStopped: false });
 			this.store.recordEvent("thread.turn_started", { operationId: operation });
 		});
+		this.#autosavedAt = Date.now();
 		const fresh = this.store.required();
 		const turn = {
-			prompt: input.text,
+			// A thread going on by itself in a new session, its last one lost with the workspace's volume, says what it was doing.
+			prompt: session === null && operation.startsWith(RESUME_PREFIX) ? await this.#lostSessionPrompt(input.text) : input.text,
 			sessionId,
 			resume: session !== null,
 			maxBudgetUsd: fresh.budgetUsd === null ? null : fresh.budgetUsd - fresh.spentUsd,
@@ -1572,7 +1618,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		});
 		const done = started
 			.then(() => runner.run(turn, timeoutMs))
-			.catch((error): RunResult => ({ ...NO_RUN, reason: "harness_error", detail: errorText(error).slice(0, 500) }))
+			.catch((error): RunResult => ({ ...NO_RUN, reason: error instanceof WorkspaceLostError ? "workspace_lost" : "harness_error", detail: errorText(error).slice(0, 500) }))
 			.then((result) => this.#endCliTurn(operation, result))
 			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.harness_turn_failed", operation, error: String(error) })))
 			.finally(() => {
@@ -1735,37 +1781,43 @@ export class CodingThreadDO extends DurableObject<Env> {
 			console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) }));
 			return null;
 		});
+		// The bundle kept of the work, so it outlives the workspace's volume.
+		if (checkpoint) await this.#autosave();
 		const thread = this.store.required();
 		if (thread.currentOperation !== operation) return;
 		const budget = thread.budgetStopped;
 		// A CLI harness whose login is missing or expired waits for the person to connect it again, and goes on when continued.
 		const login = result.status !== "done" && result.reason === "login_required";
 		
-		// Handle auto-resume for interrupted turns (restart)
-		const isInterrupted = result.reason === "interrupted";
-		const maxInterrupts = 3;
+		// Handle auto-resume for interrupted turns (restart), and for turns whose workspace went down (made again from its volume by now)
+		const lost = result.status !== "done" && result.reason === "workspace_lost";
+		const isInterrupted = result.reason === "interrupted" || lost;
+		const maxInterrupts = MAX_RESUMES;
 		const shouldAutoResume = isInterrupted && thread.consecutiveInterrupts < maxInterrupts && thread.state !== "archived";
 		
 		if (shouldAutoResume) {
 			// Increment the counter and enqueue a continuation turn
 			const attempt = thread.consecutiveInterrupts + 1;
 			const cli = cliHarness(thread.harness);
-			const resumeText = cli 
-				? `Your previous run was interrupted by a platform restart; check git status and the repo, then continue the task where you left off.`
-				: CONTINUE_TEXT;
+			const why = lost ? "workspace_lost" : "interrupted_by_restart";
+			const resumeText = lost
+				? LOST_RESUME_TEXT
+				: cli
+					? `Your previous run was interrupted by a platform restart; check git status and the repo, then continue the task where you left off.`
+					: CONTINUE_TEXT;
 			
 			// Record the interruption in the log and transcript
 			this.ctx.storage.transactionSync(() => {
 				this.store.update({ consecutiveInterrupts: attempt });
-				this.store.recordEvent("thread.resumed", { attempt, reason: "interrupted_by_restart" });
+				this.store.recordEvent("thread.resumed", { attempt, reason: why });
 			});
 			
 			// Add transcript notice
-			void this.#write("thread.resumed", { attempt, max: maxInterrupts, reason: "interrupted_by_restart" });
+			void this.#write("thread.resumed", { attempt, max: maxInterrupts, reason: why });
 			
 			// For CLI harnesses, enqueue the resume text for the next turn (which will resume the session)
 			// For Pi harness, we enqueue CONTINUE_TEXT which tells it to continue
-			const resumeOperationId = `resume-${attempt}-${operation}`;
+			const resumeOperationId = `${RESUME_PREFIX}${attempt}-${operation}`;
 			this.ctx.storage.transactionSync(() => {
 				this.store.enqueue(resumeOperationId, resumeText);
 				this.store.update({ currentOperation: null, state: "idle", stateReason: null, stateDetail: null });
@@ -1788,16 +1840,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 		
 		// For interrupted turns that exceed the limit, mark as failed with the interruption detail
 		const outcome: TurnOutcome = budget ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : login ? "needs_approval" : isInterrupted && thread.consecutiveInterrupts >= maxInterrupts ? "error" : "error";
+		const exhausted = isInterrupted && thread.consecutiveInterrupts >= maxInterrupts;
 		const reason = budget 
 			? "budget"
 			: outcome === "error" || login 
-				? (isInterrupted && thread.consecutiveInterrupts >= maxInterrupts 
+				? (exhausted && !lost
 					? "interrupted_too_many_times"
 					: (result.reason ?? "error"))
 				: null;
 		const state: CodingThreadState = outcome === "error" ? "failed" : login ? "waiting_input" : "idle";
 		const said = await this.#lastSaid().catch(() => null);
-		const detail = outcome === "completed" ? null : (result.detail ?? thread.stateDetail)?.slice(0, DETAIL_MAX);
+		const detail = outcome === "completed" ? null : exhausted && lost ? lostDetail(result.detail) : (result.detail ?? thread.stateDetail)?.slice(0, DETAIL_MAX);
 		const stop = budget ? { budgetUsd: thread.budgetUsd ?? 0, spentUsd: thread.spentUsd } : null;
 		const event: TurnEndedEvent = {
 			type: "thread.turn_ended",
@@ -1816,7 +1869,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			at: this.now(),
 		};
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: outcome === "completed" ? null : (result.detail ?? null) });
+			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: outcome === "completed" ? null : exhausted && lost ? (detail ?? null) : (result.detail ?? null) });
 			this.store.recordEvent(event.type, event);
 			if (stop) this.store.recordEvent("app.budget_stop", stop);
 		});
@@ -1891,6 +1944,20 @@ export class CodingThreadDO extends DurableObject<Env> {
 			await this.#schedule(Date.now() + HEARTBEAT_MS);
 			return;
 		}
+		// A workspace found down is made again from its volume; while a thread goes on after one, a backend it can't reach is waited for, longer each time. A few times in a row at most.
+		const resuming = this.store.nextInput()?.operationId.startsWith(RESUME_PREFIX) === true;
+		if (thread.state !== "archived" && (error instanceof WorkspaceLostError || (resuming && error instanceof ComposeManagerError && error.status >= 500))) {
+			const attempt = thread.consecutiveInterrupts + 1;
+			console.warn(JSON.stringify({ event: "pim.coding.workspace_retry", thread: thread.threadId, attempt, error: errorText(error).slice(0, 300) }));
+			if (attempt > MAX_RESUMES) return this.#failLost(error);
+			this.ctx.storage.transactionSync(() => {
+				this.store.update({ consecutiveInterrupts: attempt, stateReason: "workspace_lost", stateDetail: errorText(error).slice(0, 500) });
+				this.store.recordEvent("workspace.retry", { attempt, error: errorText(error).slice(0, 300) });
+			});
+			if (error instanceof WorkspaceLostError) this.#kick();
+			else await this.#schedule(Date.now() + LOST_RETRY_MS * 2 ** (attempt - 1));
+			return;
+		}
 		console.warn(JSON.stringify({ event: "pim.coding.provisioning_failed", thread: thread.threadId, error: String(error) }));
 		if (thread.state === "archived") return;
 		const aborted = error instanceof Error && / was stopped:/.test(error.message);
@@ -1943,6 +2010,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const waited = this.now() - thread.updatedAt;
 		if (waited < this.stuckMs()) return;
 		await this.#fail("stuck", `The thread was provisioning for ${Math.round(waited / 60_000)} minutes without moving on`, true);
+	}
+
+	/**
+	 * Gives up on a workspace that went down again each time it was made
+	 * again while being readied: the input waiting for it is dropped and the
+	 * thread fails as any failure outside a turn's end does, so whoever
+	 * started it hears of it once, with what went wrong last.
+	 */
+	async #failLost(error: unknown): Promise<void> {
+		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
+		await this.#fail("workspace_lost", lostDetail(errorText(error)), true);
 	}
 
 	/** Makes the thread's model resolvable: its provider in the catalog pi resolves models against. */
@@ -2039,7 +2117,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (!workspace) throw new Error("The workspace provider lost the workspace it just made");
 		}
 		if ((await workspace.status()).state === "stopped") await workspace.start();
-		const killable = this.#killable(workspace);
+		const killable = this.#killable(workspace, this.store.required().workspaceRef!);
 		await this.#ensureRepository(killable, thread);
 		if (started !== null) this.#setEnvironment({ provisionMs: Math.round(performance.now() - started) });
 		this.#open = { id: this.store.required().workspaceRef!.id, workspace: killable };
@@ -2096,14 +2174,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * workspace (or its kept volume) has it already. Until the thread first
 	 * checked out (`baseSha` is null), a workspace with a clone, such as one
 	 * restored from another thread's snapshot, fetches and checks out the
-	 * thread's branch over it.
+	 * thread's branch over it. A thread that had checked out before and finds
+	 * no clone lost its workspace's volume: it starts again from its base and
+	 * the work it last saved (`#restoreWork`).
 	 */
 	async #ensureRepository(workspace: Workspace, thread: CodingThreadRow): Promise<void> {
+		// Only a missing file means there is no clone: a workspace that doesn't answer throws.
 		const cloned = await workspace.stat(`${REPO_DIR}/.git`).then(
 			() => true,
-			() => false,
+			(error) => {
+				if (error instanceof WorkspaceFileError) return false;
+				throw error;
+			},
 		);
-		if (cloned && this.store.required().baseSha !== null) return;
+		const base = this.store.required().baseSha;
+		if (cloned && base !== null) return;
 		const { url, token } = await this.cloneSource(thread);
 		// The broker token as an HTTP header for these commands alone: git keeps no copy of it in the repository.
 		const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
@@ -2121,9 +2206,45 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (thread.baseRef !== "main") throw error;
 			await gitWithRetries(workspace, ["fetch", "origin", "HEAD"], fetchOptions, delays);
 		}
+		if (!cloned && base !== null) return this.#restoreWork(workspace, thread, base);
 		await git(workspace, ["checkout", "-f", "-B", thread.branch, "FETCH_HEAD"]);
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
 		if (this.store.required().baseSha === null) this.store.update({ baseSha: sha });
+	}
+
+	/**
+	 * Puts the thread's work back in a new clone, after its workspace's volume
+	 * was lost: the branch as it was when last autosaved, its checkpoints
+	 * included, with the changes not committed then left uncommitted, from the
+	 * bundle this object keeps (`#autosave`); without one, the thread's base.
+	 * A CLI's session went with the volume, unless the CLI keeps its sessions
+	 * elsewhere, so the next turn starts a new one.
+	 */
+	async #restoreWork(workspace: Workspace, thread: CodingThreadRow, base: string): Promise<void> {
+		const saved = this.store.autosave();
+		let from: "autosave" | "base" = "base";
+		if (saved?.bundle) {
+			const file = `${WORKSPACE_ROOT}/.pim-autosave.bundle`;
+			try {
+				await workspace.writeFile(file, saved.bundle);
+				await git(workspace, ["fetch", file, `+${AUTOSAVE_REF}:${AUTOSAVE_REF}`]);
+				await git(workspace, ["checkout", "-f", "-B", thread.branch, saved.commit]);
+				await git(workspace, ["reset", "--mixed", saved.head]);
+				from = "autosave";
+			} catch (error) {
+				if (error instanceof WorkspaceLostError) throw error;
+				console.warn(JSON.stringify({ event: "pim.coding.autosave_restore_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+			} finally {
+				await workspace.remove(file).catch(() => {});
+			}
+		}
+		if (from === "base") await git(workspace, ["checkout", "-f", "-B", thread.branch, base]);
+		const cli = cliHarness(thread.harness);
+		this.ctx.storage.transactionSync(() => {
+			if (cli && !cli.remoteSessions) this.store.setHarnessSession(null);
+			this.store.recordEvent("workspace.restored", { from, ...(from === "autosave" && saved ? { savedAt: saved.savedAt } : {}) });
+		});
+		console.warn(JSON.stringify({ event: "pim.coding.workspace_restored", thread: thread.threadId, from }));
 	}
 
 	/**
@@ -2406,19 +2527,160 @@ export class CodingThreadDO extends DurableObject<Env> {
 		this.store.update({ workspaceRef: null });
 	}
 
-	/** The workspace with every command also killed when the thread is stopped. */
-	#killable(workspace: Workspace): Workspace {
+	/**
+	 * The workspace with every command also killed when the thread is
+	 * stopped, and every call that fails as a workspace that went down would
+	 * looked into (`#failure`): one on a workspace found down throws
+	 * `WorkspaceLostError`.
+	 */
+	#killable(workspace: Workspace, ref: WorkspaceRef): Workspace {
 		const kill = () => this.#kill.signal;
+		const failure = (error: unknown) => this.#failure(workspace, ref, error);
+		const lost = () => this.#lost.has(workspace);
 		return new Proxy(workspace, {
 			get(target, property) {
 				if (property === "exec") {
-					return (cmd: string[], options: Parameters<Workspace["exec"]>[1]) =>
-						target.exec(cmd, { ...options, signal: options.signal ? AbortSignal.any([options.signal, kill()]) : kill() });
+					return (cmd: string[], options: Parameters<Workspace["exec"]>[1]) => {
+						if (lost()) return refused();
+						return watched(target.exec(cmd, { ...options, signal: options.signal ? AbortSignal.any([options.signal, kill()]) : kill() }), failure);
+					};
 				}
 				const value = Reflect.get(target, property, target);
-				return typeof value === "function" ? value.bind(target) : value;
+				if (typeof value !== "function") return value;
+				return (...args: unknown[]) => {
+					if (lost()) return Promise.reject(new WorkspaceLostError());
+					return (value as (...args: unknown[]) => Promise<unknown>).apply(target, args).catch(async (error) => {
+						throw await failure(error);
+					});
+				};
 			},
 		});
+	}
+
+	/**
+	 * What a call on the workspace that threw should throw: the error itself,
+	 * unless it is one a workspace that went down would throw and the
+	 * workspace, the thread's current one, doesn't answer for the grace
+	 * (`#probe`). Then the workspace is let go of, keeping its volume, and
+	 * the call and every later one on it throw `WorkspaceLostError`.
+	 */
+	async #failure(workspace: Workspace, ref: WorkspaceRef, error: unknown): Promise<unknown> {
+		if (this.#lost.has(workspace)) return new WorkspaceLostError();
+		// A workspace the thread let go of, or replaced, isn't looked into.
+		if (!mayBeLost(error) || this.store.thread()?.workspaceRef?.id !== ref.id) return error;
+		let probe = this.#probing.get(workspace);
+		if (!probe) {
+			probe = this.#probe(ref);
+			this.#probing.set(workspace, probe);
+			void probe.finally(() => this.#probing.delete(workspace));
+		}
+		if (!(await probe)) return error;
+		if (!this.#lost.has(workspace)) {
+			this.#lost.add(workspace);
+			await this.#loseWorkspace(ref, error);
+		}
+		return new WorkspaceLostError();
+	}
+
+	/**
+	 * Whether the workspace went down: its backend says it has no such
+	 * workspace, or neither the backend nor the workspace answers until the
+	 * grace runs out. A workspace that answers, or that its backend stopped
+	 * on purpose, isn't.
+	 */
+	async #probe(ref: WorkspaceRef): Promise<boolean> {
+		const provider = this.workspaceProviders().get(ref.providerId);
+		const grace = this.workspaceLostGraceMs();
+		const deadline = Date.now() + grace;
+		for (;;) {
+			try {
+				const workspace = await provider.get(ref);
+				if (!workspace) return true;
+				const { state } = await workspace.status();
+				if (state === "gone") return true;
+				if (state !== "running" || (await answers(workspace))) return false;
+			} catch {
+				// The backend doesn't answer: maybe it is restarting.
+			}
+			if (Date.now() >= deadline) return true;
+			await new Promise((resolve) => setTimeout(resolve, Math.max(10, Math.min(5_000, grace / 5))));
+		}
+	}
+
+	/** Lets a workspace that went down go, keeping its volume, so its next use makes it again from its files. */
+	async #loseWorkspace(ref: WorkspaceRef, error: unknown): Promise<void> {
+		const thread = this.store.required();
+		console.warn(JSON.stringify({ event: "pim.coding.workspace_lost", thread: thread.threadId, operation: thread.currentOperation, error: errorText(error).slice(0, 300) }));
+		this.store.recordEvent("workspace.lost", { operationId: thread.currentOperation ?? "", error: errorText(error).slice(0, 300) });
+		if (this.#open?.id === ref.id) this.#open = null;
+		try {
+			await this.workspaceProviders().get(ref.providerId).destroy(ref, { keepVolume: true });
+			if (this.store.required().workspaceRef?.id === ref.id) this.store.update({ workspaceRef: null });
+		} catch (failure) {
+			// The backend can't be reached: the next use finds the workspace down again, and lets it go then.
+			console.warn(JSON.stringify({ event: "pim.coding.destroy_failed", thread: thread.threadId, error: errorText(failure).slice(0, 300) }));
+		}
+	}
+
+	/**
+	 * Saves the work in the open workspace, committed or not, without
+	 * touching the checkout: what git would add goes into a tree through an
+	 * index of its own, which a commit on top of the branch holds, kept as
+	 * `refs/pim/autosave` and pushed nowhere, and a bundle of everything
+	 * since the thread's base is kept in this object, so the work outlives
+	 * the workspace's volume. Nothing is saved when nothing changed; a bundle
+	 * too big to keep leaves the last one kept. One asked for while another
+	 * runs follows it, so it sees what changed meanwhile.
+	 */
+	#autosave(): Promise<void> {
+		if (this.#autosaving) return this.#autosaving.then(() => this.#autosave());
+		this.#autosaving = this.#saveWork()
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.autosave_failed", thread: this.store.thread()?.threadId, error: errorText(error).slice(0, 300) })))
+			.finally(() => {
+				this.#autosaving = null;
+			});
+		return this.#autosaving;
+	}
+
+	async #saveWork(): Promise<void> {
+		const thread = this.store.required();
+		const open = this.#open;
+		if (!open || thread.slot !== "held" || thread.workspaceRef?.id !== open.id || thread.baseSha === null) return;
+		this.#autosavedAt = Date.now();
+		const workspace = open.workspace;
+		const index = { env: { GIT_INDEX_FILE: AUTOSAVE_INDEX } };
+		await git(workspace, ["add", "-A"], index);
+		const tree = (await git(workspace, ["write-tree"], index)).trim();
+		const head = (await git(workspace, ["rev-parse", "HEAD"])).trim();
+		const last = this.store.autosave();
+		if (last?.tree === tree && last.head === head) return;
+		const commit = (await git(workspace, ["-c", "user.name=Pim", "-c", "user.email=coding@pim.invalid", "commit-tree", tree, "-p", head, "-m", "Autosave"])).trim();
+		await git(workspace, ["update-ref", AUTOSAVE_REF, commit]);
+		const file = `${WORKSPACE_ROOT}/.pim-autosave.bundle`;
+		let bundle: Uint8Array;
+		try {
+			await git(workspace, ["bundle", "create", file, `${thread.baseSha}..${AUTOSAVE_REF}`]);
+			bundle = await workspace.readFile(file);
+		} finally {
+			await workspace.remove(file).catch(() => {});
+		}
+		if (bundle.length > MAX_AUTOSAVE_BYTES) {
+			console.warn(JSON.stringify({ event: "pim.coding.autosave_too_big", thread: thread.threadId, bytes: bundle.length }));
+			return;
+		}
+		this.store.saveAutosave({ head, tree, commit, bundle, savedAt: this.now() });
+	}
+
+	/** A resume's prompt for a CLI that starts a new session, its last one lost with the workspace's volume: what it was asked first and what it last said. */
+	async #lostSessionPrompt(text: string): Promise<string> {
+		const messages = projectEntries(await this.harness.messages());
+		const task = messages
+			.find((message) => message.role === "user")
+			?.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))
+			.join("\n")
+			.trim();
+		const said = await this.#lastSaid().catch(() => null);
+		return [text, "Your earlier session was lost with the workspace, so this is a new one; the repository holds your work as it was last saved.", ...(task ? ["The task you were given:", task] : []), ...(said ? ["What you last said:", said] : [])].join("\n\n");
 	}
 }
 
@@ -2579,6 +2841,8 @@ export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branc
 
 /** What `continue` tells the model. */
 export const CONTINUE_TEXT = "Continue where you left off.";
+/** What a CLI turn cut off by its workspace going down is told when it goes on in the workspace made again. */
+export const LOST_RESUME_TEXT = "You were interrupted by an infrastructure restart; continue where you left off.";
 const STALLED_CONTINUE_TEXT = "Your last turn was stopped because it made no progress for a long while, so a command of yours may have hung. Check where you were, and continue where you left off.";
 
 /** A refused model call's error. "out of budget" is wording pi-ai never retries. */
@@ -2624,6 +2888,27 @@ const UNLIMITED_TOKEN_MS = 7 * 24 * 60 * 60_000;
 
 /** Marks the operation of a turn the thread began itself, after one stalled. */
 const AUTO_CONTINUE_PREFIX = "auto-continue:";
+
+/** The operations of turns a thread goes on with by itself after an interruption, and how many it goes on with in a row. */
+const RESUME_PREFIX = "resume-";
+const MAX_RESUMES = 3;
+
+/** How long a workspace that fails may not answer before it counts as down. */
+const LOST_GRACE_MS = 60_000;
+
+/** How long a thread going on after its workspace went down first waits for a backend it can't reach; doubled each time. */
+const LOST_RETRY_MS = 60_000;
+
+const lostTooOften = (times: number) => `The workspace went down ${times + 1} times in a row: its container, the workspace manager or its host died, and it was made again from its files ${times} times. Continue the thread to try again.`;
+
+/** Why a thread failed for a workspace that kept going down, with the last error if there was one, as its state and its parents tell it. */
+const lostDetail = (last?: string | null) => (last ? `${lostTooOften(MAX_RESUMES)} Last: ${last}` : lostTooOften(MAX_RESUMES)).slice(0, DETAIL_MAX);
+
+/** How often a running turn's work is autosaved, where it is kept in the workspace, the index it is added with, and the most of it this object keeps. */
+const AUTOSAVE_MS = 3 * 60_000;
+const AUTOSAVE_REF = "refs/pim/autosave";
+const AUTOSAVE_INDEX = ".git/pim-autosave-index";
+const MAX_AUTOSAVE_BYTES = 1024 * 1024;
 
 const DEFAULT_LIMITS: CodingLimits = { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: null };
 
@@ -2739,6 +3024,37 @@ function transcriptOf(entries: readonly EntryRecord[]): TranscriptMessage[] {
 		}
 		return projectEntries([entry]);
 	});
+}
+
+/** Whether a workspace call's failure may be the workspace going down, rather than about what was asked: a missing file, a path, a full disk or a full backend never is. */
+function mayBeLost(error: unknown): boolean {
+	if (error instanceof WorkspaceFileError || error instanceof WorkspacePathError || error instanceof WorkspaceLimitError || error instanceof WorkspaceCapacityError || error instanceof WorkspaceLostError) return false;
+	if (error instanceof ComposeManagerError) return error.status >= 500;
+	return !(error instanceof Error && error.name === "AbortError");
+}
+
+/** Whether a command runs in the workspace at all: any exit says so, whatever its code. */
+async function answers(workspace: Workspace): Promise<boolean> {
+	try {
+		for await (const event of workspace.exec(["true"], { timeoutMs: 10_000 })) if (event.type === "exit") return event.timedOut !== true;
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+/** A command's events, with what it throws looked into by `failure`. */
+async function* watched(events: AsyncIterable<ExecEvent>, failure: (error: unknown) => Promise<unknown>): AsyncGenerator<ExecEvent> {
+	try {
+		yield* events;
+	} catch (error) {
+		throw await failure(error);
+	}
+}
+
+/** A command on a workspace found down: it throws at once. */
+async function* refused(): AsyncGenerator<ExecEvent> {
+	throw new WorkspaceLostError();
 }
 
 /** Whether git's error says the host rate limited the request or was briefly unavailable, which is worth another try. */

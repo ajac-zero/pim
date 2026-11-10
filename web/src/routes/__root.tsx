@@ -5,7 +5,6 @@ import {
 } from "@tanstack/react-query";
 import {
   createRootRouteWithContext,
-  Link,
   Outlet,
   redirect,
   retainSearchParams,
@@ -22,16 +21,13 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { AgentIcon } from "~/components/agent-icon";
 import {
   AppSidebar,
   SIDEBAR_PANELS,
   type SidebarPanel,
   SidebarPanelContent,
-  sessionTitle,
   useAwaitingApproval,
 } from "~/components/app-sidebar";
-import { ActivityToggle } from "~/components/chat/activity-toggle";
 import { CommandPalette } from "~/components/command-palette";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { MeetMajordomo } from "~/components/majordomo-setup";
@@ -52,7 +48,7 @@ import { authSessionQuery } from "~/lib/auth";
 import { closeScreen } from "~/lib/computer-screen";
 import { pimClient } from "~/lib/pim-client";
 import { pushEnabled, pushSupported } from "~/lib/push";
-import { agentsQuery, majordomoQuery, sessionsQuery } from "~/lib/queries";
+import { majordomoQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 export interface RouterContext {
@@ -396,42 +392,6 @@ function usePimEvents() {
   }, [queryClient, navigate, t, sessionId]);
 }
 
-/** The open chat's title, or the app's name elsewhere. */
-function MobileTitle() {
-  const { t } = useI18n();
-  const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
-  const { data: sessions } = useQuery(sessionsQuery());
-  const { data: agents } = useQuery(agentsQuery());
-  const session = sessions?.find((candidate) => candidate.id === sessionId);
-  const agent =
-    session && !session.visit
-      ? agents?.find((agent) =>
-          session.agent ? agent.id === session.agent.id : agent.majordomo,
-        )
-      : undefined;
-  return (
-    <span className="flex min-w-0 items-center gap-2 text-[15px]">
-      {agent && (
-        <Link
-          to="."
-          search={(prev) => ({ ...prev, dialog: "agents", agent: agent.id })}
-          aria-label={t("editAgent")}
-          className="shrink-0 rounded-md"
-        >
-          <AgentIcon
-            agent={agent}
-            tile
-            className="size-6 shrink-0 rounded-md"
-          />
-        </Link>
-      )}
-      <span className="truncate">
-        {session ? sessionTitle(session, t) : "Pim"}
-      </span>
-    </span>
-  );
-}
-
 /**
  * The sidebar beside the page on wider screens. On narrow ones a bar along
  * the bottom takes its place, always there like the rail, and its lists fill
@@ -472,10 +432,6 @@ function AppLayout() {
     setListedPanel(panel);
     setListOpen(true);
   }
-  const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
-  const inChat = useRouterState({
-    select: (state) => state.location.pathname.startsWith("/chat/"),
-  });
   const awaitingApproval = useAwaitingApproval();
   usePimEvents();
 
@@ -518,7 +474,7 @@ function AppLayout() {
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {listOpen ? (
+        {listOpen && (
           <div className="flex min-h-0 flex-1 flex-col bg-sidebar text-sidebar-foreground md:hidden">
             <TooltipProvider>
               <SidebarPanelContent
@@ -527,18 +483,6 @@ function AppLayout() {
               />
             </TooltipProvider>
           </div>
-        ) : (
-          inChat && (
-            <div className="flex h-13 shrink-0 items-center gap-2 border-sidebar-border border-b px-4 md:hidden">
-              <MobileTitle />
-              {sessionId && (
-                <ActivityToggle
-                  sessionId={sessionId}
-                  className="ml-auto shrink-0"
-                />
-              )}
-            </div>
-          )
         )}
 
         {/* Stays mounted under a list, so going back finds the page as it was. */}

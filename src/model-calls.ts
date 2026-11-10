@@ -281,6 +281,10 @@ export class ModelCallLedger {
 				price ? this.#prices.version : null,
 				call.plan ? 1 : 0,
 			);
+			// One structured line per call, so what was priced (and what was not, and why) can be read from the logs.
+			console.log(
+				JSON.stringify({ event: "pim.model_call", provider: call.provider, model: call.model, plan: call.plan, input: tokens.input, output: tokens.output, cacheRead: tokens.cacheRead, cacheWrite: tokens.cacheWrite5m + tokens.cacheWrite1h, costUsd: cost, priceVersion: price ? this.#prices.version : null, stop: call.stopReason }),
+			);
 			const wasDirty = this.#dirty;
 			this.#dirty = true;
 			return !wasDirty;

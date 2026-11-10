@@ -796,9 +796,7 @@ describe("the harness", () => {
     threadPage(api);
     const header = (await screen.findByRole("banner")) as HTMLElement;
     expect(within(header).getByText("Claude Code")).toBeTruthy();
-    expect(
-      header.querySelector("svg[data-harness='claude-code']"),
-    ).toBeTruthy();
+    expect(header.querySelector("[data-harness='claude-code']")).toBeTruthy();
   });
 
   it("is chosen in the start form, which then offers to connect Claude Code", async () => {
@@ -1115,7 +1113,7 @@ describe("a coding subthread in the chat list", () => {
     const link = await screen.findByRole("link");
     expect(link.getAttribute("href")).toBe("/coding/t1");
     expect(within(link).getByText("Fix the flaky date test")).toBeTruthy();
-    expect(link.querySelector("svg[data-harness='codex']")).toBeTruthy();
+    expect(link.querySelector("[data-harness='codex']")).toBeTruthy();
     expect(within(link).getByRole("img", { name: "Working" })).toBeTruthy();
   });
 
@@ -1177,9 +1175,7 @@ describe("connecting with an API key", () => {
     });
     const panel = within(region);
     expect(await panel.findByText("Not connected")).toBeTruthy();
-    expect(
-      region.querySelector("svg[data-harness='mistral-vibe']"),
-    ).toBeTruthy();
+    expect(region.querySelector("[data-harness='mistral-vibe']")).toBeTruthy();
     const disclosure = HARNESS_DISCLOSURES["mistral-vibe"];
     expect(panel.getByText(disclosure.title)).toBeTruthy();
     for (const paragraph of disclosure.paragraphs) {

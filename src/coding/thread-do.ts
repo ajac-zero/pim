@@ -8,6 +8,15 @@ import { PiHarness } from "agents/harness/pi";
 import { Lifecycle, type LifecycleJobContext, type LifecycleJobOutcome } from "agents/lifecycle";
 import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 import { deploymentSettings } from "../deployment";
+import {
+	type CodingEnvironment,
+	environmentError,
+	environmentKey,
+	lockfileHashes,
+	repositorySetupScript,
+	runSetup,
+	SETUP_TIMEOUT_MS,
+} from "./environment-cache";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
@@ -66,7 +75,16 @@ import { restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
-import { WORKSPACE_ROOT, WorkspaceCapacityError, type Workspace, type WorkspaceProvider, type WorkspaceSpec } from "./workspace/types";
+import {
+	type EnvironmentOwner,
+	type EnvironmentSnapshot,
+	WORKSPACE_ROOT,
+	WorkspaceCapacityError,
+	type Workspace,
+	type WorkspaceProvider,
+	type WorkspaceRef,
+	type WorkspaceSpec,
+} from "./workspace/types";
 import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
 
 /**
@@ -91,6 +109,12 @@ import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
  * Every step is driven from durable state by one job (`advance`), so an
  * eviction loses nothing: on restart pi resumes its run, and the job picks
  * up provisioning, the next input, or the end of the turn where they were.
+ *
+ * Before its first turn a thread readies the repository's environment
+ * (./environment-cache.ts): it starts its workspace from the person's
+ * snapshot of the repository where there is one, and otherwise runs the
+ * repository's setup script and keeps a snapshot for the threads after it.
+ * The environment never stops a thread: without one it goes on as before.
  *
  * A thread whose `harness` is a vendor's CLI, such as Claude Code, runs each
  * turn as one run of that CLI in the workspace instead of a pi run
@@ -182,6 +206,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The machine image a workspace starts from. */
 	protected workspaceImage(): string {
 		return DEFAULT_WORKSPACE_IMAGE;
+	}
+
+	/** How often a thread waiting for another thread's build of its environment looks for the snapshot. */
+	protected environmentPollMs(): number {
+		return 5_000;
 	}
 
 	/** Hosts the workspace may reach through the egress proxy: Pim's git broker and the common package registries. */
@@ -310,7 +339,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
 		// A queued thread whose backend reports its health checks it again each time, so a queue held for low disk opens once there is room.
-		const busy = thread !== null && (thread.currentOperation !== null || (thread.slot === "held" && thread.state === "provisioning") || (thread.slot === "queued" && this.#healthOf(thread) !== null));
+		const busy =
+			thread !== null &&
+			(thread.currentOperation !== null ||
+				(thread.slot === "held" && (thread.state === "provisioning" || thread.environment.rebuildRequested)) ||
+				(thread.slot === "queued" && this.#healthOf(thread) !== null));
 		return busy ? { rescheduleAt: Date.now() + HEARTBEAT_MS } : undefined;
 	}
 
@@ -393,11 +426,37 @@ export class CodingThreadDO extends DurableObject<Env> {
 			currentOperation: thread.currentOperation,
 			inbox: this.store.inboxSize(),
 			checkpoint: this.store.latestCheckpoint(),
+			environment: thread.environment,
 			createdBy: thread.createdBy,
 			parentThread: thread.parentThread,
 			createdAt: thread.createdAt,
 			updatedAt: thread.updatedAt,
 		};
+	}
+
+	/** The repository's prepared environment in the thread's workspace (./environment-cache.ts). */
+	async environment(): Promise<CodingEnvironment> {
+		await this.lifecycle.start();
+		return this.store.required().environment;
+	}
+
+	/**
+	 * Builds the thread's environment again: deletes the person's snapshot of
+	 * its current key now, then, once the thread holds its workspace and
+	 * between turns, runs the setup script there again and keeps a new
+	 * snapshot (`#prepareEnvironment`). A thread without a slot asks for one;
+	 * a failed thread rebuilds once it is continued.
+	 */
+	async rebuildEnvironment(): Promise<CodingEnvironment> {
+		await this.lifecycle.start();
+		const thread = this.#live();
+		if (thread.currentOperation) throw new Error("This coding thread's turn is under way: rebuild its environment between turns");
+		const provider = this.workspaceProviders().get(thread.providerId);
+		if (!provider.capabilities.environmentSnapshots) throw new Error("This coding thread's workspace backend keeps no environments");
+		if (thread.environment.key) await provider.deleteEnvironment(thread.space, thread.environment.key);
+		this.#setEnvironment({ state: "building", rebuildRequested: true, error: undefined });
+		this.#kick();
+		return this.store.required().environment;
 	}
 
 	/**
@@ -1009,7 +1068,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (!thread || thread.state === "failed" || thread.state === "archived" || thread.state === "waiting_input") return;
 		}
 		const work = this.store.inboxSize() > 0;
-		if (!work) {
+		// A rebuild of the environment needs the workspace as a turn does.
+		const rebuild = thread.environment.rebuildRequested;
+		if (!work && !rebuild) {
 			if (thread.state === "provisioning" && thread.slot !== "held") this.store.update({ state: "idle" });
 			return;
 		}
@@ -1023,8 +1084,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.stateReason === "low_disk") await this.#refreshCapacity();
 		try {
 			await this.#workspace();
+			// A rebuild between turns is work the scheduler shouldn't take the slot back from.
+			if (!work && rebuild) await this.#report("running");
+			await this.#prepareEnvironment();
 		} catch (error) {
 			await this.#provisioningFailed(error);
+			return;
+		}
+		if (!work) {
+			if (this.store.required().state === "provisioning") this.store.update({ state: "idle" });
+			await this.#report("idle");
 			return;
 		}
 		try {
@@ -1574,23 +1643,24 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return `The repository ${thread.repoUrl} is checked out at ${REPO_DIR}, on the branch ${thread.branch} made from ${thread.baseRef}. Work in that directory.`;
 	}
 
-	/** The thread's workspace, made and cloned on first use, with its commands killed when the thread is stopped. */
-	#workspace(): Promise<Workspace> {
-		this.#opening ??= this.#openWorkspace().finally(() => {
+	/** The thread's workspace, made and cloned on first use, with its commands killed when the thread is stopped. A new one starts from `restoreFrom`, the person's environment snapshot, when given. */
+	#workspace(options: { restoreFrom?: EnvironmentSnapshot } = {}): Promise<Workspace> {
+		this.#opening ??= this.#openWorkspace(options).finally(() => {
 			this.#opening = null;
 		});
 		return this.#opening;
 	}
 
-	async #openWorkspace(): Promise<Workspace> {
+	async #openWorkspace(options: { restoreFrom?: EnvironmentSnapshot }): Promise<Workspace> {
 		const thread = this.store.required();
 		if (thread.slot !== "held") throw new Error("The coding thread holds no workspace slot now");
 		const provider = this.workspaceProviders().get(thread.providerId);
 		if (this.#open && thread.workspaceRef?.id === this.#open.id) return this.#open.workspace;
 		let workspace = thread.workspaceRef ? await provider.get(thread.workspaceRef) : null;
+		const started = workspace ? null : performance.now();
 		if (!workspace) {
 			// Creating twice for one session is one workspace, so a restart mid-create makes no second one.
-			const ref = await provider.create(this.#spec(thread));
+			const ref = await this.#createWorkspace(provider, thread, options.restoreFrom);
 			if (this.store.required().slot !== "held") {
 				// Archived or released while it was made: it goes at once.
 				await provider.destroy(ref, { keepVolume: true });
@@ -1603,11 +1673,45 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if ((await workspace.status()).state === "stopped") await workspace.start();
 		const killable = this.#killable(workspace);
 		await this.#ensureRepository(killable, thread);
+		if (started !== null) this.#setEnvironment({ provisionMs: Math.round(performance.now() - started) });
 		this.#open = { id: this.store.required().workspaceRef!.id, workspace: killable };
 		return killable;
 	}
 
-	#spec(thread: CodingThreadRow): WorkspaceSpec {
+	/**
+	 * Makes the thread's workspace. Its first one, on a backend that keeps
+	 * environments, starts from the person's newest snapshot of the
+	 * repository, the best guess before the repository is checked out
+	 * (`#prepareEnvironment` checks it then), or from `restoreFrom`. A
+	 * restore that fails for any reason but a full backend is logged and
+	 * the workspace is made empty, to be cloned as usual.
+	 */
+	async #createWorkspace(provider: WorkspaceProvider, thread: CodingThreadRow, restoreFrom?: EnvironmentSnapshot): Promise<WorkspaceRef> {
+		const spec = this.#spec(thread, provider);
+		const owner = spec.environment;
+		let snapshot = restoreFrom;
+		if (owner && !snapshot && thread.baseSha === null && thread.environment.preparedAt === null) {
+			snapshot = await provider.listEnvironments(owner).then(
+				(snapshots) => snapshots[0],
+				(error) => void console.warn(JSON.stringify({ event: "pim.coding.environment_list_failed", thread: thread.threadId, error: String(error).slice(0, 300) })),
+			);
+		}
+		if (owner && snapshot) {
+			const started = performance.now();
+			try {
+				const ref = await provider.create({ ...spec, environment: { ...owner, restoreFrom: snapshot.key } });
+				this.#setEnvironment({ state: "restoring", restoredFromKey: snapshot.key, builtAt: snapshot.createdAt, restoreMs: Math.round(performance.now() - started), error: undefined });
+				return ref;
+			} catch (error) {
+				if (error instanceof WorkspaceCapacityError || (error instanceof ComposeManagerError && error.code === "low_disk")) throw error;
+				console.warn(JSON.stringify({ event: "pim.coding.environment_restore_failed", thread: thread.threadId, key: snapshot.key, error: String(error).slice(0, 300) }));
+				this.store.recordEvent("environment.restore_failed", { key: snapshot.key, error: environmentError("The snapshot couldn't be restored", errorText(error)) });
+			}
+		}
+		return provider.create(spec);
+	}
+
+	#spec(thread: CodingThreadRow, provider: WorkspaceProvider): WorkspaceSpec {
 		return {
 			sessionId: thread.threadId,
 			image: this.workspaceImage(),
@@ -1615,20 +1719,29 @@ export class CodingThreadDO extends DurableObject<Env> {
 			limits: thread.limits,
 			egress: { allow: [...this.egressAllow(), ...(cliHarness(thread.harness)?.egress ?? [])] },
 			gitAuth: { mode: "none" },
+			...(provider.capabilities.environmentSnapshots ? { environment: environmentOwner(thread) } : {}),
 		};
 	}
 
-	/** Clones the repository and checks out the thread's branch, unless the workspace (or its kept volume) has it. */
+	/**
+	 * Clones the repository and checks out the thread's branch, unless the
+	 * workspace (or its kept volume) has it already. Until the thread first
+	 * checked out (`baseSha` is null), a workspace with a clone, such as one
+	 * restored from another thread's snapshot, fetches and checks out the
+	 * thread's branch over it.
+	 */
 	async #ensureRepository(workspace: Workspace, thread: CodingThreadRow): Promise<void> {
 		const cloned = await workspace.stat(`${REPO_DIR}/.git`).then(
 			() => true,
 			() => false,
 		);
-		if (cloned) return;
+		if (cloned && this.store.required().baseSha !== null) return;
 		const { url, token } = await this.cloneSource(thread);
-		// The broker token as an HTTP header for these two commands alone: git keeps no copy of it in the repository.
+		// The broker token as an HTTP header for these commands alone: git keeps no copy of it in the repository.
 		const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
-		await git(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+		if (!cloned) await git(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+		// A snapshot's clone may come from this Pim at another address.
+		else await git(workspace, ["remote", "set-url", "origin", url]);
 		const fetchOptions = { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token };
 		try {
 			await git(workspace, ["fetch", "origin", thread.baseRef], fetchOptions);
@@ -1637,9 +1750,157 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (thread.baseRef !== "main") throw error;
 			await git(workspace, ["fetch", "origin", "HEAD"], fetchOptions);
 		}
-		await git(workspace, ["checkout", "-B", thread.branch, "FETCH_HEAD"]);
+		await git(workspace, ["checkout", "-f", "-B", thread.branch, "FETCH_HEAD"]);
 		const sha = (await git(workspace, ["rev-parse", "HEAD"])).trim();
 		if (this.store.required().baseSha === null) this.store.update({ baseSha: sha });
+	}
+
+	/**
+	 * Readies the repository's environment in the thread's workspace, which
+	 * has the repository checked out: before the thread's first turn, and
+	 * again when a rebuild was asked for. That is before any secret has been
+	 * in the workspace (a harness's login goes in only for a turn and comes
+	 * out after it; the git broker's token and the model gateway's are only
+	 * ever in a command's environment), so what is snapshotted holds none.
+	 *
+	 * With a setup script (the person's setting for the repository, else
+	 * its `.pim/setup.sh`) the environment's key is computed. A workspace
+	 * restored from that key's snapshot is ready. Otherwise one of the
+	 * person's snapshots with the key is restored into a new workspace, or,
+	 * when there is none, the thread takes the person's lock on building it,
+	 * runs the script and keeps a snapshot; while another of their threads
+	 * holds the lock it waits for that one's snapshot, a bounded time.
+	 * Nothing here fails the thread: a failure is recorded and the thread
+	 * goes on in its workspace as it is. Only a stop is thrown.
+	 */
+	async #prepareEnvironment(): Promise<void> {
+		const thread = this.store.required();
+		const current = thread.environment;
+		const provider = this.workspaceProviders().get(thread.providerId);
+		if (!provider.capabilities.environmentSnapshots) return;
+		const rebuild = current.rebuildRequested;
+		if (!rebuild && current.preparedAt !== null) return;
+		// A thread that already worked without one (it began before environments, or was called off while one was readied) gets none unless asked.
+		if (!rebuild && this.store.nextInput()?.operationId !== thread.startOperation) {
+			const unfinished = current.state !== "none";
+			this.#setEnvironment(unfinished ? { state: "failed", error: "The thread went on before its environment was ready", preparedAt: this.now() } : { preparedAt: this.now() });
+			return;
+		}
+		const signal = this.#kill.signal;
+		const owner = environmentOwner(thread);
+		let workspace = await this.#workspace();
+		let setup: { script: string; source: "settings" | "repository" } | null;
+		let key: string;
+		try {
+			setup = await this.#setupScript(workspace, thread, owner);
+			if (setup === null) {
+				this.#setEnvironment({ state: "none", key: null, source: null, rebuildRequested: false, preparedAt: this.now(), error: undefined });
+				return;
+			}
+			key = await environmentKey({ ...owner, setupScript: setup.script, lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage() });
+		} catch (error) {
+			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
+			this.#environmentFailed(null, environmentError("The environment's setup script couldn't be read", errorText(error)));
+			return;
+		}
+		const { source } = setup;
+		if (!rebuild && current.state === "restoring" && current.restoredFromKey === key) {
+			this.#setEnvironment({ state: "cached", key, source, preparedAt: this.now(), error: undefined });
+			this.store.recordEvent("environment.restored", { key });
+			return;
+		}
+		// A rebuild runs the script in the thread's own workspace; a new thread may start over from someone's snapshot.
+		let restore = !rebuild;
+		const scheduler = codingScheduler(this.env, thread.space);
+		const deadline = performance.now() + BUILD_LOCK_MS;
+		for (;;) {
+			const snapshot = restore ? await this.#findSnapshot(provider, owner, key) : undefined;
+			if (snapshot) {
+				// Nothing has worked in the workspace yet: it is replaced, and the new one checks the repository out again.
+				this.store.update({ baseSha: null });
+				await this.#dropWorkspace({ keepVolume: false });
+				workspace = await this.#workspace({ restoreFrom: snapshot });
+				const now = this.store.required().environment;
+				if (now.state === "restoring" && now.restoredFromKey === key) {
+					this.#setEnvironment({ state: "cached", key, source, preparedAt: this.now(), error: undefined });
+					this.store.recordEvent("environment.restored", { key });
+					return;
+				}
+				// The restore failed and the workspace is a plain clone: build it here instead.
+				restore = false;
+			}
+			if (await scheduler.acquireEnvironmentBuild(key, thread.threadId, BUILD_LOCK_MS)) {
+				try {
+					await this.#buildEnvironment(provider, workspace, owner, key, setup);
+				} finally {
+					await scheduler.releaseEnvironmentBuild(key, thread.threadId).catch(() => {});
+				}
+				return;
+			}
+			// Another of the person's threads is building it: wait for its snapshot.
+			const waiting = this.store.required().environment;
+			if (waiting.state !== "building" || waiting.key !== key) this.#setEnvironment({ state: "building", key, source, error: undefined });
+			if (performance.now() > deadline) {
+				this.#environmentFailed(key, "Another of your coding threads was still preparing this environment");
+				return;
+			}
+			await sleep(this.environmentPollMs(), signal);
+			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
+			restore = !rebuild;
+		}
+	}
+
+	/** Runs the setup script in the workspace, then keeps the snapshot. A failure of either is recorded, and the thread goes on. */
+	async #buildEnvironment(provider: WorkspaceProvider, workspace: Workspace, owner: EnvironmentOwner, key: string, setup: { script: string; source: "settings" | "repository" }): Promise<void> {
+		this.#setEnvironment({ state: "building", key, source: setup.source, error: undefined });
+		const started = performance.now();
+		const result = await runSetup(workspace, setup.script, { cwd: REPO_DIR });
+		const setupMs = Math.round(performance.now() - started);
+		if (result.outcome === "stopped") throw new Error(ENVIRONMENT_STOPPED);
+		if (result.outcome === "failed") {
+			this.#setEnvironment({ setupMs });
+			this.#environmentFailed(key, result.error);
+			return;
+		}
+		const snapshotStarted = performance.now();
+		try {
+			const ref = this.store.required().workspaceRef;
+			if (!ref) throw new Error("The coding thread has no workspace");
+			const snapshot = await provider.snapshotEnvironment(ref, { ...owner, key });
+			this.#setEnvironment({ state: "cached", key, builtAt: snapshot.createdAt, setupMs, snapshotMs: Math.round(performance.now() - snapshotStarted), rebuildRequested: false, preparedAt: this.now(), error: undefined });
+			this.store.recordEvent("environment.built", { key, setupMs });
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.environment_snapshot_failed", thread: this.store.required().threadId, key, error: String(error).slice(0, 300) }));
+			this.#setEnvironment({ setupMs });
+			this.#environmentFailed(key, environmentError("The environment was set up but couldn't be kept", errorText(error)));
+		}
+	}
+
+	#environmentFailed(key: string | null, error: string): void {
+		this.#setEnvironment({ state: "failed", key, error, rebuildRequested: false, preparedAt: this.now() });
+		this.store.recordEvent("environment.failed", { key, error });
+	}
+
+	#setEnvironment(change: Partial<CodingEnvironment>): void {
+		this.store.update({ environment: { ...this.store.required().environment, ...change } });
+	}
+
+	/** The person's snapshot of the repository with `key`; none when they have none, or the backend can't say. */
+	async #findSnapshot(provider: WorkspaceProvider, owner: EnvironmentOwner, key: string): Promise<EnvironmentSnapshot | undefined> {
+		try {
+			return (await provider.listEnvironments(owner)).find((snapshot) => snapshot.key === key);
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.environment_list_failed", thread: this.store.required().threadId, error: String(error).slice(0, 300) }));
+			return undefined;
+		}
+	}
+
+	/** The repository's setup script: the person's setting for it, else its own `.pim/setup.sh`; null without either. */
+	async #setupScript(workspace: Workspace, thread: CodingThreadRow, owner: EnvironmentOwner): Promise<{ script: string; source: "settings" | "repository" } | null> {
+		const setting = (await codingScheduler(this.env, thread.space).repoSettings(owner.repo)).setupScript;
+		if (setting !== null) return { script: setting, source: "settings" };
+		const own = await repositorySetupScript(workspace, REPO_DIR);
+		return own === null ? null : { script: own, source: "repository" };
 	}
 
 	/** Commits whatever changed in the workspace as a checkpoint, and keeps its diff from the start. Null when nothing changed or there is no workspace. */
@@ -1740,6 +2001,8 @@ export type CodingThreadStatus = {
 	/** Inputs waiting for a turn. */
 	readonly inbox: number;
 	readonly checkpoint: Checkpoint | null;
+	/** The repository's prepared environment in the thread's workspace. */
+	readonly environment: CodingEnvironment;
 	readonly createdBy: string;
 	readonly parentThread: string | null;
 	readonly createdAt: number;
@@ -1890,6 +2153,30 @@ const HEARTBEAT_MS = 30_000;
 const ADVANCE_WAIT_MS = 20_000;
 const GIT_TIMEOUT_MS = 120_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
+
+/** How long a thread holds the lock on building an environment, and waits for another thread's build: the setup script's time, and the snapshot's. */
+const BUILD_LOCK_MS = SETUP_TIMEOUT_MS + 10 * 60_000;
+
+/** An abort while the environment is readied: `#provisioningFailed` takes " was stopped:" as one. */
+const ENVIRONMENT_STOPPED = "Readying the environment was stopped: the thread was aborted";
+
+/** Whose the thread's environments are: the person whose space it is, and the repository as `owner/name` in lowercase. */
+function environmentOwner(thread: CodingThreadRow): EnvironmentOwner {
+	return { userId: thread.space, repo: parseRepoUrl(thread.repoUrl).fullName.toLowerCase() };
+}
+
+/** Waits `ms`, or less if `signal` aborts. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		const done = () => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", done);
+			resolve();
+		};
+		const timer = setTimeout(done, ms);
+		signal.addEventListener("abort", done);
+	});
+}
 
 /** pi's run policy for coding threads: a few retries for transient model errors. */
 const CODING_SETTINGS: HarnessSettings = {

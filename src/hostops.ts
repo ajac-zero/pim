@@ -92,6 +92,10 @@ export type AuditRow = {
 	ts: number;
 	actorKind: string;
 	actorId: string | null;
+	/** The chat the request came from, when an agent asked; for the daemon's own rows, the chat that asked for their operation. */
+	chatId: string | null;
+	/** The operation the row is about, when it is about one; for a refused command, `exec`. */
+	op: string | null;
 	action: string;
 	opId: string | null;
 	args: HostOpData | null;
@@ -239,7 +243,8 @@ CREATE TABLE IF NOT EXISTS audit (
 	op_id TEXT,
 	args_redacted_json TEXT,
 	outcome TEXT NOT NULL,
-	detail TEXT
+	detail TEXT,
+	chat_id TEXT
 );
 CREATE TABLE IF NOT EXISTS credential (
 	hash TEXT PRIMARY KEY,
@@ -257,11 +262,11 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((byte) => byt
 const unhex = (text: string) => new Uint8Array(text.match(/../g)!.map((pair) => Number.parseInt(pair, 16)));
 const sha256 = (text: string) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
 
-type Actor = { kind: string; id: string | null };
+type Actor = { kind: string; id: string | null; chatId?: string | null };
 const actorOf = (caller: HostOpsCaller): Actor => {
 	switch (caller.kind) {
 		case "agent":
-			return { kind: "agent", id: `${caller.accountId}/${caller.agentId}` };
+			return { kind: "agent", id: `${caller.accountId}/${caller.agentId}`, chatId: caller.chatId };
 		case "anonymous":
 			return { kind: "anonymous", id: caller.address ?? null };
 		default:
@@ -300,6 +305,8 @@ export class HostOps extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		ctx.storage.sql.exec(SCHEMA);
+		// The audit log of an older version has no chat column.
+		if (!ctx.storage.sql.exec("SELECT 1 FROM pragma_table_info('audit') WHERE name = 'chat_id'").toArray().length) ctx.storage.sql.exec("ALTER TABLE audit ADD COLUMN chat_id TEXT");
 	}
 
 	#sql(query: string, ...bindings: unknown[]) {
@@ -310,7 +317,7 @@ export class HostOps extends DurableObject<Env> {
 		const full = args === undefined ? null : JSON.stringify(redactValue(args) ?? null);
 		const redacted = full === null || full.length <= AUDIT_ARGS_CHARS ? full : JSON.stringify({ truncated: full.slice(0, AUDIT_ARGS_CHARS) });
 		this.#sql(
-			"INSERT INTO audit (ts, actor_kind, actor_id, action, op_id, args_redacted_json, outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO audit (ts, actor_kind, actor_id, action, op_id, args_redacted_json, outcome, detail, chat_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			Date.now(),
 			actor.kind,
 			actor.id,
@@ -319,6 +326,7 @@ export class HostOps extends DurableObject<Env> {
 			redacted,
 			outcome,
 			detail === null ? null : redactSecrets(detail).slice(0, MAX_SUMMARY),
+			actor.chatId ?? null,
 		);
 		this.#sql("DELETE FROM audit WHERE id <= (SELECT MAX(id) FROM audit) - ?", AUDIT_ROWS);
 	}
@@ -531,21 +539,41 @@ export class HostOps extends DurableObject<Env> {
 		};
 	}
 
-	/** The audit log, newest first. */
-	audit(limit: number): AuditRow[] {
-		return this.#sql("SELECT * FROM audit ORDER BY id DESC LIMIT ?", limit)
+	/** The audit log, newest first, from `since` (a time in ms) on, and only the rows about operation `op` or with action `op`. */
+	audit(limit: number, { since, op }: { since?: number; op?: string } = {}): AuditRow[] {
+		return this.#sql(
+			`SELECT audit.*, COALESCE(audit.chat_id, ops.caller_chat_id) AS chat, ops.op AS op_name FROM audit LEFT JOIN ops ON ops.id = audit.op_id
+			WHERE audit.ts >= ? AND (? IS NULL OR ops.op = ? OR audit.action = ?) ORDER BY audit.id DESC LIMIT ?`,
+			since ?? 0,
+			op ?? null,
+			op ?? null,
+			op ?? null,
+			limit,
+		)
 			.toArray()
-			.map((row) => ({
-				id: Number(row.id),
-				ts: Number(row.ts),
-				actorKind: String(row.actor_kind),
-				actorId: row.actor_id === null ? null : String(row.actor_id),
-				action: String(row.action),
-				opId: row.op_id === null ? null : String(row.op_id),
-				args: row.args_redacted_json === null ? null : JSON.parse(String(row.args_redacted_json)),
-				outcome: String(row.outcome),
-				detail: row.detail === null ? null : String(row.detail),
-			}));
+			.map((row) => {
+				const args = row.args_redacted_json === null ? null : JSON.parse(String(row.args_redacted_json));
+				const given = isObject(args?.args) ? args.args : args;
+				return {
+					id: Number(row.id),
+					ts: Number(row.ts),
+					actorKind: String(row.actor_kind),
+					actorId: row.actor_id === null ? null : String(row.actor_id),
+					chatId: row.chat === null ? null : String(row.chat),
+					op: row.op_name === null ? (typeof given?.command === "string" ? "exec" : null) : String(row.op_name),
+					action: String(row.action),
+					opId: row.op_id === null ? null : String(row.op_id),
+					args,
+					outcome: String(row.outcome),
+					detail: row.detail === null ? null : String(row.detail),
+				};
+			});
+	}
+
+	/** The audit log for `caller`, who must be the admin's majordomo; a refusal is audited. */
+	async auditFor(caller: HostOpsCaller, limit: number, filter: { since?: number; op?: string }): Promise<{ ok: true; rows: AuditRow[] } | Refusal> {
+		const refused = await this.#refusal(caller, "audit", filter);
+		return refused ?? { ok: true, rows: this.audit(limit, filter) };
 	}
 
 	/** A new credential for the daemon, in place of any other, which stops working now. It is returned only here; only its digest is kept. */
@@ -676,6 +704,13 @@ export async function hostOpsStatus(env: Env, caller: HostOpsCaller): Promise<Ho
 	const read = await hostOps(env).statusFor(caller);
 	if (!read.ok) throw new HttpError(read.status, read.error);
 	return read.status;
+}
+
+/** The audit log, newest first, read by `caller`, who must be the admin's majordomo; throws the `HttpError` to answer otherwise. */
+export async function readHostOpsAudit(env: Env, caller: HostOpsCaller, limit: number, filter: { since?: number; op?: string }): Promise<AuditRow[]> {
+	const read = await hostOps(env).auditFor(caller, limit, filter);
+	if (!read.ok) throw new HttpError(read.status, read.error);
+	return read.rows;
 }
 
 const fail = (status: number, error: string) => json({ error }, status);

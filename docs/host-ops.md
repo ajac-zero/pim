@@ -13,6 +13,7 @@ The admin's majordomo can look after the machine a self-hosted Pim runs on: read
 | `hostops_deploy` | Deploy a git ref (`ref`, `origin/main` by default). The daemon checks the new version and rolls back on its own when it fails, which reports `rolled_back` |
 | `hostops_rollback` | Go back to a commit (`commit`, 7 to 40 hex digits) |
 | `hostops_status` | Whether the daemon has a credential, when it was last seen, its version and commit, and its queue |
+| `hostops_audit` | The audit log, newest first, read-only (`limit`, 1 to 200, 50 by default; `since`, an ISO time; `op`, an operation or action): when, what, a short summary of its arguments, which agent and chat asked, the approval for a command and how it ended. Never secrets or a command's output |
 | `hostops_op` | An operation by its id, once it ends |
 | `hostops_exec` | One shell command, with your approval for that call: see [Running a command](#running-a-command) |
 

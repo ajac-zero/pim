@@ -5,11 +5,15 @@ import {
 	assertHostOpsCaller,
 	checkExecArgs,
 	enqueueHostOp,
+	AUDIT_ROWS,
+	type AuditRow,
 	HOST_SERVICES,
+	HOST_OPS,
 	type HostOpName,
 	type HostOpView,
 	hostOpsStatus,
 	readHostOp,
+	readHostOpsAudit,
 	waitForHostOp,
 } from "../hostops";
 import { HttpError } from "../http";
@@ -62,6 +66,34 @@ function outcome(op: HostOpView) {
 /** An operation as a tool's answer. */
 const result = (op: HostOpView) => json(outcome(op));
 
+const SUMMARY_CHARS = 300;
+
+/**
+ * What the model reads of an audit row. The row's arguments were redacted when
+ * it was kept; here a command's output is left out as well, and what remains
+ * is cut short.
+ */
+function auditBrief(row: AuditRow) {
+	const asked = row.args?.args && typeof row.args.args === "object" ? (row.args.args as Record<string, unknown>) : row.args;
+	const summary = Object.entries(asked ?? {})
+		.filter(([key]) => key !== "output")
+		.map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+		.join(" ");
+	const agent = row.actorKind === "agent" ? (row.actorId?.split("/")[1] ?? null) : null;
+	const approver = asked?.approver;
+	return {
+		at: new Date(row.ts).toISOString(),
+		operation: row.op ?? row.action,
+		action: row.action,
+		args: summary.length > SUMMARY_CHARS ? `${summary.slice(0, SUMMARY_CHARS)}…` : summary,
+		requested_by: { kind: row.actorKind, agent, chat: row.chatId },
+		approval: row.op !== "exec" ? "not_required" : typeof approver === "string" ? `approved by ${approver}` : row.outcome === "rejected" ? "not_approved" : "unknown",
+		outcome: row.outcome,
+		detail: row.detail,
+		op_id: row.opId,
+	};
+}
+
 /** A refusal or a bad argument, as a tool error the model can act on. */
 async function answer(work: () => Promise<ReturnType<typeof text>>) {
 	try {
@@ -85,6 +117,7 @@ const PROMPT = `You run this Pim's host for the person, who is its admin, throug
 - hostops_deploy: deploy a git ref (origin/main unless given). The daemon checks the new version and rolls back on its own when it fails, which comes back as rolled_back. A deploy can take up to 15 minutes: when the call answers before it ends, follow it with hostops_op.
 - hostops_rollback: go back to an earlier commit.
 - hostops_status: whether the daemon is connected, its version, and what waits in its queue.
+- hostops_audit: the audit log of host operations (deploy, exec, restart, credential changes, refusals), newest first, with who asked, the approval and how each ended; filter by limit, since and op. It never shows secrets.
 - hostops_op: an operation by its id, once it finishes.
 - hostops_exec: one shell command, run as the daemon's unprivileged user. It asks the person to approve every call, showing them the command, so give the exact command and say why in your message. No root or sudo, no stdin or terminal: one non-interactive command, killed after its timeout (60 seconds unless given, 300 at most), and its output (stdout and stderr together, secrets taken out) cut to its last part, flagged as truncated. Prefer the fixed operations above where one does the job.
 The services are ${HOST_SERVICES.join(", ")}. One deploy or rollback runs at a time. Apart from hostops_exec, nothing else runs on the host: there is no shell. The others run without asking, so run only what the person asked for, or what a schedule they set says to; every call is in the audit log they read in Settings → Deployment, hostops_exec's with the command, who approved it and its output. If the daemon hasn't been seen, operations wait and expire after 10 minutes: tell them to install it from there. Report each result briefly: what ran, how it ended, and anything they need to do.`;
@@ -195,6 +228,24 @@ export function hostOpsExtension({ waitMs = HOSTOPS_WAIT_MS }: { waitMs?: number
 									commit: agent.commit,
 									queue,
 								});
+							});
+						},
+					}),
+					defineTool({
+						name: "hostops_audit",
+						description:
+							"Read-only: the audit log of host operations, newest first. Each row has its time, operation, a short summary of its arguments, who asked (agent and chat), the approval for a command and how it ended. Secrets are never in it, nor a command's output.",
+						parameters: Type.Object({
+							limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "How many rows, 50 unless given." })),
+							since: Type.Optional(Type.String({ description: "Only rows from this time on, as an ISO 8601 time such as 2026-01-31T00:00:00Z." })),
+							op: Type.Optional(Type.String({ description: `Only rows about this operation (${HOST_OPS.join(", ")}) or with this action (such as credential.issue, enqueue, result).` })),
+						}),
+						async execute({ limit, since, op }, api) {
+							return answer(async () => {
+								const from = since === undefined ? undefined : Date.parse(since);
+								if (from !== undefined && Number.isNaN(from)) return text("since must be an ISO 8601 time.", true);
+								const rows = await readHostOpsAudit(env, caller(api.conversationId), Math.min(limit ?? 50, AUDIT_ROWS), { since: from, op });
+								return json({ audit: rows.map(auditBrief) });
 							});
 						},
 					}),

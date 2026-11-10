@@ -15,8 +15,14 @@ manager refuses to start.
 ```sh
 MANAGER_TOKEN=$(openssl rand -hex 24) PROXY_ADMIN_TOKEN=$(openssl rand -hex 24) \
 AGENTD_TOKEN_SECRET=$(openssl rand -hex 32) \
-./up.sh   # = docker compose up -d --build with the git sha baked in (/health "version")
+./up.sh   # builds the images with the git sha baked in (/health "version"), then docker compose up -d --no-build
 ```
+
+Deploy with `up.sh`, not `docker compose up --build`: compose recreates every service it builds
+with `--build`, even from an identical image, and recreating `egress-proxy` cuts the open
+connections of every running session. `up.sh` tags the proxy's image by a hash of its inputs and
+rebuilds it only when they change, so a deploy recreates the manager alone. Running sessions keep
+going through a manager restart (see Restarts).
 
 The compose file builds `pim-workspace:local` from `../workspace-agentd` (the default and only
 allowed sandbox image unless `ALLOWED_IMAGES` says otherwise) and runs three services:

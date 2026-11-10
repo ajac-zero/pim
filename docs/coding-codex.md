@@ -89,12 +89,12 @@ It was built on an orb with Docker: `docker build -t pim-workspace:local workspa
 To roll it out on the sandbox host, from the repository's checkout there (here `~/pim-src`) with this change in it, in the same environment the stack was first started with (`MANAGER_TOKEN`, `PROXY_ADMIN_TOKEN` and `AGENTD_TOKEN_SECRET` exported or in `sandbox-manager/.env`; compose refuses to start without the first two, and new values would cut Pim off from the manager):
 
 ```sh
-cd ~/pim-src && git pull && cd sandbox-manager && docker compose up -d --build
+cd ~/pim-src && git pull && sandbox-manager/up.sh
 docker run --rm --entrypoint codex pim-workspace:local --version    # codex-cli 0.167.0
 docker run --rm --entrypoint claude pim-workspace:local --version   # 2.1.311 (Claude Code)
 ```
 
-`up -d --build` rebuilds every image the compose file builds, `pim-workspace:local` from `../workspace-agentd` included (its `workspace-image` service, which the manager waits for), and recreates the containers whose image changed. `git pull` brings the change once it is on the branch the checkout follows; before that, `git fetch origin && git checkout review/coding-s5-codex`. Workspaces that already exist keep the image they were made with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there.
+`up.sh` rebuilds the images the compose file builds, `pim-workspace:local` from `../workspace-agentd` included (its `workspace-image` service, which the manager waits for), and recreates the containers whose image changed, leaving the egress proxy alone unless it changed. `git pull` brings the change once it is on the branch the checkout follows; before that, `git fetch origin && git checkout review/coding-s5-codex`. Workspaces that already exist keep the image they were made with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there.
 
 To move to a newer Codex, change `CODEX_VERSION`, rebuild, and check `codex exec --help` for the flags above, the trust behavior (a repository's `.codex/config.toml` MCP server must not start), and a run's JSONL against `src/coding/harness/codex.ts` and `test/fixtures/codex/`.
 

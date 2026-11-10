@@ -944,11 +944,19 @@ describe('gVisor self-check', () => {
 })
 
 describe('build stamping', () => {
-	test('manager and egress-proxy share one image tag, so they are built with the same BUILD_SHA arg', async () => {
+	test('a deploy rebuilds the manager with BUILD_SHA and leaves an unchanged egress proxy running', async () => {
 		const { readFile } = await import('node:fs/promises')
-		const compose = await readFile(new URL('../compose.yaml', import.meta.url), 'utf8')
-		assert.match(compose, /build: &manager-build[\s\S]*BUILD_SHA: \$\{BUILD_SHA:\?/)
-		assert.match(compose, /build: \*manager-build/)
+		const read = (f) => readFile(new URL(`../${f}`, import.meta.url), 'utf8')
+		const [compose, dockerfile, up] = await Promise.all([read('compose.yaml'), read('Dockerfile'), read('up.sh')])
+		const service = (name) => compose.slice(compose.indexOf(`\n  ${name}:\n`)).split(/\n {2}(?=\S)/)[1]
+		assert.match(service('sandbox-manager'), /target: manager\n\s+args:\n\s+BUILD_SHA: \$\{BUILD_SHA:\?/)
 		assert.doesNotMatch(compose, /BUILD_SHA:-unknown/)
+		// The proxy's image has no build stamp and is tagged by its inputs, which up.sh hashes.
+		assert.match(service('egress-proxy'), /target: egress-proxy\n\s+image: pim-egress-proxy:\$\{EGRESS_PROXY_TAG/)
+		assert.doesNotMatch(service('egress-proxy'), /BUILD_SHA/)
+		assert.doesNotMatch(dockerfile.slice(dockerfile.indexOf('AS egress-proxy'), dockerfile.indexOf('AS manager')), /BUILD_SHA/)
+		// `up --build` would recreate the proxy on every deploy.
+		assert.match(up, /docker compose up -d --no-build/)
+		assert.doesNotMatch(up, /up -d --build/)
 	})
 })

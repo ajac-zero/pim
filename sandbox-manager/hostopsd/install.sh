@@ -21,7 +21,8 @@
 #                        PROXY_ADMIN_TOKEN, ... (default: sandbox-manager/.env if it exists,
 #                        otherwise captured from the running sandbox-manager container)
 #   --manager-url URL    [MANAGER_URL] default http://127.0.0.1:$MANAGER_PORT (8080)
-#   --node PATH          [NODE_BIN] Node.js 22 or later (default: node on PATH)
+#   --node PATH          [NODE_BIN] Node.js 22 or later (default: found on the host, else the
+#                        official Node.js 22 is installed in /opt/hostopsd)
 set -euo pipefail
 
 die() {
@@ -31,6 +32,8 @@ die() {
 [ "$(id -u)" = 0 ] || die "run it with sudo"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# Finding, and when there is none, installing the Node.js hostopsd runs; see node.sh.
+source "$SCRIPT_DIR/node.sh"
 # The locations can be moved only so the tests can run this script without touching the system.
 ETC=${HOSTOPSD_ETC:-/etc/hostopsd}
 ENV_FILE=$ETC/env
@@ -71,10 +74,24 @@ command -v setfacl >/dev/null || die "setfacl is missing (apt-get install acl)"
 docker compose version >/dev/null 2>&1 || die "the docker compose plugin is missing"
 getent group docker >/dev/null || die "there is no docker group"
 NODE_BIN=${NODE_BIN:-$(installed NODE_BIN)}
-NODE_BIN=${NODE_BIN:-$(command -v node || true)}
-[ -n "$NODE_BIN" ] || die "node was not found; install Node.js 22 or later, or pass --node /path/to/node"
-NODE_MAJOR=$("$NODE_BIN" -p 'process.versions.node.split(".")[0]')
-[ "$NODE_MAJOR" -ge 22 ] || die "$NODE_BIN is Node.js $NODE_MAJOR; hostopsd needs 22 or later"
+# The host may have no Node.js at all: the manager runs in Docker, and the invoking user's node is
+# usually nvm's, under a home directory root's PATH does not see. So an explicit --node must work;
+# otherwise look in the usual places (the invoking user's nvm, the system-wide ones and the copy in
+# $NODE_DIR an earlier run left); otherwise install the official Node.js 22, checking its SHA256
+# against SHASUMS256.txt. The binary is made executable by the hostopsd user below.
+NODE_DIR=${HOSTOPSD_NODE_DIR:-/opt/hostopsd}
+NODE_DIST=${HOSTOPSD_NODE_DIST:-https://nodejs.org/dist/latest-v22.x}
+if [ -n "$NODE_BIN" ]; then
+	[ -x "$NODE_BIN" ] || die "--node $NODE_BIN is not executable"
+	node_is_new_enough "$NODE_BIN" || die "$NODE_BIN is Node.js $(node_major "$NODE_BIN"); hostopsd needs $NODE_MIN_MAJOR or later"
+else
+	NODE_BIN=$(pick_node "$(command -v node 2>/dev/null || true)" "$(nvm_node "${SUDO_USER:-}")" \
+		${HOSTOPSD_NODE_FALLBACKS:-/usr/local/bin/node /usr/bin/node} "$NODE_DIR/node" || true)
+	if [ -z "$NODE_BIN" ]; then
+		echo "install.sh: no Node.js $NODE_MIN_MAJOR or later on this host; installing the official Node.js 22 in $NODE_DIR"
+		NODE_BIN=$(install_node_tarball "$NODE_DIST" "$NODE_DIR") || die "could not install Node.js 22 from $NODE_DIST; install Node.js 22 or later and pass --node /path/to/node"
+	fi
+fi
 
 URL=${URL:-$(installed HOSTOPS_URL)}
 URL=${URL%/}
@@ -92,7 +109,21 @@ getent group systemd-journal >/dev/null && usermod -aG systemd-journal hostopsd
 install -d -o hostopsd -g hostopsd -m 0750 "$STATE_DIR"
 # The directory is open for traversal so up.sh can read the stamp; the files in it stay 0640.
 install -d -o root -g hostopsd -m 0755 "$ETC"
-as_hostopsd "$NODE_BIN" --version >/dev/null || die "hostopsd cannot run $NODE_BIN (is it under a home directory?); pass --node with a system-wide Node.js"
+# hostopsd must be able to execute the node binary, which one under the invoking user's home
+# directory (nvm's usual place) may well not be: test -x as hostopsd also proves it can traverse
+# every directory on the way to it. A node in a home directory is copied to the root-owned
+# $NODE_DIR regardless, so the unit does not depend on the invoking user's files.
+invoker_home=
+[ -n "${SUDO_USER:-}" ] && invoker_home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)
+if [[ "$NODE_BIN" == /home/* || ( -n "$invoker_home" && "$NODE_BIN" == "$invoker_home"* ) ]] || ! as_hostopsd test -x "$NODE_BIN"; then
+	if [ "$NODE_BIN" != "$NODE_DIR/node" ]; then
+		echo "install.sh: copying $NODE_BIN to $NODE_DIR/node so hostopsd can run it"
+		install -d -m 0755 "$NODE_DIR"
+		install -m 0755 "$NODE_BIN" "$NODE_DIR/node"
+		NODE_BIN=$NODE_DIR/node
+	fi
+fi
+as_hostopsd "$NODE_BIN" --version >/dev/null || die "hostopsd cannot run $NODE_BIN"
 
 # --- The checkout ----------------------------------------------------------------------------
 # hostopsd checks out commits in it, so it gets read and write access through ACLs, which new

@@ -14,6 +14,8 @@ import { checkKey, checkOwner, createEnvCache, parseSnapshot } from './snapshots
 import { AGENTD_PORT, LABEL, LABEL_KEPT, LABEL_KEPT_INFO, LABEL_NONCE, LABEL_SPEC, agentdPath, buildSpec, cacheVolume, names, parseCreate, proxyEnv, workspacePath } from './template.js'
 
 const MAX_FILE = 32 * 1024 * 1024
+// An exec id, as agentd takes it (workspace-agentd/exec.mjs).
+const EXEC_ID = /^[A-Za-z0-9_-]{8,128}$/
 const MiB = 1024 * 1024
 const notFound = (e) => e instanceof DockerError && e.status === 404
 const sha = (s) => createHash('sha256').update(s).digest()
@@ -705,6 +707,40 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			}
 		}
 		const path = () => url.searchParams.get('path')
+		// Streams a command's events as NDJSON. A client that goes away aborts the request to agentd,
+		// and the command is killed: by agentd at once, or, for one with an id (which agentd would
+		// keep running for a client to read on), by a DELETE. If the manager itself stops, nothing
+		// kills a command with an id, and the client reads on through the restarted manager
+		// (GET /sessions/:id/exec/:execId/stream?after=n).
+		const stream = async (s, execId, open) => {
+			const gone = new AbortController()
+			let over = false
+			res.on('close', () => {
+				gone.abort()
+				if (!over && execId) Promise.resolve().then(() => agentd.killExec(target(s), execId)).catch(() => {})
+			})
+			let events
+			try {
+				events = await open(gone.signal)
+			} catch (e) {
+				over = true
+				throw e
+			}
+			res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' })
+			res.flushHeaders()
+			// A silent command (a device-code sign-in polling for minutes) would hit Cloudflare's 100 s idle limit (524): a blank line, which clients skip, keeps the stream alive and the session in use.
+			const beat = setInterval(() => {
+				s.lastUsed = now()
+				if (!res.writableEnded) res.write('\n')
+			}, 15000)
+			try {
+				for await (const ev of events) res.write(`${JSON.stringify(ev)}\n`)
+			} finally {
+				over = true
+				clearInterval(beat)
+			}
+			res.end()
+		}
 		try {
 			if (req.method === 'GET' && url.pathname === '/health') return send(200, await health())
 			if (!authorized(req)) throw new HttpError(401, 'unauthorized')
@@ -730,6 +766,14 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 				const r = await createSession(await json())
 				return send(r.created ? 201 : 200, r.session)
 			}
+			const resume = /^\/sessions\/([a-z0-9-]+)\/exec\/([A-Za-z0-9_-]{8,128})\/stream$/.exec(url.pathname)
+			if (resume) {
+				if (req.method !== 'GET') throw new HttpError(405, 'method not allowed')
+				const after = Number(url.searchParams.get('after') ?? 0)
+				if (!Number.isInteger(after) || after < 0) throw new HttpError(400, 'after must be a non-negative integer')
+				const s = get(resume[1])
+				return await stream(s, resume[2], (signal) => agentd.resumeExec(target(s), resume[2], after, graceMs, signal))
+			}
 			const m = /^\/sessions\/([a-z0-9-]+)(?:\/(exec|exec\/stream|files?|list|stat|status|stop|start))?$/.exec(url.pathname)
 			if (!m) throw new HttpError(404, 'not found')
 			const [, id, sub = ''] = m
@@ -747,23 +791,9 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			if (route === 'POST exec/stream') {
 				const s = get(id)
 				const spec = execSpec(s, parseExec(await json()))
-				// A client that goes away aborts the request to agentd, which then kills the command.
-				const gone = new AbortController()
-				res.on('close', () => gone.abort())
-				const events = await agentd.startExec(target(s), spec, graceMs, gone.signal)
-				res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' })
-				res.flushHeaders()
-				// A silent command (a device-code sign-in polling for minutes) would hit Cloudflare's 100 s idle limit (524): a blank line, which clients skip, keeps the stream alive and the session in use.
-				const beat = setInterval(() => {
-					s.lastUsed = now()
-					if (!res.writableEnded) res.write('\n')
-				}, 15000)
-				try {
-					for await (const ev of events) res.write(`${JSON.stringify(ev)}\n`)
-				} finally {
-					clearInterval(beat)
-				}
-				return res.end()
+				const execId = req.headers['x-exec-id']
+				if (execId !== undefined && !EXEC_ID.test(execId)) throw new HttpError(400, 'x-exec-id must be 8-128 letters, digits, - or _')
+				return await stream(s, execId, (signal) => agentd.startExec(target(s), { ...spec, ...(execId && { id: execId }) }, graceMs, signal))
 			}
 			if (route === 'PUT file') {
 				const s = get(id)

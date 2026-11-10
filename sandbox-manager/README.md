@@ -101,7 +101,8 @@ All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors 
 | `POST /sessions/:id/start` | | The session, now `running`; does nothing if running already |
 | `GET /sessions/:id/status` | | `{sessionId, state, reason, diskBytes, diskQuotaBytes, diskFreeBytes, activeExecs, quotaMode, measuredAt}` |
 | `POST /sessions/:id/exec` | `{cmd:[...], cwd?, timeoutMs, stdin?, env?}` | `{stdout, stderr, exitCode, timedOut, truncated}` |
-| `POST /sessions/:id/exec/stream` | same as exec | `application/x-ndjson` ExecEvents |
+| `POST /sessions/:id/exec/stream` | same as exec; optional header `x-exec-id` | `application/x-ndjson` ExecEvents |
+| `GET /sessions/:id/exec/:execId/stream?after=n` | | The same stream of the command started with `x-exec-id: execId`, from its event `n` on; 404 `exec_not_found` when the workspace no longer has it |
 | `PUT /sessions/:id/file` | `?path=&mode=0644`, raw body | `{ok: true}` |
 | `GET /sessions/:id/file` | `?path=` | raw bytes |
 | `DELETE /sessions/:id/file` | `?path=&recursive=1` | `{ok: true}` |
@@ -140,7 +141,14 @@ exit code 127, one killed by a signal 128 + its number, a timeout `exitCode: nul
 `{type: "stdout"|"stderr", data}` as output arrives, then exactly one
 `{type: "exit", code, signal, timedOut}`. A command that cannot start gives a stderr line and
 `{type: "exit", code: 127}`. If the client disconnects, the manager closes its request to agentd,
-which kills the command's process group. If agentd goes silent past the timeout plus 5 s, the
+which kills the command's process group. A command started with an `x-exec-id` header (8–128
+letters, digits, `-` or `_`, unique per session) also survives the manager itself: when the manager
+stops (a deploy, a restart), agentd keeps the command running and its output buffered, and the
+client reads on through the restarted manager with `GET /sessions/:id/exec/:execId/stream?after=n`,
+where `n` is the number of events it already has. A client that disconnects on purpose still
+kills it: the manager then sends agentd a kill for that id. agentd kills a command nobody has read
+on from within 10 minutes. Workspaces created before agentd could keep commands answer 404
+`exec_not_found`, and their commands still die with the manager. If agentd goes silent past the timeout plus 5 s, the
 stream ends with `{type: "exit", code: null, signal: "SIGKILL", timedOut: true}`. Execs run
 concurrently. Exec and file routes on a stopped session give 409 `session_stopped` or
 `over_disk_quota`.
@@ -268,7 +276,8 @@ starting session are never deleted.
   reach agentd. agentd resolves every path (each component, and a write target's parent)
   inside the container and refuses symlink escapes. It needs no shell or coreutils.
 - **Exec timeouts.** agentd runs each command in its own process group and on timeout (or when
-  the manager drops the connection) kills that group only. If agentd itself stops answering, the
+  the manager drops the connection, or after the detach grace for a command with an id) kills
+  that group only. If agentd itself stops answering, the
   manager drops the connection after the timeout plus 5 s.
 
 ## Disk governance

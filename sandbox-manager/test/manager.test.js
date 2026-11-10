@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { promises as fs, mkdtempSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -862,40 +862,93 @@ describe('with the real workspace-agentd', () => {
 		const missing = await call('POST', '/sessions/abc-1/exec', { cmd: ['definitely-not-a-command'], timeoutMs: 1000 })
 		assert.equal(missing.json.exitCode, 127)
 	})
-	test('a client that drops exec/stream kills that command', async () => {
-		const ac = new AbortController()
-		let pid
-		try {
-			const res = await fetch(`${base}/sessions/abc-1/exec/stream`, { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer t0ken' }, body: JSON.stringify({ cmd: ['sh', '-c', 'echo start; sleep 60 & echo $!; wait'], timeoutMs: 20000 }) })
-			assert.equal(res.headers.get('content-type'), 'application/x-ndjson')
-			// Neither the NDJSON lines nor the stdout events line up with reads: buffer both until the pid line is complete.
-			const decoder = new TextDecoder()
-			let ndjson = ''
-			let stdout = ''
-			for await (const chunk of res.body) {
-				ndjson += decoder.decode(chunk, { stream: true })
-				const lines = ndjson.split('\n')
-				ndjson = lines.pop()
-				for (const line of lines.filter(Boolean)) {
-					const ev = JSON.parse(line)
-					assert.notEqual(ev.type, 'exit', 'the command ended early')
-					if (ev.type === 'stdout') stdout += ev.data
+	test('a client that drops exec/stream kills that command, also one with an id that agentd would keep', async () => {
+		for (const headers of [{}, { 'x-exec-id': 'dropped-by-client' }]) {
+			const ac = new AbortController()
+			let pid
+			try {
+				const res = await fetch(`${base}/sessions/abc-1/exec/stream`, { method: 'POST', signal: ac.signal, headers: { authorization: 'Bearer t0ken', ...headers }, body: JSON.stringify({ cmd: ['sh', '-c', 'echo start; sleep 60 & echo $!; wait'], timeoutMs: 20000 }) })
+				assert.equal(res.headers.get('content-type'), 'application/x-ndjson')
+				// Neither the NDJSON lines nor the stdout events line up with reads: buffer both until the pid line is complete.
+				const decoder = new TextDecoder()
+				let ndjson = ''
+				let stdout = ''
+				for await (const chunk of res.body) {
+					ndjson += decoder.decode(chunk, { stream: true })
+					const lines = ndjson.split('\n')
+					ndjson = lines.pop()
+					for (const line of lines.filter(Boolean)) {
+						const ev = JSON.parse(line)
+						assert.notEqual(ev.type, 'exit', 'the command ended early')
+						if (ev.type === 'stdout') stdout += ev.data
+					}
+					const m = /^start\n(\d+)\n/.exec(stdout)
+					if (m) {
+						pid = Number(m[1])
+						break
+					}
 				}
-				const m = /^start\n(\d+)\n/.exec(stdout)
-				if (m) {
-					pid = Number(m[1])
-					break
-				}
+				assert.ok(pid && alive(pid), `no live pid in ${JSON.stringify(stdout)}`)
+			} finally {
+				ac.abort()
 			}
-			assert.ok(pid && alive(pid), `no live pid in ${JSON.stringify(stdout)}`)
-		} finally {
-			ac.abort()
+			const end = Date.now() + 8000
+			while (alive(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
+			const survived = alive(pid)
+			if (survived) process.kill(pid, 'SIGKILL')
+			assert.ok(!survived, `the command outlived the client (${JSON.stringify(headers)})`)
 		}
-		const end = Date.now() + 8000
-		while (alive(pid) && Date.now() < end) await new Promise((r) => setTimeout(r, 50))
-		const survived = alive(pid)
-		if (survived) process.kill(pid, 'SIGKILL')
-		assert.ok(!survived, 'the command outlived the client')
+	})
+	test('a command with an id keeps running when the manager process dies, and its client reads on through the next manager', async () => {
+		// The first manager runs in a process of its own and is killed, as Docker kills a replaced container.
+		const addresses = Object.fromEntries([...fake.containers.values()].map((c) => [c.ip, fake.agentdAddress(c.ip)]))
+		const src = (f) => new URL(`../src/${f}`, import.meta.url).href
+		const child = spawn(process.execPath, ['--input-type=module', '-e', `
+			import { createManager } from '${src('manager.js')}'
+			import { Docker } from '${src('docker.js')}'
+			const addresses = ${JSON.stringify(addresses)}
+			const m = createManager({ docker: new Docker(${JSON.stringify(fake.path)}), cfg: ${JSON.stringify(cfg)}, proxyAdmin: { set: async () => {}, del: async () => {} }, statfsFn: async () => ({ bavail: 50, blocks: 100 }), agentdAddress: (ip) => addresses[ip] })
+			await m.reconcile()
+			m.server.listen(0, '127.0.0.1', () => console.log(m.server.address().port))
+		`], { stdio: ['ignore', 'pipe', 'inherit'] })
+		const port = Number(await new Promise((r) => child.stdout.once('data', (d) => r(String(d).trim()))))
+		const dir = path.join(root, 'pim-s-abc-1')
+		const cmd = ['sh', '-c', 'echo $$; while [ ! -f go ]; do sleep 0.05; done; echo finished']
+		const startTurn = async (headers) => {
+			const res = await fetch(`http://127.0.0.1:${port}/sessions/abc-1/exec/stream`, { method: 'POST', headers: { authorization: 'Bearer t0ken', ...headers }, body: JSON.stringify({ cmd, timeoutMs: 20000 }) })
+			const reader = res.body.getReader()
+			const got = []
+			let buf = ''
+			while (!got.length) {
+				buf += new TextDecoder().decode((await reader.read()).value)
+				const lines = buf.split('\n')
+				buf = lines.pop()
+				for (const l of lines) if (l) got.push(JSON.parse(l))
+			}
+			return { pid: Number(got[0].data), got, reader }
+		}
+		const kept = await startTurn({ 'x-exec-id': 'turn-through-restart' })
+		const legacy = await startTurn({}) // an older client, which sends no id
+		child.kill('SIGKILL')
+		await new Promise((r) => child.once('exit', r))
+		await assert.rejects(kept.reader.read(), 'the stream broke with the manager')
+		await new Promise((r) => setTimeout(r, 500))
+		assert.ok(alive(kept.pid), 'the command with an id is still running')
+		assert.ok(!alive(legacy.pid), 'the command without an id died with the manager, as before')
+		// It finishes while no manager is there; the next manager hands its client the rest.
+		await fs.writeFile(path.join(dir, 'go'), '')
+		await new Promise((r) => setTimeout(r, 200))
+		const fresh = make()
+		await fresh.reconcile()
+		mgr.server.close()
+		mgr = fresh
+		await new Promise((r) => mgr.server.listen(0, '127.0.0.1', r))
+		const r = await call('GET', `/sessions/abc-1/exec/turn-through-restart/stream?after=${kept.got.length}`)
+		assert.equal(r.status, 200)
+		const rest = r.text.split('\n').filter(Boolean).map((l) => JSON.parse(l))
+		assert.deepEqual(rest, [{ type: 'stdout', data: 'finished\n' }, { type: 'exit', code: 0, signal: null, timedOut: false }])
+		const gone = await call('GET', '/sessions/abc-1/exec/no-such-exec/stream?after=0')
+		assert.deepEqual([gone.status, gone.json.code], [404, 'exec_not_found'])
 	})
 	test('files round-trip and symlink escapes are refused', async () => {
 		assert.equal((await call('PUT', '/sessions/abc-1/files?path=d/a.txt', 'héllo')).status, 200)

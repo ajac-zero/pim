@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { env, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
 import { api, apiUrl, OWNER, post, ROOT, say, TOKEN, toolUse, url } from "./helpers";
@@ -262,5 +262,211 @@ describe("export", () => {
 		expect(exported).not.toContain("SECRET-");
 		expect(exported).not.toContain("cookie_key");
 		await runInDurableObject(agent(), (instance: Pim) => instance.store.deleteCredential("openai"));
+	});
+});
+
+describe("model call ledger", () => {
+	const HOUR = 3_600_000;
+	const DAY = 24 * HOUR;
+	const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0, cacheWrite1h?: number) => ({
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
+		...(cacheWrite1h === undefined ? {} : { cacheWrite1h }),
+		totalTokens: input + output + cacheRead + cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	});
+	const modelOf = (id: string, provider = "faux") => ({ provider, id, api: "faux" }) as unknown as Model<Api>;
+	beforeEach(() =>
+		runInDurableObject(agent(), (instance: Pim) => {
+			for (const table of ["pim_model_calls", "pim_usage_daily", "pim_usage_rollup"]) instance.ctx.storage.sql.exec(`DELETE FROM ${table}`);
+			instance.usage.calls.rollup(Date.now());
+			instance.ctx.storage.sql.exec("DELETE FROM pim_usage_rollup");
+		}),
+	);
+	const rows = (instance: Pim, model: string) => instance.ctx.storage.sql.exec("SELECT * FROM pim_model_calls WHERE model = ? ORDER BY id", model).toArray();
+
+	/** Sends one call through a meter on the instance's own database and settles it as `message` says. */
+	async function call(instance: Pim, model: Model<Api>, message: Partial<AssistantMessage>, meter = instance.usage, context: unknown = { messages: [] }) {
+		const { catalog, open } = heldCatalog();
+		const request = meter.meter(catalog).stream(model, context as never, { sessionId: "s1" });
+		open[0]!.push({ type: "done", reason: "stop", message: { ...answered(0, 0), ...message } });
+		open[0]!.end({ ...answered(0, 0), ...message });
+		await request.result();
+		await vi.waitFor(() => expect(rows(instance, model.id).length).toBeGreaterThan(0));
+	}
+
+	it("prices each cache tier, with the 1h writes as part of pi-ai's cache writes", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			// 1000 input at 4, 500 output at 20, 2000 read at 0.2, 200 5m writes at 5 and 100 1h writes at 8, per million.
+			await call(instance, modelOf("claude-opus-5-5"), { usage: usage(1000, 500, 2000, 300, 100) });
+			const [row] = rows(instance, "claude-opus-5-5");
+			expect(row).toMatchObject({ input: 1000, output: 500, cache_read: 2000, cache_write_5m: 200, cache_write_1h: 100, plan: 0 });
+			expect(row!.cost_usd).toBeCloseTo(0.0162, 10);
+			expect(row!.price_version).toBe("2026-11-10.1");
+			// Without a 1h split every cache write is a 5m write.
+			await call(instance, modelOf("gpt-6.1-sol"), { usage: usage(0, 0, 0, 1_000_000) });
+			expect(rows(instance, "gpt-6.1-sol")[0]).toMatchObject({ cache_write_5m: 1_000_000, cache_write_1h: 0, cost_usd: 2.5 });
+			// A model with a gateway prefix is the same model.
+			await call(instance, modelOf("anthropic/claude-sonnet-5-5"), { usage: usage(1_000_000, 0) });
+			expect(rows(instance, "anthropic/claude-sonnet-5-5")[0]!.cost_usd).toBe(2);
+		});
+	});
+
+	it("leaves the cost of an unknown model and of a plan's calls null, and counts only the first as unpriced", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			await call(instance, modelOf("mystery-model"), { usage: usage(100, 100) });
+			await call(instance, modelOf("gpt-6-luna", "openai"), { usage: usage(100, 100) });
+			expect(rows(instance, "mystery-model")[0]).toMatchObject({ cost_usd: null, price_version: null, plan: 0 });
+			expect(rows(instance, "gpt-6-luna")[0]).toMatchObject({ cost_usd: null, plan: 1 });
+			instance.usage.calls.rollup(Date.now());
+			// The unknown model counts as unpriced, and the plan's call, whose price is known, doesn't.
+			expect(instance.usageCosts(1).unpricedCalls).toBe(1);
+		});
+	});
+
+	it("records errored and aborted calls with the usage they reported", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			await call(instance, modelOf("claude-haiku-5-5"), { stopReason: "aborted", usage: usage(1000, 10) });
+			await call(instance, modelOf("claude-fable-5-1"), { stopReason: "error", errorMessage: "boom", usage: usage(0, 0) });
+			expect(rows(instance, "claude-haiku-5-5")[0]).toMatchObject({ stop_reason: "aborted", input: 1000, output: 10 });
+			expect(rows(instance, "claude-fable-5-1")[0]).toMatchObject({ stop_reason: "error", input: 0 });
+			// A stream that rejects is recorded too, without usage.
+			const rejecting = { stream: () => ({ result: () => Promise.reject(new Error("closed")) }) } as unknown as Models;
+			instance.usage.meter(rejecting).stream(modelOf("grok-4.6"), { messages: [] });
+			await vi.waitFor(() => expect(rows(instance, "grok-4.6")).toHaveLength(1));
+			expect(rows(instance, "grok-4.6")[0]).toMatchObject({ stop_reason: "error", input: 0, cost_usd: 0 });
+		});
+	});
+
+	it("records what the tagger says, and the size of what was sent; unknown tags are null", async () => {
+		await runInDurableObject(agent(), async (instance: Pim, state) => {
+			const meter = new UsageMeter({
+				sql: state.storage.sql,
+				limits: () => UNLIMITED,
+				ownProvider: () => false,
+				tags: ({ sessionId }) => ({ agentId: "a1", chatId: `chat-${sessionId}`, runKind: "scheduled", scheduleOrTriggerId: "t1" }),
+			});
+			const context = { systemPrompt: "Be brief", messages: [{ role: "user", content: "hi" }, { role: "assistant", content: [] }, { role: "user", content: "again" }], tools: [{ name: "a" }, { name: "b" }] };
+			await call(instance, modelOf("gemini-3.5-flash"), { usage: usage(10, 5) }, meter, context);
+			expect(rows(instance, "gemini-3.5-flash")[0]).toMatchObject({
+				agent_id: "a1",
+				chat_id: "chat-s1",
+				run_kind: "scheduled",
+				schedule_or_trigger_id: "t1",
+				coding_thread_id: null,
+				turn_index: 1,
+				tool_count: 2,
+				tool_schema_bytes: JSON.stringify(context.tools).length,
+				prompt_bytes: JSON.stringify("Be brief").length + JSON.stringify(context.messages).length,
+			});
+			const throwing = new UsageMeter({ sql: state.storage.sql, limits: () => UNLIMITED, ownProvider: () => false, tags: () => { throw new Error("no tags"); } });
+			await call(instance, modelOf("gpt-5.5"), { usage: usage(10, 5) }, throwing);
+			expect(rows(instance, "gpt-5.5")[0]).toMatchObject({ agent_id: null, run_kind: null, chat_id: null });
+		});
+	});
+
+	it("tags a chat's calls with its agent, chat and run kind, and naming it as background work", async () => {
+		const session = (await post("/sessions")).body.id;
+		faux.setResponses([toolUse("send_to_user", { message: "Hello!" })]);
+		await say("Hi", session);
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const chat = () => instance.ctx.storage.sql.exec("SELECT run_kind, agent_id, chat_id FROM pim_model_calls WHERE chat_id = ?", session).toArray();
+			await vi.waitFor(() => expect(chat()).toHaveLength(1));
+			expect(chat()[0]).toMatchObject({ run_kind: "interactive", agent_id: expect.any(String) });
+			// Naming the chat has no conversation of its own to tag.
+			const named = instance.ctx.storage.sql.exec("SELECT agent_id, chat_id FROM pim_model_calls WHERE run_kind = 'background'").toArray();
+			expect(named.length).toBeGreaterThan(0);
+			expect(named[0]).toMatchObject({ agent_id: null, chat_id: null });
+		});
+	});
+
+	it("rolls up idempotently, replacing a day's rows rather than adding to them", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const ledger = instance.usage.calls;
+			const sql = instance.ctx.storage.sql;
+			const at = Date.UTC(2026, 5, 1, 10);
+			for (const [minute, output] of [[0, 100], [30, 50]] as const) {
+				ledger.record({ ts: at + minute * 60_000, tags: { agentId: "a", chatId: "c", runKind: "interactive" }, provider: "faux", model: "claude-opus-5-5", usage: usage(1000, output, 500, 0), stopReason: "stop", latencyMs: 5, shape: undefined, plan: false });
+			}
+			ledger.record({ ts: at, tags: {}, provider: "faux", model: "claude-opus-5-5", usage: undefined, stopReason: "error", latencyMs: 5, shape: undefined, plan: false });
+			const daily = () => sql.exec("SELECT * FROM pim_usage_daily WHERE day = '2026-06-01' ORDER BY agent_id").toArray();
+			ledger.rollup(at + HOUR);
+			const first = daily();
+			ledger.rollup(at + HOUR);
+			ledger.rollup(at + HOUR);
+			expect(daily()).toEqual(first);
+			expect(first).toHaveLength(2);
+			expect(first.find((row) => row.agent_id === "a")).toMatchObject({ calls: 2, errors: 0, input: 2000, output: 150, cache_read: 1000, unpriced_calls: 0 });
+			expect(first.find((row) => row.agent_id === null)).toMatchObject({ calls: 1, errors: 1 });
+			// A late call for the same day is added by recomputing, not by adding twice.
+			ledger.record({ ts: at + 2 * HOUR, tags: { agentId: "a", chatId: "c", runKind: "interactive" }, provider: "faux", model: "claude-opus-5-5", usage: usage(1, 1), stopReason: "stop", latencyMs: 5, shape: undefined, plan: false });
+			ledger.rollup(at + 3 * HOUR);
+			expect(daily().find((row) => row.agent_id === "a")).toMatchObject({ calls: 3, input: 2001 });
+		});
+	});
+
+	it("serves costs from the rollup and the calls since, with the cache hit ratio and cost per 1k output tokens", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const ledger = instance.usage.calls;
+			const now = Date.UTC(2026, 5, 10, 12);
+			const base = { tags: { agentId: "a", chatId: "c1", runKind: "interactive" as const }, provider: "faux", model: "claude-opus-5-5", stopReason: "stop", latencyMs: 1, plan: false };
+			ledger.record({ ...base, ts: now - 2 * DAY, usage: usage(1_000_000, 1000, 1_000_000, 0), shape: { promptBytes: 100, toolCount: 0, toolSchemaBytes: 0, turnIndex: 3 } });
+			ledger.rollup(now - 2 * DAY + HOUR);
+			// After the rollup: summed from the calls, today's partial hour included.
+			ledger.record({ ...base, ts: now - HOUR, usage: usage(1_000_000, 1000, 0, 0), shape: { promptBytes: 300, toolCount: 0, toolSchemaBytes: 0, turnIndex: 5 } });
+			const report = ledger.costs(7, now);
+			expect(report.byDay.map((day) => day.day)).toEqual(["2026-06-08", "2026-06-10"]);
+			expect(report.totalCostUsd).toBeCloseTo(4.02 + 0.2 + 4.02, 6);
+			expect(report.byDay[0]).toMatchObject({ cacheHitRatio: 0.5, byAgent: [{ key: "a" }], byRunKind: [{ key: "interactive" }], byModel: [{ key: "claude-opus-5-5" }] });
+			expect(report.byDay[1]!.cacheHitRatio).toBe(0);
+			expect(report.costPer1kOutputTokens).toBeCloseTo(report.totalCostUsd / 2, 6);
+			expect(report.topChats).toEqual([{ id: "c1", costUsd: report.totalCostUsd, calls: 2, turns: 5, avgPromptBytes: 200 }]);
+			expect(ledger.costs(1, now).byDay.map((day) => day.day)).toEqual(["2026-06-10"]);
+		});
+		expect((await api("/usage/costs?days=7")).body).toMatchObject({ days: 7, byDay: expect.any(Array), topChats: expect.any(Array), unpricedCalls: expect.any(Number) });
+	});
+
+	it("never fails or delays a call when recording fails", async () => {
+		await runInDurableObject(agent(), async (instance: Pim, state) => {
+			const meter = new UsageMeter({ sql: state.storage.sql, limits: () => UNLIMITED, ownProvider: () => false });
+			state.storage.sql.exec("ALTER TABLE pim_model_calls RENAME TO pim_model_calls_away");
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				const { catalog, open } = heldCatalog();
+				const request = meter.meter(catalog).stream(modelOf("claude-opus-5-5"), { messages: [] });
+				open[0]!.push({ type: "done", reason: "stop", message: answered(7, 3) });
+				open[0]!.end(answered(7, 3));
+				expect((await request.result()).stopReason).toBe("stop");
+				await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining("pim.model_call_record_failed")));
+			} finally {
+				warn.mockRestore();
+				state.storage.sql.exec("ALTER TABLE pim_model_calls_away RENAME TO pim_model_calls");
+			}
+			// The call's tokens were still counted where limits read them.
+			expect(instance.usage.today().tokens).toBeGreaterThanOrEqual(10);
+		});
+	});
+
+	it("keeps calls 90 days and rollups 400", async () => {
+		await runInDurableObject(agent(), async (instance: Pim) => {
+			const ledger = instance.usage.calls;
+			const sql = instance.ctx.storage.sql;
+			const now = Date.UTC(2026, 10, 10, 12);
+			const old = (days: number) => ledger.record({ ts: now - days * DAY, tags: {}, provider: "faux", model: "claude-opus-5-5", usage: usage(1, 1), stopReason: "stop", latencyMs: 1, shape: undefined, plan: false });
+			old(91);
+			old(89);
+			ledger.rollup(now - 85 * DAY);
+			old(0);
+			sql.exec("INSERT INTO pim_usage_daily (day, model, calls, errors, input, output, cache_read, cache_write_5m, cache_write_1h, unpriced_calls) VALUES (?, 'm', 1, 0, 0, 0, 0, 0, 0, 0), (?, 'm', 1, 0, 0, 0, 0, 0, 0, 0)", new Date(now - 401 * DAY).toISOString().slice(0, 10), new Date(now - 399 * DAY).toISOString().slice(0, 10));
+			ledger.rollup(now);
+			expect(sql.exec("SELECT COUNT(*) AS n FROM pim_model_calls WHERE ts < ?", now - 90 * DAY).one().n).toBe(0);
+			expect(sql.exec("SELECT COUNT(*) AS n FROM pim_model_calls WHERE model = 'claude-opus-5-5' AND ts >= ?", now - 90 * DAY).one().n).toBeGreaterThanOrEqual(2);
+			const days = sql.exec("SELECT day FROM pim_usage_daily WHERE model = 'm'").toArray();
+			expect(days).toEqual([{ day: new Date(now - 399 * DAY).toISOString().slice(0, 10) }]);
+			// The 91-day-old call's day was rolled up before it was pruned and stays in the rollup.
+			expect(sql.exec("SELECT COUNT(*) AS n FROM pim_usage_daily WHERE model = 'claude-opus-5-5'").one().n).toBeGreaterThanOrEqual(2);
+		});
 	});
 });

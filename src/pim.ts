@@ -19,6 +19,7 @@ import {
 	InboxDoc,
 	LiveDoc,
 	type ModelRef,
+	ProviderDoc,
 	type TaskId,
 	ROOT_CONVERSATION_ID,
 	UsageDoc,
@@ -218,7 +219,8 @@ import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from 
 import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcript";
 import { Stalls, stoppable } from "./run-guard";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
-import { type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
+import type { RunTags } from "./model-calls";
+import { type CallInfo, type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
 /** The hook that carries a chat on in a new one when compaction would shorten it (`#continuationExtension`). */
@@ -678,7 +680,12 @@ export class Pim extends DurableAgent<Env> {
 		limits: () => this.limits(),
 		// The person's own plan and providers: their tokens are theirs, not the deployment's.
 		ownProvider: (provider) => provider === CHATGPT_PROVIDER || provider.startsWith(OWN_PROVIDER),
+		tags: (call) => this.#callTags(call),
+		// The hourly rollup of model calls rides the triggers' wake.
+		rollupDue: () => void this.wakeTriggers().catch((error) => console.warn("setting the usage rollup wake failed", error)),
 	});
+	/** The conversation each provider session id names; a conversation's id never changes. */
+	readonly #providerSessions = new Map<string, string>();
 	/** The person's connections to connectors extensions implement themselves, with their sign-ins. */
 	readonly nativeApps = new NativeApps({
 		sql: this.ctx.storage.sql,
@@ -2716,6 +2723,7 @@ export class Pim extends DurableAgent<Env> {
 			await this.triggerEngine()?.coordinator.tick();
 			// What connector events carried is kept a day at most.
 			if (this.triggerEngine()) new ConnectorEventData(this.ctx.storage.sql).sweep(this.triggerClock());
+			this.usage.calls.rollup(this.triggerClock());
 		} finally {
 			await this.wakeTriggers();
 		}
@@ -2736,6 +2744,7 @@ export class Pim extends DurableAgent<Env> {
 				this.#connectorSubscriptions()?.nextWakeAt() ?? null,
 				this.#computerTriggers()?.renewAt() ?? null,
 				engine ? new ConnectorEventData(this.ctx.storage.sql).nextSweepAt() : null,
+				this.usage.calls.nextRollupAt(this.triggerClock()),
 			].filter((at) => at !== null);
 			const wake = due.length === 0 ? null : Math.min(...due);
 			const at = wake === null ? null : Math.ceil((Date.now() + Math.max(1_000, wake - this.triggerClock())) / 1000);
@@ -5223,6 +5232,63 @@ export class Pim extends DurableAgent<Env> {
 		return this.limits();
 	}
 
+	/**
+	 * What a model call is for. A call carries the provider session id of its
+	 * conversation, so the conversation is found from that, then its agent, and
+	 * how its run started: a task's conversation is delegated work, a chat a
+	 * trigger is running in is the trigger's (scheduled when it fires on a
+	 * time), and any other is the person's. A call with no session, such as
+	 * naming a chat or compressing memory, is background work, as is a
+	 * compaction's summary.
+	 */
+	async #callTags({ sessionId, context }: CallInfo): Promise<RunTags> {
+		const first = (context as { messages?: { role?: string; content?: unknown }[] } | undefined)?.messages?.[0];
+		if (sessionId === undefined || (first?.role === "system" && String(first.content).startsWith("You are a context summarization assistant"))) return { runKind: "background" };
+		const session = await this.#sessionOfProvider(sessionId);
+		if (session === undefined) return {};
+		const agentId = this.agents.findOfSession(session)?.id ?? null;
+		const task = this.#tasks.of(session);
+		if (task) return { agentId, runKind: "delegated", chatId: this.store.publicId(task.root || session), parentRunId: task.id };
+		const chatId = this.store.publicId(session);
+		try {
+			const [run] = this.ctx.storage.sql
+				.exec("SELECT trigger_id, revision FROM pim_trigger_runs WHERE chat_id = ? AND phase NOT IN ('completed', 'failed', 'cancelled', 'not_submitted') ORDER BY created_at DESC, rowid DESC LIMIT 1", session)
+				.toArray();
+			if (run) {
+				const source = this.triggerEngine()?.store.revision(String(run.trigger_id), Number(run.revision))?.source;
+				return { agentId, chatId, runKind: source?.kind === "time" ? "scheduled" : "trigger", scheduleOrTriggerId: String(run.trigger_id) };
+			}
+		} catch {
+			// No triggers table: this space never had the engine on.
+		}
+		return { agentId, chatId, runKind: "interactive" };
+	}
+
+	/** The conversation whose provider session id is `id`, found by asking the conversations this space knows, newest first, the first time. */
+	async #sessionOfProvider(id: string): Promise<string | undefined> {
+		const known = this.#providerSessions.get(id);
+		if (known !== undefined) return known;
+		const sql = this.ctx.storage.sql;
+		const sessions = sql
+			.exec("SELECT id AS session FROM pim_sessions UNION SELECT session FROM pim_agent_sessions UNION SELECT conversation AS session FROM pim_tasks")
+			.toArray()
+			.map((row) => String(row.session))
+			.filter((session) => /^[1-9]\d*$/.test(session) && ![...this.#providerSessions.values()].includes(session));
+		const pi = await this.harness.pi();
+		await Promise.all(
+			sessions.map(async (session) => {
+				const provider = await pi.snapshot(ProviderDoc, Number(session) as ConversationId, BACKGROUND_CONTEXT);
+				if (provider) this.#providerSessions.set(provider.sessionId, session);
+			}),
+		);
+		return this.#providerSessions.get(id);
+	}
+
+	/** What model calls have cost over the last `days` days (at most 400), from the daily rollup and the calls since it. */
+	usageCosts(days = 30) {
+		return this.usage.calls.costs(Math.min(Math.max(Math.floor(days) || 30, 1), 400), this.triggerClock());
+	}
+
 	/** Usage today and on recent days, with the limits it counts against. */
 	usageReport(days = 30) {
 		return {
@@ -6300,6 +6366,7 @@ export class Pim extends DurableAgent<Env> {
 			},
 		],
 		["GET", "/usage", () => this.usageReport()],
+		["GET", "/usage/costs", (_params, _request, url) => this.usageCosts(Number(url.searchParams.get("days") ?? 30))],
 
 		// Apps: what the agent made, every version kept. Their bytes are never kept by the browser,
 		// and HTML in them runs only sandboxed (see ./artifacts.ts).

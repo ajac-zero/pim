@@ -40,7 +40,7 @@ import {
   openCanvasTab,
 } from "~/lib/canvas";
 import { pim, type UserContent } from "~/lib/pim-api";
-import { pimClient, usePimClient } from "~/lib/pim-client";
+import { pimClient, textOf, usePimClient } from "~/lib/pim-client";
 import { agentsQuery, sessionsQuery, suggestionsQuery } from "~/lib/queries";
 import { useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
@@ -234,7 +234,7 @@ function ChatPage() {
     alone &&
     !view.running &&
     !roomBusy &&
-    pending === null &&
+    pending.length === 0 &&
     view.error === null &&
     view.retry === null &&
     view.entries.length > 0;
@@ -358,7 +358,7 @@ function ChatPage() {
             )}
             {/* Until its snapshot arrives a chat opened for the first time
              * would look empty; a message just sent is already worth showing. */}
-            {ready && (loaded || pending !== null) ? (
+            {ready && (loaded || pending.length > 0) ? (
               <Thread
                 key={sessionId}
                 sessionId={sessionId}
@@ -370,6 +370,10 @@ function ChatPage() {
                 continuedFrom={session?.continuedFrom}
                 view={view}
                 pending={pending}
+                // A message given up on goes back in the message box, to send again or change.
+                onDiscard={(content) =>
+                  setFill({ text: textOf(content), id: Date.now() })
+                }
                 composerHeight={composerHeight}
                 composerCardHeight={composerCardHeight}
                 footer={

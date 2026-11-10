@@ -8,14 +8,34 @@ it. Plain Node 22 ESM, no dependencies.
 
 ## Install
 
-On the host, from the Pim checkout the stack runs from, once the checkout has this directory:
+There is nothing to install by hand. The usual update command, run as your normal user from the
+Pim checkout, installs and updates hostopsd:
 
 ```sh
-cd ~/pim && git fetch origin && git checkout --detach origin/main && sudo sandbox-manager/hostopsd/install.sh --url https://YOUR-PIM-ORIGIN
+git pull && sandbox-manager/up.sh
 ```
 
-It asks for the hostopsd token from Pim without echoing it (or reads it from `--token-file PATH`,
-or from stdin when stdin is not a terminal; never from the command line). It then:
+After the stack is up, `up.sh` checks whether hostopsd is installed and current (the installed
+`install.sh`, unit, Pim URL and checkout match this checkout, and the unit is running). If not, it
+runs [`install.sh`](install.sh) through `sudo` (it asks for your password when there is a terminal,
+and uses `sudo -n` when there is none). That is the one time root is needed: creating the
+`hostopsd` system user, installing its systemd unit and giving it access to the checkout. If `sudo`
+is not available, `up.sh` prints the single command to run and still succeeds. Failing to install
+hostopsd never fails `up.sh`; the manager stack comes first. When up to date, or when run as
+`hostopsd` itself (a host-ops deploy runs `up.sh` that way), it needs no root and changes nothing.
+
+**Pim's origin** is `HOSTOPS_URL` from the environment, else the one installed in
+`/etc/hostopsd/env`, else `HOSTOPS_URL` in `sandbox-manager/.env`, else `https://pim.ajac-zero.com`.
+
+**The credential** is not pasted from anywhere. `install.sh` enrolls: it sends `POST
+/api/hostops/agent/enroll` with the manager's `MANAGER_TOKEN` and stores the credential Pim returns
+only in `/etc/hostopsd/env` (never printed, never on a command line). It enrolls again only when
+there is no credential or Pim rejects the installed one (401 on a poll); running it again otherwise
+keeps the credential. If the admin revoked hostopsd in Settings, Pim answers 403: the unit is
+installed but left stopped, `up.sh` does not ask again, and the installer says so. After
+re-enabling it in Settings, run `sudo sandbox-manager/hostopsd/install.sh`.
+
+`install.sh` also:
 
 - creates the system user `hostopsd` and adds it to the `docker` group (and `systemd-journal`, so
   `logs hostopsd` can read its own journal);
@@ -25,16 +45,21 @@ or from stdin when stdin is not a terminal; never from the command line). It the
 - finds the manager's environment (`MANAGER_TOKEN`, `PROXY_ADMIN_TOKEN`, ...) that `up.sh` and
   `docker compose` need: `--manager-env PATH`, else `sandbox-manager/.env`, else it copies the
   variables from the running `sandbox-manager` container into `/etc/hostopsd/manager.env`;
-- writes `/etc/hostopsd/env` (mode 0640, `root:hostopsd`), installs
-  `/etc/systemd/system/hostopsd.service`, enables and restarts it, and prints its status.
+- writes `/etc/hostopsd/env` (mode 0640, `root:hostopsd`) and `/etc/hostopsd/installed`, a
+  world-readable note of which installer and unit are installed that `up.sh` compares (no secret),
+  installs `/etc/systemd/system/hostopsd.service`, enables and restarts it;
+- verifies the credential end to end, by reading the daemon's journal for it polling Pim, and
+  prints one summary line such as `hostopsd: enrolled with Pim, running and polling https://...`.
 
-Run it again to change the URL, the token (give a new one) or the checkout; it keeps the rest.
-To revoke access, revoke the token in Pim: hostopsd then logs that it was rejected and retries
-every few minutes. `sudo systemctl disable --now hostopsd` stops it on the host.
+It is an internal helper and stays runnable: `--url`, `--checkout`, `--manager-env`,
+`--manager-url`, `--node`, and `--token-file PATH` (or `-` for stdin) to install a credential you
+already have instead of enrolling. To revoke access, revoke it in Pim: hostopsd then logs that it
+was rejected and retries every few minutes. `sudo systemctl disable --now hostopsd` stops it on the
+host.
 
 hostopsd runs from the checkout (`ExecStart` points at `sandbox-manager/hostopsd/hostopsd.js`), so
 a deploy that changes this directory makes it exit after reporting, and systemd starts the new
-version. A change to `hostopsd.service` needs `install.sh` again.
+version. A change to `hostopsd.service` or `install.sh` is picked up by the next `up.sh`, which runs `install.sh` again.
 
 The checkout is left on a detached HEAD after each deploy. To update by hand, use
 `git fetch && git checkout --detach origin/main && sandbox-manager/up.sh` (or `git checkout main`
@@ -120,7 +145,8 @@ deploys are kept in `deploys` (the last 50), which `rollback` accepts.
 
 ## Tests
 
-`node --test` here (or in `sandbox-manager/`, which includes these). They run the daemon against a
+`node --test` here (or in `sandbox-manager/`, which includes these). `test/install.test.js` runs
+`up.sh` and `install.sh` with fake `curl`, `sudo`, `systemctl` and friends on `PATH`. The rest run the daemon against a
 fake Pim and a fake manager, with a real git repository cloned from a local origin, and wrappers
 for git (which log and then run the real git), docker, journalctl and the checkout's `up.sh`
 (see `support/`). No Docker or systemd needed.

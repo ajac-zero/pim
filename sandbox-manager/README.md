@@ -35,7 +35,9 @@ workspace-agentd as a local process). No Docker daemon needed.
 Live check: `scripts/live-smoke.sh` (needs a Docker daemon with runsc, `curl`, `jq`).
 
 On the host, [hostopsd](hostopsd/README.md) deploys, rolls back, restarts and reports on this stack
-for the operations the admin's agent queues in Pim.
+for the operations the admin's agent queues in Pim. `up.sh` installs and updates it too, so the
+usual update, `git pull && sandbox-manager/up.sh`, is the only step; see
+[Install](hostopsd/README.md#install).
 
 ### Environment
 

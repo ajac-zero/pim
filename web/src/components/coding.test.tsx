@@ -86,6 +86,8 @@ const noEnvironment: CodingEnvironment = {
   setupMs: null,
   snapshotMs: null,
   snapshotBytes: null,
+  snapshotKept: null,
+  readyFrom: null,
   preparedAt: null,
   rebuildRequested: false,
 };

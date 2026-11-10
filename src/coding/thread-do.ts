@@ -16,6 +16,7 @@ import {
 	repositorySetupScript,
 	runSetup,
 	SETUP_TIMEOUT_MS,
+	snapshotWorthKeeping,
 } from "./environment-cache";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
@@ -1805,7 +1806,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		const { source } = setup;
 		if (!rebuild && current.state === "restoring" && current.restoredFromKey === key) {
-			this.#setEnvironment({ state: "cached", key, source, preparedAt: this.now(), error: undefined });
+			this.#setEnvironment({ state: "cached", key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined });
 			this.store.recordEvent("environment.restored", { key });
 			return;
 		}
@@ -1822,16 +1823,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 				workspace = await this.#workspace({ restoreFrom: snapshot });
 				const now = this.store.required().environment;
 				if (now.state === "restoring" && now.restoredFromKey === key) {
-					this.#setEnvironment({ state: "cached", key, source, preparedAt: this.now(), error: undefined });
+					this.#setEnvironment({ state: "cached", key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined });
 					this.store.recordEvent("environment.restored", { key });
 					return;
 				}
 				// The restore failed and the workspace is a plain clone: build it here instead.
 				restore = false;
 			}
+			// An environment whose snapshot wasn't worth keeping is set up by each thread, so there is nothing to wait for.
+			if (!rebuild && (await scheduler.environmentSnapshotSkipped(key))) {
+				await this.#buildEnvironment(provider, workspace, owner, key, setup, { snapshot: false });
+				return;
+			}
 			if (await scheduler.acquireEnvironmentBuild(key, thread.threadId, BUILD_LOCK_MS)) {
 				try {
-					await this.#buildEnvironment(provider, workspace, owner, key, setup);
+					await this.#buildEnvironment(provider, workspace, owner, key, setup, { snapshot: true });
 				} finally {
 					await scheduler.releaseEnvironmentBuild(key, thread.threadId).catch(() => {});
 				}
@@ -1850,8 +1856,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** Runs the setup script in the workspace, then keeps the snapshot. A failure of either is recorded, and the thread goes on. */
-	async #buildEnvironment(provider: WorkspaceProvider, workspace: Workspace, owner: EnvironmentOwner, key: string, setup: { script: string; source: "settings" | "repository" }): Promise<void> {
+	/**
+	 * Runs the setup script in the workspace, then, with `o.snapshot`, takes
+	 * a snapshot and keeps it if it is worth keeping (`snapshotWorthKeeping`),
+	 * recording the finding for the person's next threads. Its size is known
+	 * only once it is taken, so one that isn't is deleted again. A failure is
+	 * recorded, and the thread goes on.
+	 */
+	async #buildEnvironment(provider: WorkspaceProvider, workspace: Workspace, owner: EnvironmentOwner, key: string, setup: { script: string; source: "settings" | "repository" }, o: { snapshot: boolean }): Promise<void> {
 		this.#setEnvironment({ state: "building", key, source: setup.source, error: undefined });
 		const started = performance.now();
 		const result = await runSetup(workspace, setup.script, { cwd: REPO_DIR });
@@ -1862,13 +1874,38 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.#environmentFailed(key, result.error);
 			return;
 		}
+		const ready = { state: "cached", key, setupMs, readyFrom: "setup", rebuildRequested: false, error: undefined } as const;
+		if (!o.snapshot) {
+			this.#setEnvironment({ ...ready, builtAt: null, snapshotMs: null, snapshotBytes: null, snapshotKept: false, preparedAt: this.now() });
+			this.store.recordEvent("environment.built", { key, setupMs, snapshotKept: false });
+			return;
+		}
 		const snapshotStarted = performance.now();
 		try {
-			const ref = this.store.required().workspaceRef;
-			if (!ref) throw new Error("The coding thread has no workspace");
-			const snapshot = await provider.snapshotEnvironment(ref, { ...owner, key });
-			this.#setEnvironment({ state: "cached", key, builtAt: snapshot.createdAt, setupMs, snapshotMs: Math.round(performance.now() - snapshotStarted), snapshotBytes: snapshot.size ?? null, rebuildRequested: false, preparedAt: this.now(), error: undefined });
-			this.store.recordEvent("environment.built", { key, setupMs });
+			const thread = this.store.required();
+			if (!thread.workspaceRef) throw new Error("The coding thread has no workspace");
+			const snapshot = await provider.snapshotEnvironment(thread.workspaceRef, { ...owner, key });
+			const snapshotMs = Math.round(performance.now() - snapshotStarted);
+			const snapshotBytes = snapshot.size ?? null;
+			const worth = snapshotWorthKeeping(setupMs, snapshotBytes);
+			let kept = worth;
+			if (!worth) {
+				// The person's other snapshots of the repository are older environments of it, which only start new threads as a guess (`#createWorkspace`) to be set up again: they don't pay either. One that can't be deleted, such as one a restore holds at this moment, stays.
+				const others = await provider.listEnvironments(owner).then(
+					(snapshots) => snapshots.map((each) => each.key).filter((each) => each !== key),
+					() => [],
+				);
+				for (const each of [key, ...others]) {
+					const deleted = await provider.deleteEnvironment(owner.userId, each).then(
+						() => true,
+						(error) => void console.warn(JSON.stringify({ event: "pim.coding.environment_delete_failed", thread: thread.threadId, key: each, error: String(error).slice(0, 300) })),
+					);
+					if (each === key) kept = !deleted;
+				}
+			}
+			await codingScheduler(this.env, thread.space).setEnvironmentSnapshotSkipped(key, !worth);
+			this.#setEnvironment({ ...ready, builtAt: kept ? snapshot.createdAt : null, snapshotMs, snapshotBytes, snapshotKept: kept, preparedAt: this.now() });
+			this.store.recordEvent("environment.built", { key, setupMs, snapshotKept: kept });
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.environment_snapshot_failed", thread: this.store.required().threadId, key, error: String(error).slice(0, 300) }));
 			this.#setEnvironment({ setupMs });

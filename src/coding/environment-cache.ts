@@ -40,6 +40,10 @@ export type CodingEnvironment = {
 	readonly snapshotMs: number | null;
 	/** The size of the snapshot the thread took or was restored from, compressed, as the backend stores it; null when it doesn't say. */
 	readonly snapshotBytes: number | null;
+	/** Whether the snapshot was kept for the threads after it (`snapshotWorthKeeping`): false when restoring it would have taken longer than setting up again, so it was deleted or never taken; null before a build. */
+	readonly snapshotKept: boolean | null;
+	/** How the thread's environment became ready: restored from a snapshot, or by running the setup script in the thread's workspace; null until it is. */
+	readonly readyFrom: "snapshot" | "setup" | null;
 	/** When the thread last readied its environment: restored it, built it, failed, or found no setup script; null before it first does. */
 	readonly preparedAt: number | null;
 	/** Whether a rebuild was asked for and hasn't finished yet. */
@@ -60,6 +64,8 @@ export const NO_ENVIRONMENT: CodingEnvironment = {
 	setupMs: null,
 	snapshotMs: null,
 	snapshotBytes: null,
+	snapshotKept: null,
+	readyFrom: null,
 	preparedAt: null,
 	rebuildRequested: false,
 };
@@ -72,6 +78,28 @@ export const MAX_SETUP_SCRIPT_BYTES = 64 * 1024;
 
 /** How long a setup script may run: as long as the coding tools' longest command. */
 export const SETUP_TIMEOUT_MS = 15 * 60_000;
+
+/** A setup that took at least this long is worth a snapshot whatever its size: such a setup does more than install from the dependency cache. */
+export const SNAPSHOT_MIN_SETUP_MS = 60_000;
+
+/** How fast a snapshot is taken to restore, in MB (10^6 bytes) of the stored snapshot a second: about what the first live restores did. */
+export const SNAPSHOT_RESTORE_MB_PER_S = 8;
+
+/** How long restoring a snapshot of `bytes` is expected to take, in ms. */
+export function estimatedRestoreMs(bytes: number): number {
+	return bytes / (SNAPSHOT_RESTORE_MB_PER_S * 1_000);
+}
+
+/**
+ * Whether a snapshot is worth keeping for the threads after it: when the
+ * setup took `SNAPSHOT_MIN_SETUP_MS` or more, or restoring the snapshot is
+ * expected to take less time than the setup did. A cheap setup is otherwise
+ * run again by each thread, from the warm dependency cache. A snapshot of
+ * unknown size is kept.
+ */
+export function snapshotWorthKeeping(setupMs: number, snapshotBytes: number | null): boolean {
+	return setupMs >= SNAPSHOT_MIN_SETUP_MS || snapshotBytes === null || estimatedRestoreMs(snapshotBytes) < setupMs;
+}
 
 /** The most of a failure kept on the thread. */
 export const MAX_ENVIRONMENT_ERROR_CHARS = 500;

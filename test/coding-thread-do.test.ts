@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyBrokerToken } from "../src/coding/git-broker/broker";
 import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
-import { type EnvironmentKeyInput, environmentKey, lockfileHashes, SETUP_ENV } from "../src/coding/environment-cache";
+import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, SNAPSHOT_MIN_SETUP_MS, snapshotWorthKeeping } from "../src/coding/environment-cache";
 import { CONTINUE_TEXT, codingThread, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
@@ -740,7 +740,7 @@ describe("a coding thread's environment", () => {
 		expect(keptBeforeTurn).toBe(true);
 		const { environment } = await stub.status();
 		const key = await environmentKey({ userId: space, repo: fullName, setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": await sha256(LOCK), "web/package-lock.json": await sha256(WEB_LOCK) }, image: DEFAULT_WORKSPACE_IMAGE });
-		expect(environment).toMatchObject({ state: "cached", key, source: "repository", restoredFromKey: null, rebuildRequested: false });
+		expect(environment).toMatchObject({ state: "cached", key, source: "repository", restoredFromKey: null, rebuildRequested: false, readyFrom: "setup", snapshotKept: true });
 		for (const field of ["builtAt", "preparedAt", "provisionMs", "setupMs", "snapshotMs"] as const) expect(environment[field]).toEqual(expect.any(Number));
 		expect(environment.error).toBeUndefined();
 		// The script ran once, with bash in the checkout, given nothing but CI and a git that never prompts.
@@ -769,7 +769,7 @@ describe("a coding thread's environment", () => {
 		const second = await startThread({ repo, space });
 		await turns(second.id, 1);
 		const status = await second.stub.status();
-		expect(status.environment).toMatchObject({ state: "cached", key, restoredFromKey: key, source: "repository" });
+		expect(status.environment).toMatchObject({ state: "cached", key, restoredFromKey: key, source: "repository", readyFrom: "snapshot" });
 		expect(status.environment.restoreMs).toEqual(expect.any(Number));
 		expect(status.environment.setupMs).toBeNull();
 		// Made from the snapshot: no clone and no setup, the dependencies there, and the repository fetched and checked out over it.
@@ -805,6 +805,66 @@ describe("a coding thread's environment", () => {
 		expect(environment.error).not.toMatch(/[\u0000-\u0009\u000b-\u001f]/);
 		expect(await codingWorkspaces.listEnvironments({ userId: input.space, repo: fullName })).toEqual([]);
 		expect((await stub.log()).find((event) => event.kind === "environment.failed")?.data).toMatchObject({ error: environment.error });
+	});
+
+	it("keeps a snapshot only when the setup was long or restoring it is expected to be quicker than the setup was", () => {
+		// 8 MB a second: 400 MB takes 50 s to restore.
+		expect(estimatedRestoreMs(400_000_000)).toBe(50_000);
+		expect(snapshotWorthKeeping(50_001, 400_000_000)).toBe(true);
+		expect(snapshotWorthKeeping(50_000, 400_000_000)).toBe(false);
+		expect(snapshotWorthKeeping(10_000, 355_000_000)).toBe(false);
+		// A long setup does more than install from the cache: kept whatever its size.
+		expect(snapshotWorthKeeping(SNAPSHOT_MIN_SETUP_MS, 4_000_000_000)).toBe(true);
+		expect(snapshotWorthKeeping(SNAPSHOT_MIN_SETUP_MS - 1, 4_000_000_000)).toBe(false);
+		// A backend that doesn't say how big it is keeps it, as before.
+		expect(snapshotWorthKeeping(0, null)).toBe(true);
+	});
+
+	it("deletes a snapshot that would restore slower than the setup ran, and the person's next threads set up again without taking one", async () => {
+		const { repo, fullName } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		const taken = vi.spyOn(codingWorkspaces, "snapshotEnvironment");
+		// An older environment of the repository, which the first thread starts from as a guess.
+		const stale = "e".repeat(64);
+		codingWorkspaces.environments.set(`${space}\0${stale}`, { userId: space, repo: fullName, key: stale, createdAt: 1, lastUsedAt: 1, nodes: new Map([["/workspace", { type: "dir", mode: 0o755, mtimeMs: 1 }]]) });
+		// 1 GB: about 2 minutes to restore, where the fake setup takes a moment.
+		codingWorkspaces.environmentSize = 1_000_000_000;
+		try {
+			codingFaux.setResponses([fauxAssistantMessage("First."), fauxAssistantMessage("Second.")]);
+			const first = await startThread({ repo, space });
+			await turns(first.id, 1);
+			const built = (await first.stub.status()).environment;
+			expect(built).toMatchObject({ state: "cached", readyFrom: "setup", snapshotKept: false, snapshotBytes: 1_000_000_000, builtAt: null, snapshotMs: expect.any(Number), restoredFromKey: stale });
+			// Neither its own snapshot nor the older one stays.
+			expect(snapshotsOf(space)).toEqual([]);
+			expect(taken).toHaveBeenCalledTimes(1);
+			expect((await first.stub.log()).find((event) => event.kind === "environment.built")?.data).toMatchObject({ key: built.key, snapshotKept: false });
+			// The next thread clones, runs the setup (cheap from the warm dependency cache) and takes no snapshot.
+			const clones = fakeClones.length;
+			const second = await startThread({ repo, space });
+			await turns(second.id, 1);
+			expect((await second.stub.status()).environment).toMatchObject({ state: "cached", key: built.key, readyFrom: "setup", snapshotKept: false, snapshotMs: null, snapshotBytes: null, restoredFromKey: null });
+			expect(fakeClones.length).toBe(clones + 1);
+			expect(setups.map((each) => each.space)).toEqual([space, space]);
+			expect(taken).toHaveBeenCalledTimes(1);
+			// A rebuild takes one and decides again: of a size the backend doesn't say, it is kept.
+			codingWorkspaces.environmentSize = undefined;
+			await second.stub.rebuildEnvironment();
+			const rebuilt = await vi.waitFor(
+				async () => {
+					const { environment } = await second.stub.status();
+					expect(environment).toMatchObject({ state: "cached", rebuildRequested: false, snapshotKept: true });
+					return environment;
+				},
+				{ timeout: 10_000, interval: 50 },
+			);
+			expect(rebuilt.snapshotBytes).toBeNull();
+			expect(taken).toHaveBeenCalledTimes(2);
+			expect(snapshotsOf(space).map((saved) => [saved.repo, saved.key])).toEqual([[fullName, built.key]]);
+		} finally {
+			codingWorkspaces.environmentSize = undefined;
+			taken.mockRestore();
+		}
 	});
 
 	it("clones as usual when the snapshot can't be restored, and builds it again", async () => {

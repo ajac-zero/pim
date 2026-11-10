@@ -1,11 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useI18n } from "~/components/i18n";
-import { Copy, Link2 } from "~/components/icons";
+import { Copy, Link2, Pin, PinOff } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import { usePimClient } from "~/lib/pim-client";
 import { conversationMarkdown } from "~/lib/pim-view";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { pinTab, unpinTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
 
 /** Copies every message in the open conversation, including those above the viewport. */
@@ -77,6 +78,25 @@ export function CopyChatId({
       }}
     >
       <Link2 className="size-4.5" />
+    </Button>
+  );
+}
+
+/** Pins the chat as a tab above the header, or unpins it. Tabs show only on wider screens. */
+export function PinChat({ sessionId }: { sessionId: string }) {
+  const { t } = useI18n();
+  const pinned = useTabs().some((tab) => tab.session === sessionId);
+  const label = pinned ? t("unpinChat") : t("pinChat");
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="shrink-0 self-center max-md:hidden"
+      aria-label={label}
+      title={label}
+      onClick={() => (pinned ? unpinTab(sessionId) : pinTab(sessionId))}
+    >
+      {pinned ? <PinOff className="size-4.5" /> : <Pin className="size-4.5" />}
     </Button>
   );
 }

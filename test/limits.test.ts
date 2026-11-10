@@ -278,14 +278,15 @@ describe("model call ledger", () => {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	});
 	const modelOf = (id: string, provider = "faux") => ({ provider, id, api: "faux" }) as unknown as Model<Api>;
+	const sqlOf = (instance: Pim) => (instance as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
 	beforeEach(() =>
 		runInDurableObject(agent(), (instance: Pim) => {
-			for (const table of ["pim_model_calls", "pim_usage_daily", "pim_usage_rollup"]) instance.ctx.storage.sql.exec(`DELETE FROM ${table}`);
+			for (const table of ["pim_model_calls", "pim_usage_daily", "pim_usage_rollup"]) sqlOf(instance).exec(`DELETE FROM ${table}`);
 			instance.usage.calls.rollup(Date.now());
-			instance.ctx.storage.sql.exec("DELETE FROM pim_usage_rollup");
+			sqlOf(instance).exec("DELETE FROM pim_usage_rollup");
 		}),
 	);
-	const rows = (instance: Pim, model: string) => instance.ctx.storage.sql.exec("SELECT * FROM pim_model_calls WHERE model = ? ORDER BY id", model).toArray();
+	const rows = (instance: Pim, model: string) => sqlOf(instance).exec("SELECT * FROM pim_model_calls WHERE model = ? ORDER BY id", model).toArray();
 
 	/** Sends one call through a meter on the instance's own database and settles it as `message` says. */
 	async function call(instance: Pim, model: Model<Api>, message: Partial<AssistantMessage>, meter = instance.usage, context: unknown = { messages: [] }) {
@@ -372,11 +373,11 @@ describe("model call ledger", () => {
 		faux.setResponses([toolUse("send_to_user", { message: "Hello!" })]);
 		await say("Hi", session);
 		await runInDurableObject(agent(), async (instance: Pim) => {
-			const chat = () => instance.ctx.storage.sql.exec("SELECT run_kind, agent_id, chat_id FROM pim_model_calls WHERE chat_id = ?", session).toArray();
+			const chat = () => sqlOf(instance).exec("SELECT run_kind, agent_id, chat_id FROM pim_model_calls WHERE chat_id = ?", session).toArray();
 			await vi.waitFor(() => expect(chat()).toHaveLength(1));
 			expect(chat()[0]).toMatchObject({ run_kind: "interactive", agent_id: expect.any(String) });
 			// Naming the chat has no conversation of its own to tag.
-			const named = instance.ctx.storage.sql.exec("SELECT agent_id, chat_id FROM pim_model_calls WHERE run_kind = 'background'").toArray();
+			const named = sqlOf(instance).exec("SELECT agent_id, chat_id FROM pim_model_calls WHERE run_kind = 'background'").toArray();
 			expect(named.length).toBeGreaterThan(0);
 			expect(named[0]).toMatchObject({ agent_id: null, chat_id: null });
 		});
@@ -385,7 +386,7 @@ describe("model call ledger", () => {
 	it("rolls up idempotently, replacing a day's rows rather than adding to them", async () => {
 		await runInDurableObject(agent(), async (instance: Pim) => {
 			const ledger = instance.usage.calls;
-			const sql = instance.ctx.storage.sql;
+			const sql = sqlOf(instance);
 			const at = Date.UTC(2026, 5, 1, 10);
 			for (const [minute, output] of [[0, 100], [30, 50]] as const) {
 				ledger.record({ ts: at + minute * 60_000, tags: { agentId: "a", chatId: "c", runKind: "interactive" }, provider: "faux", model: "claude-opus-5-5", usage: usage(1000, output, 500, 0), stopReason: "stop", latencyMs: 5, shape: undefined, plan: false });
@@ -452,7 +453,7 @@ describe("model call ledger", () => {
 	it("keeps calls 90 days and rollups 400", async () => {
 		await runInDurableObject(agent(), async (instance: Pim) => {
 			const ledger = instance.usage.calls;
-			const sql = instance.ctx.storage.sql;
+			const sql = sqlOf(instance);
 			const now = Date.UTC(2026, 10, 10, 12);
 			const old = (days: number) => ledger.record({ ts: now - days * DAY, tags: {}, provider: "faux", model: "claude-opus-5-5", usage: usage(1, 1), stopReason: "stop", latencyMs: 1, shape: undefined, plan: false });
 			old(91);

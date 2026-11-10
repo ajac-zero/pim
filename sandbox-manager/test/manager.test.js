@@ -270,7 +270,7 @@ describe('sessions', () => {
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
+		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, running: 1, free: 1, sessions: 1, reserved: { liveMiB: 1024, live: 1, keptMiB: 0, kept: 0, envMiB: 0, totalMiB: 1024 }, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
 	})
 	test('health includes version from BUILD_SHA env', async () => {
 		process.env.BUILD_SHA = 'abc1234'
@@ -529,20 +529,37 @@ describe('disk governance', () => {
 		mgr = make()
 		await new Promise((r) => mgr.server.listen(0, '127.0.0.1', r))
 	})
-	test('the total workspace quota refuses creates with 507, and counts kept volumes', async () => {
+	test('the total workspace quota refuses creates with 507 and says what holds the space', async () => {
 		await setup({ maxTotalWorkspaceMiB: 2048, maxConcurrent: 5 })
 		await call('POST', '/sessions', good)
 		await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })
 		const r = await call('POST', '/sessions', { ...good, sessionId: 'abc-3', limits: { ...limits, diskMiB: 64 } })
 		assert.equal(r.status, 507)
-		assert.deepEqual(r.json, { error: 'workspace disk would exceed 2048 MiB', code: 'workspace_quota', reservedMiB: 2048, requestedMiB: 64, maxTotalMiB: 2048 })
+		assert.equal(r.json.code, 'workspace_quota')
+		assert.deepEqual([r.json.reservedMiB, r.json.liveMiB, r.json.live, r.json.keptMiB, r.json.envMiB], [2048, 2048, 2, 0, 0])
+		assert.match(r.json.error, /2 live workspaces 2048 MiB, 0 stopped workspaces 0 MiB/)
 		assert.equal(fake.calls.filter((c) => c.path === '/containers/create').length, 2)
+	})
+	test('a kept workspace holds only the bytes it uses, and is removed to make room before a create is refused', async () => {
+		await setup({ maxTotalWorkspaceMiB: 2048, maxConcurrent: 5 })
+		await call('POST', '/sessions', good)
+		await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })
+		fake.volumeSizes.set('pim-ws-abc-2', 100 * MiB)
 		await call('DELETE', '/sessions/abc-2?keepVolume=1')
-		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'abc-3' })).status, 507, 'kept volume still reserved')
-		// Resuming the kept session reuses its own reservation.
-		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'abc-2' })).status, 201)
-		await call('DELETE', '/sessions/abc-2')
-		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'abc-3' })).status, 201)
+		await mgr.reap() // measures the kept workspace
+		assert.equal((await call('GET', '/health')).json.reserved.keptMiB, 100)
+		assert.equal((await call('POST', '/sessions', { ...good, sessionId: 'abc-3' })).status, 201, 'it fits beside the kept 100 MiB? no: 1024+100+1024 > 2048, so the kept one went')
+		assert.ok(!fake.volumes.has('pim-ws-abc-2'), 'the stale kept workspace was removed')
+		assert.equal((await call('GET', '/sessions/abc-2/status')).status, 404)
+	})
+	test('kept entries whose volume vanished stop holding quota', async () => {
+		await setup({ maxTotalWorkspaceMiB: 4096, maxConcurrent: 5 })
+		await call('POST', '/sessions', good)
+		await call('DELETE', '/sessions/abc-1?keepVolume=1')
+		assert.equal((await call('GET', '/health')).json.reserved.kept, 1)
+		fake.volumes.delete('pim-ws-abc-1')
+		await mgr.reap()
+		assert.equal((await call('GET', '/health')).json.reserved.kept, 0)
 	})
 	test('delete with keepVolume keeps the workspace across restarts until resumed, deleted or reaped', async () => {
 		await setup({ keptVolumeDays: 7 })

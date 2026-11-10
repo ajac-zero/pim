@@ -248,12 +248,55 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		return u.origin
 	}
 
-	// Disk promised to workspaces: the quota of every live, starting and kept workspace, plus what
-	// snapshots and cache volumes use.
-	function reservedMiB(except) {
-		let sum = Math.ceil(env.bytes() / MiB)
-		for (const [id, x] of [...sessions, ...creating, ...kept]) if (id !== except) sum += x.params.limits.diskMiB
-		return sum
+	// What a kept workspace holds back: the bytes it uses when they are known (never more than its
+	// quota), else its whole quota. Live and starting workspaces hold their whole quota, since they
+	// may grow into it.
+	const keptMiB = (k) => {
+		const quota = k.params.limits.diskMiB
+		return typeof k.diskBytes === 'number' ? Math.min(quota, Math.max(1, Math.ceil(k.diskBytes / MiB))) : quota
+	}
+
+	// Disk promised to workspaces, by what holds it: live and starting workspaces, kept ones, and
+	// snapshots and cache volumes.
+	function reservation(except) {
+		const r = { liveMiB: 0, live: 0, keptMiB: 0, kept: 0, envMiB: Math.ceil(env.bytes() / MiB) }
+		for (const [id, x] of [...sessions, ...creating]) if (id !== except) (r.liveMiB += x.params.limits.diskMiB, r.live++)
+		for (const [id, k] of kept) if (id !== except) (r.keptMiB += keptMiB(k), r.kept++)
+		r.totalMiB = r.liveMiB + r.keptMiB + r.envMiB
+		return r
+	}
+	const reservedMiB = (except) => reservation(except).totalMiB
+
+	// Reads what kept workspaces really use from Docker, and forgets kept entries whose volume is
+	// gone, so a stale entry cannot hold quota for good.
+	async function reconcileKept() {
+		if (!kept.size) return
+		const df = await docker.request('GET', '/system/df?type=volume&verbose=1')
+		const volumes = df?.VolumeUsage ? (df.VolumeUsage.Items ?? []) : df?.Volumes
+		if (!Array.isArray(volumes)) return
+		const sizes = new Map(volumes.map((v) => [v.Name, v.UsageData?.Size]))
+		for (const [id, k] of [...kept]) {
+			const size = sizes.get(names(id).volume)
+			if (size === undefined) {
+				kept.delete(id)
+				await docker.request('DELETE', `/volumes/${names(id).marker}`).catch(() => {})
+			} else if (size >= 0) k.diskBytes = size
+		}
+	}
+
+	// Frees disk for a workspace needing `needMiB` before the create is refused: collects snapshots
+	// and caches over their share, then removes kept workspaces, those of deleted sessions first and
+	// then the longest stopped, until it fits.
+	async function makeRoom(id, needMiB) {
+		const fits = () => reservedMiB(id) + needMiB <= cfg.maxTotalWorkspaceMiB
+		await env.gc().catch(() => {})
+		await reconcileKept().catch(() => {})
+		const order = [...kept].filter(([kid]) => kid !== id).sort(([, a], [, b]) => (a.reason === 'kept_volume' ? 0 : 1) - (b.reason === 'kept_volume' ? 0 : 1) || a.keptAt - b.keptAt)
+		for (const [kid] of order) {
+			if (fits()) return
+			console.warn(`removing kept workspace ${kid} to make room`)
+			await remove(kid).catch(() => {})
+		}
 	}
 
 	const lowDisk = (free) => new HttpError(507, `free disk ${free.toFixed(1)}% is below ${cfg.minFreePct}%`, { code: 'low_disk', freeDiskPct: Math.round(free * 10) / 10, minFreePct: cfg.minFreePct })
@@ -285,13 +328,17 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	// Starts a container for `params`, reusing a kept volume of the same session.
 	async function launch(params, restoreFrom) {
 		const id = params.sessionId
+		const need = params.limits.diskMiB
+		if (cfg.maxTotalWorkspaceMiB && reservedMiB(id) + need > cfg.maxTotalWorkspaceMiB) await makeRoom(id, need)
 		// Check and reserve the slot in one synchronous step (no await in between), so concurrent
 		// creates cannot pass the checks together. Existing sessions over the limit are left alone.
 		const running = sessions.size + creating.size
 		if (running >= cfg.maxConcurrent) throw new HttpError(429, 'at capacity', { code: 'capacity', limit: cfg.maxConcurrent, running })
-		const reserved = reservedMiB(id)
-		if (cfg.maxTotalWorkspaceMiB && reserved + params.limits.diskMiB > cfg.maxTotalWorkspaceMiB) {
-			throw new HttpError(507, `workspace disk would exceed ${cfg.maxTotalWorkspaceMiB} MiB`, { code: 'workspace_quota', reservedMiB: reserved, requestedMiB: params.limits.diskMiB, maxTotalMiB: cfg.maxTotalWorkspaceMiB })
+		const held = reservation(id)
+		if (cfg.maxTotalWorkspaceMiB && held.totalMiB + need > cfg.maxTotalWorkspaceMiB) {
+			const { totalMiB, ...by } = held
+			const detail = `${by.live} live workspaces ${by.liveMiB} MiB, ${by.kept} stopped workspaces ${by.keptMiB} MiB, snapshots and caches ${by.envMiB} MiB`
+			throw new HttpError(507, `workspace disk would exceed ${cfg.maxTotalWorkspaceMiB} MiB (${detail}; ${totalMiB} MiB reserved, ${need} MiB requested)`, { code: 'workspace_quota', reservedMiB: totalMiB, requestedMiB: need, maxTotalMiB: cfg.maxTotalWorkspaceMiB, ...by })
 		}
 		const promise = (async () => {
 			const free = await freeDiskPct()
@@ -322,6 +369,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	async function keep(id, reason) {
 		const s = sessions.get(id)
 		const k = kept.get(id)
+		if (s) await measure(s).catch(() => {})
 		sessions.delete(id)
 		const params = s?.params ?? k?.params
 		const info = params && { params, createdAt: s?.createdAt ?? k?.createdAt ?? null, keptAt: now(), reason, diskBytes: s?.disk?.rootBytes ?? k?.diskBytes ?? null }
@@ -496,6 +544,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	async function reap() {
 		for (const [id, s] of [...sessions]) if (now() - s.lastUsed > cfg.idleMin * 60000) await remove(id).catch(() => {})
 		if (cfg.keptVolumeDays) for (const [id, k] of [...kept]) if (now() - k.keptAt > cfg.keptVolumeDays * 86400000) await remove(id).catch(() => {})
+		await reconcileKept().catch((e) => console.error('measuring kept workspaces:', e.message))
 		await env.gc().catch((e) => console.error('collecting snapshots and caches:', e.message))
 	}
 
@@ -509,6 +558,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			running,
 			free: Math.max(0, cfg.maxConcurrent - running),
 			sessions: sessions.size,
+			reserved: reservation(),
 			...(await env.ready().then(env.stats, () => ({ snapshotBytes: null, cacheBytes: null, snapshotCount: null }))),
 		}
 	}

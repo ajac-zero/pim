@@ -47,7 +47,7 @@ Live check: `scripts/live-smoke.sh` (needs a Docker daemon with runsc, `curl`, `
 | `MIN_FREE_DISK_PCT` | 15 | Refuse create (507, `low_disk`) below this free-disk percentage |
 | `MAX_CONCURRENT` | derived | Refuse create (429, `capacity`) at this many live sessions. Default `clamp(min(cpus, floor((memGiB - 1) / 1.5)), 1, 8)`: 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4 |
 | `DEFAULT_DISK_MIB` | 5120 | Workspace quota when a create leaves out `limits.diskMiB` |
-| `MAX_TOTAL_WORKSPACE_GB` | 100 | Refuse create (507, `workspace_quota`) when the quotas of live, starting and kept workspaces plus the new one exceed this many GiB. `0` turns it off |
+| `MAX_TOTAL_WORKSPACE_GB` | 100 | Refuse create (507, `workspace_quota`) when the quotas of live and starting workspaces, the bytes kept workspaces use, and snapshots and caches, plus the new quota, exceed this many GiB. Before refusing, the manager collects snapshots and caches and removes kept workspaces (deleted sessions first, then the longest stopped). The error lists what holds the space. `0` turns it off |
 | `DISK_QUOTA_MODE` | `auto` | `volume`, `measure` or `auto` (probe at start); see Disk governance |
 | `DISK_CHECK_SEC` | 60 | How often every workspace is measured |
 | `WORKSPACE_TMPFS` | 0 | `1` makes `/workspace` a size-capped tmpfs volume (quota mode `tmpfs`: enforced, but counts against RAM) |
@@ -271,8 +271,9 @@ starting session are never deleted.
     its quota is stopped: its container and network are removed, its volume is kept, and status
     says `stopped` / `over_disk_quota`. A session can overshoot until the next check.
   - `tmpfs` (`WORKSPACE_TMPFS=1`): a size-capped tmpfs workspace, enforced but held in RAM.
-- **Total.** Creates are refused with 507 `workspace_quota` when the quotas of all live,
-  starting and kept workspaces plus the new one exceed `MAX_TOTAL_WORKSPACE_GB`, and with 507
+- **Total.** Creates are refused with 507 `workspace_quota` when the quotas of live and
+  starting workspaces, the bytes kept workspaces use (their whole quota until measured), and
+  snapshots and caches, plus the new one, exceed `MAX_TOTAL_WORKSPACE_GB`, and with 507
   `low_disk` below `MIN_FREE_DISK_PCT` free disk. The capacity check, the total check and the
   slot reservation happen in one synchronous step, so concurrent creates cannot exceed them.
   Sessions already over a limit (after lowering it or a restart) are never killed; they only
@@ -325,5 +326,5 @@ restarted while the manager kept running gets its networks and allowlists back t
   beyond the single bearer token.
 - Image pulls have no timeout, and the manager does not verify digests itself.
 - No TTY and no metrics.
-- A stopped session stays reserved against `MAX_TOTAL_WORKSPACE_GB` and is removed, files and
-  all, by the reaper after `KEPT_VOLUME_DAYS`.
+- A stopped session stays reserved against `MAX_TOTAL_WORKSPACE_GB` (by the bytes it uses) and is
+  removed, files and all, by the reaper after `KEPT_VOLUME_DAYS`, or earlier when a create needs the room.

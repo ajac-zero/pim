@@ -50,6 +50,12 @@ describe("ComposeWorkspaceProvider", () => {
 		const full = stub(429, { error: "at capacity", code: "capacity", limit: 2, running: 2 });
 		await expect(full.create(spec("a"))).rejects.toBeInstanceOf(WorkspaceCapacityError);
 		expect(full.capabilities.maxConcurrent).toBe(2);
+		// The manager's total workspace disk being promised out queues the thread like a full backend, and says what holds it.
+		const quota = await stub(507, { error: "workspace disk would exceed 100 MiB (3 live workspaces 100 MiB)", code: "workspace_quota" })
+			.create(spec("a"))
+			.catch((e) => e);
+		expect(quota).toBeInstanceOf(WorkspaceCapacityError);
+		expect(quota.message).toContain("3 live workspaces");
 		const low = await stub(507, { error: "free disk 3% is below 15%", code: "low_disk" })
 			.create(spec("a"))
 			.catch((e) => e);

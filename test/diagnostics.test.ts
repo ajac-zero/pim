@@ -90,6 +90,7 @@ describe("the majordomo's diagnostics tools", () => {
 		await inPim((pim) => {
 			const now = Date.now();
 			pim.usage.calls.record({ ts: now, tags: { runKind: "interactive" }, provider: "test", model: "m", usage: undefined, stopReason: "error", latencyMs: 90_000, shape: undefined, plan: false });
+			pim.providerCooldowns.failed("openai", { message: `You've hit your usage limit (key ${SECRET}). Try again in 42 min.` }, now);
 			pim.diagnosticEvents.record("slow_request", { method: "GET", path: "/api/sessions", ms: 7000, error: `Bearer ${SECRET} from https://${PUBLIC_HOST}/x?key=${SECRET}`, api_key: SECRET });
 			pim.store.requestApproval({ id: "ap-1", session: pim.store.sessionOf(ROOT)!, action: "send_email", tool: null, args: {}, summary: `Send to someone@example.org with token=${SECRET}`, callId: null, createdAt: now, expiresAt: null, onTimeout: "deny" });
 		});
@@ -110,7 +111,7 @@ describe("the majordomo's diagnostics tools", () => {
 			);
 		});
 		const report = await ask("pim_diagnostics", { since: "1h" });
-		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "runs", "triggers"]);
+		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "provider_cooldowns", "runs", "triggers"]);
 		expect(report).toMatchObject({ limit: 20, generated_at: expect.any(String), since: expect.any(String) });
 		expect(report.sections.model_calls.items[0]).toMatchObject({ why: "stopped with error", provider: "test", model: "m", run_kind: "interactive", latency_ms: 90_000 });
 		expect(report.sections.events.items[0]).toMatchObject({ kind: "slow_request", detail: { method: "GET", path: "/api/sessions", ms: 7000, api_key: "[redacted]" } });
@@ -121,6 +122,9 @@ describe("the majordomo's diagnostics tools", () => {
 			]),
 		);
 		expect(report.sections.approvals).toMatchObject({ count: 1, items: [{ id: "ap-1", action: "send_email" }] });
+		const [cooldown] = report.sections.provider_cooldowns.items;
+		expect(cooldown).toEqual({ provider: "openai", active: true, since: expect.any(String), until: expect.any(String), reason: "You've hit your usage limit (key [redacted]). Try again in 42 min.", failures: 1, reset_from: "provider" });
+		expect(Date.parse(cooldown.until) - Date.parse(cooldown.since)).toBe(42 * 60_000);
 		const everything = JSON.stringify(report);
 		expect(everything).not.toContain(SECRET);
 		expect(everything).not.toContain(PUBLIC_HOST);

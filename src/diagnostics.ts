@@ -18,7 +18,7 @@ const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 
 /** The kinds of thing `pim_diagnostics` reports on, which its `kind` chooses between. */
-export const DIAGNOSTIC_KINDS = ["runs", "triggers", "model_calls", "coding", "connectors", "approvals", "events"] as const;
+export const DIAGNOSTIC_KINDS = ["runs", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
 export type DiagnosticKind = (typeof DIAGNOSTIC_KINDS)[number];
 
 const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie|bearer/i;
@@ -171,6 +171,24 @@ function modelCalls({ sql }: DiagnosticSources, since: number, limit: number): S
 	return section(items.slice(0, limit), items.length, `${Number(totals.calls)} calls in the window, ${Number(totals.errors)} of them errors or aborted. Slow is ${SLOW_CALL_MS / 1000} s or more, costly $${COSTLY_CALL_USD} or more.`);
 }
 
+/**
+ * Subscriptions cooling down after their usage limit (see ./provider-cooldowns.ts), and those whose cooldown ended
+ * without a request since, which keep their count of limits in a row. They are reported whatever the window.
+ */
+function providerCooldowns({ sql, now }: DiagnosticSources, _since: number, limit: number): Section {
+	const all = rows(sql, "SELECT provider, since, until, reason, failures, reset_from FROM pim_provider_cooldowns ORDER BY until DESC");
+	const items = all.slice(0, limit).map((row) => ({
+		provider: String(row.provider),
+		active: Number(row.until) > now,
+		since: iso(Number(row.since)),
+		until: iso(Number(row.until)),
+		reason: scrub(String(row.reason)),
+		failures: Number(row.failures),
+		reset_from: String(row.reset_from),
+	}));
+	return section(items, all.length, "While a provider cools down, its runs go to the deployment's default model, and chats held on its limit are tried again when it ends. A provider's entry goes once it answers again.");
+}
+
 async function coding({ codingThreads }: DiagnosticSources, since: number, limit: number): Promise<Section> {
 	const threads = (await codingThreads()).filter((thread) => thread.state === "failed" || thread.state === "waiting_input" || (thread.updatedAt >= since && thread.state === "running"));
 	const items = threads.slice(0, limit).map((thread) => ({
@@ -218,6 +236,7 @@ const READERS: Record<DiagnosticKind, (sources: DiagnosticSources, since: number
 	runs,
 	triggers,
 	model_calls: modelCalls,
+	provider_cooldowns: providerCooldowns,
 	coding,
 	connectors,
 	approvals,

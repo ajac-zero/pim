@@ -483,15 +483,11 @@ describe("a thread's page", () => {
   it("stops a running thread, and steers it with or without interrupting", async () => {
     const { api } = fakeApi(view({ state: "running", currentOperation: "op" }));
     threadPage(api);
-    const steer = await screen.findByRole("textbox", {
-      name: "Steer the thread",
-    });
-    const send = screen.getByRole("button", { name: "Send" });
-    expect((send as HTMLButtonElement).disabled).toBe(true);
+    const steer = await screen.findByPlaceholderText(/^Steer it/);
 
     fireEvent.change(steer, { target: { value: "Only touch src/date.ts" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Interrupt/ }));
-    fireEvent.click(send);
+    fireEvent.keyDown(steer, { key: "Enter" });
     await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(1));
     expect(api.steer.mock.calls[0]).toEqual([
       "t1",
@@ -504,7 +500,7 @@ describe("a thread's page", () => {
     await waitFor(() => expect((steer as HTMLTextAreaElement).value).toBe(""));
 
     fireEvent.change(steer, { target: { value: "Also run lint" } });
-    fireEvent.keyDown(steer, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(steer, { key: "Enter" });
     await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2));
     expect(api.steer.mock.calls[1]?.[1]).toEqual({
       text: "Also run lint",
@@ -531,9 +527,7 @@ describe("a thread's page", () => {
     expect(screen.getByText(/PIM_CODING_MANAGER_URL/)).toBeTruthy();
     expect(screen.getByText("Failed")).toBeTruthy();
     // Steering a failed thread does nothing; continuing it does.
-    expect(
-      screen.queryByRole("textbox", { name: "Steer the thread" }),
-    ).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() =>
       expect(api.continue).toHaveBeenCalledWith("t1", {
@@ -662,9 +656,7 @@ describe("a thread's page", () => {
     expect(
       await screen.findByText(/Archived: its workspace was deleted/),
     ).toBeTruthy();
-    expect(
-      screen.queryByRole("textbox", { name: "Steer the thread" }),
-    ).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("button", { name: "Archive" })).toBeNull();
   });
 

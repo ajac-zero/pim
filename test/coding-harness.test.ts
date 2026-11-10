@@ -1220,6 +1220,8 @@ describe("Amp's command line", () => {
 			`/workspace/.cache/amp/logs/pim-${NEW}.log`,
 			"--visibility",
 			"private",
+			"--mode",
+			"medium",
 			`--execute=<instructions from="Pim">\nDon't push.\n</instructions>\n\nFix the greeting test`,
 		]);
 		// Every flag is one the pinned CLI's `amp --help` lists.
@@ -1246,8 +1248,11 @@ describe("Amp's command line", () => {
 			`/workspace/.cache/amp/logs/pim-${AMP_SESSION}.log`,
 			"--execute=--help me",
 		]);
+		// A new thread with a mode in its profile uses that mode.
 		expect(amp.buildCommand({ ...TURN, sessionId: NEW, model: "High" })).toEqual(expect.arrayContaining(["--mode", "high"]));
-		// A thread's mode is fixed when Amp makes it.
+		// A new thread without a mode gets medium explicitly.
+		expect(amp.buildCommand({ ...TURN, sessionId: NEW })).toEqual(expect.arrayContaining(["--mode", "medium"]));
+		// A thread's mode is fixed when Amp makes it, so continued threads aren't given one again.
 		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true, model: "high" })).not.toContain("--mode");
 		expect(() => amp.buildCommand({ ...TURN, model: "claude-opus-5" })).toThrow('Amp has no mode "claude-opus-5": ask for low, medium, high, ultra');
 	});

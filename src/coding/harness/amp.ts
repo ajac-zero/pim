@@ -35,6 +35,8 @@ export const AMP_FLAGS: readonly string[] = ["--stream-json", "--no-ide", "--no-
 
 /** Amp's own modes, which pick its model, prompt and tools; a thread's model names one, or is Amp's default. */
 export const AMP_MODES = ["low", "medium", "high", "ultra"] as const;
+/** Default mode to use when a new Amp thread has no mode in its profile. Amp's own default is the last-used mode. */
+export const AMP_DEFAULT_MODE = "medium";
 
 /** Where Amp (a Bun binary) may unpack and dlopen its addon: the sandbox's /tmp is noexec, the workspace volume is not. Outside the checkout (`repo/`). */
 export const AMP_TMPDIR = `${HARNESS_HOME}/.cache/amp-tmp`;
@@ -67,8 +69,8 @@ export const amp: CliHarness = {
 			"--log-file",
 			ampLogFile(turn.sessionId),
 			// A new thread is the person's alone on ampcode.com, whatever their workspace shares by default; its mode is
-			// fixed with it.
-			...(turn.resume ? [] : ["--visibility", "private", ...(mode ? ["--mode", mode] : [])]),
+			// fixed with it. When no mode is named, pass medium explicitly so threads stay on predictable modes.
+			...(turn.resume ? [] : ["--visibility", "private", ...(mode ? ["--mode", mode] : ["--mode", AMP_DEFAULT_MODE])]),
 			// Joined to its flag, so a prompt that starts with a dash is never read as one. Pim's instructions open the
 			// thread's first message: Amp has no flag for them, and nothing is written into the checkout.
 			`--execute=${turn.resume ? turn.prompt : `<instructions from="Pim">\n${turn.instructions}\n</instructions>\n\n${turn.prompt}`}`,

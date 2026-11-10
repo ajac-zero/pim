@@ -196,6 +196,7 @@ describe("a coding thread", () => {
 		const url = "https://pim.test/api/coding/git/acme/limited.git";
 		fakeRemotes.set(url, { "README.md": "# Limited\n" });
 		fakeCloneFailures.set(url, { times: 2, stderr: "fatal: unable to access: The requested URL returned error: 429\n" });
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
 		const { id } = await startThread({ repo: "https://github.com/acme/limited" });
 		const [ended] = await turns(id, 1);
 		expect(ended).toMatchObject({ outcome: "completed" });

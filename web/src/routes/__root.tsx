@@ -442,7 +442,21 @@ function AppLayout() {
   const { t } = useI18n();
   const { panel } = Route.useSearch();
   // Collapsing hides the panel the sidebar was showing; showing another opens it again.
-  const [collapsedOn, setCollapsedOn] = useState<string | null>(null);
+  // The choice is kept in this browser, so a reload does not reopen the sidebar.
+  const [collapsedOn, setCollapsedOnState] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("pim-sidebar-collapsed-on");
+    } catch {
+      return null;
+    }
+  });
+  const setCollapsedOn = (value: string | null) => {
+    setCollapsedOnState(value);
+    try {
+      if (value) localStorage.setItem("pim-sidebar-collapsed-on", value);
+      else localStorage.removeItem("pim-sidebar-collapsed-on");
+    } catch {}
+  };
   const sidebarCollapsed = collapsedOn === (panel ?? "chats");
   const [sidebarWidth, setSidebarWidth] = useStoredSize(
     "pim-sidebar-width",

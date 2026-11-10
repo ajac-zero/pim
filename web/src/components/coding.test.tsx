@@ -108,6 +108,10 @@ const noEnvironment: CodingEnvironment = {
   readyFrom: null,
   preparedAt: null,
   rebuildRequested: false,
+  toolchains: [],
+  dependencies: [],
+  testCommands: [],
+  notes: [],
 };
 
 const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
@@ -989,9 +993,7 @@ describe("the repository address", () => {
   it("takes an https repository address, and the server decides which hosts it serves", () => {
     const bad = (repo: string) => startProblems({ ...form, repo }).repo;
     expect(bad("https://github.com/acme/widgets")).toBeUndefined();
-    expect(
-      bad("https://gitea.example.test/acme/widgets"),
-    ).toBeUndefined();
+    expect(bad("https://gitea.example.test/acme/widgets")).toBeUndefined();
     expect(bad("http://gitea.example.test/a/b")).toBe("codingRepoInvalid");
     expect(bad("https://gitea.example.test/a")).toBe("codingRepoInvalid");
   });
@@ -1742,10 +1744,106 @@ describe("the environment", () => {
     expect(
       screen.getByText("Workspace and checkout").nextSibling?.textContent,
     ).toBe("1.5 s");
-    expect(screen.getByText("Setup script").nextSibling?.textContent).toBe(
-      "42 s",
-    );
+    expect(screen.getByText("Setup").nextSibling?.textContent).toBe("42 s");
     expect(screen.queryByText("Restore")).toBeNull();
+  });
+
+  it("lists the toolchains and dependencies set up from the repository's files, what failed and why, and its checks", async () => {
+    const { button } = await chip(
+      env({
+        state: "cached",
+        builtAt: null,
+        readyFrom: "setup",
+        toolchains: [
+          {
+            tool: "go",
+            version: "1.22.5",
+            source: "manifest",
+            from: "go.mod",
+            status: "failed",
+            error:
+              "`mise use --global --yes go@1.22.5` exited 1: <b>offline</b>",
+          },
+          {
+            tool: "node",
+            version: null,
+            source: "image",
+            from: "package.json",
+            status: "present",
+          },
+        ],
+        dependencies: [
+          {
+            tool: "go",
+            command: "go mod download",
+            from: "go.sum",
+            status: "skipped",
+          },
+        ],
+        testCommands: [
+          { command: "make test", source: "make", from: "Makefile" },
+          {
+            command: "go vet ./...",
+            source: "ci",
+            from: ".gitea/workflows/ci.yml",
+          },
+        ],
+        notes: [
+          ".gitea/workflows/ci.yml starts the services postgres, which aren't running here",
+        ],
+      }),
+    );
+    // The chip warns, and says how many steps failed: the image's Node is no step.
+    expect(button.className).toContain("text-destructive");
+    expect(button.getAttribute("aria-label")).toBe(
+      "Environment: cached · 2 of 2 setup steps failed. Show details",
+    );
+    fireEvent.click(button);
+    await screen.findByText("Toolchains");
+    expect(screen.getByText("Set up in this workspace.")).toBeTruthy();
+    const row = (text: string | RegExp) =>
+      screen.getByText(text).closest("li") as HTMLElement;
+    const go = row(/^go 1\.22\.5/);
+    expect(go.textContent).toContain("from go.mod");
+    expect(within(go).getByText("failed").className).toContain(
+      "text-destructive",
+    );
+    // The failure is the repository's text, shown as text.
+    expect(within(go).getByText(/exited 1/).textContent).toBe(
+      "`mise use --global --yes go@1.22.5` exited 1: <b>offline</b>",
+    );
+    expect(go.querySelector("b")).toBeNull();
+    expect(within(row(/^node/)).getByText("in the image")).toBeTruthy();
+    expect(within(row("go mod download")).getByText("skipped")).toBeTruthy();
+    expect(row("go vet ./...").textContent).toBe(
+      "go vet ./... from .gitea/workflows/ci.yml",
+    );
+    expect(screen.getByText(/starts the services postgres/)).toBeTruthy();
+  });
+
+  it("says when the environment came from a cached snapshot", async () => {
+    const { button } = await chip(
+      env({
+        state: "cached",
+        builtAt: 1,
+        readyFrom: "snapshot",
+        toolchains: [
+          {
+            tool: "python",
+            version: "3.12",
+            source: "mise",
+            from: "mise.toml",
+            status: "cached",
+          },
+        ],
+      }),
+    );
+    expect(button.className).not.toContain("text-destructive");
+    fireEvent.click(button);
+    expect(
+      await screen.findByText("Restored from a cached snapshot."),
+    ).toBeTruthy();
+    expect(screen.getByText("cached")).toBeTruthy();
   });
 
   it("rebuilds only after the person confirms, and shows the new state", async () => {

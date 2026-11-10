@@ -103,6 +103,51 @@ export type CodingEnvironment = {
   preparedAt: number | null;
   rebuildRequested: boolean;
   error?: string;
+  toolchains: CodingToolchain[];
+  dependencies: CodingDependencies[];
+  testCommands: CodingTestCommand[];
+  notes: string[];
+};
+
+/** How far a toolchain's or the dependencies' install got; `present` is the workspace image's own, and `cached` came with the snapshot. */
+export type CodingProvisionStatus =
+  | "pending"
+  | "installed"
+  | "cached"
+  | "failed"
+  | "skipped"
+  | "present";
+
+/** A toolchain the repository pins, where its version came from, and how its install went. */
+export type CodingToolchain = {
+  tool: string;
+  version: string | null;
+  source:
+    | "mise"
+    | "devcontainer"
+    | "manifest"
+    | "dockerfile"
+    | "default"
+    | "image";
+  from: string;
+  status: CodingProvisionStatus;
+  error?: string;
+};
+
+/** A dependency install run for one of the repository's lockfiles. */
+export type CodingDependencies = {
+  tool: string;
+  command: string;
+  from: string;
+  status: CodingProvisionStatus;
+  error?: string;
+};
+
+/** A command the repository checks itself with, and the file it was found in. */
+export type CodingTestCommand = {
+  command: string;
+  source: "mise" | "make" | "package.json" | "ci" | "default";
+  from: string;
 };
 
 /** The person's settings for one repository. */

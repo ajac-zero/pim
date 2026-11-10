@@ -19,6 +19,7 @@ import {
 } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChatsPanel } from "~/components/app-sidebar";
 import {
   CodingApiProvider,
   CodingPage,
@@ -41,7 +42,7 @@ import type {
   TranscriptMessage,
 } from "~/lib/coding";
 import { ApiError } from "~/lib/pim-api";
-import { approvalsQuery } from "~/lib/queries";
+import { approvalsQuery, sessionsQuery } from "~/lib/queries";
 import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
 afterEach(cleanup);
@@ -1194,6 +1195,34 @@ describe("a coding subthread in the chat list", () => {
       client.invalidateQueries({ queryKey: ["coding", "threads"] }),
     );
     await waitFor(() => expect(screen.queryAllByRole("link")).toEqual([]));
+  });
+});
+
+describe("archived coding threads in the chat list", () => {
+  it("are listed under Archived, and live ones are not", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({
+      threads: [
+        summary({ id: "live", task: "Still going", state: "idle" }),
+        summary({ id: "old", task: "Finished long ago", state: "archived" }),
+      ],
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    client.setQueryData(sessionsQuery().queryKey, []);
+    renderWith(
+      api,
+      () => <ChatsPanel awaitingApproval={new Set()} />,
+      "/",
+      client,
+    );
+    const archived = await screen.findByRole("region", { name: "Archived" });
+    fireEvent.click(within(archived).getByRole("button"));
+    expect(within(archived).getByRole("link").getAttribute("href")).toBe(
+      "/coding/old",
+    );
+    expect(screen.queryByText("Still going")).toBeNull();
   });
 });
 

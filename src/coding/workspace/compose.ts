@@ -4,11 +4,14 @@
 //
 // Routes used are the manager's own (sandbox-manager/README.md). What is worth knowing:
 // - Exec uses `/exec/stream`, so output arrives as the command prints it; aborting drops the connection, which makes the manager kill the command.
-// - The create body carries no repository, git auth or wall-clock limit, so the caller checks the repository out with exec and the manager's idle reaper bounds the lifetime.
+// - The create body carries no repository, git auth or wall-clock limit, so the caller checks the repository out with exec and the manager's idle reaper bounds the lifetime. It carries `spec.environment`'s person and repository (`userId`, `repo`), which give the session its dependency cache volume and let it be snapshotted, and `restoreFrom`. It never says `hasRuntimeSecrets`: Pim puts no secrets in a workspace beyond a harness run, which removes them again, and snapshots one only before its first run.
+// - Environment snapshots are the manager's `/snapshots` (V1 environment caching), keyed by the caller.
 // - The manager's `stat` describes a symlink itself, while `Workspace.stat` follows it, so a symlink is resolved with `readlink -f` run through exec and its target is stat'ed, provided the target is inside /workspace. The workspace image ships coreutils.
 
 import type { ManagerHealth } from "../provider-capacity";
 import {
+	type EnvironmentOwner,
+	type EnvironmentSnapshot,
 	type ExecEvent,
 	type ExecOptions,
 	type FileStat,
@@ -107,9 +110,14 @@ function absolute(path: string): string {
 
 type ManagerView = { sessionId: string; state?: WorkspaceState; createdAt?: number };
 
+/** A snapshot as the manager describes it. */
+type ManagerSnapshot = { key: string; repo: string; size?: number; createdAt: number; lastUsedAt?: number };
+
+const snapshotOf = (s: ManagerSnapshot): EnvironmentSnapshot => ({ key: s.key, repo: s.repo, createdAt: s.createdAt, ...(s.lastUsedAt !== undefined ? { lastUsedAt: s.lastUsedAt } : {}), ...(s.size !== undefined ? { size: s.size } : {}) });
+
 export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	readonly id = "compose";
-	#capabilities: WorkspaceProvider["capabilities"] = { snapshot: false, egressAllowlist: true };
+	#capabilities: WorkspaceProvider["capabilities"] = { snapshot: false, environmentSnapshots: true, egressAllowlist: true };
 	readonly #base: string;
 	readonly #token: string;
 	readonly #fetch: typeof fetch;
@@ -169,11 +177,38 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	}
 
 	async create(spec: WorkspaceSpec): Promise<WorkspaceRef> {
+		const owner = spec.environment;
 		const res = await this.call("POST", "/sessions", {
-			json: { sessionId: spec.sessionId, image: spec.image, limits: { cpu: spec.limits.cpu, memMiB: spec.limits.memMiB, diskMiB: spec.limits.diskMiB, pids: spec.limits.pids }, egressAllow: spec.egress.allow },
+			json: {
+				sessionId: spec.sessionId,
+				image: spec.image,
+				limits: { cpu: spec.limits.cpu, memMiB: spec.limits.memMiB, diskMiB: spec.limits.diskMiB, pids: spec.limits.pids },
+				egressAllow: spec.egress.allow,
+				...(owner ? { userId: owner.userId, repo: owner.repo } : {}),
+				...(owner?.restoreFrom !== undefined ? { restoreFrom: { key: owner.restoreFrom } } : {}),
+			},
 		});
 		await this.check(res);
 		return { id: spec.sessionId, providerId: this.id, sessionId: spec.sessionId };
+	}
+
+	async snapshotEnvironment(ref: WorkspaceRef, o: EnvironmentOwner & { key: string }): Promise<EnvironmentSnapshot> {
+		const res = await this.call("POST", "/snapshots", { json: { userId: o.userId, repo: o.repo, key: o.key, sessionId: ref.id } });
+		await this.check(res);
+		return snapshotOf((await res.json()) as ManagerSnapshot);
+	}
+
+	async listEnvironments(owner: EnvironmentOwner): Promise<EnvironmentSnapshot[]> {
+		const res = await this.call("GET", `/snapshots?userId=${encodeURIComponent(owner.userId)}&repo=${encodeURIComponent(owner.repo)}`);
+		await this.check(res);
+		return ((await res.json()) as ManagerSnapshot[]).map(snapshotOf);
+	}
+
+	async deleteEnvironment(userId: string, key: string): Promise<boolean> {
+		const res = await this.call("DELETE", `/snapshots/${encodeURIComponent(key)}?userId=${encodeURIComponent(userId)}`);
+		if (res.status === 404) return false;
+		await this.check(res);
+		return true;
 	}
 
 	async get(ref: WorkspaceRef): Promise<Workspace | null> {

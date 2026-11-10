@@ -1,6 +1,7 @@
 // The Cloudflare Sandbox backend for coding workspaces. A workspace is one sandbox (a container behind a Durable Object) per coding session, reached through `SandboxLike`, a structural subset of the `@cloudflare/sandbox` client. This module deliberately imports nothing from `@cloudflare/*`: the Worker passes in `(sessionId) => getSandbox(env.Sandbox, sessionId)`, so nothing here runs, or is billed, until an owner adds the Sandbox binding. See docs/coding-cloudflare-sandbox.md.
 
 import {
+	type EnvironmentSnapshot,
 	type ExecEvent,
 	type ExecOptions,
 	type FileStat,
@@ -274,7 +275,8 @@ export class CloudflareSandboxProvider implements WorkspaceProvider {
 	private kept = new Map<string, string>();
 
 	constructor(private options: CloudflareSandboxOptions) {
-		this.capabilities = { snapshot: options.backup !== undefined, egressAllowlist: options.applyEgress !== undefined, maxConcurrent: options.maxConcurrent ?? 2 };
+		// Environment snapshots wait for the sandbox's own; until then a thread here prepares nothing.
+		this.capabilities = { snapshot: options.backup !== undefined, environmentSnapshots: false, egressAllowlist: options.applyEgress !== undefined, maxConcurrent: options.maxConcurrent ?? 2 };
 	}
 
 	private backupOf(sandbox: SandboxLike) {
@@ -363,4 +365,18 @@ export class CloudflareSandboxProvider implements WorkspaceProvider {
 			.filter((entry) => entry.state !== "gone" && (!filter.sessionId || entry.ref.sessionId === filter.sessionId) && (!filter.state || entry.state === filter.state))
 			.map((entry) => ({ ref: entry.ref, state: entry.state, createdAt: entry.createdAt }));
 	}
+
+	async snapshotEnvironment(): Promise<EnvironmentSnapshot> {
+		throw new Error(NO_ENVIRONMENTS);
+	}
+
+	async listEnvironments(): Promise<EnvironmentSnapshot[]> {
+		throw new Error(NO_ENVIRONMENTS);
+	}
+
+	async deleteEnvironment(): Promise<boolean> {
+		throw new Error(NO_ENVIRONMENTS);
+	}
 }
+
+const NO_ENVIRONMENTS = "The Cloudflare sandbox backend keeps no environment snapshots";

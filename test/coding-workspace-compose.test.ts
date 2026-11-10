@@ -37,6 +37,12 @@ describe("ComposeWorkspaceProvider", () => {
 		const m = fakeManager();
 		await provider(m).create(spec("body-1"));
 		expect(m.requests[0]?.body).toEqual({ sessionId: "body-1", image: "default", limits: { cpu: 1, memMiB: 256, diskMiB: 64, pids: 64 }, egressAllow: ["allowed.test"] });
+		// A person's workspace names them and the repository, for its caches, and the snapshot it starts from; never secrets.
+		const key = "ab".repeat(32);
+		await provider(m)
+			.create({ ...spec("body-2"), environment: { userId: "ada", repo: "acme/demo", restoreFrom: key } })
+			.catch(() => {});
+		expect(m.requests.at(-1)?.body).toEqual({ sessionId: "body-2", image: "default", limits: { cpu: 1, memMiB: 256, diskMiB: 64, pids: 64 }, egressAllow: ["allowed.test"], userId: "ada", repo: "acme/demo", restoreFrom: { key } });
 	});
 
 	it("maps the manager's refusals and misses to workspace errors", async () => {
@@ -123,7 +129,7 @@ describe("ComposeWorkspaceProvider", () => {
 			token: TOKEN,
 			fetch: (async () => json(200, { runsc: true, freeDiskPct: 61.2, maxConcurrent: 4, running: 1, free: 3, sessions: 1 })) as typeof fetch,
 		});
-		expect(p.capabilities).toEqual({ snapshot: false, egressAllowlist: true, maxConcurrent: undefined });
+		expect(p.capabilities).toEqual({ snapshot: false, environmentSnapshots: true, egressAllowlist: true, maxConcurrent: undefined });
 		expect(await p.managerHealth()).toEqual({ freeDiskPct: 61.2, maxConcurrent: 4, running: 1, free: 3, runscVerified: true, sessions: 1 });
 		expect(p.capabilities.maxConcurrent).toBe(4);
 		// A disk the manager could not read is reported as null by JSON, and is NaN here.

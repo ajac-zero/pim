@@ -7,7 +7,7 @@ import os from 'node:os'
 import * as agentd from './agentd.js'
 import { DockerError } from './docker.js'
 import { HttpError } from './errors.js'
-import { AGENTD_PORT, LABEL, LABEL_KEPT, LABEL_KEPT_INFO, LABEL_NONCE, LABEL_SPEC, agentdPath, buildSpec, names, parseCreate, proxyEnv, workspacePath } from './template.js'
+import { AGENTD_PORT, LABEL, LABEL_KEPT, LABEL_KEPT_INFO, LABEL_NONCE, LABEL_SPEC, agentdPath, buildSpec, cacheVolume, names, parseCreate, proxyEnv, workspacePath } from './template.js'
 
 const MAX_FILE = 32 * 1024 * 1024
 const MiB = 1024 * 1024
@@ -189,6 +189,8 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			// Creating a volume that exists returns it, so a kept workspace is reused as it is.
 			const { volume, network } = buildSpec(params, { ...base, proxyUrl: cfg.proxyUrl })
 			await docker.request('POST', '/volumes/create', volume)
+			const cache = cacheVolume(params)
+			if (cache) await docker.request('POST', '/volumes/create', cache)
 			await docker.request('POST', '/networks/create', network)
 			// Docker's embedded DNS does not work under gVisor, so the session reaches the proxy by
 			// IP: attach the proxy first, read its address on the session network, then create.

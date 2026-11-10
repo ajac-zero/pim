@@ -236,6 +236,33 @@ describe('sessions', () => {
 		assert.equal(mgr.sessions.size, 0)
 		assert.equal(fake.containers.size, 0)
 	})
+	test('each (user, repo) gets its own cache volume at /caches, with the package managers pointed at it', async () => {
+		const ada = { ...good, userId: 'ada', repo: 'github.com/ada/app' }
+		await call('POST', '/sessions', ada)
+		const c = fake.containers.get('pim-s-abc-1').body
+		const [, cache] = c.HostConfig.Mounts.map((m) => m.Source)
+		assert.deepEqual(c.HostConfig.Mounts.map((m) => [m.Type, m.Target]), [['volume', '/workspace'], ['volume', '/caches']])
+		assert.match(cache, /^pim-cache-[0-9a-f]{32}$/)
+		const env = envOf('pim-s-abc-1')
+		assert.deepEqual([env.PNPM_STORE_DIR, env.npm_config_cache, env.CARGO_HOME, env.CARGO_TARGET_DIR, env.PIP_CACHE_DIR, env.UV_CACHE_DIR], ['/caches/pnpm', '/caches/npm', '/caches/cargo', '/caches/cargo-target', '/caches/pip', '/caches/uv'])
+		assert.deepEqual(fake.volumes.get(cache).Labels, { 'pim.coding.cache': cache.slice(10), 'pim.coding.cache-user': 'ada', 'pim.coding.cache-repo': ada.repo })
+		const cacheOf = (id) => fake.containers.get(`pim-s-${id}`).body.HostConfig.Mounts.find((m) => m.Target === '/caches')?.Source
+		const many = make({ maxConcurrent: 5 })
+		await many.reconcile()
+		await many.createSession({ ...ada, sessionId: 'abc-2' })
+		await many.createSession({ ...ada, sessionId: 'bob-1', userId: 'bob' })
+		await many.createSession({ ...ada, sessionId: 'other-1', repo: 'github.com/ada/other' })
+		await many.createSession({ ...good, sessionId: 'anon' })
+		assert.equal(cacheOf('abc-2'), cache, 'the same user and repo share it')
+		assert.notEqual(cacheOf('bob-1'), cache, 'never shared across users')
+		assert.notEqual(cacheOf('other-1'), cache)
+		assert.equal(cacheOf('anon'), undefined)
+		assert.equal(envOf('pim-s-anon').CARGO_HOME, undefined)
+		// It outlives its sessions and a restart, which removes only sessions' own leftovers.
+		for (const id of ['abc-1', 'abc-2']) await many.remove(id)
+		await make().reconcile()
+		assert.ok(fake.volumes.has(cache))
+	})
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })

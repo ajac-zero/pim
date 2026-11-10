@@ -14,6 +14,7 @@ import {
 } from "react";
 import { StateBadge } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
+import { ChatHeader } from "~/components/chat/header";
 import {
   AssistantMessage,
   StepList,
@@ -33,6 +34,7 @@ import {
   GitFork,
   ListChecks,
   Loader2,
+  MoreHorizontal,
   TriangleAlert,
 } from "~/components/icons";
 import { EmptyState, Page } from "~/components/page";
@@ -43,6 +45,12 @@ import {
   ConversationContent,
   ConversationScrollButton,
 } from "~/components/ui/conversation";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "~/components/ui/dropdown-menu";
 import { Input } from "~/components/ui/input";
 import {
   ACTIVE_STATES,
@@ -1044,16 +1052,21 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
   const { t } = useI18n();
   const [tab, setTab] = useState("conversation");
   // Above the panels: what the thread works on, why it waits, its environment and what can be done with it.
+  const controls = useThreadControls(thread);
   const top = (
     <>
-      <ThreadHeader thread={thread} />
+      <ThreadSummary thread={thread} />
       <StateNotice thread={thread} />
       <EnvironmentSection thread={thread} />
-      <ThreadActions thread={thread} />
+      <ThreadActions thread={thread} controls={controls} />
     </>
   );
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <ChatHeader
+        title={<ThreadTitle thread={thread} />}
+        actions={<ThreadControls thread={thread} controls={controls} />}
+      />
       <Tabs.Root
         value={tab}
         onValueChange={setTab}
@@ -1121,29 +1134,36 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
   );
 }
 
-function ThreadHeader({ thread }: { thread: CodingThreadView }) {
+/** The thread's mark and repository, where a chat's header has its agent and title. */
+function ThreadTitle({ thread }: { thread: CodingThreadView }) {
+  const { t } = useI18n();
+  return (
+    <>
+      <span className="inline-flex shrink-0 items-center">
+        <span className="sr-only">
+          {t("codingHarness")}: <span>{HARNESS_NAMES[thread.harness]}</span>
+        </span>
+        <CodingHarnessMark harness={thread.harness} state={thread.state} />
+      </span>
+      <a
+        href={thread.repo.url}
+        target="_blank"
+        rel="noreferrer"
+        className={cn("truncate hover:underline", LINK_RING)}
+      >
+        {repoName(thread.repo.url)}
+      </a>
+    </>
+  );
+}
+
+/** What the thread works on, and its branch, spend and start. */
+function ThreadSummary({ thread }: { thread: CodingThreadView }) {
   const { t } = useI18n();
   const money = useMoney();
   const date = useDate();
   return (
-    <header>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <h1 className="min-w-0 truncate font-semibold text-xl">
-          <a
-            href={thread.repo.url}
-            target="_blank"
-            rel="noreferrer"
-            className={cn("hover:underline", LINK_RING)}
-          >
-            {repoName(thread.repo.url)}
-          </a>
-        </h1>
-        <span className="inline-flex items-center gap-1.5 text-[13px] text-muted-foreground">
-          <span className="sr-only">{t("codingHarness")}: </span>
-          <CodingHarnessMark harness={thread.harness} state={thread.state} />
-          {HARNESS_NAMES[thread.harness]}
-        </span>
-      </div>
+    <section aria-label={t("codingTask")}>
       <p className="mt-2 line-clamp-3 whitespace-pre-wrap break-words text-[15px]">
         {thread.task}
       </p>
@@ -1184,7 +1204,7 @@ function ThreadHeader({ thread }: { thread: CodingThreadView }) {
           </dd>
         </div>
       </dl>
-    </header>
+    </section>
   );
 }
 
@@ -1286,8 +1306,8 @@ function useThreadUpdate(id: string) {
 }
 
 /** Stop, Continue, Push and Archive, each where the thread's state allows it. */
-function ThreadActions({ thread }: { thread: CodingThreadView }) {
-  const { t } = useI18n();
+/** What can be done with the thread now, and where each action stands. */
+function useThreadControls(thread: CodingThreadView) {
   const api = useCodingApi();
   const update = useThreadUpdate(thread.id);
   const [confirming, setConfirming] = useState(false);
@@ -1304,6 +1324,29 @@ function ThreadActions({ thread }: { thread: CodingThreadView }) {
       update(next);
     },
   });
+  return {
+    abort,
+    archive,
+    push,
+    confirming,
+    setConfirming,
+    continuing,
+    setContinuing,
+  };
+}
+
+type ThreadControlsState = ReturnType<typeof useThreadControls>;
+
+/** The thread's actions in its header: stop, continue and push, with archive in a menu. */
+function ThreadControls({
+  thread,
+  controls,
+}: {
+  thread: CodingThreadView;
+  controls: ThreadControlsState;
+}) {
+  const { t } = useI18n();
+  const { abort, push, continuing, setConfirming, setContinuing } = controls;
   if (thread.state === "archived") return null;
   const working =
     thread.state === "running" || thread.currentOperation !== null;
@@ -1313,37 +1356,67 @@ function ThreadActions({ thread }: { thread: CodingThreadView }) {
     thread.state === "waiting_input" ||
     (thread.state === "idle" &&
       (thread.stateReason === "aborted" || thread.stateReason === "cancelled"));
+  return (
+    <div className="flex shrink-0 items-center gap-2 self-center">
+      {working && (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={abort.isPending}
+          onClick={() => abort.mutate()}
+        >
+          {t("codingStop")}
+        </Button>
+      )}
+      {stopped && !continuing && (
+        <ContinueButton thread={thread} onExpand={() => setContinuing(true)} />
+      )}
+      {!waiting && <PushButton thread={thread} push={push} />}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={t("more")}
+            title={t("more")}
+          >
+            <MoreHorizontal className="size-4.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => setConfirming(true)}>
+            {t("codingArchive")}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+/** What the header's actions ask for or report: the budget to continue with, their errors, the push's outcome and the archive's confirmation. */
+function ThreadActions({
+  thread,
+  controls,
+}: {
+  thread: CodingThreadView;
+  controls: ThreadControlsState;
+}) {
+  const { t } = useI18n();
+  const {
+    abort,
+    archive,
+    push,
+    confirming,
+    setConfirming,
+    continuing,
+    setContinuing,
+  } = controls;
+  if (thread.state === "archived") return null;
   const error = abort.error ?? archive.error;
   return (
     <div className="mt-5 flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        {working && (
-          <Button
-            type="button"
-            variant="secondary"
-            disabled={abort.isPending}
-            onClick={() => abort.mutate()}
-          >
-            {t("codingStop")}
-          </Button>
-        )}
-        {stopped && !continuing && (
-          <ContinueButton
-            thread={thread}
-            onExpand={() => setContinuing(true)}
-          />
-        )}
-        {!waiting && <PushButton thread={thread} push={push} />}
-        <Button
-          type="button"
-          variant="ghost"
-          className="ml-auto"
-          aria-expanded={confirming}
-          onClick={() => setConfirming(true)}
-        >
-          {t("codingArchive")}
-        </Button>
-      </div>
       {continuing && (
         <ContinueForm thread={thread} onDone={() => setContinuing(false)} />
       )}

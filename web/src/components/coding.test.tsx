@@ -669,7 +669,13 @@ describe("a thread's page", () => {
   it("archives only once confirmed, and an archived thread can only be read", async () => {
     const { api } = fakeApi();
     threadPage(api);
-    fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
+    // Archive is in the header's menu, not among its buttons.
+    expect(screen.queryByRole("button", { name: "Archive" })).toBeNull();
+    fireEvent.pointerDown(await screen.findByRole("button", { name: "More" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
     expect(api.archive).not.toHaveBeenCalled();
     const confirm = screen.getByRole("group");
     fireEvent.click(within(confirm).getByRole("button", { name: "Archive" }));
@@ -819,6 +825,11 @@ describe("the harness", () => {
     threadPage(api);
     const header = (await screen.findByRole("banner")) as HTMLElement;
     expect(within(header).getByText("Claude Code")).toBeTruthy();
+    // The same header as a chat's holds the thread's title and its actions.
+    expect(
+      within(header).getByRole("link", { name: "acme/widgets" }),
+    ).toBeTruthy();
+    expect(within(header).getByRole("button", { name: "Push" })).toBeTruthy();
     expect(header.querySelector("[data-harness='claude-code']")).toBeTruthy();
   });
 

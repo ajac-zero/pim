@@ -69,31 +69,20 @@ function SessionStatus({ session }: { session: Session }) {
   ) : null;
 }
 
-/** The open chat's agent icon, status and title, in its header. */
-export function ChatTitle({
-  activeId,
-  className,
-}: {
-  activeId: string;
-  className?: string;
-}) {
+/** The open chat's agent icon, status and title, for its header. */
+export function ChatTitle({ activeId }: { activeId: string }) {
   const { t } = useI18n();
   const { data: sessions } = useQuery(sessionsQuery());
   const { data: agents } = useQuery(agentsQuery());
   const session = sessions?.find((candidate) => candidate.id === activeId);
-  if (!session) return <div className={className} />;
+  if (!session) return null;
   const agent = session.visit
     ? undefined
     : agents?.find((candidate) =>
         session.agent ? candidate.id === session.agent.id : candidate.majordomo,
       );
   return (
-    <div
-      className={cn(
-        "flex min-w-0 items-center gap-2 pl-4 text-[15px]",
-        className,
-      )}
-    >
+    <>
       {agent && (
         <Link
           to="."
@@ -110,7 +99,7 @@ export function ChatTitle({
       )}
       <SessionStatus session={session} />
       <span className="truncate">{sessionTitle(session, t)}</span>
-    </div>
+    </>
   );
 }
 

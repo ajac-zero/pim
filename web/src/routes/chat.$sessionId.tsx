@@ -24,6 +24,7 @@ import {
 } from "~/components/chat/activity-toggle";
 import { CanvasTabs } from "~/components/chat/canvas-tabs";
 import { Composer } from "~/components/chat/composer";
+import { ChatHeader } from "~/components/chat/header";
 import { QueuedMessages } from "~/components/chat/queued-messages";
 import { ChatTabs, ChatTitle, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
@@ -342,18 +343,22 @@ function ChatPage() {
             <ChatTabs activeId={sessionId} />
           </header>
         )}
-        <header className="hidden h-13 shrink-0 gap-2 pr-4 md:flex">
-          <ChatTitle activeId={sessionId} className="flex-1" />
-          {reconnecting && (
-            <span className="shrink-0 self-center text-muted-foreground text-[13px]">
-              {t("connecting")}
-            </span>
-          )}
-          <ActivityToggle
-            sessionId={sessionId}
-            className="shrink-0 self-center"
-          />
-        </header>
+        <ChatHeader
+          title={<ChatTitle activeId={sessionId} />}
+          actions={
+            <>
+              {reconnecting && (
+                <span className="shrink-0 self-center text-muted-foreground text-[13px]">
+                  {t("connecting")}
+                </span>
+              )}
+              <ActivityToggle
+                sessionId={sessionId}
+                className="shrink-0 self-center"
+              />
+            </>
+          }
+        />
         {/* The options box floats over the thread's top right corner. */}
         <div
           // The box floats clear of the thread's scrollbar, which stays at the edge of the page.

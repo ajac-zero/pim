@@ -440,6 +440,13 @@ describe("opening a pull request from a coding thread", () => {
 			expect(schema.required).toEqual(["thread_id"]);
 		});
 	});
+
+	it("tells agents to retry a transiently failed thread once, then tell the person", async () => {
+		await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			const tool = pim.abilities.get("coding")!.tools!.find((candidate) => candidate.name === "coding_start")!;
+			expect(tool.description).toMatch(/transient error.*retry once by starting a fresh thread with the same task.*stop and tell the person/);
+		});
+	});
 });
 
 describe("merging a coding thread into the default branch", () => {

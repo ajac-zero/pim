@@ -1241,6 +1241,34 @@ describe("tasks whose model can't answer", () => {
 		// Not a word of the provider's own error reaches the agent.
 		expect(update).not.toContain("subscription_sharing");
 	});
+
+	it("fail for their requester when waiting for their run throws, instead of staying at work", async () => {
+		const agent = await planner("Crashing trip planner");
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			const wait = pim.harness.wait.bind(pim.harness) as (...args: unknown[]) => Promise<unknown>;
+			vi.spyOn(pim.harness, "wait").mockImplementation(((operation: string, ...rest: unknown[]) =>
+				operation.startsWith("task:") ? Promise.reject(new Error("The run crashed.")) : wait(operation, ...rest)) as never);
+		});
+		let update = "";
+		scripts({
+			lead: [
+				() => toolUse("delegate", { tasks: [{ to: "Researcher", task: "Find a flight." }] }),
+				() => toolUse("send_to_user", { message: "I asked." }),
+				(context) => {
+					update = lastUserText(context.messages);
+					return toolUse("send_to_user", { message: "It failed." });
+				},
+			],
+			Researcher: [() => fauxAssistantMessage("Found one.")],
+		});
+		await say("Find me a flight.", session);
+		await settled(session);
+		expect((await tasksOf(session)).map((task) => task.state)).toEqual(["failed"]);
+		expect((await tasksOf(session))[0]!.result).toBe("It didn't finish: The run crashed..");
+		expect(update).toContain("didn't finish: The run crashed.");
+		vi.restoreAllMocks();
+	});
 });
 
 describe("archiving a chat", () => {

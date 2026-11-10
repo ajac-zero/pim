@@ -1,0 +1,31 @@
+# hostopsd: runs the host operations Pim queues (see README.md). install.sh installs this as
+# /etc/systemd/system/hostopsd.service and writes /etc/hostopsd/env.
+[Unit]
+Description=Pim host operations daemon
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=hostopsd
+Group=hostopsd
+EnvironmentFile=/etc/hostopsd/env
+# It runs from the checkout it deploys, so after a deploy that changes it, it exits and comes back
+# as the new version.
+ExecStart=/usr/bin/env ${NODE_BIN} ${PIM_CHECKOUT}/sandbox-manager/hostopsd/hostopsd.js
+SyslogIdentifier=hostopsd
+Restart=always
+RestartSec=5
+StateDirectory=hostopsd
+StateDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

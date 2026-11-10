@@ -34,6 +34,9 @@ Tests: `node --test` (fake Docker over a unix socket and fake agentds; one suite
 workspace-agentd as a local process). No Docker daemon needed.
 Live check: `scripts/live-smoke.sh` (needs a Docker daemon with runsc, `curl`, `jq`).
 
+On the host, [hostopsd](hostopsd/README.md) deploys, rolls back, restarts and reports on this stack
+for the operations the admin's agent queues in Pim.
+
 ### Environment
 
 | Variable | Default | Meaning |

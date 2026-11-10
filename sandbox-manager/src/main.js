@@ -15,6 +15,7 @@ const cfg = {
 	dockerRoot: env.DOCKER_ROOT ?? '/var/lib/docker',
 	minFreePct: Number(env.MIN_FREE_DISK_PCT ?? 15),
 	maxConcurrent: Number(env.MAX_CONCURRENT || defaultMaxConcurrent()),
+	maxConcurrentSource: env.MAX_CONCURRENT ? 'env' : 'default',
 	maxTotalWorkspaceMiB: Number(env.MAX_TOTAL_WORKSPACE_GB ?? 100) * 1024,
 	idleMin: Number(env.IDLE_MIN ?? 30),
 	keptVolumeDays: Number(env.KEPT_VOLUME_DAYS ?? 7),

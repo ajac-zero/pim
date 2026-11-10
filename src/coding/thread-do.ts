@@ -10,6 +10,7 @@ import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 import { deploymentSettings } from "../deployment";
 import {
 	type CodingEnvironment,
+	NO_ENVIRONMENT,
 	environmentError,
 	environmentKey,
 	lockfileHashes,
@@ -399,6 +400,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 				startOperation: input.operationId,
 			});
 			this.store.enqueue(input.operationId, task);
+			if (input.rebuildEnvironment) {
+				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
+			}
 		});
 		if (this.#ensureBackend()) {
 			await this.#requestSlot();
@@ -2023,6 +2027,8 @@ export type StartThread = {
 	/** The workspace backend's id (the deployment's default). */
 	readonly workspaceProvider?: string;
 	readonly limits?: Partial<CodingLimits>;
+	/** When true, start with a freshly rebuilt environment, skipping any cached snapshot. Default false. */
+	readonly rebuildEnvironment?: boolean;
 };
 
 export type CodingThreadStatus = {

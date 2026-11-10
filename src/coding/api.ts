@@ -62,6 +62,8 @@ export type StartCodingThread = {
 	readonly budgetUsd?: number;
 	readonly parent?: string;
 	readonly operationId?: string;
+	/** When true, start with a freshly rebuilt environment, skipping any cached snapshot. Default false. */
+	readonly rebuildEnvironment?: boolean;
 };
 
 /** `POST /api/coding/threads/:id/push`: the approval the person decides. */

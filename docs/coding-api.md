@@ -129,7 +129,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 | Method | Path | Body / query | Answers |
 | --- | --- | --- | --- |
 | GET | `/coding/threads` | | `{ threads: CodingThreadSummary[] }`, newest first, archived ones included |
-| POST | `/coding/threads` | `{ repo, ref?, task, profile?, harness?, chat?, budgetUsd?, parent?, operationId? }` | `201` with `CodingThreadView`, or `200` with the same thread when `operationId` started one already. It returns at once: the thread is `provisioning`, or `queued` with `position` and `reason` when the space's slots are taken |
+| POST | `/coding/threads` | `{ repo, ref?, task, profile?, harness?, chat?, budgetUsd?, parent?, operationId?, rebuildEnvironment? }` | `201` with `CodingThreadView`, or `200` with the same thread when `operationId` started one already. It returns at once: the thread is `provisioning`, or `queued` with `position` and `reason` when the space's slots are taken. When `rebuildEnvironment` is true, the thread starts with a freshly rebuilt environment, skipping any cached snapshot |
 | GET | `/coding/threads/:id` | | `CodingThreadView` |
 | GET | `/coding/threads/:id/transcript` | | `{ messages: TranscriptMessage[] }`, as `/sessions/:s/messages` has them, with the thread's own notices (a budget stop) as `role: "notice"` |
 | GET | `/coding/threads/:id/diff` | `?since=<sha>` | `{ since, head, diff, truncated }`: `git diff` from `since` (the commit it started from, by default) to its latest checkpoint, at most 256 KiB. From the start it is kept for every checkpoint; from another commit it needs the workspace (`workspace_not_running`) |
@@ -187,6 +187,7 @@ POST /api/coding/threads
 - `parent` must be a thread of this space (`not_found`).
 - `harness` is the coding agent that runs it: `pi` by default, `claude-code`, Anthropic's Claude Code CLI ([coding-claude-code.md](coding-claude-code.md)), or `codex`, OpenAI's Codex CLI ([coding-codex.md](coding-codex.md)), each run in the thread's workspace with the person's own subscription, or `mistral-vibe`, Mistral's Vibe CLI ([coding-vibe.md](coding-vibe.md)), or `amp`, Amp's CLI ([coding-amp.md](coding-amp.md)), each run with the person's own API key. A `claude-code` thread's `profile` is `{ providerId: "claude-code", model: "default" }`, the CLI's own model, unless it is given one with that `providerId`, whose `model` the CLI is asked for (`--model`); a `codex` thread's likewise, with `providerId: "codex"` (`-m`), and a `mistral-vibe` thread's with `providerId: "mistral-vibe"` and one of Vibe's model aliases (`--model`, on a new session only). An `amp` thread's `model` is one of Amp's modes, `low`, `medium`, `high` or `ultra` (`--mode`), or `default` for Amp's; another fails its turn.
 - `chat` is the chat the thread is started from, for the chat list to show it under that chat. A thread an agent starts records its own chat, so it needs none.
+- `rebuildEnvironment` is a boolean, false by default. When true, the thread starts with a freshly rebuilt environment: its workspace is made from a clean clone, the repository's setup script is run from scratch, and no cached snapshot is restored. This is useful when you need a fresh environment, such as after changing dependencies or the setup script.
 
 ## Agents
 

@@ -488,7 +488,7 @@ async function pushToGitProvider(deps: PushDeps, push: PreparedPush): Promise<Pu
 	const call = callWith(deps, name);
 	const credential = await provider.credential(repo, "write");
 	if (!credential) throw new GitBrokerNotConfiguredError();
-	const git = provider.gitUrl(repo).replace(/\.git$/, "");
+	const git = provider.gitUrl(repo);
 	const gitHeaders = { Authorization: basicAuth(credential), "User-Agent": "git/pim-git-broker" };
 
 	const defaultBranch = await provider.defaultBranch(repo);

@@ -880,6 +880,19 @@ describe("a CLI harness run", () => {
 		expect(log.at(-1)).toBe("unlock");
 	});
 
+	it("reports a command the workspace cut off short of the turn's limit as that, not as the turn's own limit", async () => {
+		// The turn's limit is 240 minutes; the workspace (a manager capping an exec) ends the command at once.
+		const { workspace, log } = scripted(async function* () {
+			yield { type: "exit", code: null, signal: "SIGKILL", timedOut: true };
+		});
+		const { options } = deps(workspace, log);
+		const runner = await prepared(options);
+		const result = await runner.run(TURN, 240 * 60_000);
+		expect(result).toMatchObject({ status: "unanswered", reason: "timeout" });
+		expect(result.detail).not.toContain("240");
+		expect(result.detail).toContain("workspace stopped");
+	});
+
 	it("stops a turn that prints nothing for the stall window as stalled, with SIGINT", async () => {
 		const { workspace, log, signals } = scripted(async function* (options, signals) {
 			yield { type: "stdout", data: `${lines("turn")[0]}\n` };

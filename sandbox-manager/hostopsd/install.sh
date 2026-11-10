@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# Installs or updates hostopsd on the Pim host. Run it with sudo; running it again is safe and
-# keeps what it set up before (the token too, unless you give a new one).
+# Installs or updates hostopsd on the Pim host. sandbox-manager/up.sh runs it (through sudo) when
+# hostopsd is missing or out of date, so there is normally nothing to run by hand. It must run as
+# root; running it again is safe and keeps what it set up before, the credential included.
 #
 #   sudo sandbox-manager/hostopsd/install.sh --url https://pim.example.com
 #
-# It asks for the hostopsd token without echoing it, or reads it from --token-file (a path, or
-# "-" for stdin), or from stdin when stdin is not a terminal. The token is never accepted on the
-# command line, where `ps` would show it.
+# Without a credential it enrolls with Pim, using the sandbox manager's MANAGER_TOKEN, and stores
+# the credential it gets only in /etc/hostopsd/env. It enrolls again when Pim rejects the
+# installed one (401). When Pim answers 403 the admin revoked hostopsd in Settings: the unit is
+# installed but not started, and nothing is retried. A credential can still be given with
+# --token-file (a path, or "-" for stdin). Credentials are never accepted on the command line,
+# where `ps` would show them, and never printed.
 #
 # Options, each also taken from the environment variable in brackets:
 #   --url URL            [HOSTOPS_URL] Pim's https origin
-#   --token-file PATH    [HOSTOPS_TOKEN_FILE] file holding the token, or - for stdin
+#   --token-file PATH    [HOSTOPS_TOKEN_FILE] file holding a credential, or - for stdin
+#                        (optional: without one the installer enrolls)
 #   --checkout PATH      [PIM_CHECKOUT] the Pim checkout (default: the one holding this script)
 #   --manager-env PATH   [MANAGER_ENV_FILE] the sandbox manager's environment: MANAGER_TOKEN,
 #                        PROXY_ADMIN_TOKEN, ... (default: sandbox-manager/.env if it exists,
@@ -26,9 +31,14 @@ die() {
 [ "$(id -u)" = 0 ] || die "run it with sudo"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ETC=/etc/hostopsd
+# The locations can be moved only so the tests can run this script without touching the system.
+ETC=${HOSTOPSD_ETC:-/etc/hostopsd}
 ENV_FILE=$ETC/env
-STATE_DIR=/var/lib/hostopsd
+# Which install.sh and unit are installed, readable by everyone, so up.sh can tell when to run
+# this again without being root. It holds no secret.
+STAMP=$ETC/installed
+STATE_DIR=${HOSTOPSD_STATE_DIR:-/var/lib/hostopsd}
+UNIT_DIR=${HOSTOPSD_UNIT_DIR:-/etc/systemd/system}
 URL=${HOSTOPS_URL:-}
 TOKEN_FILE=${HOSTOPS_TOKEN_FILE:-}
 CHECKOUT=${PIM_CHECKOUT:-$(cd "$SCRIPT_DIR/../.." && pwd)}
@@ -70,22 +80,6 @@ URL=${URL:-$(installed HOSTOPS_URL)}
 URL=${URL%/}
 [[ "$URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "give Pim's origin with --url https://... (got '${URL}')"
 
-TOKEN=${HOSTOPS_TOKEN:-}
-if [ -z "$TOKEN" ] && [ -n "$TOKEN_FILE" ]; then
-	if [ "$TOKEN_FILE" = - ]; then IFS= read -r TOKEN || true; else IFS= read -r TOKEN <"$TOKEN_FILE" || true; fi
-elif [ -z "$TOKEN" ] && [ -t 0 ]; then
-	prompt="hostopsd token from Pim"
-	[ -n "$(installed HOSTOPS_TOKEN)" ] && prompt="$prompt (Enter keeps the installed one)"
-	IFS= read -r -s -p "$prompt: " TOKEN || true
-	echo >&2
-elif [ -z "$TOKEN" ]; then
-	IFS= read -r TOKEN || true
-fi
-TOKEN=${TOKEN%$'\r'}
-TOKEN=${TOKEN:-$(installed HOSTOPS_TOKEN)}
-[ -n "$TOKEN" ] || die "no token: paste it at the prompt, pipe it in, or pass --token-file"
-[[ "$TOKEN" =~ ^[A-Za-z0-9._~+/=-]{16,1024}$ ]] || die "the token has unexpected characters or length"
-
 # --- The user and its directories ------------------------------------------------------------
 if ! id hostopsd >/dev/null 2>&1; then
 	useradd --system --user-group --home-dir "$STATE_DIR" --no-create-home --shell /usr/sbin/nologin hostopsd
@@ -96,7 +90,8 @@ fi
 usermod -aG docker hostopsd
 getent group systemd-journal >/dev/null && usermod -aG systemd-journal hostopsd
 install -d -o hostopsd -g hostopsd -m 0750 "$STATE_DIR"
-install -d -o root -g hostopsd -m 0750 "$ETC"
+# The directory is open for traversal so up.sh can read the stamp; the files in it stay 0640.
+install -d -o root -g hostopsd -m 0755 "$ETC"
 as_hostopsd "$NODE_BIN" --version >/dev/null || die "hostopsd cannot run $NODE_BIN (is it under a home directory?); pass --node with a system-wide Node.js"
 
 # --- The checkout ----------------------------------------------------------------------------
@@ -145,13 +140,68 @@ port=$(sed -n 's/^MANAGER_PORT=//p' "$MANAGER_ENV" | tail -n 1)
 MANAGER_URL=${MANAGER_URL:-$(installed MANAGER_URL)}
 MANAGER_URL=${MANAGER_URL:-http://127.0.0.1:${port:-8080}}
 
+# --- The credential ---------------------------------------------------------------------------
+# Requests to Pim take their Authorization header from a curl config on stdin, so no secret is
+# ever on a command line. Prints the HTTP status (000 when Pim cannot be reached); the body goes
+# to $RESPONSE.
+RESPONSE=$(mktemp)
+trap 'rm -f "$RESPONSE"' EXIT
+pim_post() { # path bearer body
+	local status
+	status=$(printf 'header = "Authorization: Bearer %s"\n' "$2" |
+		curl --silent --show-error --max-time 30 --config - --output "$RESPONSE" --write-out '%{http_code}' \
+			--request POST --header 'content-type: application/json' --data "$3" "$URL$1" 2>/dev/null) || true
+	echo "${status:-000}"
+}
+
+TOKEN=${HOSTOPS_TOKEN:-}
+if [ -z "$TOKEN" ] && [ -n "$TOKEN_FILE" ]; then
+	if [ "$TOKEN_FILE" = - ]; then IFS= read -r TOKEN || true; else IFS= read -r TOKEN <"$TOKEN_FILE" || true; fi
+fi
+TOKEN=${TOKEN%$'\r'}
+HOW="kept the installed credential"
+REVOKED=0
+if [ -n "$TOKEN" ]; then
+	HOW="installed the given credential"
+else
+	TOKEN=$(installed HOSTOPS_TOKEN)
+	if [ -n "$TOKEN" ] && [ "$(pim_post /api/hostops/agent/poll "$TOKEN" '{"agentVersion":"install","commit":"","waitMs":0}')" = 401 ]; then
+		echo "the installed credential was rejected by Pim (401); enrolling again"
+		TOKEN=
+	fi
+	if [ -z "$TOKEN" ]; then
+		MANAGER_TOKEN=$(sed -n 's/^MANAGER_TOKEN=//p' "$MANAGER_ENV" | tail -n 1)
+		[[ "$MANAGER_TOKEN" =~ ^[A-Za-z0-9._~+/=-]{8,1024}$ ]] || die "MANAGER_TOKEN in $MANAGER_ENV has unexpected characters or length"
+		status=$(pim_post /api/hostops/agent/enroll "$MANAGER_TOKEN" '{}')
+		unset MANAGER_TOKEN
+		case "$status" in
+		201)
+			TOKEN=$(sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$RESPONSE" | head -n 1)
+			[ -n "$TOKEN" ] || die "Pim enrolled hostopsd but its answer has no token"
+			HOW="enrolled with Pim"
+			;;
+		403)
+			REVOKED=1
+			HOW="credential revoked in Pim's Settings"
+			;;
+		401) die "Pim rejected MANAGER_TOKEN (401) when enrolling hostopsd; is $MANAGER_ENV the manager's current environment?" ;;
+		404) die "$URL does not support enrolling hostopsd (404); update Pim, or give a credential with --token-file" ;;
+		000) die "could not reach $URL to enroll hostopsd" ;;
+		*) die "Pim answered $status when enrolling hostopsd" ;;
+		esac
+	fi
+fi
+if [ "$REVOKED" = 0 ]; then
+	[[ "$TOKEN" =~ ^[A-Za-z0-9._~+/=-]{16,1024}$ ]] || die "the credential has unexpected characters or length"
+fi
+
 # --- The env file and the unit ---------------------------------------------------------------
 umask 077
 tmp=$(mktemp "$ETC/.env.XXXXXX")
 {
 	echo "# Written by sandbox-manager/hostopsd/install.sh; run it again to change these."
 	printf 'HOSTOPS_URL=%s\n' "$URL"
-	printf 'HOSTOPS_TOKEN=%s\n' "$TOKEN"
+	[ "$REVOKED" = 1 ] || printf 'HOSTOPS_TOKEN=%s\n' "$TOKEN"
 	printf 'PIM_CHECKOUT=%s\n' "$CHECKOUT"
 	printf 'MANAGER_URL=%s\n' "$MANAGER_URL"
 	printf 'MANAGER_ENV_FILE=%s\n' "$MANAGER_ENV"
@@ -162,11 +212,34 @@ chmod 0640 "$tmp"
 mv -f "$tmp" "$ENV_FILE"
 unset TOKEN
 
-install -m 0644 "$SCRIPT_DIR/hostopsd.service" /etc/systemd/system/hostopsd.service
+install -m 0644 "$SCRIPT_DIR/hostopsd.service" "$UNIT_DIR/hostopsd.service"
+tmp=$(mktemp "$ETC/.installed.XXXXXX")
+{
+	echo "INSTALL_SHA=$(sha256sum <"$SCRIPT_DIR/install.sh" | cut -d' ' -f1)"
+	echo "UNIT_SHA=$(sha256sum <"$SCRIPT_DIR/hostopsd.service" | cut -d' ' -f1)"
+	echo "HOSTOPS_URL=$URL"
+	echo "PIM_CHECKOUT=$CHECKOUT"
+	[ "$REVOKED" = 1 ] && echo "REVOKED=1"
+	true
+} >"$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$STAMP"
 systemctl daemon-reload
 systemctl enable --quiet hostopsd
+if [ "$REVOKED" = 1 ]; then
+	systemctl stop hostopsd 2>/dev/null || true
+	echo "hostopsd is installed but not running: its credential was revoked in Pim's Settings, so it stays stopped. Re-enable it there, then run: sudo $SCRIPT_DIR/install.sh"
+	exit 0
+fi
+since=$(date '+%Y-%m-%d %H:%M:%S')
 systemctl restart hostopsd
-sleep 3
-systemctl --no-pager --lines=20 status hostopsd || true
+# End to end: the daemon logs "polling" once it starts, and "rejected" when Pim refuses its credential.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	journal=$(journalctl -u hostopsd --since "$since" --no-pager -o cat 2>/dev/null || true)
+	if grep -q ' polling ' <<<"$journal" || grep -q 'rejected HOSTOPS_TOKEN' <<<"$journal"; then break; fi
+	sleep 1
+done
 systemctl is-active --quiet hostopsd || die "hostopsd is not running; see journalctl -u hostopsd"
-echo "hostopsd is installed and polling $URL"
+grep -q 'rejected HOSTOPS_TOKEN' <<<"$journal" && die "hostopsd is running but Pim rejects its credential; see journalctl -u hostopsd"
+grep -q ' polling ' <<<"$journal" || die "hostopsd started but has not begun polling Pim yet; see journalctl -u hostopsd"
+echo "hostopsd: $HOW, running and polling $URL"

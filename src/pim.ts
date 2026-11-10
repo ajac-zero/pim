@@ -4744,6 +4744,12 @@ export class Pim extends DurableAgent<Env> {
 		return { id: agent.id, name: agent.name };
 	}
 
+	/** The id of this space's majordomo, which host operations (./hostops.ts) check their caller against; null in an erased or guest's space. */
+	async majordomoId(): Promise<string | null> {
+		if (this.#closed() || this.guestBot() !== null) return null;
+		return this.agents.majordomo().id;
+	}
+
 	/**
 	 * One of the owner's agents, with its uploaded icon, for the Worker to
 	 * publish to the gallery: with its contacts, and theirs, which come with

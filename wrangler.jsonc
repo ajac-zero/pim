@@ -32,7 +32,9 @@
       // Each space's coding scheduler: the queue for its coding workspaces' slots, named by its owner ID.
       { "name": "CodingScheduler", "class_name": "CodingSchedulerDO" },
       // Each coding thread: its agent loop, transcript, checkpoints and spend, named by the thread's ID.
-      { "name": "CodingThread", "class_name": "CodingThreadDO" }
+      { "name": "CodingThread", "class_name": "CodingThreadDO" },
+      // Host operations: the queue and audit log of what the admin's majordomo asks of this Pim's host, one for the deployment.
+      { "name": "HostOps", "class_name": "HostOps" }
     ]
   },
   // SQLite-backed Durable Objects are available on the Workers free plan.
@@ -42,7 +44,8 @@
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
     { "tag": "v4", "new_sqlite_classes": ["Gallery"] },
     { "tag": "v5", "new_sqlite_classes": ["CodingSchedulerDO"] },
-    { "tag": "v6", "new_sqlite_classes": ["CodingThreadDO"] }
+    { "tag": "v6", "new_sqlite_classes": ["CodingThreadDO"] },
+    { "tag": "v7", "new_sqlite_classes": ["HostOps"] }
   ],
   // MCP clients' sign-ins to people's spaces: registered clients, grants and hashed tokens
   // (src/mcp-auth.ts). Deploying creates the namespace.
@@ -96,7 +99,8 @@
         { "name": "Pim", "class_name": "Pim" },
         { "name": "Auth", "class_name": "Auth" },
         { "name": "Directory", "class_name": "Directory" },
-        { "name": "Gallery", "class_name": "Gallery" }
+        { "name": "Gallery", "class_name": "Gallery" },
+        { "name": "HostOps", "class_name": "HostOps" }
       ]
     },
     "ratelimits": [

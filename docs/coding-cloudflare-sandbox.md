@@ -14,7 +14,7 @@
 - **Destroy** deletes the container; with `keepVolume` and backups the files are saved and come back when the session is created again.
 - **Capacity** is 2 workspaces at once unless `maxConcurrent` says otherwise.
 - Which workspaces exist is remembered per provider instance. After a restart `get(ref)` reopens a workspace if `/workspace` exists in its sandbox; `list` shows only workspaces seen since.
-- Disk, memory, CPU and process limits in `WorkspaceSpec.limits` are not enforced by this backend; they come from the container's instance type. Wall-clock limits are the caller's.
+- Disk, memory, CPU and process limits in `WorkspaceSpec.limits` are not enforced by this backend; they come from the container's instance type. A turn's time limit, if the thread has one, is the caller's.
 
 ## Egress allowlist (design)
 

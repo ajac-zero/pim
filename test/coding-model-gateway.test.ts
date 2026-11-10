@@ -77,7 +77,7 @@ async function makeThread(overrides: Partial<CodingThreadRow> = {}): Promise<{ i
 			state: "idle",
 			createdBy: "tester",
 			parentThread: null,
-			limits: { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: 240 },
+			limits: { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: 120 },
 			budgetUsd: 3,
 			startOperation: `start-${id}`,
 			...overrides,
@@ -169,6 +169,12 @@ const everything = (stub: Stub) =>
 const nonceOf = (stub: Stub) => runInDurableObject(stub, (thread: CodingThreadDO) => thread.store.gatewayNonce());
 
 describe("the model gateway's tokens", () => {
+	it("last a week for a thread with no time limit", async () => {
+		const { stub } = await makeThread({ limits: { cpu: 2, memMiB: 4096, diskMiB: 5120, pids: 1024, wallClockMin: null } });
+		const { expiresAt } = await stub.gatewayToken(["anthropic"]);
+		expect(expiresAt).toBeGreaterThan(Date.now() + 7 * 24 * 60 * 60_000);
+	});
+
 	it("are minted for one thread, its space and families, until the thread's wall clock and a margin", async () => {
 		const { id, stub } = await makeThread();
 		const before = Date.now();
@@ -176,9 +182,9 @@ describe("the model gateway's tokens", () => {
 		expect(token).toMatch(/^pimgw_[\w-]+\.[\w-]+$/);
 		const claims = await verifyGatewayToken(await gatewayTokenKey(env), token);
 		expect(claims).toEqual({ threadId: id, space: OWNER, families: ["anthropic"], nonce: await nonceOf(stub), expiresAt });
-		// 240 minutes of wall clock and 15 of margin.
-		expect(expiresAt).toBeGreaterThanOrEqual(before + 255 * 60_000);
-		expect(expiresAt).toBeLessThanOrEqual(Date.now() + 255 * 60_000);
+		// 120 minutes of wall clock and 15 of margin.
+		expect(expiresAt).toBeGreaterThanOrEqual(before + 135 * 60_000);
+		expect(expiresAt).toBeLessThanOrEqual(Date.now() + 135 * 60_000);
 		// A second token carries the same nonce, so the first still works.
 		const second = await stub.gatewayToken(["openai"]);
 		expect((await verifyGatewayToken(await gatewayTokenKey(env), second.token))?.nonce).toBe(claims!.nonce);

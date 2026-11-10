@@ -563,6 +563,8 @@ export function stateReasonKey(
       return { key: "codingReasonInterrupted" };
     case "timeout":
       return { key: "codingReasonTimeout" };
+    case "stalled":
+      return { key: "codingReasonStalled" };
     default:
       return { key: "codingReasonOther", reason };
   }

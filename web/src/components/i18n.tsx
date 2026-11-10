@@ -1710,6 +1710,8 @@ const translations = {
     codingReasonInterrupted:
       "The run was interrupted before it finished; nothing was reported as done.",
     codingReasonTimeout: "It ran past its time limit.",
+    codingReasonStalled:
+      "It made no progress for a long while, so it was stopped. Continue to go on.",
     codingHarnessHint:
       "Pi uses this space's models. Claude Code and Codex use your own Claude or ChatGPT subscription; Mistral Vibe and Amp use an API key of yours.",
     codingConnectTitle: "Connect {harness}",
@@ -3547,6 +3549,8 @@ const translations = {
     codingReasonInterrupted:
       "La ejecución se interrumpió antes de terminar; no se dio nada por hecho.",
     codingReasonTimeout: "Superó su tiempo límite.",
+    codingReasonStalled:
+      "No avanzó durante un buen rato, así que se detuvo. Continúa para seguir.",
     codingHarnessHint:
       "Pi usa los modelos de este espacio. Claude Code y Codex usan tu propia suscripción de Claude o ChatGPT; Mistral Vibe y Amp usan una clave de API tuya.",
     codingConnectTitle: "Conectar {harness}",

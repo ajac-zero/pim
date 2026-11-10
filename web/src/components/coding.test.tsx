@@ -9,6 +9,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -244,10 +245,14 @@ function fakeApi(thread = view(), messages: TranscriptMessage[] = []) {
   return { api, connections };
 }
 
-function renderWith(api: CodingApi, page: () => ReactNode, at = "/") {
-  const client = new QueryClient({
+function renderWith(
+  api: CodingApi,
+  page: () => ReactNode,
+  at = "/",
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
-  });
+  }),
+) {
   // A push asks for an approval; the approvals Pim has are none here.
   client.setQueryData(approvalsQuery().queryKey, []);
   const root = createRootRoute({ component: page });
@@ -1151,6 +1156,44 @@ describe("a coding subthread in the chat list", () => {
     expect(links.map((link) => link.getAttribute("href"))).toEqual([
       "/coding/a",
     ]);
+  });
+
+  it("leaves out an archived thread, and drops a thread once it is archived", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({
+      threads: [
+        summary({ id: "a", chat: "chat-1", state: "idle" }),
+        summary({ id: "old", chat: "chat-1", state: "archived" }),
+      ],
+    });
+    const Under = () => (
+      <ul>
+        {(useCodingByChat().get("chat-1") ?? []).map((thread) => (
+          <CodingSubthreadRow key={thread.id} thread={thread} depth={1} />
+        ))}
+      </ul>
+    );
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    renderWith(api, Under, "/", client);
+    const hrefs = async () =>
+      (await screen.findAllByRole("link")).map((link) =>
+        link.getAttribute("href"),
+      );
+    expect(await hrefs()).toEqual(["/coding/a"]);
+
+    // What the Worker's "sessions" broadcast makes the page do.
+    api.list.mockResolvedValue({
+      threads: [
+        summary({ id: "a", chat: "chat-1", state: "archived" }),
+        summary({ id: "old", chat: "chat-1", state: "archived" }),
+      ],
+    });
+    await act(() =>
+      client.invalidateQueries({ queryKey: ["coding", "threads"] }),
+    );
+    await waitFor(() => expect(screen.queryAllByRole("link")).toEqual([]));
   });
 });
 

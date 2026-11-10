@@ -1194,6 +1194,38 @@ describe("a Claude Code thread", () => {
 		await vi.waitFor(() => expect(signals.map((each) => each[0])).toEqual(["-INT", "-KILL"]));
 	});
 
+	it("stops a turn that prints nothing as stalled, then continues it once by itself, resuming the session, and leaves it failed if that stalls too", async () => {
+		claude = async ({ killed }) => {
+			await until("-INT", killed);
+			return { stdout: `${claudeLines("turn")[0]}\n`, code: 130 };
+		};
+		const { id, stub } = await startClaude();
+		const [first, second] = await turns(id, 2);
+		expect(first).toMatchObject({ outcome: "error", reason: "stalled", state: "failed" });
+		expect(second).toMatchObject({ outcome: "error", reason: "stalled", state: "failed" });
+		expect(second!.operationId).toMatch(/^auto-continue:/);
+		// Once: the continuation resumed the CLI's session, and its own stall is not continued again.
+		await new Promise((resolve) => setTimeout(resolve, 600));
+		expect(runs).toHaveLength(2);
+		expect(runs[1]!.argv[runs[1]!.argv.indexOf("--resume") + 1]).toBe(CLAUDE_SESSION);
+		expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "stalled" });
+	});
+
+	it("goes on after a stall when the continuation finishes", async () => {
+		let attempt = 0;
+		claude = async ({ killed }) => {
+			if (attempt++ === 0) {
+				await until("-INT", killed);
+				return { stdout: `${claudeLines("turn")[0]}\n`, code: 130 };
+			}
+			return { stdout: claudeFixture("turn") };
+		};
+		const { id, stub } = await startClaude();
+		const [first, second] = await turns(id, 2);
+		expect(first).toMatchObject({ reason: "stalled" });
+		expect(second).toMatchObject({ outcome: "completed", state: "idle" });
+	});
+
 	it("ends a turn its object's reset cut off as interrupted, auto-resumes, and finishes the run off", async () => {
 		let first = true;
 		claude = async ({ killed }) => {

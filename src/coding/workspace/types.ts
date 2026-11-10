@@ -17,7 +17,20 @@ export type WorkspaceSpec = {
 	egress: { allow: string[] };
 	/** How git authenticates: "none" for public repositories, "broker" for credentials a broker supplies outside the workspace so the machine never holds them. */
 	gitAuth: { mode: "none" | "broker" };
+	/**
+	 * Whose workspace it is, on a backend with `capabilities.environmentSnapshots`: the person and repository its
+	 * dependency caches and environment snapshots belong to. With `restoreFrom`, the workspace starts from that
+	 * person's snapshot of that repository with this key instead of empty; a restore that fails throws and makes
+	 * nothing. A workspace that already exists, or comes back from a kept volume, keeps its own files.
+	 */
+	environment?: EnvironmentOwner & { restoreFrom?: string };
 };
+
+/** One person's prepared environments of one repository: what keeps their caches and snapshots apart from everyone else's. */
+export type EnvironmentOwner = { userId: string; repo: string };
+
+/** A snapshot of a prepared environment: a workspace's files once the repository's setup ran, kept by key for its owner. */
+export type EnvironmentSnapshot = { key: string; repo: string; createdAt: number; lastUsedAt?: number; size?: number };
 
 /** A durable handle on one workspace. It is plain data, so it can be stored and used again after the Durable Object restarts. */
 export type WorkspaceRef = {
@@ -98,6 +111,8 @@ export interface WorkspaceProvider {
 	capabilities: {
 		/** Whether `snapshot` and `restore` work. */
 		snapshot: boolean;
+		/** Whether keyed environment snapshots work: `spec.environment.restoreFrom`, `snapshotEnvironment`, `listEnvironments` and `deleteEnvironment`. */
+		environmentSnapshots: boolean;
 		/** Whether `spec.egress.allow` is enforced. */
 		egressAllowlist: boolean;
 		/** The most workspaces the backend runs at once, when it has a limit. */
@@ -111,6 +126,17 @@ export interface WorkspaceProvider {
 	destroy(ref: WorkspaceRef, o?: { keepVolume?: boolean }): Promise<void>;
 	/** Lists the workspaces that exist, optionally narrowed. */
 	list(filter?: WorkspaceFilter): Promise<WorkspaceInfo[]>;
+	/**
+	 * Keeps the files of a running workspace made with `spec.environment` of this owner as the owner's environment
+	 * snapshot with `key`, or returns the one already kept with it. The caller makes sure the workspace holds no
+	 * secrets then; a backend may also leave out credential files it knows. Throws when
+	 * `capabilities.environmentSnapshots` is false.
+	 */
+	snapshotEnvironment(ref: WorkspaceRef, o: EnvironmentOwner & { key: string }): Promise<EnvironmentSnapshot>;
+	/** The owner's environment snapshots of the repository, newest first. Throws when `capabilities.environmentSnapshots` is false. */
+	listEnvironments(owner: EnvironmentOwner): Promise<EnvironmentSnapshot[]>;
+	/** Deletes the person's environment snapshot with `key`; false when they have none. Throws when `capabilities.environmentSnapshots` is false. */
+	deleteEnvironment(userId: string, key: string): Promise<boolean>;
 }
 
 /** The backend is running as many workspaces as it can; try again after one is destroyed. */

@@ -47,6 +47,12 @@ export type ComposeOptions = {
 const ATTEMPTS = 6;
 const BACKOFF_MS = 4_000;
 
+/** Whether a network error is a refused connection, which means the manager never saw the request. */
+const refused = (error: unknown): boolean => {
+	const e = error as { code?: string; cause?: unknown; message?: string } | undefined;
+	return e?.code === "ECONNREFUSED" || /ECONNREFUSED|connection refused/i.test(e?.message ?? "") || (e?.cause !== undefined && refused(e.cause));
+};
+
 const wait = (ms: number, signal?: AbortSignal) =>
 	new Promise<void>((resolve) => {
 		const timer = setTimeout(done, ms);
@@ -58,9 +64,11 @@ const wait = (ms: number, signal?: AbortSignal) =>
 		signal?.addEventListener("abort", done);
 	});
 
-/** Whether the manager's answer says to try again later: a gateway failure or timeout, or a rate limit that is not the manager's capacity, which queues the thread instead. */
-async function transientStatus(res: Response): Promise<boolean> {
-	if (res.status === 502 || res.status === 503 || res.status === 504 || res.status === 408) return true;
+/** Whether the manager's answer says to try again later: a gateway failure, or, except for a command (see `call`), a request timeout or a rate limit that is not the manager's capacity, which queues the thread instead. */
+async function transientStatus(res: Response, exec: boolean): Promise<boolean> {
+	if (res.status === 502 || res.status === 503 || res.status === 504) return true;
+	if (exec) return false;
+	if (res.status === 408) return true;
 	if (res.status !== 429) return false;
 	const body = (await res.clone().json().catch(() => ({}))) as { code?: string };
 	return body.code !== "capacity";
@@ -169,12 +177,14 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	/** One request to the manager, tried again with exponential backoff and jitter when the manager can't be reached or answers 502, 503, 504, 408 or a rate limit, as it does while restarting; any other answer is returned at once, and after the last attempt so is the last answer or error. Network failures become an error that names no header. A request aborted through `signal` throws what `fetch` throws, for the caller to recognize. `retry: false` makes one attempt. */
 	async call(method: string, path: string, init: { json?: unknown; body?: Uint8Array; signal?: AbortSignal; auth?: boolean; retry?: boolean } = {}): Promise<Response> {
 		const attempts = init.retry === false ? 1 : ATTEMPTS;
+		// A command may have run before its answer was lost, so exec is tried again only when the manager surely never took it: a refused connection or a gateway answer.
+		const exec = /\/exec(\/stream)?$/.test(path);
 		for (let attempt = 1; ; attempt++) {
 			try {
 				const res = await this.#once(method, path, init);
-				if (attempt >= attempts || !(await transientStatus(res))) return res;
+				if (attempt >= attempts || !(await transientStatus(res, exec))) return res;
 			} catch (error) {
-				if (init.signal?.aborted || attempt >= attempts) throw error;
+				if (init.signal?.aborted || attempt >= attempts || (exec && !(error as { refused?: boolean }).refused)) throw error;
 			}
 			await this.#sleep(BACKOFF_MS * 2 ** (attempt - 1) * (0.75 + Math.random() * 0.5), init.signal);
 			if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
@@ -194,7 +204,7 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 			});
 		} catch (error) {
 			if (init.signal?.aborted) throw error;
-			throw new Error(this.#scrub(`Cannot reach the workspace manager: ${error instanceof Error ? error.message : String(error)}`));
+			throw Object.assign(new Error(this.#scrub(`Cannot reach the workspace manager: ${error instanceof Error ? error.message : String(error)}`)), { refused: refused(error) });
 		}
 	}
 

@@ -289,6 +289,31 @@ describe("ComposeWorkspaceProvider", () => {
 			expect(unreachable.attempts()).toBe(6);
 		});
 
+		it("never repeats a command the manager may have run: only a refused connection or a gateway answer is retried", async () => {
+			const exec = async (fail: (n: number) => Response | Error | null) => {
+				const manager = fakeManager();
+				const { p, attempts } = flaky(manager, fail);
+				const ws = await p.get(await p.create(spec("exec-1")));
+				const before = attempts();
+				const events: ExecEvent[] = [];
+				const outcome = await (async () => {
+					for await (const e of ws!.exec(["echo", "hi"], { timeoutMs: 1000 })) events.push(e);
+				})().then(
+					() => "ok",
+					(e: Error) => e.message,
+				);
+				return { outcome, tries: attempts() - before, events };
+			};
+			// Calls 1 and 2 are the create and the get; the exec is the third.
+			expect((await exec((n) => (n === 3 ? new TypeError("socket hang up: ECONNRESET") : null))).tries).toBe(1);
+			expect((await exec((n) => (n === 3 ? json(408, {}) : null))).tries).toBe(1);
+			expect((await exec((n) => (n === 3 ? json(500, {}) : null))).tries).toBe(1);
+			const refusedThenOk = await exec((n) => (n === 3 ? new Error("connect ECONNREFUSED 127.0.0.1:8080") : n === 4 ? json(502, {}) : null));
+			expect(refusedThenOk.tries).toBe(3);
+			expect(refusedThenOk.events.at(-1)).toMatchObject({ type: "exit", code: 0 });
+		});
+
+
 		it("fails at once on an answer that retrying won't change", async () => {
 			for (const [status, body] of [[400, {}], [401, {}], [404, {}], [409, {}], [422, {}], [429, { code: "capacity", limit: 1 }], [507, { code: "low_disk" }]] as const) {
 				const { p, attempts } = flaky(fakeManager(), () => json(status, body));

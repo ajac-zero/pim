@@ -11,6 +11,7 @@ import { codingScheduler } from "../src/coding/scheduler-do";
 import { type CodingEventSink, codingThread } from "../src/coding/thread-do";
 import { CodingThreadIndex } from "../src/coding/thread-index";
 import { CodingThreadStore } from "../src/coding/thread-store";
+import type { Pim } from "../src/pim";
 import type { Approval } from "../src/store";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
@@ -380,6 +381,64 @@ describe("the coding threads API", () => {
 	});
 });
 
+describe("opening a pull request from a coding thread", () => {
+	const approvals = async () => (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.filter((approval) => approval.action === "coding_open_pull_request");
+
+	it("is refused until the provider is set up and the branch pushed, then asks the person, and opens it once approved", async () => {
+		codingFaux.setResponses([toolUse("write", { path: "hello.txt", content: "Hello!\n" }), fauxAssistantMessage("Added hello.txt.")]);
+		const thread = await start();
+		await turns(thread.id, 1);
+		const open = (body: Record<string, unknown> = {}) => post(`/coding/threads/${thread.id}/pull-request`, body);
+		const unset = await open();
+		expect([unset.status, unset.body.code]).toEqual([409, "github_app_not_configured"]);
+		const github = fakeGitHub();
+		codingGitHub.app = github.app;
+		codingGitHub.fetch = github.fetch;
+		const unpushed = await open();
+		expect([unpushed.status, unpushed.body.code]).toEqual([409, "not_pushed"]);
+		expect(await approvals()).toEqual([]);
+		// Pushed (the person approves), it asks, and nothing is opened until they approve.
+		const push = await post(`/coding/threads/${thread.id}/push`);
+		await post(`/approvals/${push.body.approval}/approve`);
+		expect(github.pushes).toHaveLength(1);
+		const asked = await open();
+		expect(asked.status).toBe(202);
+		expect(asked.body).toMatchObject({ approval: expect.any(String), status: "pending", title: "Add a greeting", base: "main", summary: `Open a pull request from ${thread.repo.branch} into main of github.com/acme/demo: Add a greeting` });
+		expect((await open()).body.approval).toBe(asked.body.approval);
+		expect(await approvals()).toEqual([expect.objectContaining({ id: asked.body.approval, tool: null })]);
+		expect(github.pulls).toEqual([]);
+		const approved = await post<Approval>(`/approvals/${asked.body.approval}/approve`);
+		expect(approved.body).toMatchObject({ status: "approved", result: `Pull request #1 from ${thread.repo.branch} into main: https://github.com/acme/demo/pull/1` });
+		expect(github.pulls).toEqual([{ head: thread.repo.branch, base: "main", title: "Add a greeting", body: "Add a greeting\n\n---\nOpened by Pim from a coding thread." }]);
+		expect((await view(thread.id)).pullRequest).toEqual({ url: "https://github.com/acme/demo/pull/1", number: 1 });
+		// A title and body given are used as they are, in a request of their own.
+		const custom = await open({ title: "Greet the world", body: "Says hello." });
+		expect(custom.body).toMatchObject({ title: "Greet the world" });
+		expect(custom.body.approval).not.toBe(asked.body.approval);
+		await post(`/approvals/${custom.body.approval}/approve`);
+		expect(github.pulls.at(-1)).toEqual({ head: thread.repo.branch, base: "main", title: "Greet the world", body: "Says hello." });
+		const log = (await api<{ events: { kind: string; data: unknown }[] }>(`/coding/threads/${thread.id}/log`)).body.events;
+		expect(log.at(-1)).toMatchObject({ kind: "thread.pull_request", data: { repo: "acme/demo", branch: thread.repo.branch, base: "main", number: 2 } });
+	});
+
+	it("is an approval-gated tool with a title and body of its own, which refuses a thread that wasn't pushed", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Nothing to change.")]);
+		const thread = await start();
+		await turns(thread.id, 1);
+		await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			const action = pim.abilities.get("coding")!.actions!.find((candidate) => candidate.name === "coding_open_pull_request")!;
+			expect(action.explicitApproval).toBe(true);
+			expect(action.description).not.toMatch(/github\.com/i);
+			const schema = action.parameters as unknown as { properties: Record<string, unknown>; required: string[] };
+			expect(Object.keys(schema.properties).sort()).toEqual(["body", "thread_id", "title"]);
+			expect(schema.required).toEqual(["thread_id"]);
+			codingGitHub.app = fakeGitHub().app;
+			const refused = await action.prepare!({ thread_id: thread.id } as never, { session: pim.store.sessionOf((await post<{ id: string }>("/sessions")).body.id)! });
+			expect(JSON.parse((refused as { refused: string }).refused)).toMatchObject({ error: "not_pushed" });
+		});
+	});
+});
+
 describe("merging a coding thread into the default branch", () => {
 	const MAIN = hex40("m-main");
 	const MAIN_REMOTE = "https://pim.test/api/coding/git/acme/demo.git";
@@ -558,6 +617,7 @@ function fakeGitHub(refs: Record<string, string> = {}, patchAnswers: number[] = 
 		}
 		return out;
 	};
+	const pulls: { head: string; base: string; title: string; body: string }[] = [];
 	const app = { installationToken: async () => ({ token: "ghs_test", expiresAt: Date.now() + 3_600_000 }) } as unknown as GitHubApp;
 	const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = String(input);
@@ -567,6 +627,10 @@ function fakeGitHub(refs: Record<string, string> = {}, patchAnswers: number[] = 
 			return new Response(lines("# service=git-receive-pack\n", "", ...(listed.length ? listed : [`${"0".repeat(40)} capabilities^{}\0report-status delete-refs ofs-delta quiet\n`]), ""), {
 				headers: { "content-type": "application/x-git-receive-pack-advertisement" },
 			});
+		}
+		if (url === "https://api.github.com/repos/acme/demo/pulls" && init?.method === "POST") {
+			pulls.push(JSON.parse(String(init.body)));
+			return Response.json({ html_url: `https://github.com/acme/demo/pull/${pulls.length}`, number: pulls.length }, { status: 201 });
 		}
 		if (init?.method === "PATCH" && url.startsWith("https://api.github.com/repos/acme/demo/git/")) {
 			const { sha, force } = JSON.parse(String(init.body)) as { sha: unknown; force: unknown };
@@ -581,7 +645,7 @@ function fakeGitHub(refs: Record<string, string> = {}, patchAnswers: number[] = 
 		}
 		return new Response("Not found", { status: 404 });
 	};
-	return { app, fetch, pushes, moves };
+	return { app, fetch, pushes, moves, pulls };
 }
 
 describe("threads from before harnesses", () => {

@@ -272,8 +272,9 @@ export function deploymentGitea(env: Env, options: { fetch?: Fetch } = {}): Gite
 }
 
 /** The git providers of this deployment: GitHub, with its App when it is configured, and Gitea. */
-export function deploymentProviders(env: Env, options: { fetch?: Fetch } = {}): ProviderRegistry {
-	return new ProviderRegistry([new GitHubProvider(deploymentGitHubApp(env), { policy: brokerPolicy(env), ...options }), deploymentGitea(env, options)]);
+export function deploymentProviders(env: Env, options: { fetch?: Fetch; app?: GitHubApp | null } = {}): ProviderRegistry {
+	const { app = deploymentGitHubApp(env), ...rest } = options;
+	return new ProviderRegistry([new GitHubProvider(app, { policy: brokerPolicy(env), ...rest }), deploymentGitea(env, rest)]);
 }
 
 /** The broker, as the Worker serves it at `/api` + `path`. */

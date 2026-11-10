@@ -70,6 +70,8 @@ export type CodingThreadRow = {
 	readonly environment: CodingEnvironment;
 	/** How many consecutive interruptions (restarts) have been auto-resumed for this thread. Resets to 0 when a turn completes normally. */
 	readonly consecutiveInterrupts: number;
+	/** The pull request opened from the thread's branch (`coding_open_pull_request`); null until one is. */
+	readonly pullRequest: { readonly url: string; readonly number: number } | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -256,6 +258,9 @@ export class CodingThreadStore {
 		if (!columns.has("provider_instance")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN provider_instance TEXT NOT NULL DEFAULT 'github'");
 		// Consecutive interruptions counter for auto-resume.
 		if (!columns.has("consecutive_interrupts")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN consecutive_interrupts INTEGER NOT NULL DEFAULT 0");
+		// The pull request opened from the thread's branch.
+		if (!columns.has("pull_request_url")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_url TEXT");
+		if (!columns.has("pull_request_number")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_number INTEGER");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -271,7 +276,7 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "createdAt" | "updatedAt" | "providerInstance"> & { consecutiveInterrupts?: number; providerInstance?: string },
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "createdAt" | "updatedAt" | "providerInstance"> & { consecutiveInterrupts?: number; providerInstance?: string },
 	): void {
 		const now = this.#now();
 		this.#sql.exec(
@@ -301,7 +306,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
@@ -318,6 +323,10 @@ export class CodingThreadStore {
 		if (change.budgetUsd !== undefined) columns.budget_usd = change.budgetUsd ?? 0;
 		if (change.environment !== undefined) columns.environment = JSON.stringify(change.environment);
 		if (change.consecutiveInterrupts !== undefined) columns.consecutive_interrupts = change.consecutiveInterrupts;
+		if (change.pullRequest !== undefined) {
+			columns.pull_request_url = change.pullRequest?.url ?? null;
+			columns.pull_request_number = change.pullRequest?.number ?? null;
+		}
 		const names = Object.keys(columns);
 		if (names.length === 0) return;
 		this.#sql.exec(`UPDATE coding_thread SET ${names.map((name) => `${name} = ?`).join(", ")}, updated_at = ?`, ...Object.values(columns), this.#now());
@@ -378,6 +387,14 @@ export class CodingThreadStore {
 	recordEvent(kind: string, data: EventData): CodingEvent {
 		const seq = this.#sql.exec("INSERT INTO coding_event (kind, at, data) VALUES (?, ?, ?) RETURNING seq", kind, this.#now(), JSON.stringify(data)).one().seq;
 		return this.events(Number(seq) - 1, 1)[0]!;
+	}
+
+	/** Whether Pim has pushed `branch` of the thread's repository, as the log records it. */
+	hasPushed(branch: string): boolean {
+		return this.#sql
+			.exec("SELECT data FROM coding_event WHERE kind = 'thread.pushed'")
+			.toArray()
+			.some((row) => (JSON.parse(String(row.data)) as { branch?: unknown }).branch === branch);
 	}
 
 	/** The log after `since`, oldest first. */
@@ -543,6 +560,7 @@ function threadOf(row: Row): CodingThreadRow {
 		budgetStopped: row.budget_stopped === 1,
 		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : { ...NO_ENVIRONMENT, ...(JSON.parse(String(row.environment)) as Partial<CodingEnvironment>) },
 		consecutiveInterrupts: Number(row.consecutive_interrupts),
+		pullRequest: row.pull_request_url === null || row.pull_request_url === undefined ? null : { url: String(row.pull_request_url), number: Number(row.pull_request_number) },
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 	};

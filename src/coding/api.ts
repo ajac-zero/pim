@@ -81,6 +81,15 @@ export type CodingPushRequested = {
 	readonly summary: string;
 };
 
+/** `POST /api/coding/threads/:id/pull-request`: the approval the person decides. */
+export type CodingPullRequestRequested = {
+	readonly approval: string;
+	readonly status: "pending" | "approved" | "denied";
+	readonly title: string;
+	readonly base: string;
+	readonly summary: string;
+};
+
 /** `GET`/`PUT /api/coding/repos/:owner/:name/settings`: the person's settings for one repository. */
 export type CodingRepoSettings = {
 	/** `owner/name`, in lowercase. */
@@ -101,6 +110,7 @@ export type CodingErrorCode =
 	| "nothing_to_push"
 	| "github_app_not_configured"
 	| "push_refused"
+	| "not_pushed"
 	| "conflict";
 
 export type CodingApiError = { readonly error: string; readonly code: CodingErrorCode };

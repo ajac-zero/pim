@@ -79,8 +79,8 @@ All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors 
 | `GET /health` | (no token) | `{runsc, freeDiskPct, maxConcurrent, running, free, sessions, snapshotBytes, cacheBytes, snapshotCount}` |
 | `GET /sessions` | | Every known session, sorted by id: `[{sessionId, image, limits, egressAllow, state, ...}]` |
 | `POST /sessions` | `{sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow?, userId?, repo?, hasRuntimeSecrets?, restoreFrom?:{key}}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
-| `POST /snapshots` | `{userId, repo, key, sessionId}` | 201 the new snapshot, 200 the one already there for `key` |
-| `GET /snapshots` | `?userId=&repo=` (`repo` optional) | The user's snapshots, newest first: `[{key, repo, size, sha256, format, contentBytes, excluded, createdAt, lastUsedAt}]` |
+| `POST /snapshots` | `{userId, repo, key, sessionId, exclude?}` | 201 the new snapshot, 200 the one already there for `key` |
+| `GET /snapshots` | `?userId=&repo=` (`repo` optional) | The user's snapshots, newest first: `[{key, repo, size, sha256, format, contentBytes, excluded, exclude, omitted, createdAt, lastUsedAt}]` |
 | `DELETE /snapshots/:key` | `?userId=` | `{deleted}`; 409 `snapshot_in_use` while it is being restored |
 | `GET /sessions/:id` | | The session: `state` `running`, `creating` or `stopped`; 404 otherwise |
 | `DELETE /sessions/:id` | `?keepVolume=1` | `{deleted}`; with `keepVolume` also `keptVolume`, and the volume stays |
@@ -171,6 +171,10 @@ one share a single creation. The session must have been created with the same `u
   `.env*` in the home directory and its dot-directories (not in a checkout), devices, fifos, and
   symlinks that point outside `/workspace`. Every `.git/config` is rewritten without the user and
   password of http(s) URLs and without `extraheader` lines. `excluded` counts the entries left out.
+  `exclude` (up to 16 names, such as `["node_modules", ".venv"]`; no slashes or wildcards) also
+  leaves out every file or directory with one of those names, at any depth, for a caller that
+  rebuilds them after a restore; `omitted` counts those entries. It doesn't change the key: a
+  snapshot already there for the key is returned whatever it left out.
   The manager never adds secrets to a session; a caller that gives one secrets says so with
   `hasRuntimeSecrets: true` at create, which is kept in the session's labels.
 - **Writes are atomic:** the tarball is written to a temporary file, flushed and renamed, then its

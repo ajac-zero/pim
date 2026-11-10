@@ -278,7 +278,7 @@ describe("the coding threads API", () => {
 		await say("Is its environment ready?");
 		const { builtAt, provisionMs, setupMs, snapshotMs, preparedAt } = environment;
 		for (const value of [builtAt, provisionMs, setupMs, snapshotMs, preparedAt]) expect(value).toEqual(expect.any(Number));
-		expect(JSON.parse(told).environment).toEqual({ state: "cached", key: environment.key, source: "settings", builtAt, provisionMs, setupMs, snapshotMs, preparedAt, rebuildRequested: false });
+		expect(JSON.parse(told).environment).toEqual({ state: "cached", key: environment.key, source: "settings", builtAt, provisionMs, setupMs, snapshotMs, preparedAt, rebuildRequested: false, snapshotKept: true, readyFrom: "setup" });
 		// A rebuild runs it again, between turns.
 		expect(await post(`/coding/threads/${thread.id}/environment/rebuild`)).toMatchObject({ status: 200, body: { state: "building", rebuildRequested: true } });
 		await vi.waitFor(async () => expect((await view(thread.id)).environment).toMatchObject({ state: "cached", rebuildRequested: false }), { timeout: 10_000, interval: 50 });

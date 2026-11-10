@@ -37,7 +37,8 @@
       { "name": "Directory", "class_name": "Directory" },
       { "name": "Gallery", "class_name": "Gallery" },
       { "name": "CodingScheduler", "class_name": "CodingSchedulerDO" },
-      { "name": "CodingThread", "class_name": "CodingThreadDO" }
+      { "name": "CodingThread", "class_name": "CodingThreadDO" },
+      { "name": "HostOps", "class_name": "HostOps" }
     ]
   },
   "migrations": [
@@ -46,7 +47,8 @@
     { "tag": "v3", "new_sqlite_classes": ["Directory"] },
     { "tag": "v4", "new_sqlite_classes": ["Gallery"] },
     { "tag": "v5", "new_sqlite_classes": ["CodingSchedulerDO"] },
-    { "tag": "v6", "new_sqlite_classes": ["CodingThreadDO"] }
+    { "tag": "v6", "new_sqlite_classes": ["CodingThreadDO"] },
+    { "tag": "v7", "new_sqlite_classes": ["HostOps"] }
   ],
   // Only what differs from the defaults in src/deployment.ts.
   "vars": {

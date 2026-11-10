@@ -21,7 +21,7 @@ import type { Provider } from "@earendil-works/pi-ai";
 import { loginProvider } from "./fake-claude-login";
 import { fakeGit } from "./fake-git";
 
-export { default, Auth, Directory, Gallery } from "../src/index";
+export { default, Auth, Directory, Gallery, HostOps } from "../src/index";
 
 /** The scripted model every test agent talks to. Tests set its responses. */
 export const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-model", contextWindow: 200_000 }] });

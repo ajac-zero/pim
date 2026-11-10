@@ -20,6 +20,8 @@ import {
 } from "../src/coding/git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError, type GitHubAppConfig, githubAppConfig, githubAppStatus } from "../src/coding/git-broker/config";
 import { appJwt, GitHubApp, importPrivateKey, RepoNotInstalledError, TOKEN_MARGIN_MS } from "../src/coding/git-broker/github-app";
+import { GitHubProvider } from "../src/coding/git-broker/github-provider";
+import { GITHUB_INSTANCE, type GitProvider, ProviderRegistry, SEEDED_INSTANCES } from "../src/coding/git-broker/provider";
 import { brokerTokenKey, type GitBrokerDeps, handleGitBroker } from "../src/coding/git-broker/routes";
 
 // Every request to GitHub goes to a fake one; nothing here reaches the network.
@@ -711,5 +713,91 @@ describe("secrets", () => {
 		expect(everything).not.toContain(btoa(`x-access-token:${APP_TOKEN}`));
 		expect(everything).not.toContain(keyBody);
 		for (const jwt of jwts) expect(everything).not.toContain(jwt);
+	});
+});
+
+describe("git provider instances", () => {
+	/** A stand-in for a second host, which only knows its own URLs. */
+	const gitea: GitProvider = {
+		instance: { id: "gitea", kind: "gitea", baseUrl: "https://gitea.example.test", label: "Gitea" },
+		parseRepoUrl: (input) => {
+			const [owner, name] = new URL(input).pathname.slice(1).split("/") as [string, string];
+			return { owner, name, fullName: `${owner}/${name}` };
+		},
+		repoUrl: (repo) => `https://gitea.example.test/${repo.fullName}`,
+		gitUrl: (repo) => `https://gitea.example.test/${repo.fullName}.git`,
+		credential: async () => null,
+		defaultBranch: async () => "main",
+		createPullRequest: async () => ({ url: "https://gitea.example.test/o/n/pulls/1", number: 1 }),
+	};
+
+	it("seeds the one GitHub instance", () => {
+		expect(SEEDED_INSTANCES).toEqual([{ id: "github", kind: "github", baseUrl: "https://github.com", label: "GitHub" }]);
+		expect(new ProviderRegistry([new GitHubProvider(null)]).instances()).toEqual([GITHUB_INSTANCE]);
+	});
+
+	it("resolves a URL to the instance whose host it is on, and an absent instance to GitHub", () => {
+		const registry = new ProviderRegistry([new GitHubProvider(null), gitea]);
+		expect(registry.resolveUrl("https://github.com/acme/widgets.git")).toMatchObject({ provider: { instance: { id: "github" } }, repo: WIDGETS });
+		expect(registry.resolveUrl("https://gitea.example.test/acme/widgets").provider.instance.id).toBe("gitea");
+		expect(registry.get(undefined).instance.id).toBe("github");
+		expect(registry.get(null).instance.id).toBe("github");
+		expect(registry.get("gitea")).toBe(gitea);
+		expect(() => registry.get("nope")).toThrow(GitBrokerError);
+	});
+
+	it("holds a URL on an unknown host to GitHub's rules, which refuse it", () => {
+		const registry = new ProviderRegistry([new GitHubProvider(null)]);
+		expect(() => registry.resolveUrl("https://gitlab.com/acme/widgets")).toThrow("A repository must be https://github.com/<owner>/<name>");
+		expect(() => registry.resolveUrl("https://github.com/acme/widgets", { repos: ["me/notes"] })).toThrow(/doesn't let coding threads use/);
+	});
+
+	it("refuses a duplicate id, or a registry without GitHub", () => {
+		expect(() => new ProviderRegistry([new GitHubProvider(null), new GitHubProvider(null)])).toThrow();
+		expect(() => new ProviderRegistry([gitea])).toThrow();
+	});
+
+	it("wraps the GitHub App: credentials, URLs and the default branch", async () => {
+		const tokens: string[] = [];
+		const app = {
+			installationToken: async (repo: RepoRef, access: string) => {
+				tokens.push(`${repo.fullName}:${access}`);
+				if (repo.name === "private") throw new RepoNotInstalledError(repo);
+				return { token: "t0ken", expiresAt: NOW + 3_600_000 };
+			},
+		} as unknown as GitHubApp;
+		const requests: string[] = [];
+		const fetcher = async (input: RequestInfo | URL) => {
+			requests.push(String(input));
+			return Response.json({ default_branch: "trunk" });
+		};
+		const provider = new GitHubProvider(app, { fetch: fetcher, policy: POLICY });
+		expect(provider.repoUrl(WIDGETS)).toBe("https://github.com/acme/widgets");
+		expect(provider.gitUrl(WIDGETS)).toBe("https://github.com/acme/widgets.git");
+		expect(await provider.credential(WIDGETS, "read")).toEqual({ username: "x-access-token", token: "t0ken" });
+		expect(await provider.credential({ owner: "acme", name: "private", fullName: "acme/private" }, "read")).toBeNull();
+		await expect(provider.credential({ owner: "acme", name: "private", fullName: "acme/private" }, "write")).rejects.toBeInstanceOf(RepoNotInstalledError);
+		expect(await provider.defaultBranch(WIDGETS)).toBe("trunk");
+		expect(requests).toEqual(["https://api.github.com/repos/acme/widgets"]);
+		expect(tokens).toContain("acme/widgets:write");
+	});
+
+	it("reads anonymously without the App, and refuses to write", async () => {
+		const provider = new GitHubProvider(null);
+		expect(await provider.credential(WIDGETS, "read")).toBeNull();
+		await expect(provider.credential(WIDGETS, "write")).rejects.toBeInstanceOf(GitBrokerNotConfiguredError);
+	});
+
+	it("opens a pull request with a write token", async () => {
+		const app = { installationToken: async () => ({ token: "t0ken", expiresAt: NOW + 3_600_000 }) } as unknown as GitHubApp;
+		let seen: { url: string; init?: RequestInit } | null = null;
+		const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+			seen = { url: String(input), init };
+			return Response.json({ html_url: "https://github.com/acme/widgets/pull/7", number: 7 }, { status: 201 });
+		};
+		const pr = await new GitHubProvider(app, { fetch: fetcher }).createPullRequest({ repo: WIDGETS, head: "pim/x", base: "main", title: "T", body: "B" });
+		expect(pr).toEqual({ url: "https://github.com/acme/widgets/pull/7", number: 7 });
+		expect(seen!.url).toBe("https://api.github.com/repos/acme/widgets/pulls");
+		expect(JSON.parse(String(seen!.init!.body))).toEqual({ head: "pim/x", base: "main", title: "T", body: "B" });
 	});
 });

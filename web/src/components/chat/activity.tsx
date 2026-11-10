@@ -10,6 +10,7 @@ import { ChatLinkMenu } from "~/components/chat/chat-link";
 import {
   CopyChatId,
   CopyConversation,
+  PinChat,
 } from "~/components/chat/copy-conversation";
 import { ApprovalBlock } from "~/components/chat/items";
 import { Markdown } from "~/components/chat/markdown";
@@ -103,6 +104,7 @@ export function ActivityBox({
               <RoomMenu sessionId={sessionId} />
               <span className="ml-auto flex gap-0.5">
                 <CopyConversation sessionId={sessionId} />
+                <PinChat sessionId={sessionId} />
                 <CopyChatId sessionId={sessionId} />
                 <ChatLinkMenu sessionId={sessionId} />
                 <SessionCostMenu sessionId={sessionId} />

@@ -42,7 +42,7 @@ export const metaDiagnostics = definePimExtension({
 				defineTool({
 					name: "pim_diagnostics",
 					description:
-						"What went wrong in this Pim lately, read only: failed runs and tasks, triggers' health and failed runs, model call errors and unusual calls, coding threads that failed or wait, connectors that aren't ready, approvals waiting, and the log of recent warnings such as slow requests.",
+						"What went wrong in this Pim lately, read only: failed runs and tasks, triggers' health and failed runs, model call errors and unusual calls, subscriptions cooling down after their usage limit, coding threads that failed or wait, connectors that aren't ready, approvals waiting, and the log of recent warnings such as slow requests.",
 					parameters: Type.Object({
 						since: Type.Optional(Type.String({ description: "An ISO 8601 time, or how long back, such as 90m, 6h or 2d. A day unless given." })),
 						kind: Type.Optional(Type.Union(DIAGNOSTIC_KINDS.map((kind) => Type.Literal(kind)), { description: "Read one kind only; every kind unless given." })),

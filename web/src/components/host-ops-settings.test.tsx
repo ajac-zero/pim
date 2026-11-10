@@ -187,7 +187,7 @@ describe("Settings → Deployment → Host operations", () => {
     fireEvent.click(screen.getByRole("button", { name: "Issue credential" }));
     expect(await screen.findByText(TOKEN)).toBeTruthy();
     const command =
-      "sudo ./sandbox-manager/hostopsd/install.sh https://pim.example.test";
+      "sudo ./sandbox-manager/hostopsd/install.sh --url https://pim.example.test";
     expect(screen.getByText(command)).toBeTruthy();
     expect(pim.writes()).toEqual(["POST /api/hostops/credential"]);
 

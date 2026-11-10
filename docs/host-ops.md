@@ -29,7 +29,7 @@ Only the majordomo of the admin's space. Other agents, the admin's included, are
 2. On the host, in Pim's checkout, run the installer with this Pim's URL, and give it the credential:
 
    ```sh
-   sudo ./sandbox-manager/hostopsd/install.sh https://pim.example.com
+   sudo ./sandbox-manager/hostopsd/install.sh --url https://pim.example.com
    ```
 
 3. Once the daemon polls, the section shows when it was last seen, its version and its commit.

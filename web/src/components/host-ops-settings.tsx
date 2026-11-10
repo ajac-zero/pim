@@ -17,7 +17,7 @@ const REFRESH_MS = 15_000;
 
 /** The installer, run on the host from Pim's checkout, for this Pim. */
 export const installCommand = (origin: string) =>
-  `sudo ./sandbox-manager/hostopsd/install.sh ${origin}`;
+  `sudo ./sandbox-manager/hostopsd/install.sh --url ${origin}`;
 
 const FAILED = new Set([
   "rejected",

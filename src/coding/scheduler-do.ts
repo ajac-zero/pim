@@ -59,7 +59,8 @@ import type { WorkspaceRef } from "./workspace/types";
  * (`repoSettings`), such as the setup script that readies a thread's
  * environment, and the lock that has one of their threads at a time build
  * an environment (`acquireEnvironmentBuild`), so threads that start
- * together don't each run the same setup.
+ * together don't each run the same setup, and which environments' snapshots
+ * weren't worth keeping (`environmentSnapshotSkipped`).
  */
 export class CodingSchedulerDO extends DurableObject<Env> {
 	readonly #scheduler: CodingScheduler;
@@ -233,6 +234,18 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 
 	releaseEnvironmentBuild(key: string, holder: string): void {
 		this.releaseHarness(`environment:${key}`, holder);
+	}
+
+	/** Whether a build of the environment with `key` found its snapshot not worth keeping (`snapshotWorthKeeping`) in the last `SNAPSHOT_SKIP_TTL_MS`, so threads set it up each time and take no snapshot. */
+	environmentSnapshotSkipped(key: string): boolean {
+		return this.ctx.storage.sql.exec("SELECT 1 FROM pim_coding_environment_skip WHERE key = ? AND decided_at > ?", key, this.now() - SNAPSHOT_SKIP_TTL_MS).toArray().length > 0;
+	}
+
+	/** Records what the latest build of the environment with `key` found, and forgets findings past `SNAPSHOT_SKIP_TTL_MS`. */
+	setEnvironmentSnapshotSkipped(key: string, skipped: boolean): void {
+		const now = this.now();
+		this.ctx.storage.sql.exec("DELETE FROM pim_coding_environment_skip WHERE key = ? OR decided_at <= ?", key, now - SNAPSHOT_SKIP_TTL_MS);
+		if (skipped) this.ctx.storage.sql.exec("INSERT INTO pim_coding_environment_skip (key, decided_at) VALUES (?, ?)", key, now);
 	}
 
 	/** The person's settings for a repository, `owner/name`; empty ones when they set none. */
@@ -503,11 +516,18 @@ CREATE TABLE IF NOT EXISTS pim_coding_harness_login (
 `;
 
 /** The person's settings for each of their repositories, by lowercase `owner/name`. */
+/** How long a finding that an environment's snapshot isn't worth keeping holds; after it, the next build takes one and decides again. */
+const SNAPSHOT_SKIP_TTL_MS = 30 * 24 * 60 * 60_000;
+
 const REPO_SETTINGS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_coding_repo_settings (
 	repo TEXT PRIMARY KEY,
 	setup_script TEXT,
 	updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pim_coding_environment_skip (
+	key TEXT PRIMARY KEY,
+	decided_at INTEGER NOT NULL
 );
 `;
 

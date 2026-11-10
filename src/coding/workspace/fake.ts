@@ -374,6 +374,8 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 	private snapshots = new Map<string, Nodes>();
 	/** Environment snapshots by owner and key. A test may mark one `corrupt`: restoring it then fails and deletes it, as the sandbox manager does. */
 	readonly environments = new Map<string, EnvironmentSnapshot & { userId: string; nodes: Nodes; corrupt?: boolean }>();
+	/** The size new environment snapshots report, as the sandbox manager reports their compressed size; none when unset. */
+	environmentSize: number | undefined;
 	private counter = 0;
 
 	constructor(options: FakeProviderOptions = {}) {
@@ -444,7 +446,7 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 			return snapshotView(existing);
 		}
 		const now = Date.now();
-		const saved = { userId: o.userId, repo: o.repo, key: o.key, createdAt: now, lastUsedAt: now, nodes: cloneNodes(found.workspace.nodes) };
+		const saved = { userId: o.userId, repo: o.repo, key: o.key, createdAt: now, lastUsedAt: now, ...(this.environmentSize !== undefined ? { size: this.environmentSize } : {}), nodes: cloneNodes(found.workspace.nodes) };
 		this.environments.set(id, saved);
 		return snapshotView(saved);
 	}
@@ -463,4 +465,4 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 
 const environmentId = (userId: string, key: string) => `${userId}\0${key}`;
 
-const snapshotView = (saved: EnvironmentSnapshot): EnvironmentSnapshot => ({ key: saved.key, repo: saved.repo, createdAt: saved.createdAt, lastUsedAt: saved.lastUsedAt });
+const snapshotView = (saved: EnvironmentSnapshot): EnvironmentSnapshot => ({ key: saved.key, repo: saved.repo, createdAt: saved.createdAt, lastUsedAt: saved.lastUsedAt, ...(saved.size !== undefined ? { size: saved.size } : {}) });

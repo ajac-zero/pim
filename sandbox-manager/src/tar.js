@@ -160,6 +160,29 @@ export function tarHeader(e) {
 
 export const tarEnd = () => zeros(2 * BLOCK)
 
+// Joins the small buffers a tar stream is made of (a 512-byte header, then a file's data, then its
+// padding, for every entry) into buffers of at least `size` bytes, so what reads the stream (the
+// compressor, whose every write is a round trip to the thread pool, or the HTTP request to Docker,
+// a chunk of chunked encoding each) handles thousands of writes instead of three per file.
+export async function* coalesce(source, size = 256 * 1024) {
+	let parts = []
+	let n = 0
+	for await (const b of source) {
+		if (!n && b.length >= size) {
+			yield b
+			continue
+		}
+		parts.push(b)
+		n += b.length
+		if (n >= size) {
+			yield Buffer.concat(parts, n)
+			parts = []
+			n = 0
+		}
+	}
+	if (n) yield Buffer.concat(parts, n)
+}
+
 // Reads a tar stream and yields a new one. `onEntry(entry)` sees each entry, with `type` one of
 // file, dir, symlink, hardlink, device, fifo or other, and returns null to leave it out, or
 // `{entry}` to write it (as changed), or `{entry, edit}` where `edit(Buffer)` returns the file's

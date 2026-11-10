@@ -10,7 +10,7 @@ import zlib from 'node:zlib'
 import { Docker } from '../src/docker.js'
 import { createManager } from '../src/manager.js'
 import { entryPolicy } from '../src/snapshots.js'
-import { TarError, tarEnd, tarHeader, transformTar } from '../src/tar.js'
+import { TarError, coalesce, tarEnd, tarHeader, transformTar } from '../src/tar.js'
 import { startFakeDocker } from '../support/fake-docker.js'
 
 const IMAGE = 'registry.example/sandbox@sha256:abc'
@@ -154,6 +154,46 @@ describe('snapshots', () => {
 		const again = await snap('a-1', K1)
 		assert.deepEqual([again.status, again.json.sha256], [200, r.json.sha256])
 		assert.equal(archiveCalls('GET').length, 1)
+	})
+
+	test('a snapshot can leave out files and directories by name, at any depth', async () => {
+		await call('POST', '/sessions', session('a-1'))
+		await write(ws('a-1'), {
+			'app/package.json': '{}',
+			'app/node_modules/dep/index.js': 'dep',
+			'app/web/node_modules/other/index.js': 'other',
+			'app/src/node_modules.md': 'kept: only whole names match',
+			'app/.venv/bin/activate': 'venv',
+		})
+		for (const exclude of [['a/b'], ['*'], ['..'], ['.'], [''], 'node_modules', [1], Array.from({ length: 17 }, (_, i) => `d${i}`)]) {
+			const r = await call('POST', '/snapshots', { ...ada, key: K1, sessionId: 'a-1', exclude })
+			assert.deepEqual([r.status, /exclude must be/.test(r.json.error)], [400, true], JSON.stringify(exclude))
+		}
+		const r = await call('POST', '/snapshots', { ...ada, key: K1, sessionId: 'a-1', exclude: ['node_modules', '.venv', 'node_modules'] })
+		assert.equal(r.status, 201, r.text)
+		// Each node_modules with its package directory and file, and .venv with bin and its file.
+		assert.deepEqual([r.json.exclude, r.json.omitted, r.json.excluded], [['.venv', 'node_modules'], 9, 0])
+		await call('POST', '/sessions', session('b-1', ada, { restoreFrom: { key: K1 } }))
+		const out = ws('b-1')
+		assert.equal(await fs.readFile(path.join(out, 'app/src/node_modules.md'), 'utf8'), 'kept: only whole names match')
+		assert.equal(await fs.readFile(path.join(out, 'app/package.json'), 'utf8'), '{}')
+		for (const p of ['app/node_modules', 'app/web/node_modules', 'app/.venv']) await assert.rejects(fs.lstat(path.join(out, p)), { code: 'ENOENT' }, p)
+		// Without exclude, everything is kept, as before.
+		assert.equal((await snap('a-1', K2)).json.omitted, 0)
+	})
+
+	test('tar streams reach the compressor and Docker in large buffers, byte for byte', async () => {
+		const entries = Array.from({ length: 2000 }, (_, i) => ({ name: `f${i}`, type: 'file', data: Buffer.from(`file ${i}`) }))
+		entries.push({ name: 'big', type: 'file', data: randomBytes(600 * KiB) })
+		const tar = tarOf(entries)
+		const small = []
+		for await (const c of transformTar(Readable.from([tar]), entryPolicy())) small.push(c)
+		const large = []
+		for await (const c of coalesce(transformTar(Readable.from([tar]), entryPolicy()), 64 * KiB)) large.push(c)
+		assert.ok(Buffer.concat(large).equals(Buffer.concat(small)))
+		assert.ok(small.length > 6000, String(small.length))
+		assert.ok(large.slice(0, -1).every((c) => c.length >= 64 * KiB))
+		assert.ok(large.length <= Buffer.concat(small).length / (64 * KiB) + 1, String(large.length))
 	})
 
 	test('a corrupt snapshot is refused before anything is extracted, deleted, and the session is not created', async () => {
@@ -368,6 +408,24 @@ describe('garbage collection and disk accounting', () => {
 		await mgr.reap()
 		assert.ok(!fake.volumes.has(adaCache))
 		assert.deepEqual((await call('GET', '/health')).json.cacheBytes, 0)
+	})
+
+	test('cache volumes are measured whichever /system/df shape the daemon answers with', async () => {
+		await setup()
+		await call('POST', '/sessions', session('a-1'))
+		const cache = fake.containers.get('pim-s-a-1').body.HostConfig.Mounts.find((m) => m.Target === '/caches').Source
+		fake.volumeSizes.set(cache, 300 * KiB)
+		for (const [apiVersion, size] of [['1.51', 300 * KiB], ['1.52', 400 * KiB], ['1.53', 500 * KiB]]) {
+			fake.apiVersion = apiVersion
+			fake.volumeSizes.set(cache, size)
+			await mgr.reap()
+			assert.equal((await call('GET', '/health')).json.cacheBytes, size, apiVersion)
+		}
+		// A cache volume that is gone is forgotten, even when Docker leaves out an empty list.
+		await call('DELETE', '/sessions/a-1')
+		fake.volumes.delete(cache)
+		await mgr.reap()
+		assert.equal((await call('GET', '/health')).json.cacheBytes, 0)
 	})
 
 	test('a snapshot being restored is never collected or deleted', async () => {

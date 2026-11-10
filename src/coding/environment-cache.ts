@@ -38,6 +38,8 @@ export type CodingEnvironment = {
 	readonly setupMs: number | null;
 	/** Keeping the snapshot after setup. */
 	readonly snapshotMs: number | null;
+	/** The size of the snapshot the thread took or was restored from, compressed, as the backend stores it; null when it doesn't say. */
+	readonly snapshotBytes: number | null;
 	/** When the thread last readied its environment: restored it, built it, failed, or found no setup script; null before it first does. */
 	readonly preparedAt: number | null;
 	/** Whether a rebuild was asked for and hasn't finished yet. */
@@ -57,6 +59,7 @@ export const NO_ENVIRONMENT: CodingEnvironment = {
 	restoreMs: null,
 	setupMs: null,
 	snapshotMs: null,
+	snapshotBytes: null,
 	preparedAt: null,
 	rebuildRequested: false,
 };

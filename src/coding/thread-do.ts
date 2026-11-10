@@ -1700,7 +1700,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			const started = performance.now();
 			try {
 				const ref = await provider.create({ ...spec, environment: { ...owner, restoreFrom: snapshot.key } });
-				this.#setEnvironment({ state: "restoring", restoredFromKey: snapshot.key, builtAt: snapshot.createdAt, restoreMs: Math.round(performance.now() - started), error: undefined });
+				this.#setEnvironment({ state: "restoring", restoredFromKey: snapshot.key, builtAt: snapshot.createdAt, restoreMs: Math.round(performance.now() - started), snapshotBytes: snapshot.size ?? null, error: undefined });
 				return ref;
 			} catch (error) {
 				if (error instanceof WorkspaceCapacityError || (error instanceof ComposeManagerError && error.code === "low_disk")) throw error;
@@ -1867,7 +1867,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			const ref = this.store.required().workspaceRef;
 			if (!ref) throw new Error("The coding thread has no workspace");
 			const snapshot = await provider.snapshotEnvironment(ref, { ...owner, key });
-			this.#setEnvironment({ state: "cached", key, builtAt: snapshot.createdAt, setupMs, snapshotMs: Math.round(performance.now() - snapshotStarted), rebuildRequested: false, preparedAt: this.now(), error: undefined });
+			this.#setEnvironment({ state: "cached", key, builtAt: snapshot.createdAt, setupMs, snapshotMs: Math.round(performance.now() - snapshotStarted), snapshotBytes: snapshot.size ?? null, rebuildRequested: false, preparedAt: this.now(), error: undefined });
 			this.store.recordEvent("environment.built", { key, setupMs });
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.environment_snapshot_failed", thread: this.store.required().threadId, key, error: String(error).slice(0, 300) }));

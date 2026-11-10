@@ -44,11 +44,8 @@ function brief(view: CodingThreadView) {
 		turn_under_way: view.currentOperation !== null,
 		inputs_waiting: view.inbox,
 		checkpoint: view.checkpoint ? { sha: view.checkpoint.sha, message: view.checkpoint.message } : null,
-		environment: {
-			state: view.environment.state,
-			...(view.environment.key ? { key: view.environment.key } : {}),
-			...(view.environment.error ? { error: view.environment.error } : {}),
-		},
+		// Every field that says something, so the model can tell where the time to readiness went: durations in ms, times in ms since the epoch.
+		environment: Object.fromEntries(Object.entries(view.environment).filter(([, value]) => value !== null && value !== undefined)),
 		spent_usd: Number(view.spentUsd.toFixed(4)),
 		budget_usd: view.budgetUsd,
 	};

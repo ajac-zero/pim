@@ -1,4 +1,5 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { type CodingEnvironment, NO_ENVIRONMENT } from "./environment-cache";
 import type { RunRecord } from "./harness/runner";
 import type { HarnessUsage } from "./harness/types";
 import type { JournalEntry, TestRun as ToolTestRun, TestSummary } from "./tools";
@@ -61,6 +62,8 @@ export type CodingThreadRow = {
 	readonly currentOperation: string | null;
 	/** Set before a model call is refused for the budget, so the turn that ends with it stops the thread. */
 	readonly budgetStopped: boolean;
+	/** The repository's prepared environment in the thread's workspace (./environment-cache.ts). */
+	readonly environment: CodingEnvironment;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -236,6 +239,8 @@ export class CodingThreadStore {
 		if (!columns.has("harness")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 		// The nonce the thread's model gateway tokens carry (./model-gateway.ts): null until one is minted, and again once they are revoked.
 		if (!columns.has("gateway_nonce")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN gateway_nonce TEXT");
+		// The prepared environment, as JSON: null until the thread first readies one.
+		if (!columns.has("environment")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN environment TEXT");
 		// A CLI harness's session's whole usage, for one that reports only that (Codex).
 		const session = new Set(this.#sql.exec("PRAGMA table_info(coding_harness_session)").toArray().map((row) => String(row.name)));
 		if (!session.has("usage")) this.#sql.exec("ALTER TABLE coding_harness_session ADD COLUMN usage TEXT");
@@ -253,7 +258,9 @@ export class CodingThreadStore {
 		return thread;
 	}
 
-	create(thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "createdAt" | "updatedAt">): void {
+	create(
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "createdAt" | "updatedAt">,
+	): void {
 		const now = this.#now();
 		this.#sql.exec(
 			`INSERT INTO coding_thread (thread_id, space, repo_url, base_ref, branch, agent_profile, harness, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, created_at, updated_at)
@@ -279,7 +286,9 @@ export class CodingThreadStore {
 	}
 
 	/** Sets the given fields of the thread's row. */
-	update(change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd">>): void {
+	update(
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment">>,
+	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
 		if (change.stateReason !== undefined) columns.state_reason = change.stateReason;
@@ -293,6 +302,7 @@ export class CodingThreadStore {
 		if (change.currentOperation !== undefined) columns.current_operation = change.currentOperation;
 		if (change.budgetStopped !== undefined) columns.budget_stopped = change.budgetStopped ? 1 : 0;
 		if (change.budgetUsd !== undefined) columns.budget_usd = change.budgetUsd;
+		if (change.environment !== undefined) columns.environment = JSON.stringify(change.environment);
 		const names = Object.keys(columns);
 		if (names.length === 0) return;
 		this.#sql.exec(`UPDATE coding_thread SET ${names.map((name) => `${name} = ?`).join(", ")}, updated_at = ?`, ...Object.values(columns), this.#now());
@@ -514,6 +524,7 @@ function threadOf(row: Row): CodingThreadRow {
 		resumePriority: row.resume_priority === 1,
 		currentOperation: text(row.current_operation),
 		budgetStopped: row.budget_stopped === 1,
+		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : (JSON.parse(String(row.environment)) as CodingEnvironment),
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 	};

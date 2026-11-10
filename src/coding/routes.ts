@@ -3,7 +3,11 @@ import type { Account } from "../directory";
 import type { ApiExtension } from "../gateway";
 import { dispatch, HttpError, readJson, type Route } from "../http";
 import type { TranscriptMessage } from "../transcript";
-import { CODING_API_PATH, type CodingErrorCode, type CodingPushRequested, type StartCodingThread } from "./api";
+import { CODING_API_PATH, CODING_REPOS_PATH, type CodingErrorCode, type CodingPushRequested, type StartCodingThread } from "./api";
+import { GitBrokerError, repoRef } from "./git-broker/broker";
+import { brokerPolicy } from "./git-broker/config";
+import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
+import { codingScheduler } from "./scheduler-do";
 import { codingThread } from "./thread-do";
 import { calling, CodingError, listThreads, liveThread, ownedThread, startThread, threadView, viewOf } from "./threads";
 
@@ -11,12 +15,13 @@ import { calling, CodingError, listThreads, liveThread, ownedThread, startThread
  * The coding threads API, `/api/coding/threads` (docs/coding-api.md), for
  * the signed-in person's own space: the gateway (../gateway.ts) has checked
  * who they are. Every route but the list and a start finds the thread in the
- * space's list first, so another space's thread is `404`. The git broker,
+ * space's list first, so another space's thread is `404`. The person's
+ * settings for each repository are under `/api/coding/repos`. The git broker,
  * `/api/coding/git`, is apart: a workspace reaches it with its own token.
  */
 export function codingApi(env: Env, account: Account, request: Request): ApiExtension {
 	return async (path) => {
-		if (path !== CODING_API_PATH && !path.startsWith(`${CODING_API_PATH}/`)) return undefined;
+		if (path !== CODING_API_PATH && !path.startsWith(`${CODING_API_PATH}/`) && !path.startsWith(`${CODING_REPOS_PATH}/`)) return undefined;
 		if (account.role === "guest") return failure(new CodingError(403, "A guest's account has no coding threads.", "forbidden"));
 		return dispatch(codingRoutes(env, account.ownerId), request, path);
 	};
@@ -61,6 +66,25 @@ function sinceOf(url: URL): number {
 
 function codingRoutes(env: Env, space: string): Route[] {
 	const thread = (id: string) => ownedThread(env, space, id);
+	/** A route of a repository's settings, `/coding/repos/:owner/:name/settings`, given the repository as `owner/name` once the deployment allows it. */
+	const repoRoute = (method: string, handler: (repo: string, request: Request) => Promise<unknown>): Route => [
+		method,
+		`${CODING_REPOS_PATH}/:owner/:name/settings`,
+		async ({ owner, name }, request) => {
+			try {
+				let repo: string;
+				try {
+					repo = repoRef(owner!, name!, brokerPolicy(env)).fullName;
+				} catch (error) {
+					if (error instanceof GitBrokerError) throw new CodingError(error.status, error.message, error.status === 403 ? "forbidden" : "invalid");
+					throw error;
+				}
+				return await handler(repo, request);
+			} catch (error) {
+				return failure(error);
+			}
+		},
+	];
 	return [
 		route("GET", "", async () => ({ threads: await listThreads(env, space) })),
 		route("POST", "", async (_params, request) => {
@@ -129,6 +153,18 @@ function codingRoutes(env: Env, space: string): Route[] {
 		route("POST", "/:id/archive", async ({ id }) => {
 			const listed = await thread(id!);
 			return viewOf(listed, await calling(() => codingThread(env, listed.threadId).archive()));
+		}),
+		route("GET", "/:id/environment", async ({ id }) => codingThread(env, (await thread(id!)).threadId).environment()),
+		route("POST", "/:id/environment/rebuild", async ({ id }) => {
+			const { stub } = await liveThread(env, space, id!);
+			return calling(() => stub.rebuildEnvironment());
+		}),
+		repoRoute("GET", async (repo) => codingScheduler(env, space).repoSettings(repo)),
+		repoRoute("PUT", async (repo, request) => {
+			const setupScript = (await readJson<Record<string, unknown>>(request)).setupScript ?? null;
+			if (setupScript !== null && typeof setupScript !== "string") throw new CodingError(400, "setupScript must be a string or null", "invalid");
+			if (setupScript !== null && new TextEncoder().encode(setupScript).byteLength > MAX_SETUP_SCRIPT_BYTES) throw new CodingError(400, `setupScript may be at most ${MAX_SETUP_SCRIPT_BYTES / 1024} KiB`, "invalid");
+			return calling(() => codingScheduler(env, space).setRepoSettings(repo, { setupScript }));
 		}),
 		route("POST", "/:id/push", async ({ id }, request) => {
 			const branch = optionalString(await readJson<Record<string, unknown>>(request), "branch");

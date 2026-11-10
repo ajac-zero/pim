@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyBrokerToken } from "../src/coding/git-broker/broker";
 import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
+import { type EnvironmentKeyInput, environmentKey, lockfileHashes, SETUP_ENV } from "../src/coding/environment-cache";
 import { CONTINUE_TEXT, codingThread, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
-import type { FakeCommandHandler, FakeCommandResult } from "../src/coding/workspace/fake";
-import { NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
+import { type FakeCommandHandler, type FakeCommandResult, FakeWorkspaceProvider } from "../src/coding/workspace/fake";
+import { DEFAULT_WORKSPACE_IMAGE, NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
+import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { fakeClones, fakeGit, fakeRemotes } from "./fake-git";
 import { fakeManager, TOKEN, URL_BASE } from "./fake-manager";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
@@ -523,6 +525,35 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		expect((await codingScheduler(env, input.space).snapshot()).running).toEqual([]);
 	});
 
+	it("keeps the environment as the person's snapshot in the manager, and starts their next thread from it", async () => {
+		const { manager } = compose();
+		manager.backing.register("bash", async ({ cwd, workspace }) => {
+			await workspace.writeFile(`${cwd}/node_modules/.modules.yaml`, new TextEncoder().encode("installed\n"));
+			return {};
+		});
+		const name = `Env-${crypto.randomUUID().slice(0, 8)}`;
+		fakeRemotes.set(`https://pim.test/api/coding/git/Acme/${name}.git`, { "README.md": "# Env\n", ".pim/setup.sh": "pnpm install\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" });
+		const repo = `https://github.com/Acme/${name}`;
+		const fullName = `acme/${name.toLowerCase()}`;
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("One."), fauxAssistantMessage("Two.")]);
+		const first = await startThread({ repo, space });
+		await turns(first.id, 1);
+		const { key } = (await first.stub.status()).environment;
+		const creates = () => manager.requests.filter((request) => request.method === "POST" && request.path === "/sessions").map((request) => request.body as Record<string, unknown>);
+		// The session is the person's, of the repository, and says nothing of secrets: it never has any while it is snapshotted.
+		expect(creates()[0]).toEqual({ sessionId: first.id, image: "pim-workspace:local", limits: expect.any(Object), egressAllow: expect.any(Array), userId: space, repo: fullName });
+		expect(manager.requests.filter((request) => request.method === "POST" && request.path === "/snapshots").map((request) => request.body)).toEqual([{ userId: space, repo: fullName, key, sessionId: first.id }]);
+		const second = await startThread({ repo, space });
+		await turns(second.id, 1);
+		expect(creates().find((body) => body.sessionId === second.id)).toMatchObject({ userId: space, repo: fullName, restoreFrom: { key } });
+		expect((await second.stub.status()).environment).toMatchObject({ state: "cached", key, restoredFromKey: key });
+		// Every listing asked for this person's snapshots alone.
+		const listings = manager.requests.filter((request) => request.method === "GET" && request.path.startsWith("/snapshots"));
+		expect(listings.length).toBeGreaterThan(0);
+		expect(listings.every((request) => new URL(request.path, URL_BASE).searchParams.get("userId") === space)).toBe(true);
+	});
+
 	it("waits in the queue while the manager's disk is low, and checks its health until there is room", async () => {
 		const { manager } = compose();
 		manager.disk.freeDiskPct = 9;
@@ -601,6 +632,272 @@ describe("a coding thread's model", () => {
 	});
 });
 
+describe("a coding thread's environment", () => {
+	// Each test's repository has a setup script, and its own remote. `bash` in the in-memory workspace stands in for the
+	// script: it records how it was run, then does what the test says, which is to install by writing node_modules.
+	const SCRIPT = "set -euo pipefail\npnpm install --frozen-lockfile\n";
+	const LOCK = "lockfileVersion: '9.0'\n";
+	const WEB_LOCK = '{ "lockfileVersion": 3 }\n';
+	const encoder = new TextEncoder();
+	const decoder = new TextDecoder();
+	const install: FakeCommandHandler = async ({ cwd, workspace }) => {
+		await workspace.writeFile(`${cwd}/node_modules/.modules.yaml`, encoder.encode("installed\n"));
+		return { stdout: "Done in 8s\n" };
+	};
+	const setups: { argv: string[]; cwd: string; env: Record<string, string>; space: string | undefined }[] = [];
+	let setup: FakeCommandHandler = install;
+	codingWorkspaces.register("bash", async (context) => {
+		const spec = (context.workspace as unknown as { spec: WorkspaceSpec }).spec;
+		setups.push({ argv: context.argv, cwd: context.cwd, env: context.env, space: spec.environment?.userId });
+		return setup(context);
+	});
+
+	/** A repository of its own for the test, `Acme/<name>`, with a setup script and lockfiles at its root and in `web/`. */
+	function envRepo(files: Record<string, string> = {}) {
+		const name = `Env-${crypto.randomUUID().slice(0, 8)}`;
+		fakeRemotes.set(`https://pim.test/api/coding/git/Acme/${name}.git`, { "README.md": "# Env\n", ".pim/setup.sh": SCRIPT, "pnpm-lock.yaml": LOCK, "web/package-lock.json": WEB_LOCK, ...files });
+		return { repo: `https://github.com/Acme/${name}`, fullName: `acme/${name.toLowerCase()}`, remote: `https://pim.test/api/coding/git/Acme/${name}.git` };
+	}
+
+	const sha256 = async (text: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(text)))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+	const snapshotsOf = (space: string) => [...codingWorkspaces.environments.values()].filter((saved) => saved.userId === space);
+	const settledEnvironment = (stub: Stub) =>
+		vi.waitFor(
+			async () => {
+				const { environment } = await stub.status();
+				expect(environment.state).toMatch(/^(cached|failed|none)$/);
+				expect(environment.rebuildRequested).toBe(false);
+				return environment;
+			},
+			{ timeout: 10_000, interval: 50 },
+		);
+
+	beforeEach(() => {
+		setups.length = 0;
+		setup = install;
+	});
+
+	it("is keyed by everything it is made from, however its lockfiles are listed", async () => {
+		const base = { userId: "ada", repo: "acme/env", setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": "a".repeat(64), "web/package-lock.json": "b".repeat(64) }, image: "pim-workspace@sha256:1" };
+		const key = await environmentKey(base);
+		expect(key).toMatch(/^[0-9a-f]{64}$/);
+		expect(await environmentKey({ ...base })).toBe(key);
+		expect(await environmentKey({ ...base, lockfiles: { "web/package-lock.json": "b".repeat(64), "pnpm-lock.yaml": "a".repeat(64) } })).toBe(key);
+		const variants: EnvironmentKeyInput[] = [
+			{ ...base, userId: "bob" },
+			// Joined without separating the inputs, these two would be one key.
+			{ ...base, userId: "ad", repo: "aacme/env" },
+			{ ...base, repo: "acme/other" },
+			{ ...base, setupScript: `${SCRIPT}pnpm build\n` },
+			{ ...base, lockfiles: { ...base.lockfiles, "pnpm-lock.yaml": "c".repeat(64) } },
+			{ ...base, lockfiles: { ...base.lockfiles, "web/package-lock.json": "c".repeat(64) } },
+			{ ...base, lockfiles: { "pnpm-lock.yaml": "a".repeat(64) } },
+			{ ...base, lockfiles: { ...base.lockfiles, "api/uv.lock": "d".repeat(64) } },
+			{ ...base, lockfiles: { "pnpm-lock.yaml": "a".repeat(64), "app/package-lock.json": "b".repeat(64) } },
+			{ ...base, image: "pim-workspace@sha256:2" },
+		];
+		const keys = await Promise.all(variants.map((variant) => environmentKey(variant)));
+		expect(new Set([key, ...keys]).size).toBe(variants.length + 1);
+	});
+
+	it("covers the lockfiles at the repository's root and one directory down, not deeper, in node_modules or in dot-directories", async () => {
+		const provider = new FakeWorkspaceProvider();
+		const ref = await provider.create({ sessionId: "lockfiles", image: "x", repo: { url: "", ref: "", branch: "" }, limits: { cpu: 1, memMiB: 64, diskMiB: 64, pids: 16, wallClockMin: 1 }, egress: { allow: [] }, gitAuth: { mode: "none" } });
+		const workspace = (await provider.get(ref))!;
+		const files: Record<string, string> = {
+			"pnpm-lock.yaml": LOCK,
+			"requirements-dev.txt": "pytest\n",
+			"Cargo.toml": "[package]\n",
+			"web/package-lock.json": WEB_LOCK,
+			"api/poetry.lock": "poetry\n",
+			"api/Cargo.lock": "cargo\n",
+			"packages/a/yarn.lock": "too deep\n",
+			"node_modules/yarn.lock": "a dependency's\n",
+			".github/uv.lock": "hidden\n",
+		};
+		for (const [path, text] of Object.entries(files)) await workspace.writeFile(`${REPO_DIR}/${path}`, encoder.encode(text));
+		expect(await lockfileHashes(workspace, REPO_DIR)).toEqual({
+			"pnpm-lock.yaml": await sha256(LOCK),
+			"requirements-dev.txt": await sha256("pytest\n"),
+			"web/package-lock.json": await sha256(WEB_LOCK),
+			"api/poetry.lock": await sha256("poetry\n"),
+			"api/Cargo.lock": await sha256("cargo\n"),
+		});
+	});
+
+	it("is set up by the repository's script before the first turn, with no secrets, and kept as the person's snapshot", async () => {
+		const { repo, fullName } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		let keptBeforeTurn = false;
+		codingFaux.setResponses([
+			() => {
+				keptBeforeTurn = snapshotsOf(space).length === 1;
+				return fauxAssistantMessage("Ready.");
+			},
+		]);
+		const { id, stub } = await startThread({ repo, space });
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		expect(keptBeforeTurn).toBe(true);
+		const { environment } = await stub.status();
+		const key = await environmentKey({ userId: space, repo: fullName, setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": await sha256(LOCK), "web/package-lock.json": await sha256(WEB_LOCK) }, image: DEFAULT_WORKSPACE_IMAGE });
+		expect(environment).toMatchObject({ state: "cached", key, source: "repository", restoredFromKey: null, rebuildRequested: false });
+		for (const field of ["builtAt", "preparedAt", "provisionMs", "setupMs", "snapshotMs"] as const) expect(environment[field]).toEqual(expect.any(Number));
+		expect(environment.error).toBeUndefined();
+		// The script ran once, with bash in the checkout, given nothing but CI and a git that never prompts.
+		expect(setups).toEqual([{ argv: ["bash", "-c", SCRIPT], cwd: REPO_DIR, env: SETUP_ENV, space }]);
+		expect(SETUP_ENV).toEqual({ CI: "true", GIT_TERMINAL_PROMPT: "0" });
+		// The snapshot is the person's, of this repository, with the dependencies installed; nobody else's lists it.
+		const [saved] = snapshotsOf(space);
+		expect(saved).toMatchObject({ repo: fullName, key });
+		expect(decoder.decode((saved!.nodes.get(`${REPO_DIR}/node_modules/.modules.yaml`) as { data: Uint8Array }).data)).toBe("installed\n");
+		expect(await codingWorkspaces.listEnvironments({ userId: `space-${crypto.randomUUID()}`, repo: fullName })).toEqual([]);
+		// The workspace was made for the person and repository, and the log says what happened.
+		expect(((await workspaceOf(id)) as unknown as { spec: WorkspaceSpec }).spec.environment).toEqual({ userId: space, repo: fullName });
+		expect((await stub.log()).find((event) => event.kind === "environment.built")?.data).toMatchObject({ key });
+	});
+
+	it("starts the person's next thread from the snapshot, checked out afresh, and another person's from scratch", async () => {
+		const { repo, fullName, remote } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("First."), fauxAssistantMessage("Second."), fauxAssistantMessage("Someone else's.")]);
+		const first = await startThread({ repo, space });
+		await turns(first.id, 1);
+		const { key } = (await first.stub.status()).environment;
+		// The repository moved on, but not its lockfiles or script: the same environment.
+		fakeRemotes.set(remote, { ...fakeRemotes.get(remote), "README.md": "# Env, later\n" });
+		const clones = fakeClones.length;
+		const second = await startThread({ repo, space });
+		await turns(second.id, 1);
+		const status = await second.stub.status();
+		expect(status.environment).toMatchObject({ state: "cached", key, restoredFromKey: key, source: "repository" });
+		expect(status.environment.restoreMs).toEqual(expect.any(Number));
+		expect(status.environment.setupMs).toBeNull();
+		// Made from the snapshot: no clone and no setup, the dependencies there, and the repository fetched and checked out over it.
+		const workspace = await workspaceOf(second.id);
+		expect((workspace as unknown as { spec: WorkspaceSpec }).spec.environment).toEqual({ userId: space, repo: fullName, restoreFrom: key });
+		expect(fakeClones.length).toBe(clones);
+		expect(setups).toHaveLength(1);
+		expect(decoder.decode(await workspace.readFile(`${REPO_DIR}/node_modules/.modules.yaml`))).toBe("installed\n");
+		expect(await fileIn(second.id, "README.md")).toBe("# Env, later\n");
+		expect(decoder.decode(await workspace.readFile(`${REPO_DIR}/.git/origin`))).toBe(remote);
+		expect(await fileIn(second.id, ".git/branch")).toBe(status.repo.branch);
+		expect(status.repo.baseSha).toBe("base0000");
+		expect((await second.stub.log()).map((event) => event.kind)).toContain("environment.restored");
+		// Another person's thread of the same repository finds none of it, and builds its own.
+		const other = await startThread({ repo });
+		await turns(other.id, 1);
+		const theirs = (await other.stub.status()).environment;
+		expect(theirs).toMatchObject({ state: "cached", restoredFromKey: null });
+		expect(theirs.key).not.toBe(key);
+		expect(setups.map((each) => each.space)).toEqual([space, `space-${other.id}`]);
+	});
+
+	it("goes on without one when the setup script fails, keeping only the end of what it printed", async () => {
+		const { repo, fullName } = envRepo();
+		setup = async () => ({ stderr: `\u001b[31m${"x".repeat(5000)}\u0007\nERR_PNPM_OUTDATED_LOCKFILE\u001b[0m\n`, code: 1 });
+		codingFaux.setResponses([fauxAssistantMessage("Went on without it.")]);
+		const { id, stub, input } = await startThread({ repo });
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		const { environment } = await stub.status();
+		expect(environment).toMatchObject({ state: "failed", setupMs: expect.any(Number), snapshotMs: null, builtAt: null });
+		expect(environment.error).toMatch(/^The setup script exited 1: …x+\nERR_PNPM_OUTDATED_LOCKFILE$/);
+		expect(environment.error!.length).toBeLessThanOrEqual(500);
+		expect(environment.error).not.toMatch(/[\u0000-\u0009\u000b-\u001f]/);
+		expect(await codingWorkspaces.listEnvironments({ userId: input.space, repo: fullName })).toEqual([]);
+		expect((await stub.log()).find((event) => event.kind === "environment.failed")?.data).toMatchObject({ error: environment.error });
+	});
+
+	it("clones as usual when the snapshot can't be restored, and builds it again", async () => {
+		const { repo } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("First."), fauxAssistantMessage("Second.")]);
+		const first = await startThread({ repo, space });
+		await turns(first.id, 1);
+		const { key } = (await first.stub.status()).environment;
+		snapshotsOf(space)[0]!.corrupt = true;
+		const clones = fakeClones.length;
+		const second = await startThread({ repo, space });
+		expect((await turns(second.id, 1))[0]!.outcome).toBe("completed");
+		expect((await second.stub.status()).environment).toMatchObject({ state: "cached", key, restoredFromKey: null });
+		expect(fakeClones.length).toBe(clones + 1);
+		expect(setups).toHaveLength(2);
+		expect((await second.stub.log()).find((event) => event.kind === "environment.restore_failed")?.data).toMatchObject({ key });
+		expect(snapshotsOf(space).map((saved) => [saved.key, saved.corrupt])).toEqual([[key, undefined]]);
+	});
+
+	it("is built once when two of the person's threads need it together: the other waits for it and restores it", async () => {
+		const { repo } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		setup = async (context) => {
+			await Promise.race([gate, context.killed]);
+			return install(context);
+		};
+		codingFaux.setResponses([fauxAssistantMessage("One."), fauxAssistantMessage("Two.")]);
+		const threads = [await startThread({ repo, space }), await startThread({ repo, space })];
+		await vi.waitFor(() => expect(setups).toHaveLength(1), { timeout: 10_000, interval: 20 });
+		// One runs the script; the other waits for it, building too as far as anyone can tell.
+		await vi.waitFor(async () => expect(await Promise.all(threads.map(async ({ stub }) => (await stub.status()).environment.state))).toEqual(["building", "building"]), { timeout: 10_000, interval: 20 });
+		release();
+		for (const { id } of threads) await turns(id, 1);
+		const environments = await Promise.all(threads.map(async ({ stub }) => (await stub.status()).environment));
+		expect(setups).toHaveLength(1);
+		const key = environments[0]!.key;
+		expect(environments.map((each) => [each.state, each.key])).toEqual([
+			["cached", key],
+			["cached", key],
+		]);
+		expect(environments.map((each) => each.restoredFromKey).sort()).toEqual([key, null].sort());
+		expect(snapshotsOf(space)).toHaveLength(1);
+		// The one that waited has a workspace made from the snapshot, on its own branch.
+		for (const { id, stub } of threads) {
+			const status = await stub.status();
+			expect(await fileIn(id, ".git/branch")).toBe(status.repo.branch);
+			expect(status.repo.baseSha).toBe("base0000");
+			expect(await fileIn(id, "node_modules/.modules.yaml")).toBe("installed\n");
+		}
+	});
+
+	it("is rebuilt on request: its snapshot deleted, the script run again in the thread's workspace, and a new snapshot kept", async () => {
+		const { repo } = envRepo();
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const { id, stub } = await startThread({ repo, space });
+		await turns(id, 1);
+		const before = (await stub.status()).environment;
+		const workspace = (await codingWorkspaces.list({ sessionId: id }))[0]!.ref.id;
+		const deleted = vi.spyOn(codingWorkspaces, "deleteEnvironment");
+		setup = async ({ cwd, workspace: ws }) => {
+			await ws.writeFile(`${cwd}/node_modules/.modules.yaml`, encoder.encode("reinstalled\n"));
+			return {};
+		};
+		expect(await stub.rebuildEnvironment()).toMatchObject({ state: "building", rebuildRequested: true });
+		expect(deleted).toHaveBeenCalledWith(space, before.key);
+		deleted.mockRestore();
+		const after = await settledEnvironment(stub);
+		expect(after).toMatchObject({ state: "cached", key: before.key, rebuildRequested: false });
+		// In the same workspace, between turns, with no turn of its own.
+		expect(setups).toHaveLength(2);
+		expect((await codingWorkspaces.list({ sessionId: id }))[0]!.ref.id).toBe(workspace);
+		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", currentOperation: null });
+		const [saved] = snapshotsOf(space);
+		expect(decoder.decode((saved!.nodes.get(`${REPO_DIR}/node_modules/.modules.yaml`) as { data: Uint8Array }).data)).toBe("reinstalled\n");
+		expect((await stub.log()).filter((event) => event.kind === "environment.built")).toHaveLength(2);
+	});
+
+	it("is none for a repository without a setup script, which works as before", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Nothing to set up.")]);
+		const { id, stub, input } = await startThread();
+		await turns(id, 1);
+		expect((await stub.status()).environment).toMatchObject({ state: "none", key: null, source: null, restoredFromKey: null, preparedAt: expect.any(Number) });
+		expect(setups).toEqual([]);
+		expect(snapshotsOf(input.space)).toEqual([]);
+	});
+});
+
 describe("a Claude Code thread", () => {
 	// The thread runs `claude` in its in-memory workspace, where it is a script that prints the stream-json of
 	// test/fixtures/claude-code/, and `pkill` tells the script the signal it was sent. Its person is the file's account,
@@ -670,6 +967,20 @@ describe("a Claude Code thread", () => {
 	afterEach(async () => {
 		// Its slots and the person's lock are free for the next test.
 		for (const stub of started.splice(0)) await stub.archive().catch(() => {});
+	});
+
+	it("readies its environment before the person's login goes in, so the snapshot holds none of it", async () => {
+		const name = `Env-${crypto.randomUUID().slice(0, 8)}`;
+		fakeRemotes.set(`https://pim.test/api/coding/git/Acme/${name}.git`, { "README.md": "# Env\n", ".pim/setup.sh": "pnpm install\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" });
+		const { id, stub } = await startClaude({ repo: `https://github.com/Acme/${name}` });
+		await turns(id, 1);
+		expect((await stub.status()).environment).toMatchObject({ state: "cached" });
+		// The CLI ran signed in, after the snapshot was kept without the login in it.
+		expect(runs[0]).toMatchObject({ login: LOGIN });
+		const saved = [...codingWorkspaces.environments.values()].find((each) => each.userId === OWNER && each.repo === `acme/${name.toLowerCase()}`)!;
+		expect(saved.nodes.has(`${REPO_DIR}/node_modules/.modules.yaml`)).toBe(true);
+		expect([...saved.nodes.keys()].filter((path) => path.startsWith("/workspace/.claude"))).toEqual([]);
+		expect(JSON.stringify([...saved.nodes.values()].map((node) => ("data" in node ? decoder.decode(node.data) : "")))).not.toContain("sk-ant-");
 	});
 
 	it("runs a turn with the person's login, and keeps its transcript, cost, tests, checkpoint and refreshed login, then resumes it", async () => {

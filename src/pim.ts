@@ -1765,7 +1765,8 @@ export class Pim extends DurableAgent<Env> {
 	async utilityModel(): Promise<Model<Api> | undefined> {
 		const model = await this.#chosenUtilityModel();
 		// The plan said it is out of quota: side jobs use the default or a custom provider's model until it has had time to recover.
-		if (model?.provider === CHATGPT_PROVIDER && this.#planCooledDown()) return this.defaultUtilityModel() ?? this.#customFallback() ?? model;
+		// With no other model to use, side jobs go without one: never back to the plan that just failed.
+		if (model?.provider === CHATGPT_PROVIDER && this.#planCooledDown()) return this.defaultUtilityModel() ?? this.#customFallback();
 		return model;
 	}
 
@@ -1840,7 +1841,14 @@ export class Pim extends DurableAgent<Env> {
 				// A reasoning model thinks as little as it can; a cap on its tokens could cut off the answer.
 				{ ...(asked.reasoning ? { reasoning: "minimal" } : { maxTokens }), ...(onPayload && { onPayload }), signal: AbortSignal.timeout(60_000) },
 			);
-		const answer = await ask(model);
+		let answer: Awaited<ReturnType<typeof ask>>;
+		try {
+			answer = await ask(model);
+		} catch (error) {
+			// A request that throws instead of answering with an error counts as a failure too.
+			if (model.provider === CHATGPT_PROVIDER) this.#cooldowns.failed(CHATGPT_PROVIDER, errorMessage(error));
+			throw error;
+		}
 		if (answer.stopReason !== "error" || model.provider !== CHATGPT_PROVIDER) return answer;
 		// The plan failed, most likely out of quota: leave it alone for a while, and answer this once from another provider.
 		this.#cooldowns.failed(CHATGPT_PROVIDER, answer.errorMessage);

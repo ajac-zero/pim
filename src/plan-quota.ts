@@ -4,7 +4,7 @@
  * leave the plan alone for a while and use another provider instead.
  */
 
-const QUOTA = /quota|usage[ _-]?limit|rate[ _-]?limit|too many requests|\b429\b|exceeded|insufficient|billing|limit reached|try again (in|later)/i;
+const QUOTA = /quota|usage[ _-]?limit|rate[ _-]?limit|too many requests|\b429\b|exceeded|insufficient|billing|limit reached|hit your|usage_limit_reached|try again (in|later)/i;
 
 /** Whether an error message says the plan is out of quota or throttled, rather than the request being wrong. */
 export function isQuotaError(message: string | undefined): boolean {

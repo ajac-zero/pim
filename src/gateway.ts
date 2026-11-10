@@ -22,6 +22,7 @@ import { MODEL_GATEWAY_PATH, serveModelGateway } from "./coding/model-gateway";
 import { codingApi } from "./coding/routes";
 import { codingVaultApi } from "./coding/vault/routes";
 import { appAddress, appOfHost, appOfLabel, SESSION_COOKIE as APP_SESSION_COOKIE } from "./hosted";
+import { HOSTOPS_AGENT_PATH, hostOpsApi, serveHostOpsAgent } from "./hostops";
 import { installScript } from "./install-script";
 import { BROWSER_LIVE_PATH } from "./browser";
 import { NOTE_LIVE_PATH } from "./notes";
@@ -74,6 +75,9 @@ import { PimThemes } from "./themes";
  *   (./coding/model-gateway.ts), where a CLI in a coding workspace calls
  *   its model with the thread's gateway token, `pimgw_<…>`, which opens
  *   only this, and Pim adds the space's key.
+ * - `/api/hostops/*`: host operations (./hostops.ts). The host daemon polls
+ *   `/api/hostops/agent/*` with its own credential, `pimhostops_<secret>`,
+ *   which opens only that; the admin reads the rest signed in to the app.
  * - `/install.sh`: public, what installs pim-host or pim-computer from this
  *   Pim (./install-script.ts).
  * - `/mcp/callback/<owner>`, `/mcp/events/<owner>/<key>`: public, for
@@ -614,9 +618,13 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	if (under(path, GIT_BROKER_PATH)) return serveGitBroker(request, env, path);
 	// A coding workspace's CLI calling its model, opened by its gateway token only.
 	if (under(path, MODEL_GATEWAY_PATH)) return serveModelGateway(request, env, path);
+	// The host daemon polling for operations, opened by its own credential only.
+	if (under(path, HOSTOPS_AGENT_PATH)) return serveHostOpsAgent(request, env, path);
 	const caller = await admit(request, env);
-	if (caller instanceof Response) return withCors(caller);
+	if (caller instanceof Response) return withCors(under(path, "/hostops") ? await hostOpsApi(env, request, path, { refused: caller, address }) : caller);
 	const { account, viaSession } = caller;
+	// Host operations, for everyone who signs in, guests included, so the audit log keeps who asked.
+	if (under(path, "/hostops")) return withCors(await hostOpsApi(env, request, path, caller));
 	if (account.role === "guest") {
 		const answered = await guestRequest(env, account, request, path);
 		if (answered) return withCors(answered);

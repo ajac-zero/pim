@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { WithChatTabs } from "~/components/chat/tabs";
 import { CodingThreadPage } from "~/components/coding";
 
 export const Route = createFileRoute("/coding/$threadId")({
@@ -7,5 +8,9 @@ export const Route = createFileRoute("/coding/$threadId")({
 
 function CodingThreadRoute() {
   const { threadId } = Route.useParams();
-  return <CodingThreadPage key={threadId} id={threadId} />;
+  return (
+    <WithChatTabs>
+      <CodingThreadPage key={threadId} id={threadId} />
+    </WithChatTabs>
+  );
 }

@@ -20,6 +20,7 @@ import {
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatsPanel } from "~/components/app-sidebar";
+import { WithChatTabs } from "~/components/chat/tabs";
 import {
   CodingApiProvider,
   CodingPage,
@@ -48,6 +49,7 @@ import {
   modelQuery,
   sessionsQuery,
 } from "~/lib/queries";
+import { pinTab, pruneTabs } from "~/lib/tabs";
 import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
 afterEach(cleanup);
@@ -321,6 +323,45 @@ const summary = (
   lastTurnEndedAt: null,
   lastSeenAt: null,
   ...overrides,
+});
+
+describe("pinned chats on a thread's page", () => {
+  it("stay as tabs above the thread, and unpin from there", async () => {
+    pruneTabs(new Set());
+    pinTab("travel");
+    pinTab("work");
+    const { api } = fakeApi();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    client.setQueryData(sessionsQuery().queryKey, [
+      { id: "travel", title: "Travel" },
+      { id: "work", title: "Work" },
+    ] as never);
+    renderWith(
+      api,
+      () => (
+        <WithChatTabs>
+          <CodingThreadPage id="t1" />
+        </WithChatTabs>
+      ),
+      "/",
+      client,
+    );
+    const nav = await screen.findByRole("navigation", { name: "Open chats" });
+    expect(
+      within(nav)
+        .getAllByRole("link")
+        .map((link) => link.getAttribute("href")),
+    ).toEqual(["/chat/travel", "/chat/work"]);
+    expect(within(nav).queryByRole("link", { current: "page" })).toBeNull();
+    await screen.findByText("Fix the flaky date test");
+    fireEvent.click(within(nav).getAllByRole("button")[0] as HTMLElement);
+    await waitFor(() =>
+      expect(within(nav).getAllByRole("link")).toHaveLength(1),
+    );
+    pruneTabs(new Set());
+  });
 });
 
 describe("the list", () => {

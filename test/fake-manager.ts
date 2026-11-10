@@ -16,7 +16,11 @@ const refusal = (error: unknown): Response | null => {
 
 type FakeNodes = Map<string, { type: string; target?: string }>;
 
-/** A fetch stub that speaks the sandbox-manager's route contract (sandbox-manager/README.md), backed by a FakeWorkspaceProvider. Where the real manager differs from the fake's workspace it follows the manager: `stat` describes a symlink itself, a deleted-with-keepVolume session is listed as gone, exec and files on a stopped session are 409, and `/exec/stream` answers NDJSON as the command prints. `readlink -f` is a command of the fake's shell. */
+/**
+ * A fetch stub that speaks the sandbox-manager's route contract (sandbox-manager/README.md), backed by a FakeWorkspaceProvider. Where the real manager differs from the fake's workspace it follows the manager: `stat` describes a symlink itself, a deleted-with-keepVolume session is listed as gone, exec and files on a stopped session are 409, and `/exec/stream` answers NDJSON as the command prints. `readlink -f` is a command of the fake's shell.
+ *
+ * A test can make things go wrong as they do for real. `crash` kills a session's container: its streams break and its daemon stops answering (502 `agentd_unreachable`) while the manager still lists it as running; with `restart`, the host came back and the manager reconciled, keeping the crashed session's volume as a kept one (gone) or, with `volume: "lost"`, having lost it with the host's disk. While `outage.down` is set the manager can't be reached at all, as while it restarts; streams already open go on.
+ */
 export function fakeManager(max = 3) {
 	const backing = new FakeWorkspaceProvider({ maxConcurrent: max });
 	const requests: { method: string; path: string; auth: string | null; body?: unknown }[] = [];
@@ -24,6 +28,21 @@ export function fakeManager(max = 3) {
 	const kept = new Map<string, number>();
 	/** The manager's disk, which a test may fill: below 15% free it refuses new workspaces with `low_disk`, as the real one does by default. */
 	const disk = { freeDiskPct: 42.5 };
+	/** Sessions whose container died, and the exec streams open on each session. */
+	const dead = new Set<string>();
+	const streams = new Map<string, Set<() => void>>();
+	const outage = { down: false };
+	async function crash(id: string, o: { restart?: boolean; volume?: "kept" | "lost" } = {}) {
+		dead.add(id);
+		for (const die of streams.get(id) ?? []) die();
+		streams.delete(id);
+		if (!o.restart) return;
+		const ref = refs.get(id);
+		refs.delete(id);
+		dead.delete(id);
+		if (ref) await backing.destroy(ref, { keepVolume: o.volume !== "lost" });
+		if (o.volume !== "lost") kept.set(id, 1);
+	}
 	backing.register("readlink", async ({ argv, workspace }) => {
 		const nodes = (workspace as unknown as { nodes: FakeNodes }).nodes;
 		let path = posix.normalize(argv.at(-1) ?? "");
@@ -43,6 +62,7 @@ export function fakeManager(max = 3) {
 		new Promise((resolve, reject) => {
 			const abort = () => reject(new DOMException("aborted", "AbortError"));
 			if (init.signal?.aborted) return abort();
+			if (outage.down) return reject(new TypeError("fetch failed"));
 			init.signal?.addEventListener("abort", abort);
 			route(input, init).then(resolve, reject);
 		});
@@ -117,9 +137,11 @@ export function fakeManager(max = 3) {
 			const keep = url.searchParams.get("keepVolume") === "1";
 			await backing.destroy(ref, { keepVolume: keep });
 			refs.delete(id);
+			dead.delete(id);
 			if (keep) kept.set(id, 1);
 			return json(200, { deleted: id });
 		}
+		if (dead.has(id)) return json(502, { error: "workspace daemon unreachable: EHOSTUNREACH", code: "agentd_unreachable" });
 		if (sub === "stop") return await ws.stop(), json(200, { sessionId: id, state: "stopped" });
 		if (sub === "start") return await ws.start(), json(200, { sessionId: id, state: "running" });
 		if ((await ws.status()).state === "stopped") return json(409, { error: "session is stopped; start it first", code: "session_stopped" });
@@ -152,10 +174,31 @@ export function fakeManager(max = 3) {
 				new ReadableStream({
 					async start(controller) {
 						init.signal?.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")));
+						// A crash breaks the stream from the request's own context, as a dropped connection would.
+						let die = () => {};
+						const died = new Promise<"died">((resolve) => {
+							die = () => resolve("died");
+						});
+						const open = streams.get(id) ?? new Set();
+						streams.set(id, open.add(die));
+						const iterator = events[Symbol.asyncIterator]();
 						try {
-							for await (const event of events) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
-							controller.close();
-						} catch {}
+							for (;;) {
+								const next = await Promise.race([iterator.next(), died]);
+								if (next === "died") {
+									controller.error(new TypeError("network connection lost"));
+									break;
+								}
+								if (next.done) {
+									controller.close();
+									break;
+								}
+								controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`));
+							}
+						} catch {
+						} finally {
+							open.delete(die);
+						}
 					},
 				}),
 				{ status: 200, headers: { "content-type": "application/x-ndjson" } },
@@ -163,5 +206,5 @@ export function fakeManager(max = 3) {
 		}
 		throw new Error("the provider no longer uses buffered exec");
 	};
-	return { fetch: handler as typeof fetch, requests, backing, disk };
+	return { fetch: handler as typeof fetch, requests, backing, disk, crash, outage };
 }

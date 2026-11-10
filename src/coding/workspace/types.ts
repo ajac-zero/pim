@@ -155,6 +155,18 @@ export class WorkspaceNotFoundError extends Error {
 	}
 }
 
+/**
+ * The workspace stopped answering for good: its container, its manager or
+ * its host died, and what ran in it was lost. Its files may still be there
+ * (a kept volume): the thread makes the workspace again from them.
+ */
+export class WorkspaceLostError extends Error {
+	constructor(message = "The workspace stopped answering: its container or the machine it ran on went down, so what ran in it was lost. The workspace is made again from its saved files: check what state it is in (git status) before going on.") {
+		super(message);
+		this.name = "WorkspaceLostError";
+	}
+}
+
 /** A path left `/workspace`, directly or through a symlink. */
 export class WorkspacePathError extends Error {
 	constructor(path: string) {

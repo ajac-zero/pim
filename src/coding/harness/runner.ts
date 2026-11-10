@@ -86,7 +86,7 @@ export type RunnerDeps = {
 };
 
 /** Why a turn didn't complete. */
-export type RunFailure = "aborted" | "timeout" | "stalled" | "budget" | "max_turns" | "login_required" | "harness_error" | "interrupted";
+export type RunFailure = "aborted" | "timeout" | "stalled" | "budget" | "max_turns" | "login_required" | "harness_error" | "interrupted" | "workspace_lost";
 
 /** How a turn ended, with what it cost as the CLI reported it. */
 export type RunResult = {

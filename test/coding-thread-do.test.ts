@@ -7,7 +7,7 @@ import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, snapshotWorthKeeping } from "../src/coding/environment-cache";
 import { PROVISION_ENV } from "../src/coding/repo-environment";
-import { CONTINUE_TEXT, cliInstructions, codingThread, type StartThread, threadLimits } from "../src/coding/thread-do";
+import { CONTINUE_TEXT, cliInstructions, codingThread, LOST_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
@@ -22,7 +22,7 @@ import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { GO_REPO, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
-import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingWorkspaces } from "./worker";
+import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingTimings, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
 // `coding-faux` model, and asks a scheduler of its own space for a slot; the schedulers tell threads what happens to them
@@ -585,6 +585,47 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		expect(listings.every((request) => new URL(request.path, URL_BASE).searchParams.get("userId") === space)).toBe(true);
 	});
 
+	it("makes a pi thread's workspace again when its container dies under a command, and the turn goes on in it", async () => {
+		const { manager, calls } = compose();
+		const command = { release: null as (() => void) | null };
+		manager.backing.register("sleep", async () => {
+			await new Promise<void>((resolve) => {
+				command.release = resolve;
+			});
+			return {};
+		});
+		const results: string[] = [];
+		const lastResult = (context: Context) => {
+			const result = context.messages.findLast((each) => each.role === "toolResult");
+			return result?.role === "toolResult" ? result.content.map((part) => (part.type === "text" ? part.text : "")).join("") : "";
+		};
+		codingFaux.setResponses([
+			toolUse("write", { path: "wip.txt", content: "half done\n" }),
+			toolUse("bash", { command: "sleep 600" }),
+			(context) => {
+				results.push(lastResult(context));
+				return toolUse("bash", { command: "cat wip.txt" });
+			},
+			(context) => {
+				results.push(lastResult(context));
+				return fauxAssistantMessage("Done.");
+			},
+		]);
+		const { id, stub } = await startThread();
+		await vi.waitFor(() => expect(command.release).not.toBeNull(), { timeout: 10_000, interval: 20 });
+		// The container dies under the command; the manager still lists the session as running.
+		await inside(stub, async () => void (await manager.crash(id)));
+		await inside(stub, async () => command.release!());
+		const [ended] = await turns(id, 1);
+		expect(ended!.outcome).toBe("completed");
+		// The model was told the command was lost, and its next one ran in the workspace made again from the kept volume.
+		expect(results[0]).toContain("The workspace stopped answering");
+		expect(results[1]).toContain("half done");
+		expect(calls().filter((call) => call === "POST /sessions")).toHaveLength(2);
+		expect(manager.requests.filter((request) => request.method === "DELETE" && !request.path.includes("/file")).map((request) => request.path)).toEqual([`/sessions/${id}?keepVolume=1`]);
+		expect((await stub.log()).map((event) => event.kind)).toContain("workspace.lost");
+	});
+
 	it("waits in the queue while the manager's disk is low, and checks its health until there is room", async () => {
 		const { manager } = compose();
 		manager.disk.freeDiskPct = 9;
@@ -1145,19 +1186,21 @@ describe("a Claude Code thread", () => {
 	const CREDENTIALS = "/workspace/.claude/.credentials.json";
 	const started: Stub[] = [];
 
-	codingWorkspaces.register("claude", async (context) => {
+	const claudeCommand: FakeCommandHandler = async (context) => {
 		const login = await context.workspace.readFile(`${context.env.CLAUDE_CONFIG_DIR}/.credentials.json`).then(
 			(data) => decoder.decode(data),
 			() => "",
 		);
 		runs.push({ argv: context.argv, env: context.env, cwd: context.cwd, login });
 		return claude(context);
-	});
-	codingWorkspaces.register("pkill", ({ argv }) => {
+	};
+	const pkillCommand: FakeCommandHandler = ({ argv }) => {
 		signals.push(argv.slice(1));
 		for (const waiter of waiting.splice(0).filter((each) => each.signal === argv[1] || (waiting.push(each), false))) waiter.resolve();
 		return {};
-	});
+	};
+	codingWorkspaces.register("claude", claudeCommand);
+	codingWorkspaces.register("pkill", pkillCommand);
 
 	/** Resolves when `pkill` sends `signal`, or the command is killed. */
 	const until = (signal: string, killed: Promise<void>) => Promise.race([new Promise<void>((resolve) => waiting.push({ signal, resolve })), killed]);
@@ -1364,6 +1407,118 @@ describe("a Claude Code thread", () => {
 		expect(status).toMatchObject({ consecutiveInterrupts: 0 });
 		const log = await after.log();
 		expect(log.some((event) => event.kind === "thread.resumed")).toBe(true);
+	});
+
+	describe("on the Compose sandbox manager, when its workspace goes down", () => {
+		// The thread's workspaces are the stubbed manager's (test/fake-manager.ts), which a test makes go down: a container
+		// that dies under a turn, a host that comes back with or without the workspace's volume, a manager that restarts.
+		/** The Compose provider on a stubbed manager whose workspaces run the fake git and `claude`. */
+		function compose() {
+			const manager = fakeManager();
+			manager.backing.register("git", fakeGit);
+			manager.backing.register("claude", claudeCommand);
+			manager.backing.register("pkill", pkillCommand);
+			codingBackends.registry = workspaceRegistry([new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch })]);
+			const creates = () => manager.requests.filter((request) => request.method === "POST" && request.path === "/sessions").length;
+			const deletes = () => manager.requests.filter((request) => request.method === "DELETE" && /^\/sessions\/[^/?]+(\?|$)/.test(request.path)).map((request) => request.path);
+			return { manager, creates, deletes };
+		}
+
+		/** Runs `what` in the thread's object, as what a workspace does reaches the thread from its own requests: a stream the object reads may only be moved on from there. */
+		const within = (stub: Stub, what: () => unknown) => inside(stub, async () => void (await what()));
+		const SESSION_FILE = `/workspace/.claude/projects/repo/${CLAUDE_SESSION}.jsonl`;
+
+		/** A run that writes half its work, then works on until `release` is called: when its container dies, or when the test lets it finish with `then`. */
+		function halfway(then: () => FakeCommandResult = () => ({})) {
+			const run = { release: null as (() => void) | null };
+			const command = async ({ cwd, workspace }: Parameters<FakeCommandHandler>[0]) => {
+				await workspace.writeFile(`${cwd}/wip.txt`, encoder.encode("half done\n"));
+				await new Promise<void>((resolve) => {
+					run.release = resolve;
+				});
+				return then();
+			};
+			return { run, command, started: () => vi.waitFor(() => expect(run.release).not.toBeNull(), { timeout: 10_000, interval: 20 }) };
+		}
+
+		beforeEach(() => {
+			// The runs that wait for their container to die print nothing meanwhile.
+			codingTimings.stallMs = 60_000;
+		});
+
+		afterEach(() => {
+			Object.assign(codingTimings, { stallMs: 300, lostGraceMs: 1_000 });
+		});
+
+		it("makes the workspace again from its kept volume when its container dies mid-turn, and resumes the CLI's session there", async () => {
+			const { manager, creates, deletes } = compose();
+			const cut = halfway();
+			let sessionKept: boolean | null = null;
+			claude = async (context) => {
+				if (runs.length === 1) {
+					await context.workspace.writeFile(SESSION_FILE, encoder.encode("{}\n"));
+					return { stdout: claudeFixture("turn") };
+				}
+				if (runs.length === 2) return cut.command(context);
+				sessionKept = await context.workspace.stat(SESSION_FILE).then(
+					() => true,
+					() => false,
+				);
+				return { stdout: claudeFixture("turn") };
+			};
+			const { id, stub } = await startClaude();
+			await turns(id, 1);
+			await stub.steer("Add a farewell too", { operationId: "steer-1" });
+			await cut.started();
+			// The container dies; the manager, which didn't see it go, still lists the session as running.
+			await within(stub, () => manager.crash(id));
+			await within(stub, cut.run.release!);
+			// The cut-off turn went on by itself: the only turn to end after the first is the one it went on with.
+			const [, ended] = await turns(id, 2);
+			expect(ended).toMatchObject({ outcome: "completed", operationId: "resume-1-steer-1", state: "idle" });
+			// It resumed Claude Code's session, whose files were on the kept volume, told why.
+			expect(runs).toHaveLength(3);
+			expect(runs[2]!.argv).toEqual(expect.arrayContaining(["--resume", CLAUDE_SESSION]));
+			expect(runs[2]!.argv.at(-1)).toBe(LOST_RESUME_TEXT);
+			expect(sessionKept).toBe(true);
+			// The dead session was let go with its volume kept, and made again from it; what the cut-off run wrote is in the checkpoint.
+			expect(deletes()).toEqual([`/sessions/${id}?keepVolume=1`]);
+			expect(creates()).toBe(2);
+			expect((await stub.diff()).diff).toContain("+half done");
+			const log = await stub.log();
+			expect(log.map((event) => event.kind)).toEqual(expect.arrayContaining(["workspace.lost", "thread.resumed"]));
+			expect(log.find((event) => event.kind === "thread.resumed")?.data).toMatchObject({ attempt: 1, reason: "workspace_lost" });
+			expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", consecutiveInterrupts: 0 });
+		});
+
+		it("fails, telling whoever started it, once its workspace went down more times in a row than it goes on after", async () => {
+			const { manager } = compose();
+			const cuts: ReturnType<typeof halfway>[] = [];
+			claude = async (context) => {
+				if (runs.length === 1) return { stdout: claudeFixture("turn") };
+				const cut = halfway();
+				cuts.push(cut);
+				return cut.command(context);
+			};
+			const { id, stub } = await startClaude();
+			await turns(id, 1);
+			await stub.steer("Add a farewell too", { operationId: "steer-1" });
+			for (let attempt = 0; attempt < 4; attempt++) {
+				await vi.waitFor(() => expect(cuts).toHaveLength(attempt + 1), { timeout: 10_000, interval: 20 });
+				await cuts[attempt]!.started();
+				// The first time the manager still lists the dead session; later the host came back, and its manager kept the volume.
+				await within(stub, () => manager.crash(id, { restart: attempt > 0 }));
+				await within(stub, cuts[attempt]!.run.release!);
+			}
+			const [, ended] = await turns(id, 2);
+			expect(ended).toMatchObject({ outcome: "error", reason: "workspace_lost", state: "failed" });
+			const status = await stub.status();
+			expect(status).toMatchObject({ state: "failed", stateReason: "workspace_lost", slot: "none", consecutiveInterrupts: 3 });
+			expect(status.stateDetail).toContain("went down 4 times in a row");
+			expect(runs).toHaveLength(5);
+			expect((await stub.log()).filter((event) => event.kind === "thread.resumed")).toHaveLength(3);
+		});
+
 	});
 
 	it("runs one of the person's threads at a time on their login: the next waits for the first to end", async () => {

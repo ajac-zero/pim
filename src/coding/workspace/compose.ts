@@ -49,7 +49,7 @@ export type ComposeManagerHealth = ManagerHealth & {
 	sessions: number;
 };
 
-/** The manager refused or failed in a way with no workspace error of its own: a refusal for low disk has `code` "low_disk", which `ProviderCapacity.onManagerError` takes. */
+/** The manager refused or failed in a way with no workspace error of its own: a refusal for low disk has `code` "low_disk", which `ProviderCapacity.onManagerError` takes, and a manager that can't be reached at all is status 503 with `code` "unreachable". */
 export class ComposeManagerError extends Error {
 	constructor(
 		message: string,
@@ -153,7 +153,7 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 			});
 		} catch (error) {
 			if (init.signal?.aborted) throw error;
-			throw new Error(this.#scrub(`Cannot reach the workspace manager: ${error instanceof Error ? error.message : String(error)}`));
+			throw new ComposeManagerError(this.#scrub(`Cannot reach the workspace manager: ${error instanceof Error ? error.message : String(error)}`), 503, "unreachable");
 		}
 	}
 

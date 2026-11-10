@@ -1676,6 +1676,8 @@ describe("an Amp thread", () => {
 	const started: Stub[] = [];
 	const runs: { argv: string[]; env: Record<string, string> }[] = [];
 	codingWorkspaces.register("amp", ({ argv, env }) => {
+		// Unarchiving the thread before a turn continues it (`amp threads archive <id> --unarchive`) prints nothing.
+		if (argv[1] === "threads" && argv[2] === "archive") return {};
 		runs.push({ argv, env });
 		return { stdout: ampFixture("turn.jsonl") };
 	});

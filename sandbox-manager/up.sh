@@ -18,9 +18,11 @@ docker compose up -d --build "$@"
 ensure_hostopsd() {
   local etc=${HOSTOPSD_ETC:-/etc/hostopsd}
   local installer="$PWD/hostopsd/install.sh"
-  local checkout url cmd
+  local checkout url cmd node_bin
 
   [ -f "$installer" ] || return 0
+  # The functions that resolve Node.js, shared with install.sh (see hostopsd/node.sh).
+  source "$(dirname "$installer")/node.sh"
   checkout=$(cd .. && pwd)
 
   # Pim's origin: HOSTOPS_URL in the environment, else what is installed, else sandbox-manager/.env,
@@ -45,6 +47,14 @@ PIM_CHECKOUT=$checkout"
   fi
 
   cmd=("$installer" --url "$url" --checkout "$checkout")
+  # sudo's PATH drops the invoking user's node (nvm keeps it under the home directory), so resolve
+  # it here as this user and hand install.sh the path. When there is none, install.sh looks for a
+  # Node.js itself and installs the official one, so that is no reason to skip it.
+  node_bin=$(command -v node 2>/dev/null || true)
+  if [ -n "$node_bin" ] && node_is_new_enough "$node_bin"; then
+    node_bin=$(cd "$(dirname "$node_bin")" && pwd)/"$(basename "$node_bin")"
+    cmd+=(--node "$node_bin")
+  fi
   local manual="sudo ${cmd[*]}"
   if [ "$(id -un)" = hostopsd ]; then
     echo "up.sh: hostopsd is out of date; run '$manual' from a login with sudo to update its unit" >&2

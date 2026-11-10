@@ -45,6 +45,12 @@ re-enabling it in Settings, run `sudo sandbox-manager/hostopsd/install.sh`.
 - finds the manager's environment (`MANAGER_TOKEN`, `PROXY_ADMIN_TOKEN`, ...) that `up.sh` and
   `docker compose` need: `--manager-env PATH`, else `sandbox-manager/.env`, else it copies the
   variables from the running `sandbox-manager` container into `/etc/hostopsd/manager.env`;
+- finds the Node.js the unit runs: `--node PATH`, else the invoking user's nvm (root's PATH does
+  not see it), else `/usr/local/bin/node`, `/usr/bin/node` or the `/opt/hostopsd/node` an earlier
+  run left, and when the host has none at all it installs the official Node.js 22 LTS tarball in
+  `/opt/hostopsd`, verifying its SHA256 against `SHASUMS256.txt` from the same download. A node
+  under a home directory is copied to the root-owned `/opt/hostopsd/node` (mode 0755) so the
+  `hostopsd` user can execute it;
 - writes `/etc/hostopsd/env` (mode 0640, `root:hostopsd`) and `/etc/hostopsd/installed`, a
   world-readable note of which installer and unit are installed that `up.sh` compares (no secret),
   installs `/etc/systemd/system/hostopsd.service`, enables and restarts it;

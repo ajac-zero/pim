@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatsPanel } from "~/components/app-sidebar";
 import {
   CodingApiProvider,
+  CodingConnectionsSection,
   CodingPage,
   CodingThreadPage,
   SIGN_IN_POLL_MS,
@@ -810,6 +811,31 @@ describe("a thread's page", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "There's no such coding thread in your space.",
     );
+  });
+});
+
+describe("the settings tab", () => {
+  it("lists each harness login to connect, and no threads", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({ threads: [summary()] });
+    api.vault.status.mockImplementation(async (harness) => ({
+      ...notConnected(),
+      harness,
+      connected: harness === "codex",
+    }));
+    renderWith(api, CodingConnectionsSection);
+    for (const name of ["Claude Code", "Codex", "Amp", "Mistral Vibe"]) {
+      expect(
+        await screen.findByRole("region", { name: `Connect ${name}` }),
+      ).toBeTruthy();
+    }
+    const codex = screen.getByRole("region", { name: "Connect Codex" });
+    expect(await within(codex).findByText("Connected")).toBeTruthy();
+    expect(
+      within(codex).getByRole("button", { name: "Disconnect" }),
+    ).toBeTruthy();
+    expect(api.list).not.toHaveBeenCalled();
+    expect(screen.queryByText("Fix the flaky date test")).toBeNull();
   });
 });
 

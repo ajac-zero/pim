@@ -11,6 +11,7 @@ import { type Api, type Model, Type } from "@earendil-works/pi-ai";
 import { section } from "@earendil-works/pi-durable";
 import { defineAppTool, defineGatedAction, definePimExtension, oauth2, type PimConfig } from "../src/extensions/define";
 import { GOOGLE_SCOPES, googleApp, googleJson } from "../src/extensions/google";
+import { hostOpsExtension } from "../src/extensions/hostops";
 import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } from "../src/coding/scheduler-do";
 import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO } from "../src/coding/thread-do";
 import type { Fetch, GitHubApp } from "../src/coding/git-broker/github-app";
@@ -229,6 +230,9 @@ export const google = definePimExtension({ id: "test.google", name: "Test Google
 	googleApp({ id: "unset", name: "Unset", description: "Never configured.", client: { id: "TEST_UNSET_CLIENT_ID", secret: "TEST_UNSET_CLIENT_SECRET" }, scopes: [GOOGLE_SCOPES.driveFile], tools: [] }),
 ] });
 
+/** How long the tests' host operation tools wait for an operation to end. */
+export const HOSTOPS_TEST_WAIT_MS = 4_000;
+
 /** How far tests have moved the triggers' clock on from the time (test/triggers-host.test.ts). */
 export const triggerClock = { offset: 0 };
 
@@ -238,10 +242,11 @@ export class Pim extends RealPim {
 		return Date.now() + triggerClock.offset;
 	}
 
-	/** The deployment's extensions, and the tests' own. */
+	/** The deployment's extensions, with host operations that wait seconds rather than minutes, and the tests' own. */
 	protected override pimConfig(): PimConfig {
 		const config = super.pimConfig();
-		return { ...config, extensions: [...config.extensions, ledger, google] };
+		const extensions = config.extensions.map((extension) => (extension.id === "hostops" ? hostOpsExtension({ waitMs: HOSTOPS_TEST_WAIT_MS }) : extension));
+		return { ...config, extensions: [...extensions, ledger, google] };
 	}
 
 	/** Email works in tests, into `outbox`. */

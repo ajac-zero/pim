@@ -3829,12 +3829,17 @@ export class Pim extends DurableAgent<Env> {
 	/**
 	 * The names of the tools an agent's conversations aren't offered: the connector
 	 * tools switched off for it, writing and installing skills when its switch
-	 * for skills is off, and, for any agent but the majordomo, the majordomo's
-	 * own: naming and sharing memory scopes, and adding connectors.
+	 * for skills is off, the tools of abilities not offered to it, and, for
+	 * any agent but the majordomo, the majordomo's own: naming and sharing
+	 * memory scopes, and adding connectors.
 	 */
 	#switchedOff(agent: Agent): Set<string> {
 		const off = this.agentToolPermissions(agent).flatMap((info) => (info.permission === "off" ? [info.name] : []));
 		if (skillsSwitch(this.store, agent.id).permission === "off") off.push(WRITE_SKILL, INSTALL_SKILL);
+		for (const { tools, actions, offeredTo } of this.abilities.values()) {
+			if (offeredTo?.(agent) !== false) continue;
+			off.push(...(tools ?? []).map((tool) => tool.name), ...(actions ?? []).map((action) => action.name));
+		}
 		return new Set(agent.majordomo ? off : [...off, ...MAJORDOMO_TOOLS]);
 	}
 
@@ -4537,9 +4542,12 @@ export class Pim extends DurableAgent<Env> {
 						await this.deliverNotification(notification);
 					},
 					space: this.name,
+					get admin() {
+						return pim.store.meta(OWNER_ADMIN_KEY) === "1";
+					},
 					conversationOf: (session) => {
-						const { id, name } = this.agents.ofSession(session);
-						return { chat: this.store.publicId(session), agent: { id, name } };
+						const { id, name, majordomo } = this.agents.ofSession(session);
+						return { chat: this.store.publicId(session), agent: { id, name, majordomo } };
 					},
 				});
 				return [[extension.id, ability] as const];
@@ -4554,7 +4562,7 @@ export class Pim extends DurableAgent<Env> {
 	 * the person's permissions have them, sections, hooks and tasks.
 	 */
 	#installAbilities(services: PimServices): void {
-		for (const [id, { actions, ...ability }] of this.abilities) {
+		for (const [id, { actions, offeredTo: _offeredTo, ...ability }] of this.abilities) {
 			this.registry.install(defineExtension({ ...ability, name: id, tools: [...(ability.tools ?? []), ...gatedTools(services, actions ?? [])] }));
 		}
 	}

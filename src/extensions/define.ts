@@ -68,12 +68,14 @@ export type AbilityContext = {
 	notify(title: string, body: string): Promise<void>;
 	/** The space's ID: its owner's, which names its Durable Objects, such as its Pim. */
 	readonly space: string;
+	/** Whether the space's owner runs this Pim, as the space last read it from the directory. */
+	readonly admin: boolean;
 	/**
 	 * A conversation, by its ID (a tool's `api.conversationId`), as the
 	 * person and the API know it: its chat's ID, which links and the API take,
 	 * and the agent it is with.
 	 */
-	conversationOf(session: string): { readonly chat: string; readonly agent: { readonly id: string; readonly name: string } };
+	conversationOf(session: string): { readonly chat: string; readonly agent: { readonly id: string; readonly name: string; readonly majordomo: boolean } };
 };
 
 /**
@@ -83,7 +85,16 @@ export type AbilityContext = {
  * actions unless the person chose Ask or Off. Actions marked explicitApproval
  * always wait for the person's own decision.
  */
-export type Ability = Omit<Extension, "name"> & { readonly actions?: readonly GatedAction[] };
+export type Ability = Omit<Extension, "name"> & {
+	readonly actions?: readonly GatedAction[];
+	/**
+	 * Whether an agent's chats are offered the ability's tools and actions, as
+	 * things are now; every agent's are without it. Its prompt sections decide
+	 * for themselves, with `conversationOf`. Not a permission: a tool that must
+	 * refuse other agents checks the caller when it runs.
+	 */
+	readonly offeredTo?: (agent: { readonly id: string; readonly majordomo: boolean }) => boolean;
+};
 
 export type WidgetContext = {
 	/** The agent whose chat shows the widget. */

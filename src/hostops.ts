@@ -344,18 +344,25 @@ export class HostOps extends DurableObject<Env> {
 		await this.sweep();
 	}
 
+	/** Null when `caller` may use host operations; otherwise the refusal, which the audit log keeps as `action` with what was asked. */
+	async #refusal(caller: HostOpsCaller, action: string, asked: unknown): Promise<Refusal | null> {
+		try {
+			await assertHostOpsCaller(this.env, caller);
+			return null;
+		} catch (error) {
+			const status = error instanceof HttpError ? error.status : 403;
+			const message = error instanceof Error ? error.message : String(error);
+			this.#audit(actorOf(caller), action, "rejected", null, asked, message);
+			return { ok: false, status, error: message };
+		}
+	}
+
 	/** Queues an operation for the host, if the caller may ask for it and it is allowed; the audit log keeps the request either way. */
 	async enqueue(caller: HostOpsCaller, op: unknown, args: unknown): Promise<{ ok: true; op: HostOpView } | Refusal> {
 		const actor = actorOf(caller);
 		const asked = { op, args };
-		try {
-			await assertHostOpsCaller(this.env, caller);
-		} catch (error) {
-			const status = error instanceof HttpError ? error.status : 403;
-			const message = error instanceof Error ? error.message : String(error);
-			this.#audit(actor, "enqueue", "rejected", null, asked, message);
-			return { ok: false, status, error: message };
-		}
+		const refused = await this.#refusal(caller, "enqueue", asked);
+		if (refused) return refused;
 		let checked: ReturnType<typeof checkHostOp>;
 		try {
 			checked = checkHostOp(op, args);
@@ -406,6 +413,18 @@ export class HostOps extends DurableObject<Env> {
 			if (!op || FINISHED.includes(op.state) || Date.now() >= until) return op;
 			await this.#sleep(until - Date.now(), this.#watchers);
 		}
+	}
+
+	/** An operation once it finishes, or as it is after `timeoutMs`, for `caller`, who must be the admin's majordomo; a refusal is audited. */
+	async readFor(caller: HostOpsCaller, id: string, timeoutMs: number): Promise<{ ok: true; op: HostOpView | null } | Refusal> {
+		const refused = await this.#refusal(caller, "read", { id });
+		return refused ?? { ok: true, op: await this.waitFor(id, timeoutMs) };
+	}
+
+	/** The daemon's status, for `caller`, who must be the admin's majordomo; a refusal is audited. */
+	async statusFor(caller: HostOpsCaller): Promise<{ ok: true; status: HostOpsStatus } | Refusal> {
+		const refused = await this.#refusal(caller, "status", undefined);
+		return refused ?? { ok: true, status: await this.status() };
 	}
 
 	async status(): Promise<HostOpsStatus> {
@@ -541,6 +560,20 @@ export async function getHostOp(env: Env, id: string): Promise<HostOpView | null
 /** The operation once it finishes, or as it is after `timeoutMs`. */
 export async function waitForHostOp(env: Env, id: string, timeoutMs: number): Promise<HostOpView | null> {
 	return hostOps(env).waitFor(id, timeoutMs);
+}
+
+/** An operation once it finishes, or as it is after `timeoutMs`, read by `caller`, who must be the admin's majordomo; throws the `HttpError` to answer otherwise. */
+export async function readHostOp(env: Env, caller: HostOpsCaller, id: string, timeoutMs: number): Promise<HostOpView | null> {
+	const read = await hostOps(env).readFor(caller, id, timeoutMs);
+	if (!read.ok) throw new HttpError(read.status, read.error);
+	return read.op;
+}
+
+/** The daemon's status, read by `caller`, who must be the admin's majordomo; throws the `HttpError` to answer otherwise. */
+export async function hostOpsStatus(env: Env, caller: HostOpsCaller): Promise<HostOpsStatus> {
+	const read = await hostOps(env).statusFor(caller);
+	if (!read.ok) throw new HttpError(read.status, read.error);
+	return read.status;
 }
 
 const fail = (status: number, error: string) => json({ error }, status);

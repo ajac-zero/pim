@@ -28,7 +28,7 @@ const MAX_ANSWER_CHARS = 30_000;
 
 type AuditRow = { at: string; method: string; path: string; status: number; bodyKeys: string[]; approved: boolean };
 
-const SECRET_KEY = /token|secret|password|api_?key|^key$|credential|^codes?$|^links?$|setupurl/i;
+const SECRET_KEY = /(?<!max)tokens?|secret|password|api_?key|^key$|credential|^codes?$|^links?$|setupurl/i;
 const SECRET_VALUE = /#(invite|setup)=/;
 
 /** A value with everything that is a secret taken out: by the name it is under, or by what it looks like. */
@@ -65,7 +65,7 @@ function parse(method: string, given: string, query: unknown, body: unknown): Pa
 	return { method, path, query: params, body: body as Record<string, unknown> | undefined };
 }
 
-const line = ({ method, path, body }: { method: string; path: string; body?: object }) => `${method} ${path}${body === undefined ? "" : ` ${JSON.stringify(body)}`}`;
+const line = ({ method, path, body }: { method: string; path: string; body?: object }) => `${method} ${path}${body === undefined ? "" : ` ${JSON.stringify(redact(body))}`}`;
 const error = (message: string, status: number) => JSON.stringify({ error: message, status });
 
 const PROMPT = `You run the admin area of this Pim for the person, who is its admin, as the app's Admin pages do. admin_read gets (stats, accounts, accounts/<username>, sign-in, deployment, computer-host, default-agent, builtin-apps), and admin_write changes (POST invites, POST/PUT apps, PUT builtin-apps/<id>, PUT default-agent, accounts/<username>/suspend, unsuspend and limits). Paths are under /admin and take the same bodies as the app sends. Every DELETE, the computer host's pairing, model providers and setup links run only through admin_write_approved, which asks the person first and shows them the exact request. Secrets (provider keys, the computer host's token, invite codes and links, setup links) are never shown to you: tell the person to take them from Admin in the app. Every write is kept for admin_audit. Do only what the person asked.`;

@@ -91,7 +91,7 @@ describe("the admin area for the majordomo", () => {
 		expect(await run("admin_read", { path: "/admin/computer-host" })).toMatchObject({ body: { body: { paired: false } } });
 		expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(200);
 		await turn;
-		const answer = JSON.parse(told);
+		const answer = JSON.parse(told.slice(told.indexOf("Result:\n") + 8));
 		expect(answer.status).toBe(201);
 		expect(answer.body.token).toBe("[redacted]");
 		expect(told).not.toMatch(/pim_host_|"token":"[^[]/);
@@ -104,7 +104,7 @@ describe("the admin area for the majordomo", () => {
 		expect(await pendingApproval()).toMatchObject({ summary: "DELETE /admin/computer-host" });
 		expect((await post(`/approvals/${(await pendingApproval()).id}/approve`)).status).toBe(200);
 		await forgetting;
-		expect(JSON.parse(told).status).toBe(200);
+		expect(JSON.parse(told.slice(told.indexOf("Result:\n") + 8)).status).toBe(200);
 		faux.setResponses([toolUse("admin_write_approved", { method: "PUT", path: "/admin/default-agent", body: {} }), note as never]);
 		await say("Do it", ROOT);
 		expect(JSON.parse(told)).toMatchObject({ status: 400 });

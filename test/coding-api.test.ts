@@ -276,10 +276,10 @@ describe("the coding threads API", () => {
 	});
 
 	it("keeps the person's setup script for a repository, which its threads run, and shows and rebuilds a thread's environment", async () => {
-		// The repository has no .pim/setup.sh of its own; the person's setting gives it one. `bash` runs it.
-		fakeRemotes.set("https://pim.test/api/coding/git/acme/configured.git", { "README.md": "# Configured\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" });
+		// The repository has no .pim/setup.sh of its own; the person's setting gives it one. Its go.mod pins Go, which is provisioned before it. `bash` runs both.
+		fakeRemotes.set("https://pim.test/api/coding/git/acme/configured.git", { "README.md": "# Configured\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n", "go.mod": "module example.com/configured\n\ngo 1.22\n" });
 		const scripts: string[] = [];
-		codingWorkspaces.register("bash", ({ argv }) => (scripts.push(argv[2]!), {}));
+		codingWorkspaces.register("bash", ({ argv }) => (scripts.push(argv[2]!.replace(/^export PATH=.*\n/, "")), {}));
 		const path = "/coding/repos/Acme/Configured/settings";
 		const put = (body: unknown, as = api) => as(path, { method: "PUT", body: JSON.stringify(body) });
 		expect((await api<CodingRepoSettings>(path)).body).toEqual({ repo: "acme/configured", setupScript: null, updatedAt: null });
@@ -297,8 +297,8 @@ describe("the coding threads API", () => {
 		const environment = (await view(thread.id)).environment;
 		expect(environment).toMatchObject({ state: "cached", source: "settings", key: expect.stringMatching(/^[0-9a-f]{64}$/) });
 		expect((await api<CodingEnvironment>(`/coding/threads/${thread.id}/environment`)).body).toEqual(environment);
-		expect(scripts).toEqual(["pnpm install --frozen-lockfile\n"]);
-		// An agent's coding_status shows every field that says something, its timings included.
+		expect(scripts).toEqual(["mise use --global --yes go@1.22", "pnpm install --frozen-lockfile\n"]);
+		// An agent's coding_status shows every field that says something, its timings, toolchains and check commands included, and whether it came from a cached snapshot.
 		let told = "";
 		faux.setResponses([
 			toolUse("coding_status", { thread_id: thread.id }),
@@ -311,11 +311,29 @@ describe("the coding threads API", () => {
 		await say("Is its environment ready?");
 		const { builtAt, provisionMs, setupMs, snapshotMs, preparedAt } = environment;
 		for (const value of [builtAt, provisionMs, setupMs, snapshotMs, preparedAt]) expect(value).toEqual(expect.any(Number));
-		expect(JSON.parse(told).environment).toEqual({ state: "cached", key: environment.key, source: "settings", builtAt, provisionMs, setupMs, snapshotMs, preparedAt, rebuildRequested: false, snapshotKept: true, readyFrom: "setup" });
+		expect(JSON.parse(told).environment).toEqual({
+			state: "cached",
+			key: environment.key,
+			source: "settings",
+			builtAt,
+			provisionMs,
+			setupMs,
+			snapshotMs,
+			preparedAt,
+			rebuildRequested: false,
+			snapshotKept: true,
+			readyFrom: "setup",
+			cache_hit: false,
+			toolchains: [{ tool: "go", version: "1.22", source: "manifest", from: "go.mod", status: "installed" }],
+			testCommands: [
+				{ command: "go vet ./...", source: "default", from: "go.mod" },
+				{ command: "go test ./...", source: "default", from: "go.mod" },
+			],
+		});
 		// A rebuild runs it again, between turns.
 		expect(await post(`/coding/threads/${thread.id}/environment/rebuild`)).toMatchObject({ status: 200, body: { state: "building", rebuildRequested: true } });
 		await vi.waitFor(async () => expect((await view(thread.id)).environment).toMatchObject({ state: "cached", rebuildRequested: false }), { timeout: 10_000, interval: 50 });
-		expect(scripts).toHaveLength(2);
+		expect(scripts).toHaveLength(4);
 		expect((await asOther(`/coding/threads/${thread.id}/environment`)).status).toBe(404);
 		// A blank script clears the setting.
 		expect((await put({ setupScript: null })).body).toEqual({ repo: "acme/configured", setupScript: null, updatedAt: null });

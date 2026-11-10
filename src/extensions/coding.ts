@@ -45,8 +45,11 @@ function brief(view: CodingThreadView) {
 		turn_under_way: view.currentOperation !== null,
 		inputs_waiting: view.inbox,
 		checkpoint: view.checkpoint ? { sha: view.checkpoint.sha, message: view.checkpoint.message } : null,
-		// Every field that says something, so the model can tell where the time to readiness went: durations in ms, times in ms since the epoch.
-		environment: Object.fromEntries(Object.entries(view.environment).filter(([, value]) => value !== null && value !== undefined)),
+		// Every field that says something, so the model can tell where the time to readiness went and what the workspace has: durations in ms, times in ms since the epoch; toolchains and dependencies with how their install went, and the commands the repository checks itself with.
+		environment: {
+			...Object.fromEntries(Object.entries(view.environment).filter(([, value]) => value !== null && value !== undefined && !(Array.isArray(value) && value.length === 0))),
+			...(view.environment.readyFrom ? { cache_hit: view.environment.readyFrom === "snapshot" } : {}),
+		},
 		// Null for a CLI that reports no cost (Codex, Amp): its spend is unmetered, not $0.
 		spent_usd: cliHarness(view.harness)?.reportsCost === false ? null : Number(view.spentUsd.toFixed(4)),
 		budget_usd: view.budgetUsd,
@@ -128,7 +131,7 @@ export const coding = definePimExtension({
 			}),
 			defineTool({
 				name: "coding_status",
-				description: "How a coding thread is doing: its state, its latest checkpoint, its prepared environment (dependencies installed by the repository's setup script, restored from a snapshot when one was kept) and what it has spent. Without a thread_id, lists the space's coding threads, newest first.",
+				description: "How a coding thread is doing: its state, its latest checkpoint, its prepared environment (the toolchains and dependencies the repository pins and how each install went, the commands it checks itself with, what its setup script did, and whether it was restored from a cached snapshot) and what it has spent. Without a thread_id, lists the space's coding threads, newest first.",
 				parameters: Type.Object({ thread_id: Type.Optional(ThreadId) }),
 				replay: "safe",
 				async execute({ thread_id }) {

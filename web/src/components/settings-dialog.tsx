@@ -16,6 +16,7 @@ import {
   ComputerSection,
 } from "~/components/computer-settings";
 import { DeploymentSection } from "~/components/deployment-settings";
+import { HostOpsSection } from "~/components/host-ops-settings";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
   AlertCircle,
@@ -228,6 +229,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
           <>
             <DeploymentSection />
             <ComputerHostSection />
+            <HostOpsSection />
           </>
         )}
       </div>

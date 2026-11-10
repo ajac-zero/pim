@@ -94,6 +94,15 @@ export const computerQuery = () =>
 export const computerHostQuery = () =>
   queryOptions({ queryKey: ["computer-host"], queryFn: admin.computerHost });
 
+/** The host daemon and the host operations' audit log: the admin's view. */
+export const hostOpsStatusQuery = () =>
+  queryOptions({
+    queryKey: ["hostops", "status"],
+    queryFn: admin.hostOpsStatus,
+  });
+export const hostOpsAuditQuery = () =>
+  queryOptions({ queryKey: ["hostops", "audit"], queryFn: admin.hostOpsAudit });
+
 /** A chat's window in the agents' browser: its own, or that of a task it handed out. */
 export const browserQuery = (sessionId: string) =>
   queryOptions({

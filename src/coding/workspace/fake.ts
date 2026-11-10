@@ -329,15 +329,20 @@ class FakeWorkspace implements Workspace {
 				yield out("ok\n");
 				return 0;
 			}
+			case "mkdir":
+				return 0;
+			case "exec":
+				return yield* this.run(args, ctx);
 			case "sh": {
 				if (args[0] !== "-c" || args[1] === undefined) {
 					yield err("sh: only -c SCRIPT is supported\n");
 					return 2;
 				}
 				let code = 0;
-				for (const statement of args[1].split(/[;\n]/)) {
+				for (const statement of args[1].split(/&&|[;\n]/)) {
 					if (ctx.kill.reason) return 137;
-					const line = words(statement);
+					// `"$@"` is the arguments after the script and `$0`, as the CLI harnesses' `sh -c 'mkdir -p "$TMPDIR" && exec "$@"'` wrappers use it.
+					const line = words(statement).flatMap((word) => (word === "$@" ? args.slice(3) : [word]));
 					if (line.length === 0) continue;
 					if (line[0] === "exit") return Number(line[1] ?? code);
 					const toStderr = line[line.length - 1] === ">&2";

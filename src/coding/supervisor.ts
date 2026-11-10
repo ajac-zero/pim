@@ -35,7 +35,7 @@ export function turnEndedMessage(event: TurnEndedEvent, origin: string | null): 
 	const reason = event.reason && event.reason !== event.outcome ? ` (${event.reason})` : "";
 	const lines = [
 		`[Coding thread ${event.threadId}] It ${OUTCOMES[event.outcome]}${reason}.`,
-		`State: ${event.state}. Spent $${event.spentUsd.toFixed(2)} of its $${event.budgetUsd} budget.`,
+		`State: ${event.state}. ${event.unmetered ? "Its spend isn't metered, so its budget isn't enforced." : `Spent $${event.spentUsd.toFixed(2)} of its $${event.budgetUsd} budget.`}`,
 		`Link: ${origin ?? ""}${threadPath(event.threadId)}`,
 	];
 	if (event.checkpoint) lines.push(`Its changes are committed as ${event.checkpoint.slice(0, 12)}.`);

@@ -3,5 +3,10 @@
 # Usage: ./up.sh [extra docker compose up args]   (same env vars as README: MANAGER_TOKEN etc.)
 set -euo pipefail
 cd "$(dirname "$0")"
-export BUILD_SHA="${BUILD_SHA:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+BUILD_SHA="${BUILD_SHA:-$(git rev-parse --short HEAD)}" || true
+if [ -z "$BUILD_SHA" ] || [ "$BUILD_SHA" = unknown ]; then
+  echo "up.sh: cannot determine the git commit to stamp into the image (set BUILD_SHA or run from a git checkout)" >&2
+  exit 1
+fi
+export BUILD_SHA
 exec docker compose up -d --build "$@"

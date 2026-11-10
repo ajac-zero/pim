@@ -35,10 +35,10 @@ services:
     networks: [control]
 
   sandbox-manager:
-    build:
+    build: &manager-build
       context: .
       args:
-        BUILD_SHA: ${BUILD_SHA:-unknown}
+        BUILD_SHA: ${BUILD_SHA:?run ./up.sh, which sets BUILD_SHA}
     image: pim-sandbox-manager
     container_name: sandbox-manager # it attaches itself to session networks by this name
     restart: unless-stopped
@@ -82,7 +82,9 @@ services:
     networks: [control, api]
 
   egress-proxy:
-    build: .
+    # Same image tag as the manager, so it must be built with the same args: a build without
+    # BUILD_SHA would replace the manager's image with one that reports "unknown".
+    build: *manager-build
     image: pim-sandbox-manager
     container_name: egress-proxy # the manager connects it to every session network by this name
     restart: unless-stopped

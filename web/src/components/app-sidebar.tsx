@@ -9,8 +9,10 @@ import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AgentIcon } from "~/components/agent-icon";
+import { useCodingApi } from "~/components/coding";
 import {
   CodingSubthreadRow,
+  subthreadTitle,
   useCodingByChat,
 } from "~/components/coding-subthread-row";
 import { useI18n } from "~/components/i18n";
@@ -74,6 +76,7 @@ import {
   TooltipTrigger,
 } from "~/components/ui/tooltip";
 import { flatChats, groupByAge, isInactive, nestChats } from "~/lib/chat-list";
+import { type CodingThreadSummary, codingThreadsQuery } from "~/lib/coding";
 import { pim, type Session } from "~/lib/pim-api";
 import { pimClient } from "~/lib/pim-client";
 import {
@@ -356,7 +359,7 @@ export function AppSidebar({
 }
 
 /** Every chat in one list, most recently active first, under dividers by age. */
-function ChatsPanel({
+export function ChatsPanel({
   awaitingApproval,
   onNavigate,
 }: {
@@ -374,6 +377,14 @@ function ChatsPanel({
     [sessions, search, t],
   );
   const archived = current.filter((session) => session.archived);
+  const { data: codingThreads } = useQuery(codingThreadsQuery(useCodingApi()));
+  const archivedCoding = (codingThreads ?? []).filter(
+    (thread) =>
+      thread.state === "archived" &&
+      subthreadTitle(thread)
+        .toLowerCase()
+        .includes(search.trim().toLowerCase()),
+  );
   const inactive = current.filter((session) => isInactive(session));
   const open = current.filter(
     (session) => !session.archived && !inactive.includes(session),
@@ -411,10 +422,11 @@ function ChatsPanel({
         className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin [mask-image:linear-gradient(to_bottom,transparent,black_12px,black_calc(100%-12px),transparent)]"
       >
         {open.length === 0 ? (
-          (archived.length + inactive.length === 0 || !search) && (
+          (archived.length + archivedCoding.length + inactive.length === 0 ||
+            !search) && (
             <p className="px-2 py-6 text-center text-muted-foreground text-sm">
               {t(
-                archived.length + inactive.length > 0
+                archived.length + archivedCoding.length + inactive.length > 0
                   ? "noRecentChats"
                   : search
                     ? "noChatsMatch"
@@ -442,10 +454,11 @@ function ChatsPanel({
             onNavigate={onNavigate}
           />
         )}
-        {archived.length > 0 && (
+        {archived.length + archivedCoding.length > 0 && (
           <FoldedChats
             label={t("archived")}
             list={archived}
+            coding={archivedCoding}
             all={current}
             activeId={activeId}
             searching={!!search}
@@ -735,6 +748,7 @@ const DONE_STATES = new Set(["completed", "failed", "canceled"]);
 function FoldedChats({
   label,
   list,
+  coding = [],
   all,
   activeId,
   searching,
@@ -743,6 +757,8 @@ function FoldedChats({
 }: {
   label: string;
   list: Session[];
+  /** Archived coding threads, listed after the chats. */
+  coding?: CodingThreadSummary[];
   all: Session[];
   activeId?: string;
   searching: boolean;
@@ -767,7 +783,7 @@ function FoldedChats({
         aria-expanded={expanded}
       >
         {label}
-        <span className="font-normal">{list.length}</span>
+        <span className="font-normal">{list.length + coding.length}</span>
         <ChevronDown
           className={cn(
             "size-3.5 transition-transform",
@@ -784,6 +800,14 @@ function FoldedChats({
               tree={nested.children}
               activeId={activeId}
               awaitingApproval={awaitingApproval}
+              onNavigate={onNavigate}
+            />
+          ))}
+          {coding.map((thread) => (
+            <CodingSubthreadRow
+              key={thread.id}
+              thread={thread}
+              depth={0}
               onNavigate={onNavigate}
             />
           ))}

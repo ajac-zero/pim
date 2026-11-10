@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyBrokerToken } from "../src/coding/git-broker/broker";
 import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
-import { CONTINUE_TEXT, codingThread, type StartThread } from "../src/coding/thread-do";
+import { CONTINUE_TEXT, codingThread, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
@@ -1176,5 +1176,13 @@ describe("an Amp thread", () => {
 		expect((await stub.log()).find((event) => event.kind === "app.budget_stop")?.data).toEqual({ budgetUsd: 0.03, spentUsd: 0, tokens: 102_363, tokenCeiling: 30_000 });
 		const transcript = await inside(stub, (thread) => thread.transcript());
 		expect(transcript.at(-1)).toMatchObject({ role: "notice", parts: [{ type: "text", text: "Stopped: the thread used 102,363 of the 30,000 tokens its $0.03 budget allows." }] });
+	});
+});
+
+describe("threadLimits", () => {
+	it("uses the defaults, a repository's override, and lets explicit limits win", () => {
+		expect(threadLimits("someone/else").memMiB).toBe(4096);
+		expect(threadLimits("Ajac-Zero/Pim").memMiB).toBe(6144);
+		expect(threadLimits("ajac-zero/pim", { memMiB: 2048 })).toMatchObject({ memMiB: 2048, cpu: 2 });
 	});
 });

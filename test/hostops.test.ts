@@ -617,7 +617,7 @@ describe("the majordomo's host operation tools", () => {
 		const secret = `tok_${"9fQ2xLmA7".repeat(3)}`;
 		await report(token, succeeded(id, { summary: `restarted with ${secret}` }));
 		await turn;
-		await call("/hostops/ops", { method: "POST", cookie, body: { op: "deploy", args: { ref: "main" } } });
+		await enqueueHostOp(env, majordomo, "deploy", { ref: "main" });
 
 		faux.setResponses([toolUse("hostops_audit", {}), record]);
 		await sayAs(TOKEN, ROOT, "What happened on the host?");
@@ -633,7 +633,7 @@ describe("the majordomo's host operation tools", () => {
 
 		faux.setResponses([toolUse("hostops_audit", { op: "deploy", limit: 5 }), record]);
 		await sayAs(TOKEN, ROOT, "Only deploys");
-		expect(JSON.parse(told).audit.map((row: any) => [row.operation, requestedBy(row)])).toEqual([["deploy", "session"]]);
+		expect(JSON.parse(told).audit.map((row: any) => [row.operation, requestedBy(row)])).toEqual([["deploy", "agent"]]);
 
 		faux.setResponses([toolUse("hostops_audit", { since: "2999-01-01T00:00:00Z" }), record]);
 		await sayAs(TOKEN, ROOT, "Anything later?");

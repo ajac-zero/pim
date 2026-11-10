@@ -272,6 +272,11 @@ export class Pim extends RealPim {
 		return faux.getModel();
 	}
 
+	/** None while a test sets `test:no-fallback`, as in a deployment with no other model to run a subscription's chats on. */
+	protected override fallbackModel(provider: string): Model<Api> | undefined {
+		return this.store.meta("test:no-fallback") === undefined ? super.fallbackModel(provider) : undefined;
+	}
+
 	/** Under `auto`, long enough for a test to answer an approval, short enough to wait out. */
 	protected override approvalTimeoutMs(policy = this.settings().approvalPolicy): number | null {
 		return policy === "auto" ? 1_500 : null;

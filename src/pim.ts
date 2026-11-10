@@ -417,6 +417,8 @@ const STOP_WAIT_MS = 5_000;
 /** How long an agent's run may go without any progress before it is stopped, with a note: a call that never returns can't hold a chat's events for good. A wait for the person, or for a retry, is not a stall. */
 const STALL_MS = 30 * 60 * 1000;
 const WATCHDOG_CALLBACK = "watchRuns";
+/** What wakes the chats held on a subscription's usage limit once its cooldown ends (see ./provider-cooldowns.ts). */
+const COOLDOWN_CALLBACK = "retryAfterCooldown";
 /** How long an erasure waits for runs to stop and connectors to unsubscribe before wiping anyway. */
 const ERASE_COURTESY_MS = 3_000;
 /** `pim_meta` keys of the models chosen through the API: for chats, and the utility model. */
@@ -1341,9 +1343,43 @@ export class Pim extends DurableAgent<Env> {
 			return true;
 		}
 		if (this.#taskApart(conversation) || this.#taskUnderway(conversation)) return false;
+		// Held on a subscription's usage limit, the chat goes on by itself: on another model once there is one, else once the limit resets.
+		const provider = message.provider;
+		if (provider !== undefined && this.#subscription(provider) && this.providerCooldowns.active(provider)) {
+			void this.keepAliveWhile(() => (this.fallbackModel(provider) ? this.#resumeSoon(conversation) : this.retryAfterCooldown({ provider })));
+		}
 		// The chat list stops showing it as working once the hold is committed, just after this answers.
 		setTimeout(() => this.broadcastMessage({ type: "sessions" }), 1000);
 		return true;
+	}
+
+	/**
+	 * Asks the model again in the chats held on a subscription's error once it
+	 * has cooled down, or at once when another model can take them meanwhile.
+	 * While it still cools down with nowhere else to go, wakes again at the
+	 * cooldown's end, which `until` names, so each end is armed once.
+	 */
+	async retryAfterCooldown({ provider, until }: { provider: string; until?: number }): Promise<void> {
+		if (this.#closed()) return;
+		const cooldown = this.providerCooldowns.active(provider);
+		if (cooldown && !this.fallbackModel(provider)) {
+			// Schedules keep whole seconds, so the wake is at the second after the end. One that came early anyway wakes
+			// again a second later, as a new one: the schedule running now still matches its own.
+			const at = Math.ceil(Math.max(cooldown.until, until === undefined ? 0 : until + 1000) / 1000) * 1000;
+			await this.schedule(new Date(at), COOLDOWN_CALLBACK, { provider, until: at }, { idempotent: true });
+			return;
+		}
+		for (const conversation of await this.#heldOn(provider)) await this.#resumeHeld(conversation);
+	}
+
+	/** The chats held after an error from `provider`, such as its usage limit. */
+	async #heldOn(provider: string): Promise<string[]> {
+		const found: string[] = [];
+		for (const conversation of await this.#heldSessions()) {
+			const failed = (await this.harness.session(conversation).messages()).map((entry) => entry.model?.[0]).findLast((message) => message?.role === "assistant" && message.stopReason === "error");
+			if (failed?.role === "assistant" && failed.provider === provider) found.push(conversation);
+		}
+		return found;
 	}
 
 	/** The model after the one that failed in the agent's own and fallback models; none when it was the last, or isn't one of them. */
@@ -1358,7 +1394,11 @@ export class Pim extends DurableAgent<Env> {
 	async #failOver(conversation: string, model: PiModel): Promise<void> {
 		this.#note("failover", { conversation, provider: model.provider, model: model.id });
 		await this.harness.session(conversation).setModel(model);
-		// The run is held just after its hook answers.
+		await this.#resumeSoon(conversation);
+	}
+
+	/** Runs a run being held again as soon as its hold is committed, which is just after its hook answers. */
+	async #resumeSoon(conversation: string): Promise<void> {
 		for (let attempt = 0; attempt < 20; attempt++) {
 			if (await this.#resumeHeld(conversation)) return;
 			await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1413,9 +1453,10 @@ export class Pim extends DurableAgent<Env> {
 		return this.#modelCatalog;
 	}
 
-	/** Notes a subscription's cooldown, in the diagnostics' log. */
+	/** Notes a subscription's cooldown, and has the chats held on it go on: on the default model at once, or when the cooldown ends. */
 	#cooled({ provider, until, failures, resetFrom }: Cooldown): void {
 		this.#note("provider_cooldown", { provider, until: new Date(until).toISOString(), failures, resetFrom });
+		void this.keepAliveWhile(() => this.retryAfterCooldown({ provider })).catch((error) => console.warn("retrying after a cooldown failed", error));
 	}
 
 	/** The catalog without failing over, for side jobs, which choose their own model when the plan can't answer (see `#askUtility`). */

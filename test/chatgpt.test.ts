@@ -356,6 +356,31 @@ describe("Sign in with ChatGPT", () => {
 		expect(asked("And the second?")).toBe(0);
 	});
 
+	it("holds a chat on the plan's usage limit with no other model, and tries it again by itself once the limit resets", async () => {
+		await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => {
+			instance.store.setMeta("test:no-fallback", "1");
+			// The plan answered since the last test's limit.
+			instance.providerCooldowns.succeeded("openai", Date.now());
+		});
+		try {
+			limit = { requests: 1, resetsInSeconds: 3 };
+			const session = (await post<{ id: string }>("/sessions")).body.id;
+			const chat = () => api("/sessions").then(({ body }) => body.sessions.find((info: { id: string }) => info.id === session));
+			await post(`/sessions/${session}/messages`, { content: "Wait for the reset" });
+			await vi.waitFor(async () => expect(await chat()).toMatchObject({ held: true, error: expect.stringContaining("usage") }));
+			const cooldown = await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.providerCooldowns.active("openai"));
+			expect(cooldown).toMatchObject({ failures: 1, resetFrom: "provider" });
+
+			// No one says Try again: the cooldown's end does, and the plan answers.
+			await vi.waitFor(async () => expect(await chat()).toMatchObject({ held: false }), { timeout: 15_000, interval: 250 });
+			const asked = callsTo("/v1/responses").filter((call) => call.body.includes("Wait for the reset") && !call.body.includes("You name chats"));
+			expect(asked).toHaveLength(2);
+			expect(await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.providerCooldowns.list())).toEqual([]);
+		} finally {
+			await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.store.deleteMeta("test:no-fallback"));
+		}
+	});
+
 	it("goes back to the default model when ChatGPT is disconnected", async () => {
 		const { body } = await api("/chatgpt", { method: "DELETE" });
 		expect(body).toEqual({ connected: false, email: null });

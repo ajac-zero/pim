@@ -55,7 +55,7 @@ export async function dispatch(routes: readonly Route[], request: Request, path:
 }
 
 /** The params `segments` give `pattern`'s, or null when they don't match it. */
-function match(pattern: string, segments: readonly string[]): Record<string, string> | null {
+export function match(pattern: string, segments: readonly string[]): Record<string, string> | null {
 	const parts = pattern.split("/").filter(Boolean);
 	if (parts.length !== segments.length) return null;
 	const params: Record<string, string> = {};

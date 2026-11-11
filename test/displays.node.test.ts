@@ -105,6 +105,43 @@ describe("driver calls with a thread", () => {
 		expect(primary.seen).toEqual([]);
 	});
 
+	it("tells a queued thread its position, estimated wait and who holds the displays", async () => {
+		const queue = { position: 2, estimatedWaitSec: 90, holders: [{ threadId: "h1", idleSec: 30, state: "active" }, { threadId: "h2", idleSec: 5, state: "idle" }] };
+		const { primary, machine } = await setup(() => ({ status: 202, json: { lease: { threadId: "a", state: "queued", ...queue } } }));
+		const result = (await (machine().displays as DisplayClient).call("a", "click", {})) as any;
+		expect(result.isError).toBe(true);
+		expect(text(result)).toMatch(/^display_queued /);
+		expect(text(result)).toContain("position 2");
+		expect(text(result)).toContain("estimated wait 90 s");
+		expect(text(result)).toContain("h1 (active, idle 30 s)");
+		expect(text(result)).toContain("h2 (idle, idle 5 s)");
+		expect(text(result)).toMatch(/try again/i);
+		expect(primary.seen).toEqual([]);
+	});
+
+	it("reports a timeout and a preempted display as retryable errors", async () => {
+		const states = { a: { state: "timeout" }, b: { state: "gone", reason: "preempted" } } as const;
+		const { machine } = await setup((t) => ({ status: 202, json: { lease: { threadId: t, ...states[t as "a" | "b"] } } }));
+		const m = machine().displays as DisplayClient;
+		expect(text(await m.call("a", "click", {}))).toMatch(/^display_timeout .*try again/);
+		const gone = (await m.call("b", "click", {})) as any;
+		expect(gone.isError).toBe(true);
+		expect(text(gone)).toMatch(/^display_gone .*preempted.*try again/);
+	});
+
+	it("does not call the driver while a person controls the display", async () => {
+		const a = await start(fakeDriver("a"));
+		const { displayd, machine } = await setup((t) => ({ json: { lease: { ...lease(t, a), control: "user" } } }));
+		const result = (await (machine().displays as DisplayClient).call("a", "click", {})) as any;
+		expect(result.isError).toBe(true);
+		expect(text(result)).toMatch(/^display_user_controlled .*(wait|try again)/i);
+		expect(a.seen).toEqual([]);
+		expect(displayd.seen.some((r) => r.url === "/touch")).toBe(false);
+		// Handed back, the same call goes through.
+		const back = await setup((t) => ({ json: { lease: { ...lease(t, a), control: "agent" } } }));
+		expect(JSON.parse(text(await (back.machine().displays as DisplayClient).call("a", "click", {}))).driver).toBe("a");
+	});
+
 	it("says display_starting while the display comes up", async () => {
 		const { machine } = await setup(() => ({ status: 202, json: { lease: { threadId: "a", state: "starting" } } }));
 		expect(text(await (machine().displays as DisplayClient).call("a", "click", {}))).toMatch(/^display_starting /);

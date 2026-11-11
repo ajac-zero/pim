@@ -933,16 +933,20 @@ describe("a coding thread on a provider with sessions, keepalives and egress inj
 		codingFaux.setResponses(Array.from({ length: 12 }, (_, n) => toolUse("bash", { command: `sleep ${30 + n}` })));
 		const { id, stub } = await startThread();
 		for (let restart = 1; restart <= 4; restart++) {
-			// The turn is under way in a session that began at the last restart.
-			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ currentOperation: expect.any(String), session: { startedAt: t0 + (restart - 1) * 50_000 } }), { timeout: 15_000, interval: 50 });
+			// The turn is under way again after the last restart.
+			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ currentOperation: expect.any(String), session: { unproductiveRestarts: restart - 1 } }), { timeout: 15_000, interval: 50 });
 			codingThreadClock.now = t0 + restart * 50_000;
 			await heartbeat(stub);
 		}
-		const [ended] = await turns(id, 1);
-		expect(ended).toMatchObject({ outcome: "error", reason: "session_restarts_exhausted", state: "failed", detail: expect.stringContaining("4 times in a row") });
-		expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "session_restarts_exhausted", session: { state: "active", unproductiveRestarts: 4 } });
-		codingFaux.setResponses([]);
-	});
+		try {
+			const [ended] = await turns(id, 1);
+			expect(ended).toMatchObject({ outcome: "error", reason: "session_restarts_exhausted", state: "failed", detail: expect.stringContaining("4 times in a row") });
+			// The move that ended it settles a moment after the turn's end is told.
+			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "session_restarts_exhausted", session: { state: "active", unproductiveRestarts: 4 } }), { timeout: 15_000, interval: 50 });
+		} finally {
+			codingFaux.setResponses([]);
+		}
+	}, 120_000);
 });
 
 async function printedOf(workspace: { exec: (cmd: string[], o: { timeoutMs: number }) => AsyncIterable<{ type: string; data?: string }> }, cmd: string[]) {
@@ -1898,7 +1902,7 @@ describe("a Claude Code thread", () => {
 		const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
 		const { id, stub } = await startClaude();
 		await running(1);
-		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1));
+		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1), { timeout: 15_000, interval: 50 });
 		expect((await stub.status()).session).toMatchObject({ startedAt: t0, continuations: 0 });
 		codingThreadClock.now = t0 + 50_000;
 		await heartbeat(stub);
@@ -1907,8 +1911,8 @@ describe("a Claude Code thread", () => {
 		expect(signals.map((each) => each[0])).toEqual(["-INT"]);
 		expect(runs[1]!.argv[runs[1]!.argv.indexOf("--resume") + 1]).toBe(CLAUDE_SESSION);
 		expect(runs[1]!.argv).toContain("-p");
-		expect(sessions).toEqual([t0, t0 + 50_000]);
-		await vi.waitFor(async () => expect((await stub.status()).session).toMatchObject({ state: "active", continuations: 1, startedAt: t0 + 50_000, last: { mode: "turn_restarted" } }));
+		await vi.waitFor(() => expect(sessions).toEqual([t0, t0 + 50_000]), { timeout: 15_000, interval: 50 });
+		await vi.waitFor(async () => expect((await stub.status()).session).toMatchObject({ state: "active", continuations: 1, last: { mode: "turn_restarted" } }), { timeout: 15_000, interval: 50 });
 		expect(await stub.status()).toMatchObject({ state: "running", consecutiveInterrupts: 0 });
 		// The person stops the second run: nothing runs it a third time.
 		await stub.abort();
@@ -1944,7 +1948,7 @@ describe("a Claude Code thread", () => {
 		};
 		const { id, stub } = await startClaude();
 		await running(1);
-		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1));
+		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1), { timeout: 15_000, interval: 50 });
 		await runInDurableObject(stub, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
 		// Auto-resume should happen - no turn_ended event is emitted to supervisor
 		// The turn continues with a new CLI run

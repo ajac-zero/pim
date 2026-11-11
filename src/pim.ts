@@ -1565,15 +1565,22 @@ export class Pim extends DurableAgent<Env> {
 	 * that can't take it now (erased, suspended, at a limit), is left be. Says
 	 * whether it woke.
 	 */
-	async codingTurnEnded(chat: string, text: string, key: string): Promise<boolean> {
-		const session = this.store.sessionOf(chat);
+	async codingTurnEnded(chat: string, text: string, key: string, agent?: string): Promise<boolean> {
+		const named = this.store.sessionOf(chat);
+		// A thread recorded under an agent's own conversation in a room belongs to the room's chat.
+		const session = named === undefined ? undefined : (this.#rooms.of(named)?.room ?? named);
 		if (this.#closed() || session === undefined || !this.store.sessionInfo(session) || this.store.deletedSessions().has(session)) return false;
 		const woken = `${CODING_WAKE_KEY}${key}`;
 		if (this.store.meta(woken) !== undefined) return false;
 		// Claimed first, so the same turn told twice at once wakes the chat once.
 		this.store.setMeta(woken, "1");
 		try {
-			await this.submitTo(await this.#carriedOn(session), text, { operationId: key, whenBusy: "followUp" }, "pim");
+			// In a room it is the agent that started the thread that is woken, in its seat.
+			const seat = agent === undefined ? undefined : this.#rooms.at(session, agent);
+			const target = seat?.conversation ?? session;
+			if (seat) await this.#selectAbilities(target);
+			await this.submitTo(await this.#carriedOn(target), text, { operationId: key, whenBusy: "followUp" }, "pim");
+			if (seat && seat.conversation !== seat.room) this.broadcastMessage({ type: "sessions" });
 			return true;
 		} catch (error) {
 			this.store.deleteMeta(woken);
@@ -4795,7 +4802,8 @@ export class Pim extends DurableAgent<Env> {
 					},
 					conversationOf: (session) => {
 						const { id, name, majordomo } = this.agents.ofSession(session);
-						return { chat: this.store.publicId(session), agent: { id, name, majordomo } };
+						// An agent in a room is in the room's chat, which is where its work shows.
+						return { chat: this.store.publicId(this.#rooms.of(session)?.room ?? session), agent: { id, name, majordomo } };
 					},
 					diagnostics: { report: (query) => this.diagnosticsReport(query), health: () => this.healthReport() },
 				});

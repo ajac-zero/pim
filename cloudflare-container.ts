@@ -1,5 +1,5 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import type { ContainerHost as ContainerHostApi, ContainerCatalog } from "./src/coding/workspace/cloudflare";
+import { type ContainerHost as ContainerHostApi, type ContainerCatalog, isNoInstanceError } from "./src/coding/workspace/cloudflare";
 import { egressPolicy } from "./src/coding/workspace/egress";
 import { WorkspaceLostError, WorkspaceNotFoundError, WorkspaceUnsupportedError, type WorkspaceSpec, type WorkspaceInfo, type EgressPolicy } from "./src/coding/workspace/types";
 import { handleEgress } from "./cloudflare-egress";
@@ -10,6 +10,21 @@ import { handleEgress } from "./cloudflare-egress";
 const IDLE_MS = 30 * 60_000;
 type Saved = { spec: WorkspaceSpec; createdAt: number; state: "running" | "stopped" | "kept"; snapshot?: string; token: string };
 type Snapshot = { id: string; sessionId: string };
+
+/**
+ * The instance a coding workspace runs on: the thread's limits, raised to
+ * at least 4 vCPU, 12 GiB of memory (Cloudflare asks for 3 GiB per vCPU) and 16 GB of disk so builds have room,
+ * and kept within Cloudflare's largest custom instance (4 vCPU, 12 GiB,
+ * 20 GB). Memory and disk are billed for as long as the container is up, CPU
+ * only while it is busy (docs/coding-cloudflare-sandbox.md).
+ */
+export function instanceFor(limits: WorkspaceSpec["limits"]): { vcpu: number; memoryMib: number; diskMb: number } {
+	return {
+		vcpu: Math.min(Math.max(limits.cpu, 4), 4),
+		memoryMib: Math.min(Math.max(limits.memMiB, 12 * 1024), 12 * 1024),
+		diskMb: Math.min(Math.max(Math.ceil(limits.diskMiB * 1.048576), 16_000), 20_000),
+	};
+}
 type EgressProps = { sessionId: string; target: string };
 type Bindings = { WorkspaceContainer: DurableObjectNamespace<WorkspaceContainer> };
 
@@ -62,7 +77,7 @@ export class ContainerHost implements ContainerHostApi {
 	private async boot(saved: Saved) {
 		await this.intercept(saved);
 		const limits = saved.spec.limits;
-		const common = { enableInternet: false, env: { AGENTD_TOKEN: saved.token }, instance: { vcpu: limits.cpu, memoryMib: limits.memMiB, diskMb: Math.ceil(limits.diskMiB * 1.048576) } };
+		const common = { enableInternet: false, env: { AGENTD_TOKEN: saved.token }, instance: instanceFor(limits) };
 		this.container.start(saved.snapshot ? { ...common, containerSnapshot: { id: saved.snapshot } } : { ...common, image: this.container.images.base! });
 		await this.container.setInactivityTimeout(IDLE_MS);
 		// Do not publish running until agentd accepts authenticated requests.
@@ -72,7 +87,10 @@ export class ContainerHost implements ContainerHostApi {
 					const response = await this.agent(saved, new Request("http://agentd/health"));
 					await response.body?.cancel();
 					if (response.ok) break;
-				} catch {}
+				} catch (error) {
+					// Cloudflare has no instance to give it now: the thread makes its workspace elsewhere or waits, rather than this waiting out the loop.
+					if (isNoInstanceError(error)) throw error;
+				}
 				if (attempt >= 100) throw new Error("Workspace agent did not become ready");
 				await new Promise((resolve) => setTimeout(resolve, 200));
 			}

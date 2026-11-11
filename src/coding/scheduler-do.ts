@@ -5,7 +5,7 @@ import type { CodingRepoSettings } from "./api";
 import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
 import { cliHarness } from "./harness";
 import { HarnessLoginFlow, type LoginStatus } from "./harness/login";
-import { DEFAULT_SPACE_CAP, type ManagerHealth, ProviderCapacity } from "./provider-capacity";
+import { DEFAULT_SPACE_CAP, type ManagerHealth, PROVIDER_SPACE_CAPS, ProviderCapacity } from "./provider-capacity";
 import {
 	type AdmissionConditions,
 	CodingScheduler,
@@ -81,6 +81,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 			transaction: (work) => ctx.storage.transactionSync(work),
 			now: () => this.now(),
 			defaultLimit: DEFAULT_SPACE_CAP,
+			limits: PROVIDER_SPACE_CAPS,
 		});
 		this.#threads = new CodingThreadIndex(ctx.storage.sql);
 		// A crash between counting a sign-in's workspace and making it leaves a count nothing owns.
@@ -107,7 +108,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		return threadNotifier(this.env);
 	}
 
-	/** Gives the thread a slot or a place in the queue (`CodingScheduler.request`). */
+	/** Gives the thread a slot, on its provider or one of its overflow, or a place in the queue (`CodingScheduler.request`). */
 	async request(threadId: string, request: SlotRequest): Promise<RequestResult> {
 		const result = this.#scheduler.request(threadId, request);
 		await this.#schedule(false);
@@ -136,33 +137,41 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		return this.#scheduler.snapshot();
 	}
 
-	/** Sets how many slots the space has: the space's own cap for a provider without a manager, or `refreshConditions` for one with. */
-	async setLimit(limit: number): Promise<string[]> {
+	/** Moves the thread's slot to the first of `providers` with room (`CodingScheduler.move`), and tells the threads admitted into the slot it left. */
+	async move(threadId: string, providers: readonly string[]): Promise<string | null> {
 		return this.#changed(() => {
-			const admitted = this.#scheduler.setLimit(limit);
+			const { provider, admitted } = this.#scheduler.move(threadId, providers);
+			return { result: provider, admitted };
+		});
+	}
+
+	/** Sets how many slots the space has on each provider without a limit of its own, or `provider`'s own: the space's cap for a provider without a manager, or `refreshConditions` for one with. */
+	async setLimit(limit: number, provider?: string): Promise<string[]> {
+		return this.#changed(() => {
+			const admitted = this.#scheduler.setLimit(limit, provider);
 			return { result: admitted, admitted };
 		});
 	}
 
-	async setConditions(conditions: AdmissionConditions): Promise<string[]> {
+	async setConditions(conditions: AdmissionConditions, provider?: string): Promise<string[]> {
 		return this.#changed(() => {
-			const admitted = this.#scheduler.setConditions(conditions);
+			const admitted = this.#scheduler.setConditions(conditions, provider);
 			return { result: admitted, admitted };
 		});
 	}
 
-	/** Sets the conditions and the limit from the workspace manager's `/health`, with the space's cap (./provider-capacity.ts). */
-	async refreshConditions(health: ManagerHealth, spaceCap = DEFAULT_SPACE_CAP): Promise<string[]> {
+	/** Sets the conditions and the limit from the workspace manager's `/health`, with the space's cap (./provider-capacity.ts): `provider`'s, the manager's, or with none, every provider's without its own. */
+	async refreshConditions(health: ManagerHealth, spaceCap = DEFAULT_SPACE_CAP, provider?: string): Promise<string[]> {
 		return this.#changed(() => {
-			const admitted = new ProviderCapacity(this.#scheduler, spaceCap).refreshConditions(health);
+			const admitted = new ProviderCapacity(this.#scheduler, spaceCap, provider).refreshConditions(health);
 			return { result: admitted, admitted };
 		});
 	}
 
-	/** Takes in the workspace manager's refusal of a workspace, by its `code`. */
-	async onManagerError(code: string): Promise<string[]> {
+	/** Takes in the workspace manager's refusal of a workspace, by its `code`, for `provider`, the manager's. */
+	async onManagerError(code: string, provider?: string): Promise<string[]> {
 		return this.#changed(() => {
-			const admitted = new ProviderCapacity(this.#scheduler).onManagerError(code);
+			const admitted = new ProviderCapacity(this.#scheduler, DEFAULT_SPACE_CAP, provider).onManagerError(code);
 			return { result: admitted, admitted };
 		});
 	}
@@ -452,7 +461,8 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 			this.ctx.storage.sql.exec("INSERT INTO pim_coding_outbox (kind, thread_id, body, created_at) VALUES (?, ?, ?, ?)", kind, threadId, JSON.stringify(body), now);
 		for (const entry of released) write("released", entry.threadId, entry);
 		for (const entry of expired) write("expired", entry.threadId, entry);
-		for (const threadId of admitted) write("admitted", threadId, null);
+		// The slot's provider goes with the notice, as a thread may have been admitted to one of its overflow.
+		for (const threadId of admitted) write("admitted", threadId, { provider: this.#scheduler.slot(threadId)?.provider ?? null });
 		return admitted.length + released.length + expired.length > 0;
 	}
 
@@ -464,7 +474,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 			const notice = noticeOf(row);
 			if (held.has(notice.threadId)) continue;
 			try {
-				if (notice.kind === "admitted") await notifier.admitted(notice.threadId, notice.key);
+				if (notice.kind === "admitted") await notifier.admitted(notice.threadId, notice.key, notice.provider);
 				else if (notice.kind === "expired") await notifier.expired(notice.entry, notice.key);
 				else await notifier.released(notice.released, notice.key);
 				this.ctx.storage.sql.exec("DELETE FROM pim_coding_outbox WHERE seq = ?", row.seq);
@@ -515,8 +525,8 @@ export const MAX_NOTICE_ATTEMPTS = 20;
  * (`threadNotifier`).
  */
 export interface SchedulerNotifier {
-	/** The thread was admitted from the queue and holds a slot: it may start its workspace. */
-	admitted(threadId: string, key: string): void | Promise<void>;
+	/** The thread was admitted from the queue and holds a slot, on `provider` when the notice says: it may start its workspace there. */
+	admitted(threadId: string, key: string, provider?: string): void | Promise<void>;
 	/** The thread waited past its deadline and left the queue; `entry.reason` is what it waited for. */
 	expired(entry: QueueEntry, key: string): void | Promise<void>;
 	/** A sweep took the thread's slot back: it checkpoints its work and destroys its workspace, and for `preempted` asks again then. */
@@ -529,7 +539,7 @@ export const noopNotifier: SchedulerNotifier = { admitted() {}, expired() {}, re
 /** Tells each thread's Durable Object, which ignores a notice it already took by its key. A thread that can't be reached throws, so the notice is delivered again later. */
 export function threadNotifier(env: Env): SchedulerNotifier {
 	return {
-		admitted: (threadId, key) => env.CodingThread.getByName(threadId).admitted(key),
+		admitted: (threadId, key, provider) => env.CodingThread.getByName(threadId).admitted(key, provider),
 		expired: (entry, key) => env.CodingThread.getByName(entry.threadId).expired(entry, key),
 		released: (released, key) => env.CodingThread.getByName(released.threadId).released(released, key),
 	};
@@ -537,7 +547,7 @@ export function threadNotifier(env: Env): SchedulerNotifier {
 
 /** A notice as delivered. */
 export type SchedulerNotice = { readonly key: string; readonly threadId: string } & (
-	| { readonly kind: "admitted" }
+	| { readonly kind: "admitted"; readonly provider?: string }
 	| { readonly kind: "expired"; readonly entry: QueueEntry }
 	| { readonly kind: "released"; readonly released: Released }
 );
@@ -607,5 +617,7 @@ function noticeOf(row: Record<string, SqlStorageValue>): SchedulerNotice {
 	const body = JSON.parse(String(row.body));
 	if (kind === "expired") return { key, threadId, kind, entry: body as QueueEntry };
 	if (kind === "released") return { key, threadId, kind, released: body as Released };
-	return { key, threadId, kind };
+	// Notices from before overflow have no body.
+	const provider = (body as { provider?: string | null } | null)?.provider;
+	return provider ? { key, threadId, kind, provider } : { key, threadId, kind };
 }

@@ -3,6 +3,7 @@
 import { ComposeWorkspace, ComposeWorkspaceProvider } from "./compose";
 import { resumeOrCreate } from "./egress";
 import {
+	WorkspaceCapacityError,
 	WorkspaceNotFoundError,
 	WorkspaceUnsupportedError,
 	type EgressPolicy,
@@ -49,7 +50,12 @@ export class CloudflareContainerProvider implements WorkspaceProvider {
 	async create(spec: WorkspaceSpec): Promise<WorkspaceRef> {
 		// Register first so a lost response cannot leave an unlisted container.
 		await this.options.catalog.add(spec.sessionId);
-		await this.options.containerFor(spec.sessionId).create(spec);
+		try {
+			await this.options.containerFor(spec.sessionId).create(spec);
+		} catch (error) {
+			if (isNoInstanceError(error)) throw new WorkspaceCapacityError("Cloudflare has no container instance for the workspace now");
+			throw error;
+		}
 		return { id: spec.sessionId, sessionId: spec.sessionId, providerId: this.id };
 	}
 	async get(ref: WorkspaceRef) {
@@ -173,6 +179,11 @@ class ContainerWorkspace extends ComposeWorkspace {
 		if (ref.providerId !== this.providerId) throw new WorkspaceNotFoundError();
 		await this.host.restore(ref.id);
 	}
+}
+
+/** Whether Cloudflare refused to start a container for want of an instance, as at the account's limit of running ones: the backend is full for now. */
+export function isNoInstanceError(error: unknown): boolean {
+	return /no container instance/i.test(error instanceof Error ? error.message : String(error));
 }
 
 /** Both bindings are needed; a legacy Sandbox binding must never advertise Containers as usable. */

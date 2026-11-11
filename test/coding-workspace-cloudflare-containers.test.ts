@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { CloudflareContainerProvider, containerProvider } from "../src/coding/workspace/cloudflare";
+import { CloudflareContainerProvider, type ContainerHost as ContainerHostApi, containerProvider } from "../src/coding/workspace/cloudflare";
 import { runConformanceSuite } from "../src/coding/workspace/conformance";
 import { fakeContainers } from "./fake-container";
 import { computeSummary, prepareComputeProvider, workspaceProviderOf } from "../src/compute";
 import { workspaceBackends } from "../src/coding/workspace/registry";
-import type { WorkspaceSpec } from "../src/coding/workspace/types";
-import { ContainerHost } from "../cloudflare-container";
+import { WorkspaceCapacityError, type WorkspaceSpec } from "../src/coding/workspace/types";
+import { ContainerHost, instanceFor } from "../cloudflare-container";
 import { handleEgress } from "../cloudflare-egress";
 
 const spec: WorkspaceSpec = {
@@ -92,6 +92,9 @@ describe("Cloudflare Containers integration", () => {
 	});
 });
 
+/** What Cloudflare says when it has no instance to start a container on. */
+const NO_INSTANCE = "There is no container instance that can be provided to this Durable Object, try again later";
+
 /** A native API stand-in: snapshot failure and unexpected stops must not claim a successful suspension. */
 function hostFixture() {
 	const data = new Map<string, unknown>();
@@ -99,6 +102,8 @@ function hostFixture() {
 	let running = false;
 	let failSnapshot = false;
 	let failDestroy = false;
+	let noInstance = false;
+	const instances: unknown[] = [];
 	const container = {
 		get running() {
 			return running;
@@ -106,6 +111,7 @@ function hostFixture() {
 		images: { base: "test-image" },
 		start: (options: ContainerStartupOptions) => {
 			calls.push(options.containerSnapshot ? "restore" : "start");
+			instances.push(options.instance);
 			expect(options.enableInternet).toBe(false);
 			running = true;
 		},
@@ -126,7 +132,12 @@ function hostFixture() {
 			if (failSnapshot) throw new Error("snapshot failed");
 			return { id: "checkpoint", size: 1 };
 		},
-		getTcpPort: () => ({ fetch: async () => Response.json({ ok: true }) }),
+		getTcpPort: () => ({
+			fetch: async () => {
+				if (noInstance) throw new Error(NO_INSTANCE);
+				return Response.json({ ok: true });
+			},
+		}),
 	};
 	const ctx = {
 		container,
@@ -145,6 +156,10 @@ function hostFixture() {
 	return {
 		host: new ContainerHost(ctx as unknown as DurableObjectState),
 		calls,
+		instances,
+		full: () => {
+			noInstance = true;
+		},
 		restartWithFailedCleanup: () => {
 			running = true;
 			failDestroy = true;
@@ -193,6 +208,31 @@ describe("WorkspaceContainer lifecycle", () => {
 			expect((request as Request).headers.get("authorization")).not.toBe("stale-token");
 			return new Response("ok");
 		});
+	});
+	it("runs a coding workspace on at least 4 vCPU, 12 GiB and 16 GB, within Cloudflare's largest instance", async () => {
+		const { host, instances } = hostFixture();
+		await host.create(spec);
+		await host.suspend();
+		await host.start();
+		// The first start and the restore from the snapshot are the same size.
+		expect(instances).toEqual([
+			{ vcpu: 4, memoryMib: 12_288, diskMb: 16_000 },
+			{ vcpu: 4, memoryMib: 12_288, diskMb: 16_000 },
+		]);
+		expect(instanceFor({ cpu: 2, memMiB: 6144, diskMiB: 5120, pids: 1024, wallClockMin: null })).toEqual({ vcpu: 4, memoryMib: 12_288, diskMb: 16_000 });
+		expect(instanceFor({ cpu: 8, memMiB: 16_384, diskMiB: 32_768, pids: 1024, wallClockMin: null })).toEqual({ vcpu: 4, memoryMib: 12_288, diskMb: 20_000 });
+		expect(instanceFor({ cpu: 3, memMiB: 10_240, diskMiB: 17_000, pids: 1024, wallClockMin: null })).toEqual({ vcpu: 4, memoryMib: 12_288, diskMb: 17_826 });
+	});
+	it("gives up at once when Cloudflare has no instance for it, which the provider reports as a full backend", async () => {
+		const { host, calls, full } = hostFixture();
+		full();
+		await expect(host.create(spec)).rejects.toThrow(NO_INSTANCE);
+		expect(calls).toEqual(["start", "destroy"]);
+		const catalog = { add: async () => {}, remove: async () => {}, list: async () => [] };
+		const provider = new CloudflareContainerProvider({ containerFor: () => ({ create: () => host.create(spec) }) as unknown as ContainerHostApi, catalog });
+		await expect(provider.create(spec)).rejects.toBeInstanceOf(WorkspaceCapacityError);
+		const broken = new CloudflareContainerProvider({ containerFor: () => ({ create: async () => Promise.reject(new Error("image pull failed")) }) as unknown as ContainerHostApi, catalog });
+		await expect(broken.create(spec)).rejects.toThrow("image pull failed");
 	});
 	it("saves before destroy and restores once, with durable state", async () => {
 		const { host, calls } = hostFixture();

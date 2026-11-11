@@ -52,7 +52,7 @@ import {
 	type SandboxModelEnv,
 	verifyGatewayToken,
 } from "./model-gateway";
-import type { ManagerHealth } from "./provider-capacity";
+import { DEFAULT_SPACE_CAP, type ManagerHealth } from "./provider-capacity";
 import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { BranchMovedError, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
@@ -808,6 +808,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },
 				harness,
 				providerId,
+				// A thread started on a provider by name runs there; any other may overflow until it makes its workspace.
+				placed: input.workspaceProvider !== undefined,
 				state: "provisioning",
 				createdBy: input.createdBy,
 				parentThread: input.parent ?? null,
@@ -1504,8 +1506,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		})().catch((error) => console.warn(JSON.stringify({ event: "pim.coding.gateway_charge_failed", error: String(error).slice(0, 300) })));
 	}
 
-	/** The scheduler's notice: the queued thread holds a slot now. */
-	async admitted(key: string): Promise<void> {
+	/** The scheduler's notice: the queued thread holds a slot now, on `provider` when the notice says, which may be one it overflowed to. */
+	async admitted(key: string, provider?: string): Promise<void> {
 		await this.lifecycle.start();
 		const thread = this.store.thread();
 		if (!thread || !this.store.firstNotice(key) || thread.slot === "held") return;
@@ -1514,7 +1516,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			await codingScheduler(this.env, thread.space).release(thread.threadId);
 			return;
 		}
-		this.#holdSlot();
+		this.#holdSlot(provider);
 		this.#kick();
 	}
 
@@ -1824,40 +1826,82 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/**
 	 * Tells the space's scheduler what the workspace manager's health says
-	 * (./provider-capacity.ts): under 15% of its disk free holds the queue,
-	 * and its limit caps the space's slots. Only for a backend with a
-	 * manager; one that can't be reached changes nothing.
+	 * (./provider-capacity.ts): under 15% of its disk free holds the queue
+	 * for the manager's provider, and its limit caps the space's slots there.
+	 * Only for a backend with a manager; one that can't be reached changes
+	 * nothing. Returns the health, or null without one.
 	 */
-	async #refreshCapacity(): Promise<void> {
+	async #refreshCapacity(): Promise<ManagerHealth | null> {
 		const thread = this.store.required();
 		const health = this.#healthOf(thread);
-		if (!health) return;
+		if (!health) return null;
 		try {
 			const { freeDiskPct, maxConcurrent, running, free } = await health();
-			await codingScheduler(this.env, thread.space).refreshConditions({ freeDiskPct, maxConcurrent, running, free });
+			await codingScheduler(this.env, thread.space).refreshConditions({ freeDiskPct, maxConcurrent, running, free }, DEFAULT_SPACE_CAP, thread.providerId);
+			return { freeDiskPct, maxConcurrent, running, free };
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.health_failed", thread: thread.threadId, error: String(error) }));
+			return null;
 		}
+	}
+
+	/**
+	 * Where the thread may take a slot: its own provider alone once it is
+	 * placed there; otherwise its provider first and the deployment's others
+	 * after it, in the registry's order, as overflow. A provider whose
+	 * manager says it runs as many workspaces as it may goes last, so the
+	 * thread takes a slot elsewhere rather than one it can't use.
+	 */
+	#placement(thread: CodingThreadRow, health: ManagerHealth | null): { provider: string; overflow: string[] } {
+		if (thread.placed) return { provider: thread.providerId, overflow: [] };
+		const others = this.workspaceProviders()
+			.ids()
+			.filter((id) => id !== thread.providerId);
+		const order = health && health.free <= 0 ? [...others, thread.providerId] : [thread.providerId, ...others];
+		return { provider: order[0]!, overflow: order.slice(1) };
+	}
+
+	/**
+	 * Moves the slot of a thread not yet placed whose provider refused its
+	 * workspace for room (a full backend, or the manager's low disk) to
+	 * another provider with a slot free: true when it moved, so it makes its
+	 * workspace there next.
+	 */
+	async #overflow(thread: CodingThreadRow): Promise<boolean> {
+		if (thread.placed || thread.slot !== "held") return false;
+		const others = this.workspaceProviders()
+			.ids()
+			.filter((id) => id !== thread.providerId);
+		if (others.length === 0) return false;
+		const moved = await codingScheduler(this.env, thread.space).move(thread.threadId, others);
+		if (moved === null) return false;
+		this.ctx.storage.transactionSync(() => {
+			this.store.update({ providerId: moved, stateReason: null });
+			this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: moved });
+		});
+		return true;
 	}
 
 	/** Asks the scheduler for a slot, unless the thread holds one or waits for one, after telling it the manager's health. */
 	async #requestSlot(): Promise<void> {
 		if (this.store.required().slot !== "none") return;
-		await this.#refreshCapacity();
+		const health = await this.#refreshCapacity();
 		const thread = this.store.required();
 		if (thread.slot !== "none") return;
 		this.store.update({ slot: "queued" });
+		const { provider, overflow } = this.#placement(thread, health);
 		let result: Awaited<ReturnType<ReturnType<typeof codingScheduler>["request"]>>;
 		try {
 			result = await codingScheduler(this.env, thread.space).request(thread.threadId, {
-				provider: thread.providerId,
+				provider,
+				...(overflow.length > 0 ? { overflow } : {}),
 				...(thread.resumePriority ? { priority: PREEMPT_RESUME_PRIORITY } : {}),
 			});
 		} catch (error) {
 			if (this.store.required().slot === "queued") this.store.update({ slot: "none" });
 			throw error;
 		}
-		if (result.status === "admitted") this.#holdSlot();
+		if (result.status === "admitted") this.#holdSlot(result.provider);
 		// Admission may have been told meanwhile, by a notice that came while the request was answered.
 		else if (this.store.required().slot === "queued") {
 			this.ctx.storage.transactionSync(() => {
@@ -1867,11 +1911,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** Records that the thread holds a slot: it readies its workspace next. */
-	#holdSlot(): void {
+	/** Records that the thread holds a slot, on `provider` when it took one other than its own: it readies its workspace there next. */
+	#holdSlot(provider = this.store.required().providerId): void {
 		const thread = this.store.required();
 		if (thread.slot === "held") return;
-		this.store.update({ slot: "held", slotSince: this.now(), resumePriority: false, ...(thread.state === "queued" ? { state: "provisioning" } : {}) });
+		this.ctx.storage.transactionSync(() => {
+			this.store.update({ slot: "held", slotSince: this.now(), resumePriority: false, providerId: provider, ...(thread.state === "queued" ? { state: "provisioning" } : {}) });
+			if (provider !== thread.providerId) this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: provider });
+		});
 	}
 
 	async #cancelQueued(): Promise<void> {
@@ -2358,11 +2405,15 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		const lowDisk = error instanceof ComposeManagerError && error.code === "low_disk";
 		if (error instanceof WorkspaceCapacityError || lowDisk) {
-			// The backend is full though the scheduler gave a slot: try again at the next heartbeat. Low disk also holds the space's queue until the manager's health says there is room.
+			// The backend is full though the scheduler gave a slot: a thread with no workspace yet makes it on another provider with room, at once; otherwise it tries again at the next heartbeat. Low disk also holds the provider's queue until the manager's health says there is room.
 			if (lowDisk) {
 				await codingScheduler(this.env, thread.space)
-					.onManagerError("low_disk")
+					.onManagerError("low_disk", thread.providerId)
 					.catch((failure) => console.warn(JSON.stringify({ event: "pim.coding.capacity_failed", thread: thread.threadId, error: String(failure) })));
+			}
+			if (await this.#overflow(thread)) {
+				this.#kick();
+				return;
 			}
 			// Not rewritten while it holds, so the wait counts toward the thread being stuck.
 			const waiting = lowDisk ? "low_disk" : "workspace_capacity";
@@ -2538,7 +2589,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (!workspace && !thread.workspaceRef) {
 			const ref = { id: thread.threadId, providerId: thread.providerId, sessionId: thread.threadId };
 			workspace = await provider.get(ref);
-			if (workspace) this.store.update({ workspaceRef: ref });
+			if (workspace) this.store.update({ workspaceRef: ref, placed: true });
 		}
 		const started = workspace ? null : performance.now();
 		// A workspace the provider makes or resumes costs the deployment compute: the space's quota is checked before it does, and the time it runs is counted from then.
@@ -2560,7 +2611,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				await this.#releaseCompute("suspend");
 				throw new Error("The coding thread gave its workspace slot up");
 			}
-			this.store.update({ workspaceRef: ref });
+			// From here on the thread runs on this provider, where its files and environment are.
+			this.store.update({ workspaceRef: ref, placed: true });
 			workspace = await provider.get(ref);
 			if (!workspace) throw new Error("The workspace provider lost the workspace it just made");
 		} else if ((await workspace.status()).state === "stopped") {

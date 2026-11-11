@@ -40,6 +40,15 @@ export const HARNESS_NAMES: Record<CodingHarness, string> = {
   amp: "Amp",
 };
 
+/** The workspace providers a thread runs on, by id, as the admin's compute settings name them; another shows its id. */
+export const WORKSPACE_PROVIDER_NAMES: Record<string, string> = {
+  compose: "Sandbox manager",
+  cloudflare: "Cloudflare Containers",
+};
+
+export const workspaceProviderName = (id: string): string =>
+  WORKSPACE_PROVIDER_NAMES[id] ?? id;
+
 export type CodingCreator =
   | { type: "person" }
   | { type: "agent"; agent: string; chat: string };

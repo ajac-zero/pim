@@ -15,7 +15,7 @@ type Context = {
 	make: (options?: MakeOptions) => CodingScheduler;
 };
 
-type MakeOptions = { defaultLimit?: number; crash?: boolean; gates?: readonly AdmissionGate[]; defaultDeadlineMs?: number; idleMs?: number; waitingGraceMs?: number };
+type MakeOptions = { defaultLimit?: number; limits?: Record<string, number>; crash?: boolean; gates?: readonly AdmissionGate[]; defaultDeadlineMs?: number; idleMs?: number; waitingGraceMs?: number };
 
 async function withScheduler(work: (context: Context) => void, defaultLimit = 1): Promise<void> {
 	await runInDurableObject(env.Pim.getByName(`coding-${crypto.randomUUID()}`), (_pim: Pim, state) => {
@@ -30,6 +30,7 @@ async function withScheduler(work: (context: Context) => void, defaultLimit = 1)
 					}),
 				now: () => clock.now,
 				defaultLimit: options.defaultLimit ?? defaultLimit,
+				...(options.limits ? { limits: options.limits } : {}),
 				...(options.gates ? { gates: options.gates } : {}),
 				...(options.defaultDeadlineMs === undefined ? {} : { defaultDeadlineMs: options.defaultDeadlineMs }),
 				...(options.idleMs === undefined ? {} : { idleMs: options.idleMs }),
@@ -73,7 +74,7 @@ class Model {
 	request(id: string): RequestResult {
 		if (!this.running.has(id) && !this.queue.includes(id)) this.queue.push(id);
 		this.#admit();
-		return this.running.has(id) ? { status: "admitted" } : { status: "queued", position: this.queue.indexOf(id) + 1, reason: this.reason(id) };
+		return this.running.has(id) ? { status: "admitted", provider: "sandbox" } : { status: "queued", position: this.queue.indexOf(id) + 1, reason: this.reason(id) };
 	}
 	/** A thread waits for the gate only when a slot is free for it. */
 	reason(id: string): string {
@@ -158,7 +159,7 @@ describe("the coding scheduler", () => {
 
 	it("admits strictly in the order threads asked, not by their ids", async () => {
 		await withScheduler(({ scheduler, clock }) => {
-			expect(scheduler.request("r", { provider: "sandbox" })).toEqual({ status: "admitted" });
+			expect(scheduler.request("r", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
 			// z and a ask in the same millisecond; m later.
 			expect(ask(scheduler, "z", "a")).toEqual([
 				{ status: "queued", position: 1, reason: "slots_full" },
@@ -195,8 +196,8 @@ describe("the coding scheduler", () => {
 
 	it("answers a request asked again the same way, without queueing or admitting twice", async () => {
 		await withScheduler(({ scheduler, clock }) => {
-			expect(scheduler.request("a", { provider: "sandbox" })).toEqual({ status: "admitted" });
-			expect(scheduler.request("a", { provider: "other" })).toEqual({ status: "admitted" });
+			expect(scheduler.request("a", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
+			expect(scheduler.request("a", { provider: "other" })).toEqual({ status: "admitted", provider: "sandbox" });
 			expect(scheduler.request("b", { provider: "sandbox", reason: "first", deadlineMs: 1_000 })).toEqual({ status: "queued", position: 1, reason: "first" });
 			clock.now += 500;
 			expect(scheduler.request("b", { provider: "other", reason: "second", deadlineMs: 60_000 })).toEqual({ status: "queued", position: 1, reason: "first" });
@@ -204,7 +205,7 @@ describe("the coding scheduler", () => {
 			expect(snapshot.running).toEqual([{ threadId: "a", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "running", activitySince: START }]);
 			expect(snapshot.queued).toEqual([{ threadId: "b", provider: "sandbox", reason: "first", priority: 0, queuedAt: START, deadlineAt: START + 1_000 }]);
 			expect(scheduler.release("a")).toEqual(["b"]);
-			expect(scheduler.request("b", { provider: "sandbox" })).toEqual({ status: "admitted" });
+			expect(scheduler.request("b", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
 			expect(scheduler.release("a")).toEqual([]);
 			expect(scheduler.snapshot().running).toEqual([{ threadId: "b", provider: "sandbox", acquiredAt: START + 500, state: "admitted", activity: "running", activitySince: START + 500 }]);
 			expect(queued(scheduler)).toEqual([]);
@@ -218,7 +219,7 @@ describe("the coding scheduler", () => {
 				const before = scheduler.snapshot();
 				const again = make();
 				expect(again.snapshot()).toEqual(before);
-				expect(again.request("a", { provider: "sandbox" })).toEqual({ status: "admitted" });
+				expect(again.request("a", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
 				expect(again.request("c", { provider: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
 				expect(() => make({ crash: true }).release("a")).toThrow("crash before commit");
 				expect(() => make({ crash: true }).request("f", { provider: "sandbox" })).toThrow("crash before commit");
@@ -232,31 +233,86 @@ describe("the coding scheduler", () => {
 		await withScheduler(
 			({ scheduler, make, clock }) => {
 				ask(scheduler, "a", "b", "c");
-				scheduler.request("d", { provider: "vm" });
 				clock.now += 10;
 				const restarted = make();
-				// a's workspace is gone; b's runs; d was queued but its workspace runs; x runs with no record at all.
-				expect(restarted.reconcile(["b", "d", "x"])).toEqual({ released: ["a"], adopted: ["d", "x"], admitted: [] });
+				// a's workspace is gone; b's runs; c was queued but its workspace runs; x runs with no record at all.
+				expect(restarted.reconcile(["b", "c", "x"])).toEqual({ released: ["a"], adopted: ["c", "x"], admitted: [] });
 				const snapshot = restarted.snapshot();
 				expect(snapshot.running).toEqual([
 					{ threadId: "b", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "running", activitySince: START },
-					{ threadId: "d", provider: "vm", acquiredAt: START + 10, state: "adopted", activity: "running", activitySince: START + 10 },
+					{ threadId: "c", provider: "sandbox", acquiredAt: START + 10, state: "adopted", activity: "running", activitySince: START + 10 },
 					{ threadId: "x", provider: null, acquiredAt: START + 10, state: "adopted", activity: "running", activitySince: START + 10 },
 				]);
-				expect(snapshot.queued.map((entry) => entry.threadId)).toEqual(["c"]);
-				// Three running against a limit of two: nothing is admitted until two of them end.
+				expect(snapshot.queued).toEqual([]);
+				// Three running against a limit of two, x on whichever provider: nothing is admitted until two of them end.
+				expect(restarted.request("e", { provider: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
 				expect(restarted.release("b")).toEqual([]);
-				expect(restarted.request("c", { provider: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
-				expect(restarted.release("x")).toEqual(["c"]);
+				expect(restarted.release("x")).toEqual(["e"]);
 				// Run again with the same answer, it changes nothing.
-				expect(restarted.reconcile(["c", "d"])).toEqual({ released: [], adopted: [], admitted: [] });
+				expect(restarted.reconcile(["c", "e"])).toEqual({ released: [], adopted: [], admitted: [] });
 				// An orphan's slot goes to the queue's head in the same step.
-				ask(restarted, "e");
-				expect(restarted.reconcile(["d"])).toEqual({ released: ["c"], adopted: [], admitted: ["e"] });
-				expect(running(restarted).sort()).toEqual(["d", "e"]);
+				ask(restarted, "f");
+				expect(restarted.reconcile(["e"])).toEqual({ released: ["c"], adopted: [], admitted: ["f"] });
+				expect(running(restarted).sort()).toEqual(["e", "f"]);
 			},
 			2,
 		);
+	});
+
+	it("counts slots per provider, overflows a thread to the next of its providers with room, and queues it only when all are full", async () => {
+		await withScheduler(({ make }) => {
+			const scheduler = make({ defaultLimit: 2, limits: { cloud: 3 } });
+			const both = { provider: "compose", overflow: ["cloud"] };
+			for (const id of ["a", "b"]) expect(scheduler.request(id, both)).toEqual({ status: "admitted", provider: "compose" });
+			// The compose slots are the space's limit of two; the cloud has three of its own.
+			for (const id of ["c", "d", "e"]) expect(scheduler.request(id, both)).toEqual({ status: "admitted", provider: "cloud" });
+			expect(scheduler.request("f", both)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+			expect(scheduler.request("g", { provider: "compose" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
+			expect(scheduler.request("h", { provider: "cloud" })).toEqual({ status: "queued", position: 3, reason: "slots_full" });
+			expect(scheduler.snapshot().queued[0]).toMatchObject({ threadId: "f", provider: "compose", overflow: ["cloud"] });
+			// A freed cloud slot goes to f, whichever provider f asked for first, and not to g; h waits behind f.
+			expect(scheduler.release("c")).toEqual(["f"]);
+			expect(scheduler.slot("f")).toMatchObject({ provider: "cloud" });
+			expect(scheduler.release("a")).toEqual(["g"]);
+			expect(scheduler.setLimit(4, "cloud")).toEqual(["h"]);
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["b:compose", "d:cloud", "e:cloud", "f:cloud", "g:compose", "h:cloud"]);
+			// The cloud's limit is its own: the space's doesn't change it, and it survives a restart.
+			expect(scheduler.setLimit(1)).toEqual([]);
+			expect(make({ defaultLimit: 2 }).request("i", both)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+		});
+	});
+
+	it("moves a slot to the first other provider with room, and admits the queue into the one it leaves", async () => {
+		await withScheduler(({ make }) => {
+			const scheduler = make({ defaultLimit: 1, limits: { cloud: 1 } });
+			expect(scheduler.request("a", { provider: "compose", overflow: ["cloud"] })).toEqual({ status: "admitted", provider: "compose" });
+			expect(scheduler.request("q", { provider: "compose" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+			expect(scheduler.move("a", ["compose", "cloud"])).toEqual({ provider: "cloud", admitted: ["q"] });
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["a:cloud", "q:compose"]);
+			// Every provider is full: nothing moves.
+			expect(scheduler.move("q", ["cloud"])).toEqual({ provider: null, admitted: [] });
+			expect(scheduler.move("nobody", ["cloud"])).toEqual({ provider: null, admitted: [] });
+			// A gate that holds the cloud up holds a move there too.
+			scheduler.release("a");
+			scheduler.setConditions({ lowDisk: true, budgetCapped: false }, "cloud");
+			expect(scheduler.move("q", ["cloud"])).toEqual({ provider: null, admitted: [] });
+			scheduler.setConditions({ lowDisk: false, budgetCapped: false }, "cloud");
+			expect(scheduler.move("q", ["cloud"])).toEqual({ provider: "cloud", admitted: [] });
+		});
+	});
+
+	it("holds only the provider whose conditions say so", async () => {
+		await withScheduler(({ scheduler }) => {
+			expect(scheduler.setConditions({ lowDisk: true, budgetCapped: false, detail: "5% free" }, "compose")).toEqual([]);
+			expect(scheduler.conditions("compose")).toEqual({ lowDisk: true, budgetCapped: false, detail: "5% free" });
+			expect(scheduler.conditions("cloud")).toEqual({ lowDisk: false, budgetCapped: false });
+			expect(scheduler.request("a", { provider: "compose" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "5% free" });
+			expect(scheduler.request("b", { provider: "compose", overflow: ["cloud"] })).toEqual({ status: "admitted", provider: "cloud" });
+			// The space's conditions hold every provider without its own.
+			expect(scheduler.setConditions({ lowDisk: false, budgetCapped: true })).toEqual([]);
+			expect(scheduler.request("c", { provider: "vm" })).toEqual({ status: "queued", position: 2, reason: "budget_cap" });
+			expect(scheduler.setConditions({ lowDisk: false, budgetCapped: false }, "compose")).toEqual(["a"]);
+		});
 	});
 
 	it("takes threads out of the queue once their deadline comes, in queue order", async () => {
@@ -382,28 +438,31 @@ describe("the coding scheduler", () => {
 		});
 	});
 
-	it("holds the whole queue behind a head a gate refuses, even threads the gate would let through", async () => {
+	it("holds a provider's share of the queue behind a thread a gate refuses, even threads the gate would let through, and lets other providers admit", async () => {
 		await withScheduler(({ make }) => {
 			let vmDown = true;
-			const vmGate: AdmissionGate = { check: (entry) => (entry.provider === "vm" && vmDown ? { ok: false, reason: "provider_down", detail: "vm is down" } : { ok: true }) };
-			const scheduler = make({ defaultLimit: 3, gates: [vmGate] });
+			const vmGate: AdmissionGate = { check: (entry) => (entry.provider === "vm" && entry.threadId === "v" && vmDown ? { ok: false, reason: "provider_down", detail: "vm is down" } : { ok: true }) };
+			const scheduler = make({ defaultLimit: 2, gates: [vmGate] });
 			expect(scheduler.request("v", { provider: "vm" })).toEqual({ status: "queued", position: 1, reason: "provider_down", detail: "vm is down" });
-			expect(ask(scheduler, "s1", "s2", "s3").map((result) => (result.status === "queued" ? result.reason : result.status))).toEqual(["provider_down", "provider_down", "slots_full"]);
-			expect(running(scheduler)).toEqual([]);
-			// A higher priority goes in front of v, and nothing refuses it.
-			expect(scheduler.request("p", { provider: "sandbox", priority: 1 })).toEqual({ status: "admitted" });
-			expect(reasons(scheduler)).toEqual(["v:provider_down", "s1:provider_down", "s2:slots_full", "s3:slots_full"]);
-			// Once v leaves, the next tick admits the threads behind it.
-			expect(scheduler.cancel("v")).toBe(true);
-			expect(scheduler.tick()).toEqual({ expired: [], admitted: ["s1", "s2"], released: [] });
-			expect(scheduler.request("w", { provider: "vm" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
-			expect(scheduler.release("p")).toEqual(["s3"]);
-			expect(scheduler.release("s1")).toEqual([]);
-			expect(reasons(scheduler)).toEqual(["w:provider_down"]);
+			// w would be let through, but waits behind v; the second free slot waits for it too.
+			expect(scheduler.request("w", { provider: "vm" })).toEqual({ status: "queued", position: 2, reason: "provider_down", detail: "vm is down" });
+			expect(scheduler.request("u", { provider: "vm" })).toEqual({ status: "queued", position: 3, reason: "slots_full" });
+			// The sandbox's slots are its own, and nothing holds them up.
+			expect(ask(scheduler, "s1", "s2", "s3")).toEqual([
+				{ status: "admitted", provider: "sandbox" },
+				{ status: "admitted", provider: "sandbox" },
+				{ status: "queued", position: 4, reason: "slots_full" },
+			]);
+			// A thread that may also run on the sandbox waits for whichever frees first, and the vm's free slots wait for v and w, not for it.
+			expect(scheduler.request("o", { provider: "vm", overflow: ["sandbox"] })).toEqual({ status: "queued", position: 5, reason: "slots_full" });
+			expect(scheduler.release("s1")).toEqual(["s3"]);
+			expect(scheduler.release("s2")).toEqual(["o"]);
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["o:sandbox", "s3:sandbox"]);
+			expect(reasons(scheduler)).toEqual(["v:provider_down", "w:provider_down", "u:slots_full"]);
 			// The gate's world changes outside the scheduler; the next tick sees it.
 			vmDown = false;
-			expect(scheduler.tick()).toEqual({ expired: [], admitted: ["w"], released: [] });
-			expect(running(scheduler).sort()).toEqual(["s2", "s3", "w"]);
+			expect(scheduler.tick()).toEqual({ expired: [], admitted: ["v", "w"], released: [] });
+			expect(queued(scheduler)).toEqual(["u"]);
 		});
 	});
 
@@ -701,9 +760,9 @@ describe("the coding scheduler", () => {
 
 	it("preempts as many waiting threads as queued threads can start, the longest waiting first", async () => {
 		await withScheduler(({ make, clock }) => {
-			let vmDown = true;
-			const vmGate: AdmissionGate = { check: (entry) => (entry.provider === "vm" && vmDown ? { ok: false, reason: "provider_down" } : { ok: true }) };
-			const scheduler = make({ defaultLimit: 5, gates: [vmGate] });
+			let vDown = true;
+			const vGate: AdmissionGate = { check: (entry) => (entry.threadId === "v" && vDown ? { ok: false, reason: "provider_down" } : { ok: true }) };
+			const scheduler = make({ defaultLimit: 5, gates: [vGate] });
 			ask(scheduler, "a", "b", "c", "d", "e");
 			// b has waited longest, then c, then a; d runs; e is idle, though not for 10 minutes.
 			for (const [id, activity] of [["b", "waiting"], ["c", "waiting"], ["a", "waiting"], ["e", "idle"]] as const) {
@@ -711,7 +770,7 @@ describe("the coding scheduler", () => {
 				scheduler.setActivity(id, activity);
 			}
 			ask(scheduler, "x", "y");
-			scheduler.request("v", { provider: "vm" });
+			scheduler.request("v", { provider: "sandbox" });
 			ask(scheduler, "w");
 			clock.now += 5 * MINUTE;
 			// x and y can start; v can't, and holds up w behind it.
@@ -724,10 +783,30 @@ describe("the coding scheduler", () => {
 			});
 			expect(activities(scheduler)).toEqual(["a:waiting", "d:running", "e:idle", "x:running", "y:running"]);
 			expect(queued(scheduler)).toEqual(["v", "w"]);
-			vmDown = false;
+			vDown = false;
 			expect(scheduler.sweep()).toEqual({ released: [{ threadId: "a", why: "preempted" }], admitted: ["v"] });
 			expect(scheduler.sweep()).toEqual({ released: [], admitted: [] });
 			expect(queued(scheduler)).toEqual(["w"]);
+		});
+	});
+
+	it("preempts only on the provider the queue waits for, and on an overflow's when its own has no one to preempt", async () => {
+		await withScheduler(({ scheduler, clock }) => {
+			scheduler.setLimit(1, "cloud");
+			expect(scheduler.request("s", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
+			expect(scheduler.request("c", { provider: "cloud" })).toEqual({ status: "admitted", provider: "cloud" });
+			clock.now += 1;
+			scheduler.setActivity("c", "waiting");
+			clock.now += 1;
+			scheduler.setActivity("s", "waiting");
+			// q waits for the sandbox alone: c has waited longer, but its slot is the cloud's.
+			ask(scheduler, "q");
+			clock.now += 5 * MINUTE;
+			expect(scheduler.sweep()).toEqual({ released: [{ threadId: "s", why: "preempted" }], admitted: ["q"] });
+			// o would rather run on the sandbox, where q runs and no one waits; the cloud's slot is taken from c.
+			scheduler.request("o", { provider: "sandbox", overflow: ["cloud"] });
+			expect(scheduler.sweep()).toEqual({ released: [{ threadId: "c", why: "preempted" }], admitted: ["o"] });
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["o:cloud", "q:sandbox"]);
 		});
 	});
 

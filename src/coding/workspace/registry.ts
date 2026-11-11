@@ -1,19 +1,21 @@
-import { COMPUTE_KINDS, type ComputeProvider, workspaceProviderOf } from "../../compute";
+import { COMPUTE_KINDS, type ComputeProvider, workspaceProviderOf, workspaceRole } from "../../compute";
 import { containerProvider } from "./cloudflare";
 import { ComposeWorkspaceProvider } from "./compose";
 import type { WorkspaceProvider } from "./types";
 
 /**
  * The workspace providers a deployment offers coding threads, by id, such as
- * "compose" or "cloudflare". A thread keeps the id of the provider that made
- * its workspace and asks the registry for it again after a restart.
+ * "compose" or "cloudflare". A new thread runs on the first, the default,
+ * and on the others in order when the ones before have no room for it. A
+ * thread keeps the id of the provider that made its workspace and asks the
+ * registry for it again after a restart.
  */
 export interface WorkspaceProviderRegistry {
 	/** The provider with this id. Throws `NoWorkspaceBackendError` when there is none. */
 	get(id: string): WorkspaceProvider;
 	/** The provider new threads use when they don't name one, or null when there is none. */
 	defaultId(): string | null;
-	/** The ids of every provider, the default first. */
+	/** The ids of every provider, the default first, then each a full thread overflows to, in order. */
 	ids(): string[];
 }
 
@@ -57,12 +59,14 @@ let cached: { env: object; signature: string; registry: WorkspaceProviderRegistr
  * - The Compose sandbox manager, when `PIM_CODING_MANAGER_URL` and the
  *   secret `PIM_CODING_MANAGER_TOKEN` are both set.
  * - Cloudflare Containers, when the Worker has both workspace Durable Object
- *   bindings (docs/coding-cloudflare-sandbox.md); it has none today.
+ *   bindings (docs/coding-cloudflare-sandbox.md).
  *
- * The providers the admin set up for the deployment (./compute.ts) come
- * first, so the first of them is the default, and replace the one of the
- * same backend the environment sets up; one the admin switched off for
- * coding is left out whichever way it was set up. With no backend at all,
+ * The providers the admin set up for the deployment (./compute.ts) replace
+ * the one of the same backend the environment sets up, and one the admin
+ * switched off for coding is left out whichever way it was set up. Primary
+ * backends (by their kind's role) come before overflow ones, so the sandbox
+ * manager stays the default and Cloudflare Containers takes the threads it
+ * has no room for; within a role, the admin's come first. With no backend at all,
  * every thread fails with `NoWorkspaceBackendError`. Made once per isolate
  * and settings; Cloudflare lifecycle state lives in Durable Objects.
  */
@@ -99,7 +103,9 @@ export function workspaceBackends(env: object, configured: readonly ComputeProvi
 		}
 	}
 	const taken = new Set(added.map((provider) => provider.id));
-	const registry = workspaceRegistry([...added, ...providers.filter((provider) => !taken.has(provider.id) && !off.has(provider.id))], missing);
+	// An overflow backend costs money by the second, so the environment's bindings alone don't offer it: the admin adds it (./compute.ts).
+	const usable = [...added, ...providers.filter((provider) => !taken.has(provider.id) && !off.has(provider.id) && workspaceRole(provider.id) !== "overflow")];
+	const registry = workspaceRegistry([...usable.filter((provider) => workspaceRole(provider.id) === "primary"), ...usable.filter((provider) => workspaceRole(provider.id) === "overflow")], missing);
 	cached = { env, signature, registry };
 	return registry;
 }

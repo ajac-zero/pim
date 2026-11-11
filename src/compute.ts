@@ -22,19 +22,29 @@ import { HttpError } from "./http";
 /** A kind's field: `secret` ones are credentials, kept apart and never shown again. */
 type Field = { readonly name: string; readonly secret: boolean; readonly required: boolean };
 
+/**
+ * Whether new coding threads go to a backend first (`primary`), or to it
+ * only when the primary ones have no room for them (`overflow`). An overflow
+ * backend is still the default where it is the only one.
+ */
+export type ComputeRole = "primary" | "overflow";
+
 type Kind = {
 	readonly name: string;
 	/** The id of the workspace backend (`WorkspaceProvider.id`) a provider of this kind makes. */
 	readonly workspace: string;
+	readonly role: ComputeRole;
 	readonly fields: readonly Field[];
 };
 
 /** The kinds Pim can make workspaces with. Daytona, E2B and the others join here as their backends are written. */
 export const COMPUTE_KINDS = {
-	"cloudflare-sandbox": { name: "Cloudflare Containers", workspace: "cloudflare", fields: [] },
+	// Billed by the second while up, it takes the threads the sandbox manager has no room for.
+	"cloudflare-sandbox": { name: "Cloudflare Containers", workspace: "cloudflare", role: "overflow", fields: [] },
 	compose: {
 		name: "Sandbox manager",
 		workspace: "compose",
+		role: "primary",
 		fields: [
 			{ name: "managerUrl", secret: false, required: true },
 			{ name: "token", secret: true, required: true },
@@ -56,7 +66,7 @@ export type ComputeProvider = {
 	readonly settings: Readonly<Record<string, string>>;
 	/** Secrets, by field name. */
 	readonly credentials: Readonly<Record<string, string>>;
-	/** Whether coding threads may get their workspaces here. A provider switched off stays configured. */
+	/** Whether coding threads may get their workspaces here, as their first choice or as overflow by its kind's role. A provider switched off stays configured. */
 	readonly codingSandbox: boolean;
 	/** Reserved for agents' own computers; nothing uses it yet. */
 	readonly agentComputer: boolean;
@@ -159,6 +169,11 @@ export function workspaceProviderOf(provider: ComputeProvider, env: object): Wor
 		case "compose":
 			return new ComposeWorkspaceProvider({ managerUrl: provider.settings.managerUrl ?? "", token: provider.credentials.token ?? "" });
 	}
+}
+
+/** The role of the workspace backend `id`, by the kind that makes it; a backend no kind makes is primary. */
+export function workspaceRole(id: string): ComputeRole {
+	return Object.values(COMPUTE_KINDS).find((kind) => kind.workspace === id)?.role ?? "primary";
 }
 
 /** Removes every credential from a message that may quote one, such as an error from a library. */

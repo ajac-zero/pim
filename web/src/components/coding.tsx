@@ -38,6 +38,7 @@ import {
   ListChecks,
   Loader2,
   Play,
+  Server,
   TriangleAlert,
   Upload,
 } from "~/components/icons";
@@ -95,6 +96,7 @@ import {
   type TranscriptRow,
   toolSummary,
   transcriptRows,
+  workspaceProviderName,
   writingMessage,
 } from "~/lib/coding";
 import { ApiError, pim, SignInRequired } from "~/lib/pim-api";
@@ -1307,7 +1309,8 @@ function ThreadTitle({ thread }: { thread: CodingThreadView }) {
 
 /**
  * What the thread works on, one compact icon item each: its branch (its base
- * ref in the tooltip), its spend and when it started. The task itself is the
+ * ref in the tooltip), the workspace provider it runs on, its spend and when
+ * it started. The task itself is the
  * transcript's first message, and the repository, harness and state are in
  * the header, so none of those is said again here.
  */
@@ -1324,6 +1327,16 @@ function ThreadSummary({ thread }: { thread: CodingThreadView }) {
         <dt className="sr-only">{t("codingBranch")}</dt>
         <GitFork className="size-3.5 shrink-0" />
         <dd className="truncate font-mono">{thread.repo.branch}</dd>
+      </div>
+      <div
+        className="inline-flex items-center gap-1"
+        title={t("codingRunsOn", {
+          provider: workspaceProviderName(thread.workspaceProvider),
+        })}
+      >
+        <dt className="sr-only">{t("codingWorkspaceProvider")}</dt>
+        <Server className="size-3.5 shrink-0" />
+        <dd>{workspaceProviderName(thread.workspaceProvider)}</dd>
       </div>
       <div className="inline-flex items-center gap-1">
         <dt className="sr-only">{t("codingSpend")}</dt>

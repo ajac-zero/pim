@@ -376,7 +376,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Hosts the workspace may reach through the egress proxy: Pim's git broker, the common package registries (Go's proxy redirects module zips to storage.googleapis.com; the CONNECT proxy filters by host only, so no path scoping), and where mise downloads toolchains (./repo-environment.ts). */
 	protected egressAllow(): string[] {
-		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org", "storage.googleapis.com", ...TOOLCHAIN_HOSTS];
+		const hosts = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "crates.io", "static.crates.io", "index.crates.io", "proxy.golang.org", "storage.googleapis.com", ...TOOLCHAIN_HOSTS, ...JAVA_HOSTS];
 		try {
 			const origin = deploymentSettings(this.env).publicUrl;
 			if (origin) hosts.unshift(new URL(origin).hostname);
@@ -3477,6 +3477,8 @@ type Setup = { readonly script: string; readonly source: "settings" | "repositor
  * and GitHub's releases for Python, uv, Bun and the rest.
  */
 const TOOLCHAIN_HOSTS = ["mise-versions.jdx.dev", "dl.google.com", "go.dev", "sum.golang.org", "nodejs.org", "static.rust-lang.org", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+/** JDK downloads and the Gradle/Maven/Minecraft mod toolchain hosts, so Java builds (NeoForge mods) work in a workspace. */
+const JAVA_HOSTS = ["api.foojay.io", "api.adoptium.net", "repo.maven.apache.org", "repo1.maven.org", "services.gradle.org", "downloads.gradle.org", "plugins.gradle.org", "plugins-artifacts.gradle.org", "maven.neoforged.net", "maven.minecraftforge.net", "piston-meta.mojang.com", "piston-data.mojang.com", "launchermeta.mojang.com", "libraries.minecraft.net", "resources.download.minecraft.net"];
 
 /** An abort while the environment is readied: `#provisioningFailed` takes " was stopped:" as one. */
 const ENVIRONMENT_STOPPED = "Readying the environment was stopped: the thread was aborted";

@@ -820,7 +820,7 @@ The admin can share an agent as a bot with anyone, like a chat app with one assi
 ## Develop
 
 ```sh
-pnpm test        # Vitest in workerd, with pi-ai's faux model, then the web app's tests; no Cloudflare account needed
+pnpm test        # Vitest in workerd, with pi-ai's faux model, beside the web app's tests and the internal-identifier check; no Cloudflare account needed (pnpm test:serial runs them one at a time)
 pnpm test:live   # live checks against real MCP servers (Hugging Face's); needs the network
 pnpm typecheck   # also generates the web app's route tree, so it works on a fresh checkout
 pnpm types       # regenerate worker-configuration.d.ts after editing wrangler.jsonc

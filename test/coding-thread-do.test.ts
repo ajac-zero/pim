@@ -125,7 +125,8 @@ describe("a coding thread", () => {
 		const idle = await stub.status();
 		expect(idle).toMatchObject({ state: "idle", slot: "held", currentOperation: null, inbox: 0, repo: { baseSha: "base0000" } });
 		// The coding agent's instructions and where the repository is.
-		expect(prompt).toContain("run the repository's whole test suite once");
+		expect(prompt).toContain("The repository's full suite runs in its CI on the pushed branch");
+		expect(prompt).toContain("never sleep-poll");
 		expect(prompt).toContain(`checked out at ${REPO_DIR}, on the branch ${idle.repo.branch}`);
 		// One model call, priced from the catalog: $1 per million tokens.
 		const calls = (await stub.log()).filter((event) => event.kind === "model_call");

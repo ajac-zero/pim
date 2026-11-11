@@ -4,7 +4,7 @@
 // origin/main, or the ref given as an argument) and picks what to run: the whole suite when
 // configuration changed or nothing maps to a test, otherwise vitest's own --changed over the
 // root project for the Worker's tests, plus the web app's tests when web/ changed. The whole
-// suite still runs once at the end of a change, in the foreground (AGENTS.md).
+// suite itself runs in GitHub CI on the pushed branch, never locally (AGENTS.md).
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";

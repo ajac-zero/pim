@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",
     "lint": "pnpm --filter pim-web lint",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
-    "test": "node scripts/check-internal-identifiers.mjs && vitest run && pnpm --filter pim-web test",
+    "test": "node scripts/test-all.mjs",
+    "test:serial": "node scripts/check-internal-identifiers.mjs && vitest run && pnpm --filter pim-web test",
     "test:changed": "node scripts/test-changed.mjs",
     "test:live": "PIM_LIVE=1 vitest run"
   },

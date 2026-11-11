@@ -4,14 +4,14 @@ Pim is one Cloudflare Worker (`src/`) that serves the API, passkey sign-in and t
 
 ## Checks
 
-Run them one at a time. An orb has 2 CPUs and 3 GB of memory, and parallel runs next to the preview and a browser have run out of memory.
+Run them one at a time. An orb has 2 CPUs and 3 GB of memory, and parallel runs next to the preview and a browser have run out of memory; `pnpm test` is the exception, running its three stages side by side — use `pnpm test:serial` where even that doesn't fit.
 
 ```sh
 pnpm exec vitest run test/goals.test.ts   # one file of Worker tests, while iterating
 pnpm --filter pim-web test                # the web app's tests (seconds)
 pnpm typecheck                            # about 30 s
 pnpm lint                                 # Biome, for web/; `pnpm --filter pim-web format` fixes formatting
-pnpm test                                 # every test, about 3 min
+pnpm test                                 # every test, its three stages at once
 pnpm check                                # typecheck, lint and test, as CI does
 ```
 
@@ -21,12 +21,12 @@ After editing `wrangler.jsonc`, run `pnpm types` to regenerate `worker-configura
 
 ## Testing
 
-Cut the wall-clock you spend waiting for tests. While iterating, run the one file that covers your change, or `pnpm test:changed`; never run the whole suite to see whether a fix worked, and never run tests in the background and poll for them with sleep. Run the whole `pnpm test` once, at the end, in the foreground with a long timeout. After fixing one failing file, rerun only that file; run the whole suite again only if shared code changed.
+Cut the wall-clock you spend waiting for tests. While iterating, run the one file that covers your change, or `pnpm test:changed`, plus any other file that covers it; never run tests in the background and poll for them with sleep. The full suite runs in GitHub CI on the pushed branch (`.github/workflows/ci.yml`), and CI is the authority for whether it passes: don't run it locally just to check a fix. After fixing one failing file, rerun only that file, and the files that cover a change to shared code.
 
 ```sh
 pnpm exec vitest run test/goals.test.ts   # one file, while iterating
 pnpm test:changed                         # what a diff since origin/main reaches
-pnpm test                                 # the whole suite, once, at the end
+# the full suite: GitHub CI, on the pushed branch
 ```
 
 `pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest, wrangler or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root project, and the web app's tests too when `web/` changed.

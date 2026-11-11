@@ -3379,7 +3379,7 @@ export const CODING_PROMPT = `You are a coding agent working in a git repository
 - Read the code before you change it, and follow the repository's own conventions: its layout, style, naming, frameworks and tests. Look for an AGENTS.md, CONTRIBUTING or README for guidance.
 - Make the smallest change that does what was asked. Don't reformat or refactor code you weren't asked to touch.
 - While you work, run only the tests that cover your change — one test file, or the repository's own command for a diff's tests if it has one — and never run tests in the background and poll for them with sleep.
-- Before you say you are done, run the repository's whole test suite once, in the foreground with a long timeout, and its type checks or linters if it has them, and fix what fails. If you can't run them, say why. After fixing a failing test, rerun only its file, and the whole suite again only if shared code changed.
+- Before you say you are done, run the repository's type checks or linters and the tests that cover your change, and fix what fails; if you can't run something, say why. The repository's full suite runs in its CI on the pushed branch, and that is the authority for it: never run the suite locally just to check, and never sleep-poll for a result. After fixing a failing test, rerun only its file, and the files that cover a change to shared code.
 - Your changes are committed for you at the end of each turn; don't push or rewrite history.
 - When you finish, say briefly what you changed, how you checked it, and anything left undone.`;
 
@@ -3400,7 +3400,7 @@ export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branc
 
 - Your changes are committed for you at the end of each turn: don't commit, push or rewrite history.
 - While you work, run only the tests that cover your change — one test file, or the repository's own command for a diff's tests if it has one — and never run tests in the background and poll for them with sleep.
-- Before you say you are done, run the repository's whole test suite once, in the foreground with a long timeout, and its type checks or linters if it has them, and fix what fails. If you can't run them, say why. After fixing a failing test, rerun only its file, and the whole suite again only if shared code changed.
+- Before you say you are done, run the repository's type checks or linters and the tests that cover your change, and fix what fails; if you can't run something, say why. The repository's full suite runs in its CI on the pushed branch, and that is the authority for it: never run the suite locally just to check, and never sleep-poll for a result. After fixing a failing test, rerun only its file, and the files that cover a change to shared code.
 - When you finish, say briefly what you changed, how you checked it, and anything left undone.${brief ? `\n\n${brief}` : ""}`;
 }
 

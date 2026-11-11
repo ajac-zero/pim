@@ -3,14 +3,14 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "pim/**"]
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  check:
+  typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,9 +21,61 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: pnpm lint
+
+  # Fails when the repository names a deployment's internal hosts or identifiers, so it runs on its
+  # own: it needs only the checkout and Node, not the dependencies.
+  internal-identifiers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: node scripts/check-internal-identifiers.mjs
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter pim-web test
+
+  # The Worker and node tests in workerd, a quarter of the files each, so one job's files don't
+  # wait for the other three quarters'. Vitest sharding splits by file size, which tracks duration.
+  worker:
+    name: worker (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       # The Chrome that stands in for Browser Run in the browser tests.
       - run: node scripts/install-test-browser.mjs
       # test/people.test.ts can hang for good in workerd, past even the test timeout, so the step has a hard limit.
-      - run: pnpm test
-        timeout-minutes: 75
+      - run: pnpm exec vitest run --shard=${{ matrix.shard }}/4
+        timeout-minutes: 45

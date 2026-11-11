@@ -82,6 +82,7 @@ import { isLoginHarness } from "./vault/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
+import { type ComputeProvider, type ComputeQuota } from "../compute";
 import { egressPolicy, gatewayInjection, gitBrokerInjection, placeSecret } from "./workspace/egress";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import {
@@ -177,6 +178,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The workspace opened in this isolate, by its ref's id. */
 	#open: { id: string; workspace: Workspace } | null = null;
 	#configured: string | null = null;
+	/** The compute providers the admin set up, as last read from the Gallery, and when. */
+	#compute: { providers: readonly ComputeProvider[]; at: number } = { providers: [], at: 0 };
 	/**
 	 * The tools' journal, in `coding_tool_journal`. A call's record is on
 	 * disk before `put` returns, since the command it records starts right
@@ -211,6 +214,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#renewing: Promise<void> | null = null;
 	/** The part of it in which the workspace is being suspended and brought back: calls for the workspace wait for it. */
 	#cycling: Promise<void> | null = null;
+	/** When the ledger says the open stretch must end (its compute cap), in the thread's clock; null with none. Read from the ledger at boot and at each heartbeat. */
+	#capAt: number | null = null;
+	/** A ledger write left running (`#cycleWorkspace`): the next one waits for it. */
+	#ledgerWrite: Promise<void> | null = null;
 	/** The turn that is being restarted from its transcript because its session ended, so its end is auto-resumed. */
 	#restarting: string | null = null;
 	/** The turn the person stopped (abort, cancel, archive, an interrupting steer): a restart for a new session never resumes it. */
@@ -261,9 +268,99 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return Date.now();
 	}
 
-	/** The workspace providers threads may use: the backends the deployment's environment sets up. */
+	/** The workspace providers threads may use: the backends the deployment's environment sets up, and the compute providers its admin added (./compute.ts), as last read by `#refreshCompute`. */
 	protected workspaceProviders(): WorkspaceProviderRegistry {
-		return workspaceBackends(this.env);
+		return workspaceBackends(this.env, this.#compute.providers);
+	}
+
+	/** The compute providers with their credentials, from the Gallery. */
+	protected async computeProviders(): Promise<readonly ComputeProvider[]> {
+		return this.env.Gallery.getByName("gallery").computeProviders();
+	}
+
+	/** What the space may use of the deployment's compute: the admin's default, with the person's own where the admin set it. */
+	protected async computeQuota(space: string): Promise<ComputeQuota> {
+		return (await getAgentByName(this.env.Pim, space)).computeQuota();
+	}
+
+	/** Reads the compute providers again, at most every few seconds, so the admin's changes reach a thread's next step. A Gallery that can't be reached leaves what was read. */
+	async #refreshCompute(): Promise<void> {
+		if (Date.now() - this.#compute.at < COMPUTE_REFRESH_MS) return;
+		try {
+			this.#compute = { providers: await this.computeProviders(), at: Date.now() };
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.compute_read_failed", error: String(error).slice(0, 300) }));
+		}
+	}
+
+	/**
+	 * Checks the space's compute quota and records that a workspace is about to run
+	 * (./compute-ledger.ts), before the provider is asked to make or resume one.
+	 * `enforce` is false for a workspace that is running already. Returns the
+	 * minutes the workspace may run, or throws `ComputeQuotaError`. A limit is
+	 * enforced here, not by the provider: `#enforceCompute` stops the workspace
+	 * when its time is up, on the `advance` job, which `#schedule` brings
+	 * forward to that time.
+	 */
+	async #reserveCompute(thread: CodingThreadRow, enforce: boolean, renew = false): Promise<number | null> {
+		await this.#ledgerWrite;
+		const quota = enforce ? await this.computeQuota(thread.space) : null;
+		const gallery = this.env.Gallery.getByName("gallery");
+		const entry = { userId: thread.space, threadId: thread.threadId, provider: thread.providerId, quota, now: this.now() };
+		const admitted = renew ? await gallery.computeRenew(entry) : await gallery.computeBegin(entry);
+		if (!admitted.ok) throw new ComputeQuotaError(admitted.message);
+		this.#capAt = admitted.capAt;
+		if (admitted.capAt !== null) await this.#schedule(Date.now() + HEARTBEAT_MS);
+		return admitted.wallClockMin;
+	}
+
+	/**
+	 * Keeps the ledger (../compute-ledger.ts) true to the thread's workspace, as the
+	 * thread boots, at each heartbeat, when a turn starts and when a session
+	 * limit is up (the heartbeat is brought forward to it). A workspace its provider no longer has ends as `lost`. One
+	 * that ran as long as the person's session limit allows is stopped, its files
+	 * kept: a turn under way is stopped first, and the thread is idle until it is
+	 * continued, which asks for a workspace again and checks the quota again.
+	 */
+	async #enforceCompute(): Promise<void> {
+		const thread = this.store.thread();
+		// A workspace being made isn't in the thread's record yet.
+		// Nor is one being moved to a new session: its stretch is ended and begun again by the move (`#cycleWorkspace`).
+		if (!thread || this.#opening || this.#cycling || this.#renewing) return;
+		try {
+			const open = await this.env.Gallery.getByName("gallery").computeOpen(thread.threadId);
+			this.#capAt = open?.capAt ?? null;
+			if (!open) return;
+			const provider = this.workspaceProviders().get(thread.providerId);
+			if (!(thread.workspaceRef && (await provider.get(thread.workspaceRef)))) {
+				this.#open = null;
+				await this.#releaseCompute("lost");
+				return;
+			}
+			if (open.capAt === null || this.now() < open.capAt) return;
+			if (thread.currentOperation) await this.#stopTurn();
+			await this.#dropWorkspace({ keepVolume: true }, "stop");
+			const after = this.store.required();
+			if (after.state !== "archived") {
+				this.ctx.storage.transactionSync(() => {
+					this.store.update({ state: "idle", stateReason: "compute_quota", stateDetail: "The workspace reached this Pim's session limit and was stopped, its files kept. Continue the thread to start a new session." });
+					this.store.recordEvent("workspace.session_limit", {});
+				});
+				await this.#report("idle");
+			}
+		} catch (error) {
+			// The provider can't be asked, or the Gallery can't be reached: the next look tries again.
+			console.warn(JSON.stringify({ event: "pim.coding.compute_enforce_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+		}
+	}
+
+	/** Records that the thread's workspace stopped running. Counting never holds a thread up: a Gallery that can't be reached is logged. */
+	async #releaseCompute(reason: "stop" | "suspend" | "lost" | "failed"): Promise<void> {
+		await this.#ledgerWrite;
+		const threadId = this.store.required().threadId;
+		await this.env.Gallery.getByName("gallery")
+			.computeEnd(threadId, reason, this.now())
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.compute_end_failed", thread: threadId, error: String(error).slice(0, 300) })));
 	}
 
 	/** The machine image a workspace starts from. */
@@ -452,6 +549,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The `advance` job: moves the thread on, and comes back while a turn or a workspace is under way. */
 	async onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome | void> {
 		if (job.fn !== ADVANCE_JOB) return;
+		await this.#enforceCompute();
 		// Bounded, as a job must be: work still going after this goes on outside it.
 		await this.#failIfStuck();
 		await this.#keepSessionAlive();
@@ -465,7 +563,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 				thread.state === "provisioning" ||
 				(thread.slot === "held" && thread.environment.rebuildRequested) ||
 				(thread.slot === "queued" && this.#healthOf(thread) !== null));
-		return busy ? { rescheduleAt: Math.max(Date.now() + 1_000, Math.min(Date.now() + HEARTBEAT_MS, this.#nextSessionWake(thread) ?? Infinity)) } : undefined;
+		// The heartbeat, the session's next due time and the compute cap are one timer: the earliest of them.
+		const wakes = [busy ? Date.now() + HEARTBEAT_MS : Infinity, this.#nextSessionWake(thread) ?? Infinity, this.#capWake() ?? Infinity];
+		const next = Math.min(...wakes);
+		return next === Infinity ? undefined : { rescheduleAt: Math.max(Date.now() + 1_000, next) };
 	}
 
 	/**
@@ -495,6 +596,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 				.keepAlive(thread.workspaceRef)
 				.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.keepalive_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) })));
 		}
+	}
+
+	/** When the open stretch's compute cap is up, as a time of the job clock; null with none. */
+	#capWake(): number | null {
+		return this.#capAt === null ? null : this.#capAt - (this.now() - Date.now());
 	}
 
 	/** Whether the workspace's session is within its margin of the provider's cap. */
@@ -544,26 +650,57 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.recordEvent("session.continued", { operationId: operation, mode });
 			void this.#write("session.continued", { mode, session: this.store.required().session.continuations });
 		} catch (error) {
-			await this.#restartTurn(operation, error);
+			if (error instanceof ComputeQuotaError) await this.#refuseRenewal(operation, error);
+			else await this.#restartTurn(operation, error);
 		} finally {
 			this.#settleSession();
 		}
 	}
 
-	/** Suspends the workspace and brings it back as a new session, with the checkout in place. Returns whether it was resumed or made again. */
+	/**
+	 * The space's quota refused the new session: the turn ends, with the reason as the thread's, and isn't tried again.
+	 * The workspace is suspended with its files kept, and its stretch ended.
+	 */
+	async #refuseRenewal(operation: string, error: ComputeQuotaError): Promise<void> {
+		if (this.store.required().currentOperation !== operation || this.#userStop === operation) return;
+		await this.#stopTurn("session");
+		if (this.store.required().state !== "archived") await this.#fail(error.code, error.message, true);
+	}
+
+	/**
+	 * Suspends the workspace and brings it back as a new session, with the checkout in place. Returns whether it was resumed or made again. */
 	async #cycleWorkspace(thread: CodingThreadRow, provider: WorkspaceProvider): Promise<"resumed" | "created"> {
 		const ref = thread.workspaceRef;
 		if (!ref) throw new Error("The thread has no workspace");
-		// What runs in the old session is stopped now, and calls for the workspace wait until the new one is up.
-		this.#killCommands();
 		const cycle = (async () => {
 			this.#open = null;
-			if (provider.capabilities.suspendResume) await provider.suspend(ref);
-			else await provider.destroy(ref, { keepVolume: true });
-			const back = await provider.resumeOrCreate(ref, this.#spec(thread, provider));
+			// Calls for the workspace wait until the new session is up. The old stretch ends as the old session does, and the new one begins once the quota allows it: each exactly once. This comes before what runs in the old session is stopped, so a turn's model doesn't get ahead of the move.
+			const refusal: { error?: unknown } = {};
+			const wallClockMin = await this.#reserveCompute(thread, true, true).catch((error) => {
+				refusal.error = error;
+				return null;
+			});
+			this.#killCommands();
+			try {
+				if (provider.capabilities.suspendResume) await provider.suspend(ref);
+				else await provider.destroy(ref, { keepVolume: true });
+			} catch (error) {
+				if (!refusal.error) this.#ledgerWrite = this.#releaseCompute("failed");
+				throw error;
+			}
+			if (refusal.error) throw refusal.error;
+			let back: Awaited<ReturnType<WorkspaceProvider["resumeOrCreate"]>>;
+			try {
+				back = await provider.resumeOrCreate(ref, this.#spec(thread, provider, wallClockMin));
+			} catch (error) {
+				// Not waited for, so the turn is told the move failed as soon as the provider says so: the next ledger call follows it.
+				this.#ledgerWrite = this.#releaseCompute("failed");
+				throw error;
+			}
 			// The thread was archived or gave its slot up meanwhile, and dropped the workspace it had: this one would be orphaned.
 			const now = this.store.required();
 			if (now.slot !== "held" || now.state === "archived") {
+				await this.#releaseCompute("stop");
 				await provider.destroy(back.ref, { keepVolume: now.state !== "archived" });
 				throw new Error("The coding thread gave its workspace slot up");
 			}
@@ -646,6 +783,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const { provider, repo } = deploymentProviders(this.env).resolveUrl(input.repo, brokerPolicy(this.env));
 		const budgetUsd = input.budgetUsd ?? null;
 		if (budgetUsd !== null && !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
+		await this.#refreshCompute();
 		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
 		const harness = input.harness ?? "pi";
 		const cli = cliHarness(harness);
@@ -680,6 +818,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
 			}
 		});
+		await this.#refreshCompute();
 		const backend = this.#ensureBackend();
 		if (backend === true) {
 			await this.#requestSlot();
@@ -723,7 +862,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#sessionView(thread: CodingThreadRow): CodingSessionStatus {
 		const caps = this.#capabilities(thread);
 		const maxMin = caps?.sessionMaxMin ?? null;
-		return { ...thread.session, maxMin, expiresAt: maxMin !== null && thread.session.startedAt !== null ? thread.session.startedAt + maxMin * 60_000 : null, keepAlive: caps?.keepAlive ?? false };
+		// The session ends at the earlier of the provider's cap and the compute cap of the stretch the ledger has open.
+		const ends = [maxMin !== null && thread.session.startedAt !== null ? thread.session.startedAt + maxMin * 60_000 : null, this.#capAt].filter((at) => at !== null);
+		return { ...thread.session, maxMin, expiresAt: ends.length === 0 ? null : Math.min(...ends), keepAlive: caps?.keepAlive ?? false };
 	}
 
 	#capabilities(thread: CodingThreadRow): WorkspaceProvider["capabilities"] | null {
@@ -1544,7 +1685,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	#schedule(at: number): Promise<unknown> {
-		return this.lifecycle.jobs.push({ id: ADVANCE_JOB, fn: ADVANCE_JOB, time: at });
+		// One job is the thread's only timer: it comes no later than the compute cap, if the workspace has one.
+		const cap = this.#capWake();
+		return this.lifecycle.jobs.push({ id: ADVANCE_JOB, fn: ADVANCE_JOB, time: cap === null ? at : Math.min(at, Math.max(cap, Date.now() + 1_000)) });
 	}
 
 	/** Moves the thread on until there is nothing to do but wait; one at a time, and once more if asked again meanwhile. */
@@ -1598,6 +1741,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return;
 		}
 		if (thread.slot === "none") {
+			await this.#refreshCompute();
 			const backend = this.#ensureBackend();
 			if (backend !== true) {
 				await backend;
@@ -2245,7 +2389,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ state: "idle", stateReason: "aborted" });
 			return;
 		}
-		if (error instanceof NoWorkspaceBackendError) await this.#fail(error.code, error.message, true);
+		if (error instanceof NoWorkspaceBackendError || error instanceof ComputeQuotaError) await this.#fail(error.code, error.message, true);
 		else await this.#fail("workspace", error instanceof Error ? error.message : String(error), true);
 	}
 
@@ -2394,19 +2538,40 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (workspace) this.store.update({ workspaceRef: ref });
 		}
 		const started = workspace ? null : performance.now();
+		// A workspace the provider makes or resumes costs the deployment compute: the space's quota is checked before it does, and the time it runs is counted from then.
+		let counted = false;
 		if (!workspace) {
+			const wallClockMin = await this.#reserveCompute(thread, true);
+			counted = true;
 			// Creating twice for one session is one workspace, so a restart mid-create makes no second one.
-			const ref = await this.#createWorkspace(provider, thread, options.restoreFrom);
+			let ref: WorkspaceRef;
+			try {
+				ref = await this.#createWorkspace(provider, thread, options.restoreFrom, wallClockMin);
+			} catch (error) {
+				await this.#releaseCompute("failed");
+				throw error;
+			}
 			if (this.store.required().slot !== "held") {
 				// Archived or released while it was made: it goes at once.
 				await provider.destroy(ref, { keepVolume: true });
+				await this.#releaseCompute("suspend");
 				throw new Error("The coding thread gave its workspace slot up");
 			}
 			this.store.update({ workspaceRef: ref });
 			workspace = await provider.get(ref);
 			if (!workspace) throw new Error("The workspace provider lost the workspace it just made");
+		} else if ((await workspace.status()).state === "stopped") {
+			await this.#reserveCompute(thread, true);
+			counted = true;
+			try {
+				await workspace.start();
+			} catch (error) {
+				await this.#releaseCompute("failed");
+				throw error;
+			}
 		}
-		if ((await workspace.status()).state === "stopped") await workspace.start();
+		// A workspace found running, such as after a restart, is counted as it is, with no check: it runs already.
+		if (!counted) await this.#reserveCompute(thread, false);
 		// A workspace made now starts a session; one found with none recorded (made before they were) is taken to have just begun one.
 		if (started !== null || this.store.required().session.startedAt === null) this.store.update({ session: { ...this.store.required().session, startedAt: this.now() } });
 		const killable = this.#killable(workspace, this.store.required().workspaceRef!);
@@ -2424,8 +2589,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * restore that fails for any reason but a full backend is logged and
 	 * the workspace is made empty, to be cloned as usual.
 	 */
-	async #createWorkspace(provider: WorkspaceProvider, thread: CodingThreadRow, restoreFrom?: EnvironmentSnapshot): Promise<WorkspaceRef> {
-		const spec = this.#spec(thread, provider);
+	async #createWorkspace(provider: WorkspaceProvider, thread: CodingThreadRow, restoreFrom?: EnvironmentSnapshot, wallClockMin: number | null = null): Promise<WorkspaceRef> {
+		const spec = this.#spec(thread, provider, wallClockMin);
 		const owner = spec.environment;
 		let snapshot = restoreFrom;
 		if (owner && !snapshot && thread.baseSha === null && thread.environment.preparedAt === null) {
@@ -2449,12 +2614,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return provider.create(spec);
 	}
 
-	#spec(thread: CodingThreadRow, provider: WorkspaceProvider): WorkspaceSpec {
+	#spec(thread: CodingThreadRow, provider: WorkspaceProvider, wallClockMin: number | null = null): WorkspaceSpec {
+		// The quota's limit on a session's minutes caps the thread's own, which the provider enforces.
+		const wallClock = [thread.limits.wallClockMin, wallClockMin].filter((minutes) => minutes !== null);
 		return {
 			sessionId: thread.threadId,
 			image: this.workspaceImage(),
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch },
-			limits: thread.limits,
+			limits: { ...thread.limits, wallClockMin: wallClock.length === 0 ? null : Math.min(...wallClock) },
 			// The allowlist as a policy: the credentials the proxy injects join it once a workspace has them (`#inject`).
 			egress: egressPolicy({ allow: [...this.egressAllow(), ...(cliHarness(thread.harness)?.egress ?? [])], inject: [...this.#injections.values()] }),
 			gitAuth: { mode: "none" },
@@ -2833,12 +3000,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** Deletes the workspace, keeping its files for the next one with `keepVolume`. */
-	async #dropWorkspace(options: { keepVolume: boolean }): Promise<void> {
+	async #dropWorkspace(options: { keepVolume: boolean }, reason?: "stop"): Promise<void> {
 		const thread = this.store.required();
 		this.#open = null;
 		if (!thread.workspaceRef) return;
 		await this.workspaceProviders().get(thread.providerId).destroy(thread.workspaceRef, options);
 		this.store.update({ workspaceRef: null });
+		await this.#releaseCompute(reason ?? (options.keepVolume ? "suspend" : "stop"));
 	}
 
 	/**
@@ -2930,6 +3098,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		try {
 			await this.workspaceProviders().get(ref.providerId).destroy(ref, { keepVolume: true });
 			if (this.store.required().workspaceRef?.id === ref.id) this.store.update({ workspaceRef: null });
+			await this.#releaseCompute("lost");
 		} catch (failure) {
 			// The backend can't be reached: the next use finds the workspace down again, and lets it go then.
 			console.warn(JSON.stringify({ event: "pim.coding.destroy_failed", thread: thread.threadId, error: errorText(failure).slice(0, 300) }));
@@ -3196,6 +3365,15 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 
 /** The workspace provider of a thread started while the deployment had none. */
 const NO_BACKEND = "none";
+
+/** How long the compute providers read from the Gallery are used before they're read again. */
+const COMPUTE_REFRESH_MS = 5_000;
+
+/** The space is over its compute quota (./compute.ts), so no workspace is made or resumed for it now. A state to show the person (`failed(compute_quota)`), not a crash. */
+class ComputeQuotaError extends Error {
+	override readonly name = "ComputeQuotaError";
+	readonly code = "compute_quota";
+}
 
 /** A thread's own time limit for a turn, in milliseconds, or null when it has none: turns have no default limit, and are stopped only when they stall. */
 const wallClockMs = (thread: CodingThreadRow): number | null => (thread.limits.wallClockMin === null ? null : thread.limits.wallClockMin * 60_000);

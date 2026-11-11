@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool } from "@earendil-works/pi-durable";
+import { defineTool, section } from "@earendil-works/pi-durable";
+import { NO_CODING_SANDBOX_LINE } from "../compute";
 import { deploymentSettings } from "../deployment";
 import { type CodingThreadView, threadPath } from "../coding/api";
 import { cliHarness } from "../coding/harness";
@@ -72,7 +73,10 @@ export const coding = definePimExtension({
 	id: "coding",
 	name: "Coding threads",
 	description: "Coding agents that work on GitHub and Gitea repositories in workspaces of their own.",
-	ability: ({ space, conversationOf }) => ({
+	ability: ({ space, conversationOf, compute }) => ({
+		// The tools follow the configuration: with no coding sandbox provider they aren't offered, and the prompt says so in one line.
+		offeredTo: () => compute.codingSandbox(),
+		sections: [section("coding_unavailable", () => (compute.codingSandbox() ? undefined : NO_CODING_SANDBOX_LINE))],
 		tools: [
 			defineTool({
 				name: "coding_start",

@@ -227,6 +227,8 @@ import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcrip
 import { RunWatch, runKey, stoppable } from "./run-guard";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import type { RunTags } from "./model-calls";
+import { type ComputeQuota, codingBackendIds, parseComputeQuota, resolveQuota } from "./compute";
+import { workspaceBackends } from "./coding/workspace/registry";
 import { type CallInfo, type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
 import { type BriefResult, type GuestBrief, type GuestCallResult, VISIT_PREFIX, VisitStore, visitExtension, visitExtensionName } from "./visits";
 
@@ -453,6 +455,8 @@ const PROFILE_KEY = "owner";
 const PERSON_NAME_KEY = "person_name";
 const STATUS_KEY = "status";
 const LIMITS_KEY = "limits";
+/** The space's own compute quota (./compute.ts), over the deployment's; absent when the admin gave none. */
+const COMPUTE_QUOTA_KEY = "compute_quota";
 /** In a guest's space: the bot they joined through, the agent that is their copy of it, and which sharing of it the copy follows. */
 const GUEST_BOT_KEY = "guest_bot";
 /** Tools of the space the person talks with that an agent at work on a task doesn't get, though their extensions stay. */
@@ -690,6 +694,8 @@ export class Pim extends DurableAgent<Env> {
 	/** Extensions' own data, each apart from the others'. */
 	readonly extensionData = new ExtensionDataStore(this.ctx.storage.sql);
 	#abilities: Map<string, Ability> | undefined;
+	/** Whether a coding sandbox provider is configured, as read before the chat's latest turn (`#refreshCompute`); until then, whether the deployment's environment has one. */
+	#codingSandboxes: boolean | undefined;
 	/** What this space has used, and its limits. */
 	readonly usage = new UsageMeter({
 		sql: this.ctx.storage.sql,
@@ -4806,6 +4812,7 @@ export class Pim extends DurableAgent<Env> {
 						return { chat: this.store.publicId(this.#rooms.of(session)?.room ?? session), agent: { id, name, majordomo } };
 					},
 					diagnostics: { report: (query) => this.diagnosticsReport(query), health: () => this.healthReport() },
+					compute: { codingSandbox: () => this.#hasCodingSandbox() },
 				});
 				return [[extension.id, ability] as const];
 			}),
@@ -4818,6 +4825,31 @@ export class Pim extends DurableAgent<Env> {
 	 * extension named after its extension: its tools, its actions' tools as
 	 * the person's permissions have them, sections, hooks and tasks.
 	 */
+	/** The ids of the workspace backends the deployment's environment sets up. */
+	protected environmentWorkspaceIds(): string[] {
+		return workspaceBackends(this.env).ids();
+	}
+
+	/**
+	 * Reads which compute providers the admin set up, so a chat's next turn
+	 * offers coding tools only while some provider can run a coding thread:
+	 * the capability follows the configuration, with no flag of its own. A
+	 * Gallery that can't be reached leaves what was read.
+	 */
+	async #refreshCompute(): Promise<void> {
+		try {
+			const configured = await this.env.Gallery.getByName("gallery").computeSummaries();
+			this.#codingSandboxes = codingBackendIds(this.environmentWorkspaceIds(), configured).length > 0;
+		} catch (error) {
+			console.warn("reading the admin's compute providers failed", error);
+		}
+	}
+
+	/** Whether coding threads can get a workspace: what `#refreshCompute` last found. */
+	#hasCodingSandbox(): boolean {
+		return (this.#codingSandboxes ??= this.environmentWorkspaceIds().length > 0);
+	}
+
 	#installAbilities(services: PimServices): void {
 		for (const [id, { actions, offeredTo: _offeredTo, ...ability }] of this.abilities) {
 			this.registry.install(defineExtension({ ...ability, name: id, tools: [...(ability.tools ?? []), ...gatedTools(services, actions ?? [])] }));
@@ -4837,6 +4869,7 @@ export class Pim extends DurableAgent<Env> {
 	 */
 	async #selectAbilities(session: string): Promise<void> {
 		if (this.visits.bySession(session) || this.#taskApart(session)) return;
+		await this.#refreshCompute();
 		const agent = this.agents.ofSession(session);
 		// Connectors last: their tools come and go, and pi only appends cheaply at the end.
 		const grants = this.registry.snapshot().extension(COMPUTER_GRANT_EXTENSION) ? [COMPUTER_GRANT_EXTENSION] : [];
@@ -5636,6 +5669,32 @@ export class Pim extends DurableAgent<Env> {
 		if (limits === null) this.store.deleteMeta(LIMITS_KEY);
 		else this.store.setMeta(LIMITS_KEY, JSON.stringify(parseLimits(limits)));
 		return this.limits();
+	}
+
+	/** What this space may use of the deployment's compute: the admin's default, with this space's own where the admin set it (`setComputeQuota`). Read fresh, as a workspace is about to be made on it. */
+	async computeQuota(): Promise<ComputeQuota> {
+		return resolveQuota(await this.env.Gallery.getByName("gallery").computeQuota(), this.#ownComputeQuota());
+	}
+
+	#ownComputeQuota(): Partial<ComputeQuota> | null {
+		const own = this.store.meta(COMPUTE_QUOTA_KEY);
+		return own === undefined ? null : (JSON.parse(own) as Partial<ComputeQuota>);
+	}
+
+	/** This space's own compute quota, over the deployment's; null goes back to the deployment's. Returns what applies now. */
+	async setComputeQuota(quota: Partial<ComputeQuota> | null): Promise<ComputeQuota> {
+		this.#assertOpen();
+		if (quota === null) this.store.deleteMeta(COMPUTE_QUOTA_KEY);
+		else this.store.setMeta(COMPUTE_QUOTA_KEY, JSON.stringify(parseComputeQuota(quota)));
+		return this.computeQuota();
+	}
+
+	/** The person's compute: what they may use, whether the admin set it for them, and the sandbox minutes they have used by provider and month. */
+	async computeReport() {
+		const gallery = this.env.Gallery.getByName("gallery");
+		const [deployment, usage] = await Promise.all([gallery.computeQuota(), gallery.computeUsageOf(this.name)]);
+		const own = this.#ownComputeQuota();
+		return { quota: resolveQuota(deployment, own), own, usage };
 	}
 
 	/**
@@ -6806,7 +6865,7 @@ export class Pim extends DurableAgent<Env> {
 				return this.#describeSettings();
 			},
 		],
-		["GET", "/usage", () => this.usageReport()],
+		["GET", "/usage", async () => ({ ...this.usageReport(), compute: await this.computeReport() })],
 		["GET", "/usage/costs", (_params, _request, url) => this.usageCosts(Number(url.searchParams.get("days") ?? 30))],
 
 		// Apps: what the agent made, every version kept. Their bytes are never kept by the browser,

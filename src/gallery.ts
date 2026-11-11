@@ -2,6 +2,18 @@ import { DurableObject } from "cloudflare:workers";
 import pimConfig from "../pim.config";
 import { isBuiltinApp } from "./builtin-apps";
 import { HttpError } from "./http";
+import { type Admission, ComputeLedger, type ComputeDeploymentUsage, type ComputeUsage, type EndReason } from "./compute-ledger";
+import {
+	type ComputeProvider,
+	type ComputeProviderInput,
+	type ComputeQuota,
+	type ComputeSummary,
+	computeSummary,
+	DEFAULT_COMPUTE_QUOTA,
+	parseComputeQuota,
+	prepareComputeProvider,
+	resolveQuota,
+} from "./compute";
 import { type CustomProvider, MAX_PROVIDERS, type ProviderInput, prepareProvider } from "./providers";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
@@ -302,6 +314,15 @@ CREATE TABLE IF NOT EXISTS providers (
 CREATE TABLE IF NOT EXISTS disabled_builtin_apps (
 	id TEXT PRIMARY KEY
 );
+CREATE TABLE IF NOT EXISTS compute_providers (
+	id TEXT PRIMARY KEY,
+	provider TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS compute_settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 `;
 
 type Row = Record<string, SqlStorageValue>;
@@ -583,6 +604,100 @@ export class Gallery extends DurableObject<Env> {
 	/** Takes a provider away from everyone; their chats on its models go back to the default model. */
 	removeSharedProvider(id: string): boolean {
 		return this.#sql("DELETE FROM providers WHERE id = ?", id).rowsWritten > 0;
+	}
+
+	// Compute (./compute.ts): the providers the admin set up for everyone's coding sandboxes, the quotas on them, and what people have used.
+
+	/** The compute providers, with their credentials, for the Durable Objects that make workspaces. No route shows these. */
+	computeProviders(): ComputeProvider[] {
+		return this.#sql("SELECT provider FROM compute_providers ORDER BY created_at, id")
+			.toArray()
+			.map((row) => JSON.parse(String(row.provider)) as ComputeProvider);
+	}
+
+	/** The compute providers without their credentials: what a space needs to know to say whether coding is on. */
+	computeSummaries(): ComputeSummary[] {
+		return this.computeProviders().map((provider) => computeSummary(provider, this.env));
+	}
+
+	/** The admin adds a compute provider, or changes the one of that kind: `id` is null to add. Null when there's no provider `id`. */
+	putComputeProvider(id: string | null, input: ComputeProviderInput): ComputeProvider | null {
+		const existing = id === null ? null : (this.computeProviders().find((provider) => provider.id === id) ?? null);
+		if (id !== null && !existing) return null;
+		const provider = prepareComputeProvider(input, existing);
+		if (!existing && this.computeProviders().some((candidate) => candidate.id === provider.id)) {
+			throw new HttpError(409, `${provider.name} is already set up: change it instead.`);
+		}
+		this.#sql(
+			"INSERT INTO compute_providers (id, provider, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET provider = excluded.provider",
+			provider.id,
+			JSON.stringify(provider),
+			Date.now(),
+		);
+		return provider;
+	}
+
+	/** Takes a compute provider away. Workspaces already made on it go on until their threads stop them. */
+	removeComputeProvider(id: string): boolean {
+		return this.#sql("DELETE FROM compute_providers WHERE id = ?", id).rowsWritten > 0;
+	}
+
+	/** What each person may use of the compute unless the admin gave them their own. */
+	computeQuota(): ComputeQuota {
+		const [row] = this.#sql("SELECT value FROM compute_settings WHERE key = 'quota'").toArray();
+		return resolveQuota(DEFAULT_COMPUTE_QUOTA, row ? (JSON.parse(String(row.value)) as Partial<ComputeQuota>) : null);
+	}
+
+	/** The admin changes the quota for everyone: the names given change, the rest stay. */
+	setComputeQuota(change: unknown): ComputeQuota {
+		const quota = resolveQuota(this.computeQuota(), parseComputeQuota(change));
+		this.#sql("INSERT INTO compute_settings (key, value) VALUES ('quota', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", JSON.stringify(quota));
+		return quota;
+	}
+
+	/** A workspace is about to run: checks the person's quota and records the start, together (./compute-ledger.ts). A null quota records without checking. */
+	computeBegin(o: { userId: string; threadId: string; provider: string; quota: ComputeQuota | null; now?: number }): Admission {
+		return this.#ledger().begin({ ...o, now: o.now ?? Date.now() });
+	}
+
+	/** A workspace moves to a new session: ends its stretch and begins the next, checking the quota, in one step (`ComputeLedger.renew`). */
+	computeRenew(o: { userId: string; threadId: string; provider: string; quota: ComputeQuota | null; now?: number }): Admission {
+		return this.#ledger().renew({ ...o, now: o.now ?? Date.now() });
+	}
+
+	/** Forgets what a person's sandboxes ran, for an erased account. */
+	computeForget(userId: string): void {
+		this.#ledger().forget(userId);
+	}
+
+	/** The thread's workspace as the ledger has it running (its stop time, if it has a limit), or null. */
+	computeOpen(threadId: string): { capAt: number | null } | null {
+		return this.#ledger().open(threadId);
+	}
+
+	/** Ends the running stretches of threads named `prefix…` that aren't in `keep`: for a space to clear what its crash left. */
+	computeEndExcept(prefix: string, keep: string[], reason: EndReason, now = Date.now()): number {
+		return this.#ledger().endExcept(prefix, keep, reason, now);
+	}
+
+	/** A thread's workspace stopped running. */
+	computeEnd(threadId: string, reason: EndReason, now = Date.now()): boolean {
+		return this.#ledger().end(threadId, reason, now);
+	}
+
+	/** One person's sandbox minutes this month, by provider, and the months before. */
+	computeUsageOf(userId: string, now = Date.now()): ComputeUsage {
+		return this.#ledger().usage(userId, now);
+	}
+
+	/** Everyone's sandbox minutes this month, for the admin. */
+	computeUsage(now = Date.now()): ComputeDeploymentUsage {
+		return this.#ledger().deployment(now);
+	}
+
+	#ledgerOf: ComputeLedger | undefined;
+	#ledger(): ComputeLedger {
+		return (this.#ledgerOf ??= new ComputeLedger(this.ctx.storage.sql));
 	}
 
 	/** The built-in apps (../builtin-apps.ts) the admin turned off for everyone. */

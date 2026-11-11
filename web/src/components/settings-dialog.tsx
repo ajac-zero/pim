@@ -14,6 +14,10 @@ import { ModelOrderList } from "~/components/agent-settings";
 import { ChatGPTLogo } from "~/components/chatgpt-logo";
 import { CodingConnectionsSection } from "~/components/coding";
 import {
+  ComputeSection,
+  ComputeUsageSection,
+} from "~/components/compute-settings";
+import {
   ComputerHostSection,
   ComputerSection,
 } from "~/components/computer-settings";
@@ -103,6 +107,7 @@ export const SETTINGS_TABS = [
   "usage",
   "account",
   "members",
+  "compute",
   "deployment",
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
@@ -117,6 +122,7 @@ const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   usage: ["settingsUsage", ChartColumn],
   account: ["settingsAccount", UserRound],
   members: ["settingsMembers", Users],
+  compute: ["settingsCompute", Server],
   deployment: ["settingsDeployment", Settings],
 };
 
@@ -158,10 +164,11 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
   const { t } = useI18n();
   const { data: model } = useQuery(modelQuery());
   const { data: account } = useQuery(accountQuery());
-  // Members, how they sign in, and how the deployment runs are the admin's.
+  // Members, how they sign in, their compute, and how the deployment runs are the admin's.
   const tabs = SETTINGS_TABS.filter(
     (tab) =>
-      (tab !== "members" && tab !== "deployment") || account?.role === "admin",
+      (tab !== "members" && tab !== "compute" && tab !== "deployment") ||
+      account?.role === "admin",
   );
   const [tab, setTab] = useState(tabs.includes(initial) ? initial : "general");
   return (
@@ -226,7 +233,12 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
         {tab === "coding" && <CodingConnectionsSection />}
         {tab === "memory" && <MemorySection />}
         {tab === "permissions" && <ToolPermissionsSection />}
-        {tab === "usage" && <UsageCostSection />}
+        {tab === "usage" && (
+          <>
+            <UsageCostSection />
+            <ComputeUsageSection />
+          </>
+        )}
         {tab === "account" && (
           <>
             <AccountSection />
@@ -242,6 +254,7 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
             <SignInMethodsSection />
           </>
         )}
+        {tab === "compute" && <ComputeSection />}
         {tab === "deployment" && (
           <>
             <DeploymentSection />

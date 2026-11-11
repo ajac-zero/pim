@@ -936,6 +936,85 @@ export type UsageReport = {
   storageBytes: number;
 };
 
+/** What one person may use of the deployment's compute for coding sandboxes; null is no limit. */
+export type ComputeQuota = {
+  maxConcurrentWorkspaces: number | null;
+  monthlySandboxMinutes: number | null;
+  maxSessionMinutes: number | null;
+};
+
+export type ComputeMinutes = {
+  provider: string;
+  minutes: number;
+  /** Workspaces running now. */
+  running: number;
+};
+
+/** A person's sandbox minutes this month, by provider, and the twelve months to this one. */
+export type ComputeUsage = {
+  /** The UTC month, such as `2026-11`. */
+  month: string;
+  minutes: number;
+  running: number;
+  byProvider: ComputeMinutes[];
+  history: { month: string; minutes: number }[];
+};
+
+/** What the person may use of compute and has used (`GET /usage`). `own` is what the admin set for them alone. */
+export type ComputeReport = {
+  quota: ComputeQuota;
+  own: Partial<ComputeQuota> | null;
+  usage: ComputeUsage;
+};
+
+/** A compute provider the admin set up, as the admin sees it: which credentials are set, never what they are. */
+export type ComputeProvider = {
+  id: string;
+  kind: string;
+  name: string;
+  settings: Record<string, string>;
+  credentialsSet: Record<string, boolean>;
+  /** Whether coding threads may get their workspaces here. */
+  codingSandbox: boolean;
+  /** Reserved for agents' own computers. */
+  agentComputer: boolean;
+};
+
+export type ComputeKind = {
+  kind: string;
+  name: string;
+  fields: { name: string; secret: boolean; required: boolean }[];
+};
+
+export type ComputeProviderInput = {
+  kind?: string;
+  name?: string;
+  settings?: Record<string, string | null>;
+  credentials?: Record<string, string | null>;
+  codingSandbox?: boolean;
+  agentComputer?: boolean;
+};
+
+/** Everyone's sandbox minutes this month. */
+export type ComputeDeploymentUsage = {
+  month: string;
+  minutes: number;
+  running: number;
+  byProvider: ComputeMinutes[];
+  /** The people who used the most; `username` is null for an account that's gone. */
+  top: { username: string | null; minutes: number; running: number }[];
+};
+
+export type ComputeOverview = {
+  providers: ComputeProvider[];
+  kinds: ComputeKind[];
+  quota: ComputeQuota;
+  usage: ComputeDeploymentUsage;
+};
+
+/** What one cheap read against a compute provider found. */
+export type ComputeHealth = { ok: boolean; message: string; ms: number };
+
 /** What one agent, model or kind of run cost; a null key is a call with no tag. */
 export type Spend = { key: string | null; costUsd: number };
 
@@ -981,6 +1060,7 @@ export type Account = {
   status: "active" | "pending" | "suspended";
   createdAt: number;
   usage: UsageReport;
+  compute: ComputeReport;
   recoveryCodesLeft: number;
   /** Nobody else has an active account on this Pim, so there is nobody to share with. */
   alone: boolean;
@@ -2403,6 +2483,34 @@ export const admin = {
     call<{ deleted: boolean }>(`/admin/apps/${encodeURIComponent(id)}`, {
       method: "DELETE",
       body: "{}",
+    }),
+  /** Compute providers for everyone's coding sandboxes, the default quota, and everyone's usage this month. */
+  compute: () => call<ComputeOverview>("/admin/compute"),
+  addComputeProvider: (input: ComputeProviderInput) =>
+    call<{ provider: ComputeProvider }>("/admin/compute/providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateComputeProvider: (id: string, input: ComputeProviderInput) =>
+    call<{ provider: ComputeProvider }>(
+      `/admin/compute/providers/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify(input) },
+    ),
+  removeComputeProvider: (id: string) =>
+    call<{ deleted: boolean }>(
+      `/admin/compute/providers/${encodeURIComponent(id)}`,
+      { method: "DELETE", body: "{}" },
+    ),
+  /** One cheap read against the provider, to see it works. */
+  validateComputeProvider: (id: string) =>
+    call<{ health: ComputeHealth }>(
+      `/admin/compute/providers/${encodeURIComponent(id)}/validate`,
+      { method: "POST", body: "{}" },
+    ).then((body) => body.health),
+  setComputeQuota: (quota: Partial<ComputeQuota>) =>
+    call<{ quota: ComputeQuota }>("/admin/compute/quota", {
+      method: "PUT",
+      body: JSON.stringify({ quota }),
     }),
   /** Model providers everyone on this Pim can use. */
   addProvider: (input: ProviderInput) =>

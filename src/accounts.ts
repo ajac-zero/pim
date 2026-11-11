@@ -9,6 +9,7 @@ import type { AgentIcon, Bot, BotCard, PublishedArtifact } from "./gallery";
 import { HttpError } from "./http";
 import { MAX_YOUR_NAME } from "./majordomo";
 import { providerInfo } from "./providers";
+import { checkCompute, COMPUTE_KINDS, computeProviderInfo, parseComputeQuota } from "./compute";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
 import { claimWindowOpen, limited } from "./runtime";
@@ -415,8 +416,9 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 		const route = `${request.method} ${path}`;
 		if (route === "GET /account") {
 			const pim = await pimOf(env, account.ownerId);
-			const [usage, recoveryCodesLeft, others] = await Promise.all([
+			const [usage, compute, recoveryCodesLeft, others] = await Promise.all([
 				pim.usageReport(),
+				pim.computeReport(),
 				site.store.recoveryCodesLeft(),
 				directory(env).hasOthers(account.ownerId),
 			]);
@@ -427,6 +429,7 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 				status: account.status,
 				createdAt: account.createdAt,
 				usage,
+				compute,
 				recoveryCodesLeft,
 				// Nobody else is here yet: the app hides Sharing, Discover and publishing until someone is.
 				alone: !others,
@@ -463,7 +466,7 @@ export function accountApi(env: Env, account: Account, site: AuthSite, request: 
 /** An error a Durable Object threw across RPC, as the API answers it: its message, with the status its words imply. */
 function rpcFailure(error: unknown): Response {
 	const message = error instanceof Error ? error.message : String(error);
-	const status = /^No (circle|agent|template)/.test(message) ? 404 : /up to \d+/.test(message) ? 429 : 400;
+	const status = /^No (circle|agent|template)/.test(message) ? 404 : /up to \d+/.test(message) ? 429 : / is already set up/.test(message) ? 409 : 400;
 	return fail(status, message);
 }
 
@@ -729,6 +732,25 @@ export async function adminAsMajordomo(env: Env, ownerId: string, agentId: strin
 	return (await adminApi(env, account, request, false, true)(path, request)) ?? fail(404, "Not found");
 }
 
+/** What the admin's Compute section shows: each provider without its credentials, what kinds there are to add, the default quota, and everyone's usage this month. */
+async function computeOverview(env: Env) {
+	const store = gallery(env);
+	const [providers, quota, usage] = await Promise.all([store.computeProviders(), store.computeQuota(), computeStats(env)]);
+	return {
+		providers: providers.map(computeProviderInfo),
+		kinds: Object.entries(COMPUTE_KINDS).map(([kind, { name, fields }]) => ({ kind, name, fields })),
+		quota,
+		usage,
+	};
+}
+
+/** Everyone's sandbox minutes this month, with each of the biggest users named. */
+async function computeStats(env: Env) {
+	const usage = await gallery(env).computeUsage();
+	const top = await Promise.all(usage.top.map(async ({ userId, ...rest }) => ({ username: (await resolveAccount(env, userId))?.username ?? null, ...rest })));
+	return { ...usage, top };
+}
+
 /**
  * `/api/admin/*`: the admin's view of everyone, and which sign-in providers
  * are on, with a signed-in browser only. An API token can't run the instance.
@@ -744,7 +766,7 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 		const dir = directory(env);
 		const body = async () => ((await request.json().catch(() => ({}))) ?? {}) as Record<string, unknown>;
 		try {
-			if (route === "GET /stats") return json(await dir.stats());
+			if (route === "GET /stats") return json({ ...(await dir.stats()), compute: await computeStats(env) });
 			if (route === "GET /accounts") {
 				const status = url.searchParams.get("status") as AccountStatus | null;
 				return json({
@@ -848,6 +870,36 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				log("provider_removed", { provider: sharedProvider[1], by: admin.ownerId });
 				return json({ deleted: true });
 			}
+			// Compute for everyone's coding sandboxes (./compute.ts): the providers, the quota on each person, and what has been used.
+			if (route === "GET /compute") return json(await computeOverview(env));
+			const computeProvider = /^\/admin\/compute\/providers\/([^/]+)(\/validate)?$/.exec(path);
+			if (route === "POST /compute/providers" || (computeProvider && !computeProvider[2] && request.method === "PUT")) {
+				const id = computeProvider ? decodeURIComponent(computeProvider[1]!) : null;
+				const provider = await gallery(env)
+					.putComputeProvider(id, await body())
+					.catch((error: unknown) => rpcFailure(error));
+				if (provider instanceof Response) return provider;
+				if (!provider) return fail(404, "No such compute provider");
+				log(id ? "compute_provider_changed" : "compute_provider_added", { provider: provider.id, by: admin.ownerId });
+				return json({ provider: computeProviderInfo(provider) }, id ? 200 : 201);
+			}
+			if (computeProvider && !computeProvider[2] && request.method === "DELETE") {
+				if (!(await gallery(env).removeComputeProvider(decodeURIComponent(computeProvider[1]!)))) return fail(404, "No such compute provider");
+				log("compute_provider_removed", { provider: computeProvider[1], by: admin.ownerId });
+				return json({ deleted: true });
+			}
+			if (computeProvider?.[2] && request.method === "POST") {
+				const provider = (await gallery(env).computeProviders()).find((candidate) => candidate.id === decodeURIComponent(computeProvider[1]!));
+				if (!provider) return fail(404, "No such compute provider");
+				return json({ health: await checkCompute(provider, env) });
+			}
+			if (route === "PUT /compute/quota") {
+				const { quota } = await body();
+				const applied = await gallery(env).setComputeQuota(quota).catch((error: unknown) => rpcFailure(error));
+				if (applied instanceof Response) return applied;
+				log("compute_quota_changed", { quota: parseComputeQuota(quota), by: admin.ownerId });
+				return json({ quota: applied });
+			}
 			if (route === "POST /invites") {
 				const given = await body();
 				const count = typeof given.count === "number" && Number.isInteger(given.count) && given.count > 0 && given.count <= 100 ? given.count : 1;
@@ -868,7 +920,8 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 
 			if (request.method === "GET" && action === "") {
 				const usage = gone ? null : await (await pim()).usageReport();
-				return json({ account, usage, cleanup: await dir.cleanup(account.ownerId) });
+				const compute = gone ? null : await (await pim()).computeReport();
+				return json({ account, usage, compute, cleanup: await dir.cleanup(account.ownerId) });
 			}
 			if (request.method === "POST" && (action === "/suspend" || action === "/unsuspend")) {
 				if (self) return fail(409, "You can't suspend yourself.");
@@ -881,6 +934,14 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				forget(account.ownerId);
 				log(status === "suspended" ? "suspended" : "unsuspended", { owner: account.ownerId, username, reason, by: admin.ownerId });
 				return json({ account: updated });
+			}
+			if (request.method === "PUT" && action === "/compute-quota") {
+				if (gone) return fail(409, `${username} is ${account.status}`);
+				const { quota } = await body();
+				const parsed = quota === null ? null : parseComputeQuota(quota);
+				const applied = await (await pim()).setComputeQuota(parsed);
+				log("compute_quota_changed", { owner: account.ownerId, username, quota: parsed, by: admin.ownerId });
+				return json({ quota: applied });
 			}
 			if (request.method === "PUT" && action === "/limits") {
 				if (gone) return fail(409, `${username} is ${account.status}`);

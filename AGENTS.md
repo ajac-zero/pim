@@ -19,6 +19,18 @@ Worker tests run in workerd against `test/worker.ts`: the real Worker, with pi-a
 
 After editing `wrangler.jsonc`, run `pnpm types` to regenerate `worker-configuration.d.ts`.
 
+## Testing
+
+Cut the wall-clock you spend waiting for tests. While iterating, run the one file that covers your change, or `pnpm test:changed`; never run the whole suite to see whether a fix worked, and never run tests in the background and poll for them with sleep. Run the whole `pnpm test` once, at the end, in the foreground with a long timeout. After fixing one failing file, rerun only that file; run the whole suite again only if shared code changed.
+
+```sh
+pnpm exec vitest run test/goals.test.ts   # one file, while iterating
+pnpm test:changed                         # what a diff since origin/main reaches
+pnpm test                                 # the whole suite, once, at the end
+```
+
+`pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest, wrangler or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root project, and the web app's tests too when `web/` changed.
+
 ## Running Pim
 
 Use the preview. `amp orb services ensure` starts it (`.amp/services.yaml`) at `http://localhost:8787` and prints a portal link that signs the viewer in. It is `wrangler.preview.jsonc` with `preview/worker.ts`: the real Worker with a stand-in model, open registration, and no Cloudflare account. It rebuilds the web app when `web/src` changes and reloads the Worker when its code does; check `amp orb service logs preview` after an edit. State persists in `.wrangler/state-preview`; delete that directory for a fresh Pim.

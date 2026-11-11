@@ -4,7 +4,10 @@ import { egressPolicy } from "./src/coding/workspace/egress";
 import { WorkspaceLostError, WorkspaceNotFoundError, WorkspaceUnsupportedError, type WorkspaceSpec, type WorkspaceInfo, type EgressPolicy } from "./src/coding/workspace/types";
 import { handleEgress } from "./cloudflare-egress";
 
-const IDLE_MS = 10 * 60_000;
+// Cloudflare stops an inactive container without a snapshot. The thread gives an idle workspace's slot back after 10 minutes
+// (src/coding/scheduler.ts), which suspends it with a snapshot (`park`); this is only the net under that, long enough that the
+// thread always gets there first, so files outside git survive.
+const IDLE_MS = 30 * 60_000;
 type Saved = { spec: WorkspaceSpec; createdAt: number; state: "running" | "stopped" | "kept"; snapshot?: string; token: string };
 type Snapshot = { id: string; sessionId: string };
 type EgressProps = { sessionId: string; target: string };

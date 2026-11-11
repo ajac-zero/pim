@@ -58,7 +58,7 @@ CPU, memory and disk are passed as native container resources; process count is
 not separately enforced. The durable-object scheduling policy does not accept
 `max_instances`; use A0 quotas to bound running workspaces and the account's platform limits as the final ceiling.
 
-The native inactivity timeout is ten minutes and is renewed by `keepAlive`.
+The native inactivity timeout is thirty minutes and is renewed by `keepAlive`. It is only a safety net: an idle thread gives its slot back after ten minutes, which suspends the workspace with a snapshot, and the next turn resumes it from that snapshot.
 Unexpected stops lose changes since the last snapshot. The provider does not
 promise transparent recovery from those losses.
 

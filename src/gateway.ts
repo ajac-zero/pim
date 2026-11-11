@@ -650,5 +650,7 @@ export async function serve(arrived: Request, env: Env, ctx: ExecutionContext): 
 	}
 	// The desktop takes input as if at the computer itself: only the person, signed in in their browser, uses it.
 	if (path === COMPUTER_SCREEN_PATH && !viaSession) return withCors(fail(403, "Only the person, signed in to Pim in their browser, can use the computer's desktop"));
+	// Taking a display over pauses the agent using it: the person's browser only, like the desktop itself.
+	if (path === "/computer/displays/control" && !viaSession) return withCors(fail(403, "Only the person, signed in to Pim in their browser, can take a display over"));
 	return withCors(await toAgent(request, env, account.ownerId, path, viaSession));
 }

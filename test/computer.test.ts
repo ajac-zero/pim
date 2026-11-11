@@ -5,12 +5,12 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import type { DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
+import type { DisplayHost, DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
 import { Computer } from "../src/computer";
-import { api, apiUrl, browserCalls, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, browserCalls, connectTestComputer, opens, OWNER, pendingApproval, post, ROOT as ROOT_CHAT, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -501,6 +501,105 @@ describe("the computer", () => {
 		expect(await offeredTools()).not.toContain("file_read");
 		expect((await api("/files")).status).toBe(404);
 		expect(await fs.readFile(`${ROOT}/trips/lisbon.md`, "utf8")).toContain("Lisbon");
+	});
+
+	it("shows and takes over a chat's own display, for the person only", async () => {
+		const { body: paired } = await post<{ token: string }>("/computer");
+		const chat = ROOT_CHAT;
+		const internal = await runInDurableObject(agent(), (instance: Pim) => instance.store.sessionOf(chat)!);
+		// Where each stream opened, which display it was for, and who took over.
+		const opened: { display: string; heard: string[]; closed: boolean }[] = [];
+		const screenOf = (display: string): ScreenHost => ({
+			async clipboard() {
+				return `clipboard of ${display}`;
+			},
+			async open(onMessage, onClose) {
+				const stream = { display, heard: [] as string[], closed: false };
+				opened.push(stream);
+				onMessage(JSON.stringify({ type: "hello", display }));
+				return {
+					send: (data) => stream.heard.push(data),
+					close: () => {
+						stream.closed = true;
+						onClose();
+					},
+				};
+			},
+		});
+		const controls: [string, string][] = [];
+		const displays: DisplayHost = {
+			call: async () => ({ content: [] }),
+			envOf: async () => undefined,
+			list: async () => ({
+				displays: [{ threadId: internal, state: "idle", control: "agent", idleSec: 245 }],
+				queue: [{ threadId: "some-other-thread", state: "queued", control: "agent", idleSec: 0, position: 1 }],
+			}),
+			screenOf: async (thread) => {
+				if (thread !== internal) throw Object.assign(new Error(`No display is held by thread ${thread}.`), { code: "ENODISPLAY" });
+				return screenOf(thread);
+			},
+			control: async (thread, mode) => (controls.push([thread, mode]), { control: mode }),
+			touchViewer: async () => {},
+		};
+		const primary = screenOf("primary");
+		const hosted = await connectTestComputer(paired.token, `/tmp/computer-${crypto.randomUUID()}`, async () => answer({ command: "true" }), undefined, primary, undefined, {}, displays);
+		const cookie = await signedIn();
+		const viewing = async (query = "") => {
+			const response = await exports.default.fetch(new Request(apiUrl(`/computer/screen${query}`), { headers: { Upgrade: "websocket", origin: "https://pim.test", cookie } }));
+			const socket = response.webSocket!;
+			const messages: string[] = [];
+			const closing = new Promise<{ code: number; reason: string }>((resolve) => socket.addEventListener("close", (event) => resolve({ code: event.code, reason: event.reason })));
+			socket.addEventListener("message", (event) => messages.push(String(event.data)));
+			socket.accept();
+			return { socket, messages, closing };
+		};
+
+		// The list names each chat by the id the app knows it by, with its title, and leaves out what is the computer's alone.
+		const listed = await api<{ displays: any[]; queue: any[] }>("/computer/displays");
+		expect(listed.status).toBe(200);
+		expect(listed.body.displays).toMatchObject([{ threadId: chat, state: "idle", control: "agent", idleSec: 245 }]);
+		expect(listed.body.displays[0].title === null || typeof listed.body.displays[0].title === "string").toBe(true);
+		expect(listed.body.queue).toHaveLength(1);
+		expect(listed.body.queue[0]).toMatchObject({ state: "queued", position: 1 });
+
+		// Without a display it shows the primary desktop; with one (by the chat's id) that chat's own, and the two don't mix.
+		const main = await viewing();
+		await vi.waitFor(() => expect(main.messages).toHaveLength(1));
+		expect(JSON.parse(main.messages[0]!)).toEqual({ type: "hello", display: "primary" });
+		const own = await viewing(`?display=${chat}`);
+		await vi.waitFor(() => expect(own.messages).toHaveLength(1));
+		expect(JSON.parse(own.messages[0]!)).toEqual({ type: "hello", display: internal });
+		main.socket.send("to-primary");
+		own.socket.send("to-display");
+		await vi.waitFor(() => expect(opened.map((stream) => stream.heard)).toEqual([["to-primary"], ["to-display"]]));
+		// Its clipboard is its own too.
+		own.socket.send(JSON.stringify({ type: "pim_clipboard", payload: {} }));
+		await vi.waitFor(() => expect(own.messages).toHaveLength(2));
+		expect(JSON.parse(own.messages[1]!)).toEqual({ type: "pim_clipboard_text", payload: { text: `clipboard of ${internal}` } });
+		main.socket.close(1000);
+		own.socket.close(1000);
+		await vi.waitFor(() => expect(opened.every((stream) => stream.closed)).toBe(true));
+
+		// A chat that holds no display (or doesn't exist) is an error the app hears, not the primary desktop.
+		const unknown = await viewing("?display=nobody");
+		expect(await unknown.closing).toMatchObject({ code: 4004 });
+		expect(opened).toHaveLength(2);
+
+		// Taking over names the chat as the app knows it, goes to the display of its inside id, and is the person's alone: not an API token.
+		expect((await post("/computer/displays/control", { thread: chat, mode: "user" })).status).toBe(403);
+		const control = (body: unknown) =>
+			exports.default.fetch(new Request(apiUrl("/computer/displays/control"), { method: "POST", body: JSON.stringify(body), headers: { origin: "https://pim.test", "content-type": "application/json", cookie } }));
+		const taken = await control({ thread: chat, mode: "user" });
+		expect(taken.status).toBe(200);
+		expect(await taken.json()).toEqual({ control: "user" });
+		expect((await (await control({ thread: chat, mode: "agent" })).json())).toEqual({ control: "agent" });
+		expect(controls).toEqual([[internal, "user"], [internal, "agent"]]);
+		expect((await control({ thread: chat, mode: "root" })).status).toBe(400);
+		expect((await control({ mode: "user" })).status).toBe(400);
+
+		hosted.socket.close(1000);
+		await hosted.closed;
+		await runInDurableObject(agent(), (instance: Pim) => instance.computer.forget());
 	});
 });
 

@@ -5,6 +5,7 @@ import {
   keyEvent,
   normalized,
   readPacket,
+  screenPath,
 } from "~/lib/computer-screen";
 
 /** A packet as cua-spacesd sends one: two big-endian lengths, a JSON header and the payload. */
@@ -100,5 +101,13 @@ describe("the computer's screen", () => {
       y_normalized: 0.5,
     });
     expect(normalized({ clientX: 10, clientY: 30 }, box).y_normalized).toBe(0);
+  });
+});
+
+describe("a chat's display on the computer's screen", () => {
+  it("is asked for by the chat's id, and the primary desktop by none", () => {
+    expect(screenPath()).toBe("/api/computer/screen");
+    expect(screenPath(null)).toBe("/api/computer/screen");
+    expect(screenPath("a b/c")).toBe("/api/computer/screen?display=a%20b%2Fc");
   });
 });

@@ -200,13 +200,14 @@ export class Link {
 	 * as `screen` messages; its binary ones as binary, after the channel's
 	 * number in four bytes.
 	 */
-	async #openScreen(channel: unknown): Promise<null> {
-		const screen = this.#machine.screen;
+	async #openScreen(channel: unknown, display?: string): Promise<null> {
+		const screen = display ? await this.#displayScreen(display) : this.#machine.screen;
 		if (!screen) throw new CallError("This computer doesn't stream its desktop: it needs Cua's cua-spacesd.", "ENOSYS");
 		if (typeof channel !== "number" || !Number.isInteger(channel) || channel < 1 || channel > 0xffffffff || this.#screens.has(channel)) {
 			throw new CallError(`${String(channel)} isn't a channel for a new stream`, "EINVAL");
 		}
 		let closed = false;
+		let timer: ReturnType<typeof setInterval> | undefined;
 		const opened = await screen.open(
 			(data) => {
 				if (closed) return;
@@ -222,12 +223,34 @@ export class Link {
 			() => {
 				if (closed) return;
 				closed = true;
+				clearInterval(timer);
 				this.#screens.delete(channel);
 				this.#send(JSON.stringify({ type: "screen_closed", channel }));
 			},
 		);
-		if (!closed) this.#screens.set(channel, opened);
+		let watched: ScreenChannel = opened;
+		if (!closed && display) {
+			// A watched display must not idle out: the person's viewing is a touch, every 30 seconds while the stream is open.
+			const touch = () => void this.#machine.displays?.touchViewer?.(display).catch(() => undefined);
+			touch();
+			timer = setInterval(touch, VIEWER_TOUCH_MS);
+			watched = {
+				send: (data) => opened.send(data),
+				close: () => {
+					clearInterval(timer);
+					opened.close();
+				},
+			};
+		}
+		if (!closed) this.#screens.set(channel, watched);
 		return null;
+	}
+
+	/** The stream source of the display a thread holds now, never leasing one. */
+	async #displayScreen(display: string): Promise<ScreenHost> {
+		const displays = this.#machine.displays;
+		if (!displays?.screenOf) throw new CallError(NO_DISPLAY, "ENOSYS");
+		return displays.screenOf(display);
 	}
 
 	async #call(op: string, args: Args): Promise<unknown> {
@@ -245,9 +268,20 @@ export class Link {
 		if (op.startsWith("app_")) return appCall(this.#machine, op, args);
 		// The space times its round trip to here, for the Computer dialog.
 		if (op === "ping") return null;
-		if (op === "screen_open") return this.#openScreen(args.channel);
+		const display = typeof args.display === "string" && args.display !== "" ? args.display : undefined;
+		if (op === "screen_open") return this.#openScreen(args.channel, display);
+		if (op === "displays_list") {
+			if (!this.#machine.displays?.list) throw new CallError(NO_DISPLAY, "ENOSYS");
+			return this.#machine.displays.list();
+		}
+		if (op === "display_control") {
+			if (!this.#machine.displays?.control) throw new CallError(NO_DISPLAY, "ENOSYS");
+			if (typeof args.thread !== "string" || args.thread === "") throw new CallError("thread must name the thread whose display it is", "EINVAL");
+			if (args.mode !== "user" && args.mode !== "agent") throw new CallError("mode must be 'user' or 'agent'", "EINVAL");
+			return this.#machine.displays.control(args.thread, args.mode);
+		}
 		if (op === "screen_clipboard") {
-			const screen = this.#machine.screen;
+			const screen = display ? await this.#displayScreen(display) : this.#machine.screen;
 			if (!screen) throw new CallError("This computer doesn't stream its desktop: it needs Cua's cua-spacesd.", "ENOSYS");
 			return screen.clipboard();
 		}
@@ -1243,7 +1277,20 @@ async function grpcWeb(base: string, token: string, method: string, message: num
 }
 
 /** A computer's per-thread displays: calls a thread's driver tool on its own display, and finds the environment of the one it holds. */
-export type DisplayHost = Pick<DisplayClient, "call" | "envOf">;
+export type DisplayHost = Pick<DisplayClient, "call" | "envOf"> & Partial<Pick<DisplayClient, "list" | "control" | "touchViewer" | "screenOf">>;
+
+/** How often a stream of a thread's display tells displayd its person is watching. */
+const VIEWER_TOUCH_MS = 30_000;
+
+/** What the app lists of a display: who holds it, how it is, and for a queued thread, where it stands. */
+export type DisplaySummary = {
+	threadId: string;
+	state: string;
+	control: "agent" | "user";
+	idleSec: number;
+	position?: number;
+	estimatedWaitSec?: number;
+};
 
 /** The space id displayd records its leases under: one computer serves one person. */
 const SPACE = "pim-computer";
@@ -1261,7 +1308,7 @@ function queuedMessage(lease: Lease): string {
 	return `display_queued No display is free yet: ${place}${wait}.${held} Try again shortly.`;
 }
 
-type Lease = { state: string; id?: string; env?: Record<string, string>; cdpPort?: number; driver?: { base: string; tokenFile: string }; [key: string]: unknown };
+type Lease = { state: string; id?: string; control?: string; env?: Record<string, string>; cdpPort?: number; driver?: { base: string; tokenFile: string }; [key: string]: unknown };
 
 /** What a thread's lease gives, or the retryable text for why it isn't a display to use yet. */
 export type Acquired = { lease: Lease & { driver: { base: string; tokenFile: string } } } | { error: string };
@@ -1278,8 +1325,11 @@ export class DisplayClient {
 	readonly #token: () => Promise<string>;
 	readonly #drivers = new Map<string, DriverHost>();
 	readonly #makeDriver: (base: string, tokenFile: string) => DriverHost;
+	readonly #screens = new Map<string, ScreenHost>();
+	readonly #makeScreen: (base: string, tokenFile: string) => ScreenHost;
 
-	constructor(options: { url?: string; token?: string; tokenFile?: string; driver?: (base: string, tokenFile: string) => DriverHost } = {}) {
+	constructor(options: { url?: string; token?: string; tokenFile?: string; driver?: (base: string, tokenFile: string) => DriverHost; screen?: (base: string, tokenFile: string) => ScreenHost } = {}) {
+		this.#makeScreen = options.screen ?? spacesdScreen;
 		this.#url = options.url ?? "http://127.0.0.1:9900";
 		this.#token = async () => options.token ?? (await fs.readFile(options.tokenFile ?? "/etc/displayd/token", "utf8")).trim();
 		this.#makeDriver = options.driver ?? spacesdDriver;
@@ -1309,6 +1359,54 @@ export class DisplayClient {
 		} catch {
 			return undefined;
 		}
+	}
+
+	/** The displays in use and the threads queued for one, in queue order after the displays; gone and timed-out leases are left out. */
+	async list(): Promise<{ displays: DisplaySummary[]; queue: DisplaySummary[] }> {
+		const leases = await this.leases();
+		if (!leases) throw new CallError(NO_DISPLAY, "ENODISPLAY");
+		const now = Date.now();
+		const shown = leases
+			.filter((lease) => ["queued", "starting", "active", "idle"].includes(lease.state))
+			.map((lease): DisplaySummary => ({
+				threadId: String(lease.threadId),
+				state: lease.state,
+				control: lease.control === "user" ? "user" : "agent",
+				idleSec: lease.control === "user" ? 0 : Math.max(0, Math.floor((now - Number(lease.lastTouch ?? now)) / 1000)),
+				...(typeof lease.position === "number" ? { position: lease.position } : {}),
+				...(typeof lease.estimatedWaitSec === "number" ? { estimatedWaitSec: lease.estimatedWaitSec } : {}),
+			}));
+		return {
+			displays: shown.filter((one) => one.state !== "queued"),
+			queue: shown.filter((one) => one.state === "queued").sort((a, b) => (a.position ?? 0) - (b.position ?? 0)),
+		};
+	}
+
+	/** The stream source of the display a thread holds now (active or idle); an unknown or queued one is an error, and none is leased. */
+	async screenOf(thread: string): Promise<ScreenHost> {
+		const leases = await this.leases();
+		if (!leases) throw new CallError(NO_DISPLAY, "ENODISPLAY");
+		const lease = leases.find((one) => one.threadId === thread && one.state !== "gone" && one.state !== "timeout" && one.state !== "reaping");
+		if (!lease) throw new CallError(`No display is held by thread ${thread}.`, "ENODISPLAY");
+		if (lease.state === "queued") throw new CallError(`The display of thread ${thread} is still queued.`, "ENODISPLAY");
+		if ((lease.state !== "active" && lease.state !== "idle") || !lease.driver) throw new CallError(`The display of thread ${thread} is ${lease.state}, not ready to show yet.`, "ENODISPLAY");
+		const key = `${lease.driver.base} ${lease.driver.tokenFile}`;
+		let screen = this.#screens.get(key);
+		if (!screen) this.#screens.set(key, (screen = this.#makeScreen(lease.driver.base, lease.driver.tokenFile)));
+		return screen;
+	}
+
+	/** Tells displayd the person is watching the thread's display, so it doesn't idle out. */
+	async touchViewer(thread: string): Promise<void> {
+		await this.#request("POST", "/touch", { threadId: thread, viewer: true });
+	}
+
+	/** Takes the thread's display over for the person (`user`, which pauses the agent's driver calls) or hands it back (`agent`). */
+	async control(thread: string, mode: "user" | "agent"): Promise<{ control: "agent" | "user" }> {
+		const { status, body } = await this.#request("POST", "/control", { threadId: thread, mode });
+		if (status === 404) throw new CallError(`No display is held by thread ${thread}.`, "ENODISPLAY");
+		if (status !== 200) throw new CallError(`displayd refused: HTTP ${status} ${JSON.stringify(body)}`, "ENODISPLAY");
+		return { control: body?.lease?.control === "user" ? "user" : "agent" };
 	}
 
 	/** The environment of the display the thread holds, if it does: it never leases one. */

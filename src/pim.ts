@@ -178,7 +178,7 @@ import { cancelTask, describeTask, type ScheduleHost, ScheduledTasks, scheduledT
 import type { PimServices } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { HostedApps, SESSION_COOKIE as HOSTED_SESSION_COOKIE } from "./hosted";
-import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
+import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerDisplay, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
 import { byteRange, FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -504,8 +504,8 @@ function noStore(value: unknown, status = 200): Response {
 }
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
 
-/** A socket's chat, or for an app showing the computer's desktop, the channel its stream comes on. */
-type SocketState = { readonly session: string; readonly channel?: number };
+/** A socket's chat, or for an app showing the computer's desktop, the channel its stream comes on and the thread whose display it shows, if not the primary desktop. */
+type SocketState = { readonly session: string; readonly channel?: number; readonly display?: string };
 /** A socket editing a note: which one. */
 type NoteSocketState = { readonly note: string };
 
@@ -7117,6 +7117,27 @@ export class Pim extends DurableAgent<Env> {
 				return noStore(this.computer.status());
 			},
 		],
+		// The computer's per-thread displays, for the Computer view to list and take over (the desktop itself streams at /computer/screen?display=).
+		[
+			"GET",
+			"/computer/displays",
+			async () => {
+				// displayd knows threads by the id the chat has inside the space; the app knows them by their public id, with a title.
+				const shown = (one: ComputerDisplay) => ({ ...one, threadId: this.store.publicId(one.threadId), title: this.store.sessionInfo(one.threadId)?.title ?? null });
+				const { displays, queue } = await this.computer.displays();
+				return noStore({ displays: displays.map(shown), queue: queue.map(shown) });
+			},
+		],
+		[
+			"POST",
+			"/computer/displays/control",
+			async (_params, request) => {
+				const { thread, mode } = (await request.json().catch(() => ({}))) as { thread?: unknown; mode?: unknown };
+				if (typeof thread !== "string" || !thread) throw new HttpError(400, "thread must name the thread whose display to take over");
+				if (mode !== "user" && mode !== "agent") throw new HttpError(400, "mode must be 'user' or 'agent'");
+				return noStore(await this.computer.displayControl(this.store.sessionOf(thread) ?? thread, mode));
+			},
+		],
 		[
 			"POST",
 			"/computer",
@@ -8519,15 +8540,19 @@ export class Pim extends DurableAgent<Env> {
 	 * stream says goes to the socket as it is, and what the app sends goes to
 	 * the stream (Cua's media plane, rcdp wire v2).
 	 */
-	async #viewScreen(connection: Connection<SocketState>): Promise<void> {
+	async #viewScreen(connection: Connection<SocketState>, request: Request): Promise<void> {
 		const channel = crypto.getRandomValues(new Uint32Array(1))[0]! || 1;
-		connection.setState({ session: ROOT_SESSION, channel });
+		// `?display=` names the thread whose own display it shows, rather than the primary desktop.
+		const named = new URL(request.url).searchParams.get("display") || undefined;
+		const display = named === undefined ? undefined : this.store.sessionOf(named);
+		connection.setState({ session: ROOT_SESSION, channel, ...(display ? { display } : {}) });
 		try {
+			if (named !== undefined && display === undefined) throw new Error("No such chat.");
 			const status = this.computer.status();
 			if (status.state === "none") throw new Error("This space has no computer.");
 			if (status.state === "offline") throw new Error("The computer is offline.");
 			if (!status.computer?.screen) throw new Error("This computer doesn't stream its desktop.");
-			await this.computer.openScreen(channel);
+			await this.computer.openScreen(channel, display);
 		} catch (error) {
 			connection.close(4004, errorMessage(error).slice(0, 120));
 		}
@@ -8573,7 +8598,7 @@ export class Pim extends DurableAgent<Env> {
 	async #screenClipboard(connection: Connection<SocketState>): Promise<void> {
 		let payload: { text: string; error?: string };
 		try {
-			payload = { text: await this.computer.clipboard() };
+			payload = { text: await this.computer.clipboard(connection.state?.display) };
 		} catch (error) {
 			payload = { text: "", error: errorMessage(error) };
 		}
@@ -8617,7 +8642,7 @@ export class Pim extends DurableAgent<Env> {
 			return;
 		}
 		if (this.#isScreenViewer(connection)) {
-			await this.#viewScreen(connection);
+			await this.#viewScreen(connection, ctx.request);
 			return;
 		}
 		if (this.#isNoteEditor(connection)) {

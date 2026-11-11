@@ -29,6 +29,7 @@ import { QueuedMessages } from "~/components/chat/queued-messages";
 import { ChatTabs, ChatTitle, useChatDrop } from "~/components/chat/tabs";
 import { TaskView } from "~/components/chat/tasks";
 import { Thread } from "~/components/chat/thread";
+import { ComputerDisplayChip } from "~/components/computer-display-chip";
 import { FileView } from "~/components/file-view";
 import { useI18n } from "~/components/i18n";
 import { Loader2, Pin, Users } from "~/components/icons";
@@ -352,6 +353,7 @@ function ChatPage() {
                   {t("connecting")}
                 </span>
               )}
+              <ComputerDisplayChip sessionId={sessionId} />
               <ActivityToggle
                 sessionId={sessionId}
                 className="shrink-0 self-center"

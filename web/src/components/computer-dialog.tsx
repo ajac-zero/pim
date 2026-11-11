@@ -1,8 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Dialog } from "radix-ui";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
+import { useDisplayText } from "~/components/computer-display-chip";
 import { useI18n } from "~/components/i18n";
 import { Loader2, Maximize2, Monitor, X } from "~/components/icons";
 import { Action } from "~/components/ui/actions";
@@ -13,6 +20,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "~/components/ui/tooltip";
+import { allDisplays, defaultDisplay, showable } from "~/lib/computer-displays";
 import {
   ComputerScreen,
   canPlayScreen,
@@ -21,8 +29,8 @@ import {
   type ScreenLatency,
   type ScreenState,
 } from "~/lib/computer-screen";
-import { type ComputerStatus, pim } from "~/lib/pim-api";
-import { computerQuery } from "~/lib/queries";
+import { type ComputerDisplay, type ComputerStatus, pim } from "~/lib/pim-api";
+import { computerDisplaysQuery, computerQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
 /**
@@ -32,12 +40,19 @@ import { cn } from "~/lib/utils";
  * while it's being set up, and why it couldn't be. While the desktop has
  * the keyboard, every key goes to the computer, Escape too; ⌘⇧D (see the
  * command palette) or the close button closes it.
+ *
+ * Besides the primary desktop, which is yours, each chat whose agent works
+ * on a display of its own has it listed: it opens on the display of the chat
+ * you're in (`chat`), to watch only, until you take it over, which makes its
+ * agent wait.
  */
 export function ComputerDialog({
   open,
+  chat,
   onOpenChange,
 }: {
   open: boolean;
+  chat?: string | undefined;
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useI18n();
@@ -51,6 +66,23 @@ export function ComputerDialog({
         : false,
   });
   const live = status?.state === "online" && status.computer?.screen;
+  const queryClient = useQueryClient();
+  // A computer without displayd has no displays to list, so it fails and shows just its desktop.
+  const displaysQuery = useQuery(computerDisplaysQuery(open && !!live));
+  const displays = allDisplays(displaysQuery.data);
+  // What you picked, or until you pick, the display of the chat you're in when it holds one.
+  const [picked, setPicked] = useState<string | null | undefined>(undefined);
+  const wanted =
+    picked === undefined ? defaultDisplay(displaysQuery.data, chat) : picked;
+  const selected = displays.find((one) => one.threadId === wanted);
+  const choosing = !!live && displaysQuery.isPending;
+  const control = useMutation({
+    mutationFn: (mode: "user" | "agent") =>
+      pim.controlDisplay(selected?.threadId ?? "", mode),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["computer", "displays"] }),
+    onError: (error) => toast.error(error.message),
+  });
   const [latency, setLatency] = useState<ScreenLatency | null>(null);
   const [size, setSize] = useState({ width: 16, height: 10 });
 
@@ -86,6 +118,20 @@ export function ComputerDialog({
               <span className="sr-only">{t("close")}</span>
             </Dialog.Close>
           </header>
+          {live && displays.length > 0 && (
+            <DisplayList
+              displays={displays}
+              selected={selected?.threadId ?? null}
+              onSelect={setPicked}
+            />
+          )}
+          {live && selected && (
+            <TakeOver
+              display={selected}
+              pending={control.isPending}
+              onControl={(mode) => control.mutate(mode)}
+            />
+          )}
           <div
             ref={frame}
             // The desktop as large as the window allows, in its own shape, below the header; the whole screen on a phone.
@@ -103,10 +149,18 @@ export function ComputerDialog({
                 : "px-6 pt-10 pb-14 sm:w-md sm:flex-none",
             )}
           >
-            {!status ? (
+            {!status || choosing ? (
               <Loader2 className="size-4 animate-spin text-muted-foreground" />
+            ) : live && selected && !showable(selected) ? (
+              <p className="px-6 text-center text-muted-foreground text-sm">
+                {selected.state === "queued"
+                  ? t("computerDisplayQueuedHint")
+                  : t("computerDisplayNotReady")}
+              </p>
             ) : live ? (
               <Desktop
+                display={selected?.threadId ?? null}
+                input={!selected || selected.control === "user"}
                 onLatency={setLatency}
                 onSize={(width, height) => setSize({ width, height })}
               />
@@ -117,6 +171,106 @@ export function ComputerDialog({
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+/** The primary desktop and each chat's display, to pick what the view shows. */
+function DisplayList({
+  displays,
+  selected,
+  onSelect,
+}: {
+  displays: ComputerDisplay[];
+  selected: string | null;
+  onSelect: (display: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const text = useDisplayText();
+  const item = (
+    active: boolean,
+    key: string,
+    onClick: () => void,
+    children: ReactNode,
+  ) => (
+    <button
+      key={key}
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "flex max-w-56 shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        active
+          ? "bg-accent text-foreground"
+          : "text-muted-foreground hover:bg-accent/50",
+      )}
+    >
+      {children}
+    </button>
+  );
+  return (
+    <nav
+      aria-label={t("computerDisplays")}
+      className="flex min-w-0 gap-2 overflow-x-auto px-4 pb-2 sm:w-0 sm:min-w-full"
+    >
+      {item(
+        selected === null,
+        "primary",
+        () => onSelect(null),
+        <>
+          <Monitor className="size-3.5 shrink-0" />
+          <span className="truncate">{t("computerPrimary")}</span>
+        </>,
+      )}
+      {displays.map((display) =>
+        item(
+          selected === display.threadId,
+          display.threadId,
+          () => onSelect(display.threadId),
+          <>
+            <span className="truncate">
+              {display.title || t("computerDisplayUntitled")}
+            </span>
+            <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
+              {display.control === "user"
+                ? t("computerDisplayYours")
+                : text(display)}
+            </span>
+          </>,
+        ),
+      )}
+    </nav>
+  );
+}
+
+/** Whether you have a chat's display, with the button to take it over, which pauses its agent, or hand it back. */
+function TakeOver({
+  display,
+  pending,
+  onControl,
+}: {
+  display: ComputerDisplay;
+  pending: boolean;
+  onControl: (mode: "user" | "agent") => void;
+}) {
+  const { t } = useI18n();
+  const yours = display.control === "user";
+  return (
+    <div className="flex items-center gap-3 px-4 pb-2">
+      <p className="min-w-0 flex-1 text-muted-foreground text-xs">
+        {yours ? t("computerYouControl") : t("computerWatchOnly")}
+      </p>
+      {showable(display) && (
+        <Button
+          size="sm"
+          variant={yours ? "secondary" : "default"}
+          disabled={pending}
+          onClick={() => onControl(yours ? "agent" : "user")}
+        >
+          {pending && <Loader2 className="animate-spin" />}
+          {yours ? t("computerHandBack") : t("computerTakeOver")}
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -222,9 +376,15 @@ function NotLive({ status }: { status: ComputerStatus }) {
  * while (`holdScreen`), with the canvas it draws on, which is put here.
  */
 function Desktop({
+  display,
+  input,
   onLatency,
   onSize,
 }: {
+  /** The chat whose display it shows, or null for the primary desktop. */
+  display: string | null;
+  /** Whether what you do goes to it; a chat's display is watched only until you take it over. */
+  input: boolean;
   onLatency: (latency: ScreenLatency | null) => void;
   onSize: (width: number, height: number) => void;
 }) {
@@ -232,6 +392,7 @@ function Desktop({
   const holder = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<ScreenState>({ status: "connecting" });
   const [attempt, setAttempt] = useState(0);
+  const shown = useRef<ComputerScreen | null>(null);
   const playable = canPlayScreen();
   const label = t("computerDesktop");
 
@@ -239,7 +400,12 @@ function Desktop({
   useEffect(() => {
     const host = holder.current;
     if (!host || !playable) return;
-    const screen = holdScreen(() => new ComputerScreen(desktopCanvas()));
+    const screen = holdScreen(
+      display,
+      () => new ComputerScreen(desktopCanvas(), display),
+    );
+    shown.current = screen;
+    screen.setInput(input);
     host.append(screen.canvas);
     screen.observe(setState, onLatency);
     screen.canvas.focus({ preventScroll: true });
@@ -253,7 +419,13 @@ function Desktop({
       onLatency(null);
       releaseScreen(screen);
     };
-  }, [playable, attempt]);
+  }, [playable, attempt, display]);
+
+  // Taking a display over, or handing it back, doesn't reconnect it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new attempt or display is a new screen to tell.
+  useEffect(() => {
+    shown.current?.setInput(input);
+  }, [input, attempt, display]);
 
   useEffect(() => {
     holder.current?.querySelector("canvas")?.setAttribute("aria-label", label);

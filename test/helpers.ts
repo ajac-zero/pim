@@ -5,7 +5,7 @@ import { getAgentByName } from "agents";
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, vi } from "vitest";
-import { type BrowserHost, type DriverHost, type ExecArgs, type ExecResult, Link, type Machine, type ScreenHost } from "../computer/pim-computer";
+import { type BrowserHost, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, Link, type Machine, type ScreenHost } from "../computer/pim-computer";
 import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
 import type { TranscriptMessage } from "../src/transcript";
@@ -306,9 +306,11 @@ export async function connectTestComputer(
 	driver?: DriverHost,
 	/** Calls this computer answers itself rather than through `Link`: what the test can't run in workerd, such as an app's backend. */
 	calls: Record<string, (args: any) => unknown> = {},
+	/** The computer's per-thread displays, where the test needs them to list, show and take over; else they call `driver`. */
+	displays?: DisplayHost,
 ) {
 	await fs.mkdir(root, { recursive: true });
-	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}), ...(screen ? { screen } : {}), ...(driver ? { driver, displays: { call: (_thread, tool, args) => driver.call(tool, args), envOf: async () => undefined } } : {}) };
+	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}), ...(screen ? { screen } : {}), ...(driver ? { driver, displays: { call: (_thread, tool, args) => driver.call(tool, args), envOf: async () => undefined } } : {}), ...(displays ? { displays } : {}) };
 	const response = await opens("/computer/connect", token);
 	expect(response.status).toBe(101);
 	const socket = response.webSocket!;

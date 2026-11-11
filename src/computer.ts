@@ -125,6 +125,16 @@ export type BrowserTransport = {
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 
+/** One of the computer's per-thread displays, as its displayd reports it. */
+export type ComputerDisplay = {
+	threadId: string;
+	state: "queued" | "starting" | "active" | "idle";
+	control: "agent" | "user";
+	idleSec: number;
+	position?: number;
+	estimatedWaitSec?: number;
+};
+
 /** A failure the computer reported, with its code (`ENOENT`…), which the file tools read. */
 function remoteError(error: { message?: unknown; code?: unknown }): Error {
 	return Object.assign(new Error(String(error.message ?? "The computer failed")), typeof error.code === "string" ? { code: error.code } : {});
@@ -350,8 +360,18 @@ export class Computer {
 	 * numbers so it knows the stream's first messages; they go to the
 	 * `screen` given to the constructor.
 	 */
-	async openScreen(channel: number): Promise<void> {
-		await this.call("screen_open", { channel });
+	async openScreen(channel: number, display?: string): Promise<void> {
+		await this.call("screen_open", { channel, ...(display ? { display } : {}) });
+	}
+
+	/** The computer's per-thread displays, and the threads queued for one; the primary desktop isn't among them. */
+	async displays(): Promise<{ displays: ComputerDisplay[]; queue: ComputerDisplay[] }> {
+		return this.call("displays_list", {});
+	}
+
+	/** Takes a thread's display over for the person (`user`, which pauses its agent) or hands it back (`agent`). */
+	async displayControl(thread: string, mode: "user" | "agent"): Promise<{ control: "agent" | "user" }> {
+		return this.call("display_control", { thread, mode });
 	}
 
 	/** The person's input to a stream of the desktop, as the stream's own text messages. */
@@ -371,8 +391,8 @@ export class Computer {
 	}
 
 	/** The text on the computer's clipboard. */
-	async clipboard(): Promise<string> {
-		return (await this.call("screen_clipboard", {})) as string;
+	async clipboard(display?: string): Promise<string> {
+		return (await this.call("screen_clipboard", display ? { display } : {})) as string;
 	}
 
 	/** Closes a stream of the desktop. */

@@ -12,6 +12,13 @@
 /** Where the app shows the desktop: a socket of the stream (`src/computer.ts`'s `COMPUTER_SCREEN_PATH`). */
 export const COMPUTER_SCREEN_PATH = "/api/computer/screen";
 
+/** The address of a stream: the primary desktop, or the display a chat holds (`display`, the chat's id). */
+export function screenPath(display?: string | null): string {
+  return display
+    ? `${COMPUTER_SCREEN_PATH}?display=${encodeURIComponent(display)}`
+    : COMPUTER_SCREEN_PATH;
+}
+
 /** A video packet's header, as the media plane describes each frame. */
 export type VideoFrame = {
   session_id: string;
@@ -217,6 +224,9 @@ export class ComputerScreen {
   #onState: (state: ScreenState) => void = () => {};
   #onLatency: (latency: ScreenLatency | null) => void = () => {};
   readonly #socket: WebSocket;
+  /** Whether what the person does goes to the desktop: always on the primary one, and on a chat's display once taken over. */
+  #input: boolean;
+  readonly display: string | null;
   #session = "";
   #decoder: VideoDecoder | null = null;
   #epoch = -1;
@@ -262,11 +272,13 @@ export class ComputerScreen {
   /** Keys pressed on the desktop and not yet let go, which go up when it loses the keyboard. */
   readonly #held = new Map<string, Extract<InputEvent, { kind: "key" }>>();
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, display: string | null = null) {
     this.canvas = canvas;
+    this.display = display;
+    this.#input = display === null;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     this.#socket = new WebSocket(
-      `${scheme}://${location.host}${COMPUTER_SCREEN_PATH}`,
+      `${scheme}://${location.host}${screenPath(display)}`,
     );
     this.#socket.binaryType = "arraybuffer";
     this.#socket.addEventListener("open", () => this.#timeRoundTrip());
@@ -301,6 +313,12 @@ export class ComputerScreen {
   #setState(state: ScreenState): void {
     this.#state = state;
     this.#onState(state);
+  }
+
+  /** Lets what the person does go to the desktop, or keeps it to watching. */
+  setInput(on: boolean): void {
+    if (!on) this.releaseKeys();
+    this.#input = on;
   }
 
   /** Lets go of the keys still held on the desktop, as when it loses the keyboard before they're released. */
@@ -488,6 +506,7 @@ export class ComputerScreen {
 
   /** Sends what the person did, a batch per animation frame, so pointer moves between frames don't pile up. */
   #send(event: InputEvent): void {
+    if (!this.#input) return;
     const last = this.#pending.at(-1);
     if (
       event.kind === "pointer" &&
@@ -622,8 +641,16 @@ let kept: {
  * (`releaseScreen`) stays open for `KEEP_MS`, so opening it again
  * shows the desktop at once rather than connecting again.
  */
-export function holdScreen(open: () => ComputerScreen): ComputerScreen {
-  if (kept?.screen.state.status === "closed") closeScreen();
+export function holdScreen(
+  display: string | null,
+  open: () => ComputerScreen,
+): ComputerScreen {
+  // One stream is kept: another display's replaces it.
+  if (
+    kept?.screen.state.status === "closed" ||
+    kept?.screen.display !== display
+  )
+    closeScreen();
   clearTimeout(kept?.closing);
   kept ??= { screen: open() };
   return kept.screen;

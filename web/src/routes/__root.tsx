@@ -516,6 +516,7 @@ function AppLayout() {
 
 function AppDialogs() {
   const { dialog, tab, agent, prompt } = Route.useSearch();
+  const { sessionId } = useParams({ strict: false }) as { sessionId?: string };
   const navigate = useNavigate();
   const close = (open: boolean) => {
     if (open) return;
@@ -544,7 +545,11 @@ function AppDialogs() {
           prompt={prompt}
           onOpenChange={close}
         />
-        <ComputerDialog open={dialog === "computer"} onOpenChange={close} />
+        <ComputerDialog
+          open={dialog === "computer"}
+          chat={sessionId}
+          onOpenChange={close}
+        />
         <AgentsDialog
           open={dialog === "agents"}
           agent={agent}

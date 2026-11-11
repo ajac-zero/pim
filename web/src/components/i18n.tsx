@@ -737,6 +737,24 @@ const translations = {
     computerCantPlay:
       "This browser can't show your computer's desktop. Try a recent Chrome, Edge, Safari or Firefox.",
     computerDesktop: "Your computer's desktop",
+    computerPrimary: "Primary desktop",
+    computerDisplays: "Displays",
+    computerDisplayUntitled: "Untitled chat",
+    computerDisplayQueued: "Queued #{position}",
+    computerDisplayStarting: "Starting",
+    computerDisplayActive: "Active",
+    computerDisplayIdle: "Idle {time}",
+    computerDisplayYours: "You",
+    computerChip: "Computer: {state}",
+    computerTakeOver: "Take over",
+    computerHandBack: "Hand back",
+    computerWatchOnly:
+      "Watching only. Take over to use this display; its agent waits meanwhile.",
+    computerYouControl:
+      "You're in control. Its agent waits until you hand it back.",
+    computerDisplayNotReady: "This display isn't ready to show yet.",
+    computerDisplayQueuedHint:
+      "This chat is waiting for a display. It shows here once it has one.",
     computerOpen: "Open",
     computerHost: "Computers",
     computerHostDescription:
@@ -2659,6 +2677,24 @@ const translations = {
     computerCantPlay:
       "Este navegador no puede mostrar el escritorio de tu computadora. Prueba un Chrome, Edge, Safari o Firefox reciente.",
     computerDesktop: "El escritorio de tu computadora",
+    computerPrimary: "Escritorio principal",
+    computerDisplays: "Pantallas",
+    computerDisplayUntitled: "Chat sin título",
+    computerDisplayQueued: "En cola n.º {position}",
+    computerDisplayStarting: "Iniciando",
+    computerDisplayActive: "Activa",
+    computerDisplayIdle: "Inactiva {time}",
+    computerDisplayYours: "Tú",
+    computerChip: "Computadora: {state}",
+    computerTakeOver: "Tomar el control",
+    computerHandBack: "Devolver",
+    computerWatchOnly:
+      "Solo mirando. Toma el control para usar esta pantalla; su agente espera mientras tanto.",
+    computerYouControl:
+      "Tienes el control. Su agente espera hasta que lo devuelvas.",
+    computerDisplayNotReady: "Esta pantalla aún no se puede mostrar.",
+    computerDisplayQueuedHint:
+      "Este chat espera una pantalla. Se mostrará aquí cuando la tenga.",
     computerOpen: "Abrir",
     computerHost: "Computadoras",
     computerHostDescription:

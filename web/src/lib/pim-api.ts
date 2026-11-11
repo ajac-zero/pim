@@ -807,6 +807,27 @@ export type ComputerStatus = {
   } | null;
 };
 
+/** One of your computer's per-thread displays: the desktop of a chat's own, where its agent works. */
+export type ComputerDisplay = {
+  /** The chat that holds it. */
+  threadId: string;
+  /** The chat's title, if it has one. */
+  title: string | null;
+  state: "queued" | "starting" | "active" | "idle";
+  /** Who has it: its agent, or you, having taken it over. */
+  control: "agent" | "user";
+  idleSec: number;
+  /** For a queued chat: its place in the queue, and when a display is likely to free up. */
+  position?: number;
+  estimatedWaitSec?: number;
+};
+
+/** The displays in use, and the chats queued for one. */
+export type ComputerDisplays = {
+  displays: ComputerDisplay[];
+  queue: ComputerDisplay[];
+};
+
 /** The machine that keeps everyone's computers, as the admin sees it. */
 export type ComputerHostStatus = {
   paired: boolean;
@@ -1623,6 +1644,14 @@ export const pim = {
       body: JSON.stringify({ managed: true }),
     }),
   removeComputer: () => call<ComputerStatus>("/computer", { method: "DELETE" }),
+  /** The computer's per-thread displays, and the chats queued for one. */
+  computerDisplays: () => call<ComputerDisplays>("/computer/displays"),
+  /** Takes a chat's display over (`user`, which pauses its agent there) or hands it back (`agent`). */
+  controlDisplay: (thread: string, mode: "user" | "agent") =>
+    call<{ control: "user" | "agent" }>("/computer/displays/control", {
+      method: "POST",
+      body: JSON.stringify({ thread, mode }),
+    }),
   browser: (sessionId: string) =>
     call<BrowserStatus>(`/browser?session=${encodeURIComponent(sessionId)}`),
   closeBrowser: (sessionId: string) =>

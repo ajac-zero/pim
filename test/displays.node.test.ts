@@ -4,8 +4,8 @@ import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DisplayClient, handle, Link, type Machine, runCommand } from "../computer/pim-computer";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DisplayClient, handle, Link, type Machine, runCommand, type ScreenHost } from "../computer/pim-computer";
 
 type Req = { method: string; url: string; body: any; auth?: string };
 
@@ -219,5 +219,135 @@ describe("exec's display environment", () => {
 				else process.env[name] = value;
 			}
 		}
+	});
+});
+
+describe("showing a thread's display", () => {
+	/** A screen source that records which driver base each stream was opened on, and what its streams heard. */
+	function fakeScreens() {
+		const opened: { base: string; heard: string[]; closed: boolean }[] = [];
+		const make = (base: string): ScreenHost => ({
+			clipboard: async () => `clipboard of ${base}`,
+			async open(onMessage, onClose) {
+				const stream = { base, heard: [] as string[], closed: false };
+				opened.push(stream);
+				onMessage(JSON.stringify({ type: "hello", base }));
+				return {
+					send: (data) => stream.heard.push(data),
+					close: () => {
+						stream.closed = true;
+						onClose();
+					},
+				};
+			},
+		});
+		return { opened, make };
+	}
+
+	const leases = (driver: { base: string }) => [
+		{ ...lease("a", driver), createdAt: 1, lastTouch: Date.now() - 245_000 },
+		{ ...lease("u", driver), state: "idle", control: "user", lastTouch: Date.now() - 900_000 },
+		{ threadId: "q2", state: "queued", position: 2, estimatedWaitSec: 60 },
+		{ threadId: "q1", state: "queued", position: 1, estimatedWaitSec: 30 },
+		{ threadId: "s", state: "starting", driver: null },
+		{ threadId: "g", state: "gone", reason: "preempted" },
+	];
+
+	async function rig() {
+		const a = await start(fakeDriver("a"));
+		const displayd = await start(
+			serve((r) => (r.url === "/displays" ? { json: { displays: leases(a) } } : r.url === "/control" ? { json: { lease: { threadId: r.body.threadId, control: r.body.mode } } } : { json: {} })),
+		);
+		const screens = fakeScreens();
+		const primary = fakeScreens();
+		const machine: Machine = {
+			root: dir,
+			exec: async () => ({}) as never,
+			screen: primary.make("primary"),
+			displays: new DisplayClient({ url: displayd.base, tokenFile: tokenFile(), screen: screens.make }),
+		};
+		const sent: any[] = [];
+		const link = new Link(machine, (m) => sent.push(typeof m === "string" ? JSON.parse(m) : m));
+		const call = async (op: string, args: Record<string, unknown>) => {
+			const id = `${op}-${sent.length}`;
+			link.receive(JSON.stringify({ type: "call", id, op, args }));
+			await vi.waitFor(() => expect(sent.some((m) => m.id === id)).toBe(true));
+			return sent.find((m) => m.id === id);
+		};
+		return { a, displayd, screens, primary, link, sent, call };
+	}
+
+	it("lists displays and the queue in order, without gone ones or secrets, with idle time", async () => {
+		const { call } = await rig();
+		const { result } = await call("displays_list", {});
+		expect(result.displays.map((d: any) => [d.threadId, d.state, d.control])).toEqual([["a", "active", "agent"], ["u", "idle", "user"], ["s", "starting", "agent"]]);
+		expect(result.displays[0].idleSec).toBeGreaterThanOrEqual(245);
+		expect(result.displays[0].idleSec).toBeLessThan(260);
+		// A person's own display isn't idle while they have it.
+		expect(result.displays[1].idleSec).toBe(0);
+		expect(result.queue.map((d: any) => [d.threadId, d.position, d.estimatedWaitSec])).toEqual([["q1", 1, 30], ["q2", 2, 60]]);
+		expect(JSON.stringify(result)).not.toMatch(/driver|env|tokenFile/);
+	});
+
+	it("streams the thread's own display, and the primary desktop without a display, never leasing", async () => {
+		const { a, displayd, screens, primary, call, link, sent } = await rig();
+		expect((await call("screen_open", { channel: 1, display: "a" })).error).toBeUndefined();
+		expect((await call("screen_open", { channel: 2 })).error).toBeUndefined();
+		expect(screens.opened.map((s) => s.base)).toEqual([a.base]);
+		expect(primary.opened.map((s) => s.base)).toEqual(["primary"]);
+		// Each stream's input goes only to its own.
+		link.receive(JSON.stringify({ type: "screen", channel: 1, data: "to-a" }));
+		link.receive(JSON.stringify({ type: "screen", channel: 2, data: "to-primary" }));
+		expect(screens.opened[0]!.heard).toEqual(["to-a"]);
+		expect(primary.opened[0]!.heard).toEqual(["to-primary"]);
+		expect(sent.filter((m) => m.type === "screen").map((m) => m.channel)).toEqual([1, 2]);
+		expect((await call("screen_clipboard", { display: "a" })).result).toBe(`clipboard of ${a.base}`);
+		expect((await call("screen_clipboard", {})).result).toBe("clipboard of primary");
+		expect(displayd.seen.some((r) => r.url === "/acquire")).toBe(false);
+	});
+
+	it("refuses an unknown, queued, starting or gone display", async () => {
+		const { screens, call } = await rig();
+		for (const display of ["nobody", "q1", "s", "g"]) {
+			const reply = await call("screen_open", { channel: 9, display });
+			expect(reply.error?.code, display).toBe("ENODISPLAY");
+		}
+		expect((await call("screen_clipboard", { display: "q1" })).error?.code).toBe("ENODISPLAY");
+		expect(screens.opened).toEqual([]);
+	});
+
+	it("tells displayd someone is watching, at once and every 30 seconds, until the stream closes", async () => {
+		const { displayd, call } = await rig();
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		try {
+			await call("screen_open", { channel: 1, display: "a" });
+			const touches = () => displayd.seen.filter((r) => r.url === "/touch");
+			await vi.waitFor(() => expect(touches()).toHaveLength(1));
+			expect(touches()[0]!.body).toEqual({ threadId: "a", viewer: true });
+			await vi.advanceTimersByTimeAsync(30_000);
+			await vi.waitFor(() => expect(touches()).toHaveLength(2));
+			await vi.advanceTimersByTimeAsync(29_000);
+			expect(touches()).toHaveLength(2);
+			await call("screen_close", { channel: 1 });
+			await vi.advanceTimersByTimeAsync(120_000);
+			expect(touches()).toHaveLength(2);
+			// The primary desktop is never touched this way.
+			await call("screen_open", { channel: 2 });
+			await vi.advanceTimersByTimeAsync(60_000);
+			expect(touches()).toHaveLength(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("takes a display over and hands it back through displayd, and says when it has none", async () => {
+		const { displayd, call } = await rig();
+		expect((await call("display_control", { thread: "a", mode: "user" })).result).toEqual({ control: "user" });
+		expect(displayd.seen.find((r) => r.url === "/control")!.body).toEqual({ threadId: "a", mode: "user" });
+		expect((await call("display_control", { thread: "a", mode: "agent" })).result).toEqual({ control: "agent" });
+		expect((await call("display_control", { thread: "a", mode: "root" })).error?.code).toBe("EINVAL");
+		const none = await start(serve(() => ({ status: 404, json: { error: "the thread has no display" } })));
+		const machine: Machine = { root: dir, exec: async () => ({}) as never, displays: new DisplayClient({ url: none.base, tokenFile: tokenFile() }) };
+		await expect(machine.displays!.control!("x", "user")).rejects.toMatchObject({ code: "ENODISPLAY" });
 	});
 });

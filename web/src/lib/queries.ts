@@ -102,6 +102,16 @@ export const filesQuery = (path: string) =>
 export const computerQuery = () =>
   queryOptions({ queryKey: ["computer"], queryFn: pim.computer });
 
+/** The computer's per-thread displays; it fails where the computer has no displayd, which isn't retried. */
+export const computerDisplaysQuery = (enabled = true) =>
+  queryOptions({
+    queryKey: ["computer", "displays"],
+    queryFn: pim.computerDisplays,
+    retry: false,
+    enabled,
+    refetchInterval: (query) => (query.state.error ? false : 5_000),
+  });
+
 /** The machine that keeps everyone's computers: the admin's view. */
 export const computerHostQuery = () =>
   queryOptions({ queryKey: ["computer-host"], queryFn: admin.computerHost });

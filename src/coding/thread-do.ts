@@ -57,6 +57,7 @@ import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Release
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { BranchMovedError, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
+import { WORKSPACE_GIT_AUTH_DIR, workspaceCredentialHelper } from "./git-broker/workspace-credential";
 import { GiteaNotConnectedError } from "./git-broker/gitea-connection";
 import { GITHUB_INSTANCE_ID } from "./git-broker/provider";
 import type { Fetch, GitHubApp } from "./git-broker/github-app";
@@ -386,16 +387,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/**
 	 * Where the workspace clones the repository from: the git broker on this
 	 * Pim (./git-broker/), with a broker token for this thread and this
-	 * repository alone. The token goes to git in the clone's environment
-	 * only, never in a URL, argument or file, and the thread never writes it
-	 * down or logs it.
+	 * repository alone. Clone commands use a header, never a credential in
+	 * the URL or arguments. Agent access uses injection or the global Git
+	 * credential helper, and no token is recorded in thread events.
 	 */
-	protected async cloneSource(thread: CodingThreadRow): Promise<{ url: string; token: string }> {
+	protected async cloneSource(thread: CodingThreadRow, renewable = false): Promise<{ url: string; token: string }> {
 		const provider = this.#providers().get(thread.providerInstance);
 		const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
 		const origin = deploymentSettings(this.env).publicUrl;
 		if (!origin) throw new Error("PIM_PUBLIC_URL isn't set, so the workspace can't reach Pim's git broker");
-		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo, instance: provider.instance.id });
+		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo, instance: provider.instance.id, ...(renewable ? { renewUntil: Date.now() + 12 * 60 * 60_000 } : {}) });
 		const instance = provider.instance.id === GITHUB_INSTANCE_ID ? "" : `/${provider.instance.id}`;
 		return { url: `${origin}/api${GIT_BROKER_PATH}${instance}/${repo.owner}/${repo.name}.git`, token };
 	}
@@ -1759,6 +1760,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			// A rebuild between turns is work the scheduler shouldn't take the slot back from.
 			if (!work && rebuild) await this.#report("running");
 			await this.#prepareEnvironment();
+			await this.#prepareWorkspaceGit(await this.#workspace(), this.store.required());
 		} catch (error) {
 			await this.#provisioningFailed(error);
 			return;
@@ -2642,6 +2644,22 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return { url, token, auth };
 	}
 
+	/** Refreshes agent git access before a turn, after preparing the environment snapshot. */
+	async #prepareWorkspaceGit(workspace: Workspace, thread: CodingThreadRow): Promise<void> {
+		if (this.workspaceProviders().get(thread.providerId).capabilities.egressInjection) {
+			await this.#brokerAccess(thread);
+			return;
+		}
+		const { url, token } = await this.cloneSource(thread, true);
+		const encoder = new TextEncoder();
+		await workspace.writeFile(`${WORKSPACE_GIT_AUTH_DIR}/credential.json`, encoder.encode(JSON.stringify({ url, token })), 0o600);
+		await workspace.writeFile(`${WORKSPACE_GIT_AUTH_DIR}/helper.mjs`, encoder.encode(workspaceCredentialHelper), 0o700);
+		await git(workspace, ["config", "--global", `credential.${url}.useHttpPath`, "true"]);
+		// Reset inherited helpers so none can store this token elsewhere.
+		await git(workspace, ["config", "--global", "--replace-all", `credential.${url}.helper`, ""]);
+		await git(workspace, ["config", "--global", "--add", `credential.${url}.helper`, `!node ${WORKSPACE_GIT_AUTH_DIR}/helper.mjs`]);
+	}
+
 	/** Gives the workspace's egress proxy a credential to add to requests, with the ones it already has. The workspace itself never holds it. */
 	async #inject(purpose: string, rule: EgressInjection): Promise<void> {
 		const thread = this.store.required();
@@ -2670,8 +2688,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			},
 		);
 		const base = this.store.required().baseSha;
-		if (cloned && base !== null) return;
 		const { url, token, auth } = await this.#brokerAccess(thread);
+		if (cloned && base !== null) return;
 		const delays = this.gitRetryDelaysMs();
 		if (!cloned) {
 			await gitWithRetries(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token }, delays, () => workspace.remove(REPO_DIR).catch(() => undefined));
@@ -2765,6 +2783,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const signal = this.#kill.signal;
 		const owner = environmentOwner(thread);
 		let workspace = await this.#workspace();
+		// A rebuild must not snapshot the previous turn's fetch grant, on any provider.
+		await workspace.remove(WORKSPACE_GIT_AUTH_DIR).catch((error: unknown) => {
+			if (!(error instanceof WorkspaceFileError)) throw error;
+		});
 		let setup: Setup | null;
 		let plan: ProvisionStep[];
 		let key: string;

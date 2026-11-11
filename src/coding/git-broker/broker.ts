@@ -139,7 +139,7 @@ export const MAX_BROKER_TOKEN_TTL_MS = 12 * 60 * 60_000;
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** What a broker token lets its holder do: fetch `repo` (`owner/name`, lowercase) for `sessionId` until `expiresAt`. */
-export type BrokerClaims = { readonly sessionId: string; readonly repo: string; readonly expiresAt: number; readonly instance: string };
+export type BrokerClaims = { readonly sessionId: string; readonly repo: string; readonly expiresAt: number; readonly instance: string; readonly renewUntil?: number };
 
 /** The key broker tokens are signed with, derived from `secret` for this use alone. */
 export async function brokerKey(secret: string | Uint8Array): Promise<CryptoKey> {
@@ -152,12 +152,14 @@ export async function brokerKey(secret: string | Uint8Array): Promise<CryptoKey>
 /** A token for the workspace of coding session `sessionId` to fetch `repo` with, for `ttlMs` (an hour unless given, 12 hours at most). */
 export async function issueBrokerToken(
 	key: CryptoKey,
-	grant: { sessionId: string; repo: RepoRef; /** A git provider instance's id; GitHub unless given. */ instance?: string; ttlMs?: number; now?: number },
+	grant: { sessionId: string; repo: RepoRef; /** A git provider instance's id; GitHub unless given. */ instance?: string; ttlMs?: number; now?: number; renewUntil?: number },
 ): Promise<string> {
+	const now = grant.now ?? Date.now();
 	const ttl = grant.ttlMs ?? BROKER_TOKEN_TTL_MS;
 	if (!SESSION_ID.test(grant.sessionId)) throw new GitBrokerError(400, "That isn't a coding session's ID");
 	if (!Number.isFinite(ttl) || ttl <= 0 || ttl > MAX_BROKER_TOKEN_TTL_MS) throw new GitBrokerError(400, "A broker token lasts from a moment to 12 hours");
-	const claims = { v: 1, sid: grant.sessionId, repo: grant.repo.fullName.toLowerCase(), exp: (grant.now ?? Date.now()) + ttl, ...(grant.instance && grant.instance !== GITHUB_INSTANCE.id ? { inst: grant.instance } : {}) };
+	if (grant.renewUntil !== undefined && (!Number.isFinite(grant.renewUntil) || grant.renewUntil <= now || grant.renewUntil > now + MAX_BROKER_TOKEN_TTL_MS)) throw new GitBrokerError(400, "Invalid renewal deadline");
+	const claims = { v: 1, renew: grant.renewUntil, sid: grant.sessionId, repo: grant.repo.fullName.toLowerCase(), exp: Math.min(now + ttl, grant.renewUntil ?? Infinity), ...(grant.instance && grant.instance !== GITHUB_INSTANCE.id ? { inst: grant.instance } : {}) };
 	const signed = `${TOKEN_PREFIX}${base64UrlEncode(encoder.encode(JSON.stringify(claims)))}`;
 	const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(signed)));
 	return `${signed}.${base64UrlEncode(mac)}`;
@@ -171,9 +173,9 @@ export async function verifyBrokerToken(key: CryptoKey, token: string, now = Dat
 	try {
 		if (!(await crypto.subtle.verify("HMAC", key, base64UrlDecode(mac), encoder.encode(`${TOKEN_PREFIX}${payload}`)))) return null;
 		const claims = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload))) as Record<string, unknown>;
-		const { v, sid, repo, exp, inst } = claims;
-		if (v !== 1 || typeof sid !== "string" || typeof repo !== "string" || typeof exp !== "number" || (inst !== undefined && typeof inst !== "string")) return null;
-		return exp > now ? { sessionId: sid, repo, expiresAt: exp, instance: inst ?? GITHUB_INSTANCE.id } : null;
+		const { v, sid, repo, exp, inst, renew } = claims;
+		if ((renew !== undefined && (typeof renew !== "number" || !Number.isFinite(renew))) || v !== 1 || typeof sid !== "string" || typeof repo !== "string" || typeof exp !== "number" || (inst !== undefined && typeof inst !== "string")) return null;
+		return exp > now ? { sessionId: sid, repo, expiresAt: exp, instance: inst ?? GITHUB_INSTANCE.id, ...(typeof renew === "number" ? { renewUntil: renew } : {}) } : null;
 	} catch {
 		return null;
 	}

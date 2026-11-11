@@ -1,3 +1,5 @@
+import { injectedHeaders } from "../src/coding/workspace/egress";
+import { handleGitBroker } from "../src/coding/git-broker/routes";
 import type { Context } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
@@ -825,6 +827,21 @@ describe("a coding thread on a provider with sessions, keepalives and egress inj
 		const token = policy.inject![0]!.headers.authorization!.replace("Bearer ", "");
 		expect(JSON.stringify(fakeClones)).not.toContain(token);
 		expect(await everything(injected.stub)).not.toContain(token);
+		// An agent supplies no header: the egress policy authenticates its ordinary fetch.
+		const [info] = await provider.list({ sessionId: injected.id });
+		const workspace = (await provider.get(info!.ref))!;
+		const events = [];
+		for await (const event of workspace.exec(["git", "fetch", "origin", "main"], { cwd: REPO_DIR, timeoutMs: 1000 })) events.push(event);
+		expect(events.at(-1)).toMatchObject({ type: "exit", code: 0 });
+		const path = "/api/coding/git/acme/demo.git/info/refs?service=git-upload-pack";
+		const headers = injectedHeaders(policy, "pim.test", path);
+		const fetched = await handleGitBroker(new Request("https://pim.test" + path, { headers }), path.slice(4).split("?")[0]!, {
+			key: await brokerTokenKey(env), app: null, policy: { branchPrefix: "pim/", repos: null },
+			fetch: async () => new Response("refs", { headers: { "content-type": "application/x-git-upload-pack-advertisement" } }),
+		});
+		expect(fetched.status).toBe(200);
+		await fetched.text();
+
 		// The model gateway's token goes to the proxy too, next to the git rule, and the workspace is given a placeholder to send.
 		const gateway = await inside(injected.stub, (thread) => thread.modelGatewayEnv("claude-code"));
 		policy = provider.egressOf(injected.id)!;
@@ -994,6 +1011,17 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		const [info] = await manager.backing.list({ sessionId: id });
 		const workspace = (await manager.backing.get(info!.ref))!;
 		expect(new TextDecoder().decode(await workspace.readFile(`${REPO_DIR}/hello.txt`))).toBe("Hello!\n");
+		const credential = JSON.parse(new TextDecoder().decode(await workspace.readFile("/workspace/.config/pim/git/credential.json"))) as { url: string; token: string };
+		expect(credential.url).toBe(BROKER_URL);
+		expect(await verifyBrokerToken(await brokerTokenKey(env), credential.token)).toMatchObject({ sessionId: id, repo: "acme/demo", renewUntil: expect.any(Number) });
+		const configs = manager.requests.filter(request => (request.body as { cmd?: string[] })?.cmd?.[1] === "config");
+		expect(configs.some(request => (request.body as { cmd: string[] }).cmd.includes("credential." + BROKER_URL + ".helper"))).toBe(true);
+		expect(JSON.stringify(configs)).not.toContain(credential.token);
+		expect(await everything(stub)).not.toContain(credential.token);
+		const fetchEvents = [];
+		for await (const event of workspace.exec(["git", "fetch", "origin", "main"], { cwd: REPO_DIR, timeoutMs: 1000 })) fetchEvents.push(event);
+		expect(fetchEvents.at(-1)).toMatchObject({ type: "exit", code: 0 });
+
 		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", checkpoint: { operationId: input.operationId } });
 		// Archived: the session is deleted without its volume, and the slot is free.
 		expect(await stub.archive()).toMatchObject({ state: "archived", slot: "none" });

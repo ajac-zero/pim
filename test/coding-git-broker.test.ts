@@ -232,6 +232,47 @@ describe("installation tokens", () => {
 });
 
 describe("broker tokens", () => {
+	it("renews only a live, bounded grant for the same repository and thread", async () => {
+		const key = await brokerKey("test-renewal-key");
+		let now = NOW;
+		const until = NOW + 2 * 60 * 60_000;
+		for (const renewUntil of [NOW, NOW + 12 * 60 * 60_000 + 1, Number.NaN]) {
+			await expect(issueBrokerToken(key, { sessionId: "T-renew", repo: WIDGETS, now, renewUntil })).rejects.toThrow("Invalid renewal deadline");
+		}
+		const logged = vi.spyOn(console, "log");
+		const original = await issueBrokerToken(key, { sessionId: "T-renew", repo: WIDGETS, now, renewUntil: until });
+		const deps: GitBrokerDeps = { key, app: null, policy: POLICY, now: () => now };
+		const ask = (path: string, token: string) => handleGitBroker(new Request("https://pim.test/api" + path, {
+			method: "POST", headers: { Authorization: "Bearer " + token },
+		}), path, deps);
+		now += 30 * 60_000;
+		const path = "/coding/git/acme/widgets.git/credential";
+		const response = await ask(path, original);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("cache-control")).toBe("no-store");
+		const { token } = await response.json() as { token: string };
+		expect(await verifyBrokerToken(key, token, now)).toEqual({
+			sessionId: "T-renew", repo: "acme/widgets", instance: "github",
+			expiresAt: now + 60 * 60_000, renewUntil: until,
+		});
+		expect((await ask("/coding/git/acme/other.git/credential", token)).status).toBe(403);
+		expect((await ask("/coding/git/other/acme/widgets.git/credential", token)).status).toBe(403);
+		expect((await ask("/coding/git/acme/widgets.git/git-receive-pack", token)).status).toBe(404);
+		now = NOW + 60 * 60_000;
+		expect((await ask(path, original)).status).toBe(401);
+		now = until - 1;
+		const nearDeadline = await issueBrokerToken(key, { sessionId: "T-renew", repo: WIDGETS, now, renewUntil: until });
+		const last = await ask(path, nearDeadline);
+		const renewed = (await last.json() as { token: string }).token;
+		expect((await verifyBrokerToken(key, renewed, now))?.expiresAt).toBe(until);
+		now = until;
+		expect((await ask(path, renewed)).status).toBe(401);
+		expect((await ask(path, nearDeadline)).status).toBe(401);
+		const plain = await issueBrokerToken(key, { sessionId: "T-plain", repo: WIDGETS, now });
+		expect((await ask(path, plain)).status).toBe(403);
+		expect(JSON.stringify(logged.mock.calls)).not.toContain("pimgit_");
+	});
+
 	it("open one repository for one session until they expire", async () => {
 		const key = await brokerKey("directory-secret");
 		const token = await issueBrokerToken(key, { sessionId: "T-123", repo: { owner: "Acme", name: "Widgets", fullName: "Acme/Widgets" }, ttlMs: 60_000, now: NOW });

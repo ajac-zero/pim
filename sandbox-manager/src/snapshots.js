@@ -32,6 +32,7 @@ const FORMAT = typeof zlib.createZstdCompress === 'function' ? 'zstd' : 'gzip'
 
 // Credentials that live in the home directory (/workspace, as HOME) and never go into a snapshot.
 const HOME_SECRETS = [
+	'.config/pim/git',
 	'.npmrc', '.netrc', '.git-credentials', '.pypirc', '.yarnrc.yml', '.ssh', '.aws', '.docker', '.kube', '.gnupg', '.azure',
 	'.config/gh', '.config/gcloud', '.cargo/credentials', '.cargo/credentials.toml',
 	// The coding harnesses' sign-ins.

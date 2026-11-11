@@ -68,3 +68,13 @@ A name counts as a check when it is `test`, `tests`, `check`, `lint`, `vet`, `ty
 - **The CLIs share the PATH.** mise's shims come first for the coding CLIs too, so a repository that pins a very old Node runs the Node-based CLI wrappers with it.
 - **Cloudflare Sandbox** keeps no environments, so it neither provisions, finds checks, nor runs a setup script.
 - **Not tested against a live sandbox.** The Worker's tests run the steps in the in-memory workspace. The steps themselves were run for real with mise 2026.10.4 for Go, pnpm, requirements files, uv, Rust and a mise repository, and the Go, pnpm and mise ones in the workspace image as its user, after which a command with only the image's PATH found the pinned versions; but not under gVisor or behind the egress proxy, so the allowlist above is what mise is documented to reach, not what a live run was seen to need.
+
+### Git access inside a thread
+
+An agent can run ordinary `git fetch origin <branch>` and `git pull` for any branch of its thread's repository. Origin is Pim's git broker. The broker admits only the repository and provider instance named in the signed thread token and serves only `git-upload-pack`. Direct pushes are refused; writes still go through Pim's `coding_push` and `coding_merge` approval flow.
+
+On providers with credential injection, the egress policy supplies the broker header even when Git sends no credentials. Pim refreshes that policy before each turn and when opening an existing workspace. The workspace never receives that token.
+
+Compose cannot inject credentials. After preparing the environment, Pim installs a URL-scoped credential helper in the workspace's **global** Git configuration, with `useHttpPath` enabled. The helper keeps a read-only broker token in `/workspace/.config/pim/git/credential.json` (mode 0600), not in the checkout's configuration, remote URL, command arguments or agent environment. This directory is excluded from compose environment snapshots. The agent can read this short-lived token; it never receives an upstream provider credential or a signing key.
+
+The helper asks the broker for a fresh token on each credential lookup, preserving the thread, repository and provider scope. Each token lasts at most one hour; renewal cannot pass the original twelve-hour deadline. Expired tokens cannot renew. Pim supplies a new grant before each turn, including after an idle period or workspace restore. If a command runs after access expires without an intervening credential lookup, or a single turn exceeds the renewal window, Git fails closed; starting another turn refreshes access. The helper does not cache tokens through other Git helpers or print broker errors or credentials.

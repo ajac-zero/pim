@@ -1,3 +1,4 @@
+import { WORKSPACE_GIT_AUTH_DIR } from "../src/coding/git-broker/workspace-credential";
 import type { FakeCommandHandler } from "../src/coding/workspace/fake";
 import type { EgressPolicy, Workspace } from "../src/coding/workspace/types";
 
@@ -67,6 +68,14 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 	};
 	const commit = async (sha: string) => JSON.parse(await read(workspace, objects(sha))) as Files;
 	switch (command) {
+		case "config": {
+			if (!rest.includes("--global")) return { code: 1 };
+			const [key, value] = rest.filter(arg => !arg.startsWith("--")) as [string, string];
+			const config = JSON.parse(await read(workspace, "/workspace/.gitconfig").catch(() => "{}")) as Record<string, string[]>;
+			config[key] = rest.includes("--add") ? [...(config[key] ?? []), value] : [value];
+			await write(workspace, "/workspace/.gitconfig", JSON.stringify(config));
+			return {};
+		}
 		case "clone": {
 			const [url, dir] = rest.filter((arg) => !arg.startsWith("--"));
 			if (url) fakeClones.push({ url, env });
@@ -107,9 +116,13 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 				return {};
 			}
 			// Like git against the broker, a fetch without its bearer header is refused.
-			// The broker's token reaches git as a header, or, on a provider that injects credentials, an egress proxy adds it.
+			// Git uses the global helper, a command header, or an injecting egress proxy.
 			const injected = (workspace as { egress?: EgressPolicy }).egress?.inject?.some((rule) => rule.headers.authorization?.startsWith("Bearer "));
-			if (!injected && !env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Bearer ")) return { stderr: "fatal: could not read Username for 'https://pim.invalid': terminal prompts disabled\n", code: 128 };
+			const origin = await read(workspace, `${cwd}/.git/origin`);
+			const global = JSON.parse(await read(workspace, "/workspace/.gitconfig").catch(() => "{}")) as Record<string, string[]>;
+			const grant = JSON.parse(await read(workspace, `${WORKSPACE_GIT_AUTH_DIR}/credential.json`).catch(() => "{}")) as { url?: string; token?: string };
+			const helper = global[`credential.${origin}.helper`]?.includes(`!node ${WORKSPACE_GIT_AUTH_DIR}/helper.mjs`) && grant.url === origin && grant.token?.startsWith("pimgit_");
+			if (!injected && !helper && !env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Bearer ")) return { stderr: "fatal: could not read Username for 'https://pim.invalid': terminal prompts disabled\n", code: 128 };
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
 			if (!files) return { stderr: "fatal: could not read from remote\n", code: 128 };
 			const dest = rest.find((arg) => arg.includes(":"))?.split(":")[1];

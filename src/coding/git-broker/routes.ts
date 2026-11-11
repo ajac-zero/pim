@@ -1,6 +1,6 @@
 import { base64UrlDecode } from "../../auth/encoding";
 import { dispatch, type Route } from "../../http";
-import { type BrokerClaims, brokerKey, GitBrokerError, type RepoRef, repoRef, verifyBrokerToken } from "./broker";
+import { type BrokerClaims, brokerKey, GitBrokerError, type RepoRef, repoRef, issueBrokerToken, verifyBrokerToken } from "./broker";
 import { type BrokerPolicy, brokerPolicy, GITEA_INSTANCE_ID, giteaBaseUrl, giteaConfig, githubAppConfig, githubAppStatus } from "./config";
 import { GiteaConnection, type GiteaBackend, giteaKeyFrom, GiteaNotConnectedError } from "./gitea-connection";
 import { giteaInstance, GiteaProvider } from "./gitea-provider";
@@ -241,6 +241,22 @@ async function proxy(
  */
 export function gitBrokerRoutes(deps: GitBrokerDeps): Route[] {
 	return ["/:owner/:repo", "/:instance/:owner/:repo"].flatMap((repoPath): Route[] => [
+		[
+			"POST",
+			`${GIT_BROKER_PATH}${repoPath}/credential`,
+			async (params, request) => {
+				const admitted = await admit(deps, params, request);
+				if (admitted instanceof Response) return admitted;
+				const now = (deps.now ?? Date.now)();
+				const until = admitted.claims.renewUntil;
+				if (!until || until <= now) return text(403, "Prepare the workspace in Pim to renew git access");
+				const token = await issueBrokerToken(deps.key, {
+					sessionId: admitted.claims.sessionId, repo: admitted.repo, instance: admitted.claims.instance,
+					now, ttlMs: Math.min(60 * 60_000, until - now), renewUntil: until,
+				});
+				return Response.json({ token }, { headers: { "Cache-Control": "no-store" } });
+			},
+		],
 		[
 			"GET",
 			`${GIT_BROKER_PATH}${repoPath}/info/refs`,

@@ -101,6 +101,7 @@ describe('snapshots', () => {
 			'.cache/x/.env': 'CACHE_SECRET=1',
 			'.env.local': 'HOME_SECRET=1',
 			'.codex/auth.json': '{"token":"CODEX_SECRET"}',
+			'.config/pim/git/credential.json': '{"token":"GIT_SECRET"}',
 		})
 		await fs.chmod(path.join(dir, '.cache/tool/bin'), 0o4755)
 		await fs.symlink('src/index.js', path.join(dir, 'app/link'))
@@ -115,7 +116,7 @@ describe('snapshots', () => {
 		const bytes = await fs.readFile(data)
 		assert.deepEqual([r.json.key, r.json.repo, r.json.size, r.json.sha256], [K1, ada.repo, bytes.length, createHash('sha256').update(bytes).digest('hex')])
 		// .npmrc, .netrc, .config/gh and its file, .cache/x/.env, .env.local, .codex/auth.json, the python link, the fifo.
-		assert.equal(r.json.excluded, 9)
+		assert.equal(r.json.excluded, 11)
 		assert.ok(!bytes.includes('SECRET'), 'compressed, so this only rules out the obvious')
 		const list = await call('GET', `/snapshots?userId=ada&repo=${encodeURIComponent(ada.repo)}`)
 		assert.deepEqual(list.json.map((s) => [s.key, s.size, s.sha256, s.createdAt, s.lastUsedAt]), [[K1, r.json.size, r.json.sha256, clock.t, clock.t]])
@@ -146,7 +147,7 @@ describe('snapshots', () => {
 		const git = await read('app/.git/config')
 		assert.match(git, /url = https:\/\/github\.com\/ada\/app\.git/)
 		assert.ok(!git.includes('ghp_SECRET') && !git.includes('extraheader'), git)
-		for (const p of ['.npmrc', '.netrc', '.config/gh', '.cache/x/.env', '.env.local', '.codex/auth.json', '.venv/bin/python', 'app/pipe']) {
+		for (const p of ['.npmrc', '.netrc', '.config/gh', '.cache/x/.env', '.env.local', '.codex/auth.json', '.config/pim/git', '.venv/bin/python', 'app/pipe']) {
 			await assert.rejects(fs.lstat(path.join(out, p)), { code: 'ENOENT' }, p)
 		}
 		assert.deepEqual((await call('GET', '/snapshots?userId=ada')).json.map((s) => [s.key, s.lastUsedAt]), [[K1, clock.t]])

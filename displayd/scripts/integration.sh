@@ -64,7 +64,7 @@ if DISPLAY=$DB XAUTHORITY=$(jq -r .env.XAUTHORITY <<<"$LA") xdotool getmouseloca
 for L in "$LA" "$LB"; do
 	port=$(jq -r .vncPort <<<"$L")
 	listen=$(ss -ltnH "sport = :$port" | awk '{print $4}')
-	[[ "$listen" == 127.0.0.1:* && $(wc -l <<<"$listen") = 1 ]] && ok "VNC $port listens on loopback only" || bad "VNC $port listens on: $listen"
+	! grep -qvE '^(127\.0\.0\.1|\[::1\]):' <<<"$listen" && ok "VNC $port listens on loopback only" || bad "VNC $port listens on: $listen"
 done
 for L in "$LA" "$LB"; do
 	d=$(jq -r .display <<<"$L")
@@ -88,12 +88,14 @@ seen=$(on B timeout 3 xclip -selection clipboard -o 2>/dev/null || true)
 [ "$seen" != "$secret" ] && ok "B does not see A's clipboard" || bad "B sees A's clipboard"
 
 # 5. Drivers: type into a terminal on each display at once through its MCP server (needs xfce4-terminal).
-mcp() { # lease method-json: POST to the display's driver
-	curl -fsS --max-time 30 -H "authorization: Bearer $(cat "$(jq -r .driver.tokenFile <<<"$1")")" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$2" "$(jq -r .driver.base <<<"$1")/mcp"
+mcp() { # lease session-or-empty method-json: POST to the display's driver; prints headers then body
+	curl -sS -i --max-time 30 -H "authorization: Bearer $(cat "$(jq -r .driver.tokenFile <<<"$1")")" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' ${2:+-H "mcp-session-id: $2"} -d "$3" "$(jq -r .driver.base <<<"$1")/mcp"
 }
 type_into() { # lease text
-	mcp "$1" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"itest","version":"1"}}}' >/dev/null
-	mcp "$1" "$(jq -nc --arg t "$2" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"type_text",arguments:{text:$t,delivery_mode:"foreground"}}}')" >/dev/null
+	local sid
+	sid=$(mcp "$1" "" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"itest","version":"1"}}}' | tr -d '\r' | awk 'tolower($1)=="mcp-session-id:"{print $2}')
+	mcp "$1" "$sid" '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+	mcp "$1" "$sid" "$(jq -nc --arg t "$2" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"type_text",arguments:{text:$t,delivery_mode:"foreground"}}}')" >/dev/null
 }
 for N in A B; do
 	printf '#!/bin/sh\nexec cat > /tmp/out-%s-%s\n' "$N" "$RUN" >"/tmp/term-$N-$RUN.sh"
@@ -105,6 +107,7 @@ sleep 4
 type_into "$LA" "alpha-$RUN" &
 type_into "$LB" "bravo-$RUN" &
 wait
+for N in A B; do on $N xdotool key Return ctrl+d; done
 sleep 1
 grep -q "alpha-$RUN" "/tmp/out-A-$RUN" && ! grep -q "bravo-$RUN" "/tmp/out-A-$RUN" && ok "A's terminal got only A's text" || bad "A's terminal: $(cat "/tmp/out-A-$RUN" 2>&1)"
 grep -q "bravo-$RUN" "/tmp/out-B-$RUN" && ! grep -q "alpha-$RUN" "/tmp/out-B-$RUN" && ok "B's terminal got only B's text" || bad "B's terminal: $(cat "/tmp/out-B-$RUN" 2>&1)"

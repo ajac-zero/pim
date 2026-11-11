@@ -94,6 +94,7 @@ beforeEach(() => {
 	codingSchedulers.now = null;
 	codingThreadClock.now = null;
 	codingTimings.resumeWaitMs = 120_000;
+	codingTimings.stallMs = 300;
 	codingEvents.length = 0;
 });
 
@@ -2201,6 +2202,8 @@ describe("a Claude Code thread", () => {
 	});
 
 	it("runs one of the person's threads at a time on their login: the next waits for the first to end", async () => {
+		// The first thread's run is held with no output for the whole test: it is not to be taken for stalled meanwhile, however long the second thread takes to get here.
+		codingTimings.stallMs = 60_000;
 		let release = () => {};
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;

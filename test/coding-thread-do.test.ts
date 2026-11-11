@@ -2765,7 +2765,7 @@ describe("a coding thread's compute", () => {
 
 		it("ends the turn with the quota's reason when it refuses the new session, and doesn't try again", async () => {
 			const { provider, t0 } = capped();
-			// The command the move stops is followed by another, so the turn is still under way when the quota refuses.
+			// The command the move stops may be followed by another call; the turn is stopped by the refusal either way, so what is left unused is dropped.
 			codingFaux.setResponses([...sleeping(), ...sleeping()]);
 			const { id, stub } = await startThread();
 			await running(stub);
@@ -2773,12 +2773,13 @@ describe("a coding thread's compute", () => {
 			const resume = vi.spyOn(provider, "resumeOrCreate");
 			codingThreadClock.now = t0 + 48_000;
 			await heartbeat(stub);
-			expect((await turns(id, 1))[0]).toMatchObject({ outcome: "cancelled" });
 			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "compute_quota" }));
+			expect((await turns(id, 2)).map((event) => event.outcome)).toEqual(["cancelled", "error"]);
 			await heartbeat(stub);
 			expect(resume).not.toHaveBeenCalled();
 			expect(await ledger(id)).toEqual([expect.objectContaining({ ended_at: t0 + 48_000, end_reason: "suspend" })]);
 			expect(await sql(stub, "SELECT kind FROM coding_event WHERE kind LIKE 'session.%'")).toEqual([{ kind: "session.continuing" }]);
+			codingFaux.setResponses([]);
 		});
 
 		it("ends at the earlier of the compute cap and the provider's session limit", async () => {

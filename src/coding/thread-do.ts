@@ -216,6 +216,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#cycling: Promise<void> | null = null;
 	/** When the ledger says the open stretch must end (its compute cap), in the thread's clock; null with none. Read from the ledger at boot and at each heartbeat. */
 	#capAt: number | null = null;
+	/** A ledger write left running (`#cycleWorkspace`): the next one waits for it. */
+	#ledgerWrite: Promise<void> | null = null;
 	/** The turn that is being restarted from its transcript because its session ended, so its end is auto-resumed. */
 	#restarting: string | null = null;
 	/** The turn the person stopped (abort, cancel, archive, an interrupting steer): a restart for a new session never resumes it. */
@@ -301,6 +303,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * forward to that time.
 	 */
 	async #reserveCompute(thread: CodingThreadRow, enforce: boolean): Promise<number | null> {
+		await this.#ledgerWrite;
 		const quota = enforce ? await this.computeQuota(thread.space) : null;
 		const admitted = await this.env.Gallery.getByName("gallery").computeBegin({ userId: thread.space, threadId: thread.threadId, provider: thread.providerId, quota, now: this.now() });
 		if (!admitted.ok) throw new ComputeQuotaError(admitted.message);
@@ -351,6 +354,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Records that the thread's workspace stopped running. Counting never holds a thread up: a Gallery that can't be reached is logged. */
 	async #releaseCompute(reason: "stop" | "suspend" | "lost" | "failed"): Promise<void> {
+		await this.#ledgerWrite;
 		const threadId = this.store.required().threadId;
 		await this.env.Gallery.getByName("gallery")
 			.computeEnd(threadId, reason, this.now())
@@ -666,23 +670,30 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async #cycleWorkspace(thread: CodingThreadRow, provider: WorkspaceProvider): Promise<"resumed" | "created"> {
 		const ref = thread.workspaceRef;
 		if (!ref) throw new Error("The thread has no workspace");
-		// What runs in the old session is stopped now, and calls for the workspace wait until the new one is up.
-		this.#killCommands();
 		const cycle = (async () => {
 			this.#open = null;
-			// The old stretch ends as the old session does, and the new one begins once the quota allows it: each exactly once.
+			// Calls for the workspace wait until the new session is up. The old stretch ends as the old session does, and the new one begins once the quota allows it: each exactly once. This comes before what runs in the old session is stopped, so a turn's model doesn't get ahead of the move.
+			await this.#releaseCompute("suspend");
+			const refusal: { error?: unknown } = {};
+			const wallClockMin = await this.#reserveCompute(thread, true).catch((error) => {
+				refusal.error = error;
+				return null;
+			});
+			this.#killCommands();
 			try {
 				if (provider.capabilities.suspendResume) await provider.suspend(ref);
 				else await provider.destroy(ref, { keepVolume: true });
-			} finally {
-				await this.#releaseCompute("suspend");
+			} catch (error) {
+				if (!refusal.error) this.#ledgerWrite = this.#releaseCompute("failed");
+				throw error;
 			}
-			const wallClockMin = await this.#reserveCompute(thread, true);
+			if (refusal.error) throw refusal.error;
 			let back: Awaited<ReturnType<WorkspaceProvider["resumeOrCreate"]>>;
 			try {
 				back = await provider.resumeOrCreate(ref, this.#spec(thread, provider, wallClockMin));
 			} catch (error) {
-				await this.#releaseCompute("failed");
+				// Not waited for, so the turn is told the move failed as soon as the provider says so: the next ledger call follows it.
+				this.#ledgerWrite = this.#releaseCompute("failed");
 				throw error;
 			}
 			// The thread was archived or gave its slot up meanwhile, and dropped the workspace it had: this one would be orphaned.

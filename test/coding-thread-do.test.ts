@@ -22,7 +22,7 @@ import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { GO_REPO, installed, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
-import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
+import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingQuota, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
 // `coding-faux` model, and asks a scheduler of its own space for a slot; the schedulers tell threads what happens to them
@@ -2361,5 +2361,79 @@ describe("threadLimits", () => {
 		expect(threadLimits("someone/else").memMiB).toBe(4096);
 		expect(threadLimits("Ajac-Zero/Pim").memMiB).toBe(6144);
 		expect(threadLimits("ajac-zero/pim", { memMiB: 2048 })).toMatchObject({ memMiB: 2048, cpu: 2 });
+	});
+});
+
+describe("a coding thread's compute", () => {
+	// The ledger (src/compute-ledger.ts) lives in the Gallery; a thread's rows are read there. Time goes by `codingThreadClock`.
+	const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+	const capJob = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "compute_cap" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+	const rows = (id: string) =>
+		runInDurableObject(env.Gallery.getByName("gallery"), (_instance: unknown, state: DurableObjectState) =>
+			state.storage.sql.exec("SELECT end_reason, cap_at FROM compute_usage WHERE thread_id = ? ORDER BY id", id).toArray(),
+		);
+	const unlimited = { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null };
+	const MINUTE = 60_000;
+
+	afterEach(() => {
+		codingQuota.quota = null;
+	});
+
+	/** A thread that ran its task and sits idle with its workspace. */
+	async function idle() {
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const thread = await startThread();
+		await turns(thread.id, 1);
+		return thread;
+	}
+
+	it("stops a workspace that is still running past its session limit, keeping its files, and counts it as stopped", async () => {
+		codingQuota.quota = { ...unlimited, maxSessionMinutes: 10 };
+		const thread = await idle();
+		const [row] = await rows(thread.id);
+		expect(row).toMatchObject({ end_reason: null, cap_at: expect.any(Number) });
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
+		// Before its time, nothing happens, at a heartbeat or at the alarm set for it.
+		codingThreadClock.now = Date.now() + 5 * MINUTE;
+		await heartbeat(thread.stub);
+		await capJob(thread.stub);
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
+		// Past it, the provider is told to delete the workspace and the ledger ends the stretch as stopped.
+		codingThreadClock.now = Date.now() + 11 * MINUTE;
+		await capJob(thread.stub);
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toEqual([]);
+		expect(await rows(thread.id)).toEqual([expect.objectContaining({ end_reason: "stop" })]);
+		expect(await thread.stub.status()).toMatchObject({ state: "idle", stateReason: "compute_quota" });
+	});
+
+	it("stops a turn under way when its workspace's session limit is up", async () => {
+		codingQuota.quota = { ...unlimited, maxSessionMinutes: 10 };
+		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
+		const thread = await startThread();
+		await vi.waitFor(async () => expect((await thread.stub.status()).currentOperation).not.toBeNull());
+		codingThreadClock.now = Date.now() + 11 * MINUTE;
+		await heartbeat(thread.stub);
+		expect((await turns(thread.id, 1))[0]).toMatchObject({ outcome: "cancelled" });
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toEqual([]);
+		expect(await rows(thread.id)).toEqual([expect.objectContaining({ end_reason: "stop" })]);
+	});
+
+	it("lets a thread on a fresh deployment run past 120 minutes: there is no limit until the admin sets one", async () => {
+		const thread = await idle();
+		expect(await rows(thread.id)).toEqual([{ end_reason: null, cap_at: null }]);
+		codingThreadClock.now = Date.now() + 300 * MINUTE;
+		await heartbeat(thread.stub);
+		await capJob(thread.stub);
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
+		expect(await rows(thread.id)).toEqual([{ end_reason: null, cap_at: null }]);
+		expect(await thread.stub.status()).toMatchObject({ state: "idle", stateReason: null });
+	});
+
+	it("ends the count of a workspace its provider no longer has, as lost", async () => {
+		const thread = await idle();
+		const [info] = await codingWorkspaces.list({ sessionId: thread.id });
+		await codingWorkspaces.destroy(info!.ref);
+		await heartbeat(thread.stub);
+		expect(await rows(thread.id)).toEqual([expect.objectContaining({ end_reason: "lost" })]);
 	});
 });

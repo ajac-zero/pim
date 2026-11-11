@@ -69,6 +69,8 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	readonly #threads: CodingThreadIndex;
 	/** The person's sign-ins under way, by harness. */
 	readonly #logins = new Map<Harness, HarnessLoginFlow>();
+	/** The sign-ins being started: counted, but with no flow yet. */
+	readonly #starting = new Set<Harness>();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -81,6 +83,8 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 			defaultLimit: DEFAULT_SPACE_CAP,
 		});
 		this.#threads = new CodingThreadIndex(ctx.storage.sql);
+		// A crash between counting a sign-in's workspace and making it leaves a count nothing owns.
+		ctx.waitUntil(this.#reconcileLogins());
 	}
 
 	/** The clock the scheduler and its alarm go by. */
@@ -291,6 +295,8 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	 */
 	async harnessLoginStart(userId: string, harness: Harness): Promise<LoginStatus> {
 		await this.#forgetLogin(harness);
+		// Whatever an earlier sign-in left counted is not this one's.
+		await this.#endLoginCompute(harness);
 		const cli = cliHarness(harness);
 		if (!cli?.login) return { harness, state: "failed", url: null, userCode: null, error: "This harness has no sign-in Pim can relay" };
 		let provider: ReturnType<WorkspaceProviderRegistry["get"]>;
@@ -300,25 +306,31 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		} catch (error) {
 			return { harness, state: "failed", url: null, userCode: null, error: error instanceof Error ? error.message : String(error) };
 		}
-		// The sign-in's workspace costs the deployment compute like a thread's: the person's quota is checked before it is made, and its minutes counted until it is deleted.
-		const admitted = await this.env.Gallery.getByName("gallery").computeBegin({ userId, threadId: this.#loginKey(harness), provider: provider.id, quota: await this.computeQuota(userId) });
-		if (!admitted.ok) return { harness, state: "failed", url: null, userCode: null, error: admitted.message };
-		const flow = new HarnessLoginFlow({
-			harness: cli,
-			userId,
-			provider,
-			image: DEFAULT_WORKSPACE_IMAGE,
-			vault: codingVault(this.env),
-			remember: (ref) => this.#rememberLogin(harness, ref),
-			onConnected: async () => this.#resumeWaiting(harness),
-		});
-		this.#logins.set(harness, flow);
-		const status = await flow.start();
-		// A sign-in that failed before it made a workspace has none to count.
-		if (status.state === "failed" && !this.ctx.storage.sql.exec("SELECT 1 FROM pim_coding_harness_login WHERE harness = ?", harness).toArray()[0]) {
-			await this.#endLoginCompute(harness);
+		// Not reconciled away while it is being made.
+		this.#starting.add(harness);
+		try {
+			// The sign-in's workspace costs the deployment compute like a thread's: the person's quota is checked before it is made, and its minutes counted until it is deleted.
+			const admitted = await this.env.Gallery.getByName("gallery").computeBegin({ userId, threadId: this.#loginKey(harness), provider: provider.id, quota: await this.computeQuota(userId) });
+			if (!admitted.ok) return { harness, state: "failed", url: null, userCode: null, error: admitted.message };
+			const flow = new HarnessLoginFlow({
+				harness: cli,
+				userId,
+				provider,
+				image: DEFAULT_WORKSPACE_IMAGE,
+				vault: codingVault(this.env),
+				remember: (ref) => this.#rememberLogin(harness, ref),
+				onConnected: async () => this.#resumeWaiting(harness),
+			});
+			this.#logins.set(harness, flow);
+			const status = await flow.start();
+			// A sign-in that failed before it made a workspace has none to count.
+			if (status.state === "failed" && !this.ctx.storage.sql.exec("SELECT 1 FROM pim_coding_harness_login WHERE harness = ?", harness).toArray()[0]) {
+				await this.#endLoginCompute(harness);
+			}
+			return status;
+		} finally {
+			this.#starting.delete(harness);
 		}
-		return status;
 	}
 
 	/** Where the person's sign-in to `harness` is. */
@@ -359,8 +371,17 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 	}
 
 	/** What the ledger (../compute-ledger.ts) calls this space's sign-in workspace: a name no thread has. */
-	#loginKey(harness: Harness): string {
+	#loginKey(harness: string): string {
 		return `login:${this.ctx.id.name ?? "space"}:${harness}`;
+	}
+
+	/** Ends the counts of sign-in workspaces this space has neither under way nor remembered, as when this object restarted. */
+	async #reconcileLogins(): Promise<void> {
+		const keep = [...this.#logins.keys(), ...this.#starting].map((harness) => this.#loginKey(harness));
+		for (const row of this.ctx.storage.sql.exec("SELECT harness FROM pim_coding_harness_login").toArray()) keep.push(this.#loginKey(String(row.harness) as Harness));
+		await this.env.Gallery.getByName("gallery")
+			.computeEndExcept(this.#loginKey(""), keep, "lost", this.now())
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.compute_end_failed", error: String(error).slice(0, 300) })));
 	}
 
 	#endLoginCompute(harness: Harness): Promise<unknown> {
@@ -405,6 +426,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 
 	/** Ticks the scheduler, delivers the notices waiting, and sets the next alarm if anything is left to do. */
 	override async alarm(): Promise<void> {
+		await this.#reconcileLogins();
 		this.ctx.storage.transactionSync(() => {
 			const tick = this.#scheduler.tick();
 			this.#post({ admitted: tick.admitted, released: tick.released, expired: tick.expired });

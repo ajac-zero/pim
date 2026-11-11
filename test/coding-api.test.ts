@@ -315,6 +315,44 @@ describe("the coding threads API", () => {
 		}
 	});
 
+	it("checks the quota again and counts a new stretch when a suspended thread resumes", async () => {
+		const quota = (change: Partial<ComputeQuota> | null) => runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.setComputeQuota(change));
+		const stretches = (id: string) =>
+			runInDurableObject(env.Gallery.getByName("gallery"), (_instance: unknown, state: DurableObjectState) =>
+				state.storage.sql.exec("SELECT end_reason FROM compute_usage WHERE thread_id = ? ORDER BY id", id).toArray().map((row) => row.end_reason),
+			);
+		codingFaux.setResponses([fauxAssistantMessage("Nothing to change.")]);
+		const thread = await start();
+		await turns(thread.id, 1);
+		// The scheduler takes its idle workspace back: the stretch ends as suspended.
+		await release(thread.id, OWNER);
+		expect(await stretches(thread.id)).toEqual(["suspend"]);
+
+		// Over its quota, the thread is refused before the provider is asked for a workspace, and nothing is counted.
+		await quota({ maxConcurrentWorkspaces: 0 });
+		try {
+			await post(`/coding/threads/${thread.id}/steer`, { text: "More, please.", operationId: "more-1" });
+			const refused = await vi.waitFor(async () => {
+				const now = await view(thread.id);
+				expect(now.stateReason).toBe("compute_quota");
+				return now;
+			});
+			expect(refused.stateDetail).toMatch(/most this Pim lets you have at once \(0\)/);
+			expect(await codingWorkspaces.list({ sessionId: thread.id })).toEqual([]);
+			expect(await stretches(thread.id)).toEqual(["suspend"]);
+		} finally {
+			await quota(null);
+		}
+
+		// Within it, continuing makes the workspace again and a second stretch runs.
+		codingFaux.setResponses([fauxAssistantMessage("Did more.")]);
+		await post(`/coding/threads/${thread.id}/continue`, { operationId: "more-2" });
+		// Its first turn, the refusal (a failed turn), and this one.
+		expect((await turns(thread.id, 3))[2]).toMatchObject({ outcome: "completed" });
+		expect(await stretches(thread.id)).toEqual(["suspend", null]);
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
+	});
+
 	it("aborts, continues and steers a thread, and refuses an archived one", async () => {
 		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" }), fauxAssistantMessage("Went on."), fauxAssistantMessage("Did more.")]);
 		const thread = await start();

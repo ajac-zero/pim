@@ -12,9 +12,12 @@ import type { ComputeQuota } from "./compute";
  * month by the time it ran in it, and a new month starts at zero. A person's
  * past months stay in their history for a year.
  *
- * A stretch has a ceiling, `cap_at`: the person's session limit, or a week,
- * whichever is sooner. A thread whose Durable Object went away without saying
- * it stopped therefore can't be counted as running forever.
+ * A stretch counts as running until it ends, whatever its session limit
+ * says: `cap_at` is when the limit means it should end, which its thread
+ * enforces by stopping the workspace (./coding/thread-do.ts), and a limit
+ * nothing enforced must not hide a workspace from the concurrency and monthly
+ * checks. A stretch whose thread lost track of it is ended by that thread's
+ * next look at its workspace (`end` with reason `lost`).
  *
  * `begin` checks and records in one step, so threads that start together
  * can't all take the last of a quota.
@@ -29,16 +32,13 @@ CREATE TABLE IF NOT EXISTS compute_usage (
 	started_at INTEGER NOT NULL,
 	ended_at INTEGER,
 	end_reason TEXT,
-	cap_at INTEGER NOT NULL
+	cap_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS compute_usage_by_user ON compute_usage (user_id, started_at);
 CREATE INDEX IF NOT EXISTS compute_usage_open ON compute_usage (thread_id) WHERE ended_at IS NULL;
 `;
 
 const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * 60 * 1000;
-/** The longest a stretch is counted when nothing ends it. */
-const MAX_STRETCH_MS = 7 * DAY_MS;
 /** How many months of history a person's view shows, this one included. */
 const HISTORY_MONTHS = 12;
 
@@ -46,7 +46,13 @@ const HISTORY_MONTHS = 12;
 export type EndReason = "stop" | "suspend" | "lost" | "failed";
 
 export type Admission =
-	| { readonly ok: true; /** The most minutes the workspace may run, which the provider is asked to enforce. Null: no limit. */ readonly wallClockMin: number | null }
+	| {
+			readonly ok: true;
+			/** The most minutes the workspace may run. Null: no limit. */
+			readonly wallClockMin: number | null;
+			/** When the workspace must be stopped for running that long, in ms since the epoch. Null: never. */
+			readonly capAt: number | null;
+	  }
 	| { readonly ok: false; readonly code: "concurrent" | "monthly" | "session"; readonly message: string };
 
 export type ProviderMinutes = { readonly provider: string; readonly minutes: number; readonly running: number };
@@ -102,7 +108,8 @@ export class ComputeLedger {
 	 */
 	begin(o: { userId: string; threadId: string; provider: string; now: number; quota: ComputeQuota | null }): Admission {
 		const { userId, threadId, provider, now, quota } = o;
-		if (this.#running(threadId)) return { ok: true, wallClockMin: null };
+		const running = this.open(threadId);
+		if (running) return { ok: true, wallClockMin: null, capAt: running.capAt };
 		let wallClockMin: number | null = null;
 		if (quota) {
 			const refused = this.#refusal(userId, quota, now);
@@ -111,15 +118,29 @@ export class ComputeLedger {
 			const remaining = monthly === null ? null : Math.max(1, Math.ceil(monthly - this.#minutes(userId, monthStart(now), monthsFrom(now, 1), now)));
 			wallClockMin = session === null ? remaining : remaining === null ? session : Math.min(session, remaining);
 		}
-		const cap = now + (wallClockMin === null ? MAX_STRETCH_MS : Math.min(MAX_STRETCH_MS, wallClockMin * MINUTE_MS));
-		this.#sql.exec("INSERT INTO compute_usage (user_id, thread_id, provider, started_at, cap_at) VALUES (?, ?, ?, ?, ?)", userId, threadId, provider, now, cap);
+		const capAt = wallClockMin === null ? null : now + wallClockMin * MINUTE_MS;
+		this.#sql.exec("INSERT INTO compute_usage (user_id, thread_id, provider, started_at, cap_at) VALUES (?, ?, ?, ?, ?)", userId, threadId, provider, now, capAt);
 		this.#sql.exec("DELETE FROM compute_usage WHERE ended_at IS NOT NULL AND ended_at < ?", monthsFrom(now, -HISTORY_MONTHS - 1));
-		return { ok: true, wallClockMin };
+		return { ok: true, wallClockMin, capAt };
+	}
+
+	/** The thread's workspace as the ledger has it running, or null when it has none. */
+	open(threadId: string): { capAt: number | null } | null {
+		const [row] = this.#sql.exec("SELECT cap_at FROM compute_usage WHERE thread_id = ? AND ended_at IS NULL", threadId).toArray();
+		return row ? { capAt: row.cap_at === null ? null : Number(row.cap_at) } : null;
+	}
+
+	/** Ends the stretches that are running for threads named `prefix…` and not in `keep`: the ones whose owner no longer has what they counted. */
+	endExcept(prefix: string, keep: readonly string[], reason: EndReason, now: number): number {
+		let ended = 0;
+		const rows = this.#sql.exec("SELECT thread_id FROM compute_usage WHERE ended_at IS NULL AND substr(thread_id, 1, ?) = ?", prefix.length, prefix).toArray();
+		for (const { thread_id } of rows) if (!keep.includes(String(thread_id)) && this.end(String(thread_id), reason, now)) ended++;
+		return ended;
 	}
 
 	/** The thread's workspace stopped running. False when it wasn't recorded as running. */
 	end(threadId: string, reason: EndReason, now: number): boolean {
-		return this.#sql.exec("UPDATE compute_usage SET ended_at = MIN(?, cap_at), end_reason = ? WHERE thread_id = ? AND ended_at IS NULL", now, reason, threadId).rowsWritten > 0;
+		return this.#sql.exec("UPDATE compute_usage SET ended_at = ?, end_reason = ? WHERE thread_id = ? AND ended_at IS NULL", now, reason, threadId).rowsWritten > 0;
 	}
 
 	/** One person's minutes this month and in the months before. */
@@ -134,7 +155,7 @@ export class ComputeLedger {
 		return {
 			month: monthName(from),
 			minutes: toMinutes(rows.reduce((sum, row) => sum + row.ms, 0)),
-			running: this.#runningFor(userId, now),
+			running: this.#runningFor(userId),
 			byProvider: rows.map(({ provider, ms, running }) => ({ provider, minutes: toMinutes(ms), running })),
 			history,
 		};
@@ -157,12 +178,8 @@ export class ComputeLedger {
 		};
 	}
 
-	#running(threadId: string): boolean {
-		return this.#sql.exec("SELECT 1 FROM compute_usage WHERE thread_id = ? AND ended_at IS NULL", threadId).toArray().length > 0;
-	}
-
-	#runningFor(userId: string, now: number): number {
-		return Number(this.#sql.exec("SELECT COUNT(*) AS n FROM compute_usage WHERE user_id = ? AND ended_at IS NULL AND cap_at > ?", userId, now).one().n);
+	#runningFor(userId: string): number {
+		return Number(this.#sql.exec("SELECT COUNT(*) AS n FROM compute_usage WHERE user_id = ? AND ended_at IS NULL", userId).one().n);
 	}
 
 	#minutes(userId: string, from: number, until: number, now: number): number {
@@ -179,7 +196,7 @@ export class ComputeLedger {
 	/** Why the person can't start another workspace, or null. */
 	#refusal(userId: string, quota: ComputeQuota, now: number): Extract<Admission, { ok: false }> | null {
 		const { maxConcurrentWorkspaces: concurrent, monthlySandboxMinutes: monthly, maxSessionMinutes: session } = quota;
-		const running = this.#runningFor(userId, now);
+		const running = this.#runningFor(userId);
 		if (concurrent !== null && running >= concurrent) {
 			return {
 				ok: false,
@@ -204,9 +221,9 @@ export class ComputeLedger {
 	}
 }
 
-/** Each `column`'s minutes inside a window: every stretch clipped to it and, while it runs, to now and to its ceiling. Bind it with `bindings`. */
-const windowSelect = (column: "user_id" | "provider") => `SELECT ${column}, SUM(MAX(0, MIN(COALESCE(ended_at, ?), cap_at, ?) - MAX(started_at, ?))) AS ms, SUM(CASE WHEN ended_at IS NULL AND cap_at > ? THEN 1 ELSE 0 END) AS running
-FROM compute_usage WHERE started_at < ? AND COALESCE(ended_at, cap_at) > ? AND (? IS NULL OR user_id = ?)`;
+/** Each `column`'s minutes inside a window: every stretch clipped to it and, while it runs, to now. Bind it with `bindings`. */
+const windowSelect = (column: "user_id" | "provider") => `SELECT ${column}, SUM(MAX(0, MIN(COALESCE(ended_at, ?), ?) - MAX(started_at, ?))) AS ms, SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END) AS running
+FROM compute_usage WHERE started_at < ? AND COALESCE(ended_at, ?) > ? AND (? IS NULL OR user_id = ?)`;
 
 /** The bindings of `windowSelect`, in order. */
-const bindings = (now: number, from: number, until: number, userId: string | null): (string | number | null)[] => [now, until, from, now, until, from, userId, userId];
+const bindings = (now: number, from: number, until: number, userId: string | null): (string | number | null)[] => [now, until, from, until, now, from, userId, userId];

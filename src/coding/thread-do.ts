@@ -267,20 +267,65 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * Checks the space's compute quota and records that a workspace is about to run
 	 * (./compute-ledger.ts), before the provider is asked to make or resume one.
 	 * `enforce` is false for a workspace that is running already. Returns the
-	 * minutes the workspace may run, or throws `ComputeQuotaError`.
+	 * minutes the workspace may run, or throws `ComputeQuotaError`. A limit is
+	 * enforced here, not by the provider: `#enforceCompute` stops the workspace
+	 * when its time is up, at an alarm set now.
 	 */
 	async #reserveCompute(thread: CodingThreadRow, enforce: boolean): Promise<number | null> {
 		const quota = enforce ? await this.computeQuota(thread.space) : null;
-		const admitted = await this.env.Gallery.getByName("gallery").computeBegin({ userId: thread.space, threadId: thread.threadId, provider: thread.providerId, quota });
+		const admitted = await this.env.Gallery.getByName("gallery").computeBegin({ userId: thread.space, threadId: thread.threadId, provider: thread.providerId, quota, now: this.now() });
 		if (!admitted.ok) throw new ComputeQuotaError(admitted.message);
+		if (admitted.capAt !== null) await this.lifecycle.jobs.push({ id: CAP_JOB, fn: CAP_JOB, time: admitted.capAt });
 		return admitted.wallClockMin;
+	}
+
+	/**
+	 * Keeps the ledger (../compute-ledger.ts) true to the thread's workspace, as the
+	 * thread boots, at each heartbeat, when a turn starts and at the alarm set for
+	 * a session limit. A workspace its provider no longer has ends as `lost`. One
+	 * that ran as long as the person's session limit allows is stopped, its files
+	 * kept: a turn under way is stopped first, and the thread is idle until it is
+	 * continued, which asks for a workspace again and checks the quota again.
+	 */
+	async #enforceCompute(): Promise<void> {
+		const thread = this.store.thread();
+		// A workspace being made isn't in the thread's record yet.
+		if (!thread || this.#opening) return;
+		try {
+			const open = await this.env.Gallery.getByName("gallery").computeOpen(thread.threadId);
+			if (!open) return;
+			const provider = this.workspaceProviders().get(thread.providerId);
+			if (!(thread.workspaceRef && (await provider.get(thread.workspaceRef)))) {
+				this.#open = null;
+				await this.#releaseCompute("lost");
+				return;
+			}
+			if (open.capAt === null) return;
+			if (this.now() < open.capAt) {
+				await this.lifecycle.jobs.push({ id: CAP_JOB, fn: CAP_JOB, time: open.capAt });
+				return;
+			}
+			if (thread.currentOperation) await this.#stopTurn();
+			await this.#dropWorkspace({ keepVolume: true }, "stop");
+			const after = this.store.required();
+			if (after.state !== "archived") {
+				this.ctx.storage.transactionSync(() => {
+					this.store.update({ state: "idle", stateReason: "compute_quota", stateDetail: "The workspace reached this Pim's session limit and was stopped, its files kept. Continue the thread to start a new session." });
+					this.store.recordEvent("workspace.session_limit", {});
+				});
+				await this.#report("idle");
+			}
+		} catch (error) {
+			// The provider can't be asked, or the Gallery can't be reached: the next look tries again.
+			console.warn(JSON.stringify({ event: "pim.coding.compute_enforce_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+		}
 	}
 
 	/** Records that the thread's workspace stopped running. Counting never holds a thread up: a Gallery that can't be reached is logged. */
 	async #releaseCompute(reason: "stop" | "suspend" | "lost" | "failed"): Promise<void> {
 		const threadId = this.store.required().threadId;
 		await this.env.Gallery.getByName("gallery")
-			.computeEnd(threadId, reason)
+			.computeEnd(threadId, reason, this.now())
 			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.compute_end_failed", thread: threadId, error: String(error).slice(0, 300) })));
 	}
 
@@ -469,7 +514,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** The `advance` job: moves the thread on, and comes back while a turn or a workspace is under way. */
 	async onJob({ job }: LifecycleJobContext): Promise<LifecycleJobOutcome | void> {
+		if (job.fn === CAP_JOB) return void (await this.#enforceCompute());
 		if (job.fn !== ADVANCE_JOB) return;
+		await this.#enforceCompute();
 		// Bounded, as a job must be: work still going after this goes on outside it.
 		await this.#failIfStuck();
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
@@ -1630,6 +1677,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Submits the inbox's oldest input to pi as the next turn. */
 	async #startTurn(): Promise<void> {
+		await this.#enforceCompute();
 		const thread = this.store.required();
 		const input = this.store.nextInput();
 		if (!input || thread.currentOperation) return;
@@ -2650,13 +2698,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** Deletes the workspace, keeping its files for the next one with `keepVolume`. */
-	async #dropWorkspace(options: { keepVolume: boolean }): Promise<void> {
+	async #dropWorkspace(options: { keepVolume: boolean }, reason?: "stop"): Promise<void> {
 		const thread = this.store.required();
 		this.#open = null;
 		if (!thread.workspaceRef) return;
 		await this.workspaceProviders().get(thread.providerId).destroy(thread.workspaceRef, options);
 		this.store.update({ workspaceRef: null });
-		await this.#releaseCompute(options.keepVolume ? "suspend" : "stop");
+		await this.#releaseCompute(reason ?? (options.keepVolume ? "suspend" : "stop"));
 	}
 
 	/**
@@ -3073,6 +3121,8 @@ const MAX_OUTPUT_TOKENS = 32_000;
 const MAX_DIFF_CHARS = 256 * 1024;
 
 const ADVANCE_JOB = "advance";
+/** The job that stops a workspace when its session limit is up (`#enforceCompute`). */
+const CAP_JOB = "compute_cap";
 const HEARTBEAT_MS = 30_000;
 /** How long a thread may sit queued or provisioning with no change before it is failed as stuck. */
 const STUCK_MS = 20 * 60_000;

@@ -16,6 +16,7 @@ import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } fr
 import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO } from "../src/coding/thread-do";
 import type { Fetch, GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "../src/coding/model-gateway";
+import type { ComputeQuota } from "../src/compute";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -353,6 +354,9 @@ codingWorkspaces.register("git", fakeGit);
 /** The workspace backends coding threads have: the in-memory one unless a test sets others, such as the Compose provider on a stubbed manager. */
 export const codingBackends: { registry: WorkspaceProviderRegistry | null } = { registry: null };
 
+/** What every space may use of compute in thread tests, in place of its Pim's answer, until a test sets one (test/coding-thread-do.test.ts). */
+export const codingQuota: { quota: ComputeQuota | null } = { quota: null };
+
 /** What coding threads emitted, in order. */
 export const codingEvents: CodingThreadEvent[] = [];
 
@@ -373,6 +377,10 @@ export class CodingThreadDO extends RealCodingThreadDO {
 
 	protected override workspaceProviders(): WorkspaceProviderRegistry {
 		return codingBackends.registry ?? workspaceRegistry([codingWorkspaces]);
+	}
+
+	protected override async computeQuota(space: string): Promise<ComputeQuota> {
+		return codingQuota.quota ?? super.computeQuota(space);
 	}
 
 	/** The scripted model besides the space's real providers. */

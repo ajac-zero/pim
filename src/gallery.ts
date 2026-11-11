@@ -617,7 +617,7 @@ export class Gallery extends DurableObject<Env> {
 
 	/** The compute providers without their credentials: what a space needs to know to say whether coding is on. */
 	computeSummaries(): ComputeSummary[] {
-		return this.computeProviders().map(computeSummary);
+		return this.computeProviders().map((provider) => computeSummary(provider, this.env));
 	}
 
 	/** The admin adds a compute provider, or changes the one of that kind: `id` is null to add. Null when there's no provider `id`. */
@@ -658,6 +658,16 @@ export class Gallery extends DurableObject<Env> {
 	/** A workspace is about to run: checks the person's quota and records the start, together (./compute-ledger.ts). A null quota records without checking. */
 	computeBegin(o: { userId: string; threadId: string; provider: string; quota: ComputeQuota | null; now?: number }): Admission {
 		return this.#ledger().begin({ ...o, now: o.now ?? Date.now() });
+	}
+
+	/** The thread's workspace as the ledger has it running (its stop time, if it has a limit), or null. */
+	computeOpen(threadId: string): { capAt: number | null } | null {
+		return this.#ledger().open(threadId);
+	}
+
+	/** Ends the running stretches of threads named `prefix…` that aren't in `keep`: for a space to clear what its crash left. */
+	computeEndExcept(prefix: string, keep: string[], reason: EndReason, now = Date.now()): number {
+		return this.#ledger().endExcept(prefix, keep, reason, now);
 	}
 
 	/** A thread's workspace stopped running. */

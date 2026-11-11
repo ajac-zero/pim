@@ -1249,6 +1249,7 @@ describe("the admin", () => {
 		expect((await ann.browser.json("/api/admin/compute/providers", { method: "POST", json: input })).status).toBe(403);
 		expect((await ann.browser.json("/api/admin/compute")).status).toBe(403);
 		expect((await admin("/api/admin/compute/providers", { method: "POST", json: { ...input, credentials: {} } })).status).toBe(400);
+		expect((await admin("/api/admin/compute/providers", { method: "POST", json: { ...input, settings: { managerUrl: `https://admin:${secret}@manager.example.test` } } })).status).toBe(400);
 		try {
 			const added = await admin("/api/admin/compute/providers", { method: "POST", json: input });
 			expect(added).toMatchObject({ status: 201, body: { provider: { id: "compose", kind: "compose", codingSandbox: true, agentComputer: false, settings: { managerUrl: manager }, credentialsSet: { token: true } } } });
@@ -1294,22 +1295,23 @@ describe("the admin", () => {
 
 		// Everyone starts with the deployment's quota, which the admin changes; each person's own is kept over it.
 		const quotaOf = async () => (await ann.browser.json("/api/usage")).body.compute;
-		expect(await quotaOf()).toMatchObject({ quota: { maxConcurrentWorkspaces: 3, monthlySandboxMinutes: 3000, maxSessionMinutes: 120 }, own: null, usage: { running: 0, minutes: 0, byProvider: [] } });
+		// A deployment starts with no limits: the admin sets them.
+		expect(await quotaOf()).toMatchObject({ quota: { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null }, own: null, usage: { running: 0, minutes: 0, byProvider: [] } });
 		expect((await ann.browser.json("/api/admin/compute/quota", { method: "PUT", json: { quota: { maxSessionMinutes: 5 } } })).status).toBe(403);
 		expect((await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { maxSessionMinutes: -1 } } })).status).toBe(400);
 		expect((await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { hours: 1 } } })).status).toBe(400);
 		try {
-			expect((await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { monthlySandboxMinutes: null, maxSessionMinutes: 30 } } })).body.quota).toEqual({ maxConcurrentWorkspaces: 3, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
-			expect((await quotaOf()).quota).toEqual({ maxConcurrentWorkspaces: 3, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
+			expect((await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { monthlySandboxMinutes: null, maxSessionMinutes: 30 } } })).body.quota).toEqual({ maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
+			expect((await quotaOf()).quota).toEqual({ maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
 			const own = (quota: unknown) => admin("/api/admin/accounts/compute-ann/compute-quota", { method: "PUT", json: { quota } });
 			expect((await own({ maxConcurrentWorkspaces: 1, maxSessionMinutes: "long" })).status).toBe(400);
 			expect((await own({ maxConcurrentWorkspaces: 1 })).body.quota).toEqual({ maxConcurrentWorkspaces: 1, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
 			expect(await quotaOf()).toMatchObject({ quota: { maxConcurrentWorkspaces: 1 }, own: { maxConcurrentWorkspaces: 1 } });
 			expect((await admin("/api/admin/accounts/compute-ann")).body.compute).toMatchObject({ own: { maxConcurrentWorkspaces: 1 } });
-			expect((await own(null)).body.quota.maxConcurrentWorkspaces).toBe(3);
+			expect((await own(null)).body.quota.maxConcurrentWorkspaces).toBeNull();
 			expect((await quotaOf()).own).toBeNull();
 		} finally {
-			await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { monthlySandboxMinutes: 3000, maxSessionMinutes: 120 } } });
+			await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { monthlySandboxMinutes: null, maxSessionMinutes: null } } });
 		}
 		expect((await admin("/api/admin/stats")).body.compute).toMatchObject({ month: expect.stringMatching(/^\d{4}-\d{2}$/), minutes: expect.any(Number), byProvider: expect.any(Array), top: expect.any(Array) });
 	});

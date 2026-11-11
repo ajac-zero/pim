@@ -581,6 +581,28 @@ describe("signing in to Claude Code", () => {
 		expect((await gallery.computeUsageOf(OWNER)).running).toBe(running);
 	});
 
+	it("ends a count a crash left, so a person at their limit can sign in, and at the scheduler's alarm", async () => {
+		const gallery = env.Gallery.getByName("gallery");
+		const quota = (change: { maxConcurrentWorkspaces: number } | null) => runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.setComputeQuota(change));
+		// A crash between counting the workspace and making it: a stretch of this sign-in that nothing owns.
+		const key = `login:${OWNER}:claude-code`;
+		const left = await gallery.computeBegin({ userId: OWNER, threadId: key, provider: "fake", quota: null });
+		expect(left.ok).toBe(true);
+		await quota({ maxConcurrentWorkspaces: 1 });
+		try {
+			expect((await login("", { method: "POST" })).body).toMatchObject({ state: "waiting_code" });
+			expect((await gallery.computeUsageOf(OWNER)).running).toBe(1);
+		} finally {
+			await quota(null);
+			await login("", { method: "DELETE" });
+		}
+		expect(await gallery.computeOpen(key)).toBeNull();
+		// With no sign-in under way or remembered, the alarm clears what is left.
+		await gallery.computeBegin({ userId: OWNER, threadId: key, provider: "fake", quota: null });
+		await runInDurableObject(codingScheduler(env, OWNER), (scheduler: { alarm(): Promise<void> }) => scheduler.alarm());
+		expect(await gallery.computeOpen(key)).toBeNull();
+	});
+
 	it("fails on a code the CLI refuses, saving nothing, and can start again; a sign-in can be cancelled", async () => {
 		await login("", { method: "POST" });
 		const refused = await send("wrong#code");

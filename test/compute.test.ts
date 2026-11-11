@@ -56,6 +56,12 @@ describe("a compute provider's secrets", () => {
 		expect(() => prepareComputeProvider({ credentials: { token: "" } }, provider)).toThrow(/needs token/);
 	});
 
+	it("take a manager address that is http(s) and has no login in it", () => {
+		for (const managerUrl of ["https://user:pass@manager.example.test", "ftp://manager.example.test", "manager.example.test"]) {
+			expect(() => manager({ settings: { managerUrl } }), managerUrl).toThrow(/managerUrl must/);
+		}
+	});
+
 	it("are required, and only for the fields a kind has", () => {
 		expect(() => prepareComputeProvider({ kind: "compose", settings: { managerUrl: MANAGER } }, null)).toThrow(/needs token/);
 		expect(() => prepareComputeProvider({ kind: "compose", credentials: { token: TOKEN } }, null)).toThrow(/needs managerUrl/);
@@ -99,7 +105,7 @@ describe("a compute provider's secrets", () => {
 		const store = gallery();
 		await store.putComputeProvider(null, { kind: "compose", settings: { managerUrl: MANAGER }, credentials: { token: TOKEN } });
 		expect(JSON.stringify(await store.computeSummaries())).not.toContain(TOKEN);
-		expect(await store.computeSummaries()).toEqual([{ id: "compose", kind: "compose", codingSandbox: true }]);
+		expect(await store.computeSummaries()).toEqual([{ id: "compose", kind: "compose", codingSandbox: true, usable: true }]);
 		expect((await store.computeProviders())[0]?.credentials).toEqual({ token: TOKEN });
 		// One provider of each kind.
 		const duplicate = await store.putComputeProvider(null, { kind: "compose", settings: { managerUrl: MANAGER }, credentials: { token: "x" } }).then(
@@ -115,7 +121,7 @@ describe("a compute provider's secrets", () => {
 
 describe("which backends coding threads have", () => {
 	it("follow the configuration: a provider is added, and one switched off is taken out whichever way it was set up", () => {
-		const configured = (codingSandbox: boolean) => [{ id: "compose" as const, kind: "compose" as const, codingSandbox }];
+		const configured = (codingSandbox: boolean, usable = true) => [{ id: "compose" as const, kind: "compose" as const, codingSandbox, usable }];
 		expect(codingBackendIds([], [])).toEqual([]);
 		expect(codingBackendIds(["cloudflare"], [])).toEqual(["cloudflare"]);
 		expect(codingBackendIds([], configured(true))).toEqual(["compose"]);
@@ -123,6 +129,9 @@ describe("which backends coding threads have", () => {
 		expect(codingBackendIds(["cloudflare", "compose"], configured(true))).toEqual(["compose", "cloudflare"]);
 		expect(codingBackendIds(["compose"], configured(false))).toEqual([]);
 		expect(codingBackendIds(["compose", "cloudflare"], configured(false))).toEqual(["cloudflare"]);
+		// A provider this Worker can't make workspaces with offers nothing, and takes nothing from the environment.
+		expect(codingBackendIds([], configured(true, false))).toEqual([]);
+		expect(codingBackendIds(["compose"], configured(true, false))).toEqual(["compose"]);
 	});
 
 	it("are the registry's: a configured provider is the default, and one switched off is absent", () => {
@@ -145,7 +154,7 @@ describe("quotas", () => {
 
 	it("refuse another workspace past the most running at once, until one stops, for that person only", async () => {
 		const store = gallery();
-		expect(await begin(store, "t1", { maxConcurrentWorkspaces: 2 }, NOV)).toEqual({ ok: true, wallClockMin: null });
+		expect(await begin(store, "t1", { maxConcurrentWorkspaces: 2 }, NOV)).toEqual({ ok: true, wallClockMin: null, capAt: null });
 		expect(await begin(store, "t2", { maxConcurrentWorkspaces: 2 }, NOV)).toMatchObject({ ok: true });
 		const refused = await begin(store, "t3", { maxConcurrentWorkspaces: 2 }, NOV);
 		expect(refused).toMatchObject({ ok: false, code: "concurrent" });
@@ -154,7 +163,7 @@ describe("quotas", () => {
 		expect(await begin(store, "b1", { maxConcurrentWorkspaces: 2 }, NOV, "bea")).toMatchObject({ ok: true });
 		expect((await store.computeUsageOf("ann", NOV)).running).toBe(2);
 		// A thread that is running already is let be, whatever the quota says now: its restart doesn't count it twice.
-		expect(await begin(store, "t1", { maxConcurrentWorkspaces: 0 }, NOV + MINUTE)).toEqual({ ok: true, wallClockMin: null });
+		expect(await begin(store, "t1", { maxConcurrentWorkspaces: 0 }, NOV + MINUTE)).toEqual({ ok: true, wallClockMin: null, capAt: null });
 		expect((await store.computeUsageOf("ann", NOV)).running).toBe(2);
 		expect(await store.computeEnd("t1", "suspend", NOV + MINUTE)).toBe(true);
 		expect(await store.computeEnd("t1", "suspend", NOV + MINUTE)).toBe(false);
@@ -165,17 +174,17 @@ describe("quotas", () => {
 		const store = gallery();
 		const quota = { monthlySandboxMinutes: 60, maxSessionMinutes: 45 };
 		// The first session is held to 45 minutes; it runs 40.
-		expect(await begin(store, "t1", quota, NOV)).toEqual({ ok: true, wallClockMin: 45 });
+		expect(await begin(store, "t1", quota, NOV)).toEqual({ ok: true, wallClockMin: 45, capAt: NOV + 45 * MINUTE });
 		await store.computeEnd("t1", "stop", NOV + 40 * MINUTE);
 		// 20 are left, which is less than a session.
-		expect(await begin(store, "t2", quota, NOV + 41 * MINUTE)).toEqual({ ok: true, wallClockMin: 20 });
+		expect(await begin(store, "t2", quota, NOV + 41 * MINUTE)).toEqual({ ok: true, wallClockMin: 20, capAt: NOV + 61 * MINUTE });
 		await store.computeEnd("t2", "stop", NOV + 61 * MINUTE);
 		const spent = await begin(store, "t3", quota, NOV + 62 * MINUTE);
 		expect(spent).toMatchObject({ ok: false, code: "monthly" });
 		expect(spent.ok === false && spent.message).toMatch(/used your 60 sandbox minutes for 2026-11 \(60 used\).*reset/);
 		// The reset is the calendar: on the 1st the new month starts at zero, and the old one stays in the history.
 		const december = Date.UTC(2026, 11, 1, 0, 5);
-		expect(await begin(store, "t4", quota, december)).toEqual({ ok: true, wallClockMin: 45 });
+		expect(await begin(store, "t4", quota, december)).toEqual({ ok: true, wallClockMin: 45, capAt: december + 45 * MINUTE });
 		const usage = await store.computeUsageOf("ann", december);
 		expect(usage).toMatchObject({ month: "2026-12", minutes: 0, running: 1 });
 		expect(usage.history.at(-1)).toEqual({ month: "2026-12", minutes: 0 });
@@ -196,15 +205,31 @@ describe("quotas", () => {
 		]);
 	});
 
-	it("refuse when the session limit is 0, and stop counting a workspace nobody ended past its limit", async () => {
+	it("refuse when the session limit is 0, and go on counting a workspace past its session limit until it is ended", async () => {
 		const store = gallery();
 		expect(await begin(store, "t1", { maxSessionMinutes: 0 }, NOV)).toMatchObject({ ok: false, code: "session" });
-		// A thread whose Durable Object vanished leaves its stretch open: it counts up to its session limit, and no longer runs.
-		expect(await begin(store, "t2", { maxSessionMinutes: 30, maxConcurrentWorkspaces: 1 }, NOV)).toEqual({ ok: true, wallClockMin: 30 });
+		// The limit says when the thread must stop the workspace; until it has, the workspace is running and counts, so a limit nothing enforced is no way round the others.
+		expect(await begin(store, "t2", { maxSessionMinutes: 30, maxConcurrentWorkspaces: 1 }, NOV)).toEqual({ ok: true, wallClockMin: 30, capAt: NOV + 30 * MINUTE });
+		expect(await store.computeOpen("t2")).toEqual({ capAt: NOV + 30 * MINUTE });
 		const later = NOV + 3 * 60 * MINUTE;
-		expect((await store.computeUsageOf("ann", later)).running).toBe(0);
-		expect((await store.computeUsageOf("ann", later)).minutes).toBe(30);
+		expect(await store.computeUsageOf("ann", later)).toMatchObject({ running: 1, minutes: 180 });
+		expect(await begin(store, "t3", { maxConcurrentWorkspaces: 1 }, later)).toMatchObject({ ok: false, code: "concurrent" });
+		// Ended, it stops counting; a thread that lost track of it ends it as lost.
+		expect(await store.computeEnd("t2", "lost", later)).toBe(true);
+		expect(await store.computeOpen("t2")).toBeNull();
 		expect(await begin(store, "t3", { maxConcurrentWorkspaces: 1 }, later)).toMatchObject({ ok: true });
+	});
+
+	it("starts with no limits, and ends the stretches of threads that aren't kept", async () => {
+		const store = gallery();
+		expect(await store.computeQuota()).toEqual(UNLIMITED);
+		await begin(store, "login:a:claude-code", null, NOV);
+		await begin(store, "login:a:codex", null, NOV);
+		await begin(store, "login:b:codex", null, NOV);
+		expect(await store.computeEndExcept("login:a:", ["login:a:codex"], "lost", NOV + MINUTE)).toBe(1);
+		expect(await store.computeOpen("login:a:claude-code")).toBeNull();
+		expect(await store.computeOpen("login:a:codex")).not.toBeNull();
+		expect(await store.computeOpen("login:b:codex")).not.toBeNull();
 	});
 });
 
@@ -238,7 +263,9 @@ describe("usage", () => {
 			{ userId: "bea", minutes: 30, running: 1 },
 			{ userId: "ann", minutes: 18, running: 0 },
 		]);
-		// Nothing carried into the next month, and nobody else's minutes are in a person's.
+		// A workspace still running carries into the next month, as it runs; ended, nothing does, and nobody else's minutes are in a person's.
+		expect(await store.computeUsage(Date.UTC(2026, 11, 20))).toMatchObject({ month: "2026-12", running: 1 });
+		await store.computeEnd("b1", "stop", at);
 		expect(await store.computeUsage(Date.UTC(2026, 11, 20))).toMatchObject({ month: "2026-12", minutes: 0, byProvider: [], top: [] });
 		expect((await store.computeUsageOf("nobody", at)).minutes).toBe(0);
 	});
@@ -297,6 +324,14 @@ describe("coding tools", () => {
 			const added = await turn();
 			expect(names(added.tools)).toContain("coding_start");
 			expect(added.line).toBeNull();
+
+			// A provider this Worker can't make workspaces with offers nothing, whatever is set.
+			await shared.removeComputeProvider("compose");
+			await shared.putComputeProvider(null, { kind: "cloudflare-sandbox" });
+			expect(await shared.computeSummaries()).toEqual([{ id: "cloudflare-sandbox", kind: "cloudflare-sandbox", codingSandbox: true, usable: false }]);
+			expect(names((await turn()).tools)).toEqual([]);
+			await shared.removeComputeProvider("cloudflare-sandbox");
+			await shared.putComputeProvider(null, { kind: "compose", settings: { managerUrl: MANAGER }, credentials: { token: TOKEN } });
 
 			// Switched off for coding, it is configured but offers nothing.
 			await shared.putComputeProvider("compose", { codingSandbox: false });

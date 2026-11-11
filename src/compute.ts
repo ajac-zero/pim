@@ -81,10 +81,16 @@ export function computeProviderInfo({ credentials, ...provider }: ComputeProvide
 	return { ...provider, credentialsSet: Object.fromEntries(fields.map((field) => [field.name, Boolean(credentials[field.name])])) };
 }
 
-/** What the people's spaces need to know of a provider to say whether coding is on: no credentials. */
-export type ComputeSummary = { readonly id: ComputeKind; readonly kind: ComputeKind; readonly codingSandbox: boolean };
+/** What the people's spaces need to know of a provider to say whether coding is on: no credentials. `usable` is whether this Worker can make its workspaces at all. */
+export type ComputeSummary = { readonly id: ComputeKind; readonly kind: ComputeKind; readonly codingSandbox: boolean; readonly usable: boolean };
 
-export const computeSummary = ({ id, kind, codingSandbox }: ComputeProvider): ComputeSummary => ({ id, kind, codingSandbox });
+export function computeSummary(provider: ComputeProvider, env: object): ComputeSummary {
+	let usable = false;
+	try {
+		usable = workspaceProviderOf(provider, env) !== null;
+	} catch {}
+	return { id: provider.id, kind: provider.kind, codingSandbox: provider.codingSandbox, usable };
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -117,6 +123,12 @@ export function prepareComputeProvider(input: ComputeProviderInput, existing: Co
 	const name = input.name === undefined ? (existing?.name ?? COMPUTE_KINDS[kind].name) : readText(input.name, "name", 60) || COMPUTE_KINDS[kind].name;
 	const settings = readFields(input.settings, "settings", false, kind, existing?.settings ?? {});
 	const credentials = readFields(input.credentials, "credentials", true, kind, existing?.credentials ?? {});
+	if (settings.managerUrl !== undefined) {
+		// An address is a place, not a login: credentials in it would be kept and shown as a setting.
+		const url = URL.parse(settings.managerUrl);
+		if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) throw new HttpError(400, "managerUrl must be an http(s) address");
+		if (url.username || url.password) throw new HttpError(400, "managerUrl must not contain a user name or password: give the token as a credential");
+	}
 	for (const field of COMPUTE_KINDS[kind].fields) {
 		const given = field.secret ? credentials[field.name] : settings[field.name];
 		if (field.required && !given) throw new HttpError(400, `${COMPUTE_KINDS[kind].name} needs ${field.name}`);
@@ -197,7 +209,7 @@ export async function checkCompute(provider: ComputeProvider, env: object): Prom
  * leaves the environment's as they were.
  */
 export function codingBackendIds(environment: readonly string[], configured: readonly ComputeSummary[]): string[] {
-	const on = configured.filter((provider) => provider.codingSandbox).map((provider) => COMPUTE_KINDS[provider.kind].workspace as string);
+	const on = configured.filter((provider) => provider.codingSandbox && provider.usable).map((provider) => COMPUTE_KINDS[provider.kind].workspace as string);
 	const off = new Set(configured.filter((provider) => !provider.codingSandbox).map((provider) => COMPUTE_KINDS[provider.kind].workspace as string));
 	return [...new Set([...on, ...environment.filter((id) => !off.has(id))])];
 }
@@ -219,8 +231,8 @@ export type ComputeQuota = {
 
 export const QUOTA_NAMES = ["maxConcurrentWorkspaces", "monthlySandboxMinutes", "maxSessionMinutes"] as const satisfies readonly (keyof ComputeQuota)[];
 
-/** The quota a deployment starts with, until its admin changes it: enough for ordinary use, so one person can't run up the bill unnoticed. */
-export const DEFAULT_COMPUTE_QUOTA: ComputeQuota = { maxConcurrentWorkspaces: 3, monthlySandboxMinutes: 3_000, maxSessionMinutes: 120 };
+/** The quota a deployment starts with, until its admin sets one: none. A deployment that ran coding threads before quotas existed keeps running them as before; the admin who wants limits sets them. */
+export const DEFAULT_COMPUTE_QUOTA: ComputeQuota = { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null };
 
 /** Checks a partial quota, as the admin sets one: each a non-negative integer or null. */
 export function parseComputeQuota(value: unknown): Partial<ComputeQuota> {

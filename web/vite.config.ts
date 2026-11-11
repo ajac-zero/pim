@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
+import { displaydBundle } from "../displayd/bundle.js";
 
 /**
  * In development, `/api` goes to Pim under `wrangler dev` (run `pnpm dev` at
@@ -92,6 +93,17 @@ export default defineConfig(({ mode }) => {
               ),
             });
           }
+        },
+      },
+      {
+        // displayd, which pim-computer gets from the same Pim to give each thread its own display.
+        name: "pim-displayd",
+        generateBundle() {
+          this.emitFile({
+            type: "asset",
+            fileName: "displayd.tar.gz",
+            source: displaydBundle(),
+          });
         },
       },
       tanstackRouter({ target: "react", autoCodeSplitting: true }),

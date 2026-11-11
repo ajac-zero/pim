@@ -1739,6 +1739,8 @@ exec ${shellQuote(process.execPath)} "$DIR/pim-computer.ts"
 	].some(Boolean);
 	const { kind, atBoot } = await startService(service, changed);
 	const bin = await installCommand("pim-computer", program);
+	// Displays for the threads' desktops, which never stops the install.
+	await ensureDisplayd(url, (line) => console.log(line));
 	const root = values.root ? path.resolve(values.root as string) : path.join(os.homedir(), "pim");
 	console.log(`pim-computer ${VERSION} is installed and running, connecting to ${url}, with your files in ${root}.`);
 	if (kind === "systemd" && !atBoot && !service.desktop) {
@@ -1746,6 +1748,217 @@ exec ${shellQuote(process.execPath)} "$DIR/pim-computer.ts"
 	}
 	if (kind === "loop") console.log("This machine has no systemd for you, so it runs in the background until the machine restarts: run `pim-computer install` again then.");
 	console.log(`Manage it with: pim-computer status | logs | update | uninstall${bin ? ` (add ${bin} to your PATH)` : ""}`);
+}
+
+/** Where displayd listens on a computer, and where its token is kept when the user may write /etc. */
+const DISPLAYD_TOKEN_FILE = "/etc/displayd/token";
+
+/** What `displaydUnit` and `displaydSetupScript` need to know about the computer. */
+export type DisplaydSetup = {
+	/** The Pim's address, which serves displayd's bundle at /displayd.tar.gz. */
+	url: string;
+	/** The computer's user, whose displays these are. */
+	user: string;
+	home: string;
+	/** The Node.js that runs it. */
+	node: string;
+};
+
+/**
+ * displayd's systemd unit, for computers with systemd as root. It runs as the computer's user, so the
+ * displays' cookies and sockets are readable by the programs pim-computer starts in them. KillMode=process
+ * and a preserved runtime directory mean restarting it leaves the running displays alone: the next start
+ * re-adopts them.
+ */
+export function displaydUnit({ user, home, node }: DisplaydSetup): string {
+	return `[Unit]
+Description=Pim display daemon
+After=network.target
+
+[Service]
+Type=simple
+User=${user}
+Environment="HOME=${home}"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="DISPLAYD_TOKEN_FILE=${DISPLAYD_TOKEN_FILE}"
+Environment="DISPLAYD_STATE_DIR=${home}/.displayd/state"
+Environment="DISPLAYD_CONTEXT_DIR=/run/pim/displays"
+ExecStart=${node} ${home}/.displayd/app/src/main.js
+SyslogIdentifier=displayd
+Restart=always
+RestartSec=5
+RuntimeDirectory=pim
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# A restart of displayd must not end the displays: they run in their own process groups, and the next start re-adopts them.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+`;
+}
+
+/** The POSIX sh that ensures displayd, with @NAME@ where `displaydSetupScript` puts a value. It has no `${`, so it needs no escaping here. */
+const DISPLAYD_SETUP = String.raw`# Ensures displayd on this computer: its packages, its files from the Pim, a token, and a service.
+# It can be run again at any time, and never fails: what it can't do it says, and goes on.
+URL=@URL@
+ME=@USER@
+HOME_DIR=@HOME@
+NODE=@NODE@
+D="$HOME_DIR/.displayd"
+warn() { echo "displayd: $*" >&2; }
+[ "$(uname -s)" = Linux ] || exit 0
+# Only Cua's computers (or where PIM_DISPLAYD=1 says so) get displays: PIM_DISPLAYD=0 turns it off.
+if [ "$PIM_DISPLAYD" = 0 ]; then exit 0; fi
+if [ "$PIM_DISPLAYD" != 1 ] && [ ! -r /usr/local/bin/cua-spacesd ]; then exit 0; fi
+mkdir -p "$D" && chmod 700 "$D" || { warn "can't make $D"; exit 0; }
+if command -v flock >/dev/null 2>&1; then
+	exec 9>"$D/setup.lock"
+	flock -n 9 || { echo "displayd is being set up by another run."; exit 0; }
+fi
+if [ "$(id -u)" = 0 ]; then SUDO=""; CAN=1
+elif sudo -n true 2>/dev/null; then SUDO="sudo -n"; CAN=1
+else SUDO=""; CAN=0; fi
+as_root() { if [ "$CAN" = 1 ]; then $SUDO "$@"; else return 1; fi; }
+GROUP="$(id -gn)"
+
+# 1. Its packages.
+PACKAGES="tigervnc-standalone-server openbox dbus-x11 at-spi2-core xdotool xclip"
+missing=0
+for pkg in $PACKAGES; do
+	dpkg -s "$pkg" 2>/dev/null | grep -q '^Status: install ok installed' || missing=1
+done
+if [ "$missing" = 1 ]; then
+	if [ "$CAN" != 1 ]; then warn "some of $PACKAGES are missing, and there's no sudo to install them."
+	elif ! command -v apt-get >/dev/null 2>&1; then warn "some of $PACKAGES are missing, and there's no apt-get to install them."
+	else
+		as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES >"$D/apt.log" 2>&1 ||
+			{ as_root env DEBIAN_FRONTEND=noninteractive apt-get update >>"$D/apt.log" 2>&1 && as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y $PACKAGES >>"$D/apt.log" 2>&1; } ||
+			warn "couldn't install $PACKAGES; see $D/apt.log"
+	fi
+fi
+command -v Xvnc >/dev/null 2>&1 && command -v openbox >/dev/null 2>&1 || { warn "Xvnc or openbox is missing, so displayd isn't set up."; exit 0; }
+
+# 2. Its files, from the Pim's own copy.
+changed=0
+if curl -fsSL --retry 3 --max-time 60 "$URL/displayd.tar.gz" -o "$D/bundle.new" 2>/dev/null && tar -tzf "$D/bundle.new" 2>/dev/null | grep -qx src/main.js; then
+	sum="$(sha256sum "$D/bundle.new" | cut -d' ' -f1)"
+	if [ ! -f "$D/app/src/main.js" ] || [ "$sum" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
+		rm -rf "$D/app.new" "$D/app.old"
+		mkdir "$D/app.new" && tar -xzf "$D/bundle.new" -C "$D/app.new" || { warn "couldn't unpack displayd's files"; rm -rf "$D/app.new"; exit 0; }
+		if [ -d "$D/app" ]; then mv "$D/app" "$D/app.old"; fi
+		mv "$D/app.new" "$D/app"
+		rm -rf "$D/app.old"
+		echo "$sum" >"$D/bundle.sha256"
+		changed=1
+	fi
+else
+	warn "couldn't get displayd's files from $URL"
+fi
+rm -f "$D/bundle.new"
+[ -f "$D/app/src/main.js" ] || { warn "displayd's files aren't here, so it isn't set up."; exit 0; }
+
+# 3. Its token, made once, which the computer's user can read; and its folders.
+if [ "$CAN" = 1 ]; then
+	TOKEN=@TOKEN_FILE@
+	CONTEXT=/run/pim/displays
+	as_root install -d -m 1777 /tmp/.X11-unix
+	as_root install -d -o "$ME" -g "$GROUP" -m 0755 /run/pim
+	as_root install -d -o "$ME" -g "$GROUP" -m 0700 /run/pim/displays
+	if [ ! -s "$TOKEN" ] || [ ! -r "$TOKEN" ]; then
+		head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' | as_root sh -c 'umask 077 && install -d -m 0755 "$(dirname "$1")" && cat >"$1" && chown "$2" "$1" && chmod 0640 "$1"' sh "$TOKEN" "$ME:$GROUP" ||
+			warn "couldn't make $TOKEN"
+	fi
+else
+	TOKEN="$D/token"
+	CONTEXT="$D/displays"
+	warn "no sudo, so its token and displays are kept in $D."
+	if [ ! -s "$TOKEN" ]; then (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$TOKEN"); fi
+fi
+[ -s "$TOKEN" ] && [ -r "$TOKEN" ] || { warn "it has no token, so isn't started."; exit 0; }
+
+# 4. A service: systemd's, where there is systemd and root, or else a loop of the user's.
+if [ "$CAN" = 1 ] && [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+	cat >"$D/unit.new" <<'UNIT'
+@UNIT@
+UNIT
+	if ! cmp -s "$D/unit.new" /etc/systemd/system/displayd.service; then
+		as_root install -m 0644 "$D/unit.new" /etc/systemd/system/displayd.service && as_root systemctl daemon-reload && changed=1
+	fi
+	rm -f "$D/unit.new"
+	as_root systemctl enable displayd.service >/dev/null 2>&1
+	# A restart leaves the displays running (KillMode=process), and the new one re-adopts them.
+	if [ "$changed" = 1 ]; then as_root systemctl restart displayd.service; else as_root systemctl start displayd.service; fi || warn "systemd didn't start displayd."
+else
+	cat >"$D/start" <<RUN
+#!/bin/sh
+export HOME='$HOME_DIR' DISPLAYD_TOKEN_FILE='$TOKEN' DISPLAYD_STATE_DIR='$D/state' DISPLAYD_CONTEXT_DIR='$CONTEXT'
+if [ '$CAN' = 1 ] && [ ! -d /run/pim/displays ]; then
+	$SUDO install -d -m 1777 /tmp/.X11-unix
+	$SUDO install -d -o '$ME' -g '$GROUP' -m 0755 /run/pim
+	$SUDO install -d -o '$ME' -g '$GROUP' -m 0700 /run/pim/displays
+fi
+echo \$\$ >'$D/displayd.pid'
+exec '$NODE' '$D/app/src/main.js'
+RUN
+	chmod 755 "$D/start"
+	printf '#!/bin/sh\necho $$ >"%s/loop.pid"\nwhile :; do "%s/start"; sleep 5; done\n' "$D" "$D" >"$D/loop"
+	chmod 755 "$D/loop"
+	loop="$(cat "$D/loop.pid" 2>/dev/null)"
+	if [ -n "$loop" ] && kill -0 "$loop" 2>/dev/null && tr '\0' ' ' <"/proc/$loop/cmdline" 2>/dev/null | grep -q "$D/loop"; then
+		# Only displayd itself ends: the loop starts it again, and the displays are in groups of their own.
+		if [ "$changed" = 1 ]; then kill "$(cat "$D/displayd.pid" 2>/dev/null)" 2>/dev/null; fi
+	elif command -v setsid >/dev/null 2>&1; then setsid sh "$D/loop" >>"$D/log" 2>&1 </dev/null 9>&- &
+	else nohup sh "$D/loop" >>"$D/log" 2>&1 </dev/null 9>&- &
+	fi
+fi
+
+# 5. Whether it answers.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+	if curl -fsS -m 3 -H "authorization: Bearer $(cat "$TOKEN")" http://127.0.0.1:9900/health >/dev/null 2>&1; then echo "displayd is healthy on 127.0.0.1:9900."; exit 0; fi
+	sleep 1
+done
+warn "it did not answer /health with its token; see journalctl -u displayd, or $D/log."
+exit 0
+`;
+
+/** The sh that ensures displayd on this computer (see `DISPLAYD_SETUP`), for `setup`. */
+export function displaydSetupScript(setup: DisplaydSetup): string {
+	const values: Record<string, string> = {
+		URL: shellQuote(setup.url.replace(/\/+$/, "")),
+		USER: shellQuote(setup.user),
+		HOME: shellQuote(setup.home),
+		NODE: shellQuote(setup.node),
+		TOKEN_FILE: shellQuote(DISPLAYD_TOKEN_FILE),
+		UNIT: displaydUnit(setup).trimEnd(),
+	};
+	return DISPLAYD_SETUP.replace(/@([A-Z_]+)@/g, (_, name: string) => values[name] ?? "");
+}
+
+/**
+ * Ensures displayd (../displayd) runs on this computer, so each thread can have a display of its own:
+ * `displaydSetupScript`, run with sh. It never throws, so it can't stop pim-computer or its install;
+ * what it says is passed to `say`.
+ */
+export async function ensureDisplayd(url: string, say: (line: string) => void): Promise<void> {
+	try {
+		const os = await import("node:os");
+		const script = displaydSetupScript({ url, user: os.userInfo().username, home: os.homedir(), node: process.execPath });
+		const { spawn } = await import("node:child_process");
+		await new Promise<void>((resolve) => {
+			const child = spawn("/bin/sh", ["-c", script], { stdio: ["ignore", "pipe", "pipe"], timeout: 600_000 });
+			const lines = (chunk: Buffer) => chunk.toString("utf8").split("\n").filter(Boolean).forEach(say);
+			child.stdout.on("data", lines);
+			child.stderr.on("data", lines);
+			child.on("error", (error) => {
+				say(`displayd: couldn't be set up: ${error.message}`);
+				resolve();
+			});
+			child.on("close", () => resolve());
+		});
+	} catch (error) {
+		say(`displayd: couldn't be set up: ${(error as Error).message}`);
+	}
 }
 
 /** `pim-computer status`: whether it's installed and runs, where it connects, and its last words. */
@@ -1957,10 +2170,14 @@ async function main(): Promise<void> {
 		...(driver ? { driver } : {}),
 		displays: new DisplayClient({
 			url: env.DISPLAYD_URL ?? "http://127.0.0.1:9900",
-			...(env.DISPLAYD_TOKEN ? { token: env.DISPLAYD_TOKEN } : { tokenFile: env.DISPLAYD_TOKEN_FILE ?? "/etc/displayd/token" }),
+			...(env.DISPLAYD_TOKEN
+				? { token: env.DISPLAYD_TOKEN }
+				: { tokenFile: env.DISPLAYD_TOKEN_FILE ?? ((await readable(DISPLAYD_TOKEN_FILE)) ? DISPLAYD_TOKEN_FILE : path.join(os.homedir(), ".displayd", "token")) }),
 		}),
 		apps,
 	};
+	// An update of pim-computer is how an older computer gets displayd, which runs on in the background and never stops this.
+	void ensureDisplayd(url, log);
 	const hello = {
 		type: "hello",
 		version: 1,

@@ -92,6 +92,18 @@ It creates the `displayd` user, makes `/tmp/.X11-unix`, writes `/etc/displayd/en
 token (kept when run again), installs [`displayd.service`](displayd.service) and starts it. Read
 the token from that file for whatever calls the API.
 
+## On a computer
+
+`pim-computer install` and each start of pim-computer (so an update too) ensure displayd on a Cua
+computer, without ever failing: the packages `tigervnc-standalone-server openbox dbus-x11 at-spi2-core xdotool xclip`
+(with `sudo -n`; a warning without it), displayd's files from the same Pim (`/displayd.tar.gz`,
+built with the web app, unpacked to `~/.displayd/app`), a token in `/etc/displayd/token` (0640,
+the computer user's, made once), and a service that runs as that user: a systemd unit with
+`KillMode=process` where there's systemd and sudo, else a restart loop in `~/.displayd`. State is
+in `~/.displayd/state` and contexts in `/run/pim/displays`; without sudo the token and contexts
+are kept in `~/.displayd`. It prints whether `/health` answers. `PIM_DISPLAYD=0` turns it off,
+`=1` turns it on where cua-spacesd isn't present. Restarting displayd leaves the displays running.
+
 ## Tests
 
 `node --test` runs the unit tests with a fake runner and a fake clock; no X needed.

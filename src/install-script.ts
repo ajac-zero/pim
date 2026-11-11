@@ -10,7 +10,8 @@
  * build, checked against the checksum here), downloads the program from this
  * Pim into its own folder, and runs the program's `install` command, which
  * does the rest: its checks, and a service that keeps it running. Anything
- * after the token goes to that command. The computers a Pim's host keeps
+ * after the token goes to that command. For pim-computer that includes ensuring
+ * displayd (../displayd), which it gets from this Pim at /displayd.tar.gz. The computers a Pim's host keeps
  * are set up with it too, with `PIM_URL` set to the address they reach the
  * Pim at.
  */

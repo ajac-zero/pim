@@ -3479,7 +3479,7 @@ type Setup = { readonly script: string; readonly source: "settings" | "repositor
  */
 const TOOLCHAIN_HOSTS = ["mise-versions.jdx.dev", "dl.google.com", "go.dev", "sum.golang.org", "nodejs.org", "static.rust-lang.org", "github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
 /** JDK downloads and the Gradle/Maven/Minecraft mod toolchain hosts, so Java builds (NeoForge mods) work in a workspace. */
-const JAVA_HOSTS = ["api.foojay.io", "api.adoptium.net", "repo.maven.apache.org", "repo1.maven.org", "services.gradle.org", "downloads.gradle.org", "plugins.gradle.org", "plugins-artifacts.gradle.org", "maven.neoforged.net", "maven.minecraftforge.net", "piston-meta.mojang.com", "piston-data.mojang.com", "launchermeta.mojang.com", "libraries.minecraft.net", "resources.download.minecraft.net"];
+const JAVA_HOSTS = ["mise-java.jdx.dev", "api.foojay.io", "api.adoptium.net", "repo.maven.apache.org", "repo1.maven.org", "services.gradle.org", "downloads.gradle.org", "plugins.gradle.org", "plugins-artifacts.gradle.org", "maven.neoforged.net", "maven.minecraftforge.net", "piston-meta.mojang.com", "piston-data.mojang.com", "launchermeta.mojang.com", "libraries.minecraft.net", "resources.download.minecraft.net"];
 
 /** An abort while the environment is readied: `#provisioningFailed` takes " was stopped:" as one. */
 const ENVIRONMENT_STOPPED = "Readying the environment was stopped: the thread was aborted";

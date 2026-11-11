@@ -1,5 +1,5 @@
 import type { FakeCommandHandler } from "../src/coding/workspace/fake";
-import type { Workspace } from "../src/coding/workspace/types";
+import type { EgressPolicy, Workspace } from "../src/coding/workspace/types";
 
 /**
  * A git for the in-memory workspace (src/coding/workspace/fake.ts), enough
@@ -107,7 +107,9 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 				return {};
 			}
 			// Like git against the broker, a fetch without its bearer header is refused.
-			if (!env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Bearer ")) return { stderr: "fatal: could not read Username for 'https://pim.invalid': terminal prompts disabled\n", code: 128 };
+			// The broker's token reaches git as a header, or, on a provider that injects credentials, an egress proxy adds it.
+			const injected = (workspace as { egress?: EgressPolicy }).egress?.inject?.some((rule) => rule.headers.authorization?.startsWith("Bearer "));
+			if (!injected && !env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Bearer ")) return { stderr: "fatal: could not read Username for 'https://pim.invalid': terminal prompts disabled\n", code: 128 };
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
 			if (!files) return { stderr: "fatal: could not read from remote\n", code: 128 };
 			const dest = rest.find((arg) => arg.includes(":"))?.split(":")[1];

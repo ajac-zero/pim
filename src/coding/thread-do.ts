@@ -40,6 +40,7 @@ import {
 	gatewayRoute,
 	gatewayTokenKey,
 	HARNESS_FAMILY,
+	MODEL_GATEWAY_PATH,
 	estimatedUsage,
 	issueGatewayToken,
 	type MeteredAnswer,
@@ -70,6 +71,7 @@ import {
 	type CodingEvent,
 	type CodingHarness,
 	type CodingLimits,
+	type CodingSession,
 	type CodingThreadRow,
 	type CodingThreadState,
 	CodingThreadStore,
@@ -80,8 +82,10 @@ import { isLoginHarness } from "./vault/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
+import { egressPolicy, gatewayInjection, gitBrokerInjection, placeSecret } from "./workspace/egress";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import {
+	type EgressInjection,
 	type EnvironmentOwner,
 	type EnvironmentSnapshot,
 	type ExecEvent,
@@ -203,6 +207,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** When the work in the workspace was last autosaved in this isolate, and the autosave under way. */
 	#autosavedAt = 0;
 	#autosaving: Promise<void> | null = null;
+	/** A move to a new session under way (`#renewSession`): the thread takes no step meanwhile. */
+	#renewing: Promise<void> | null = null;
+	/** The part of it in which the workspace is being suspended and brought back: calls for the workspace wait for it. */
+	#cycling: Promise<void> | null = null;
+	/** The turn that is being restarted from its transcript because its session ended, so its end is auto-resumed. */
+	#restarting: string | null = null;
+	/** When the provider was last told the workspace is in use, in this isolate. */
+	#keptAliveAt = 0;
+	/** The credentials the workspace's egress proxy injects, by what they are for; kept in memory only, since each `setEgress` replaces the whole policy. */
+	readonly #injections = new Map<string, EgressInjection>();
 
 	readonly harness = new PiHarness({
 		harness: async ({ storage, context }) => {
@@ -228,6 +242,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		this.lifecycle.use(this.harness);
+	}
+
+	/** How often a running turn tells a provider that needs it (`capabilities.keepAlive`) that the workspace is in use. */
+	protected keepAliveMs(): number {
+		return 60_000;
+	}
+
+	/** How long before a provider's session cap the thread moves to a new session: a fifth of the cap, at most two minutes. */
+	protected sessionMarginMs(maxMs: number): number {
+		return Math.min(120_000, Math.floor(maxMs / 5));
 	}
 
 	/** The clock the thread's records go by. */
@@ -428,6 +452,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (job.fn !== ADVANCE_JOB) return;
 		// Bounded, as a job must be: work still going after this goes on outside it.
 		await this.#failIfStuck();
+		await this.#keepSessionAlive();
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
 		if (thread?.currentOperation && Date.now() - this.#autosavedAt >= this.autosaveMs()) void this.#autosave();
@@ -438,7 +463,143 @@ export class CodingThreadDO extends DurableObject<Env> {
 				thread.state === "provisioning" ||
 				(thread.slot === "held" && thread.environment.rebuildRequested) ||
 				(thread.slot === "queued" && this.#healthOf(thread) !== null));
-		return busy ? { rescheduleAt: Date.now() + HEARTBEAT_MS } : undefined;
+		return busy ? { rescheduleAt: Math.max(Date.now() + 1_000, Math.min(Date.now() + HEARTBEAT_MS, this.#nextSessionWake(thread) ?? Infinity)) } : undefined;
+	}
+
+	/**
+	 * What the heartbeat does for the workspace's provider while a turn runs: tells one with `capabilities.keepAlive`
+	 * the workspace is in use (activity inside the sandbox doesn't count), and, when its session is about to reach
+	 * `capabilities.sessionMaxMin`, starts moving the thread to a new one. The move goes on outside the job.
+	 */
+	async #keepSessionAlive(): Promise<void> {
+		const thread = this.store.thread();
+		if (!thread?.currentOperation || thread.slot !== "held" || !thread.workspaceRef || this.#renewing) return;
+		const caps = this.#capabilities(thread);
+		if (!caps) return;
+		const now = this.now();
+		if (this.#sessionDue(thread, caps)) {
+			this.#renewing = this.#renewSession(thread.currentOperation)
+				.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.session_renew_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) })))
+				.finally(() => {
+					this.#renewing = null;
+					this.#kick();
+				});
+			return;
+		}
+		if (caps.keepAlive && now - this.#keptAliveAt >= this.keepAliveMs()) {
+			this.#keptAliveAt = now;
+			await this.workspaceProviders()
+				.get(thread.providerId)
+				.keepAlive(thread.workspaceRef)
+				.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.keepalive_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) })));
+		}
+	}
+
+	/** Whether the workspace's session is within its margin of the provider's cap. */
+	#sessionDue(thread: CodingThreadRow, caps: WorkspaceProvider["capabilities"]): boolean {
+		if (caps.sessionMaxMin === null || thread.session.startedAt === null) return false;
+		const maxMs = caps.sessionMaxMin * 60_000;
+		return this.now() >= thread.session.startedAt + maxMs - this.sessionMarginMs(maxMs);
+	}
+
+	/** When the heartbeat next has something to do for the session, so it doesn't sleep past its cap or a keepalive. Null when nothing is due. */
+	#nextSessionWake(thread: CodingThreadRow | null): number | null {
+		if (!thread?.currentOperation || thread.slot !== "held") return null;
+		const caps = this.#capabilities(thread);
+		if (!caps) return null;
+		const clock = this.now() - Date.now();
+		const wakes: number[] = [];
+		if (caps.sessionMaxMin !== null && thread.session.startedAt !== null) {
+			const maxMs = caps.sessionMaxMin * 60_000;
+			wakes.push(thread.session.startedAt + maxMs - this.sessionMarginMs(maxMs) - clock);
+		}
+		if (caps.keepAlive) wakes.push(this.#keptAliveAt + this.keepAliveMs() - clock);
+		return wakes.length ? Math.min(...wakes) : null;
+	}
+
+	/**
+	 * Moves the turn under way to a new session before the provider ends this one: commits a checkpoint and
+	 * autosaves, suspends the workspace (or, on a provider that can't, lets go of it keeping its files), resumes it or
+	 * makes a new one, and restores the checkout. What ran in the workspace is gone, but the agent loop lives in this
+	 * object, so a pi turn goes on: the commands that were running are told they were stopped, and its next call uses
+	 * the new session. A CLI harness's process died with the session, so its turn is restarted from its transcript, its
+	 * own session resumed, as is any turn the move can't go on with. The thread's status says which happened
+	 * (`session`).
+	 */
+	async #renewSession(operation: string): Promise<void> {
+		const thread = this.store.required();
+		const provider = this.workspaceProviders().get(thread.providerId);
+		const record = (patch: Partial<CodingSession>) => this.store.update({ session: { ...this.store.required().session, ...patch } });
+		record({ state: "continuing" });
+		this.store.recordEvent("session.continuing", { operationId: operation, startedAt: thread.session.startedAt ?? 0 });
+		try {
+			if (cliHarness(thread.harness)) throw new Error("The harness's process doesn't survive a new session");
+			// A checkpoint that can't be made leaves the work to the autosave, whose bundle the new session restores from if its files are gone.
+			await this.#checkpoint(operation).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) })));
+			await this.#autosave();
+			const mode = await this.#cycleWorkspace(thread, provider);
+			record({ state: "active", continuations: this.store.required().session.continuations + 1, last: { at: this.now(), mode, reason: "session_cap" } });
+			this.store.recordEvent("session.continued", { operationId: operation, mode });
+			void this.#write("session.continued", { mode, session: this.store.required().session.continuations });
+		} catch (error) {
+			await this.#restartTurn(operation, error);
+		}
+	}
+
+	/** Suspends the workspace and brings it back as a new session, with the checkout in place. Returns whether it was resumed or made again. */
+	async #cycleWorkspace(thread: CodingThreadRow, provider: WorkspaceProvider): Promise<"resumed" | "created"> {
+		const ref = thread.workspaceRef;
+		if (!ref) throw new Error("The thread has no workspace");
+		// What runs in the old session is stopped now, and calls for the workspace wait until the new one is up.
+		this.#killCommands();
+		const cycle = (async () => {
+			this.#open = null;
+			if (provider.capabilities.suspendResume) await provider.suspend(ref);
+			else await provider.destroy(ref, { keepVolume: true });
+			const back = await provider.resumeOrCreate(ref, this.#spec(thread, provider));
+			this.store.update({ workspaceRef: back.ref });
+			this.#injections.clear();
+			this.store.update({ session: { ...this.store.required().session, startedAt: this.now() } });
+			await this.#openWorkspace({});
+			return back.resumed ? ("resumed" as const) : ("created" as const);
+		})();
+		this.#cycling = cycle.then(
+			() => undefined,
+			() => undefined,
+		);
+		try {
+			return await cycle;
+		} finally {
+			this.#cycling = null;
+		}
+	}
+
+	/**
+	 * The turn couldn't go on in a new session: it is stopped, which commits a checkpoint, and started again from its
+	 * transcript (`#settleTurn` queues it), in a workspace made fresh if need be.
+	 */
+	async #restartTurn(operation: string, cause: unknown): Promise<void> {
+		const thread = this.store.required();
+		console.warn(JSON.stringify({ event: "pim.coding.session_restart", thread: thread.threadId, operation, cause: errorText(cause).slice(0, 300) }));
+		this.#restarting = operation;
+		try {
+			await this.#stopTurn();
+		} finally {
+			this.#restarting = null;
+		}
+		const provider = this.workspaceProviders().get(thread.providerId);
+		let mode: "resumed" | "created" | null = null;
+		if (this.store.required().workspaceRef) mode = await this.#cycleWorkspace(this.store.required(), provider).catch(async (error) => {
+			// The workspace can't be brought back: the next turn makes one, from its volume or the autosave.
+			console.warn(JSON.stringify({ event: "pim.coding.session_cycle_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+			this.#open = null;
+			await this.#dropWorkspace({ keepVolume: true }).catch(() => undefined);
+			this.store.update({ session: { ...this.store.required().session, startedAt: null } });
+			return null;
+		});
+		const session = this.store.required().session;
+		this.store.update({ session: { ...session, state: "active", continuations: session.continuations + 1, last: { at: this.now(), mode: "turn_restarted", reason: mode ? `session_cap:${mode}` : "session_cap" } } });
+		this.store.recordEvent("session.turn_restarted", { operationId: operation, cause: errorText(cause).slice(0, 300) });
 	}
 
 	/**
@@ -531,8 +692,24 @@ export class CodingThreadDO extends DurableObject<Env> {
 			createdAt: thread.createdAt,
 			updatedAt: thread.updatedAt,
 			consecutiveInterrupts: thread.consecutiveInterrupts,
+			session: this.#sessionView(thread),
 			pullRequest: thread.pullRequest,
 		};
+	}
+
+	/** The workspace's session as the status tells it: what the provider caps, and when this session ends. */
+	#sessionView(thread: CodingThreadRow): CodingSessionStatus {
+		const caps = this.#capabilities(thread);
+		const maxMin = caps?.sessionMaxMin ?? null;
+		return { ...thread.session, maxMin, expiresAt: maxMin !== null && thread.session.startedAt !== null ? thread.session.startedAt + maxMin * 60_000 : null, keepAlive: caps?.keepAlive ?? false };
+	}
+
+	#capabilities(thread: CodingThreadRow): WorkspaceProvider["capabilities"] | null {
+		try {
+			return this.workspaceProviders().get(thread.providerId).capabilities;
+		} catch {
+			return null;
+		}
 	}
 
 	/** The repository's prepared environment in the thread's workspace (./environment-cache.ts). */
@@ -1053,7 +1230,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const origin = deploymentSettings(this.env).publicUrl;
 		if (!origin) throw new Error("PIM_PUBLIC_URL isn't set, so the workspace can't reach Pim's model gateway");
 		const { token } = await this.gatewayToken([HARNESS_FAMILY[harness]]);
-		return sandboxModelEnv(origin, harness, token);
+		// A provider that injects credentials gets the token in its egress proxy, and the workspace only a placeholder to send.
+		const placed = placeSecret(this.workspaceProviders().get(this.store.required().providerId), gatewayInjection(origin, `/api${MODEL_GATEWAY_PATH}`, HARNESS_FAMILY[harness], token), token);
+		if (placed.rule) await this.#inject("model-gateway", placed.rule);
+		return sandboxModelEnv(origin, harness, placed.env);
 	}
 
 	/**
@@ -1369,6 +1549,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async #step(): Promise<void> {
 		let thread = this.store.thread();
 		if (!thread || thread.state === "archived" || thread.state === "failed" || thread.state === "waiting_input") return;
+		// A move to a new session is under way: it kicks the thread when it is done.
+		if (this.#renewing) return;
 		if (thread.currentOperation) {
 			const operation = thread.currentOperation;
 			if (cliHarness(thread.harness)) {
@@ -1851,16 +2033,20 @@ export class CodingThreadDO extends DurableObject<Env> {
 		
 		// Handle auto-resume for interrupted turns (restart), and for turns whose workspace went down (made again from its volume by now)
 		const lost = result.status !== "done" && result.reason === "workspace_lost";
-		const isInterrupted = result.reason === "interrupted" || lost;
+		// A turn stopped because its session ended is started again however often that happened: each session made progress.
+		const expired = this.#restarting === operation;
+		const isInterrupted = result.reason === "interrupted" || lost || expired;
 		const maxInterrupts = MAX_RESUMES;
-		const shouldAutoResume = isInterrupted && thread.consecutiveInterrupts < maxInterrupts && thread.state !== "archived";
+		const shouldAutoResume = isInterrupted && (expired || thread.consecutiveInterrupts < maxInterrupts) && thread.state !== "archived";
 		
 		if (shouldAutoResume) {
 			// Increment the counter and enqueue a continuation turn
-			const attempt = thread.consecutiveInterrupts + 1;
+			const attempt = expired ? thread.consecutiveInterrupts : thread.consecutiveInterrupts + 1;
 			const cli = cliHarness(thread.harness);
-			const why = lost ? "workspace_lost" : "interrupted_by_restart";
-			const resumeText = lost
+			const why = expired ? "session_expired" : lost ? "workspace_lost" : "interrupted_by_restart";
+			const resumeText = expired
+				? SESSION_RESUME_TEXT
+				: lost
 				? LOST_RESUME_TEXT
 				: cli
 					? `Your previous run was interrupted by a platform restart; check git status and the repo, then continue the task where you left off.`
@@ -2144,7 +2330,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** The thread's workspace, made and cloned on first use, with its commands killed when the thread is stopped. A new one starts from `restoreFrom`, the person's environment snapshot, when given. */
-	#workspace(options: { restoreFrom?: EnvironmentSnapshot } = {}): Promise<Workspace> {
+	async #workspace(options: { restoreFrom?: EnvironmentSnapshot } = {}): Promise<Workspace> {
+		// A new session is being brought up: the old workspace is on its way out.
+		while (this.#cycling) await this.#cycling;
 		this.#opening ??= this.#openWorkspace(options).finally(() => {
 			this.#opening = null;
 		});
@@ -2177,6 +2365,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (!workspace) throw new Error("The workspace provider lost the workspace it just made");
 		}
 		if ((await workspace.status()).state === "stopped") await workspace.start();
+		// A workspace made now starts a session; one found with none recorded (made before they were) is taken to have just begun one.
+		if (started !== null || this.store.required().session.startedAt === null) this.store.update({ session: { ...this.store.required().session, startedAt: this.now() } });
 		const killable = this.#killable(workspace, this.store.required().workspaceRef!);
 		await this.#ensureRepository(killable, thread);
 		if (started !== null) this.#setEnvironment({ provisionMs: Math.round(performance.now() - started) });
@@ -2223,10 +2413,20 @@ export class CodingThreadDO extends DurableObject<Env> {
 			image: this.workspaceImage(),
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch },
 			limits: thread.limits,
-			egress: { allow: [...this.egressAllow(), ...(cliHarness(thread.harness)?.egress ?? [])] },
+			// The allowlist as a policy: the credentials the proxy injects join it once a workspace has them (`#inject`).
+			egress: egressPolicy({ allow: [...this.egressAllow(), ...(cliHarness(thread.harness)?.egress ?? [])], inject: [...this.#injections.values()] }),
 			gitAuth: { mode: "none" },
 			...(provider.capabilities.environmentSnapshots ? { environment: environmentOwner(thread) } : {}),
 		};
+	}
+
+	/** Gives the workspace's egress proxy a credential to add to requests, with the ones it already has. The workspace itself never holds it. */
+	async #inject(purpose: string, rule: EgressInjection): Promise<void> {
+		const thread = this.store.required();
+		if (!thread.workspaceRef) throw new Error("The thread has no workspace");
+		const provider = this.workspaceProviders().get(thread.providerId);
+		this.#injections.set(purpose, rule);
+		await provider.setEgress(thread.workspaceRef, this.#spec(thread, provider).egress);
 	}
 
 	/**
@@ -2250,8 +2450,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const base = this.store.required().baseSha;
 		if (cloned && base !== null) return;
 		const { url, token } = await this.cloneSource(thread);
-		// The broker token as an HTTP header for these commands alone: git keeps no copy of it in the repository.
-		const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+		// Where the provider injects credentials, the broker token goes to its egress proxy and git sends none. Otherwise it is an HTTP header for these commands alone: git keeps no copy of it in the repository.
+		const placed = placeSecret(this.workspaceProviders().get(thread.providerId), gitBrokerInjection(url, `/api${GIT_BROKER_PATH}`, token), token);
+		if (placed.rule) await this.#inject("git", placed.rule);
+		const auth: Record<string, string> = placed.rule ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
 		const delays = this.gitRetryDelaysMs();
 		if (!cloned) {
 			await gitWithRetries(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token }, delays, () => workspace.remove(REPO_DIR).catch(() => undefined));
@@ -2804,9 +3006,14 @@ export type CodingThreadStatus = {
 	readonly updatedAt: number;
 	/** How many consecutive interruptions have been auto-resumed for this thread. */
 	readonly consecutiveInterrupts: number;
+	/** The workspace's session: when it began, when the provider ends it, and how the thread moved on from earlier ones. */
+	readonly session: CodingSessionStatus;
 	/** The pull request opened from its branch; null until one is. */
 	readonly pullRequest: { readonly url: string; readonly number: number } | null;
 };
+
+/** A session as the status tells it. `maxMin` and `expiresAt` are null for a provider without a cap, `keepAlive` is whether the thread pings the provider while a turn runs. */
+export type CodingSessionStatus = CodingSession & { readonly maxMin: number | null; readonly expiresAt: number | null; readonly keepAlive: boolean };
 
 export type CodingDiff = { readonly since: string | null; readonly head: string | null; readonly diff: string; readonly truncated: boolean };
 
@@ -2903,6 +3110,7 @@ export function cliInstructions(thread: Pick<CodingThreadRow, "repoUrl" | "branc
 /** What `continue` tells the model. */
 export const CONTINUE_TEXT = "Continue where you left off.";
 /** What a CLI turn cut off by its workspace going down is told when it goes on in the workspace made again. */
+export const SESSION_RESUME_TEXT = "The sandbox's session reached its time limit and was replaced by a new one, with your files kept but what was running in it gone; check git status and continue where you left off.";
 export const LOST_RESUME_TEXT = "You were interrupted by an infrastructure restart; continue where you left off.";
 const STALLED_CONTINUE_TEXT = "Your last turn was stopped because it made no progress for a long while, so a command of yours may have hung. Check where you were, and continue where you left off.";
 

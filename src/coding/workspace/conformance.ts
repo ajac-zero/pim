@@ -1,7 +1,7 @@
 // The conformance suite every workspace backend must pass. A backend's test file calls `runConformanceSuite` with a way to make a fresh provider; passing the same cases is what shows the loop is not tied to one backend. Cases that depend on an optional capability are registered as skipped, with the reason in their name, so a skip is always visible.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { type ExecEvent, type Workspace, WorkspaceCapacityError, type WorkspaceProvider, type WorkspaceRef, type WorkspaceSpec } from "./types";
+import { type ExecEvent, type Workspace, WorkspaceCapacityError, WorkspaceNotFoundError, type WorkspaceProvider, type WorkspaceRef, type WorkspaceSpec, WorkspaceUnsupportedError } from "./types";
 
 export type ConformanceOptions = {
 	/** Fields of the spec to replace, such as the image a real backend needs. */
@@ -10,6 +10,8 @@ export type ConformanceOptions = {
 	checkLimit?: (provider: WorkspaceProvider, spec: WorkspaceSpec) => Promise<void>;
 	/** A URL on a host in `allow` and one outside it, for the egress case. Defaults to made-up hosts, which suits only backends that do not really connect. */
 	egress?: { allow: string; allowedUrl: string; blockedUrl: string };
+	/** Starts a background process in a workspace and tells whether it is still there, to prove a suspend ends processes and keeps files. Without it that part of the suspend case is skipped. */
+	process?: { start: (workspace: Workspace) => Promise<void>; alive: (workspace: Workspace) => Promise<boolean> };
 };
 
 const decode = (data: Uint8Array) => new TextDecoder().decode(data);
@@ -237,6 +239,70 @@ export function runConformanceSuite(name: string, makeProvider: () => WorkspaceP
 			const again = await provider.create(spec);
 			created.push({ provider, ref: again });
 			expect(decode(await (await provider.get(again))!.readFile("volume.txt"))).toBe("kept");
+		});
+
+		it("declares how long sessions last, whether it needs keepalives, and whether it suspends", () => {
+			const { sessionMaxMin, keepAlive, suspendResume, egressInjection } = capabilities;
+			expect(sessionMaxMin === null || (Number.isFinite(sessionMaxMin) && sessionMaxMin > 0)).toBe(true);
+			expect([typeof keepAlive, typeof suspendResume, typeof egressInjection]).toEqual(["boolean", "boolean", "boolean"]);
+		});
+
+		gated(capabilities.suspendResume, "the provider can't suspend", "suspends a workspace keeping files and losing processes, and resumes it as one session", async () => {
+			const { provider, spec, ref, workspace } = await open();
+			await workspace.writeFile("kept.txt", encode("survives"));
+			if (opts.process) {
+				await opts.process.start(workspace);
+				expect(await opts.process.alive(workspace)).toBe(true);
+			}
+			await provider.suspend(ref);
+			expect((await (await provider.get(ref))?.status())?.state).toBe("stopped");
+			// Suspending a suspended workspace does nothing.
+			await provider.suspend(ref);
+			const back = await provider.resumeOrCreate(ref, spec);
+			expect(back).toEqual({ ref, resumed: true });
+			const resumed = (await provider.get(back.ref))!;
+			expect((await resumed.status()).state).toBe("running");
+			expect(decode(await resumed.readFile("kept.txt"))).toBe("survives");
+			if (opts.process) expect(await opts.process.alive(resumed)).toBe(false);
+			expect((await run(resumed, ["echo", "again"])).stdout).toBe("again\n");
+			// A running workspace is returned as it is.
+			expect(await provider.resumeOrCreate(ref, spec)).toEqual({ ref, resumed: true });
+		});
+
+		gated(capabilities.suspendResume, "the provider can't suspend", "makes a workspace from the kept volume when the suspended one is gone", async () => {
+			const { provider, spec, ref, workspace } = await open();
+			await workspace.writeFile("volume.txt", encode("kept"));
+			await provider.destroy(ref, { keepVolume: true });
+			const made = await provider.resumeOrCreate(ref, spec);
+			created.push({ provider, ref: made.ref });
+			expect(made.resumed).toBe(false);
+			expect(decode(await (await provider.get(made.ref))!.readFile("volume.txt"))).toBe("kept");
+		});
+
+		gated(!capabilities.suspendResume, "the provider suspends", "refuses to suspend, and resumeOrCreate returns the workspace it has", async () => {
+			const { provider, spec, ref } = await open();
+			await expect(provider.suspend(ref)).rejects.toBeInstanceOf(WorkspaceUnsupportedError);
+			expect(await provider.resumeOrCreate(ref, spec)).toEqual({ ref, resumed: true });
+		});
+
+		it("takes keepalives for a workspace that exists, and refuses one that doesn't", async () => {
+			const { provider, ref } = await open();
+			await provider.keepAlive(ref);
+			await provider.destroy(ref);
+			if (capabilities.keepAlive) await expect(provider.keepAlive(ref)).rejects.toBeInstanceOf(WorkspaceNotFoundError);
+			else await provider.keepAlive(ref);
+		});
+
+		gated(capabilities.egressInjection, "the provider doesn't inject credentials", "replaces the egress policy of a workspace", async () => {
+			const { provider, ref } = await open();
+			await provider.setEgress(ref, { allow: ["example.test"], inject: [{ host: "example.test", headers: { authorization: "Bearer x" } }] });
+			await provider.destroy(ref);
+			await expect(provider.setEgress(ref, { allow: [] })).rejects.toBeInstanceOf(WorkspaceNotFoundError);
+		});
+
+		gated(!capabilities.egressInjection, "the provider injects credentials", "refuses to replace an egress policy it can't inject", async () => {
+			const { provider, ref } = await open();
+			await expect(provider.setEgress(ref, { allow: [] })).rejects.toBeInstanceOf(WorkspaceUnsupportedError);
 		});
 
 		gated(capabilities.maxConcurrent !== undefined, "the provider declares no maxConcurrent", "refuses a workspace past its capacity", async () => {

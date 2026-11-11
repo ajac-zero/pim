@@ -1,7 +1,9 @@
 import { DEFAULT_RESTORE_MB_PER_S } from "../environment-cache";
+import { egressAllows, egressPolicy, injectedHeaders, resumeOrCreate as resumeOrCreateWorkspace } from "./egress";
 // An in-memory workspace provider for tests. It keeps files in a map, runs a tiny scripted shell, and is the first backend the shared conformance suite (conformance.ts) runs against. It is a reference for the contract in types.ts, not a sandbox.
 
 import {
+	type EgressPolicy,
 	type EnvironmentOwner,
 	type EnvironmentSnapshot,
 	type ExecEvent,
@@ -15,6 +17,7 @@ import {
 	type WorkspaceInfo,
 	WorkspaceLimitError,
 	WorkspaceNotFoundError,
+	WorkspaceUnsupportedError,
 	WorkspacePathError,
 	type WorkspaceProvider,
 	type WorkspaceRef,
@@ -41,7 +44,23 @@ export type FakeProviderOptions = {
 	maxConcurrent?: number;
 	/** How fast environment snapshots restore, in MB a second; 8 when absent. */
 	restoreMBps?: number;
+	/** Minutes a session lasts before the fake stops the workspace as a backend with a session cap does; unlimited when absent. */
+	sessionMaxMin?: number;
+	/** Whether the fake needs `keepAlive` calls; false when absent. It only records them (`keepAlives`). */
+	keepAlive?: boolean;
+	/** Whether `suspend` works; true when absent. */
+	suspendResume?: boolean;
+	/** Whether the fake applies `egress.inject` itself, as a proxy outside the workspace would; false when absent. */
+	egressInjection?: boolean;
+	/** The clock sessions are measured by; `Date.now` when absent. */
+	now?: () => number;
 };
+
+/** One request the fake's `curl` made through its egress policy: the host and path, and the headers the policy injected (which the workspace never saw). */
+export type FakeRequest = { sessionId: string; host: string; path: string; injected: Record<string, string> };
+
+/** The session clock a workspace is measured by. */
+type SessionClock = { now: () => number; maxMs: number | null };
 
 const MIB = 1024 * 1024;
 const MAX_LINK_DEPTH = 32;
@@ -132,16 +151,51 @@ class Kill {
 class FakeWorkspace implements Workspace {
 	state: WorkspaceState = "running";
 	nodes: Nodes = new Map();
+	/** Background processes started with `spawn`; they end with the session. */
+	processes: string[] = [];
+	/** When this session began. */
+	startedAt: number;
+	egress: EgressPolicy;
 
 	constructor(
 		readonly ref: WorkspaceRef,
 		readonly spec: WorkspaceSpec,
 		private handlers: Map<string, FakeCommandHandler>,
 		private snapshots: Map<string, Nodes>,
-	) {}
+		private clock: SessionClock,
+		private requests: FakeRequest[],
+		private injects: boolean,
+	) {
+		this.startedAt = clock.now();
+		this.egress = spec.egress;
+	}
+
+	/** Ends the session when its cap has passed: the workspace is stopped, its files kept and its processes gone. */
+	private expire(): boolean {
+		if (this.state === "running" && this.clock.maxMs !== null && this.clock.now() - this.startedAt >= this.clock.maxMs) {
+			this.state = "stopped";
+			this.processes = [];
+			return true;
+		}
+		return false;
+	}
+
+	/** Suspends the workspace: stopped, processes gone, files kept. */
+	suspend() {
+		if (this.state === "gone") throw new WorkspaceNotFoundError();
+		this.state = "stopped";
+		this.processes = [];
+	}
+
+	/** Begins a new session of a stopped workspace. */
+	resume() {
+		this.state = "running";
+		this.startedAt = this.clock.now();
+	}
 
 	private live() {
 		if (this.state === "gone") throw new WorkspaceNotFoundError();
+		if (this.expire()) throw new Error("The session reached its maximum duration");
 	}
 
 	private running() {
@@ -248,6 +302,7 @@ class FakeWorkspace implements Workspace {
 	}
 
 	async status(): Promise<WorkspaceStatus> {
+		this.expire();
 		if (this.state === "gone") return { state: "gone" };
 		let diskBytes = 0;
 		for (const node of this.nodes.values()) diskBytes += this.sizeOf(node);
@@ -260,8 +315,8 @@ class FakeWorkspace implements Workspace {
 	}
 
 	async start(): Promise<void> {
-		this.live();
-		this.state = "running";
+		if (this.state === "gone") throw new WorkspaceNotFoundError();
+		if (this.state !== "running") this.resume();
 	}
 
 	async *exec(cmd: string[], o: ExecOptions): AsyncGenerator<ExecEvent> {
@@ -324,14 +379,22 @@ class FakeWorkspace implements Workspace {
 				return 0;
 			}
 			case "curl": {
-				const host = new URL(args[args.length - 1] ?? "").hostname;
-				if (!this.spec.egress.allow.includes(host)) {
+				const url = new URL(args[args.length - 1] ?? "");
+				const host = url.hostname;
+				if (!egressAllows(this.egress, host)) {
 					yield err(`curl: could not connect to ${host}\n`);
 					return 7;
 				}
+				this.requests.push({ sessionId: this.ref.sessionId, host, path: url.pathname, injected: this.injects ? injectedHeaders(this.egress, host, url.pathname) : {} });
 				yield out("ok\n");
 				return 0;
 			}
+			case "spawn":
+				this.processes.push(args.join(" "));
+				return 0;
+			case "ps":
+				for (const process of this.processes) yield out(`${process}\n`);
+				return 0;
 			case "mkdir":
 				return 0;
 			case "exec":
@@ -372,7 +435,7 @@ function cloneNodes(nodes: Nodes): Nodes {
 	return new Map([...nodes].map(([key, node]) => [key, node.type === "file" ? { ...node, data: node.data.slice() } : { ...node }]));
 }
 
-/** A provider whose workspaces live in memory. Its shell understands `echo`, `cat`, `sleep`, `ln -s`, `curl` (which only reaches hosts in the spec's egress list), and `sh -c` over `;`-separated `echo`, `exit` and those commands, with `>&2` after a command. `register` adds or replaces a command by name. Environment snapshots are copies of a workspace's files, kept per person and key as the sandbox manager keeps them. */
+/** A provider whose workspaces live in memory. Its shell understands `echo`, `cat`, `sleep`, `ln -s`, `spawn` and `ps` (background processes, which a suspend ends), `curl` (which only reaches hosts the egress policy allows), and `sh -c` over `;`-separated `echo`, `exit` and those commands, with `>&2` after a command. `register` adds or replaces a command by name. Environment snapshots are copies of a workspace's files, kept per person and key as the sandbox manager keeps them. */
 export class FakeWorkspaceProvider implements WorkspaceProvider {
 	readonly id = "fake";
 	readonly capabilities: WorkspaceProvider["capabilities"];
@@ -385,9 +448,25 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 	/** The size new environment snapshots report, as the sandbox manager reports their compressed size; none when unset. */
 	environmentSize: number | undefined;
 	private counter = 0;
+	private clock: SessionClock;
+	/** The times `keepAlive` was called, by session. */
+	readonly keepAlives = new Map<string, number[]>();
+	/** What `curl` in the workspaces reached. */
+	readonly requests: FakeRequest[] = [];
 
 	constructor(options: FakeProviderOptions = {}) {
-		this.capabilities = { snapshot: true, environmentSnapshots: true, egressAllowlist: true, restoreMBps: options.restoreMBps ?? DEFAULT_RESTORE_MB_PER_S, maxConcurrent: options.maxConcurrent };
+		this.capabilities = {
+			snapshot: true,
+			environmentSnapshots: true,
+			egressAllowlist: true,
+			restoreMBps: options.restoreMBps ?? DEFAULT_RESTORE_MB_PER_S,
+			maxConcurrent: options.maxConcurrent,
+			sessionMaxMin: options.sessionMaxMin ?? null,
+			keepAlive: options.keepAlive ?? false,
+			suspendResume: options.suspendResume ?? true,
+			egressInjection: options.egressInjection ?? false,
+		};
+		this.clock = { now: options.now ?? Date.now, maxMs: options.sessionMaxMin === undefined ? null : options.sessionMaxMin * 60_000 };
 	}
 
 	/** Makes `name` run `handler` in every workspace of this provider. */
@@ -415,7 +494,7 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 			restored = cloneNodes(saved.nodes);
 		}
 		const ref: WorkspaceRef = { id: `fake-${++this.counter}`, providerId: this.id, sessionId: spec.sessionId };
-		const workspace = new FakeWorkspace(ref, spec, this.handlers, this.snapshots);
+		const workspace = new FakeWorkspace(ref, spec, this.handlers, this.snapshots, this.clock, this.requests, this.capabilities.egressInjection);
 		workspace.nodes = kept ?? restored ?? new Map([[WORKSPACE_ROOT, { type: "dir", mode: 0o755, mtimeMs: Date.now() }]]);
 		this.keptVolumes.delete(spec.sessionId);
 		this.workspaces.set(spec.sessionId, { workspace, createdAt: Date.now() });
@@ -425,6 +504,11 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 	async get(ref: WorkspaceRef): Promise<Workspace | null> {
 		const found = this.workspaces.get(ref.sessionId);
 		return found?.workspace.ref.id === ref.id ? found.workspace : null;
+	}
+
+	/** The egress policy the session's workspace has now, for a test to look at what a proxy would hold. */
+	egressOf(sessionId: string): EgressPolicy | undefined {
+		return this.workspaces.get(sessionId)?.workspace.egress;
 	}
 
 	/** Forgets the files a deleted workspace kept (`destroy` with `keepVolume`), as when its host loses the volume. */
@@ -444,6 +528,37 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 		return [...this.workspaces.values()]
 			.filter(({ workspace }) => (!filter.sessionId || workspace.ref.sessionId === filter.sessionId) && (!filter.state || workspace.state === filter.state))
 			.map(({ workspace, createdAt }) => ({ ref: workspace.ref, state: workspace.state, createdAt }));
+	}
+
+	async suspend(ref: WorkspaceRef): Promise<void> {
+		if (!this.capabilities.suspendResume) throw new WorkspaceUnsupportedError("The fake provider was made without suspend");
+		const found = this.workspaces.get(ref.sessionId);
+		if (found?.workspace.ref.id !== ref.id) throw new WorkspaceNotFoundError();
+		found.workspace.suspend();
+	}
+
+	async resumeOrCreate(ref: WorkspaceRef, spec: WorkspaceSpec): Promise<{ ref: WorkspaceRef; resumed: boolean }> {
+		const found = this.workspaces.get(ref.sessionId);
+		if (found?.workspace.ref.id === ref.id) {
+			// A session that reached its cap counts as stopped.
+			await found.workspace.status();
+			if (found.workspace.state === "stopped") found.workspace.resume();
+		}
+		return resumeOrCreateWorkspace(this, ref, spec);
+	}
+
+	async keepAlive(ref: WorkspaceRef): Promise<void> {
+		if (!this.capabilities.keepAlive) return;
+		const found = this.workspaces.get(ref.sessionId);
+		if (found?.workspace.ref.id !== ref.id) throw new WorkspaceNotFoundError();
+		this.keepAlives.set(ref.sessionId, [...(this.keepAlives.get(ref.sessionId) ?? []), this.clock.now()]);
+	}
+
+	async setEgress(ref: WorkspaceRef, egress: EgressPolicy): Promise<void> {
+		if (!this.capabilities.egressInjection) throw new WorkspaceUnsupportedError("The fake provider was made without egress injection");
+		const found = this.workspaces.get(ref.sessionId);
+		if (found?.workspace.ref.id !== ref.id) throw new WorkspaceNotFoundError();
+		found.workspace.egress = egressPolicy(egress);
 	}
 
 	/** Refuses a workspace that isn't the owner's, as the sandbox manager does. */

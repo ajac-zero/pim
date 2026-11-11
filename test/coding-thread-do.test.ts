@@ -7,7 +7,7 @@ import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, snapshotWorthKeeping } from "../src/coding/environment-cache";
 import { PROVISION_ENV } from "../src/coding/repo-environment";
-import { CONTINUE_TEXT, cliInstructions, codingThread, LOST_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
+import { CONTINUE_TEXT, cliInstructions, codingThread, LOST_RESUME_TEXT, SESSION_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
@@ -686,6 +686,160 @@ describe("a coding thread", () => {
 		expect(await codingThread(env, id).status()).toMatchObject({ state: "idle", currentOperation: null });
 	});
 });
+
+describe("a coding thread on a provider with sessions, keepalives and egress injection", () => {
+	const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+
+	/** A fake provider with a one-minute session cap, driven by the thread's clock, which starts now. */
+	function capped(options: ConstructorParameters<typeof FakeWorkspaceProvider>[0] = {}) {
+		const t0 = Date.now();
+		codingThreadClock.now = t0;
+		const provider = new FakeWorkspaceProvider({ sessionMaxMin: 1, suspendResume: true, keepAlive: true, egressInjection: true, now: () => codingThreadClock.now ?? Date.now(), ...options });
+		provider.register("git", fakeGit);
+		codingBackends.registry = workspaceRegistry([provider]);
+		return { provider, t0 };
+	}
+
+	/** A file of the thread's repository in its workspace on `provider`. */
+	const fileOn = async (provider: FakeWorkspaceProvider, id: string, path: string) => new TextDecoder().decode(await (await provider.get((await provider.list({ sessionId: id }))[0]!.ref))!.readFile(`${REPO_DIR}/${path}`));
+
+	const running = (stub: Stub, tools: number) => vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(tools));
+
+	it("pings a provider that needs keepalives while a turn runs, at its interval, and wakes the heartbeat in time", async () => {
+		const { provider, t0 } = capped({ sessionMaxMin: undefined });
+		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
+		const { id, stub } = await startThread();
+		await running(stub, 1);
+		const pings = () => provider.keepAlives.get(id)?.length ?? 0;
+		const first = await heartbeat(stub);
+		expect(pings()).toBe(1);
+		// The next ping is due in a minute, so the heartbeat comes back within its usual 30 seconds.
+		expect((first as { rescheduleAt: number }).rescheduleAt).toBeLessThanOrEqual(Date.now() + 30_000);
+		await heartbeat(stub);
+		expect(pings()).toBe(1);
+		codingThreadClock.now = t0 + 61_000;
+		await heartbeat(stub);
+		expect(provider.keepAlives.get(id)).toEqual([t0, t0 + 61_000]);
+		await stub.abort();
+		await turns(id, 1);
+		// Between turns nothing is pinged.
+		codingThreadClock.now = t0 + 200_000;
+		await heartbeat(stub);
+		expect(pings()).toBe(2);
+		expect((await stub.status()).session).toMatchObject({ keepAlive: true, maxMin: null, expiresAt: null });
+	});
+
+	it("does not ping a provider that doesn't need it", async () => {
+		const { provider } = capped({ sessionMaxMin: undefined, keepAlive: false });
+		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
+		const { id, stub } = await startThread();
+		await running(stub, 1);
+		await heartbeat(stub);
+		expect(provider.keepAlives.get(id)).toBeUndefined();
+		await stub.abort();
+		await turns(id, 1);
+	});
+
+	it("moves a running turn to a new session before the provider's cap, keeping its files, and says so in its status", async () => {
+		const { provider, t0 } = capped();
+		let after = "";
+		codingFaux.setResponses([
+			toolUse("write", { path: "a.txt", content: "before\n" }),
+			toolUse("bash", { command: "sleep 30" }),
+			(context) => {
+				after = sent(context);
+				return toolUse("write", { path: "b.txt", content: "after\n" });
+			},
+			fauxAssistantMessage("Done across two sessions."),
+		]);
+		const { id, stub } = await startThread();
+		await running(stub, 2);
+		const before = await stub.status();
+		expect(before.session).toMatchObject({ state: "active", startedAt: t0, maxMin: 1, expiresAt: t0 + 60_000, continuations: 0, last: null });
+		const ref = (await provider.list({ sessionId: id }))[0]!.ref;
+		await printedOf((await provider.get(ref))!, ["spawn", "daemon"]);
+		// Twelve seconds before the cap (a fifth of it): the heartbeat starts the move.
+		codingThreadClock.now = t0 + 48_000;
+		await heartbeat(stub);
+		const [ended] = await turns(id, 1);
+		expect(ended!.outcome).toBe("completed");
+		const status = await stub.status();
+		expect(status.session).toMatchObject({ state: "active", continuations: 1, startedAt: t0 + 48_000, expiresAt: t0 + 108_000, last: { mode: "resumed", reason: "session_cap" } });
+		expect(status).toMatchObject({ state: "idle" });
+		// The running command was stopped and the model told so; it went on in the new session, where its files were.
+		expect(after).toContain("sleep 30");
+		expect(await fileOn(provider, id, "a.txt")).toBe("before\n");
+		expect(await fileOn(provider, id, "b.txt")).toBe("after\n");
+		// The same workspace was resumed, its processes gone, and the work committed in the turn's checkpoints.
+		expect((await provider.list({ sessionId: id }))[0]!.ref).toEqual(ref);
+		expect(await printedOf((await provider.get(ref))!, ["ps"])).not.toContain("daemon");
+		const checkpoints = await stub.checkpoints();
+		expect(checkpoints.length).toBeGreaterThanOrEqual(2);
+		// It is past the first session's cap now, and still works: the new session is what counts.
+		codingThreadClock.now = t0 + 70_000;
+		expect(await fileOn(provider, id, "a.txt")).toBe("before\n");
+		expect(await sql(stub, "SELECT kind FROM coding_event WHERE kind LIKE 'session.%' ORDER BY seq")).toEqual([{ kind: "session.continuing" }, { kind: "session.continued" }]);
+	});
+
+	it("restarts the turn from its transcript when it can't be moved to a new session", async () => {
+		const { provider, t0 } = capped();
+		let resumed = "";
+		codingFaux.setResponses([
+			toolUse("write", { path: "a.txt", content: "before\n" }),
+			toolUse("bash", { command: "sleep 30" }),
+			(context) => {
+				resumed = sent(context);
+				return fauxAssistantMessage("Restarted and done.");
+			},
+		]);
+		// The provider can't resume the suspended workspace this once.
+		const resume = provider.resumeOrCreate.bind(provider);
+		let refused = 0;
+		provider.resumeOrCreate = async (ref, spec) => {
+			if (refused++ === 0) throw new Error("The provider is down");
+			return resume(ref, spec);
+		};
+		const { id, stub } = await startThread();
+		await running(stub, 2);
+		codingThreadClock.now = t0 + 50_000;
+		await heartbeat(stub);
+		const [ended] = await turns(id, 1);
+		expect(ended!.outcome).toBe("completed");
+		expect(resumed).toContain(SESSION_RESUME_TEXT);
+		expect(await fileOn(provider, id, "a.txt")).toBe("before\n");
+		const status = await stub.status();
+		expect(status).toMatchObject({ state: "idle", consecutiveInterrupts: 0, session: { state: "active", continuations: 1, last: { mode: "turn_restarted" } } });
+		expect(await sql(stub, "SELECT kind FROM coding_event WHERE kind LIKE 'session.%' ORDER BY seq")).toEqual([{ kind: "session.continuing" }, { kind: "session.turn_restarted" }]);
+	});
+
+	it("keeps Pim's tokens out of the workspace when the provider injects them, and in it when it doesn't", async () => {
+		const { provider } = capped({ sessionMaxMin: undefined });
+		codingFaux.setResponses([fauxAssistantMessage("Cloned.")]);
+		const injected = await startThread();
+		await turns(injected.id, 1);
+		const policy = provider.egressOf(injected.id)!;
+		expect(policy.inject).toEqual([{ host: "pim.test", pathPrefix: "/api/coding/git", headers: { authorization: expect.stringMatching(/^Bearer .{20,}$/) } }]);
+		expect(policy.allow).toEqual(expect.arrayContaining(["pim.test", "registry.npmjs.org"]));
+		const clone = fakeClones.findLast((each) => each.url === BROKER_URL && each.env.GIT_CONFIG_COUNT === undefined)!;
+		expect(clone).toBeDefined();
+		const token = policy.inject![0]!.headers.authorization!.replace("Bearer ", "");
+		expect(JSON.stringify(fakeClones)).not.toContain(token);
+		expect(await everything(injected.stub)).not.toContain(token);
+		// The same thread's environment held none, on a provider that can't inject.
+		codingBackends.registry = null;
+		codingFaux.setResponses([fauxAssistantMessage("Cloned.")]);
+		const plain = await startThread();
+		await turns(plain.id, 1);
+		expect(codingWorkspaces.egressOf(plain.id)?.inject).toEqual([]);
+		expect(fakeClones.findLast((each) => each.url === BROKER_URL)!.env.GIT_CONFIG_VALUE_0).toMatch(/^Authorization: Bearer /);
+	});
+});
+
+async function printedOf(workspace: { exec: (cmd: string[], o: { timeoutMs: number }) => AsyncIterable<{ type: string; data?: string }> }, cmd: string[]) {
+	let out = "";
+	for await (const event of workspace.exec(cmd, { timeoutMs: 5_000 })) if (event.type === "stdout") out += event.data;
+	return out;
+}
 
 describe("a coding thread on the Compose sandbox manager", () => {
 	/** The real Compose provider, talking to a stubbed manager over its routes, whose workspaces have the fake git. */

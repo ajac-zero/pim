@@ -1,5 +1,6 @@
 // The Cloudflare Sandbox backend for coding workspaces. A workspace is one sandbox (a container behind a Durable Object) per coding session, reached through `SandboxLike`, a structural subset of the `@cloudflare/sandbox` client. This module deliberately imports nothing from `@cloudflare/*`: the Worker passes in `(sessionId) => getSandbox(env.Sandbox, sessionId)`, so nothing here runs, or is billed, until an owner adds the Sandbox binding. See docs/coding-cloudflare-sandbox.md.
 
+import { egressPolicy, resumeOrCreate, unsupportedEgress, unsupportedSuspend } from "./egress";
 import {
 	type EnvironmentSnapshot,
 	type ExecEvent,
@@ -276,7 +277,7 @@ export class CloudflareSandboxProvider implements WorkspaceProvider {
 
 	constructor(private options: CloudflareSandboxOptions) {
 		// Environment snapshots wait for the sandbox's own; until then a thread here prepares nothing.
-		this.capabilities = { snapshot: options.backup !== undefined, environmentSnapshots: false, egressAllowlist: options.applyEgress !== undefined, maxConcurrent: options.maxConcurrent ?? 2 };
+		this.capabilities = { snapshot: options.backup !== undefined, environmentSnapshots: false, egressAllowlist: options.applyEgress !== undefined, maxConcurrent: options.maxConcurrent ?? 2, sessionMaxMin: null, keepAlive: false, suspendResume: false, egressInjection: false };
 	}
 
 	private backupOf(sandbox: SandboxLike) {
@@ -321,7 +322,7 @@ export class CloudflareSandboxProvider implements WorkspaceProvider {
 			await this.restoreFrom(sandbox, handle);
 			this.kept.delete(spec.sessionId);
 		}
-		await this.options.applyEgress?.(sandbox, spec.egress.allow);
+		await this.options.applyEgress?.(sandbox, egressPolicy(spec.egress).allow);
 		const ref: WorkspaceRef = { id: spec.sessionId, providerId: this.id, sessionId: spec.sessionId };
 		this.entries.set(spec.sessionId, { ref, sandbox, state: "running", createdAt: Date.now() });
 		return ref;
@@ -364,6 +365,21 @@ export class CloudflareSandboxProvider implements WorkspaceProvider {
 		return [...this.entries.values()]
 			.filter((entry) => entry.state !== "gone" && (!filter.sessionId || entry.ref.sessionId === filter.sessionId) && (!filter.state || entry.state === filter.state))
 			.map((entry) => ({ ref: entry.ref, state: entry.state, createdAt: entry.createdAt }));
+	}
+
+	async suspend(): Promise<void> {
+		throw unsupportedSuspend("cloudflare");
+	}
+
+	async resumeOrCreate(ref: WorkspaceRef, spec: WorkspaceSpec): Promise<{ ref: WorkspaceRef; resumed: boolean }> {
+		return resumeOrCreate(this, ref, spec);
+	}
+
+	/** The backend has no idle timeout to hold off. */
+	async keepAlive(): Promise<void> {}
+
+	async setEgress(): Promise<void> {
+		throw unsupportedEgress("cloudflare");
 	}
 
 	async snapshotEnvironment(): Promise<EnvironmentSnapshot> {

@@ -30,6 +30,23 @@ export type CodingLimits = { readonly cpu: number; readonly memMiB: number; read
 /** Whether the thread holds a slot of its space's scheduler, waits in its queue for one, or neither. */
 export type SlotHold = "none" | "queued" | "held";
 
+/**
+ * The workspace's session, for a backend that caps how long one lasts (`capabilities.sessionMaxMin`). The thread
+ * moves to a new session before the cap: it commits a checkpoint, suspends the workspace, resumes it or makes a new
+ * one, restores the checkout and goes on. `state` is "continuing" while that happens.
+ */
+export type CodingSession = {
+	readonly state: "active" | "continuing";
+	/** When the current session began; null until the thread has a workspace. */
+	readonly startedAt: number | null;
+	/** How many times the thread moved to a new session. */
+	readonly continuations: number;
+	/** The latest move: how the turn went on in the new session, or that it was restarted from its transcript (`turn_restarted`) because it couldn't go on. */
+	readonly last: { readonly at: number; readonly mode: "resumed" | "created" | "turn_restarted"; readonly reason: string } | null;
+};
+
+export const NO_SESSION: CodingSession = { state: "active", startedAt: null, continuations: 0, last: null };
+
 export type CodingThreadRow = {
 	readonly threadId: string;
 	readonly space: string;
@@ -70,6 +87,8 @@ export type CodingThreadRow = {
 	readonly environment: CodingEnvironment;
 	/** How many consecutive interruptions (restarts) have been auto-resumed for this thread. Resets to 0 when a turn completes normally. */
 	readonly consecutiveInterrupts: number;
+	/** The workspace's session: when it began and how often the thread moved to a new one. */
+	readonly session: CodingSession;
 	/** The pull request opened from the thread's branch (`coding_open_pull_request`); null until one is. */
 	readonly pullRequest: { readonly url: string; readonly number: number } | null;
 	readonly createdAt: number;
@@ -279,6 +298,8 @@ export class CodingThreadStore {
 		if (!columns.has("consecutive_interrupts")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN consecutive_interrupts INTEGER NOT NULL DEFAULT 0");
 		// The pull request opened from the thread's branch.
 		if (!columns.has("pull_request_url")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_url TEXT");
+		// The workspace's session, as JSON.
+		if (!columns.has("session")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN session TEXT");
 		if (!columns.has("pull_request_number")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_number INTEGER");
 	}
 
@@ -295,7 +316,7 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "createdAt" | "updatedAt" | "providerInstance"> & { consecutiveInterrupts?: number; providerInstance?: string },
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance"> & { consecutiveInterrupts?: number; providerInstance?: string },
 	): void {
 		const now = this.#now();
 		this.#sql.exec(
@@ -325,7 +346,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
@@ -341,6 +362,7 @@ export class CodingThreadStore {
 		if (change.budgetStopped !== undefined) columns.budget_stopped = change.budgetStopped ? 1 : 0;
 		if (change.budgetUsd !== undefined) columns.budget_usd = change.budgetUsd ?? 0;
 		if (change.environment !== undefined) columns.environment = JSON.stringify(change.environment);
+		if (change.session !== undefined) columns.session = JSON.stringify(change.session);
 		if (change.consecutiveInterrupts !== undefined) columns.consecutive_interrupts = change.consecutiveInterrupts;
 		if (change.pullRequest !== undefined) {
 			columns.pull_request_url = change.pullRequest?.url ?? null;
@@ -596,6 +618,7 @@ function threadOf(row: Row): CodingThreadRow {
 		budgetStopped: row.budget_stopped === 1,
 		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : { ...NO_ENVIRONMENT, ...(JSON.parse(String(row.environment)) as Partial<CodingEnvironment>) },
 		consecutiveInterrupts: Number(row.consecutive_interrupts),
+		session: row.session === null || row.session === undefined ? NO_SESSION : { ...NO_SESSION, ...(JSON.parse(String(row.session)) as Partial<CodingSession>) },
 		pullRequest: row.pull_request_url === null || row.pull_request_url === undefined ? null : { url: String(row.pull_request_url), number: Number(row.pull_request_number) },
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),

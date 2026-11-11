@@ -13,8 +13,8 @@ export type WorkspaceSpec = {
 	repo: { url: string; ref: string; branch: string; depth?: number };
 	/** The most the workspace may use: CPU cores, memory and disk in MiB, process count, and minutes of wall clock before it is stopped. */
 	limits: { cpu: number; memMiB: number; diskMiB: number; pids: number; wallClockMin: number | null };
-	/** The hosts the workspace may reach over the network; everything else is refused, on backends that can enforce it. */
-	egress: { allow: string[] };
+	/** What the workspace may reach over the network, on backends that can enforce it: see `EgressPolicy`. `{ allow }` alone is a policy with no credential injection. */
+	egress: EgressPolicy;
 	/** How git authenticates: "none" for public repositories, "broker" for credentials a broker supplies outside the workspace so the machine never holds them. */
 	gitAuth: { mode: "none" | "broker" };
 	/**
@@ -25,6 +25,19 @@ export type WorkspaceSpec = {
 	 */
 	environment?: EnvironmentOwner & { restoreFrom?: string };
 };
+
+/**
+ * What a workspace may reach and how it signs in, described without naming a backend. `allow` lists the hostnames it
+ * may connect to (`*.example.com` means subdomains only); everything else is refused where
+ * `capabilities.egressAllowlist` is true. `inject` says which headers an egress proxy adds to requests to a host, so
+ * the secret stays outside the sandbox: a backend with `capabilities.egressInjection` applies the rules itself, and
+ * the caller then puts no such secret in the workspace's environment, files or commands. A host with a rule is
+ * reachable whether or not `allow` lists it (`egressPolicy` in ./egress.ts normalizes both).
+ */
+export type EgressPolicy = { allow: string[]; inject?: EgressInjection[] };
+
+/** Headers added to requests to `host` (`*.example.com` means subdomains), replacing any the workspace sends with the same names. The values are secrets: never log them, and never keep them anywhere a workspace can read. */
+export type EgressInjection = { host: string; /** Only requests whose path starts with this; every path when absent. */ pathPrefix?: string; headers: Record<string, string> };
 
 /** One person's prepared environments of one repository: what keeps their caches and snapshots apart from everyone else's. */
 export type EnvironmentOwner = { userId: string; repo: string };
@@ -119,6 +132,14 @@ export interface WorkspaceProvider {
 		restoreMBps?: number;
 		/** The most workspaces the backend runs at once, when it has a limit. */
 		maxConcurrent?: number;
+		/** How long a session may last, in minutes, before the backend ends it; null when it has no limit. A thread checkpoints and moves to a new session before this is reached (`resumeOrCreate`). */
+		sessionMaxMin: number | null;
+		/** Whether the backend stops an idle workspace unless it is told periodically that it is in use. Activity inside the workspace doesn't count: callers call `keepAlive` while a turn runs. */
+		keepAlive: boolean;
+		/** Whether `suspend` works: the files survive it and the processes do not. */
+		suspendResume: boolean;
+		/** Whether `spec.egress.inject` is applied by the backend, outside the workspace. */
+		egressInjection: boolean;
 	};
 	/** Makes a workspace, or returns the one that already exists for `spec.sessionId`. Throws `WorkspaceCapacityError` when the backend is full. */
 	create(spec: WorkspaceSpec): Promise<WorkspaceRef>;
@@ -128,6 +149,18 @@ export interface WorkspaceProvider {
 	destroy(ref: WorkspaceRef, o?: { keepVolume?: boolean }): Promise<void>;
 	/** Lists the workspaces that exist, optionally narrowed. */
 	list(filter?: WorkspaceFilter): Promise<WorkspaceInfo[]>;
+	/** Stops the workspace and frees what it runs on, keeping its files: every process in it is gone, and the session ends. Suspending a suspended workspace does nothing. Throws `WorkspaceUnsupportedError` when `capabilities.suspendResume` is false. */
+	suspend(ref: WorkspaceRef): Promise<void>;
+	/**
+	 * Brings a suspended workspace back with its files and no processes, or, when it no longer exists, makes one for
+	 * `spec.sessionId` (from its kept volume, if there is one). Either way a new session starts, so the time
+	 * `capabilities.sessionMaxMin` counts from begins again. `resumed` says which happened. A running workspace is returned as it is.
+	 */
+	resumeOrCreate(ref: WorkspaceRef, spec: WorkspaceSpec): Promise<{ ref: WorkspaceRef; resumed: boolean }>;
+	/** Tells a backend with `capabilities.keepAlive` that the workspace is in use, so it isn't stopped for idling. Does nothing on one without. Throws `WorkspaceNotFoundError` for a workspace that is gone. */
+	keepAlive(ref: WorkspaceRef): Promise<void>;
+	/** Replaces the egress policy of a workspace that exists, such as to give a request proxy a fresh token. Only for a backend with `capabilities.egressInjection`; others throw `WorkspaceUnsupportedError`. */
+	setEgress(ref: WorkspaceRef, egress: EgressPolicy): Promise<void>;
 	/**
 	 * Keeps the files of a running workspace made with `spec.environment` of this owner as the owner's environment
 	 * snapshot with `key`, or returns the one already kept with it. The caller makes sure the workspace holds no
@@ -146,6 +179,14 @@ export class WorkspaceCapacityError extends Error {
 	constructor(message = "The workspace backend is at capacity") {
 		super(message);
 		this.name = "WorkspaceCapacityError";
+	}
+}
+
+/** The backend can't do this: its `capabilities` say so. */
+export class WorkspaceUnsupportedError extends Error {
+	constructor(message = "The workspace backend doesn't support this") {
+		super(message);
+		this.name = "WorkspaceUnsupportedError";
 	}
 }
 

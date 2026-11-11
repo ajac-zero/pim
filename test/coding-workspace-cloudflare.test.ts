@@ -167,9 +167,9 @@ async function collect(workspace: Workspace, o: Parameters<Workspace["exec"]>[1]
 describe("cloudflare sandbox provider", () => {
 	it("reports capabilities from what it was given", () => {
 		const bare = new CloudflareSandboxProvider({ sandboxFor: () => scripted(async () => ({ exitCode: 0 })) });
-		expect(bare.capabilities).toEqual({ snapshot: false, environmentSnapshots: false, egressAllowlist: false, maxConcurrent: 2 });
+		expect(bare.capabilities).toEqual({ snapshot: false, environmentSnapshots: false, egressAllowlist: false, maxConcurrent: 2, sessionMaxMin: null, keepAlive: false, suspendResume: false, egressInjection: false });
 		const full = new CloudflareSandboxProvider({ sandboxFor: () => scripted(async () => ({ exitCode: 0 })), backup: {}, applyEgress: async () => {}, maxConcurrent: 5 });
-		expect(full.capabilities).toEqual({ snapshot: true, environmentSnapshots: false, egressAllowlist: true, maxConcurrent: 5 });
+		expect(full.capabilities).toEqual({ snapshot: true, environmentSnapshots: false, egressAllowlist: true, maxConcurrent: 5, sessionMaxMin: null, keepAlive: false, suspendResume: false, egressInjection: false });
 	});
 
 	it("hands the egress allowlist to the hook when a workspace is created", async () => {

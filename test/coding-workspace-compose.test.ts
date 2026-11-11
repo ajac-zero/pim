@@ -139,7 +139,7 @@ describe("ComposeWorkspaceProvider", () => {
 			token: TOKEN,
 			fetch: (async () => json(200, { runsc: true, freeDiskPct: 61.2, maxConcurrent: 4, running: 1, free: 3, sessions: 1 })) as typeof fetch,
 		});
-		expect(p.capabilities).toEqual({ snapshot: false, environmentSnapshots: true, egressAllowlist: true, restoreMBps: 8, maxConcurrent: undefined });
+		expect(p.capabilities).toEqual({ snapshot: false, environmentSnapshots: true, egressAllowlist: true, restoreMBps: 8, maxConcurrent: undefined, sessionMaxMin: null, keepAlive: false, suspendResume: false, egressInjection: false });
 		expect(await p.managerHealth()).toEqual({ freeDiskPct: 61.2, maxConcurrent: 4, running: 1, free: 3, runscVerified: true, sessions: 1 });
 		expect(p.capabilities.maxConcurrent).toBe(4);
 		// A disk the manager could not read is reported as null by JSON, and is NaN here.

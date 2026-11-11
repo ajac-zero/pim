@@ -5,6 +5,8 @@ const live = process.env.PIM_LIVE === "1";
 
 export default defineConfig({
 	test: {
+		// At most two test files at once: each workerd is 0.5-0.7 GiB and 1+ CPU, and a 2-vCPU sandbox starves with more.
+		maxWorkers: 2,
 		projects: [
 			{
 				plugins: [
@@ -57,7 +59,10 @@ export default defineConfig({
 				],
 				test: {
 					name: "worker",
-					testTimeout: 20_000,
+					// Sandboxes and CI runners have 2 vCPUs and the Worker pool runs Durable Objects in workerd, so
+					// a test that takes 3 s on a laptop takes 20+ s under load; failures at 20 s were contention, not bugs.
+					testTimeout: 60_000,
+					hookTimeout: 60_000,
 					// Live checks against real third-party servers need the network: `pnpm test:live`.
 					include: live ? ["test/live/**/*.test.ts"] : ["test/*.test.ts"],
 					exclude: ["test/*.node.test.ts"],

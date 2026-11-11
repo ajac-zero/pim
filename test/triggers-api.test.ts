@@ -414,10 +414,17 @@ describe("triggers' API where triggers are on", () => {
 		const viaTool = tooled.body.trigger.id as string;
 		await wakeBy(second);
 
-		// Paused, nothing is due, and the wake goes.
+		// The space's wake also serves the hourly usage rollup, which these calls make due, so with no trigger due the one wake left is that one, at the top of an hour.
+		const onlyRollup = async () => {
+			const left = await wakes();
+			expect(left.length).toBeLessThanOrEqual(1);
+			for (const wake of left) expect((wake.time * SECOND) % HOUR).toBe(0);
+		};
+
+		// Paused, nothing is due, and the triggers' wake goes.
 		expect((await call(`/triggers/${viaRoute}/pause`, { method: "POST" })).status).toBe(200);
 		expect((await tool("pause_trigger", { id: viaTool })).body).toMatchObject({ lifecycle: "paused" });
-		expect(await wakes()).toEqual([]);
+		await onlyRollup();
 
 		// Resumed and edited, each sets it again.
 		expect((await call(`/triggers/${viaRoute}/resume`, { method: "POST", headers: { "if-match": '"1"' } })).status).toBe(200);
@@ -437,7 +444,7 @@ describe("triggers' API where triggers are on", () => {
 		expect((await call(`/triggers/${viaRoute}`, { method: "DELETE" })).status).toBe(200);
 		await wakeBy(sooner);
 		expect((await tool("delete_trigger", { id: viaTool })).body).toMatchObject({ deleted: true });
-		expect(await wakes()).toEqual([]);
+		await onlyRollup();
 
 		// A trigger an agent made runs at its time from the wake its making set, and nothing else.
 		const at = Math.ceil((clock() + 3 * MINUTE) / SECOND) * SECOND;

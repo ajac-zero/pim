@@ -49,6 +49,7 @@ import type {
   FunctionCallOutputItem,
   MessageItem,
 } from "~/lib/openresponses";
+import { messageText } from "~/lib/openresponses";
 import {
   pim,
   type Room,
@@ -74,6 +75,7 @@ import {
   appsQuery,
 } from "~/lib/queries";
 import { useForkChat } from "~/lib/start-chat";
+import { type UiResponse, uiResponseOf } from "../../../../src/ui-lang";
 
 /**
  * Tools whose answer names an app's or a note's version, shown as the app itself: one made, changed or shown again.
@@ -228,6 +230,7 @@ export const Thread = memo(function Thread({
   view,
   pending,
   onDiscard,
+  sendTurn,
   composerHeight,
   composerCardHeight,
   footer,
@@ -249,6 +252,8 @@ export const Thread = memo(function Thread({
   pending: readonly PendingSend[];
   /** Given what a discarded message said, so it can be written again. */
   onDiscard?: (content: UserContent) => void;
+  /** How a ui block sends the turn its form asks for: the composer's own send path. */
+  sendTurn?: (text: string) => Promise<void>;
   composerHeight?: number;
   composerCardHeight?: number;
   /** Shown under the last message, such as suggested replies. */
@@ -291,6 +296,32 @@ export const Thread = memo(function Thread({
     }
     return [...all, ...view.live];
   }, [view.entries, view.live, pending]);
+
+  /**
+   * What each entry's ui blocks' forms were answered, by block, as the user
+   * turns after it say: a form that was submitted re-locks where its answers
+   * stand, without asking Pim to remember them. Only this page's history is
+   * scanned; state lives in memory for now.
+   */
+  const submittedAfter = useMemo(() => {
+    const after = new Map<string, ReadonlyMap<string, UiResponse>>();
+    let later = new Map<string, UiResponse>();
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry === undefined) continue;
+      if (
+        entry.kind === "item" &&
+        entry.source === "user" &&
+        entry.item.type === "message"
+      ) {
+        const response = uiResponseOf(messageText(entry.item as MessageItem));
+        if (response) later = new Map([...later, [response.block, response]]);
+        continue;
+      }
+      after.set(entry.key, later);
+    }
+    return after;
+  }, [entries]);
 
   // The entries the chat had when it was shown: an app made after them,
   // while the person watches, opens in the canvas by itself. A chat shown as
@@ -539,6 +570,9 @@ export const Thread = memo(function Thread({
                     ? sentImages(outputs.get(row.call.call_id)?.output)
                     : null
                 }
+                submitted={submittedAfter.get(row.key)}
+                messageId={row.key.split(":")[0]}
+                uiSend={sendTurn}
                 attachments={
                   row.sent.widgets.length > 0 ? (
                     <SentWidgets
@@ -579,6 +613,9 @@ export const Thread = memo(function Thread({
                 mention={mention(entry.key, entry.text)}
                 pinned={entry.key === latestKey}
                 images={postedImages(entry.text)}
+                submitted={submittedAfter.get(entry.key)}
+                messageId={entry.key}
+                uiSend={sendTurn}
               />
             );
           }
@@ -621,17 +658,33 @@ export const Thread = memo(function Thread({
             const send = pending.find(
               (send) => `pending:${send.operationId}` === entry.key,
             );
+            // An agent's message kept in the transcript draws its own blocks;
+            // what a person said is theirs.
+            if (entry.source === "user") {
+              return (
+                <UserMessage
+                  key={entry.key}
+                  item={item as MessageItem}
+                  at={entry.at}
+                  onEdit={
+                    forkable && !liveKeys.has(entry.key) ? edit : undefined
+                  }
+                  status={
+                    send && send.status !== "sent" ? (
+                      <SendStatus send={send} onDiscard={onDiscard} />
+                    ) : undefined
+                  }
+                />
+              );
+            }
             return (
-              <UserMessage
+              <AssistantMessage
                 key={entry.key}
                 item={item as MessageItem}
                 at={entry.at}
-                onEdit={forkable && !liveKeys.has(entry.key) ? edit : undefined}
-                status={
-                  send && send.status !== "sent" ? (
-                    <SendStatus send={send} onDiscard={onDiscard} />
-                  ) : undefined
-                }
+                submitted={submittedAfter.get(entry.key)}
+                messageId={item.id}
+                uiSend={sendTurn}
               />
             );
           }

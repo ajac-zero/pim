@@ -19,6 +19,7 @@ import {
   isReplyBlock,
   ReplyBlock,
 } from "~/components/chat/reply-blocks";
+import { isUiBlock, UiBlock } from "~/components/chat/ui-block";
 import { FileKindIcon } from "~/components/file-kind-icon";
 import { FileLink } from "~/components/file-link";
 import { useI18n } from "~/components/i18n";
@@ -836,6 +837,9 @@ export const Markdown = memo(function Markdown({
               return (
                 <ReplyBlock kind={language} source={source} fallback={code} />
               );
+            }
+            if (isUiBlock(language)) {
+              return <UiBlock source={source} fallback={code} />;
             }
             return language === "mermaid" ? (
               <Diagram source={source} fallback={code} />

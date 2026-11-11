@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useTheme } from "~/components/theme";
 import { cn } from "~/lib/utils";
+import type { UiResponse } from "../../../../src/ui-lang";
 import { Video, youtubeId } from "./video-block";
 
 /**
@@ -39,21 +40,41 @@ export function isReplyBlock(language: string): language is Kind {
   return Object.hasOwn(KINDS, language);
 }
 
-type ReplyContext = {
+export type ReplyContext = {
   /** Each image's copy by its address on the web; null until the send's result comes. */
   images: Readonly<Record<string, string>> | null;
   streaming: boolean;
+  /**
+   * How a ui block sends the turn its form asks for: the composer's own send
+   * path, as the person's message. Without it, a form still checks and locks,
+   * but sends nothing.
+   */
+  send?: (text: string) => Promise<void>;
+  /**
+   * What this message's ui blocks' forms were answered, as later user turns
+   * say, so a form that was submitted re-locks where its answers stand.
+   */
+  submitted?: ReadonlyMap<string, UiResponse>;
+  /** The message this reply is drawn from, for the trailer a form's turn carries. */
+  messageId?: string;
 };
 
 const Reply = createContext<ReplyContext>({ images: {}, streaming: false });
 
+export { Reply };
+
 export function ReplyImages({
   images,
   streaming = false,
+  send,
+  submitted,
+  messageId,
   children,
 }: ReplyContext & { children: ReactNode }) {
   return (
-    <Reply.Provider value={{ images, streaming }}>{children}</Reply.Provider>
+    <Reply.Provider value={{ images, streaming, send, submitted, messageId }}>
+      {children}
+    </Reply.Provider>
   );
 }
 

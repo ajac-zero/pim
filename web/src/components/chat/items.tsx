@@ -81,6 +81,7 @@ import type {
 } from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
+import { splitUiResponse, type UiResponse } from "../../../../src/ui-lang";
 
 function useCopy(text: string) {
   const [copied, setCopied] = useState(false);
@@ -281,6 +282,7 @@ export const UserMessage = memo(function UserMessage({
           .replace(/\n{3,}/g, "\n\n")
           .trim()
       : text;
+  const answered = splitUiResponse(shown);
 
   return (
     <div
@@ -315,7 +317,19 @@ export const UserMessage = memo(function UserMessage({
       ) : (
         shown.length > 0 && (
           <div className="min-w-0 max-w-[88%] md:max-w-[80%] rounded-2xl bg-bubble px-4 py-3 text-bubble-foreground">
-            <Markdown text={shown} bubble />
+            {answered ? (
+              // A form's answers come back as a small chip and its table;
+              // the trailer they rode in stays hidden.
+              <>
+                <span className="mb-1.5 inline-flex items-center gap-1 rounded-full bg-current/15 px-2 py-0.5 text-[13px] font-medium">
+                  <ListChecks className="size-3.5" />
+                  {t("uiAnsweredForm", { block: answered.response.block })}
+                </span>
+                <Markdown text={answered.readable} bubble />
+              </>
+            ) : (
+              <Markdown text={shown} bubble />
+            )}
           </div>
         )
       )}
@@ -356,6 +370,9 @@ export const AssistantMessage = memo(function AssistantMessage({
   mention,
   pinned,
   onFork,
+  uiSend,
+  submitted,
+  messageId,
 }: {
   item: MessageItem;
   /** Opens a new chat with what was said through this message; without it, it can't be forked. */
@@ -375,6 +392,12 @@ export const AssistantMessage = memo(function AssistantMessage({
   attachments?: ReactNode;
   /** The copies Pim keeps of the images its cards show, by their addresses on the web; null until they're kept. */
   images?: Readonly<Record<string, string>> | null;
+  /** How a ui block sends the turn its form asks for: the composer's own send path. */
+  uiSend?: (text: string) => Promise<void>;
+  /** What this message's ui forms were answered, as its chat's later user turns say. */
+  submitted?: ReadonlyMap<string, UiResponse>;
+  /** This message's id, which the trailer of a form's turn names it by. */
+  messageId?: string;
 }) {
   const { t } = useI18n();
   const [forking, setForking] = useState(false);
@@ -390,7 +413,13 @@ export const AssistantMessage = memo(function AssistantMessage({
       className="group/assistant w-full min-w-0"
     >
       {speaker}
-      <ReplyImages images={images} streaming={streaming ?? false}>
+      <ReplyImages
+        images={images}
+        streaming={streaming ?? false}
+        send={uiSend}
+        submitted={submitted}
+        messageId={messageId}
+      >
         <Markdown text={text} streaming={streaming} untrusted={untrusted} />
       </ReplyImages>
       {attachments}

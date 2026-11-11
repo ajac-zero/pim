@@ -1331,7 +1331,20 @@ export class DisplayClient {
 	constructor(options: { url?: string; token?: string; tokenFile?: string; driver?: (base: string, tokenFile: string) => DriverHost; screen?: (base: string, tokenFile: string) => ScreenHost } = {}) {
 		this.#makeScreen = options.screen ?? spacesdScreen;
 		this.#url = options.url ?? "http://127.0.0.1:9900";
-		this.#token = async () => options.token ?? (await fs.readFile(options.tokenFile ?? "/etc/displayd/token", "utf8")).trim();
+		// The token is made by the displayd installer, which may still be running when pim-computer starts: look for it on each request, in the system place and then the user's own.
+		this.#token = async () => {
+			if (options.token) return options.token;
+			const files = options.tokenFile ? [options.tokenFile] : ["/etc/displayd/token", path.join((process.env.HOME ?? ""), ".displayd", "token")];
+			let failure: unknown;
+			for (const file of files) {
+				try {
+					return (await fs.readFile(file, "utf8")).trim();
+				} catch (error) {
+					failure = error;
+				}
+			}
+			throw failure;
+		};
 		this.#makeDriver = options.driver ?? spacesdDriver;
 	}
 
@@ -2824,7 +2837,9 @@ async function main(): Promise<void> {
 		url: env.DISPLAYD_URL ?? "http://127.0.0.1:9900",
 		...(env.DISPLAYD_TOKEN
 			? { token: env.DISPLAYD_TOKEN }
-			: { tokenFile: env.DISPLAYD_TOKEN_FILE ?? ((await readable(DISPLAYD_TOKEN_FILE)) ? DISPLAYD_TOKEN_FILE : path.join(os.homedir(), ".displayd", "token")) }),
+			: env.DISPLAYD_TOKEN_FILE
+				? { tokenFile: env.DISPLAYD_TOKEN_FILE }
+				: {}),
 	});
 	// Each thread's browser runs on its own display, with the person's sign-ins copied from the primary browser.
 	const threadBrowsers =

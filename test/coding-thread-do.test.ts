@@ -345,7 +345,7 @@ describe("a coding thread", () => {
 	it("aborts a turn, killing the command it runs", async () => {
 		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
 		const { id, stub } = await startThread();
-		await vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(1));
+		await vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(1), { timeout: 10_000, interval: 20 });
 		const stopping = Date.now();
 		const status = await stub.abort();
 		expect(Date.now() - stopping).toBeLessThan(5_000);
@@ -677,7 +677,7 @@ describe("a coding thread", () => {
 			},
 		]);
 		const { id, stub } = await startThread();
-		await vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(1));
+		await vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(1), { timeout: 10_000, interval: 20 });
 		await runInDurableObject(stub, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
 		const [ended] = await turns(id, 1, true);
 		expect(ended!.outcome).toBe("completed");

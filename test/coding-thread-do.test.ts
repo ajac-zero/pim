@@ -414,7 +414,7 @@ describe("a coding thread", () => {
 		const { id, stub, input } = await startThread();
 		await turns(id, 1);
 		const scheduler = codingScheduler(env, input.space);
-		codingSchedulers.now = Date.now() + 31 * 60_000;
+		codingSchedulers.now = Date.now() + 11 * 60_000;
 		expect(await scheduler.sweep()).toEqual({ released: [{ threadId: id, why: "idle" }], admitted: [] });
 		await runDurableObjectAlarm(scheduler);
 		codingSchedulers.now = null;
@@ -428,6 +428,40 @@ describe("a coding thread", () => {
 		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", repo: { baseSha: "base0000" } });
 		expect(await fileIn(id, "a.txt")).toBe("A\n");
 		expect(await stub.checkpoints()).toHaveLength(1);
+	});
+
+	it("checkpoints uncommitted work when its idle slot is taken back after 10 minutes, and resumes at the checkpoint in a new workspace once the kept volume is gone", async () => {
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		codingFaux.setResponses([fauxAssistantMessage("Done."), fauxAssistantMessage("Back.")]);
+		const { id, stub } = await startThread({ space });
+		await turns(id, 1);
+		await (await workspaceOf(id)).writeFile(`${REPO_DIR}/notes.txt`, new TextEncoder().encode("Draft\n"));
+		const before = (await stub.log()).length;
+		// Nine minutes idle is not enough; ten is.
+		codingSchedulers.now = Date.now() + 9 * 60_000;
+		expect(await scheduler.sweep()).toEqual({ released: [], admitted: [] });
+		codingSchedulers.now = Date.now() + 10 * 60_000 + 1_000;
+		expect(await scheduler.sweep()).toEqual({ released: [{ threadId: id, why: "idle" }], admitted: [] });
+		await runDurableObjectAlarm(scheduler);
+		codingSchedulers.now = null;
+		expect(await stub.status()).toMatchObject({ state: "idle", slot: "none" });
+		expect((await scheduler.snapshot()).running).toEqual([]);
+		expect(await codingWorkspaces.list({ sessionId: id })).toEqual([]);
+		expect(await stub.checkpoints()).toEqual([expect.objectContaining({ message: "Checkpoint 1", operationId: null })]);
+		expect((await stub.diff()).diff).toContain("+Draft");
+		// Only the checkpoint was recorded: no turn, no other work.
+		const added = (await stub.log()).slice(before).map((event) => event.kind);
+		expect(added.filter((kind) => kind !== "checkpoint.created" && kind !== "workspace.released")).toEqual([]);
+		// The kept volume is reclaimed, so a steer starts a new workspace from the saved work.
+		codingWorkspaces.loseVolume(id);
+		await stub.steer("Carry on.", { operationId: "resume" });
+		const [, again] = await turns(id, 2);
+		expect(again).toMatchObject({ outcome: "completed", operationId: "resume" });
+		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held" });
+		expect(await fileIn(id, "notes.txt")).toBe("Draft\n");
+		expect((await stub.log()).find((event) => event.kind === "workspace.restored")?.data).toMatchObject({ from: "autosave" });
+		await stub.archive();
 	});
 
 	it("waits in the queue while its space's slots are taken, and runs once archiving another frees one", async () => {
@@ -493,7 +527,7 @@ describe("a coding thread", () => {
 		await turns(first.id, 1);
 		const second = await startThread({ space });
 		expect(second.status.state).toBe("queued");
-		// Seven hours on: the second waited past its six, and the first was idle past its half hour.
+		// Seven hours on: the second waited past its six, and the first was idle past its ten minutes.
 		codingSchedulers.now = Date.now() + 7 * 60 * 60_000;
 		await runDurableObjectAlarm(scheduler);
 		codingSchedulers.now = null;

@@ -424,6 +424,11 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 		return found?.workspace.ref.id === ref.id ? found.workspace : null;
 	}
 
+	/** Forgets the files a deleted workspace kept (`destroy` with `keepVolume`), as when its host loses the volume. */
+	loseVolume(sessionId: string): void {
+		this.keptVolumes.delete(sessionId);
+	}
+
 	async destroy(ref: WorkspaceRef, o: { keepVolume?: boolean } = {}): Promise<void> {
 		const found = this.workspaces.get(ref.sessionId);
 		if (found?.workspace.ref.id !== ref.id) return;

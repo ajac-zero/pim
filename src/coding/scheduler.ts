@@ -35,14 +35,14 @@
  * A slot is for work, so the scheduler also knows what each slot's thread is
  * doing (`setActivity`): `running` a turn, `idle` between turns, or `waiting`
  * for the person, for an answer or an approval. A slot starts `running`. A
- * thread idle for 30 minutes gives its slot back. A thread waiting for the
+ * thread idle for 10 minutes gives its slot back. A thread waiting for the
  * person keeps it for 5 minutes, and after that only until the queue has a
  * thread that slot would admit: then the thread that has waited longest is
  * preempted, and only as many as the queue can put to work, so none is
  * preempted for a queue a gate holds up or for slots still over the limit
  * after a restart. A running thread is never stopped. `sweep` (and `tick`)
  * does both and says which threads lost their slot and why; the caller
- * destroys an idle thread's workspace, checkpoints a preempted one's before
+ * checkpoints an idle or preempted thread's work before
  * destroying it, and later asks again for the preempted thread with
  * `PREEMPT_RESUME_PRIORITY`.
  *
@@ -94,8 +94,8 @@ const ORDER = "ORDER BY priority DESC, queued_at, seq";
 /** How long a thread waits in the queue when neither it nor the options say (6 hours). */
 const DEFAULT_DEADLINE_MS = 6 * 60 * 60 * 1000;
 
-/** How long a slot's thread may be idle before it gives the slot back, and how long one waiting for the person keeps it before it may be preempted, when the options don't say (30 and 5 minutes). */
-const DEFAULT_IDLE_MS = 30 * 60 * 1000;
+/** How long a slot's thread may be idle before it gives the slot back, and how long one waiting for the person keeps it before it may be preempted, when the options don't say (10 and 5 minutes). */
+const DEFAULT_IDLE_MS = 10 * 60 * 1000;
 const DEFAULT_WAITING_GRACE_MS = 5 * 60 * 1000;
 
 /**
@@ -125,7 +125,7 @@ export type CodingSchedulerOptions = {
 	readonly defaultDeadlineMs?: number;
 	/** Asked in order before each admission ([lowDiskGate, budgetCapGate]). */
 	readonly gates?: readonly AdmissionGate[];
-	/** How long a slot's thread may be idle before `sweep` releases the slot (30 minutes). */
+	/** How long a slot's thread may be idle before `sweep` releases the slot (10 minutes). */
 	readonly idleMs?: number;
 	/** How long a thread waiting for the person keeps its slot before `sweep` may preempt it for the queue (5 minutes). */
 	readonly waitingGraceMs?: number;

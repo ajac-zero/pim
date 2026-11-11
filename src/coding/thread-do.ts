@@ -1187,7 +1187,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			await this.#requestSlot();
 			return;
 		}
-		if (released.why === "preempted") await this.#checkpoint(null).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", thread: thread.threadId, error: String(error) })));
+		// Idle or preempted, the work is committed and bundled first, best effort, so it outlives the kept volume should that be reclaimed.
+		await this.#checkpoint(null).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", thread: thread.threadId, error: String(error) })));
+		await this.#autosave();
 		await this.#dropWorkspace({ keepVolume: true });
 		this.store.update({ slot: "none", slotSince: null, resumePriority: released.why === "preempted" });
 		this.#recordDuration(thread);

@@ -540,7 +540,21 @@ describe("the coding scheduler", () => {
 		}
 	});
 
-	it("gives an idle thread's slot back after 30 minutes idle and not a moment before, and starts the 30 minutes over when it works again", async () => {
+	it("gives an idle slot back after 10 minutes unless idleMs says otherwise", async () => {
+		await withScheduler(({ scheduler, clock, make }) => {
+			ask(scheduler, "a");
+			scheduler.setActivity("a", "idle");
+			const idle = clock.now;
+			expect(scheduler.sweep(idle + 10 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
+			expect(scheduler.sweep(idle + 10 * MINUTE)).toEqual({ released: [{ threadId: "a", why: "idle" }], admitted: [] });
+			const tuned = make({ idleMs: 2 * MINUTE });
+			ask(tuned, "b");
+			tuned.setActivity("b", "idle");
+			expect(tuned.sweep(clock.now + 2 * MINUTE)).toEqual({ released: [{ threadId: "b", why: "idle" }], admitted: [] });
+		});
+	});
+
+	it("gives an idle thread's slot back after 10 minutes idle and not a moment before, and starts the 10 minutes over when it works again", async () => {
 		await withScheduler(({ scheduler, clock, make }) => {
 			ask(scheduler, "a");
 			// A running thread keeps its slot however long its turn takes.
@@ -550,18 +564,18 @@ describe("the coding scheduler", () => {
 			expect(scheduler.setActivity("a", "idle")).toBe(true);
 			const idle = clock.now;
 			expect(scheduler.snapshot().running).toEqual([{ threadId: "a", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "idle", activitySince: idle }]);
-			expect(scheduler.sweep(idle + 30 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
-			// A turn a minute before the 30 are up, then idle again: they start over.
-			clock.now = idle + 29 * MINUTE;
+			expect(scheduler.sweep(idle + 10 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
+			// A turn a minute before the 10 are up, then idle again: they start over.
+			clock.now = idle + 9 * MINUTE;
 			scheduler.setActivity("a", "running");
 			clock.now += MINUTE;
 			scheduler.setActivity("a", "idle");
-			expect(scheduler.sweep(idle + 30 * MINUTE)).toEqual({ released: [], admitted: [] });
-			expect(scheduler.sweep(clock.now + 30 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
-			clock.now += 30 * MINUTE;
+			expect(scheduler.sweep(idle + 10 * MINUTE)).toEqual({ released: [], admitted: [] });
+			expect(scheduler.sweep(clock.now + 10 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
+			clock.now += 10 * MINUTE;
 			expect(scheduler.tick()).toEqual({ expired: [], admitted: ["q"], released: [{ threadId: "a", why: "idle" }] });
 			expect(scheduler.snapshot().running).toEqual([{ threadId: "q", provider: "sandbox", acquiredAt: clock.now, state: "admitted", activity: "running", activitySince: clock.now }]);
-			// With no one queued, an idle slot is given back all the same, any time after its 30 minutes.
+			// With no one queued, an idle slot is given back all the same, any time after its 10 minutes.
 			scheduler.setActivity("q", "idle");
 			expect(scheduler.sweep(clock.now + 2 * SIX_HOURS)).toEqual({ released: [{ threadId: "q", why: "idle" }], admitted: [] });
 			expect(running(scheduler)).toEqual([]);
@@ -628,13 +642,13 @@ describe("the coding scheduler", () => {
 				expect(scheduler.sweep()).toEqual({ released: [{ threadId: "a", why: "idle" }], admitted: [] });
 				// A real change still starts the time over: q goes idle, waits for the person, then is idle again.
 				scheduler.setActivity("q", "idle");
-				clock.now += 10 * MINUTE;
+				clock.now += 5 * MINUTE;
 				scheduler.setActivity("q", "waiting");
 				clock.now += MINUTE;
 				scheduler.setActivity("q", "idle");
 				const idle = clock.now;
-				expect(scheduler.sweep(idle + 30 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
-				expect(scheduler.sweep(idle + 30 * MINUTE)).toEqual({ released: [{ threadId: "q", why: "idle" }], admitted: [] });
+				expect(scheduler.sweep(idle + 10 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
+				expect(scheduler.sweep(idle + 10 * MINUTE)).toEqual({ released: [{ threadId: "q", why: "idle" }], admitted: [] });
 				expect(scheduler.setActivity("q", "idle")).toBe(false);
 			},
 			2,
@@ -691,7 +705,7 @@ describe("the coding scheduler", () => {
 			const vmGate: AdmissionGate = { check: (entry) => (entry.provider === "vm" && vmDown ? { ok: false, reason: "provider_down" } : { ok: true }) };
 			const scheduler = make({ defaultLimit: 5, gates: [vmGate] });
 			ask(scheduler, "a", "b", "c", "d", "e");
-			// b has waited longest, then c, then a; d runs; e is idle, though not for 30 minutes.
+			// b has waited longest, then c, then a; d runs; e is idle, though not for 10 minutes.
 			for (const [id, activity] of [["b", "waiting"], ["c", "waiting"], ["a", "waiting"], ["e", "idle"]] as const) {
 				clock.now += 1;
 				scheduler.setActivity(id, activity);
@@ -734,8 +748,8 @@ describe("the coding scheduler", () => {
 				expect(() => make({ crash: true }).sweep(START + SIX_HOURS)).toThrow("crash before commit");
 				const restarted = make();
 				expect(restarted.snapshot()).toEqual(before);
-				// The 30 minutes count from when a went idle, before the restart.
-				clock.now = START + 1_000 + 30 * MINUTE;
+				// The 10 minutes count from when a went idle, before the restart.
+				clock.now = START + 1_000 + 10 * MINUTE;
 				expect(restarted.sweep()).toEqual({ released: [{ threadId: "a", why: "idle" }], admitted: ["q"] });
 				expect(restarted.reconcile(["b", "q", "x"])).toEqual({ released: [], adopted: ["x"], admitted: [] });
 				expect(restarted.snapshot().running.map(({ threadId, state, activity, activitySince }) => ({ threadId, state, activity, activitySince }))).toEqual([

@@ -465,7 +465,7 @@ export interface SchedulerNotifier {
 	admitted(threadId: string, key: string): void | Promise<void>;
 	/** The thread waited past its deadline and left the queue; `entry.reason` is what it waited for. */
 	expired(entry: QueueEntry, key: string): void | Promise<void>;
-	/** A sweep took the thread's slot back: it destroys its workspace, after a checkpoint when `why` is `preempted`, and asks again then. */
+	/** A sweep took the thread's slot back: it checkpoints its work and destroys its workspace, and for `preempted` asks again then. */
 	released(released: Released, key: string): void | Promise<void>;
 }
 

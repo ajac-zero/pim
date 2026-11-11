@@ -167,8 +167,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#watching: string | null = null;
 	#advancing: Promise<void> | null = null;
 	#advanceAgain = false;
-	/** How many `#ensureWorkspace` calls are waiting for the workspace: the thread gets a slot and a workspace for them, with no turn. */
-	#resumers = 0;
+	/** A tool asked for the workspace (`#ensureWorkspace`): the thread gets a slot and a workspace for it, with no turn, and then goes back to idle. */
+	#resuming = false;
 	#opening: Promise<Workspace> | null = null;
 	/** The workspace opened in this isolate, by its ref's id. */
 	#open: { id: string; workspace: Workspace } | null = null;
@@ -1291,34 +1291,30 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 */
 	async #ensureWorkspace({ waitMs = this.resumeWaitMs() }: { waitMs?: number } = {}): Promise<{ ok: true } | { ok: false; code: "workspace_queued" | "workspace_not_running"; message: string }> {
 		const deadline = Date.now() + waitMs;
-		this.#resumers++;
-		try {
-			for (;;) {
-				const thread = this.store.required();
-				if (thread.state === "archived" || thread.state === "failed" || thread.state === "waiting_input") {
-					return { ok: false, code: "workspace_not_running", message: `The thread's workspace isn't running: the thread is ${thread.state.replace("_", " ")}, so only each checkpoint's diff from the start is kept` };
-				}
-				if (thread.slot === "held" && thread.state !== "provisioning") {
-					try {
-						await this.#workspace();
-						if (this.store.required().slot === "held") return { ok: true };
-					} catch (error) {
-						if (this.store.required().slot === "held") return { ok: false, code: "workspace_not_running", message: `The thread's workspace isn't running and could not be opened: ${errorText(error)}` };
-					}
-					continue;
-				}
-				// Otherwise it is queued or being made; the step that makes it ends in idle.
-				if (thread.slot === "none") {
-					this.#reopen();
-					await this.#requestSlot();
-				}
-				this.#kick();
-				const remaining = deadline - Date.now();
-				if (remaining <= 0) return await this.#resumeTimedOut();
-				await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 250)))]);
+		for (;;) {
+			const thread = this.store.required();
+			if (thread.state === "archived" || thread.state === "failed" || thread.state === "waiting_input") {
+				return { ok: false, code: "workspace_not_running", message: `The thread's workspace isn't running: the thread is ${thread.state.replace("_", " ")}, so only each checkpoint's diff from the start is kept` };
 			}
-		} finally {
-			this.#resumers--;
+			if (thread.slot === "held" && thread.state !== "provisioning") {
+				try {
+					await this.#workspace();
+					if (this.store.required().slot === "held") return { ok: true };
+				} catch (error) {
+					if (this.store.required().slot === "held") return { ok: false, code: "workspace_not_running", message: `The thread's workspace isn't running and could not be opened: ${errorText(error)}` };
+				}
+				continue;
+			}
+			// Otherwise it is queued or being made; the step that makes it ends in idle.
+			this.#resuming = true;
+			if (thread.slot === "none") {
+				this.#reopen();
+				await this.#requestSlot();
+			}
+			this.#kick();
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) return await this.#resumeTimedOut();
+			await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 250)))]);
 		}
 	}
 
@@ -1393,9 +1389,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const work = this.store.inboxSize() > 0;
 		// A rebuild of the environment needs the workspace as a turn does.
 		const rebuild = thread.environment.rebuildRequested;
-		// A tool waiting for the workspace (`#ensureWorkspace`) needs it made too, though no turn follows; so does a thread that was already provisioning when the tool stopped waiting.
-		const resume = this.#resumers > 0 || (thread.state === "provisioning" && thread.slot === "held");
-		if (!work && !rebuild && !resume) {
+		// A tool waiting for the workspace needs it made too, though no turn follows, even if it stops waiting before it is made.
+		if (!work && !rebuild && !this.#resuming) {
 			if (thread.state === "provisioning" && thread.slot !== "held") this.store.update({ state: "idle" });
 			return;
 		}
@@ -1411,6 +1406,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.slot !== "held") return;
 		// The manager refused the workspace for low disk last time: its health now says whether the space's queue may open again.
 		if (thread.stateReason === "low_disk") await this.#refreshCapacity();
+		this.#resuming = false;
 		try {
 			await this.#workspace();
 			// A rebuild between turns is work the scheduler shouldn't take the slot back from.

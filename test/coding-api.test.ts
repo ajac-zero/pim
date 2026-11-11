@@ -412,7 +412,10 @@ describe("the coding threads API", () => {
 		expect(codingEvents.filter((event) => event.threadId === thread.id)).toHaveLength(1);
 		// Released again before the approval is given, it is resumed for the push itself.
 		await release(thread.id, ended!.space);
-		expect(await post(`/coding/threads/${thread.id}/push`, { branch: `pim/again-${thread.id.slice(0, 8)}` })).toMatchObject({ status: 202 });
+		const again = await post(`/coding/threads/${thread.id}/push`, { branch: `pim/again-${thread.id.slice(0, 8)}` });
+		expect(again.status).toBe(202);
+		await post(`/approvals/${again.body.approval}/approve`);
+		expect(github.pushes).toHaveLength(2);
 	});
 
 	it("starts a thread with rebuildEnvironment=true", async () => {

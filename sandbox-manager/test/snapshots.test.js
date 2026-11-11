@@ -83,6 +83,30 @@ describe('snapshots', () => {
 	beforeEach(() => setup())
 	afterEach(() => teardown())
 
+	test('environment snapshots exclude the in-workspace Git broker credential and helper', async () => {
+		assert.equal((await call('POST', '/sessions', session('git-auth'))).status, 201)
+		const secret = 'short-lived-read-only-broker-token'
+		await write(ws('git-auth'), {
+			'app/package.json': '{"name":"app"}',
+			'.config/pim/git/credential.json': JSON.stringify({ url: 'https://pim.example/api/coding/git/app.git', token: secret }),
+			'.config/pim/git/helper.mjs': '// URL-scoped credential helper',
+		})
+		const result = await snap('git-auth', K1)
+		assert.equal(result.status, 201, result.text)
+		const { data, m } = await storedFiles(K1)
+		const compressed = await fs.readFile(data)
+		const archive = m.format === 'zstd' ? zlib.zstdDecompressSync(compressed) : zlib.gunzipSync(compressed)
+		const entries = []
+		await runPolicy(archive, (entry) => { entries.push(entry.name); return null })
+		assert.ok(entries.some((name) => name.endsWith('app/package.json')), 'the archive contains the environment')
+		assert.ok(!entries.some((name) => /(^|\/)\.config\/pim\/git(?:\/|$)/.test(name)), 'no Git credential directory or files in the archive')
+		assert.ok(!archive.includes(secret), 'no broker token in the uncompressed archive')
+		assert.equal((await call('POST', '/sessions', session('git-restored', ada, { restoreFrom: { key: K1 } }))).status, 201)
+		for (const name of ['credential.json', 'helper.mjs']) {
+			await assert.rejects(fs.stat(path.join(ws('git-restored'), '.config/pim/git', name)), { code: 'ENOENT' })
+		}
+	})
+
 	test('create, list and restore round-trip: sha256 verified, credentials left out, files owned by the sandbox user', async () => {
 		assert.equal((await call('POST', '/sessions', session('a-1'))).status, 201)
 		const dir = ws('a-1')

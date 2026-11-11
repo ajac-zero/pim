@@ -21,6 +21,19 @@ describe("Cloudflare container egress", () => {
 		expect(sent?.redirect).toBe("manual");
 		expect(response.status).toBe(302);
 	});
+	it("injects an exact subdomain's credentials through a wildcard intercept", async () => {
+		const scoped = { allow: ["*.packages.example"], inject: [{ host: "private.packages.example", headers: { authorization: "exact-token" } }] };
+		for (const [host, expected] of [
+			["private.packages.example", "exact-token"],
+			["public.packages.example", null],
+		] as const) {
+			const response = await handleEgress(new Request("https://" + host + "/package"), scoped, "*.packages.example", async (request) => {
+				expect((request as Request).headers.get("authorization")).toBe(expected);
+				return new Response("ok");
+			});
+			expect(response.status).toBe(200);
+		}
+	});
 	it("denies a Host/SNI mismatch, trailing dots, unlisted names and nonstandard ports", async () => {
 		for (const [url, target] of [
 			["https://api.example/api/git", "allowed.example"],

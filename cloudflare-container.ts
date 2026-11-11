@@ -29,7 +29,9 @@ export class ContainerHost implements ContainerHostApi {
 				// Complete a stop interrupted after its checkpoint was persisted.
 				if (!saved || saved.state !== "running") await ctx.container!.destroy();
 				else await ctx.container!.setInactivityTimeout(IDLE_MS);
-			})();
+			})().catch((error) => {
+				console.warn(JSON.stringify({ event: "pim.coding.container_startup_cleanup_failed", error: String(error) }));
+			});
 		}
 	}
 	private get container() {

@@ -113,7 +113,8 @@ import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
  * slot of its space's scheduler (./scheduler-do.ts) while it has a
  * workspace, and drives the workspace, a remote machine reached through
  * `Workspace` (./workspace/types.ts). Neither the model's credentials nor git
- * credentials ever enter the workspace.
+ * provider credentials enter the workspace. Compose uses a short-lived, read-only
+ * broker credential file and helper for agent Git access.
  *
  * A thread works through its inputs one turn at a time: the task `start`
  * gives it, then whatever the person sends between turns (`steer`) or asks
@@ -225,7 +226,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#userStop: string | null = null;
 	/** When the provider was last told the workspace is in use, in this isolate. */
 	#keptAliveAt = 0;
-	/** The credentials the workspace's egress proxy injects, by what they are for; kept in memory only, since each `setEgress` replaces the whole policy. */
+	/** The credentials the workspace's egress proxy injects, by what they are for; kept in this map in memory, since each `setEgress` replaces the whole policy. The Containers provider persists its copy in the workspace DO. */
 	readonly #injections = new Map<string, EgressInjection>();
 
 	readonly harness = new PiHarness({

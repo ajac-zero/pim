@@ -16,6 +16,7 @@ import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } fr
 import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO } from "../src/coding/thread-do";
 import type { Fetch, GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "../src/coding/model-gateway";
+import type { ComputeQuota } from "../src/compute";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
 import type { Provider } from "@earendil-works/pi-ai";
@@ -277,6 +278,11 @@ export class Pim extends RealPim {
 		return this.store.meta("test:no-fallback") === undefined ? super.fallbackModel(provider, session) : undefined;
 	}
 
+	/** The in-memory workspace backend coding threads have in tests, unless a test sets `test:no-coding-backend`, as in a deployment with none. */
+	protected override environmentWorkspaceIds(): string[] {
+		return this.store.meta("test:no-coding-backend") === undefined ? ["fake"] : [];
+	}
+
 	/** Under `auto`, long enough for a test to answer an approval, short enough to wait out. */
 	protected override approvalTimeoutMs(policy = this.settings().approvalPolicy): number | null {
 		return policy === "auto" ? 1_500 : null;
@@ -315,7 +321,7 @@ export class CodingSchedulerDO extends RealCodingSchedulerDO {
 	}
 
 	/** Sign-ins run Claude Code's fake `claude auth login` (test/fake-claude-login.ts). */
-	protected override loginProviders(): WorkspaceProviderRegistry {
+	protected override async loginProviders(): Promise<WorkspaceProviderRegistry> {
 		return workspaceRegistry([codingLogins]);
 	}
 
@@ -348,6 +354,9 @@ codingWorkspaces.register("git", fakeGit);
 /** The workspace backends coding threads have: the in-memory one unless a test sets others, such as the Compose provider on a stubbed manager. */
 export const codingBackends: { registry: WorkspaceProviderRegistry | null } = { registry: null };
 
+/** What every space may use of compute in thread tests, in place of its Pim's answer, until a test sets one (test/coding-thread-do.test.ts). */
+export const codingQuota: { quota: ComputeQuota | null } = { quota: null };
+
 /** What coding threads emitted, in order. */
 export const codingEvents: CodingThreadEvent[] = [];
 
@@ -368,6 +377,10 @@ export class CodingThreadDO extends RealCodingThreadDO {
 
 	protected override workspaceProviders(): WorkspaceProviderRegistry {
 		return codingBackends.registry ?? workspaceRegistry([codingWorkspaces]);
+	}
+
+	protected override async computeQuota(space: string): Promise<ComputeQuota> {
+		return codingQuota.quota ?? super.computeQuota(space);
 	}
 
 	/** The scripted model besides the space's real providers. */

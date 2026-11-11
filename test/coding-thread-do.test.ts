@@ -22,7 +22,7 @@ import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { GO_REPO, installed, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
-import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingGitHub, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
+import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingGitHub, codingQuota, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
 // `coding-faux` model, and asks a scheduler of its own space for a slot; the schedulers tell threads what happens to them
@@ -2664,5 +2664,195 @@ describe("threadLimits", () => {
 		expect(threadLimits("someone/else").memMiB).toBe(4096);
 		expect(threadLimits("Ajac-Zero/Pim").memMiB).toBe(6144);
 		expect(threadLimits("ajac-zero/pim", { memMiB: 2048 })).toMatchObject({ memMiB: 2048, cpu: 2 });
+	});
+});
+
+describe("a coding thread's compute", () => {
+	// The ledger (src/compute-ledger.ts) lives in the Gallery; a thread's rows are read there. Time goes by `codingThreadClock`.
+	const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+	const rows = (id: string) =>
+		runInDurableObject(env.Gallery.getByName("gallery"), (_instance: unknown, state: DurableObjectState) =>
+			state.storage.sql.exec("SELECT end_reason, cap_at FROM compute_usage WHERE thread_id = ? ORDER BY id", id).toArray(),
+		);
+	const unlimited = { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null };
+	const MINUTE = 60_000;
+
+	afterEach(() => {
+		codingQuota.quota = null;
+	});
+
+	/** A thread that ran its task and sits idle with its workspace. */
+	async function idle() {
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const thread = await startThread();
+		await turns(thread.id, 1);
+		return thread;
+	}
+
+	it("stops a workspace that is still running past its session limit, keeping its files, and counts it as stopped", async () => {
+		codingQuota.quota = { ...unlimited, maxSessionMinutes: 10 };
+		const thread = await idle();
+		const [row] = await rows(thread.id);
+		expect(row).toMatchObject({ end_reason: null, cap_at: expect.any(Number) });
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
+		// Before its time, nothing happens at a heartbeat.
+		codingThreadClock.now = Date.now() + 5 * MINUTE;
+		await heartbeat(thread.stub);
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
+		// Past it, the provider is told to delete the workspace and the ledger ends the stretch as stopped.
+		codingThreadClock.now = Date.now() + 11 * MINUTE;
+		await heartbeat(thread.stub);
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toEqual([]);
+		expect(await rows(thread.id)).toEqual([expect.objectContaining({ end_reason: "stop" })]);
+		expect(await thread.stub.status()).toMatchObject({ state: "idle", stateReason: "compute_quota" });
+	});
+
+	it("stops a turn under way when its workspace's session limit is up", async () => {
+		codingQuota.quota = { ...unlimited, maxSessionMinutes: 10 };
+		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
+		const thread = await startThread();
+		await vi.waitFor(async () => expect((await thread.stub.status()).currentOperation).not.toBeNull());
+		codingThreadClock.now = Date.now() + 11 * MINUTE;
+		await heartbeat(thread.stub);
+		expect((await turns(thread.id, 1))[0]).toMatchObject({ outcome: "cancelled" });
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toEqual([]);
+		expect(await rows(thread.id)).toEqual([expect.objectContaining({ end_reason: "stop" })]);
+	});
+
+	it("lets a thread on a fresh deployment run past 120 minutes: there is no limit until the admin sets one", async () => {
+		const thread = await idle();
+		expect(await rows(thread.id)).toEqual([{ end_reason: null, cap_at: null }]);
+		codingThreadClock.now = Date.now() + 300 * MINUTE;
+		await heartbeat(thread.stub);
+		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
+		expect(await rows(thread.id)).toEqual([{ end_reason: null, cap_at: null }]);
+		expect(await thread.stub.status()).toMatchObject({ state: "idle", stateReason: null });
+	});
+
+	it("ends the count of a workspace its provider no longer has, as lost", async () => {
+		const thread = await idle();
+		const [info] = await codingWorkspaces.list({ sessionId: thread.id });
+		await codingWorkspaces.destroy(info!.ref);
+		await heartbeat(thread.stub);
+		expect(await rows(thread.id)).toEqual([expect.objectContaining({ end_reason: "lost" })]);
+	});
+
+	describe("across a move to a new session", () => {
+		const ledger = (id: string) =>
+			runInDurableObject(env.Gallery.getByName("gallery"), (_instance: unknown, state: DurableObjectState) =>
+				state.storage.sql.exec("SELECT started_at, ended_at, end_reason, cap_at FROM compute_usage WHERE thread_id = ? ORDER BY id", id).toArray(),
+			);
+		const sleeping = () => [toolUse("bash", { command: "sleep 30" })];
+		const running = (stub: Stub) => vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(1), { timeout: 15_000, interval: 50 });
+
+		it("ends the old stretch and begins a new one, once each", async () => {
+			const { t0 } = capped();
+			codingQuota.quota = { ...unlimited, maxSessionMinutes: 10 };
+			codingFaux.setResponses([...sleeping(), fauxAssistantMessage("Done.")]);
+			const { id, stub } = await startThread();
+			await running(stub);
+			expect(await ledger(id)).toEqual([{ started_at: t0, ended_at: null, end_reason: null, cap_at: t0 + 10 * MINUTE }]);
+			codingThreadClock.now = t0 + 48_000;
+			await heartbeat(stub);
+			await turns(id, 1);
+			// A heartbeat after the move counts nothing more.
+			await heartbeat(stub);
+			expect(await ledger(id)).toEqual([
+				{ started_at: t0, ended_at: t0 + 48_000, end_reason: "suspend", cap_at: t0 + 10 * MINUTE },
+				{ started_at: t0 + 48_000, ended_at: null, end_reason: null, cap_at: t0 + 48_000 + 10 * MINUTE },
+			]);
+		});
+
+		it("ends the turn with the quota's reason when it refuses the new session, and doesn't try again", async () => {
+			const { provider, t0 } = capped();
+			// The command the move stops is followed by another, so the turn is still under way when the quota refuses.
+			codingFaux.setResponses([...sleeping(), ...sleeping()]);
+			const { id, stub } = await startThread();
+			await running(stub);
+			codingQuota.quota = { ...unlimited, maxSessionMinutes: 0 };
+			const resume = vi.spyOn(provider, "resumeOrCreate");
+			codingThreadClock.now = t0 + 48_000;
+			await heartbeat(stub);
+			expect((await turns(id, 1))[0]).toMatchObject({ outcome: "cancelled" });
+			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "compute_quota" }));
+			await heartbeat(stub);
+			expect(resume).not.toHaveBeenCalled();
+			expect(await ledger(id)).toEqual([expect.objectContaining({ ended_at: t0 + 48_000, end_reason: "suspend" })]);
+			expect(await sql(stub, "SELECT kind FROM coding_event WHERE kind LIKE 'session.%'")).toEqual([{ kind: "session.continuing" }]);
+		});
+
+		it("ends at the earlier of the compute cap and the provider's session limit", async () => {
+			const { t0 } = capped();
+			// The provider's limit (a minute) is earlier than the quota's ten.
+			codingQuota.quota = { ...unlimited, maxSessionMinutes: 10 };
+			codingFaux.setResponses(sleeping());
+			const first = await startThread();
+			await running(first.stub);
+			expect((await first.stub.status()).session).toMatchObject({ maxMin: 1, expiresAt: t0 + 60_000 });
+			await first.stub.abort();
+			await turns(first.id, 1);
+			// The quota's thirty seconds are earlier than the provider's minute: the workspace is stopped, not moved.
+			codingQuota.quota = { ...unlimited, maxSessionMinutes: 0.5 };
+			codingFaux.setResponses(sleeping());
+			const second = await startThread();
+			await running(second.stub);
+			expect((await second.stub.status()).session).toMatchObject({ maxMin: 1, expiresAt: t0 + 30_000 });
+			codingThreadClock.now = t0 + 31_000;
+			await heartbeat(second.stub);
+			expect((await turns(second.id, 1))[0]).toMatchObject({ outcome: "cancelled" });
+			expect(await ledger(second.id)).toEqual([expect.objectContaining({ end_reason: "stop" })]);
+			expect((await second.stub.status()).session).toMatchObject({ continuations: 0 });
+		});
+
+		it("leaves no stretch open for a workspace lost mid-move, and counts the one made after it", async () => {
+			const { provider, t0 } = capped();
+			codingFaux.setResponses([...sleeping(), fauxAssistantMessage("Restarted and done.")]);
+			let open!: () => void;
+			const gate = new Promise<void>((resolve) => (open = resolve));
+			const resume = provider.resumeOrCreate.bind(provider);
+			let tried = 0;
+			provider.resumeOrCreate = async (ref, spec) => {
+				if (tried++ > 0) return resume(ref, spec);
+				await gate;
+				await provider.destroy(ref, { keepVolume: false });
+				throw new Error("The workspace is gone");
+			};
+			const { id, stub } = await startThread();
+			await running(stub);
+			codingThreadClock.now = t0 + 48_000;
+			await heartbeat(stub);
+			await vi.waitFor(() => expect(tried).toBe(1));
+			// A heartbeat in the middle of the move doesn't take the workspace that is being brought back for lost.
+			await heartbeat(stub);
+			expect((await ledger(id)).map((row) => row.end_reason)).toEqual(["suspend", null]);
+			open();
+			await turns(id, 1);
+			// The provider failed the move: its stretch ends as failed, and nothing is left open for the workspace that is gone.
+			await vi.waitFor(async () => expect((await ledger(id)).map((row) => row.end_reason)).toEqual(["suspend", "failed"]));
+			await heartbeat(stub);
+			expect((await ledger(id)).filter((row) => row.ended_at === null)).toEqual([]);
+		});
+
+		it("closes the stretch when the person stops and archives the thread during the move", async () => {
+			const { provider, t0 } = capped();
+			codingFaux.setResponses([...sleeping(), ...sleeping()]);
+			let open!: () => void;
+			const gate = new Promise<void>((resolve) => (open = resolve));
+			const resume = provider.resumeOrCreate.bind(provider);
+			provider.resumeOrCreate = async (ref, spec) => {
+				await gate;
+				return resume(ref, spec);
+			};
+			const { id, stub } = await startThread();
+			await running(stub);
+			codingThreadClock.now = t0 + 48_000;
+			await heartbeat(stub);
+			await vi.waitFor(async () => expect((await ledger(id)).map((row) => row.end_reason)).toEqual(["suspend", null]));
+			const stopped = stub.abort().then(() => stub.archive());
+			open();
+			await stopped;
+			await vi.waitFor(async () => expect((await ledger(id)).filter((row) => row.ended_at === null)).toEqual([]));
+			expect((await ledger(id)).map((row) => row.end_reason)).toEqual(["suspend", expect.stringMatching(/^(stop|suspend)$/)]);
+		});
 	});
 });

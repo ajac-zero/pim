@@ -252,6 +252,10 @@ export const suggestionsQuery = (session: string, locale: string) =>
 export const deploymentQuery = () =>
   queryOptions({ queryKey: ["deployment"], queryFn: admin.deployment });
 
+/** Compute providers, quotas and usage for everyone: the admin's view. */
+export const computeQuery = () =>
+  queryOptions({ queryKey: ["compute"], queryFn: admin.compute });
+
 /** Pim's built-in apps and which are on: the admin's view. */
 export const adminBuiltinAppsQuery = () =>
   queryOptions({

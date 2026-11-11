@@ -1241,6 +1241,81 @@ describe("the admin", () => {
 		expect((await admin("/api/admin/providers/team-gpu", { method: "DELETE" })).status).toBe(404);
 	});
 
+	it("sets up compute providers for everyone's coding sandboxes without ever showing a credential, and limits what each person may use", async () => {
+		const ann = await person("compute-ann");
+		const secret = "mgr-secret-token-91";
+		const manager = "https://manager.example.test";
+		const input = { kind: "compose", settings: { managerUrl: manager }, credentials: { token: secret } };
+		expect((await ann.browser.json("/api/admin/compute/providers", { method: "POST", json: input })).status).toBe(403);
+		expect((await ann.browser.json("/api/admin/compute")).status).toBe(403);
+		expect((await admin("/api/admin/compute/providers", { method: "POST", json: { ...input, credentials: {} } })).status).toBe(400);
+		expect((await admin("/api/admin/compute/providers", { method: "POST", json: { ...input, settings: { managerUrl: `https://admin:${secret}@manager.example.test` } } })).status).toBe(400);
+		try {
+			const added = await admin("/api/admin/compute/providers", { method: "POST", json: input });
+			expect(added).toMatchObject({ status: 201, body: { provider: { id: "compose", kind: "compose", codingSandbox: true, agentComputer: false, settings: { managerUrl: manager }, credentialsSet: { token: true } } } });
+			expect((await admin("/api/admin/compute/providers", { method: "POST", json: input })).status).toBe(409);
+
+			// A change that leaves the credential out keeps it; one that gives it replaces it.
+			const renamed = await admin("/api/admin/compute/providers/compose", { method: "PUT", json: { name: "Team sandboxes", agentComputer: true } });
+			expect(renamed.body.provider).toMatchObject({ name: "Team sandboxes", agentComputer: true, credentialsSet: { token: true } });
+			expect((await admin("/api/admin/compute/providers/compose", { method: "PUT", json: { credentials: { token: "rotated-secret-77" } } })).body.provider.credentialsSet).toEqual({ token: true });
+			expect((await admin("/api/admin/compute/providers/nope", { method: "PUT", json: { name: "x" } })).status).toBe(404);
+
+			// The health check reads from the manager with the credential the admin gave, and answers without it.
+			const realFetch = globalThis.fetch;
+			const asked: { path: string; authorization: string | null }[] = [];
+			const server = vi.spyOn(globalThis, "fetch").mockImplementation(async (request, init) => {
+				const call = new Request(request, init);
+				if (!call.url.startsWith(manager)) return realFetch(request, init);
+				asked.push({ path: new URL(call.url).pathname, authorization: call.headers.get("authorization") });
+				return call.url.endsWith("/health") ? Response.json({ maxConcurrent: 5, running: 2, free: 3, freeDiskPct: 50 }) : Response.json([]);
+			});
+			let validated: { status: number; body: { health: { ok: boolean; message: string } } };
+			try {
+				validated = await admin("/api/admin/compute/providers/compose/validate", { method: "POST" });
+			} finally {
+				server.mockRestore();
+			}
+			expect(validated).toMatchObject({ status: 200, body: { health: { ok: true, message: "Reachable: 2 of 5 workspaces running." } } });
+			expect(asked[0]).toEqual({ path: "/sessions", authorization: "Bearer rotated-secret-77" });
+			expect((await admin("/api/admin/compute/providers/nope/validate", { method: "POST" })).status).toBe(404);
+
+			// Nothing the admin or a member can read has either credential.
+			const overview = await admin("/api/admin/compute");
+			expect(overview.body.providers).toHaveLength(1);
+			expect(overview.body.kinds.map((kind: { kind: string }) => kind.kind)).toEqual(["cloudflare-sandbox", "compose"]);
+			for (const shown of [added.body, renamed.body, validated.body, overview.body, (await admin("/api/admin/stats")).body, (await ann.browser.json("/api/account")).body, (await ann.browser.json("/api/usage")).body]) {
+				for (const hidden of [secret, "rotated-secret-77"]) expect(JSON.stringify(shown)).not.toContain(hidden);
+			}
+		} finally {
+			await admin("/api/admin/compute/providers/compose", { method: "DELETE" });
+		}
+		expect((await admin("/api/admin/compute/providers/compose", { method: "DELETE" })).status).toBe(404);
+		expect((await admin("/api/admin/compute")).body.providers).toEqual([]);
+
+		// Everyone starts with the deployment's quota, which the admin changes; each person's own is kept over it.
+		const quotaOf = async () => (await ann.browser.json("/api/usage")).body.compute;
+		// A deployment starts with no limits: the admin sets them.
+		expect(await quotaOf()).toMatchObject({ quota: { maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: null }, own: null, usage: { running: 0, minutes: 0, byProvider: [] } });
+		expect((await ann.browser.json("/api/admin/compute/quota", { method: "PUT", json: { quota: { maxSessionMinutes: 5 } } })).status).toBe(403);
+		expect((await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { maxSessionMinutes: -1 } } })).status).toBe(400);
+		expect((await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { hours: 1 } } })).status).toBe(400);
+		try {
+			expect((await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { monthlySandboxMinutes: null, maxSessionMinutes: 30 } } })).body.quota).toEqual({ maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
+			expect((await quotaOf()).quota).toEqual({ maxConcurrentWorkspaces: null, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
+			const own = (quota: unknown) => admin("/api/admin/accounts/compute-ann/compute-quota", { method: "PUT", json: { quota } });
+			expect((await own({ maxConcurrentWorkspaces: 1, maxSessionMinutes: "long" })).status).toBe(400);
+			expect((await own({ maxConcurrentWorkspaces: 1 })).body.quota).toEqual({ maxConcurrentWorkspaces: 1, monthlySandboxMinutes: null, maxSessionMinutes: 30 });
+			expect(await quotaOf()).toMatchObject({ quota: { maxConcurrentWorkspaces: 1 }, own: { maxConcurrentWorkspaces: 1 } });
+			expect((await admin("/api/admin/accounts/compute-ann")).body.compute).toMatchObject({ own: { maxConcurrentWorkspaces: 1 } });
+			expect((await own(null)).body.quota.maxConcurrentWorkspaces).toBeNull();
+			expect((await quotaOf()).own).toBeNull();
+		} finally {
+			await admin("/api/admin/compute/quota", { method: "PUT", json: { quota: { monthlySandboxMinutes: null, maxSessionMinutes: null } } });
+		}
+		expect((await admin("/api/admin/stats")).body.compute).toMatchObject({ month: expect.stringMatching(/^\d{4}-\d{2}$/), minutes: expect.any(Number), byProvider: expect.any(Array), top: expect.any(Array) });
+	});
+
 	it("turns Pim's built-in apps on and off for everyone, leaving people's notes theirs", async () => {
 		const nell = await person("notes-nell");
 		const { body: kept } = await nell.browser.json("/api/notes", { method: "POST", json: { title: "Kept" } });

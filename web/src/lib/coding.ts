@@ -611,6 +611,8 @@ export function stateReasonKey(
       return { key: "codingReasonBudget" };
     case "no_backend":
       return { key: "codingReasonNoBackend" };
+    case "compute_quota":
+      return { key: "codingReasonComputeQuota" };
     case "aborted":
       return { key: "codingReasonAborted" };
     case "cancelled":

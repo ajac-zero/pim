@@ -57,7 +57,7 @@ How the Pim runs for everyone is its variables, set in the Cloudflare dashboard 
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
-| GET | `/api/admin/stats` | | Accounts by status, registrations in the last day, unused invites, queued and failing cleanups |
+| GET | `/api/admin/stats` | | Accounts by status, registrations in the last day, unused invites, queued and failing cleanups, and this month's sandbox minutes by provider and person (`compute`) |
 | GET | `/api/admin/accounts` | `?status=&after=&limit=` | Accounts, by username |
 | GET | `/api/admin/accounts/:username` | | The account, its usage, and its cleanup job if one is queued |
 | POST | `/api/admin/accounts/:username/suspend` | `{ reason? }` | Stops the agent at once: its runs abort, sockets close, requests get `403` |
@@ -65,6 +65,11 @@ How the Pim runs for everyone is its variables, set in the Cloudflare dashboard 
 | GET | `/api/admin/deployment` | | How the deployment runs, from its variables, and why Pim can't read any it can't |
 | GET, POST, DELETE | `/api/admin/computer-host` | | The machine that keeps everyone's computers: its status; pairing it, which returns its token once; or forgetting it (see [Computers Pim keeps](reference.md#computers-pim-keeps)) |
 | PUT | `/api/admin/accounts/:username/limits` | `{ limits }` or `{ limits: null }` | One person's limits over the `PIM_LIMIT_*` variables |
+| PUT | `/api/admin/accounts/:username/compute-quota` | `{ quota }` or `{ quota: null }` | One person's compute quota over the deployment's (see [Compute](reference.md#compute-providers-and-quotas)) |
+| GET | `/api/admin/compute` | | The compute providers (never their credentials), the kinds that can be added, the default quota, and everyone's usage this month |
+| POST, PUT, DELETE | `/api/admin/compute/providers[/:id]` | `{ kind, name?, settings?, credentials?, codingSandbox?, agentComputer? }` | Adds, changes or removes a compute provider; a credential left out stays, an empty one is removed |
+| POST | `/api/admin/compute/providers/:id/validate` | | One cheap read against the provider: `{ health: { ok, message, ms } }` |
+| PUT | `/api/admin/compute/quota` | `{ quota }` | The default quota for everyone: `maxConcurrentWorkspaces`, `monthlySandboxMinutes`, `maxSessionMinutes`, each a whole number or null for no limit |
 | POST | `/api/admin/accounts/:username/setup-link` | | A one-hour link that adds a passkey, for recovery |
 | DELETE | `/api/admin/accounts/:username` | `{ reason? }` | Deletes it as the owner would: `200` once erased, `202` while the cleanup is still queued. Run it again to retry at once |
 | DELETE | `/api/admin/templates/:id` | | Takes a published agent out of Discover |

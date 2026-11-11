@@ -485,7 +485,8 @@ describe("API keys", () => {
 			const raw = await exports.default.fetch(new Request(apiUrl(path), { headers: { Authorization: `Bearer ${TOKEN}` } }));
 			const body = await raw.text();
 			expect(body).not.toContain(MARKER);
-			expect(body).not.toContain(String(AMP_KEY.length));
+			// Without the timestamps, whose digits can hold any two-digit length by chance.
+			expect(body.replace(/"updatedAt":\d+/g, '"updatedAt":0')).not.toContain(String(AMP_KEY.length));
 		}
 		expect((await api("/coding/vault")).body.harnesses.find((entry: { harness: string }) => entry.harness === "amp")).toEqual({ harness: "amp", connected: true, updatedAt: expect.any(Number), byteLength: null });
 		// The other person's key is theirs alone.

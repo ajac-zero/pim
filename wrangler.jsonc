@@ -59,7 +59,7 @@
       "name": "coding-workspaces",
       "class_name": "WorkspaceContainer",
       "scheduling_policy": "durable_object",
-      "images": { "base": { "image": "registry.cloudflare.com/coding-workspace@sha256:96bd7b8761df10d1e798b0c051349ea15a1f4ad2f1591a4e2e7f1eaa00f6eaf2" } }
+      "images": { "base": { "image": "registry.cloudflare.com/50fc740fb96dd3b4d9aeacd257575377/coding-workspace@sha256:96bd7b8761df10d1e798b0c051349ea15a1f4ad2f1591a4e2e7f1eaa00f6eaf2" } }
     }
   ],
   // MCP clients' sign-ins to people's spaces: registered clients, grants and hashed tokens

@@ -382,7 +382,7 @@ describe("pinned chats on a thread's page", () => {
         .map((link) => link.getAttribute("href")),
     ).toEqual(["/chat/travel", "/chat/work"]);
     expect(within(nav).queryByRole("link", { current: "page" })).toBeNull();
-    await screen.findByText("Fix the flaky date test");
+    await screen.findByText("pim/fix-date-test-t1");
     fireEvent.click(within(nav).getAllByRole("button")[0] as HTMLElement);
     await waitFor(() =>
       expect(within(nav).getAllByRole("link")).toHaveLength(1),
@@ -833,6 +833,35 @@ describe("a thread's page", () => {
     ).toBeTruthy();
   });
 
+  it("keeps the task to the transcript, with the rest of the thread's facts as one compact row", async () => {
+    const { api } = fakeApi(
+      view({ createdBy: { type: "agent", agent: "a1", chat: "chat-1" } }),
+      [
+        {
+          id: "1",
+          role: "user",
+          parts: [{ type: "text", text: "Fix the flaky date test" }],
+          timestamp: 1,
+        },
+      ],
+    );
+    threadPage(api);
+    // The task shows once: as the transcript's first message, not again above it.
+    expect(await screen.findAllByText("Fix the flaky date test")).toHaveLength(
+      1,
+    );
+    // The branch, spend and start are icon items; the base ref moved into the branch's tooltip.
+    const branch = screen.getByText("pim/fix-date-test-t1").closest("div");
+    expect(branch?.getAttribute("title")).toBe(
+      "pim/fix-date-test-t1 from main",
+    );
+    expect(screen.getByText("$0.42 of $3.00")).toBeTruthy();
+    const started = screen.getByRole("link", {
+      name: /Started from a chat/,
+    });
+    expect(started.getAttribute("href")).toBe("/chat/chat-1");
+  });
+
   it("follows the live stream, opening it again when it ends, without repeating rows", async () => {
     const task = userEntry("1", "Fix the flaky date test");
     const looking = assistantEntry("2", [
@@ -876,7 +905,7 @@ describe("a thread's page", () => {
     await waitFor(() => expect(api.events).toHaveBeenCalledTimes(2));
 
     await waitFor(() => {
-      expect(screen.getAllByText("Fix the flaky date test")).toHaveLength(2); // the header and the task
+      expect(screen.getAllByText("Fix the flaky date test")).toHaveLength(1); // the transcript's first message, not said again above it
       expect(screen.getAllByText("Looking at the test.")).toHaveLength(1);
       expect(screen.getAllByText("Fixed it.")).toHaveLength(1);
     });

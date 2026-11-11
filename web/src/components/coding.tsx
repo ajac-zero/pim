@@ -30,6 +30,7 @@ import {
   Archive,
   ArrowLeft,
   ChevronRight,
+  Clock,
   Code,
   DollarSign,
   ExternalLink,
@@ -1243,7 +1244,7 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
           <Conversation className="scrollbar-thin" initial="instant">
             <ConversationContent
               scrollClassName="overflow-auto"
-              className={cn(FRAME, "min-h-full gap-5 pt-2 pb-4")}
+              className={cn(FRAME, "min-h-full gap-3 pt-2 pb-4")}
             >
               {top}
               <Tabs.Content value="conversation" className="outline-none">
@@ -1254,12 +1255,12 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
           </Conversation>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-            <div className={cn(FRAME, "pt-2 pb-8")}>
+            <div className={cn(FRAME, "flex flex-col gap-3 pt-2 pb-8")}>
               {top}
-              <Tabs.Content value="changes" className="pt-4 outline-none">
+              <Tabs.Content value="changes" className="outline-none">
                 <DiffPanel id={thread.id} />
               </Tabs.Content>
-              <Tabs.Content value="tests" className="pt-4 outline-none">
+              <Tabs.Content value="tests" className="outline-none">
                 <TestsPanel id={thread.id} />
               </Tabs.Content>
             </div>
@@ -1304,54 +1305,55 @@ function ThreadTitle({ thread }: { thread: CodingThreadView }) {
   );
 }
 
-/** What the thread works on, and its branch, spend and start. */
+/**
+ * What the thread works on, one compact icon item each: its branch (its base
+ * ref in the tooltip), its spend and when it started. The task itself is the
+ * transcript's first message, and the repository, harness and state are in
+ * the header, so none of those is said again here.
+ */
 function ThreadSummary({ thread }: { thread: CodingThreadView }) {
-  const { t } = useI18n();
+  const { t, formatDate } = useI18n();
   const money = useMoney();
   const date = useDate();
   return (
-    <section aria-label={t("codingTask")}>
-      <p className="mt-2 line-clamp-3 whitespace-pre-wrap break-words text-[15px]">
-        {thread.task}
-      </p>
-      <dl className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-muted-foreground">
-        <div className="inline-flex min-w-0 items-center gap-1">
-          <dt className="sr-only">{t("codingBranch")}</dt>
-          <GitFork className="size-3.5 shrink-0" />
-          <dd className="truncate font-mono">
-            {thread.repo.branch}
-            <span className="font-sans">
-              {" "}
-              {t("codingFromRef", { ref: thread.repo.ref })}
-            </span>
-          </dd>
-        </div>
-        <div className="inline-flex items-center gap-1">
-          <dt className="sr-only">{t("codingSpend")}</dt>
-          <DollarSign className="size-3.5 shrink-0" />
-          <dd>{spendText(thread, t, money)}</dd>
-        </div>
-        <div>
-          <dt className="sr-only">{t("codingCreated")}</dt>
-          <dd>
-            {thread.createdBy.type === "agent" ? (
-              <Link
-                to="/chat/$sessionId"
-                params={{ sessionId: thread.createdBy.chat }}
-                className={cn(
-                  "hover:text-foreground hover:underline",
-                  LINK_RING,
-                )}
-              >
-                {t("codingStartedFromChat", { date: date(thread.createdAt) })}
-              </Link>
-            ) : (
-              t("codingStartedAt", { date: date(thread.createdAt) })
-            )}
-          </dd>
-        </div>
-      </dl>
-    </section>
+    <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-muted-foreground">
+      <div
+        className="inline-flex min-w-0 items-center gap-1"
+        title={`${thread.repo.branch} ${t("codingFromRef", { ref: thread.repo.ref })}`}
+      >
+        <dt className="sr-only">{t("codingBranch")}</dt>
+        <GitFork className="size-3.5 shrink-0" />
+        <dd className="truncate font-mono">{thread.repo.branch}</dd>
+      </div>
+      <div className="inline-flex items-center gap-1">
+        <dt className="sr-only">{t("codingSpend")}</dt>
+        <DollarSign className="size-3.5 shrink-0" />
+        <dd>{spendText(thread, t, money)}</dd>
+      </div>
+      <div
+        className="inline-flex items-center gap-1"
+        title={formatDate(new Date(thread.createdAt), {
+          dateStyle: "full",
+          timeStyle: "short",
+        })}
+      >
+        <dt className="sr-only">{t("codingCreated")}</dt>
+        <Clock className="size-3.5 shrink-0" />
+        <dd>
+          {thread.createdBy.type === "agent" ? (
+            <Link
+              to="/chat/$sessionId"
+              params={{ sessionId: thread.createdBy.chat }}
+              className={cn("hover:text-foreground hover:underline", LINK_RING)}
+            >
+              {t("codingStartedFromChat", { date: date(thread.createdAt) })}
+            </Link>
+          ) : (
+            t("codingStartedAt", { date: date(thread.createdAt) })
+          )}
+        </dd>
+      </div>
+    </dl>
   );
 }
 
@@ -1365,7 +1367,7 @@ function StateNotice({ thread }: { thread: CodingThreadView }) {
     mutationFn: () => api.cancel(thread.id),
     onSuccess: update,
   });
-  const box = "mt-5 flex flex-col gap-2 rounded-2xl bg-muted px-4 py-4";
+  const box = "flex flex-col gap-2 rounded-2xl bg-muted px-4 py-3";
   if (thread.state === "queued" || thread.state === "provisioning") {
     const queue = thread.queue;
     return (
@@ -1404,9 +1406,7 @@ function StateNotice({ thread }: { thread: CodingThreadView }) {
   }
   if (thread.state === "archived") {
     return (
-      <p className="mt-5 text-muted-foreground text-sm">
-        {t("codingArchivedNote")}
-      </p>
+      <p className="text-muted-foreground text-sm">{t("codingArchivedNote")}</p>
     );
   }
   const why = stateReasonKey(thread.stateReason);
@@ -1541,8 +1541,11 @@ function ThreadActions({
   } = controls;
   if (thread.state === "archived") return null;
   const error = abort.error ?? archive.error;
+  // Nothing to say most of the time: an empty block would still take room above the transcript.
+  if (!continuing && !error && !push.data && !push.error && !confirming)
+    return null;
   return (
-    <div className="mt-5 flex flex-col gap-3">
+    <div className="flex flex-col gap-2">
       {continuing && (
         <ContinueForm thread={thread} onDone={() => setContinuing(false)} />
       )}
@@ -1901,7 +1904,7 @@ function Transcript({ thread }: { thread: CodingThreadView }) {
   const { t } = useI18n();
   const live = useLiveTranscript(thread.id, thread.state !== "archived");
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-3">
       {live.reconnecting && (
         <p
           role="status"
@@ -1922,15 +1925,19 @@ function Transcript({ thread }: { thread: CodingThreadView }) {
       ) : (
         <ol
           aria-label={t("codingConversation")}
-          className="flex flex-col gap-5"
+          className={cn(
+            "flex flex-col gap-3",
+            // A command's answer, and the next command, sit close under it, as an agent log's do.
+            "[&>li[data-kind=tool]+li]:-mt-1",
+          )}
         >
           {live.rows.map((row) => (
-            <li key={row.key}>
+            <li key={row.key} data-kind={row.kind}>
               <Row row={row} />
             </li>
           ))}
           {live.tools.map((tool) => (
-            <li key={`running:${tool.callId}`}>
+            <li key={`running:${tool.callId}`} data-kind="tool">
               <div className="flex flex-col gap-1.5 text-[13px] text-muted-foreground">
                 <p className="flex items-center gap-2">
                   <Loader2 className="size-3.5 motion-safe:animate-spin" />
@@ -2045,7 +2052,7 @@ function ToolRow({ row }: { row: Extract<TranscriptRow, { kind: "tool" }> }) {
               {outcome}
             </p>
           )}
-          <div className="mt-2 flex flex-col gap-2">
+          <div className="mt-1.5 flex flex-col gap-1.5">
             {row.args !== null && (
               <pre className="max-h-64 overflow-auto rounded-xl bg-muted px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap break-all">
                 {JSON.stringify(row.args, null, 2)}

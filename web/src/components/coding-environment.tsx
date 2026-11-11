@@ -36,7 +36,7 @@ const FIELD =
 export function EnvironmentSection({ thread }: { thread: CodingThreadView }) {
   const [editing, setEditing] = useState(false);
   return (
-    <div className="mt-4">
+    <div>
       <EnvironmentChip thread={thread} onEditScript={() => setEditing(true)} />
       {editing && (
         <SetupScriptPanel

@@ -569,6 +569,59 @@ describe("an agent's coding tools", () => {
 		expect((await messagesOf(chat, "user")).filter((text) => text.includes("[Coding thread"))).toHaveLength(1);
 	});
 
+	it("started by a guest agent in a group chat belong to that chat, and wake that agent in it when a turn ends", async () => {
+		const coach = (await post<{ id: string }>("/agents", { name: "Coach", description: "Plans runs", instructions: "Plan runs." })).body;
+		const chat = (await post<{ id: string }>("/sessions")).body.id;
+		const heard: string[] = [];
+		let started: Record<string, unknown> = {};
+		const result = (context: Parameters<FauxResponseFactory>[0]) => {
+			const last = context.messages.findLast((message) => message.role === "toolResult");
+			return last?.role === "toolResult" && last.content[0]?.type === "text" ? last.content[0].text : "{}";
+		};
+		const guest = (step: (context: Parameters<FauxResponseFactory>[0]) => ReturnType<FauxResponseFactory>) => step;
+		faux.setResponses([toolUse("send_to_user", { message: "Hello." })]);
+		await say("Hi.", chat);
+		await settled(chat);
+		// The guest is brought in by a mention, and starts a thread.
+		faux.setResponses([
+			guest(() => toolUse("coding_start", { repo: REPO, task: "Add a greeting", profile: { provider: "coding-faux", model: "coder" } })),
+			guest((context) => {
+				started = JSON.parse(result(context));
+				return toolUse("send_to_user", { message: "Started it." });
+			}),
+			guest((context) => {
+				heard.push(lastUserText(context.messages));
+				return toolUse("send_to_user", { message: "Noted." });
+			}),
+			guest((context) => {
+				heard.push(lastUserText(context.messages));
+				return toolUse("send_to_user", { message: "Noted the failure." });
+			}),
+		]);
+		codingFaux.setResponses([fauxAssistantMessage("Added the greeting.")]);
+		await say("@coach add a greeting to acme/demo.", chat);
+		await vi.waitFor(() => expect(started.thread_id).toBeDefined(), { timeout: 10_000 });
+		const id = String(started.thread_id);
+		const [ended] = await turns(id, 1);
+
+		// It is recorded under the group chat, not under the guest's own conversation, and the guest started it.
+		const listed = (await api<{ threads: CodingThreadSummary[] }>("/coding/threads")).body.threads.find((thread) => thread.id === id);
+		expect(listed).toMatchObject({ chat, createdBy: { type: "agent", agent: coach.id, chat } });
+		// The sidebar shows it under a chat the list has.
+		expect((await api<{ sessions: { id: string }[] }>("/sessions")).body.sessions.map((info) => info.id)).toContain(listed!.chat);
+
+		// The guest, not the host, hears that its turn ended, in the room; and again for a failed turn.
+		await vi.waitFor(() => expect(heard).toHaveLength(1), { timeout: 10_000 });
+		expect(heard[0]).toContain(`[Coding thread ${id}] It finished its turn.`);
+		await runInDurableObject(codingThread(env, id), (thread: CodingThreadDO) =>
+			(thread as unknown as { eventSink(): CodingEventSink }).eventSink().emit({ ...ended!, operationId: "failed-turn", outcome: "error", reason: "the model failed" }),
+		);
+		await vi.waitFor(() => expect(heard).toHaveLength(2), { timeout: 10_000 });
+		expect(heard[1]).toContain(`[Coding thread ${id}] It stopped with an error (the model failed).`);
+		await settled(chat);
+		expect((await messagesOf(chat, "user")).filter((text) => text.includes("[Coding thread"))).toEqual([]);
+	});
+
 	it("follow, steer and archive the space's threads, and push only once the App is set up, asking first", async () => {
 		codingFaux.setResponses([fauxAssistantMessage("Nothing to change."), fauxAssistantMessage("Still nothing.")]);
 		const thread = await start();

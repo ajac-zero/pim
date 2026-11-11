@@ -18,7 +18,7 @@ export function supervisorSink(env: Env): CodingEventSink {
 			const thread = await codingScheduler(env, event.space).thread(event.threadId);
 			if (thread?.createdBy.type !== "agent") return;
 			const pim = await getAgentByName(env.Pim, event.space);
-			await pim.codingTurnEnded(thread.createdBy.chat, turnEndedMessage(event, deploymentSettings(env).publicUrl), `coding:${event.threadId}:${event.operationId}`);
+			await pim.codingTurnEnded(thread.createdBy.chat, turnEndedMessage(event, deploymentSettings(env).publicUrl), `coding:${event.threadId}:${event.operationId}`, thread.createdBy.agent);
 		},
 	};
 }

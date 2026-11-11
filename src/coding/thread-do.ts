@@ -167,6 +167,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#watching: string | null = null;
 	#advancing: Promise<void> | null = null;
 	#advanceAgain = false;
+	/** How many `#ensureWorkspace` calls are waiting for the workspace: the thread gets a slot and a workspace for them, with no turn. */
+	#resumers = 0;
 	#opening: Promise<Workspace> | null = null;
 	/** The workspace opened in this isolate, by its ref's id. */
 	#open: { id: string; workspace: Workspace } | null = null;
@@ -324,6 +326,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** How often the work of a running turn is autosaved. */
 	protected autosaveMs(): number {
 		return AUTOSAVE_MS;
+	}
+
+	/** How long a tool waits for a suspended workspace to resume. */
+	protected resumeWaitMs(): number {
+		return RESUME_WAIT_MS;
 	}
 
 	/** How long a thread may sit provisioning with no change before it is failed as stuck. */
@@ -691,7 +698,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (from === head) return { since: from, head, diff: "", truncated: false };
 		const cached = this.store.cachedDiff(from, head);
 		if (cached) return { since: from, head, ...cached };
-		if (thread.slot !== "held") throw new Error("The thread's workspace isn't running: only each checkpoint's diff from the start is kept");
+		const ready = await this.#ensureWorkspace();
+		if (!ready.ok) throw new Error(ready.message);
 		return { since: from, head, ...(await this.#makeDiff(from, head)) };
 	}
 
@@ -783,9 +791,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
 		const checkpoint = this.store.latestCheckpoint();
 		if (!checkpoint) return { ok: false, code: "nothing_to_push", message: "The thread hasn't committed anything yet: each turn's changes are committed when it ends" };
-		if (thread.slot !== "held" || !thread.workspaceRef) {
-			return { ok: false, code: "workspace_not_running", message: "The thread's workspace isn't running: continue or steer the thread, then push once its turn ends" };
-		}
+		const ready = await this.#ensureWorkspace();
+		if (!ready.ok) return ready;
 		try {
 			const bundle = await this.#bundle(target, checkpoint.sha);
 			const prepared = preparePush({ app: this.githubApp(), policy, providers: this.#providers() }, { sessionId: thread.threadId, repo: thread.repoUrl, branch: target, bundle });
@@ -806,7 +813,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		const blocker = await this.#pushBlocker(thread);
 		if (blocker) return { ok: false, message: blocker.message };
-		if (thread.slot !== "held" || !thread.workspaceRef) return { ok: false, message: "The thread's workspace isn't running now: continue the thread, then ask to push again" };
+		const ready = await this.#ensureWorkspace();
+		if (!ready.ok) return { ok: false, message: ready.message };
 		try {
 			const policy = brokerPolicy(this.env);
 			const fetch = this.githubFetch();
@@ -835,9 +843,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.state === "archived") return { ok: false, code: "archived", message: "This coding thread is archived" };
 		const checkpoint = this.store.latestCheckpoint();
 		if (!checkpoint) return { ok: false, code: "nothing_to_push", message: "The thread hasn't committed anything yet: each turn's changes are committed when it ends" };
-		if (thread.slot !== "held" || !thread.workspaceRef) {
-			return { ok: false, code: "workspace_not_running", message: "The thread's workspace isn't running: continue or steer the thread, then merge once its turn ends" };
-		}
+		const ready = await this.#ensureWorkspace();
+		if (!ready.ok) return ready;
 		try {
 			const defaultBranch = await this.#defaultBranch(thread);
 			const provider = this.#providers().get(thread.providerInstance);
@@ -863,7 +870,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		const blocker = await this.#pushBlocker(thread);
 		if (blocker) return { ok: false, message: blocker.message };
-		if (thread.slot !== "held" || !thread.workspaceRef) return { ok: false, message: "The thread's workspace isn't running now: continue the thread, then ask to merge again" };
+		const ready = await this.#ensureWorkspace();
+		if (!ready.ok) return { ok: false, message: ready.message };
 		if (this.store.latestCheckpoint()?.sha !== approved.checkpoint) return { ok: false, message: "The thread has a newer checkpoint than the one approved: ask to merge again" };
 		try {
 			const fetch = this.githubFetch();
@@ -1274,6 +1282,58 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return thread.budgetUsd !== null && thread.spentUsd >= thread.budgetUsd ? `This coding thread has spent its $${thread.budgetUsd} budget` : null;
 	}
 
+	/**
+	 * Makes sure the thread has a running workspace for a tool that needs one
+	 * (push, merge, a diff not kept): a thread whose slot was given back asks
+	 * for a slot again and gets its workspace made, with no turn, and goes back
+	 * to idle. Waits up to `waitMs`. A thread queued for a slot says so, with
+	 * its place, as `workspace_queued`; the caller can try again later.
+	 */
+	async #ensureWorkspace({ waitMs = this.resumeWaitMs() }: { waitMs?: number } = {}): Promise<{ ok: true } | { ok: false; code: "workspace_queued" | "workspace_not_running"; message: string }> {
+		const deadline = Date.now() + waitMs;
+		this.#resumers++;
+		try {
+			for (;;) {
+				const thread = this.store.required();
+				if (thread.state === "archived" || thread.state === "failed" || thread.state === "waiting_input") {
+					return { ok: false, code: "workspace_not_running", message: `The thread's workspace isn't running: the thread is ${thread.state.replace("_", " ")}, so only each checkpoint's diff from the start is kept` };
+				}
+				if (thread.slot === "held" && thread.state !== "provisioning") {
+					try {
+						await this.#workspace();
+						if (this.store.required().slot === "held") return { ok: true };
+					} catch (error) {
+						if (this.store.required().slot === "held") return { ok: false, code: "workspace_not_running", message: `The thread's workspace isn't running and could not be opened: ${errorText(error)}` };
+					}
+					continue;
+				}
+				// Otherwise it is queued or being made; the step that makes it ends in idle.
+				if (thread.slot === "none") {
+					this.#reopen();
+					await this.#requestSlot();
+				}
+				this.#kick();
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) return await this.#resumeTimedOut();
+				await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 250)))]);
+			}
+		} finally {
+			this.#resumers--;
+		}
+	}
+
+	/** The thread's workspace isn't back after the wait: says whether it waits for a slot, and its place. */
+	async #resumeTimedOut(): Promise<{ ok: false; code: "workspace_queued" | "workspace_not_running"; message: string }> {
+		const thread = this.store.required();
+		if (thread.slot !== "queued") return { ok: false, code: "workspace_not_running", message: "The thread's workspace is still resuming: try again in a minute" };
+		const scheduler = codingScheduler(this.env, thread.space);
+		const place = await scheduler.position(thread.threadId);
+		const total = (await scheduler.snapshot()).queued.length;
+		const eta = place ? await scheduler.etaMs(place.position) : null;
+		const where = place ? ` (position ${place.position} of ${total}, ${eta === null ? "no ETA yet" : `ETA about ${Math.max(1, Math.round(eta / 60_000))} min`})` : "";
+		return { ok: false, code: "workspace_queued", message: `The thread's workspace is suspended and still queued for a sandbox slot${where}: try again later` };
+	}
+
 	/** A failed or stopped thread with new input waits for a slot again. Runs in the caller's transaction. */
 	#reopen(): void {
 		const thread = this.store.required();
@@ -1333,7 +1393,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const work = this.store.inboxSize() > 0;
 		// A rebuild of the environment needs the workspace as a turn does.
 		const rebuild = thread.environment.rebuildRequested;
-		if (!work && !rebuild) {
+		// A tool waiting for the workspace (`#ensureWorkspace`) needs it made too, though no turn follows; so does a thread that was already provisioning when the tool stopped waiting.
+		const resume = this.#resumers > 0 || (thread.state === "provisioning" && thread.slot === "held");
+		if (!work && !rebuild && !resume) {
 			if (thread.state === "provisioning" && thread.slot !== "held") this.store.update({ state: "idle" });
 			return;
 		}
@@ -2856,7 +2918,7 @@ export const GITHUB_APP_NOT_CONFIGURED = "GitHub App not configured: ask the Pim
 /** A push readied for the person to approve, with the checkpoint it is of; or why it can't be. */
 export type PushPreparation =
 	| { readonly ok: true; readonly request: PushApprovalRequest & { readonly checkpoint: string } }
-	| { readonly ok: false; readonly code: "github_app_not_configured" | "push_refused" | "archived" | "nothing_to_push" | "workspace_not_running" | "conflict"; readonly message: string };
+	| { readonly ok: false; readonly code: "github_app_not_configured" | "push_refused" | "archived" | "nothing_to_push" | "workspace_not_running" | "workspace_queued" | "conflict"; readonly message: string };
 
 /** A pull request readied for the person to approve; or why it can't be. */
 export type PullRequestPreparation =
@@ -2866,7 +2928,7 @@ export type PullRequestPreparation =
 /** A merge readied for the person to approve, with the checkpoint it is of; or why it can't be. */
 export type MergePreparation =
 	| { readonly ok: true; readonly request: { readonly checkpoint: string; readonly summary: string } }
-	| { readonly ok: false; readonly code: "github_app_not_configured" | "archived" | "nothing_to_push" | "workspace_not_running" | "conflict"; readonly message: string };
+	| { readonly ok: false; readonly code: "github_app_not_configured" | "archived" | "nothing_to_push" | "workspace_not_running" | "workspace_queued" | "conflict"; readonly message: string };
 
 /** What a merge did: the default branch's move, whether the thread's commits were rebased, and the thread's own branch if it was pushed too. */
 export type MergeResult = PushResult & { readonly rebased: boolean; readonly threadBranch: string | null };
@@ -2938,6 +3000,8 @@ const HEARTBEAT_MS = 30_000;
 const STUCK_MS = 20 * 60_000;
 const DETAIL_MAX = 500;
 const ADVANCE_WAIT_MS = 20_000;
+/** How long a tool waits for a suspended workspace to resume (`#ensureWorkspace`). */
+const RESUME_WAIT_MS = 120_000;
 const GIT_TIMEOUT_MS = 120_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 /** The pauses before the retries of a clone or fetch the git host rate limited: 5 s, 15 s, then 45 s. */

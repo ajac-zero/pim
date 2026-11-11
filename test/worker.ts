@@ -356,7 +356,7 @@ export const codingEvents: CodingThreadEvent[] = [];
  * workspace that fails and doesn't answer for a second counts as down; a running turn's work is autosaved every three
  * minutes, which a test may set to 0, to autosave at each heartbeat.
  */
-export const codingTimings = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000 };
+export const codingTimings = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, resumeWaitMs: 120_000 };
 
 /** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
 export const codingThreadClock: { now: number | null } = { now: null };
@@ -410,6 +410,10 @@ export class CodingThreadDO extends RealCodingThreadDO {
 
 	protected override autosaveMs(): number {
 		return codingTimings.autosaveMs;
+	}
+
+	protected override resumeWaitMs(): number {
+		return codingTimings.resumeWaitMs;
 	}
 
 	/** A thread waiting for another's environment looks for it often. */

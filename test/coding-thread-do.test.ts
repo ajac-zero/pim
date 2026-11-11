@@ -93,6 +93,7 @@ beforeEach(() => {
 	codingSchedulers.notifier = null;
 	codingSchedulers.now = null;
 	codingThreadClock.now = null;
+	codingTimings.resumeWaitMs = 120_000;
 	codingEvents.length = 0;
 });
 
@@ -428,6 +429,68 @@ describe("a coding thread", () => {
 		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", repo: { baseSha: "base0000" } });
 		expect(await fileIn(id, "a.txt")).toBe("A\n");
 		expect(await stub.checkpoints()).toHaveLength(1);
+	});
+
+	describe("resuming a released workspace for a tool", () => {
+		/** A thread with two checkpoints, whose idle slot was then taken back; the first checkpoint's diff to the second was never made. */
+		async function released(space = `space-${crypto.randomUUID()}`) {
+			codingFaux.setResponses([toolUse("write", { path: "a.txt", content: "A\n" }), fauxAssistantMessage("Wrote a."), toolUse("write", { path: "b.txt", content: "B\n" }), fauxAssistantMessage("Wrote b.")]);
+			const thread = await startThread({ space });
+			await turns(thread.id, 1);
+			await thread.stub.steer("And b.", { operationId: "b" });
+			await turns(thread.id, 2);
+			const [first] = await thread.stub.checkpoints();
+			const scheduler = codingScheduler(env, space);
+			codingSchedulers.now = Date.now() + 11 * 60_000;
+			expect(await scheduler.sweep()).toEqual({ released: [{ threadId: thread.id, why: "idle" }], admitted: [] });
+			await runDurableObjectAlarm(scheduler);
+			codingSchedulers.now = null;
+			expect(await thread.stub.status()).toMatchObject({ state: "idle", slot: "none" });
+			expect(await codingWorkspaces.list({ sessionId: thread.id })).toEqual([]);
+			return { ...thread, scheduler, first: first! };
+		}
+
+		it("makes a diff that isn't kept, by resuming the workspace with no turn, and goes back to idle", async () => {
+			const { id, stub, scheduler, first } = await released();
+			const diff = await stub.diff(first.sha);
+			expect(diff.diff).toContain("+++ b/b.txt");
+			expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", currentOperation: null, inbox: 0 });
+			expect(await codingWorkspaces.list({ sessionId: id })).toHaveLength(1);
+			expect(await fileIn(id, "a.txt")).toBe("A\n");
+			// No turn began, and the scheduler was told it is idle, so it takes the slot back in time.
+			expect(codingEvents.filter((event) => event.threadId === id)).toHaveLength(2);
+			expect((await scheduler.snapshot()).running).toEqual([expect.objectContaining({ threadId: id, activity: "idle" })]);
+			await stub.archive();
+		});
+
+		it("does nothing to a thread that already holds a slot", async () => {
+			const { id, stub, first } = await released();
+			await stub.diff(first.sha);
+			const slot = (await codingScheduler(env, `space-${id}`).snapshot()).running;
+			const workspaces = await codingWorkspaces.list({ sessionId: id });
+			await expect(inside(stub, (thread) => thread.diff("base0000"))).resolves.toMatchObject({ truncated: false });
+			await expect(stub.diff(first.sha)).resolves.toMatchObject({ since: first.sha });
+			expect((await codingScheduler(env, `space-${id}`).snapshot()).running).toEqual(slot);
+			expect(await codingWorkspaces.list({ sessionId: id })).toEqual(workspaces);
+			await stub.archive();
+		});
+
+		it("says it is queued, with its place, while its space has no free slot, and resumes once one frees", async () => {
+			const space = `space-${crypto.randomUUID()}`;
+			const { id, stub, scheduler, first } = await released(space);
+			await scheduler.setLimit(1);
+			codingFaux.setResponses([fauxAssistantMessage("Other done.")]);
+			const other = await startThread({ space });
+			await turns(other.id, 1);
+			codingTimings.resumeWaitMs = 300;
+			await expect(inside(stub, (thread) => thread.diff(first.sha))).rejects.toThrow(/still queued for a sandbox slot \(position 1 of 1, .*\)/);
+			expect(await stub.status()).toMatchObject({ slot: "queued", queue: { position: 1 }, inbox: 0 });
+			// It stays queued for the slot, which it gets, and makes its workspace, when another thread gives one up.
+			await other.stub.archive();
+			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "idle", slot: "held" }), { timeout: 10_000, interval: 50 });
+			expect(codingEvents.filter((event) => event.threadId === id)).toHaveLength(2);
+			await stub.archive();
+		});
 	});
 
 	it("checkpoints uncommitted work when its idle slot is taken back after 10 minutes, and resumes at the checkpoint in a new workspace once the kept volume is gone", async () => {

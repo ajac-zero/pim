@@ -106,6 +106,7 @@ export type CodingErrorCode =
 	| "budget_spent"
 	| "not_cancellable"
 	| "workspace_not_running"
+	| "workspace_queued"
 	| "nothing_to_push"
 	| "github_app_not_configured"
 	| "push_refused"

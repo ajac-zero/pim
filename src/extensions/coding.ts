@@ -169,7 +169,7 @@ export const coding = definePimExtension({
 			}),
 			defineTool({
 				name: "coding_diff",
-				description: `What a coding thread changed, as a git diff from where it started (or from \`since\`, a commit) to its latest checkpoint. At most ${MAX_DIFF_CHARS} characters; the thread's page has all of it.`,
+				description: `What a coding thread changed, as a git diff from where it started (or from \`since\`, a commit) to its latest checkpoint. At most ${MAX_DIFF_CHARS} characters; the thread's page has all of it. A suspended workspace is resumed automatically for a diff not kept, which may take a minute and may report that the thread is queued.`,
 				parameters: Type.Object({ thread_id: ThreadId, since: Type.Optional(Type.String({ description: "A commit to diff from: an earlier checkpoint's sha." })) }),
 				replay: "safe",
 				async execute({ thread_id, since }) {
@@ -235,7 +235,7 @@ export const coding = definePimExtension({
 			defineTool({
 				name: "coding_push",
 				description:
-					"Push a coding thread's work to its git host (GitHub or Gitea) right away, with no approval: its latest checkpoint, to its own branch (pim/…) unless you name another pim/ branch, never main or the default branch (to ship to it, use coding_merge). Then open a pull request with coding_open_pull_request. The result includes the thread's latest test runs. Its workspace must be running: push soon after its turn ends.",
+					"Push a coding thread's work to its git host (GitHub or Gitea) right away, with no approval: its latest checkpoint, to its own branch (pim/…) unless you name another pim/ branch, never main or the default branch (to ship to it, use coding_merge). Then open a pull request with coding_open_pull_request. The result includes the thread's latest test runs. A suspended workspace is resumed automatically, which may take a minute and may report that the thread is queued for a sandbox slot (error workspace_queued): try again later.",
 				parameters: Type.Object({ thread_id: ThreadId, branch: Type.Optional(Type.String({ description: "A branch starting with pim/; the thread's own by default." })) }),
 				// Run again, it finds the branch already there.
 				replay: "safe",
@@ -258,7 +258,7 @@ export const coding = definePimExtension({
 			defineTool({
 				name: "coding_merge",
 				description:
-					"Ship a coding thread's work: merge its latest checkpoint into the repository's default branch on the git host right away, with no approval, so look at coding_diff and coding_tests first. Pim fetches the default branch into the thread's workspace, fast-forwards or rebases the checkpoint onto it, and moves the default branch forward through the host's integration (never a force push; if it moves meanwhile, the rebase is retried once), and updates the thread's own pim/… branch to the same commit. If the thread's changes conflict with the default branch, the rebase is aborted and nothing is pushed: coding_steer the thread to rebase onto origin/<default branch> and resolve the conflicts, then merge again after its turn ends. Its workspace must be running. Returns the default branch's new commit and the thread's latest test runs.",
+					"Ship a coding thread's work: merge its latest checkpoint into the repository's default branch on the git host right away, with no approval, so look at coding_diff and coding_tests first. Pim fetches the default branch into the thread's workspace, fast-forwards or rebases the checkpoint onto it, and moves the default branch forward through the host's integration (never a force push; if it moves meanwhile, the rebase is retried once), and updates the thread's own pim/… branch to the same commit. If the thread's changes conflict with the default branch, the rebase is aborted and nothing is pushed: coding_steer the thread to rebase onto origin/<default branch> and resolve the conflicts, then merge again after its turn ends. A suspended workspace is resumed automatically, which may take a minute and may report that the thread is queued for a sandbox slot (error workspace_queued): try again later. Returns the default branch's new commit and the thread's latest test runs.",
 				parameters: Type.Object({ thread_id: ThreadId }),
 				// Run again, it finds the work already merged.
 				replay: "safe",

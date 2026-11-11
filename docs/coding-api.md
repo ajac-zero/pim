@@ -20,7 +20,8 @@ Every error is JSON with the HTTP status:
 | `archived` | 409 | The thread is archived: only reading it works |
 | `budget_spent` | 409 | Steering a thread that spent its budget, or continuing it without a bigger `budgetUsd` |
 | `not_cancellable` | 409 | Cancelling a thread whose turn has started: abort it instead |
-| `workspace_not_running` | 409 | A diff from a commit other than the start, or a push, while the thread's workspace isn't running |
+| `workspace_not_running` | 409 | A diff from a commit other than the start, a push or a merge, when the thread's workspace can't be resumed (archived or failed thread, or a workspace that won't open) |
+| `workspace_queued` | 409 | The same, when the suspended thread is still queued for a sandbox slot or resuming after about two minutes: try again later. A suspended workspace is otherwise resumed automatically |
 | `nothing_to_push` | 409 | A push before the thread has committed a checkpoint |
 | `github_app_not_configured` | 409 | A push on a Pim whose GitHub App isn't set up; nothing was asked |
 | `push_refused` | 403 | A push (a merge is `coding_merge`'s) to `main`, `master`, the default branch, or a branch outside the deployment's prefix (`pim/`) |

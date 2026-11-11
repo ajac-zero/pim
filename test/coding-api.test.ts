@@ -1,6 +1,6 @@
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { getAgentByName } from "agents";
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingEnvironment, CodingRepoSettings, CodingThreadSummary, CodingThreadView } from "../src/coding/api";
@@ -18,7 +18,7 @@ import { CODING_EVENT } from "../src/transcript";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
 import { installed } from "./fixtures/repos";
-import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, codingWorkspaces, faux } from "./worker";
+import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, codingSchedulers, codingWorkspaces, faux } from "./worker";
 
 // The API and the agents' tools over real coding threads: each works in the in-memory workspace with a fake git and the
 // scripted `coding-faux` model, in the space of the file's account (`OWNER`), whose chats talk to the scripted `faux`.
@@ -62,6 +62,19 @@ async function start(body: Record<string, unknown> = {}) {
 	const { status, body: view } = await post<CodingThreadView>("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, ...body });
 	expect(status).toBe(201);
 	return view;
+}
+
+/** Takes the idle thread's slot back, as the scheduler does after 10 minutes, which deletes its workspace. */
+async function release(threadId: string, space: string) {
+	const scheduler = codingScheduler(env, space);
+	codingSchedulers.now = Date.now() + 11 * 60_000;
+	try {
+		expect((await scheduler.sweep()).released).toEqual([{ threadId, why: "idle" }]);
+		await runDurableObjectAlarm(scheduler);
+	} finally {
+		codingSchedulers.now = null;
+	}
+	expect(await codingWorkspaces.list({ sessionId: threadId })).toEqual([]);
 }
 
 /** The thread's `thread.turn_ended` events once it has had `count`. */
@@ -383,6 +396,25 @@ describe("the coding threads API", () => {
 		expect(log.at(-1)).toMatchObject({ kind: "thread.pushed", data: { repo: "acme/demo", branch: thread.repo.branch, before: null, after: head, outcome: "created" } });
 	});
 
+	it("resumes a thread whose workspace was released to push it, with no turn", async () => {
+		codingFaux.setResponses([toolUse("write", { path: "hello.txt", content: "Hello!\n" }), fauxAssistantMessage("Added hello.txt.")]);
+		const thread = await start();
+		const [ended] = await turns(thread.id, 1);
+		const github = fakeGitHub();
+		codingGitHub.app = github.app;
+		codingGitHub.fetch = github.fetch;
+		await release(thread.id, ended!.space);
+		const asked = await post(`/coding/threads/${thread.id}/push`);
+		expect(asked.status).toBe(202);
+		expect((await view(thread.id)).slot).toBe("held");
+		await post(`/approvals/${asked.body.approval}/approve`);
+		expect(github.pushes).toEqual([`0000000000000000000000000000000000000000 ${hex40(ended!.checkpoint!)} refs/heads/${thread.repo.branch}`]);
+		expect(codingEvents.filter((event) => event.threadId === thread.id)).toHaveLength(1);
+		// Released again before the approval is given, it is resumed for the push itself.
+		await release(thread.id, ended!.space);
+		expect(await post(`/coding/threads/${thread.id}/push`, { branch: `pim/again-${thread.id.slice(0, 8)}` })).toMatchObject({ status: 202 });
+	});
+
 	it("starts a thread with rebuildEnvironment=true", async () => {
 		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
 		const thread = await start({ rebuildEnvironment: true });
@@ -457,7 +489,7 @@ describe("merging a coding thread into the default branch", () => {
 	const MAIN_REMOTE = "https://pim.test/api/coding/git/acme/demo.git";
 
 	/** A thread that added hello.txt, and the agent merging it: what the tool answered once the person approved, and the log's merge events. */
-	async function merged(options: { remote?: Record<string, string>; patchAnswers?: number[]; refs?: Record<string, string> } = {}) {
+	async function merged(options: { remote?: Record<string, string>; patchAnswers?: number[]; refs?: Record<string, string>; released?: boolean } = {}) {
 		codingFaux.setResponses([toolUse("write", { path: "hello.txt", content: "Hello!\n" }), fauxAssistantMessage("Added hello.txt.")]);
 		const thread = await start();
 		const [ended] = await turns(thread.id, 1);
@@ -465,6 +497,7 @@ describe("merging a coding thread into the default branch", () => {
 		codingGitHub.app = github.app;
 		codingGitHub.fetch = github.fetch;
 		if (options.remote) fakeRemotes.set(MAIN_REMOTE, options.remote);
+		if (options.released) await release(thread.id, ended!.space);
 		try {
 			let told = "";
 			faux.setResponses([
@@ -486,6 +519,15 @@ describe("merging a coding thread into the default branch", () => {
 			fakeRemotes.set(MAIN_REMOTE, { "README.md": "# Demo\n" });
 		}
 	}
+
+	it("resumes a thread whose workspace was released, to merge it", async () => {
+		const { thread, ended, result, log } = await merged({ released: true });
+		const head = hex40(ended.checkpoint!);
+		expect(JSON.parse(result)).toMatchObject({ message: expect.stringContaining(`main is now at ${head}`), sha: head });
+		expect(log.filter((event) => event.kind === "thread.merged")).toHaveLength(1);
+		expect((await view(thread.id)).slot).toBe("held");
+		expect(codingEvents.filter((event) => event.threadId === thread.id)).toHaveLength(1);
+	});
 
 	it("fast-forwards the default branch to the thread's checkpoint and updates its own branch, never by force", async () => {
 		const { thread, ended, github, result, log } = await merged();

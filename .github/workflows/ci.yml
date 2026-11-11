@@ -24,4 +24,6 @@ jobs:
       - run: pnpm lint
       # The Chrome that stands in for Browser Run in the browser tests.
       - run: node scripts/install-test-browser.mjs
+      # test/people.test.ts can hang for good in workerd, past even the test timeout, so the step has a hard limit.
       - run: pnpm test
+        timeout-minutes: 75

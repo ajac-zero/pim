@@ -50,6 +50,12 @@ describe("Cloudflare container egress", () => {
 				).status,
 			).toBe(403);
 	});
+	it("with the catch-all target allows only what the policy lists, and still denies trailing dots and ports", async () => {
+		const forward = async () => new Response("ok");
+		expect((await handleEgress(new Request("https://api.example/api/git"), policy, "*", forward)).status).toBe(200);
+		for (const url of ["https://denied.example/", "https://api.example./api/git", "https://api.example:8443/api/git"])
+			expect((await handleEgress(new Request(url), policy, "*", async () => { throw new Error("must not forward"); })).status).toBe(403);
+	});
 	it("does not inject on HTTP or outside the normalized path prefix", async () => {
 		for (const url of ["http://api.example/api/git", "https://api.example/api/gitx", "https://api.example/api/git/%2e%2e/other", "https://api.example/api/git/%2fother"]) {
 			await handleEgress(new Request(url), policy, "api.example", async (request) => {

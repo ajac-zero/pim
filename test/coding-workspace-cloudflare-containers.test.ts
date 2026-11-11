@@ -119,6 +119,7 @@ function hostFixture() {
 		},
 		setInactivityTimeout: async () => {},
 		interceptOutboundHttp: async () => {},
+		interceptAllOutboundHttp: async () => {},
 		interceptOutboundHttps: async () => {},
 		snapshotContainer: async () => {
 			calls.push("snapshot");

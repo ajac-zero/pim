@@ -5,7 +5,7 @@ import type { EgressPolicy } from "./src/coding/workspace/types";
 export async function handleEgress(request: Request, policy: EgressPolicy, target: string, forward: typeof fetch = fetch): Promise<Response> {
 	const url = new URL(request.url);
 	const denied = () => new Response("Forbidden", { status: 403 });
-	if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || !egressAllows({ allow: [target] }, url.hostname) || !egressAllows(policy, url.hostname)) return denied();
+	if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || (target !== "*" && !egressAllows({ allow: [target] }, url.hostname)) || !egressAllows(policy, url.hostname)) return denied();
 	if (url.port && url.port !== (url.protocol === "https:" ? "443" : "80")) return denied();
 	const headers = new Headers(request.headers);
 	headers.delete("host");

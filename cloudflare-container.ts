@@ -48,13 +48,13 @@ export class ContainerHost implements ContainerHostApi {
 	}
 	private async intercept(saved: Saved) {
 		const policy = egressPolicy(saved.spec.egress);
-		if (policy.allow.length > 64) throw new Error("Cloudflare workspaces allow at most 64 egress hosts");
-		for (const target of policy.allow) {
-			if (!/^(\*\.)?[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(target)) throw new Error("Invalid egress hostname");
-			const handler = this.ctx.exports.ContainerEgress({ props: { sessionId: saved.spec.sessionId, target } });
-			await this.container.interceptOutboundHttp(target, handler);
-			await this.container.interceptOutboundHttps(target, handler);
-		}
+		if (policy.allow.length > 256) throw new Error("Cloudflare workspaces allow at most 256 egress hosts");
+		for (const target of policy.allow) if (!/^(\*\.)?[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(target)) throw new Error("Invalid egress hostname");
+		// A container may hold at most 128 intercept entries, and each host needs two. Two catch-alls cover every
+		// host; the handler allows or denies each request against the current policy, by the URL it will fetch.
+		const handler = this.ctx.exports.ContainerEgress({ props: { sessionId: saved.spec.sessionId, target: "*" } });
+		await this.container.interceptAllOutboundHttp(handler);
+		await this.container.interceptOutboundHttps("*", handler);
 	}
 	private async boot(saved: Saved) {
 		await this.intercept(saved);

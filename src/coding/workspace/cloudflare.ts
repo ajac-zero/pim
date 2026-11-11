@@ -90,7 +90,7 @@ export class CloudflareContainerProvider implements WorkspaceProvider {
 					else init.signal.addEventListener("abort", cancel, { once: true });
 				}
 				const response = await host.request(
-					new Request(`http://agentd${route}${url.search}`, { method, headers, body: init.json !== undefined ? JSON.stringify(init.json) : init.body, signal: init.signal }),
+					new Request(`http://agentd${route}${url.search}`, { method, headers, body: init.json !== undefined ? JSON.stringify(init.json) : init.body }),
 				);
 				if (init.signal?.aborted && route === "/exec") {
 					void host

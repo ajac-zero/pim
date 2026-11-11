@@ -544,7 +544,11 @@ describe("the model gateway", () => {
 		const [call] = await charged(stub, 1);
 		expect(call).toMatchObject({ input: 1200, cacheRead: 5000, cacheWrite: 300 });
 		answer = () => streamed(ANTHROPIC_STREAM);
-		expect((await gateway("/anthropic/v1/messages", token, { body: { model: "claude-sonnet-4-5", stream: true, messages: [] } })).status).toBe(200);
+		const again = await gateway("/anthropic/v1/messages", token, { body: { model: "claude-sonnet-4-5", stream: true, messages: [] } });
+		expect(again.status).toBe(200);
+		// Read to its end and charged, so nothing of the request is still running when the file ends and its worker is closed.
+		await again.text();
+		await charged(stub, 2);
 	});
 });
 

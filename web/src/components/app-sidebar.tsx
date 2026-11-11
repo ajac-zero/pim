@@ -843,28 +843,21 @@ export type StateBadgeState =
 
 /**
  * The state of a chat or coding thread, on the top right corner of its icon,
- * opposite who started it. The icon's wrapper is `relative`. One mark shows at
+ * opposite who started it. The mark sits on a small background-colored disc,
+ * the same for every icon. The icon's wrapper is `relative`. One mark shows at
  * a time; `label` names a queued, setting-up, error or attention mark for screen readers.
  */
 export function StateBadge({
   state,
   label,
-  backed = false,
 }: {
   state: StateBadgeState | null;
   label?: string;
-  /** Sits on a background-colored disc, for an icon with no tile of its own to read against. */
-  backed?: boolean;
 }) {
   const { t } = useI18n();
   if (!state) return null;
   return (
-    <span
-      className={cn(
-        "-top-0.5 -right-1 absolute flex size-2.5 items-center justify-center",
-        backed && "-top-1 -right-1.5 size-3.5 rounded-full bg-background",
-      )}
-    >
+    <span className="-top-1 -right-1.5 absolute flex size-3.5 items-center justify-center rounded-full bg-background">
       {state === "working" ? (
         <Loader2
           className="size-2.5 animate-spin text-primary motion-reduce:animate-none"

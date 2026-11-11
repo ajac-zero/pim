@@ -206,11 +206,7 @@ export function CodingHarnessMark({
   return (
     <span className="relative flex shrink-0">
       <HarnessIcon harness={harness} className={className} />
-      <StateBadge
-        state={codingStateBadge(state, unread)}
-        label={label}
-        backed
-      />
+      <StateBadge state={codingStateBadge(state, unread)} label={label} />
       <span className="sr-only">
         {t("codingState")}: <span>{label}</span>
       </span>

@@ -319,6 +319,15 @@ describe("an agent's contacts", () => {
 			(await (await pim.harness.pi()).inspect(BACKGROUND_CONTEXT)).tasks.flatMap(({ record, state }) => (record.kind === "pi.tool" ? [state.kind] : [])),
 		);
 		expect(calls).toEqual(["suspended", "suspended"]);
+		// The diagnostics say what each waits on: the agent on its task, its contact on the person.
+		const [waited] = await tasksOf(session);
+		const { items } = (await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.diagnosticsReport({ kind: "runs" }))).sections.runs!;
+		expect(items).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ chat: session, waiting_on: `tasks it handed out: ${waited!.id} to Researcher (auth-required)` }),
+				expect.objectContaining({ agent: "Researcher", waiting_on: expect.stringContaining(`the person's decision on approval ${approval.id}`) }),
+			]),
+		);
 		expect(result).toBe("");
 		await post(`/approvals/${approval.id}/approve`);
 		expect(await booked).toMatchObject({ status: "done", replies: ["Booked: confirmation 77."] });

@@ -836,7 +836,23 @@ export type WorkStep = {
   tool: string | null;
   text: string | null;
   approval?: ApprovalStatus;
+  /** A tool call's: when it began, as the model's answer ended. */
+  at?: number;
+  /** A tool call's: how long it took, until its result; null while it goes on. */
+  ms?: number | null;
+  /** How long of that it waited for its approval to be decided. */
+  waitedMs?: number;
 };
+
+/** An approval as the work reads it: how it stands, and when it was asked and decided. */
+export type WorkApproval = {
+  status: ApprovalStatus;
+  createdAt: number;
+  decidedAt: number | null;
+};
+
+/** Where a stretch of work's time went: the model's answers, its tool calls apart from approvals, and waiting for those. */
+export type WorkTime = { thinking: number; tools: number; approvals: number };
 
 /** One row of the chat as the person reads it. */
 export type ThreadRow =
@@ -858,8 +874,30 @@ export type ThreadRow =
       steps: WorkStep[];
       /** How long it took, in ms; null while it goes on, or when it's unknown where it began. */
       ms: number | null;
+      /** Where that time went, once it's known. */
+      time: WorkTime | null;
       live: boolean;
     };
+
+/**
+ * When the agent's model began the answer it is on now: the latest thing said
+ * or result that came since the person last spoke, while none of the calls
+ * made since then goes on; null while one does.
+ */
+export function thinkingSince(entries: readonly ThreadEntry[]): number | null {
+  const going = new Set<string>();
+  let latest: number | null = null;
+  for (const entry of entries) {
+    if (entry.at !== undefined) latest = Math.max(latest ?? entry.at, entry.at);
+    if (entry.kind !== "item") continue;
+    if (entry.source === "user") going.clear();
+    else if (entry.item.type === "function_call")
+      going.add((entry.item as FunctionCallItem).call_id);
+    else if (entry.item.type === "function_call_output")
+      going.delete((entry.item as FunctionCallOutputItem).call_id);
+  }
+  return going.size === 0 ? latest : null;
+}
 
 /**
  * The steps an assistant block shows: its reasoning's headings, or a tool it
@@ -868,7 +906,7 @@ export type ThreadRow =
 function stepsOf(
   item: ORItem,
   lines: Readonly<Record<string, string>>,
-  approvals: Readonly<Record<string, ApprovalStatus>>,
+  approvals: Readonly<Record<string, WorkApproval>>,
 ): WorkStep[] {
   if (item.type === "reasoning") {
     return reasoningHeadings(
@@ -885,7 +923,7 @@ function stepsOf(
       {
         tool: call.name,
         text: lines[call.call_id] ?? null,
-        ...(approval && { approval }),
+        ...(approval && { approval: approval.status }),
       },
     ];
   }
@@ -912,13 +950,19 @@ export function layoutThread(
     work?: {
       running: boolean;
       lines?: Readonly<Record<string, string>>;
-      /** The status of the approval each gated call (by call id) filed. */
-      approvals?: Readonly<Record<string, ApprovalStatus>>;
+      /** The approval each gated call (by call id) filed. */
+      approvals?: Readonly<Record<string, WorkApproval>>;
     };
   },
 ): ThreadRow[] {
   const rows: ThreadRow[] = [];
   let steps: WorkStep[] = [];
+  /** The work's tool calls, by call id, for their results to end. */
+  let calls = new Map<string, WorkStep>();
+  /** When each answer that called tools ended, and when the last of its calls did: calls of one answer may run side by side. */
+  let rounds = new Map<number, number>();
+  /** How long the work's calls waited for their approvals. */
+  let waited = 0;
   let workKey = "";
   /** When the last row was said, where the work after it began. */
   let since: number | null = null;
@@ -928,18 +972,35 @@ export function layoutThread(
   const approvals = options.work?.approvals ?? {};
   const fold = (end: number | null, live = false) => {
     if (options.work && steps.length > 0) {
+      const ms =
+        !live && since !== null && end !== null
+          ? Math.max(0, end - since)
+          : null;
+      // What the tools didn't take, the model did: writing its answers, and waiting to try again.
+      const tools = [...rounds].reduce(
+        (sum, [began, ended]) => sum + Math.max(0, ended - began),
+        0,
+      );
       rows.push({
         kind: "work",
         key: `work:${workKey}`,
         steps,
-        ms:
-          !live && since !== null && end !== null
-            ? Math.max(0, end - since)
-            : null,
+        ms,
+        time:
+          ms === null
+            ? null
+            : {
+                thinking: Math.max(0, ms - tools),
+                tools: Math.max(0, tools - waited),
+                approvals: waited,
+              },
         live,
       });
     }
     steps = [];
+    calls = new Map();
+    rounds = new Map();
+    waited = 0;
   };
   const own = (entry: ThreadEntry) => {
     fold(until);
@@ -982,15 +1043,40 @@ export function layoutThread(
         } else if (options.shown(call)) own(entry);
         else {
           if (steps.length === 0) workKey = entry.key;
-          steps.push(...stepsOf(item, lines, approvals));
+          // The call began as the model's answer that made it ended.
+          for (const step of stepsOf(item, lines, approvals)) {
+            step.at = entry.at;
+            step.ms = null;
+            calls.set(call.call_id, step);
+            steps.push(step);
+          }
+          rounds.set(entry.at, rounds.get(entry.at) ?? entry.at);
           until = entry.at;
         }
         break;
       }
-      case "function_call_output":
+      case "function_call_output": {
         // Shown with its call; the step it ends lasted until it came.
+        const output = item as FunctionCallOutputItem;
+        const step = calls.get(output.call_id);
+        if (step?.at !== undefined) {
+          step.ms = Math.max(0, entry.at - step.at);
+          rounds.set(
+            step.at,
+            Math.max(rounds.get(step.at) ?? step.at, entry.at),
+          );
+          const approval = approvals[output.call_id];
+          if (approval?.decidedAt != null) {
+            step.waitedMs = Math.max(
+              0,
+              approval.decidedAt - approval.createdAt,
+            );
+            waited += step.waitedMs;
+          }
+        }
         until = entry.at;
         break;
+      }
       default:
         // Unknown internal items are not a user-facing message either.
         break;

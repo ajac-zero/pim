@@ -18,6 +18,7 @@ import {
 	type HarnessSettings,
 	InboxDoc,
 	LiveDoc,
+	type LiveState,
 	type ModelRef,
 	ProviderDoc,
 	type TaskId,
@@ -184,7 +185,7 @@ import { LegacyFiles } from "./legacy-files";
 import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "./notes";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
 import { type DeploymentSettings, deploymentSettings, readDeployment } from "./deployment";
-import { DiagnosticEvents, diagnose, scrubValue } from "./diagnostics";
+import { DiagnosticEvents, diagnose, scrub, scrubValue, type Turn, turnsOf } from "./diagnostics";
 import { dispatch, HttpError, readJson, type Route, routeOf } from "./http";
 import type { ClientMessage, PublicApproval, ServerMessage, ToolInfo } from "./protocol";
 import { generateVapidKeys, type PushSubscription, sendPush, validSubscription, type VapidKeys } from "./push";
@@ -223,7 +224,7 @@ import { HARNESSES, type Harness as CodingHarness, isHarness } from "./coding/va
 import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcript";
-import { Stalls, stoppable } from "./run-guard";
+import { RunWatch, runKey, stoppable } from "./run-guard";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import type { RunTags } from "./model-calls";
 import { type CallInfo, type Limits, parseLimits, sessionCost, UsageMeter } from "./usage";
@@ -417,6 +418,8 @@ const STOP_WAIT_MS = 5_000;
 /** How long an agent's run may go without any progress before it is stopped, with a note: a call that never returns can't hold a chat's events for good. A wait for the person, or for a retry, is not a stall. */
 const STALL_MS = 30 * 60 * 1000;
 const WATCHDOG_CALLBACK = "watchRuns";
+/** The most chats the diagnostics read the turns of at once, those at work most recently. */
+const TURN_CHATS = 20;
 /** What wakes the chats held on a subscription's usage limit once its cooldown ends (see ./provider-cooldowns.ts). */
 const COOLDOWN_CALLBACK = "retryAfterCooldown";
 /** How long an erasure waits for runs to stop and connectors to unsubscribe before wiping anyway. */
@@ -1428,7 +1431,7 @@ export class Pim extends DurableAgent<Env> {
 		const { tasks } = await (await this.harness.pi()).inspect(BACKGROUND_CONTEXT);
 		const held = tasks.find(({ record }) => String(record.conversationId) === conversation && this.#isHeld(record));
 		if (!held) return false;
-		await this.harness.resumeTask(conversation, held.record.id);
+		await this.#resumeTask(conversation, held.record.id);
 		return true;
 	}
 
@@ -3290,7 +3293,7 @@ export class Pim extends DurableAgent<Env> {
 			await this.#selectAbilities(approval.session);
 			const task = this.#tasks.of(approval.session);
 			if (task && this.#tasks.setState(task.id, "working")) this.#tasksChanged(task.root);
-			await this.harness.resumeTask(approval.session, call);
+			await this.#resumeTask(approval.session, call);
 		}
 		return decided;
 	}
@@ -4179,7 +4182,7 @@ export class Pim extends DurableAgent<Env> {
 		}
 		if (tasks[0]!.waits) {
 			if (tasks.some((task) => !TERMINAL_STATES.has(task.state))) return;
-			if ((await this.harness.resumeTask(requester, Number(batch) as TaskId)) !== "terminal") return;
+			if ((await this.#resumeTask(requester, Number(batch) as TaskId)) !== "terminal") return;
 			// The call ended without them, as when its chat was stopped: the answers come in an update.
 			this.#tasks.stopWaiting(batch);
 		}
@@ -4606,12 +4609,19 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
+	/** Wakes a suspended task of `session`, and the watchdog with it: nothing watched its run while it waited. */
+	async #resumeTask(session: string, task: TaskId): ReturnType<PiHarness["resumeTask"]> {
+		const result = await this.harness.resumeTask(session, task);
+		void this.#armWatchdog().catch((error) => console.warn("arming the run watchdog failed", error));
+		return result;
+	}
+
 	/** How long a run may make no progress before it is stopped. */
 	protected stallMs(): number {
 		return STALL_MS;
 	}
 
-	readonly #stalls = new Stalls();
+	readonly #runWatch = new RunWatch(this.ctx.storage.sql);
 
 	/**
 	 * Looks at the runs again in a while, once, whoever asks: a space with no
@@ -4628,8 +4638,9 @@ export class Pim extends DurableAgent<Env> {
 	 * Stops the run of an agent that has made no progress for a long while,
 	 * with a note to the agent, so that one call that never returns can't hold
 	 * a chat and what is queued behind it for good. A run waiting for the
-	 * person's decision, or for a retry, makes none by design, and is left be:
-	 * Stop ends those.
+	 * person's decision, for tasks it handed out, or for a retry, makes none by
+	 * design, and is left be: Stop ends those. Every run is noted, with when it
+	 * was first seen at work, for the diagnostics to tell.
 	 */
 	async watchRuns(look?: { via: "delayed" | "scheduled" }): Promise<void> {
 		if (this.#closed()) return;
@@ -4637,17 +4648,21 @@ export class Pim extends DurableAgent<Env> {
 		const { tasks } = await pi.inspect(BACKGROUND_CONTEXT);
 		const byConversation = new Map<string, typeof tasks[number][]>();
 		for (const task of tasks) if (!task.record.background) byConversation.set(String(task.record.conversationId), [...(byConversation.get(String(task.record.conversationId)) ?? []), task]);
+		const now = Date.now();
+		const seen = new Set<string>();
 		const watched = new Set<string>();
 		const stalled: string[] = [];
 		for (const [session, group] of byConversation) {
-			if (group.some((task) => task.state.kind === "suspended")) continue;
 			const live = await pi.snapshot(LiveDoc, Number(session) as ConversationId, BACKGROUND_CONTEXT);
-			if (live?.run === undefined || live.generation?.retry !== undefined || live.generation?.deferred !== undefined || live.compactions?.some((compaction) => compaction.retry !== undefined)) continue;
+			if (live?.run === undefined) continue;
+			seen.add(session);
+			// In task order: a restart lists them in another.
+			const unchanged = await this.#runWatch.observe(session, runKey(live.run), JSON.stringify([[...group].sort((a, b) => a.record.id - b.record.id).map((task) => [task.record.id, task.state.kind]), live]), now);
+			if (group.some((task) => task.state.kind === "suspended") || live.generation?.retry !== undefined || live.generation?.deferred !== undefined || live.compactions?.some((compaction) => compaction.retry !== undefined)) continue;
 			watched.add(session);
-			const fingerprint = JSON.stringify([group.map((task) => [task.record.id, task.state.kind]), live]);
-			if (this.#stalls.observe(session, fingerprint, Date.now()) >= this.stallMs()) stalled.push(session);
+			if (unchanged >= this.stallMs()) stalled.push(session);
 		}
-		this.#stalls.keepOnly(new Set([...watched].filter((session) => !stalled.includes(session))));
+		this.#runWatch.keepOnly(new Set([...seen].filter((session) => !stalled.includes(session))));
 		for (const session of stalled) {
 			this.#note("run_stalled", { session, ms: this.stallMs() });
 			await this.#stop(session, `[Pim] Your last turn was stopped: it made no progress for ${describeWait(this.stallMs())}, so a call of yours may be stuck. Look at what you were doing, and carry on or tell the person.`).catch((error) => console.warn("stopping a stalled run failed", error));
@@ -4677,7 +4692,7 @@ export class Pim extends DurableAgent<Env> {
 				this.store.recordApprovalResult(approval.id, "The space restarted while this was running, so it may have partly run, and it was not run again. Check before asking again.");
 			}
 			console.warn(JSON.stringify({ event: "pim.approval_resumed", owner: this.name, session, approval: approval.id, status: approval.status }));
-			await this.harness.resumeTask(session, record.id);
+			await this.#resumeTask(session, record.id);
 		}
 	}
 
@@ -4986,7 +5001,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** What went wrong in this space lately, by kind, for the admin's majordomo (see ./diagnostics.ts). */
-	diagnosticsReport(query: { since?: string; kind?: string; limit?: number }) {
+	diagnosticsReport(query: { since?: string; kind?: string; limit?: number; chat?: string }) {
 		this.#assertOpen();
 		return diagnose(
 			{
@@ -4998,6 +5013,8 @@ export class Pim extends DurableAgent<Env> {
 					const errors = await this.#heldErrors(held);
 					return [...held].map((conversation) => ({ chat: this.store.publicId(conversation), agent: this.#roleOf(conversation).agent.name, error: errors.get(conversation) ?? "" }));
 				},
+				busyRuns: () => this.#busyRuns(),
+				turns: (chat, since) => this.#turns(chat, since),
 				chatId: (session) => this.store.publicId(session),
 				triggerFailures: (since, limit) => (this.triggerEngine() ? triggerFailures(this.ctx.storage.sql, since, limit) : null),
 				connectors: () => this.apps.servers(),
@@ -5005,6 +5022,98 @@ export class Pim extends DurableAgent<Env> {
 			},
 			query,
 		);
+	}
+
+	/**
+	 * The turns of a chat, by its public id, or else those of the chats at work
+	 * since `since`, the most recently first and at most `TURN_CHATS` of them,
+	 * from their transcripts and the approvals their calls filed.
+	 */
+	async #turns(chat: string | null, since: number): Promise<{ chat: string; agent: string; turn: Turn }[]> {
+		const now = Date.now();
+		const all = await this.harness.sessions.list();
+		const busy = new Set(all.flatMap((info) => (info.busy ? [info.id] : [])));
+		let sessions: string[];
+		if (chat !== null) {
+			const session = this.store.sessionOf(chat);
+			if (session === undefined) throw new Error(`No chat ${chat}`);
+			sessions = [session];
+		} else {
+			const updated = (session: string) => this.store.sessionInfo(session)?.updatedAt ?? 0;
+			sessions = all
+				.map((info) => info.id)
+				.filter((session) => busy.has(session) || updated(session) >= since)
+				.sort((a, b) => updated(b) - updated(a))
+				.slice(0, TURN_CHATS);
+		}
+		const approvals = this.store.approvals();
+		const found = [];
+		for (const session of sessions) {
+			const calls = new Map(
+				approvals.flatMap((approval) =>
+					approval.session === session && approval.callId !== null
+						? [[approval.callId, { id: approval.id, status: approval.status, createdAt: approval.createdAt, decidedAt: approval.decidedAt, decidedBy: approval.decidedBy }] as const]
+						: [],
+				),
+			);
+			const messages = (await this.harness.session(session).messages()).flatMap((entry) => entry.model ?? []);
+			for (const turn of turnsOf(messages, calls, now, busy.has(session))) {
+				if (turn.endedAt >= since) found.push({ chat: this.store.publicId(session), agent: this.#roleOf(session).agent.name, turn });
+			}
+		}
+		return found;
+	}
+
+	/**
+	 * The chats whose run is at work, or waits, now: what each waits on, and,
+	 * as the watchdog saw it, since when it has been at work and since when
+	 * nothing about it changed. Runs held after a model error are told apart.
+	 */
+	async #busyRuns(): Promise<{ chat: string; agent: string; waitingOn: string; seenAt: number | null; unchangedSince: number | null }[]> {
+		const pi = await this.harness.pi();
+		const { tasks } = await pi.inspect(BACKGROUND_CONTEXT);
+		const held = await this.#heldSessions();
+		const byConversation = new Map<string, typeof tasks[number][]>();
+		for (const task of tasks) if (!task.record.background) byConversation.set(String(task.record.conversationId), [...(byConversation.get(String(task.record.conversationId)) ?? []), task]);
+		const pending = this.store.approvals().filter((approval) => approval.status === "pending");
+		const runs = [];
+		for (const [session, group] of byConversation) {
+			if (held.has(session)) continue;
+			const live = await pi.snapshot(LiveDoc, Number(session) as ConversationId, BACKGROUND_CONTEXT);
+			if (live?.run === undefined) continue;
+			const seen = this.#runWatch.seen(session);
+			const known = seen?.run === runKey(live.run) ? seen : undefined;
+			runs.push({
+				chat: this.store.publicId(session),
+				agent: this.#roleOf(session).agent.name,
+				waitingOn: this.#waitingOn(live, group, pending.filter((approval) => approval.session === session)),
+				seenAt: known?.seenAt ?? null,
+				unchangedSince: known?.since ?? null,
+			});
+		}
+		return runs;
+	}
+
+	/** What a run waits on, in a few words: the person, tasks it handed out, a retry, its tools or the model. Its free text is scrubbed, and its ids are left whole to look up. */
+	#waitingOn(live: LiveState, group: readonly { record: { id: TaskId; kind: string }; state: { kind: string } }[], approvals: readonly Approval[]): string {
+		// Only the approvals its own calls wait for: one filed outside a call has none to hold.
+		const calls = new Set((live.tools ?? []).map((slot) => slot.callId));
+		const waits: string[] = approvals.filter((approval) => approval.callId !== null && calls.has(approval.callId)).map((approval) =>
+			approval.review?.status === "reviewing" ? `the majordomo's review of approval ${approval.id}: ${scrub(approval.summary, 200)}` : `the person's decision on approval ${approval.id}: ${scrub(approval.summary, 200)}`,
+		);
+		for (const task of group) {
+			if (task.record.kind !== "pi.tool" || task.state.kind !== "suspended") continue;
+			const handed = this.#tasks.inBatch(String(task.record.id)).filter((given) => !TERMINAL_STATES.has(given.state));
+			if (handed.length > 0) waits.push(`tasks it handed out: ${handed.map((given) => `${given.id} to ${this.#roleOf(given.conversation).agent.name} (${given.state})`).join(", ")}`);
+		}
+		if (waits.length > 0) return waits.join("; ");
+		const retry = live.generation?.retry ?? live.compactions?.find((compaction) => compaction.retry !== undefined)?.retry;
+		if (retry) return `a retry of the model at ${new Date(retry.at).toISOString()}, after: ${scrub(retry.error, 200)}`;
+		if (live.generation?.deferred) return "the model's deferred answer";
+		if (live.compactions?.some((compaction) => compaction.blocking)) return "compacting the chat";
+		const running = (live.tools ?? []).filter((slot) => slot.status !== "done").map((slot) => slot.name);
+		if (running.length > 0) return `its tool calls: ${running.join(", ")}`;
+		return "the model's answer";
 	}
 
 	/** How this Pim is doing: its version, its Durable Object, what it holds and how the deployment is set, for the admin's majordomo. Addresses and keys are left out. */
@@ -8269,7 +8378,7 @@ export class Pim extends DurableAgent<Env> {
 		this.#assertOpen();
 		if (this.guestBot()?.owner !== owner) return;
 		const call = await this.#waitingCall({ session, callId });
-		if (call) await this.harness.resumeTask(session, call);
+		if (call) await this.#resumeTask(session, call);
 	}
 
 	/**

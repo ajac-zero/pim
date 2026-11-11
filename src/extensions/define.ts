@@ -93,7 +93,7 @@ export type AbilityContext = {
 	conversationOf(session: string): { readonly chat: string; readonly agent: { readonly id: string; readonly name: string; readonly majordomo: boolean } };
 	/** Reads of the space's own failures and state, for the admin's majordomo (see ./meta-diagnostics.ts); a tool that offers them checks its caller. */
 	readonly diagnostics: {
-		report(query: { since?: string; kind?: string; limit?: number }): Promise<unknown>;
+		report(query: { since?: string; kind?: string; limit?: number; chat?: string }): Promise<unknown>;
 		health(): Promise<unknown>;
 	};
 };

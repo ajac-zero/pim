@@ -58,7 +58,10 @@ export function tabShortcutPosition(
 function SessionStatus({ session }: { session: Session }) {
   const { t } = useI18n();
   const awaitingApproval = useAwaitingApproval();
-  return session.busy ? (
+  // A run waiting for the person's approval is busy too, but waits on them.
+  return awaitingApproval.has(session.id) ? (
+    <AwaitingApprovalMark className="ml-0" />
+  ) : session.busy ? (
     <Loader2
       className="size-3 shrink-0 text-primary motion-safe:animate-spin"
       role="img"
@@ -70,8 +73,6 @@ function SessionStatus({ session }: { session: Session }) {
       role="img"
       aria-label={t("waitingToTryAgain")}
     />
-  ) : awaitingApproval.has(session.id) ? (
-    <AwaitingApprovalMark className="ml-0" />
   ) : null;
 }
 

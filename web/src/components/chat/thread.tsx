@@ -63,6 +63,7 @@ import {
   type SessionView,
   type ThreadEntry,
   taskHistory,
+  thinkingSince,
   userItem,
   type ViewError,
 } from "~/lib/pim-view";
@@ -435,7 +436,11 @@ export const Thread = memo(function Thread({
           approvals: Object.fromEntries(
             [...approvalsByCall].map(([call, approval]) => [
               call,
-              approval.status,
+              {
+                status: approval.status,
+                createdAt: approval.createdAt,
+                decidedAt: approval.decidedAt,
+              },
             ]),
           ),
         },
@@ -449,6 +454,12 @@ export const Thread = memo(function Thread({
       view.running,
       view.lines,
     ],
+  );
+
+  // While none of its calls goes on, the model is on its answer: since the latest thing said or result.
+  const thinking = useMemo(
+    () => (view.running ? thinkingSince(entries) : null),
+    [entries, view.running],
   );
 
   // A reply being written in the chat shows the work going on by itself.
@@ -547,6 +558,7 @@ export const Thread = memo(function Thread({
                 key={row.key}
                 steps={row.steps}
                 ms={row.ms}
+                time={row.time}
                 live={row.live}
                 apps={toolApps}
               />
@@ -683,7 +695,7 @@ export const Thread = memo(function Thread({
           (grouped && host ? (
             <MembersWorking members={[host]} agents={agents} />
           ) : (
-            <ThinkingDot />
+            <ThinkingDot since={thinking} />
           ))}
 
         <MembersWorking members={working} agents={agents} />

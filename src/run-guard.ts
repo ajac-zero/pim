@@ -29,20 +29,55 @@ export function stoppable<R extends Registry>(registry: R): R {
 	});
 }
 
-/** How long runs have gone without progress: a fingerprint of each run's live state, and since when it has been the same. */
-export class Stalls {
-	readonly #seen = new Map<string, { fingerprint: string; since: number }>();
+/** What names a run: its inputs, which move with it when a continuation takes it over. */
+export function runKey(run: { readonly taskId: number; readonly inputs: readonly number[] }): string {
+	return run.inputs.length > 0 ? run.inputs.join(",") : String(run.taskId);
+}
 
-	/** Notes a run's state at `now`, and says for how long it has been the same. A run that changed starts over. */
-	observe(key: string, fingerprint: string, now: number): number {
-		const seen = this.#seen.get(key);
-		if (seen?.fingerprint === fingerprint) return now - seen.since;
-		this.#seen.set(key, { fingerprint, since: now });
+/**
+ * How long runs have gone without progress: for each chat's run, a
+ * fingerprint of its live state, since when it has been the same, and since
+ * when the run has been seen at work. It is kept in the space's storage, so a
+ * restart, which every deploy and crash brings, doesn't start the count over.
+ */
+export class RunWatch {
+	readonly #sql: SqlStorage;
+
+	constructor(sql: SqlStorage) {
+		this.#sql = sql;
+		sql.exec("CREATE TABLE IF NOT EXISTS pim_run_watch (session TEXT PRIMARY KEY, run TEXT NOT NULL, seen_at INTEGER NOT NULL, fingerprint TEXT NOT NULL, since INTEGER NOT NULL)");
+	}
+
+	/**
+	 * Notes the state of `session`'s run `run` at `now`, and says for how long
+	 * it has been the same. A run that changed starts over, and another run
+	 * starts over as seen at work from now.
+	 */
+	async observe(session: string, run: string, state: string, now: number): Promise<number> {
+		const fingerprint = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(state))), (byte) => byte.toString(16).padStart(2, "0")).join("");
+		const seen = this.seen(session);
+		if (seen?.run === run && seen.fingerprint === fingerprint) return now - seen.since;
+		this.#sql.exec(
+			"INSERT INTO pim_run_watch (session, run, seen_at, fingerprint, since) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session) DO UPDATE SET run = excluded.run, seen_at = excluded.seen_at, fingerprint = excluded.fingerprint, since = excluded.since",
+			session,
+			run,
+			seen?.run === run ? seen.seenAt : now,
+			fingerprint,
+			now,
+		);
 		return 0;
 	}
 
-	/** Forgets every run not in `keys`: it ended, or waits for the person, which is no stall. */
-	keepOnly(keys: ReadonlySet<string>): void {
-		for (const key of this.#seen.keys()) if (!keys.has(key)) this.#seen.delete(key);
+	/** What was last seen of `session`'s run: which run, since when it was at work, and since when its state was the same. */
+	seen(session: string): { run: string; seenAt: number; fingerprint: string; since: number } | undefined {
+		const row = this.#sql.exec("SELECT run, seen_at, fingerprint, since FROM pim_run_watch WHERE session = ?", session).toArray()[0];
+		return row && { run: String(row.run), seenAt: Number(row.seen_at), fingerprint: String(row.fingerprint), since: Number(row.since) };
+	}
+
+	/** Forgets every run not in `sessions`: it ended, or was stopped. */
+	keepOnly(sessions: ReadonlySet<string>): void {
+		for (const row of this.#sql.exec("SELECT session FROM pim_run_watch").toArray()) {
+			if (!sessions.has(String(row.session))) this.#sql.exec("DELETE FROM pim_run_watch WHERE session = ?", row.session);
+		}
 	}
 }

@@ -108,7 +108,11 @@ export function useNewChat(onDone?: () => void) {
   };
 }
 
-/** Chats with an action waiting for the user's approval. */
+/**
+ * Chats with an action waiting for the user's approval: their own, or one an
+ * agent asked for while at work on a task for them. One the majordomo is still
+ * deciding asks nothing of the user yet.
+ */
 export function useAwaitingApproval() {
   const { data: approvals } = useQuery(approvalsQuery());
   return useMemo(
@@ -117,7 +121,9 @@ export function useAwaitingApproval() {
         approvals
           ?.filter(
             (approval) =>
-              approval.status === "pending" && !approval.requestedBy,
+              approval.status === "pending" &&
+              !approval.requestedBy &&
+              approval.review?.status !== "reviewing",
           )
           .flatMap(
             (approval) => approval.member?.session ?? approval.session ?? [],
@@ -1045,15 +1051,16 @@ function SessionRow({
     );
   }
 
+  // A run waiting for the user's approval is still busy, but it waits on them, not at work.
   const stateBadge = (
     <StateBadge
       state={
-        session.busy
-          ? "working"
-          : session.held
-            ? "error"
-            : awaitingApproval
-              ? "attention"
+        awaitingApproval
+          ? "attention"
+          : session.busy
+            ? "working"
+            : session.held
+              ? "error"
               : session.unread && !session.archived
                 ? "unread"
                 : null

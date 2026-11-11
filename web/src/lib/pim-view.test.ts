@@ -12,6 +12,8 @@ import {
   type StreamState,
   type ThreadEntry,
   taskHistory,
+  thinkingSince,
+  type WorkApproval,
 } from "~/lib/pim-view";
 import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
 
@@ -40,6 +42,7 @@ const toolResult = (
   toolCallId: string,
   text: string,
   isError = false,
+  timestamp?: number,
 ): EntryRecord =>
   ({
     id,
@@ -51,6 +54,7 @@ const toolResult = (
         toolName: "web_fetch",
         content: [{ type: "text", text }],
         isError,
+        timestamp,
       },
     ],
   }) as unknown as EntryRecord;
@@ -617,7 +621,8 @@ describe("work rows", () => {
       ],
       { timestamp: 2_000, durationMs: 1_000 },
     ),
-    toolResult(3, "s", "Private result"),
+    // The search ran from the end of its answer, at 3 s, to 4 s.
+    toolResult(3, "s", "Private result", false, 4_000),
     // The request started at 4 s and took 3 s: the send went at 7 s.
     assistant(4, [send("m", "Found flights.")], {
       timestamp: 4_000,
@@ -629,7 +634,7 @@ describe("work rows", () => {
   const rows = (
     running: boolean,
     lines: Record<string, string> = {},
-    approvals: Record<string, "pending" | "approved" | "denied"> = {},
+    approvals: Record<string, WorkApproval> = {},
   ) =>
     layoutThread(run([snapshot({ entries })]).view.entries, {
       shown: () => false,
@@ -644,9 +649,11 @@ describe("work rows", () => {
         key: "work:2:0",
         steps: [
           { tool: null, text: "Checking flights" },
-          { tool: "web_search", text: null },
+          { tool: "web_search", text: null, at: 3_000, ms: 1_000 },
         ],
         ms: 6_000,
+        // The search's second; the rest the model's answers and the wait before the first.
+        time: { thinking: 5_000, tools: 1_000, approvals: 0 },
         live: false,
       },
       expect.objectContaining({ kind: "sent", key: "4:0", at: 7_000 }),
@@ -665,15 +672,17 @@ describe("work rows", () => {
     expect(rows(true).at(-1)).toEqual({
       kind: "work",
       key: "work:6:0",
-      steps: [{ tool: "web_search", text: null }],
+      steps: [{ tool: "web_search", text: null, at: 8_500, ms: null }],
       ms: null,
+      time: null,
       live: true,
     });
     expect(rows(false).at(-1)).toEqual({
       kind: "work",
       key: "work:6:0",
-      steps: [{ tool: "web_search", text: null }],
+      steps: [{ tool: "web_search", text: null, at: 8_500, ms: null }],
       ms: 1_500,
+      time: { thinking: 1_500, tools: 0, approvals: 0 },
       live: false,
     });
   });
@@ -707,7 +716,10 @@ describe("layoutThread approvals", () => {
       work: {
         running: true,
         lines: { a: "Run a command", b: "Run a command" },
-        approvals: { a: "approved", b: "denied" },
+        approvals: {
+          a: { status: "approved", createdAt: 0, decidedAt: 1 },
+          b: { status: "denied", createdAt: 0, decidedAt: 1 },
+        },
       },
     });
     expect(work).toMatchObject({
@@ -720,6 +732,88 @@ describe("layoutThread approvals", () => {
         { tool: "shell", text: "Run a command", approval: "denied" },
       ],
     });
+  });
+});
+
+describe("layoutThread time", () => {
+  it("tells the time calls waited for approval apart from their tools' and the model's", () => {
+    const call = (id: string) => ({
+      type: "toolCall",
+      id,
+      name: "shell",
+      arguments: {},
+    });
+    const entries = run([
+      snapshot({
+        entries: [
+          user(1, "Go", 0),
+          // Two commands, asked side by side as the answer ended at 2 s.
+          assistant(2, [call("a"), call("b")], {
+            timestamp: 1_000,
+            durationMs: 1_000,
+          }),
+          toolResult(3, "b", "done", false, 2_500),
+          toolResult(4, "a", "done", false, 7_000),
+          assistant(
+            5,
+            [
+              {
+                type: "toolCall",
+                id: "m",
+                name: "send_to_user",
+                arguments: { message: "Done." },
+              },
+            ],
+            { timestamp: 7_000, durationMs: 2_000 },
+          ),
+        ],
+      }),
+    ]).view.entries;
+    const [, work] = layoutThread(entries, {
+      shown: () => false,
+      work: {
+        running: false,
+        approvals: {
+          a: { status: "approved", createdAt: 2_000, decidedAt: 6_500 },
+          b: { status: "denied", createdAt: 2_000, decidedAt: 2_400 },
+        },
+      },
+    });
+    expect(work).toMatchObject({
+      steps: [
+        { tool: "shell", at: 2_000, ms: 5_000, waitedMs: 4_500 },
+        { tool: "shell", at: 2_000, ms: 500, waitedMs: 400 },
+      ],
+      ms: 9_000,
+      // The round ran 5 s, all but 0.1 s of it waiting; the model took the rest.
+      time: { thinking: 4_000, tools: 100, approvals: 4_900 },
+    });
+  });
+});
+
+describe("thinkingSince", () => {
+  const call = (id: string) => ({
+    type: "toolCall",
+    id,
+    name: "shell",
+    arguments: {},
+  });
+  const since = (entries: EntryRecord[]) =>
+    thinkingSince(run([snapshot({ entries })]).view.entries);
+
+  it("is when the model began its answer: after the latest result, but not while a call goes on", () => {
+    const asked = [
+      // A call stopped before its result, in an earlier turn, holds nothing up.
+      user(1, "Try it", 0),
+      assistant(2, [call("old")], { timestamp: 100, durationMs: 100 }),
+      user(3, "Go", 1_000),
+      assistant(4, [call("a")], { timestamp: 1_500, durationMs: 500 }),
+    ];
+    expect(since(asked)).toBeNull();
+    expect(since([...asked, toolResult(5, "a", "done", false, 4_000)])).toBe(
+      4_000,
+    );
+    expect(since(asked.slice(0, 3))).toBe(1_000);
   });
 });
 

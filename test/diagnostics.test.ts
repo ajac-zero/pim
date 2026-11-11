@@ -2,10 +2,11 @@ import type { Message } from "@earendil-works/pi-ai";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { EVENT_KEEP, scrub } from "../src/diagnostics";
 import type { Pim } from "../src/pim";
-import { apiUrl, OWNER, post, ROOT, say, systemPrompt, toolUse } from "./helpers";
+import type { Approval } from "../src/store";
+import { api, apiUrl, OWNER, post, ROOT, say, settled, systemPrompt, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 const TOOLS = ["pim_diagnostics", "pim_health"];
@@ -111,7 +112,7 @@ describe("the majordomo's diagnostics tools", () => {
 			);
 		});
 		const report = await ask("pim_diagnostics", { since: "1h" });
-		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "provider_cooldowns", "runs", "triggers"]);
+		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "provider_cooldowns", "runs", "triggers", "turns"]);
 		expect(report).toMatchObject({ limit: 20, generated_at: expect.any(String), since: expect.any(String) });
 		expect(report.sections.model_calls.items[0]).toMatchObject({ why: "stopped with error", provider: "test", model: "m", run_kind: "interactive", latency_ms: 90_000 });
 		expect(report.sections.events.items[0]).toMatchObject({ kind: "slow_request", detail: { method: "GET", path: "/api/sessions", ms: 7000, api_key: "[redacted]" } });
@@ -150,6 +151,90 @@ describe("the majordomo's diagnostics tools", () => {
 		});
 		expect(health.counts.agents).toBeGreaterThanOrEqual(2);
 		expect(JSON.stringify(health)).not.toContain("pim.test");
+	});
+
+	it("tell how long a turn took, and how much of it was the model, the tools and waiting for an approval", async () => {
+		const policy = (approvalPolicy: string | null) => api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy }) });
+		await policy("explicit");
+		const realFetch = globalThis.fetch;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const request = new Request(input, init);
+			return request.url.startsWith("https://hooks.example.test/") ? new Response("ordered", { status: 201 }) : realFetch(input, init);
+		});
+		try {
+			const chat = (await post("/sessions")).body.id;
+			// A provider stamps its answer with when the request began, as the real ones do, not when it ended.
+			const answer = async (ms: number, message: ReturnType<typeof toolUse>) => {
+				const began = Date.now();
+				await new Promise((done) => setTimeout(done, ms));
+				return { ...message, timestamp: began };
+			};
+			faux.setResponses([
+				() => answer(400, toolUse("http_request", { method: "POST", url: "https://hooks.example.test/order" })),
+				() => answer(0, toolUse("send_to_user", { message: "Ordered." })),
+			]);
+			expect((await post(`/sessions/${chat}/messages`, { content: "Order it." })).status).toBe(202);
+			const approval = await vi.waitFor(async () => {
+				const found = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.find((candidate) => candidate.action === "http_request");
+				expect(found).toBeDefined();
+				return found!;
+			});
+			await new Promise((done) => setTimeout(done, 700));
+			expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(200);
+			await settled(chat);
+
+			const [turn] = (await ask("pim_diagnostics", { kind: "turns", chat })).sections.turns.items;
+			// The wait for the person is the approval's, not the tool's, and the model's 400 ms are its own.
+			expect(turn).toMatchObject({ chat, in_progress: false, model_calls: 2, tool_calls: 2, approvals_ms: expect.any(Number) });
+			expect(turn.approvals_ms).toBeGreaterThanOrEqual(700);
+			expect(turn.tools_ms).toBeLessThan(700);
+			expect(turn.model_ms).toBeGreaterThanOrEqual(400);
+			expect(turn.total_ms).toBeGreaterThanOrEqual(1_100);
+			expect(turn.steps.map((step: { step: string; name?: string }) => step.name ?? step.step)).toEqual(["model", "http_request", "model", "send_to_user"]);
+			expect(turn.steps[0].ms).toBeGreaterThanOrEqual(400);
+			expect(turn.steps[1]).toMatchObject({ approval: { id: approval.id, status: "approved", decided_by: "user" } });
+			expect(turn.steps[1].approval.waited_ms).toBeGreaterThanOrEqual(700);
+
+			// Without a chat, the turns of the chats at work in the window, without their steps.
+			const { items } = (await ask("pim_diagnostics", { kind: "turns", limit: 100 })).sections.turns;
+			const listed = items.find((item: { chat: string }) => item.chat === chat);
+			expect(listed).toMatchObject({ approvals_ms: turn.approvals_ms, model_calls: 2 });
+			expect(listed.steps).toBeUndefined();
+		} finally {
+			await policy(null);
+		}
+	});
+
+	it("tell which chats are at work now, what each waits on, and since when", async () => {
+		const policy = (approvalPolicy: string | null) => api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy }) });
+		await policy("explicit");
+		try {
+			const waiting = (await post("/sessions")).body.id;
+			faux.setResponses([toolUse("http_request", { method: "POST", url: "https://hooks.example.test/order" })]);
+			expect((await post(`/sessions/${waiting}/messages`, { content: "Order it." })).status).toBe(202);
+			const approval = await vi.waitFor(async () => {
+				const found = (await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals.find((candidate) => candidate.action === "http_request");
+				expect(found).toBeDefined();
+				return found!;
+			});
+			await inPim((pim) => pim.watchRuns());
+
+			const { items } = (await ask("pim_diagnostics", { kind: "runs" })).sections.runs;
+			expect(items.find((item: { chat: string }) => item.chat === waiting)).toMatchObject({
+				state: "working",
+				waiting_on: `the person's decision on approval ${approval.id}: POST [address]/order`,
+				working_since: expect.any(String),
+				working_minutes: 0,
+				unchanged_since: expect.any(String),
+			});
+			// The chat that asked is at work on the call, which the watchdog hasn't seen yet; ap-1, filed outside any call, holds none of its.
+			expect(items.find((item: { chat: string }) => item.chat === ROOT)).toMatchObject({ state: "working", waiting_on: "its tool calls: pim_diagnostics", working_since: null, unchanged_since: null });
+
+			expect((await post(`/sessions/${waiting}/abort`)).status).toBe(200);
+			await settled(waiting);
+		} finally {
+			await policy(null);
+		}
 	});
 });
 

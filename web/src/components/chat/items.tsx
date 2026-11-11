@@ -73,7 +73,12 @@ import {
   pim,
   type UserContent,
 } from "~/lib/pim-api";
-import type { CodingNotice, PimNotice, WorkStep } from "~/lib/pim-view";
+import type {
+  CodingNotice,
+  PimNotice,
+  WorkStep,
+  WorkTime,
+} from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
 
@@ -965,7 +970,8 @@ export const GeneratedImage = memo(function GeneratedImage({
 
 /* ------------------------------- indicators ------------------------------ */
 
-export function ThinkingDot() {
+/** The agent at work; with `since`, how long its model has been on its answer, counting up. */
+export function ThinkingDot({ since = null }: { since?: number | null }) {
   return (
     <div
       data-thinking
@@ -974,8 +980,33 @@ export function ThinkingDot() {
       <span className="size-1.5 animate-pulse rounded-full bg-current motion-reduce:animate-none" />
       <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms] motion-reduce:animate-none" />
       <span className="size-1.5 animate-pulse rounded-full bg-current [animation-delay:300ms] motion-reduce:animate-none" />
+      {since !== null && <ThinkingFor since={since} />}
     </div>
   );
+}
+
+function ThinkingFor({ since }: { since: number }) {
+  const { t } = useI18n();
+  return (
+    <span className="ml-1.5 text-[13px] tabular-nums">
+      {t("thinkingFor", { time: useElapsed(since) })}
+    </span>
+  );
+}
+
+/** The time since `since`, updated every second. */
+function useElapsed(since: number): string {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  // The space's clock and this device's may differ a little.
+  return duration(Math.max(0, now - since));
+}
+
+function Elapsed({ since }: { since: number }) {
+  return <>{useElapsed(since)}</>;
 }
 
 /** How the steps that use a tool are named and marked, by the tool's name; other tools get a wrench and their name. */
@@ -1039,6 +1070,9 @@ export function stepView(
   };
 }
 
+/** Whether `ms` is worth a mention: a second or more. */
+const shown = (ms: number) => ms >= 1000;
+
 /** "42s", "2m 5s", "1h 3m". */
 function duration(ms: number): string {
   const seconds = Math.max(1, Math.round(ms / 1000));
@@ -1066,6 +1100,56 @@ function ApprovalMark({ status }: { status: ApprovalStatus }) {
         status === "denied" && "text-destructive",
       )}
     />
+  );
+}
+
+/** How many times a step was taken and how long it took in all, or how long it has gone on, and how much of it waited for approval. */
+function StepTime({
+  count,
+  ms,
+  since,
+  waitedMs,
+}: {
+  count: number;
+  ms?: number | null;
+  since?: number;
+  waitedMs: number;
+}) {
+  const { t } = useI18n();
+  const parts: ReactNode[] = [];
+  // A step that waited for approval shows how long it ran apart from the wait, then the wait.
+  if (since !== undefined) parts.push(<Elapsed key="since" since={since} />);
+  else if (ms != null && shown(ms - waitedMs))
+    parts.push(duration(ms - waitedMs));
+  if (shown(waitedMs))
+    parts.push(t("stepWaited", { time: duration(waitedMs) }));
+  if (parts.length === 0 && count === 1) return null;
+  return (
+    <span className="text-muted-foreground/70 tabular-nums">
+      {count > 1 && ` ×${count}`}
+      {parts.map((part, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: the parts keep their order.
+        <span key={index}> · {part}</span>
+      ))}
+    </span>
+  );
+}
+
+/** Where a fold's time went, after how long it took: the parts of a second or more. */
+function WorkBreakdown({ time }: { time: WorkTime }) {
+  const { t } = useI18n();
+  const parts = [
+    shown(time.thinking) &&
+      t("workThinking", { time: duration(time.thinking) }),
+    shown(time.tools) && t("workTools", { time: duration(time.tools) }),
+    shown(time.approvals) &&
+      t("workApprovals", { time: duration(time.approvals) }),
+  ].filter((part) => part !== false);
+  if (parts.length === 0) return null;
+  return (
+    <span className="text-muted-foreground/70 tabular-nums">
+      {parts.map((part) => ` · ${part}`).join("")}
+    </span>
   );
 }
 
@@ -1114,25 +1198,57 @@ export function StepRow({
 export const WorkedSteps = memo(function WorkedSteps({
   steps,
   ms,
+  time = null,
   live,
   apps,
 }: {
   steps: WorkStep[];
   ms: number | null;
+  /** Where the time went: the model's answers, the tools, and waiting for approvals. */
+  time?: WorkTime | null;
   live: boolean;
   apps: ToolApps;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  // A tool used again and again is one step.
-  const views = steps
-    .map((step) => ({ ...stepView(step, apps, t), approval: step.approval }))
-    .filter(
-      (view, index, all) =>
-        view.text !== all[index - 1]?.text ||
-        view.mark !== all[index - 1]?.mark ||
-        view.approval !== all[index - 1]?.approval,
-    );
+  // A tool used again and again is one step, with how many times and how long in all.
+  const views: (ReturnType<typeof stepView> & {
+    approval?: WorkStep["approval"];
+    count: number;
+    at?: number;
+    ms?: number | null;
+    waitedMs: number;
+  })[] = [];
+  for (const step of steps) {
+    const view = stepView(step, apps, t);
+    const last = views.at(-1);
+    if (
+      last &&
+      last.text === view.text &&
+      last.mark === view.mark &&
+      last.approval === step.approval
+    ) {
+      last.count++;
+      // Still going while any of them is; the last one's start is where its clock runs from.
+      last.ms =
+        last.ms === null || step.ms === null
+          ? null
+          : last.ms === undefined && step.ms === undefined
+            ? undefined
+            : (last.ms ?? 0) + (step.ms ?? 0);
+      if (step.ms === null) last.at = step.at;
+      last.waitedMs += step.waitedMs ?? 0;
+      continue;
+    }
+    views.push({
+      ...view,
+      approval: step.approval,
+      count: 1,
+      at: step.at,
+      ms: step.ms,
+      waitedMs: step.waitedMs ?? 0,
+    });
+  }
   // A call waiting for its answer stays in view, so it isn't lost in a folded list.
   const waiting = steps.some((step) => step.approval === "pending");
   const list = (
@@ -1148,6 +1264,12 @@ export const WorkedSteps = memo(function WorkedSteps({
             title={view.text}
           >
             {view.text}
+            <StepTime
+              count={view.count}
+              ms={view.ms}
+              since={live && view.ms === null ? view.at : undefined}
+              waitedMs={view.waitedMs}
+            />
           </span>
           {view.approval && <ApprovalMark status={view.approval} />}
         </StepRow>
@@ -1170,6 +1292,7 @@ export const WorkedSteps = memo(function WorkedSteps({
         className="inline-flex items-center gap-1 text-muted-foreground text-[13px] transition-colors hover:text-foreground"
       >
         {ms === null ? t("worked") : t("workedFor", { time: duration(ms) })}
+        {time && <WorkBreakdown time={time} />}
         <ChevronRight
           className={cn(
             "size-3 shrink-0 transition-transform",

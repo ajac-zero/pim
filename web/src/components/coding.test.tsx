@@ -1485,8 +1485,8 @@ describe("archived coding threads in the chat list", () => {
   });
 });
 
-describe("unread marks in the chat list", () => {
-  it("show on active chats but not on archived ones", async () => {
+describe("marks in the chat list", () => {
+  it("show unread responses on active chats but not on archived ones", async () => {
     const { api } = fakeApi();
     api.list.mockResolvedValue({ threads: [] });
     const client = new QueryClient({
@@ -1518,6 +1518,43 @@ describe("unread marks in the chat list", () => {
     expect(within(archived).getByText("old-chat")).toBeTruthy();
     expect(within(archived).queryByLabelText("Unread response")).toBeNull();
     expect(screen.getAllByLabelText("Unread response")).toHaveLength(1);
+  });
+
+  it("show a busy chat waiting for the person's approval as waiting for them, not working", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({ threads: [] });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    const chat = (id: string) => ({
+      id,
+      title: id,
+      busy: true,
+      createdAt: 1,
+      updatedAt: 2,
+      responseAt: 2,
+      unread: false,
+      archived: false,
+      visit: { username: "ada", available: true },
+    });
+    client.setQueryData(sessionsQuery().queryKey, [
+      chat("asking"),
+      chat("at-work"),
+    ]);
+    renderWith(
+      api,
+      () => <ChatsPanel awaitingApproval={new Set(["asking"])} />,
+      "/",
+      client,
+    );
+    const row = (name: string) =>
+      screen.getByText(name).closest("li") as HTMLElement;
+    await screen.findByText("asking");
+    expect(
+      within(row("asking")).getByLabelText("Waiting for your approval"),
+    ).toBeTruthy();
+    expect(within(row("asking")).queryByLabelText("Working")).toBeNull();
+    expect(within(row("at-work")).getByLabelText("Working")).toBeTruthy();
   });
 });
 

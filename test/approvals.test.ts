@@ -1,5 +1,5 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { env, runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
 import type { Message } from "@earendil-works/pi-ai";
@@ -266,6 +266,37 @@ describe("a chat that can't be held up", () => {
 		await settled();
 		expect(heard[0]).toMatch(/^\[Pim\] Your last turn was stopped: it made no progress for 1.5 seconds/);
 		expect(heard[1]).toContain("[Coding thread T-2] It finished its turn.");
+	});
+
+	it("counts a run's time without progress across a restart", async () => {
+		const started = stuckPage();
+		await setStall("600000");
+		const heard: string[] = [];
+		faux.setResponses([
+			toolUse("fetch_url", { url: "https://stuck.example.test/page" }),
+			(context) => {
+				heard.push(lastUserText(context.messages));
+				return toolUse("send_to_user", { message: "Noted the stop." });
+			},
+		]);
+		expect((await send("Read the page.")).status).toBe(202);
+		await vi.waitFor(() => expect(started).toHaveBeenCalled());
+		await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.watchRuns());
+		await new Promise((resolve) => setTimeout(resolve, 1_500));
+		// A crash or a deploy restarts the space, and the call it ran starts again, as stuck as before.
+		await abortAllDurableObjects();
+		expect(await busy()).toBe(true);
+		await vi.waitFor(() => expect(started).toHaveBeenCalledTimes(2));
+		// The first look after the restart already finds it stuck for longer than a second.
+		const stalled = await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
+			const before = Date.now();
+			pim.store.setMeta("test:stall-ms", "1000");
+			await pim.watchRuns();
+			return pim.diagnosticEvents.since(before, 10).filter((event) => event.kind === "run_stalled");
+		});
+		expect(stalled).toHaveLength(1);
+		await settled();
+		expect(heard[0]).toMatch(/^\[Pim\] Your last turn was stopped: it made no progress for 1 second/);
 	});
 
 	it("leaves a run waiting for the person's decision alone, until Stop", async () => {

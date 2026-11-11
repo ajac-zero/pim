@@ -10,7 +10,7 @@ describe("approvalView", () => {
         server: "cf-1",
         tool: "execute",
         arguments: {
-          account_id: "50fc740fb96dd3b4d9aeacd257575377",
+          account_id: "0123456789abcdef0123456789abcdef",
           code: "async () => { return await cloudflare.request({ method: 'GET' }); }",
           query: { page: 1 },
           filter: '{"status":"active"}',
@@ -18,14 +18,14 @@ describe("approvalView", () => {
         },
       },
       summary:
-        'Cloudflare: execute {"account_id":"50fc740fb96dd3b4d9aeacd257575377","code":"async () => …"}',
+        'Cloudflare: execute {"account_id":"0123456789abcdef0123456789abcdef","code":"async () => …"}',
     });
     expect(view.title).toBe("Cloudflare · execute");
     expect(view.fields).toEqual([
       {
         name: "account_id",
         kind: "text",
-        text: "50fc740fb96dd3b4d9aeacd257575377",
+        text: "0123456789abcdef0123456789abcdef",
       },
       {
         name: "code",

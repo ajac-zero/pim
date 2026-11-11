@@ -131,7 +131,11 @@ function EnvironmentChip({
           <p className="mt-2 text-muted-foreground">
             {env.source === "settings"
               ? t("codingEnvSourceSettings")
-              : t("codingEnvSourceRepository")}
+              : env.source === "mise"
+                ? t("codingEnvSourceMise")
+                : env.source === "devcontainer"
+                  ? t("codingEnvSourceDevcontainer")
+                  : t("codingEnvSourceRepository")}
           </p>
         )}
         {env.readyFrom && (

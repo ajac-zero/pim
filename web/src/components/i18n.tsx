@@ -1866,6 +1866,9 @@ const translations = {
     codingEnvTitle: "Environment",
     codingEnvSourceSettings: "Set up by your setup script for this repository.",
     codingEnvSourceRepository: "Set up by the repository's .pim/setup.sh.",
+    codingEnvSourceMise: "Set up by the repository's mise task `setup`.",
+    codingEnvSourceDevcontainer:
+      "Set up by the repository's dev container commands.",
     codingEnvProvision: "Workspace and checkout",
     codingEnvRestore: "Restore",
     codingEnvSetup: "Setup",
@@ -3828,6 +3831,10 @@ const translations = {
       "Configurado con tu script de configuración para este repositorio.",
     codingEnvSourceRepository:
       "Configurado con el .pim/setup.sh del repositorio.",
+    codingEnvSourceMise:
+      "Configurado con la tarea `setup` de mise del repositorio.",
+    codingEnvSourceDevcontainer:
+      "Configurado con los comandos del dev container del repositorio.",
     codingEnvProvision: "Espacio de trabajo y clonado",
     codingEnvRestore: "Restauración",
     codingEnvSetup: "Preparación",

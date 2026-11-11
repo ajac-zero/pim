@@ -960,7 +960,7 @@ describe("a coding thread's environment", () => {
 	});
 
 	it("is keyed by everything it is made from, however its lockfiles are listed", async () => {
-		const base: EnvironmentKeyInput = { userId: "ada", repo: "acme/env", provision: [], setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": "a".repeat(64), "web/package-lock.json": "b".repeat(64) }, image: "pim-workspace@sha256:1" };
+		const base: EnvironmentKeyInput = { userId: "ada", repo: "acme/env", provision: [], setupScript: SCRIPT, setupSource: "repository", unpinned: [], lockfiles: { "pnpm-lock.yaml": "a".repeat(64), "web/package-lock.json": "b".repeat(64) }, image: "pim-workspace@sha256:1" };
 		const key = await environmentKey(base);
 		expect(key).toMatch(/^[0-9a-f]{64}$/);
 		expect(await environmentKey({ ...base })).toBe(key);
@@ -972,6 +972,12 @@ describe("a coding thread's environment", () => {
 			{ ...base, repo: "acme/other" },
 			{ ...base, setupScript: `${SCRIPT}pnpm build\n` },
 			{ ...base, setupScript: null },
+			// The same text from another source is another environment, and so is a toolchain that resolved to a newer version or whose period ended.
+			{ ...base, setupSource: "settings" },
+			{ ...base, unpinned: ["node@lts=22.1.0"] },
+			{ ...base, unpinned: ["node@lts=22.2.0"] },
+			{ ...base, unpinned: ["node@lts=ttl:2"] },
+			{ ...base, unpinned: ["node@lts=ttl:3"] },
 			{ ...base, provision: [installed("go@1.22")] },
 			{ ...base, provision: [installed("go@1.23")] },
 			{ ...base, provision: [installed("go@1.22"), "go mod download"] },
@@ -1025,7 +1031,7 @@ describe("a coding thread's environment", () => {
 		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
 		expect(keptBeforeTurn).toBe(true);
 		const { environment } = await stub.status();
-		const key = await environmentKey({ userId: space, repo: fullName, provision: [], setupScript: SCRIPT, lockfiles: { "pnpm-lock.yaml": await sha256(LOCK), "web/package-lock.json": await sha256(WEB_LOCK) }, image: DEFAULT_WORKSPACE_IMAGE });
+		const key = await environmentKey({ userId: space, repo: fullName, provision: [], setupScript: SCRIPT, setupSource: "repository", lockfiles: { "pnpm-lock.yaml": await sha256(LOCK), "web/package-lock.json": await sha256(WEB_LOCK) }, image: DEFAULT_WORKSPACE_IMAGE });
 		expect(environment).toMatchObject({ state: "cached", key, source: "repository", restoredFromKey: null, rebuildRequested: false, readyFrom: "setup", snapshotKept: true });
 		for (const field of ["builtAt", "preparedAt", "provisionMs", "setupMs", "snapshotMs"] as const) expect(environment[field]).toEqual(expect.any(Number));
 		expect(environment.error).toBeUndefined();
@@ -1094,8 +1100,17 @@ describe("a coding thread's environment", () => {
 	});
 
 	it("keeps a snapshot only when restoring it is expected to be quicker than the setup was", () => {
-		// 8 MB a second: 400 MB takes 50 s to restore.
+		// 8 MB a second by default: 400 MB takes 50 s to restore.
 		expect(estimatedRestoreMs(400_000_000)).toBe(50_000);
+		// A provider that restores 4 times as fast keeps what the default would delete, and one that is slower deletes what it would keep.
+		expect(estimatedRestoreMs(400_000_000, 32)).toBe(12_500);
+		expect(snapshotWorthKeeping(20_000, 400_000_000)).toBe(false);
+		expect(snapshotWorthKeeping(20_000, 400_000_000, 32)).toBe(true);
+		expect(snapshotWorthKeeping(12_500, 400_000_000, 32)).toBe(false);
+		expect(snapshotWorthKeeping(60_000, 400_000_000, 2)).toBe(false);
+		expect(snapshotWorthKeeping(60_000, 400_000_000, 8)).toBe(true);
+		expect(new FakeWorkspaceProvider().capabilities.restoreMBps).toBe(8);
+		expect(new FakeWorkspaceProvider({ restoreMBps: 50 }).capabilities.restoreMBps).toBe(50);
 		expect(snapshotWorthKeeping(50_001, 400_000_000)).toBe(true);
 		expect(snapshotWorthKeeping(50_000, 400_000_000)).toBe(false);
 		expect(snapshotWorthKeeping(10_000, 355_000_000)).toBe(false);
@@ -1151,6 +1166,42 @@ describe("a coding thread's environment", () => {
 			codingWorkspaces.environmentSize = undefined;
 			taken.mockRestore();
 		}
+	});
+
+	it("runs the highest setup source there is: the setting, .pim/setup.sh, a mise task, a dev container's commands", async () => {
+		const MISE = '[tasks.setup]\nrun = "pnpm install"\n';
+		const DEVCONTAINER = '{ // comments are allowed\n "postCreateCommand": "pnpm install",\n "onCreateCommand": ["echo", "hi there"] }\n';
+		const ran = async (files: Record<string, string>, drop: string[] = [], space = `space-${crypto.randomUUID()}`) => {
+			const { repo, remote } = envRepo(files);
+			for (const path of drop) delete fakeRemotes.get(remote)![path];
+			setups.length = 0;
+			codingFaux.setResponses([fauxAssistantMessage("Ok.")]);
+			const { id, stub } = await startThread({ repo, space });
+			await turns(id, 1);
+			const environment = await settledEnvironment(stub);
+			return { environment, bash: setups.map((each) => each.argv[2]) };
+		};
+		const all = { "mise.toml": MISE, ".devcontainer/devcontainer.json": DEVCONTAINER };
+		const repository = await ran(all);
+		expect(repository.environment.source).toBe("repository");
+		expect(repository.bash).toContain(SCRIPT);
+		const mise = await ran(all, [".pim/setup.sh"]);
+		expect(mise.environment.source).toBe("mise");
+		expect(mise.bash).toContain("mise trust --yes --quiet && mise run setup");
+		expect(mise.bash.join()).not.toContain("hi there");
+		const devcontainer = await ran({ ".devcontainer/devcontainer.json": DEVCONTAINER }, [".pim/setup.sh"]);
+		expect(devcontainer.environment.source).toBe("devcontainer");
+		expect(devcontainer.bash).toContain("set -e\necho 'hi there'\n(\npnpm install\n)\n");
+		// A setting beats them all.
+		const space = `space-${crypto.randomUUID()}`;
+		const { repo, fullName } = envRepo(all);
+		await codingScheduler(env, space).setRepoSettings(fullName, { setupScript: "echo setting\n" });
+		codingFaux.setResponses([fauxAssistantMessage("Ok.")]);
+		const { id, stub } = await startThread({ repo, space });
+		await turns(id, 1);
+		expect((await settledEnvironment(stub)).source).toBe("settings");
+		// The source and what defines it are in the key.
+		expect(new Set([repository, mise, devcontainer].map((each) => each.environment.key)).size).toBe(3);
 	});
 
 	it("clones as usual when the snapshot can't be restored, and builds it again", async () => {
@@ -1374,7 +1425,7 @@ describe("a coding thread's environment", () => {
 		const { environment } = await stub.status();
 		expect(environment).toMatchObject({ state: "cached", source: "repository" });
 		expect(environment.toolchains.map(({ tool, source, status }) => `${tool}:${source}:${status}`)).toEqual(["go:mise:installed", "node:mise:installed", "npm:prettier:mise:installed", "python:devcontainer:installed"]);
-		const key = await environmentKey({ userId: space, repo: fullName, provision: ["mise trust --yes --quiet && mise install --yes", installed("python@3.12")], setupScript: SCRIPT, lockfiles: { "mise.toml": await sha256(MISE_REPO["mise.toml"]!) }, image: DEFAULT_WORKSPACE_IMAGE });
+		const key = await environmentKey({ userId: space, repo: fullName, provision: ["mise trust --yes --quiet && mise install --yes", installed("python@3.12")], setupScript: SCRIPT, setupSource: "repository", lockfiles: { "mise.toml": await sha256(MISE_REPO["mise.toml"]!) }, image: DEFAULT_WORKSPACE_IMAGE });
 		expect(environment.key).toBe(key);
 	});
 });

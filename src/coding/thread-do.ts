@@ -20,7 +20,7 @@ import {
 	SETUP_TIMEOUT_MS,
 	snapshotWorthKeeping,
 } from "./environment-cache";
-import { detectRepository, environmentBrief, type ProvisionStep, pendingItems, provisionPlan, runProvisionStep, stepOf, workspaceFiles } from "./repo-environment";
+import { detectConfiguredSetup, detectRepository, environmentBrief, type ProvisionStep, pendingItems, provisionPlan, runProvisionStep, stepOf, unpinnedKeyParts, workspaceFiles } from "./repo-environment";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
@@ -2358,7 +2358,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.#setEnvironment({ state: "none", key: null, source: null, rebuildRequested: false, preparedAt: this.now(), error: undefined });
 				return;
 			}
-			key = await environmentKey({ ...owner, provision: plan.map((step) => step.script), setupScript: setup?.script ?? null, lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage() });
+			key = await environmentKey({ ...owner, provision: plan.map((step) => step.script), setupScript: setup?.content ?? null, setupSource: setup?.source ?? null, unpinned: await unpinnedKeyParts(workspace, profile.toolchains, this.now(), REPO_DIR), lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage() });
 		} catch (error) {
 			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
 			this.#environmentFailed(null, environmentError("The environment's setup script couldn't be read", errorText(error)));
@@ -2457,7 +2457,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			const snapshot = await provider.snapshotEnvironment(thread.workspaceRef, { ...owner, key });
 			const snapshotMs = Math.round(performance.now() - snapshotStarted);
 			const snapshotBytes = snapshot.size ?? null;
-			const worth = snapshotWorthKeeping(setupMs, snapshotBytes);
+			const worth = snapshotWorthKeeping(setupMs, snapshotBytes, provider.capabilities.restoreMBps);
 			let kept = worth;
 			if (!worth) {
 				// The person's other snapshots of the repository are older environments of it, which only start new threads as a guess (`#createWorkspace`) to be set up again: they don't pay either. One that can't be deleted, such as one a restore holds at this moment, stays.
@@ -2540,12 +2540,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** The repository's setup script: the person's setting for it, else its own `.pim/setup.sh`; null without either. */
+	/** The repository's setup, the highest of: the person's setting for it, its `.pim/setup.sh`, a mise task named `setup`, a dev container's lifecycle commands; null without any. */
 	async #setupScript(workspace: Workspace, thread: CodingThreadRow, owner: EnvironmentOwner): Promise<Setup | null> {
 		const setting = (await codingScheduler(this.env, thread.space).repoSettings(owner.repo)).setupScript;
-		if (setting !== null) return { script: setting, source: "settings" };
+		if (setting !== null) return { script: setting, source: "settings", content: setting };
 		const own = await repositorySetupScript(workspace, REPO_DIR);
-		return own === null ? null : { script: own, source: "repository" };
+		if (own !== null) return { script: own, source: "repository", content: own };
+		return detectConfiguredSetup(workspaceFiles(workspace, REPO_DIR));
 	}
 
 	/** Commits whatever changed in the workspace as a checkpoint, and keeps its diff from the start. Null when nothing changed (no edits and no new commits) or there is no workspace. */
@@ -3007,7 +3008,7 @@ const GIT_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000];
 const BUILD_LOCK_MS = 2 * SETUP_TIMEOUT_MS + 10 * 60_000;
 
 /** A repository's setup script and where it came from. */
-type Setup = { readonly script: string; readonly source: "settings" | "repository" };
+type Setup = { readonly script: string; readonly source: "settings" | "repository" | "mise" | "devcontainer"; /** What the key covers: the script, or the configuration that defines it. */ readonly content: string };
 
 /**
  * Where mise downloads the toolchains a repository pins: its version lists,

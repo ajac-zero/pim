@@ -1,3 +1,4 @@
+import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
 import type { ExecEvent, Workspace } from "./workspace/types";
 
 /**
@@ -733,4 +734,108 @@ export function environmentBrief(env: {
 	}
 	for (const note of env.notes) lines.push(`${note}.`);
 	return lines.length > 0 ? lines.join("\n") : null;
+}
+
+/** A setup the repository's own configuration describes: the script to run, and the text of what defines it, which the environment's key covers. */
+export type ConfiguredSetup = { readonly script: string; readonly source: "mise" | "devcontainer"; readonly content: string };
+
+/** The devcontainer.json lifecycle commands that prepare a checkout, in the order a dev container runs them. */
+const DEVCONTAINER_COMMANDS = ["onCreateCommand", "updateContentCommand", "postCreateCommand"] as const;
+const DEVCONTAINER_PATHS = [".devcontainer/devcontainer.json", ".devcontainer.json"];
+
+/**
+ * The setup a repository's configuration describes when it has no `.pim/setup.sh`: a mise task named `setup` in
+ * `mise.toml` or `.mise.toml`, run with `mise run setup`; else the dev container's lifecycle commands. Only the first
+ * found is returned. Throws when a devcontainer's commands add up to more than `MAX_SETUP_SCRIPT_BYTES`.
+ */
+export async function detectConfiguredSetup(files: RepoFiles): Promise<ConfiguredSetup | null> {
+	const read = (path: string) => files.read(path).catch(() => null);
+	for (const name of ["mise.toml", ".mise.toml"]) {
+		const text = await read(name);
+		if (text !== null && text.length <= MAX_FILE_BYTES && hasMiseTask(text, "setup")) return { script: "mise trust --yes --quiet && mise run setup", source: "mise", content: `${name}\n${text}` };
+	}
+	for (const path of DEVCONTAINER_PATHS) {
+		const text = await read(path);
+		if (text === null || text.length > MAX_FILE_BYTES) continue;
+		const script = devcontainerSetupScript(parseJsonc(text));
+		if (script === null) continue;
+		if (script.length > MAX_SETUP_SCRIPT_BYTES) throw new Error(`The lifecycle commands in ${path} are larger than ${MAX_SETUP_SCRIPT_BYTES / 1024} KiB`);
+		return { script, source: "devcontainer", content: script };
+	}
+	return null;
+}
+
+/** Whether mise's configuration defines a task: `[tasks.name]`, `[tasks."name"]`, `name = ...` under `[tasks]`, or `tasks.name = ...`. */
+export function hasMiseTask(text: string, name: string): boolean {
+	for (const [table, keys] of tomlTables(text)) {
+		if (table === "tasks" && keys.has(name)) return true;
+		if (table === `tasks.${name}` || table === `tasks."${name}"` || table === `tasks.'${name}'`) return true;
+		if (table === "" && keys.has(`tasks.${name}`)) return true;
+	}
+	return false;
+}
+
+/**
+ * A bash script for a devcontainer.json's `onCreateCommand`, `updateContentCommand` and `postCreateCommand`, in that
+ * order; null when it has none. A command is a string (run by a shell), an array (one program and its arguments, run
+ * without a shell) or an object of either, whose entries a dev container runs in parallel and this runs one after another.
+ * Each runs in a subshell in the repository's directory, and the script stops at the first that fails.
+ */
+export function devcontainerSetupScript(devcontainer: unknown): string | null {
+	if (!isObject(devcontainer)) return null;
+	const commands: string[] = [];
+	const one = (value: unknown) => {
+		if (typeof value === "string" && value.trim()) commands.push(`(\n${value.trim()}\n)`);
+		else if (Array.isArray(value) && value.length > 0 && value.every((each) => typeof each === "string")) commands.push(value.map(shellQuote).join(" "));
+	};
+	for (const key of DEVCONTAINER_COMMANDS) {
+		const value = devcontainer[key];
+		if (isObject(value)) for (const each of Object.values(value)) one(each);
+		else one(value);
+	}
+	return commands.length > 0 ? `set -e\n${commands.join("\n")}\n` : null;
+}
+
+function shellQuote(word: string): string {
+	return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** How long a snapshot of an unpinned toolchain is trusted when its concrete version can't be resolved: the key changes every week. */
+export const UNPINNED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Whether a toolchain's version names a moving target: `lts`, `stable`, `latest` and the like. */
+export function isUnpinned(version: string | null): boolean {
+	return version !== null && /^(lts|stable|latest|current|nightly|beta|x|\*)$/i.test(version);
+}
+
+/**
+ * What an environment's key takes from the toolchains that aren't pinned to a version, so a snapshot of `lts` or
+ * `latest` doesn't outlive the release it was built with: each one's concrete version as mise resolves it in the
+ * workspace (`mise latest node@lts`), or, when that can't be resolved, the number of the `UNPINNED_TTL_MS` period `now`
+ * falls in. Sorted; empty when every toolchain is pinned.
+ */
+export async function unpinnedKeyParts(workspace: Workspace, toolchains: readonly DetectedToolchain[], now: number, cwd: string): Promise<string[]> {
+	const parts = new Set<string>();
+	for (const each of toolchains) {
+		if (!isUnpinned(each.version)) continue;
+		const resolved = await resolveVersion(workspace, `${miseName(each.tool, each.version!)}@${each.version}`, cwd);
+		parts.add(`${each.tool}@${each.version}=${resolved ?? `ttl:${Math.floor(now / UNPINNED_TTL_MS)}`}`);
+	}
+	return [...parts].sort();
+}
+
+/** The version `mise latest <spec>` prints; null when mise can't tell. */
+async function resolveVersion(workspace: Workspace, spec: string, cwd: string): Promise<string | null> {
+	let out = "";
+	let code: number | null = null;
+	try {
+		for await (const event of workspace.exec(["bash", "-c", `${PATH_PREAMBLE}mise latest "$0"`, spec], { cwd, timeoutMs: 60_000, env: PROVISION_ENV })) {
+			if (event.type === "stdout") out += event.data;
+			else if (event.type === "exit") code = event.code;
+		}
+	} catch {
+		return null;
+	}
+	const version = out.trim();
+	return code === 0 && /^\d[\w.+-]{0,63}$/.test(version) ? version : null;
 }

@@ -102,7 +102,7 @@ type CodingThreadView = {
 type CodingEnvironment = {
   state: "none" | "restoring" | "cached" | "building" | "failed"; // none: nothing to provision and no setup script, or a backend that keeps no environments; failed: the setup script failed (a failed provisioning step is on its item)
   key: string | null;           // 64 hex digits: the person, the repository, the provisioning steps, the script, its lockfiles and the workspace image
-  source: "settings" | "repository" | null; // the person's setting, or the repository's .pim/setup.sh; null without a script
+  source: "settings" | "repository" | "mise" | "devcontainer" | null; // the person's setting, the repository's .pim/setup.sh, its mise task `setup`, or its dev container's lifecycle commands (the first that exists); null without a setup
   builtAt: number | null;       // when the snapshot the thread has was made
   restoredFromKey: string | null; // the snapshot the workspace started from, an older key's when the repository moved on
   provisionMs: number | null;   // making the workspace and checking the repository out, restore included

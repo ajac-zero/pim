@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { Workspace } from "../src/coding/workspace/types";
 import { environmentKey } from "../src/coding/environment-cache";
-import { detectRepository, environmentBrief, makeTargets, nodeRange, pendingItems, pnpmPostinstall, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
+import { detectConfiguredSetup, detectRepository, devcontainerSetupScript, environmentBrief, hasMiseTask, isUnpinned, UNPINNED_TTL_MS, unpinnedKeyParts, makeTargets, nodeRange, pendingItems, pnpmPostinstall, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
 import { GO_REPO, installed, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./fixtures/repos";
 
 // What a coding thread reads from a repository's checkout to provision its workspace and tell its agent how to check
@@ -205,5 +206,91 @@ describe("reading versions and commands", () => {
 	it("reads folded and literal run blocks, and stops at the step's end", () => {
 		const workflow = "steps:\n  - run: >-\n      cargo clippy\n      --all-targets\n    env:\n      X: test\n  - name: t\n    run: 'cargo test --locked'\n";
 		expect(workflowCommands(workflow)).toEqual(["cargo clippy --all-targets", "cargo test --locked"]);
+	});
+});
+
+describe("setup sources a repository's configuration describes", () => {
+	const MISE = '[tools]\nnode = "22"\n\n[tasks.setup]\nrun = "pnpm install"\n';
+	const DEVCONTAINER = '{ "onCreateCommand": "echo create", "postCreateCommand": "pnpm install" }';
+
+	it("finds a task named setup in mise.toml or .mise.toml, in the forms mise accepts, and not one that only looks like it", () => {
+		expect(hasMiseTask("[tasks.setup]\nrun = 'x'\n", "setup")).toBe(true);
+		expect(hasMiseTask('[tasks."setup"]\nrun = "x"\n', "setup")).toBe(true);
+		expect(hasMiseTask('[tasks]\nsetup = "pnpm install"\n', "setup")).toBe(true);
+		expect(hasMiseTask('tasks.setup = "pnpm install"\n', "setup")).toBe(true);
+		expect(hasMiseTask('[tasks.setup-db]\nrun = "x"\n[tasks.test]\nsetup = "x"\n', "setup")).toBe(false);
+		expect(hasMiseTask('[tools]\nsetup = "1"\n# [tasks.setup]\n', "setup")).toBe(false);
+	});
+
+	it("runs a mise setup task with mise run setup, from either file, and covers the file's text", async () => {
+		const found = await detectConfiguredSetup(filesOf({ ".mise.toml": MISE }));
+		expect(found).toEqual({ script: "mise trust --yes --quiet && mise run setup", source: "mise", content: `.mise.toml\n${MISE}` });
+		expect((await detectConfiguredSetup(filesOf({ "mise.toml": MISE })))?.source).toBe("mise");
+		expect(await detectConfiguredSetup(filesOf({ "mise.toml": '[tasks.test]\nrun = "x"\n' }))).toBeNull();
+	});
+
+	it("prefers a mise task to a dev container's commands, and only runs one", async () => {
+		const found = await detectConfiguredSetup(filesOf({ "mise.toml": MISE, ".devcontainer/devcontainer.json": DEVCONTAINER }));
+		expect(found?.source).toBe("mise");
+		expect(found?.script).not.toContain("echo create");
+		expect((await detectConfiguredSetup(filesOf({ "mise.toml": "[tools]\n", ".devcontainer.json": DEVCONTAINER })))?.source).toBe("devcontainer");
+	});
+
+	it("runs a dev container's string, array and object commands in its lifecycle order", () => {
+		const script = devcontainerSetupScript({
+			postCreateCommand: { install: "pnpm install", build: ["pnpm", "run", "build the app"] },
+			updateContentCommand: ["echo", "it's", "$HOME"],
+			onCreateCommand: "  make init  ",
+		});
+		expect(script).toBe("set -e\n(\nmake init\n)\necho 'it'\\''s' '$HOME'\n(\npnpm install\n)\npnpm run 'build the app'\n");
+		expect(devcontainerSetupScript({ onCreateCommand: "" , postCreateCommand: [], updateContentCommand: [1], image: "x" })).toBeNull();
+		expect(devcontainerSetupScript(null)).toBeNull();
+	});
+
+	it("reads a dev container written with comments, and passes over one with no commands", async () => {
+		const jsonc = '{\n // set up\n "image": "x", /* hi */ "postCreateCommand": "npm ci",\n}';
+		expect((await detectConfiguredSetup(filesOf({ ".devcontainer/devcontainer.json": jsonc })))?.script).toBe("set -e\n(\nnpm ci\n)\n");
+		expect(await detectConfiguredSetup(filesOf({ ".devcontainer/devcontainer.json": '{ "image": "x" }' }))).toBeNull();
+	});
+});
+
+describe("toolchains that aren't pinned", () => {
+	/** A workspace whose `mise latest` answers from `versions`, or fails. */
+	const resolving = (versions: Record<string, string>): Workspace =>
+		({
+			async *exec(cmd: string[]) {
+				const version = versions[cmd[3]!];
+				if (version) yield { type: "stdout", data: `${version}\n` };
+				yield { type: "exit", code: version ? 0 : 1 };
+			},
+		}) as unknown as Workspace;
+	const lts = [{ tool: "node", version: "lts", source: "manifest", from: ".nvmrc" }] as const;
+	const keyWith = (unpinned: string[]) => environmentKey({ userId: "ada", repo: "acme/widgets", provision: [], setupScript: null, unpinned, lockfiles: {}, image: "img" });
+
+	it("names the unpinned versions only, not exact ones or prefixes", () => {
+		for (const version of ["lts", "stable", "latest", "current"]) expect(isUnpinned(version)).toBe(true);
+		for (const version of ["22", "1.22.5", null]) expect(isUnpinned(version)).toBe(false);
+	});
+
+	it("puts the version mise resolves in the key, so a new release is a new environment", async () => {
+		const before = await unpinnedKeyParts(resolving({ "node@lts": "22.1.0" }), lts, 0, "/repo");
+		const after = await unpinnedKeyParts(resolving({ "node@lts": "22.2.0" }), lts, 0, "/repo");
+		expect(before).toEqual(["node@lts=22.1.0"]);
+		expect(await keyWith(before)).toBe(await keyWith(await unpinnedKeyParts(resolving({ "node@lts": "22.1.0" }), lts, 10 * UNPINNED_TTL_MS, "/repo")));
+		expect(await keyWith(before)).not.toBe(await keyWith(after));
+		const pnpm = [{ tool: "pnpm", version: "latest", source: "default", from: "package.json" }] as const;
+		expect(await unpinnedKeyParts(resolving({ "npm:pnpm@latest": "9.1.0" }), pnpm, 0, "/repo")).toEqual(["pnpm@latest=9.1.0"]);
+	});
+
+	it("expires the key every seven days when the version can't be resolved", async () => {
+		const stuck = resolving({});
+		const week = async (at: number) => keyWith(await unpinnedKeyParts(stuck, lts, at, "/repo"));
+		expect(await unpinnedKeyParts(stuck, lts, 0, "/repo")).toEqual(["node@lts=ttl:0"]);
+		expect(await week(UNPINNED_TTL_MS - 1)).toBe(await week(0));
+		expect(await week(UNPINNED_TTL_MS)).not.toBe(await week(0));
+	});
+
+	it("adds nothing when every toolchain is pinned", async () => {
+		expect(await unpinnedKeyParts(resolving({}), [{ tool: "go", version: "1.22.5", source: "manifest", from: "go.mod" }], 0, "/repo")).toEqual([]);
 	});
 });

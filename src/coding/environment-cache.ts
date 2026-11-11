@@ -28,7 +28,7 @@ export type CodingEnvironment = {
 	/** The environment's key, once the repository is checked out and the setup script found; null without one. */
 	readonly key: string | null;
 	/** Where the setup script came from: the person's setting for the repository, or `.pim/setup.sh` in it. */
-	readonly source: "settings" | "repository" | null;
+	readonly source: "settings" | "repository" | "mise" | "devcontainer" | null;
 	/** When the snapshot the thread has was made. */
 	readonly builtAt: number | null;
 	/** The snapshot the workspace was restored from, which may be an older key's when the repository moved on. */
@@ -94,23 +94,23 @@ export const MAX_SETUP_SCRIPT_BYTES = 64 * 1024;
 /** How long a setup script may run: as long as the coding tools' longest command. */
 export const SETUP_TIMEOUT_MS = 15 * 60_000;
 
-/** How fast a snapshot is taken to restore, in MB (10^6 bytes) of the stored snapshot a second: about what the first live restores did. */
-export const SNAPSHOT_RESTORE_MB_PER_S = 8;
+/** How fast a snapshot restores, in MB (10^6 bytes) of the stored snapshot a second, for a provider that doesn't say (`capabilities.restoreMBps`): about what the first live restores did. */
+export const DEFAULT_RESTORE_MB_PER_S = 8;
 
-/** How long restoring a snapshot of `bytes` is expected to take, in ms. */
-export function estimatedRestoreMs(bytes: number): number {
-	return bytes / (SNAPSHOT_RESTORE_MB_PER_S * 1_000);
+/** How long restoring a snapshot of `bytes` is expected to take, in ms, on a provider that restores `restoreMBps` MB a second. */
+export function estimatedRestoreMs(bytes: number, restoreMBps: number = DEFAULT_RESTORE_MB_PER_S): number {
+	return bytes / (restoreMBps * 1_000);
 }
 
 /**
  * Whether a snapshot is worth keeping for the threads after it: only when
  * restoring it is expected to take less time than the setup did, so a
  * restore is never slower than running the setup again (from the warm
- * dependency cache). A snapshot whose backend doesn't report its size is
- * kept, as before sizes were known.
+ * dependency cache), at the provider's own restore rate. A snapshot whose
+ * backend doesn't report its size is kept, as before sizes were known.
  */
-export function snapshotWorthKeeping(setupMs: number, snapshotBytes: number | null): boolean {
-	return snapshotBytes === null || estimatedRestoreMs(snapshotBytes) < setupMs;
+export function snapshotWorthKeeping(setupMs: number, snapshotBytes: number | null, restoreMBps: number = DEFAULT_RESTORE_MB_PER_S): boolean {
+	return snapshotBytes === null || estimatedRestoreMs(snapshotBytes, restoreMBps) < setupMs;
 }
 
 /** The most of a failure kept on the thread. */
@@ -132,8 +132,12 @@ export type EnvironmentKeyInput = {
 	readonly repo: string;
 	/** The provisioning steps' scripts, in order (./repo-environment.ts): they name the versions they install. */
 	readonly provision: readonly string[];
-	/** The setup script; null without one. */
+	/** What the setup is made from: the script, or for a setup the repository's configuration describes (a mise task, a dev container's commands) the text that defines it; null without a setup. */
 	readonly setupScript: string | null;
+	/** Where the setup came from (`settings`, `repository`, `mise`, `devcontainer`); null without one. A new source with the same content is another environment. */
+	readonly setupSource?: string | null;
+	/** The concrete versions, or the expiry periods, of the toolchains that aren't pinned (`unpinnedKeyParts` in ./repo-environment.ts), so `lts` and `latest` don't keep a snapshot forever. */
+	readonly unpinned?: readonly string[];
 	readonly lockfiles: Readonly<Record<string, string>>;
 	/** The workspace image as the backend names it; a digest-pinned reference changes with the image. */
 	readonly image: string;
@@ -143,7 +147,7 @@ export type EnvironmentKeyInput = {
 export async function environmentKey(input: EnvironmentKeyInput): Promise<string> {
 	const lockfiles = Object.entries(input.lockfiles).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 	const script = input.setupScript === null ? null : await sha256Hex(new TextEncoder().encode(input.setupScript));
-	const parts = ["pim-environment/2", input.userId, input.repo, input.provision, script, lockfiles, input.image];
+	const parts = ["pim-environment/3", input.userId, input.repo, input.provision, input.setupSource ?? null, script, lockfiles, input.image, [...(input.unpinned ?? [])].sort()];
 	return sha256Hex(new TextEncoder().encode(JSON.stringify(parts)));
 }
 

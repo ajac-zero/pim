@@ -1,3 +1,4 @@
+import { DEFAULT_RESTORE_MB_PER_S } from "../environment-cache";
 // The Docker Compose backend: a WorkspaceProvider that talks over HTTP to the sandbox-manager (spikes/coding-sandbox-manager), which runs one gVisor container per session. This file holds no Docker knowledge, only the manager's routes and how its answers map onto the provider contract.
 //
 // The manager is reached with a bearer token. The token is only ever sent in the Authorization header of requests to the manager: it is never logged, and it is scrubbed from the message of any error this file throws. The manager's URL must be https, unless its host is a loopback or private address (localhost, 127.0.0.0/8, ::1, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, fc00::/7, fe80::/10), where the traffic does not cross the public internet; and it may not carry a username or password.
@@ -154,7 +155,7 @@ const snapshotOf = (s: ManagerSnapshot): EnvironmentSnapshot => ({ key: s.key, r
 
 export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	readonly id = "compose";
-	#capabilities: WorkspaceProvider["capabilities"] = { snapshot: false, environmentSnapshots: true, egressAllowlist: true };
+	#capabilities: WorkspaceProvider["capabilities"] = { snapshot: false, environmentSnapshots: true, egressAllowlist: true, restoreMBps: DEFAULT_RESTORE_MB_PER_S };
 	readonly #base: string;
 	readonly #token: string;
 	readonly #fetch: typeof fetch;

@@ -115,6 +115,8 @@ export interface WorkspaceProvider {
 		environmentSnapshots: boolean;
 		/** Whether `spec.egress.allow` is enforced. */
 		egressAllowlist: boolean;
+		/** How fast an environment snapshot restores, in MB (10^6 bytes) of the stored snapshot a second; decides whether one is worth keeping. 8 when absent. */
+		restoreMBps?: number;
 		/** The most workspaces the backend runs at once, when it has a limit. */
 		maxConcurrent?: number;
 	};

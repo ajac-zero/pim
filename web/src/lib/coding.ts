@@ -90,7 +90,7 @@ export type CodingCheckpoint = {
 export type CodingEnvironment = {
   state: "none" | "restoring" | "cached" | "building" | "failed";
   key: string | null;
-  source: "settings" | "repository" | null;
+  source: "settings" | "repository" | "mise" | "devcontainer" | null;
   builtAt: number | null;
   restoredFromKey: string | null;
   provisionMs: number | null;

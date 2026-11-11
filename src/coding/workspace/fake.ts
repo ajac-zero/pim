@@ -1,3 +1,4 @@
+import { DEFAULT_RESTORE_MB_PER_S } from "../environment-cache";
 // An in-memory workspace provider for tests. It keeps files in a map, runs a tiny scripted shell, and is the first backend the shared conformance suite (conformance.ts) runs against. It is a reference for the contract in types.ts, not a sandbox.
 
 import {
@@ -38,6 +39,8 @@ export type FakeCommandHandler = (context: FakeCommandContext) => FakeCommandRes
 export type FakeProviderOptions = {
 	/** The most workspaces that exist at once; unlimited when absent. */
 	maxConcurrent?: number;
+	/** How fast environment snapshots restore, in MB a second; 8 when absent. */
+	restoreMBps?: number;
 };
 
 const MIB = 1024 * 1024;
@@ -384,7 +387,7 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 	private counter = 0;
 
 	constructor(options: FakeProviderOptions = {}) {
-		this.capabilities = { snapshot: true, environmentSnapshots: true, egressAllowlist: true, maxConcurrent: options.maxConcurrent };
+		this.capabilities = { snapshot: true, environmentSnapshots: true, egressAllowlist: true, restoreMBps: options.restoreMBps ?? DEFAULT_RESTORE_MB_PER_S, maxConcurrent: options.maxConcurrent };
 	}
 
 	/** Makes `name` run `handler` in every workspace of this provider. */

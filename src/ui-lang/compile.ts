@@ -58,7 +58,7 @@ class Compiler {
 	}
 
 	private finish(nodes: Node[]): UiProgram {
-		let program: UiProgram = {
+		const program: UiProgram = {
 			version: CATALOG_VERSION,
 			nodes,
 			texts: this.texts,
@@ -67,20 +67,18 @@ class Compiler {
 			forms: this.forms,
 			diagnostics: this.diagnostics,
 			fallbackMarkdown: "",
-			valid: true,
+			valid: this.diagnostics.every((diagnostic) => diagnostic.severity !== "error"),
 		};
-		if (this.diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
-			program = { ...program, fallbackMarkdown: "", valid: false };
-			return program;
-		}
-		// The fallback is the block as it first draws, which needs nothing from the person.
+		// The fallback is the block as it first draws, which needs nothing from
+		// the person. It is made even where something was wrong, of what was
+		// left; when even that can't be worked out, there is nothing to stand in.
 		try {
 			const drawn = evaluate(program, initialState(program), null);
 			if (drawn.error !== null) {
 				this.say("error", "runtime_error", drawn.error);
 				return { ...program, valid: false };
 			}
-			return { ...program, fallbackMarkdown: markdownOf(drawn.tree), valid: true };
+			return { ...program, fallbackMarkdown: markdownOf(drawn.tree) };
 		} catch {
 			this.say("error", "runtime_error", "The block didn't work out.");
 			return { ...program, valid: false };

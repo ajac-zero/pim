@@ -397,6 +397,8 @@ function ChatPage() {
                 onDiscard={(content) =>
                   setFill({ text: textOf(content), id: Date.now() })
                 }
+                // A ui block's form sends its turn the same way the composer does.
+                sendTurn={(text) => pimClient.send(text)}
                 composerHeight={composerHeight}
                 composerCardHeight={composerCardHeight}
                 footer={

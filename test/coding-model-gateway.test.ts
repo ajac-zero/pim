@@ -53,7 +53,8 @@ beforeEach(() => {
 	}
 });
 
-afterEach(() => {
+afterEach(async () => {
+	for (const response of opened.splice(0)) if (!response.bodyUsed) await response.body?.cancel().catch(() => {});
 	vi.restoreAllMocks();
 	codingGateway.fetch = null;
 	// Nothing the Worker or the thread logged, in any test, holds a provider key.
@@ -87,15 +88,20 @@ async function makeThread(overrides: Partial<CodingThreadRow> = {}): Promise<{ i
 }
 
 /** A request to the gateway as a CLI sends it: through the Worker, with the token as Anthropic's or OpenAI's clients send keys. */
-function gateway(path: string, token: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<Response> {
+/** Every response a test got from the gateway: the ones it did not read are cancelled when the test ends, so no request is still running when the file's worker is closed. */
+const opened: Response[] = [];
+
+async function gateway(path: string, token: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<Response> {
 	const auth: Record<string, string> = path.startsWith("/anthropic") ? { "x-api-key": token } : { authorization: `Bearer ${token}` };
-	return exports.default.fetch(
+	const response = await exports.default.fetch(
 		new Request(`https://pim.test/api/coding/gateway${path}`, {
 			method: init.method ?? "POST",
 			headers: { "content-type": "application/json", ...auth, ...init.headers },
 			...(init.method === "GET" ? {} : { body: typeof init.body === "string" ? init.body : JSON.stringify(init.body ?? {}) }),
 		}),
 	);
+	opened.push(response);
+	return response;
 }
 
 /** `bytes` as a provider streams them: in chunks of `size`, which split lines, events and multi-byte characters. */

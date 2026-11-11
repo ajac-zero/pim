@@ -6644,7 +6644,12 @@ export class Pim extends DurableAgent<Env> {
 				const { operationId } = await readJson<{ operationId: string }>(request);
 				if (operationId !== undefined) return { aborted: await this.harness.session(id).abort(operationId) };
 				// Stopping a group chat stops every agent at work in it.
-				for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) await this.#stop(seat.conversation);
+				// What they were waiting on from the person is withdrawn with them, so no request is left that nothing can wake.
+				for (const seat of this.#rooms.seats(id).filter((seat) => seat.conversation !== id)) {
+					this.#denyPending(seat.conversation, "Its chat was stopped.");
+					await this.#stop(seat.conversation);
+				}
+				this.#denyPending(id, "Its chat was stopped.");
 				await this.#stop(id);
 				return { aborted: true };
 			},

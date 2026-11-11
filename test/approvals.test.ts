@@ -174,7 +174,7 @@ describe("approvals", () => {
 		}
 	});
 
-	it("withdraws a request whose chat was stopped: deciding it later runs nothing", async () => {
+	it("withdraws a request whose chat was stopped, and deciding it later runs nothing", async () => {
 		const hook = mockHook();
 		await policy("explicit");
 		try {
@@ -183,8 +183,10 @@ describe("approvals", () => {
 			const approval = await pendingApproval();
 			expect((await post(`/sessions/${ROOT}/abort`)).status).toBe(200);
 			expect((await said).status).toBe("unanswered");
-			const decided = await post<Approval>(`/approvals/${approval.id}/approve`);
-			expect(decided.body).toMatchObject({ status: "denied", note: "Its chat stopped before the decision, so nothing ran." });
+			// Stop withdraws the request, so no card is left that nothing can wake, and deciding it later changes nothing.
+			expect((await api<Approval>(`/approvals/${approval.id}`)).body).toMatchObject({ status: "denied", note: "Its chat was stopped." });
+			expect((await api<{ approvals: Approval[] }>("/approvals?status=pending")).body.approvals).toEqual([]);
+			expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(409);
 			expect(hook).not.toHaveBeenCalled();
 		} finally {
 			await policy(null);
@@ -313,8 +315,7 @@ describe("a chat that can't be held up", () => {
 			expect((await post(`/sessions/${ROOT}/abort`)).status).toBe(200);
 			await settled();
 			expect(await busy()).toBe(false);
-			// Stop leaves the request it stopped on pending, with no call left to wake; the next test's `pendingApproval` would take it for its own.
-			expect((await post(`/approvals/${approval.id}/deny`)).status).toBe(200);
+			expect((await api<Approval>(`/approvals/${approval.id}`)).body.status).toBe("denied");
 		} finally {
 			await policy(null);
 		}

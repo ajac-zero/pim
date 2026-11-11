@@ -751,6 +751,30 @@ describe("conversation", () => {
 		]);
 	});
 
+	it("checks a ```ui block when it is sent, refusing what can't be drawn and noting what still can", async () => {
+		const bad = "Here you go:\n\n```ui\n<form id=\"quiz\"><chart/></form>\n```";
+		const good = ["Try it:", "", "```ui", '<form id="quiz" title="Capitals" submitLabel="Check">', '  <input name="city" label="Capital of Portugal" answer="Lisbon" hint="h"/>', "</form>", "```"].join("\n");
+		faux.setResponses([
+			toolUse("send_to_user", { message: bad }),
+			toolUse("send_to_user", { message: good }),
+		]);
+		const { id: session } = (await post("/sessions")).body;
+		const answer = await say("Quiz me", session);
+		const results = ((await api(`/sessions/${session}/messages`)).body.messages as TranscriptMessage[]).flatMap((message) =>
+			message.parts.flatMap((part) => (part.type === "tool-result" && part.name === "send_to_user" ? [part.content.map((content) => (content.type === "text" ? content.text : "")).join("")] : [])),
+		);
+		// The refused one says what Pim's compiler found, without the compiled block.
+		expect(results[0]).toContain("Not sent: a ```ui block");
+		expect(results[0]).toContain("<chart> is not one of the components a ui block may draw.");
+		expect(results[0]).not.toContain("forms");
+		// The good one sends, with only its diagnostics going back to the model.
+		const sent = JSON.parse(results[1]!) as { sent: string; uiNotes: string[] };
+		expect(sent.sent).toBe("Sent.");
+		expect(sent.uiNotes).toEqual(["a ```ui block <input> has no hint."]);
+		// What a client that can't draw it gets: the block as readable Markdown, its answers as blanks.
+		expect(answer.text).toBe(["Try it:", "", "Capitals (form quiz)", "", "- Capital of Portugal: ___"].join("\n"));
+	});
+
 	it("gives a model whose API fetches images a signed URL instead, which serves the image without the token", async () => {
 		const png = "iVBORw0KGgo=";
 		const { body: created } = await post("/sessions");

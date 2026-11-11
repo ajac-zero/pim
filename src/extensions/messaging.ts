@@ -1,5 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
+import { compile, uiBlockReference } from "../ui-lang";
 import { DELIVERY_REMINDER } from "../transcript";
 import { widgetMarkdown } from "./define";
 import { type PimServices, text } from "./services";
@@ -128,15 +129,40 @@ function blockMarkdown({ kind, items }: ReplyBlock): string {
 		.join("\n");
 }
 
+/** A ```ui fence, alone on its lines. */
+const UI_BLOCK = /```ui[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/g;
+
+/**
+ * What's wrong with a reply's ```ui blocks, as the model can read and fix.
+ * Only the diagnostics come back — never the compiled block — so the model's
+ * context stays small; `error` is set when one of them can't be drawn at all.
+ */
+export function uiDiagnostics(message: string): { error?: string; notes?: string[] } {
+	const notes: string[] = [];
+	for (const [, body] of message.matchAll(UI_BLOCK)) {
+		for (const diagnostic of compile(body!).diagnostics) {
+			const said = `a \`\`\`ui block${diagnostic.line > 0 ? ` (line ${diagnostic.line})` : ""} ${diagnostic.message}`;
+			if (diagnostic.severity === "error") return { error: said };
+			notes.push(said);
+		}
+	}
+	return notes.length > 0 ? { notes } : {};
+}
+
 /**
  * A reply as plain Markdown, for where its blocks can't be drawn: an email,
  * a push notification, an API client's reply or a chat's public copy. Its
- * blocks become lists of links.
+ * blocks become lists of links, and its ```ui blocks the readable pieces the
+ * app drew from them.
  */
 export function plainReply(message: string): string {
 	return message.replace(BLOCK, (fence) => {
 		const blocks = replyBlocks(fence);
 		return "error" in blocks || blocks.length === 0 ? fence : blockMarkdown(blocks[0]!);
+	}).replace(UI_BLOCK, (fence, body: string) => {
+		// What couldn't be drawn stays as it was written, so nothing is quietly lost.
+		const fallback = compile(body).fallbackMarkdown;
+		return fallback.trim() === "" ? fence : fallback;
 	});
 }
 
@@ -156,6 +182,7 @@ export function messagingExtension(services: PimServices) {
 				"To show pictures, such as an image search's results, put a ```gallery block: a JSON array of { image, caption?, url? }, where url is the page it's from. " +
 				"To show a video, such as an exercise demonstration, put a ```videos block: a JSON array of { url, title? } of YouTube watch, youtu.be or shorts addresses of real videos a tool's result gave you, never made up; it plays in the chat only when the person chooses, and other links stay ordinary Markdown links. " +
 				"To draw a diagram, such as a flowchart, a sequence or a timeline, put a ```mermaid block of Mermaid source in it; the person sees it drawn. " +
+				"To draw a small interactive piece, such as a quiz, a checklist or a form the person fills in and sends back as a turn, put a ```ui block of ui source in it, alone on its lines. " + uiBlockReference() + " " +
 				"An image must be an address a tool's result in this chat gave you, such as a page's image from fetch_url, never one you made up; Pim shows a copy of it.",
 		}),
 		complete: Type.Optional(Type.Boolean({ description: "Finish this turn (default true). Set false only for a progress update; send the final answer in a separate call with no other tools." })),
@@ -201,6 +228,9 @@ export function messagingExtension(services: PimServices) {
 			// So is a block it wrote wrong, or an image no tool gave it, which it may have made up.
 			const blocks = replyBlocks(message);
 			if ("error" in blocks) return text(`Not sent: ${blocks.error}.`, true);
+			// A ```ui block it wrote wrong is the same: say what Pim's compiler found and send nothing, so it can fix the block first.
+			const ui = uiDiagnostics(message);
+			if (ui.error !== undefined) return text(`Not sent: ${ui.error}.`, true);
 			const pictured = blockImages(blocks);
 			if (pictured.length > MAX_REPLY_IMAGES) return text(`Not sent: a message can show at most ${MAX_REPLY_IMAGES} images.`, true);
 			const unseen = await services.unseenImages(session, pictured);
@@ -233,6 +263,8 @@ export function messagingExtension(services: PimServices) {
 				...(shown.length > 0 ? { widgets: shown } : {}),
 				...(Object.keys(images).length > 0 ? { images } : {}),
 				...(missing.length > 0 ? { notShown: `${missing.join(", ")}: not an image Pim could load` } : {}),
+				// A block's warnings go back too, so the model can fix what still drew.
+				...(ui.notes !== undefined ? { uiNotes: ui.notes } : {}),
 			};
 			return { ...text(Object.keys(result).length === 1 ? sent : JSON.stringify(result)), ...(args.complete === false ? {} : { control: { terminate: true as const } }) };
 		},

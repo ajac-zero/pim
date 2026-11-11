@@ -69,7 +69,7 @@ export type ExecResult = {
 	readonly truncated: boolean;
 };
 
-export type ExecArgs = { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number; readonly thread?: string; readonly env?: Readonly<Record<string, string>> };
+export type ExecArgs = { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number; readonly thread?: string; readonly env?: Readonly<Record<string, string>>; /** Variables taken out of the process environment before `env` is added. */ readonly unset?: readonly string[] };
 
 /** Where this computer keeps the space's files, how it runs commands, and its browser (tests give their own). */
 export type Machine = {
@@ -536,9 +536,11 @@ export async function handle(machine: Machine, op: string, args: Args): Promise<
 			case "exec": {
 				if (typeof args.command !== "string" || args.command.trim() === "") throw new CallError("command must be a shell command", "EINVAL");
 				const cwd = args.cwd === undefined ? machine.root : await local(machine, args.cwd);
-				// A thread that already holds a display runs its commands in it; a plain command never makes one.
+				// A thread that already holds a display runs its commands in it; a plain command never makes one. Without one, the
+				// person's own display is taken out of its environment, so a GUI program fails instead of landing on their screen.
 				const env = typeof args.thread === "string" && machine.displays ? await machine.displays.envOf(args.thread) : undefined;
-				return await machine.exec({ ...(args as ExecArgs), ...(env ? { env } : {}) }, cwd);
+				const unset = typeof args.thread === "string" && machine.displays && !env ? DISPLAY_VARIABLES : undefined;
+				return await machine.exec({ ...(args as ExecArgs), ...(env ? { env } : {}), ...(unset ? { unset } : {}) }, cwd);
 			}
 			default:
 				throw new CallError(`This computer doesn't know the call ${op}. Update pim-computer.`, "ENOSYS");
@@ -586,11 +588,16 @@ class Output {
 	}
 }
 
+/** What points a program at the primary display. */
+const DISPLAY_VARIABLES = ["DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS"] as const;
+
 /** Runs a command in a login shell, in its own process group, killed with it at the timeout. `$PIM_WORKSPACE` is the root. */
-async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000, env }: ExecArgs, cwd: string, root: string): Promise<ExecResult> {
+export async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000, env, unset }: ExecArgs, cwd: string, root: string): Promise<ExecResult> {
 	const { spawn } = await import("node:child_process");
 	const shell = process.env.SHELL || "/bin/bash";
-	const child = spawn(shell, ["-lc", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env, PIM_WORKSPACE: root } });
+	const base = { ...process.env };
+	for (const name of unset ?? []) delete base[name];
+	const child = spawn(shell, ["-lc", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...base, ...env, PIM_WORKSPACE: root } });
 	const stdout = new Output(maxBytes);
 	const stderr = new Output(maxBytes);
 	child.stdout!.on("data", (chunk: Buffer) => stdout.add(chunk));

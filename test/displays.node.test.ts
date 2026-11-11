@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DisplayClient, handle, Link, type Machine } from "../computer/pim-computer";
+import { DisplayClient, handle, Link, type Machine, runCommand } from "../computer/pim-computer";
 
 type Req = { method: string; url: string; body: any; auth?: string };
 
@@ -155,5 +155,32 @@ describe("exec with a thread", () => {
 		expect(await run("q")).toBeNull();
 		expect(await run()).toBeNull();
 		expect(displayd.seen.some((r) => r.url === "/acquire")).toBe(false);
+	});
+});
+
+describe("exec's display environment", () => {
+	it("takes the primary display out for a thread without a lease, and leaves other calls alone", async () => {
+		const saved = { DISPLAY: process.env.DISPLAY, XAUTHORITY: process.env.XAUTHORITY };
+		process.env.DISPLAY = ":1";
+		process.env.XAUTHORITY = "/tmp/primary-auth";
+		try {
+		const displayd = await start(serve((r) => ({ json: r.url === "/displays" ? { displays: [{ threadId: "a", state: "active", env: { DISPLAY: ":100" } }] } : {} })));
+		const machine: Machine = {
+			root: dir,
+			exec: (args, cwd) => runCommand(args, cwd, dir),
+			displays: new DisplayClient({ url: displayd.base, tokenFile: tokenFile() }),
+		};
+		const printed = async (thread?: string) => ((await handle(machine, "exec", { command: "printenv DISPLAY XAUTHORITY", ...(thread ? { thread } : {}) })) as any).stdout;
+		expect(await printed("none")).toBe("");
+		expect(await printed("a")).toBe(":100\n/tmp/primary-auth\n");
+		expect(await printed()).toBe(":1\n/tmp/primary-auth\n");
+		displayd.close();
+		expect(await printed("none")).toBe("");
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 });

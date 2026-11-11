@@ -9,7 +9,8 @@ import type { DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/p
 import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
-import { api, apiUrl, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
+import { Computer } from "../src/computer";
+import { api, apiUrl, browserCalls, connectTestComputer, opens, OWNER, pendingApproval, post, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -672,5 +673,51 @@ describe("a computer this Pim's host keeps", () => {
 		// So the person can connect a computer of their own again.
 		expect((await post("/computer")).status).toBe(201);
 		await runInDurableObject(agent(), (instance: Pim) => instance.computer.forget());
+	});
+});
+
+describe("browser calls name their thread", () => {
+	it("carries the thread on browser_status, browser_connect, browser_disconnect and browser_stop, and keeps one channel for each", async () => {
+		const meta = new Map<string, string>([["computer_token", "x"]]);
+		const sent: { op: string; args: Record<string, unknown> }[] = [];
+		let channels = 0;
+		const computer: Computer = new Computer({
+			meta: { meta: (key) => meta.get(key), setMeta: (key, value) => void meta.set(key, value), deleteMeta: (key) => void meta.delete(key) },
+			sockets: () => [
+				{
+					readyState: WebSocket.OPEN,
+					send: (raw: string) => {
+						const message = JSON.parse(raw) as { type: string; id: string; op: string; args: Record<string, unknown> };
+						if (message.type !== "call") return;
+						sent.push({ op: message.op, args: message.args });
+						const result = message.op === "browser_connect" ? { channel: ++channels } : message.op === "browser_status" ? { available: true, running: false } : null;
+						queueMicrotask(() => computer.receive(JSON.stringify({ type: "reply", id: message.id, result })));
+					},
+				} as never,
+			],
+			screen: () => {},
+		});
+		await computer.browserStatus("conv-a");
+		const a = await computer.connectBrowser("conv-a");
+		const b = await computer.connectBrowser("conv-b");
+		// Connecting for one thread leaves the other's connection open.
+		let closed = "";
+		a.onclose = () => void (closed += "a");
+		b.onclose = () => void (closed += "b");
+		await computer.connectBrowser("conv-b");
+		expect(closed).toBe("b");
+		a.close();
+		await computer.stopBrowser("conv-b");
+		await computer.stopBrowser();
+		expect(sent.map(({ op, args }) => [op, args.thread])).toEqual([
+			["browser_status", "conv-a"],
+			["browser_connect", "conv-a"],
+			["browser_connect", "conv-b"],
+			["browser_connect", "conv-b"],
+			["browser_disconnect", "conv-a"],
+			["browser_stop", "conv-b"],
+			["browser_stop", undefined],
+		]);
+		expect(sent.find((call) => call.op === "browser_disconnect")!.args.channel).toBe(1);
 	});
 });

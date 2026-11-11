@@ -783,11 +783,10 @@ export class Pim extends DurableAgent<Env> {
 		fileDeleteAction(this.#files),
 		shellAction(this.computer),
 		appDeployAction(this.#hostedServices),
-		browserClickAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
-		browserTypeAction(this.browser, (conversation) => this.#browserWindowOf(conversation)),
+		browserClickAction(this.browser),
+		browserTypeAction(this.browser),
 		browserUploadAction(
 			this.browser,
-			(conversation) => this.#browserWindowOf(conversation),
 			(path) => this.computer.localPath(path),
 		),
 		desktopAction(this.computer),
@@ -6037,18 +6036,15 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * The window a chat (`?session=`, the root chat without one) shows in
-	 * the browser: its own, or that of a task it handed out, whichever was
-	 * used last, so the person sees, and takes over, where work is going on.
+	 * the browser: its own, that of a task it handed out, or that of an agent
+	 * in it when it is a group chat, whichever was used last, so the person
+	 * sees, and takes over, where work is going on. Each conversation has a
+	 * browser of its own, on the display of its own that its desktop tools use.
 	 */
 	async #browserWindow(url: URL): Promise<string> {
 		const requested = url.searchParams.get("session");
 		const chat = requested ? await this.#session(requested) : ROOT_SESSION;
-		return this.browser.lastUsed([chat, ...this.#tasks.ofRoot(chat).map((task) => task.conversation)]);
-	}
-
-	/** The window an agent's conversation browses in: in a group chat, the chat's, which its agents share. */
-	#browserWindowOf(conversation: string): string {
-		return this.#rooms.of(conversation)?.room ?? conversation;
+		return this.browser.lastUsed([...this.#rooms.everyConversation(chat), ...this.#tasks.ofRoot(chat).map((task) => task.conversation)]);
 	}
 
 	/** The browser, or 404 while the person has no computer for it to run on. */
@@ -8164,7 +8160,6 @@ export class Pim extends DurableAgent<Env> {
 		this.registry.install(
 			browserExtension(services, {
 				browser: this.browser,
-				windowOf: (conversation) => this.#browserWindowOf(conversation),
 				saveScreenshot: async (path, png) => {
 					this.#assertOpen();
 					const target = path ?? `${FILES_ROOT}/screenshots/${new Date().toISOString().replace(/[:.]/g, "-")}.png`;

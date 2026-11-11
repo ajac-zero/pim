@@ -294,6 +294,9 @@ export function testBrowser(): BrowserHost & { devtools(method: string, params?:
  * desktop, if it has one, the `screen` that streams it and the `driver`
  * agents use it with, which the test gives.
  */
+/** The browser calls the space made of test computers, with their arguments, in order. */
+export const browserCalls: { op: string; args: Record<string, unknown> }[] = [];
+
 export async function connectTestComputer(
 	token: string,
 	root: string,
@@ -313,6 +316,7 @@ export async function connectTestComputer(
 	const link = new Link(machine, (message) => socket.send(message));
 	socket.addEventListener("message", (event) => {
 		const message = JSON.parse(event.data as string) as { type?: string; id?: string; op?: string; args?: unknown };
+		if (message.type === "call" && message.op?.startsWith("browser_")) browserCalls.push({ op: message.op, args: (message.args ?? {}) as Record<string, unknown> });
 		const answer = message.type === "call" && message.op ? calls[message.op] : undefined;
 		if (!answer) return link.receive(event.data as string);
 		Promise.resolve()

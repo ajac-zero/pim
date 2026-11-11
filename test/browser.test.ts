@@ -3,7 +3,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Approval } from "../src/store";
-import { api, apiUrl, opens, pairTestComputer, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
+import { api, apiUrl, browserCalls, opens, pairTestComputer, pendingApproval, post, say, TOKEN, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 /** A page with a form whose button changes the page, so a click shows in what's read after, a search form that says method="get", and a link and a checkbox outside them. */
@@ -96,6 +96,19 @@ beforeAll(async () => {
 });
 
 describe("the browser", () => {
+	it("names the conversation, the thread its display is leased to, on the calls it makes to the computer", async () => {
+		browserCalls.length = 0;
+		const session = (await post<{ id: string }>("/sessions", {})).body.id;
+		await callTool("browser_open", { url: "data:text/html,<title>T</title>hi" }, session);
+		expect(browserCalls.length).toBeGreaterThan(0);
+		// The conversation's id, the same one the desktop tools lease their display with (`api.conversationId`), not the chat's id in the API.
+		const thread = browserCalls[0]!.args.thread;
+		expect(thread).toEqual(expect.any(String));
+		expect(thread).not.toBe("");
+		for (const call of browserCalls) expect(call.args.thread, call.op).toBe(thread);
+		expect(browserCalls.map((call) => call.op)).toEqual(expect.arrayContaining(["browser_status", "browser_connect"]));
+	});
+
 	it("reads pages, clicks and types at once, and sends a form only once the person approves what the page shows", async () => {
 		const page = await callTool("browser_open", { url: FORM });
 		expect(page).toContain("Page: Orders");

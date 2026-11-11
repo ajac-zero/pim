@@ -249,7 +249,8 @@ export class PimBrowser {
 	readonly #computer: Computer;
 	readonly #meta: Meta;
 	/**
-	 * Each chat's own browser, on a display of its own: the computer gives
+	 * Each conversation's own browser (the conversation id is also the thread
+	 * its display is leased to), on a display of its own: the computer gives
 	 * each chat a Chrome with a clean profile and the person's sign-ins
 	 * copied in, so chats never share a screen or a window.
 	 */

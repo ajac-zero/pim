@@ -47,8 +47,6 @@ const UploadArgs = Type.Object({
 
 export type BrowserServices = {
 	readonly browser: PimBrowser;
-	/** The window a conversation works in: its own, or its room's, which every agent in a group chat shares. */
-	readonly windowOf: (conversation: string) => string;
 	/** Saves a screenshot to the person's files, on their computer. */
 	readonly saveScreenshot: (path: string | undefined, png: Uint8Array) => Promise<string>;
 	/** Where a file in the person's files is on their computer, for the browser to upload; it must exist. */
@@ -60,7 +58,7 @@ function failure(error: unknown) {
 }
 
 /** Clicking, once the person approved what the request named. */
-export function browserClickAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
+export function browserClickAction(browser: PimBrowser): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_CLICK,
 		description: "Click a button that belongs to a form in the agents' browser, which may send it. Links, other controls, and buttons of forms that say method=\"get\" (searches) are clicked without asking.",
@@ -69,13 +67,13 @@ export function browserClickAction(browser: PimBrowser, windowOf: (conversation:
 		parameters: ClickArgs,
 		summarize: ({ ref }) => `Click [${ref}] in the browser`,
 		async run({ ref }, { session }) {
-			return describePage(await browser.click(windowOf(session), ref));
+			return describePage(await browser.click(session, ref));
 		},
 	}) as GatedAction;
 }
 
 /** Typing, once the person approved what the request named. */
-export function browserTypeAction(browser: PimBrowser, windowOf: (conversation: string) => string): GatedAction {
+export function browserTypeAction(browser: PimBrowser): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_TYPE,
 		description: "Type into a field in the agents' browser and press Enter, which usually sends the form. Typing without pressing Enter, or into a form that says method=\"get\" (a search), runs without asking.",
@@ -83,13 +81,13 @@ export function browserTypeAction(browser: PimBrowser, windowOf: (conversation: 
 		parameters: TypeArgs,
 		summarize: ({ ref, text }) => `Type “${text}” into [${ref}] in the browser`,
 		async run({ ref, text, submit }, { session }) {
-			return describePage(await browser.type(windowOf(session), ref, text, submit === true));
+			return describePage(await browser.type(session, ref, text, submit === true));
 		},
 	}) as GatedAction;
 }
 
 /** Uploading files from the person's files, once the person approved what the request named. */
-export function browserUploadAction(browser: PimBrowser, windowOf: (conversation: string) => string, localPath: (path: string) => Promise<string>): GatedAction {
+export function browserUploadAction(browser: PimBrowser, localPath: (path: string) => Promise<string>): GatedAction {
 	return defineGatedAction({
 		name: BROWSER_UPLOAD,
 		description: "Upload files from the person's files to a file field in the agents' browser.",
@@ -98,12 +96,12 @@ export function browserUploadAction(browser: PimBrowser, windowOf: (conversation
 		summarize: ({ ref, paths }) => `Upload ${paths.join(", ")} with [${ref}] in the browser`,
 		async run({ ref, paths }, { session }) {
 			const files = await Promise.all(paths.map(localPath));
-			return describePage(await browser.upload(windowOf(session), ref, files));
+			return describePage(await browser.upload(session, ref, files));
 		},
 	}) as GatedAction;
 }
 
-export function browserExtension(services: PimServices, { browser, windowOf, saveScreenshot, localPath }: BrowserServices) {
+export function browserExtension(services: PimServices, { browser, saveScreenshot, localPath }: BrowserServices) {
 	const browserOpen = defineTool({
 		name: "browser_open",
 		description: `Open a web page in your window of the browser and read it: its text, with what can be clicked or typed into numbered like [12 link “Prices”]. Use it for pages fetch_url can't read (built by JavaScript) and for anything you need to click through. What the browser downloads goes to /workspace/downloads, and you're told where. ${SHARED}`,
@@ -111,7 +109,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute({ url }, api) {
 			try {
-				return text(describePage(await browser.visit(windowOf(String(api.conversationId)), url)));
+				return text(describePage(await browser.visit(String(api.conversationId), url)));
 			} catch (error) {
 				return failure(error);
 			}
@@ -125,7 +123,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute(_args, api) {
 			try {
-				const view = await browser.read(windowOf(String(api.conversationId)));
+				const view = await browser.read(String(api.conversationId));
 				return view ? text(describePage(view)) : text("Your window is closed. Open a page with browser_open.", true);
 			} catch (error) {
 				return failure(error);
@@ -140,7 +138,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute({ ref }, api) {
 			try {
-				return text(describePage(await browser.hover(windowOf(String(api.conversationId)), ref)));
+				return text(describePage(await browser.hover(String(api.conversationId), ref)));
 			} catch (error) {
 				return failure(error);
 			}
@@ -158,7 +156,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute({ accept, text: answer }, api) {
 			try {
-				return text(describePage(await browser.answerDialog(windowOf(String(api.conversationId)), accept, answer)));
+				return text(describePage(await browser.answerDialog(String(api.conversationId), accept, answer)));
 			} catch (error) {
 				return failure(error);
 			}
@@ -180,7 +178,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 			// The request keeps the summary it was filed with: when the call runs again after the decision, the page has changed (it may show a dialog the action opened).
 			let summary = await api.memo<string>(BROWSER_CLICK, context);
 			if (summary === undefined) {
-				const window = windowOf(String(api.conversationId));
+				const window = String(api.conversationId);
 				try {
 					const element = await browser.describe(window, args.ref);
 					if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
@@ -204,7 +202,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 			// The request keeps the summary it was filed with: when the call runs again after the decision, the page has changed (it may show a dialog the action opened).
 			let summary = await api.memo<string>(BROWSER_TYPE, context);
 			if (summary === undefined) {
-				const window = windowOf(String(api.conversationId));
+				const window = String(api.conversationId);
 				try {
 					const element = await browser.describe(window, args.ref);
 					if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
@@ -232,7 +230,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 			let summary = await api.memo<string>(BROWSER_UPLOAD, context);
 			if (summary === undefined) {
 				try {
-					const element = await browser.describe(windowOf(String(api.conversationId)), args.ref);
+					const element = await browser.describe(String(api.conversationId), args.ref);
 					if (!element) return text(`There is no [${args.ref}] on the page now. Read the page again with browser_read and use a number it shows.`, true);
 					await Promise.all(args.paths.map(localPath));
 					const names = args.paths.map((path) => path.slice(path.lastIndexOf("/") + 1));
@@ -255,7 +253,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		replay: "safe",
 		async execute({ path }, api) {
 			try {
-				const png = await browser.screenshot(windowOf(String(api.conversationId)));
+				const png = await browser.screenshot(String(api.conversationId));
 				if (!png) return text("Your window is closed. Open a page with browser_open.", true);
 				return text(`Saved to ${await saveScreenshot(path, png)}.`);
 			} catch (error) {
@@ -270,7 +268,7 @@ export function browserExtension(services: PimServices, { browser, windowOf, sav
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute(_args, api) {
-			await browser.close(windowOf(String(api.conversationId)));
+			await browser.close(String(api.conversationId));
 			return text("Your window is closed.");
 		},
 	});

@@ -5,9 +5,8 @@ threads never share a screen, pointer, clipboard or accessibility tree. Plain No
 dependencies. It runs on the Pim host next to [sandbox-manager](../sandbox-manager/README.md) and
 [hostopsd](../sandbox-manager/hostopsd/README.md), and listens on loopback only.
 
-This is the first part (P1a): leasing displays, supervising them, and the HTTP API. Queue
-fairness and preemption, routing the computer tools to a display, and browser cookies come later;
-`DisplayAllocator` takes its runner, store and memory reader as parameters so they can grow.
+This part covers leasing displays, supervising them, the HTTP API, and the queue with preemption
+and a person's take-over. `DisplayAllocator` takes its runner, store and memory reader as parameters so they can grow.
 
 ## A display
 
@@ -33,7 +32,7 @@ unique among live displays and reserved for Chrome before it starts.
 ## Leases
 
 `acquire(threadId, spaceId)` gives a thread one display, and the same lease again if it has one.
-States: `queued` (no slot, or the memory guard says no) → `starting` → `active` ⇄ `idle` →
+States: `queued` (no slot, or the memory guard says no; or `timeout`) → `starting` → `active` ⇄ `idle` →
 `reaping` → `gone`. `touch` is the heartbeat; a display not touched for 1 minute is `idle`, and for
 10 minutes (20 once `markBrowser` is called, via `{"browser": true}` on `/touch`) it is reaped. A
 display still `starting` after 30 s is killed and started once more; the second failure drops the
@@ -51,6 +50,31 @@ answers a health probe, starts their idle clocks afresh, kills and forgets the r
 context directories no lease owns. The unit uses `KillMode=process` so a restart of displayd does
 not end the displays.
 
+## Queue, preemption and take-over
+
+A thread that cannot get a display (no free slot, or the memory guard says no) is `queued`. The
+queue is first come, first served by request time; when several spaces are queued they take turns,
+one lease per space per round. A lease queued for 5 minutes (`queueTimeoutMs`) is dropped and its
+next `acquire` returns state `timeout` once; asking again queues afresh. Each lease still asks
+for one display per thread.
+
+When the queue is not empty and no display can start, displayd reaps the longest-idle display
+whose idle time is more than 2 minutes (`minIdleMs`). A display touched within that time by a tool
+call or by the viewer, or one a person has taken over, is never preempted. The preempted thread's
+lease becomes `gone` with `reason: "preempted"` (shown until it asks again); its next `acquire`
+queues a new lease. Its thread directory and profile data stay. After a preemption another one
+for memory reasons waits 15 s for the memory to come back.
+
+A queued lease in `acquire`, `GET /displays` and `GET /health` carries `position`,
+`estimatedWaitSec` (when a holder becomes preemptable, or is reaped at its TTL at the latest) and
+`holders: [{threadId, idleSec, state}]`.
+
+`POST /control {threadId, mode: "user"|"agent"}` sets `lease.control`. While `user`, the display
+counts as active, is not preempted or reaped for idleness, and pim-computer returns the retryable
+error `display_user_controlled` instead of calling the driver. It reverts to `agent` after 30
+minutes without `POST /touch {threadId, viewer: true}`, which is the viewer's heartbeat and
+counts as activity like any touch.
+
 ## API
 
 Loopback, JSON, `Authorization: Bearer $DISPLAYD_TOKEN` on every request.
@@ -58,9 +82,10 @@ Loopback, JSON, `Authorization: Bearer $DISPLAYD_TOKEN` on every request.
 | Request | Meaning |
 | --- | --- |
 | `POST /acquire {threadId, spaceId, waitMs?}` | The lease: 200 once active, 202 while queued or starting (`waitMs` waits up to 60 s) |
-| `POST /touch {threadId, browser?}` | Heartbeat; 404 when the thread has no display |
+| `POST /touch {threadId, browser?, viewer?}` | Heartbeat; `viewer` marks the person watching the display; 404 when the thread has no display |
+| `POST /control {threadId, mode}` | `user` takes the display over, `agent` hands it back; 404 when the thread has no display |
 | `POST /release {threadId}` | Kills the display and waits; `{released}` |
-| `GET /displays` | Every lease |
+| `GET /displays` | Every lease, queued ones with their queue status |
 | `GET /health` | Slots, queue length, `MemAvailable`, and each display's liveness now, with `driver` for the Cua Driver's |
 
 A lease is `{id, threadId, spaceId, state, display, env, vncPort, cdpPort, driver: {base, tokenFile}, browser, createdAt,

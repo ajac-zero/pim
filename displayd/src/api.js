@@ -44,7 +44,7 @@ export function createServer({ allocator, token, sleepFn = sleep }) {
 			const route = `${req.method} ${new URL(req.url, 'http://x').pathname}`
 			if (route === 'GET /health') return send(200, { ok: true, ...(await allocator.health()) })
 			if (route === 'GET /displays') return send(200, { displays: allocator.list() })
-			if (!['POST /acquire', 'POST /release', 'POST /touch'].includes(route)) throw new HttpError(404, 'not found')
+			if (!['POST /acquire', 'POST /release', 'POST /touch', 'POST /control'].includes(route)) throw new HttpError(404, 'not found')
 			const b = await body(req)
 			const threadId = id(b.threadId, 'threadId')
 			if (route === 'POST /acquire') {
@@ -57,10 +57,18 @@ export function createServer({ allocator, token, sleepFn = sleep }) {
 					lease = allocator.get(threadId)
 				}
 				if (!lease) throw new HttpError(503, 'the display could not be started')
+				if (lease.state === 'timeout') await allocator.ack(threadId)
 				return send(lease.state === 'active' || lease.state === 'idle' ? 200 : 202, { lease })
 			}
+			if (route === 'POST /control') {
+				if (b.mode !== 'user' && b.mode !== 'agent') throw new HttpError(400, "mode must be 'user' or 'agent'")
+				const lease = await allocator.setControl(threadId, b.mode)
+				if (!lease) throw new HttpError(404, 'the thread has no display')
+				return send(200, { lease })
+			}
 			if (route === 'POST /release') return send(200, { released: await allocator.release(threadId) })
-			const lease = await (b.browser ? allocator.markBrowser(threadId) : allocator.touch(threadId))
+			const viewed = b.viewer === true || !b.browser ? await allocator.touch(threadId, { viewer: b.viewer === true }) : null
+			const lease = b.browser ? await allocator.markBrowser(threadId) : viewed
 			if (!lease) throw new HttpError(404, 'the thread has no display')
 			return send(200, { lease })
 		} catch (e) {

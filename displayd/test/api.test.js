@@ -54,3 +54,14 @@ test('bad input is rejected', async () => {
 	assert.equal((await call('POST', '/acquire', { threadId: '../x y', spaceId: 's' })).status, 400)
 	assert.equal((await call('GET', '/nope')).status, 404)
 })
+
+test('control and viewer touch', async () => {
+	await call('POST', '/acquire', { threadId: 'ctl', spaceId: 'sp-1' })
+	await allocator.tick()
+	assert.equal((await call('POST', '/control', { threadId: 'ctl', mode: 'user' })).json.lease.control, 'user')
+	assert.equal((await call('POST', '/touch', { threadId: 'ctl', viewer: true })).status, 200)
+	assert.equal((await call('POST', '/control', { threadId: 'ctl', mode: 'bogus' })).status, 400)
+	assert.equal((await call('POST', '/control', { threadId: 'nobody', mode: 'user' })).status, 404)
+	assert.equal((await call('POST', '/control', { threadId: 'ctl', mode: 'agent' })).json.lease.control, 'agent')
+	await call('POST', '/release', { threadId: 'ctl' })
+})

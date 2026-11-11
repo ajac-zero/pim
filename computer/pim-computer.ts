@@ -1227,6 +1227,15 @@ const NO_DISPLAY = "no display allocated: displayd is not reachable on this comp
 /** The tools that act with the keyboard or pointer, which a display's driver only delivers in the foreground. */
 const INPUT_TOOLS = new Set(["click", "double_click", "right_click", "type_text", "press_key", "hotkey", "set_value", "scroll", "drag"]);
 
+/** The text of a retryable error for a thread still waiting in displayd's queue for a display. */
+function queuedMessage(lease: Lease): string {
+	const holders = Array.isArray(lease.holders) ? (lease.holders as { threadId: string; idleSec: number; state: string }[]) : [];
+	const place = typeof lease.position === "number" ? `position ${lease.position} in the queue` : "in the queue";
+	const wait = typeof lease.estimatedWaitSec === "number" ? `, estimated wait ${lease.estimatedWaitSec} s` : "";
+	const held = holders.length ? ` Displays are held by: ${holders.map((h) => `${h.threadId} (${h.state}, idle ${h.idleSec} s)`).join(", ")}.` : "";
+	return `display_queued No display is free yet: ${place}${wait}.${held} Try again shortly.`;
+}
+
 type Lease = { state: string; env?: Record<string, string>; driver?: { base: string; tokenFile: string }; [key: string]: unknown };
 
 /**
@@ -1282,9 +1291,15 @@ export class DisplayClient {
 		const lease = (acquired.body?.lease ?? undefined) as Lease | undefined;
 		if (!lease || (lease.state !== "active" && lease.state !== "idle") || !lease.driver) {
 			const state = lease?.state ?? "unknown";
+			if (lease && state === "queued") return { content: [{ type: "text", text: queuedMessage(lease) }], isError: true };
 			const why = acquired.status >= 400 ? `HTTP ${acquired.status} ${JSON.stringify(acquired.body)}` : JSON.stringify({ state, ...(lease ? { lease: { ...lease, env: undefined } } : {}) });
-			const label = state === "starting" ? "display_starting" : state === "queued" ? "display_queued" : "display_unavailable";
-			return { content: [{ type: "text", text: `${label} ${why}. The display isn't ready yet; try again shortly.` }], isError: true };
+			const label = state === "starting" ? "display_starting" : state === "timeout" ? "display_timeout" : state === "gone" ? "display_gone" : "display_unavailable";
+			const hint = state === "timeout" ? "It waited too long in the queue; try again to queue afresh." : state === "gone" ? "Its display was taken for another thread; try again to queue for a new one." : "The display isn't ready yet; try again shortly.";
+			return { content: [{ type: "text", text: `${label} ${why}. ${hint}` }], isError: true };
+		}
+		// A person has taken the display over: the agent's calls would fight them for it, so wait.
+		if (lease.control === "user") {
+			return { content: [{ type: "text", text: "display_user_controlled The person is using this display themselves right now. Wait and try again in a minute, or tell them you need the display." }], isError: true };
 		}
 		await this.#request("POST", "/touch", { threadId: thread }).catch(() => undefined);
 		const key = `${lease.driver.base} ${lease.driver.tokenFile}`;

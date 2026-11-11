@@ -27,7 +27,7 @@ export const BROWSER_CLICK = "browser_click";
 export const BROWSER_TYPE = "browser_type";
 export const BROWSER_UPLOAD = "browser_upload";
 
-const SHARED = `The browser is the Chrome on the person's computer. You have a window of your own in it, which keeps its page between your steps; other agents and chats have theirs, and what the person signed in to there is signed in in every window. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the activity box beside the chat, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
+const SHARED = `The browser is a Chrome on the person's computer that you have to yourself, on a display of its own, with the sign-ins the person made in their primary browser copied in when it starts; other agents and chats have theirs. Its window keeps its page between your steps. If the primary browser has no saved sign-ins, a page that needs one won't be signed in: ask the person to sign in on the Primary desktop in Computer, never for credentials in chat. If a page needs the person (signing in, a check that they're human, payment details), stop and ask them to take over: in the activity box beside the chat, they choose Take over and tell you when they're done. Never ask them for passwords or codes in the chat.`;
 
 const Ref = Type.Integer({ minimum: 1, description: "The element's number, from the page as browser_open or browser_read last showed it: 12 for [12 button “Search”]." });
 const ClickArgs = Type.Object({ ref: Ref });

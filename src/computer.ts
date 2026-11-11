@@ -119,6 +119,8 @@ export type BrowserTransport = {
 	close(): void;
 	onmessage?: (message: string) => void;
 	onclose?: () => void;
+	/** What the computer says the agent should know of this browser first, such as that no sign-ins were copied into it. */
+	note?: string;
 };
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
@@ -132,8 +134,8 @@ export class Computer {
 	readonly #meta: Meta;
 	readonly #sockets: () => Connection[];
 	readonly #pending = new Map<string, Pending>();
-	/** The DevTools connection to the computer's browser, of which there is one at a time. */
-	#browser: { channel: number; transport: BrowserTransport } | null = null;
+	/** The DevTools connections to the computer's browsers, one for each thread (and one for calls without a thread), by thread. */
+	readonly #browsers = new Map<string, { channel: number; transport: BrowserTransport }>();
 	/** Where the desktop's streams go: what a channel's stream says, as text or binary, or null once it's closed. */
 	readonly #screen: (channel: number, data: string | ArrayBuffer | null) => void;
 
@@ -257,7 +259,7 @@ export class Computer {
 	}
 
 	#failPending(): void {
-		this.#browserClosed();
+		for (const thread of [...this.#browsers.keys()]) this.#browserClosed(thread);
 		for (const [id, pending] of this.#pending) {
 			clearTimeout(pending.timer);
 			pending.reject(new HttpError(503, "The computer disconnected before it answered."));
@@ -304,10 +306,11 @@ export class Computer {
 			return;
 		}
 		if (message.type === "cdp" || message.type === "cdp_closed") {
-			const browser = this.#browser;
-			if (!browser || browser.channel !== (message as { channel?: unknown }).channel) return;
-			if (message.type === "cdp_closed") this.#browserClosed();
-			else browser.transport.onmessage?.(String((message as { data?: unknown }).data));
+			const channel = (message as { channel?: unknown }).channel;
+			const found = [...this.#browsers].find(([, browser]) => browser.channel === channel);
+			if (!found) return;
+			if (message.type === "cdp_closed") this.#browserClosed(found[0]);
+			else found[1].transport.onmessage?.(String((message as { data?: unknown }).data));
 			return;
 		}
 		if (message.type !== "reply" || typeof message.id !== "string") return;
@@ -396,43 +399,52 @@ export class Computer {
 		return this.call("driver", { tool, arguments: args, ...(thread ? { thread } : {}) }, DRIVER_CALL_MS);
 	}
 
-	/** Whether the computer has a browser, and whether it's running; neither while the computer is offline. */
-	async browserStatus(): Promise<{ available: boolean; running: boolean }> {
+	/**
+	 * Whether the computer has a browser, and whether it's running; neither
+	 * while the computer is offline. With a `thread`, that thread's own
+	 * browser, on its own display: asking never starts or leases anything.
+	 */
+	async browserStatus(thread?: string): Promise<{ available: boolean; running: boolean }> {
 		if (!this.#socket()) return { available: false, running: false };
-		return this.call<{ available: boolean; running: boolean }>("browser_status", {});
+		return this.call<{ available: boolean; running: boolean }>("browser_status", thread ? { thread } : {});
 	}
 
 	/**
-	 * Connects to the computer's browser over DevTools, starting it there
-	 * first when it isn't running. Its messages go through the computer's
-	 * connection; a connection made before this one is closed.
+	 * Connects to a browser on the computer over DevTools, starting it there
+	 * first when it isn't running. With a `thread`, the thread's own browser,
+	 * on its own display and with the person's sign-ins copied in; without
+	 * one, the computer's primary browser. Its messages go through the
+	 * computer's connection; a connection made before this one for the same
+	 * thread is closed.
 	 */
-	async connectBrowser(): Promise<BrowserTransport> {
-		const { channel } = await this.call<{ channel: number }>("browser_connect", {}, 60_000);
-		this.#browserClosed();
+	async connectBrowser(thread?: string): Promise<BrowserTransport> {
+		const key = thread ?? "";
+		const { channel, note } = await this.call<{ channel: number; note?: string }>("browser_connect", thread ? { thread } : {}, 120_000);
+		this.#browserClosed(key);
 		const transport: BrowserTransport = {
+			...(note ? { note } : {}),
 			send: (data) => {
-				if (this.#browser?.channel !== channel) return;
+				if (this.#browsers.get(key)?.channel !== channel) return;
 				this.#socket()?.send(JSON.stringify({ type: "cdp", channel, data }));
 			},
 			close: () => {
-				if (this.#browser?.channel !== channel) return;
-				this.#browser = null;
-				void this.call("browser_disconnect", { channel }).catch(() => undefined);
+				if (this.#browsers.get(key)?.channel !== channel) return;
+				this.#browsers.delete(key);
+				void this.call("browser_disconnect", { channel, ...(thread ? { thread } : {}) }).catch(() => undefined);
 			},
 		};
-		this.#browser = { channel, transport };
+		this.#browsers.set(key, { channel, transport });
 		return transport;
 	}
 
-	/** Quits the computer's browser; its profile, with what's signed in there, stays. */
-	async stopBrowser(): Promise<void> {
-		await this.call("browser_stop", {});
+	/** Quits a browser of the computer: the thread's own, which ends with its display, or the primary one. Its profile, with what's signed in there, stays. */
+	async stopBrowser(thread?: string): Promise<void> {
+		await this.call("browser_stop", thread ? { thread } : {});
 	}
 
-	#browserClosed(): void {
-		const browser = this.#browser;
-		this.#browser = null;
+	#browserClosed(key: string): void {
+		const browser = this.#browsers.get(key);
+		this.#browsers.delete(key);
 		browser?.transport.onclose?.();
 	}
 

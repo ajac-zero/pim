@@ -50,10 +50,21 @@ const WINDOWS_KEY = "browser_windows";
 export const DOWNLOADS = "/workspace/downloads";
 /** How long an action waits for a download it started to finish, before the agent hears it's still going. */
 const DOWNLOAD_WAIT_MS = 30_000;
-/** The most windows open at once; opening another closes the one used longest ago, which opens again where it was when it's next needed. */
-const MAX_WINDOWS = 6;
 /** How many chats' windows are remembered. */
 const MAX_RECORDS = 30;
+
+/** One chat's connection to its browser: the connection, if it's made, and what is using it. */
+type Connection = {
+	browser?: Browser;
+	connecting?: Promise<Browser | undefined>;
+	idle?: ReturnType<typeof setTimeout>;
+	/** Uses of the browser under way. */
+	busy: number;
+	/** What the computer said of the browser as it connected, which the agent reads with the next page. */
+	note?: string;
+	/** The windows Chrome opened as it started that no chat claimed, closed once the chat's window is open. */
+	unclaimed: Page[];
+};
 
 /** A chat's window: its target in the running browser, if it's open, and the page it showed when last used. */
 type WindowRecord = { target: string | null; url: string; title: string; usedAt: number };
@@ -237,11 +248,12 @@ const DESCRIBE = `((ref) => {
 export class PimBrowser {
 	readonly #computer: Computer;
 	readonly #meta: Meta;
-	#browser: Browser | undefined;
-	#connecting: Promise<Browser | undefined> | undefined;
-	#idle: ReturnType<typeof setTimeout> | undefined;
-	/** Uses of the browser under way, in any window. */
-	#busy = 0;
+	/**
+	 * Each chat's own browser, on a display of its own: the computer gives
+	 * each chat a Chrome with a clean profile and the person's sign-ins
+	 * copied in, so chats never share a screen or a window.
+	 */
+	readonly #connections = new Map<string, Connection>();
 	/** Each chat's window, while the space is connected to the browser. */
 	readonly #pages = new Map<string, Page>();
 	/** Each window's turn: one use at a time in a window, while the others go on. */
@@ -463,7 +475,7 @@ export class PimBrowser {
 		screencast.page.removeAllListeners("framenavigated");
 		screencast.page.removeAllListeners("load");
 		screencast.page.removeAllListeners("close");
-		this.#letGoLater();
+		this.#letGoLater(chat!);
 	}
 
 	/** Whether `id` is watching, as far as this instance knows: a space that woke again has forgotten. */
@@ -529,14 +541,19 @@ export class PimBrowser {
 		this.#saveRecords(records);
 	}
 
-	/** Quits the browser, with every window; what's signed in there stays in its profile. */
+	/** Quits every chat's browser, with its window, and the primary one; what's signed in there stays in its profile. */
 	async quit(): Promise<void> {
-		const browser = this.#browser;
-		this.#browser = undefined;
-		await browser?.disconnect().catch(() => {});
-		this.#ended();
+		const chats = [...this.#connections.keys()];
+		for (const chat of chats) {
+			const browser = this.#connections.get(chat)?.browser;
+			this.#connections.delete(chat);
+			await browser?.disconnect().catch(() => {});
+			this.#ended(chat);
+		}
 		this.#meta.set(WINDOWS_KEY, null);
-		if (this.#computer.status().state === "online") await this.#computer.stopBrowser();
+		if (this.#computer.status().state !== "online") return;
+		for (const chat of chats) await this.#computer.stopBrowser(chat).catch(() => {});
+		await this.#computer.stopBrowser();
 	}
 
 	async #act(chat: string, ref: number, act: (page: Page, element: ElementHandle) => Promise<void>): Promise<PageView> {
@@ -633,16 +650,23 @@ export class PimBrowser {
 	#use<T>(chat: string, mode: "existing", use: (page: Page) => Promise<T>): Promise<T | null>;
 	#use<T>(chat: string, mode: OpenMode, use: (page: Page) => Promise<T>): Promise<T | null> {
 		const work = async () => {
-			this.#busy++;
+			const connection = this.#connectionOf(chat);
+			connection.busy++;
 			try {
 				const page = await this.#window(chat, mode);
 				if (!page) return null;
 				const result = await use(page);
 				if (!page.isClosed()) this.#remember(chat, page);
+				// What the computer said as the browser started is read once, with the first page.
+				if (connection.note && result && typeof result === "object" && typeof (result as Partial<PageView>).text === "string") {
+					const view = result as unknown as PageView;
+					view.note = view.note ? `${connection.note}\n\n${view.note}` : connection.note;
+					connection.note = undefined;
+				}
 				return result;
 			} finally {
-				this.#busy--;
-				this.#letGoLater();
+				connection.busy--;
+				this.#letGoLater(chat);
 			}
 		};
 		const run = (this.#turns.get(chat) ?? Promise.resolve()).then(work, work);
@@ -656,7 +680,7 @@ export class PimBrowser {
 
 	/** The chat's window: the one it has open, or, as `mode` allows, one opened for it. */
 	async #window(chat: string, mode: OpenMode): Promise<Page | undefined> {
-		const browser = await this.#connect(mode !== "existing");
+		const browser = await this.#connect(chat, mode !== "existing");
 		if (!browser) return undefined;
 		const known = this.#pages.get(chat);
 		if (known && !known.isClosed()) return known;
@@ -668,11 +692,10 @@ export class PimBrowser {
 			page = await this.#openWindow(browser, mode === "reopen" && record ? record.url : "about:blank");
 			this.#pages.set(chat, page);
 			this.#remember(chat, page, mode === "reopen" ? record?.title : "");
-			await this.#closeLeastUsed(chat);
 		}
 		await this.#prepare(browser, page);
 		this.#pages.set(chat, page);
-		for (const other of this.#unclaimed.splice(0)) if (other !== page) await other.close().catch(() => {});
+		for (const other of this.#connectionOf(chat).unclaimed.splice(0)) if (other !== page) await other.close().catch(() => {});
 		return page;
 	}
 
@@ -691,46 +714,41 @@ export class PimBrowser {
 		return page;
 	}
 
-	/** With more than `MAX_WINDOWS` open, closes the one used longest ago, but not `keep`'s or one being taken over; it opens again where it was. */
-	async #closeLeastUsed(keep: string): Promise<void> {
-		const records = this.#records();
-		const open = [...this.#pages.entries()].filter(([, page]) => !page.isClosed());
-		if (open.length <= MAX_WINDOWS) return;
-		const [chat, page] = open
-			.filter(([chat]) => chat !== keep && !this.#screencasts.has(chat) && !this.#turns.has(chat))
-			.sort(([a], [b]) => (records[a]?.usedAt ?? 0) - (records[b]?.usedAt ?? 0))[0] ?? [undefined, undefined];
-		if (!chat || !page) return;
-		this.#pages.delete(chat);
-		await page.close().catch(() => {});
+	#connectionOf(chat: string): Connection {
+		let connection = this.#connections.get(chat);
+		if (!connection) this.#connections.set(chat, (connection = { busy: 0, unclaimed: [] }));
+		return connection;
 	}
 
-	/** The browser, connected to, started first when `start` allows. */
-	async #connect(start: boolean): Promise<Browser | undefined> {
+	/** The chat's browser, connected to, started first when `start` allows. */
+	async #connect(chat: string, start: boolean): Promise<Browser | undefined> {
 		if (!this.available) throw new Error("This space has no browser: the person can connect a computer in Settings → Computer.");
-		if (this.#browser?.connected) return this.#browser;
-		const connecting = (this.#connecting ??= (async () => {
-			this.#browser = undefined;
-			this.#pages.clear();
-			const { running } = await this.#computer.browserStatus();
+		const connection = this.#connectionOf(chat);
+		if (connection.browser?.connected) return connection.browser;
+		const connecting = (connection.connecting ??= (async () => {
+			connection.browser = undefined;
+			this.#pages.delete(chat);
+			const { running } = await this.#computer.browserStatus(chat);
 			if (!running && !start) return undefined;
-			const transport = await this.#computer.connectBrowser();
+			const transport = await this.#computer.connectBrowser(chat);
+			if (transport.note) connection.note = transport.note;
 			// The window's own size, so what the person sees when they take over is what the agents read.
 			const browser = await puppeteer.connect({ transport, defaultViewport: null });
 			browser.on("disconnected", () => {
-				if (this.#browser !== browser) return;
-				this.#browser = undefined;
-				this.#ended();
+				if (connection.browser !== browser) return;
+				connection.browser = undefined;
+				this.#ended(chat);
 			});
 			await this.#downloadToFiles(browser);
-			this.#browser = browser;
-			if (!running) await this.#claimRestored(browser);
+			connection.browser = browser;
+			if (!running) await this.#claimRestored(chat, browser);
 			return browser;
 		})().finally(() => {
-			this.#connecting = undefined;
+			connection.connecting = undefined;
 		}));
 		const browser = await connecting;
 		// One that connected without starting found the browser closed; this one may start it.
-		return browser ?? (start ? this.#connect(start) : undefined);
+		return browser ?? (start ? this.#connect(chat, start) : undefined);
 	}
 
 	/**
@@ -739,21 +757,19 @@ export class PimBrowser {
 	 * the one where it was, and the others close, once the chat that started
 	 * the browser has its window: Chrome on a desktop quits with its last.
 	 */
-	async #claimRestored(browser: Browser): Promise<void> {
+	async #claimRestored(chat: string, browser: Browser): Promise<void> {
 		const records = this.#records();
 		const unclaimed = Object.entries(records).sort(([, a], [, b]) => b.usedAt - a.usedAt);
 		for (const [, record] of unclaimed) record.target = null;
-		this.#unclaimed = [];
+		const unclaimedPages: Page[] = [];
 		for (const page of await browser.pages()) {
 			const owner = unclaimed.find(([, record]) => record.target === null && record.url === page.url());
 			if (owner) owner[1].target = targetIdOf(page.target());
-			else this.#unclaimed.push(page);
+			else unclaimedPages.push(page);
 		}
+		this.#connectionOf(chat).unclaimed = unclaimedPages;
 		this.#saveRecords(records);
 	}
-
-	/** The windows Chrome opened as it started that no chat claimed, closed once a chat's window is open. */
-	#unclaimed: Page[] = [];
 
 	/**
 	 * Has the browser save downloads to the person's files, and tell the
@@ -806,25 +822,25 @@ export class PimBrowser {
 		}
 	}
 
-	/** The connection ended: anyone watching hears the browser is gone. */
-	#ended(): void {
-		this.#pages.clear();
-		this.#downloads.clear();
-		for (const chat of [...this.#screencasts.keys()]) this.#endScreencast(chat);
+	/** The chat's connection ended: anyone watching hears the browser is gone. */
+	#ended(chat: string): void {
+		this.#pages.delete(chat);
+		this.#endScreencast(chat);
 	}
 
-	/** Lets the connection go after a while unused, unless someone is watching; the browser itself stays open. */
-	#letGoLater(): void {
-		clearTimeout(this.#idle);
-		this.#idle = setTimeout(() => {
-			if (this.#screencasts.size > 0 || this.#busy > 0) return;
-			const browser = this.#browser;
-			const pages = [...this.#pages.values()];
-			this.#browser = undefined;
-			this.#pages.clear();
+	/** Lets the chat's connection go after a while unused, unless someone is watching; the browser itself stays open. */
+	#letGoLater(chat: string): void {
+		const connection = this.#connectionOf(chat);
+		clearTimeout(connection.idle);
+		connection.idle = setTimeout(() => {
+			if (this.#screencasts.has(chat) || connection.busy > 0) return;
+			const browser = connection.browser;
+			const page = this.#pages.get(chat);
+			connection.browser = undefined;
+			this.#pages.delete(chat);
 			void (async () => {
 				// A dialog left open would hold its page from the next connection too, which couldn't start: it's dismissed.
-				for (const page of pages) await this.#dialogs.get(page)?.dismiss().catch(() => {});
+				if (page) await this.#dialogs.get(page)?.dismiss().catch(() => {});
 				await browser?.disconnect().catch(() => {});
 			})();
 		}, CONNECTION_IDLE_MS);

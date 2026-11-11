@@ -527,18 +527,23 @@ describe("the computer", () => {
 			},
 		});
 		const controls: [string, string][] = [];
+		let holds: "agent" | "user" = "agent";
+		let listing = true;
 		const displays: DisplayHost = {
 			call: async () => ({ content: [] }),
 			envOf: async () => undefined,
-			list: async () => ({
-				displays: [{ threadId: internal, state: "idle", control: "agent", idleSec: 245 }],
+			list: async () => {
+				if (!listing) throw new Error("displayd is down");
+				return {
+				displays: [{ threadId: internal, state: "idle", control: holds, idleSec: 245 }],
 				queue: [{ threadId: "some-other-thread", state: "queued", control: "agent", idleSec: 0, position: 1 }],
-			}),
+				};
+			},
 			screenOf: async (thread) => {
 				if (thread !== internal) throw Object.assign(new Error(`No display is held by thread ${thread}.`), { code: "ENODISPLAY" });
 				return screenOf(thread);
 			},
-			control: async (thread, mode) => (controls.push([thread, mode]), { control: mode }),
+			control: async (thread, mode) => (controls.push([thread, mode]), (holds = mode), { control: mode }),
 			touchViewer: async () => {},
 		};
 		const primary = screenOf("primary");
@@ -555,9 +560,12 @@ describe("the computer", () => {
 		};
 
 		// The list names each chat by the id the app knows it by, with its title, and leaves out what is the computer's alone.
-		const listed = await api<{ displays: any[]; queue: any[] }>("/computer/displays");
+		const shown = await exports.default.fetch(new Request(apiUrl("/computer/displays"), { headers: { cookie } }));
+		const listed = { status: shown.status, body: (await shown.json()) as { displays: any[]; queue: any[] } };
 		expect(listed.status).toBe(200);
 		expect(listed.body.displays).toMatchObject([{ threadId: chat, state: "idle", control: "agent", idleSec: 245 }]);
+		// It shows the chats' titles, so it is the person's alone, like the desktop: not an API token.
+		expect((await raw("/computer/displays")).status).toBe(403);
 		expect(listed.body.displays[0].title === null || typeof listed.body.displays[0].title === "string").toBe(true);
 		expect(listed.body.queue).toHaveLength(1);
 		expect(listed.body.queue[0]).toMatchObject({ state: "queued", position: 1 });
@@ -570,15 +578,17 @@ describe("the computer", () => {
 		await vi.waitFor(() => expect(own.messages).toHaveLength(1));
 		expect(JSON.parse(own.messages[0]!)).toEqual({ type: "hello", display: internal });
 		main.socket.send("to-primary");
-		own.socket.send("to-display");
-		await vi.waitFor(() => expect(opened.map((stream) => stream.heard)).toEqual([["to-primary"], ["to-display"]]));
+		await vi.waitFor(() => expect(opened[0]!.heard).toEqual(["to-primary"]));
+		// A chat's display is only watched until the person takes it over: its input is dropped, and the primary desktop's isn't.
+		own.socket.send("watching");
+		own.socket.send(JSON.stringify({ type: "pim_ping", payload: {} }));
+		await vi.waitFor(() => expect(own.messages).toHaveLength(2));
+		expect(opened[1]!.heard).toEqual([]);
 		// Its clipboard is its own too.
 		own.socket.send(JSON.stringify({ type: "pim_clipboard", payload: {} }));
-		await vi.waitFor(() => expect(own.messages).toHaveLength(2));
-		expect(JSON.parse(own.messages[1]!)).toEqual({ type: "pim_clipboard_text", payload: { text: `clipboard of ${internal}` } });
+		await vi.waitFor(() => expect(own.messages).toHaveLength(3));
+		expect(JSON.parse(own.messages[2]!)).toEqual({ type: "pim_clipboard_text", payload: { text: `clipboard of ${internal}` } });
 		main.socket.close(1000);
-		own.socket.close(1000);
-		await vi.waitFor(() => expect(opened.every((stream) => stream.closed)).toBe(true));
 
 		// A chat that holds no display (or doesn't exist) is an error the app hears, not the primary desktop.
 		const unknown = await viewing("?display=nobody");
@@ -592,7 +602,33 @@ describe("the computer", () => {
 		const taken = await control({ thread: chat, mode: "user" });
 		expect(taken.status).toBe(200);
 		expect(await taken.json()).toEqual({ control: "user" });
+		// Taken over, the person's input reaches the display's stream; handed back, it stops again.
+		const settle = async (count: number) => {
+			own.socket.send(JSON.stringify({ type: "pim_ping", payload: {} }));
+			await vi.waitFor(() => expect(own.messages.filter((message) => message.includes("pim_pong"))).toHaveLength(count));
+		};
+		own.socket.send("driving");
+		await settle(2);
+		expect(opened[1]!.heard).toEqual(["driving"]);
 		expect((await (await control({ thread: chat, mode: "agent" })).json())).toEqual({ control: "agent" });
+		own.socket.send("paused");
+		await settle(3);
+		expect(opened[1]!.heard).toEqual(["driving"]);
+		// Without an answer from displayd it fails closed, even when the person had taken the display over; once it answers again, what it says goes.
+		holds = "user";
+		await new Promise((resolve) => setTimeout(resolve, 3_100));
+		listing = false;
+		own.socket.send("unknown");
+		await settle(4);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(opened[1]!.heard).toEqual(["driving"]);
+		listing = true;
+		own.socket.send("again");
+		await settle(5);
+		await vi.waitFor(() => expect(opened[1]!.heard).toEqual(["driving", "again"]));
+		holds = "agent";
+		own.socket.close(1000);
+		await vi.waitFor(() => expect(opened.every((stream) => stream.closed)).toBe(true));
 		expect(controls).toEqual([[internal, "user"], [internal, "agent"]]);
 		expect((await control({ thread: chat, mode: "root" })).status).toBe(400);
 		expect((await control({ mode: "user" })).status).toBe(400);

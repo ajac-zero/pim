@@ -504,6 +504,9 @@ function noStore(value: unknown, status = 200): Response {
 }
 const GOAL_STATUSES: readonly GoalStatus[] = ["active", "paused", "done", "abandoned"];
 
+/** How long what displayd said of who has a display is believed, in milliseconds. */
+const DISPLAY_CONTROL_TTL_MS = 3_000;
+
 /** A socket's chat, or for an app showing the computer's desktop, the channel its stream comes on and the thread whose display it shows, if not the primary desktop. */
 type SocketState = { readonly session: string; readonly channel?: number; readonly display?: string };
 /** A socket editing a note: which one. */
@@ -937,6 +940,9 @@ export class Pim extends DurableAgent<Env> {
 
 	/** Streams of the desktop whose socket went, which have been asked to close. */
 	readonly #orphanedScreens = new Set<number>();
+	/** Whether each display's person has it, as displayd last said, for `#mayDrive`: kept a few seconds, so input needn't ask for every event. */
+	readonly #displayControl = new Map<string, { control: "agent" | "user"; at: number }>();
+	#displayLookup: Promise<void> | null = null;
 	/** pi agent-event watches, by connection id. In memory: rebuilt in `onStart`. */
 	readonly #watches = new Map<string, AgentEventStream>();
 	/** Each connection's latest watch request: one that finishes setting up after a newer one is dropped. */
@@ -7135,7 +7141,10 @@ export class Pim extends DurableAgent<Env> {
 				const { thread, mode } = (await request.json().catch(() => ({}))) as { thread?: unknown; mode?: unknown };
 				if (typeof thread !== "string" || !thread) throw new HttpError(400, "thread must name the thread whose display to take over");
 				if (mode !== "user" && mode !== "agent") throw new HttpError(400, "mode must be 'user' or 'agent'");
-				return noStore(await this.computer.displayControl(this.store.sessionOf(thread) ?? thread, mode));
+				const inside = this.store.sessionOf(thread) ?? thread;
+				const done = await this.computer.displayControl(inside, mode);
+				this.#displayControl.set(inside, { control: done.control, at: Date.now() });
+				return noStore(done);
 			},
 		],
 		[
@@ -8558,6 +8567,31 @@ export class Pim extends DurableAgent<Env> {
 		}
 	}
 
+	/**
+	 * Whether the person's input may reach a display's stream: only while they have taken it over in
+	 * displayd. Anything else, including a display that isn't listed or a list that couldn't be had, is no.
+	 */
+	async #mayDrive(display: string): Promise<boolean> {
+		const fresh = () => {
+			const known = this.#displayControl.get(display);
+			return known && Date.now() - known.at < DISPLAY_CONTROL_TTL_MS ? known : undefined;
+		};
+		const hit = fresh();
+		if (hit) return hit.control === "user";
+		this.#displayLookup ??= this.computer
+			.displays()
+			.then(({ displays }) => {
+				this.#displayControl.clear();
+				for (const one of displays) this.#displayControl.set(one.threadId, { control: one.control, at: Date.now() });
+			})
+			.catch(() => this.#displayControl.clear())
+			.finally(() => {
+				this.#displayLookup = null;
+			});
+		await this.#displayLookup;
+		return fresh()?.control === "user";
+	}
+
 	/** What a stream of the desktop said, for the socket it's for; null when it closed. */
 	#screenSaid(channel: number, data: string | ArrayBuffer | null): void {
 		const viewer = [...this.getConnections<SocketState>(SCREEN_TAG)].find((connection) => connection.state?.channel === channel);
@@ -8680,7 +8714,9 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isScreenViewer(connection)) {
 			if (raw.startsWith(SCREEN_PING)) return this.#screenPing(connection, raw);
 			if (raw.startsWith(SCREEN_CLIPBOARD)) return this.#screenClipboard(connection);
-			if (connection.state?.channel) this.computer.screenInput(connection.state.channel, raw);
+			const { channel, display } = connection.state ?? {};
+			// A chat's display is watched only until the person takes it over, which the browser's own say-so doesn't settle.
+			if (channel && (display === undefined || (await this.#mayDrive(display)))) this.computer.screenInput(channel, raw);
 			return;
 		}
 		if (this.#isBrowserWatcher(connection)) {

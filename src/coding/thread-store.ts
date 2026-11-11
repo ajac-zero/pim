@@ -62,8 +62,10 @@ export type CodingThreadRow = {
 	readonly branch: string;
 	readonly profile: AgentProfile;
 	readonly harness: CodingHarness;
-	/** The workspace provider's id. */
+	/** The workspace provider's id: where the thread runs, or would first try to while it has made no workspace. */
 	readonly providerId: string;
+	/** Whether the thread stays on its provider: once it made a workspace there, whose files and environment are kept there, or when it was started on that provider by name. Until then it may run on another provider when its own is full. */
+	readonly placed: boolean;
 	readonly workspaceRef: WorkspaceRef | null;
 	readonly state: CodingThreadState;
 	/** Why the thread failed, such as `budget`, `no_backend` or `queue_expired`; null otherwise. */
@@ -304,6 +306,8 @@ export class CodingThreadStore {
 		// The workspace's session, as JSON.
 		if (!columns.has("session")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN session TEXT");
 		if (!columns.has("pull_request_number")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_number INTEGER");
+		// Whether the thread stays on its provider; threads from before overflow stay where they are.
+		if (!columns.has("placed")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN placed INTEGER NOT NULL DEFAULT 1");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -319,12 +323,16 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance"> & { consecutiveInterrupts?: number; providerInstance?: string },
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed"> & {
+			consecutiveInterrupts?: number;
+			providerInstance?: string;
+			placed?: boolean;
+		},
 	): void {
 		const now = this.#now();
 		this.#sql.exec(
-			`INSERT INTO coding_thread (thread_id, space, repo_url, provider_instance, base_ref, branch, agent_profile, harness, provider_id, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO coding_thread (thread_id, space, repo_url, provider_instance, base_ref, branch, agent_profile, harness, provider_id, placed, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			thread.threadId,
 			thread.space,
 			thread.repoUrl,
@@ -334,6 +342,7 @@ export class CodingThreadStore {
 			JSON.stringify(thread.profile),
 			thread.harness,
 			thread.providerId,
+			thread.placed ? 1 : 0,
 			thread.state,
 			thread.createdBy,
 			thread.parentThread,
@@ -349,13 +358,14 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "placed" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
 		if (change.stateReason !== undefined) columns.state_reason = change.stateReason;
 		if (change.stateDetail !== undefined) columns.state_detail = change.stateDetail;
 		if (change.providerId !== undefined) columns.provider_id = change.providerId;
+		if (change.placed !== undefined) columns.placed = change.placed ? 1 : 0;
 		if (change.baseSha !== undefined) columns.base_sha = change.baseSha;
 		if (change.workspaceRef !== undefined) columns.workspace_ref = change.workspaceRef === null ? null : JSON.stringify(change.workspaceRef);
 		if (change.slot !== undefined) columns.slot = change.slot;
@@ -604,6 +614,7 @@ function threadOf(row: Row): CodingThreadRow {
 		profile: JSON.parse(String(row.agent_profile)) as AgentProfile,
 		harness: String(row.harness) as CodingHarness,
 		providerId: String(row.provider_id),
+		placed: row.placed === 1,
 		workspaceRef: row.workspace_ref === null ? null : (JSON.parse(String(row.workspace_ref)) as WorkspaceRef),
 		state: String(row.state) as CodingThreadState,
 		stateReason: text(row.state_reason),

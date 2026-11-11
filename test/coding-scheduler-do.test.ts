@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { conditionsFromHealth, type ManagerHealth } from "../src/coding/provider-capacity";
+import { conditionsFromHealth, DEFAULT_SPACE_CAP, type ManagerHealth, PROVIDER_SPACE_CAPS } from "../src/coding/provider-capacity";
 import type { AdmissionConditions } from "../src/coding/scheduler";
 import { codingScheduler, MAX_NOTICE_ATTEMPTS, type SchedulerNotifier, TICK_MS } from "../src/coding/scheduler-do";
 import { CodingSchedulerDO, codingSchedulers } from "./worker";
@@ -50,8 +50,8 @@ describe("a space's coding scheduler", () => {
 	it("answers every method over RPC, with a limit of 2 set", async () => {
 		const stub = space();
 		await stub.setLimit(2);
-		expect(await stub.request("a", { provider: "sandbox" })).toEqual({ status: "admitted" });
-		expect(await stub.request("b", { provider: "sandbox" })).toEqual({ status: "admitted" });
+		expect(await stub.request("a", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
+		expect(await stub.request("b", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
 		expect(await stub.request("c", { provider: "sandbox", reason: "resume" })).toEqual({ status: "queued", position: 1, reason: "resume" });
 		expect(await stub.request("d", { provider: "sandbox" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
 		expect(await stub.position("d")).toEqual({ position: 2, reason: "slots_full" });
@@ -315,6 +315,27 @@ describe("the workspace manager's capacity", () => {
 		expect(await rising.refreshConditions(health(5, 4), 4)).toEqual([]);
 		expect(await rising.position("b")).toEqual({ position: 1, reason: "low_disk", detail: "5% of the disk free" });
 		expect(await rising.refreshConditions(health(40, 4), 4)).toEqual(["b", "c"]);
+	});
+
+	it("keeps the sandbox manager's limit and disk to its own slots, gives Cloudflare 20 of its own, and tells a thread admitted from the queue its provider", async () => {
+		const stub = space();
+		const overflow = { provider: "compose", overflow: ["cloudflare"] };
+		codingSchedulers.notifier = { ...recorder, admitted: (threadId, key, provider) => void (heard.push(`admitted:${threadId}:${provider}`), keys.push(key)) };
+		// The manager's disk is low: its threads wait, and those that may overflow run on Cloudflare.
+		expect(await stub.refreshConditions(health(5, 2), DEFAULT_SPACE_CAP, "compose")).toEqual([]);
+		expect(await stub.request("pinned", { provider: "compose" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "5% of the disk free" });
+		expect(await stub.request("a", overflow)).toEqual({ status: "admitted", provider: "cloudflare" });
+		expect(await stub.refreshConditions(health(80, 2), DEFAULT_SPACE_CAP, "compose")).toEqual(["pinned"]);
+		expect(await stub.request("b", overflow)).toEqual({ status: "admitted", provider: "compose" });
+		// The manager's limit of 2 is the compose slots', not the space's: Cloudflare's 20 are its own.
+		expect((await stub.snapshot()).limit).toBe(DEFAULT_SPACE_CAP);
+		expect(PROVIDER_SPACE_CAPS.cloudflare).toBe(20);
+		for (let i = 1; i < 20; i++) expect(await stub.request(`c${i}`, overflow)).toEqual({ status: "admitted", provider: "cloudflare" });
+		expect(await stub.request("late", overflow)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+		// The first slot to free is the compose one: the notice says so.
+		expect(await stub.release("b")).toEqual(["late"]);
+		await runDurableObjectAlarm(stub);
+		expect(heard).toEqual(["admitted:pinned:compose", "admitted:late:compose"]);
 	});
 
 	it("holds the queue on the manager's low_disk refusal until its health says the disk has room, and ignores capacity", async () => {

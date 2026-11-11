@@ -146,6 +146,22 @@ describe("which backends coding threads have", () => {
 		expect(() => broken.get("compose")).toThrow(/can't be used/);
 		expect(() => broken.get("compose")).not.toThrow(TOKEN);
 	});
+
+	it("keep the sandbox manager first and Cloudflare Containers after it, as overflow, whoever set each up", () => {
+		const containers = { WorkspaceContainer: { getByName: () => ({}) }, WorkspaceCatalog: { getByName: () => ({}) } };
+		const environment = () => ({ PIM_CODING_MANAGER_URL: MANAGER, PIM_CODING_MANAGER_TOKEN: TOKEN, ...containers });
+		const cloudflare = (codingSandbox: boolean) => prepareComputeProvider({ kind: "cloudflare-sandbox", codingSandbox }, null);
+		// As deployed: the admin's Cloudflare provider is off, so threads have the manager alone.
+		expect(workspaceBackends(environment(), [cloudflare(false)]).ids()).toEqual(["compose"]);
+		// Switched on, it overflows from the manager rather than taking its place as the default.
+		const on = workspaceBackends(environment(), [cloudflare(true)]);
+		expect(on.ids()).toEqual(["compose", "cloudflare"]);
+		expect(on.defaultId()).toBe("compose");
+		expect(workspaceBackends(containers, [cloudflare(true), manager()]).ids()).toEqual(["compose", "cloudflare"]);
+		// Where it is the only backend, it is the default.
+		expect(workspaceBackends({ ...containers }, [cloudflare(true)]).defaultId()).toBe("cloudflare");
+		expect(workspaceBackends(environment(), [cloudflare(true), manager({ codingSandbox: false })]).ids()).toEqual(["cloudflare"]);
+	});
 });
 
 describe("quotas", () => {

@@ -40,6 +40,8 @@ export type FakeCommandResult = { stdout?: string; stderr?: string; code?: numbe
 export type FakeCommandHandler = (context: FakeCommandContext) => FakeCommandResult | Promise<FakeCommandResult>;
 
 export type FakeProviderOptions = {
+	/** The provider's id, as a deployment's registry has it; "fake" when absent. */
+	id?: string;
 	/** The most workspaces that exist at once; unlimited when absent. */
 	maxConcurrent?: number;
 	/** How fast environment snapshots restore, in MB a second; 8 when absent. */
@@ -440,7 +442,7 @@ function cloneNodes(nodes: Nodes): Nodes {
 
 /** A provider whose workspaces live in memory. Its shell understands `echo`, `cat`, `sleep`, `ln -s`, `spawn` and `ps` (background processes, which a suspend ends), `curl` (which only reaches hosts the egress policy allows), and `sh -c` over `;`-separated `echo`, `exit` and those commands, with `>&2` after a command. `register` adds or replaces a command by name. Environment snapshots are copies of a workspace's files, kept per person and key as the sandbox manager keeps them. */
 export class FakeWorkspaceProvider implements WorkspaceProvider {
-	readonly id = "fake";
+	readonly id: string;
 	readonly capabilities: WorkspaceProvider["capabilities"];
 	private handlers = new Map<string, FakeCommandHandler>();
 	private workspaces = new Map<string, { workspace: FakeWorkspace; createdAt: number }>();
@@ -458,6 +460,7 @@ export class FakeWorkspaceProvider implements WorkspaceProvider {
 	readonly requests: FakeRequest[] = [];
 
 	constructor(options: FakeProviderOptions = {}) {
+		this.id = options.id ?? "fake";
 		this.capabilities = {
 			snapshot: true,
 			environmentSnapshots: true,

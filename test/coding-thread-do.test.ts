@@ -1005,9 +1005,11 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		const [ended] = await turns(id, 1);
 		expect(ended!.outcome).toBe("completed");
 		expect(listed).toContain("Hello!");
-		// The manager's health went to the scheduler before the slot was asked for: its limit of 1 is under the space's 2.
+		// The manager's health went to the scheduler before the slot was asked for: its limit of 1 is under the space's 3, so the space's next thread waits.
 		expect(calls()[0]).toBe("GET /health");
-		expect((await codingScheduler(env, input.space).snapshot()).limit).toBe(1);
+		const next = await startThread({ space: input.space });
+		expect(next.status).toMatchObject({ state: "queued", queue: { position: 1, reason: "slots_full" } });
+		await next.stub.archive();
 		// One workspace for the thread's session, the clone run in it with the broker's header, and every route but /health sent the manager's token.
 		expect(manager.requests.find((request) => request.path === "/sessions" && request.method === "POST")?.body).toMatchObject({ sessionId: id });
 		const clone = manager.requests.find((request) => (request.body as { cmd?: string[] } | undefined)?.cmd?.[1] === "clone")!;
@@ -1180,6 +1182,166 @@ describe("a coding thread on the Compose sandbox manager", () => {
 		expect(calls()).toContain(`GET /sessions/${id}`);
 	});
 
+});
+
+describe("a coding thread with an overflow provider", () => {
+	/** A sandbox manager and Cloudflare in memory, each with the fake git: the manager runs at most `managerMax` workspaces of every space's, as its own limit does. */
+	function providers(managerMax?: number) {
+		const compose = new FakeWorkspaceProvider({ id: "compose", ...(managerMax === undefined ? {} : { maxConcurrent: managerMax }) });
+		const cloudflare = new FakeWorkspaceProvider({ id: "cloudflare" });
+		for (const provider of [compose, cloudflare]) provider.register("git", fakeGit);
+		codingBackends.registry = workspaceRegistry([compose, cloudflare]);
+		return { compose, cloudflare };
+	}
+	const on = async (provider: FakeWorkspaceProvider, id: string) => (await provider.list({ sessionId: id })).length;
+	const slots = async (space: string) => (await codingScheduler(env, space).snapshot()).running.map((slot) => `${slot.threadId}:${slot.provider}`);
+	const ledger = (id: string) =>
+		runInDurableObject(env.Gallery.getByName("gallery"), (_instance: unknown, state: DurableObjectState) =>
+			state.storage.sql.exec("SELECT provider, end_reason FROM compute_usage WHERE thread_id = ? ORDER BY id", id).toArray(),
+		);
+	const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+
+	afterEach(() => {
+		codingQuota.quota = null;
+	});
+
+	it("runs on the sandbox manager while it has a slot, overflows to Cloudflare once it has none, and queues only when both are full", async () => {
+		const { compose, cloudflare } = providers();
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		await scheduler.setLimit(1);
+		await scheduler.setLimit(1, "cloudflare");
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Second done."), fauxAssistantMessage("Third done.")]);
+		const first = await startThread({ space });
+		await turns(first.id, 1);
+		expect(await first.stub.status()).toMatchObject({ workspaceProvider: "compose", slot: "held" });
+		// The manager's one slot is taken: the next thread runs on Cloudflare at once, instead of waiting.
+		const second = await startThread({ space });
+		await turns(second.id, 1);
+		expect(await second.stub.status()).toMatchObject({ workspaceProvider: "cloudflare", slot: "held", state: "idle" });
+		expect([await on(compose, second.id), await on(cloudflare, second.id)]).toEqual([0, 1]);
+		expect((await second.stub.log()).find((event) => event.kind === "workspace.overflow")?.data).toEqual({ from: "compose", to: "cloudflare" });
+		expect(await slots(space)).toEqual(expect.arrayContaining([`${first.id}:compose`, `${second.id}:cloudflare`]));
+		// Both are full: the third waits for whichever frees first.
+		const third = await startThread({ space });
+		expect(third.status).toMatchObject({ state: "queued", slot: "queued", workspaceProvider: "compose", queue: { position: 1, reason: "slots_full" } });
+		await second.stub.archive();
+		await turns(third.id, 1);
+		expect(await third.stub.status()).toMatchObject({ workspaceProvider: "cloudflare", slot: "held" });
+		expect(await on(cloudflare, third.id)).toBe(1);
+		// The ledger counts each workspace's minutes under the provider it ran on.
+		expect(await ledger(first.id)).toEqual([{ provider: "compose", end_reason: null }]);
+		expect(await ledger(second.id)).toEqual([{ provider: "cloudflare", end_reason: "stop" }]);
+		expect(await ledger(third.id)).toEqual([{ provider: "cloudflare", end_reason: null }]);
+		for (const each of [first, third]) await each.stub.archive();
+	});
+
+	it("goes on where it made its workspace when it resumes, waiting for that provider though another has room", async () => {
+		const { compose, cloudflare } = providers();
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		await scheduler.setLimit(1);
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Other done."), fauxAssistantMessage("First again.")]);
+		const first = await startThread({ space });
+		await turns(first.id, 1);
+		await (await compose.get((await compose.list({ sessionId: first.id }))[0]!.ref))!.writeFile(`${REPO_DIR}/notes.txt`, new TextEncoder().encode("Draft\n"));
+		// Idle past ten minutes, it gives its slot back, keeping its files on the manager.
+		codingSchedulers.now = Date.now() + 10 * 60_000 + 1_000;
+		await scheduler.sweep();
+		await runDurableObjectAlarm(scheduler);
+		codingSchedulers.now = null;
+		expect(await first.stub.status()).toMatchObject({ slot: "none", workspaceProvider: "compose" });
+		// Another thread takes the manager's slot meanwhile.
+		const other = await startThread({ space });
+		await turns(other.id, 1);
+		expect(await other.stub.status()).toMatchObject({ workspaceProvider: "compose" });
+		// Cloudflare has room, but the first thread's work is on the manager: it waits for the manager's slot.
+		await first.stub.steer("Carry on.", { operationId: "resume" });
+		await vi.waitFor(async () => expect(await first.stub.status()).toMatchObject({ state: "queued", slot: "queued" }));
+		expect((await scheduler.snapshot()).queued).toEqual([expect.objectContaining({ threadId: first.id, provider: "compose" })]);
+		expect((await scheduler.snapshot()).queued[0]!.overflow).toBeUndefined();
+		await other.stub.archive();
+		const [, again] = await turns(first.id, 2);
+		expect(again).toMatchObject({ outcome: "completed", operationId: "resume" });
+		expect(await first.stub.status()).toMatchObject({ workspaceProvider: "compose", slot: "held" });
+		expect(await on(cloudflare, first.id)).toBe(0);
+		expect(new TextDecoder().decode(await (await compose.get((await compose.list({ sessionId: first.id }))[0]!.ref))!.readFile(`${REPO_DIR}/notes.txt`))).toBe("Draft\n");
+		expect((await first.stub.log()).some((event) => event.kind === "workspace.overflow")).toBe(false);
+		await first.stub.archive();
+	});
+
+	it("moves to Cloudflare when the manager refuses its first workspace for capacity, though its space had a slot", async () => {
+		const { compose, cloudflare } = providers(1);
+		codingFaux.setResponses([fauxAssistantMessage("Elsewhere done."), fauxAssistantMessage("Done.")]);
+		// Another space's thread holds the manager's only workspace.
+		const elsewhere = await startThread();
+		await turns(elsewhere.id, 1);
+		expect(await on(compose, elsewhere.id)).toBe(1);
+		const { id, stub, input } = await startThread();
+		await turns(id, 1);
+		expect(await stub.status()).toMatchObject({ workspaceProvider: "cloudflare", slot: "held", stateReason: null });
+		expect(await on(cloudflare, id)).toBe(1);
+		expect(await slots(input.space)).toEqual([`${id}:cloudflare`]);
+		// The refused try on the manager made no workspace and counted nothing that still runs.
+		expect(await ledger(id)).toEqual([
+			{ provider: "compose", end_reason: "failed" },
+			{ provider: "cloudflare", end_reason: null },
+		]);
+		for (const each of [elsewhere.stub, stub]) await each.archive();
+	});
+
+	it("runs on Cloudflare at once when the manager's health says it is full", async () => {
+		const manager = fakeManager(1);
+		manager.backing.register("git", fakeGit);
+		const cloudflare = new FakeWorkspaceProvider({ id: "cloudflare" });
+		cloudflare.register("git", fakeGit);
+		codingBackends.registry = workspaceRegistry([new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch, sleep: async () => {} }), cloudflare]);
+		codingFaux.setResponses([fauxAssistantMessage("Elsewhere done."), fauxAssistantMessage("Done.")]);
+		const elsewhere = await startThread();
+		await turns(elsewhere.id, 1);
+		const creates = () => manager.requests.filter((request) => request.method === "POST" && request.path === "/sessions").length;
+		expect(creates()).toBe(1);
+		const { id, stub } = await startThread();
+		await turns(id, 1);
+		expect(await stub.status()).toMatchObject({ workspaceProvider: "cloudflare" });
+		// It never asked the full manager for a workspace.
+		expect(creates()).toBe(1);
+		expect(await ledger(id)).toEqual([{ provider: "cloudflare", end_reason: null }]);
+		for (const each of [elsewhere.stub, stub]) await each.archive();
+	});
+
+	it("counts a workspace on Cloudflare against the person's quota like any other", async () => {
+		providers();
+		const space = `space-${crypto.randomUUID()}`;
+		await codingScheduler(env, space).setLimit(1);
+		codingQuota.quota = { maxConcurrentWorkspaces: 1, monthlySandboxMinutes: null, maxSessionMinutes: null };
+		codingFaux.setResponses([fauxAssistantMessage("First done.")]);
+		const first = await startThread({ space });
+		await turns(first.id, 1);
+		const second = await startThread({ space });
+		await vi.waitFor(async () => expect(await second.stub.status()).toMatchObject({ state: "failed", stateReason: "compute_quota", workspaceProvider: "cloudflare" }), { timeout: 10_000, interval: 50 });
+		await first.stub.archive();
+	});
+
+	it("waits on the sandbox manager alone, holding its slot, when it refuses the workspace for capacity", async () => {
+		const compose = new FakeWorkspaceProvider({ id: "compose", maxConcurrent: 1 });
+		compose.register("git", fakeGit);
+		codingBackends.registry = workspaceRegistry([compose]);
+		codingFaux.setResponses([fauxAssistantMessage("Elsewhere done."), fauxAssistantMessage("Done.")]);
+		const elsewhere = await startThread();
+		await turns(elsewhere.id, 1);
+		const { id, stub, input } = await startThread();
+		await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "provisioning", slot: "held", stateReason: "workspace_capacity", workspaceProvider: "compose" }), {
+			timeout: 10_000,
+			interval: 50,
+		});
+		expect(await slots(input.space)).toEqual([`${id}:compose`]);
+		await elsewhere.stub.archive();
+		await heartbeat(stub);
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		expect(await on(compose, id)).toBe(1);
+		await stub.archive();
+	});
 });
 
 describe("a coding thread's model", () => {

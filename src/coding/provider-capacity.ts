@@ -1,11 +1,20 @@
 import type { AdmissionConditions, CodingScheduler } from "./scheduler";
 
 /**
- * How many coding workspaces a space may hold at once unless it is
- * configured otherwise. A provider with no manager of its own, such as
- * Cloudflare Sandbox, has only this cap, set through `setLimit`.
+ * How many coding workspaces a space may hold at once on a provider unless
+ * it is configured otherwise. The sandbox manager lowers it to its own limit
+ * (`refreshConditions`).
  */
 export const DEFAULT_SPACE_CAP = 3;
+
+/**
+ * The caps of providers with far more room than one machine: Cloudflare
+ * Containers runs each workspace on an instance of its own, so a space may
+ * hold many there, as overflow when the sandbox manager is full. The
+ * person's compute quota (../compute.ts) and the account's own limits bound
+ * them further.
+ */
+export const PROVIDER_SPACE_CAPS: Readonly<Record<string, number>> = { cloudflare: 20 };
 
 /** Below this percentage of free disk the workspace manager refuses new workspaces with `low_disk`, so the queue waits instead. */
 export const LOW_DISK_PCT = 15;
@@ -19,22 +28,25 @@ export type ManagerHealth = {
 	readonly free: number;
 };
 
-/** What `ProviderCapacity` changes of a scheduler; a Durable Object's `CodingScheduler` has it. */
+/** What `ProviderCapacity` changes of a scheduler, for one provider or, with none, for every provider without its own; a Durable Object's `CodingScheduler` has it. */
 export type CapacityTarget = Pick<CodingScheduler, "conditions" | "setConditions" | "setLimit">;
 
 /**
  * Keeps a space's scheduler in line with the workspace manager: its disk and
  * how many workspaces it runs at once. It only maps what the manager says to
- * the scheduler's conditions and limit; whoever reads `/health` or gets the
- * manager's refusal calls it.
+ * the scheduler's conditions and limit for the manager's provider, so other
+ * providers go on admitting; whoever reads `/health` or gets the manager's
+ * refusal calls it.
  */
 export class ProviderCapacity {
 	readonly #target: CapacityTarget;
 	readonly #spaceCap: number;
+	readonly #provider: string | undefined;
 
-	constructor(target: CapacityTarget, spaceCap = DEFAULT_SPACE_CAP) {
+	constructor(target: CapacityTarget, spaceCap = DEFAULT_SPACE_CAP, provider?: string) {
 		this.#target = target;
 		this.#spaceCap = spaceCap;
+		this.#provider = provider;
 	}
 
 	/**
@@ -46,10 +58,11 @@ export class ProviderCapacity {
 	 * admitted.
 	 */
 	refreshConditions(health: ManagerHealth): string[] {
-		const conditions = conditionsFromHealth(health, this.#target.conditions());
+		const provider = this.#provider;
+		const conditions = conditionsFromHealth(health, this.#target.conditions(provider));
 		const limit = Math.min(this.#spaceCap, health.maxConcurrent);
-		if (conditions.lowDisk || conditions.budgetCapped) return [...this.#target.setConditions(conditions), ...this.#target.setLimit(limit)];
-		return [...this.#target.setLimit(limit), ...this.#target.setConditions(conditions)];
+		if (conditions.lowDisk || conditions.budgetCapped) return [...this.#target.setConditions(conditions, provider), ...this.#target.setLimit(limit, provider)];
+		return [...this.#target.setLimit(limit, provider), ...this.#target.setConditions(conditions, provider)];
 	}
 
 	/**
@@ -60,7 +73,7 @@ export class ProviderCapacity {
 	 */
 	onManagerError(code: string): string[] {
 		if (code !== "low_disk") return [];
-		return this.#target.setConditions({ lowDisk: true, budgetCapped: this.#target.conditions().budgetCapped });
+		return this.#target.setConditions({ lowDisk: true, budgetCapped: this.#target.conditions(this.#provider).budgetCapped }, this.#provider);
 	}
 }
 

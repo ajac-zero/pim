@@ -621,6 +621,7 @@ export class Directory extends DurableObject<Env> {
 		const gallery = this.env.Gallery?.getByName("gallery");
 		if (gallery) {
 			await gallery.forgetOwner(ownerId);
+			await gallery.computeForget(ownerId);
 			if (await gallery.holds(ownerId)) throw new Error("The gallery still holds their profile or published agents");
 		}
 		const auth = this.env.Auth.getByName(ownerId);

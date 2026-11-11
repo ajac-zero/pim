@@ -302,10 +302,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * when its time is up, on the `advance` job, which `#schedule` brings
 	 * forward to that time.
 	 */
-	async #reserveCompute(thread: CodingThreadRow, enforce: boolean): Promise<number | null> {
+	async #reserveCompute(thread: CodingThreadRow, enforce: boolean, renew = false): Promise<number | null> {
 		await this.#ledgerWrite;
 		const quota = enforce ? await this.computeQuota(thread.space) : null;
-		const admitted = await this.env.Gallery.getByName("gallery").computeBegin({ userId: thread.space, threadId: thread.threadId, provider: thread.providerId, quota, now: this.now() });
+		const gallery = this.env.Gallery.getByName("gallery");
+		const entry = { userId: thread.space, threadId: thread.threadId, provider: thread.providerId, quota, now: this.now() };
+		const admitted = renew ? await gallery.computeRenew(entry) : await gallery.computeBegin(entry);
 		if (!admitted.ok) throw new ComputeQuotaError(admitted.message);
 		this.#capAt = admitted.capAt;
 		if (admitted.capAt !== null) await this.#schedule(Date.now() + HEARTBEAT_MS);
@@ -673,9 +675,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const cycle = (async () => {
 			this.#open = null;
 			// Calls for the workspace wait until the new session is up. The old stretch ends as the old session does, and the new one begins once the quota allows it: each exactly once. This comes before what runs in the old session is stopped, so a turn's model doesn't get ahead of the move.
-			await this.#releaseCompute("suspend");
 			const refusal: { error?: unknown } = {};
-			const wallClockMin = await this.#reserveCompute(thread, true).catch((error) => {
+			const wallClockMin = await this.#reserveCompute(thread, true, true).catch((error) => {
 				refusal.error = error;
 				return null;
 			});
@@ -1929,7 +1930,6 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Submits the inbox's oldest input to pi as the next turn. */
 	async #startTurn(): Promise<void> {
-		await this.#enforceCompute();
 		const thread = this.store.required();
 		const input = this.store.nextInput();
 		if (!input || thread.currentOperation) return;

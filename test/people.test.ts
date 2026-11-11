@@ -1583,6 +1583,18 @@ describe("erasure boundaries", () => {
 		return body;
 	};
 
+	it("forgets the sandbox minutes of an erased account, those still running included", async () => {
+		const ana = await person("eb-compute");
+		const gallery = env.Gallery.getByName("gallery");
+		await gallery.computeBegin({ userId: ana.ownerId, threadId: "eb-compute-1", provider: "compose", quota: null });
+		await gallery.computeBegin({ userId: ana.ownerId, threadId: "eb-compute-2", provider: "compose", quota: null });
+		await gallery.computeEnd("eb-compute-2", "stop");
+		expect(await gallery.computeUsageOf(ana.ownerId)).toMatchObject({ running: 1 });
+		expect(await deleteAccount(ana.browser, "eb-compute")).toEqual({ deleted: true });
+		expect(await gallery.computeUsageOf(ana.ownerId)).toMatchObject({ minutes: 0, running: 0, byProvider: [] });
+		expect(await gallery.computeOpen("eb-compute-1")).toBeNull();
+	});
+
 	it("closes a socket that was open across the deletion, and takes nothing from it", async () => {
 		const ana = await person("eb-socket");
 		const upgrade = await ana.browser.fetch("/api/ws", { headers: { Upgrade: "websocket", origin: ORIGIN } });

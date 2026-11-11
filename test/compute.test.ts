@@ -271,6 +271,40 @@ describe("usage", () => {
 	});
 });
 
+describe("moving a workspace to a new session", () => {
+	const concurrentOne: ComputeQuota = { maxConcurrentWorkspaces: 1, monthlySandboxMinutes: null, maxSessionMinutes: 10 };
+	const rows = (store: ReturnType<typeof gallery>, thread: string) =>
+		runInDurableObject(store, (_instance: unknown, state: DurableObjectState) =>
+			state.storage.sql.exec("SELECT started_at, ended_at, end_reason, cap_at FROM compute_usage WHERE thread_id = ? ORDER BY id", thread).toArray(),
+		);
+
+	it("ends one stretch and begins the next in one step, so the person's only slot is theirs to keep, with the limit carried over", async () => {
+		const store = gallery();
+		const first = await store.computeBegin({ userId: "ann", threadId: "m1", provider: "compose", quota: concurrentOne, now: NOV });
+		expect(first).toMatchObject({ ok: true, capAt: NOV + 10 * MINUTE });
+		// A plain begin for another thread is refused while the slot is taken; the renewal of the first isn't, and it keeps its end time.
+		expect(await store.computeBegin({ userId: "ann", threadId: "m2", provider: "compose", quota: concurrentOne, now: NOV + MINUTE })).toMatchObject({ ok: false, code: "concurrent" });
+		const renewed = await store.computeRenew({ userId: "ann", threadId: "m1", provider: "compose", quota: concurrentOne, now: NOV + 4 * MINUTE });
+		expect(renewed).toEqual({ ok: true, wallClockMin: 6, capAt: NOV + 10 * MINUTE });
+		expect(await rows(store, "m1")).toEqual([
+			{ started_at: NOV, ended_at: NOV + 4 * MINUTE, end_reason: "suspend", cap_at: NOV + 10 * MINUTE },
+			{ started_at: NOV + 4 * MINUTE, ended_at: null, end_reason: null, cap_at: NOV + 10 * MINUTE },
+		]);
+		expect((await store.computeUsageOf("ann", NOV + 5 * MINUTE)).running).toBe(1);
+		// Continuing the thread later begins afresh, with a limit of its own.
+		await store.computeEnd("m1", "stop", NOV + 8 * MINUTE);
+		expect(await store.computeBegin({ userId: "ann", threadId: "m1", provider: "compose", quota: concurrentOne, now: NOV + 20 * MINUTE })).toMatchObject({ capAt: NOV + 30 * MINUTE });
+	});
+
+	it("leaves the old stretch ended when the quota refuses the new one", async () => {
+		const store = gallery();
+		await store.computeBegin({ userId: "bea", threadId: "r1", provider: "compose", quota: null, now: NOV });
+		const refused = await store.computeRenew({ userId: "bea", threadId: "r1", provider: "compose", quota: { ...UNLIMITED, monthlySandboxMinutes: 5 }, now: NOV + 6 * MINUTE });
+		expect(refused).toMatchObject({ ok: false, code: "monthly" });
+		expect(await rows(store, "r1")).toEqual([{ started_at: NOV, ended_at: NOV + 6 * MINUTE, end_reason: "suspend", cap_at: null }]);
+	});
+});
+
 describe("coding tools", () => {
 	const offered = ({ messages }: { messages: Message[] }) => {
 		const tools = new Set<string>();

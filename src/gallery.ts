@@ -660,6 +660,16 @@ export class Gallery extends DurableObject<Env> {
 		return this.#ledger().begin({ ...o, now: o.now ?? Date.now() });
 	}
 
+	/** A workspace moves to a new session: ends its stretch and begins the next, checking the quota, in one step (`ComputeLedger.renew`). */
+	computeRenew(o: { userId: string; threadId: string; provider: string; quota: ComputeQuota | null; now?: number }): Admission {
+		return this.#ledger().renew({ ...o, now: o.now ?? Date.now() });
+	}
+
+	/** Forgets what a person's sandboxes ran, for an erased account. */
+	computeForget(userId: string): void {
+		this.#ledger().forget(userId);
+	}
+
 	/** The thread's workspace as the ledger has it running (its stop time, if it has a limit), or null. */
 	computeOpen(threadId: string): { capAt: number | null } | null {
 		return this.#ledger().open(threadId);

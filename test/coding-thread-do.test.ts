@@ -2759,8 +2759,27 @@ describe("a coding thread's compute", () => {
 			await heartbeat(stub);
 			expect(await ledger(id)).toEqual([
 				{ started_at: t0, ended_at: t0 + 48_000, end_reason: "suspend", cap_at: t0 + 10 * MINUTE },
-				{ started_at: t0 + 48_000, ended_at: null, end_reason: null, cap_at: t0 + 48_000 + 10 * MINUTE },
+				// The session limit carries over: moving doesn't begin another one.
+				{ started_at: t0 + 48_000, ended_at: null, end_reason: null, cap_at: t0 + 10 * MINUTE },
 			]);
+		});
+
+		it("still fires the session limit after a move, when the provider's sessions are shorter than it", async () => {
+			const { t0 } = capped();
+			codingQuota.quota = { ...unlimited, maxSessionMinutes: 2 };
+			codingFaux.setResponses([...sleeping(), ...sleeping()]);
+			const { id, stub } = await startThread();
+			await running(stub);
+			codingThreadClock.now = t0 + 48_000;
+			await heartbeat(stub);
+			await vi.waitFor(async () => expect((await stub.status()).session).toMatchObject({ continuations: 1 }));
+			expect((await ledger(id))[1]).toMatchObject({ started_at: t0 + 48_000, cap_at: t0 + 2 * MINUTE });
+			// Past the limit of the first session, the second's own minute isn't up yet, and the workspace is stopped all the same.
+			codingThreadClock.now = t0 + 2 * MINUTE + 1_000;
+			await heartbeat(stub);
+			await vi.waitFor(async () => expect(await ledger(id)).toEqual([expect.anything(), expect.objectContaining({ end_reason: "stop" })]));
+			expect(await stub.status()).toMatchObject({ state: "idle", stateReason: "compute_quota" });
+			codingFaux.setResponses([]);
 		});
 
 		it("ends the turn with the quota's reason when it refuses the new session, and doesn't try again", async () => {

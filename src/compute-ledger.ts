@@ -107,9 +107,30 @@ export class ComputeLedger {
 	 * running already.
 	 */
 	begin(o: { userId: string; threadId: string; provider: string; now: number; quota: ComputeQuota | null }): Admission {
-		const { userId, threadId, provider, now, quota } = o;
-		const running = this.open(threadId);
+		const running = this.open(o.threadId);
 		if (running) return { ok: true, wallClockMin: null, capAt: running.capAt };
+		return this.#start(o, null);
+	}
+
+	/**
+	 * The thread's workspace moves to a new session: ends its running stretch
+	 * (as `suspend`) and begins the next after checking the quota again, in
+	 * one step, so nothing else can take the place the first leaves. The
+	 * session limit carries over: the new stretch ends when the chain's did
+	 * (or sooner, if the month's minutes run out), so moving doesn't buy
+	 * another limit's worth of time. Only a stretch begun afresh, when the
+	 * person continues the thread, gets a limit of its own. A refusal leaves
+	 * the first stretch ended.
+	 */
+	renew(o: { userId: string; threadId: string; provider: string; now: number; quota: ComputeQuota | null }): Admission {
+		const prior = this.open(o.threadId);
+		this.end(o.threadId, "suspend", o.now);
+		return this.#start(o, prior?.capAt ?? null);
+	}
+
+	/** Checks the quota and records a stretch that ends no later than `inherited`, when given. */
+	#start(o: { userId: string; threadId: string; provider: string; now: number; quota: ComputeQuota | null }, inherited: number | null): Admission {
+		const { userId, threadId, provider, now, quota } = o;
 		let wallClockMin: number | null = null;
 		if (quota) {
 			const refused = this.#refusal(userId, quota, now);
@@ -118,10 +139,19 @@ export class ComputeLedger {
 			const remaining = monthly === null ? null : Math.max(1, Math.ceil(monthly - this.#minutes(userId, monthStart(now), monthsFrom(now, 1), now)));
 			wallClockMin = session === null ? remaining : remaining === null ? session : Math.min(session, remaining);
 		}
-		const capAt = wallClockMin === null ? null : now + wallClockMin * MINUTE_MS;
+		let capAt = wallClockMin === null ? null : now + wallClockMin * MINUTE_MS;
+		if (inherited !== null) {
+			capAt = capAt === null ? inherited : Math.min(capAt, inherited);
+			wallClockMin = Math.max(1, Math.ceil((capAt - now) / MINUTE_MS));
+		}
 		this.#sql.exec("INSERT INTO compute_usage (user_id, thread_id, provider, started_at, cap_at) VALUES (?, ?, ?, ?, ?)", userId, threadId, provider, now, capAt);
 		this.#sql.exec("DELETE FROM compute_usage WHERE ended_at IS NOT NULL AND ended_at < ?", monthsFrom(now, -HISTORY_MONTHS - 1));
 		return { ok: true, wallClockMin, capAt };
+	}
+
+	/** Deletes every stretch of the person's, running or not: they are erased. */
+	forget(userId: string): void {
+		this.#sql.exec("DELETE FROM compute_usage WHERE user_id = ?", userId);
 	}
 
 	/** The thread's workspace as the ledger has it running, or null when it has none. */

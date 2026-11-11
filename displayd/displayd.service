@@ -1,0 +1,35 @@
+# displayd: per-thread X displays for the agent computer (see README.md). install.sh installs this
+# as /etc/systemd/system/displayd.service and writes /etc/displayd/env.
+[Unit]
+Description=Pim display daemon
+After=network.target
+
+[Service]
+Type=simple
+User=displayd
+Group=displayd
+EnvironmentFile=/etc/displayd/env
+ExecStart=/usr/bin/env ${NODE_BIN} ${PIM_CHECKOUT}/displayd/src/main.js
+SyslogIdentifier=displayd
+Restart=always
+RestartSec=5
+StateDirectory=displayd
+StateDirectoryMode=0750
+# The contexts live in /run/pim/displays and are kept across a restart of this unit.
+RuntimeDirectory=pim
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# A restart of displayd must not end the displays: they run in their own process groups, inside
+# this unit's cgroup, and the next start re-adopts the healthy ones. Stopping the unit for good
+# leaves them to the idle TTL, or `systemctl kill displayd` ends them.
+KillMode=process
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

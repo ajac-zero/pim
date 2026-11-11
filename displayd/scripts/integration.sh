@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks on a real host, with real Xvnc, that two displays are isolated from each other. Not run
-# in CI: it needs Xvnc, openbox, xdotool, xclip, curl and jq, and a running displayd.
+# in CI: it needs Xvnc, openbox, xdotool, xclip, xfce4-terminal, cua-env-driver, curl and jq, and a running displayd.
 #
 #   DISPLAYD_TOKEN=... displayd/scripts/integration.sh        # DISPLAYD_URL defaults to http://127.0.0.1:9900
 #
@@ -9,7 +9,8 @@
 #   2. the X cookie of A does not open B, and the VNC ports listen on loopback only
 #   3. xdotool moving the pointer in A leaves B's pointer where it was
 #   4. a clipboard set with xclip in A is not seen in B
-#   5. after release the context directories and processes are gone
+#   5. text typed through each display's Cua Driver at once lands only in that display's terminal
+#   6. after release the context directories and processes are gone
 set -euo pipefail
 URL=${DISPLAYD_URL:-http://127.0.0.1:9900}
 : "${DISPLAYD_TOKEN:?set DISPLAYD_TOKEN}"
@@ -86,7 +87,30 @@ sleep 0.3
 seen=$(on B timeout 3 xclip -selection clipboard -o 2>/dev/null || true)
 [ "$seen" != "$secret" ] && ok "B does not see A's clipboard" || bad "B sees A's clipboard"
 
-# 5. Release.
+# 5. Drivers: type into a terminal on each display at once through its MCP server (needs xfce4-terminal).
+mcp() { # lease method-json: POST to the display's driver
+	curl -fsS --max-time 30 -H "authorization: Bearer $(cat "$(jq -r .driver.tokenFile <<<"$1")")" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d "$2" "$(jq -r .driver.base <<<"$1")/mcp"
+}
+type_into() { # lease text
+	mcp "$1" '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"itest","version":"1"}}}' >/dev/null
+	mcp "$1" "$(jq -nc --arg t "$2" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:"type_text",arguments:{text:$t,delivery_mode:"foreground"}}}')" >/dev/null
+}
+for N in A B; do
+	printf '#!/bin/sh\nexec cat > /tmp/out-%s-%s\n' "$N" "$RUN" >"/tmp/term-$N-$RUN.sh"
+	chmod +x "/tmp/term-$N-$RUN.sh"
+	rm -f "/tmp/out-$N-$RUN"
+	(on $N xfce4-terminal --disable-server -x "/tmp/term-$N-$RUN.sh" >/dev/null 2>&1 &)
+done
+sleep 4
+type_into "$LA" "alpha-$RUN" &
+type_into "$LB" "bravo-$RUN" &
+wait
+sleep 1
+grep -q "alpha-$RUN" "/tmp/out-A-$RUN" && ! grep -q "bravo-$RUN" "/tmp/out-A-$RUN" && ok "A's terminal got only A's text" || bad "A's terminal: $(cat "/tmp/out-A-$RUN" 2>&1)"
+grep -q "bravo-$RUN" "/tmp/out-B-$RUN" && ! grep -q "alpha-$RUN" "/tmp/out-B-$RUN" && ok "B's terminal got only B's text" || bad "B's terminal: $(cat "/tmp/out-B-$RUN" 2>&1)"
+rm -f /tmp/out-?-$RUN /tmp/term-?-$RUN.sh
+
+# 6. Release.
 DIRA=$(dirname "$(jq -r .env.XAUTHORITY <<<"$LA")")
 api POST /release "{\"threadId\":\"$A\"}" >/dev/null
 api POST /release "{\"threadId\":\"$B\"}" >/dev/null

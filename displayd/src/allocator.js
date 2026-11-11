@@ -18,6 +18,7 @@ export const DEFAULTS = {
 	displayBase: 100, // the display number of slot 0; slots count up from it
 	vncBasePort: 5910, // loopback VNC port of slot 0
 	cdpBasePort: 9320, // the Chrome DevTools port reserved for slot 0
+	driverBasePort: 3220, // loopback port of slot 0's Cua Driver
 	geometry: '1280x800',
 	idleAfterMs: MIN, // without a touch for this long an active display is idle
 	ttlMs: 10 * MIN, // without a touch for this long a display is reaped
@@ -56,7 +57,8 @@ export class DisplayAllocator {
 
 	#view(l) {
 		const { id, threadId, spaceId, state, display, vncPort, cdpPort, env, browser, createdAt, lastTouch, attempts, lastError } = l
-		return { id, threadId, spaceId, state, display, vncPort, cdpPort, env, browser, createdAt, lastTouch, attempts, lastError }
+		const driver = l.slot === null ? null : { base: `http://127.0.0.1:${this.config.driverBasePort + l.slot}`, tokenFile: `${this.runner.contextDir(l.id)}/driver-token` }
+		return { id, threadId, spaceId, state, display, vncPort, cdpPort, driver, env, browser, createdAt, lastTouch, attempts, lastError }
 	}
 
 	list() {
@@ -205,7 +207,7 @@ export class DisplayAllocator {
 			const displays = []
 			for (const l of this.#leases) {
 				const started = l.pgid && l.slot !== null
-				displays.push({ id: l.id, threadId: l.threadId, state: l.state, display: l.display, alive: started ? await this.runner.probe(this.#spec(l), l.pgid) : false })
+				displays.push({ id: l.id, threadId: l.threadId, state: l.state, display: l.display, alive: started ? await this.runner.probe(this.#spec(l), l.pgid) : false, driver: started ? await this.runner.probeDriver(this.#spec(l)) : false })
 			}
 			const used = this.#leases.filter((l) => l.slot !== null).length
 			return { slots: { max: this.config.maxDisplays, used, free: this.config.maxDisplays - used }, memAvailableBytes: mem?.memAvailableBytes ?? null, memTotalBytes: mem?.memTotalBytes ?? null, queued: this.#leases.filter((l) => l.state === 'queued').length, displays }
@@ -225,7 +227,7 @@ export class DisplayAllocator {
 
 	#spec(l) {
 		const dir = this.runner.contextDir(l.id)
-		return { id: l.id, display: l.display, vncPort: l.vncPort, cdpPort: l.cdpPort, dir, geometry: this.config.geometry, env: this.#env(l, dir) }
+		return { id: l.id, display: l.display, vncPort: l.vncPort, cdpPort: l.cdpPort, driverPort: this.config.driverBasePort + l.slot, dir, geometry: this.config.geometry, env: this.#env(l, dir) }
 	}
 
 	#env(l, dir) {

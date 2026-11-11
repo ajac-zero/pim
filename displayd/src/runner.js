@@ -4,13 +4,14 @@
 //   contextDir(id)            -> the display's context directory
 //   start(spec)               -> {pgid}; spawns the display's process group and returns at once
 //   probe(spec, pgid)         -> whether the display is healthy: its processes are up, X is
-//                                serving and the VNC port answers
+//                                serving and the VNC and driver ports answer
+//   probeDriver(spec)         -> whether the display's Cua Driver port answers
 //   isAlive(pgid, spec)       -> whether pgid is still this display's process group
 //   kill(pgid, spec)          -> ends the group, with SIGKILL after a grace period
 //   removeContext(id)         -> deletes the context directory
 //   listContexts()            -> [{id, pgid}] for every context directory on disk
 //
-// spec is {id, display, vncPort, cdpPort, dir, geometry, env}.
+// spec is {id, display, vncPort, cdpPort, driverPort, dir, geometry, env}.
 import { execFile, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -22,7 +23,8 @@ const run = promisify(execFile)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // One bash process is the group leader and the supervisor: it starts the X server, a private
-// session bus, the window manager and the accessibility bus, writes `ready` when all are up, and
+// session bus, the window manager, the accessibility bus and the display's Cua Driver (an MCP
+// server on a loopback port that sees only this display's windows), writes `ready` when all are up, and
 // exits, taking the group with it, as soon as any of them does. Nothing listens on TCP but the
 // loopback VNC port; X itself is a unix socket guarded by the cookie in XAUTHORITY.
 const SUPERVISOR = String.raw`
@@ -39,6 +41,7 @@ for _ in $(seq 50); do [ -S "$PIM_DIR/bus" ] && break; sleep 0.1; done
 openbox >"$PIM_DIR/openbox.log" 2>&1 &
 ATSPI=$(command -v at-spi-bus-launcher || echo /usr/libexec/at-spi-bus-launcher)
 "$ATSPI" --launch-immediately >"$PIM_DIR/atspi.log" 2>&1 &
+"$PIM_DRIVER_BIN" serve --listen "127.0.0.1:$PIM_DRIVER_PORT" --token-file "$PIM_DIR/driver-token" >"$PIM_DIR/driver.log" 2>&1 &
 sleep 0.5
 touch "$PIM_DIR/ready"
 wait -n
@@ -66,6 +69,7 @@ const connects = (port) =>
 export class RealRunner {
 	constructor({ root = '/run/pim/displays', env = process.env } = {}) {
 		this.root = root
+		this.driverBin = env.DISPLAYD_DRIVER_BIN || '/usr/local/bin/cua-env-driver'
 		this.baseEnv = { PATH: env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: env.HOME ?? '/', LANG: env.LANG ?? 'C.UTF-8' }
 		mkdirSync(root, { recursive: true, mode: 0o700 })
 	}
@@ -81,10 +85,11 @@ export class RealRunner {
 		chmodSync(dir, 0o700)
 		await run('xauth', ['-f', spec.env.XAUTHORITY, 'add', spec.env.DISPLAY, '.', randomBytes(16).toString('hex')], { env: this.baseEnv })
 		chmodSync(spec.env.XAUTHORITY, 0o600)
+		writeFileSync(path.join(dir, 'driver-token'), randomBytes(16).toString('hex'), { mode: 0o600 })
 		// A file to source, for a person or a tool that joins the display.
 		const exports = Object.entries(spec.env).map(([k, v]) => `export ${k}='${v}'`)
 		writeFileSync(path.join(dir, 'env'), `${exports.join('\n')}\n`, { mode: 0o600 })
-		const env = { ...this.baseEnv, ...spec.env, PIM_DIR: dir, PIM_DISPLAY: String(spec.display), PIM_VNC_PORT: String(spec.vncPort), PIM_GEOMETRY: spec.geometry }
+		const env = { ...this.baseEnv, ...spec.env, PIM_DIR: dir, PIM_DISPLAY: String(spec.display), PIM_VNC_PORT: String(spec.vncPort), PIM_GEOMETRY: spec.geometry, PIM_DRIVER_BIN: this.driverBin, PIM_DRIVER_PORT: String(spec.driverPort) }
 		// $0 names the display so isAlive can tell it from an unrelated process that reuses the pid.
 		const child = spawn('bash', ['-c', SUPERVISOR, `pim-display-${spec.id}`], { env, detached: true, stdio: 'ignore' })
 		child.unref()
@@ -105,7 +110,11 @@ export class RealRunner {
 	}
 
 	async probe(spec, pgid) {
-		return this.isAlive(pgid, spec) && existsSync(path.join(spec.dir, 'ready')) && existsSync(`/tmp/.X11-unix/X${spec.display}`) && (await connects(spec.vncPort))
+		return this.isAlive(pgid, spec) && existsSync(path.join(spec.dir, 'ready')) && existsSync(`/tmp/.X11-unix/X${spec.display}`) && (await connects(spec.vncPort)) && (await this.probeDriver(spec))
+	}
+
+	probeDriver(spec) {
+		return connects(spec.driverPort)
 	}
 
 	async kill(pgid, spec) {

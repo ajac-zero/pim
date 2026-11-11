@@ -19,7 +19,7 @@ export class FakeRunner {
 			throw new Error('spawn failed')
 		}
 		const pgid = this.nextPgid++
-		this.procs.set(pgid, { id: spec.id, healthy: this.autoHealthy, spec })
+		this.procs.set(pgid, { id: spec.id, healthy: this.autoHealthy, driverUp: this.autoHealthy, spec })
 		this.contexts.add(spec.id)
 		return { pgid }
 	}
@@ -27,7 +27,10 @@ export class FakeRunner {
 		return this.procs.get(pgid)?.id === spec.id
 	}
 	async probe(spec, pgid) {
-		return this.isAlive(pgid, spec) && this.procs.get(pgid).healthy
+		return this.isAlive(pgid, spec) && this.procs.get(pgid).healthy && this.procs.get(pgid).driverUp
+	}
+	async probeDriver(spec) {
+		return [...this.procs.values()].some((p) => p.id === spec.id && p.driverUp)
 	}
 	async kill(pgid, spec) {
 		this.calls.push(['kill', spec.id])
@@ -44,8 +47,13 @@ export class FakeRunner {
 	pgidOf(id) {
 		return [...this.procs].find(([, p]) => p.id === id)?.[0]
 	}
+	// Makes the whole display healthy, driver included; setDriverUp changes the driver alone.
 	setHealthy(id, healthy = true) {
-		this.procs.get(this.pgidOf(id)).healthy = healthy
+		const p = this.procs.get(this.pgidOf(id))
+		p.healthy = p.driverUp = healthy
+	}
+	setDriverUp(id, up = true) {
+		this.procs.get(this.pgidOf(id)).driverUp = up
 	}
 	crash(id) {
 		this.procs.delete(this.pgidOf(id))

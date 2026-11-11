@@ -13,7 +13,8 @@ fairness and preemption, routing the computer tools to a display, and browser co
 
 One display is one process group, started by one supervisor shell: `Xvnc` (1280x800, VNC on a
 loopback port only, no TCP X), `openbox`, a private `dbus-daemon` session and
-`at-spi-bus-launcher`. If any of them exits the group ends. Its context directory,
+`at-spi-bus-launcher` and the display's own Cua Driver (`cua-env-driver serve`, an MCP server on a
+loopback port that sees only this display's windows; tools there need `delivery_mode: "foreground"`). If any of them exits the group ends. Its context directory,
 `/run/pim/displays/<id>/` (0700), holds what a process needs to join it:
 
 | File | Meaning |
@@ -22,10 +23,11 @@ loopback port only, no TCP X), `openbox`, a private `dbus-daemon` session and
 | `bus` | The private session bus socket |
 | `run/` | `XDG_RUNTIME_DIR` |
 | `env` | Shell-sourceable `DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `XDG_RUNTIME_DIR`, `GTK_MODULES=gail:atk-bridge`, `QT_ACCESSIBILITY=1` |
-| `pgid`, `ready`, `*.log` | The process group, written when all four are up, and their output |
+| `driver-token` | The driver's bearer token, 32 random hex characters (0600), written by displayd |
+| `pgid`, `ready`, `*.log` | The process group, written when all five are up, and their output |
 
 Display, VNC and Chrome DevTools ports come from the slot a lease holds: display `100 + slot`, VNC
-`5910 + slot`, CDP `9320 + slot`. A slot is free again when its lease is gone, so the ports are
+`5910 + slot`, CDP `9320 + slot`, driver `3220 + slot`. A slot is free again when its lease is gone, so the ports are
 unique among live displays and reserved for Chrome before it starts.
 
 ## Leases
@@ -59,10 +61,11 @@ Loopback, JSON, `Authorization: Bearer $DISPLAYD_TOKEN` on every request.
 | `POST /touch {threadId, browser?}` | Heartbeat; 404 when the thread has no display |
 | `POST /release {threadId}` | Kills the display and waits; `{released}` |
 | `GET /displays` | Every lease |
-| `GET /health` | Slots, queue length, `MemAvailable`, and each display's liveness now |
+| `GET /health` | Slots, queue length, `MemAvailable`, and each display's liveness now, with `driver` for the Cua Driver's |
 
-A lease is `{id, threadId, spaceId, state, display, env, vncPort, cdpPort, browser, createdAt,
-lastTouch, attempts, lastError}`.
+A lease is `{id, threadId, spaceId, state, display, env, vncPort, cdpPort, driver: {base, tokenFile}, browser, createdAt,
+lastTouch, attempts, lastError}`. A lease is active only once the driver at `driver.base` answers a
+loopback connect; call its `POST /mcp` with `Authorization: Bearer <contents of tokenFile>`.
 
 ## Run
 
@@ -73,6 +76,7 @@ lastTouch, attempts, lastError}`.
 | `DISPLAYD_STATE_DIR` | `/var/lib/displayd` | Holds `state.json` |
 | `DISPLAYD_CONTEXT_DIR` | `/run/pim/displays` | Context directories |
 | `DISPLAYD_MAX_DISPLAYS` | 6 | Lowers the hard maximum (the memory guard may already set it lower) |
+| `DISPLAYD_DRIVER_BIN` | `/usr/local/bin/cua-env-driver` | The Cua Driver binary |
 | `DISPLAYD_IDLE_TTL_MIN`, `DISPLAYD_BROWSER_TTL_MIN` | 10, 20 | Idle TTLs |
 
 ## Install

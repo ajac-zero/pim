@@ -241,3 +241,40 @@ test('health reports slots, memory and per-display liveness', async () => {
 	assert.equal(h.memAvailableBytes, 10 * GiB)
 	assert.deepEqual(h.displays.map((d) => [d.threadId, d.alive]), [['t1', false], ['t2', true]])
 })
+
+test('a lease carries its driver, and stays starting until the driver answers', async () => {
+	const a = make()
+	runner.autoHealthy = false
+	const l = await a.acquire('t1', 's1')
+	assert.deepEqual(l.driver, { base: 'http://127.0.0.1:3220', tokenFile: `/fake/displays/${l.id}/driver-token` })
+	assert.equal(a.get('t1').state, 'starting')
+	runner.setHealthy(l.id)
+	runner.setDriverUp(l.id, false) // the display is up, the driver is not
+	await a.tick()
+	assert.equal(a.get('t1').state, 'starting')
+	runner.setDriverUp(l.id)
+	await a.tick()
+	assert.equal(a.get('t1').state, 'active')
+	assert.equal(a.get('t1').driver.base, 'http://127.0.0.1:3220')
+	assert.equal((await up(a, 't2')).driver.base, 'http://127.0.0.1:3221')
+})
+
+test('a driver that never comes up fails the start like any other stuck start', async () => {
+	const a = make()
+	const l = await a.acquire('t1', 's1')
+	runner.setDriverUp(l.id, false)
+	advance(31_000)
+	await a.tick()
+	assert.equal(runner.started(l.id), 2) // killed and started again
+})
+
+test('a driver that dies makes the display unhealthy, and it is reaped', async () => {
+	const a = make()
+	const l = await up(a, 't1')
+	assert.deepEqual((await a.health()).displays.map((d) => [d.alive, d.driver]), [[true, true]])
+	runner.setDriverUp(l.id, false)
+	assert.deepEqual((await a.health()).displays.map((d) => [d.alive, d.driver]), [[false, false]])
+	await a.tick()
+	assert.equal(a.get('t1'), null)
+	assert.equal(runner.procs.size, 0)
+})

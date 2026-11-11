@@ -41,6 +41,16 @@ describe("the egress policy", () => {
 		expect(injectedHeaders(policy, "example.test")).toEqual({});
 	});
 
+	it("lets exact-host headers win over wildcard headers in either rule order and casing", () => {
+		const wildcard = { host: "*.example.test", headers: { Authorization: "wildcard-token", "x-shared": "wildcard" } };
+		const exact = { host: "api.example.test", pathPrefix: "/api", headers: { authorization: "exact-token" } };
+		for (const inject of [[wildcard, exact], [exact, wildcard]]) {
+			const policy = { allow: [], inject };
+			expect(injectedHeaders(policy, "api.example.test", "/api/request")).toEqual({ authorization: "exact-token", "x-shared": "wildcard" });
+			expect(injectedHeaders(policy, "other.example.test", "/api/request").authorization).toBe("wildcard-token");
+			expect(injectedHeaders(policy, "api.example.test", "/outside").authorization).toBe("wildcard-token");
+		}
+	});
 	it("puts a secret in the workspace's environment only on a provider that can't inject it", () => {
 		const rule = gitBrokerInjection(ORIGIN, "/g", "secret");
 		expect(placeSecret({ capabilities: { egressInjection: true } as never }, rule, "secret")).toEqual({ env: INJECTED_PLACEHOLDER, rule });

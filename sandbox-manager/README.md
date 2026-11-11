@@ -189,7 +189,8 @@ one share a single creation. The session must have been created with the same `u
 `runtime_secrets`), and free disk must be above `MIN_FREE_DISK_PCT` (507 `low_disk`).
 - **What is left out:** credentials in the home directory (`.npmrc`, `.netrc`, `.git-credentials`,
   `.pypirc`, `.yarnrc.yml`, `.ssh`, `.aws`, `.docker`, `.kube`, `.gnupg`, `.azure`, `.config/gh`,
-  `.config/gcloud`, cargo credentials, the coding harnesses' sign-ins, shell histories), every
+  `.config/gcloud`, `.config/pim/git` (the short-lived, read-only Git broker credential
+  file and helper), cargo credentials, the coding harnesses' sign-ins, shell histories), every
   `.env*` in the home directory and its dot-directories (not in a checkout), devices, fifos, and
   symlinks that point outside `/workspace`. Every `.git/config` is rewritten without the user and
   password of http(s) URLs and without `extraheader` lines. `excluded` counts the entries left out.

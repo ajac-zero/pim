@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CloudflareContainerProvider, containerProvider } from "../src/coding/workspace/cloudflare";
 import { runConformanceSuite } from "../src/coding/workspace/conformance";
 import { fakeContainers } from "./fake-container";
@@ -6,6 +6,7 @@ import { computeSummary, prepareComputeProvider, workspaceProviderOf } from "../
 import { workspaceBackends } from "../src/coding/workspace/registry";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { ContainerHost } from "../cloudflare-container";
+import { handleEgress } from "../cloudflare-egress";
 
 const spec: WorkspaceSpec = {
 	sessionId: "session",
@@ -97,6 +98,7 @@ function hostFixture() {
 	const calls: string[] = [];
 	let running = false;
 	let failSnapshot = false;
+	let failDestroy = false;
 	const container = {
 		get running() {
 			return running;
@@ -109,6 +111,10 @@ function hostFixture() {
 		},
 		destroy: async () => {
 			calls.push("destroy");
+			if (failDestroy) {
+				failDestroy = false;
+				throw new Error("startup destroy failed");
+			}
 			running = false;
 		},
 		setInactivityTimeout: async () => {},
@@ -138,6 +144,12 @@ function hostFixture() {
 	return {
 		host: new ContainerHost(ctx as unknown as DurableObjectState),
 		calls,
+		restartWithFailedCleanup: () => {
+			running = true;
+			failDestroy = true;
+			return new ContainerHost(ctx as unknown as DurableObjectState);
+		},
+		restart: () => new ContainerHost(ctx as unknown as DurableObjectState),
 		lose: () => {
 			running = false;
 		},
@@ -147,6 +159,40 @@ function hostFixture() {
 	};
 }
 describe("WorkspaceContainer lifecycle", () => {
+	it("recovers from a rejected startup cleanup and continues serving the workspace", async () => {
+		const fixture = hostFixture();
+		await fixture.host.create(spec);
+		await fixture.host.suspend();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const host = fixture.restartWithFailedCleanup();
+			expect((await host.info())?.state).toBe("stopped");
+			expect(warn).toHaveBeenCalledWith(expect.stringContaining("container_startup_cleanup_failed"));
+			// A later lifecycle operation must run even though the constructor's cleanup failed.
+			await host.destroy(false);
+			await host.create(spec);
+			await host.keepAlive();
+			expect((await host.request(new Request("http://agentd/health"))).status).toBe(200);
+			expect((await host.info())?.state).toBe("running");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+	it("injects the fresh token after suspend, resume and policy replacement, including after eviction", async () => {
+		const fixture = hostFixture();
+		const policy = (token: string) => ({ allow: ["api.example.com"], inject: [{ host: "api.example.com", headers: { authorization: token } }] });
+		await fixture.host.create({ ...spec, egress: policy("stale-token") });
+		await fixture.host.suspend();
+		await fixture.host.start();
+		await fixture.host.setEgress(policy("fresh-token"));
+		const host = fixture.restart();
+		await host.info();
+		await handleEgress(new Request("https://api.example.com/request"), await host.egressPolicy(), "api.example.com", async (request) => {
+			expect((request as Request).headers.get("authorization")).toBe("fresh-token");
+			expect((request as Request).headers.get("authorization")).not.toBe("stale-token");
+			return new Response("ok");
+		});
+	});
 	it("saves before destroy and restores once, with durable state", async () => {
 		const { host, calls } = hostFixture();
 		await host.create(spec);

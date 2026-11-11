@@ -125,6 +125,13 @@ the connection target and the latest policy, refuses nonstandard ports, and
 injects only into HTTPS requests with a matching normalized path. Redirects are
 returned for a new policy check. Removed targets still fail closed through old
 intercepts; no policy or injection credentials are put in the container.
+The policy, including gateway and broker tokens in `Saved.spec.egress.inject`,
+is persisted in the workspace's own Durable Object storage. These credentials
+are thread-scoped and expire; they are replaced when access is refreshed and
+removed with the workspace on full destruction. Expiration invalidates a token
+even if its stored value remains until replacement or deletion. They do not live
+only in Worker memory. After resume, the thread refreshes broker access with
+`setEgress`; CLI gateway access is refreshed before its harness starts.
 The entrypoint installs Cloudflare's mounted CA then starts agentd as uid 10001.
 [Cloudflare's outbound intercept documentation](https://developers.cloudflare.com/containers/configuration/outbound-traffic/)
 explains the CA and connection-target/Host distinction.
@@ -132,3 +139,8 @@ explains the CA and connection-target/Host distinction.
 Tests use a fake remote service for client conformance and a fake native API for
 lifecycle failures. These do not prove image startup, snapshot availability,
 network interception or billing against a live Cloudflare account.
+
+Compose has no native injection. It writes a short-lived, read-only broker
+credential to `/workspace/.config/pim/git/credential.json` (mode 0600) and installs
+a URL-scoped Git credential helper beside it. Both files are excluded from
+Compose environment snapshots. See [in-workspace Git access](coding-environment.md#in-workspace-git-access).

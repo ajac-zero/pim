@@ -52,16 +52,20 @@ const underPrefix = (path: string, prefix: string) => prefix === "/" || path ===
 /**
  * The headers a policy adds to a request to `host` and `path`, or none. The path is normalized (`normalizePath`) and
  * a rule's prefix matches whole segments only. The host is compared as given, lowercased and nothing else, so a
- * name with a trailing dot or userinfo matches no rule: it fails closed.
+ * name with a trailing dot or userinfo matches no rule: it fails closed. Exact-host rules override wildcard
+ * rules per header, regardless of their order; equally specific rules keep their existing later-wins order.
  */
 export function injectedHeaders(policy: EgressPolicy, host: string, path = "/"): Record<string, string> {
 	const name = lower(host);
 	const resolved = normalizePath(path);
 	let out: Record<string, string> = {};
 	if (resolved === null) return out;
-	for (const rule of egressPolicy(policy).inject) {
+	const rules = egressPolicy(policy).inject.sort((a, b) => Number(!a.host.startsWith("*.")) - Number(!b.host.startsWith("*.")));
+	for (const rule of rules) {
 		const prefix = rule.pathPrefix === undefined ? "/" : normalizePath(rule.pathPrefix);
-		if (covers(rule.host, name) && prefix !== null && underPrefix(resolved, prefix)) out = { ...out, ...rule.headers };
+		if (covers(rule.host, name) && prefix !== null && underPrefix(resolved, prefix)) {
+			for (const [header, value] of Object.entries(rule.headers)) out[header.toLowerCase()] = value;
+		}
 	}
 	return out;
 }

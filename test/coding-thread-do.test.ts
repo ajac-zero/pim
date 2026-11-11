@@ -760,11 +760,16 @@ describe("a coding thread on a provider with sessions, keepalives and egress inj
 		expect(before.session).toMatchObject({ state: "active", startedAt: t0, maxMin: 1, expiresAt: t0 + 60_000, continuations: 0, last: null });
 		const ref = (await provider.list({ sessionId: id }))[0]!.ref;
 		await printedOf((await provider.get(ref))!, ["spawn", "daemon"]);
+		const staleHeaders = injectedHeaders(provider.egressOf(id)!, "pim.test", "/api/coding/git/acme/demo.git/info/refs");
+		expect(staleHeaders.authorization).toMatch(/^Bearer /);
 		// Twelve seconds before the cap (a fifth of it): the heartbeat starts the move.
 		codingThreadClock.now = t0 + 48_000;
 		await heartbeat(stub);
 		const [ended] = await turns(id, 1);
 		expect(ended!.outcome).toBe("completed");
+		const freshHeaders = injectedHeaders(provider.egressOf(id)!, "pim.test", "/api/coding/git/acme/demo.git/info/refs");
+		expect(freshHeaders.authorization).toMatch(/^Bearer /);
+		expect(freshHeaders.authorization).not.toBe(staleHeaders.authorization);
 		const status = await stub.status();
 		expect(status.session).toMatchObject({ state: "active", continuations: 1, startedAt: t0 + 48_000, expiresAt: t0 + 108_000, last: { mode: "resumed", reason: "session_cap" } });
 		expect(status).toMatchObject({ state: "idle" });

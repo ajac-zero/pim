@@ -122,9 +122,9 @@ export function shellAction(computer: Computer): GatedAction {
 		}),
 		// The approval request lists the command itself; a notice in a chat only says that one ran.
 		summarize: () => "Run a command",
-		async run({ command, cwd, timeout_seconds }) {
+		async run({ command, cwd, timeout_seconds }, { session }) {
 			if (cwd !== undefined && filesPath(cwd) === null) throw new Error(`${cwd} is not a folder under ${FILES_ROOT}.`);
-			const result = await computer.exec(command, { ...(cwd ? { cwd } : {}), ...(timeout_seconds ? { timeoutMs: timeout_seconds * 1000 } : {}) });
+			const result = await computer.exec(command, { thread: session, ...(cwd ? { cwd } : {}), ...(timeout_seconds ? { timeoutMs: timeout_seconds * 1000 } : {}) });
 			const status = result.timedOut
 				? `Stopped after ${timeout_seconds ?? DEFAULT_COMMAND_MS / 1000} seconds`
 				: result.exitCode === null

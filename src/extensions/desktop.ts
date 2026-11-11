@@ -23,9 +23,9 @@ const ABOUT = `The person's computer has a desktop, which they can watch and use
 /** The label Cua Driver keeps a conversation's cursor and snapshots under. */
 const sessionOf = (conversation: string) => `pim-${conversation.replace(/[^\w-]/g, "").slice(0, 24)}`;
 
-async function driverCall(computer: Computer, tool: string, args: Record<string, unknown>): Promise<ToolExecutionResult> {
+async function driverCall(computer: Computer, thread: string, tool: string, args: Record<string, unknown>): Promise<ToolExecutionResult> {
 	try {
-		const result = (await computer.driver(tool, args)) as McpCallResult;
+		const result = (await computer.driver(tool, args, thread)) as McpCallResult;
 		return { content: toContent(result), ...(result.isError ? { isError: true } : {}) };
 	} catch (error) {
 		return text(error instanceof Error ? error.message : String(error), true);
@@ -108,7 +108,7 @@ export function desktopAction(computer: Computer): GatedAction {
 		summarize,
 		async run({ action, foreground, ...args }, { session }) {
 			const delivery = foreground ? { delivery_mode: "foreground" } : {};
-			return toText((await computer.driver(action, { ...args, ...delivery, session: sessionOf(session) })) as McpCallResult);
+			return toText((await computer.driver(action, { ...args, ...delivery, session: sessionOf(session) }, session)) as McpCallResult);
 		},
 	}) as GatedAction;
 }
@@ -121,7 +121,7 @@ export function desktopExtension(computer: Computer) {
 		parameters: Type.Object({}),
 		replay: "safe",
 		async execute(_args, api) {
-			return driverCall(computer, "get_desktop_state", { session: sessionOf(String(api.conversationId)) });
+			return driverCall(computer, String(api.conversationId), "get_desktop_state", { session: sessionOf(String(api.conversationId)) });
 		},
 	});
 
@@ -136,8 +136,9 @@ export function desktopExtension(computer: Computer) {
 		}),
 		replay: "safe",
 		async execute(args, api) {
-			const session = sessionOf(String(api.conversationId));
-			return args.pid === undefined ? driverCall(computer, "list_apps", { session }) : driverCall(computer, "get_window_state", { ...args, session });
+			const thread = String(api.conversationId);
+			const session = sessionOf(thread);
+			return args.pid === undefined ? driverCall(computer, thread, "list_apps", { session }) : driverCall(computer, thread, "get_window_state", { ...args, session });
 		},
 	});
 

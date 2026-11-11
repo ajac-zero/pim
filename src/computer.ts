@@ -387,8 +387,13 @@ export class Computer {
 	}
 
 	/** Calls one of Cua Driver's tools on the computer's desktop, and returns its MCP result. */
-	driver(tool: string, args: Record<string, unknown>): Promise<{ content?: unknown[]; structuredContent?: unknown; isError?: boolean }> {
-		return this.call("driver", { tool, arguments: args }, DRIVER_CALL_MS);
+	driver(
+		tool: string,
+		args: Record<string, unknown>,
+		thread?: string,
+	): Promise<{ content?: unknown[]; structuredContent?: unknown; isError?: boolean }> {
+		// With a thread, pim-computer uses that thread's own display rather than the computer's primary one.
+		return this.call("driver", { tool, arguments: args, ...(thread ? { thread } : {}) }, DRIVER_CALL_MS);
 	}
 
 	/** Whether the computer has a browser, and whether it's running; neither while the computer is offline. */
@@ -447,9 +452,9 @@ export class Computer {
 	}
 
 	/** Runs a shell command on the computer. */
-	exec(command: string, options: { cwd?: string; timeoutMs?: number } = {}): Promise<ExecResult> {
+	exec(command: string, options: { cwd?: string; timeoutMs?: number; thread?: string } = {}): Promise<ExecResult> {
 		const timeoutMs = Math.min(options.timeoutMs ?? DEFAULT_COMMAND_MS, MAX_COMMAND_MS);
-		const args: ExecArgs = { command, timeoutMs, maxBytes: COMMAND_OUTPUT_BYTES, ...(options.cwd ? { cwd: options.cwd } : {}) };
+		const args: ExecArgs = { command, timeoutMs, maxBytes: COMMAND_OUTPUT_BYTES, ...(options.cwd ? { cwd: options.cwd } : {}), ...(options.thread ? { thread: options.thread } : {}) };
 		return this.call<ExecResult>("exec", args, timeoutMs + 15_000);
 	}
 

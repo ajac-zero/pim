@@ -305,7 +305,7 @@ export async function connectTestComputer(
 	calls: Record<string, (args: any) => unknown> = {},
 ) {
 	await fs.mkdir(root, { recursive: true });
-	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}), ...(screen ? { screen } : {}), ...(driver ? { driver } : {}) };
+	const machine: Machine = { root: await fs.realpath(root), exec, ...(browser ? { browser } : {}), ...(screen ? { screen } : {}), ...(driver ? { driver, displays: { call: (_thread, tool, args) => driver.call(tool, args), envOf: async () => undefined } } : {}) };
 	const response = await opens("/computer/connect", token);
 	expect(response.status).toBe(101);
 	const socket = response.webSocket!;

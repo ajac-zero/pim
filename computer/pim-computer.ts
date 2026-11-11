@@ -69,7 +69,7 @@ export type ExecResult = {
 	readonly truncated: boolean;
 };
 
-export type ExecArgs = { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number };
+export type ExecArgs = { readonly command: string; readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number; readonly thread?: string; readonly env?: Readonly<Record<string, string>> };
 
 /** Where this computer keeps the space's files, how it runs commands, and its browser (tests give their own). */
 export type Machine = {
@@ -82,6 +82,8 @@ export type Machine = {
 	readonly screen?: ScreenHost;
 	/** Cua Driver, for the agents to use its desktop's apps, or none where cua-spacesd doesn't run. */
 	readonly driver?: DriverHost;
+	/** Where this computer's displayd leases each thread its own display, or none (tests give their own). */
+	readonly displays?: DisplayHost;
 	/** The backends of the space's apps that run here, or none where nothing supervises them (tests give their own). */
 	readonly apps?: Apps;
 };
@@ -217,6 +219,11 @@ export class Link {
 	}
 
 	async #call(op: string, args: Args): Promise<unknown> {
+		if (op === "driver" && typeof args.thread === "string" && args.thread !== "") {
+			if (!this.#machine.displays) throw new CallError(NO_DISPLAY, "ENOSYS");
+			if (typeof args.tool !== "string") throw new CallError("tool must name one of Cua Driver's tools", "EINVAL");
+			return this.#machine.displays.call(args.thread, args.tool, (args.arguments ?? {}) as Args);
+		}
 		if (op === "driver") {
 			const driver = this.#machine.driver;
 			if (!driver) throw new CallError("This computer has no desktop tools: they need Cua's cua-spacesd.", "ENOSYS");
@@ -529,7 +536,9 @@ export async function handle(machine: Machine, op: string, args: Args): Promise<
 			case "exec": {
 				if (typeof args.command !== "string" || args.command.trim() === "") throw new CallError("command must be a shell command", "EINVAL");
 				const cwd = args.cwd === undefined ? machine.root : await local(machine, args.cwd);
-				return await machine.exec(args as ExecArgs, cwd);
+				// A thread that already holds a display runs its commands in it; a plain command never makes one.
+				const env = typeof args.thread === "string" && machine.displays ? await machine.displays.envOf(args.thread) : undefined;
+				return await machine.exec({ ...(args as ExecArgs), ...(env ? { env } : {}) }, cwd);
 			}
 			default:
 				throw new CallError(`This computer doesn't know the call ${op}. Update pim-computer.`, "ENOSYS");
@@ -578,10 +587,10 @@ class Output {
 }
 
 /** Runs a command in a login shell, in its own process group, killed with it at the timeout. `$PIM_WORKSPACE` is the root. */
-async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000 }: ExecArgs, cwd: string, root: string): Promise<ExecResult> {
+async function runCommand({ command, timeoutMs = 120_000, maxBytes = 64_000, env }: ExecArgs, cwd: string, root: string): Promise<ExecResult> {
 	const { spawn } = await import("node:child_process");
 	const shell = process.env.SHELL || "/bin/bash";
-	const child = spawn(shell, ["-lc", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PIM_WORKSPACE: root } });
+	const child = spawn(shell, ["-lc", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env, PIM_WORKSPACE: root } });
 	const stdout = new Output(maxBytes);
 	const stderr = new Output(maxBytes);
 	child.stdout!.on("data", (chunk: Buffer) => stdout.add(chunk));
@@ -1206,6 +1215,85 @@ async function grpcWeb(base: string, token: string, method: string, message: num
 		throw new CallError(`cua-spacesd refused ${method}: ${why}`, "ESPACESD");
 	}
 	return answer;
+}
+
+/** A computer's per-thread displays: calls a thread's driver tool on its own display, and finds the environment of the one it holds. */
+export type DisplayHost = Pick<DisplayClient, "call" | "envOf">;
+
+/** The space id displayd records its leases under: one computer serves one person. */
+const SPACE = "pim-computer";
+const NO_DISPLAY = "no display allocated: displayd is not reachable on this computer";
+
+/** The tools that act with the keyboard or pointer, which a display's driver only delivers in the foreground. */
+const INPUT_TOOLS = new Set(["click", "double_click", "right_click", "type_text", "press_key", "hotkey", "set_value", "scroll", "drag"]);
+
+type Lease = { state: string; env?: Record<string, string>; driver?: { base: string; tokenFile: string }; [key: string]: unknown };
+
+/**
+ * displayd's per-thread displays (see ../displayd/README.md): a thread's
+ * desktop calls go to the Cua Driver of the display it holds, which is
+ * leased on first use and kept alive by each call. Never the primary
+ * desktop's driver: a display that isn't active yet, or no displayd, is an
+ * error the agent can retry.
+ */
+export class DisplayClient {
+	readonly #url: string;
+	readonly #token: () => Promise<string>;
+	readonly #drivers = new Map<string, DriverHost>();
+	readonly #makeDriver: (base: string, tokenFile: string) => DriverHost;
+
+	constructor(options: { url?: string; token?: string; tokenFile?: string; driver?: (base: string, tokenFile: string) => DriverHost } = {}) {
+		this.#url = options.url ?? "http://127.0.0.1:9900";
+		this.#token = async () => options.token ?? (await fs.readFile(options.tokenFile ?? "/etc/displayd/token", "utf8")).trim();
+		this.#makeDriver = options.driver ?? spacesdDriver;
+	}
+
+	async #request(method: string, path: string, body?: unknown, timeoutMs = 10_000): Promise<{ status: number; body: any }> {
+		let response: Response;
+		try {
+			response = await fetch(new URL(path, this.#url), {
+				method,
+				headers: { authorization: `Bearer ${await this.#token()}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+				...(body === undefined ? {} : { body: JSON.stringify(body) }),
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+		} catch {
+			throw new CallError(NO_DISPLAY, "ENODISPLAY");
+		}
+		return { status: response.status, body: await response.json().catch(() => ({})) };
+	}
+
+	/** The environment of the display the thread holds, if it does: it never leases one. */
+	async envOf(thread: string): Promise<Record<string, string> | undefined> {
+		try {
+			const { status, body } = await this.#request("GET", "/displays");
+			if (status !== 200) return undefined;
+			const leases: Lease[] = Array.isArray(body) ? body : Array.isArray(body?.displays) ? body.displays : [];
+			const lease = leases.find((one) => one.threadId === thread && (one.state === "active" || one.state === "idle"));
+			return lease?.env;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Calls one of Cua Driver's tools on the thread's display. */
+	async call(thread: string, tool: string, args: Args): Promise<Awaited<ReturnType<DriverHost["call"]>>> {
+		const acquired = await this.#request("POST", "/acquire", { threadId: thread, spaceId: SPACE, waitMs: 60_000 }, 70_000);
+		const lease = (acquired.body?.lease ?? undefined) as Lease | undefined;
+		if (!lease || (lease.state !== "active" && lease.state !== "idle") || !lease.driver) {
+			const state = lease?.state ?? "unknown";
+			const why = acquired.status >= 400 ? `HTTP ${acquired.status} ${JSON.stringify(acquired.body)}` : JSON.stringify({ state, ...(lease ? { lease: { ...lease, env: undefined } } : {}) });
+			const label = state === "starting" ? "display_starting" : state === "queued" ? "display_queued" : "display_unavailable";
+			return { content: [{ type: "text", text: `${label} ${why}. The display isn't ready yet; try again shortly.` }], isError: true };
+		}
+		await this.#request("POST", "/touch", { threadId: thread }).catch(() => undefined);
+		const key = `${lease.driver.base} ${lease.driver.tokenFile}`;
+		let driver = this.#drivers.get(key);
+		if (!driver) this.#drivers.set(key, (driver = this.#makeDriver(lease.driver.base, lease.driver.tokenFile)));
+		// Focus is private to a display, and its driver refuses background delivery.
+		const sent = INPUT_TOOLS.has(tool) && args.delivery_mode === undefined ? { ...args, delivery_mode: "foreground" } : args;
+		return driver.call(tool, sent);
+	}
 }
 
 /**
@@ -1867,6 +1955,10 @@ async function main(): Promise<void> {
 		...(browser ? { browser } : {}),
 		...(screen ? { screen } : {}),
 		...(driver ? { driver } : {}),
+		displays: new DisplayClient({
+			url: env.DISPLAYD_URL ?? "http://127.0.0.1:9900",
+			...(env.DISPLAYD_TOKEN ? { token: env.DISPLAYD_TOKEN } : { tokenFile: env.DISPLAYD_TOKEN_FILE ?? "/etc/displayd/token" }),
+		}),
 		apps,
 	};
 	const hello = {

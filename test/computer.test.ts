@@ -245,7 +245,7 @@ describe("the computer", () => {
 		expect(ran).toEqual([]);
 		await post(`/approvals/${approval.id}/approve`);
 		await testing;
-		expect(ran).toEqual([{ command: "npm test", cwd: "/workspace/project", timeoutMs: 30_000, maxBytes: 64_000 }]);
+		expect(ran).toEqual([{ command: "npm test", cwd: "/workspace/project", timeoutMs: 30_000, maxBytes: 64_000, thread: "1" }]);
 		expect(result.text).toContain("Exit code 2\nstdout:\nran npm test\n\nstderr:\nwarning: old npm");
 
 		// A folder outside the files is refused before anything runs.

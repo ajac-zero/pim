@@ -313,6 +313,8 @@ describe("a chat that can't be held up", () => {
 			expect((await post(`/sessions/${ROOT}/abort`)).status).toBe(200);
 			await settled();
 			expect(await busy()).toBe(false);
+			// Stop leaves the request it stopped on pending, with no call left to wake; the next test's `pendingApproval` would take it for its own.
+			expect((await post(`/approvals/${approval.id}/deny`)).status).toBe(200);
 		} finally {
 			await policy(null);
 		}

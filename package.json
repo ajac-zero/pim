@@ -17,6 +17,7 @@
     "lint": "pnpm --filter pim-web lint",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
     "test": "node scripts/check-internal-identifiers.mjs && vitest run && pnpm --filter pim-web test",
+    "test:changed": "node scripts/test-changed.mjs",
     "test:live": "PIM_LIVE=1 vitest run"
   },
   "dependencies": {

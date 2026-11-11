@@ -1,7 +1,7 @@
 import type { Context } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { verifyBrokerToken } from "../src/coding/git-broker/broker";
 import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
@@ -2201,6 +2201,11 @@ describe("a Claude Code thread", () => {
 	});
 
 	it("runs one of the person's threads at a time on their login: the next waits for the first to end", async () => {
+		// The first run prints nothing while it waits for the gate, longer than the tests' usual 300 ms stall limit on a slow runner.
+		codingTimings.stallMs = 60_000;
+		onTestFinished(() => {
+			codingTimings.stallMs = 300;
+		});
 		let release = () => {};
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
@@ -2587,9 +2592,10 @@ describe("an Amp thread", () => {
 		await stub.steer("Also add a test for an empty name", { operationId: "steer-1" });
 		await turns(id, 2);
 		// Amp's thread is unarchived first (it may have archived itself after `--execute`), then continued.
-		expect(runs[1]!.argv.slice(0, 5)).toEqual(["amp", "threads", "archive", AMP_SESSION, "--unarchive"]);
-		expect(runs[2]!.argv.slice(0, 4)).toEqual(["amp", "threads", "continue", AMP_SESSION]);
-		expect(runs[2]!.argv.at(-1)).toBe("--execute=Also add a test for an empty name");
+		// The unarchive runs in the same shell as the continue, and the fake records it apart from `runs`.
+		expect(unarchives.at(-1)).toEqual(["amp", "threads", "archive", AMP_SESSION, "--unarchive", ">/dev/null", "2>&1"]);
+		expect(runs[1]!.argv.slice(0, 4)).toEqual(["amp", "threads", "continue", AMP_SESSION]);
+		expect(runs[1]!.argv.at(-1)).toBe("--execute=Also add a test for an empty name");
 		// The key is nowhere in the thread's tables, its log or its transcript.
 		expect(await everything(stub)).not.toContain("THREADKEY");
 		expect(JSON.stringify(await stub.log())).not.toContain("THREADKEY");

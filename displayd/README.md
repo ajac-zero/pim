@@ -38,9 +38,10 @@ display still `starting` after 30 s is killed and started once more; the second 
 lease. A display whose processes die is reaped. Displays start one at a time, oldest queued first,
 so the memory reading that admits the next one includes the last.
 
-The memory guard (`src/memory.js`) admits a display only if `MemAvailable - 1.5 GiB >= 3 GiB`
-(Chrome and X cost, then the reserve for sandbox-manager, which shares the host that has no swap),
-and never more than 6 displays.
+The memory guard (`src/memory.js`) scales with the computer displayd runs in. A display is admitted
+only if `MemAvailable - 1 GiB >= reserve`, where the reserve is 15% of `MemTotal` clamped to 0.5–3 GiB,
+and, when the computer has swap, `SwapFree >= 1 GiB`. At most `min(6, floor((MemTotal - reserve) / 1.5 GiB))`
+displays run, so 2 on a 3.9 GiB computer.
 
 State is kept in `state.json` in the state dir. After a restart displayd re-adopts every display
 whose process group is still its own (the pidfile and the name in `/proc/<pid>/cmdline`) and that
@@ -71,7 +72,7 @@ lastTouch, attempts, lastError}`.
 | `DISPLAYD_HOST`, `DISPLAYD_PORT` | `127.0.0.1`, `9900` | Where the API listens |
 | `DISPLAYD_STATE_DIR` | `/var/lib/displayd` | Holds `state.json` |
 | `DISPLAYD_CONTEXT_DIR` | `/run/pim/displays` | Context directories |
-| `DISPLAYD_MAX_DISPLAYS` | 6 | Hard maximum |
+| `DISPLAYD_MAX_DISPLAYS` | 6 | Lowers the hard maximum (the memory guard may already set it lower) |
 | `DISPLAYD_IDLE_TTL_MIN`, `DISPLAYD_BROWSER_TTL_MIN` | 10, 20 | Idle TTLs |
 
 ## Install

@@ -13,7 +13,7 @@ type Snapshot = { id: string; sessionId: string };
 
 /**
  * The instance a coding workspace runs on: the thread's limits, raised to
- * at least 4 vCPU, 8 GiB of memory and 16 GB of disk so builds have room,
+ * at least 4 vCPU, 12 GiB of memory (Cloudflare asks for 3 GiB per vCPU) and 16 GB of disk so builds have room,
  * and kept within Cloudflare's largest custom instance (4 vCPU, 12 GiB,
  * 20 GB). Memory and disk are billed for as long as the container is up, CPU
  * only while it is busy (docs/coding-cloudflare-sandbox.md).
@@ -21,7 +21,7 @@ type Snapshot = { id: string; sessionId: string };
 export function instanceFor(limits: WorkspaceSpec["limits"]): { vcpu: number; memoryMib: number; diskMb: number } {
 	return {
 		vcpu: Math.min(Math.max(limits.cpu, 4), 4),
-		memoryMib: Math.min(Math.max(limits.memMiB, 8 * 1024), 12 * 1024),
+		memoryMib: Math.min(Math.max(limits.memMiB, 12 * 1024), 12 * 1024),
 		diskMb: Math.min(Math.max(Math.ceil(limits.diskMiB * 1.048576), 16_000), 20_000),
 	};
 }

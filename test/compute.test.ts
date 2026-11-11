@@ -151,6 +151,9 @@ describe("which backends coding threads have", () => {
 		const containers = { WorkspaceContainer: { getByName: () => ({}) }, WorkspaceCatalog: { getByName: () => ({}) } };
 		const environment = () => ({ PIM_CODING_MANAGER_URL: MANAGER, PIM_CODING_MANAGER_TOKEN: TOKEN, ...containers });
 		const cloudflare = (codingSandbox: boolean) => prepareComputeProvider({ kind: "cloudflare-sandbox", codingSandbox }, null);
+		// The bindings alone offer no overflow: the admin has to add the provider.
+		expect(workspaceBackends(environment(), []).ids()).toEqual(["compose"]);
+		expect(workspaceBackends(containers, []).ids()).toEqual([]);
 		// As deployed: the admin's Cloudflare provider is off, so threads have the manager alone.
 		expect(workspaceBackends(environment(), [cloudflare(false)]).ids()).toEqual(["compose"]);
 		// Switched on, it overflows from the manager rather than taking its place as the default.
@@ -375,11 +378,11 @@ describe("coding tools", () => {
 			expect(names(added.tools)).toContain("coding_start");
 			expect(added.line).toBeNull();
 
-			// A provider this Worker can't make workspaces with offers nothing, whatever is set.
+			// The tests' Worker has the container bindings, so Cloudflare Containers is usable here once the admin adds it.
 			await shared.removeComputeProvider("compose");
 			await shared.putComputeProvider(null, { kind: "cloudflare-sandbox" });
-			expect(await shared.computeSummaries()).toEqual([{ id: "cloudflare-sandbox", kind: "cloudflare-sandbox", codingSandbox: true, usable: false }]);
-			expect(names((await turn()).tools)).toEqual([]);
+			expect(await shared.computeSummaries()).toEqual([{ id: "cloudflare-sandbox", kind: "cloudflare-sandbox", codingSandbox: true, usable: true }]);
+			expect(names((await turn()).tools)).toContain("coding_start");
 			await shared.removeComputeProvider("cloudflare-sandbox");
 			await shared.putComputeProvider(null, { kind: "compose", settings: { managerUrl: MANAGER }, credentials: { token: TOKEN } });
 

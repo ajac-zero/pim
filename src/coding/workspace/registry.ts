@@ -103,7 +103,8 @@ export function workspaceBackends(env: object, configured: readonly ComputeProvi
 		}
 	}
 	const taken = new Set(added.map((provider) => provider.id));
-	const usable = [...added, ...providers.filter((provider) => !taken.has(provider.id) && !off.has(provider.id))];
+	// An overflow backend costs money by the second, so the environment's bindings alone don't offer it: the admin adds it (./compute.ts).
+	const usable = [...added, ...providers.filter((provider) => !taken.has(provider.id) && !off.has(provider.id) && workspaceRole(provider.id) !== "overflow")];
 	const registry = workspaceRegistry([...usable.filter((provider) => workspaceRole(provider.id) === "primary"), ...usable.filter((provider) => workspaceRole(provider.id) === "overflow")], missing);
 	cached = { env, signature, registry };
 	return registry;

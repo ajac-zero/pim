@@ -33,20 +33,17 @@ lets threads overflow here; with it off, threads have the manager alone.
 
 ## Instance size and cost
 
-Each coding workspace runs on a custom instance of at least 4 vCPU, 8 GiB of
+Each coding workspace runs on a custom instance of at least 4 vCPU, 12 GiB of
 memory and 16 GB of disk, or the thread's own limits where those are larger,
 within Cloudflare's largest custom instance of 4 vCPU, 12 GiB and 20 GB
-(`instanceFor` in `cloudflare-container.ts`). Cloudflare's documented custom
-instance constraints also ask for at least 3 GiB of memory per vCPU, which 4
-vCPU with 8 GiB is under; the earlier 2 vCPU with 4 GiB was under it too and
-started in live tests, so the size is used as it is. If a deploy shows starts refused for
-the ratio, raise memory to 12 GiB or lower CPU to 2.
+(`instanceFor` in `cloudflare-container.ts`). 12 GiB meets Cloudflare's
+requirement of at least 3 GiB of memory per vCPU for custom instances.
 
 [Cloudflare bills](https://developers.cloudflare.com/containers/platform/pricing/)
 memory and disk for as long as a container is up, by the size provisioned, and
 CPU only while it is busy. At list prices past the Workers Paid plan's
-included usage, an instance of this size costs about $0.072 an hour for its
-8 GiB of memory and $0.004 for its 16 GB of disk while it is up, whether or not
+included usage, an instance of this size costs about $0.108 an hour for its
+12 GiB of memory and $0.004 for its 16 GB of disk while it is up, whether or not
 it works, plus up to $0.29 an hour while all 4 vCPUs are busy. A workspace is
 up while its thread works and for up to ten minutes idle after, when the thread
 gives its slot back and suspends it with a snapshot; a suspended workspace runs

@@ -1,11 +1,14 @@
 # Minimal workspace image: the tools a coding agent needs, the coding harness CLIs, plus agentd as the entrypoint.
 # Build from the repository root:  docker build -t pim-workspace workspace-agentd
+# The last stage picks the flavor: `compose` (default) for the sandbox manager, `cloudflare` (build arg FLAVOR, set by
+# wrangler.jsonc) for Cloudflare Containers.
 
 # Mistral Vibe's CLI, unmodified, for coding threads whose harness is `mistral-vibe` (docs/coding-vibe.md).
 # Pinned: bump it on purpose, after checking `vibe --help`, its streaming output and export.json against
 # src/coding/harness/vibe.ts. It needs Python 3.12 or later, which bookworm doesn't have, so uv (pinned too)
 # installs it with a Python of its own, both under /opt/vibe, in a stage of its own: the image keeps
 # /opt/vibe and not uv.
+ARG FLAVOR=compose
 ARG UV_VERSION=0.12.9
 # mise, which provisions the toolchains a repository pins (src/coding/repo-environment.ts), copied as its static binary
 # from its release image. Pinned: bump it on purpose, after checking that `mise use --global`, `mise install` and
@@ -20,10 +23,10 @@ COPY --from=uv /uv /usr/local/bin/uv
 RUN UV_PYTHON_INSTALL_DIR=/opt/vibe/python UV_TOOL_DIR=/opt/vibe/tools UV_TOOL_BIN_DIR=/opt/vibe/bin \
 	uv tool install --no-cache --compile-bytecode --managed-python --python 3.12 "mistral-vibe==${VIBE_VERSION}"
 
-FROM node:22-bookworm-slim
+FROM node:22-bookworm-slim AS compose
 
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends git ripgrep build-essential ca-certificates tini procps time \
+	&& apt-get install -y --no-install-recommends git ripgrep build-essential ca-certificates curl tini procps time \
 	&& rm -rf /var/lib/apt/lists/*
 
 # pnpm, pinned to the repository's `packageManager` field, so large pnpm repositories build without corepack:
@@ -97,3 +100,19 @@ ENV AGENTD_ROOT=/workspace AGENTD_PORT=8787
 
 # tini reaps the orphans that exec leaves behind. AGENTD_TOKEN must be provided at run time.
 ENTRYPOINT ["tini", "--", "node", "/opt/agentd/server.mjs"]
+
+# Cloudflare Containers: the same image, with the container CA trusted and agentd started as the workspace user
+# by workspace-agentd/cloudflare-entrypoint.sh.
+FROM compose AS cloudflare
+USER root
+COPY cloudflare-entrypoint.sh /usr/local/bin/cloudflare-entrypoint
+RUN apt-get update && apt-get install -y --no-install-recommends util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod 755 /usr/local/bin/cloudflare-entrypoint
+# /workspace must be on the snapshot's root filesystem, not a separate volume.
+# Do not declare a VOLUME or mount it separately.
+ENV NODE_EXTRA_CA_CERTS=/etc/cloudflare/certs/cloudflare-containers-ca.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["tini", "--", "/usr/local/bin/cloudflare-entrypoint"]
+
+FROM ${FLAVOR} AS final

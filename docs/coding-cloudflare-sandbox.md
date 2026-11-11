@@ -14,77 +14,22 @@ including reconnect by exec id, and explicitly kills an exec on cancellation.
 The old SDK adapter remains in `cloudflare-sandbox.ts` for its existing callers
 and tests, but is no longer selected by production compute configuration.
 
-## Deploy safety: disabled in the shared config
+## Deploying
 
-**There is deliberately no `containers` entry, no container bindings and no v8
-migration in `wrangler.jsonc`.** Exporting classes does not provision containers.
-The ordinary production build has no new Docker requirement.
+`wrangler.jsonc` has the `containers` entry, the `WorkspaceContainer` and `WorkspaceCatalog`
+bindings and their migration, so a fork deploys to any account with no edits and no manual
+image step. The image is built from `workspace-agentd/Dockerfile` (stage `cloudflare`, chosen
+by the `FLAVOR` build variable) by `wrangler deploy`, which pushes it to the deploying
+account's own Cloudflare registry. Workers Builds does this on every push to `main`. The
+sandbox manager builds the same Dockerfile with its default stage, `compose`.
 
-Pim production deploys use Cloudflare Git integration (Workers Builds). The
-repository's `.github/workflows/ci.yml` only installs dependencies and runs checks;
-it does not build or publish images or deploy the Worker. `package.json` builds
-the web app with `pnpm build` and deploys with `wrangler deploy`. Wrangler's own
-`build.command` also builds only `web/`. `docs/instance.md` describes Workers
-Builds previews using `wrangler preview`; those must remain separate from
-production resources. Nothing checked into this repository proves Docker is
-available in Workers Builds. A Dockerfile `image` entry would make production
-deploys depend on it, so none is installed here.
-
-An operator must enable Containers in a separate, reviewed deployment configuration
-and keep the normal Git build on the shared configuration until the new deployment
-path has been verified. Do not deploy `wrangler.preview.jsonc`.
-
-1. On a Docker-capable machine, from the repository root, build the shared image
-   and Cloudflare variant:
-
-   ```sh
-   docker build --platform linux/amd64 -t pim-workspace:local workspace-agentd
-   docker build --platform linux/amd64 -t pim-workspace-cloudflare:local -f workspace-agentd/Dockerfile.cloudflare workspace-agentd
-   ```
-
-2. In a private deployment copy of the production config, add these entries to
-   `durable_objects.bindings` and append the migration after v7:
-
-   ```json
-   { "name": "WorkspaceContainer", "class_name": "WorkspaceContainer" }
-   { "name": "WorkspaceCatalog", "class_name": "WorkspaceCatalog" }
-   { "tag": "v8", "new_sqlite_classes": ["WorkspaceContainer", "WorkspaceCatalog"] }
-   ```
-
-3. In that copy, use this container entry only on the Docker-capable release
-   runner (the paths assume the config is at the repository root):
-
-   ```json
-   "containers": [{
-     "name": "coding-workspaces",
-     "class_name": "WorkspaceContainer",
-     "scheduling_policy": "durable_object",
-     "images": {
-       "base": {
-         "dockerfile": "./workspace-agentd/Dockerfile.cloudflare",
-         "build_context": "./workspace-agentd"
-       }
-     }
-   }]
-   ```
-
-   Keep Workers Builds on the unchanged shared config. To use it for container
-   releases later, publish the image separately using
-   [Cloudflare image management](https://developers.cloudflare.com/containers/guides/image-management/),
-   replace the whole `base` object with `{ "image": "<published-registry-digest>" }`,
-   and prove in a staging build without Docker that Wrangler resolves it without
-   building or pulling through Docker. A registry reference alone is not treated
-   here as proof that every Wrangler release path is Docker-free.
-4. Run `pnpm exec wrangler types --config wrangler.containers.jsonc` and
-   `pnpm typecheck`, then `pnpm exec wrangler deploy --config wrangler.containers.jsonc`
-   from the release runner (using that filename for the private config). Do not repeat production bindings
-   in preview configuration. Add Cloudflare Containers in Settings → Compute and
-   check its health. Start a disposable thread, write a file, suspend and resume,
-   and verify files, egress denial, token replacement and usage accounting before
-   enabling it for other people. No live deployment was performed for S1a.
-
-The private deployment config and image registry identity belong outside this
-public repository. Do not add account IDs, deployment hostnames or credentials.
+Deploys run on Workers Builds and need no setup. To deploy from a machine, it needs Docker
+(`wrangler deploy` builds the image) and a linux/amd64 build. Each account's Durable Object
+namespaces are capped at 500 and every Workers Builds preview of a branch takes about 8, so
+sweep stale previews now and then (`scripts/sweep-preview-aliases.sh --apply`). Add Cloudflare
+Containers in Settings → Compute and check its health. Start a disposable thread, write a
+file, suspend and resume, and verify files, egress denial, token replacement and usage
+accounting before turning it on for other people.
 
 ## Lifecycle and limits
 

@@ -10,7 +10,7 @@
     "dev": "wrangler dev --var PIM_PUBLIC_URL:http://localhost:8787",
     "dev:web": "pnpm --filter pim-web dev",
     "build": "pnpm --filter pim-web build",
-    "deploy": "node scripts/deploy.mjs",
+    "deploy": "wrangler deploy",
     "preview": "wrangler dev --local --config wrangler.preview.jsonc --persist-to .wrangler/state-preview",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit && pnpm --filter pim-web typecheck",

@@ -51,15 +51,15 @@
     { "tag": "v7", "new_sqlite_classes": ["HostOps"] },
     { "tag": "v8", "new_sqlite_classes": ["WorkspaceContainer", "WorkspaceCatalog"] }
   ],
-  // Coding workspaces' image: workspace-agentd/Dockerfile.cloudflare, built for linux/amd64 and pushed to this
-  // account's Cloudflare registry, pinned by digest so Workers Builds needs no Docker. To update it: rebuild,
-  // push, and replace the digest (docs/coding-cloudflare-sandbox.md).
+  // Coding workspaces on Cloudflare Containers: `wrangler deploy` builds this image with Docker and pushes it to the
+  // deploying account's registry, so a fork needs no edits (docs/coding-cloudflare-sandbox.md). FLAVOR picks the
+  // Cloudflare stage of the one Dockerfile the sandbox manager also uses.
   "containers": [
     {
       "name": "coding-workspaces",
       "class_name": "WorkspaceContainer",
       "scheduling_policy": "durable_object",
-      "images": { "base": { "image": "registry.cloudflare.com/00000000000000000000000000000000/coding-workspace@sha256:b267405d1aebf528ebb8af060bc79913b18cdb498a3c07ddf2f6d68eb1c56024" } }
+      "images": { "base": { "dockerfile": "./workspace-agentd/Dockerfile", "build_context": "./workspace-agentd", "build_vars": { "FLAVOR": "cloudflare" } } }
     }
   ],
   // MCP clients' sign-ins to people's spaces: registered clients, grants and hashed tokens

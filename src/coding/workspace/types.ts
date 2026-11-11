@@ -33,6 +33,13 @@ export type WorkspaceSpec = {
  * the secret stays outside the sandbox: a backend with `capabilities.egressInjection` applies the rules itself, and
  * the caller then puts no such secret in the workspace's environment, files or commands. A host with a rule is
  * reachable whether or not `allow` lists it (`egressPolicy` in ./egress.ts normalizes both).
+ *
+ * A backend that enforces this must match what the request really reaches, not what it claims. The host is the
+ * connection's target (the CONNECT or SNI name, or the URL's host after userinfo), never the Host header or userinfo,
+ * and a name that differs from a rule's in any way, a trailing dot included, matches nothing. A rule's path prefix is
+ * compared with the request path normalized as `normalizePath` does (percent-decoded, dot segments resolved) and
+ * matches whole segments: `/api/git` covers `/api/git/x`, not `/api/gitx`. A path that can't be normalized gets no
+ * injection.
  */
 export type EgressPolicy = { allow: string[]; inject?: EgressInjection[] };
 

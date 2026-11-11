@@ -24,11 +24,45 @@ export function egressPolicy(policy: EgressPolicy): { allow: string[]; inject: E
 	return { allow: [...new Set([...policy.allow.map(lower), ...injected].filter(Boolean))], inject: [...rules.values()] };
 }
 
-/** The headers a policy adds to a request to `host` and `path`, or none. */
+/**
+ * The path a request means, as a server would resolve it: percent-encoding decoded per segment, `.` and `..`
+ * resolved, empty segments dropped. Null (matches nothing) for a path that can't be read safely: bad
+ * percent-encoding, or an encoded slash or backslash, which servers disagree about.
+ */
+export function normalizePath(path: string): string | null {
+	const out: string[] = [];
+	for (const raw of path.split(/[?#]/)[0]!.split("/")) {
+		let segment: string;
+		try {
+			segment = decodeURIComponent(raw);
+		} catch {
+			return null;
+		}
+		if (segment.includes("/") || segment.includes("\\")) return null;
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") out.pop();
+		else out.push(segment);
+	}
+	return `/${out.join("/")}`;
+}
+
+/** Whether a normalized path is the prefix or below it: `/api/git` covers `/api/git/x` but not `/api/gitx`. */
+const underPrefix = (path: string, prefix: string) => prefix === "/" || path === prefix || path.startsWith(`${prefix}/`);
+
+/**
+ * The headers a policy adds to a request to `host` and `path`, or none. The path is normalized (`normalizePath`) and
+ * a rule's prefix matches whole segments only. The host is compared as given, lowercased and nothing else, so a
+ * name with a trailing dot or userinfo matches no rule: it fails closed.
+ */
 export function injectedHeaders(policy: EgressPolicy, host: string, path = "/"): Record<string, string> {
 	const name = lower(host);
+	const resolved = normalizePath(path);
 	let out: Record<string, string> = {};
-	for (const rule of egressPolicy(policy).inject) if (covers(rule.host, name) && path.startsWith(rule.pathPrefix ?? "")) out = { ...out, ...rule.headers };
+	if (resolved === null) return out;
+	for (const rule of egressPolicy(policy).inject) {
+		const prefix = rule.pathPrefix === undefined ? "/" : normalizePath(rule.pathPrefix);
+		if (covers(rule.host, name) && prefix !== null && underPrefix(resolved, prefix)) out = { ...out, ...rule.headers };
+	}
 	return out;
 }
 

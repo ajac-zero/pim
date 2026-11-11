@@ -379,13 +379,16 @@ class FakeWorkspace implements Workspace {
 				return 0;
 			}
 			case "curl": {
-				const url = new URL(args[args.length - 1] ?? "");
+				// Strict, as a backend must be: the target is the URL's host (userinfo and a Host header are not it), and the path is the one written, before the URL parser tidies it.
+				const target = args[args.length - 1] ?? "";
+				const url = new URL(target);
 				const host = url.hostname;
+				const rawPath = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*([^?#]*)/i.exec(target)?.[1] || "/";
 				if (!egressAllows(this.egress, host)) {
 					yield err(`curl: could not connect to ${host}\n`);
 					return 7;
 				}
-				this.requests.push({ sessionId: this.ref.sessionId, host, path: url.pathname, injected: this.injects ? injectedHeaders(this.egress, host, url.pathname) : {} });
+				this.requests.push({ sessionId: this.ref.sessionId, host, path: rawPath, injected: this.injects ? injectedHeaders(this.egress, host, rawPath) : {} });
 				yield out("ok\n");
 				return 0;
 			}

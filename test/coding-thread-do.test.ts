@@ -22,7 +22,7 @@ import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { GO_REPO, installed, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
-import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
+import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingGitHub, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
 // `coding-faux` model, and asks a scheduler of its own space for a slot; the schedulers tell threads what happens to them
@@ -687,23 +687,23 @@ describe("a coding thread", () => {
 	});
 });
 
+/** A fake provider with a one-minute session cap, driven by the thread's clock, which starts now. */
+function capped(options: ConstructorParameters<typeof FakeWorkspaceProvider>[0] = {}) {
+	const t0 = Date.now();
+	codingThreadClock.now = t0;
+	const provider = new FakeWorkspaceProvider({ sessionMaxMin: 1, suspendResume: true, keepAlive: true, egressInjection: true, now: () => codingThreadClock.now ?? Date.now(), ...options });
+	provider.register("git", fakeGit);
+	codingBackends.registry = workspaceRegistry([provider]);
+	return { provider, t0 };
+}
+
 describe("a coding thread on a provider with sessions, keepalives and egress injection", () => {
 	const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
-
-	/** A fake provider with a one-minute session cap, driven by the thread's clock, which starts now. */
-	function capped(options: ConstructorParameters<typeof FakeWorkspaceProvider>[0] = {}) {
-		const t0 = Date.now();
-		codingThreadClock.now = t0;
-		const provider = new FakeWorkspaceProvider({ sessionMaxMin: 1, suspendResume: true, keepAlive: true, egressInjection: true, now: () => codingThreadClock.now ?? Date.now(), ...options });
-		provider.register("git", fakeGit);
-		codingBackends.registry = workspaceRegistry([provider]);
-		return { provider, t0 };
-	}
 
 	/** A file of the thread's repository in its workspace on `provider`. */
 	const fileOn = async (provider: FakeWorkspaceProvider, id: string, path: string) => new TextDecoder().decode(await (await provider.get((await provider.list({ sessionId: id }))[0]!.ref))!.readFile(`${REPO_DIR}/${path}`));
 
-	const running = (stub: Stub, tools: number) => vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(tools));
+	const running = (stub: Stub, tools: number) => vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(tools), { timeout: 15_000, interval: 50 });
 
 	it("pings a provider that needs keepalives while a turn runs, at its interval, and wakes the heartbeat in time", async () => {
 		const { provider, t0 } = capped({ sessionMaxMin: undefined });
@@ -817,7 +817,7 @@ describe("a coding thread on a provider with sessions, keepalives and egress inj
 		codingFaux.setResponses([fauxAssistantMessage("Cloned.")]);
 		const injected = await startThread();
 		await turns(injected.id, 1);
-		const policy = provider.egressOf(injected.id)!;
+		let policy = provider.egressOf(injected.id)!;
 		expect(policy.inject).toEqual([{ host: "pim.test", pathPrefix: "/api/coding/git", headers: { authorization: expect.stringMatching(/^Bearer .{20,}$/) } }]);
 		expect(policy.allow).toEqual(expect.arrayContaining(["pim.test", "registry.npmjs.org"]));
 		const clone = fakeClones.findLast((each) => each.url === BROKER_URL && each.env.GIT_CONFIG_COUNT === undefined)!;
@@ -825,6 +825,17 @@ describe("a coding thread on a provider with sessions, keepalives and egress inj
 		const token = policy.inject![0]!.headers.authorization!.replace("Bearer ", "");
 		expect(JSON.stringify(fakeClones)).not.toContain(token);
 		expect(await everything(injected.stub)).not.toContain(token);
+		// The model gateway's token goes to the proxy too, next to the git rule, and the workspace is given a placeholder to send.
+		const gateway = await inside(injected.stub, (thread) => thread.modelGatewayEnv("claude-code"));
+		policy = provider.egressOf(injected.id)!;
+		expect(policy.inject).toEqual([
+			{ host: "pim.test", pathPrefix: "/api/coding/git", headers: { authorization: `Bearer ${token}` } },
+			{ host: "pim.test", pathPrefix: "/api/coding/gateway", headers: { "x-api-key": expect.stringMatching(/.{20,}/) } },
+		]);
+		const gatewayToken = policy.inject![1]!.headers["x-api-key"]!;
+		expect(gateway.env.ANTHROPIC_API_KEY).toBe("pim-injected-by-egress-proxy");
+		expect(JSON.stringify(gateway.env)).not.toContain(gatewayToken);
+		expect(await everything(injected.stub)).not.toContain(gatewayToken);
 		// The same thread's environment held none, on a provider that can't inject.
 		codingBackends.registry = null;
 		codingFaux.setResponses([fauxAssistantMessage("Cloned.")]);
@@ -832,6 +843,105 @@ describe("a coding thread on a provider with sessions, keepalives and egress inj
 		await turns(plain.id, 1);
 		expect(codingWorkspaces.egressOf(plain.id)?.inject).toEqual([]);
 		expect(fakeClones.findLast((each) => each.url === BROKER_URL)!.env.GIT_CONFIG_VALUE_0).toMatch(/^Authorization: Bearer /);
+	});
+
+	it("keeps the broker token out of the workspace when it fetches for a merge, on a provider that injects", async () => {
+		const { provider } = capped({ sessionMaxMin: undefined });
+		const fetches: Record<string, string>[] = [];
+		provider.register("git", async (context) => {
+			if (context.argv.includes("fetch") && context.argv.includes("origin")) fetches.push(context.env);
+			return fakeGit(context);
+		});
+		codingFaux.setResponses([toolUse("write", { path: "hello.txt", content: "Hello!\n" }), fauxAssistantMessage("Added.")]);
+		const { id, stub } = await startThread();
+		await turns(id, 1);
+		codingGitHub.app = { installationToken: async () => ({ token: "ghs_test", expiresAt: Date.now() + 3_600_000 }) } as never;
+		codingGitHub.fetch = async (input: RequestInfo | URL) => (String(input) === "https://api.github.com/repos/acme/demo" ? Response.json({ default_branch: "main" }) : new Response("no", { status: 404 }));
+		try {
+			const checkpoint = (await stub.status()).checkpoint!.sha;
+			// What the merge does after its fetch doesn't matter here.
+			await inside(stub, (thread) => thread.merge({ checkpoint })).catch(() => undefined);
+		} finally {
+			codingGitHub.app = null;
+			codingGitHub.fetch = null;
+		}
+		const token = provider.egressOf(id)!.inject![0]!.headers.authorization!.replace("Bearer ", "");
+		// The merge's own fetch: the last one, with no header in its environment.
+		expect(fetches.length).toBeGreaterThan(0);
+		for (const fetchEnv of fetches) expect(Object.keys(fetchEnv).filter((name) => name.startsWith("GIT_CONFIG"))).toEqual([]);
+		expect(JSON.stringify(fetches)).not.toContain(token);
+	});
+
+	it("doesn't leave a workspace behind when the thread is archived while its session is being renewed", async () => {
+		const { provider, t0 } = capped();
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		const resume = provider.resumeOrCreate.bind(provider);
+		provider.resumeOrCreate = async (ref, spec) => {
+			await gate;
+			return resume(ref, spec);
+		};
+		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" }), toolUse("bash", { command: "sleep 31" })]);
+		const { id, stub } = await startThread();
+		await running(stub, 1);
+		codingThreadClock.now = t0 + 50_000;
+		await heartbeat(stub);
+		// The old workspace is suspended and the renewal waits for the provider.
+		await vi.waitFor(async () => expect((await provider.list({ sessionId: id }))[0]?.state).toBe("stopped"), { timeout: 15_000 });
+		// Its command was stopped for the move, and the model asked for another.
+		await vi.waitFor(() => expect(codingFaux.getPendingResponseCount()).toBe(0), { timeout: 15_000 });
+		await stub.archive();
+		expect(await provider.list({ sessionId: id })).toEqual([]);
+		release();
+		// The renewal finishes after the archive: the workspace it made is destroyed, not kept.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(await provider.list({ sessionId: id })).toEqual([]);
+		expect(await stub.status()).toMatchObject({ state: "archived", slot: "none", session: { state: "active" } });
+	});
+
+	it("doesn't restart a turn the person stopped while its session was being renewed", async () => {
+		const { provider, t0 } = capped();
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		provider.suspend = async () => {
+			await gate;
+			throw new Error("The provider is down");
+		};
+		codingFaux.setResponses([toolUse("bash", { command: "sleep 30" }), toolUse("bash", { command: "sleep 31" })]);
+		const { id, stub } = await startThread();
+		await running(stub, 1);
+		codingThreadClock.now = t0 + 50_000;
+		await heartbeat(stub);
+		// Its command was stopped for the move, and the model asked for another.
+		await vi.waitFor(() => expect(codingFaux.getPendingResponseCount()).toBe(0), { timeout: 15_000 });
+		await stub.abort();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "cancelled" });
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(await turns(id, 1)).toHaveLength(1);
+		expect(await stub.status()).toMatchObject({ state: "idle", currentOperation: null, inbox: 0, session: { state: "active", continuations: 0 } });
+		expect(await sql(stub, "SELECT kind FROM coding_event WHERE kind = 'session.turn_restarted'")).toEqual([]);
+	});
+
+	it("fails a thread whose turn is restarted for its session again and again without committing anything", async () => {
+		const { provider, t0 } = capped();
+		provider.suspend = async () => {
+			throw new Error("The provider is down");
+		};
+		// Each move also stops the command running, and the model may ask for another before the turn is: more answers than turns.
+		codingFaux.setResponses(Array.from({ length: 12 }, (_, n) => toolUse("bash", { command: `sleep ${30 + n}` })));
+		const { id, stub } = await startThread();
+		for (let restart = 1; restart <= 4; restart++) {
+			// The turn is under way in a session that began at the last restart.
+			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ currentOperation: expect.any(String), session: { startedAt: t0 + (restart - 1) * 50_000 } }), { timeout: 15_000, interval: 50 });
+			codingThreadClock.now = t0 + restart * 50_000;
+			await heartbeat(stub);
+		}
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "error", reason: "session_restarts_exhausted", state: "failed", detail: expect.stringContaining("4 times in a row") });
+		expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "session_restarts_exhausted", session: { state: "active", unproductiveRestarts: 4 } });
+		codingFaux.setResponses([]);
 	});
 });
 
@@ -1772,6 +1882,41 @@ describe("a Claude Code thread", () => {
 		expect(runs).toHaveLength(2);
 		expect(runs[1]!.argv[runs[1]!.argv.indexOf("--resume") + 1]).toBe(CLAUDE_SESSION);
 		expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "stalled" });
+	});
+
+	it("ends the CLI of a turn whose session is about to end, runs it again resuming its session in the new workspace, and doesn't if the person stopped it", async () => {
+		// A provider with a one-minute session cap, whose workspaces run `claude` and `pkill` as the default ones do.
+		const { provider, t0 } = capped();
+		provider.register("claude", claudeCommand);
+		provider.register("pkill", pkillCommand);
+		const sessions: number[] = [];
+		claude = async ({ killed, workspace }) => {
+			sessions.push((workspace as unknown as { startedAt: number }).startedAt);
+			await until("-INT", killed);
+			return { stdout: `${claudeLines("turn")[0]}\n`, code: 130 };
+		};
+		const heartbeat = (stub: Stub) => inside(stub, (thread) => thread.onJob({ job: { fn: "advance" } } as Parameters<CodingThreadDO["onJob"]>[0]));
+		const { id, stub } = await startClaude();
+		await running(1);
+		await vi.waitFor(async () => expect(await sql(stub, "SELECT record FROM coding_harness_run")).toHaveLength(1));
+		expect((await stub.status()).session).toMatchObject({ startedAt: t0, continuations: 0 });
+		codingThreadClock.now = t0 + 50_000;
+		await heartbeat(stub);
+		// The CLI got its interrupt, and ran again in a session that began after the move, resuming its own.
+		await running(2);
+		expect(signals.map((each) => each[0])).toEqual(["-INT"]);
+		expect(runs[1]!.argv[runs[1]!.argv.indexOf("--resume") + 1]).toBe(CLAUDE_SESSION);
+		expect(runs[1]!.argv).toContain("-p");
+		expect(sessions).toEqual([t0, t0 + 50_000]);
+		await vi.waitFor(async () => expect((await stub.status()).session).toMatchObject({ state: "active", continuations: 1, startedAt: t0 + 50_000, last: { mode: "turn_restarted" } }));
+		expect(await stub.status()).toMatchObject({ state: "running", consecutiveInterrupts: 0 });
+		// The person stops the second run: nothing runs it a third time.
+		await stub.abort();
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "cancelled" });
+		await new Promise((resolve) => setTimeout(resolve, 600));
+		expect(runs).toHaveLength(2);
+		expect(await stub.status()).toMatchObject({ state: "idle", currentOperation: null, inbox: 0 });
 	});
 
 	it("goes on after a stall when the continuation finishes", async () => {

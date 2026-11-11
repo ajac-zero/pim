@@ -213,6 +213,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#cycling: Promise<void> | null = null;
 	/** The turn that is being restarted from its transcript because its session ended, so its end is auto-resumed. */
 	#restarting: string | null = null;
+	/** The turn the person stopped (abort, cancel, archive, an interrupting steer): a restart for a new session never resumes it. */
+	#userStop: string | null = null;
 	/** When the provider was last told the workspace is in use, in this isolate. */
 	#keptAliveAt = 0;
 	/** The credentials the workspace's egress proxy injects, by what they are for; kept in memory only, since each `setEgress` replaces the whole policy. */
@@ -543,6 +545,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			void this.#write("session.continued", { mode, session: this.store.required().session.continuations });
 		} catch (error) {
 			await this.#restartTurn(operation, error);
+		} finally {
+			this.#settleSession();
 		}
 	}
 
@@ -557,6 +561,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (provider.capabilities.suspendResume) await provider.suspend(ref);
 			else await provider.destroy(ref, { keepVolume: true });
 			const back = await provider.resumeOrCreate(ref, this.#spec(thread, provider));
+			// The thread was archived or gave its slot up meanwhile, and dropped the workspace it had: this one would be orphaned.
+			const now = this.store.required();
+			if (now.slot !== "held" || now.state === "archived") {
+				await provider.destroy(back.ref, { keepVolume: now.state !== "archived" });
+				throw new Error("The coding thread gave its workspace slot up");
+			}
 			this.store.update({ workspaceRef: back.ref });
 			this.#injections.clear();
 			this.store.update({ session: { ...this.store.required().session, startedAt: this.now() } });
@@ -574,19 +584,31 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
+	/** The session is no longer being moved. */
+	#settleSession(): void {
+		const session = this.store.required().session;
+		if (session.state === "continuing") this.store.update({ session: { ...session, state: "active" } });
+	}
+
 	/**
 	 * The turn couldn't go on in a new session: it is stopped, which commits a checkpoint, and started again from its
 	 * transcript (`#settleTurn` queues it), in a workspace made fresh if need be.
 	 */
 	async #restartTurn(operation: string, cause: unknown): Promise<void> {
 		const thread = this.store.required();
+		// The person stopped the turn, or it ended, while the move was under way: nothing is left to restart.
+		if (thread.currentOperation !== operation || this.#userStop === operation) return this.#settleSession();
 		console.warn(JSON.stringify({ event: "pim.coding.session_restart", thread: thread.threadId, operation, cause: errorText(cause).slice(0, 300) }));
 		this.#restarting = operation;
 		try {
-			await this.#stopTurn();
+			await this.#stopTurn("session");
+		} catch (error) {
+			this.#settleSession();
+			throw error;
 		} finally {
 			this.#restarting = null;
 		}
+		if (this.#userStop === operation || this.store.required().state === "failed") return this.#settleSession();
 		const provider = this.workspaceProviders().get(thread.providerId);
 		let mode: "resumed" | "created" | null = null;
 		if (this.store.required().workspaceRef) mode = await this.#cycleWorkspace(this.store.required(), provider).catch(async (error) => {
@@ -1061,8 +1083,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			let rebased = false;
 			for (let attempt = 0; ; attempt++) {
 				// Fetching goes through Pim's git broker, so it carries a broker token as a header for this command alone, as the clone does.
-				const { token } = await this.cloneSource(thread);
-				const auth = { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+				const { token, auth } = await this.#brokerAccess(thread);
 				await git(workspace, ["fetch", "origin", `+refs/heads/${defaultBranch}:refs/pim/merge-base`], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
 				const base = (await git(workspace, ["rev-parse", "refs/pim/merge-base"])).trim();
 				const common = (await git(workspace, ["merge-base", base, head]).catch(() => "")).trim();
@@ -2019,7 +2040,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	async #settleTurn(operation: string, result: TurnResult): Promise<void> {
 		if (this.store.thread()?.currentOperation !== operation) return;
-		const checkpoint = await this.#checkpoint(operation).catch((error) => {
+		// While a new session is being brought up there is no workspace to commit in; the move committed what there was before it began.
+		const checkpoint = this.#cycling ? null : await this.#checkpoint(operation).catch((error) => {
 			console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) }));
 			return null;
 		});
@@ -2033,11 +2055,19 @@ export class CodingThreadDO extends DurableObject<Env> {
 		
 		// Handle auto-resume for interrupted turns (restart), and for turns whose workspace went down (made again from its volume by now)
 		const lost = result.status !== "done" && result.reason === "workspace_lost";
-		// A turn stopped because its session ended is started again however often that happened: each session made progress.
-		const expired = this.#restarting === operation;
+		// A turn stopped because its session ended is started again, unless the person stopped it too. Restarts that commit nothing new count: after MAX_SESSION_RESTARTS of them in a row the thread fails rather than go round again.
+		const expired = this.#restarting === operation && this.#userStop !== operation;
+		let loop = false;
+		if (expired) {
+			const sha = this.store.latestCheckpoint()?.sha ?? null;
+			const prior = thread.session;
+			const unproductive = sha !== null && sha !== prior.restartCheckpoint ? 0 : prior.unproductiveRestarts + 1;
+			loop = unproductive > MAX_SESSION_RESTARTS;
+			this.store.update({ session: { ...prior, restartCheckpoint: sha, unproductiveRestarts: unproductive } });
+		}
 		const isInterrupted = result.reason === "interrupted" || lost || expired;
 		const maxInterrupts = MAX_RESUMES;
-		const shouldAutoResume = isInterrupted && (expired || thread.consecutiveInterrupts < maxInterrupts) && thread.state !== "archived";
+		const shouldAutoResume = isInterrupted && (expired ? !loop : thread.consecutiveInterrupts < maxInterrupts) && thread.state !== "archived";
 		
 		if (shouldAutoResume) {
 			// Increment the counter and enqueue a continuation turn
@@ -2080,15 +2110,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// Reset counter on normal completion
 		if (result.status === "done" && !budget && !login) {
 			this.ctx.storage.transactionSync(() => {
-				this.store.update({ consecutiveInterrupts: 0 });
+				this.store.update({ consecutiveInterrupts: 0, session: { ...this.store.required().session, unproductiveRestarts: 0 } });
 			});
 		}
 		
 		// For interrupted turns that exceed the limit, mark as failed with the interruption detail
-		const outcome: TurnOutcome = budget ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : login ? "needs_approval" : isInterrupted && thread.consecutiveInterrupts >= maxInterrupts ? "error" : "error";
-		const exhausted = isInterrupted && thread.consecutiveInterrupts >= maxInterrupts;
+		const outcome: TurnOutcome = budget || loop ? "error" : result.status === "done" ? "completed" : result.reason === "aborted" ? "cancelled" : login ? "needs_approval" : isInterrupted && thread.consecutiveInterrupts >= maxInterrupts ? "error" : "error";
+		const exhausted = !expired && isInterrupted && thread.consecutiveInterrupts >= maxInterrupts;
 		const reason = budget 
 			? "budget"
+			: loop
+			? "session_restarts_exhausted"
 			: outcome === "error" || login 
 				? (exhausted && !lost
 					? "interrupted_too_many_times"
@@ -2096,7 +2128,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				: null;
 		const state: CodingThreadState = outcome === "error" ? "failed" : login ? "waiting_input" : "idle";
 		const said = await this.#lastSaid().catch(() => null);
-		const detail = outcome === "completed" ? null : exhausted && lost ? lostDetail(result.detail) : (result.detail ?? thread.stateDetail)?.slice(0, DETAIL_MAX);
+		const detail = loop ? `The sandbox's session reached its time limit ${MAX_SESSION_RESTARTS + 1} times in a row without the thread committing anything new, so it stopped; continue it, or ask for less per turn` : outcome === "completed" ? null : exhausted && lost ? lostDetail(result.detail) : (result.detail ?? thread.stateDetail)?.slice(0, DETAIL_MAX);
 		const stop = budget ? { budgetUsd: thread.budgetUsd ?? 0, spentUsd: thread.spentUsd } : null;
 		const event: TurnEndedEvent = {
 			type: "thread.turn_ended",
@@ -2115,7 +2147,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			at: this.now(),
 		};
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: outcome === "completed" ? null : exhausted && lost ? (detail ?? null) : (result.detail ?? null) });
+			this.store.update({ currentOperation: null, state, stateReason: reason, stateDetail: loop ? detail : outcome === "completed" ? null : exhausted && lost ? (detail ?? null) : (result.detail ?? null) });
 			this.store.recordEvent(event.type, event);
 			if (stop) this.store.recordEvent("app.budget_stop", stop);
 		});
@@ -2146,9 +2178,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** Stops the turn under way: kills its commands, aborts pi's run and waits for the turn to end. */
-	async #stopTurn(): Promise<void> {
+	async #stopTurn(why: "person" | "session" = "person"): Promise<void> {
 		const thread = this.store.required();
 		const operation = thread.currentOperation;
+		if (why === "person") this.#userStop = operation;
 		if (cliHarness(thread.harness)) {
 			const run = this.#cli;
 			if (run && run.operation === operation) {
@@ -2331,8 +2364,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** The thread's workspace, made and cloned on first use, with its commands killed when the thread is stopped. A new one starts from `restoreFrom`, the person's environment snapshot, when given. */
 	async #workspace(options: { restoreFrom?: EnvironmentSnapshot } = {}): Promise<Workspace> {
-		// A new session is being brought up: the old workspace is on its way out.
-		while (this.#cycling) await this.#cycling;
+		// A new session is being brought up: the old workspace is on its way out. A stop of the thread ends the wait.
+		const stopped = this.#kill.signal;
+		while (this.#cycling) {
+			await Promise.race([
+				this.#cycling,
+				new Promise<never>((_, reject) => {
+					if (stopped.aborted) reject(stopped.reason);
+					else stopped.addEventListener("abort", () => reject(stopped.reason), { once: true });
+				}),
+			]);
+		}
 		this.#opening ??= this.#openWorkspace(options).finally(() => {
 			this.#opening = null;
 		});
@@ -2420,6 +2462,19 @@ export class CodingThreadDO extends DurableObject<Env> {
 		};
 	}
 
+	/**
+	 * What a git command that reaches Pim's git broker needs: the broker's URL and a token for this thread, and the
+	 * environment to run with. Where the provider injects credentials, the token goes to its egress proxy and the
+	 * environment is empty. Otherwise it is an HTTP header for that command alone: git keeps no copy of it in the repository.
+	 */
+	async #brokerAccess(thread: CodingThreadRow): Promise<{ url: string; token: string; auth: Record<string, string> }> {
+		const { url, token } = await this.cloneSource(thread);
+		const placed = placeSecret(this.workspaceProviders().get(thread.providerId), gitBrokerInjection(url, `/api${GIT_BROKER_PATH}`, token), token);
+		if (placed.rule) await this.#inject("git", placed.rule);
+		const auth: Record<string, string> = placed.rule ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+		return { url, token, auth };
+	}
+
 	/** Gives the workspace's egress proxy a credential to add to requests, with the ones it already has. The workspace itself never holds it. */
 	async #inject(purpose: string, rule: EgressInjection): Promise<void> {
 		const thread = this.store.required();
@@ -2449,11 +2504,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		);
 		const base = this.store.required().baseSha;
 		if (cloned && base !== null) return;
-		const { url, token } = await this.cloneSource(thread);
-		// Where the provider injects credentials, the broker token goes to its egress proxy and git sends none. Otherwise it is an HTTP header for these commands alone: git keeps no copy of it in the repository.
-		const placed = placeSecret(this.workspaceProviders().get(thread.providerId), gitBrokerInjection(url, `/api${GIT_BROKER_PATH}`, token), token);
-		if (placed.rule) await this.#inject("git", placed.rule);
-		const auth: Record<string, string> = placed.rule ? {} : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}` };
+		const { url, token, auth } = await this.#brokerAccess(thread);
 		const delays = this.gitRetryDelaysMs();
 		if (!cloned) {
 			await gitWithRetries(workspace, ["clone", "--no-checkout", url, REPO_DIR], { cwd: WORKSPACE_ROOT, timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token }, delays, () => workspace.remove(REPO_DIR).catch(() => undefined));
@@ -3161,6 +3212,8 @@ const AUTO_CONTINUE_PREFIX = "auto-continue:";
 /** The operations of turns a thread goes on with by itself after an interruption, and how many it goes on with in a row. */
 const RESUME_PREFIX = "resume-";
 const MAX_RESUMES = 3;
+/** How many times in a row a turn is restarted for a session that ended, with nothing new committed between, before the thread fails. */
+const MAX_SESSION_RESTARTS = 3;
 
 /** How long a workspace that fails may not answer before it counts as down. */
 const LOST_GRACE_MS = 60_000;

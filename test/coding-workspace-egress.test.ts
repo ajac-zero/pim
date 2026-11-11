@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { egressAllows, egressPolicy, gatewayInjection, gitBrokerInjection, INJECTED_PLACEHOLDER, injectedHeaders, placeSecret } from "../src/coding/workspace/egress";
+import { egressAllows, egressPolicy, gatewayInjection, gitBrokerInjection, INJECTED_PLACEHOLDER, injectedHeaders, normalizePath, placeSecret } from "../src/coding/workspace/egress";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
 
@@ -66,5 +66,73 @@ describe("the fake provider's sessions", () => {
 		expect(new TextDecoder().decode(await workspace.readFile("kept.txt"))).toBe("kept");
 		now += 59_000;
 		expect((await workspace.status()).state).toBe("running");
+	});
+});
+
+describe("matching what a request really reaches", () => {
+	const policy = { allow: [], inject: [gitBrokerInjection(ORIGIN, "/api/coding/git", "git-token")] };
+	const headers = (path: string, host = "pim.example.test") => injectedHeaders(policy, host, path);
+	const GIT = { authorization: "Bearer git-token" };
+
+	it("matches whole path segments of the normalized path", () => {
+		expect(headers("/api/coding/git")).toEqual(GIT);
+		expect(headers("/api/coding/git/")).toEqual(GIT);
+		expect(headers("/api/coding/git/acme/demo.git?service=x")).toEqual(GIT);
+		expect(headers("/api/coding//git/./acme")).toEqual(GIT);
+		expect(headers("/api/coding/gitx")).toEqual({});
+		expect(headers("/api/coding/gitx/acme")).toEqual({});
+		expect(headers("/api/coding")).toEqual({});
+	});
+
+	it("resolves dot segments and percent-encoding before matching, and refuses paths it can't read", () => {
+		expect(headers("/api/coding/git/../other")).toEqual({});
+		expect(headers("/api/coding/git/%2e%2e/other")).toEqual({});
+		expect(headers("/api/coding/git/%2E%2E/gitx")).toEqual({});
+		expect(headers("/x/../api/coding/git/a")).toEqual(GIT);
+		expect(headers("/api/coding/%67it/a")).toEqual(GIT);
+		expect(headers("/api/coding%2fgit/a")).toEqual({});
+		expect(headers("/api/coding/git%5ca")).toEqual({});
+		expect(headers("/api/coding/git/%zz")).toEqual({});
+		expect(normalizePath("/a/%2e%2e/%2e%2e/b")).toBe("/b");
+	});
+
+	it("fails closed for a host that differs in any way", () => {
+		expect(headers("/api/coding/git", "pim.example.test.")).toEqual({});
+		expect(headers("/api/coding/git", "pim.example.test@evil.test")).toEqual({});
+		expect(egressAllows(policy, "pim.example.test.")).toBe(false);
+	});
+});
+
+describe("the fake provider's egress", () => {
+	const spec: WorkspaceSpec = { sessionId: "e", image: "default", repo: { url: "https://example.test/r.git", ref: "main", branch: "work" }, limits: { cpu: 1, memMiB: 64, diskMiB: 8, pids: 8, wallClockMin: null }, egress: { allow: [], inject: [gitBrokerInjection(ORIGIN, "/api/coding/git", "git-token")] }, gitAuth: { mode: "none" } };
+
+	/** curl in a workspace of an injecting provider: its exit code, and what the proxy then held of the request. */
+	async function curl(...args: string[]) {
+		const provider = new FakeWorkspaceProvider({ egressInjection: true });
+		const workspace = (await provider.get(await provider.create(spec)))!;
+		let code: number | null = null;
+		for await (const event of workspace.exec(["curl", ...args], { timeoutMs: 5_000 })) if (event.type === "exit") code = event.code;
+		return { code, request: provider.requests[0] };
+	}
+
+	const GIT = { authorization: "Bearer git-token" };
+
+	it("injects for the target host and the path as written, on whole segments", async () => {
+		expect(await curl(`${ORIGIN}/api/coding/git/acme/demo.git`)).toMatchObject({ code: 0, request: { host: "pim.example.test", injected: GIT } });
+		expect((await curl(`${ORIGIN}/api/coding/gitx/acme`)).request!.injected).toEqual({});
+		expect((await curl(`${ORIGIN}/api/coding/git/../other`)).request!.injected).toEqual({});
+		expect((await curl(`${ORIGIN}/api/coding/git/%2e%2e/other`)).request!.injected).toEqual({});
+		expect((await curl(`${ORIGIN}/api/coding/git%2fa`)).request!.injected).toEqual({});
+	});
+
+	it("takes the host from the target, not a Host header or userinfo", async () => {
+		expect((await curl("-H", "Host: pim.example.test", "https://evil.test/api/coding/git/a")).code).toBe(7);
+		expect((await curl("https://pim.example.test@evil.test/api/coding/git/a")).code).toBe(7);
+		// The right target with another name in its Host header still gets what the target gets.
+		expect(await curl("-H", "Host: evil.test", `${ORIGIN}/api/coding/git/a`)).toMatchObject({ code: 0, request: { host: "pim.example.test", injected: GIT } });
+	});
+
+	it("fails closed for a trailing-dot host", async () => {
+		expect((await curl("https://pim.example.test./api/coding/git/a")).code).toBe(7);
 	});
 });

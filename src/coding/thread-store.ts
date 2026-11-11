@@ -41,11 +41,14 @@ export type CodingSession = {
 	readonly startedAt: number | null;
 	/** How many times the thread moved to a new session. */
 	readonly continuations: number;
+	/** The latest checkpoint when a turn was last restarted for a session that ended, and how many restarts in a row committed nothing new since: too many fail the thread. */
+	readonly restartCheckpoint: string | null;
+	readonly unproductiveRestarts: number;
 	/** The latest move: how the turn went on in the new session, or that it was restarted from its transcript (`turn_restarted`) because it couldn't go on. */
 	readonly last: { readonly at: number; readonly mode: "resumed" | "created" | "turn_restarted"; readonly reason: string } | null;
 };
 
-export const NO_SESSION: CodingSession = { state: "active", startedAt: null, continuations: 0, last: null };
+export const NO_SESSION: CodingSession = { state: "active", startedAt: null, continuations: 0, restartCheckpoint: null, unproductiveRestarts: 0, last: null };
 
 export type CodingThreadRow = {
 	readonly threadId: string;

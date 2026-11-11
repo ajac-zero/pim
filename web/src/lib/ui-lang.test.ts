@@ -235,8 +235,12 @@ describe("the ui language's interpreter", () => {
     });
     // The handler's actions come back as data, in order.
     expect(submitted.actions).toEqual([
-      { name: "reveal", args: [] },
-      { name: "issueNewTurn", args: [expect.stringContaining("| d1 | 5 ✓ |")] },
+      { name: "reveal", args: [], form: "knn" },
+      {
+        name: "issueNewTurn",
+        args: [expect.stringContaining("| d1 | 5 ✓ |")],
+        form: "knn",
+      },
     ]);
     const summary = submitted.actions.find(
       (action) => action.name === "issueNewTurn",
@@ -272,7 +276,9 @@ describe("the ui language's interpreter", () => {
       "q.n": false,
       "q.city": true,
     });
-    expect(submitted.actions).toEqual([{ name: "reveal", args: [] }]);
+    expect(submitted.actions).toEqual([
+      { name: "reveal", args: [], form: "q" },
+    ]);
   });
 
   it("keeps an answer off the page until the form is revealed", () => {
@@ -322,6 +328,26 @@ describe("the ui language's interpreter", () => {
     );
     const result = evaluate(probe, initialState(probe), null);
     expect(result.error).toContain("not the block's to read");
+  });
+
+  it("reveals a form's answers when its button is clicked", () => {
+    const source =
+      '<form id="q"><input name="city" answer="Rome"/><button onClick={[reveal()]}>Show me</button></form>';
+    const program = programOf(source);
+    const before = evaluate(program, initialState(program), null);
+    expect(JSON.stringify(before.tree)).not.toContain("Rome");
+    // The click asks for the reveal, as data; the app runs it.
+    const clicked = evaluate(program, before.state, {
+      type: "click",
+      key: "b0",
+    });
+    expect(clicked.actions).toEqual([{ name: "reveal", args: [], form: "q" }]);
+    const shown = evaluate(program, clicked.state, {
+      type: "reveal",
+      form: "q",
+    });
+    expect(shown.error).toBeNull();
+    expect(JSON.stringify(shown.tree)).toContain("Rome");
   });
 
   it("gives the same answer every time", () => {

@@ -168,7 +168,13 @@ function UiProgramView({ program }: { program: UiProgram }) {
   /** Runs what a handler asked for, as data; one turn sends once. */
   const runActions = (actions: readonly Action[], event: UiEvent) => {
     for (const action of actions) {
-      if (action.name === "reveal") continue;
+      if (action.name === "reveal") {
+        // A reveal shows the answers of the form it belongs to, in place.
+        const form =
+          action.form ?? (event.type === "submit" ? event.form : null);
+        if (form !== null) run({ type: "reveal", form });
+        continue;
+      }
       if (action.name === "copy") {
         void navigator.clipboard
           ?.writeText(stringOf(action.args[0] ?? ""))
@@ -176,8 +182,8 @@ function UiProgramView({ program }: { program: UiProgram }) {
         continue;
       }
       if (action.name !== "issueNewTurn" || reply.send === undefined) continue;
-      const form = event.type === "submit" ? event.form : undefined;
-      if (form === undefined || sending.current) continue;
+      const form = action.form ?? (event.type === "submit" ? event.form : null);
+      if (form === null || sending.current) continue;
       const submitted = viewRef.current.state.submitted[form];
       if (submitted === undefined) continue;
       const spec = program.forms[form];

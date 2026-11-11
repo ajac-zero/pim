@@ -14,8 +14,8 @@ import type { Expr } from "./parse";
 import type { FormSpec, UiState, Value } from "./value";
 import { evalExpr, EvalError, gradeForm, initialUiState, stringOf, Steps, truthy } from "./value";
 
-/** An action to run, with its arguments worked out. */
-export type Action = { name: ActionName; args: Value[] };
+/** An action to run, with its arguments worked out, and the form it belongs to. */
+export type Action = { name: ActionName; args: Value[]; form: string | null };
 
 /** A node to draw: text, or a catalog component with its props and children. */
 export type RenderNode =
@@ -27,7 +27,8 @@ export type RenderNode =
 export type UiEvent =
 	| { type: "change"; key: string; value: string }
 	| { type: "submit"; form: string }
-	| { type: "click"; key: string };
+	| { type: "click"; key: string }
+	| { type: "reveal"; form: string };
 
 /** What one evaluation gave: the tree, the state it ends in, and the actions to run. */
 export type Evaluation = { tree: RenderNode[]; state: UiState; actions: Action[]; error: string | null };
@@ -53,13 +54,17 @@ export function evaluate(program: UiProgram, given: UiState, event: UiEvent | nu
 			if (event.value.length > MAX_TEXT_CHARS) throw new EvalError(`A text value may be at most ${MAX_TEXT_CHARS} characters.`);
 			state.values[event.key] = event.value;
 		}
-		if (event?.type === "submit") {
+		if (event?.type === "submit" || event?.type === "reveal") {
 			const spec = program.forms[event.form];
 			if (spec === undefined) throw new EvalError(`No form is called ${event.form}.`);
-			const values: Record<string, Value> = {};
-			for (const field of spec.fields) values[field.key] = state.values[field.key] ?? "";
-			state.submitted[event.form] = { values, graded: gradeForm(spec, values) };
-			state.revealed[event.form] = true;
+			if (event.type === "reveal") {
+				state.revealed[event.form] = true;
+			} else {
+				const values: Record<string, Value> = {};
+				for (const field of spec.fields) values[field.key] = state.values[field.key] ?? "";
+				state.submitted[event.form] = { values, graded: gradeForm(spec, values) };
+				state.revealed[event.form] = true;
+			}
 		}
 		const renderer = new Renderer(program, state, event, actions, steps);
 		const tree = renderer.all(program.nodes);
@@ -158,7 +163,7 @@ class Renderer {
 			if (key !== undefined) {
 				const formId = this.currentForm ?? key.slice(0, Math.max(0, key.lastIndexOf(".")));
 				const submitted = this.state.submitted[formId];
-				const revealed = submitted !== undefined && this.state.revealed[formId] === true;
+				const revealed = this.state.revealed[formId] === true;
 				if (!revealed) {
 					// Until its form is revealed, an answer is for checking, not for the page.
 					for (const secret of ["answer", "tol", "explain"]) delete props[secret];
@@ -196,7 +201,7 @@ class Renderer {
 				: this.event?.type === "click" && node.key !== undefined && this.event.key === node.key;
 		if (!mine) return;
 		for (const action of handler.a) {
-			this.actions.push({ name: action.name, args: action.args.map((arg) => this.expr(arg)) });
+			this.actions.push({ name: action.name, args: action.args.map((arg) => this.expr(arg)), form: form ?? this.currentForm });
 		}
 	}
 

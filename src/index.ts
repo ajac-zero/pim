@@ -18,3 +18,5 @@ export default {
 		return serve(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;
+
+export { WorkspaceContainer, WorkspaceCatalog, ContainerEgress } from "../cloudflare-container";

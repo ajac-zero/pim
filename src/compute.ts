@@ -1,4 +1,4 @@
-import { CloudflareSandboxProvider, type SandboxLike } from "./coding/workspace/cloudflare";
+import { containerProvider } from "./coding/workspace/cloudflare";
 import { ComposeWorkspaceProvider } from "./coding/workspace/compose";
 import type { WorkspaceProvider } from "./coding/workspace/types";
 import { HttpError } from "./http";
@@ -31,7 +31,7 @@ type Kind = {
 
 /** The kinds Pim can make workspaces with. Daytona, E2B and the others join here as their backends are written. */
 export const COMPUTE_KINDS = {
-	"cloudflare-sandbox": { name: "Cloudflare Sandbox", workspace: "cloudflare", fields: [] },
+	"cloudflare-sandbox": { name: "Cloudflare Containers", workspace: "cloudflare", fields: [] },
 	compose: {
 		name: "Sandbox manager",
 		workspace: "compose",
@@ -149,16 +149,13 @@ export function prepareComputeProvider(input: ComputeProviderInput, existing: Co
 
 /**
  * The workspace backend a provider makes, or null when this Worker can't make
- * it (Cloudflare Sandbox needs the Worker's `Sandbox` binding). Throws with
+ * it (Cloudflare Containers needs both workspace bindings). Throws with
  * why when its settings can't be used.
  */
 export function workspaceProviderOf(provider: ComputeProvider, env: object): WorkspaceProvider | null {
 	switch (provider.kind) {
-		case "cloudflare-sandbox": {
-			const sandbox = (env as { Sandbox?: DurableObjectNamespace }).Sandbox;
-			// TODO(coding): unverified until `@cloudflare/sandbox` is installed; use its `getSandbox(env.Sandbox, id)` here then (docs/coding-cloudflare-sandbox.md, step 4).
-			return sandbox ? new CloudflareSandboxProvider({ sandboxFor: (id) => sandbox.getByName(id) as unknown as SandboxLike }) : null;
-		}
+		case "cloudflare-sandbox":
+			return containerProvider(env);
 		case "compose":
 			return new ComposeWorkspaceProvider({ managerUrl: provider.settings.managerUrl ?? "", token: provider.credentials.token ?? "" });
 	}
@@ -182,7 +179,7 @@ export async function checkCompute(provider: ComputeProvider, env: object): Prom
 	const result = (ok: boolean, message: string): ComputeHealth => ({ ok, message, ms: Date.now() - started });
 	const read = async (): Promise<ComputeHealth> => {
 		const backend = workspaceProviderOf(provider, env);
-		if (!backend) return result(false, "This Worker has no Sandbox binding, so Cloudflare Sandbox can't be used.");
+		if (!backend) return result(false, "This Worker has no WorkspaceContainer and WorkspaceCatalog bindings, so Cloudflare Containers can't be used.");
 		// The manager's `/health` needs no token, so its listing, which does, is what shows the credentials work.
 		await backend.list();
 		const health = provider.kind === "compose" ? await (backend as ComposeWorkspaceProvider).managerHealth() : null;

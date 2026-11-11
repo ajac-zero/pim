@@ -318,9 +318,9 @@ export class ComposeWorkspaceProvider implements WorkspaceProvider {
 	}
 }
 
-class ComposeWorkspace implements Workspace {
+export class ComposeWorkspace implements Workspace {
 	constructor(
-		private provider: ComposeWorkspaceProvider,
+		private provider: Pick<ComposeWorkspaceProvider, "call" | "check">,
 		private id: string,
 	) {}
 
@@ -478,7 +478,7 @@ class ComposeWorkspace implements Workspace {
 		throw new Error("The compose backend cannot snapshot");
 	}
 
-	async restore(): Promise<void> {
+	async restore(_snapshot: SnapshotRef): Promise<void> {
 		throw new Error("The compose backend cannot snapshot");
 	}
 

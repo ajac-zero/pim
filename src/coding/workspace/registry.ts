@@ -1,5 +1,5 @@
 import { COMPUTE_KINDS, type ComputeProvider, workspaceProviderOf } from "../../compute";
-import { CloudflareSandboxProvider, type SandboxLike } from "./cloudflare";
+import { containerProvider } from "./cloudflare";
 import { ComposeWorkspaceProvider } from "./compose";
 import type { WorkspaceProvider } from "./types";
 
@@ -48,7 +48,7 @@ export function workspaceRegistry(providers: readonly WorkspaceProvider[], missi
 	};
 }
 
-let cached: { signature: string; registry: WorkspaceProviderRegistry } | null = null;
+let cached: { env: object; signature: string; registry: WorkspaceProviderRegistry } | null = null;
 
 /**
  * The backends this deployment has, read from its environment when a thread
@@ -56,24 +56,23 @@ let cached: { signature: string; registry: WorkspaceProviderRegistry } | null = 
  *
  * - The Compose sandbox manager, when `PIM_CODING_MANAGER_URL` and the
  *   secret `PIM_CODING_MANAGER_TOKEN` are both set.
- * - Cloudflare Sandbox, when the Worker has a `Sandbox` Durable Object
- *   binding (docs/coding-cloudflare-sandbox.md); it has none today.
+ * - Cloudflare Containers, when the Worker has both workspace Durable Object
+ *   bindings (docs/coding-cloudflare-sandbox.md); it has none today.
  *
  * The providers the admin set up for the deployment (./compute.ts) come
  * first, so the first of them is the default, and replace the one of the
  * same backend the environment sets up; one the admin switched off for
  * coding is left out whichever way it was set up. With no backend at all,
  * every thread fails with `NoWorkspaceBackendError`. Made once per isolate
- * and settings, so a provider's own state, such as Cloudflare's list of
- * workspaces, lasts.
+ * and settings; Cloudflare lifecycle state lives in Durable Objects.
  */
 export function workspaceBackends(env: object, configured: readonly ComputeProvider[] = []): WorkspaceProviderRegistry {
 	const vars = env as Record<string, unknown>;
 	const managerUrl = typeof vars.PIM_CODING_MANAGER_URL === "string" ? vars.PIM_CODING_MANAGER_URL.trim() : "";
 	const managerToken = typeof vars.PIM_CODING_MANAGER_TOKEN === "string" ? vars.PIM_CODING_MANAGER_TOKEN.trim() : "";
-	const sandbox = vars.Sandbox as DurableObjectNamespace | undefined;
-	const signature = JSON.stringify([managerUrl, managerToken, sandbox !== undefined, configured]);
-	if (cached?.signature === signature) return cached.registry;
+	const containers = containerProvider(env);
+	const signature = JSON.stringify([managerUrl, managerToken, containers !== null, configured]);
+	if (cached?.env === env && cached.signature === signature) return cached.registry;
 	const providers: WorkspaceProvider[] = [];
 	let missing = NO_BACKEND_MESSAGE;
 	if (managerUrl && managerToken) {
@@ -86,10 +85,7 @@ export function workspaceBackends(env: object, configured: readonly ComputeProvi
 	} else if (managerUrl || managerToken) {
 		missing = `${managerUrl ? "PIM_CODING_MANAGER_TOKEN" : "PIM_CODING_MANAGER_URL"} isn't set, so coding threads have no workspace backend. Set both to use the sandbox manager.`;
 	}
-	if (sandbox) {
-		// TODO(coding): unverified until `@cloudflare/sandbox` is installed; use its `getSandbox(env.Sandbox, id)` here then (docs/coding-cloudflare-sandbox.md, step 4).
-		providers.push(new CloudflareSandboxProvider({ sandboxFor: (id) => sandbox.getByName(id) as unknown as SandboxLike }));
-	}
+	if (containers) providers.push(containers);
 	const off = new Set(configured.filter((provider) => !provider.codingSandbox).map((provider) => COMPUTE_KINDS[provider.kind].workspace as string));
 	const added: WorkspaceProvider[] = [];
 	for (const provider of configured) {
@@ -104,6 +100,6 @@ export function workspaceBackends(env: object, configured: readonly ComputeProvi
 	}
 	const taken = new Set(added.map((provider) => provider.id));
 	const registry = workspaceRegistry([...added, ...providers.filter((provider) => !taken.has(provider.id) && !off.has(provider.id))], missing);
-	cached = { signature, registry };
+	cached = { env, signature, registry };
 	return registry;
 }

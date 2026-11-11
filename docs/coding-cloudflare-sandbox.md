@@ -1,58 +1,134 @@
-# Coding workspaces on Cloudflare Sandbox
+# Cloudflare Containers workspaces (S1a)
 
-**Status: not applied.** The backend in `src/coding/workspace/cloudflare.ts` is finished and tested against an in-memory stand-in, but nothing in `wrangler.jsonc` enables it. Deploying Pim today needs no Containers billing and does not create any sandbox. Everything below is what an owner does to switch it on.
+The `cloudflare` workspace backend now uses Cloudflare Containers directly, with
+`workspace-agentd`, rather than the unwired Sandbox SDK adapter. The stored compute
+kind stays `cloudflare-sandbox` so existing admin settings survive; its display name
+is Cloudflare Containers. Both `WorkspaceContainer` and `WorkspaceCatalog` bindings
+are required for A0's `usable` summary. Adding the admin provider alone cannot
+turn on coding tools. Switching it off removes it from the workspace registry.
 
-## What it is
+`src/coding/workspace/cloudflare.ts` is the client. `cloudflare-container.ts` holds
+the lifecycle controller, its Durable Object, a durable listing and the egress
+entrypoint. The client reuses Compose's agentd file and streaming exec protocol,
+including reconnect by exec id, and explicitly kills an exec on cancellation.
+The old SDK adapter remains in `cloudflare-sandbox.ts` for its existing callers
+and tests, but is no longer selected by production compute configuration.
 
-`CloudflareSandboxProvider` implements the `WorkspaceProvider` contract (`src/coding/workspace/types.ts`) with one Cloudflare Sandbox per coding session. It imports no `@cloudflare/*` package. It takes `sandboxFor(sessionId)` and a structural `SandboxLike`, the few methods of the Sandbox SDK it calls (`exec`, `readFile`, `writeFile`, `mkdir`, and optionally `createBackup`, `restoreBackup`, `destroy`). `@cloudflare/sandbox` is therefore not a dependency yet; add it when wiring the binding.
+## Deploy safety: disabled in the shared config
 
-- **Create** ensures the sandbox and `/workspace`. Cloning the repository is the coding thread's job, run through `exec`.
-- **Files** are all under `/workspace`. Paths are checked lexically, then resolved with `realpath -m` inside the sandbox, so `..` and symlinks that leave the root are refused. The image needs GNU `realpath`, `find` and `rm`.
-- **Exec** shell-quotes the argument list, streams stdout and stderr, and ends with one exit event. Timeout and abort both abort the SDK call and end the stream at once; a sandbox failure becomes stderr plus an exit with `signal: "SANDBOX_ERROR"`.
-- **Stop and start.** With backups, stop saves `/workspace` to R2 and destroys the container; start restores it. Without backups, stop only marks the workspace stopped and refuses commands; the container sleeps by itself after `sleepAfter`, and its disk is not guaranteed to survive that.
-- **Snapshots** use `createBackup` and `restoreBackup` on `/workspace`. `capabilities.snapshot` is true only when the provider is given `backup`.
-- **Destroy** deletes the container; with `keepVolume` and backups the files are saved and come back when the session is created again.
-- **Capacity** is 2 workspaces at once unless `maxConcurrent` says otherwise.
-- Which workspaces exist is remembered per provider instance. After a restart `get(ref)` reopens a workspace if `/workspace` exists in its sandbox; `list` shows only workspaces seen since.
-- Disk, memory, CPU and process limits in `WorkspaceSpec.limits` are not enforced by this backend; they come from the container's instance type. A turn's time limit, if the thread has one, is the caller's.
+**There is deliberately no `containers` entry, no container bindings and no v8
+migration in `wrangler.jsonc`.** Exporting classes does not provision containers.
+The ordinary production build has no new Docker requirement.
 
-## Egress allowlist (design)
+Pim production deploys use Cloudflare Git integration (Workers Builds). The
+repository's `.github/workflows/ci.yml` only installs dependencies and runs checks;
+it does not build or publish images or deploy the Worker. `package.json` builds
+the web app with `pnpm build` and deploys with `wrangler deploy`. Wrangler's own
+`build.command` also builds only `web/`. `docs/instance.md` describes Workers
+Builds previews using `wrangler preview`; those must remain separate from
+production resources. Nothing checked into this repository proves Docker is
+available in Workers Builds. A Dockerfile `image` entry would make production
+deploys depend on it, so none is installed here.
 
-`capabilities.egressAllowlist` is false unless `applyEgress(sandbox, allowedHosts)` is supplied. The intended hook uses the SDK's outbound interception: a handler that runs in the Worker for every outbound HTTP(S) request from the container, compares the request's hostname to the session's allowlist (exact match or a `*.` suffix), and answers 403 for anything else. Git and package registries then work only for hosts a thread was granted, and a broker can add credentials in the handler so the container never holds them. The hook is called with each workspace's `spec.egress.allow` at creation. Traffic that is not HTTP(S) must be blocked by the container's network settings; the hook does not cover it.
+An operator must enable Containers in a separate, reviewed deployment configuration
+and keep the normal Git build on the shared configuration until the new deployment
+path has been verified. Do not deploy `wrangler.preview.jsonc`.
 
-## What the owner must enable (not applied)
+1. On a Docker-capable machine, from the repository root, build the shared image
+   and Cloudflare variant:
 
-1. Put the account on **Workers Paid** and enable **Containers**. Containers are billed for memory, CPU and disk while running, plus Durable Object and R2 use. A sandbox that is idle past `sleepAfter` stops billing compute; backups cost R2 storage until their TTL.
-2. Add an image, for example `deploy/sandbox/Dockerfile`:
-
-   ```dockerfile
-   FROM docker.io/cloudflare/sandbox:<version>
-   RUN apt-get update && apt-get install -y --no-install-recommends git ripgrep build-essential python3 \
-       && rm -rf /var/lib/apt/lists/*
-   # Add the language toolchains threads need, such as Node and pnpm.
+   ```sh
+   docker build --platform linux/amd64 -t pim-workspace:local workspace-agentd
+   docker build --platform linux/amd64 -t pim-workspace-cloudflare:local -f workspace-agentd/Dockerfile.cloudflare workspace-agentd
    ```
 
-   The base image carries the sandbox shim that the SDK talks to; keep its version in step with the `@cloudflare/sandbox` package.
-3. Add to `wrangler.jsonc` (**do not merge until Containers billing is on**):
+2. In a private deployment copy of the production config, add these entries to
+   `durable_objects.bindings` and append the migration after v7:
 
-   ```jsonc
-   "containers": [
-     { "class_name": "Sandbox", "image": "./deploy/sandbox/Dockerfile", "instance_type": "standard-1", "max_instances": 2 }
-   ],
-   "durable_objects": { "bindings": [ /* existing, */ { "name": "Sandbox", "class_name": "Sandbox" } ] },
-   "migrations": [ /* existing, */ { "tag": "sandbox-v1", "new_sqlite_classes": ["Sandbox"] } ]
+   ```json
+   { "name": "WorkspaceContainer", "class_name": "WorkspaceContainer" }
+   { "name": "WorkspaceCatalog", "class_name": "WorkspaceCatalog" }
+   { "tag": "v8", "new_sqlite_classes": ["WorkspaceContainer", "WorkspaceCatalog"] }
    ```
 
-   and `export { Sandbox } from "@cloudflare/sandbox";` in the Worker entry. For backups add an R2 bucket binding as the SDK documents. Run `pnpm types` afterwards.
-4. Install `pnpm add @cloudflare/sandbox` and construct the provider where coding threads pick a backend:
+3. In that copy, use this container entry only on the Docker-capable release
+   runner (the paths assume the config is at the repository root):
 
-   ```ts
-   import { getSandbox } from "@cloudflare/sandbox";
-   new CloudflareSandboxProvider({ sandboxFor: (id) => getSandbox(env.Sandbox, id), backup: { ttlSeconds: 7 * 86400 } });
+   ```json
+   "containers": [{
+     "name": "coding-workspaces",
+     "class_name": "WorkspaceContainer",
+     "scheduling_policy": "durable_object",
+     "images": {
+       "base": {
+         "dockerfile": "./workspace-agentd/Dockerfile.cloudflare",
+         "build_context": "./workspace-agentd"
+       }
+     }
+   }]
    ```
 
-   Keep `max_instances` and `maxConcurrent` equal, so Pim refuses new workspaces before Cloudflare does.
+   Keep Workers Builds on the unchanged shared config. To use it for container
+   releases later, publish the image separately using
+   [Cloudflare image management](https://developers.cloudflare.com/containers/guides/image-management/),
+   replace the whole `base` object with `{ "image": "<published-registry-digest>" }`,
+   and prove in a staging build without Docker that Wrangler resolves it without
+   building or pulling through Docker. A registry reference alone is not treated
+   here as proof that every Wrangler release path is Docker-free.
+4. Run `pnpm exec wrangler types --config wrangler.containers.jsonc` and
+   `pnpm typecheck`, then `pnpm exec wrangler deploy --config wrangler.containers.jsonc`
+   from the release runner (using that filename for the private config). Do not repeat production bindings
+   in preview configuration. Add Cloudflare Containers in Settings → Compute and
+   check its health. Start a disposable thread, write a file, suspend and resume,
+   and verify files, egress denial, token replacement and usage accounting before
+   enabling it for other people. No live deployment was performed for S1a.
 
-## Not verified against the real SDK
+The private deployment config and image registry identity belong outside this
+public repository. Do not add account IDs, deployment hostnames or credentials.
 
-The method names and option shapes in `SandboxLike` (`exec` with `stdin`, `signal`, `onOutput`; `readFile` with `encoding: "base64"`; `createBackup({ dir, ttl })`; `destroy`) come from the SDK documentation, not from running it. Check them when wiring the binding; an adapter function is the place to absorb differences.
+## Lifecycle and limits
+
+A session has one named Durable Object; its specification and snapshot handles
+live in Durable Object storage. The catalog contains only session IDs. Suspending
+captures the root filesystem before destroying the container; resuming runs the
+entrypoint again from the snapshot with no old processes. Snapshot failure keeps
+the live container intact. Unexpected container loss reports `gone` and a fresh
+create rebuilds rather than claiming an older snapshot contains current files.
+`destroy({ keepVolume: true })` suspends; a full destroy erases stored handles.
+Checkpoints are scoped to the workspace that made them. Environment caching is
+not supported yet.
+
+[Cloudflare snapshots](https://developers.cloudflare.com/containers/guides/snapshots/)
+require the `durable_object` scheduling policy, cover the root filesystem rather
+than separately mounted volumes, retain no processes and expire after 30 days
+without a restore. They are tied to an image version. Keep `/workspace` on that
+filesystem and plan image upgrades and retention accordingly. Do not claim
+indefinite disk persistence or cross-image restore.
+
+A0 checks the person's quota before creating or resuming a workspace and records
+running stretches in the Gallery ledger. Suspension ends a stretch; resuming
+starts another. The thread's heartbeat enforces the compute session cap and
+releases usage on failure. The provider does not maintain a second usage counter.
+CPU, memory and disk are passed as native container resources; process count is
+not separately enforced. The durable-object scheduling policy does not accept
+`max_instances`; use A0 quotas to bound running workspaces and the account's platform limits as the final ceiling.
+
+The native inactivity timeout is ten minutes and is renewed by `keepAlive`.
+Unexpected stops lose changes since the last snapshot. The provider does not
+promise transparent recovery from those losses.
+
+## Egress
+
+Containers start with Internet access disabled. Each allowed target gets HTTP
+and HTTPS intercepts bound to that target. The handler checks the URL against both
+the connection target and the latest policy, refuses nonstandard ports, and
+injects only into HTTPS requests with a matching normalized path. Redirects are
+returned for a new policy check. Removed targets still fail closed through old
+intercepts; no policy or injection credentials are put in the container.
+The entrypoint installs Cloudflare's mounted CA then starts agentd as uid 10001.
+[Cloudflare's outbound intercept documentation](https://developers.cloudflare.com/containers/configuration/outbound-traffic/)
+explains the CA and connection-target/Host distinction.
+
+Tests use a fake remote service for client conformance and a fake native API for
+lifecycle failures. These do not prove image startup, snapshot availability,
+network interception or billing against a live Cloudflare account.

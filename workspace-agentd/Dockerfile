@@ -91,7 +91,7 @@ COPY --chown=root:root *.mjs package.json /opt/agentd/
 
 USER 10001:10001
 WORKDIR /workspace
-VOLUME /workspace
+# Managers mount their own volume here; keep the image root snapshot-compatible for Cloudflare.
 EXPOSE 8787
 ENV AGENTD_ROOT=/workspace AGENTD_PORT=8787
 

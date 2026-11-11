@@ -1,6 +1,6 @@
 # Sessions, keepalives and egress policy for workspace providers
 
-Sandbox providers such as Cloudflare Sandbox, Daytona, E2B and Vercel cap how long a session lasts, stop a sandbox that sits idle, suspend one while keeping its files, and can enforce egress themselves. The `WorkspaceProvider` contract (`src/coding/workspace/types.ts`) says so in four capabilities, and a coding thread (`src/coding/thread-do.ts`) acts on them. Compose and Cloudflare declare the conservative values: no cap, no keepalive, no suspend, no injection.
+Sandbox providers such as Cloudflare Sandbox, Daytona, E2B and Vercel cap how long a session lasts, stop a sandbox that sits idle, suspend one while keeping its files, and can enforce egress themselves. The `WorkspaceProvider` contract (`src/coding/workspace/types.ts`) says so in four capabilities, and a coding thread (`src/coding/thread-do.ts`) acts on them. Compose declares no cap, no keepalive, no suspend and no injection. Cloudflare Containers has no fixed session cap, takes keepalives, suspends through filesystem snapshots, and injects credentials through outbound intercepts. The legacy Sandbox SDK adapter still declares the conservative values.
 
 ## Capabilities
 

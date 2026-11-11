@@ -15,5 +15,5 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["pim.config.ts", "computer/**/*.ts", "src/**/*.ts", "test/**/*.ts", "preview/**/*.ts", "worker-configuration.d.ts"]
+  "include": ["pim.config.ts", "cloudflare-container.ts", "cloudflare-egress.ts", "computer/**/*.ts", "src/**/*.ts", "test/**/*.ts", "preview/**/*.ts", "worker-configuration.d.ts"]
 }

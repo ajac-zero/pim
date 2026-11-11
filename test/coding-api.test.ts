@@ -12,8 +12,10 @@ import { type CodingEventSink, codingThread } from "../src/coding/thread-do";
 import { turnEndedMessage } from "../src/coding/supervisor";
 import { CodingThreadIndex } from "../src/coding/thread-index";
 import { CodingThreadStore } from "../src/coding/thread-store";
+import type { ComputeQuota } from "../src/compute";
 import type { Pim } from "../src/pim";
 import type { Approval } from "../src/store";
+import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { CODING_EVENT } from "../src/transcript";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
@@ -270,6 +272,47 @@ describe("the coding threads API", () => {
 		expect((await post<CodingThreadView>(`/coding/threads/${queued.id}/cancel`)).body).toMatchObject({ state: "idle", stateReason: "cancelled" });
 		expect(codingEvents.filter((event) => event.threadId === queued.id)).toHaveLength(1);
 		await post(`/coding/threads/${running.id}/abort`);
+	});
+
+	it("counts a workspace's minutes by provider, and refuses one past the person's compute quota before the provider is asked", async () => {
+		const gallery = env.Gallery.getByName("gallery");
+		const quota = (change: Partial<ComputeQuota> | null) => runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.setComputeQuota(change));
+		const before = (await gallery.computeUsageOf(OWNER)).minutes;
+		await quota({ maxConcurrentWorkspaces: 1, maxSessionMinutes: 45 });
+		try {
+			codingFaux.setResponses([toolUse("bash", { command: "sleep 30" })]);
+			const running = await start();
+			await vi.waitFor(async () => expect((await view(running.id)).state).toBe("running"));
+			// The workspace is counted as running, held to the session limit.
+			const during = await gallery.computeUsageOf(OWNER);
+			expect(during).toMatchObject({ running: 1, byProvider: [{ provider: "fake", running: 1 }] });
+			const [made] = await codingWorkspaces.list({ sessionId: running.id });
+			expect(((await codingWorkspaces.get(made!.ref)) as unknown as { spec: WorkspaceSpec }).spec.limits.wallClockMin).toBe(45);
+
+			// The person's one is taken: a second thread has its slot, but no workspace is made for it.
+			const second = await start({ task: "Write the docs" });
+			const failed = await vi.waitFor(async () => {
+				const thread = await view(second.id);
+				expect(thread.state).toBe("failed");
+				return thread;
+			});
+			expect(failed.stateReason).toBe("compute_quota");
+			expect(failed.stateDetail).toMatch(/already have 1 sandbox workspace running.*\(1\)/);
+			expect(await codingWorkspaces.list({ sessionId: second.id })).toEqual([]);
+			expect((await gallery.computeUsageOf(OWNER)).running).toBe(1);
+
+			// Stopping the first gives its minutes back as usage, and the person's next workspace is made.
+			await post(`/coding/threads/${running.id}/archive`);
+			const after = await gallery.computeUsageOf(OWNER);
+			expect(after.running).toBe(0);
+			expect(after.minutes).toBeGreaterThanOrEqual(before);
+			expect(after.byProvider).toEqual([expect.objectContaining({ provider: "fake", running: 0 })]);
+			codingFaux.setResponses([fauxAssistantMessage("Nothing to change.")]);
+			const next = await start({ task: "Try again" });
+			await turns(next.id, 1);
+		} finally {
+			await quota(null);
+		}
 	});
 
 	it("aborts, continues and steers a thread, and refuses an archived one", async () => {

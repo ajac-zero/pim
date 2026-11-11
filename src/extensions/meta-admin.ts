@@ -43,10 +43,10 @@ function redact(value: unknown): unknown {
 	return value;
 }
 
-/** Writes the admin must approve: every delete, the computer host's pairing, model providers, and credentials for someone's sign-in. */
+/** Writes the admin must approve: every delete, the computer host's pairing, model and compute providers, and credentials for someone's sign-in. */
 export function needsApproval(method: string, path: string): boolean {
 	if (method === "DELETE") return true;
-	if (path === "/admin/computer-host" || path.startsWith("/admin/providers")) return true;
+	if (path === "/admin/computer-host" || path.startsWith("/admin/providers") || path.startsWith("/admin/compute/providers")) return true;
 	return /^\/admin\/accounts\/[^/]+\/setup-link$/.test(path);
 }
 
@@ -68,7 +68,7 @@ function parse(method: string, given: string, query: unknown, body: unknown): Pa
 const line = ({ method, path, body }: { method: string; path: string; body?: object }) => `${method} ${path}${body === undefined ? "" : ` ${JSON.stringify(redact(body))}`}`;
 const error = (message: string, status: number) => JSON.stringify({ error: message, status });
 
-const PROMPT = `You run the admin area of this Pim for the person, who is its admin, as the app's Admin pages do. admin_read gets (stats, accounts, accounts/<username>, sign-in, deployment, computer-host, default-agent, builtin-apps), and admin_write changes (POST invites, POST/PUT apps, PUT builtin-apps/<id>, PUT default-agent, accounts/<username>/suspend, unsuspend and limits). Paths are under /admin and take the same bodies as the app sends. Every DELETE, the computer host's pairing, model providers and setup links run only through admin_write_approved, which asks the person first and shows them the exact request. Secrets (provider keys, the computer host's token, invite codes and links, setup links) are never shown to you: tell the person to take them from Admin in the app. Every write is kept for admin_audit. Do only what the person asked.`;
+const PROMPT = `You run the admin area of this Pim for the person, who is its admin, as the app's Admin pages do. admin_read gets (stats, accounts, accounts/<username>, sign-in, deployment, computer-host, default-agent, builtin-apps, compute), and admin_write changes (POST invites, POST/PUT apps, PUT builtin-apps/<id>, PUT default-agent, PUT compute/quota, accounts/<username>/suspend, unsuspend, limits and compute-quota). Paths are under /admin and take the same bodies as the app sends. Every DELETE, the computer host's pairing, model and compute providers and setup links run only through admin_write_approved, which asks the person first and shows them the exact request. Secrets (provider keys, the computer host's token, invite codes and links, setup links) are never shown to you: tell the person to take them from Admin in the app. Every write is kept for admin_audit. Do only what the person asked.`;
 
 export const metaAdmin = definePimExtension({
 	id: "meta-admin",
@@ -133,7 +133,7 @@ export const metaAdmin = definePimExtension({
 				defineGatedAction({
 					name: "admin_write_approved",
 					description:
-						"A write to the admin area that can't be taken back or touches credentials: any DELETE, POST or DELETE /admin/computer-host, anything under /admin/providers, and an account's setup-link. Same arguments as admin_write. The person reads the exact request before it runs.",
+						"A write to the admin area that can't be taken back or touches credentials: any DELETE, POST or DELETE /admin/computer-host, anything under /admin/providers or /admin/compute/providers, and an account's setup-link. Same arguments as admin_write. The person reads the exact request before it runs.",
 					parameters: writeParameters,
 					explicitApproval: true,
 					summarize: ({ method, path, body }) => line({ method, path, body }),
@@ -158,7 +158,7 @@ export const metaAdmin = definePimExtension({
 				defineTool({
 					name: "admin_read",
 					description:
-						"Reads the admin area, as the app's Admin pages do: GET /admin/stats, /accounts (query status, after, limit), /accounts/<username>, /sign-in, /deployment, /computer-host, /default-agent, /builtin-apps. Secrets are left out.",
+						"Reads the admin area, as the app's Admin pages do: GET /admin/stats, /accounts (query status, after, limit), /accounts/<username>, /sign-in, /deployment, /computer-host, /default-agent, /builtin-apps, /compute. Secrets are left out.",
 					parameters: Type.Object({
 						path: Type.String({ description: "Under /admin, such as /admin/stats." }),
 						query: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Query parameters." })),
@@ -175,7 +175,7 @@ export const metaAdmin = definePimExtension({
 				defineTool({
 					name: "admin_write",
 					description:
-						"Changes the admin area, as the app's Admin pages do. Writes that can't be taken back or touch credentials (DELETE, computer-host, providers, setup-link) are refused here: use admin_write_approved. Every write is kept for admin_audit.",
+						"Changes the admin area, as the app's Admin pages do. Writes that can't be taken back or touch credentials (DELETE, computer-host, model and compute providers, setup-link) are refused here: use admin_write_approved. Every write is kept for admin_audit.",
 					parameters: writeParameters,
 					async execute({ method, path, body }, api) {
 						const agentId = majordomoOf(api.conversationId);

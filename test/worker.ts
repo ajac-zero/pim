@@ -277,6 +277,11 @@ export class Pim extends RealPim {
 		return this.store.meta("test:no-fallback") === undefined ? super.fallbackModel(provider, session) : undefined;
 	}
 
+	/** The in-memory workspace backend coding threads have in tests, unless a test sets `test:no-coding-backend`, as in a deployment with none. */
+	protected override environmentWorkspaceIds(): string[] {
+		return this.store.meta("test:no-coding-backend") === undefined ? ["fake"] : [];
+	}
+
 	/** Under `auto`, long enough for a test to answer an approval, short enough to wait out. */
 	protected override approvalTimeoutMs(policy = this.settings().approvalPolicy): number | null {
 		return policy === "auto" ? 1_500 : null;
@@ -315,7 +320,7 @@ export class CodingSchedulerDO extends RealCodingSchedulerDO {
 	}
 
 	/** Sign-ins run Claude Code's fake `claude auth login` (test/fake-claude-login.ts). */
-	protected override loginProviders(): WorkspaceProviderRegistry {
+	protected override async loginProviders(): Promise<WorkspaceProviderRegistry> {
 		return workspaceRegistry([codingLogins]);
 	}
 

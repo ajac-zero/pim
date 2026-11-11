@@ -1,5 +1,5 @@
 import { getAgentByName } from "agents";
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { codex } from "../src/coding/harness/codex";
@@ -14,6 +14,7 @@ import { MAX_SEALED_BYTES } from "../src/coding/vault/store";
 import { ApiKeyError, CodingVault, codingVault, type Ownership, spaceVaultBackend, threadOwnership } from "../src/coding/vault/vault";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
+import type { Pim } from "../src/pim";
 import { fakeRemotes } from "./fake-git";
 import { codesGiven, GOOD_CODE, LOGIN_URL, loginRuns, SAVED_LOGIN } from "./fake-claude-login";
 import { DEVICE_URL, deviceLogin, SAVED_AUTH, USER_CODE } from "./fake-codex-login";
@@ -559,6 +560,25 @@ describe("signing in to Claude Code", () => {
 		expect(text(files.find((file) => file.path === ".credentials.json"))).toBe(SAVED_LOGIN);
 		expect(await loginWorkspaces()).toEqual([]);
 		expect(JSON.stringify(connected.body)).not.toContain("sk-ant-");
+	});
+
+	it("counts its workspace against the person's compute quota, and makes none for a person over it", async () => {
+		const gallery = env.Gallery.getByName("gallery");
+		const quota = (change: { maxConcurrentWorkspaces: number } | null) => runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.setComputeQuota(change));
+		await quota({ maxConcurrentWorkspaces: 0 });
+		try {
+			const refused = await login("", { method: "POST" });
+			expect(refused.body).toMatchObject({ state: "failed", error: expect.stringContaining("most this Pim lets you have at once (0)") });
+			expect(await loginWorkspaces()).toEqual([]);
+		} finally {
+			await quota(null);
+		}
+		// Under it, the workspace runs until the sign-in is cancelled, and its minutes are counted by provider.
+		const running = (await gallery.computeUsageOf(OWNER)).running;
+		expect((await login("", { method: "POST" })).body).toMatchObject({ state: "waiting_code" });
+		expect((await gallery.computeUsageOf(OWNER)).running).toBe(running + 1);
+		await login("", { method: "DELETE" });
+		expect((await gallery.computeUsageOf(OWNER)).running).toBe(running);
 	});
 
 	it("fails on a code the CLI refuses, saving nothing, and can start again; a sign-in can be cancelled", async () => {

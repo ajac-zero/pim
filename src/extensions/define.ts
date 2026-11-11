@@ -91,6 +91,11 @@ export type AbilityContext = {
 	 * and the agent it is with.
 	 */
 	conversationOf(session: string): { readonly chat: string; readonly agent: { readonly id: string; readonly name: string; readonly majordomo: boolean } };
+	/** What the deployment's compute providers (src/compute.ts) offer, as of the chat's latest turn. */
+	readonly compute: {
+		/** Whether some provider can run a coding thread's workspace. */
+		codingSandbox(): boolean;
+	};
 	/** Reads of the space's own failures and state, for the admin's majordomo (see ./meta-diagnostics.ts); a tool that offers them checks its caller. */
 	readonly diagnostics: {
 		report(query: { since?: string; kind?: string; limit?: number; chat?: string }): Promise<unknown>;

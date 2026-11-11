@@ -80,6 +80,7 @@ import { isLoginHarness } from "./vault/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
+import { type ComputeProvider, type ComputeQuota } from "../compute";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import {
 	type EnvironmentOwner,
@@ -173,6 +174,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The workspace opened in this isolate, by its ref's id. */
 	#open: { id: string; workspace: Workspace } | null = null;
 	#configured: string | null = null;
+	/** The compute providers the admin set up, as last read from the Gallery, and when. */
+	#compute: { providers: readonly ComputeProvider[]; at: number } = { providers: [], at: 0 };
 	/**
 	 * The tools' journal, in `coding_tool_journal`. A call's record is on
 	 * disk before `put` returns, since the command it records starts right
@@ -235,9 +238,50 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return Date.now();
 	}
 
-	/** The workspace providers threads may use: the backends the deployment's environment sets up. */
+	/** The workspace providers threads may use: the backends the deployment's environment sets up, and the compute providers its admin added (./compute.ts), as last read by `#refreshCompute`. */
 	protected workspaceProviders(): WorkspaceProviderRegistry {
-		return workspaceBackends(this.env);
+		return workspaceBackends(this.env, this.#compute.providers);
+	}
+
+	/** The compute providers with their credentials, from the Gallery. */
+	protected async computeProviders(): Promise<readonly ComputeProvider[]> {
+		return this.env.Gallery.getByName("gallery").computeProviders();
+	}
+
+	/** What the space may use of the deployment's compute: the admin's default, with the person's own where the admin set it. */
+	protected async computeQuota(space: string): Promise<ComputeQuota> {
+		return (await getAgentByName(this.env.Pim, space)).computeQuota();
+	}
+
+	/** Reads the compute providers again, at most every few seconds, so the admin's changes reach a thread's next step. A Gallery that can't be reached leaves what was read. */
+	async #refreshCompute(): Promise<void> {
+		if (Date.now() - this.#compute.at < COMPUTE_REFRESH_MS) return;
+		try {
+			this.#compute = { providers: await this.computeProviders(), at: Date.now() };
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.compute_read_failed", error: String(error).slice(0, 300) }));
+		}
+	}
+
+	/**
+	 * Checks the space's compute quota and records that a workspace is about to run
+	 * (./compute-ledger.ts), before the provider is asked to make or resume one.
+	 * `enforce` is false for a workspace that is running already. Returns the
+	 * minutes the workspace may run, or throws `ComputeQuotaError`.
+	 */
+	async #reserveCompute(thread: CodingThreadRow, enforce: boolean): Promise<number | null> {
+		const quota = enforce ? await this.computeQuota(thread.space) : null;
+		const admitted = await this.env.Gallery.getByName("gallery").computeBegin({ userId: thread.space, threadId: thread.threadId, provider: thread.providerId, quota });
+		if (!admitted.ok) throw new ComputeQuotaError(admitted.message);
+		return admitted.wallClockMin;
+	}
+
+	/** Records that the thread's workspace stopped running. Counting never holds a thread up: a Gallery that can't be reached is logged. */
+	async #releaseCompute(reason: "stop" | "suspend" | "lost" | "failed"): Promise<void> {
+		const threadId = this.store.required().threadId;
+		await this.env.Gallery.getByName("gallery")
+			.computeEnd(threadId, reason)
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.compute_end_failed", thread: threadId, error: String(error).slice(0, 300) })));
 	}
 
 	/** The machine image a workspace starts from. */
@@ -463,6 +507,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const { provider, repo } = deploymentProviders(this.env).resolveUrl(input.repo, brokerPolicy(this.env));
 		const budgetUsd = input.budgetUsd ?? null;
 		if (budgetUsd !== null && !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
+		await this.#refreshCompute();
 		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
 		const harness = input.harness ?? "pi";
 		const cli = cliHarness(harness);
@@ -497,6 +542,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
 			}
 		});
+		await this.#refreshCompute();
 		const backend = this.#ensureBackend();
 		if (backend === true) {
 			await this.#requestSlot();
@@ -1395,6 +1441,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return;
 		}
 		if (thread.slot === "none") {
+			await this.#refreshCompute();
 			const backend = this.#ensureBackend();
 			if (backend !== true) {
 				await backend;
@@ -2026,7 +2073,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ state: "idle", stateReason: "aborted" });
 			return;
 		}
-		if (error instanceof NoWorkspaceBackendError) await this.#fail(error.code, error.message, true);
+		if (error instanceof NoWorkspaceBackendError || error instanceof ComputeQuotaError) await this.#fail(error.code, error.message, true);
 		else await this.#fail("workspace", error instanceof Error ? error.message : String(error), true);
 	}
 
@@ -2164,19 +2211,40 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (workspace) this.store.update({ workspaceRef: ref });
 		}
 		const started = workspace ? null : performance.now();
+		// A workspace the provider makes or resumes costs the deployment compute: the space's quota is checked before it does, and the time it runs is counted from then.
+		let counted = false;
 		if (!workspace) {
+			const wallClockMin = await this.#reserveCompute(thread, true);
+			counted = true;
 			// Creating twice for one session is one workspace, so a restart mid-create makes no second one.
-			const ref = await this.#createWorkspace(provider, thread, options.restoreFrom);
+			let ref: WorkspaceRef;
+			try {
+				ref = await this.#createWorkspace(provider, thread, options.restoreFrom, wallClockMin);
+			} catch (error) {
+				await this.#releaseCompute("failed");
+				throw error;
+			}
 			if (this.store.required().slot !== "held") {
 				// Archived or released while it was made: it goes at once.
 				await provider.destroy(ref, { keepVolume: true });
+				await this.#releaseCompute("suspend");
 				throw new Error("The coding thread gave its workspace slot up");
 			}
 			this.store.update({ workspaceRef: ref });
 			workspace = await provider.get(ref);
 			if (!workspace) throw new Error("The workspace provider lost the workspace it just made");
+		} else if ((await workspace.status()).state === "stopped") {
+			await this.#reserveCompute(thread, true);
+			counted = true;
+			try {
+				await workspace.start();
+			} catch (error) {
+				await this.#releaseCompute("failed");
+				throw error;
+			}
 		}
-		if ((await workspace.status()).state === "stopped") await workspace.start();
+		// A workspace found running, such as after a restart, is counted as it is, with no check: it runs already.
+		if (!counted) await this.#reserveCompute(thread, false);
 		const killable = this.#killable(workspace, this.store.required().workspaceRef!);
 		await this.#ensureRepository(killable, thread);
 		if (started !== null) this.#setEnvironment({ provisionMs: Math.round(performance.now() - started) });
@@ -2192,8 +2260,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * restore that fails for any reason but a full backend is logged and
 	 * the workspace is made empty, to be cloned as usual.
 	 */
-	async #createWorkspace(provider: WorkspaceProvider, thread: CodingThreadRow, restoreFrom?: EnvironmentSnapshot): Promise<WorkspaceRef> {
-		const spec = this.#spec(thread, provider);
+	async #createWorkspace(provider: WorkspaceProvider, thread: CodingThreadRow, restoreFrom?: EnvironmentSnapshot, wallClockMin: number | null = null): Promise<WorkspaceRef> {
+		const spec = this.#spec(thread, provider, wallClockMin);
 		const owner = spec.environment;
 		let snapshot = restoreFrom;
 		if (owner && !snapshot && thread.baseSha === null && thread.environment.preparedAt === null) {
@@ -2217,12 +2285,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return provider.create(spec);
 	}
 
-	#spec(thread: CodingThreadRow, provider: WorkspaceProvider): WorkspaceSpec {
+	#spec(thread: CodingThreadRow, provider: WorkspaceProvider, wallClockMin: number | null): WorkspaceSpec {
+		// The quota's limit on a session's minutes caps the thread's own, which the provider enforces.
+		const wallClock = [thread.limits.wallClockMin, wallClockMin].filter((minutes) => minutes !== null);
 		return {
 			sessionId: thread.threadId,
 			image: this.workspaceImage(),
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch },
-			limits: thread.limits,
+			limits: { ...thread.limits, wallClockMin: wallClock.length === 0 ? null : Math.min(...wallClock) },
 			egress: { allow: [...this.egressAllow(), ...(cliHarness(thread.harness)?.egress ?? [])] },
 			gitAuth: { mode: "none" },
 			...(provider.capabilities.environmentSnapshots ? { environment: environmentOwner(thread) } : {}),
@@ -2586,6 +2656,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (!thread.workspaceRef) return;
 		await this.workspaceProviders().get(thread.providerId).destroy(thread.workspaceRef, options);
 		this.store.update({ workspaceRef: null });
+		await this.#releaseCompute(options.keepVolume ? "suspend" : "stop");
 	}
 
 	/**
@@ -2677,6 +2748,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		try {
 			await this.workspaceProviders().get(ref.providerId).destroy(ref, { keepVolume: true });
 			if (this.store.required().workspaceRef?.id === ref.id) this.store.update({ workspaceRef: null });
+			await this.#releaseCompute("lost");
 		} catch (failure) {
 			// The backend can't be reached: the next use finds the workspace down again, and lets it go then.
 			console.warn(JSON.stringify({ event: "pim.coding.destroy_failed", thread: thread.threadId, error: errorText(failure).slice(0, 300) }));
@@ -2937,6 +3009,15 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 
 /** The workspace provider of a thread started while the deployment had none. */
 const NO_BACKEND = "none";
+
+/** How long the compute providers read from the Gallery are used before they're read again. */
+const COMPUTE_REFRESH_MS = 5_000;
+
+/** The space is over its compute quota (./compute.ts), so no workspace is made or resumed for it now. A state to show the person (`failed(compute_quota)`), not a crash. */
+class ComputeQuotaError extends Error {
+	override readonly name = "ComputeQuotaError";
+	readonly code = "compute_quota";
+}
 
 /** A thread's own time limit for a turn, in milliseconds, or null when it has none: turns have no default limit, and are stopped only when they stall. */
 const wallClockMs = (thread: CodingThreadRow): number | null => (thread.limits.wallClockMin === null ? null : thread.limits.wallClockMin * 60_000);

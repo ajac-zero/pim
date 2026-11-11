@@ -63,6 +63,11 @@ export default defineConfig({
 					// a test that takes 3 s on a laptop takes 20+ s under load; failures at 20 s were contention, not bugs.
 					testTimeout: 60_000,
 					hookTimeout: 60_000,
+					// The Worker test files share one workerd and its Durable Objects (the Directory, the scheduler, the
+					// test Pim names), so two of them at once can interfere: settings one file changes, spaces it erases,
+					// claims of the Pim. Two halves of people.test.ts run together failed in different places each time
+					// (3 to 7 tests), and clean when run one at a time in about the same total time.
+					fileParallelism: false,
 					// Live checks against real third-party servers need the network: `pnpm test:live`.
 					include: live ? ["test/live/**/*.test.ts"] : ["test/*.test.ts"],
 					exclude: ["test/*.node.test.ts"],

@@ -1276,6 +1276,9 @@ async function grpcWeb(base: string, token: string, method: string, message: num
 	return answer;
 }
 
+/** How many displays at a time may be signed in to a site, and the domains (with their subdomains) whose cookies are its sign-in. */
+export type SiteLimit = { max: number; domains: string[] };
+
 /** A computer's per-thread displays: calls a thread's driver tool on its own display, and finds the environment of the one it holds. */
 export type DisplayHost = Pick<DisplayClient, "call" | "envOf"> & Partial<Pick<DisplayClient, "list" | "control" | "touchViewer" | "screenOf">>;
 
@@ -1420,6 +1423,29 @@ export class DisplayClient {
 		if (status === 404) throw new CallError(`No display is held by thread ${thread}.`, "ENODISPLAY");
 		if (status !== 200) throw new CallError(`displayd refused: HTTP ${status} ${JSON.stringify(body)}`, "ENODISPLAY");
 		return { control: body?.lease?.control === "user" ? "user" : "agent" };
+	}
+
+	/** The sites whose sign-ins are limited to a number of displays at a time, with their domains; none when displayd can't say (or is older). */
+	async sites(): Promise<Record<string, SiteLimit>> {
+		try {
+			const { status, body } = await this.#request("GET", "/sites");
+			return status === 200 && body?.sites && typeof body.sites === "object" ? body.sites : {};
+		} catch {
+			return {};
+		}
+	}
+
+	/** Takes the thread a slot of a limited site: granted, refused because other chats hold it, or unreachable when displayd can't say. */
+	async claimSite(thread: string, site: string): Promise<"granted" | "refused" | "unreachable"> {
+		try {
+			const { status, body } = await this.#request("POST", "/site-claim", { threadId: thread, site });
+			if (status === 200) return body?.granted === true ? "granted" : "refused";
+		} catch {}
+		return "unreachable";
+	}
+
+	async releaseSite(thread: string, site: string): Promise<void> {
+		await this.#request("POST", "/site-release", { threadId: thread, site }).catch(() => undefined);
 	}
 
 	/** The environment of the display the thread holds, if it does: it never leases one. */
@@ -1590,6 +1616,9 @@ type ThreadBrowser = {
 	profile: string;
 	connections: number;
 	syncedAt: number;
+	/** The limited sites whose slot this browser holds, and those it was refused: their cookies were not copied. */
+	claimed: Set<string>;
+	withheld: Set<string>;
 	idle?: ReturnType<typeof setTimeout>;
 	keepAlive?: ReturnType<typeof setInterval>;
 };
@@ -1605,7 +1634,7 @@ export type ThreadBrowsersOptions = {
 	primary: BrowserHost;
 	/** The file listing the origins whose localStorage is copied too: `~/.displayd/storage-origins.json`. */
 	storageOrigins: string;
-	displays: Pick<DisplayClient, "acquire" | "touch" | "leases">;
+	displays: Pick<DisplayClient, "acquire" | "touch" | "leases" | "sites" | "claimSite" | "releaseSite">;
 	log: (line: string) => void;
 	devTools?: DevTools;
 	launch?: (launch: ChromeLaunch) => Promise<ChromeProcess>;
@@ -1669,8 +1698,11 @@ export class ThreadBrowsers {
 			this.#starting.set(thread, starting);
 			({ browser, note } = await starting);
 		} else if (await this.#primaryIsNewer(browser.syncedAt)) {
-			note = await this.#copySignIns(browser.port, true);
+			note = await this.#copySignIns(thread, browser, true);
 			browser.syncedAt = this.#now();
+		} else if (browser.withheld.size > 0) {
+			// A site refused before may be free now: only its cookies are copied, so the others keep what the page has made of them.
+			note = await this.#copySignIns(thread, browser, false, new Set(browser.withheld));
 		}
 		const live = browser;
 		clearTimeout(live.idle);
@@ -1735,7 +1767,7 @@ export class ThreadBrowsers {
 		this.#o.log(`Starting a browser for thread ${thread} on ${lease.env!.DISPLAY ?? "its display"}: ${this.#o.executable}`);
 		const process_ = await (this.#o.launch ?? spawnChrome)(launch);
 		let exited = false;
-		const browser: ThreadBrowser = { lease: lease.id, port, process: process_, profile, connections: 0, syncedAt: this.#now() };
+		const browser: ThreadBrowser = { lease: lease.id, port, process: process_, profile, connections: 0, syncedAt: this.#now(), claimed: new Set(), withheld: new Set() };
 		process_.onExit(() => {
 			exited = true;
 			if (this.#browsers.get(thread) === browser) void this.stop(thread);
@@ -1753,12 +1785,13 @@ export class ThreadBrowsers {
 				}
 			}
 			// The person's sign-ins go in before anyone drives the browser.
-			const note = await this.#copySignIns(port, true);
+			const note = await this.#copySignIns(thread, browser, true);
 			this.#browsers.set(thread, browser);
 			this.#watch();
 			return { browser, ...(note ? { note } : {}) };
 		} catch (error) {
 			process_.kill("SIGKILL");
+			for (const site of browser.claimed) await this.#o.displays.releaseSite(thread, site);
 			throw error;
 		}
 	}
@@ -1771,6 +1804,7 @@ export class ThreadBrowsers {
 		clearTimeout(browser.idle);
 		clearInterval(browser.keepAlive);
 		browser.process.kill("SIGTERM");
+		for (const site of browser.claimed) await this.#o.displays.releaseSite(thread, site);
 		const hard = setTimeout(() => browser.process.kill("SIGKILL"), 3_000);
 		hard.unref?.();
 		await fs.writeFile(path.join(path.dirname(browser.profile), "ended"), String(this.#now())).catch(() => {});
@@ -1781,9 +1815,15 @@ export class ThreadBrowsers {
 	}
 
 	/** Ends every thread's browser at once, as this program ends. */
-	killAll(): void {
-		for (const browser of this.#browsers.values()) browser.process.kill("SIGKILL");
+	killAll(): Promise<unknown> {
+		const released: Promise<void>[] = [];
+		for (const [thread, browser] of this.#browsers) {
+			browser.process.kill("SIGKILL");
+			// Best effort: on a signal the program waits for these, on a plain exit they may not get out.
+			for (const site of browser.claimed) released.push(this.#o.displays.releaseSite(thread, site));
+		}
 		this.#browsers.clear();
+		return Promise.allSettled(released);
 	}
 
 	/** Checks now that each browser's display still is the one it started on, and ends the browsers of those that went. */
@@ -1883,8 +1923,13 @@ export class ThreadBrowsers {
 		}
 	}
 
-	/** Copies the person's sign-ins from the primary browser into the browser on `port`; the note for the agent when there are none to copy. */
-	async #copySignIns(port: number, fresh: boolean): Promise<string | undefined> {
+	/**
+	 * Copies the person's sign-ins from the primary browser into the thread's browser; the note for the agent
+	 * when there are none to copy, or when a site limited to a number of displays at a time (displayd's
+	 * sites.json) is held by other chats: that site's cookies stay out, so one account isn't seen from several
+	 * browsers at once. `only` names the sites to retry, whose cookies are the only ones copied.
+	 */
+	async #copySignIns(thread: string, browser: ThreadBrowser, fresh: boolean, only?: Set<string>): Promise<string | undefined> {
 		let snapshot: Snapshot | undefined;
 		try {
 			snapshot = await this.#cookies(fresh);
@@ -1892,18 +1937,45 @@ export class ThreadBrowsers {
 			this.#o.log(`Couldn't read the primary browser's sign-ins: ${(error as Error).message}`);
 		}
 		if (!snapshot) return `The primary browser couldn't be read, so this browser has no sign-ins. ${SIGNED_OUT.replace(/^The primary browser has no saved sign-ins; /, "")}`;
-		const rpc = new Rpc(await this.#devTools(port));
+		const limits = await this.#o.displays.sites();
+		const bySite = new Map<string, Cookie[]>();
+		const free: Cookie[] = [];
+		for (const cookie of snapshot.cookies) {
+			const host = String(cookie.domain ?? "").toLowerCase().replace(/^\./, "");
+			const site = Object.keys(limits).find((name) => limits[name]!.domains.some((domain) => host === domain || host.endsWith(`.${domain}`)));
+			if (site === undefined) free.push(cookie);
+			else bySite.set(site, [...(bySite.get(site) ?? []), cookie]);
+		}
+		const copy = only ? [] : free;
+		const notes: string[] = [];
+		for (const [site, cookies] of bySite) {
+			if (only && !only.has(site)) continue;
+			const claim = await this.#o.displays.claimSite(thread, site);
+			if (claim === "granted") {
+				browser.claimed.add(site);
+				browser.withheld.delete(site);
+				copy.push(...cookies);
+			} else if (claim === "unreachable") {
+				browser.withheld.add(site);
+				notes.push(`Signed-in access to ${site} is limited to ${limits[site]!.max} display(s) at a time to avoid account flags, but displayd could not be reached to take a slot, so ${site} sign-ins were not copied. Use the Primary desktop for ${site} (ask the person to do the task there or wait), or retry later; never ask for credentials in chat.`);
+			} else {
+				browser.withheld.add(site);
+				notes.push(`Signed-in access to ${site} is limited to ${limits[site]!.max} display(s) at a time to avoid account flags, and another chat holds it. Use the Primary desktop for ${site} (ask the person to do the task there or wait), or retry later; never ask for credentials in chat.`);
+			}
+		}
+		const rpc = new Rpc(await this.#devTools(browser.port));
 		try {
-			if (snapshot.cookies.length > 0) {
-				await rpc.call("Storage.setCookies", { cookies: snapshot.cookies.map(cookieParam) });
-				await this.#copyStorage(rpc).catch((error) => this.#o.log(`Couldn't copy localStorage: ${(error as Error).message}`));
+			if (copy.length > 0) {
+				await rpc.call("Storage.setCookies", { cookies: copy.map(cookieParam) });
+				if (!only) await this.#copyStorage(rpc).catch((error) => this.#o.log(`Couldn't copy localStorage: ${(error as Error).message}`));
 			}
 		} catch (error) {
 			this.#o.log(`Couldn't copy the sign-ins into the thread's browser: ${(error as Error).message}`);
 		} finally {
 			rpc.close();
 		}
-		return snapshot.cookies.length === 0 ? SIGNED_OUT : undefined;
+		if (!only && snapshot.cookies.length === 0) return SIGNED_OUT;
+		return notes.length > 0 ? notes.join("\n") : undefined;
 	}
 
 	/** Copies the localStorage of the origins in `storage-origins.json` (none by default), from the primary browser into the one `to` is connected to. */
@@ -2830,8 +2902,10 @@ async function main(): Promise<void> {
 	const apps = new Apps();
 	process.on("exit", () => apps.killAll());
 	if (triggers) process.on("exit", () => triggers.killOwned());
+	// Set once the thread browsers exist: ends them and lets go of their sites' slots before the program exits.
+	let endBrowsers: () => Promise<unknown> = async () => {};
 	for (const signal of ["SIGTERM", "SIGINT"] as const) {
-		process.on(signal, () => void (triggers ? Promise.allSettled([apps.stopAll(), triggers.close()]) : apps.stopAll()).finally(() => process.exit(0)));
+		process.on(signal, () => void Promise.allSettled([apps.stopAll(), endBrowsers(), ...(triggers ? [triggers.close()] : [])]).finally(() => process.exit(0)));
 	}
 	const displays = new DisplayClient({
 		url: env.DISPLAYD_URL ?? "http://127.0.0.1:9900",
@@ -2855,7 +2929,8 @@ async function main(): Promise<void> {
 				})
 			: undefined;
 	if (threadBrowsers) {
-		process.on("exit", () => threadBrowsers.killAll());
+		process.on("exit", () => void threadBrowsers.killAll());
+		endBrowsers = () => threadBrowsers.killAll();
 		void threadBrowsers.sweep().catch(() => {});
 		setInterval(() => void threadBrowsers.sweep().catch(() => {}), 60 * 60_000).unref();
 	}

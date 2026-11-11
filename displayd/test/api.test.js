@@ -65,3 +65,28 @@ test('control and viewer touch', async () => {
 	assert.equal((await call('POST', '/control', { threadId: 'ctl', mode: 'agent' })).json.lease.control, 'agent')
 	await call('POST', '/release', { threadId: 'ctl' })
 })
+
+test('site claims: the config, grant, refusal, release, and the claims in /displays and /health', async () => {
+	const sites = { 'linkedin.com': { max: 1, domains: ['linkedin.com', 'licdn.com'] } }
+	allocator.siteLimits = sites
+	assert.deepEqual((await call('GET', '/sites')).json, { sites })
+	await call('POST', '/acquire', { threadId: 'sc-1', spaceId: 's' })
+	await call('POST', '/acquire', { threadId: 'sc-2', spaceId: 's' })
+	await allocator.tick()
+	await allocator.tick()
+	assert.deepEqual((await call('POST', '/site-claim', { threadId: 'sc-1', site: 'linkedin.com' })).json, { granted: true })
+	assert.deepEqual((await call('POST', '/site-claim', { threadId: 'sc-1', site: 'linkedin.com' })).json, { granted: true })
+	assert.deepEqual((await call('POST', '/site-claim', { threadId: 'sc-2', site: 'linkedin.com' })).json, { granted: false, holders: ['sc-1'] })
+	assert.equal((await call('POST', '/site-claim', { threadId: 'sc-2', site: 'unlimited.com' })).status, 404)
+	assert.equal((await call('POST', '/site-claim', { threadId: 'nobody', site: 'linkedin.com' })).status, 404)
+	assert.equal((await call('POST', '/site-claim', { threadId: 'sc-2' })).status, 400)
+	const holders = { 'linkedin.com': { max: 1, holders: ['sc-1'] } }
+	assert.deepEqual((await call('GET', '/displays')).json.claims, holders)
+	assert.deepEqual((await call('GET', '/health')).json.claims, holders)
+	assert.deepEqual((await call('POST', '/site-release', { threadId: 'sc-1', site: 'linkedin.com' })).json, { released: true })
+	assert.deepEqual((await call('POST', '/site-claim', { threadId: 'sc-2', site: 'linkedin.com' })).json, { granted: true })
+	// releasing the display releases the claim
+	await call('POST', '/release', { threadId: 'sc-2' })
+	assert.deepEqual((await call('GET', '/displays')).json.claims['linkedin.com'].holders, [])
+	await call('POST', '/release', { threadId: 'sc-1' })
+})

@@ -5,6 +5,7 @@ import { DisplayAllocator } from './allocator.js'
 import { createServer } from './api.js'
 import { parseMeminfo } from './memory.js'
 import { RealRunner } from './runner.js'
+import { loadSites } from './sites.js'
 import { FileStore } from './store.js'
 
 const log = (m) => console.log(`${new Date().toISOString()} ${m}`)
@@ -16,9 +17,11 @@ if (!token) {
 }
 const minutes = (k, name) => (e[k] ? { [name]: Number(e[k]) * 60_000 } : {})
 
+const stateDir = e.DISPLAYD_STATE_DIR || '/var/lib/displayd'
 const allocator = new DisplayAllocator({
+	sites: loadSites(e.DISPLAYD_SITES_FILE || `${stateDir}/sites.json`),
 	runner: new RealRunner({ root: e.DISPLAYD_CONTEXT_DIR || '/run/pim/displays' }),
-	store: new FileStore(e.DISPLAYD_STATE_DIR || '/var/lib/displayd'),
+	store: new FileStore(stateDir),
 	readMemory: async () => parseMeminfo(readFileSync('/proc/meminfo', 'utf8')),
 	log,
 	config: { ...(e.DISPLAYD_MAX_DISPLAYS ? { maxDisplays: Number(e.DISPLAYD_MAX_DISPLAYS) } : {}), ...minutes('DISPLAYD_IDLE_TTL_MIN', 'ttlMs'), ...minutes('DISPLAYD_BROWSER_TTL_MIN', 'browserTtlMs') },

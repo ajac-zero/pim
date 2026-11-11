@@ -24,7 +24,8 @@ afterEach(async () => {
 });
 
 /** A fake displayd that hands out the leases it's given, and records what it's asked. */
-async function displayd(leases: Record<string, Lease | (() => Lease)>) {
+async function displayd(leases: Record<string, Lease | (() => Lease)>, sites: Record<string, { max: number; domains: string[]; down?: boolean }> = {}) {
+	const holders = new Map<string, Set<string>>();
 	const seen: { url: string; body: any }[] = [];
 	const server = http.createServer((req, res) => {
 		const chunks: Buffer[] = [];
@@ -32,10 +33,19 @@ async function displayd(leases: Record<string, Lease | (() => Lease)>) {
 		req.on("end", () => {
 			const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : undefined;
 			seen.push({ url: req.url!, body });
-			res.writeHead(200, { "content-type": "application/json" });
+			const down = req.url === "/site-claim" && (sites[body.site] as { down?: boolean }).down;
+			res.writeHead(down ? 500 : 200, { "content-type": "application/json" });
 			const resolve = (one: Lease | (() => Lease)) => (typeof one === "function" ? one() : one);
 			if (req.url === "/acquire") res.end(JSON.stringify({ lease: resolve(leases[body.threadId]!) }));
 			else if (req.url === "/displays") res.end(JSON.stringify({ displays: Object.values(leases).map(resolve) }));
+			else if (req.url === "/sites") res.end(JSON.stringify({ sites }));
+			else if (req.url === "/site-claim" && down) res.end("{}");
+			else if (req.url === "/site-claim") {
+				const held = holders.get(body.site) ?? holders.set(body.site, new Set()).get(body.site)!;
+				const granted = held.has(body.threadId) || held.size < sites[body.site]!.max;
+				if (granted) held.add(body.threadId);
+				res.end(JSON.stringify(granted ? { granted } : { granted, holders: [...held] }));
+			} else if (req.url === "/site-release") res.end(JSON.stringify({ released: holders.get(body.site)?.delete(body.threadId) ?? false }));
 			else res.end("{}");
 		});
 	});
@@ -99,14 +109,14 @@ function fakeWorld(primary: { cookies: unknown[]; storage?: [string, string][] }
 	return { devTools, launch, calls, launches, kills, channels };
 }
 
-async function setup(options: { leases: Record<string, Lease | (() => Lease)>; cookies?: unknown[]; storage?: [string, string][]; origins?: string[]; now?: () => number }) {
+async function setup(options: { leases: Record<string, Lease | (() => Lease)>; cookies?: unknown[]; storage?: [string, string][]; origins?: string[]; now?: () => number; sites?: Record<string, { max: number; domains: string[]; down?: boolean }> }) {
 	const world = fakeWorld({ cookies: options.cookies ?? COOKIES, ...(options.storage ? { storage: options.storage } : {}) });
 	const primaryProfile = path.join(dir, "primary");
 	await fs.mkdir(primaryProfile, { recursive: true });
 	await fs.writeFile(path.join(primaryProfile, "DevToolsActivePort"), `${PRIMARY_PORT}\n/devtools/browser/x\n`);
 	const storageOrigins = path.join(dir, "storage-origins.json");
 	if (options.origins) await fs.writeFile(storageOrigins, JSON.stringify(options.origins));
-	const fake = await displayd(options.leases);
+	const fake = await displayd(options.leases, options.sites);
 	const root = path.join(dir, "threads");
 	const primaryConnects: number[] = [];
 	const browsers = new ThreadBrowsers({
@@ -203,6 +213,70 @@ describe("a browser for each thread", () => {
 		expect(channel.note).toBe(SIGNED_OUT);
 		expect(SIGNED_OUT).toContain("ask the person to sign in on the Primary desktop in Computer; never ask for credentials in chat");
 		expect(calls.some((call) => call.method === "Storage.setCookies")).toBe(false);
+	});
+
+	it("copies a limited site's cookies into one thread's browser at a time, and into the next once the first lets go", async () => {
+		const cookies = [
+			{ name: "li_at", value: "1", domain: ".www.linkedin.com", path: "/", secure: true, httpOnly: true },
+			{ name: "bcookie", value: "2", domain: ".licdn.com", path: "/", secure: true, httpOnly: false },
+			{ name: "notlinkedin", value: "3", domain: ".evilinkedin.com", path: "/", secure: false, httpOnly: false },
+			{ name: "sid", value: "abc", domain: ".example.com", path: "/", secure: true, httpOnly: true },
+		];
+		const world = await setup({ leases: { a: lease("a", 0), b: lease("b", 1) }, cookies, sites: { "linkedin.com": { max: 1, domains: ["linkedin.com", "licdn.com"] } } });
+		const set = (port: number) => world.calls.filter((call) => call.port === port && call.method === "Storage.setCookies").flatMap((call) => call.params.cookies.map((cookie: any) => cookie.name));
+		const noop = () => {};
+		const first = await world.browsers.connect("a", noop, noop);
+		expect(first.note).toBeUndefined();
+		expect(set(9320).sort()).toEqual(["bcookie", "li_at", "notlinkedin", "sid"]);
+
+		// The second thread gets everything but LinkedIn's, and is told which site was left out.
+		const sent: any[] = [];
+		const link = new Link({ root: dir, exec: async () => { throw new Error("no"); }, browser: { connect: async () => { throw new Error("primary must not be used"); }, running: async () => false, stop: async () => {} }, threadBrowsers: world.browsers }, (message) => sent.push(JSON.parse(String(message))));
+		const connect = async (id: string, thread: string) => {
+			link.receive(JSON.stringify({ type: "call", id, op: "browser_connect", args: { thread } }));
+			for (let waited = 0; !sent.some((message) => message.id === id) && waited < 2_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+			return sent.find((message) => message.id === id).result;
+		};
+		const refused = "Signed-in access to linkedin.com is limited to 1 display(s) at a time to avoid account flags, and another chat holds it. Use the Primary desktop for linkedin.com (ask the person to do the task there or wait), or retry later; never ask for credentials in chat.";
+		expect((await connect("c1", "b")).note).toBe(refused);
+		expect(set(9321).sort()).toEqual(["notlinkedin", "sid"]);
+		// Still held: connecting again repeats the note and copies nothing more.
+		expect((await connect("c2", "b")).note).toBe(refused);
+		expect(set(9321).sort()).toEqual(["notlinkedin", "sid"]);
+
+		// The first thread's browser stops; the second reconnects and gets LinkedIn's cookies alone, once.
+		await world.browsers.stop("a");
+		expect(world.displayd.seen.filter((r) => r.url === "/site-release").map((r) => r.body)).toEqual([{ threadId: "a", site: "linkedin.com" }]);
+		const retried = await connect("c3", "b");
+		expect(retried.note).toBeUndefined();
+		expect(set(9321).sort()).toEqual(["bcookie", "li_at", "notlinkedin", "sid"]);
+		expect(world.launches).toHaveLength(2);
+		// And now the first cannot have it back.
+		expect((await world.browsers.connect("a", noop, noop)).note).toBe(refused);
+		expect(set(9320).filter((name) => name === "li_at")).toHaveLength(1);
+	});
+
+	it("lets go of a limited site's slot when every browser is killed", async () => {
+		const cookies = [{ name: "li_at", value: "1", domain: ".linkedin.com", path: "/" }];
+		const world = await setup({ leases: { a: lease("a", 0) }, cookies, sites: { "linkedin.com": { max: 1, domains: ["linkedin.com"] } } });
+		await world.browsers.connect("a", () => {}, () => {});
+		await world.browsers.killAll();
+		expect(world.displayd.seen.filter((r) => r.url === "/site-release").map((r) => r.body)).toEqual([{ threadId: "a", site: "linkedin.com" }]);
+	});
+
+	it("says displayd could not be reached, not that another chat holds the site, when the claim gets no answer", async () => {
+		const cookies = [{ name: "li_at", value: "1", domain: ".linkedin.com", path: "/" }, { name: "sid", value: "abc", domain: ".example.com", path: "/" }];
+		const world = await setup({ leases: { a: lease("a", 0) }, cookies, sites: { "linkedin.com": { max: 1, domains: ["linkedin.com"], down: true } } });
+		const channel = await world.browsers.connect("a", () => {}, () => {});
+		expect(channel.note).toMatch(/displayd could not be reached/);
+		expect(channel.note).not.toMatch(/another chat holds it/);
+		expect(world.calls.find((call) => call.method === "Storage.setCookies")!.params.cookies.map((c: any) => c.name)).toEqual(["sid"]);
+	});
+
+	it("copies every cookie when displayd lists no limited sites", async () => {
+		const { browsers, calls } = await setup({ leases: { a: lease("a", 0) }, cookies: [{ name: "li_at", value: "1", domain: ".linkedin.com", path: "/" }] });
+		expect((await browsers.connect("a", () => {}, () => {})).note).toBeUndefined();
+		expect(calls.find((call) => call.method === "Storage.setCookies")!.params.cookies).toHaveLength(1);
 	});
 
 	it("copies the localStorage of the listed origins only", async () => {

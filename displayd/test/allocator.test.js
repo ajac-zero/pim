@@ -278,3 +278,79 @@ test('a driver that dies makes the display unhealthy, and it is reaped', async (
 	assert.equal(a.get('t1'), null)
 	assert.equal(runner.procs.size, 0)
 })
+
+const SITES = { 'linkedin.com': { max: 1, domains: ['linkedin.com', 'licdn.com'] }, 'bank.example': { max: 2, domains: ['bank.example'] } }
+
+test('a limited site has as many holders as its max, and a claim is idempotent', async () => {
+	const a = make({ sites: SITES })
+	await up(a, 't1')
+	await up(a, 't2')
+	await up(a, 't3')
+	assert.deepEqual(await a.claim('t1', 'linkedin.com'), { granted: true })
+	assert.deepEqual(await a.claim('t1', 'linkedin.com'), { granted: true })
+	assert.deepEqual(await a.claim('t2', 'linkedin.com'), { granted: false, holders: ['t1'] })
+	// another site has its own count, and a max of two
+	assert.deepEqual(await a.claim('t2', 'bank.example'), { granted: true })
+	assert.deepEqual(await a.claim('t1', 'bank.example'), { granted: true })
+	assert.deepEqual(await a.claim('t3', 'bank.example'), { granted: false, holders: ['t2', 't1'] })
+	assert.equal(await a.claim('nobody', 'linkedin.com'), null) // no display, no claim
+	assert.deepEqual(a.claims()['linkedin.com'], { max: 1, holders: ['t1'] })
+	assert.deepEqual((await a.health()).claims['linkedin.com'], { max: 1, holders: ['t1'] })
+
+	assert.equal(await a.releaseSite('t1', 'linkedin.com'), true)
+	assert.equal(await a.releaseSite('t1', 'linkedin.com'), false)
+	assert.deepEqual(await a.claim('t2', 'linkedin.com'), { granted: true })
+})
+
+test('claims go with the lease: released, reaped, preempted or gone', async () => {
+	const a = make({ sites: { 'linkedin.com': { max: 1, domains: ['linkedin.com'] } }, config: { maxDisplays: 2 } })
+	const claimed = async (t) => (await a.claim(t, 'linkedin.com'))?.granted
+	await up(a, 't1')
+	await up(a, 't2')
+	assert.equal(await claimed('t1'), true)
+	assert.equal(await claimed('t2'), false)
+	await a.release('t1')
+	assert.deepEqual(a.claims()['linkedin.com'].holders, [])
+	assert.equal(await claimed('t2'), true)
+
+	// reaped for idleness
+	await up(a, 't3')
+	advance(11 * MIN)
+	await a.tick()
+	assert.deepEqual(a.claims()['linkedin.com'].holders, [])
+	assert.equal(await claimed('t3'), undefined) // t3 was reaped too: it has no display to claim with
+
+	// preempted for a queued thread
+	await up(a, 't4')
+	await up(a, 't5')
+	assert.equal(await claimed('t4'), true)
+	advance(3 * MIN)
+	await a.touch('t5')
+	await a.acquire('t6', 's1') // queued: no slot; t4 is the longest idle
+	assert.equal(a.get('t4').reason, 'preempted')
+	assert.deepEqual(a.claims()['linkedin.com'].holders, [])
+})
+
+test('claims survive a restart with their displays, and go with the ones that did not', async () => {
+	const dir = mkdtempSync(path.join(tmpdir(), 'displayd-'))
+	try {
+		store = new FileStore(dir)
+		const sites = { 'linkedin.com': { max: 2, domains: ['linkedin.com'] } }
+		const before = make({ sites })
+		await up(before, 't1')
+		const dead = await up(before, 't2')
+		await before.claim('t1', 'linkedin.com')
+		await before.claim('t2', 'linkedin.com')
+		runner.crash(dead.id)
+		const after = make({ sites, store: new FileStore(dir) })
+		await after.recover()
+		assert.deepEqual(after.claims()['linkedin.com'].holders, ['t1'])
+		assert.deepEqual(new FileStore(dir).loadClaims(), [{ threadId: 't1', site: 'linkedin.com' }])
+		// a site removed from the config drops its claims
+		const none = make({ store: new FileStore(dir) })
+		await none.recover()
+		assert.deepEqual(none.claims(), {})
+	} finally {
+		rmSync(dir, { recursive: true, force: true })
+	}
+})

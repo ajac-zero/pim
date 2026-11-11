@@ -84,7 +84,6 @@ export function ComputerDialog({
     onError: (error) => toast.error(error.message),
   });
   const [latency, setLatency] = useState<ScreenLatency | null>(null);
-  const [size, setSize] = useState({ width: 16, height: 10 });
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -103,6 +102,13 @@ export function ComputerDialog({
             <Dialog.Title className="min-w-0 flex-1 truncate font-medium text-[15px]">
               {t("computer")}
             </Dialog.Title>
+            {live && displays.length > 0 && (
+              <DisplayList
+                displays={displays}
+                selected={selected?.threadId ?? null}
+                onSelect={setPicked}
+              />
+            )}
             {live && latency && <Latency latency={latency} />}
             {live && (
               <Action
@@ -119,27 +125,25 @@ export function ComputerDialog({
             </Dialog.Close>
           </header>
           {live && displays.length > 0 && (
-            <DisplayList
-              displays={displays}
-              selected={selected?.threadId ?? null}
-              onSelect={setPicked}
-            />
-          )}
-          {live && selected && (
-            <TakeOver
-              display={selected}
-              pending={control.isPending}
-              onControl={(mode) => control.mutate(mode)}
-            />
+            // Always there, so the window is as tall for every display.
+            <div className="flex h-10 items-center">
+              {selected && (
+                <TakeOver
+                  display={selected}
+                  pending={control.isPending}
+                  onControl={(mode) => control.mutate(mode)}
+                />
+              )}
+            </div>
           )}
           <div
             ref={frame}
-            // The desktop as large as the window allows, in its own shape, below the header; the whole screen on a phone.
-            // Without one, just room for what it says.
+            // The desktop as large as the window allows, always in the same shape whatever display it shows,
+            // which is scaled to fit; the whole screen on a phone. Without one, just room for what it says.
             style={
               {
-                "--desktop-width": `min(calc(100vw - 4rem), calc((100dvh - 7rem) * ${size.width / size.height}))`,
-                "--desktop-ratio": `${size.width} / ${size.height}`,
+                "--desktop-width": `min(calc(100vw - 4rem), calc((100dvh - 8rem) * 1.6))`,
+                "--desktop-ratio": "16 / 10",
               } as CSSProperties
             }
             className={cn(
@@ -162,7 +166,6 @@ export function ComputerDialog({
                 display={selected?.threadId ?? null}
                 input={!selected || selected.control === "user"}
                 onLatency={setLatency}
-                onSize={(width, height) => setSize({ width, height })}
               />
             ) : (
               <NotLive status={status} />
@@ -174,7 +177,7 @@ export function ComputerDialog({
   );
 }
 
-/** The primary desktop and each chat's display, to pick what the view shows. */
+/** The primary desktop and each chat's display as compact buttons, to pick what the view shows; each says what it is on hover. */
 function DisplayList({
   displays,
   selected,
@@ -189,56 +192,67 @@ function DisplayList({
   const item = (
     active: boolean,
     key: string,
+    name: string,
     onClick: () => void,
     children: ReactNode,
+    badge?: ReactNode,
   ) => (
-    <button
-      key={key}
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={cn(
-        "flex max-w-56 shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        active
-          ? "bg-accent text-foreground"
-          : "text-muted-foreground hover:bg-accent/50",
-      )}
-    >
-      {children}
-    </button>
+    <Tooltip key={key}>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-pressed={active}
+          aria-label={name}
+          onClick={onClick}
+          className={cn(
+            "relative flex h-7 min-w-7 shrink-0 items-center justify-center rounded-full border px-2 text-xs tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            active
+              ? "border-foreground/30 bg-accent font-medium text-foreground"
+              : "border-transparent text-muted-foreground hover:bg-accent/50",
+          )}
+        >
+          {children}
+          {badge}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-64">{name}</TooltipContent>
+    </Tooltip>
   );
   return (
-    <nav
-      aria-label={t("computerDisplays")}
-      className="flex min-w-0 gap-2 overflow-x-auto px-4 pb-2 sm:w-0 sm:min-w-full"
-    >
-      {item(
-        selected === null,
-        "primary",
-        () => onSelect(null),
-        <>
-          <Monitor className="size-3.5 shrink-0" />
-          <span className="truncate">{t("computerPrimary")}</span>
-        </>,
-      )}
-      {displays.map((display) =>
-        item(
-          selected === display.threadId,
-          display.threadId,
-          () => onSelect(display.threadId),
-          <>
-            <span className="truncate">
-              {display.title || t("computerDisplayUntitled")}
-            </span>
-            <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
-              {display.control === "user"
-                ? t("computerDisplayYours")
-                : text(display)}
-            </span>
-          </>,
-        ),
-      )}
-    </nav>
+    <TooltipProvider>
+      <nav
+        aria-label={t("computerDisplays")}
+        className="flex min-w-0 items-center gap-1 overflow-x-auto px-1 py-1"
+      >
+        {item(
+          selected === null,
+          "primary",
+          t("computerPrimary"),
+          () => onSelect(null),
+          <Monitor className="size-3.5" />,
+        )}
+        {displays.map((display, index) => {
+          const state =
+            display.control === "user"
+              ? t("computerDisplayYours")
+              : text(display);
+          return item(
+            selected === display.threadId,
+            display.threadId,
+            `${display.title || t("computerDisplayUntitled")}: ${state}`,
+            () => onSelect(display.threadId),
+            index + 1,
+            display.state === "queued" ? (
+              <span className="-top-1 -right-1 absolute rounded-full bg-muted px-1 text-[9px] text-muted-foreground leading-3.5">
+                #{display.position ?? 0}
+              </span>
+            ) : display.control === "user" ? (
+              <span className="-top-0.5 -right-0.5 absolute size-2 rounded-full bg-primary" />
+            ) : null,
+          );
+        })}
+      </nav>
+    </TooltipProvider>
   );
 }
 
@@ -255,7 +269,7 @@ function TakeOver({
   const { t } = useI18n();
   const yours = display.control === "user";
   return (
-    <div className="flex items-center gap-3 px-4 pb-2">
+    <div className="flex min-w-0 flex-1 items-center gap-3 px-4">
       <p className="min-w-0 flex-1 text-muted-foreground text-xs">
         {yours ? t("computerYouControl") : t("computerWatchOnly")}
       </p>
@@ -379,14 +393,12 @@ function Desktop({
   display,
   input,
   onLatency,
-  onSize,
 }: {
   /** The chat whose display it shows, or null for the primary desktop. */
   display: string | null;
   /** Whether what you do goes to it; a chat's display is watched only until you take it over. */
   input: boolean;
   onLatency: (latency: ScreenLatency | null) => void;
-  onSize: (width: number, height: number) => void;
 }) {
   const { t } = useI18n();
   const holder = useRef<HTMLDivElement | null>(null);
@@ -430,13 +442,6 @@ function Desktop({
   useEffect(() => {
     holder.current?.querySelector("canvas")?.setAttribute("aria-label", label);
   }, [label]);
-
-  const width = state.status === "live" ? state.width : 0;
-  const height = state.status === "live" ? state.height : 0;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the size, not the callback, changes.
-  useEffect(() => {
-    if (width && height) onSize(width, height);
-  }, [width, height]);
 
   useEffect(() => {
     // 4004: the space said why it can't show it; anything else is a drop, so it tries again.

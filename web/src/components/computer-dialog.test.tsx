@@ -82,14 +82,15 @@ describe("the Computer view's displays", () => {
     });
     mount(<ComputerDialog open chat="a" onOpenChange={() => {}} />);
     const list = await screen.findByRole("navigation", { name: "Displays" });
-    const buttons = [...list.querySelectorAll("button")].map(
-      (button) => button.textContent,
-    );
+    const buttons = [...list.querySelectorAll("button")].map((button) => [
+      button.textContent,
+      button.getAttribute("aria-label"),
+    ]);
     expect(buttons).toEqual([
-      "Primary desktop",
-      "Plan the tripIdle 4m",
-      "Untitled chatYou",
-      "Book itQueued #2",
+      ["", "Primary desktop"],
+      ["1", "Plan the trip: Idle 4m"],
+      ["2", "Untitled chat: You"],
+      ["3#2", "Book it: Queued #2"],
     ]);
     // The chat you're in is shown, to watch only until you take it over.
     expect(

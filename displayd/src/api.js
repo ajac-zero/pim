@@ -43,10 +43,19 @@ export function createServer({ allocator, token, sleepFn = sleep }) {
 			if (!timingSafeEqual(digest(given), want)) throw new HttpError(401, 'unauthorized')
 			const route = `${req.method} ${new URL(req.url, 'http://x').pathname}`
 			if (route === 'GET /health') return send(200, { ok: true, ...(await allocator.health()) })
-			if (route === 'GET /displays') return send(200, { displays: allocator.list() })
-			if (!['POST /acquire', 'POST /release', 'POST /touch', 'POST /control'].includes(route)) throw new HttpError(404, 'not found')
+			if (route === 'GET /displays') return send(200, { displays: allocator.list(), claims: allocator.claims() })
+			if (route === 'GET /sites') return send(200, { sites: allocator.siteLimits })
+			if (!['POST /site-claim', 'POST /site-release', 'POST /acquire', 'POST /release', 'POST /touch', 'POST /control'].includes(route)) throw new HttpError(404, 'not found')
 			const b = await body(req)
 			const threadId = id(b.threadId, 'threadId')
+			if (route === 'POST /site-claim' || route === 'POST /site-release') {
+				const site = id(b.site, 'site')
+				if (!allocator.siteLimits[site]) throw new HttpError(404, `${site} is not a limited site`)
+				if (route === 'POST /site-release') return send(200, { released: await allocator.releaseSite(threadId, site) })
+				const claim = await allocator.claim(threadId, site)
+				if (!claim) throw new HttpError(404, 'the thread has no display')
+				return send(200, claim)
+			}
 			if (route === 'POST /acquire') {
 				const spaceId = id(b.spaceId, 'spaceId')
 				let lease = await allocator.acquire(threadId, spaceId)

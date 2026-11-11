@@ -42,10 +42,12 @@ export const DEFAULTS = {
 
 export class DisplayAllocator {
 	#leases = []
+	#claims = [] // {threadId, site}: which threads hold a slot of a limited site
 	#lock = Promise.resolve()
 	#lastPreempt = -Infinity
 
-	constructor({ runner, store, readMemory, now = Date.now, log = () => {}, config = {} }) {
+	constructor({ runner, store, readMemory, now = Date.now, log = () => {}, config = {}, sites = {} }) {
+		this.siteLimits = sites
 		this.runner = runner
 		this.store = store
 		this.readMemory = readMemory
@@ -115,8 +117,41 @@ export class DisplayAllocator {
 		return { position, estimatedWaitSec: Math.ceil(wait / 1000), holders: holders.map((h) => ({ threadId: h.threadId, idleSec: Math.floor(this.#idleMs(h) / 1000), state: h.state })) }
 	}
 
+	// Every change to the table ends here. A claim lives only as long as its thread's lease, so
+	// whatever way a lease ended (released, reaped, preempted, timed out), its claims go too.
 	#persist() {
-		this.store.save(this.#leases)
+		this.#claims = this.#claims.filter((c) => this.#current(c.threadId))
+		this.store.save(this.#leases, this.#claims)
+	}
+
+	// The limited sites with their limit, domains and the threads that hold a slot.
+	claims() {
+		return Object.fromEntries(Object.entries(this.siteLimits).map(([site, { max }]) => [site, { max, holders: this.#claims.filter((c) => c.site === site).map((c) => c.threadId) }]))
+	}
+
+	// Takes a slot of a limited site for a thread that has a lease; asking again is a grant. Returns
+	// null when the thread has no lease, else {granted} with the holders when it is not.
+	claim(threadId, site) {
+		return this.#serial(async () => {
+			if (!this.#current(threadId)) return null
+			this.#persist() // forget the claims of leases that ended since
+			if (this.#claims.some((c) => c.threadId === threadId && c.site === site)) return { granted: true }
+			const holders = this.#claims.filter((c) => c.site === site).map((c) => c.threadId)
+			if (holders.length >= this.siteLimits[site].max) return { granted: false, holders }
+			this.#claims.push({ threadId, site })
+			this.log(`thread ${threadId} holds a slot of ${site}`)
+			this.#persist()
+			return { granted: true }
+		})
+	}
+
+	releaseSite(threadId, site) {
+		return this.#serial(async () => {
+			const before = this.#claims.length
+			this.#claims = this.#claims.filter((c) => !(c.threadId === threadId && c.site === site))
+			this.#persist()
+			return this.#claims.length < before
+		})
 	}
 
 	#view(l) {
@@ -303,6 +338,7 @@ export class DisplayAllocator {
 				}
 			}
 			this.#leases = kept
+			this.#claims = (this.store.loadClaims?.() ?? []).filter((c) => this.siteLimits[c.site])
 			const owned = new Set(kept.filter((l) => l.pgid).map((l) => l.id))
 			for (const { id, pgid } of this.runner.listContexts()) {
 				if (owned.has(id)) continue
@@ -325,7 +361,7 @@ export class DisplayAllocator {
 				displays.push({ id: l.id, threadId: l.threadId, state: l.state, control: l.control ?? 'agent', ...(l.reason ? { reason: l.reason } : {}), ...(l.state === 'queued' ? this.#queueStatus(l) : {}), display: l.display, alive: started ? await this.runner.probe(this.#spec(l), l.pgid) : false, driver: started ? await this.runner.probeDriver(this.#spec(l)) : false })
 			}
 			const used = this.#leases.filter((l) => l.slot !== null).length
-			return { slots: { max: this.config.maxDisplays, used, free: this.config.maxDisplays - used }, memAvailableBytes: mem?.memAvailableBytes ?? null, memTotalBytes: mem?.memTotalBytes ?? null, queued: this.#leases.filter((l) => l.state === 'queued').length, displays }
+			return { slots: { max: this.config.maxDisplays, used, free: this.config.maxDisplays - used }, memAvailableBytes: mem?.memAvailableBytes ?? null, memTotalBytes: mem?.memTotalBytes ?? null, queued: this.#leases.filter((l) => l.state === 'queued').length, claims: this.claims(), displays }
 		})
 	}
 

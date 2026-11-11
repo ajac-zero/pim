@@ -85,12 +85,33 @@ Loopback, JSON, `Authorization: Bearer $DISPLAYD_TOKEN` on every request.
 | `POST /touch {threadId, browser?, viewer?}` | Heartbeat; `viewer` marks the person watching the display; 404 when the thread has no display |
 | `POST /control {threadId, mode}` | `user` takes the display over, `agent` hands it back; 404 when the thread has no display |
 | `POST /release {threadId}` | Kills the display and waits; `{released}` |
-| `GET /displays` | Every lease, queued ones with their queue status |
-| `GET /health` | Slots, queue length, `MemAvailable`, and each display's liveness now, with `driver` for the Cua Driver's |
+| `GET /displays` | Every lease, queued ones with their queue status, and `claims` |
+| `GET /health` | Slots, queue length, `MemAvailable`, each display's liveness now, with `driver` for the Cua Driver's, and `claims` |
+| `GET /sites` | The limited sites: `{sites: {<site>: {max, domains}}}` |
+| `POST /site-claim {threadId, site}` | `{granted: true}`, or `{granted: false, holders}` when `max` threads hold the site; asking again is a grant; 404 when the thread has no display or the site isn't limited |
+| `POST /site-release {threadId, site}` | `{released}` |
 
 A lease is `{id, threadId, spaceId, state, display, env, vncPort, cdpPort, driver: {base, tokenFile}, browser, createdAt,
 lastTouch, attempts, lastError}`. A lease is active only once the driver at `driver.base` answers a
 loopback connect; call its `POST /mcp` with `Authorization: Bearer <contents of tokenFile>`.
+
+## Limited sites
+
+To keep a person's account from being seen signed in from several places at once, a site can be
+limited to `max` displays at a time. The limits are in `sites.json` in the state directory
+(`DISPLAYD_SITES_FILE`), written with the default below when missing and read at start:
+
+```json
+{ "linkedin.com": { "max": 1, "domains": ["linkedin.com", "licdn.com"] } }
+```
+
+`domains` (default: the site's name) match a host and its subdomains. pim-computer claims a slot
+for each limited site among the primary browser's cookies before copying them into a thread's
+browser, and copies only the cookies of sites it was granted; a thread that is refused is told, and
+is the one to ask the person to use the Primary desktop. A claim ends with its thread's display
+(released, reaped, preempted), with `POST /site-release`, and when that thread's browser stops. Claims
+are kept in `state.json` and survive a restart with their displays. Desktop tools are not limited.
+Adding a site is an entry in the file.
 
 ## Run
 

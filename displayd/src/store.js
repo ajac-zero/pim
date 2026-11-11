@@ -17,19 +17,33 @@ export class FileStore {
 			throw e
 		}
 	}
-	save(leases) {
+	loadClaims() {
+		try {
+			const data = JSON.parse(readFileSync(this.file, 'utf8'))
+			return Array.isArray(data.claims) ? data.claims : []
+		} catch (e) {
+			if (e.code === 'ENOENT') return []
+			throw e
+		}
+	}
+	save(leases, claims = []) {
 		const tmp = `${this.file}.tmp`
-		writeFileSync(tmp, JSON.stringify({ version: 1, leases }), { mode: 0o600 })
+		writeFileSync(tmp, JSON.stringify({ version: 1, leases, claims }), { mode: 0o600 })
 		renameSync(tmp, this.file)
 	}
 }
 
 export class MemoryStore {
 	leases = []
+	claims = []
 	load() {
 		return structuredClone(this.leases)
 	}
-	save(leases) {
+	loadClaims() {
+		return structuredClone(this.claims)
+	}
+	save(leases, claims = []) {
 		this.leases = structuredClone(leases)
+		this.claims = structuredClone(claims)
 	}
 }

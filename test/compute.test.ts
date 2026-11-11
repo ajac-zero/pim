@@ -98,7 +98,7 @@ describe("a compute provider's secrets", () => {
 		expect(withoutSecrets(`bad ${TOKEN}`, provider)).toBe("bad [hidden]");
 
 		// A Worker without the Sandbox binding says so rather than throwing.
-		expect(await checkCompute(prepareComputeProvider({ kind: "cloudflare-sandbox" }, null), {})).toMatchObject({ ok: false, message: expect.stringContaining("no Sandbox binding") });
+		expect(await checkCompute(prepareComputeProvider({ kind: "cloudflare-sandbox" }, null), {})).toMatchObject({ ok: false, message: expect.stringContaining("no WorkspaceContainer and WorkspaceCatalog bindings") });
 	});
 
 	it("stay in the Gallery: the summaries a space reads have none", async () => {

@@ -22,6 +22,7 @@ import { ReplyImages } from "~/components/chat/reply-blocks";
 import type { MessageItem } from "~/lib/openresponses";
 import { ApiError, pim, type StoredUiState } from "~/lib/pim-api";
 import {
+  checkUiState,
   compile,
   evaluate,
   initialState,
@@ -479,5 +480,156 @@ describe("what a ui block holds, kept by Pim", () => {
       0, 5,
     ]);
     expect(kept[BLOCK]?.state.values?.["knn.d1"]).toBe("5");
+  });
+});
+
+/** A slider-driven price calculator, which the docs show. */
+const CALCULATOR = [
+  "{@state seats = 8}",
+  '<slider name="seats" label="Seats" min={1} max={50} unit="seats"/>',
+  "{@let price = seats * 29}",
+  "<text>{seats} seats cost \u0024{price} a month</text>",
+].join("\n");
+
+const slider = (name: string) =>
+  document.querySelector<HTMLInputElement>(
+    `[data-field="${name}"] input`,
+  ) as HTMLInputElement;
+
+describe("a checkbox, slider and chart in a reply", () => {
+  it("recalculates a derived value as the slider moves", () => {
+    const { container } = shown(CALCULATOR, { send: vi.fn() });
+    expect(container.textContent).toContain("8 seats cost $232 a month");
+    expect(slider("seats").value).toBe("8");
+    expect(container.querySelector("output")?.textContent).toBe("8 seats");
+    fireEvent.change(slider("seats"), { target: { value: "20" } });
+    expect(container.textContent).toContain("20 seats cost $580 a month");
+    expect(container.querySelector("output")?.textContent).toBe("20 seats");
+    expect(slider("seats").value).toBe("20");
+  });
+
+  it("recalculates from a checkbox as it is ticked", () => {
+    const { container } = shown(
+      [
+        '<checkbox name="vat" label="Add VAT"/>',
+        "{@let total = vat ? 120 : 100}",
+        "<text>Total {total}</text>",
+      ].join("\n"),
+      { send: vi.fn() },
+    );
+    expect(container.textContent).toContain("Total 100");
+    fireEvent.click(screen.getByLabelText("Add VAT"));
+    expect(container.textContent).toContain("Total 120");
+    expect((screen.getByLabelText("Add VAT") as HTMLInputElement).checked).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByLabelText("Add VAT"));
+    expect(container.textContent).toContain("Total 100");
+  });
+
+  it("draws a chart from state and draws it again when the slider moves", () => {
+    const { container } = shown(
+      [
+        "{@state seats = 2}",
+        '<slider name="seats" label="Seats" min={1} max={10}/>',
+        "{@let rows = [{plan: 'Solo', cost: seats * 10}, {plan: 'Team', cost: seats * 25}]}",
+        '<chart kind="bar" title="Monthly cost" data={rows} x="plan" y="cost"/>',
+        '<badge tone="warn">Estimate</badge>',
+      ].join("\n"),
+      { send: vi.fn() },
+    );
+    const cells = () =>
+      [...container.querySelectorAll("figure tbody td")].map(
+        (cell) => cell.textContent,
+      );
+    expect(cells()).toEqual(["Solo", "20", "Team", "50"]);
+    expect(container.querySelector("figure")?.getAttribute("data-chart")).toBe(
+      "bar",
+    );
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute("aria-label"),
+    ).toBe("Monthly cost");
+    expect(
+      [...container.querySelectorAll("figure th")].map(
+        (cell) => cell.textContent,
+      ),
+    ).toEqual(["plan", "cost"]);
+    fireEvent.change(slider("seats"), { target: { value: "4" } });
+    expect(cells()).toEqual(["Solo", "40", "Team", "100"]);
+    expect(container.querySelector('[data-tone="warn"]')?.textContent).toBe(
+      "Estimate",
+    );
+  });
+
+  it("keeps a slider's and a checkbox's state outside a form through Pim's writer, in a shape Pim accepts", async () => {
+    vi.useFakeTimers();
+    const source = `${CALCULATOR}\n<checkbox name="vat" label="Add VAT"/>`;
+    shown(source, { send: vi.fn() });
+    fireEvent.change(slider("seats"), { target: { value: "30" } });
+    fireEvent.click(screen.getByLabelText("Add VAT"));
+    await vi.advanceTimersByTimeAsync(500);
+    const id = uiBlockId(source);
+    expect(saveUiState).toHaveBeenCalledTimes(1);
+    expect(saveUiState).toHaveBeenCalledWith("m1", id, {
+      version: 0,
+      state: expect.objectContaining({
+        values: expect.objectContaining({ seats: 30, vat: true }),
+      }),
+      submitted: false,
+    });
+    const body = saveUiState.mock.calls[0]?.[2];
+    expect(checkUiState(compile(source), body?.state).ok).toBe(true);
+  });
+
+  it("draws a block again as Pim kept it", async () => {
+    const source = CALCULATOR;
+    kept[uiBlockId(source)] = {
+      version: 3,
+      state: { values: { seats: 40 }, revealed: {}, submitted: {} },
+      submitted: false,
+      updatedAt: 0,
+    };
+    const { container } = shown(source, { send: vi.fn() });
+    await waitFor(() =>
+      expect(container.textContent).toContain("40 seats cost $1160 a month"),
+    );
+    expect(slider("seats").value).toBe("40");
+  });
+
+  it("checks a form's checkbox and slider when it is submitted", () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    shown(
+      '<form id="f" onSubmit={[reveal(), issueNewTurn(formSummary("f"))]}><checkbox name="ok" label="Sure" answer={true} required={true}/><slider name="n" label="Pick" min={0} max={10} answer={4}/></form>',
+      { send },
+    );
+    const submitButton = () =>
+      screen.getByRole("button", { name: "Submit" }) as HTMLButtonElement;
+    expect(submitButton().disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText("Sure"));
+    fireEvent.change(slider("f.n"), { target: { value: "7" } });
+    expect(submitButton().disabled).toBe(false);
+    fireEvent.click(submitButton());
+    expect(screen.getByText("Expected 4")).toBeTruthy();
+    expect(screen.getAllByRole("img", { name: "Wrong" })).toHaveLength(1);
+    expect(screen.getAllByRole("img", { name: "Correct" })).toHaveLength(1);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to Markdown with the new components in it", () => {
+    const { container } = shown("<badge>Hi</badge><gauge/>");
+    expect(container.textContent).toContain("couldn't be shown");
+    cleanup();
+    const source = [
+      '<badge tone="good">Paid</badge>',
+      '<checkbox name="a" label="Receipt"/>',
+      '<slider name="s" label="Seats" min={0} max={9} value={3} unit="seats"/>',
+      '<chart kind="line" data={[1, 2]}/>',
+      "<gauge/>",
+    ].join("\n");
+    const view = shown(source);
+    expect(view.container.textContent).toContain("Paid");
+    expect(view.container.textContent).toContain("Receipt");
+    expect(view.container.textContent).toContain("Seats: 3 seats");
+    expect(view.container.querySelectorAll("table")).toHaveLength(1);
   });
 });

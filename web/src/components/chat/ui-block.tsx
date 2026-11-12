@@ -1,7 +1,9 @@
 import {
   createContext,
+  lazy,
   memo,
   type ReactNode,
+  Suspense,
   useContext,
   useEffect,
   useMemo,
@@ -10,6 +12,7 @@ import {
 } from "react";
 import { Markdown } from "~/components/chat/markdown";
 import { Reply } from "~/components/chat/reply-blocks";
+import type { ChartPoint } from "~/components/chat/ui-chart";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
 import { pim, type StoredUiState } from "~/lib/pim-api";
@@ -31,6 +34,7 @@ import {
   type UiState,
   uiBlockId,
   uiTurn,
+  type Value,
 } from "../../../../src/ui-lang";
 
 /**
@@ -45,6 +49,9 @@ import {
  * a form where a save was lost.
  */
 
+/** The drawn part of a chart is recharts, which only a page with a chart needs. */
+const UiChartView = lazy(() => import("~/components/chat/ui-chart"));
+
 /** A ```ui fence, as the model wrote it. */
 export function isUiBlock(language: string): boolean {
   return language === "ui";
@@ -52,7 +59,7 @@ export function isUiBlock(language: string): boolean {
 
 /** What the tree is drawn with: the events its components raise. */
 type UiEvents = {
-  change: (key: string, value: string) => void;
+  change: (key: string, value: string | number | boolean) => void;
   submit: (form: string) => void;
   click: (key: string) => void;
 };
@@ -375,7 +382,7 @@ function Node({
   const props = node.props;
   // Text that makes up a line of its own is read as text; text inside a
   // component joins the line it belongs to.
-  const own = ["text", "title", "cell", "button"].includes(node.tag);
+  const own = ["text", "title", "cell", "button", "badge"].includes(node.tag);
   const children = <Tree nodes={node.children} locked={locked} inline={own} />;
   switch (node.tag) {
     case "box": {
@@ -488,9 +495,33 @@ function Node({
         </form>
       );
     }
+    case "badge":
+      return (
+        <span
+          data-tone={String(props.tone ?? "default")}
+          className={cn(
+            "inline-flex w-fit items-center rounded-full px-2 py-0.5 text-xs font-medium",
+            props.tone === "muted"
+              ? "bg-muted text-muted-foreground"
+              : props.tone === "good"
+                ? "bg-success/12 text-success"
+                : props.tone === "bad"
+                  ? "bg-destructive/12 text-destructive"
+                  : props.tone === "warn"
+                    ? "bg-agent-amber/15 text-agent-amber"
+                    : "bg-secondary text-foreground",
+          )}
+        >
+          {children}
+        </span>
+      );
+    case "chart":
+      return <Chart props={props} />;
     case "number":
     case "input":
     case "select":
+    case "checkbox":
+    case "slider":
       return <Field node={node} locked={locked} />;
     case "button":
       return (
@@ -527,7 +558,73 @@ function Field({
   const graded = props.graded === true;
   const required = props.required !== false;
   const revealed = props.answer !== undefined;
-  const change = (next: string) => events.change(key, next);
+  const change = (next: string | number | boolean) => events.change(key, next);
+  if (node.tag === "checkbox") {
+    return (
+      <div className="min-w-0" data-field={key}>
+        <label className="flex items-center gap-2 text-[15px]">
+          <input
+            type="checkbox"
+            checked={props.value === true}
+            disabled={isLocked || locked}
+            aria-required={props.required === true}
+            onChange={(event) => change(event.currentTarget.checked)}
+            className="size-4 shrink-0 accent-primary"
+          />
+          {label ?? String(props.name ?? "")}
+          {revealed && <Mark graded={graded} />}
+        </label>
+        {revealed && !graded && props.answer !== undefined && (
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            {t("uiExpected", { answer: props.answer === true ? "✓" : "—" })}
+            {props.explain !== undefined && (
+              <span> · {String(props.explain)}</span>
+            )}
+          </p>
+        )}
+      </div>
+    );
+  }
+  if (node.tag === "slider") {
+    const shown = `${String(props.value)}${props.unit === undefined ? "" : ` ${String(props.unit)}`}`;
+    return (
+      <div className="min-w-0" data-field={key}>
+        <div className="mb-1 flex items-baseline justify-between gap-2 text-[13px] text-muted-foreground">
+          <label htmlFor={`slider-${key}`}>{label}</label>
+          <output
+            htmlFor={`slider-${key}`}
+            className="tabular-nums text-foreground"
+          >
+            {shown}
+          </output>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            id={`slider-${key}`}
+            type="range"
+            min={Number(props.min)}
+            max={Number(props.max)}
+            step={Number(props.step ?? 1)}
+            value={Number(props.value)}
+            disabled={isLocked || locked}
+            aria-label={label ?? String(props.name ?? "")}
+            aria-valuetext={shown}
+            onChange={(event) => change(event.currentTarget.valueAsNumber)}
+            className="h-6 w-full min-w-0 accent-primary disabled:cursor-not-allowed disabled:opacity-50"
+          />
+          {revealed && <Mark graded={graded} />}
+        </div>
+        {revealed && !graded && props.answer !== undefined && (
+          <p className="mt-1 text-[13px] text-muted-foreground">
+            {t("uiExpected", { answer: String(props.answer) })}
+            {props.explain !== undefined && (
+              <span> · {String(props.explain)}</span>
+            )}
+          </p>
+        )}
+      </div>
+    );
+  }
   const field =
     node.tag === "select" ? (
       <select
@@ -569,18 +666,7 @@ function Field({
       )}
       <div className="flex items-center gap-2">
         {field}
-        {revealed && (
-          <span
-            role="img"
-            aria-label={t(graded ? "uiCorrect" : "uiWrong")}
-            className={cn(
-              "shrink-0 font-medium",
-              graded ? "text-success" : "text-destructive",
-            )}
-          >
-            {graded ? "✓" : "✗"}
-          </span>
-        )}
+        {revealed && <Mark graded={graded} />}
       </div>
       {revealed && !graded && props.answer !== undefined && (
         <p className="mt-1 text-[13px] text-muted-foreground">
@@ -591,5 +677,61 @@ function Field({
         </p>
       )}
     </div>
+  );
+}
+
+/** The mark a graded field shows once its form is revealed. */
+function Mark({ graded }: { graded: boolean }) {
+  const { t } = useI18n();
+  return (
+    <span
+      role="img"
+      aria-label={t(graded ? "uiCorrect" : "uiWrong")}
+      className={cn(
+        "shrink-0 font-medium",
+        graded ? "text-success" : "text-destructive",
+      )}
+    >
+      {graded ? "✓" : "✗"}
+    </span>
+  );
+}
+
+/** A chart: drawn for those who see, with its data as a table for those who don't. */
+function Chart({ props }: { props: Record<string, Value> }) {
+  const { t } = useI18n();
+  const kind = props.kind as "bar" | "line" | "pie";
+  const points = (Array.isArray(props.data) ? props.data : []) as ChartPoint[];
+  const title = props.title === undefined ? undefined : String(props.title);
+  const label = title ?? t("uiChart", { kind });
+  return (
+    <figure className="my-2 min-w-0" data-chart={kind}>
+      {title !== undefined && (
+        <figcaption className="mb-1 font-semibold">{title}</figcaption>
+      )}
+      <div role="img" aria-label={label}>
+        <Suspense fallback={<div className="h-[220px] rounded-xl bg-muted" />}>
+          <UiChartView kind={kind} points={points} />
+        </Suspense>
+      </div>
+      <table className="sr-only">
+        <caption>{label}</caption>
+        <thead>
+          <tr>
+            <th scope="col">{String(props.x)}</th>
+            <th scope="col">{String(props.y)}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {points.map((point, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: a chart's points are its order
+            <tr key={index}>
+              <td>{point.x}</td>
+              <td>{point.y}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </figure>
   );
 }

@@ -217,4 +217,35 @@ describe("AmpHttpOrbClient", () => {
 			expect(parsed(spy)[0]).toMatchObject({ event: "pim.coding.amp_http_failed" });
 		});
 	});
+	describe("redirects", () => {
+		const workersFetch = (inner: () => Response) => vi.fn<typeof fetch>(async (_url, init) => {
+			if (init?.redirect !== "follow" && init?.redirect !== "manual") throw new TypeError('Invalid redirect value, must be one of "follow" or "manual" ("error" won\'t be implemented since it does not make sense at the edge; use "manual" and check the response status code)');
+			return inner();
+		});
+		const redirect = () => new Response(null, { status: 302, headers: { Location: "https://evil.example/path?secret=abc" } });
+		it("works with a Workers-style fetch that rejects redirect: error", async () => {
+			const { client, fetcher } = fixture({ fetch: workersFetch(() => json({ thread: { id: "T-1", url: "https://ampcode.com/threads/T-1" } }, 201)) });
+			await expect(client.start(start)).resolves.toMatchObject({ threadId: "T-1" });
+			expect(fetcher).not.toHaveBeenCalled();
+		});
+		it("treats a 302 as a definitive non-retryable error and releases the reservation", async () => {
+			const { client, store } = fixture({ fetch: workersFetch(redirect) });
+			const error = await client.start(start).catch((e: Error) => e);
+			expect(error).toMatchObject({ code: "orb_request" });
+			expect(error).not.toBeInstanceOf(OrbUnreachableError);
+			expect((error as Error).message).toContain("302");
+			expect((error as Error).message).not.toMatch(/sgamp_saved|secret=abc|evil\.example/);
+			expect(store.values.get("amp:start:one")).toBeNull();
+			expect(store.values.get("amp:retry:/threads")).toBeUndefined();
+		});
+		it("also refuses redirects on the M2M token request", async () => {
+			const fetcher = workersFetch(redirect);
+			const { client } = fixture({ fetch: fetcher, m2m: async () => ({ clientId: "client", clientSecret: "topsecret" }) });
+			const error = await client.usage("T").catch((e: Error) => e);
+			expect(error).toMatchObject({ code: "orb_request" });
+			expect((error as Error).message).toContain("302");
+			expect((error as Error).message).not.toMatch(/topsecret|secret=abc|evil\.example/);
+			expect(fetcher).toHaveBeenCalledTimes(1);
+		});
+	});
 });

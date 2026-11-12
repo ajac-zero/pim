@@ -77,7 +77,7 @@ export class AmpHttpOrbClient implements OrbClient {
 		} catch (error) {
 			// Only a definitive rejection permits another POST. Network failures,
 			// malformed success responses and 5xx leave the reservation intact.
-			if (error instanceof OrbAuthError || error instanceof AmpRateLimitError || error instanceof AmpBeforeSendError) await this.options.store.put(key, null);
+			if (error instanceof OrbAuthError || error instanceof AmpRateLimitError || error instanceof AmpBeforeSendError || error instanceof AmpRedirectError) await this.options.store.put(key, null);
 			else await this.options.store.put(key, this.#failure ? { pending: true, failure: this.#failure } : { pending: true });
 			throw error;
 		}
@@ -149,7 +149,7 @@ export class AmpHttpOrbClient implements OrbClient {
 		const op = `${(init.method ?? "GET").toUpperCase()} ${path.startsWith("https:") ? new URL(path).pathname : path.split("?")[0]}`;
 		const attempt = (retry?.attempts ?? 0) + 1;
 		try {
-			response = await this.#fetch(path.startsWith("https:") ? path : `https://ampcode.com/api/v2${path}`, { ...init, redirect: "error", signal: AbortSignal.timeout(30_000), headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers } });
+			response = await this.#fetch(path.startsWith("https:") ? path : `https://ampcode.com/api/v2${path}`, { ...init, redirect: "manual", signal: AbortSignal.timeout(30_000), headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers } });
 		} catch (error) {
 			const elapsedMs = this.#now() - began;
 			const errName = error instanceof Error ? error.name : "Error";
@@ -159,6 +159,13 @@ export class AmpHttpOrbClient implements OrbClient {
 		}
 		this.#lastStatus = response.status;
 		const elapsedMs = this.#now() - began;
+		// Never follow redirects (the bearer token must not reach another host).
+		// Workers rejects redirect:"error", so detect them after the fact.
+		if ((response.type as string) === "opaqueredirect" || (response.status >= 300 && response.status <= 399)) {
+			this.#log(op, { status: response.status, errMessage: "redirected" }, elapsedMs, attempt);
+			await response.body?.cancel().catch(() => {});
+			throw new AmpRedirectError(`Amp HTTP API redirected (status ${response.status}); refusing to follow`);
+		}
 		if (!response.ok && response.status !== 404 && response.status !== 401 && response.status !== 403) {
 			const body = snippet(await response.text().catch(() => ""));
 			this.#log(op, { status: response.status, ...(body ? { errMessage: body } : {}) }, elapsedMs, attempt);
@@ -201,6 +208,7 @@ export class AmpHttpOrbClient implements OrbClient {
 }
 class AmpRateLimitError extends OrbUnreachableError {}
 class AmpBeforeSendError extends OrbUnreachableError {}
+class AmpRedirectError extends OrbError { constructor(message: string) { super(message, "orb_request"); } }
 
 /** The API accepts namespace/name, not a repository URL. */
 export function projectName(project: string): string {

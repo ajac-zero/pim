@@ -2118,22 +2118,117 @@ describe("a coding thread's environment", () => {
 		expect(environment.notes).toEqual([".pim/env.json: the cache key \"gone.txt\" matches no file and is left out"]);
 	});
 
-	it("says a backend that keeps no environments is unsupported, with why, and works without one", async () => {
-		const backend = new FakeWorkspaceProvider({ id: "no-environments" });
-		backend.register("git", fakeGit);
-		backend.capabilities.environmentSnapshots = false;
-		codingBackends.registry = workspaceRegistry([backend]);
+	/** Two fake backends, one that keeps environment snapshots ("snapshots") and one that doesn't ("plain"), whose `bash` runs the test's `setup`. */
+	function twoBackends() {
+		const make = (id: string, snapshots: boolean) => {
+			const backend = new FakeWorkspaceProvider({ id });
+			backend.register("git", fakeGit);
+			backend.register("bash", async (context) => {
+				setups.push({ argv: context.argv, cwd: context.cwd, env: context.env, space: undefined });
+				return setup(context);
+			});
+			backend.capabilities.environmentSnapshots = snapshots;
+			return backend;
+		};
+		const backends = { snapshots: make("snapshots", true), plain: make("plain", false) };
+		codingBackends.registry = workspaceRegistry([backends.snapshots, backends.plain]);
+		return backends;
+	}
+	const failing: FakeCommandHandler = async ({ argv }) => (argv[2]!.includes("fail-me") ? { stderr: "fail-me\n", code: 3 } : { stdout: "Done in 8s\n" });
+	const environmentNotices = (messages: { role: string; parts: readonly unknown[] }[]) =>
+		messages.filter((message) => message.role === "notice" && (message.parts[0] as { text: string }).text.startsWith("Environment")).map((message) => (message.parts[0] as { text: string }).text.replace(/\d+(\.\d)? m?s\b/g, "<time>"));
+
+	it("runs the same lifecycle on a backend that keeps no snapshots, and keeps one only where it can", async () => {
+		const runs: Record<string, { kinds: string[]; keys: string[][]; notices: string[]; state: string; reason: string | null }> = {};
+		for (const [label, script, ok] of [["ok", SCRIPT, true], ["failing", "fail-me\n", false]] as const) {
+			for (const provider of ["snapshots", "plain"] as const) {
+				const backends = twoBackends();
+				setup = failing;
+				const { repo } = envRepo({ ".pim/setup.sh": script });
+				codingFaux.setResponses([fauxAssistantMessage("Went on.")]);
+				const { id, stub } = await startThread({ repo, provider });
+				expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+				const status = await stub.status();
+				const events = (await stub.log()).filter((event) => event.kind.startsWith("environment."));
+				runs[`${label}/${provider}`] = {
+					kinds: events.map((event) => event.kind),
+					keys: events.map((event) => Object.keys(event.data ?? {}).sort()),
+					notices: environmentNotices(await inside(stub, (thread) => thread.transcript())),
+					state: status.environment.state,
+					reason: status.stateReason,
+				};
+				expect(status.workspaceProvider).toBe(provider);
+				// Only the backend that can, keeps a snapshot.
+				expect(backends.snapshots.environments.size).toBe(provider === "snapshots" && ok ? 1 : 0);
+				expect(backends.plain.environments.size).toBe(0);
+				expect(status.environment.snapshotKept).toBe(provider === "snapshots" && ok ? true : ok ? false : null);
+				expect(status.environment.state).toBe(ok ? "cached" : "failed");
+				setups.length = 0;
+			}
+			expect(runs[`${label}/plain`]).toEqual(runs[`${label}/snapshots`]);
+		}
+		expect(runs["ok/plain"]!.kinds).toEqual(["environment.started", "environment.step", "environment.built"]);
+		expect(runs["failing/plain"]!.kinds).toEqual(["environment.started", "environment.step", "environment.failed"]);
+		expect(runs["ok/plain"]!.reason).toBeNull();
+		expect(runs["failing/plain"]!.reason).toBe("environment_failed");
+		expect(runs["failing/plain"]!.notices[0]).toMatch(/^Environment setup: exit 3, <time>\n\$ fail-me\nfail-me$/);
+		expect(runs["failing/plain"]!.notices[1]).toContain("Environment: failed: The setup script exited 3: fail-me\nThe agent starts anyway, in the workspace as it is. Retry the environment to run the setup again.");
+	});
+
+	it("shows each step in the transcript before the first message, with its output cut to 2 KiB and redacted", async () => {
 		const { repo } = envRepo();
-		codingFaux.setResponses([fauxAssistantMessage("Worked without one.")]);
+		const secret = `sk-ant-api03-${"A".repeat(40)}`;
+		setup = async () => ({ stdout: `${"x".repeat(3000)}\nkey ${secret}\n\u001b[32mdone\u001b[0m\n` });
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
 		const { id, stub } = await startThread({ repo });
-		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
-		const { environment } = await stub.status();
-		expect(environment).toMatchObject({ state: "unsupported", reason: "The workspace backend no-environments keeps no environments", key: null, source: null, rebuildRequested: false });
-		expect(environment.preparedAt).toEqual(expect.any(Number));
+		await turns(id, 1);
+		const transcript = await inside(stub, (thread) => thread.transcript());
+		const index = transcript.findIndex((message) => message.id.startsWith("environment-"));
+		const first = transcript.findIndex((message) => message.role === "user");
+		expect(index).toBeGreaterThanOrEqual(0);
+		expect(first).toBeGreaterThan(index);
+		const steps = transcript.filter((message) => message.id.startsWith("environment-") && (message.parts[0] as { text: string }).text.startsWith("Environment setup"));
+		expect(steps).toHaveLength(1);
+		const text = (steps[0]!.parts[0] as { text: string }).text;
+		expect(text).toMatch(/^Environment setup: exit 0, [\d.]+ m?s\n\$ set -euo pipefail\npnpm install --frozen-lockfile\n/);
+		expect(text).toContain("[REDACTED]");
+		expect(text).not.toContain(secret);
+		expect(text).not.toContain("\u001b");
+		expect(text).toMatch(/done\n\[Output truncated to its last 2048 of 3\d{3} characters\]$/);
+		const data = (await stub.log()).find((event) => event.kind === "environment.step")!.data!;
+		expect(data).toMatchObject({ step: "setup", outcome: "ok", exitCode: 0, truncated: true });
+		expect(String(data.output).length).toBeLessThanOrEqual(2048);
+		// Every notice of the phase comes before the first thing the person said.
+		for (const message of transcript.filter((entry) => entry.id.startsWith("environment-"))) expect(transcript.indexOf(message)).toBeLessThan(first);
+	});
+
+	it("shows a failed setup as the thread's state, tells the agent, and runs the setup again in the same workspace on a retry", async () => {
+		const { repo } = envRepo({ ".pim/setup.sh": "fail-me\n" });
+		setup = failing;
+		let prompt = "";
+		codingFaux.setResponses([
+			(context) => {
+				prompt = sent(context);
+				return fauxAssistantMessage("Went on.");
+			},
+		]);
+		const { id, stub } = await startThread({ repo });
+		await turns(id, 1);
+		const status = await stub.status();
+		expect(status).toMatchObject({ state: "idle", stateReason: "environment_failed", stateDetail: "The setup script exited 3: fail-me", environment: { state: "failed" } });
+		expect(prompt).toContain("The environment's setup failed: The setup script exited 3: fail-me");
+		expect(prompt).toContain("the person can retry the environment");
+		const workspace = await sql(stub, "SELECT workspace_ref FROM coding_thread");
+		expect(setups).toHaveLength(1);
+		// The script works now: a retry runs it again where the thread is.
+		setup = install;
+		await stub.rebuildEnvironment();
+		const environment = await settledEnvironment(stub);
+		expect(environment).toMatchObject({ state: "cached", readyFrom: "setup" });
 		expect(environment.error).toBeUndefined();
-		// Nothing was set up: the script never ran, and no snapshot was kept.
-		expect(setups).toHaveLength(0);
-		expect(backend.environments.size).toBe(0);
+		expect(setups).toHaveLength(2);
+		expect(await sql(stub, "SELECT workspace_ref FROM coding_thread")).toEqual(workspace);
+		expect(await stub.status()).toMatchObject({ stateReason: null, stateDetail: null });
 	});
 
 	it("starts the person's next thread from the snapshot, checked out afresh, and another person's from scratch", async () => {

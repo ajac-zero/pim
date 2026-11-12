@@ -9,7 +9,7 @@ import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, snapshotWorthKeeping } from "../src/coding/environment-cache";
 import { PROVISION_ENV } from "../src/coding/repo-environment";
-import { CONTINUE_TEXT, cliInstructions, codingThread, isTransient, LOST_RESUME_TEXT, SESSION_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
+import { CONTINUE_TEXT, cliInstructions, codingThread, isTransient, LOST_RESUME_TEXT, rateLimitRetryDelayMs, retryAfterMs, SESSION_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
@@ -475,6 +475,37 @@ describe("a coding thread", () => {
 			expect((await stub.log()).filter((event) => event.kind === "thread.retrying")).toHaveLength(1);
 		});
 
+		// Workers AI's per-minute cap, as an `AiError` reaches a thread once pi gave up on it: the account shares the limit, so it outlasts one backoff.
+		const rateLimited = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: `inference request per min rate reached (${crypto.randomUUID()})` });
+
+		it("retries a rate limited turn again and again, waiting longer each time, until the cap lifts", async () => {
+			codingTimings.retryMs = 50;
+			codingFaux.setResponses([rateLimited(), rateLimited(), rateLimited(), rateLimited(), rateLimited(), rateLimited(), fauxAssistantMessage("Free at last.")]);
+			const { id, stub } = await startThread();
+			const [ended] = await turns(id, 1);
+			expect(ended).toMatchObject({ outcome: "completed" });
+			// The turn that succeeded was the sixth retry of the one that began the thread.
+			expect(ended!.operationId).toMatch(/^(retry-){6}start-/);
+			const retrying = (await stub.log()).filter((event) => event.kind === "thread.retrying");
+			expect(retrying).toHaveLength(6);
+			expect(retrying.map((event) => event.data!.attempt)).toEqual([1, 2, 3, 4, 5, 6]);
+			// Every wait is longer than the one before it: the backoff grows with each retry.
+			const waits = retrying.map((event) => Number(event.data!.retryAt) - event.at);
+			expect(waits.every((wait, index) => index === 0 || wait > waits[index - 1]!)).toBe(true);
+			expect(await stub.status()).toMatchObject({ state: "idle", stateReason: null });
+		});
+
+		it("gives up on a rate limit that never lifts after six retries, leaving the thread failed", async () => {
+			codingTimings.retryMs = 50;
+			codingFaux.setResponses([rateLimited(), rateLimited(), rateLimited(), rateLimited(), rateLimited(), rateLimited(), rateLimited()]);
+			const { id, stub } = await startThread();
+			const [failed] = await turns(id, 1);
+			expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });
+			expect(failed!.operationId).toMatch(/^(retry-){6}start-/);
+			expect((await stub.log()).filter((event) => event.kind === "thread.retrying")).toHaveLength(6);
+			expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "model_error", inbox: 0 });
+		});
+
 		it.each([
 			["a rejected key", "401 Unauthorized: invalid api key"],
 			["a bad request", "400 Bad Request: messages must not be empty"],
@@ -502,6 +533,22 @@ describe("a coding thread", () => {
 			expect(isTransient("harness_error", "Amp exited without a result: crashed")).toBe(false);
 			expect(isTransient("aborted", "connection closed")).toBe(false);
 			expect(isTransient("max_turns", "The turn reached its most steps")).toBe(false);
+			// Workers AI's per-minute cap: neither its words nor the uuid in them read as a permanent error.
+			expect(isTransient("model_error", "AiError: AiError: rate limiting: inference request per min rate reached (4f0e2b3c-9a71-4a2e-8d17-e45d1f1c3d21)")).toBe(true);
+		});
+
+		it("waits longer before each retry of a rate limited turn, up to a cap, and honors the provider's retry-after", () => {
+			// A minute the first time, half again more each retry, at most five minutes, with jitter on top.
+			const waits = [1, 2, 3, 4, 5].map((attempt) => rateLimitRetryDelayMs(attempt, null));
+			expect(waits[0]).toBeGreaterThanOrEqual(60_000);
+			expect(waits[0]).toBeLessThan(70_000);
+			for (let index = 1; index < waits.length; index++) expect(waits[index]).toBeGreaterThan(waits[index - 1]!);
+			expect(rateLimitRetryDelayMs(9, null)).toBeLessThanOrEqual(5 * 60_000 + 10_000);
+			// A provider that says when to come back is obeyed, past the backoff and the cap alike.
+			expect(rateLimitRetryDelayMs(1, 8 * 60_000)).toBe(8 * 60_000);
+			expect(retryAfterMs("rate limited (429): retry-after: 90")).toBe(90_000);
+			expect(retryAfterMs('429 Too Many Requests, headers: {"retry-after": "120"}')).toBe(120_000);
+			expect(retryAfterMs("429 Too Many Requests")).toBeNull();
 		});
 	});
 

@@ -213,6 +213,17 @@ describe("WorkspaceContainer lifecycle", () => {
 		expect(fixture.intercepts).toEqual(["http", "https", "http", "https"]);
 		expect(fixture.calls).toEqual(["start"]);
 	});
+	it("reinstalls the egress intercepts for a container that outlived its isolate", async () => {
+		const fixture = hostFixture();
+		await fixture.host.create(spec);
+		expect(fixture.intercepts).toEqual(["http", "https"]);
+		// A deploy or an eviction starts this Durable Object over a container that is still running, with the
+		// intercepts the previous code installed: the current handler must take them back.
+		const host = fixture.restart();
+		await host.info();
+		expect(fixture.intercepts).toEqual(["http", "https", "http", "https"]);
+		expect((await host.info())?.state).toBe("running");
+	});
 	it("injects the fresh token after suspend, resume and policy replacement, including after eviction", async () => {
 		const fixture = hostFixture();
 		const policy = (token: string) => ({ allow: ["api.example.com"], inject: [{ host: "api.example.com", headers: { authorization: token } }] });

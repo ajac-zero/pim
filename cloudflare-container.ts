@@ -46,7 +46,13 @@ export class ContainerHost implements ContainerHostApi {
 				const saved = await ctx.storage.get<Saved>("workspace");
 				// Complete a stop interrupted after its checkpoint was persisted.
 				if (!saved || saved.state !== "running") await ctx.container!.destroy();
-				else await ctx.container!.setInactivityTimeout(IDLE_MS);
+				else {
+					await ctx.container!.setInactivityTimeout(IDLE_MS);
+					// The container outlived this isolate (a deploy, an eviction), carrying the egress intercepts the
+					// code that ran then installed. Put the current handler in place, so requests are decided by the
+					// policy as this deployment reads it, not by whichever handler the container was left with.
+					await this.intercept(saved);
+				}
 			})().catch((error) => {
 				console.warn(JSON.stringify({ event: "pim.coding.container_startup_cleanup_failed", error: String(error) }));
 			});

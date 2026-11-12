@@ -959,6 +959,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
 		const queue = thread.slot === "queued" ? await codingScheduler(this.env, thread.space).position(thread.threadId) : null;
+		// For amp-http orb threads, display as 'amp-orbs' in pool/provider
+		const displayProvider = thread.providerId === "amp-http" ? "amp-orbs" : thread.providerId;
 		return {
 			threadId: thread.threadId,
 			state: thread.state,
@@ -967,9 +969,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch, baseSha: thread.baseSha },
 			profile: thread.profile,
 			harness: thread.harness,
-			workspaceProvider: thread.providerId,
-			provider: thread.providerId,
-			pool: thread.providerId,
+			workspaceProvider: displayProvider,
+			provider: displayProvider,
+			pool: displayProvider,
 			placementReason: thread.placementReason,
 			providerKind: thread.providerKind,
 			orb: thread.orb === null ? null : { url: thread.orb.url },

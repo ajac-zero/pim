@@ -316,6 +316,11 @@ export class CodingScheduler {
 		for (const table of ["pim_coding_queue", "pim_coding_slots"]) {
 			const keyed = new Set(this.#sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name)));
 			if (keyed.has("provider") && !keyed.has("pool")) this.#sql.exec(`ALTER TABLE ${table} RENAME COLUMN provider TO pool`);
+			// A table that has both columns, a `provider` that is NOT NULL and so refuses every insert of a pool, loses the old one: its pool column holds the place.
+			else if (keyed.has("provider") && keyed.has("pool")) {
+				this.#sql.exec(`UPDATE ${table} SET pool = provider WHERE pool IS NULL`);
+				this.#sql.exec(`ALTER TABLE ${table} DROP COLUMN provider`);
+			}
 		}
 	}
 

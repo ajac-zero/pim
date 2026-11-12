@@ -366,6 +366,21 @@ describe("the coding scheduler", () => {
 		});
 	});
 
+	it("queues a thread whatever its pool, in a queue table that still has the old NOT NULL provider column beside pool", async () => {
+		await runInDurableObject(env.Pim.getByName(`coding-${crypto.randomUUID()}`), (_pim: Pim, state) => {
+			state.storage.sql.exec(
+				"CREATE TABLE pim_coding_queue (seq INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, pool TEXT, queued_at INTEGER NOT NULL, reason TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, deadline_at INTEGER NOT NULL)",
+			);
+			state.storage.sql.exec("INSERT INTO pim_coding_queue (thread_id, provider, queued_at, reason, priority, deadline_at) VALUES ('old', 'compose', 1, 'slots_full', 0, 9)");
+			const scheduler = new CodingScheduler(state.storage.sql, { transaction: (run) => run(), now: () => 1, defaultLimit: 0 });
+			scheduler.setPools([{ id: "dev", provider: "compose", size: 1, priority: 1 }]);
+			expect(scheduler.request("pool-only", { pool: "dev" })).toMatchObject({ status: "queued" });
+			expect(scheduler.request("provider-only", { pool: "compose" })).toMatchObject({ status: "queued" });
+			expect(scheduler.request("neither", { pool: "dev", overflow: [] })).toMatchObject({ status: "queued" });
+			expect(scheduler.snapshot().queued.map((entry) => entry.threadId)).toEqual(["old", "pool-only", "provider-only", "neither"]);
+		});
+	});
+
 	it("moves a slot to the first other pool with room, and admits the queue into the one it leaves", async () => {
 		await withScheduler(({ make }) => {
 			const scheduler = make({ defaultLimit: 1, limits: { cloud: 1 } });

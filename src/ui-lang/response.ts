@@ -54,8 +54,14 @@ export function stateSummary(state: Record<string, Value>): string {
 	return lines.length === 0 ? "" : ["Other values in the block:", "", ...lines].join("\n");
 }
 
-/** The fence a trailer rides in, alone on its lines. */
-const TRAILER = /```ui-response[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/g;
+/**
+ * The fence a trailer rides in: the last thing in the turn, alone on its lines,
+ * with its JSON on one line as `uiTurn` writes it. Anything of a form's own,
+ * such as an answer that looks like a fence, can only come before it and
+ * isn't one: a field's text can't end the turn, and can't swallow the real
+ * trailer into a fence of its own.
+ */
+const TRAILER = /(?:^|\r?\n)```ui-response[ \t]*\r?\n([^\r\n]*)\r?\n```[ \t\r\n]*$/;
 
 /** Whether a value is a record of strings, as a trailer's values must be. */
 function strings(value: unknown): value is Record<string, string> {
@@ -73,36 +79,42 @@ function isStateRecord(value: unknown): value is Record<string, Value> {
 	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every(isStorable);
 }
 
-/** The last trailer in a message, or null when it has none. */
+/** The trailer a message ends with, or null when it has none. */
 export function uiResponseOf(text: string): UiResponse | null {
-	for (const match of text.matchAll(TRAILER)) {
-		const body = match[1];
-		if (body === undefined) continue;
-		try {
-			const parsed: unknown = JSON.parse(body);
-			if (typeof parsed !== "object" || parsed === null) continue;
-			const { block, messageId, values, graded, state } = parsed as Record<string, unknown>;
-			if (typeof block !== "string" || !strings(values) || !marks(graded)) continue;
-			return {
+	return trailerOf(text)?.response ?? null;
+}
+
+function trailerOf(text: string): { response: UiResponse; at: number } | null {
+	const match = TRAILER.exec(text);
+	const body = match?.[1];
+	if (match === null || body === undefined) return null;
+	try {
+		const parsed: unknown = JSON.parse(body);
+		if (typeof parsed !== "object" || parsed === null) return null;
+		const { block, messageId, values, graded, state } = parsed as Record<string, unknown>;
+		if (typeof block !== "string" || !strings(values) || !marks(graded)) return null;
+		return {
+			at: match.index,
+			response: {
 				block,
 				values,
 				graded,
 				...(messageId !== undefined && typeof messageId === "string" ? { messageId } : {}),
 				// A trailer without state, or with state that isn't a record of storable values, is read as one without.
 				...(isStateRecord(state) ? { state } : {}),
-			};
-		} catch {
-			// Not a trailer: a fence that only looks like one.
-		}
+			},
+		};
+	} catch {
+		// Not a trailer: a fence that only looks like one.
+		return null;
 	}
-	return null;
 }
 
 /** A message with its trailer taken out, and what the trailer said. */
 export function splitUiResponse(text: string): { readable: string; response: UiResponse } | null {
-	const response = uiResponseOf(text);
-	if (response === null) return null;
-	return { readable: text.replace(TRAILER, "").trim(), response };
+	const found = trailerOf(text);
+	if (found === null) return null;
+	return { readable: text.slice(0, found.at).trim(), response: found.response };
 }
 
 /** Whether a turn is small enough to send. */

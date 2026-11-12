@@ -122,7 +122,8 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 	if (budgetUsd !== null && (typeof budgetUsd !== "number" || !(Number.isFinite(budgetUsd) && budgetUsd > 0))) throw invalid("budgetUsd must be a positive number of dollars");
 	const harness = input.harness ?? "pi";
 	if (!CODING_HARNESSES.includes(harness)) throw invalid(`harness must be ${CODING_HARNESSES.join(", ")}`);
-	if (harness !== "pi" && !cliHarness(harness)) throw invalid("harness not yet available");
+	// amp harness uses agent-hosted Orbs, so it doesn't have a CLI harness entry but is still valid
+	if (harness !== "pi" && harness !== "amp" && !cliHarness(harness)) throw invalid("harness not yet available");
 	if (input.chat !== undefined && (typeof input.chat !== "string" || !input.chat || input.chat.length > 128)) throw invalid("chat must be a chat's ID");
 	const profile = input.profile === undefined ? undefined : profileOf(input.profile);
 	if (input.parent !== undefined && input.parent !== null) await ownedThread(env, space, input.parent);

@@ -268,7 +268,7 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("Amp HTTP placement", () => {
 	it("starts Amp Orbs without a sandbox backend, slot or workspace", async () => {
-		const fake = new FakeOrbClient();
+		const fake = new FakeOrbClient({ id: "amp-http" });
 		codingOrbs.factory = () => fake;
 		const id = crypto.randomUUID();
 		const stub = codingThread(env, id);

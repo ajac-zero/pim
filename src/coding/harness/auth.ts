@@ -6,7 +6,7 @@ import type { CliHarness } from "./types";
 /**
  * SEAM: how a thread's CLI harness signs in.
  *
- * A harness with API-key sign-in (`apiKeyEnv`, such as Mistral Vibe or Amp)
+ * A harness with API-key sign-in (`apiKeyEnv`, such as Mistral Vibe)
  * runs with the person's own key from the coding vault, in the environment
  * variable its CLI reads: `{ mode: "env" }`, so the runner (./runner.ts)
  * neither restores a login nor takes the person's lock, and takes the key

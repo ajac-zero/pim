@@ -41,6 +41,8 @@ export type OrbMessage = {
 	/** When the agent's cloud says it was said. */
 	readonly at: number;
 	readonly text: string;
+	/** Original provider JSON when its transcript format is not stable. */
+	readonly raw?: unknown;
 };
 
 /** What a thread has cost, as its agent reports it. `usd` is absent when the agent reports tokens, or nothing, instead of dollars. */
@@ -79,7 +81,7 @@ export type OrbClientFactory = (context: OrbClientContext) => OrbClient | null |
 export type OrbMethod = "start" | "steer" | "stop" | "state" | "messages" | "usage";
 
 /** How a client failed, as a caller can tell apart without matching on a message. */
-export type OrbErrorCode = "orb_auth" | "orb_unreachable" | "orb_unsupported" | "orb_lost";
+export type OrbErrorCode = "orb_auth" | "orb_unreachable" | "orb_unsupported" | "orb_lost" | "orb_start_uncertain" | "orb_request" | "orb_retry_exhausted";
 
 /** Every failure an orb client reports. Clients throw these, never a bare string or a plain `Error`, so a caller can tell what went wrong from the type. */
 export class OrbError extends Error {
@@ -94,7 +96,7 @@ export class OrbError extends Error {
 
 /** The client can't reach the agent's cloud just now: nothing was changed, and the call may be tried again. */
 export class OrbUnreachableError extends OrbError {
-	constructor(message = "Can't reach the agent's cloud just now") {
+	constructor(message = "Can't reach the agent's cloud just now", readonly retryAfterMs?: number) {
 		super(message, "orb_unreachable");
 		this.name = "OrbUnreachableError";
 	}

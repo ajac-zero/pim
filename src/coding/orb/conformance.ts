@@ -37,6 +37,8 @@ export type OrbScript<C extends OrbClient> = {
 
 export type OrbConformanceOptions<C extends OrbClient> = {
 	script?: OrbScript<C>;
+	/** A project accepted by this provider. */
+	project?: string;
 };
 
 /** Every message of a thread, read a page at a time: each call asks for what follows the last message received, until one returns none. */
@@ -57,7 +59,7 @@ export function runOrbClientConformanceSuite<C extends OrbClient>(name: string, 
 	let keys = 0;
 	const key = () => `conformance-${++keys}`;
 	const start = (client: C, idempotencyKey = key()) =>
-		client.start({ project: "https://example.test/repo.git", prompt: "Fix the failing test", mode: null, title: null, idempotencyKey });
+		client.start({ project: opts.project ?? "https://example.test/repo.git", prompt: "Fix the failing test", mode: null, title: null, idempotencyKey });
 
 	// Gated cases are skipped with their reason in the name, never passed silently.
 	const gated = (enabled: boolean, reason: string, title: string, body: () => Promise<void>) => (enabled ? it(title, body) : it.skip(`${title} (skipped: ${reason})`, body));

@@ -1,12 +1,15 @@
 // @vitest-environment happy-dom
+
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
 } from "@testing-library/react";
+import type { ReactElement } from "react";
 import {
   afterEach,
   beforeEach,
@@ -32,6 +35,19 @@ import {
   uiTurn,
 } from "../../../../src/ui-lang";
 import { UI_EXAMPLE } from "../../../../src/ui-lang/catalog";
+
+/** What the block was compiled from, each time, so a test can count compiles. */
+const compiled = vi.hoisted(() => [] as { source: string; partial: boolean }[]);
+vi.mock("../../../../src/ui-lang", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../../../src/ui-lang")>();
+  return {
+    ...real,
+    compile: (source: string, options?: { partial?: boolean }) => {
+      compiled.push({ source, partial: options?.partial === true });
+      return real.compile(source, options);
+    },
+  };
+});
 
 /** What Pim keeps of the blocks of message m1, as the API would hold it. */
 let kept: Record<string, StoredUiState>;
@@ -279,8 +295,12 @@ describe("a ui block in a reply", () => {
     expect(container.innerHTML).not.toContain("```ui-response");
   });
 
-  it("shows a placeholder while the message is still arriving", () => {
-    const { container } = shown(UI_EXAMPLE, { streaming: true });
+  it("shows a placeholder until a block still being written has something to draw", () => {
+    const { container } = render(
+      <ReplyImages images={{}} streaming>
+        <Markdown text={"```ui\n<for"} streaming />
+      </ReplyImages>,
+    );
     expect(container.querySelector(".animate-pulse")).toBeTruthy();
     expect(container.textContent).not.toContain("(1, 1)");
   });
@@ -660,5 +680,145 @@ describe("a checkbox, slider and chart in a reply", () => {
     expect(view.container.textContent).toContain("Receipt");
     expect(view.container.textContent).toContain("Seats: 3 seats");
     expect(view.container.querySelectorAll("table")).toHaveLength(1);
+  });
+});
+
+describe("a ui block while its message streams", () => {
+  const send = vi.fn(async (_text: string) => {});
+  const client = new QueryClient();
+  const fence = (source: string) => `Here you go:\n\n\`\`\`ui\n${source}`;
+  const view = (text: string, streaming: boolean) => (
+    <QueryClientProvider client={client}>
+      <ReplyImages images={{}} streaming={streaming} send={send} messageId="m1">
+        <Markdown text={text} streaming={streaming} />
+      </ReplyImages>
+    </QueryClientProvider>
+  );
+  const fields = () => document.querySelectorAll("[data-field]").length;
+  const submitButton = () =>
+    document.querySelector<HTMLButtonElement>('[data-part="submit"]');
+
+  /** Tokens of a few characters, arriving every 20 ms, as `render` shows them. */
+  async function stream(
+    source: string,
+    from: number,
+    to: number,
+    each: (end: number) => void,
+    rerender: (ui: ReactElement) => void,
+  ) {
+    for (let end = from; end <= to; end += 3) {
+      rerender(view(fence(source.slice(0, end)), true));
+      await act(async () => {
+        vi.advanceTimersByTime(20);
+      });
+      each(end);
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    compiled.length = 0;
+    send.mockClear();
+  });
+
+  it("shows each component once its tag is complete, never throws, and compiles far less often than tokens arrive", async () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { rerender, container } = render(view(fence(""), true));
+    const seen: number[] = [];
+    await stream(
+      UI_EXAMPLE,
+      0,
+      UI_EXAMPLE.length,
+      () => {
+        seen.push(fields());
+        // What the repair cut is for whoever debugs, not for the person.
+        expect(container.textContent).not.toMatch(/unterminated|<number|<row/);
+      },
+      rerender,
+    );
+    // Components arrive one after another, never leaving once there.
+    expect(seen).toEqual([...seen].sort((a, b) => a - b));
+    expect(new Set(seen)).toEqual(new Set([0, 1, 2, 3]));
+    const tokens = Math.ceil(UI_EXAMPLE.length / 3);
+    const partials = compiled.filter((entry) => entry.partial).length;
+    expect(partials).toBeGreaterThan(5);
+    expect(partials).toBeLessThan(tokens / 4);
+    expect(debug).toHaveBeenCalledWith(
+      expect.stringContaining("repaired"),
+      expect.anything(),
+    );
+    // The stream ends: one more compile, of the whole block.
+    rerender(view(`${fence(UI_EXAMPLE)}\n\`\`\``, false));
+    expect(compiled.at(-1)).toEqual({ source: UI_EXAMPLE, partial: false });
+    expect(fields()).toBe(3);
+  });
+
+  it("keeps a value typed mid-stream through later compiles and the end, and saves it under the final id", async () => {
+    const { rerender } = render(view(fence(""), true));
+    let typed = false;
+    await stream(
+      UI_EXAMPLE,
+      0,
+      UI_EXAMPLE.length,
+      () => {
+        if (!typed && fields() >= 1) {
+          typed = true;
+          fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+        }
+        if (typed) expect(field("knn.d1").value).toBe("5");
+      },
+      rerender,
+    );
+    expect(typed).toBe(true);
+    // Nothing is written under the ids of cuts of the block.
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(saveUiState).not.toHaveBeenCalled();
+    rerender(view(`${fence(UI_EXAMPLE)}\n\`\`\``, false));
+    expect(field("knn.d1").value).toBe("5");
+    await act(async () => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(saveUiState).toHaveBeenCalledTimes(1);
+    expect(saveUiState.mock.calls[0]?.[1]).toBe(BLOCK);
+    expect(kept[BLOCK]?.state?.values?.["knn.d1"]).toBe("5");
+  });
+
+  it("keeps submit disabled until the stream completes", async () => {
+    const { rerender } = render(view(fence(""), true));
+    const upTo = UI_EXAMPLE.indexOf("</form>");
+    await stream(UI_EXAMPLE, 0, upTo, () => {}, rerender);
+    // Every field is there and can be filled in; nothing can be sent.
+    fillAll();
+    expect(field("knn.d1").value).toBe("5");
+    expect(submitButton()?.disabled).toBe(true);
+    fireEvent.submit(document.querySelector("form") as HTMLFormElement);
+    submitButton()?.click();
+    expect(send).not.toHaveBeenCalled();
+    rerender(view(`${fence(UI_EXAMPLE)}\n\`\`\``, false));
+    expect(submitButton()?.disabled).toBe(false);
+    submit();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the last good render when a newer compile fails", async () => {
+    const { rerender, container } = render(view(fence(""), true));
+    const good = "<text>Hello there</text>\n";
+    const steps = [good, `${good}<bogus/>\n<text>More</text>\n`];
+    for (const source of steps) {
+      rerender(view(fence(source), true));
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+    }
+    // The second compile failed (an unknown tag); the first stands, with no fallback or placeholder.
+    expect(container.textContent).toContain("Hello there");
+    expect(container.textContent).not.toContain("More");
+    expect(container.querySelector(".animate-pulse")).toBeNull();
+    expect(container.textContent).not.toContain("couldn't be shown");
   });
 });

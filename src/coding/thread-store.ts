@@ -146,6 +146,8 @@ export type CodingThreadRow = {
 	readonly resumePriority: boolean;
 	/** Queue windows expired since admission or a manual continuation after failure. */
 	readonly noCapacityTimeouts: number;
+	/** When the thread became idle with no input waiting, or null while busy. */
+	readonly idleSince: number | null;
 	/** The pi operation whose turn is under way, or null between turns. */
 	readonly currentOperation: string | null;
 	/** Set before a model call is refused for the budget, so the turn that ends with it stops the thread. */
@@ -233,6 +235,7 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	slot_since INTEGER,
 	resume_priority INTEGER NOT NULL DEFAULT 0,
 	no_capacity_timeouts INTEGER NOT NULL DEFAULT 0,
+	idle_since INTEGER,
 	current_operation TEXT,
 	budget_stopped INTEGER NOT NULL DEFAULT 0,
 	consecutive_interrupts INTEGER NOT NULL DEFAULT 0,
@@ -360,6 +363,7 @@ export class CodingThreadStore {
 	/** Brings an older thread's tables up to date. Columns added after the first schema go here, as `ALTER TABLE` behind a check. */
 	#migrate(): void {
 		const columns = new Set(this.#sql.exec("PRAGMA table_info(coding_thread)").toArray().map((row) => String(row.name)));
+		if (!columns.has("idle_since")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN idle_since INTEGER");
 		if (!columns.has("no_capacity_timeouts")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN no_capacity_timeouts INTEGER NOT NULL DEFAULT 0");
 		if (!columns.has("harness")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 		// The nonce the thread's model gateway tokens carry (./model-gateway.ts): null until one is minted, and again once they are revoked.
@@ -412,7 +416,7 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "placement" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "idleSince" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "placement" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
 			consecutiveInterrupts?: number;
 			providerInstance?: string;
 			placed?: boolean;
@@ -453,7 +457,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "placement" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "placement" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "idleSince" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
@@ -473,6 +477,7 @@ export class CodingThreadStore {
 		if (change.workspaceRef !== undefined) columns.workspace_ref = change.workspaceRef === null ? null : JSON.stringify(change.workspaceRef);
 		if (change.slot !== undefined) columns.slot = change.slot;
 		if (change.slotSince !== undefined) columns.slot_since = change.slotSince;
+		if (change.idleSince !== undefined) columns.idle_since = change.idleSince;
 		if (change.noCapacityTimeouts !== undefined) columns.no_capacity_timeouts = change.noCapacityTimeouts;
 		if (change.resumePriority !== undefined) columns.resume_priority = change.resumePriority ? 1 : 0;
 		if (change.currentOperation !== undefined) columns.current_operation = change.currentOperation;
@@ -753,6 +758,7 @@ function threadOf(row: Row): CodingThreadRow {
 		slotSince: row.slot_since === null ? null : Number(row.slot_since),
 		resumePriority: row.resume_priority === 1,
 		noCapacityTimeouts: Number(row.no_capacity_timeouts),
+		idleSince: row.idle_since === null ? null : Number(row.idle_since),
 		currentOperation: text(row.current_operation),
 		budgetStopped: row.budget_stopped === 1,
 		environment: row.environment === null || row.environment === undefined ? NO_ENVIRONMENT : { ...NO_ENVIRONMENT, ...(JSON.parse(String(row.environment)) as Partial<CodingEnvironment>) },

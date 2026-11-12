@@ -387,28 +387,35 @@ const PATH_PREAMBLE = 'export PATH="$HOME/.local/share/mise/shims:$PATH"\n';
 export const PROVISION_STEP_TIMEOUT_MS = 10 * 60_000;
 
 /** How a step ended. */
-export type StepResult = { readonly outcome: "ok"; readonly ms: number } | { readonly outcome: "failed"; readonly ms: number; readonly output: string; readonly how: string } | { readonly outcome: "stopped" };
+export type StepResult =
+	| { readonly outcome: "ok"; readonly ms: number; readonly exitCode: 0; readonly output: string; readonly outputChars: number }
+	| { readonly outcome: "failed"; readonly ms: number; readonly exitCode: number | null; readonly output: string; readonly outputChars: number; readonly how: string }
+	| { readonly outcome: "stopped" };
 
 /** Runs one step with bash in `cwd`, keeping only the end of what it printed. */
 export async function runProvisionStep(workspace: Workspace, step: ProvisionStep, o: { cwd: string; env: Readonly<Record<string, string>>; signal?: AbortSignal; timeoutMs?: number }): Promise<StepResult> {
 	const started = performance.now();
 	let tail = "";
+	let outputChars = 0;
 	let exit: Extract<ExecEvent, { type: "exit" }> | null = null;
 	const timeoutMs = o.timeoutMs ?? PROVISION_STEP_TIMEOUT_MS;
 	try {
 		for await (const event of workspace.exec(["bash", "-c", `${PATH_PREAMBLE}${step.script}`], { cwd: o.cwd, timeoutMs, env: { ...o.env, ...PROVISION_ENV }, signal: o.signal })) {
 			if (event.type === "exit") exit = event;
-			else tail = (tail + event.data).slice(-2048);
+			else {
+				tail = (tail + event.data).slice(-2048);
+				outputChars += event.data.length;
+			}
 		}
 	} catch (error) {
 		if (o.signal?.aborted) return { outcome: "stopped" };
-		return { outcome: "failed", ms: Math.round(performance.now() - started), output: String(error), how: "couldn't start" };
+		return { outcome: "failed", ms: Math.round(performance.now() - started), exitCode: null, output: String(error), outputChars: String(error).length, how: "couldn't start" };
 	}
 	const ms = Math.round(performance.now() - started);
-	if (exit?.code === 0) return { outcome: "ok", ms };
+	if (exit?.code === 0) return { outcome: "ok", ms, exitCode: 0, output: tail, outputChars };
 	if (exit && exit.code === null && !exit.timedOut) return { outcome: "stopped" };
 	const how = exit === null ? "ended without an exit" : exit.timedOut ? `ran out of time after ${Math.round(timeoutMs / 60_000)} minutes` : `exited ${exit.code}`;
-	return { outcome: "failed", ms, output: tail, how };
+	return { outcome: "failed", ms, exitCode: exit?.code ?? null, output: tail, outputChars, how };
 }
 
 /** A repository's files in a workspace, under `root`. */
@@ -709,6 +716,8 @@ function short(text: string, max: number): string {
 
 /** What a thread's environment has, for the coding agent's instructions: its toolchains, what couldn't be installed, and the commands the repository checks itself with. Null when nothing was found. */
 export function environmentBrief(env: {
+	readonly state?: string;
+	readonly error?: string;
 	readonly reason?: string;
 	readonly toolchains: readonly EnvironmentToolchain[];
 	readonly dependencies: readonly EnvironmentDependencies[];
@@ -717,6 +726,7 @@ export function environmentBrief(env: {
 	readonly services?: readonly { readonly name: string; readonly command: string; readonly port: number }[];
 }): string | null {
 	const lines: string[] = [];
+	if (env.state === "failed" && env.error) lines.push(`The environment's setup failed: ${short(env.error, 400)}\nThe workspace is as the checkout and the image left it, so dependencies may be missing. Say so if it blocks you; the person can retry the environment.`);
 	if (env.reason) lines.push(`${env.reason}, so the workspace has only what the image brings.`);
 	const broken = (each: { status: ProvisionStatus }) => each.status === "failed" || each.status === "skipped";
 	const ready = env.toolchains.filter((each) => !broken(each));

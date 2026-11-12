@@ -590,22 +590,12 @@ export class CodingThreadStore {
 	}
 
 	events(since = 0, limit = 500): CodingEvent[] {
-		return this.#sql
-			.exec("SELECT * FROM coding_event WHERE seq > ? ORDER BY seq LIMIT ?", since, limit)
-			.toArray()
-			.map((row) => ({
-				seq: Number(row.seq),
-				kind: String(row.kind),
-				at: Number(row.at),
-				provider: text(row.provider),
-				model: text(row.model),
-				input: Number(row.input),
-				output: Number(row.output),
-				cacheRead: Number(row.cache_read),
-				cacheWrite: Number(row.cache_write),
-				costUsd: Number(row.cost_usd),
-				data: row.data === null ? null : (JSON.parse(String(row.data)) as EventData),
-			}));
+		return this.#sql.exec("SELECT * FROM coding_event WHERE seq > ? ORDER BY seq LIMIT ?", since, limit).toArray().map(eventOf);
+	}
+
+	/** The environment phase's events (`environment.*`), without the log's page limit. */
+	environmentEvents(): CodingEvent[] {
+		return this.#sql.exec("SELECT * FROM coding_event WHERE kind LIKE 'environment.%' ORDER BY seq").toArray().map(eventOf);
 	}
 
 	addCheckpoint(sha: string, message: string, operationId: string | null): Checkpoint {
@@ -786,4 +776,20 @@ function threadOf(row: Row): CodingThreadRow {
 function readLimits(json: string): CodingLimits {
 	const limits = JSON.parse(json) as Omit<CodingLimits, "wallClockMin"> & { wallClockMin?: number | null };
 	return { ...limits, wallClockMin: limits.wallClockMin === 240 ? null : (limits.wallClockMin ?? null) };
+}
+
+function eventOf(row: Record<string, SqlStorageValue>): CodingEvent {
+	return {
+		seq: Number(row.seq),
+		kind: String(row.kind),
+		at: Number(row.at),
+		provider: text(row.provider),
+		model: text(row.model),
+		input: Number(row.input),
+		output: Number(row.output),
+		cacheRead: Number(row.cache_read),
+		cacheWrite: Number(row.cache_write),
+		costUsd: Number(row.cost_usd),
+		data: row.data === null ? null : (JSON.parse(String(row.data)) as EventData),
+	};
 }

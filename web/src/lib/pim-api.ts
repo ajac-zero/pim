@@ -1,4 +1,5 @@
 import type { AgentEvent } from "@earendil-works/pi-durable";
+import type { UiState } from "../../../src/ui-lang";
 
 /**
  * Pim's REST API, reached through this app's own `/api` path: the app's
@@ -1536,6 +1537,14 @@ export type ServerMessage =
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 
+/** What Pim keeps of one ```ui block of a message: its state, how many times it was saved, and whether it was submitted for good. */
+export type StoredUiState = {
+  version: number;
+  state: Partial<UiState>;
+  submitted: boolean;
+  updatedAt: number;
+};
+
 /** An API answer that isn't a success, with its status. */
 export class ApiError extends Error {
   constructor(
@@ -1652,6 +1661,21 @@ export const pim = {
     call<Session>(`/sessions/${id}/fork`, {
       method: "POST",
       body: JSON.stringify(from),
+    }),
+  /** What the ```ui blocks of a message hold, by block id. */
+  uiStates: (message: string) =>
+    call<{ blocks: Record<string, StoredUiState> }>(
+      `/messages/${message}/ui-state`,
+    ).then((body) => body.blocks),
+  /** Saves a block's state over `version`, the one last read (0 for none); a 409's body has what is kept. */
+  saveUiState: (
+    message: string,
+    block: string,
+    body: { version: number; state: UiState; submitted: boolean },
+  ) =>
+    call<StoredUiState>(`/messages/${message}/ui-state/${block}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
     }),
   readSession: (id: string, responseAt: number) =>
     call<Session>(`/sessions/${id}/read`, {

@@ -75,7 +75,7 @@ type CodingThreadView = {
   reason?: string;          // while queued, queue.reason
   state: CodingThreadState;
   stateReason: string | null;
-  stateDetail: string| null; // what to tell the person, such as how to set up a workspace backend; for a `model_error`, the provider's HTTP status, error type and code and message, secrets taken out and cut to 500 characters (or the provider and model when it said nothing)
+  stateDetail: string | null; // what to tell the person, such as how to set up a workspace backend; for a `model_error`, the provider's HTTP status, error type and code and message, secrets taken out and cut to 500 characters (or the provider and model when it said nothing)
   repo: { url: string; ref: string; branch: string; baseSha: string | null };
   profile: AgentProfile;
   workspaceProvider: string; // the backend it runs on, such as "compose" or "cloudflare"; while it waits for its first slot, the one it tries first

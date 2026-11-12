@@ -84,6 +84,19 @@ export type CodingThreadRow = {
 	 * agent's own cloud and where the person watches it. Null for a thread that runs in a workspace.
 	 */
 	readonly orb: OrbThread | null;
+	/**
+	 * The last of the orb's messages mirrored into the conversation, by the agent's own id of it, so
+	 * mirroring goes on from there after a restart and repeats nothing. Null until one is.
+	 */
+	readonly orbLastMessage: string | null;
+	/**
+	 * What the thread has cost as its agent reported it at its last turn's end, or null when the agent's
+	 * cloud says nothing: the agent's word rather than a measurement Pim made, so the thread's budget isn't
+	 * held to it. Null for a thread that runs in a workspace, which Pim meters itself (`spentUsd`).
+	 */
+	readonly orbCostUsd: number | null;
+	/** Why `orbCostUsd` is null, when the agent's cloud reports no cost: an honest note, not a number invented. */
+	readonly orbCostNote: string | null;
 	/** Whether the thread stays on its provider: once it made a workspace there, whose files and environment are kept there, or when it was started on that provider by name. Until then it may run on another provider when its own is full. */
 	readonly placed: boolean;
 	/** Why the thread is on its provider: `pinned` when the caller named it, `priority` when it took the first provider with room, `overflow` when it moved to a later one because the first had none. */
@@ -174,6 +187,9 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	provider_id TEXT NOT NULL,
 	provider_kind TEXT NOT NULL DEFAULT 'workspace',
 	orb TEXT,
+	orb_last_message TEXT,
+	orb_cost_usd REAL,
+	orb_cost_note TEXT,
 	workspace_ref TEXT,
 	state TEXT NOT NULL,
 	state_reason TEXT,
@@ -343,6 +359,10 @@ export class CodingThreadStore {
 		if (!columns.has("provider_kind")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'workspace'");
 		// The agent-hosted thread, as JSON: null for a thread that runs in a workspace.
 		if (!columns.has("orb")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN orb TEXT");
+		// The last of the orb's messages mirrored into the conversation, and the cost its agent reported: null without either.
+		if (!columns.has("orb_last_message")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN orb_last_message TEXT");
+		if (!columns.has("orb_cost_usd")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN orb_cost_usd REAL");
+		if (!columns.has("orb_cost_note")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN orb_cost_note TEXT");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -358,7 +378,7 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "providerKind" | "orb"> & {
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
 			consecutiveInterrupts?: number;
 			providerInstance?: string;
 			placed?: boolean;
@@ -397,7 +417,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "placed" | "placementReason" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
@@ -406,6 +426,9 @@ export class CodingThreadStore {
 		if (change.providerId !== undefined) columns.provider_id = change.providerId;
 		if (change.providerKind !== undefined) columns.provider_kind = change.providerKind;
 		if (change.orb !== undefined) columns.orb = change.orb === null ? null : JSON.stringify(change.orb);
+		if (change.orbLastMessage !== undefined) columns.orb_last_message = change.orbLastMessage;
+		if (change.orbCostUsd !== undefined) columns.orb_cost_usd = change.orbCostUsd;
+		if (change.orbCostNote !== undefined) columns.orb_cost_note = change.orbCostNote;
 		if (change.placed !== undefined) columns.placed = change.placed ? 1 : 0;
 		if (change.placementReason !== undefined) columns.placement_reason = change.placementReason;
 		if (change.baseSha !== undefined) columns.base_sha = change.baseSha;
@@ -669,6 +692,9 @@ function threadOf(row: Row): CodingThreadRow {
 		providerId: String(row.provider_id),
 		providerKind: (text(row.provider_kind) ?? "workspace") as CodingProviderKind,
 		orb: row.orb === null || row.orb === undefined ? null : (JSON.parse(String(row.orb)) as OrbThread),
+		orbLastMessage: text(row.orb_last_message),
+		orbCostUsd: row.orb_cost_usd === null || row.orb_cost_usd === undefined ? null : Number(row.orb_cost_usd),
+		orbCostNote: text(row.orb_cost_note),
 		placed: row.placed === 1,
 		placementReason: (text(row.placement_reason) ?? "priority") as PlacementReason,
 		workspaceRef: row.workspace_ref === null ? null : (JSON.parse(String(row.workspace_ref)) as WorkspaceRef),

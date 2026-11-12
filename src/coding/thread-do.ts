@@ -64,6 +64,7 @@ import type { Fetch, GitHubApp } from "./git-broker/github-app";
 import { brokerTokenKey, deploymentGitHubApp, deploymentProviders, GIT_BROKER_PATH } from "./git-broker/routes";
 import { authEnv } from "./harness/auth";
 import { type CliHarness, cliHarness } from "./harness";
+import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "./orb/types";
 import { describeModelFailure, explainFailures } from "./model-error";
 import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
 import { supervisorSink } from "./supervisor";
@@ -78,6 +79,7 @@ import {
 	type CodingThreadState,
 	CodingThreadStore,
 	type PlacementReason,
+	type InboxItem,
 	type TestRun,
 } from "./thread-store";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
@@ -138,6 +140,15 @@ import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
  * the threads after it.
  * The environment never stops a thread: without one it goes on as before.
  *
+ * A thread whose record says it is agent-hosted (`providerKind`) runs on no
+ * machine of Pim's at all: its agent works in the agent's own cloud, and the
+ * thread only starts, steers, reads and ends it through an orb client
+ * (./orb/). Such a thread takes no slot, makes no workspace and readies no
+ * environment; its first turn starts the orb and keeps it on its record at
+ * once, so a restart polls it rather than starting another, and every later
+ * turn is a message steered to it. What it cost, and whether its tests ran,
+ * is its agent's word: the thread reports what the agent says and no more.
+ *
  * A thread whose `harness` is a vendor's CLI, such as Claude Code, runs each
  * turn as one run of that CLI in the workspace instead of a pi run
  * (./harness/): what it prints goes into the same transcript, log, test runs
@@ -174,6 +185,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#kill = new AbortController();
 	/** The pi operation whose end is being waited for in memory. */
 	#watching: string | null = null;
+	/** How many looks in a row at an agent-hosted thread said its client can't tell what it is doing; a bound on them fails the turn as unknown. */
+	#orbUnknowns = 0;
 	#advancing: Promise<void> | null = null;
 	#advanceAgain = false;
 	/** A tool asked for the workspace (`#ensureWorkspace`): the thread gets a slot and a workspace for it, with no turn, and then goes back to idle. */
@@ -287,6 +300,27 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The compute providers with their credentials, from the Gallery. */
 	protected async computeProviders(): Promise<readonly ComputeProvider[]> {
 		return this.env.Gallery.getByName("gallery").computeProviders();
+	}
+
+	/**
+	 * How an agent-hosted thread finds the client it runs through
+	 * (./orb/types.ts): the thread asks this with its own, its space's and
+	 * its provider's name. There is no factory on a deployment yet — the real
+	 * client's runner is a later slice — so such a thread fails saying the
+	 * agent-hosted provider isn't available, rather than crashing.
+	 */
+	protected orbClients(): OrbClientFactory | null {
+		return null;
+	}
+
+	/** How often a turn on an agent-hosted thread is polled: what its client says it is doing. */
+	protected orbPollMs(): number {
+		return ORB_POLL_MS;
+	}
+
+	/** How many looks in a row may say the client can't tell what the thread is doing before the turn is failed as unknown. */
+	protected orbUnknownLimit(): number {
+		return ORB_UNKNOWN_LIMIT;
 	}
 
 	/** What the space may use of the deployment's compute: the admin's default, with the person's own where the admin set it. */
@@ -574,8 +608,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				thread.state === "provisioning" ||
 				(thread.slot === "held" && thread.environment.rebuildRequested) ||
 				(thread.slot === "queued" && this.#healthOf(thread) !== null));
-		// The heartbeat, the session's next due time and the compute cap are one timer: the earliest of them.
-		const wakes = [busy ? Date.now() + HEARTBEAT_MS : Infinity, this.#nextSessionWake(thread) ?? Infinity, this.#capWake() ?? Infinity];
+		// The heartbeat, the session's next due time and the compute cap are one timer: the earliest of them. A turn on an agent-hosted thread is polled at its own interval.
+		const wakes = [busy ? Date.now() + (thread?.providerKind === "agent-hosted" ? this.orbPollMs() : HEARTBEAT_MS) : Infinity, this.#nextSessionWake(thread) ?? Infinity, this.#capWake() ?? Infinity];
 		const next = Math.min(...wakes);
 		return next === Infinity ? undefined : { rescheduleAt: Math.max(Date.now() + 1_000, next) };
 	}
@@ -889,6 +923,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			provider: thread.providerId,
 			pool: thread.providerId,
 			placementReason: thread.placementReason,
+			providerKind: thread.providerKind,
+			orb: thread.orb === null ? null : { url: thread.orb.url },
+			cost: thread.providerKind === "agent-hosted" ? thread.orbCostUsd : thread.spentUsd,
+			costNote: thread.providerKind === "agent-hosted" ? thread.orbCostNote : null,
 			slot: thread.slot,
 			queue,
 			budgetUsd: thread.budgetUsd,
@@ -958,6 +996,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.#live();
 		if (!text.trim()) throw new Error("Say something");
+		if (thread.providerKind === "agent-hosted") return this.#steerOrb(thread, text, options);
 		if (thread.currentOperation && !options.interrupt) {
 			if (cliHarness(thread.harness)) {
 				// A CLI takes no input mid-turn: the text is the next turn, which resumes the CLI's session.
@@ -976,6 +1015,43 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.#reopen();
 		});
 		this.#kick();
+		return this.status();
+	}
+
+	/**
+	 * Tells an agent-hosted thread something. Between turns the text waits in
+	 * the inbox like any input, and the turn it starts delivers it to the
+	 * agent as a steered message. During a turn it is steered to the agent at
+	 * once, queued there until the agent takes it on a turn boundary — there
+	 * is no cutting a turn short but ending the whole thread, so `interrupt`
+	 * means no more here than it does without it. A client that can't be
+	 * steered says so in the log, and the text waits for the thread's next
+	 * turn instead of being lost.
+	 */
+	async #steerOrb(thread: CodingThreadRow, text: string, options: { interrupt?: boolean; operationId: string }): Promise<CodingThreadStatus> {
+		if (thread.currentOperation === null) {
+			this.#assertBudget(this.store.required());
+			this.ctx.storage.transactionSync(() => {
+				this.store.releaseRetries();
+				this.store.enqueue(options.operationId, text);
+				this.#reopen();
+			});
+			this.#kick();
+			return this.status();
+		}
+		const client = await this.#orbClient();
+		const orb = thread.orb;
+		if (client !== null && orb !== null && client.capabilities().steer) {
+			await client.steer(orb.threadId, text);
+			this.store.recordEvent("orb.steered", { operationId: options.operationId, provider: client.id, orb: orb.threadId });
+			return this.status();
+		}
+		const why = client === null ? AGENT_HOSTED_UNAVAILABLE : orb === null ? "This agent-hosted thread has no orb yet" : `${client.id} takes no messages for a thread while it runs`;
+		this.ctx.storage.transactionSync(() => {
+			this.store.releaseRetries();
+			this.store.enqueue(options.operationId, text);
+			this.store.recordEvent("orb.steer_unsupported", { operationId: options.operationId, message: `${why}, so this message waits for the thread's next turn` });
+		});
 		return this.status();
 	}
 
@@ -1069,6 +1145,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
 		this.store.update({ state: "archived", stateReason: null });
 		await this.#archiveHarnessSession(thread);
+		// An agent-hosted thread is archived on the agent's site too, so it leaves the person's list there.
+		if (thread.providerKind === "agent-hosted") await this.#stopOrb();
 		await this.#giveBack({ keepVolume: false });
 		await this.lifecycle.jobs.cancel(ADVANCE_JOB);
 		return this.status();
@@ -1766,6 +1844,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (!thread || thread.state === "archived" || thread.state === "failed" || thread.state === "waiting_input") return;
 		// A move to a new session is under way: it kicks the thread when it is done.
 		if (this.#renewing) return;
+		// An agent-hosted thread runs in the agent's own cloud, not a machine Pim made: it needs no slot, no workspace and no environment, and its turns are only started and polled through the client (./orb/).
+		if (thread.providerKind === "agent-hosted") return this.#stepOrb(thread);
 		if (thread.currentOperation) {
 			const operation = thread.currentOperation;
 			if (cliHarness(thread.harness)) {
@@ -2064,6 +2144,230 @@ export class CodingThreadDO extends DurableObject<Env> {
 				if (this.#watching === operation) this.#watching = null;
 				void this.#advance();
 			});
+	}
+
+	/**
+	 * One pass for a thread that runs in the agent's own cloud (./orb/): it
+	 * looks at the turn under way — mirroring what the agent said and ending
+	 * the turn when its client says it is done — and otherwise starts the
+	 * oldest input's turn there. Nothing here touches a workspace, a slot or
+	 * an environment: the client is the whole of what the thread can do with
+	 * the agent, and the work itself is on the agent's cloud.
+	 */
+	async #stepOrb(thread: CodingThreadRow): Promise<void> {
+		for (;;) {
+			if (thread.currentOperation !== null) {
+				await this.#pollOrb(thread.currentOperation);
+				const now = this.store.thread();
+				if (!now || now.state === "failed" || now.state === "archived" || now.state === "waiting_input" || now.currentOperation !== null) return;
+				thread = now;
+			}
+			const input = this.store.nextInput();
+			if (input === null) {
+				if (thread.state === "provisioning") this.store.update({ state: "idle" });
+				return;
+			}
+			// An input held for a retry's backoff waits for it.
+			if (input.notBefore > Date.now()) return void (await this.#schedule(input.notBefore));
+			await this.#startOrbTurn(input);
+			if (this.store.required().currentOperation === null) return;
+			thread = this.store.required();
+		}
+	}
+
+	/**
+	 * Starts the input's turn on the agent's cloud. The thread's first turn
+	 * does that with `start`, idempotent on a key of the thread and the
+	 * input's operation, and the orb it answers is kept on the thread's
+	 * record at once — before anything else is awaited, so a restart finds
+	 * it there and never starts a second orb. Every later turn is a message
+	 * steered to the same orb, which the agent takes when it is ready, on a
+	 * turn boundary.
+	 */
+	async #startOrbTurn(input: InboxItem): Promise<void> {
+		const thread = this.store.required();
+		const client = await this.#orbClient();
+		if (client === null) return this.#failOrb("orb_unavailable", AGENT_HOSTED_UNAVAILABLE);
+		const orb = thread.orb;
+		try {
+			if (orb === null) {
+				const started = await client.start({ project: thread.repoUrl, prompt: input.text, mode: null, title: null, idempotencyKey: `${thread.threadId}:${input.operationId}` });
+				this.ctx.storage.transactionSync(() => {
+					// The orb first: after this the thread never calls `start` again, whatever happens to it.
+					this.store.update({ orb: started, providerId: client.id });
+					this.store.dequeue(input.seq);
+					this.store.update({ state: "running", stateReason: null, stateDetail: null, currentOperation: input.operationId, budgetStopped: false });
+					this.store.recordEvent("thread.turn_started", { operationId: input.operationId, provider: client.id, orb: started.threadId });
+				});
+				return;
+			}
+			if (!client.capabilities().steer) {
+				this.store.dequeue(input.seq);
+				return this.#failOrb("orb_steer_unsupported", `${client.id} takes no messages for a thread it has started, so this thread can't be told anything more`);
+			}
+			await client.steer(orb.threadId, input.text);
+			this.ctx.storage.transactionSync(() => {
+				this.store.dequeue(input.seq);
+				this.store.update({ state: "running", stateReason: null, stateDetail: null, currentOperation: input.operationId, budgetStopped: false });
+				this.store.recordEvent("thread.turn_started", { operationId: input.operationId, provider: client.id, orb: orb.threadId, steered: true });
+			});
+		} catch (error) {
+			if (error instanceof OrbLostError) return this.#failOrb("orb_lost", error.message);
+			if (error instanceof OrbAuthError) return this.#failOrb("orb_auth", error.message);
+			if (error instanceof OrbUnreachableError) {
+				// Nothing was changed, and `start` is idempotent: the next pass starts the same turn.
+				this.ctx.storage.transactionSync(() => {
+					this.store.update({ stateReason: "orb_unreachable", stateDetail: "The agent's cloud can't be reached just now; the turn starts when it can be" });
+					this.store.recordEvent("orb.unreachable", { operationId: input.operationId });
+				});
+				await this.#schedule(Date.now() + this.orbPollMs());
+				return;
+			}
+			if (error instanceof OrbUnsupportedError) return this.#failOrb("orb_unsupported", error.message);
+			return this.#failOrb("orb_error", errorText(error));
+		}
+	}
+
+	/**
+	 * Looks at the turn under way: mirrors what the agent said since the last
+	 * look, and ends the turn when its client says it is done. "idle" ends the
+	 * turn as any turn's end does; "error" fails it with what the agent last
+	 * said; "unknown" — a client that can't tell, such as one that was itself
+	 * restarted — ends nothing, and a bound on unknown looks in a row fails
+	 * the turn as unknown rather than waiting on nothing for ever. An orb that
+	 * no longer exists fails the thread, and a cloud that can't be reached
+	 * just now is waited out. Nothing but the client's word may end the turn:
+	 * whatever ran of it belongs to the agent's cloud.
+	 */
+	async #pollOrb(operation: string): Promise<void> {
+		const thread = this.store.required();
+		if (thread.currentOperation !== operation) return;
+		const client = await this.#orbClient();
+		if (client === null) return this.#failOrb("orb_unavailable", AGENT_HOSTED_UNAVAILABLE);
+		const orb = thread.orb;
+		if (orb === null) return this.#failOrb("orb_lost", "The agent-hosted thread has no orb to run on");
+		try {
+			await this.#mirrorOrb(client, orb);
+			const status = await client.state(orb.threadId);
+			if (status.state === "idle") {
+				this.#orbUnknowns = 0;
+				await this.#orbCost(client, orb);
+				return await this.#endTurn(operation, { status: "done" });
+			}
+			if (status.state === "error") {
+				this.#orbUnknowns = 0;
+				const said = await this.#lastSaid().catch(() => null);
+				return await this.#endTurn(operation, { status: "unanswered", reason: "orb_error", detail: `The agent's cloud reported the thread ended in an error${said ? `; it last said: ${said}` : ""}` });
+			}
+			if (status.state === "unknown") {
+				if (++this.#orbUnknowns >= this.orbUnknownLimit()) return this.#failOrb("orb_state_unknown", `The agent's cloud couldn't say what the thread was doing for ${this.orbUnknownLimit()} looks in a row, so the turn was given up on`);
+			} else this.#orbUnknowns = 0;
+		} catch (error) {
+			if (error instanceof OrbLostError) return this.#failOrb("orb_lost", error.message);
+			if (error instanceof OrbAuthError) return this.#failOrb("orb_auth", error.message);
+			if (error instanceof OrbUnreachableError) {
+				// Nothing was changed: the next look tries again.
+				console.warn(JSON.stringify({ event: "pim.coding.orb_unreachable", thread: thread.threadId, operation }));
+			} else if (error instanceof OrbUnsupportedError) return this.#failOrb("orb_unsupported", error.message);
+			else return await this.#endTurn(operation, { status: "unanswered", reason: "orb_error", detail: errorText(error) });
+		}
+		await this.#schedule(Date.now() + this.orbPollMs());
+	}
+
+	/**
+	 * Mirrors what the agent's cloud has of the thread into the thread's own
+	 * conversation, so the person reads it where they read any thread's: a
+	 * page at a time, from the message after the last one mirrored — which is
+	 * kept on the thread's record, so a restart repeats nothing.
+	 */
+	async #mirrorOrb(client: OrbClient, orb: OrbThread): Promise<void> {
+		const before = this.store.required().orbLastMessage;
+		let after = before;
+		const read: OrbMessage[] = [];
+		for (let calls = 0; calls < ORB_MESSAGE_PAGES; calls++) {
+			const page = await client.messages(orb.threadId, after === null ? {} : { after });
+			if (page.length === 0) break;
+			const last = page[page.length - 1]!.id;
+			// A client that answers the same page whatever it is asked would never end; it ends here instead.
+			if (read.length > 0 && last === read[read.length - 1]!.id) break;
+			read.push(...page);
+			after = last;
+		}
+		for (const message of read) {
+			// The agent's own words, as they are, without asking the thread's model anything: no provider, model or usage of Pim's is invented for them.
+			const said: Message =
+				message.role === "assistant"
+					? {
+							role: "assistant",
+							content: [{ type: "text", text: message.text }],
+							api: "anthropic-messages",
+							provider: "orb",
+							model: "orb",
+							usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+							stopReason: "stop",
+							timestamp: message.at,
+						}
+					: { role: "user", content: message.text, timestamp: message.at };
+			await this.#writeMessage(said);
+		}
+		if (after !== before) this.store.update({ orbLastMessage: after });
+	}
+
+	/**
+	 * Records what the thread's agent says it cost, as the status reports it:
+	 * the agent's own word, never a number Pim invented, and never counted
+	 * against the thread's budget, which Pim can't hold to the agent's word.
+	 * A client that can't say — or one whose `capabilities` say it reports no
+	 * usage — leaves the cost null with a note that says so.
+	 */
+	async #orbCost(client: OrbClient, orb: OrbThread): Promise<void> {
+		if (!client.capabilities().usage) return void this.store.update({ orbCostUsd: null, orbCostNote: `${client.id} reports no usage for its threads, so what this one cost isn't known.` });
+		try {
+			const usage = await client.usage(orb.threadId);
+			this.store.update(usage?.usd === undefined ? { orbCostUsd: null, orbCostNote: "The agent's cloud reports no cost for this thread, so what it spent isn't known." } : { orbCostUsd: usage.usd, orbCostNote: null });
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.orb_usage_failed", thread: this.store.thread()?.threadId, error: errorText(error).slice(0, 300) }));
+		}
+	}
+
+	/** The client an agent-hosted thread runs through, or null when this Pim has none registered for it (./orb/). */
+	async #orbClient(): Promise<OrbClient | null> {
+		const thread = this.store.required();
+		const factory = this.orbClients();
+		if (factory === null) return null;
+		return await factory({ space: thread.space, threadId: thread.threadId, providerId: thread.providerId });
+	}
+
+	/** Fails an agent-hosted thread, outside a turn's end: its turn is over with what it ran on, and it holds no slot to give back. */
+	async #failOrb(reason: string, detail: string | null): Promise<void> {
+		this.#orbUnknowns = 0;
+		this.store.update({ currentOperation: null });
+		await this.#fail(reason, detail, false);
+	}
+
+	/**
+	 * Ends the thread on the agent's own cloud, as aborting or archiving it
+	 * asks: the run is cancelled and the thread archived there, off the
+	 * person's list. Idempotent — stopping one already stopped does nothing —
+	 * and best effort: a client that can't stop, or a cloud that can't be
+	 * reached, is logged and the thread still ends here.
+	 */
+	async #stopOrb(): Promise<void> {
+		const thread = this.store.required();
+		const orb = thread.orb;
+		if (orb === null) return;
+		const client = await this.#orbClient();
+		if (client === null) return;
+		if (!client.capabilities().stop) {
+			this.store.recordEvent("orb.stop_unsupported", { provider: client.id, message: `${client.id} can't stop its threads, so this one is left as it is on the agent's site` });
+			return;
+		}
+		try {
+			await client.stop(orb.threadId);
+			this.store.recordEvent("orb.stopped", { provider: client.id, orb: orb.threadId });
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.orb_stop_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+		}
 	}
 
 	/**
@@ -2470,6 +2774,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		const operation = thread.currentOperation;
 		if (why === "person") this.#userStop = operation;
+		// A turn on the agent's cloud ends by ending the whole thread there; nothing of it runs here to stop.
+		if (thread.providerKind === "agent-hosted") {
+			if (operation !== null) {
+				await this.#stopOrb();
+				await this.#endTurn(operation, { status: "unanswered", reason: "aborted" });
+			}
+			return;
+		}
 		if (cliHarness(thread.harness)) {
 			const run = this.#cli;
 			if (run && run.operation === operation) {
@@ -3413,6 +3725,19 @@ export type CodingThreadStatus = {
 	readonly pool: string;
 	/** Why it is there: `pinned` (the start named it), `priority` (the first provider with room) or `overflow` (moved on from a full one). */
 	readonly placementReason: PlacementReason;
+	/** What kind of provider runs the thread: a workspace Pim made and execs into, or an agent-hosted orb in the agent's own cloud. */
+	readonly providerKind: CodingThreadRow["providerKind"];
+	/** The agent-hosted thread the thread runs on, where the person can watch it on the agent's own site; null for a workspace thread. */
+	readonly orb: { readonly url: string } | null;
+	/**
+	 * What the thread has cost: what Pim measured of it in a workspace, or
+	 * what its agent's cloud reported for an agent-hosted one — the agent's
+	 * word, which Pim can't check. Null when the agent reports no cost, with
+	 * `costNote` saying so honestly.
+	 */
+	readonly cost: number | null;
+	/** Why `cost` is null, when it is. */
+	readonly costNote: string | null;
 	readonly slot: CodingThreadRow["slot"];
 	/** Its place in the space's queue while it waits for a slot. */
 	readonly queue: QueuePlace | null;
@@ -3660,6 +3985,13 @@ const MAX_DIFF_CHARS = 256 * 1024;
 
 const ADVANCE_JOB = "advance";
 const HEARTBEAT_MS = 30_000;
+/** How often a turn on an agent-hosted thread is looked at, and how many looks in a row may say the client can't tell what it is doing before the turn is failed as unknown. */
+const ORB_POLL_MS = 30_000;
+const ORB_UNKNOWN_LIMIT = 10;
+/** The most calls one look at an agent-hosted thread's transcript may page through. */
+const ORB_MESSAGE_PAGES = 1_000;
+/** What a thread that runs in the agent's own cloud is told when this Pim has no client for it: a state to show the person, not a crash. */
+const AGENT_HOSTED_UNAVAILABLE = "agent-hosted provider not available: this Pim has no orb client registered, so the thread can't run in the agent's cloud. Continue it once one is set up.";
 /** How long a thread may sit queued or provisioning with no change before it is failed as stuck. */
 const STUCK_MS = 20 * 60_000;
 const DETAIL_MAX = 500;

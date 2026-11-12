@@ -56,6 +56,25 @@ export type OrbCapabilities = {
 	readonly usage: boolean;
 };
 
+/** What a thread tells the factory that finds its client: whose space the thread is, which one it is, and the provider its record names. */
+export type OrbClientContext = {
+	/** The space the thread belongs to: its owner's ID, which names its Pim. */
+	readonly space: string;
+	/** The coding thread that runs on the client, by its own ID. */
+	readonly threadId: string;
+	/** The orb client the thread's record names, by the client's own `id`. */
+	readonly providerId: string;
+};
+
+/**
+ * How a coding thread finds the client that runs it (./thread-do.ts): the
+ * thread's control plane asks this with its own, its space's and its
+ * provider's name, and gets the client — or null when this Pim has none for
+ * it. The real factory is a later slice; there is none on a deployment yet,
+ * and tests register one that answers a `FakeOrbClient`.
+ */
+export type OrbClientFactory = (context: OrbClientContext) => OrbClient | null | Promise<OrbClient | null>;
+
 /** The methods a client has, as failures and the conformance suite name them. */
 export type OrbMethod = "start" | "steer" | "stop" | "state" | "messages" | "usage";
 

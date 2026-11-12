@@ -111,7 +111,7 @@ type CodingEnvironment = {
   state: "none" | "unsupported" | "restoring" | "cached" | "building" | "failed"; // none: nothing to provision and no setup script; unsupported: the workspace backend keeps no environments (reason says why); failed: the setup script failed (a failed provisioning step is on its item)
   reason?: string;               // why the backend can't keep environments, when the state is "unsupported"
   key: string | null;           // 64 hex digits: the person, the repository, the provisioning steps, the script, its lockfiles and the workspace image
-  source: "settings" | "repository" | "mise" | "devcontainer" | null; // the person's setting, the repository's .pim/setup.sh, its mise task `setup`, or its dev container's lifecycle commands (the first that exists); null without a setup
+  source: "settings" | "env" | "repository" | "mise" | "devcontainer" | null; // the person's setting, the repository's .pim/env.json `setup`, its .pim/setup.sh, its mise task `setup`, or its dev container's lifecycle commands (the first that exists); null without a setup
   pool: string | null;          // the sandbox pool whose snapshot this is: the one the thread restored from or, cold-provisioned, keeps its snapshot for; null until ready. With readyFrom, it says whether the thread restored or cold-provisioned in that pool
   builtAt: number | null;       // when the snapshot the thread has was made
   restoredFromKey: string | null; // the snapshot the workspace started from, an older key's when the repository moved on
@@ -134,8 +134,10 @@ type CodingEnvironment = {
     error?: string;             // the step's command, how it ended and the end of what it printed
   }[];
   dependencies: { tool: string; command: string; from: string; status: ProvisionStatus; error?: string }[]; // such as "go mod download" from "go.sum"
-  testCommands: { command: string; source: "mise" | "make" | "package.json" | "ci" | "default"; from: string }[]; // the checks the coding agent is told
-  notes: string[];              // what was found and isn't provisioned, such as a CI workflow's services
+  testCommands: { command: string; source: "mise" | "make" | "package.json" | "ci" | "default" | "pim"; from: string }[]; // the checks the coding agent is told; "pim" is the `check` list of .pim/env.json
+  notes: string[];              // what was found and isn't provisioned, such as a CI workflow's services; what .pim/env.json left out or ignored; and, without one, what was detected
+  services: { name: string; command: string; port: number; ready?: string; preview?: boolean }[]; // declared in .pim/env.json; described to the agent, not started
+  cachePaths: string[];         // the paths .pim/env.json says are worth caching
 };
 
 // pending: not run yet; installed: in this workspace; cached: came with the snapshot; failed; skipped: a toolchain it needs failed; present: the image has it
@@ -190,6 +192,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `thread.pushed`: `data: { repo, branch, before, after, outcome }`, where `outcome` is `created`, `updated` or `unchanged`.
 - `thread.merged`: `data: { repo, branch, before, after, outcome, rebased }`, a merge into the default branch (`branch`); `rebased` says whether the thread's commits were rebased onto it first. A rebase also adds a checkpoint, `Rebased onto <branch>`.
 - `environment.built`, `environment.restored`: `data: { key, setupMs?, snapshotKept? }`, the environment was set up (and its snapshot kept, unless `snapshotKept` is false), or restored from the person's snapshot.
+- `environment.detected`: `data: { toolchains, dependencies }` (comma-separated tool names), a repository with no `.pim/env.json` whose files named what to install.
 - `environment.failed`: `data: { key, error }`; `environment.restore_failed`: `data: { key, error }`, a snapshot that couldn't be restored, after which the thread cloned as usual.
 - `environment.provision_failed`: `data: { step, error }`, a provisioning step that failed (`step` is `mise`, `toolchain:<tool>` or `dependencies:<tool>`); the thread went on, and `environment.built` has `provisionFailures`.
 - `thread.waiting_input`: `data: { reason, harness, operationId }`: a CLI harness thread's input waits for the person to connect the harness (`reason: "login_required"`): to sign in with their subscription, or to give their API key.

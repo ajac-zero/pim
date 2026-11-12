@@ -109,7 +109,7 @@ export type CodingEnvironment = {
     | "failed";
   reason?: string;
   key: string | null;
-  source: "settings" | "repository" | "mise" | "devcontainer" | null;
+  source: "settings" | "env" | "repository" | "mise" | "devcontainer" | null;
   builtAt: number | null;
   pool?: string | null;
   restoredFromKey: string | null;
@@ -127,6 +127,17 @@ export type CodingEnvironment = {
   dependencies: CodingDependencies[];
   testCommands: CodingTestCommand[];
   notes: string[];
+  services: CodingEnvService[];
+  cachePaths: string[];
+};
+
+/** A service the repository's .pim/env.json declares; it is described, not started. */
+export type CodingEnvService = {
+  name: string;
+  command: string;
+  port: number;
+  ready?: string;
+  preview?: boolean;
 };
 
 /** How far a toolchain's or the dependencies' install got; `present` is the workspace image's own, and `cached` came with the snapshot. */
@@ -166,7 +177,7 @@ export type CodingDependencies = {
 /** A command the repository checks itself with, and the file it was found in. */
 export type CodingTestCommand = {
   command: string;
-  source: "mise" | "make" | "package.json" | "ci" | "default";
+  source: "mise" | "make" | "package.json" | "ci" | "default" | "pim";
   from: string;
 };
 

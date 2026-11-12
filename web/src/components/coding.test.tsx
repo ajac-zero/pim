@@ -112,6 +112,8 @@ const noEnvironment: CodingEnvironment = {
   dependencies: [],
   testCommands: [],
   notes: [],
+  services: [],
+  cachePaths: [],
 };
 
 const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({

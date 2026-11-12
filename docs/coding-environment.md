@@ -29,15 +29,43 @@ The steps run one after another with bash in the checkout, as the setup script d
 1. A repository with mise configuration that lists tools: `mise trust && mise install`, which installs what it lists as mise would on a developer's machine.
 2. Each other toolchain with a version: `mise use --global <tool>@<version>`, into mise's configuration in the workspace's home, never into the repository. mise installs npm packages without their install scripts, so for pnpm the step then runs pnpm's own install script when its executable is still the placeholder and points mise's entries at the real executables, which would otherwise crash Node. Every toolchain step ends by running the tool (`node --version`, `go version`), so an install that leaves a binary that crashes is recorded as failed, with the tool's error, not as installed.
 3. Dependencies, only from a lockfile, so nothing in the checkout changes: `go mod download` (with `go.sum`), `pnpm install --frozen-lockfile`, `npm ci`, `yarn install --frozen-lockfile` (or `--immutable` with `.yarnrc.yml`), `bun install --frozen-lockfile`, `uv sync --frozen` (with `uv.lock`), `uv venv && uv pip install -r requirements.txt …` (into `.venv`), and `cargo fetch --locked`. Downloads go to the person's dependency cache for the repository where the backend keeps one.
-4. The repository's setup runs last and may do anything else. Only the highest of these that exists runs: the person's setting for the repository; `.pim/setup.sh`; a mise task named `setup` in `mise.toml` or `.mise.toml` (run with `mise run setup`); the dev container's `onCreateCommand`, `updateContentCommand` and `postCreateCommand` from `.devcontainer/devcontainer.json` or `.devcontainer.json`, in that order. A command may be a string, an array (a program and its arguments) or an object of either; an object's entries run one after another, not in parallel, and the first failure stops the rest.
+4. The repository's setup runs last and may do anything else. Only the highest of these that exists runs: the person's setting for the repository; the `setup` of `.pim/env.json` ([below](#the-repositorys-contract-pimenvjson)); `.pim/setup.sh`; a mise task named `setup` in `mise.toml` or `.mise.toml` (run with `mise run setup`); the dev container's `onCreateCommand`, `updateContentCommand` and `postCreateCommand` from `.devcontainer/devcontainer.json` or `.devcontainer.json`, in that order. A command may be a string, an array (a program and its arguments) or an object of either; an object's entries run one after another, not in parallel, and the first failure stops the rest.
 
 A step that fails is recorded on the toolchain or dependencies it installs, with the end of what it printed, and the thread goes on: a failed step never fails the thread. Dependencies that need a toolchain that couldn't be installed are skipped. No snapshot is kept when a step failed, so the person's next thread tries again, as one would after a network failure; a rebuild tries again in the same thread. A failing setup script is still the environment's failure, as before.
 
 A repository with nothing to install and no setup script has no environment (`state: "none"`), but its checks are still found and told to the agent. A workspace backend that keeps no environments says so instead (`state: "unsupported"`, with its `reason`), and the thread works in its plain workspace.
 
+## The repository's contract: `.pim/env.json`
+
+A repository can say what its environment is instead of leaving Pim to guess. `.pim/env.json` is read from the checkout ([`src/coding/env-config.ts`](../src/coding/env-config.ts)); every field is optional:
+
+| Field | Meaning |
+| --- | --- |
+| `setup` | A bash script, or a list of lines joined into one script that starts with `set -e`. |
+| `cacheKeys` | Files, or globs, whose contents are part of the environment's key, such as `["db/schema.sql", "tools/**/*.lock"]`. `*` matches within one name, `**` across directories. |
+| `cachePaths` | Paths worth keeping between threads, such as `["node_modules"]`; shown in the status. |
+| `services` | Processes of the repository: `{ "name", "command", "port", "ready"?, "preview"? }`. They are described to the agent and shown in the status; Pim doesn't start them yet. |
+| `check` | The commands the repository checks itself with. When there are any, they replace the checks found in other files, with source `pim`. |
+
+```json
+{
+  "setup": ["pnpm install --frozen-lockfile", "pnpm run build:schema"],
+  "cacheKeys": ["db/schema.sql", "tools/**/*.lock"],
+  "cachePaths": ["node_modules"],
+  "services": [{ "name": "web", "command": "pnpm dev", "port": 5173, "ready": "curl -sf localhost:5173", "preview": true }],
+  "check": ["pnpm typecheck", "pnpm test"]
+}
+```
+
+The file is read strictly. A wrong field makes the whole file ignored, with up to five reasons in the thread's notes (`.pim/env.json is ignored: …`), and the thread is set up as if it had none. A field this version doesn't know is ignored with a note. A `cacheKeys` entry that matches no file is left out of the key, with a note. Paths in `cacheKeys` and `cachePaths` must be relative, without `~`, `..` or `\`.
+
+Limits: the file is at most 32 KiB; at most 20 services, with names of a letter and up to 39 letters, digits, `_` or `-` that don't repeat (ignoring case), ports from 1 to 65535 that don't repeat; at most 50 `check` commands of at most 200 characters; at most 50 `cacheKeys` and 50 `cachePaths`. `cacheKeys` globs are matched up to six directories deep, skipping dot-directories and `node_modules`, and at most 200 files of 2 MiB each are hashed.
+
+Precedence of the setup, highest first: the person's setting for the repository, `setup` in `.pim/env.json`, `.pim/setup.sh`, a mise task named `setup`, the dev container's commands. A repository without `.pim/env.json` has what Pim found recorded as a note (`detected: go 1.22, installing with go mod download`) and an `environment.detected` event.
+
 ## The cache key
 
-The environment's key ([`environmentKey`](../src/coding/environment-cache.ts)) covers the steps' commands, which name every version they install, so a new pin in `go.mod`, `.nvmrc`, `packageManager` or anywhere else above is a new environment, and so is a new or removed lockfile. It covers the setup that runs and where it came from (a mise task's file or the dev container's commands count as its content), and, for a toolchain that isn't pinned (`lts`, `stable`, `latest`), the concrete version mise resolves it to (`mise latest node@lts`), so a new release is a new environment; where mise can't resolve it, the key changes every 7 days instead. It also covers the lockfiles' contents (now with `go.sum`, `bun.lock`, `npm-shrinkwrap.json` and mise's configuration), the setup script, the person, the repository and the workspace image. A change to anything else, such as the code, a Makefile or a workflow, keeps the key and the snapshot. Snapshots are kept per sandbox pool ([coding-pools.md](coding-pools.md#environment-snapshots)). The key also covers the pool, except for a provider's first pool, which keeps the keys made before pools, so those snapshots still resolve. The key's format changed with provisioning, so every snapshot made before it is built once more.
+The environment's key ([`environmentKey`](../src/coding/environment-cache.ts)) covers the steps' commands, which name every version they install, so a new pin in `go.mod`, `.nvmrc`, `packageManager` or anywhere else above is a new environment, and so is a new or removed lockfile. It covers the setup that runs and where it came from (a mise task's file or the dev container's commands count as its content), and, for a toolchain that isn't pinned (`lts`, `stable`, `latest`), the concrete version mise resolves it to (`mise latest node@lts`), so a new release is a new environment; where mise can't resolve it, the key changes every 7 days instead. It also covers the contents of the files `.pim/env.json`'s `cacheKeys` name, and the lockfiles' contents (now with `go.sum`, `bun.lock`, `npm-shrinkwrap.json` and mise's configuration), the setup script, the person, the repository and the workspace image. A change to anything else, such as the code, a Makefile or a workflow, keeps the key and the snapshot. Snapshots are kept per sandbox pool ([coding-pools.md](coding-pools.md#environment-snapshots)). The key also covers the pool, except for a provider's first pool, which keeps the keys made before pools, so those snapshots still resolve. The key's format changed with provisioning, so every snapshot made before it is built once more.
 
 ## The checks the agent is told
 
@@ -60,7 +88,7 @@ A name counts as a check when it is `test`, `tests`, `check`, `lint`, `vet`, `ty
 
 ## What isn't covered
 
-- **Services.** Postgres, Redis and the other `services:` a CI workflow starts aren't started; the thread's `notes` and the agent's instructions name them, so tests that need them fail or are skipped. Docker isn't available in a workspace, so `docker compose` can't start them either.
+- **Services.** Those `.pim/env.json` declares are described, not started yet. Postgres, Redis and the other `services:` a CI workflow starts aren't started either; the thread's `notes` and the agent's instructions name them, so tests that need them fail or are skipped. Docker isn't available in a workspace, so `docker compose` can't start them either.
 - **Dockerfiles and dev containers aren't built.** A `Dockerfile` and a dev container's `image` only hint at versions. Dev container features other than the languages above, and their options besides `version`, aren't installed; their lifecycle commands are run only when nothing higher (a setting, `.pim/setup.sh`, a mise `setup` task) is set up.
 - **Only the root.** A monorepo's `go.mod`, `package.json` or `pyproject.toml` in a subdirectory isn't read (its lockfiles one directory down are in the key, as before). A workflow step's `working-directory` and a matrix aren't applied to its command.
 - **Some managers.** Poetry, Pipenv, Conda, Gradle, Maven and Bundler projects get no dependency install (Poetry is noted), and Java, Ruby and the rest are installed only when mise configuration or a dev container feature names them. A `package.json` without a lockfile installs nothing.

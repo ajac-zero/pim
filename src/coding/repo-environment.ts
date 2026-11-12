@@ -714,6 +714,7 @@ export function environmentBrief(env: {
 	readonly dependencies: readonly EnvironmentDependencies[];
 	readonly testCommands: readonly TestCommand[];
 	readonly notes: readonly string[];
+	readonly services?: readonly { readonly name: string; readonly command: string; readonly port: number }[];
 }): string | null {
 	const lines: string[] = [];
 	if (env.reason) lines.push(`${env.reason}, so the workspace has only what the image brings.`);
@@ -733,6 +734,10 @@ export function environmentBrief(env: {
 	if (env.testCommands.length > 0) {
 		lines.push("Commands the repository checks itself with, found in its files (run the ones that cover your change):");
 		for (const each of env.testCommands) lines.push(`- \`${each.command}\` (${each.source === "default" ? `the usual for ${each.from}` : each.from})`);
+	}
+	if (env.services && env.services.length > 0) {
+		lines.push("Services the repository declares in .pim/env.json (not started for you):");
+		for (const each of env.services) lines.push(`- ${each.name}: \`${each.command}\` on port ${each.port}`);
 	}
 	for (const note of env.notes) lines.push(`${note}.`);
 	return lines.length > 0 ? lines.join("\n") : null;

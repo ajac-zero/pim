@@ -6,9 +6,8 @@ import { closedPool, poolAvailable, poolResult, reservePool, type PoolBreaker } 
  * at once in each of its sandbox pools: the pool's limit. A thread asks
  * for a slot (`request`) and either gets one or waits in a queue; when it
  * gives its slot back (`release`), the queue's head takes it. The queue is
- * ordered by priority, highest first, then by when each thread asked; every
- * thread has priority 0 unless its caller says otherwise, so the queue is
- * first come, first served.
+ * ordered by when each thread asked, with insertion order breaking ties,
+ * so pins and resumed threads cannot jump ahead of older requests.
  *
  * Slots are counted per pool: a thread in one pool never takes a slot of
  * another's. Several pools may share one provider (the workspace backend
@@ -48,7 +47,7 @@ import { closedPool, poolAvailable, poolResult, reservePool, type PoolBreaker } 
  * its conditions. They are kept in the database with the rest, so admission
  * stays one transaction and a restart doesn't forget the disk is full.
  *
- * Every queued thread has a deadline, 6 hours unless it or the options say
+ * Every queued thread has a deadline, 30 minutes unless it or the options say
  * otherwise; `tick` takes out the threads past theirs, each with the reason
  * it was last waiting for, and admits into whatever that frees.
  *
@@ -141,21 +140,16 @@ export const CODING_SCHEDULER_TABLES = [
 	"pim_coding_provider_conditions",
 ] as const;
 
-const ORDER = "ORDER BY priority DESC, queued_at, seq";
+const ORDER = "ORDER BY queued_at, seq";
 
-/** How long a thread waits in the queue when neither it nor the options say (6 hours). */
-const DEFAULT_DEADLINE_MS = 6 * 60 * 60 * 1000;
+/** How long a thread waits in the queue when neither it nor the options say (30 minutes). */
+const DEFAULT_DEADLINE_MS = 30 * 60 * 1000;
 
 /** How long a slot's thread may be idle before it gives the slot back, and how long one waiting for the person keeps it before it may be preempted, when the options don't say (10 and 5 minutes). */
 const DEFAULT_IDLE_MS = 10 * 60 * 1000;
 const DEFAULT_WAITING_GRACE_MS = 5 * 60 * 1000;
 
-/**
- * The priority a preempted thread asks again with, to go to the head of the
- * queue: ahead of every thread at the usual priority 0, and, as threads of
- * the same priority are first come, first served, behind the threads
- * preempted before it.
- */
+/** The legacy priority recorded for resumed requests; it no longer changes FIFO order. */
 export const PREEMPT_RESUME_PRIORITY = 1000;
 
 const ACTIVITIES: readonly string[] = ["running", "idle", "waiting"] satisfies SlotActivity[];
@@ -175,7 +169,7 @@ export type CodingSchedulerOptions = {
 	readonly defaultLimit?: number;
 	/** The limits of the providers named here until `setLimit` sets one for them; the others have the space's. */
 	readonly limits?: Readonly<Record<string, number>>;
-	/** How long a thread may wait in the queue when its request doesn't say (6 hours). */
+	/** How long a thread may wait in the queue when its request doesn't say (30 minutes). */
 	readonly defaultDeadlineMs?: number;
 	/** Asked in order before each admission ([lowDiskGate, budgetCapGate]). */
 	readonly gates?: readonly AdmissionGate[];
@@ -222,7 +216,7 @@ export type SlotRequest = {
 	readonly reason?: string;
 	/** How long it may wait in the queue before `expire` takes it out (the options' `defaultDeadlineMs`). */
 	readonly deadlineMs?: number;
-	/** Higher goes first; threads of the same priority are first come, first served (0). */
+	/** Kept for compatibility; admission is always FIFO. */
 	readonly priority?: number;
 };
 
@@ -267,6 +261,8 @@ export type QueueEntry = {
 	readonly priority: number;
 	readonly queuedAt: number;
 	readonly deadlineAt: number;
+	/** Pool diagnostics captured before an expired entry leaves the queue. */
+	readonly skipped?: readonly { pool: string; reason: "full" | "unhealthy" | "disabled" }[];
 };
 
 export type SchedulerSnapshot = { readonly limit: number; readonly running: Slot[]; readonly queued: QueueEntry[] };
@@ -722,7 +718,13 @@ export class CodingScheduler {
 
 	#expire(now: number): QueueEntry[] {
 		// Each with the reason it is waiting for until now, read before any leaves the queue.
-		const expired = this.#queue().filter((entry) => entry.deadlineAt <= now);
+		const expired = this.#queue().filter((entry) => entry.deadlineAt <= now).map((entry): QueueEntry => ({
+			...entry,
+			skipped: [entry.pool, ...(entry.overflow ?? [])].map((pool) => ({
+				pool,
+				reason: !poolAvailable(this.#breaker(pool), now) ? "unhealthy" : "full",
+			})),
+		}));
 		for (const entry of expired) this.#sql.exec("DELETE FROM pim_coding_queue WHERE thread_id = ?", entry.threadId);
 		return expired;
 	}
@@ -850,9 +852,7 @@ export class CodingScheduler {
 	#positionOf(entry: Row): number {
 		const ahead = this.#sql
 			.exec(
-				"SELECT COUNT(*) AS n FROM pim_coding_queue WHERE priority > ? OR (priority = ? AND (queued_at < ? OR (queued_at = ? AND seq < ?)))",
-				entry.priority,
-				entry.priority,
+				"SELECT COUNT(*) AS n FROM pim_coding_queue WHERE queued_at < ? OR (queued_at = ? AND seq < ?)",
 				entry.queued_at,
 				entry.queued_at,
 				entry.seq,

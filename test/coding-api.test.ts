@@ -68,7 +68,7 @@ async function start(body: Record<string, unknown> = {}) {
 	return view;
 }
 
-/** Takes the idle thread's slot back, as the scheduler does after 10 minutes, which deletes its workspace. */
+/** Takes the idle thread's slot back, as the scheduler does after its idle grace, which suspends its workspace. */
 async function release(threadId: string, space: string) {
 	const scheduler = codingScheduler(env, space);
 	codingSchedulers.now = Date.now() + 11 * 60_000;
@@ -78,7 +78,7 @@ async function release(threadId: string, space: string) {
 	} finally {
 		codingSchedulers.now = null;
 	}
-	expect(await codingWorkspaces.list({ sessionId: threadId })).toEqual([]);
+	expect(await codingWorkspaces.list({ sessionId: threadId })).toMatchObject([{ state: "stopped" }]);
 }
 
 /** The thread's `thread.turn_ended` events once it has had `count`. */

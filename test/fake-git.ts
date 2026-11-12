@@ -27,6 +27,12 @@ export const fakeClones: { url: string; env: Record<string, string> }[] = [];
 /** Clones of a URL that fail with the given error output, this many more times, before it clones as usual: a rate limited host. */
 export const fakeCloneFailures = new Map<string, { times: number; stderr: string }>();
 
+/** Each `git push` tried, with the environment git ran in. */
+export const fakePushes: { url: string; refspec: string; sha: string; env: Record<string, string> }[] = [];
+
+/** Pushes to a URL that fail with the given error output, this many more times, before they work: a branch that moved on. */
+export const fakePushFailures = new Map<string, { times: number; stderr: string }>();
+
 type Files = Record<string, string>;
 
 let commits = 0;
@@ -142,12 +148,31 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			await write(workspace, `${cwd}/.git/FETCH_HEAD`, "base0000");
 			return {};
 		}
+		case "symbolic-ref": {
+			// `symbolic-ref --short -q HEAD`: the branch, or failing with no output when HEAD is detached.
+			if (await read(workspace, `${cwd}/.git/detached`).catch(() => "")) return { code: 1 };
+			return { stdout: `${await read(workspace, `${cwd}/.git/branch`).catch(() => "")}\n` };
+		}
+		case "push": {
+			// `push origin HEAD:refs/heads/<branch>`, authorized as a fetch is; the broker's own checks are tested elsewhere.
+			const origin = await read(workspace, `${cwd}/.git/origin`);
+			const failing = fakePushFailures.get(origin);
+			const sent = env.GIT_CONFIG_KEY_0 === "http.extraHeader" ? `> ${env.GIT_CONFIG_VALUE_0}\n` : "";
+			if (failing && failing.times > 0) {
+				failing.times--;
+				return { stderr: `${sent}${failing.stderr}`, code: 1 };
+			}
+			const refspec = rest[1] ?? "";
+			fakePushes.push({ url: origin, refspec, sha: await read(workspace, `${cwd}/.git/HEAD`), env });
+			return {};
+		}
 		case "checkout": {
-			// `checkout [-f] -B <branch> FETCH_HEAD`: the branch is kept in `.git/branch`.
+			// `checkout [-f] -B <branch> FETCH_HEAD`: the branch is kept in `.git/branch`; `--detach` leaves it, with a mark that HEAD is not on it.
 			const branch = rest[rest.indexOf("-B") + 1];
 			if (rest.includes("-B") && branch) await write(workspace, `${cwd}/.git/branch`, branch);
+			await write(workspace, `${cwd}/.git/detached`, rest.includes("--detach") ? "1" : "");
 			const target = rest.at(-1)!;
-			const sha = target === "FETCH_HEAD" || target === branch ? await read(workspace, `${cwd}/.git/FETCH_HEAD`) : target;
+			const sha = target === "FETCH_HEAD" || target === branch ? await read(workspace, `${cwd}/.git/FETCH_HEAD`) : target === "HEAD" ? await read(workspace, `${cwd}/.git/HEAD`) : target;
 			const files = await commit(sha);
 			if (target !== "FETCH_HEAD") for (const path of Object.keys(await readFiles(workspace, cwd))) if (!(path in files)) await workspace.remove(`${cwd}/${path}`);
 			for (const [path, text] of Object.entries(files)) await write(workspace, `${cwd}/${path}`, text);

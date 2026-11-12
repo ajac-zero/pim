@@ -163,6 +163,8 @@ export type CodingThreadRow = {
 	readonly session: CodingSession;
 	/** The pull request opened from the thread's branch (`coding_open_pull_request`); null until one is. */
 	readonly pullRequest: { readonly url: string; readonly number: number } | null;
+	/** The commit the thread's own branch was last pushed at, by Pim's automatic push or the workspace's own; null until it was. */
+	readonly lastPushedSha: string | null;
 	readonly createdAt: number;
 	readonly updatedAt: number;
 };
@@ -386,6 +388,8 @@ export class CodingThreadStore {
 		// The workspace's session, as JSON.
 		if (!columns.has("session")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN session TEXT");
 		if (!columns.has("pull_request_number")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_number INTEGER");
+		// The commit Pim last pushed the thread's branch at (./thread-do.ts `#autopush`); null until it has.
+		if (!columns.has("last_pushed_sha")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN last_pushed_sha TEXT");
 		// Whether the thread stays on its provider; threads from before overflow stay where they are.
 		if (!columns.has("placed")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN placed INTEGER NOT NULL DEFAULT 1");
 		// Why the thread is on its provider; threads from before placements were recorded took the default.
@@ -420,7 +424,7 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "resolvedProfile" | "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "idleSince" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "placement" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
+		thread: Omit<CodingThreadRow, "resolvedProfile" | "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "idleSince" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "lastPushedSha" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "placement" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
 			consecutiveInterrupts?: number;
 			providerInstance?: string;
 			placed?: boolean;
@@ -461,7 +465,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "resolvedProfile" | "state" | "stateReason" | "stateDetail" | "providerId" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "placement" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "idleSince" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "resolvedProfile" | "state" | "stateReason" | "stateDetail" | "providerId" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "placement" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "noCapacityTimeouts" | "idleSince" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "lastPushedSha" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.resolvedProfile !== undefined) columns.resolved_profile = change.resolvedProfile === null ? null : JSON.stringify(change.resolvedProfile);
@@ -495,6 +499,7 @@ export class CodingThreadStore {
 			columns.pull_request_url = change.pullRequest?.url ?? null;
 			columns.pull_request_number = change.pullRequest?.number ?? null;
 		}
+		if (change.lastPushedSha !== undefined) columns.last_pushed_sha = change.lastPushedSha;
 		const names = Object.keys(columns);
 		if (names.length === 0) return;
 		this.#sql.exec(`UPDATE coding_thread SET ${names.map((name) => `${name} = ?`).join(", ")}, updated_at = ?`, ...Object.values(columns), this.#now());
@@ -767,6 +772,7 @@ function threadOf(row: Row): CodingThreadRow {
 		consecutiveInterrupts: Number(row.consecutive_interrupts),
 		session: row.session === null || row.session === undefined ? NO_SESSION : { ...NO_SESSION, ...(JSON.parse(String(row.session)) as Partial<CodingSession>) },
 		pullRequest: row.pull_request_url === null || row.pull_request_url === undefined ? null : { url: String(row.pull_request_url), number: Number(row.pull_request_number) },
+		lastPushedSha: text(row.last_pushed_sha),
 		createdAt: Number(row.created_at),
 		updatedAt: Number(row.updated_at),
 	};

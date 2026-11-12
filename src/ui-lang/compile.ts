@@ -28,10 +28,11 @@ const STATE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /**
  * Compiles a block's source to its program. Whatever is wrong with it comes
  * back as diagnostics on the program, not as an exception; nothing throws.
+ * With `partial`, the source is a block still streaming in (see `parse`).
  */
-export function compile(source: string): UiProgram {
+export function compile(source: string, options: { partial?: boolean } = {}): UiProgram {
 	const compiler = new Compiler();
-	const program = compiler.compile(source);
+	const program = compiler.compile(source, options.partial === true);
 	return program;
 }
 
@@ -52,12 +53,12 @@ class Compiler {
 		this.diagnostics.push({ code, message, line: 0, severity });
 	}
 
-	compile(source: string): UiProgram {
+	compile(source: string, partial: boolean): UiProgram {
 		if (source.length > MAX_SOURCE_BYTES) {
 			this.say("error", "too_long_source", `A ui block may be at most ${MAX_SOURCE_BYTES} bytes; this one is ${source.length}.`);
 			return this.finish([]);
 		}
-		const parsed = parse(source);
+		const parsed = parse(source, { partial });
 		this.diagnostics.push(...parsed.diagnostics);
 		const nodes = this.nodes(parsed.nodes, "any", null);
 		return this.finish(nodes);

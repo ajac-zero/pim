@@ -923,3 +923,44 @@ describe("the docs' ui examples", () => {
     }
   });
 });
+
+describe("a block still being written", () => {
+  const partial = (source: string) => compile(source, { partial: true });
+  const codes = (source: string) =>
+    partial(source).diagnostics.map((diagnostic) => diagnostic.code);
+
+  it("drops an unfinished tag instead of showing it as text", () => {
+    const program = partial("Hello\n<text>Hi</text><inp");
+    expect(program.fallbackMarkdown).not.toContain("<inp");
+    expect(program.fallbackMarkdown).toContain("Hello");
+    expect(codes("Hello\n<text>Hi</text><inp")).toContain("unterminated_tag");
+    expect(partial("Hi <").fallbackMarkdown.trim()).toBe("Hi");
+    // Whole source, the same cut-off is left as text.
+    expect(compile("Hi <inp").fallbackMarkdown).toContain("<inp");
+  });
+
+  it("drops an unfinished statement and an unfinished {…}", () => {
+    expect(partial("Hi\n{@state n = 1").fallbackMarkdown.trim()).toBe("Hi");
+    expect(partial("Hi {na").fallbackMarkdown.trim()).toBe("Hi");
+    expect(codes("Hi {na")).toContain("unterminated_braced_value");
+  });
+
+  it("closes an open element that has content and drops one that has none", () => {
+    const open = partial("<box><text>Hel");
+    expect(open.valid).toBe(true);
+    expect(open.fallbackMarkdown).toContain("Hel");
+    expect(partial("<box>\n  <text>").nodes).toEqual([]);
+    expect(partial("<box>\n  ").nodes).toEqual([]);
+  });
+
+  it("repairs the example at every point it can be cut, without throwing", () => {
+    let widest = 0;
+    for (let end = 0; end <= EXAMPLE.length; end++) {
+      const program = partial(EXAMPLE.slice(0, end));
+      expect(program.fallbackMarkdown).not.toMatch(/<[a-z]/);
+      widest = Math.max(widest, program.nodes.length);
+    }
+    expect(widest).toBeGreaterThan(0);
+    expect(partial(EXAMPLE).diagnostics).toEqual([]);
+  });
+});

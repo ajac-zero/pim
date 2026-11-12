@@ -603,6 +603,11 @@ export class CodingThreadStore {
 		return this.#sql.exec("SELECT * FROM coding_event WHERE kind LIKE 'environment.%' ORDER BY seq").toArray().map(eventOf);
 	}
 
+	/** The automatic push's failure and recovery events, without the log's page limit. */
+	pushEvents(): CodingEvent[] {
+		return this.#sql.exec("SELECT * FROM coding_event WHERE kind IN ('thread.autopush_failed', 'thread.autopush_recovered') ORDER BY seq").toArray().map(eventOf);
+	}
+
 	addCheckpoint(sha: string, message: string, operationId: string | null): Checkpoint {
 		const seq = this.#sql
 			.exec("INSERT INTO coding_checkpoint (sha, message, operation_id, created_at) VALUES (?, ?, ?, ?) RETURNING seq", sha, message, operationId, this.#now())

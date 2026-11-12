@@ -74,3 +74,28 @@ export function environmentNotices(events: readonly CodingEvent[]): TranscriptMe
 	}
 	return notices;
 }
+
+/**
+ * The automatic push's failures as transcript notices: one per failure streak, at its first failure that is
+ * repeated or is a turn's last try, and one when a push works again after a streak that was told.
+ */
+export function pushNotices(events: readonly CodingEvent[]): TranscriptMessage[] {
+	const notices: TranscriptMessage[] = [];
+	let told = false;
+	for (const event of events) {
+		const data = (event.data ?? {}) as Record<string, unknown>;
+		let text: string | null = null;
+		if (event.kind === "thread.autopush_failed") {
+			const failures = Number(data.failures) || 1;
+			if (!told && (failures >= 2 || data.final === true)) {
+				told = true;
+				text = `Couldn't save commits to GitHub: ${String(data.error ?? "unknown error").slice(0, 200)}; ${failures} ${failures === 1 ? "failure" : "failures"}; the work is still in the workspace`;
+			}
+		} else if (event.kind === "thread.autopush_recovered") {
+			if (told) text = `Saved commits to GitHub at ${String(data.sha ?? "").slice(0, 7)}`;
+			told = false;
+		}
+		if (text !== null) notices.push({ id: `autopush-${event.seq}`, role: "notice", parts: [{ type: "text", text }], timestamp: event.at });
+	}
+	return notices;
+}

@@ -28,7 +28,7 @@ import { detectConfiguredSetup, detectRepository, environmentBrief, type Provisi
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { CHATGPT_PROVIDER } from "../chatgpt";
 import { piProvider } from "../providers";
-import { environmentNotices, stepRecord } from "./environment-phase";
+import { environmentNotices, pushNotices, stepRecord } from "./environment-phase";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
 import {
@@ -812,6 +812,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			// A checkpoint that can't be made leaves the work to the autosave, whose bundle the new session restores from if its files are gone.
 			await this.#checkpoint(operation).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) })));
 			await this.#autosave();
+			await this.#autopush(true, true);
 			const mode = await this.#cycleWorkspace(thread, provider);
 			record({ state: "active", continuations: this.store.required().session.continuations + 1, last: { at: this.now(), mode, reason: "session_cap" } });
 			this.store.recordEvent("session.continued", { operationId: operation, mode });
@@ -1120,7 +1121,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 			session: this.#sessionView(thread),
 			pullRequest: thread.pullRequest,
 			lastPushedSha: thread.lastPushedSha,
+			unpushed: this.#unpushed(thread),
 		};
+	}
+
+	/** Whether the latest checkpoint holds commits its branch was not pushed at: they live only in the workspace. */
+	#unpushed(thread: CodingThreadRow): boolean {
+		const sha = this.store.latestCheckpoint()?.sha;
+		return sha !== undefined && sha !== thread.baseSha && sha !== thread.lastPushedSha;
 	}
 
 	/** The workspace's session as the status tells it: what the provider caps, and when this session ends. */
@@ -1408,6 +1416,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 			at = Math.max(at < 0 ? messages.length : at, cursor);
 			messages.splice(at, 0, notice);
 			cursor = at + 1;
+		}
+		for (const notice of pushNotices(this.store.pushEvents())) {
+			const at = messages.findIndex((entry) => entry.timestamp >= notice.timestamp);
+			messages.splice(at < 0 ? messages.length : at, 0, notice);
 		}
 		for (const [index, notice] of this.store.profileNotices().entries()) {
 			const { provider, model, source } = notice.profile;
@@ -1913,6 +1925,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// Idle or preempted, the work is committed and bundled first, best effort, so it outlives the kept volume should that be reclaimed.
 		await this.#checkpoint(null).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", thread: thread.threadId, error: String(error) })));
 		await this.#autosave();
+		await this.#autopush(true, true);
 		const current = this.store.required();
 		if (current.currentOperation || this.store.inboxSize() > 0 || current.environment.rebuildRequested || this.#resuming) {
 			this.store.update({ slot: "none", resumePriority: true });
@@ -2440,6 +2453,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (this.now() < thread.idleSince + IDLE_SLOT_GRACE_MS) return;
 		await this.#checkpoint(null).catch(() => {});
 		await this.#autosave();
+		await this.#autopush(true, true);
 		if (!idle()) return;
 		await this.#suspendWorkspace();
 		this.store.update({ slot: "none", slotSince: null, idleSince: null });
@@ -2965,7 +2979,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) }));
 			return null;
 		});
-		if (!this.#cycling) await this.#autopush(true);
+		if (!this.#cycling) await this.#autopush(true, this.#userStop === operation);
 		// The bundle kept of the work, so it outlives the workspace's volume.
 		if (checkpoint) await this.#autosave();
 		const thread = this.store.required();
@@ -3948,16 +3962,24 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * failures in a row, until a push works. A failure is logged and never
 	 * fails the turn. One push runs at a time.
 	 */
-	#autopush(final: boolean): Promise<void> {
-		const run = (this.#autopushing ?? Promise.resolve()).then(() => this.#autopushNow(final));
+	#autopush(final: boolean, bounded = false): Promise<void> {
+		const run = (this.#autopushing ?? Promise.resolve()).then(() => this.#autopushNow(final, bounded));
 		const tracked = run.finally(() => {
 			if (this.#autopushing === tracked) this.#autopushing = null;
 		});
 		this.#autopushing = tracked;
-		return tracked;
+		if (!bounded) return tracked;
+		// A push at a stop or a checkpoint never holds it up for more than a short time: the push goes on (its own git timeout is as short) and is retried at the next trigger.
+		return new Promise<void>((resolve) => {
+			const timer = setTimeout(resolve, AUTOPUSH_BOUND_MS);
+			void tracked.finally(() => {
+				clearTimeout(timer);
+				resolve();
+			});
+		});
 	}
 
-	async #autopushNow(final: boolean): Promise<void> {
+	async #autopushNow(final: boolean, bounded: boolean): Promise<void> {
 		try {
 			const thread = this.store.thread();
 			if (!thread || thread.slot !== "held" || !thread.workspaceRef || thread.providerKind === "agent-hosted") return;
@@ -3974,13 +3996,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.#autopushAt = this.now();
 			try {
 				const { token, auth } = await this.#brokerAccess(thread);
-				await git(workspace, ["push", "origin", `HEAD:refs/heads/${thread.branch}`], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+				await git(workspace, ["push", "origin", `HEAD:refs/heads/${thread.branch}`], { timeoutMs: bounded ? AUTOPUSH_BOUND_MS : CLONE_TIMEOUT_MS, env: auth, secret: token });
+				if (this.#autopushFailures > 0) this.store.recordEvent("thread.autopush_recovered", { branch: thread.branch, sha: head, failures: this.#autopushFailures });
 				this.#autopushFailures = 0;
 				// The broker logs the push (`recordSandboxPush`, which also sets this); it is set here too, for a broker that can't reach this object.
 				this.store.update({ lastPushedSha: head });
 			} catch (error) {
 				this.#autopushFailures++;
-				this.store.recordEvent("thread.autopush_failed", { branch: thread.branch, sha: head, error: redactSecrets(errorText(error)).slice(0, 300), failures: this.#autopushFailures });
+				this.store.recordEvent("thread.autopush_failed", { branch: thread.branch, sha: head, error: redactSecrets(errorText(error)).slice(0, 300), failures: this.#autopushFailures, final });
 			}
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.autopush_failed", error: redactSecrets(String(error)).slice(0, 300) }));
@@ -4255,6 +4278,8 @@ export type CodingThreadStatus = {
 	readonly pullRequest: { readonly url: string; readonly number: number } | null;
 	/** The commit its branch was last pushed at; null until it was. */
 	readonly lastPushedSha: string | null;
+	/** True when the latest checkpoint isn't what its branch was last pushed at, so commits may be only in the workspace. */
+	readonly unpushed: boolean;
 };
 
 /** A session as the status tells it. `maxMin` and `expiresAt` are null for a provider without a cap, `keepAlive` is whether the thread pings the provider while a turn runs. */
@@ -4488,6 +4513,8 @@ const lostDetail = (last?: string | null) => (last ? `${lostTooOften(MAX_RESUMES
 /** The least time between automatic pushes of the thread's branch while a turn runs, and the failures in a row after which only a turn's end tries again. */
 const AUTOPUSH_MS = 20_000;
 const AUTOPUSH_MAX_FAILURES = 3;
+/** The longest a push at a stop or a checkpoint is waited for. */
+const AUTOPUSH_BOUND_MS = 30_000;
 
 /** How often a running turn's work is autosaved, where it is kept in the workspace, the index it is added with, and the most of it this object keeps. */
 const AUTOSAVE_MS = 3 * 60_000;

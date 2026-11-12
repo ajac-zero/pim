@@ -397,6 +397,8 @@ describe("what a ui block holds, kept by Pim", () => {
     );
     shown(UI_EXAMPLE, { send });
     fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    fireEvent.change(field("knn.d2"), { target: { value: "7" } });
+    fireEvent.change(field("knn.pred"), { target: { value: "B" } });
     submit();
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
     // Locked here, but the turn isn't placed: Pim holds it as an answer still open.
@@ -418,6 +420,8 @@ describe("what a ui block holds, kept by Pim", () => {
       send: vi.fn().mockRejectedValue(new Error("offline")),
     });
     fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    fireEvent.change(field("knn.d2"), { target: { value: "7" } });
+    fireEvent.change(field("knn.pred"), { target: { value: "B" } });
     submit();
     await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
     await waitFor(() => expect(kept[BLOCK]?.state.submitted).toEqual({}));
@@ -426,7 +430,9 @@ describe("what a ui block holds, kept by Pim", () => {
 
   it("stops writing and locks what a stale write finds submitted elsewhere", async () => {
     const program = compile(UI_EXAMPLE);
-    const answered = evaluate(program, initialState(program), {
+    const filled = initialState(program);
+    Object.assign(filled.values, { "knn.d1": 5, "knn.d2": 7, "knn.pred": "B" });
+    const answered = evaluate(program, filled, {
       type: "submit",
       form: "knn",
     }).state;
@@ -437,6 +443,8 @@ describe("what a ui block holds, kept by Pim", () => {
     );
     shown(UI_EXAMPLE, { send: vi.fn() });
     fireEvent.change(field("knn.d1"), { target: { value: "9" } });
+    fireEvent.change(field("knn.d2"), { target: { value: "7" } });
+    fireEvent.change(field("knn.pred"), { target: { value: "B" } });
     await waitFor(() => expect(field("knn.d1").disabled).toBe(true), {
       timeout: 2000,
     });

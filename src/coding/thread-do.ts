@@ -12,6 +12,7 @@ import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
 import { deploymentSettings } from "../deployment";
 import {
 	type CodingEnvironment,
+	cacheKeyHashes,
 	NO_ENVIRONMENT,
 	environmentError,
 	environmentKey,
@@ -22,6 +23,7 @@ import {
 	SETUP_TIMEOUT_MS,
 	snapshotWorthKeeping,
 } from "./environment-cache";
+import { type ChosenSetup, chooseSetup, type EnvConfig, readEnvConfig } from "./env-config";
 import { detectConfiguredSetup, detectRepository, environmentBrief, type ProvisionStep, pendingItems, provisionPlan, runProvisionStep, stepOf, unpinnedKeyParts, workspaceFiles } from "./repo-environment";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { CHATGPT_PROVIDER } from "../chatgpt";
@@ -3541,7 +3543,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * toolchains and dependencies to provision, and the commands it checks
 	 * itself with, which the thread keeps whatever happens next. With
 	 * something to provision or a setup script (the person's setting for
-	 * the repository, else its `.pim/setup.sh`) the environment's key is
+	 * the repository, else its `.pim/env.json` or `.pim/setup.sh`) the environment's key is
 	 * computed. A workspace
 	 * restored from that key's snapshot is ready. Otherwise one of the
 	 * person's snapshots with the key is restored into a new workspace, or,
@@ -3588,13 +3590,32 @@ export class CodingThreadDO extends DurableObject<Env> {
 			const profile = await detectRepository(workspaceFiles(workspace, REPO_DIR));
 			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
 			plan = provisionPlan(profile);
-			this.#setEnvironment({ ...pendingItems(profile), testCommands: profile.testCommands, notes: profile.notes });
-			setup = await this.#setupScript(workspace, thread, owner);
+			const envConfig = await readEnvConfig(workspace, REPO_DIR);
+			const config = envConfig.config;
+			const notes = [...profile.notes, ...envConfig.notes];
+			const cacheKeys = await cacheKeyHashes(workspace, REPO_DIR, config?.cacheKeys ?? []);
+			for (const pattern of cacheKeys.missing) notes.push(`.pim/env.json: the cache key ${JSON.stringify(pattern)} matches no file and is left out`);
+			if (config === null && envConfig.error === undefined) {
+				if (profile.toolchains.length > 0 || profile.dependencies.length > 0) {
+					const toolchains = profile.toolchains.map((each) => (each.version === null ? each.tool : `${each.tool} ${each.version}`)).join(", ") || "no toolchains";
+					notes.push(`detected: ${toolchains}, installing with ${profile.dependencies.map((each) => each.command).join(", ") || "no dependency installs"}`);
+					this.store.recordEvent("environment.detected", { toolchains: profile.toolchains.map((each) => each.tool).join(","), dependencies: profile.dependencies.map((each) => each.tool).join(",") });
+				}
+			}
+			const check = config?.check ?? [];
+			this.#setEnvironment({
+				...pendingItems(profile),
+				testCommands: check.length > 0 ? check.map((command) => ({ command, source: "pim" as const, from: ".pim/env.json" })) : profile.testCommands,
+				services: config?.services ?? [],
+				cachePaths: config?.cachePaths ?? [],
+				notes,
+			});
+			setup = await this.#setupScript(workspace, thread, owner, config);
 			if (setup === null && plan.length === 0) {
 				this.#setEnvironment({ state: "none", key: null, source: null, rebuildRequested: false, preparedAt: this.now(), error: undefined });
 				return;
 			}
-			key = await environmentKey({ ...owner, provision: plan.map((step) => step.script), setupScript: setup?.content ?? null, setupSource: setup?.source ?? null, unpinned: await unpinnedKeyParts(workspace, profile.toolchains, this.now(), REPO_DIR), lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage(), ...(scope.legacy ? {} : { pool: scope.pool }) });
+			key = await environmentKey({ ...owner, provision: plan.map((step) => step.script), setupScript: setup?.content ?? null, setupSource: setup?.source ?? null, unpinned: await unpinnedKeyParts(workspace, profile.toolchains, this.now(), REPO_DIR), lockfiles: { ...(await lockfileHashes(workspace, REPO_DIR)), ...cacheKeys.hashes }, image: this.workspaceImage(), ...(scope.legacy ? {} : { pool: scope.pool }) });
 		} catch (error) {
 			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
 			this.#environmentFailed(null, environmentError("The environment's setup script couldn't be read", errorText(error)));
@@ -3777,13 +3798,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** The repository's setup, the highest of: the person's setting for it, its `.pim/setup.sh`, a mise task named `setup`, a dev container's lifecycle commands; null without any. */
-	async #setupScript(workspace: Workspace, thread: CodingThreadRow, owner: EnvironmentOwner): Promise<Setup | null> {
+	/** The repository's setup, the highest of: the person's setting for it, its `.pim/env.json`, its `.pim/setup.sh`, a mise task named `setup`, a dev container's lifecycle commands; null without any. */
+	async #setupScript(workspace: Workspace, thread: CodingThreadRow, owner: EnvironmentOwner, config: EnvConfig | null): Promise<Setup | null> {
 		const setting = (await codingScheduler(this.env, thread.space).repoSettings(owner.repo)).setupScript;
-		if (setting !== null) return { script: setting, source: "settings", content: setting };
-		const own = await repositorySetupScript(workspace, REPO_DIR);
-		if (own !== null) return { script: own, source: "repository", content: own };
-		return detectConfiguredSetup(workspaceFiles(workspace, REPO_DIR));
+		return chooseSetup({ setting, config, repository: () => repositorySetupScript(workspace, REPO_DIR), configured: () => detectConfiguredSetup(workspaceFiles(workspace, REPO_DIR)) });
 	}
 
 	/** Commits whatever changed in the workspace as a checkpoint, and keeps its diff from the start. Null when nothing changed (no edits and no new commits) or there is no workspace. */
@@ -4354,7 +4372,7 @@ const GIT_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000];
 const BUILD_LOCK_MS = 2 * SETUP_TIMEOUT_MS + 10 * 60_000;
 
 /** A repository's setup script and where it came from. */
-type Setup = { readonly script: string; readonly source: "settings" | "repository" | "mise" | "devcontainer"; /** What the key covers: the script, or the configuration that defines it. */ readonly content: string };
+type Setup = ChosenSetup;
 
 /**
  * Where mise downloads the toolchains a repository pins: its version lists,

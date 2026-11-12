@@ -24,6 +24,11 @@ export type CodingThreadSummary = {
 	readonly task: string;
 	readonly state: CodingThreadState;
 	readonly stateReason: string | null;
+	/** The workspace provider the thread was placed on when it took its slot, and why it runs there; null until it has been placed. */
+	readonly provider: string | null;
+	/** The pool of workspaces the thread runs in: its provider, until pools are more than one. */
+	readonly pool: string | null;
+	readonly placementReason: string | null;
 	readonly queue: QueuePlace | null;
 	readonly createdBy: CodingCreator;
 	readonly parent: string | null;

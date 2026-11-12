@@ -51,6 +51,8 @@ function brief(view: CodingThreadView) {
 		repo: view.repo.url,
 		branch: view.repo.branch,
 		task: view.task.length > 300 ? `${view.task.slice(0, 300)}…` : view.task,
+		// Where the thread was placed when it took its slot, and why, once it has been.
+		...(view.placementReason ? { placement: { provider: view.provider, pool: view.pool, reason: view.placementReason } } : {}),
 		turn_under_way: view.currentOperation !== null,
 		inputs_waiting: view.inbox,
 		checkpoint: view.checkpoint ? { sha: view.checkpoint.sha, message: view.checkpoint.message } : null,

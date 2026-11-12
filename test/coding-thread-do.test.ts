@@ -9,7 +9,7 @@ import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, snapshotWorthKeeping } from "../src/coding/environment-cache";
 import { PROVISION_ENV } from "../src/coding/repo-environment";
-import { CONTINUE_TEXT, cliInstructions, codingThread, isTransient, LOST_RESUME_TEXT, SESSION_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
+import { CONTINUE_TEXT, cliInstructions, codingThread, isTransient, LOST_RESUME_TEXT, placementReason, SESSION_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
@@ -503,6 +503,13 @@ describe("a coding thread", () => {
 			expect(isTransient("aborted", "connection closed")).toBe(false);
 			expect(isTransient("max_turns", "The turn reached its most steps")).toBe(false);
 		});
+	});
+
+	it("says why a thread was placed where it was", () => {
+		// Its own provider, when nothing else was available or chosen.
+		expect(placementReason("compose", "compose")).toBe("local (only provider)");
+		// A later one it fell through to, when its own had no free slot.
+		expect(placementReason("compose", "cloudflare")).toBe("overflow: compose had no free slot");
 	});
 
 	it("stops at its budget before the next model call", async () => {

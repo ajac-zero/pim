@@ -852,6 +852,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			profile: thread.profile,
 			harness: thread.harness,
 			workspaceProvider: thread.providerId,
+			provider: thread.provider,
+			pool: thread.pool,
+			placementReason: thread.placementReason,
 			slot: thread.slot,
 			queue,
 			budgetUsd: thread.budgetUsd,
@@ -1584,6 +1587,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 						branch: thread.branch,
 						state: thread.state,
 						stateReason: thread.stateReason,
+						provider: thread.provider,
+						pool: thread.pool,
+						placementReason: thread.placementReason,
 						spentUsd: thread.spentUsd,
 						budgetUsd: thread.budgetUsd,
 						createdAt: thread.createdAt,
@@ -1892,7 +1898,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const moved = await codingScheduler(this.env, thread.space).move(thread.threadId, others);
 		if (moved === null) return false;
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ providerId: moved, stateReason: null });
+			this.store.update({
+				providerId: moved,
+				provider: moved,
+				pool: moved,
+				placementReason: placementReason(thread.providerId, moved),
+				stateReason: null,
+			});
 			this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: moved });
 		});
 		return true;
@@ -1927,12 +1939,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** Records that the thread holds a slot, on `provider` when it took one other than its own: it readies its workspace there next. */
+	/** Records that the thread holds a slot, on `provider` when it took one other than its own: it readies its workspace there next, and where it was placed, and why, is kept with it. */
 	#holdSlot(provider = this.store.required().providerId): void {
 		const thread = this.store.required();
 		if (thread.slot === "held") return;
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ slot: "held", slotSince: this.now(), resumePriority: false, providerId: provider, ...(thread.state === "queued" ? { state: "provisioning" } : {}) });
+			this.store.update({
+				slot: "held",
+				slotSince: this.now(),
+				resumePriority: false,
+				providerId: provider,
+				provider,
+				pool: provider,
+				placementReason: placementReason(thread.providerId, provider),
+				...(thread.state === "queued" ? { state: "provisioning" } : {}),
+			});
 			if (provider !== thread.providerId) this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: provider });
 		});
 	}
@@ -3366,6 +3387,11 @@ export type CodingThreadStatus = {
 	readonly profile: AgentProfile;
 	readonly harness: CodingHarness;
 	readonly workspaceProvider: string;
+	/** The provider the thread was placed on when it took its slot, and why it runs there; null until it has been placed. */
+	readonly provider: string | null;
+	/** The pool of workspaces the thread runs in: its provider, until pools are more than one. */
+	readonly pool: string | null;
+	readonly placementReason: string | null;
 	readonly slot: CodingThreadRow["slot"];
 	/** Its place in the space's queue while it waits for a slot. */
 	readonly queue: QueuePlace | null;
@@ -3604,6 +3630,15 @@ export const threadLimits = (repoFullName: string, requested?: Partial<CodingLim
 	...REPO_LIMIT_OVERRIDES[repoFullName.toLowerCase()],
 	...requested,
 });
+
+/**
+ * Why a thread took its slot where it did, from the admission that placed it:
+ * its own provider when nothing else was available or chosen, or one it
+ * overflowed to when that one had no free slot (`#holdSlot`, `#overflow`).
+ */
+export function placementReason(preferred: string, placed: string): string {
+	return placed === preferred ? "local (only provider)" : `overflow: ${preferred} had no free slot`;
+}
 
 /** The most tokens one model answer may have: the model's own limit, up to this. */
 const MAX_OUTPUT_TOKENS = 32_000;

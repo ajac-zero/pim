@@ -25,6 +25,11 @@ export type IndexedThread = {
 	readonly branch: string;
 	readonly state: CodingThreadState;
 	readonly stateReason: string | null;
+	/** The provider the thread was placed on when it took its slot, and why it runs there; null until it has been placed. */
+	readonly provider: string | null;
+	/** The pool of workspaces the thread runs in: its provider, until pools are more than one. */
+	readonly pool: string | null;
+	readonly placementReason: string | null;
 	readonly spentUsd: number;
 	/** The thread's budget; null when none was set. Stored as 0. */
 	readonly budgetUsd: number | null;
@@ -40,7 +45,7 @@ export type IndexedThread = {
 export type ThreadRegistration = Pick<IndexedThread, "threadId" | "createdBy" | "parent" | "chat" | "harness" | "task" | "repo" | "ref" | "budgetUsd" | "createdAt">;
 
 /** What the thread's object says of itself as its state changes. */
-export type ThreadRecord = Pick<IndexedThread, "threadId" | "repo" | "ref" | "branch" | "state" | "stateReason" | "spentUsd" | "budgetUsd" | "createdAt" | "updatedAt" | "lastTurnEndedAt">;
+export type ThreadRecord = Pick<IndexedThread, "threadId" | "repo" | "ref" | "branch" | "state" | "stateReason" | "provider" | "pool" | "placementReason" | "spentUsd" | "budgetUsd" | "createdAt" | "updatedAt" | "lastTurnEndedAt">;
 
 /** The most of a task the list keeps. */
 export const MAX_TASK_CHARS = 2000;
@@ -58,6 +63,9 @@ CREATE TABLE IF NOT EXISTS pim_coding_threads (
 	branch TEXT NOT NULL DEFAULT '',
 	state TEXT NOT NULL DEFAULT 'provisioning',
 	state_reason TEXT,
+	provider TEXT,
+	pool TEXT,
+	placement_reason TEXT,
 	spent_usd REAL NOT NULL DEFAULT 0,
 	budget_usd REAL NOT NULL,
 	created_at INTEGER NOT NULL,
@@ -79,6 +87,10 @@ export class CodingThreadIndex {
 		if (!columns.has("harness")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 		if (!columns.has("last_turn_ended_at")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN last_turn_ended_at INTEGER");
 		if (!columns.has("last_seen_at")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN last_seen_at INTEGER");
+		// Where the thread was placed when it took its slot, and why: the provider that runs it, its pool and the reason.
+		if (!columns.has("provider")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN provider TEXT");
+		if (!columns.has("pool")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN pool TEXT");
+		if (!columns.has("placement_reason")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN placement_reason TEXT");
 	}
 
 	/** Enters a thread about to start; one entered already stays as it is. */
@@ -106,13 +118,16 @@ export class CodingThreadIndex {
 	/** Brings a thread's row up to date, unless it has a newer one already. A thread never entered stays out. */
 	record(thread: ThreadRecord): void {
 		this.#sql.exec(
-			`UPDATE pim_coding_threads SET repo = ?, ref = ?, branch = ?, state = ?, state_reason = ?, spent_usd = ?, budget_usd = ?, created_at = ?, updated_at = ?, last_turn_ended_at = COALESCE(?, last_turn_ended_at)
+			`UPDATE pim_coding_threads SET repo = ?, ref = ?, branch = ?, state = ?, state_reason = ?, provider = ?, pool = ?, placement_reason = ?, spent_usd = ?, budget_usd = ?, created_at = ?, updated_at = ?, last_turn_ended_at = COALESCE(?, last_turn_ended_at)
 			WHERE thread_id = ? AND updated_at <= ?`,
 			thread.repo,
 			thread.ref,
 			thread.branch,
 			thread.state,
 			thread.stateReason,
+			thread.provider,
+			thread.pool,
+			thread.placementReason,
 			thread.spentUsd,
 			thread.budgetUsd ?? 0,
 			thread.createdAt,
@@ -153,6 +168,9 @@ function indexedOf(row: Record<string, SqlStorageValue>): IndexedThread {
 		branch: String(row.branch),
 		state: String(row.state) as CodingThreadState,
 		stateReason: row.state_reason === null ? null : String(row.state_reason),
+		provider: row.provider === null || row.provider === undefined ? null : String(row.provider),
+		pool: row.pool === null || row.pool === undefined ? null : String(row.pool),
+		placementReason: row.placement_reason === null || row.placement_reason === undefined ? null : String(row.placement_reason),
 		spentUsd: Number(row.spent_usd),
 		budgetUsd: Number(row.budget_usd) || null,
 		createdAt: Number(row.created_at),

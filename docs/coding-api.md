@@ -51,6 +51,9 @@ type CodingThreadSummary = {
   task: string;             // the task it was started with, at most 2,000 characters
   state: CodingThreadState;
   stateReason: string | null; // such as "budget", "no_backend", "aborted", "cancelled", "queue_expired:slots_full", "login_required"
+  provider: string | null;    // the workspace provider the thread was placed on when it took its slot; null until then
+  pool: string | null;        // the pool of workspaces it runs in: its provider, until pools are more than one
+  placementReason: string | null; // why it runs there: "local (only provider)", or "overflow: <provider> had no free slot"
   queue: QueuePlace | null;
   createdBy: CodingCreator;
   parent: string | null;    // the thread that started this one
@@ -79,6 +82,9 @@ type CodingThreadView = {
   repo: { url: string; ref: string; branch: string; baseSha: string | null };
   profile: AgentProfile;
   workspaceProvider: string; // the backend it runs on, such as "compose" or "cloudflare"; while it waits for its first slot, the one it tries first
+  provider: string | null;    // the workspace provider it was placed on when it took its slot; null until then
+  pool: string | null;        // the pool of workspaces it runs in: its provider, until pools are more than one
+  placementReason: string | null; // why it runs there: "local (only provider)", or "overflow: <provider> had no free slot"
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
   budgetUsd: number | null; // null when none was set

@@ -54,7 +54,7 @@ export const BUILTIN_NAMES = new Set([
 ]);
 
 /** The actions a handler's action list may run. */
-export const ACTION_NAMES = new Set(["reveal", "issueNewTurn", "copy"]);
+export const ACTION_NAMES = new Set(["reveal", "issueNewTurn", "copy", "openUrl"]);
 
 /** Every name a call may have while parsing; which may go where is a matter of validation. */
 const CALLABLE = new Set([...BUILTIN_NAMES, ...ACTION_NAMES]);

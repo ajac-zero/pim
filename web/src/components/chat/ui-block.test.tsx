@@ -654,6 +654,75 @@ const slider = (name: string) =>
     `[data-field="${name}"] input`,
   ) as HTMLInputElement;
 
+describe("a button that opens an address", () => {
+  const source = [
+    '{@state dest = "https://example.com/docs?a=1&b=2#top"}',
+    '<button onClick={[openUrl(dest)]}>Open the docs</button>',
+  ].join("\n");
+  const open = () => fireEvent.click(screen.getByRole("button", { name: "Open the docs" }));
+  /** The browser's confirm and open, which the test environment lacks, as the person answers the first. */
+  const browser = (answer: boolean) => {
+    const confirm = vi.fn((_message?: string) => answer);
+    const opened = vi.fn(
+      (_url?: string | URL, _target?: string, _features?: string) => null,
+    );
+    vi.stubGlobal("confirm", confirm);
+    vi.stubGlobal("open", opened);
+    return { confirm, opened };
+  };
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("asks first, with the whole address, and opens it in a new tab that is cut off from the chat", () => {
+    const { confirm, opened } = browser(true);
+    shown(source);
+    // Nothing happens until it is clicked.
+    expect(confirm).not.toHaveBeenCalled();
+    open();
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(confirm.mock.calls[0]?.[0]).toContain("https://example.com/docs?a=1&b=2#top");
+    expect(opened).toHaveBeenCalledTimes(1);
+    expect(opened).toHaveBeenCalledWith(
+      "https://example.com/docs?a=1&b=2#top",
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  it("opens nothing when the person says no", () => {
+    const { opened } = browser(false);
+    shown(source);
+    open();
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it("says why, and neither asks nor opens, for an address that isn't http or https when it is clicked", async () => {
+    const { confirm, opened } = browser(true);
+    // What Pim kept is no more trusted than the block's own text.
+    kept[uiBlockId(source)] = {
+      version: 1,
+      state: { values: { dest: "javascript:alert(1)" }, revealed: {}, submitted: {} },
+      submitted: false,
+      updatedAt: 0,
+    };
+    shown(source, { send: vi.fn() });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    open();
+    expect(screen.getByRole("alert").textContent).toContain("http or https");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it("is refused when the block is compiled if its address is plain and wrong, and then draws without the click", () => {
+    const { confirm, opened } = browser(true);
+    shown('<button onClick={[openUrl("javascript:alert(1)")]}>Open the docs</button>');
+    open();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(opened).not.toHaveBeenCalled();
+  });
+});
+
 describe("a checkbox, slider and chart in a reply", () => {
   it("recalculates a derived value as the slider moves", () => {
     const { container } = shown(CALCULATOR, { send: vi.fn() });

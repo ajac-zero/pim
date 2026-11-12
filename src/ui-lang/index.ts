@@ -24,6 +24,7 @@ export {
 export { parse } from "./parse";
 export type { Diagnostic, Expr, RawNode } from "./parse";
 export type { ActionName, ActionSpec, Node, PropValue, UiProgram } from "./program";
+export { httpUrlOf, MAX_URL_CHARS } from "./url";
 export { closedUiSources, uiFences } from "./fences";
 export type { UiFence } from "./fences";
 export { checkUiState, isStorable, MAX_STORED_LIST, storableState, uiBlockId, uiBlockIds } from "./state";

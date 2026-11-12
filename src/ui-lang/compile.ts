@@ -10,6 +10,7 @@
 
 import { CATALOG, CATALOG_VERSION, type PropSpec } from "./catalog";
 import { MAX_SOURCE_BYTES } from "./limits";
+import { httpUrlOf } from "./url";
 import { ACTION_NAMES, parse, BUILTIN_NAMES, type Diagnostic, type Expr, type RawNode } from "./parse";
 import type { ActionName, ActionSpec, Node, NodePart, PropValue, UiProgram } from "./program";
 import { evaluate, type RenderNode } from "./evaluate";
@@ -17,7 +18,7 @@ import { initialState } from "./evaluate";
 import { arityOk, evalExpr, stringOf, Steps, type ControlSpec, type Field, type FormSpec, type Value } from "./value";
 
 /** One action's arguments, as an expression each. */
-const ACTION_ARITY: Record<ActionName, number> = { reveal: 0, issueNewTurn: 1, copy: 1 };
+const ACTION_ARITY: Record<ActionName, number> = { reveal: 0, issueNewTurn: 1, copy: 1, openUrl: 1 };
 
 /** The tags that hold a person's answers when in a form. */
 const FIELD_TAGS = ["number", "input", "select", "checkbox", "slider"] as const;
@@ -297,13 +298,25 @@ class Compiler {
 		const actions: ActionSpec[] = [];
 		for (const item of expr.items) {
 			if (item.t !== "call" || !ACTION_NAMES.has(item.name) || item.args.length !== ACTION_ARITY[item.name as ActionName]) {
-				this.say("warning", "invalid_actions", `${tag}'s ${name} may call reveal(), issueNewTurn(text) and copy(text), nothing else.`);
+				this.say("warning", "invalid_actions", `${tag}'s ${name} may call reveal(), issueNewTurn(text), copy(text) and openUrl(url), nothing else.`);
 				return null;
 			}
 			for (const arg of item.args) this.check(arg);
+			if (item.name === "openUrl" && !this.urlOk(item.args[0] as Expr)) {
+				this.say("warning", "invalid_url", `${tag}'s ${name} calls openUrl with something that is not an http or https address.`);
+				return null;
+			}
 			actions.push({ name: item.name as ActionName, args: item.args });
 		}
 		return { k: "actions", a: actions };
+	}
+
+	/** Whether an address given to openUrl can be one: when it is known now it must be an http or https address, and when it depends on state it is checked as the button is clicked. */
+	private urlOk(arg: Expr): boolean {
+		const folded = this.fold(arg);
+		// Nothing, which `fold` also says of what it can't work out yet, is only an address when it is the latter.
+		if (arg.t === "null") return false;
+		return folded === null || (typeof folded === "string" && httpUrlOf(folded) !== null);
 	}
 
 	private form(node: Extract<RawNode, { t: "el" }>, props: Record<string, PropValue>, enclosing: FormSpec | null): Node | null {

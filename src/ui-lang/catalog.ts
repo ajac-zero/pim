@@ -163,9 +163,9 @@ export const CATALOG: Record<string, TagSpec> = {
 		children: "none",
 	},
 	button: {
-		description: "A button that acts without the model: copy something, show a form's answers, or send a turn.",
+		description: "A button that acts without the model: copy something, open a web address, show a form's answers, or send a turn.",
 		props: {
-			onClick: { kind: "actions", description: "What clicking does, such as [copy(\"x\")] or [issueNewTurn(\"…\")]." },
+			onClick: { kind: "actions", description: "What clicking does, such as [copy(\"x\")], [openUrl(\"https://example.com\")] or [issueNewTurn(\"…\")]." },
 		},
 		children: "text",
 	},
@@ -219,6 +219,7 @@ export const ACTIONS: Record<string, string> = {
 	reveal: "reveal(): show this form's answers and marks.",
 	issueNewTurn: 'issueNewTurn(text): send the person\'s turn, such as issueNewTurn(formSummary("formId")).',
 	copy: "copy(text): put text on the clipboard.",
+	openUrl: "openUrl(url): open an http or https address in a new tab, after the person confirms it, shown in full. Any other address is refused.",
 };
 
 /** A ```ui block the model can copy the shape of, checked by Pim's own tests. */

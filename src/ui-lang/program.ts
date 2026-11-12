@@ -9,7 +9,7 @@ import type { Diagnostic } from "./parse";
 import type { ControlSpec, Field, FormSpec, Value } from "./value";
 
 /** What a handler may run. */
-export type ActionName = "reveal" | "issueNewTurn" | "copy";
+export type ActionName = "reveal" | "issueNewTurn" | "copy" | "openUrl";
 
 /** One action in a handler's list, with the expressions that give its arguments. */
 export type ActionSpec = { name: ActionName; args: Expr[] };

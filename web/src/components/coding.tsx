@@ -479,18 +479,6 @@ export function StartThreadForm() {
         value={form.harness ?? "pi"}
         onChange={(harness) => setForm((current) => ({ ...current, harness }))}
       />
-      {form.harness === "amp" && (
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={form.orbs ?? false}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, orbs: event.target.checked }))
-            }
-          />
-          Run on Amp Orbs (no Pim sandbox)
-        </label>
-      )}
       {form.harness && form.harness !== "pi" && (
         <HarnessConnectPanel key={form.harness} harness={form.harness} />
       )}

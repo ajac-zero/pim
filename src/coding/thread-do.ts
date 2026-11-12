@@ -864,8 +864,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const budgetUsd = input.budgetUsd ?? null;
 		if (budgetUsd !== null && !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 		await this.#refreshCompute();
-		const orb = input.harness === "amp" && [input.pool, input.provider].some((name) => name === "orbs" || name === "amp-http");
-		if (orb && [input.pool, input.provider].some((name) => name !== undefined && name !== "orbs" && name !== "amp-http")) throw new Error("Amp Orbs cannot also use a sandbox pool");
+		// For harness "amp", Orbs (amp-http) is now the default and only path.
+		// Explicit pool/provider with harness amp to a sandbox pool is refused.
+		// Legacy: orbs/amp-http are accepted but redundant (they're the default now).
+		const explicitNonOrb = [input.pool, input.provider].some((name): name is string => name !== undefined && name !== "orbs" && name !== "amp-http");
+		if (input.harness === "amp" && explicitNonOrb) {
+			throw new Error("workspace Amp is retired; amp harness now uses agent-hosted Orbs only, with no sandbox slot. Do not set pool or provider with harness amp.");
+		}
+		const orb = input.harness === "amp";
 		const pin = orb ? "amp-http" : this.#pin(input);
 		const providerId = pin ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
 		const harness = input.harness ?? "pi";

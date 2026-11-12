@@ -1806,11 +1806,6 @@ describe("connecting with an API key", () => {
     expect(
       await screen.findByRole("region", { name: "Connect Amp" }),
     ).toBeTruthy();
-    fireEvent.click(
-      screen.getByRole("checkbox", {
-        name: "Run on Amp Orbs (no Pim sandbox)",
-      }),
-    );
     fireEvent.change(screen.getByRole("textbox", { name: /Repository/ }), {
       target: { value: "https://github.com/acme/widgets" },
     });

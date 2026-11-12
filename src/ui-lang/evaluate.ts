@@ -10,6 +10,7 @@
 
 import { MAX_CHART_POINTS, MAX_DEPTH, MAX_STATE_BYTES, MAX_TEXT_CHARS } from "./limits";
 import type { ActionName, Node, NodePart, UiProgram } from "./program";
+import { httpUrlOf } from "./url";
 import type { Expr } from "./parse";
 import type { FormSpec, UiState, Value } from "./value";
 import { coerceControl, evalExpr, EvalError, formReady, gradeForm, initialUiState, numberOf, stringOf, Steps, truthy } from "./value";
@@ -239,7 +240,14 @@ class Renderer {
 				: this.event?.type === "click" && node.key !== undefined && this.event.key === node.key;
 		if (!mine) return;
 		for (const action of handler.a) {
-			this.actions.push({ name: action.name, args: action.args.map((arg) => this.expr(arg)), form: form ?? this.currentForm });
+			const args = action.args.map((arg) => this.expr(arg));
+			if (action.name === "openUrl") {
+				// Whatever the address was worked out from, only an http or https address goes on, as the browser will open it.
+				const url = typeof args[0] === "string" ? httpUrlOf(args[0]) : null;
+				if (url === null) throw new EvalError("openUrl opens only an http or https address.");
+				args[0] = url;
+			}
+			this.actions.push({ name: action.name, args, form: form ?? this.currentForm });
 		}
 	}
 

@@ -97,6 +97,8 @@ const TOKENS = [
   "sum(",
   "map(",
   'formSummary("knn")',
+  'openUrl("https://a.example")',
+  '<button onClick={[openUrl("javascript:alert(1)")]}>',
   "{{{{",
   "}}}}",
 ];

@@ -709,6 +709,101 @@ describe("a message's ui fences and their ids", () => {
   });
 });
 
+describe("the openUrl action", () => {
+  const button = (url: string) => `<button onClick={[openUrl(${url})]}>Open</button>`;
+  const codesOf = (source: string) => programOf(source).diagnostics.map((diagnostic) => diagnostic.code);
+  const click = (program: UiProgram, state = initialState(program)) =>
+    evaluate(program, state, { type: "click", key: "b0" });
+
+  it("is in the reference the model reads, with what it does", () => {
+    const reference = uiBlockReference();
+    expect(reference).toContain("openUrl(url)");
+    expect(reference).toContain("http or https");
+    expect(reference).toContain("confirm");
+  });
+
+  it("opens an http or https address, as the browser will write it", () => {
+    for (const [given, opened] of [
+      ["https://example.com/a?b=1#c", "https://example.com/a?b=1#c"],
+      ["http://example.com", "http://example.com/"],
+      ["HTTPS://Example.COM:8443/x y".replace(" ", "%20"), "https://example.com:8443/x%20y"],
+      ["https://bücher.example/", "https://xn--bcher-kva.example/"],
+    ] as const) {
+      const program = programOf(button(JSON.stringify(given)));
+      expect(program.valid, given).toBe(true);
+      expect(program.diagnostics, given).toEqual([]);
+      const result = click(program);
+      expect(result.error, given).toBeNull();
+      expect(result.actions, given).toEqual([{ name: "openUrl", args: [opened], form: null }]);
+    }
+  });
+
+  it("refuses anything else when it is compiled, with a diagnostic, and drops the handler", () => {
+    for (const given of [
+      "javascript:alert(1)",
+      "JaVaScRiPt:alert(1)",
+      "java\\tscript:alert(1)",
+      " javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "file:///etc/passwd",
+      "ftp://example.com/",
+      "mailto:a@example.com",
+      "blob:https://example.com/x",
+      "//example.com/",
+      "/relative/path",
+      "example.com",
+      "https://",
+      "https://user:secret@example.com/",
+      "https://example.com/ with space",
+      "",
+      `https://example.com/${"a".repeat(2048)}`,
+    ]) {
+      const program = programOf(button(JSON.stringify(given)));
+      expect(program.diagnostics.map((d) => d.code), given).toContain("invalid_url");
+      // The button is drawn, with nothing to run.
+      expect(click(program).actions, given).toEqual([]);
+    }
+    // The language has no escape for a control character, so one is written as it is.
+    expect(codesOf(`<button onClick={[openUrl("https://example.com/\u0000")]}>x</button>`)).toContain("invalid_url");
+    // What isn't text at all.
+    for (const given of ["5", "true", "null", "[1]", "{a: 1}"]) {
+      expect(codesOf(button(given)), given).toContain("invalid_url");
+    }
+    // No address, and too many.
+    expect(codesOf("<button onClick={[openUrl()]}>x</button>")).toContain("invalid_actions");
+    expect(codesOf('<button onClick={[openUrl("https://a.example", "https://b.example")]}>x</button>')).toContain("invalid_actions");
+    // It is an action, not something an expression calls.
+    expect(codesOf('{openUrl("https://a.example")}')).toContain("invalid_builtin");
+  });
+
+  it("works out an address from state when it is clicked, and refuses a wrong one then", () => {
+    const program = programOf(['{@state dest = "https://example.com/start"}', '<button onClick={[openUrl(dest)]}>Open</button>'].join("\n"));
+    expect(program.valid).toBe(true);
+    expect(program.diagnostics).toEqual([]);
+    expect(click(program).actions[0]?.args).toEqual(["https://example.com/start"]);
+    // What it is joined to is worked out when it is clicked too.
+    const joined = programOf(['{@state dest = "https://example.com/start"}', '<button onClick={[openUrl(dest + "/next")]}>Open</button>'].join("\n"));
+    expect(click(joined).actions[0]?.args).toEqual(["https://example.com/start/next"]);
+    // State from elsewhere is no more trusted than the block's own text.
+    for (const dest of ["javascript:alert(1)//", "", "ftp://example.com", 5, true, null, ["https://example.com"]]) {
+      const state = { ...initialState(program), values: { dest } };
+      const result = click(program, state as never);
+      expect(result.error, String(dest)).toBe("openUrl opens only an http or https address.");
+      expect(result.actions, String(dest)).toEqual([]);
+    }
+  });
+
+  it("is checked in a form's handler too, and nothing runs when one of its actions is refused", () => {
+    const program = programOf(
+      '<form id="f" onSubmit={[openUrl("https://example.com"), issueNewTurn(formSummary("f"))]}><input name="a" required={false}/></form>',
+    );
+    expect(program.valid).toBe(true);
+    const result = evaluate(program, initialState(program), { type: "submit", form: "f" });
+    expect(result.actions.map((action) => action.name)).toEqual(["openUrl", "issueNewTurn"]);
+    expect(codesOf('<form id="f" onSubmit={[openUrl("javascript:1")]}><input name="a"/></form>')).toContain("invalid_url");
+  });
+});
+
 describe("names every object inherits", () => {
   const NAMES = ["__proto__", "constructor", "prototype"];
 

@@ -23,6 +23,7 @@ import {
   type Evaluation,
   evaluate,
   extraState,
+  httpUrlOf,
   initialState,
   type RenderNode,
   stateSummary,
@@ -469,6 +470,14 @@ function UiProgramView({
         void navigator.clipboard
           ?.writeText(stringOf(action.args[0] ?? ""))
           .catch(() => {});
+        continue;
+      }
+      if (action.name === "openUrl") {
+        // Checked again here, whatever the interpreter let through: only an http or https address is ever opened, and only if the person says so after seeing all of it.
+        const url = httpUrlOf(stringOf(action.args[0] ?? ""));
+        if (url !== null && window.confirm(t("uiOpenUrlConfirm", { url }))) {
+          window.open(url, "_blank", "noopener,noreferrer");
+        }
         continue;
       }
       if (action.name !== "issueNewTurn" || reply.send === undefined) continue;

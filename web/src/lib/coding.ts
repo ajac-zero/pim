@@ -690,7 +690,6 @@ export const isGiteaRepo = (url: string) =>
   new URL(url).hostname !== "github.com";
 
 export type StartForm = {
-  orbs?: boolean;
   repo: string;
   ref: string;
   task: string;
@@ -740,7 +739,7 @@ export function startInput(
     ...(ref ? { ref } : {}),
     ...(budget ? { budgetUsd: Number(budget) } : {}),
     ...(form.harness && form.harness !== "pi" ? { harness: form.harness } : {}),
-    ...(form.harness === "amp" && form.orbs ? { provider: "orbs" } : {}),
+    ...(form.harness === "amp" ? { provider: "orbs" } : {}),
     operationId,
   };
 }

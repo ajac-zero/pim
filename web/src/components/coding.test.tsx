@@ -822,14 +822,27 @@ describe("a thread's page", () => {
       },
     ]);
     threadPage(api);
-    const bash = (await screen.findByText("ls src")).closest("details");
+    await waitFor(() =>
+      expect(document.querySelector("details[data-kind='tool']")).toBeTruthy(),
+    );
+    const bash = document.querySelector<HTMLDetailsElement>(
+      "details[data-kind='tool']",
+    );
     expect(bash?.getAttribute("data-kind")).toBe("tool");
     // Tool calls are steps of the chat's step list.
     expect(bash?.closest("ol > li")).toBeTruthy();
     expect(bash?.open).toBe(false);
-    const test = screen.getByText("pnpm test").closest("details");
+    // The folded row has the label and status only; the command is in the body.
+    expect(bash?.querySelector("summary")?.textContent).not.toContain("ls src");
+    expect(bash?.querySelector("pre")?.textContent).toContain("ls src");
+    const test = document.querySelector<HTMLDetailsElement>(
+      "details[data-kind='test']",
+    );
     expect(test?.getAttribute("data-kind")).toBe("test");
     expect(test?.open).toBe(false);
+    expect(test?.querySelector("summary")?.textContent).not.toContain(
+      "pnpm test",
+    );
     // A test's outcome shows on its folded row.
     expect(
       within(test as HTMLElement).getAllByText("1 failed, 12 passed")[0],
@@ -908,7 +921,7 @@ describe("a thread's page", () => {
     await waitFor(() => expect(api.events).toHaveBeenCalledTimes(2));
 
     await waitFor(() => {
-      expect(screen.getAllByText("Fix the flaky date test")).toHaveLength(1); // the transcript's first message, not said again above it
+      expect(screen.getAllByText("Fix the flaky date test")).toHaveLength(2); // the header's title and the transcript's first message, not repeated
       expect(screen.getAllByText("Looking at the test.")).toHaveLength(1);
       expect(screen.getAllByText("Fixed it.")).toHaveLength(1);
     });
@@ -1044,6 +1057,8 @@ describe("the harness", () => {
     threadPage(api);
     const header = (await screen.findByRole("banner")) as HTMLElement;
     expect(within(header).getByText("Claude Code")).toBeTruthy();
+    // The title is the header's primary text; the repository is secondary.
+    expect(within(header).getByText("Fix the flaky date test")).toBeTruthy();
     // The same header as a chat's holds the thread's title and its actions.
     expect(
       within(header).getByRole("link", { name: "acme/widgets" }),
@@ -1056,6 +1071,15 @@ describe("the harness", () => {
     ).toBeNull();
     expect(within(header).getByRole("tab", { name: "Changes" })).toBeTruthy();
     expect(header.querySelector("[data-harness='claude-code']")).toBeTruthy();
+  });
+
+  it("falls back to the repository in the header when the task has no title", async () => {
+    const { api } = fakeApi(view({ task: " " }));
+    threadPage(api);
+    const header = (await screen.findByRole("banner")) as HTMLElement;
+    expect(
+      within(header).getByRole("link", { name: "acme/widgets" }),
+    ).toBeTruthy();
   });
 
   it("is chosen in the start form, which then offers to connect Claude Code", async () => {

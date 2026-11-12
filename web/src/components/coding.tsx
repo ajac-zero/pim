@@ -94,7 +94,6 @@ import {
   startProblems,
   stateReasonKey,
   type TranscriptRow,
-  toolSummary,
   transcriptRows,
   workspaceProviderName,
   writingMessage,
@@ -1275,9 +1274,10 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
   );
 }
 
-/** The thread's mark and repository, where a chat's header has its agent and title. */
+/** The thread's mark and title, where a chat's header has its agent and title; the repository is secondary, and the title when the task has none. */
 function ThreadTitle({ thread }: { thread: CodingThreadView }) {
   const { t } = useI18n();
+  const title = thread.task.trim().split("\n")[0] ?? "";
   return (
     <>
       <span className="inline-flex shrink-0 items-center">
@@ -1286,11 +1286,16 @@ function ThreadTitle({ thread }: { thread: CodingThreadView }) {
         </span>
         <CodingHarnessMark harness={thread.harness} state={thread.state} />
       </span>
+      {title && <span className="min-w-0 truncate">{title}</span>}
       <a
         href={thread.repo.url}
         target="_blank"
         rel="noreferrer"
-        className={cn("truncate hover:underline", LINK_RING)}
+        className={cn(
+          "truncate hover:underline",
+          LINK_RING,
+          title && "shrink-[2] text-[13px] text-muted-foreground",
+        )}
       >
         {repoName(thread.repo.url)}
       </a>
@@ -2033,7 +2038,6 @@ function Row({ row }: { row: TranscriptRow }) {
 /** A tool call and its result as a step of the chat's step list, which opens to its input and output. Tests show how they went on the step. */
 function ToolRow({ row }: { row: Extract<TranscriptRow, { kind: "tool" }> }) {
   const { t } = useI18n();
-  const summary = toolSummary(row.args);
   const output = row.result ? resultText(row.result) : "";
   const test = row.name === "test";
   const outcome = test && row.result ? (output.split("\n")[0] ?? "") : "";
@@ -2053,11 +2057,6 @@ function ToolRow({ row }: { row: Extract<TranscriptRow, { kind: "tool" }> }) {
           <summary className="flex cursor-pointer list-none items-start gap-2 rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
             <span className="min-w-0 [overflow-wrap:anywhere]">
               {test ? t("codingRanTests") : view.text}
-              {summary && (
-                <span className="ml-2 line-clamp-1 font-mono text-[12px]">
-                  {summary}
-                </span>
-              )}
             </span>
             {row.result?.error && (
               <span className="ml-auto shrink-0 text-destructive">

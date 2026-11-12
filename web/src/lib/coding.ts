@@ -1054,20 +1054,6 @@ export function transcriptRows(
   return rows;
 }
 
-/** A tool call in one line: its command, or the path or pattern it works on. */
-export function toolSummary(args: unknown): string {
-  if (!args || typeof args !== "object") return "";
-  const record = args as Record<string, unknown>;
-  for (const field of ["command", "path", "file", "pattern", "query", "url"]) {
-    const value = record[field];
-    if (typeof value === "string" && value) return value.split("\n")[0] ?? "";
-  }
-  const first = Object.values(record).find(
-    (value) => typeof value === "string",
-  );
-  return typeof first === "string" ? (first.split("\n")[0] ?? "") : "";
-}
-
 /** A tool result's text. */
 export function resultText(result: ToolResult): string {
   return result.content

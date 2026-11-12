@@ -22,6 +22,9 @@ const ACTION_ARITY: Record<ActionName, number> = { reveal: 0, issueNewTurn: 1, c
 /** The tags that hold a person's answers when in a form. */
 const FIELD_TAGS = ["number", "input", "select", "checkbox", "slider"] as const;
 
+/** Names every object has of its own accord, which nothing of a block's may be called. */
+const RESERVED = new Set(["__proto__", "constructor", "prototype"]);
+
 /** A name that state outside a form may have, which an expression reads. */
 const STATE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -54,8 +57,10 @@ class Compiler {
 	}
 
 	compile(source: string, partial: boolean): UiProgram {
-		if (source.length > MAX_SOURCE_BYTES) {
-			this.say("error", "too_long_source", `A ui block may be at most ${MAX_SOURCE_BYTES} bytes; this one is ${source.length}.`);
+		// A character is at most three bytes, so a source under a third of the limit can't be over it.
+		const bytes = source.length > MAX_SOURCE_BYTES / 3 ? new TextEncoder().encode(source).length : source.length;
+		if (bytes > MAX_SOURCE_BYTES) {
+			this.say("error", "too_long_source", `A ui block may be at most ${MAX_SOURCE_BYTES} bytes; this one is ${bytes}.`);
 			return this.finish([]);
 		}
 		const parsed = parse(source, { partial });
@@ -206,14 +211,15 @@ class Compiler {
 	}
 
 	private el(node: Extract<RawNode, { t: "el" }>, form: FormSpec | null): Node | null {
-		const spec = CATALOG[node.tag];
+		// Own tags only: `constructor` and the like are what every object inherits, not components.
+		const spec = Object.hasOwn(CATALOG, node.tag) ? CATALOG[node.tag] : undefined;
 		if (spec === undefined) {
 			this.say("error", "unknown_tag", `<${node.tag}> is not one of the components a ui block may draw.`);
 			return null;
 		}
 		const props: Record<string, PropValue> = {};
 		for (const [name, expr] of Object.entries(node.props)) {
-			const prop = spec.props[name];
+			const prop = Object.hasOwn(spec.props, name) ? spec.props[name] : undefined;
 			if (prop === undefined) {
 				this.say("warning", "unknown_prop", `<${node.tag}> has no ${name}.`);
 				continue;
@@ -303,11 +309,15 @@ class Compiler {
 	private form(node: Extract<RawNode, { t: "el" }>, props: Record<string, PropValue>, enclosing: FormSpec | null): Node | null {
 		const id = props.id?.k === "const" ? String(props.id.v) : "";
 		if (id === "") return null;
+		if (RESERVED.has(id)) {
+			this.say("error", "invalid_literal", `${id} can't be a form's id.`);
+			return null;
+		}
 		if (enclosing !== null) {
 			this.say("error", "nested_form", `The form ${id} goes inside no other form.`);
 			return null;
 		}
-		if (this.forms[id] !== undefined) {
+		if (Object.hasOwn(this.forms, id)) {
 			this.say("error", "duplicate_form", `Two forms are called ${id}; a form's id is its own.`);
 			return null;
 		}
@@ -384,7 +394,7 @@ class Compiler {
 	/** A checkbox or slider outside a form: state named by its name, declared here when nothing declared it. */
 	private standalone(node: Extract<RawNode, { t: "el" }>, props: Record<string, PropValue>): Node | null {
 		const name = String((props.name as { v: Value }).v);
-		if (!STATE_NAME.test(name)) {
+		if (!STATE_NAME.test(name) || RESERVED.has(name)) {
 			this.say("error", "invalid_literal", `A <${node.tag}> outside a form is state, so its name is a word of letters, digits and _, such as seats.`);
 			return null;
 		}
@@ -396,12 +406,12 @@ class Compiler {
 		}
 		const control = this.control(node, props);
 		if (control === undefined || control === null) return null;
-		const known = this.controls[name];
+		const known = Object.hasOwn(this.controls, name) ? this.controls[name] : undefined;
 		if (known !== undefined && known.kind !== control.spec.kind) {
 			this.say("error", "duplicate_field", `${name} is a ${known.kind}, and can't be a ${control.spec.kind} too.`);
 			return null;
 		}
-		this.controls[name] ??= control.spec;
+		if (known === undefined) this.controls[name] = control.spec;
 		if (!this.stateKeys.includes(name)) {
 			this.stateKeys.push(name);
 			this.initial[name] = control.initial;

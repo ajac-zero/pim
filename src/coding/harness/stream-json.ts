@@ -5,13 +5,13 @@ import type { HarnessEvent, HarnessParser } from "./types";
  * Claude Code's stream-json (https://code.claude.com/docs/en/headless): one
  * JSON message a line, `system`, `stream_event`, `assistant` and `user`
  * messages, and a closing `result`. Claude Code prints it
- * (./claude-code.ts), and Amp prints a version of its own
- * (https://ampcode.com/docs/cli/streaming-json, ./amp.ts), whose
- * differences this parser reads too: no `stream_event`s; `init` names its
- * mode (`agent_mode`), not a model; a background subagent's end
- * (`subagent_finished`); errors as `system` messages; a failed result's
- * `error` in place of `errors`; no cost; and the calls it refused as
- * strings (`permission_denials`).
+ * (./claude-code.ts). Amp's CLI (now retired; see ./orb/amp-http.ts for
+ * the current amp-http orb client) printed a version of its own
+ * (https://ampcode.com/docs/cli/streaming-json), whose differences this
+ * parser read: no `stream_event`s; `init` names its mode (`agent_mode`),
+ * not a model; a background subagent's end (`subagent_finished`); errors
+ * as `system` messages; a failed result's `error` in place of `errors`;
+ * no cost; and the calls it refused as strings (`permission_denials`).
  */
 
 /** What tells one CLI's stream-json from another's. */

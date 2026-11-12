@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { CLAUDE_CODE_FLAGS, ClaudeStreamParser, claudeCode } from "../src/coding/harness/claude-code";
-import { AMP_FLAGS, amp, ampLogFile } from "../src/coding/harness/amp";
 import { authEnv } from "../src/coding/harness/auth";
 import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/coding/harness/codex";
 import { cliHarness } from "../src/coding/harness/index";
@@ -12,7 +11,6 @@ import type { CodingThreadRow } from "../src/coding/thread-store";
 import type { TestRun } from "../src/coding/tools";
 import type { Restored } from "../src/coding/vault/inject";
 import { type ExecEvent, type ExecOptions, type Workspace, WorkspaceFileError } from "../src/coding/workspace/types";
-import { AMP_SESSION, ampFixture, ampLines } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeLines, vibeOutput } from "./fixtures/vibe";
@@ -629,7 +627,7 @@ class Signals {
 }
 
 /**
- * A workspace whose `claude`, `codex`, `amp` and `vibe` (started by `/bin/sh`) run `script`, and whose `pkill` sends
+ * A workspace whose `claude`, `codex` and `vibe` (started by `/bin/sh`) run `script`, and whose `pkill` sends
  * what it is given. Its files are `files`, by path, which a script may write. Everything it runs is recorded.
  */
 function scripted(script: Script, files = new Map<string, string>()) {
@@ -646,7 +644,7 @@ function scripted(script: Script, files = new Map<string, string>()) {
 				return;
 			}
 			const name = cmd[0] === "/bin/sh" ? cmd[7] : cmd[0] === "sh" ? cmd[4] : cmd[0];
-			if (name !== "claude" && name !== "codex" && name !== "amp" && name !== "vibe") throw new Error(`no ${cmd[0]}`);
+			if (name !== "claude" && name !== "codex" && name !== "vibe") throw new Error(`no ${cmd[0]}`);
 			log.push(name);
 			yield* script(options, signals);
 		},
@@ -1115,10 +1113,10 @@ describe("a Mistral Vibe run", () => {
 
 describe("a run signed in with an API key", () => {
 	// The CLI here is Claude Code's script under the name and sign-in of a harness with an API key: what is checked is
-	// what the runner does with the key, whatever the CLI. Amp's own runs are below.
-	const KEY = "sgamp_user_TESTKEY0123456789abcdefXYZ";
-	const harness: CliHarness = { ...claudeCode, id: "amp", name: "Amp", login: undefined, apiKeyEnv: "AMP_API_KEY" };
-	const auth: HarnessAuth = { mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] };
+	// what the runner does with the key, whatever the CLI.
+	const KEY = "mistral_API_KEY_TEST0123456789abcdef";
+	const harness: CliHarness = { ...claudeCode, id: "mistral-vibe", name: "Mistral Vibe", login: undefined, apiKeyEnv: "MISTRAL_API_KEY" };
+	const auth: HarnessAuth = { mode: "env", env: { MISTRAL_API_KEY: KEY }, secrets: [KEY] };
 
 	it("hands the key to the CLI in its environment alone, restores and locks nothing, and takes it out of all the CLI printed", async () => {
 		// The CLI printed the key in its text, a test's output, a retry and a refusal.
@@ -1136,13 +1134,13 @@ describe("a run signed in with an API key", () => {
 		expect(result.status).toBe("done");
 		expect(log).toEqual(["claude"]);
 		// The key is in the CLI's environment, never on its command line, which `ps` shows.
-		expect(commands[0]!.options.env).toMatchObject({ AMP_API_KEY: KEY, HOME: "/workspace" });
+		expect(commands[0]!.options.env).toMatchObject({ MISTRAL_API_KEY: KEY, HOME: "/workspace" });
 		expect(commands[0]!.options.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
 		expect(JSON.stringify(commands.map((command) => command.cmd))).not.toContain(KEY);
 		// Nothing the CLI printed reaches the thread with the key in it: not its transcript, log, test runs, result or records.
 		const handed = JSON.stringify({ events, tests, records, result });
 		expect(handed).not.toContain(KEY);
-		expect(handed).not.toContain("TESTKEY");
+		expect(handed).not.toContain("TEST");
 		expect(events.find((event) => event.type === "delta" && event.text.startsWith("tests first"))).toEqual({ type: "delta", kind: "text", text: "tests first with [redacted]." });
 		expect(events.find((event) => event.type === "retry")).toMatchObject({ error: "overloaded for [redacted]" });
 		expect(events.find((event) => event.type === "permission_denied")).toMatchObject({ message: expect.stringContaining("Permission for [redacted] to use") });
@@ -1158,8 +1156,8 @@ describe("a run signed in with an API key", () => {
 		});
 		const { options } = deps(workspace, log, { harness, auth });
 		const result = await (await prepared(options)).run(TURN, 60_000);
-		expect(result).toMatchObject({ status: "unanswered", reason: "harness_error", detail: "Amp exited 1 without a result: Error: invalid key [redacted] was refused" });
-		expect(JSON.stringify(result)).not.toContain("TESTKEY");
+		expect(result).toMatchObject({ status: "unanswered", reason: "harness_error", detail: "Mistral Vibe exited 1 without a result: Error: invalid key [redacted] was refused" });
+		expect(JSON.stringify(result)).not.toContain("TEST");
 	});
 
 	it("waits for the person's key when they have given none, touching nothing", async () => {
@@ -1176,195 +1174,18 @@ describe("a run signed in with an API key", () => {
 		const asked: string[] = [];
 		const keys = async (id: string) => {
 			asked.push(id);
-			return id === "amp" ? KEY : null;
+			return id === "mistral-vibe" ? KEY : null;
 		};
 		expect(await authEnv(thread, claudeCode, keys)).toEqual({ mode: "subscription" });
 		expect(await authEnv(thread, codex, keys)).toEqual({ mode: "subscription" });
-		expect(await authEnv(thread, amp, keys)).toEqual({ mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] });
-		expect(await authEnv(thread, mistralVibe, keys)).toEqual({ mode: "signed_out" });
-		expect(asked).toEqual(["amp", "mistral-vibe"]);
+		expect(await authEnv(thread, mistralVibe, keys)).toEqual({ mode: "env", env: { MISTRAL_API_KEY: KEY }, secrets: [KEY] });
+		expect(asked).toEqual(["mistral-vibe"]);
 	});
 
-	it("lists Amp and Mistral Vibe among the CLI harnesses, with the variable and hosts each needs", () => {
-		expect(cliHarness("amp")).toBe(amp);
+	it("lists Mistral Vibe among the CLI harnesses, with the variable and hosts it needs", () => {
 		expect(cliHarness("mistral-vibe")).toBe(mistralVibe);
-		expect(amp).toMatchObject({ name: "Amp", apiKeyEnv: "AMP_API_KEY", egress: ["ampcode.com", "*.ampcode.com"] });
 		expect(mistralVibe).toMatchObject({ name: "Mistral Vibe", apiKeyEnv: "MISTRAL_API_KEY", egress: ["api.mistral.ai"] });
-		expect(amp.login).toBeUndefined();
 		expect(mistralVibe.login).toBeUndefined();
-	});
-});
-
-describe("Amp's stream-json", () => {
-	const read = (text: string, parser = amp.parser(TURN)) => text.split("\n").flatMap((line) => parser.parseLine(line));
-
-	it("is read into the thread, the transcript's messages with their tools, a failed background subagent, a refusal and the result", () => {
-		const events = read(ampFixture("turn.jsonl"), amp.parser({ ...TURN, model: "high" }));
-		expect(events.filter((event) => event.type === "unparsed")).toEqual([]);
-		// The session is Amp's thread, and the model the mode Amp says it runs.
-		expect(events[0]).toEqual({ type: "session", sessionId: AMP_SESSION, model: "high" });
-		// Amp prints messages whole: nothing as it is written.
-		expect(events.some((event) => event.type === "delta")).toBe(false);
-		const messages = events.flatMap((event) => (event.type === "assistant" || event.type === "tool_result" ? [event.message] : []));
-		expect(messages.map((message) => (message.role === "assistant" ? message.content.map((part) => (part.type === "toolCall" ? part.name : part.type)) : [`result:${message.toolName}`]))).toEqual([
-			["text", "shell_command"],
-			["result:shell_command"],
-			["edit_file"],
-			["result:edit_file"],
-			// The subagent's own call and result aren't the thread's; what it found comes back as the Task call's result.
-			["Task"],
-			["result:Task"],
-			["Task"],
-			["result:Task"],
-			["shell_command"],
-			["result:shell_command"],
-			["text"],
-		]);
-		const first = events.find((event): event is Extract<HarnessEvent, { type: "assistant" }> => event.type === "assistant")!;
-		expect(first.message.content[1]).toEqual({ type: "toolCall", id: "toolu_01Shell", name: "shell_command", arguments: { command: "npm test" } });
-		// Its tokens as Amp counted them, with no message id: each line is a model response of its own.
-		expect(first).toMatchObject({ messageId: null, message: { provider: "amp", model: "high", stopReason: "toolUse", usage: { input: 10, output: 99, cacheRead: 0, cacheWrite: 16256 } } });
-		expect(messages[1]).toMatchObject({ toolCallId: "toolu_01Shell", isError: true, content: [{ type: "text", text: expect.stringContaining("Tests  1 failed | 3 passed (4)") }] });
-		expect(events.filter((event) => event.type === "notice")).toEqual([{ type: "notice", message: "A background subagent (toolu_01Bg) failed" }]);
-		expect(events.filter((event) => event.type === "permission_denied")).toEqual([{ type: "permission_denied", tool: "shell_command", message: "" }]);
-		// Amp reports tokens, never dollars.
-		expect(events.at(-1)).toEqual({ type: "result", ok: true, reason: null, sessionId: AMP_SESSION, sessionCostUsd: null, text: "Fixed `greet` to include the name; the greeting test passes now.", errors: [] });
-		expect(events.some((event) => event.type === "auth_failed")).toBe(false);
-	});
-
-	it("says why a run failed: its most turns, an error with no result after it, credits, and a refused token", () => {
-		expect(read(ampFixture("max-turns.jsonl")).at(-1)).toMatchObject({ type: "result", ok: false, reason: "max_turns", sessionCostUsd: null, errors: ["Reached the maximum number of turns"] });
-		expect(read(ampFixture("failed.jsonl")).at(-1)).toEqual({ type: "result", ok: false, reason: "error", sessionId: AMP_SESSION, sessionCostUsd: null, text: null, errors: ["Model provider returned an error: overloaded"] });
-		const credits = read(ampFixture("credits.jsonl"));
-		expect(credits.at(-1)).toMatchObject({ ok: false, reason: "error", errors: ["You are out of credits. Add paid credits or choose a paid tier."] });
-		expect(credits.some((event) => event.type === "auth_failed")).toBe(false);
-		// The CLI's own words for a refused token, in a failed result rather than on its error output.
-		const refused = `{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"error":"${ampLines("login.stderr")[0]}","session_id":"${AMP_SESSION}"}`;
-		expect(read(refused).map((event) => event.type)).toEqual(["auth_failed", "result"]);
-	});
-});
-
-describe("Amp's command line", () => {
-	const NEW = "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f";
-	const help = ampFixture("help.txt");
-
-	it("starts a private thread in execute mode with stream-json, Pim's instructions opening its first message, and nothing past the workspace", () => {
-		const cmd = amp.buildCommand({ ...TURN, sessionId: NEW });
-		expect(cmd).toEqual([
-			"sh",
-			"-c",
-			'mkdir -p "$TMPDIR" && exec "$@"',
-			"amp",
-			"amp",
-			"--stream-json",
-			"--no-ide",
-			"--no-notifications",
-			"--no-color",
-			"--no-remote-control-terminal",
-			"--no-archive-after-execute",
-			"--log-file",
-			`/workspace/.cache/amp/logs/pim-${NEW}.log`,
-			"--visibility",
-			"private",
-			"--mode",
-			"medium",
-			`--execute=<instructions from="Pim">\nDon't push.\n</instructions>\n\nFix the greeting test`,
-		]);
-		// Every flag is one the pinned CLI's `amp --help` lists.
-		for (const flag of [...AMP_FLAGS, "--log-file", "--visibility", "--mode", "--execute"]) expect(help).toMatch(new RegExp(`^ {2}(?:-\\w+, )?${flag}\\b`, "m"));
-		expect(help).toContain("continue                           [alias: c] Continue an existing thread");
-		expect(help).toContain("AMP_API_KEY");
-		expect(ampLogFile(NEW)).toContain(NEW);
-		// Bun unpacks its addon into the temp dir and dlopens it: not the noexec /tmp.
-		expect(amp.env).toMatchObject({ TMPDIR: "/workspace/.cache/amp-tmp", BUN_TMPDIR: "/workspace/.cache/amp-tmp" });
-	});
-
-	it("goes on with Amp's thread after the first turn, asks for one of Amp's modes, and keeps a prompt that looks like a flag a prompt", () => {
-		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true, prompt: "--help me" })).toEqual([
-			"sh",
-			"-c",
-			`mkdir -p "$TMPDIR" && amp threads archive ${AMP_SESSION} --unarchive >/dev/null 2>&1; exec "$@"`,
-			"amp",
-			"amp",
-			"threads",
-			"continue",
-			AMP_SESSION,
-			...AMP_FLAGS,
-			"--log-file",
-			`/workspace/.cache/amp/logs/pim-${AMP_SESSION}.log`,
-			"--execute=--help me",
-		]);
-		// A thread Amp archived ("This thread is archived and cannot be continued") is unarchived first, whatever that command says; the continue also carries --no-archive-after-execute.
-		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true })).toContain("--no-archive-after-execute");
-		expect(() => amp.buildCommand({ ...TURN, sessionId: "x; rm -rf /", resume: true })).toThrow();
-		// A new thread with a mode in its profile uses that mode.
-		expect(amp.buildCommand({ ...TURN, sessionId: NEW, model: "High" })).toEqual(expect.arrayContaining(["--mode", "high"]));
-		// A new thread without a mode gets medium explicitly.
-		expect(amp.buildCommand({ ...TURN, sessionId: NEW })).toEqual(expect.arrayContaining(["--mode", "medium"]));
-		// A thread's mode is fixed when Amp makes it, so continued threads aren't given one again.
-		expect(amp.buildCommand({ ...TURN, sessionId: AMP_SESSION, resume: true, model: "high" })).not.toContain("--mode");
-		expect(() => amp.buildCommand({ ...TURN, model: "claude-opus-5" })).toThrow('Amp has no mode "claude-opus-5": ask for low, medium, high, ultra');
-	});
-
-	it("signs in with the token in AMP_API_KEY, needs only Amp's hosts, estimates no cost, and is signalled by the turn's id", () => {
-		expect(cliHarness("amp")).toBe(amp);
-		expect(amp).toMatchObject({ name: "Amp", apiKeyEnv: "AMP_API_KEY", egress: ["ampcode.com", "*.ampcode.com"], reportsCost: false, shellTool: "shell_command", env: { AMP_SKIP_UPDATE_CHECK: "1" } });
-		expect(amp.login).toBeUndefined();
-		expect(amp.signalCommand(NEW, "INT")).toEqual(["pkill", "-INT", "-f", NEW]);
-		expect(amp.loginFailure!.test(ampFixture("login.stderr"))).toBe(true);
-		expect(amp.loginFailure!.test(ampFixture("unreachable.stderr"))).toBe(false);
-	});
-});
-
-describe("an Amp run", () => {
-	const KEY = "sgamp_user_AMPRUNKEY0123456789abcdef";
-	const auth: HarnessAuth = { mode: "env", env: { AMP_API_KEY: KEY }, secrets: [KEY] };
-	const AMP_TURN: HarnessTurn = { ...TURN, sessionId: "5d3c7a9e-1b2f-4c6d-8e0a-9f1b2c3d4e5f" };
-	const ampDeps = (workspace: Workspace, log: string[]) => deps(workspace, log, { harness: amp, auth });
-	const ready = async (options: RunnerDeps) => {
-		const runner = new HarnessRunner(options);
-		expect(await runner.prepare("op-1", { sessionId: AMP_TURN.sessionId, resume: false })).toEqual({ status: "ready" });
-		return runner;
-	};
-
-	it("runs Amp in the checkout with the token in its environment alone, and reports its thread, tokens and test runs, with no cost", async () => {
-		const { workspace, commands, log } = scripted(() => prints(ampLines("turn.jsonl")));
-		const { options, tests, events } = ampDeps(workspace, log);
-		const result = await (await ready(options)).run(AMP_TURN, 60_000);
-		expect(result).toMatchObject({ status: "done", sessionId: AMP_SESSION, sessionCostUsd: null, sessionUsage: null, model: "high" });
-		// Each model response's tokens, the subagent's left out as its messages are.
-		expect(result.usage).toEqual({ input: 45, output: 477, cacheRead: 84518, cacheWrite: 17323 });
-		// No login restored or written back, and no lock: only Amp ran.
-		expect(log).toEqual(["amp"]);
-		expect(commands[0]!.cmd).toEqual(amp.buildCommand(AMP_TURN));
-		expect(commands[0]!.options).toMatchObject({ cwd: "/workspace/repo", env: { HOME: "/workspace", AMP_API_KEY: KEY, AMP_SKIP_UPDATE_CHECK: "1" } });
-		expect(JSON.stringify(commands.map((command) => command.cmd))).not.toContain(KEY);
-		expect(tests).toEqual([
-			expect.objectContaining({ command: "npm test", exitCode: 1, summary: { format: "vitest", passed: 3, failed: 1, skipped: 0, total: 4 } }),
-			expect.objectContaining({ command: "npm test", exitCode: 0, summary: { format: "vitest", passed: 4, failed: 0, skipped: 0, total: 4 } }),
-		]);
-		expect(events.find((event) => event.type === "permission_denied")).toMatchObject({ tool: "shell_command" });
-	});
-
-	it("never reports a turn as done without a successful result: a refused token, no server, no credits, its most turns, an error", async () => {
-		const stderr = (name: "login.stderr" | "unreachable.stderr") =>
-			async function* (): AsyncGenerator<ExecEvent> {
-				// As the real CLI did: nothing on its output, its error on the error output, exit 1.
-				yield { type: "stderr", data: ampFixture(name) };
-				yield { type: "exit", code: 1 };
-			};
-		const cases: [Script, Partial<Awaited<ReturnType<HarnessRunner["run"]>>>][] = [
-			[stderr("login.stderr"), { status: "unanswered", reason: "login_required", detail: "Amp isn't signed in: connect it again", sessionId: null }],
-			[stderr("unreachable.stderr"), { status: "unanswered", reason: "harness_error", detail: expect.stringMatching(/^Amp exited 1 without a result: Error: Couldn't connect to the Amp server at https:\/\/unreachable\.invalid\./) }],
-			[() => prints(ampLines("credits.jsonl"), 1), { status: "unanswered", reason: "harness_error", detail: "Amp usage limit reached: You are out of credits. Add paid credits or choose a paid tier." }],
-			[() => prints(ampLines("max-turns.jsonl"), 1), { status: "unanswered", reason: "max_turns", sessionId: AMP_SESSION }],
-			[() => prints(ampLines("failed.jsonl"), 1), { status: "unanswered", reason: "harness_error", detail: "Model provider returned an error: overloaded" }],
-			[() => prints(ampLines("turn.jsonl").slice(0, -1), 0), { status: "unanswered", reason: "harness_error", detail: "Amp exited 0 without a result" }],
-		];
-		for (const [script, expected] of cases) {
-			const { workspace, log } = scripted(script);
-			expect(await (await ready(ampDeps(workspace, log).options)).run(AMP_TURN, 60_000)).toMatchObject(expected);
-		}
 	});
 });
 

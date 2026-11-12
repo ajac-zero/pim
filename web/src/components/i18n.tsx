@@ -1988,6 +1988,8 @@ const translations = {
     codingEnvStatus_present: "in the image",
     codingEnvSeconds: "{seconds} s",
     codingEnvRebuild: "Rebuild environment",
+    codingEnvFailedBanner: "The environment's setup failed.",
+    codingEnvRetry: "Retry",
     codingEnvRebuildConfirm:
       "Re-runs the setup script and replaces the cached environment.",
     codingEnvRebuildTurn: "Wait for the turn to end to rebuild.",
@@ -4056,6 +4058,8 @@ const translations = {
     codingEnvStatus_present: "en la imagen",
     codingEnvSeconds: "{seconds} s",
     codingEnvRebuild: "Reconstruir entorno",
+    codingEnvFailedBanner: "Falló la configuración del entorno.",
+    codingEnvRetry: "Reintentar",
     codingEnvRebuildConfirm:
       "Vuelve a ejecutar el script de configuración y reemplaza el entorno en caché.",
     codingEnvRebuildTurn: "Espera a que termine el turno para reconstruir.",

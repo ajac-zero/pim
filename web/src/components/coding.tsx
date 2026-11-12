@@ -23,7 +23,10 @@ import {
   stepView,
   UserMessage,
 } from "~/components/chat/items";
-import { EnvironmentSection } from "~/components/coding-environment";
+import {
+  EnvironmentFailedBanner,
+  EnvironmentSection,
+} from "~/components/coding-environment";
 import { HarnessIcon } from "~/components/harness-icon";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import {
@@ -1206,6 +1209,7 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
       <ThreadSummary thread={thread} />
       <RunActivity activity={thread.activity} />
       <StateNotice thread={thread} />
+      <EnvironmentFailedBanner thread={thread} />
       <EnvironmentSection thread={thread} />
       <ThreadActions thread={thread} controls={controls} />
     </>

@@ -655,7 +655,8 @@ export function queueReasonKey(reason: string): TranslationKey {
 export function stateReasonKey(
   reason: string | null,
 ): { key: TranslationKey; reason?: string } | null {
-  if (reason === null) return null;
+  // The environment banner says it, with the error and a retry.
+  if (reason === null || reason === "environment_failed") return null;
   if (reason.startsWith("queue_expired")) {
     const waited = reason.split(":")[1] ?? "";
     return { key: "codingReasonQueueExpired", reason: waited };

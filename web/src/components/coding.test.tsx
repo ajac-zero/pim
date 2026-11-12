@@ -2135,6 +2135,24 @@ describe("the environment", () => {
     expect(screen.getByText("cached")).toBeTruthy();
   });
 
+  it("says a failed setup in a banner with its error, and retries it", async () => {
+    const error = "The setup script exited 3: fail-me";
+    const { api } = await chip(env({ state: "failed", error }), {
+      stateReason: "environment_failed",
+      stateDetail: error,
+    });
+    expect(await screen.findByText("The environment's setup failed.")).toBeTruthy();
+    expect(screen.getAllByText(error).length).toBeGreaterThan(0);
+    expect(api.rebuildEnvironment).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(api.rebuildEnvironment).toHaveBeenCalledWith("t1"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("The environment's setup failed.")).toBeNull(),
+    );
+  });
+
   it("rebuilds only after the person confirms, and shows the new state", async () => {
     const { api, button } = await chip(env({ state: "cached", builtAt: 1 }));
     fireEvent.click(button);

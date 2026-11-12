@@ -843,14 +843,15 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * The provider a start pins the thread to, from `pool` or `provider` (or the older `workspaceProvider`): the id of a
+	 * The provider a start pins the thread to, from `pool` or `provider`, or by id from `workspaceProvider`: the id of a
 	 * provider this space's registry has, by its id, its kind's name or the admin's name for it, in any case. Undefined
 	 * when the start names none. A name the registry doesn't have is refused, saying which it does have, so a pinned
 	 * thread never waits for a place it can't have. The registry is read after `#refreshCompute`, which `start` has run.
 	 */
 	#pin(input: StartThread): string | undefined {
-		const named = [input.pool, input.provider, input.workspaceProvider].filter((name): name is string => name !== undefined);
-		if (named.length === 0) return undefined;
+		const named = [input.pool, input.provider].filter((name): name is string => name !== undefined);
+		// A backend named by its exact id (`workspaceProvider`, which the API doesn't take) isn't checked: a thread started on one the deployment lacks fails with `no_backend`.
+		if (named.length === 0) return input.workspaceProvider;
 		const registry = this.workspaceProviders();
 		const ids = registry.ids();
 		const resolved = new Set(

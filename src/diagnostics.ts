@@ -31,7 +31,9 @@ const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credentia
 
 /** `text` with what looks like a secret, an address or an email taken out, and cut to `max` characters. */
 export function scrub(text: string, max = TEXT_LENGTH): string {
-	const clean = redact(redactSecrets(text.replace(/\b(authorization\s*[:=]\s*)(?:bearer\s+|basic\s+|token\s+)?[^\s"']+/gi, "$1[redacted]")))
+	const clean = redact(redactSecrets(text
+		.replace(/\b(authorization["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|(?:bearer|basic|token)\s+[^\s"']+|[^\s"']+)/gi, "$1[redacted]")
+		.replace(/\b([\w-]*(?:token|secret|password|api[_-]?key)[\w-]*["']?)(?:\s*[=:]\s*|\s+)("[^"\n]*"|'[^'\n]*'|[^\s;"']+)/gi, "$1=[redacted]")))
 		.replace(/\b([\w-]*(?:token|secret|password|api[_-]?key)[\w-]*)\s*[=:]\s*("[^"\n]*"|'[^'\n]*'|[^\s;]+)/gi, "$1=[redacted]")
 		// Addresses keep their path but not the host, the credentials in them, or what follows `?`.
 		.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>/?#]*([^\s"'<>?#]*)[^\s"'<>]*/gi, (_url, path: string) => `[address]${path}`)
@@ -52,7 +54,7 @@ export function scrubValue(value: unknown, depth = 0): unknown {
 /** Only operational arguments belong here, never request bodies, prompts or environment values. */
 export function toolSummary(input: Record<string, unknown>): string {
 	const fields = ["command", "cmd", "thread", "threadId", "thread_id", "url", "path", "file_path", "cwd", "timeout", "timeoutMs"];
-	return scrub(fields.filter((key) => input[key] !== undefined).map((key) => 	typeof input[key] === "string" ? key + "=" + input[key] : key + "=" + JSON.stringify(input[key])).join(" "), 200);
+	return scrub(fields.filter((key) => input[key] !== undefined).map((key) => typeof input[key] === "string" ? key + "=" + input[key] : key + "=" + JSON.stringify(input[key])).join(" "), 200);
 }
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -255,6 +257,7 @@ async function turns({ turns: read }: DiagnosticSources, since: number, limit: n
 						ms: step.ms,
 						name: step.name,
 						summary: step.summary,
+						timeout_ms: step.timeoutMs,
 						exit_code: step.exitCode,
 						output_bytes: step.outputBytes,
 						...(step.error ? { error: true } : {}),
@@ -336,6 +339,7 @@ async function coding({ codingThreads }: DiagnosticSources, since: number, limit
 		updated_at: iso(thread.updatedAt),
 		spent_usd: thread.spentUsd,
 		budget_usd: thread.budgetUsd,
+		activity: thread.activity,
 	}));
 	return section(items, threads.length);
 }

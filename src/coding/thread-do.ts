@@ -2703,8 +2703,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.#tellLive({ type: "partial", kind: event.kind, text: event.text });
 				return;
 			case "assistant":
-			case "tool_result":
 				await this.#writeMessage(event.message);
+				return;
+			case "tool_result":
+				await this.#writeMessage({ ...event.message, details: { ...(event.message.details as Record<string, unknown> ?? {}), ...(event.exitCode === undefined ? {} : { exitCode: event.exitCode }) } });
 				return;
 			case "retry":
 				this.store.recordEvent("harness.api_retry", { attempt: event.attempt, maxRetries: event.maxRetries, delayMs: event.delayMs, error: event.error, status: event.status });

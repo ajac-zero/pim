@@ -250,3 +250,35 @@ type LoginStatus = { harness: "claude-code" | "codex"; state: "none" | "starting
 Claude Code's sign-in is `claude auth login`: the person signs in at `url` and pastes the code the page shows. Codex's is `codex login --device-auth`: the person enters `userCode` at `url` (`https://auth.openai.com/codex/device`), and the CLI, which polls OpenAI meanwhile, exits once they have; Pim then keeps its login, and threads that waited for it go on.
 
 No route returns or accepts a login's contents: Pim reads nothing the CLI prints but the URL and the code to enter, and keeps neither code nor what it prints. A guest's account has none (`403`).
+
+## Live activity and stalls
+
+Thread details and list rows include an `activity` record, also used by the
+web app and `pim_diagnostics` (`now`, `stalls`, and `coding`). Chats expose the
+same record at `GET /api/sessions/:session/activity`, with the chat's usual
+access checks. No feature flag is needed.
+
+The record has `running`, `lastActivityAt` (epoch milliseconds), `current`
+(the pending tools' names, short redacted summaries, `startedAt`, `elapsedMs`
+and `timeoutMs`), up to 120 timeline `steps`, and `stalls`. Completed tool
+steps include `exitCode` where the harness reports one and `outputBytes`,
+the UTF-8 size of the retained tool-result content serialized as JSON, not
+necessarily the full output before truncation. Unknown values are null.
+Model durations are null when the harness did not report them.
+
+Summaries select operational arguments only: commands, file paths, thread
+ids and URL paths. They do not include prompts, request bodies or environment
+objects. Secret-shaped values, authorization, URL queries and email addresses
+are scrubbed before summaries are cut to about 200 characters. URL hosts stay
+redacted under diagnostics' existing address policy.
+
+A pending tool is stalled past its declared timeout or after five minutes
+without observed output. A running coding thread is also stalled after
+fifteen minutes without transcript/output activity. Heartbeats are not
+output: a live scheduler cannot make a silent command look healthy. A stall
+is a warning, not proof that the process is dead; commands may legitimately
+be quiet. Parent agents receive a notice once per stall, through the same
+wake path as turn completion; threads started by the person notify the
+majordomo instead. The existing chat watchdog's stop policy is unchanged.
+CLI and agent-hosted harnesses can only expose tool calls and activity that
+they report; absence of command details is shown as working, never invented.

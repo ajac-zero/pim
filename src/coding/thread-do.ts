@@ -81,9 +81,11 @@ import {
 	type CodingThreadState,
 	CodingThreadStore,
 	type PlacementReason,
+	type ThreadPlacement,
 	type InboxItem,
 	type TestRun,
 } from "./thread-store";
+import { type PlacementPool, placementPools, type SkippedPool } from "./pools";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
 import { isLoginHarness } from "./vault/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
@@ -199,6 +201,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#configured: string | null = null;
 	/** The compute providers the admin set up, as last read from the Gallery, and when. */
 	#compute: { providers: readonly ComputeProvider[]; at: number } = { providers: [], at: 0 };
+	/** The sandbox pools the thread may take a slot in, as last read from the Gallery, and when. */
+	#pools: { pools: readonly PlacementPool[]; skipped: readonly SkippedPool[]; at: number } | null = null;
 	/**
 	 * The tools' journal, in `coding_tool_journal`. A call's record is on
 	 * disk before `put` returns, since the command it records starts right
@@ -343,6 +347,41 @@ export class CodingThreadDO extends DurableObject<Env> {
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.compute_read_failed", error: String(error).slice(0, 300) }));
 		}
+	}
+
+	/**
+	 * Reads the sandbox pool registry again (./pools.ts), at most every few
+	 * seconds, and gives it to the space's scheduler, which places by it: the
+	 * enabled pools whose provider the deployment has, in their order of
+	 * priority, or — when the registry has none usable — one pool per provider,
+	 * exactly as placement ran before pools. A Gallery that can't be reached
+	 * leaves what was read.
+	 */
+	async #refreshPools(space: string): Promise<void> {
+		if (this.#pools && Date.now() - this.#pools.at < COMPUTE_REFRESH_MS) return;
+		let read: { pools: readonly PlacementPool[]; skipped: readonly SkippedPool[] };
+		try {
+			read = placementPools(await this.sandboxPools(), this.workspaceProviders().ids());
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.pools_read_failed", error: String(error).slice(0, 300) }));
+			read = this.#pools ?? placementPools([], this.workspaceProviders().ids());
+		}
+		this.#pools = { ...read, at: Date.now() };
+		// The scheduler keeps the registry, so its own ticks and every other thread place by what was read.
+		const registry = read.pools.filter((pool): pool is PlacementPool & { size: number } => pool.size !== null);
+		await codingScheduler(this.env, space)
+			.setPools(registry)
+			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.pools_set_failed", thread: this.store.thread()?.threadId, error: String(error).slice(0, 300) })));
+	}
+
+	/** The sandbox pools as the Gallery keeps them, over its RPC. */
+	protected async sandboxPools() {
+		return this.env.Gallery.getByName("gallery").sandboxPools();
+	}
+
+	/** The pools the thread may take a slot in, and the ones it can't and why, as last read; before any read, the fallback of one pool per provider. */
+	#placementPools(): { pools: readonly PlacementPool[]; skipped: readonly SkippedPool[] } {
+		return this.#pools ?? placementPools([], this.workspaceProviders().ids());
 	}
 
 	/**
@@ -852,8 +891,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const budgetUsd = input.budgetUsd ?? null;
 		if (budgetUsd !== null && !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 		await this.#refreshCompute();
-		const pin = this.#pin(input);
-		const providerId = pin ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
+		await this.#refreshPools(input.space);
+		const pools = this.#placementPools();
+		const pin = this.#pin(input, pools.pools);
+		const first = pin ?? pools.pools[0];
+		const providerId = first ? first.provider : (this.workspaceProviders().defaultId() ?? NO_BACKEND);
+		const poolId = first ? first.id : providerId;
 		const harness = input.harness ?? "pi";
 		const cli = cliHarness(harness);
 		if (harness !== "pi" && !cli) throw new Error("harness not yet available");
@@ -875,7 +918,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				profile: { providerId: profile.providerId, model: profile.model, ...(profile.thinking ? { thinking: profile.thinking } : {}) },
 				harness,
 				providerId,
-				// A thread started on a provider by name runs there; any other may overflow until it makes its workspace.
+				poolId,
+				// A thread started on a pool by name runs there; any other may overflow until it makes its workspace.
 				placed: pin !== undefined,
 				state: "provisioning",
 				createdBy: input.createdBy,
@@ -884,7 +928,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 				budgetUsd,
 				startOperation: input.operationId,
 			});
-			if (pin !== undefined) this.store.update({ placementReason: "pinned" });
+			this.store.update({
+				placementReason: pin ? "pinned" : "priority",
+				placement: this.#placementObject(pin ? "pinned" : "priority", poolId, [poolId], pools),
+			});
 			this.store.enqueue(input.operationId, task);
 			if (input.rebuildEnvironment) {
 				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
@@ -900,33 +947,46 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * The provider a start pins the thread to, from `pool` or `provider`, or by id from `workspaceProvider`: the id of a
-	 * provider this space's registry has, by its id, its kind's name or the admin's name for it, in any case. Undefined
-	 * when the start names none. A name the registry doesn't have is refused, saying which it does have, so a pinned
-	 * thread never waits for a place it can't have. The registry is read after `#refreshCompute`, which `start` has run.
+	 * The pool a start pins the thread to, from `pool` or `provider`: a pool's
+	 * id, or a provider's — its id, its kind's name or the admin's name for it,
+	 * in any case — which names the first enabled pool on that provider.
+	 * Undefined when the start names none. A name that is neither is refused,
+	 * saying which pools the space has, so a pinned thread never waits for a
+	 * place it can't have. The registry is read after `#refreshPools`, which
+	 * `start` has run. `workspaceProvider`, which the API doesn't take, names
+	 * a backend by its exact id and isn't checked: the thread runs there, in
+	 * that provider's first pool when the registry has one.
 	 */
-	#pin(input: StartThread): string | undefined {
+	#pin(input: StartThread, pools: readonly PlacementPool[]): PlacementPool | undefined {
 		const named = [input.pool, input.provider].filter((name): name is string => name !== undefined);
-		// A backend named by its exact id (`workspaceProvider`, which the API doesn't take) isn't checked: a thread started on one the deployment lacks fails with `no_backend`.
-		if (named.length === 0) return input.workspaceProvider;
-		const registry = this.workspaceProviders();
-		const ids = registry.ids();
+		if (named.length === 0) {
+			const id = input.workspaceProvider;
+			if (id === undefined) return undefined;
+			return pools.find((pool) => pool.provider === id) ?? { id, provider: id, size: null, priority: 0 };
+		}
+		const ids = this.workspaceProviders().ids();
+		const resolve = (name: string): PlacementPool | undefined => {
+			const wanted = name.trim().toLowerCase();
+			const pool = pools.find((candidate) => candidate.id.toLowerCase() === wanted);
+			if (pool) return pool;
+			const provider = ids.find((id) => {
+				const configured = this.#compute.providers.find((candidate) => COMPUTE_KINDS[candidate.kind].workspace === id);
+				return [id, configured?.kind, configured?.name].some((alias) => alias?.toLowerCase() === wanted);
+			});
+			return provider ? pools.find((candidate) => candidate.provider === provider) : undefined;
+		};
 		const resolved = new Set(
 			named.map((name) => {
-				const wanted = name.trim().toLowerCase();
-				const found = ids.find((id) => {
-					const configured = this.#compute.providers.find((provider) => COMPUTE_KINDS[provider.kind].workspace === id);
-					return [id, configured?.kind, configured?.name].some((alias) => alias?.toLowerCase() === wanted);
-				});
+				const found = resolve(name);
 				if (!found) {
 					throw new Error(
-						`Unknown or disabled pool "${name}": this space's coding sandbox pools are ${ids.length === 0 ? "none (no backend is set up or enabled for coding)" : ids.map((id) => `"${id}"`).join(", ")}`,
+						`Unknown or disabled pool "${name}": this space's coding sandbox pools are ${pools.length === 0 ? "none (no backend is set up or enabled for coding)" : pools.map((pool) => `"${pool.id}"`).join(", ")}`,
 					);
 				}
 				return found;
 			}),
 		);
-		if (resolved.size > 1) throw new Error(`pool and provider name different pools (${[...resolved].join(", ")}): give one`);
+		if (resolved.size > 1) throw new Error(`pool and provider name different pools (${[...resolved].map((pool) => pool.id).join(", ")}): give one`);
 		return [...resolved][0];
 	}
 
@@ -944,8 +1004,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			harness: thread.harness,
 			workspaceProvider: thread.providerId,
 			provider: thread.providerId,
-			pool: thread.providerId,
+			pool: thread.poolId,
 			placementReason: thread.placementReason,
+			placement: thread.placement,
 			providerKind: thread.providerKind,
 			orb: thread.orb === null ? null : { url: thread.orb.url },
 			cost: thread.providerKind === "agent-hosted" ? thread.orbCostUsd : thread.spentUsd,
@@ -1654,8 +1715,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		})().catch((error) => console.warn(JSON.stringify({ event: "pim.coding.gateway_charge_failed", error: String(error).slice(0, 300) })));
 	}
 
-	/** The scheduler's notice: the queued thread holds a slot now, on `provider` when the notice says, which may be one it overflowed to. */
-	async admitted(key: string, provider?: string): Promise<void> {
+	/** The scheduler's notice: the queued thread holds a slot now, in `pool` when the notice says, which may be one it overflowed to. */
+	async admitted(key: string, pool?: string): Promise<void> {
 		await this.lifecycle.start();
 		const thread = this.store.thread();
 		if (!thread || !this.store.firstNotice(key) || thread.slot === "held") return;
@@ -1664,7 +1725,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			await codingScheduler(this.env, thread.space).release(thread.threadId);
 			return;
 		}
-		this.#holdSlot(provider);
+		this.#holdSlot(pool);
 		this.#kick();
 	}
 
@@ -1957,7 +2018,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const fallback = registry.defaultId();
 		if (id === NO_BACKEND && fallback !== null) {
 			id = fallback;
-			this.store.update({ providerId: id });
+			const pools = this.#placementPools().pools;
+			const pool = pools.find((candidate) => candidate.provider === id);
+			this.store.update({ providerId: id, poolId: pool ? pool.id : id });
 		}
 		try {
 			registry.get(id);
@@ -1993,7 +2056,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (!health) return null;
 		try {
 			const { freeDiskPct, maxConcurrent, running, free } = await health();
-			await codingScheduler(this.env, thread.space).refreshConditions({ freeDiskPct, maxConcurrent, running, free }, DEFAULT_SPACE_CAP, thread.providerId);
+			await codingScheduler(this.env, thread.space).refreshConditions({ freeDiskPct, maxConcurrent, running, free }, DEFAULT_SPACE_CAP, thread.poolId);
 			return { freeDiskPct, maxConcurrent, running, free };
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.health_failed", thread: thread.threadId, error: String(error) }));
@@ -2002,54 +2065,59 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * Where the thread may take a slot: its own provider alone once it is
-	 * placed there; otherwise its provider first and the deployment's others
-	 * after it, in the registry's order, as overflow. A provider whose
-	 * manager says it runs as many workspaces as it may goes last, so the
-	 * thread takes a slot elsewhere rather than one it can't use.
+	 * Where the thread may take a slot: its own pool alone once it is placed
+	 * there; otherwise its own pool first and the registry's others after it,
+	 * in their order of priority, as overflow. A pool whose provider's manager
+	 * says it runs as many workspaces as it may goes last, so the thread takes
+	 * a slot elsewhere rather than one it can't use.
 	 */
-	#placement(thread: CodingThreadRow, health: ManagerHealth | null): { provider: string; overflow: string[] } {
-		if (thread.placed) return { provider: thread.providerId, overflow: [] };
-		const others = this.workspaceProviders()
-			.ids()
-			.filter((id) => id !== thread.providerId);
-		const order = health && health.free <= 0 ? [...others, thread.providerId] : [thread.providerId, ...others];
-		return { provider: order[0]!, overflow: order.slice(1) };
+	#placement(thread: CodingThreadRow, health: ManagerHealth | null): { pool: string; overflow: string[] } {
+		if (thread.placed) return { pool: thread.poolId, overflow: [] };
+		const others = this.#placementPools()
+			.pools.map((pool) => pool.id)
+			.filter((id) => id !== thread.poolId);
+		const order = health && health.free <= 0 ? [...others, thread.poolId] : [thread.poolId, ...others];
+		return { pool: order[0]!, overflow: order.slice(1) };
 	}
 
 	/**
 	 * Moves the slot of a thread not yet placed whose provider refused its
-	 * workspace for room (a full backend, or the manager's low disk) to
-	 * another provider with a slot free: true when it moved, so it makes its
-	 * workspace there next.
+	 * workspace for room (a full backend, or the manager's low disk) to another
+	 * pool with a slot free: true when it moved, so it makes its workspace
+	 * there next.
 	 */
 	async #overflow(thread: CodingThreadRow): Promise<boolean> {
 		if (thread.placed || thread.slot !== "held") return false;
-		const others = this.workspaceProviders()
-			.ids()
-			.filter((id) => id !== thread.providerId);
-		if (others.length === 0) return false;
-		const moved = await codingScheduler(this.env, thread.space).move(thread.threadId, others);
+		const { pool, overflow } = this.#placement(thread, null);
+		if (overflow.length === 0) return false;
+		const moved = await codingScheduler(this.env, thread.space).move(thread.threadId, overflow);
 		if (moved === null) return false;
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ providerId: moved, stateReason: null, placementReason: "overflow" });
-			this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: moved });
+			this.store.update({
+				poolId: moved,
+				providerId: this.#providerOf(moved),
+				stateReason: null,
+				placementReason: "overflow",
+				placement: this.#placementObject("overflow", moved, [pool, ...overflow], this.#placementPools()),
+			});
+			this.store.recordEvent("workspace.overflow", { from: thread.poolId, to: moved });
 		});
 		return true;
 	}
 
-	/** Asks the scheduler for a slot, unless the thread holds one or waits for one, after telling it the manager's health. */
+	/** Asks the scheduler for a slot, unless the thread holds one or waits for one, after bringing the pool registry and the manager's health to the scheduler. */
 	async #requestSlot(): Promise<void> {
 		if (this.store.required().slot !== "none") return;
-		const health = await this.#refreshCapacity();
 		const thread = this.store.required();
+		await this.#refreshPools(thread.space);
+		const health = await this.#refreshCapacity();
 		if (thread.slot !== "none") return;
 		this.store.update({ slot: "queued" });
-		const { provider, overflow } = this.#placement(thread, health);
+		const { pool, overflow } = this.#placement(thread, health);
 		let result: Awaited<ReturnType<ReturnType<typeof codingScheduler>["request"]>>;
 		try {
 			result = await codingScheduler(this.env, thread.space).request(thread.threadId, {
-				provider,
+				pool,
 				...(overflow.length > 0 ? { overflow } : {}),
 				...(thread.resumePriority ? { priority: PREEMPT_RESUME_PRIORITY } : {}),
 			});
@@ -2057,7 +2125,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (this.store.required().slot === "queued") this.store.update({ slot: "none" });
 			throw error;
 		}
-		if (result.status === "admitted") this.#holdSlot(result.provider);
+		if (result.status === "admitted") this.#holdSlot(result.pool);
 		// Admission may have been told meanwhile, by a notice that came while the request was answered.
 		else if (this.store.required().slot === "queued") {
 			this.ctx.storage.transactionSync(() => {
@@ -2067,14 +2135,58 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 	}
 
-	/** Records that the thread holds a slot, on `provider` when it took one other than its own: it readies its workspace there next. */
-	#holdSlot(provider = this.store.required().providerId): void {
+	/**
+	 * Records that the thread holds a slot, in `pool` when it took one other
+	 * than its own: it readies its workspace on that pool's provider next. A
+	 * thread that took one of its overflow is placed there for good, with the
+	 * pools it walked past, full, in its placement.
+	 */
+	#holdSlot(pool = this.store.required().poolId): void {
 		const thread = this.store.required();
 		if (thread.slot === "held") return;
+		const pools = this.#placementPools();
+		const provider = this.#providerOf(pool, pools);
+		const walk = thread.placed ? undefined : this.#placement(thread, null);
+		const order = walk ? [walk.pool, ...walk.overflow] : [thread.poolId];
+		const kind: PlacementReason = pool === thread.poolId ? thread.placementReason : "overflow";
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ slot: "held", slotSince: this.now(), resumePriority: false, providerId: provider, ...(provider !== thread.providerId ? { placementReason: "overflow" as const } : {}), ...(thread.state === "queued" ? { state: "provisioning" } : {}) });
-			if (provider !== thread.providerId) this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: provider });
+			this.store.update({
+				slot: "held",
+				slotSince: this.now(),
+				resumePriority: false,
+				poolId: pool,
+				providerId: provider,
+				placementReason: kind,
+				placement: this.#placementObject(kind, pool, order, pools),
+				...(thread.state === "queued" ? { state: "provisioning" } : {}),
+			});
+			if (pool !== thread.poolId) this.store.recordEvent("workspace.overflow", { from: thread.poolId, to: pool });
 		});
+	}
+
+	/** The provider behind `pool`: the registry's, and otherwise the pool's own id, as while one provider is one pool. */
+	#providerOf(pool: string, pools: { pools: readonly PlacementPool[] } = this.#placementPools()): string {
+		return pools.pools.find((candidate) => candidate.id === pool)?.provider ?? pool;
+	}
+
+	/**
+	 * The thread's placement as its status tells it: which pool it took a
+	 * slot in, the provider behind it and the pool's priority, with the pools
+	 * it couldn't and why — switched off, without a provider the deployment
+	 * has, or full where it walked past them to the one it took.
+	 */
+	#placementObject(kind: PlacementReason, poolId: string, order: readonly string[], pools: { pools: readonly PlacementPool[]; skipped: readonly SkippedPool[] }): ThreadPlacement {
+		const full = order.slice(0, Math.max(0, order.indexOf(poolId)));
+		return {
+			kind,
+			pool: poolId,
+			provider: this.#providerOf(poolId, pools),
+			priority: pools.pools.find((candidate) => candidate.id === poolId)?.priority ?? 0,
+			skipped: [
+				...pools.skipped.map(({ pool, reason }) => ({ pool: pool.id, reason })),
+				...full.map((pool) => ({ pool, reason: "full" as const })),
+			],
+		};
 	}
 
 	async #cancelQueued(): Promise<void> {
@@ -2846,7 +2958,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			// The backend is full though the scheduler gave a slot: a thread with no workspace yet makes it on another provider with room, at once; otherwise it tries again at the next heartbeat. Low disk also holds the provider's queue until the manager's health says there is room.
 			if (lowDisk) {
 				await codingScheduler(this.env, thread.space)
-					.onManagerError("low_disk", thread.providerId)
+					.onManagerError("low_disk", thread.poolId)
 					.catch((failure) => console.warn(JSON.stringify({ event: "pim.coding.capacity_failed", thread: thread.threadId, error: String(failure) })));
 			}
 			if (await this.#overflow(thread)) {
@@ -3730,11 +3842,11 @@ export type StartThread = {
 	readonly createdBy: string;
 	/** Repeating a start with the same operation changes nothing. */
 	readonly operationId: string;
-	/** The workspace backend's id (the deployment's default). */
+	/** The workspace backend's id (the deployment's default), by its exact id: the API doesn't take this, and it isn't checked. */
 	readonly workspaceProvider?: string;
-	/** Pins the thread to this pool: it takes a slot there only, and queues when it is full. Same as `provider` while a provider is one pool. */
+	/** Pins the thread to this pool, such as "compose" or "cloudflare-2": it takes a slot there only, and queues when it is full. A provider's id names its first pool. */
 	readonly pool?: string;
-	/** Pins the thread to this provider, such as "compose" or "cloudflare". */
+	/** Pins the thread to this provider, such as "compose" or "cloudflare": its first pool. Naming both, they must agree. */
 	readonly provider?: string;
 	readonly limits?: Partial<CodingLimits>;
 	/** When true, start with a freshly rebuilt environment, skipping any cached snapshot. Default false. */
@@ -3753,10 +3865,12 @@ export type CodingThreadStatus = {
 	readonly workspaceProvider: string;
 	/** Where the thread runs (or would first try to): the same as `workspaceProvider`, named as the coding API's callers pin it. */
 	readonly provider: string;
-	/** The pool it takes slots from: its provider's id, as one provider is one pool. */
+	/** The pool it takes slots from: a pool of the registry (./pools.ts), or its provider's id while one provider is one pool. */
 	readonly pool: string;
-	/** Why it is there: `pinned` (the start named it), `priority` (the first provider with room) or `overflow` (moved on from a full one). */
+	/** Why it is there: `pinned` (the start named it), `priority` (the first pool with room) or `overflow` (moved on from a full one). */
 	readonly placementReason: PlacementReason;
+	/** The same, in full: the pool and the provider behind it, the pool's priority, and the pools it couldn't and why. Null before the thread is placed. */
+	readonly placement: ThreadPlacement | null;
 	/** What kind of provider runs the thread: a workspace Pim made and execs into, or an agent-hosted orb in the agent's own cloud. */
 	readonly providerKind: CodingThreadRow["providerKind"];
 	/** The agent-hosted thread the thread runs on, where the person can watch it on the agent's own site; null for a workspace thread. */

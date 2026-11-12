@@ -1363,7 +1363,7 @@ describe("a coding thread with an overflow provider", () => {
 		return { compose, cloudflare };
 	}
 	const on = async (provider: FakeWorkspaceProvider, id: string) => (await provider.list({ sessionId: id })).length;
-	const slots = async (space: string) => (await codingScheduler(env, space).snapshot()).running.map((slot) => `${slot.threadId}:${slot.provider}`);
+	const slots = async (space: string) => (await codingScheduler(env, space).snapshot()).running.map((slot) => `${slot.threadId}:${slot.pool}`);
 	const ledger = (id: string) =>
 		runInDurableObject(env.Gallery.getByName("gallery"), (_instance: unknown, state: DurableObjectState) =>
 			state.storage.sql.exec("SELECT provider, end_reason FROM compute_usage WHERE thread_id = ? ORDER BY id", id).toArray(),
@@ -1430,7 +1430,7 @@ describe("a coding thread with an overflow provider", () => {
 		// Cloudflare has room, but the first thread's work is on the manager: it waits for the manager's slot.
 		await first.stub.steer("Carry on.", { operationId: "resume" });
 		await vi.waitFor(async () => expect(await first.stub.status()).toMatchObject({ state: "queued", slot: "queued" }));
-		expect((await scheduler.snapshot()).queued).toEqual([expect.objectContaining({ threadId: first.id, provider: "compose" })]);
+		expect((await scheduler.snapshot()).queued).toEqual([expect.objectContaining({ threadId: first.id, pool: "compose" })]);
 		expect((await scheduler.snapshot()).queued[0]!.overflow).toBeUndefined();
 		await other.stub.archive();
 		const [, again] = await turns(first.id, 2);

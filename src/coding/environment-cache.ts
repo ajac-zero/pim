@@ -26,7 +26,7 @@ import type { ExecEvent, Workspace } from "./workspace/types";
  * this module holds what that needs and nothing that touches the thread.
  */
 
-/** Where a thread's environment is: none to prepare (the repository itself declares no setup), unsupported by the workspace backend (`reason` says why), being restored or built, ready from a snapshot, or failed (the thread goes on without it). */
+/** Where a thread's environment is: none to prepare (the repository itself declares no setup), unsupported (no longer produced: every backend runs the lifecycle; kept for old rows), being restored or built, ready from a snapshot, or failed (the thread goes on without it). */
 export type EnvironmentState = "none" | "unsupported" | "restoring" | "cached" | "building" | "failed";
 
 /** A thread's environment, as its row and its API view have it. Durations are in milliseconds, measured on a monotonic clock; times are ms since the epoch. */
@@ -34,7 +34,7 @@ export type CodingEnvironment = {
 	readonly state: EnvironmentState;
 	/** The sandbox pool whose snapshot the environment is: the one the thread restored from or, cold-provisioned, keeps its snapshot for; null before it is ready. */
 	readonly pool: string | null;
-	/** Why the workspace backend can't keep environments, when the state is "unsupported"; null otherwise, since "none" means the repository declares no setup. */
+	/** Why a thread saved as "unsupported" was; no longer set. */
 	readonly reason?: string;
 	/** The environment's key, once the repository is checked out and the setup script found; null without one. */
 	readonly key: string | null;

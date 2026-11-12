@@ -33,7 +33,15 @@ The steps run one after another with bash in the checkout, as the setup script d
 
 A step that fails is recorded on the toolchain or dependencies it installs, with the end of what it printed, and the thread goes on: a failed step never fails the thread. Dependencies that need a toolchain that couldn't be installed are skipped. No snapshot is kept when a step failed, so the person's next thread tries again, as one would after a network failure; a rebuild tries again in the same thread. A failing setup script is still the environment's failure, as before.
 
-A repository with nothing to install and no setup script has no environment (`state: "none"`), but its checks are still found and told to the agent. A workspace backend that keeps no environments says so instead (`state: "unsupported"`, with its `reason`), and the thread works in its plain workspace.
+A repository with nothing to install and no setup script has no environment (`state: "none"`), but its checks are still found and told to the agent. Every workspace backend runs the same lifecycle: detection, provisioning and the setup script. A backend that keeps no snapshots (`capabilities.environmentSnapshots` is false) builds in place for each thread, with no restore, no snapshot and no cross-thread build lock; only the snapshot is the backend's to keep. The `"unsupported"` state remains in the type for threads saved before this, and is no longer produced.
+
+## The environment phase in the transcript
+
+What the environment did is shown at the start of the thread's transcript, as notices before the agent's first message ([`src/coding/environment-phase.ts`](../src/coding/environment-phase.ts)). The restore, each provisioning step (a skipped one too) and the setup script are one notice each: `Environment setup: exit 0, 1.2 s`, the command after `$ `, and the end of what it printed: control characters removed, credentials redacted, at most its last 2048 characters, with a line saying how much was cut. A restore or a build ends with `Environment: restored from a snapshot` or `Environment: ready`. The same record is in the thread's log (`environment.started`, `environment.step`, …; [coding-api.md](coding-api.md#events)).
+
+## When the setup fails
+
+A failed setup script never fails the thread, and is never silent: the thread starts the agent anyway, in the workspace as the checkout and the image left it, and says so. Its `status` has `stateReason: "environment_failed"` with the error as `stateDetail` while the environment is `failed` and nothing else explains the thread's state; the transcript has `Environment: failed: <error>` and a line that the agent starts anyway; and the agent's instructions begin with `The environment's setup failed: <error>`, telling it dependencies may be missing, to say so if that blocks it, and that the person can retry. To retry, the person presses Retry on the thread page's banner (`POST /api/coding/threads/:id/environment/rebuild`), and an agent calls `coding_steer` with `retry_environment: true` (no `text` needed): the setup runs again in the same workspace between turns, and the state clears when it works.
 
 ## The repository's contract: `.pim/env.json`
 

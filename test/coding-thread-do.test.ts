@@ -1392,6 +1392,73 @@ describe("a coding thread with an overflow provider", () => {
 		await first.stub.archive();
 	});
 
+	it("places a pinned thread only on its pool, though the manager has room, and says why", async () => {
+		const { compose, cloudflare } = providers();
+		codingFaux.setResponses([fauxAssistantMessage("Pinned done."), fauxAssistantMessage("Default done.")]);
+		const pinned = await startThread({ pool: "Cloudflare" });
+		expect(pinned.status).toMatchObject({ provider: "cloudflare", pool: "cloudflare", placementReason: "pinned" });
+		await turns(pinned.id, 1);
+		expect([await on(compose, pinned.id), await on(cloudflare, pinned.id)]).toEqual([0, 1]);
+		// Without a pin, the thread is on the first pool by priority.
+		const plain = await startThread();
+		await turns(plain.id, 1);
+		expect(await plain.stub.status()).toMatchObject({ provider: "compose", pool: "compose", placementReason: "priority" });
+		for (const each of [pinned, plain]) await each.stub.archive();
+	});
+
+	it("queues a pinned thread when its pool is full rather than overflowing it, and agrees pool with provider", async () => {
+		providers();
+		const space = `space-${crypto.randomUUID()}`;
+		await codingScheduler(env, space).setLimit(1, "compose");
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Second done.")]);
+		const first = await startThread({ space, provider: "compose", pool: "compose" });
+		await turns(first.id, 1);
+		const second = await startThread({ space, pool: "compose" });
+		expect(second.status).toMatchObject({ state: "queued", slot: "queued", placementReason: "pinned", queue: { position: 1 } });
+		expect((await codingScheduler(env, space).snapshot()).queued[0]!.overflow).toBeUndefined();
+		await first.stub.archive();
+		await turns(second.id, 1);
+		expect(await second.stub.status()).toMatchObject({ provider: "compose", slot: "held", placementReason: "pinned" });
+		await second.stub.archive();
+		const id = crypto.randomUUID();
+		await expect(inside(codingThread(env, id), (thread) => thread.start(startInput(id, { pool: "compose", provider: "cloudflare" })))).rejects.toThrow(/different pools/);
+	});
+
+	it("refuses a pin to a pool the space doesn't have, naming the ones it has, and records nothing", async () => {
+		codingBackends.registry = workspaceRegistry([new FakeWorkspaceProvider({ id: "compose" })]);
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		await expect(inside(stub, (thread) => thread.start(startInput(id, { pool: "cloudflare" })))).rejects.toThrow(/Unknown or disabled pool "cloudflare".*"compose"/);
+		await expect(inside(stub, (thread) => thread.store.thread())).resolves.toBeNull();
+	});
+
+	it("keeps a pinned thread on its pool when it resumes, and records that an unpinned one overflowed", async () => {
+		const { compose, cloudflare } = providers();
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		codingFaux.setResponses([fauxAssistantMessage("Pinned done."), fauxAssistantMessage("Pinned again."), fauxAssistantMessage("First done."), fauxAssistantMessage("Overflowed done.")]);
+		const pinned = await startThread({ space, provider: "cloudflare" });
+		await turns(pinned.id, 1);
+		codingSchedulers.now = Date.now() + 10 * 60_000 + 1_000;
+		await scheduler.sweep();
+		await runDurableObjectAlarm(scheduler);
+		codingSchedulers.now = null;
+		expect(await pinned.stub.status()).toMatchObject({ slot: "none", provider: "cloudflare", placementReason: "pinned" });
+		await pinned.stub.steer("Carry on.", { operationId: "resume" });
+		await turns(pinned.id, 2);
+		expect(await pinned.stub.status()).toMatchObject({ provider: "cloudflare", slot: "held", placementReason: "pinned" });
+		expect([await on(compose, pinned.id), await on(cloudflare, pinned.id)]).toEqual([0, 1]);
+		await pinned.stub.archive();
+		// A thread that took a later provider because the first was full says so.
+		await scheduler.setLimit(1);
+		const first = await startThread({ space });
+		await turns(first.id, 1);
+		const overflowed = await startThread({ space });
+		await turns(overflowed.id, 1);
+		expect(await overflowed.stub.status()).toMatchObject({ provider: "cloudflare", placementReason: "overflow" });
+		for (const each of [first, overflowed]) await each.stub.archive();
+	});
+
 	it("moves to Cloudflare when the manager refuses its first workspace for capacity, though its space had a slot", async () => {
 		const { compose, cloudflare } = providers(1);
 		codingFaux.setResponses([fauxAssistantMessage("Elsewhere done."), fauxAssistantMessage("Done.")]);

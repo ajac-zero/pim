@@ -77,6 +77,7 @@ import {
 	type CodingThreadRow,
 	type CodingThreadState,
 	CodingThreadStore,
+	type PlacementReason,
 	type TestRun,
 } from "./thread-store";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
@@ -84,7 +85,7 @@ import { isLoginHarness } from "./vault/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";
-import { type ComputeProvider, type ComputeQuota } from "../compute";
+import { COMPUTE_KINDS, type ComputeProvider, type ComputeQuota } from "../compute";
 import { egressPolicy, gatewayInjection, gitBrokerInjection, placeSecret } from "./workspace/egress";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import {
@@ -794,7 +795,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const budgetUsd = input.budgetUsd ?? null;
 		if (budgetUsd !== null && !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 		await this.#refreshCompute();
-		const providerId = input.workspaceProvider ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
+		const pin = this.#pin(input);
+		const providerId = pin ?? this.workspaceProviders().defaultId() ?? NO_BACKEND;
 		const harness = input.harness ?? "pi";
 		const cli = cliHarness(harness);
 		if (harness !== "pi" && !cli) throw new Error("harness not yet available");
@@ -817,7 +819,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				harness,
 				providerId,
 				// A thread started on a provider by name runs there; any other may overflow until it makes its workspace.
-				placed: input.workspaceProvider !== undefined,
+				placed: pin !== undefined,
 				state: "provisioning",
 				createdBy: input.createdBy,
 				parentThread: input.parent ?? null,
@@ -825,6 +827,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				budgetUsd,
 				startOperation: input.operationId,
 			});
+			if (pin !== undefined) this.store.update({ placementReason: "pinned" });
 			this.store.enqueue(input.operationId, task);
 			if (input.rebuildEnvironment) {
 				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
@@ -837,6 +840,36 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.#kick();
 		} else await backend;
 		return this.status();
+	}
+
+	/**
+	 * The provider a start pins the thread to, from `pool` or `provider` (or the older `workspaceProvider`): the id of a
+	 * provider this space's registry has, by its id, its kind's name or the admin's name for it, in any case. Undefined
+	 * when the start names none. A name the registry doesn't have is refused, saying which it does have, so a pinned
+	 * thread never waits for a place it can't have. The registry is read after `#refreshCompute`, which `start` has run.
+	 */
+	#pin(input: StartThread): string | undefined {
+		const named = [input.pool, input.provider, input.workspaceProvider].filter((name): name is string => name !== undefined);
+		if (named.length === 0) return undefined;
+		const registry = this.workspaceProviders();
+		const ids = registry.ids();
+		const resolved = new Set(
+			named.map((name) => {
+				const wanted = name.trim().toLowerCase();
+				const found = ids.find((id) => {
+					const configured = this.#compute.providers.find((provider) => COMPUTE_KINDS[provider.kind].workspace === id);
+					return [id, configured?.kind, configured?.name].some((alias) => alias?.toLowerCase() === wanted);
+				});
+				if (!found) {
+					throw new Error(
+						`Unknown or disabled pool "${name}": this space's coding sandbox pools are ${ids.length === 0 ? "none (no backend is set up or enabled for coding)" : ids.map((id) => `"${id}"`).join(", ")}`,
+					);
+				}
+				return found;
+			}),
+		);
+		if (resolved.size > 1) throw new Error(`pool and provider name different pools (${[...resolved].join(", ")}): give one`);
+		return [...resolved][0];
 	}
 
 	async status(): Promise<CodingThreadStatus> {
@@ -852,6 +885,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			profile: thread.profile,
 			harness: thread.harness,
 			workspaceProvider: thread.providerId,
+			provider: thread.providerId,
+			pool: thread.providerId,
+			placementReason: thread.placementReason,
 			slot: thread.slot,
 			queue,
 			budgetUsd: thread.budgetUsd,
@@ -1892,7 +1928,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const moved = await codingScheduler(this.env, thread.space).move(thread.threadId, others);
 		if (moved === null) return false;
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ providerId: moved, stateReason: null });
+			this.store.update({ providerId: moved, stateReason: null, placementReason: "overflow" });
 			this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: moved });
 		});
 		return true;
@@ -1932,7 +1968,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		if (thread.slot === "held") return;
 		this.ctx.storage.transactionSync(() => {
-			this.store.update({ slot: "held", slotSince: this.now(), resumePriority: false, providerId: provider, ...(thread.state === "queued" ? { state: "provisioning" } : {}) });
+			this.store.update({ slot: "held", slotSince: this.now(), resumePriority: false, providerId: provider, ...(provider !== thread.providerId ? { placementReason: "overflow" as const } : {}), ...(thread.state === "queued" ? { state: "provisioning" } : {}) });
 			if (provider !== thread.providerId) this.store.recordEvent("workspace.overflow", { from: thread.providerId, to: provider });
 		});
 	}
@@ -3351,6 +3387,10 @@ export type StartThread = {
 	readonly operationId: string;
 	/** The workspace backend's id (the deployment's default). */
 	readonly workspaceProvider?: string;
+	/** Pins the thread to this pool: it takes a slot there only, and queues when it is full. Same as `provider` while a provider is one pool. */
+	readonly pool?: string;
+	/** Pins the thread to this provider, such as "compose" or "cloudflare". */
+	readonly provider?: string;
 	readonly limits?: Partial<CodingLimits>;
 	/** When true, start with a freshly rebuilt environment, skipping any cached snapshot. Default false. */
 	readonly rebuildEnvironment?: boolean;
@@ -3366,6 +3406,12 @@ export type CodingThreadStatus = {
 	readonly profile: AgentProfile;
 	readonly harness: CodingHarness;
 	readonly workspaceProvider: string;
+	/** Where the thread runs (or would first try to): the same as `workspaceProvider`, named as the coding API's callers pin it. */
+	readonly provider: string;
+	/** The pool it takes slots from: its provider's id, as one provider is one pool. */
+	readonly pool: string;
+	/** Why it is there: `pinned` (the start named it), `priority` (the first provider with room) or `overflow` (moved on from a full one). */
+	readonly placementReason: PlacementReason;
 	readonly slot: CodingThreadRow["slot"];
 	/** Its place in the space's queue while it waits for a slot. */
 	readonly queue: QueuePlace | null;

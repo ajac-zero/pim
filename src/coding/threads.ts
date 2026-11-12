@@ -128,6 +128,10 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 	if (input.operationId !== undefined && (typeof input.operationId !== "string" || !input.operationId || input.operationId.length > 200)) {
 		throw invalid("operationId must be a string of at most 200 characters");
 	}
+	for (const field of ["pool", "provider"] as const) {
+		const given = input[field];
+		if (given !== undefined && (typeof given !== "string" || !given.trim() || given.length > 100)) throw invalid(`${field} must be the name of a coding sandbox pool, such as compose or cloudflare`);
+	}
 	const operationId = input.operationId ?? crypto.randomUUID();
 	const threadId = await codingThreadId(space, operationId);
 	const scheduler = codingScheduler(env, space);
@@ -148,6 +152,8 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 			parent: input.parent ?? null,
 			createdBy: creatorId(space, createdBy),
 			operationId,
+			...(input.pool !== undefined ? { pool: input.pool } : {}),
+			...(input.provider !== undefined ? { provider: input.provider } : {}),
 			...(input.rebuildEnvironment !== undefined ? { rebuildEnvironment: input.rebuildEnvironment } : {}),
 		});
 	} catch (error) {

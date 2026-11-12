@@ -225,12 +225,18 @@ export class CodingThreadDO extends DurableObject<Env> {
 		put: async (key, entry) => {
 			this.store.recordJournal(key, entry);
 			await this.ctx.storage.sync();
+			// A finished command may have committed: its work is pushed (debounced) without waiting for the turn's end.
+			if (entry.state === "done" && (entry.tool === "bash" || entry.tool.startsWith("git "))) void this.#autopush(false);
 		},
 	};
 	/** Who follows the thread live besides pi's events (`events()`): commands' output as they run, and a CLI harness's text as it is written. */
 	readonly #liveListeners = new Set<(message: CodingLiveMessage) => void>();
 	/** The CLI harness's turn under way in this isolate, and its end. */
 	#cli: { operation: string; runner: HarnessRunner; done: Promise<void> } | null = null;
+	/** The automatic push under way, when one is (`#autopush`); when the last was tried, and how many in a row failed. */
+	#autopushing: Promise<void> | null = null;
+	#autopushAt = Number.NEGATIVE_INFINITY;
+	#autopushFailures = 0;
 	/** Turns being ended, by operation, so two who notice one end it once. */
 	readonly #endings = new Map<string, Promise<void>>();
 	/** The space's list being told of the thread's row, and whether it changed again meanwhile. */
@@ -302,6 +308,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** How long before a provider's session cap the thread moves to a new session: a fifth of the cap, at most two minutes. */
 	protected sessionMarginMs(maxMs: number): number {
 		return Math.min(120_000, Math.floor(maxMs / 5));
+	}
+
+	/** The least time between automatic pushes while a turn runs. */
+	protected autopushMs(): number {
+		return AUTOPUSH_MS;
 	}
 
 	/** How long a turn that failed for a transient error waits before it is retried: 30 to 60 seconds. */
@@ -1108,6 +1119,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			consecutiveInterrupts: thread.consecutiveInterrupts,
 			session: this.#sessionView(thread),
 			pullRequest: thread.pullRequest,
+			lastPushedSha: thread.lastPushedSha,
 		};
 	}
 
@@ -1488,6 +1500,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async recordSandboxPush(event: { repo: string; branch: string; before: string | null; after: string; outcome: string }): Promise<void> {
 		await this.lifecycle.start();
 		if (event.branch !== this.store.required().branch) return;
+		this.store.update({ lastPushedSha: event.after });
 		this.store.recordEvent("thread.pushed", { repo: event.repo, branch: event.branch, before: event.before, after: event.after, outcome: event.outcome });
 	}
 
@@ -2952,6 +2965,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", operation, error: String(error) }));
 			return null;
 		});
+		if (!this.#cycling) await this.#autopush(true);
 		// The bundle kept of the work, so it outlives the workspace's volume.
 		if (checkpoint) await this.#autosave();
 		const thread = this.store.required();
@@ -3925,6 +3939,54 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return checkpoint;
 	}
 
+	/**
+	 * Pushes the thread's own branch from its workspace when HEAD is on it, past
+	 * its base and not at `lastPushedSha`, so commits outlive a lost sandbox:
+	 * `git push origin HEAD:refs/heads/<branch>` through the broker, never a
+	 * force. A turn's end (`final`) always tries; the tool calls in between at
+	 * most once per `autopushMs`, and not at all after `AUTOPUSH_MAX_FAILURES`
+	 * failures in a row, until a push works. A failure is logged and never
+	 * fails the turn. One push runs at a time.
+	 */
+	#autopush(final: boolean): Promise<void> {
+		const run = (this.#autopushing ?? Promise.resolve()).then(() => this.#autopushNow(final));
+		const tracked = run.finally(() => {
+			if (this.#autopushing === tracked) this.#autopushing = null;
+		});
+		this.#autopushing = tracked;
+		return tracked;
+	}
+
+	async #autopushNow(final: boolean): Promise<void> {
+		try {
+			const thread = this.store.thread();
+			if (!thread || thread.slot !== "held" || !thread.workspaceRef || thread.providerKind === "agent-hosted") return;
+			if (!final && (this.#autopushFailures >= AUTOPUSH_MAX_FAILURES || this.now() - this.#autopushAt < this.autopushMs())) return;
+			if (this.#cycling) return;
+			// A call's push never wakes a workspace: only one that is open is pushed from.
+			if (!final && this.#open?.id !== thread.workspaceRef.id) return;
+			const workspace = await this.#workspace();
+			// A detached HEAD has no branch name: nothing is pushed.
+			const branch = (await git(workspace, ["symbolic-ref", "--short", "-q", "HEAD"]).catch(() => "")).trim();
+			if (branch !== thread.branch) return;
+			const head = (await git(workspace, ["rev-parse", "HEAD"])).trim();
+			if (head === thread.lastPushedSha || head === thread.baseSha) return;
+			this.#autopushAt = this.now();
+			try {
+				const { token, auth } = await this.#brokerAccess(thread);
+				await git(workspace, ["push", "origin", `HEAD:refs/heads/${thread.branch}`], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+				this.#autopushFailures = 0;
+				// The broker logs the push (`recordSandboxPush`, which also sets this); it is set here too, for a broker that can't reach this object.
+				this.store.update({ lastPushedSha: head });
+			} catch (error) {
+				this.#autopushFailures++;
+				this.store.recordEvent("thread.autopush_failed", { branch: thread.branch, sha: head, error: redactSecrets(errorText(error)).slice(0, 300), failures: this.#autopushFailures });
+			}
+		} catch (error) {
+			console.warn(JSON.stringify({ event: "pim.coding.autopush_failed", error: redactSecrets(String(error)).slice(0, 300) }));
+		}
+	}
+
 	async #makeDiff(since: string, head: string): Promise<{ diff: string; truncated: boolean }> {
 		const output = await git(await this.#workspace(), ["diff", since, head]);
 		const truncated = output.length > MAX_DIFF_CHARS;
@@ -4191,6 +4253,8 @@ export type CodingThreadStatus = {
 	readonly session: CodingSessionStatus;
 	/** The pull request opened from its branch; null until one is. */
 	readonly pullRequest: { readonly url: string; readonly number: number } | null;
+	/** The commit its branch was last pushed at; null until it was. */
+	readonly lastPushedSha: string | null;
 };
 
 /** A session as the status tells it. `maxMin` and `expiresAt` are null for a provider without a cap, `keepAlive` is whether the thread pings the provider while a turn runs. */
@@ -4421,6 +4485,10 @@ const lostTooOften = (times: number) => `The workspace went down ${times + 1} ti
 /** Why a thread failed for a workspace that kept going down, with the last error if there was one, as its state and its parents tell it. */
 const lostDetail = (last?: string | null) => (last ? `${lostTooOften(MAX_RESUMES)} Last: ${last}` : lostTooOften(MAX_RESUMES)).slice(0, DETAIL_MAX);
 
+/** The least time between automatic pushes of the thread's branch while a turn runs, and the failures in a row after which only a turn's end tries again. */
+const AUTOPUSH_MS = 20_000;
+const AUTOPUSH_MAX_FAILURES = 3;
+
 /** How often a running turn's work is autosaved, where it is kept in the workspace, the index it is added with, and the most of it this object keeps. */
 const AUTOSAVE_MS = 3 * 60_000;
 /** The git identity of Pim's own commits (checkpoints, autosaves), also set globally in the workspace so the agent's commits and pushes work. */
@@ -4604,6 +4672,11 @@ async function gitWithRetries(workspace: Workspace, args: string[], options: Par
 			await new Promise((resolve) => setTimeout(resolve, delays[retry]));
 		}
 	}
+}
+
+/** Text with broker tokens and bearer credentials hidden. */
+function redactSecrets(text: string): string {
+	return text.replace(/pimgit_[\w.~+/=-]+/g, "[redacted]").replace(/(Bearer\s+)\S+/gi, "$1[redacted]");
 }
 
 /** Runs git in the repository (or `cwd`) and returns its output; throws with its error output when it fails. */

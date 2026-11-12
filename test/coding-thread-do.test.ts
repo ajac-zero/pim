@@ -18,7 +18,7 @@ import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
 import { type FakeCommandHandler, type FakeCommandResult, FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { DEFAULT_WORKSPACE_IMAGE, NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
-import { fakeCloneFailures, fakeClones, fakeGit, fakeRemotes } from "./fake-git";
+import { fakeCloneFailures, fakeClones, fakeGit, fakePushes, fakePushFailures, fakeRemotes } from "./fake-git";
 import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
 import { fakeContainers } from "./fake-container";
 import { prepareComputeProvider } from "../src/compute";
@@ -109,6 +109,107 @@ beforeEach(() => {
 afterEach(() => {
 	// Every scripted response was used: the thread called its model as the test expected.
 	expect(codingFaux.getPendingResponseCount()).toBe(0);
+});
+
+describe("a coding thread's automatic push", () => {
+	const commit = (name: string) => [toolUse("write", { path: `${name}.txt`, content: `${name}\n` }), toolUse("bash", { command: `git commit -m ${name}` })];
+
+	beforeEach(() => {
+		fakePushes.length = 0;
+		fakePushFailures.clear();
+		codingTimings.autopushMs = 20_000;
+	});
+
+	const run = async (responses: Parameters<typeof codingFaux.setResponses>[0]) => {
+		codingFaux.setResponses(responses);
+		const { id, stub, status } = await startThread();
+		await turns(id, 1);
+		return { id, stub, branch: status.repo.branch, final: await stub.status(), log: (await stub.log()).filter((event) => event.kind === "thread.autopush_failed") };
+	};
+
+	it("pushes the thread's own branch when HEAD advanced, and keeps the sha", async () => {
+		const { branch, final, log } = await run([...commit("one"), fauxAssistantMessage("Done.")]);
+		// The commit was pushed once: the push after the call, and the turn's end finding nothing new.
+		expect(fakePushes.map((push) => ({ url: push.url, refspec: push.refspec }))).toEqual([{ url: BROKER_URL, refspec: `HEAD:refs/heads/${branch}` }]);
+		expect(final.lastPushedSha).toBe(fakePushes[0]!.sha);
+		expect(final.lastPushedSha).toBe(final.checkpoint!.sha);
+		expect(log).toEqual([]);
+	});
+
+	it("pushes uncommitted work at the turn's end, after it is checkpointed", async () => {
+		const { final } = await run([toolUse("write", { path: "loose.txt", content: "x\n" }), fauxAssistantMessage("Done.")]);
+		expect(fakePushes).toHaveLength(1);
+		expect(final.lastPushedSha).toBe(final.checkpoint!.sha);
+	});
+
+	it("pushes at most once per debounce while a turn runs, and at its end", async () => {
+		codingThreadClock.now = 1_000_000;
+		const { final } = await run([...commit("a"), ...commit("b"), ...commit("c"), fauxAssistantMessage("Done.")]);
+		expect(fakePushes).toHaveLength(2);
+		expect(final.lastPushedSha).toBe(fakePushes[1]!.sha);
+		expect(fakePushes[0]!.sha).not.toBe(fakePushes[1]!.sha);
+	});
+
+	it("pushes after each call once the debounce has passed", async () => {
+		codingThreadClock.now = 1_000_000;
+		const step = (response: ReturnType<typeof toolUse>) => async () => {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			codingThreadClock.now! += 60_000;
+			return response;
+		};
+		const [w1, c1] = commit("a");
+		const [w2, c2] = commit("b");
+		await run([w1!, c1!, step(w2!), c2!, step(fauxAssistantMessage("Done."))] as never);
+		expect(fakePushes).toHaveLength(2);
+	});
+
+	it("pushes nothing when the turn made no commits", async () => {
+		const { final } = await run([fauxAssistantMessage("Nothing to do.")]);
+		expect(fakePushes).toEqual([]);
+		expect(final.lastPushedSha).toBeNull();
+	});
+
+	it("pushes nothing from another branch", async () => {
+		const { final, log } = await run([toolUse("bash", { command: "git checkout -B main HEAD" }), ...commit("other"), fauxAssistantMessage("Done.")]);
+		expect(fakePushes).toEqual([]);
+		expect(final.lastPushedSha).toBeNull();
+		expect(log).toEqual([]);
+	});
+
+	it("pushes nothing from a detached HEAD", async () => {
+		const { final } = await run([toolUse("bash", { command: "git checkout --detach HEAD" }), ...commit("loose"), fauxAssistantMessage("Done.")]);
+		expect(fakePushes).toEqual([]);
+		expect(final.lastPushedSha).toBeNull();
+	});
+
+	it("logs a failed push with the token redacted, doesn't fail the turn, and pushes at the next trigger", async () => {
+		fakePushFailures.set(BROKER_URL, { times: 1, stderr: " ! [rejected] HEAD -> branch (non-fast-forward)\n" });
+		const { stub, final, log } = await run([...commit("one"), fauxAssistantMessage("Done.")]);
+		expect(log).toHaveLength(1);
+		expect(log[0]!.data).toMatchObject({ failures: 1, error: expect.stringContaining("non-fast-forward") });
+		expect(JSON.stringify(log)).not.toContain("pimgit_");
+		expect(JSON.stringify(log)).toContain("[redacted]");
+		// The turn ended as completed, and its end pushed what the call's push couldn't.
+		expect(codingEvents.filter((event) => event.threadId === final.threadId)).toMatchObject([{ outcome: "completed" }]);
+		expect(final.lastPushedSha).toBe(final.checkpoint!.sha);
+		expect(await stub.log()).not.toContainEqual(expect.objectContaining({ kind: "thread.autopush_failed", data: expect.objectContaining({ failures: 2 }) }));
+	});
+
+	it("falls back to the turn's end after three failures in a row", async () => {
+		fakePushFailures.set(BROKER_URL, { times: 100, stderr: "remote: rejected\n" });
+		codingThreadClock.now = 1_000_000;
+		const step = (response: unknown) => async () => {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			codingThreadClock.now! += 60_000;
+			return response;
+		};
+		const calls = ["a", "b", "c", "d"].flatMap((name) => commit(name));
+		const { final, log } = await run([calls[0]!, calls[1]!, ...calls.slice(2).map((call) => step(call)), step(fauxAssistantMessage("Done."))] as never);
+		// Three tries after calls, none after the fourth, one at the end.
+		expect(log.map((event) => (event.data as { failures: number }).failures)).toEqual([1, 2, 3, 4]);
+		expect(final.lastPushedSha).toBeNull();
+		expect(codingEvents.filter((event) => event.threadId === final.threadId)).toMatchObject([{ outcome: "completed" }]);
+	});
 });
 
 describe("a coding thread", () => {

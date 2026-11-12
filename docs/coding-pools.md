@@ -33,3 +33,14 @@ The queue deadline is a fixed 30 minutes, not a deployment flag. The scheduler's
 A thread with no turn, pending input, or environment rebuild suspends its workspace after a fixed two-minute idle grace. Its Durable Object keeps a durable wake for the grace deadline. The checkout is kept by suspension when supported, or as a retained volume and saved work otherwise. A steer reacquires a slot through the same FIFO queue before resuming; suspension does not finish or archive the thread. Running turns and pending inputs, including retry backoff, are not idle.
 
 Every slot release admits and notifies the next eligible queued thread immediately. Failed notices remain in the durable outbox. The scheduler also ticks every 30 seconds while the queue is non-empty (or idle/waiting slots or notices remain), sweeping idle slots past the same two-minute grace and reevaluating admission, so a missed thread wake cannot strand the queue.
+
+## Admin routes and page
+
+The admin keeps the pools in Settings → Compute, under the compute providers, or through `/api/admin/coding/pools`, with the same sign-in and audit as the other admin routes (the admin's majordomo may read and write them; a delete asks the person first). Every write is kept as a `pim.sandbox_pool_*` event.
+
+- `GET /api/admin/coding/pools` lists each pool: `id`, `provider`, `size`, `priority`, `enabled`, its `config` with anything that looks like a credential left out, `providerAvailable`, `slots` (`held` and `free`), `queued` (threads queued for it by name) and `breaker` (`state` of `healthy`, `open` or `half_open`, and `retryAt`). The live fields are those of the admin's own space's scheduler, since each space keeps its own slots and breakers.
+- `POST` adds a pool and `PATCH /:id` changes its `size`, `priority`, `enabled`, `config` or `provider`; a pool's id never changes. `DELETE /:id` removes one, and threads already running in it go on until they stop. The id is a slug, the provider must be one this deployment has (a backend or a compute provider the admin added), `size` is a whole number from 1 to 1000 and `priority` a whole number. A duplicate id answers `409`.
+- A write that would leave no enabled pool with an available provider, by deleting or switching off the last one, is refused with `409`.
+- After a write the new registry is given to the admin's own space's scheduler at once, so a bigger pool admits its queue straight away. Other spaces read it again within a minute, the way threads already do.
+
+The page shows each pool with an on switch, editable size and priority, add and remove, and badges: slots in use of its size, queued threads, an unavailable provider, and an unhealthy pool with the cooldown left (or that its probe is under way). It refreshes every ten seconds.

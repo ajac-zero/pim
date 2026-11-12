@@ -70,6 +70,8 @@ How the Pim runs for everyone is its variables, set in the Cloudflare dashboard 
 | POST, PUT, DELETE | `/api/admin/compute/providers[/:id]` | `{ kind, name?, settings?, credentials?, codingSandbox?, agentComputer? }` | Adds, changes or removes a compute provider; a credential left out stays, an empty one is removed |
 | POST | `/api/admin/compute/providers/:id/validate` | | One cheap read against the provider: `{ health: { ok, message, ms } }` |
 | PUT | `/api/admin/compute/quota` | `{ quota }` | The default quota for everyone: `maxConcurrentWorkspaces`, `monthlySandboxMinutes`, `maxSessionMinutes`, each a whole number or null for no limit |
+| GET, POST | `/api/admin/coding/pools` | `{ id, provider, size, priority, enabled?, config? }` (POST) | The sandbox pools, each with its live state, or adds one (see [coding-pools.md](coding-pools.md#admin-routes-and-page)) |
+| PATCH, DELETE | `/api/admin/coding/pools/:id` | `{ size?, priority?, enabled?, config?, provider? }` (PATCH) | Changes or removes a pool; the last enabled pool with an available provider can't be removed or switched off (`409`) |
 | POST | `/api/admin/accounts/:username/setup-link` | | A one-hour link that adds a passkey, for recovery |
 | DELETE | `/api/admin/accounts/:username` | `{ reason? }` | Deletes it as the owner would: `200` once erased, `202` while the cleanup is still queued. Run it again to retry at once |
 | DELETE | `/api/admin/templates/:id` | | Takes a published agent out of Discover |

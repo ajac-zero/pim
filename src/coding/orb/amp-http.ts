@@ -38,7 +38,7 @@ export class AmpHttpOrbClient implements OrbClient {
 	#lastStatus = 0;
 	#failure: string | undefined;
 	constructor(readonly options: AmpHttpOptions) {
-		this.#fetch = options.fetch ?? fetch;
+		this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
 		this.#now = options.now ?? Date.now;
 	}
 	capabilities() { return { steer: false, stop: false, usage: this.options.m2m !== undefined }; }

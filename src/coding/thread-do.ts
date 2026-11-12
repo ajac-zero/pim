@@ -67,6 +67,7 @@ import { brokerTokenKey, deploymentGitHubApp, deploymentProviders, GIT_BROKER_PA
 import { authEnv } from "./harness/auth";
 import { type CliHarness, cliHarness } from "./harness";
 import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "./orb/types";
+import { ampOrbClients } from "./orb/registry";
 import { describeModelFailure, explainFailures } from "./model-error";
 import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
 import { supervisorSink } from "./supervisor";
@@ -189,6 +190,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#watching: string | null = null;
 	/** How many looks in a row at an agent-hosted thread said its client can't tell what it is doing; a bound on them fails the turn as unknown. */
 	#orbUnknowns = 0;
+	#orbClients: OrbClientFactory | null = null;
 	#advancing: Promise<void> | null = null;
 	#advanceAgain = false;
 	/** A tool asked for the workspace (`#ensureWorkspace`): the thread gets a slot and a workspace for it, with no turn, and then goes back to idle. */
@@ -309,15 +311,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return this.env.Gallery.getByName("gallery").computeProviders();
 	}
 
-	/**
-	 * How an agent-hosted thread finds the client it runs through
-	 * (./orb/types.ts): the thread asks this with its own, its space's and
-	 * its provider's name. There is no factory on a deployment yet — the real
-	 * client's runner is a later slice — so such a thread fails saying the
-	 * agent-hosted provider isn't available, rather than crashing.
-	 */
+	/** The default Amp orb client, with the person's vault token and durable start keys. */
 	protected orbClients(): OrbClientFactory | null {
-		return null;
+		this.#orbClients ??= ampOrbClients({
+			providers: () => this.workspaceProviders(),
+			loadApiKey: (space) => codingVault(this.env).loadApiKey(space, "amp"),
+			keys: {
+				get: async (key) => (await this.ctx.storage.get<string>(`orb-start:${key}`)) ?? null,
+				set: async (key, threadId) => { await this.ctx.storage.put(`orb-start:${key}`, threadId); },
+			},
+		});
+		return this.#orbClients;
 	}
 
 	/** How often a turn on an agent-hosted thread is polled: what its client says it is doing. */

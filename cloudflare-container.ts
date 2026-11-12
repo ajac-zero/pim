@@ -119,7 +119,15 @@ export class ContainerHost implements ContainerHostApi {
 				saved.spec = spec;
 				await this.save(saved);
 			}
-			if (this.container.running) return;
+			if (this.container.running) {
+				// The container keeps its files and processes, but the spec it answers for is the thread's current one:
+				// the egress handler reads the policy from storage, so an allowlist that changed since the workspace was
+				// made (a harness host added, a deploy) takes effect here rather than being denied as not allowed.
+				saved.spec = spec;
+				await this.save(saved);
+				await this.intercept(saved);
+				return;
+			}
 			if (saved.state === "running") {
 				// An unexpected stop lost its uncheckpointed files. Rebuild instead of claiming a stale restore.
 				saved = { spec, createdAt: Date.now(), state: "stopped", token: crypto.randomUUID() };

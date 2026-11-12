@@ -104,6 +104,7 @@ function hostFixture() {
 	let failDestroy = false;
 	let noInstance = false;
 	const instances: unknown[] = [];
+	const intercepts: string[] = [];
 	const container = {
 		get running() {
 			return running;
@@ -125,8 +126,12 @@ function hostFixture() {
 		},
 		setInactivityTimeout: async () => {},
 		interceptOutboundHttp: async () => {},
-		interceptAllOutboundHttp: async () => {},
-		interceptOutboundHttps: async () => {},
+		interceptAllOutboundHttp: async () => {
+			intercepts.push("http");
+		},
+		interceptOutboundHttps: async () => {
+			intercepts.push("https");
+		},
 		snapshotContainer: async () => {
 			calls.push("snapshot");
 			if (failSnapshot) throw new Error("snapshot failed");
@@ -157,6 +162,7 @@ function hostFixture() {
 		host: new ContainerHost(ctx as unknown as DurableObjectState),
 		calls,
 		instances,
+		intercepts,
 		full: () => {
 			noInstance = true;
 		},
@@ -193,6 +199,19 @@ describe("WorkspaceContainer lifecycle", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+	it("applies the thread's current allowlist to a container that is already running", async () => {
+		const fixture = hostFixture();
+		const made = { ...spec, egress: { allow: ["registry.npmjs.org"] } };
+		const now = { ...spec, egress: { allow: ["registry.npmjs.org", "ampcode.com", "*.ampcode.com"] } };
+		await fixture.host.create(made);
+		expect(fixture.intercepts).toEqual(["http", "https"]);
+		// A create that reaches a live container (a thread that lost its ref to it) must not leave the allowlist it was made with: the
+		// egress handler reads the policy from storage, so a host the thread now allows would otherwise be denied as not allowed.
+		await fixture.host.create(now);
+		expect(await fixture.host.egressPolicy()).toEqual(now.egress);
+		expect(fixture.intercepts).toEqual(["http", "https", "http", "https"]);
+		expect(fixture.calls).toEqual(["start"]);
 	});
 	it("injects the fresh token after suspend, resume and policy replacement, including after eviction", async () => {
 		const fixture = hostFixture();

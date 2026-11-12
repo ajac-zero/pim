@@ -72,8 +72,8 @@ export type OrbClientContext = {
  * How a coding thread finds the client that runs it (./thread-do.ts): the
  * thread's control plane asks this with its own, its space's and its
  * provider's name, and gets the client — or null when this Pim has none for
- * it. The real factory is a later slice; there is none on a deployment yet,
- * and tests register one that answers a `FakeOrbClient`.
+ * it. The deployment registers Amp HTTP,
+ * and tests may register one that answers a `FakeOrbClient`.
  */
 export type OrbClientFactory = (context: OrbClientContext) => OrbClient | null | Promise<OrbClient | null>;
 
@@ -94,7 +94,7 @@ export class OrbError extends Error {
 	}
 }
 
-/** The client can't reach the agent's cloud just now: nothing was changed, and the call may be tried again. */
+/** The cloud is temporarily unreachable. A client must guard ambiguous creation before allowing a retry. */
 export class OrbUnreachableError extends OrbError {
 	constructor(message = "Can't reach the agent's cloud just now", readonly retryAfterMs?: number) {
 		super(message, "orb_unreachable");
@@ -147,7 +147,8 @@ export interface OrbClient {
 	 * `start.idempotencyKey`: the same key again is the thread the first call
 	 * started, whatever became of that call's answer, so a retry never
 	 * starts a second agent. A client that can't reach the agent's cloud
-	 * throws `OrbUnreachableError`, having made nothing.
+	 * throws `OrbUnreachableError`. A provider without server idempotency must durably
+	 * reserve creation and refuse an ambiguous retry rather than double-start.
 	 */
 	start(start: OrbStart): Promise<OrbThread>;
 	/**

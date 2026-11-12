@@ -68,6 +68,7 @@ import type { Fetch, GitHubApp } from "./git-broker/github-app";
 import { brokerTokenKey, deploymentGitHubApp, deploymentProviders, GIT_BROKER_PATH } from "./git-broker/routes";
 import { authEnv } from "./harness/auth";
 import { type CliHarness, cliHarness } from "./harness";
+import { AmpHttpOrbClient, AMP_HTTP_UNSUPPORTED } from "./orb/amp-http";
 import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "./orb/types";
 import { describeModelFailure, explainFailures } from "./model-error";
 import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
@@ -323,15 +324,26 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return this.env.Gallery.getByName("gallery").computeProviders();
 	}
 
-	/**
-	 * How an agent-hosted thread finds the client it runs through
-	 * (./orb/types.ts): the thread asks this with its own, its space's and
-	 * its provider's name. There is no factory on a deployment yet — the real
-	 * client's runner is a later slice — so such a thread fails saying the
-	 * agent-hosted provider isn't available, rather than crashing.
-	 */
+	/** Amp HTTP uses the existing Amp Connect credential, directly from the coding vault. */
 	protected orbClients(): OrbClientFactory | null {
-		return null;
+		return async ({ space, providerId }) => {
+			if (providerId !== "amp-http") return null;
+			const vault = codingVault(this.env);
+			const m2m = await vault.loadAmpM2m(space);
+			return new AmpHttpOrbClient({
+				...(m2m ? { m2m: async () => m2m } : {}),
+				token: () => vault.loadApiKey(space, "amp"),
+				store: {
+					get: async (key) => (await this.ctx.storage.get(key)) ?? null,
+					put: async (key, value) => { await this.ctx.storage.put(key, value); },
+					claim: (key, value) => this.ctx.storage.transaction(async (tx) => {
+						if (await tx.get(key)) return false;
+						await tx.put(key, value);
+						return true;
+					}),
+				},
+			});
+		};
 	}
 
 	/** How often a turn on an agent-hosted thread is polled: what its client says it is doing. */
@@ -443,7 +455,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.thread();
 		// A workspace being made isn't in the thread's record yet.
 		// Nor is one being moved to a new session: its stretch is ended and begun again by the move (`#cycleWorkspace`).
-		if (!thread || this.#opening || this.#cycling || this.#renewing) return;
+		if (!thread || thread.providerKind === "agent-hosted" || this.#opening || this.#cycling || this.#renewing) return;
 		try {
 			const open = await this.env.Gallery.getByName("gallery").computeOpen(thread.threadId);
 			this.#capAt = open?.capAt ?? null;
@@ -692,7 +704,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
-		if (thread?.currentOperation && Date.now() - this.#autosavedAt >= this.autosaveMs()) void this.#autosave();
+		if (thread?.providerKind !== "agent-hosted" && thread?.currentOperation && Date.now() - this.#autosavedAt >= this.autosaveMs()) void this.#autosave();
 		// A queued thread whose backend reports its health checks it again each time, so a queue held for low disk opens once there is room.
 		const busy =
 			thread !== null &&
@@ -923,11 +935,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (budgetUsd !== null && !(Number.isFinite(budgetUsd) && budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 		await this.#refreshCompute();
 		await this.#refreshPools(input.space);
+		const orb = input.harness === "amp" && [input.pool, input.provider].some((name) => name === "orbs" || name === "amp-http");
+		if (orb && [input.pool, input.provider].some((name) => name !== undefined && name !== "orbs" && name !== "amp-http")) throw new Error("Amp Orbs cannot also use a sandbox pool");
 		const pools = this.#placementPools();
-		const pin = this.#pin(input, pools.pools);
+		const pin = orb ? undefined : this.#pin(input, pools.pools);
 		const first = pin ?? pools.pools[0];
-		const providerId = first ? first.provider : (this.workspaceProviders().defaultId() ?? NO_BACKEND);
-		const poolId = first ? first.id : providerId;
+		const providerId = orb ? "amp-http" : first ? first.provider : (this.workspaceProviders().defaultId() ?? NO_BACKEND);
+		const poolId = orb ? "amp-http" : first ? first.id : providerId;
 		const harness = input.harness ?? "pi";
 		const cli = cliHarness(harness);
 		if (harness !== "pi" && !cli) throw new Error("harness not yet available");
@@ -950,8 +964,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 				harness,
 				providerId,
 				poolId,
+				providerKind: orb ? "agent-hosted" : "workspace",
 				// A thread started on a pool by name runs there; any other may overflow until it makes its workspace.
-				placed: pin !== undefined,
+				placed: orb || pin !== undefined,
 				state: "provisioning",
 				createdBy: input.createdBy,
 				parentThread: input.parent ?? null,
@@ -969,6 +984,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.store.update({ environment: { ...NO_ENVIRONMENT, rebuildRequested: true } });
 			}
 		});
+		if (orb) {
+			this.#kick();
+			return this.status();
+		}
 		await this.#refreshCompute();
 		const backend = this.#ensureBackend();
 		if (backend === true) {
@@ -1159,6 +1178,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * turn instead of being lost.
 	 */
 	async #steerOrb(thread: CodingThreadRow, text: string, options: { interrupt?: boolean; operationId: string }): Promise<CodingThreadStatus> {
+		if (thread.providerId === "amp-http") throw new OrbUnsupportedError(AMP_HTTP_UNSUPPORTED);
 		if (thread.currentOperation === null) {
 			this.#assertBudget(this.store.required());
 			this.ctx.storage.transactionSync(() => {
@@ -1189,6 +1209,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async abort(): Promise<CodingThreadStatus> {
 		await this.lifecycle.start();
 		const thread = this.#live();
+		if (thread.providerId === "amp-http") throw new OrbUnsupportedError(AMP_HTTP_UNSUPPORTED);
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
 		// Whatever runs in the workspace loses its model at once.
 		this.store.setGatewayNonce(null);
@@ -1249,7 +1270,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async continue(options: { operationId: string; budgetUsd?: number }): Promise<CodingThreadStatus> {
 		await this.lifecycle.start();
 		const thread = this.#live();
-		if (thread.currentOperation) return this.status();
+		if (thread.currentOperation) {
+			if (thread.providerKind === "agent-hosted" && thread.stateReason === "login_required") {
+				this.store.update({ state: "running", stateReason: null, stateDetail: null });
+				this.#kick();
+			}
+			return this.status();
+		}
+		if (thread.providerId === "amp-http" && thread.orb !== null) throw new OrbUnsupportedError(AMP_HTTP_UNSUPPORTED);
 		if (options.budgetUsd !== undefined) {
 			if (!(Number.isFinite(options.budgetUsd) && options.budgetUsd > 0)) throw new Error("budgetUsd must be a positive number of dollars");
 			this.store.update({ budgetUsd: options.budgetUsd, budgetStopped: false });
@@ -1273,7 +1301,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.currentOperation) await this.#stopTurn();
 		this.#killCommands();
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
-		this.store.update({ state: "archived", stateReason: null });
+		this.store.update({ state: "archived", stateReason: null, ...(thread.providerId === "amp-http" ? { stateDetail: `Archived in Pim only; stopping or archiving on Amp is ${AMP_HTTP_UNSUPPORTED}. The Amp run is left running.` } : {}) });
 		await this.#archiveHarnessSession(thread);
 		// An agent-hosted thread is archived on the agent's site too, so it leaves the person's list there.
 		if (thread.providerKind === "agent-hosted") await this.#stopOrb();
@@ -2186,7 +2214,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Asks the scheduler for a slot, unless the thread holds one or waits for one, after bringing the pool registry and the manager's health to the scheduler. */
 	async #requestSlot(): Promise<void> {
-		if (this.store.required().slot !== "none") return;
+		if (this.store.required().providerKind === "agent-hosted" || this.store.required().slot !== "none") return;
 		const thread = this.store.required();
 		await this.#refreshPools(thread.space);
 		const health = await this.#refreshCapacity();
@@ -2305,6 +2333,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** Gives the slot back (or leaves the queue) and deletes the workspace, as a thread does when it fails or is archived. */
 	async #giveBack(options: { keepVolume: boolean }): Promise<void> {
 		const thread = this.store.required();
+		if (thread.providerKind === "agent-hosted") return;
 		if (thread.slot === "queued") await this.#cancelQueued();
 		await this.#dropWorkspace(options).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.destroy_failed", thread: thread.threadId, error: String(error) })));
 		if (thread.slot === "held") {
@@ -2465,14 +2494,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 			});
 		} catch (error) {
 			if (error instanceof OrbLostError) return this.#failOrb("orb_lost", error.message);
-			if (error instanceof OrbAuthError) return this.#failOrb("orb_auth", error.message);
+			if (error instanceof OrbAuthError) return this.#orbAuth(error);
 			if (error instanceof OrbUnreachableError) {
-				// Nothing was changed, and `start` is idempotent: the next pass starts the same turn.
+				// The client guards idempotency, including an ambiguous start: the next pass cannot create a second orb.
 				this.ctx.storage.transactionSync(() => {
 					this.store.update({ stateReason: "orb_unreachable", stateDetail: "The agent's cloud can't be reached just now; the turn starts when it can be" });
 					this.store.recordEvent("orb.unreachable", { operationId: input.operationId });
 				});
-				await this.#schedule(Date.now() + this.orbPollMs());
+				await this.#schedule(Date.now() + Math.max(this.orbPollMs(), error.retryAfterMs ?? 0));
 				return;
 			}
 			if (error instanceof OrbUnsupportedError) return this.#failOrb("orb_unsupported", error.message);
@@ -2501,6 +2530,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		try {
 			await this.#mirrorOrb(client, orb);
 			const status = await client.state(orb.threadId);
+			this.store.update(status.state === "awaiting_approval" ? { stateReason: "needs_attention", stateDetail: "The agent needs attention; open its remote thread to review its approval" } : { stateReason: null, stateDetail: null });
 			if (status.state === "idle") {
 				this.#orbUnknowns = 0;
 				await this.#orbCost(client, orb);
@@ -2516,10 +2546,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 			} else this.#orbUnknowns = 0;
 		} catch (error) {
 			if (error instanceof OrbLostError) return this.#failOrb("orb_lost", error.message);
-			if (error instanceof OrbAuthError) return this.#failOrb("orb_auth", error.message);
+			if (error instanceof OrbAuthError) return this.#orbAuth(error);
 			if (error instanceof OrbUnreachableError) {
 				// Nothing was changed: the next look tries again.
 				console.warn(JSON.stringify({ event: "pim.coding.orb_unreachable", thread: thread.threadId, operation }));
+				await this.#schedule(Date.now() + Math.max(this.orbPollMs(), error.retryAfterMs ?? 0));
+				return;
 			} else if (error instanceof OrbUnsupportedError) return this.#failOrb("orb_unsupported", error.message);
 			else return await this.#endTurn(operation, { status: "unanswered", reason: "orb_error", detail: errorText(error) });
 		}
@@ -2590,6 +2622,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return await factory({ space: thread.space, threadId: thread.threadId, providerId: thread.providerId });
 	}
 
+	async #orbAuth(error: OrbAuthError): Promise<void> {
+		this.store.update({ state: "waiting_input", stateReason: "login_required", stateDetail: error.message });
+		await this.#report("waiting");
+	}
+
 	/** Fails an agent-hosted thread, outside a turn's end: its turn is over with what it ran on, and it holds no slot to give back. */
 	async #failOrb(reason: string, detail: string | null): Promise<void> {
 		this.#orbUnknowns = 0;
@@ -2611,7 +2648,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const client = await this.#orbClient();
 		if (client === null) return;
 		if (!client.capabilities().stop) {
-			this.store.recordEvent("orb.stop_unsupported", { provider: client.id, message: `${client.id} can't stop its threads, so this one is left as it is on the agent's site` });
+			this.store.recordEvent("orb.stop_unsupported", { provider: client.id, message: thread.providerId === "amp-http" ? AMP_HTTP_UNSUPPORTED : `${client.id} can't stop its threads, so this one is left as it is on the agent's site` });
 			return;
 		}
 		try {

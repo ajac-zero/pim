@@ -3,7 +3,7 @@ import { base64UrlDecode } from "../../auth/encoding";
 import { codingScheduler } from "../scheduler-do";
 import { ArchiveError, type ArchiveFile, packArchive, unpackArchive } from "./archive";
 import { openBlob, sealBlob, VaultUnreadableError, vaultKey } from "./crypto";
-import { type ApiKeyHarness, apiKeyProblem, HARNESS_FILES, type Harness, isApiKeyHarness, isHarness, isLoginHarness, type LoginHarness } from "./harnesses";
+import { type CodingVaultKey, type ApiKeyHarness, apiKeyProblem, HARNESS_FILES, type Harness, isApiKeyHarness, isHarness, isLoginHarness, type LoginHarness } from "./harnesses";
 import type { VaultRecord, VaultStatus, VaultWriteResult } from "./store";
 
 /**
@@ -23,8 +23,8 @@ import type { VaultRecord, VaultStatus, VaultWriteResult } from "./store";
 /** One person's sealed entries, wherever they are kept. Every call names the person; an implementation reaches only that person's. */
 export interface VaultBackend {
 	status(userId: string): Promise<VaultStatus[]>;
-	read(userId: string, harness: Harness): Promise<VaultRecord>;
-	write(userId: string, harness: Harness, sealed: Uint8Array, byteLength: number, expectedVersion: number): Promise<VaultWriteResult>;
+	read(userId: string, harness: CodingVaultKey): Promise<VaultRecord>;
+	write(userId: string, harness: CodingVaultKey, sealed: Uint8Array, byteLength: number, expectedVersion: number): Promise<VaultWriteResult>;
 	delete(userId: string, harness: Harness): Promise<VaultStatus>;
 }
 
@@ -69,6 +69,25 @@ export class CodingVault {
 		readonly key: () => Promise<CryptoKey>,
 		readonly now: () => number = Date.now,
 	) {}
+
+	/** Optional machine credentials for Amp usage, provisioned through the vault, not the PAT Connect field. */
+	async loadAmpM2m(userId: string): Promise<{ clientId: string; clientSecret: string } | null> {
+		const record = await this.backend.read(userId, "amp-http-m2m");
+		if (record.sealed === null) return null;
+		try {
+			const raw = await openBlob(await this.key(), { userId, harness: "amp-http-m2m" }, record.sealed);
+			const value = JSON.parse(new TextDecoder().decode(raw));
+			return typeof value?.clientId === "string" && value.clientId && typeof value?.clientSecret === "string" && value.clientSecret ? { clientId: value.clientId, clientSecret: value.clientSecret } : null;
+		} catch { return null; }
+	}
+
+	/** Internal provisioning path for the optional usage credential. No HTTP route returns it. */
+	async saveAmpM2m(userId: string, credentials: { clientId: string; clientSecret: string }, expectedVersion: number): Promise<VaultWriteResult> {
+		if (!credentials.clientId || !credentials.clientSecret) throw new Error("Amp M2M needs a client id and secret");
+		const raw = new TextEncoder().encode(JSON.stringify(credentials));
+		const sealed = await sealBlob(await this.key(), { userId, harness: "amp-http-m2m" }, raw);
+		return this.backend.write(userId, "amp-http-m2m", sealed, raw.byteLength, expectedVersion);
+	}
 
 	/** Each harness's entry for the person, never what it holds. */
 	async status(userId: string): Promise<VaultStatus[]> {

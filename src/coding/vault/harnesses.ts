@@ -20,6 +20,9 @@ export const HARNESSES = ["claude-code", "codex", "mistral-vibe", "amp"] as cons
 
 export type Harness = (typeof HARNESSES)[number];
 
+/** Internal vault entry for optional Amp HTTP usage; not a Connect field. */
+export type CodingVaultKey = Harness | "amp-http-m2m";
+
 export function isHarness(value: unknown): value is Harness {
 	return typeof value === "string" && (HARNESSES as readonly string[]).includes(value);
 }

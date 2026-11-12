@@ -1,4 +1,4 @@
-import type { Harness } from "./harnesses";
+import type { CodingVaultKey } from "./harnesses";
 
 /**
  * How the vault (./vault.ts) encrypts an archive: AES-256-GCM with a random
@@ -22,7 +22,7 @@ const KEY_INFO = "pim coding vault v1";
 const encoder = new TextEncoder();
 
 /** Whose and which a blob is: the person's owner id and the harness. */
-export type VaultBinding = { readonly userId: string; readonly harness: Harness };
+export type VaultBinding = { readonly userId: string; readonly harness: CodingVaultKey };
 
 /** A sealed blob that does not open: tampered with, made for another person or harness, or under another key. */
 export class VaultUnreadableError extends Error {

@@ -222,7 +222,7 @@ import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_ST
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
 import { Progress } from "./progress";
 import { codingScheduler } from "./coding/scheduler-do";
-import { HARNESSES, type Harness as CodingHarness, isHarness } from "./coding/vault/harnesses";
+import { HARNESSES, type CodingVaultKey, type Harness as CodingHarness, isHarness } from "./coding/vault/harnesses";
 import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcript";
@@ -1650,7 +1650,7 @@ export class Pim extends DurableAgent<Env> {
 
 	#codingVault(harness?: unknown): VaultStore {
 		this.#assertOpen();
-		if (harness !== undefined && !isHarness(harness)) throw new HttpError(404, "No such coding harness");
+		if (harness !== undefined && harness !== "amp-http-m2m" && !isHarness(harness)) throw new HttpError(404, "No such coding harness");
 		return (this.#codingVaultStore ??= new VaultStore(this.ctx.storage.sql));
 	}
 
@@ -1665,11 +1665,11 @@ export class Pim extends DurableAgent<Env> {
 		return HARNESSES.map((harness) => vault.status(harness));
 	}
 
-	async codingVaultRead(harness: CodingHarness): Promise<VaultRecord> {
+	async codingVaultRead(harness: CodingVaultKey): Promise<VaultRecord> {
 		return this.#codingVault(harness).read(harness);
 	}
 
-	async codingVaultWrite(harness: CodingHarness, sealed: Uint8Array, byteLength: number, expectedVersion: number): Promise<VaultWriteResult> {
+	async codingVaultWrite(harness: CodingVaultKey, sealed: Uint8Array, byteLength: number, expectedVersion: number): Promise<VaultWriteResult> {
 		return this.#codingVault(harness).write(harness, sealed, byteLength, expectedVersion, Date.now());
 	}
 

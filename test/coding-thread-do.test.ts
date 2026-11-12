@@ -406,7 +406,9 @@ describe("a coding thread", () => {
 	});
 
 	it("never leaves a model error without a detail, even when the provider said nothing", async () => {
-		codingFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "" })]);
+		// Nothing said is retried once like any model error; the retry fails the same way and ends the thread with the detail.
+		codingTimings.retryMs = 50;
+		codingFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "" }), fauxAssistantMessage("", { stopReason: "error", errorMessage: "" })]);
 		const { id, stub } = await startThread();
 		const [failed] = await turns(id, 1);
 		expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });

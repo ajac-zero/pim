@@ -111,6 +111,7 @@ export type CodingEnvironment = {
   key: string | null;
   source: "settings" | "repository" | "mise" | "devcontainer" | null;
   builtAt: number | null;
+  pool?: string | null;
   restoredFromKey: string | null;
   provisionMs: number | null;
   restoreMs: number | null;

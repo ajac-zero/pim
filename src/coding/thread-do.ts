@@ -88,7 +88,7 @@ import {
 	type InboxItem,
 	type TestRun,
 } from "./thread-store";
-import { type PlacementPool, placementPools, type SkippedPool } from "./pools";
+import { ownsLegacySnapshots, type PlacementPool, placementPools, type SandboxPool, type SkippedPool } from "./pools";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
 import { isLoginHarness } from "./vault/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
@@ -371,7 +371,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (this.#pools && Date.now() - this.#pools.at < COMPUTE_REFRESH_MS) return;
 		let read: { pools: readonly PlacementPool[]; skipped: readonly SkippedPool[] };
 		try {
-			read = placementPools(await this.sandboxPools(), this.workspaceProviders().ids());
+			const stored = await this.sandboxPools();
+			this.#storedPools = stored;
+			read = placementPools(stored, this.workspaceProviders().ids());
 		} catch (error) {
 			console.warn(JSON.stringify({ event: "pim.coding.pools_read_failed", error: String(error).slice(0, 300) }));
 			read = this.#pools ?? placementPools([], this.workspaceProviders().ids());
@@ -382,6 +384,20 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await codingScheduler(this.env, space)
 			.setPools(registry)
 			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.pools_set_failed", thread: this.store.thread()?.threadId, error: String(error).slice(0, 300) })));
+	}
+
+	/** The registry as last read, whole: which pool keeps its provider's snapshots from before pools (`ownsLegacySnapshots`) and which providers several pools share. */
+	#storedPools: readonly SandboxPool[] = [];
+
+	/**
+	 * Where the thread's environment snapshots are kept: its pool's, under the key `environmentKey` makes for it. `legacy` is true for the
+	 * provider's first pool, whose snapshots are the ones made before pools; `shared` when other pools use the same provider, so the
+	 * provider's snapshots aren't all this pool's to delete.
+	 */
+	#snapshotScope(thread: CodingThreadRow): { pool: string; legacy: boolean; shared: boolean } {
+		const pool = { id: thread.poolId, provider: thread.providerId };
+		const shared = this.#storedPools.some((each) => each.provider === pool.provider && each.id !== pool.id);
+		return { pool: pool.id, legacy: ownsLegacySnapshots(pool, this.#storedPools), shared };
 	}
 
 	/** The sandbox pools as the Gallery keeps them, over its RPC. */
@@ -3362,7 +3378,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const spec = this.#spec(thread, provider, wallClockMin);
 		const owner = spec.environment;
 		let snapshot = restoreFrom;
-		if (owner && !snapshot && thread.baseSha === null && thread.environment.preparedAt === null) {
+		// The newest snapshot of the repository is a guess only where it can be this pool's: a provider's first pool, which also holds what was made before pools.
+		if (owner && !snapshot && thread.baseSha === null && thread.environment.preparedAt === null && this.#snapshotScope(thread).legacy) {
 			snapshot = await provider.listEnvironments(owner).then(
 				(snapshots) => snapshots[0],
 				(error) => void console.warn(JSON.stringify({ event: "pim.coding.environment_list_failed", thread: thread.threadId, error: String(error).slice(0, 300) })),
@@ -3557,6 +3574,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		const signal = this.#kill.signal;
 		const owner = environmentOwner(thread);
+		await this.#refreshPools(thread.space);
+		const scope = this.#snapshotScope(thread);
 		let workspace = await this.#workspace();
 		// A rebuild must not snapshot the previous turn's fetch grant, on any provider.
 		await workspace.remove(WORKSPACE_GIT_AUTH_DIR).catch((error: unknown) => {
@@ -3575,7 +3594,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.#setEnvironment({ state: "none", key: null, source: null, rebuildRequested: false, preparedAt: this.now(), error: undefined });
 				return;
 			}
-			key = await environmentKey({ ...owner, provision: plan.map((step) => step.script), setupScript: setup?.content ?? null, setupSource: setup?.source ?? null, unpinned: await unpinnedKeyParts(workspace, profile.toolchains, this.now(), REPO_DIR), lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage() });
+			key = await environmentKey({ ...owner, provision: plan.map((step) => step.script), setupScript: setup?.content ?? null, setupSource: setup?.source ?? null, unpinned: await unpinnedKeyParts(workspace, profile.toolchains, this.now(), REPO_DIR), lockfiles: await lockfileHashes(workspace, REPO_DIR), image: this.workspaceImage(), ...(scope.legacy ? {} : { pool: scope.pool }) });
 		} catch (error) {
 			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
 			this.#environmentFailed(null, environmentError("The environment's setup script couldn't be read", errorText(error)));
@@ -3583,7 +3602,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		}
 		const source = setup?.source ?? null;
 		if (!rebuild && current.state === "restoring" && current.restoredFromKey === key) {
-			this.#restored(key, source);
+			this.#restored(key, source, scope.pool);
 			return;
 		}
 		// A rebuild runs the script in the thread's own workspace; a new thread may start over from someone's snapshot.
@@ -3599,7 +3618,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				workspace = await this.#workspace({ restoreFrom: snapshot });
 				const now = this.store.required().environment;
 				if (now.state === "restoring" && now.restoredFromKey === key) {
-					this.#restored(key, source);
+					this.#restored(key, source, scope.pool);
 					return;
 				}
 				// The restore failed and the workspace is a plain clone: build it here instead.
@@ -3607,12 +3626,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 			}
 			// An environment whose snapshot wasn't worth keeping is set up by each thread, so there is nothing to wait for.
 			if (!rebuild && (await scheduler.environmentSnapshotSkipped(key))) {
-				await this.#buildEnvironment(provider, workspace, owner, key, setup, plan, { snapshot: false });
+				await this.#buildEnvironment(provider, workspace, owner, key, setup, plan, { snapshot: false, ...scope });
 				return;
 			}
 			if (await scheduler.acquireEnvironmentBuild(key, thread.threadId, BUILD_LOCK_MS)) {
 				try {
-					await this.#buildEnvironment(provider, workspace, owner, key, setup, plan, { snapshot: true });
+					await this.#buildEnvironment(provider, workspace, owner, key, setup, plan, { snapshot: true, ...scope });
 				} finally {
 					await scheduler.releaseEnvironmentBuild(key, thread.threadId).catch(() => {});
 				}
@@ -3620,7 +3639,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			}
 			// Another of the person's threads is building it: wait for its snapshot.
 			const waiting = this.store.required().environment;
-			if (waiting.state !== "building" || waiting.key !== key) this.#setEnvironment({ state: "building", key, source, error: undefined });
+			if (waiting.state !== "building" || waiting.key !== key) this.#setEnvironment({ state: "building", pool: scope.pool, key, source, error: undefined });
 			if (performance.now() > deadline) {
 				this.#environmentFailed(key, "Another of your coding threads was still preparing this environment");
 				return;
@@ -3632,10 +3651,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** A workspace restored from the snapshot with the environment's key: what the snapshot's build installed came with it. */
-	#restored(key: string, source: Setup["source"] | null): void {
+	#restored(key: string, source: Setup["source"] | null, pool: string): void {
 		const env = this.store.required().environment;
 		const cached = <T extends { status: string }>(item: T): T => (item.status === "pending" ? { ...item, status: "cached" } : item);
-		this.#setEnvironment({ state: "cached", key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined, toolchains: env.toolchains.map(cached), dependencies: env.dependencies.map(cached) });
+		this.#setEnvironment({ state: "cached", pool, key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined, toolchains: env.toolchains.map(cached), dependencies: env.dependencies.map(cached) });
 		this.store.recordEvent("environment.restored", { key });
 	}
 
@@ -3649,8 +3668,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * the next thread tries again. A failure is recorded, and the thread
 	 * goes on.
 	 */
-	async #buildEnvironment(provider: WorkspaceProvider, workspace: Workspace, owner: EnvironmentOwner, key: string, setup: Setup | null, plan: readonly ProvisionStep[], o: { snapshot: boolean }): Promise<void> {
-		this.#setEnvironment({ state: "building", key, source: setup?.source ?? null, error: undefined });
+	async #buildEnvironment(provider: WorkspaceProvider, workspace: Workspace, owner: EnvironmentOwner, key: string, setup: Setup | null, plan: readonly ProvisionStep[], o: { snapshot: boolean; pool: string; shared: boolean }): Promise<void> {
+		this.#setEnvironment({ state: "building", pool: o.pool, key, source: setup?.source ?? null, error: undefined });
 		const started = performance.now();
 		const provisionFailures = await this.#provision(workspace, plan);
 		const result = setup ? await runSetup(workspace, setup.script, { cwd: REPO_DIR }) : ({ outcome: "ok" } as const);
@@ -3661,7 +3680,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.#environmentFailed(key, result.error);
 			return;
 		}
-		const ready = { state: "cached", key, setupMs, readyFrom: "setup", rebuildRequested: false, error: undefined } as const;
+		const ready = { state: "cached", pool: o.pool, key, setupMs, readyFrom: "setup", rebuildRequested: false, error: undefined } as const;
 		if (!o.snapshot || provisionFailures > 0) {
 			this.#setEnvironment({ ...ready, builtAt: null, snapshotMs: null, snapshotBytes: null, snapshotKept: false, preparedAt: this.now() });
 			this.store.recordEvent("environment.built", { key, setupMs, snapshotKept: false, ...(provisionFailures > 0 ? { provisionFailures } : {}) });
@@ -3678,7 +3697,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			let kept = worth;
 			if (!worth) {
 				// The person's other snapshots of the repository are older environments of it, which only start new threads as a guess (`#createWorkspace`) to be set up again: they don't pay either. One that can't be deleted, such as one a restore holds at this moment, stays.
-				const others = await provider.listEnvironments(owner).then(
+				// Pools sharing the provider share its listing, and what is theirs can't be told from what is old: only this key goes then.
+				const others = o.shared ? [] : await provider.listEnvironments(owner).then(
 					(snapshots) => snapshots.map((each) => each.key).filter((each) => each !== key),
 					() => [],
 				);

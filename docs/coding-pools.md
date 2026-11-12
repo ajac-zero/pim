@@ -10,6 +10,12 @@ Placement reads the registry: a coding thread asks its space's scheduler for a s
 
 When the registry has no pool a thread can use — none enabled, or none naming a provider the deployment has — placement falls back to exactly what it did before pools: one pool per available provider, its id the provider's, limited as the provider was. A deployment whose Gallery rows never made it keeps working.
 
+## Environment snapshots
+
+A prepared environment's snapshot is made by one pool's provider and may not restore on another's, so snapshots are kept per pool ([coding-environment.md](coding-environment.md)). The environment's key covers the pool's id, except for the first pool of each provider (by priority, then id, among all stored pools, enabled or not), which keeps the keys made before pools: those snapshots stay where they were made, and nothing is migrated. A pool with no registry row, as in the fallback of one pool per provider, is its provider's first.
+
+A thread placed in a pool restores only that pool's snapshot. When the pool has none, such as after a thread overflowed to it, the thread cold-provisions through the normal setup, never failing for the missing snapshot, and then keeps that pool's snapshot, if restoring it is expected to take less time than the setup did. The thread's `environment` says in `pool` whose snapshot it is and in `readyFrom` whether it was restored (`snapshot`) or cold-provisioned (`setup`). The guess of starting a new thread from the repository's newest snapshot is made only in a provider's first pool, and a pool sharing its provider with others deletes only its own snapshot when one isn't worth keeping.
+
 ## Unhealthy pools
 
 Each space’s scheduler keeps a persisted circuit breaker per pool, independent of other pools even when they share a provider. Three consecutive infrastructure failures while finding, creating or starting a workspace (including an unreachable provider, start errors and timeouts) open the pool for five minutes. A successful workspace start resets the count. Capacity and low-disk refusals, quota refusals, and repository or harness setup failures do not count. The thresholds are constants in `src/coding/pool-breaker.ts`, not deployment flags.

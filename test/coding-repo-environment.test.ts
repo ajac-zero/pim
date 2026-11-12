@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Workspace } from "../src/coding/workspace/types";
 import { environmentKey } from "../src/coding/environment-cache";
+import { ownsLegacySnapshots } from "../src/coding/pools";
 import { detectConfiguredSetup, detectRepository, devcontainerSetupScript, environmentBrief, hasMiseTask, isUnpinned, UNPINNED_TTL_MS, unpinnedKeyParts, makeTargets, nodeRange, pendingItems, pnpmPostinstall, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
 import { GO_REPO, installed, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./fixtures/repos";
 
@@ -292,5 +293,29 @@ describe("toolchains that aren't pinned", () => {
 
 	it("adds nothing when every toolchain is pinned", async () => {
 		expect(await unpinnedKeyParts(resolving({}), [{ tool: "go", version: "1.22.5", source: "manifest", from: "go.mod" }], 0, "/repo")).toEqual([]);
+	});
+});
+
+describe("an environment's snapshots per sandbox pool", () => {
+	const base = { userId: "ada", repo: "acme/env", provision: [], setupScript: "pnpm install\n", setupSource: "repository", lockfiles: { "pnpm-lock.yaml": "a".repeat(64) }, image: "pim-workspace:local" };
+	const pool = (id: string, provider: string, priority: number, enabled = true) => ({ id, provider, size: 1, priority, config: {}, enabled });
+
+	it("keeps the key made before pools for no pool, and gives each pool its own", async () => {
+		const legacy = await environmentKey(base);
+		const big = await environmentKey({ ...base, pool: "big" });
+		const small = await environmentKey({ ...base, pool: "small" });
+		expect(new Set([legacy, big, small]).size).toBe(3);
+		expect(big).toMatch(/^[0-9a-f]{64}$/);
+		expect(await environmentKey({ ...base, pool: "big" })).toBe(big);
+	});
+
+	it("leaves the old snapshots to the provider's first pool, enabled or not, and to a pool the registry lacks", () => {
+		const stored = [pool("b", "compose", 2), pool("a", "compose", 2), pool("cf", "cloudflare", 3), pool("first", "compose", 1, false)];
+		expect(ownsLegacySnapshots({ id: "first", provider: "compose" }, stored)).toBe(true);
+		expect(ownsLegacySnapshots({ id: "a", provider: "compose" }, stored)).toBe(false);
+		expect(ownsLegacySnapshots({ id: "b", provider: "compose" }, stored)).toBe(false);
+		expect(ownsLegacySnapshots({ id: "cf", provider: "cloudflare" }, stored)).toBe(true);
+		expect(ownsLegacySnapshots({ id: "compose", provider: "compose" }, [])).toBe(true);
+		expect(ownsLegacySnapshots({ id: "compose", provider: "compose" }, stored)).toBe(true);
 	});
 });

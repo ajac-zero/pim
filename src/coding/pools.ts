@@ -82,6 +82,18 @@ function readConfig(value: unknown): Readonly<Record<string, unknown>> {
 /** How pools stand against each other: the lowest priority first, ties by id. */
 export const comparePools = (a: SandboxPool, b: SandboxPool) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
+/**
+ * Whether `pool` keeps its provider's environment snapshots from before they
+ * were kept per pool (`environmentKey`): the provider's first pool among all
+ * the stored ones, enabled or not, so switching a pool off moves nothing. A
+ * pool the registry doesn't have, as in the fallback of one pool per
+ * provider, is its provider's only one.
+ */
+export function ownsLegacySnapshots(pool: { readonly id: string; readonly provider: string }, storedPools: readonly SandboxPool[]): boolean {
+	const first = [...storedPools].filter((each) => each.provider === pool.provider).sort(comparePools)[0];
+	return first === undefined || first.id === pool.id || !storedPools.some((each) => each.id === pool.id);
+}
+
 /** Why a pool was left out of the ones coding threads may be placed in. */
 export type PoolSkipReason = "disabled" | "provider_unavailable" | "unhealthy";
 

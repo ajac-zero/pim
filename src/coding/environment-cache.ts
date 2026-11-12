@@ -15,6 +15,12 @@ import type { ExecEvent, Workspace } from "./workspace/types";
  * change to any of them is another key, so a snapshot is never stale; old
  * ones are left for the backend to collect.
  *
+ * A snapshot is also one sandbox pool's (./pools.ts): what one pool's
+ * provider made another's may not restore, so the key covers the pool too,
+ * except for a provider's first pool, whose keys are the ones made before
+ * snapshots were kept per pool. Those snapshots stay where they were made
+ * and still resolve, so nothing is migrated or lost.
+ *
  * The thread (./thread-do.ts) decides when to restore, build and snapshot;
  * this module holds what that needs and nothing that touches the thread.
  */
@@ -25,6 +31,8 @@ export type EnvironmentState = "none" | "unsupported" | "restoring" | "cached" |
 /** A thread's environment, as its row and its API view have it. Durations are in milliseconds, measured on a monotonic clock; times are ms since the epoch. */
 export type CodingEnvironment = {
 	readonly state: EnvironmentState;
+	/** The sandbox pool whose snapshot the environment is: the one the thread restored from or, cold-provisioned, keeps its snapshot for; null before it is ready. */
+	readonly pool: string | null;
 	/** Why the workspace backend can't keep environments, when the state is "unsupported"; null otherwise, since "none" means the repository declares no setup. */
 	readonly reason?: string;
 	/** The environment's key, once the repository is checked out and the setup script found; null without one. */
@@ -68,6 +76,7 @@ export type CodingEnvironment = {
 /** A thread whose environment nothing has happened to yet. */
 export const NO_ENVIRONMENT: CodingEnvironment = {
 	state: "none",
+	pool: null,
 	key: null,
 	source: null,
 	builtAt: null,
@@ -143,6 +152,8 @@ export type EnvironmentKeyInput = {
 	readonly lockfiles: Readonly<Record<string, string>>;
 	/** The workspace image as the backend names it; a digest-pinned reference changes with the image. */
 	readonly image: string;
+	/** The sandbox pool the snapshot belongs to; absent for the key made before snapshots were kept per pool, which a provider's first pool keeps (`ownsLegacySnapshots`). */
+	readonly pool?: string;
 };
 
 /** The environment's key: 64 hex digits of SHA-256 over every input, in an order that doesn't depend on how `lockfiles` was listed. */
@@ -150,6 +161,7 @@ export async function environmentKey(input: EnvironmentKeyInput): Promise<string
 	const lockfiles = Object.entries(input.lockfiles).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 	const script = input.setupScript === null ? null : await sha256Hex(new TextEncoder().encode(input.setupScript));
 	const parts = ["pim-environment/3", input.userId, input.repo, input.provision, input.setupSource ?? null, script, lockfiles, input.image, [...(input.unpinned ?? [])].sort()];
+	if (input.pool !== undefined) parts.push(input.pool);
 	return sha256Hex(new TextEncoder().encode(JSON.stringify(parts)));
 }
 

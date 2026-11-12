@@ -1644,6 +1644,39 @@ describe("a coding thread with an overflow provider", () => {
 		for (const each of [first, second, third, fourth]) await each.stub.archive();
 	});
 
+	it("cold-provisions a thread that overflows to a pool with no snapshot, then keeps that pool's own", async () => {
+		const { compose } = providers();
+		compose.register("bash", async ({ cwd, workspace }) => {
+			await workspace.writeFile(`${cwd}/node_modules/.modules.yaml`, new TextEncoder().encode("installed\n"));
+			return {};
+		});
+		const restore = await setPools([
+			{ id: "big", provider: "compose", size: 1, priority: 1 },
+			{ id: "small", provider: "compose", size: 1, priority: 2 },
+		]);
+		onTestFinished(restore);
+		const name = `Pools-${crypto.randomUUID().slice(0, 8)}`;
+		fakeRemotes.set(`https://pim.test/api/coding/git/Acme/${name}.git`, { "README.md": "# Pools\n", ".pim/setup.sh": "pnpm install\n", "pnpm-lock.yaml": "lockfileVersion: '9.0'\n" });
+		const repo = `https://github.com/Acme/${name}`;
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Second done.")]);
+		const first = await startThread({ repo, space });
+		await turns(first.id, 1);
+		const built = (await first.stub.status()).environment;
+		// The first pool is the provider's first, so its snapshot has the key made before pools.
+		expect(built).toMatchObject({ state: "cached", pool: "big", readyFrom: "setup", restoredFromKey: null, snapshotKept: true });
+		expect([...compose.environments.values()].map((saved) => saved.key)).toEqual([built.key]);
+		// The second thread overflows to the small pool, which has no snapshot: the big pool's isn't restored there.
+		const second = await startThread({ repo, space });
+		await turns(second.id, 1);
+		const overflowed = (await second.stub.status()).environment;
+		expect(await second.stub.status()).toMatchObject({ pool: "small", placementReason: "overflow" });
+		expect(overflowed).toMatchObject({ state: "cached", pool: "small", readyFrom: "setup", restoredFromKey: null, snapshotKept: true });
+		expect(overflowed.key).not.toBe(built.key);
+		expect([...compose.environments.values()].map((saved) => saved.key).sort()).toEqual([built.key!, overflowed.key!].sort());
+		for (const each of [first, second]) await each.stub.archive();
+	});
+
 	it("pins a thread to a pool by its id, and a provider's id to that provider's first pool", async () => {
 		providers();
 		const restore = await setPools([

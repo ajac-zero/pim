@@ -6,7 +6,6 @@ import {
   Suspense,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -66,25 +65,133 @@ type UiEvents = {
   click: (key: string) => void;
 };
 
+/** Whether the block is complete. Until it is, its fields can be typed into, but nothing is sent or run. */
+const Settled = createContext(true);
+
 const Events = createContext<UiEvents>({
   change: () => {},
   submit: () => {},
   click: () => {},
 });
 
+/** How often a block still being written is compiled again, at most. */
+export const COMPILE_EVERY_MS = 250;
+
+/**
+ * The ```ui fences of a message's text, in order, and whether the last of
+ * them is still open, as a message streaming in has it. Only the last fence
+ * can be open, so this is how a block tells the one being written from the
+ * finished ones around it.
+ */
+export function uiFences(text: string): { sources: string[]; open: boolean } {
+  const sources: string[] = [];
+  let fence: { mark: string; length: number; ui: boolean } | null = null;
+  let from = 0;
+  let offset = 0;
+  for (const line of text.split("\n")) {
+    const found = /^ {0,3}(`{3,}|~{3,})\s*(\w*)/.exec(line);
+    if (found) {
+      const mark = found[1] as string;
+      if (fence === null) {
+        fence = {
+          mark: mark[0] as string,
+          length: mark.length,
+          ui: found[2] === "ui",
+        };
+        from = offset + line.length + 1;
+      } else if (
+        mark[0] === fence.mark &&
+        mark.length >= fence.length &&
+        line.trim() === mark
+      ) {
+        if (fence.ui)
+          sources.push(text.slice(from, Math.max(from, offset - 1)));
+        fence = null;
+      }
+    }
+    offset += line.length + 1;
+  }
+  if (fence?.ui) sources.push(text.slice(from));
+  return { sources, open: fence?.ui === true };
+}
+
+/** What the person typed into a block while it streamed, by message and place, for the block drawn anew when the stream ends and the message is drawn another way. */
+const carried = new Map<string, UiState["values"]>();
+
+/**
+ * The program of a block as it is written. Once it is complete it is compiled
+ * as it stands. While it is still open it is compiled at most every
+ * `COMPILE_EVERY_MS` and once more at the end, and only a compile that can be
+ * drawn replaces the last: what has been drawn stays when a newer cut of the
+ * source doesn't compile. Null until something can be drawn.
+ */
+function useStreamedProgram(
+  source: string,
+  open: boolean,
+): { program: UiProgram | null; complete: boolean } {
+  /** The last compile, so the same source is never compiled twice. */
+  const compiled = useRef<{ source: string; program: UiProgram } | null>(null);
+  const [partial, setPartial] = useState<UiProgram | null>(null);
+  const latest = useRef(source);
+  latest.current = source;
+  const lastAt = useRef(0);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `source` is what it waits on; the latest of it is read from the ref when it runs.
+  useEffect(() => {
+    if (!open) return;
+    const compileNow = () => {
+      lastAt.current = Date.now();
+      // A closing fence cut off mid-write reads as text of the source.
+      const written = latest.current.replace(/\n`{1,2}$/, "");
+      if (compiled.current?.source === written) return;
+      const program = compile(written, { partial: true });
+      compiled.current = { source: written, program };
+      if (import.meta.env.DEV) {
+        // For whoever is debugging: what the repair cut, never shown to the person.
+        const cuts = program.diagnostics.filter((diagnostic) =>
+          diagnostic.code.startsWith("unterminated_"),
+        );
+        if (cuts.length > 0)
+          console.debug("[ui] repaired a streaming block", cuts);
+      }
+      if (program.valid && program.nodes.length > 0) setPartial(program);
+    };
+    const wait = lastAt.current + COMPILE_EVERY_MS - Date.now();
+    if (wait <= 0) {
+      compileNow();
+      return;
+    }
+    const timer = setTimeout(compileNow, wait);
+    return () => clearTimeout(timer);
+  }, [source, open]);
+
+  if (open) return { program: partial, complete: false };
+  if (compiled.current?.source !== source) {
+    compiled.current = { source, program: compile(source) };
+  }
+  return { program: compiled.current.program, complete: true };
+}
+
 /** Draws one block of ui source; its fallback, when it can't be drawn. */
 export const UiBlock = memo(function UiBlock({
   source,
   fallback,
+  open: openInText = false,
+  slot,
 }: {
   source: string;
   /** Its source as a code block, kept for where nothing else can be shown. */
   fallback: ReactNode;
+  /** Whether it is the fence its message has open at its end. */
+  open?: boolean;
+  /** Which of its message's ui blocks it is, by order. */
+  slot?: number;
 }) {
-  const { streaming } = useContext(Reply);
+  const { streaming, messageId } = useContext(Reply);
   const { t } = useI18n();
-  const program = useMemo(() => compile(source), [source]);
-  if (streaming)
+  const open = streaming && openInText;
+  const { program, complete } = useStreamedProgram(source, open);
+  if (program === null)
     return <div className="my-4 h-24 animate-pulse rounded-2xl bg-muted" />;
   if (!program.valid || program.nodes.length === 0) {
     const error = program.diagnostics.find(
@@ -103,7 +210,18 @@ export const UiBlock = memo(function UiBlock({
       </div>
     );
   }
-  return <UiProgramView program={program} block={uiBlockId(source)} />;
+  return (
+    <UiProgramView
+      program={program}
+      block={uiBlockId(source)}
+      complete={complete}
+      carryKey={
+        messageId !== undefined && slot !== undefined
+          ? `${messageId}#${slot}`
+          : undefined
+      }
+    />
+  );
 });
 
 /** The state a block starts with: what Pim kept of it, relocked for any form its chat already answered. */
@@ -135,27 +253,58 @@ function seededState(
   return state;
 }
 
+/** A state with what the person typed over it, for the keys the program has. */
+function withTyped(
+  state: UiState,
+  program: UiProgram,
+  typed: UiState["values"],
+): UiState {
+  for (const [key, value] of Object.entries(typed)) {
+    if (program.stateKeys.includes(key)) state.values[key] = value;
+  }
+  return state;
+}
+
 /** One whole block, holding its state between the events that change it. */
 function UiProgramView({
   program,
   block,
+  complete,
+  carryKey,
 }: {
   program: UiProgram;
   /** Its id within its message (see `uiBlockId`), which Pim keeps its state under. */
   block: string;
+  /**
+   * False while the block streams in: its program is replaced as more of it
+   * arrives, and so is its id, so nothing is kept or sent until it is whole.
+   */
+  complete: boolean;
+  /** Where what the person typed while it streamed is carried to the block that replaces this one when the message is drawn anew. */
+  carryKey: string | undefined;
 }) {
   const reply = useContext(Reply);
   const { t } = useI18n();
-  const [seed] = useState(() => seededState(program, reply.submitted));
+  /** What the person has set, by state key. A program that replaces this one starts from its own initial state and takes these over it. */
+  const [typed] = useState(() => {
+    const values = (carryKey && carried.get(carryKey)) || {};
+    if (carryKey && !complete) carried.set(carryKey, values);
+    return values;
+  });
+  const [seed] = useState(() =>
+    withTyped(seededState(program, reply.submitted), program, typed),
+  );
   const [view, setView] = useState<Evaluation>(() =>
     evaluate(program, seed, null),
   );
   const viewRef = useRef(view);
+  const blockRef = useRef(block);
+  blockRef.current = block;
   const [problem, setProblem] = useState<string | null>(null);
   const sending = useRef(false);
   const [busy, setBusy] = useState(false);
   /** Whether the person has changed anything since the block was drawn: what Pim kept then doesn't replace it. */
-  const touched = useRef(false);
+  const touched = useRef(Object.keys(typed).length > 0);
   /** How many handlers' actions are being run, one inside another. */
   const acting = useRef(0);
 
@@ -168,7 +317,7 @@ function UiProgramView({
   if (writer.current === null) {
     writer.current = new UiStateWriter(
       (version, state, submitted) =>
-        pim.saveUiState(messageRef.current as string, block, {
+        pim.saveUiState(messageRef.current as string, blockRef.current, {
           version,
           state,
           submitted,
@@ -213,7 +362,7 @@ function UiProgramView({
   /** Has Pim keep the state: for good once every form is answered and nothing is left to send. */
   const keep = (state: UiState) => {
     // Not while a handler's actions are being run: whether a turn is left to send isn't known until they have been.
-    if (message === undefined || acting.current > 0) return;
+    if (message === undefined || acting.current > 0 || !complete) return;
     const forms = Object.keys(program.forms);
     const done =
       forms.length > 0 &&
@@ -226,6 +375,8 @@ function UiProgramView({
   };
 
   const run = (event: UiEvent) => {
+    // Typing is for any time; what sends or runs waits for the block to be whole.
+    if (!complete && event.type !== "change") return;
     const next = evaluate(program, viewRef.current.state, event);
     if (next.error !== null) {
       setProblem(next.error);
@@ -233,6 +384,7 @@ function UiProgramView({
     }
     setProblem(null);
     touched.current = true;
+    if (event.type === "change") typed[event.key] = event.value;
     show(next);
     acting.current += 1;
     try {
@@ -242,6 +394,28 @@ function UiProgramView({
     }
     keep(viewRef.current.state);
   };
+
+  // A program that replaces this one, as a block streaming in grows: it keeps what the person typed, by key.
+  const [drawnProgram, setDrawnProgram] = useState(program);
+  if (drawnProgram !== program) {
+    setDrawnProgram(program);
+    const state = withTyped(
+      seededState(program, reply.submitted),
+      program,
+      typed,
+    );
+    const next = evaluate(program, state, null);
+    // One that doesn't work out leaves the last that did.
+    if (next.error === null) show(next);
+  }
+
+  // The block is whole: what the person typed while it streamed is kept, under its final id.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only when it becomes complete
+  useEffect(() => {
+    if (!complete) return;
+    if (touched.current) keep(viewRef.current.state);
+    if (carryKey) carried.delete(carryKey);
+  }, [complete]);
 
   const events: UiEvents = {
     change: (key, value) => run({ type: "change", key, value }),
@@ -334,9 +508,11 @@ function UiProgramView({
 
   return (
     <div className="my-4 min-w-0 rounded-2xl border bg-background p-4">
-      <Events.Provider value={events}>
-        <Tree nodes={view.tree} locked={busy} />
-      </Events.Provider>
+      <Settled.Provider value={complete}>
+        <Events.Provider value={events}>
+          <Tree nodes={view.tree} locked={busy} />
+        </Events.Provider>
+      </Settled.Provider>
       {problem !== null && (
         <p className="mt-3 text-[13px] text-destructive" role="alert">
           {problem}
@@ -379,6 +555,7 @@ function Node({
 }) {
   const { t } = useI18n();
   const events = useContext(Events);
+  const settled = useContext(Settled);
   if (node.t === "md")
     return inline ? node.text : <Markdown text={node.text} untrusted />;
   if (node.t === "text")
@@ -474,7 +651,7 @@ function Node({
           data-form={id}
           onSubmit={(event) => {
             event.preventDefault();
-            if (!isLocked && ready) events.submit(id);
+            if (!isLocked && ready && settled) events.submit(id);
           }}
           className="min-w-0"
         >
@@ -483,7 +660,7 @@ function Node({
             <Button
               type="submit"
               size="sm"
-              disabled={isLocked || locked || !ready}
+              disabled={isLocked || locked || !ready || !settled}
               aria-describedby={!isLocked && !ready ? hintId : undefined}
               data-part="submit"
             >
@@ -537,7 +714,7 @@ function Node({
           type="button"
           size="sm"
           variant="secondary"
-          disabled={locked}
+          disabled={locked || !settled}
           onClick={() => events.click(String(props.key ?? ""))}
         >
           {children}

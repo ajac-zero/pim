@@ -1,7 +1,16 @@
 import { math } from "@streamdown/math";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { isValidElement, memo, type ReactNode, useState } from "react";
+import {
+  type ComponentProps,
+  createContext,
+  isValidElement,
+  memo,
+  type ReactNode,
+  useContext,
+  useMemo,
+  useState,
+} from "react";
 import type { BundledLanguage } from "shiki";
 import {
   defaultRehypePlugins,
@@ -19,7 +28,7 @@ import {
   isReplyBlock,
   ReplyBlock,
 } from "~/components/chat/reply-blocks";
-import { isUiBlock, UiBlock } from "~/components/chat/ui-block";
+import { isUiBlock, UiBlock, uiFences } from "~/components/chat/ui-block";
 import { FileKindIcon } from "~/components/file-kind-icon";
 import { FileLink } from "~/components/file-link";
 import { useI18n } from "~/components/i18n";
@@ -635,6 +644,65 @@ function SvgDrawing({
   );
 }
 
+/** What the fenced blocks of a Markdown text are drawn by: set by `Markdown`, read by `Fence`. */
+const Fences = createContext<{
+  safe: boolean;
+  drawings: boolean;
+  /** The ```ui fences of the text, and whether the last is still open. */
+  ui: { sources: string[]; open: boolean };
+}>({ safe: false, drawings: false, ui: { sources: [], open: false } });
+
+/**
+ * A fenced code block. It is a component of its own, outside `Markdown`, so
+ * its identity stays put as a message streams: a block drawn here, such as a
+ * ```ui one, is kept between tokens, with what the person has typed in it,
+ * rather than made anew each time the text grows.
+ */
+function Fence({ className, children }: ComponentProps<"code">) {
+  const { safe, drawings, ui } = useContext(Fences);
+  const match = /language-(\w+)/.exec(String(className ?? ""));
+  const language = (match?.[1] ?? "text") as BundledLanguage;
+  const source = String(children ?? "").replace(/\n$/, "");
+  const code = (
+    <CodeBlock code={source} language={language}>
+      <CodeBlockHeader>
+        <CodeBlockTitle>
+          <CodeBlockFilename>{language}</CodeBlockFilename>
+        </CodeBlockTitle>
+        <CodeBlockCopyButton />
+      </CodeBlockHeader>
+    </CodeBlock>
+  );
+  // An agent's cards, galleries and diagrams are drawn; anyone else's are code, but a note's drawings.
+  if (safe) {
+    if (!drawings) return code;
+    if (language === "mermaid")
+      return <Diagram source={source} fallback={code} />;
+    if ((language as string) === "svg")
+      return <SvgDrawing source={source} fallback={code} />;
+    return code;
+  }
+  if (isReplyBlock(language)) {
+    return <ReplyBlock kind={language} source={source} fallback={code} />;
+  }
+  if (isUiBlock(language)) {
+    const last = ui.sources.length - 1;
+    const open = ui.open && source.trim() === ui.sources[last]?.trim();
+    const slot = open
+      ? last
+      : Math.max(
+          0,
+          ui.sources.findIndex((one) => one.trim() === source.trim()),
+        );
+    return <UiBlock source={source} fallback={code} open={open} slot={slot} />;
+  }
+  return language === "mermaid" ? (
+    <Diagram source={source} fallback={code} />
+  ) : (
+    code
+  );
+}
+
 export const Markdown = memo(function Markdown({
   text,
   className,
@@ -672,191 +740,171 @@ export const Markdown = memo(function Markdown({
   drawings?: boolean;
 }) {
   const safe = untrusted || bubble;
+  // The ```ui fences of the text, and whether its last is still being written.
+  const ui = useMemo(() => {
+    const fences = uiFences(text);
+    return { ...fences, open: fences.open && streaming === true };
+  }, [text, streaming]);
   const tone = bubble ? TONES.bubble : TONES.page;
-  const heading = (props: object) => (
-    <p className="my-3 font-semibold">
-      {(props as { children?: ReactNode }).children}
-    </p>
+  // One object for as long as the text is drawn the same way, so the blocks Streamdown draws with it
+  // keep their state between the tokens of a message, rather than being made anew each time.
+  const components = useMemo((): NonNullable<
+    ComponentProps<typeof Streamdown>["components"]
+  > => {
+    const heading = (props: object) => (
+      <p className="my-3 font-semibold">
+        {(props as { children?: ReactNode }).children}
+      </p>
+    );
+    return {
+      ...(safe ? untrustedComponents : agentComponents),
+      h1: ({ children }) => (
+        <h1 className="mt-6 mb-3 font-semibold text-2xl">{children}</h1>
+      ),
+      h2: ({ children }) => (
+        <h2 className="mt-6 mb-3 font-semibold text-xl">{children}</h2>
+      ),
+      h3: ({ children }) => (
+        <h3 className="mt-5 mb-2 font-semibold text-lg">{children}</h3>
+      ),
+      h4: ({ children }) => (
+        <h4 className="mt-4 mb-2 font-semibold">{children}</h4>
+      ),
+      // Headings are too loud in a bubble.
+      ...(bubble
+        ? {
+            h1: heading,
+            h2: heading,
+            h3: heading,
+            h4: heading,
+            h5: heading,
+            h6: heading,
+          }
+        : {}),
+      p: ({ children }) => <p className="my-3">{children}</p>,
+      ul: ({ children }) => (
+        <ul className="my-3 list-disc space-y-1.5 pl-6">{children}</ul>
+      ),
+      ol: ({ children }) => (
+        <ol className="my-3 list-decimal space-y-1.5 pl-6">{children}</ol>
+      ),
+      li: ({ children }) => <li className="pl-1">{children}</li>,
+      blockquote: ({ children }) => (
+        <blockquote className={cn("my-3 border-l-2 pl-4", tone.quote)}>
+          {children}
+        </blockquote>
+      ),
+      hr: () => <hr className={cn("my-6", tone.line)} />,
+      a: ({ href, children }) =>
+        href === MENTIONS_HREF ? (
+          <Mentions text={textOf(children)} chip={tone.chip} />
+        ) : // A person may name their own chats and files too; untrusted text may not.
+        (!safe || bubble) && chatOf(href) ? (
+          <ChatLink id={chatOf(href) as string} className={tone.link}>
+            {children}
+          </ChatLink>
+        ) : !safe && artifactOf(href) ? (
+          <ArtifactLink {...(artifactOf(href) as { id: string })}>
+            {children}
+          </ArtifactLink>
+        ) : (!safe || bubble) && fileOf(href) ? (
+          <FileLink
+            path={fileOf(href) as string}
+            className={cn(tone.link, "inline-flex items-center gap-1.5")}
+          >
+            <FileKindIcon name={fileOf(href) as string} type="" />
+            {children}
+          </FileLink>
+        ) : safe && !safeLink(href) ? (
+          <span>{children}</span>
+        ) : (
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer noopener"
+            className={tone.link}
+          >
+            {children}
+          </a>
+        ),
+      table: ({ children }) => (
+        <div
+          className={cn(
+            "my-4 max-w-full overflow-x-auto rounded-xl border scrollbar-thin",
+            tone.line,
+          )}
+        >
+          <table className="w-full border-collapse text-sm">{children}</table>
+        </div>
+      ),
+      thead: ({ children }) => (
+        <thead className={cn("text-left", tone.head)}>{children}</thead>
+      ),
+      th: ({ children }) => (
+        <th className="px-3 py-2 font-semibold">{children}</th>
+      ),
+      td: ({ children }) => (
+        // A line above each body cell: between rows, and under the header, but not under the table's border.
+        <td className={cn("border-t px-3 py-2", tone.line)}>{children}</td>
+      ),
+      // Inline `code` spans (single backticks). Fenced blocks are
+      // handled separately below by `code`, so this only ever receives
+      // inline content.
+      inlineCode: ({ children, ...props }) => (
+        <code
+          className={cn(
+            "rounded-md px-1.5 py-0.5 font-mono text-[0.875em]",
+            tone.code,
+          )}
+          {...props}
+        >
+          {children}
+        </code>
+      ),
+      // Fenced code blocks (triple backticks). Streamdown routes inline
+      // spans to `inlineCode` above, so this only ever receives blocks.
+      code: (props) => <Fence {...props} />,
+      // No `pre` override: Streamdown's default `pre` component flattens
+      // itself to just its child `code` element while tagging it with
+      // `data-block="true"` — that tag is how `code` above is told
+      // "this is a fenced block" vs. "this is an inline span". Overriding
+      // `pre` with a bare passthrough (as react-markdown required) drops
+      // that tag and silently breaks block-code detection.
+    };
+  }, [safe, bubble, tone]);
+  const fences = useMemo(
+    () => ({ safe: safe === true, drawings: drawings === true, ui }),
+    [safe, drawings, ui],
   );
   return (
-    <div
-      className={cn(
-        "min-w-0 max-w-full break-words text-[15px] leading-6 [overflow-wrap:anywhere]",
-        "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-        className,
-      )}
-    >
-      <Streamdown
-        isAnimating={streaming}
-        plugins={{ math }}
-        animated
-        // Streaming mode closes unclosed Markdown, as a reply still being
-        // written needs. Finished text keeps what was written, so a lone `*`
-        // doesn't get a second one added at its end.
-        mode={streaming ? "streaming" : "static"}
-        skipHtml={safe}
-        {...(safe
-          ? {
-              rehypePlugins: untrustedRehypePlugins,
-              ...(bubble ? { remarkPlugins: bubbleRemarkPlugins } : {}),
-            }
-          : { remarkPlugins: chatRemarkPlugins })}
-        components={{
-          ...(safe ? untrustedComponents : agentComponents),
-          h1: ({ children }) => (
-            <h1 className="mt-6 mb-3 font-semibold text-2xl">{children}</h1>
-          ),
-          h2: ({ children }) => (
-            <h2 className="mt-6 mb-3 font-semibold text-xl">{children}</h2>
-          ),
-          h3: ({ children }) => (
-            <h3 className="mt-5 mb-2 font-semibold text-lg">{children}</h3>
-          ),
-          h4: ({ children }) => (
-            <h4 className="mt-4 mb-2 font-semibold">{children}</h4>
-          ),
-          // Headings are too loud in a bubble.
-          ...(bubble
-            ? {
-                h1: heading,
-                h2: heading,
-                h3: heading,
-                h4: heading,
-                h5: heading,
-                h6: heading,
-              }
-            : {}),
-          p: ({ children }) => <p className="my-3">{children}</p>,
-          ul: ({ children }) => (
-            <ul className="my-3 list-disc space-y-1.5 pl-6">{children}</ul>
-          ),
-          ol: ({ children }) => (
-            <ol className="my-3 list-decimal space-y-1.5 pl-6">{children}</ol>
-          ),
-          li: ({ children }) => <li className="pl-1">{children}</li>,
-          blockquote: ({ children }) => (
-            <blockquote className={cn("my-3 border-l-2 pl-4", tone.quote)}>
-              {children}
-            </blockquote>
-          ),
-          hr: () => <hr className={cn("my-6", tone.line)} />,
-          a: ({ href, children }) =>
-            href === MENTIONS_HREF ? (
-              <Mentions text={textOf(children)} chip={tone.chip} />
-            ) : // A person may name their own chats and files too; untrusted text may not.
-            (!safe || bubble) && chatOf(href) ? (
-              <ChatLink id={chatOf(href) as string} className={tone.link}>
-                {children}
-              </ChatLink>
-            ) : !safe && artifactOf(href) ? (
-              <ArtifactLink {...(artifactOf(href) as { id: string })}>
-                {children}
-              </ArtifactLink>
-            ) : (!safe || bubble) && fileOf(href) ? (
-              <FileLink
-                path={fileOf(href) as string}
-                className={cn(tone.link, "inline-flex items-center gap-1.5")}
-              >
-                <FileKindIcon name={fileOf(href) as string} type="" />
-                {children}
-              </FileLink>
-            ) : safe && !safeLink(href) ? (
-              <span>{children}</span>
-            ) : (
-              <a
-                href={href}
-                target="_blank"
-                rel="noreferrer noopener"
-                className={tone.link}
-              >
-                {children}
-              </a>
-            ),
-          table: ({ children }) => (
-            <div
-              className={cn(
-                "my-4 max-w-full overflow-x-auto rounded-xl border scrollbar-thin",
-                tone.line,
-              )}
-            >
-              <table className="w-full border-collapse text-sm">
-                {children}
-              </table>
-            </div>
-          ),
-          thead: ({ children }) => (
-            <thead className={cn("text-left", tone.head)}>{children}</thead>
-          ),
-          th: ({ children }) => (
-            <th className="px-3 py-2 font-semibold">{children}</th>
-          ),
-          td: ({ children }) => (
-            // A line above each body cell: between rows, and under the header, but not under the table's border.
-            <td className={cn("border-t px-3 py-2", tone.line)}>{children}</td>
-          ),
-          // Inline `code` spans (single backticks). Fenced blocks are
-          // handled separately below by `code`, so this only ever receives
-          // inline content.
-          inlineCode: ({ children, ...props }) => (
-            <code
-              className={cn(
-                "rounded-md px-1.5 py-0.5 font-mono text-[0.875em]",
-                tone.code,
-              )}
-              {...props}
-            >
-              {children}
-            </code>
-          ),
-          // Fenced code blocks (triple backticks). Streamdown routes inline
-          // spans to `inlineCode` above, so this only ever receives blocks.
-          code: ({ className, children }) => {
-            const match = /language-(\w+)/.exec(className ?? "");
-            const language = (match?.[1] ?? "text") as BundledLanguage;
-            const source = String(children).replace(/\n$/, "");
-            const code = (
-              <CodeBlock code={source} language={language}>
-                <CodeBlockHeader>
-                  <CodeBlockTitle>
-                    <CodeBlockFilename>{language}</CodeBlockFilename>
-                  </CodeBlockTitle>
-                  <CodeBlockCopyButton />
-                </CodeBlockHeader>
-              </CodeBlock>
-            );
-            // An agent's cards, galleries and diagrams are drawn; anyone else's are code, but a note's drawings.
-            if (safe) {
-              if (!drawings) return code;
-              if (language === "mermaid")
-                return <Diagram source={source} fallback={code} />;
-              if ((language as string) === "svg")
-                return <SvgDrawing source={source} fallback={code} />;
-              return code;
-            }
-            if (isReplyBlock(language)) {
-              return (
-                <ReplyBlock kind={language} source={source} fallback={code} />
-              );
-            }
-            if (isUiBlock(language)) {
-              return <UiBlock source={source} fallback={code} />;
-            }
-            return language === "mermaid" ? (
-              <Diagram source={source} fallback={code} />
-            ) : (
-              code
-            );
-          },
-          // No `pre` override: Streamdown's default `pre` component flattens
-          // itself to just its child `code` element while tagging it with
-          // `data-block="true"` — that tag is how `code` above is told
-          // "this is a fenced block" vs. "this is an inline span". Overriding
-          // `pre` with a bare passthrough (as react-markdown required) drops
-          // that tag and silently breaks block-code detection.
-        }}
+    <Fences.Provider value={fences}>
+      <div
+        className={cn(
+          "min-w-0 max-w-full break-words text-[15px] leading-6 [overflow-wrap:anywhere]",
+          "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+          className,
+        )}
       >
-        {mathDelimiters(text)}
-      </Streamdown>
-    </div>
+        <Streamdown
+          isAnimating={streaming}
+          plugins={{ math }}
+          animated
+          // Streaming mode closes unclosed Markdown, as a reply still being
+          // written needs. Finished text keeps what was written, so a lone `*`
+          // doesn't get a second one added at its end.
+          mode={streaming ? "streaming" : "static"}
+          skipHtml={safe}
+          {...(safe
+            ? {
+                rehypePlugins: untrustedRehypePlugins,
+                ...(bubble ? { remarkPlugins: bubbleRemarkPlugins } : {}),
+              }
+            : { remarkPlugins: chatRemarkPlugins })}
+          components={components}
+        >
+          {mathDelimiters(text)}
+        </Streamdown>
+      </div>
+    </Fences.Provider>
   );
 });

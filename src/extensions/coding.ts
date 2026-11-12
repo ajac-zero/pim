@@ -180,14 +180,20 @@ export const coding = definePimExtension({
 			defineTool({
 				name: "coding_steer",
 				description:
-					"Tell a coding thread something: more to do, a correction, an answer to its question. During a turn it reads it after its current step, or with interrupt stops what it is doing and starts on it; between turns it starts a new turn.",
-				parameters: Type.Object({ thread_id: ThreadId, text: Type.String({ minLength: 1 }), interrupt: Type.Optional(Type.Boolean()) }),
+					"Tell a coding thread something: more to do, a correction, an answer to its question. During a turn it reads it after its current step, or with interrupt stops what it is doing and starts on it; between turns it starts a new turn. With retry_environment it instead runs the thread's environment setup again, between turns, after a failed setup; text is then ignored.",
+				parameters: Type.Object({ thread_id: ThreadId, text: Type.Optional(Type.String({ minLength: 1 })), interrupt: Type.Optional(Type.Boolean()), retry_environment: Type.Optional(Type.Boolean({ description: "Run the environment's setup again in the thread's workspace, for a thread whose setup failed. Give it without text to only retry." })) }),
 				replay: "safe",
-				async execute({ thread_id, text: said, interrupt }, api, context) {
+				async execute({ thread_id, text: said, interrupt, retry_environment }, api, context) {
 					const operationId = await api.memo("operation", crypto.randomUUID(), context);
 					return answer(async () => {
+						if (retry_environment !== true && !said) throw new CodingError(400, "Say something, or set retry_environment", "invalid");
+						if (retry_environment === true) {
+							const { listed, stub } = await liveThread(env, space, thread_id);
+							const environment = await calling(() => stub.rebuildEnvironment());
+							return json({ thread_id: listed.threadId, environment: environment.state, retrying: true });
+						}
 						const { listed, stub } = await liveThread(env, space, thread_id, { budget: true });
-						const status = await calling(() => stub.steer(said, { interrupt: interrupt === true, operationId }));
+						const status = await calling(() => stub.steer(said!, { interrupt: interrupt === true, operationId }));
 						return json({ thread_id: listed.threadId, status: status.state, turn_under_way: status.currentOperation !== null });
 					});
 				},

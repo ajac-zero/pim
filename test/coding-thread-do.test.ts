@@ -18,13 +18,15 @@ import { DEFAULT_WORKSPACE_IMAGE, NO_BACKEND_MESSAGE, NoWorkspaceBackendError, w
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
 import { fakeCloneFailures, fakeClones, fakeGit, fakeRemotes } from "./fake-git";
 import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
+import { fakeContainers } from "./fake-container";
+import { prepareComputeProvider } from "../src/compute";
 import { AMP_SESSION, ampFixture } from "./fixtures/amp";
 import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
 import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
 import { GO_REPO, installed, MISE_REPO } from "./fixtures/repos";
 import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
 import { api, OWNER, post, toolUse } from "./helpers";
-import { type CodingThreadDO, codingBackends, codingEvents, codingFaux, codingGitHub, codingQuota, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
+import { type CodingThreadDO, codingBackends, codingCompute, codingContainers, codingEvents, codingFaux, codingGitHub, codingQuota, codingSchedulers, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
 
 // Each thread here works in the in-memory workspace with a fake git, with the real coding tools, talks to the scripted
 // `coding-faux` model, and asks a scheduler of its own space for a slot; the schedulers tell threads what happens to them
@@ -92,6 +94,9 @@ const sent = (context: Context) => JSON.stringify(context);
 
 beforeEach(() => {
 	codingBackends.registry = null;
+	codingBackends.production = false;
+	codingCompute.providers = null;
+	codingContainers.service = null;
 	codingSchedulers.notifier = null;
 	codingSchedulers.now = null;
 	codingThreadClock.now = null;
@@ -1227,6 +1232,9 @@ describe("a coding thread with an overflow provider", () => {
 
 	afterEach(() => {
 		codingQuota.quota = null;
+		codingCompute.providers = null;
+		codingContainers.service = null;
+		codingBackends.production = false;
 	});
 
 	it("runs on the sandbox manager while it has a slot, overflows to Cloudflare once it has none, and queues only when both are full", async () => {
@@ -1345,6 +1353,30 @@ describe("a coding thread with an overflow provider", () => {
 		const second = await startThread({ space });
 		await vi.waitFor(async () => expect(await second.stub.status()).toMatchObject({ state: "failed", stateReason: "compute_quota", workspaceProvider: "cloudflare" }), { timeout: 10_000, interval: 50 });
 		await first.stub.archive();
+	});
+
+	it("finds the admin's overflow provider again on a fresh instance, before the Gallery is read", async () => {
+		// The deployment's own backends as the admin set them up: Cloudflare Containers, here in memory, and nothing else.
+		const containers = fakeContainers();
+		containers.backend.register("git", fakeGit);
+		codingContainers.service = containers;
+		codingCompute.providers = [prepareComputeProvider({ kind: "cloudflare-sandbox" }, null)];
+		codingBackends.production = true;
+		codingFaux.setResponses([toolUse("write", { path: "a.txt", content: "A\n" }), fauxAssistantMessage("Wrote a."), toolUse("write", { path: "b.txt", content: "B\n" }), fauxAssistantMessage("Wrote b.")]);
+		const { id, stub } = await startThread();
+		await turns(id, 1);
+		await stub.steer("Also write b.txt.", { operationId: "more" });
+		const [, second] = await turns(id, 2);
+		expect(second).toMatchObject({ outcome: "completed", operationId: "more" });
+		expect(await stub.status()).toMatchObject({ workspaceProvider: "cloudflare", slot: "held" });
+		const [first] = await stub.checkpoints();
+		expect(first).not.toBeNull();
+		// The object hibernates and comes back fresh, as between a person's requests: its first use of the workspace since, with no turn under way to read the compute providers, must still resolve the provider the admin added. The diff from the first checkpoint isn't one the thread kept, so it needs the workspace.
+		await runInDurableObject(stub, (_instance: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
+		const again = codingThread(env, id);
+		expect(await again.diff(first!.sha)).toMatchObject({ since: first!.sha, diff: expect.stringContaining("+++ b/b.txt"), truncated: false });
+		expect(await again.status()).toMatchObject({ workspaceProvider: "cloudflare", slot: "held", state: "idle" });
+		await again.archive();
 	});
 
 	it("waits on the sandbox manager alone, holding its slot, when it refuses the workspace for capacity", async () => {

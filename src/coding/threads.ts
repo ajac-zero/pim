@@ -150,6 +150,11 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 		if (given !== undefined && (typeof given !== "string" || !given.trim() || given.length > 100)) throw invalid(`${field} must be the name of a coding sandbox pool, such as compose or cloudflare`);
 	}
 	if ([input.pool, input.provider].some((name) => name === "orbs" || name === "amp-http") && harness !== "amp") throw invalid("Orbs requires harness amp");
+	// workspace Amp is retired; amp harness uses agent-hosted Orbs only, no sandbox slot.
+	// Explicit non-orb pool/provider with harness amp is refused.
+	if (harness === "amp" && [input.pool, input.provider].some((name): name is string => name !== undefined && name !== "orbs" && name !== "amp-http")) {
+		throw invalid("workspace Amp is retired; amp harness now uses agent-hosted Orbs only, with no sandbox slot. Do not set pool or provider with harness amp.");
+	}
 	const operationId = input.operationId ?? crypto.randomUUID();
 	const threadId = await codingThreadId(space, operationId);
 	const scheduler = codingScheduler(env, space);

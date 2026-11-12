@@ -249,10 +249,12 @@ No route returns or accepts a login's contents: Pim reads nothing the CLI prints
 
 ## Live activity and stalls
 
-Thread details and list rows include an `activity` record, also used by the
-web app and `pim_diagnostics` (`now`, `stalls`, and `coding`). Chats expose the
-same record at `GET /api/sessions/:session/activity`, with the chat's usual
-access checks. No feature flag is needed.
+Thread details include an `activity` record, also used by the web app and
+`pim_diagnostics` (`now`, `stalls`, and `coding`). List rows fetch activity only
+for threads indexed as `running`, at most eight at once, and omit it if a
+thread's activity cannot be read. Other states are not woken for activity.
+Chats expose the same record at `GET /api/sessions/:session/activity`, with
+the chat's usual access checks. No feature flag is needed.
 
 The record has `running`, `lastActivityAt` (epoch milliseconds), `current`
 (the pending tools' names, short redacted summaries, `startedAt`, `elapsedMs`

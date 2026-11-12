@@ -475,10 +475,11 @@ describe("a coding thread", () => {
 			expect((await stub.log()).filter((event) => event.kind === "thread.retrying")).toHaveLength(1);
 		});
 
-		// Workers AI's per-minute cap, as an `AiError` reaches a thread once pi gave up on it: the account shares the limit, so it outlasts one backoff. Its uuid is
-		// fixed, and its hex chosen: pi reads an error as worth retrying inside the turn by words in it, and a random uuid can spell "429" or "502", which would
-		// have pi retry the call itself and so leave the thread's own retries one short of six.
-		const rateLimited = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "inference request per min rate reached (3f7b1a9c-6d2e-4c8b-9a1d-7e3c2b8f1a6d)" });
+		// Workers AI's per-minute cap, as an `AiError` reaches a thread once pi gave up on it: the account shares the limit, so it outlasts one backoff.
+		// The uuid in the error is fixed, not random: a random one can spell a run of digits — a "500" or "429" inside it — that reads as a
+		// transient error to pi, which then retries the model call inside the turn (waiting out its own two-second backoff) and takes two
+		// scripted responses for one retry, so the thread is seen to retry only five times. Fixed, it trips no retry but the thread's own.
+		const rateLimited = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: `inference request per min rate reached (4f0e2b3c-9a71-4a2e-8d17-e45d1f1c3d21)` });
 
 		it("retries a rate limited turn again and again, waiting longer each time, until the cap lifts", async () => {
 			codingTimings.retryMs = 50;

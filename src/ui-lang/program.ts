@@ -6,7 +6,7 @@
 
 import type { Expr } from "./parse";
 import type { Diagnostic } from "./parse";
-import type { Field, FormSpec, Value } from "./value";
+import type { ControlSpec, Field, FormSpec, Value } from "./value";
 
 /** What a handler may run. */
 export type ActionName = "reveal" | "issueNewTurn" | "copy";
@@ -44,6 +44,8 @@ export type UiProgram = {
 	initial: Record<string, Value>;
 	/** The keys of its stateful things: declared state and each field of each form. */
 	stateKeys: string[];
+	/** Its checkboxes and sliders, by the key of the state each holds. */
+	controls: Record<string, ControlSpec>;
 	/** Its forms, by their id. */
 	forms: Record<string, FormSpec>;
 	/** What was wrong with it, warnings and errors. */

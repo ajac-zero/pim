@@ -126,11 +126,11 @@ describe("a ui block in a reply", () => {
   });
 
   it("falls back to readable Markdown, with a note, when it can't be drawn", () => {
-    const { container } = shown('<form id="x"><chart/></form>');
+    const { container } = shown('<form id="x"><gauge/></form>');
     expect(container.textContent).toContain("Form x");
     expect(container.textContent).toContain("couldn't be shown");
     expect(container.textContent).toContain(
-      "<chart> is not one of the components",
+      "<gauge> is not one of the components",
     );
   });
 

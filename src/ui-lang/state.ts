@@ -8,7 +8,7 @@
 
 import { MAX_STATE_BYTES, MAX_TEXT_CHARS } from "./limits";
 import type { UiProgram } from "./program";
-import type { UiState } from "./value";
+import { controlValueOk, type UiState, type Value } from "./value";
 
 /** How many items a list kept in a block's state may have. */
 export const MAX_STORED_LIST = 64;
@@ -51,6 +51,13 @@ export function storableState(state: UiState): UiState {
 	return { ...state, values: Object.fromEntries(Object.entries(state.values).filter(([, value]) => isStorable(value))) };
 }
 
+/** Why a value can't be what a checkbox or slider holds, or null when the key isn't one or the value fits. */
+function controlProblem(program: UiProgram, key: string, value: Value): string | null {
+	const control = Object.hasOwn(program.controls, key) ? program.controls[key] : undefined;
+	if (control === undefined || controlValueOk(control, value)) return null;
+	return control.kind === "checkbox" ? `${key} must be true or false` : `${key} must be a number from ${control.min} to ${control.max}`;
+}
+
 /** A block's state as it may be kept, or what is wrong with it. */
 export function checkUiState(program: UiProgram, input: unknown): { ok: true; state: UiState } | { ok: false; error: string } {
 	const bad = (error: string) => ({ ok: false as const, error });
@@ -63,6 +70,8 @@ export function checkUiState(program: UiProgram, input: unknown): { ok: true; st
 	for (const [key, value] of Object.entries(values)) {
 		if (!stateKeys.has(key)) return bad(`the block has no state called ${key}`);
 		if (!isStorable(value)) return bad(`${key} must be text, a finite number, true, false, null or a short list of them`);
+		const problem = controlProblem(program, key, value as Value);
+		if (problem !== null) return bad(problem);
 	}
 	for (const [form, shown] of Object.entries(revealed)) {
 		if (!Object.hasOwn(program.forms, form)) return bad(`the block has no form called ${form}`);
@@ -76,6 +85,8 @@ export function checkUiState(program: UiProgram, input: unknown): { ok: true; st
 		for (const [key, value] of Object.entries(answer.values)) {
 			if (!keys.has(key)) return bad(`form ${form} has no field ${key}`);
 			if (!isStorable(value)) return bad(`${key} must be text, a finite number, true, false, null or a short list of them`);
+			const problem = controlProblem(program, key, value as Value);
+			if (problem !== null) return bad(problem);
 		}
 		for (const [key, mark] of Object.entries(answer.graded)) {
 			if (!keys.has(key)) return bad(`form ${form} has no field ${key}`);

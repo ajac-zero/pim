@@ -14,13 +14,16 @@ import { ACTION_NAMES, parse, BUILTIN_NAMES, type Diagnostic, type Expr, type Ra
 import type { ActionName, ActionSpec, Node, NodePart, PropValue, UiProgram } from "./program";
 import { evaluate, type RenderNode } from "./evaluate";
 import { initialState } from "./evaluate";
-import { arityOk, evalExpr, Steps, type Field, type FormSpec, type Value } from "./value";
+import { arityOk, evalExpr, stringOf, Steps, type ControlSpec, type Field, type FormSpec, type Value } from "./value";
 
 /** One action's arguments, as an expression each. */
 const ACTION_ARITY: Record<ActionName, number> = { reveal: 0, issueNewTurn: 1, copy: 1 };
 
-/** The tags that hold a person's answers. */
-const FIELD_TAGS = ["number", "input", "select"] as const;
+/** The tags that hold a person's answers when in a form. */
+const FIELD_TAGS = ["number", "input", "select", "checkbox", "slider"] as const;
+
+/** A name that state outside a form may have, which an expression reads. */
+const STATE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Compiles a block's source to its program. Whatever is wrong with it comes
@@ -40,6 +43,9 @@ class Compiler {
 	private readonly stateKeys: string[] = [];
 	private readonly initial: Record<string, Value> = {};
 	private readonly constants = new Map<string, Value>();
+	private readonly controls: Record<string, ControlSpec> = {};
+	/** Nodes an element needs just before it, such as the state a slider outside a form declares. */
+	private before: Node[] = [];
 	private buttons = 0;
 
 	private say(severity: "error" | "warning", code: string, message: string) {
@@ -64,6 +70,7 @@ class Compiler {
 			texts: this.texts,
 			initial: this.initial,
 			stateKeys: this.stateKeys,
+			controls: this.controls,
 			forms: this.forms,
 			diagnostics: this.diagnostics,
 			fallbackMarkdown: "",
@@ -160,6 +167,7 @@ class Compiler {
 						continue;
 					}
 					const el = this.el(node, form);
+					nodes.push(...this.before.splice(0));
 					if (el) nodes.push(el);
 					break;
 			}
@@ -181,7 +189,8 @@ class Compiler {
 			if (!this.stateKeys.includes(name)) this.stateKeys.push(name);
 			if (folded !== null && !known) this.initial[name] = folded;
 		}
-		if (folded !== null) this.constants.set(name, folded);
+		// State changes as the person does, so no prop may fold it into a constant.
+		if (folded !== null && !node.state) this.constants.set(name, folded);
 		else this.constants.delete(name);
 		return { t: "decl", key: name, e: node.value, state: node.state };
 	}
@@ -218,7 +227,7 @@ class Compiler {
 			}
 		}
 		// What a form is called, what a field is called and what a choice offers must be written plainly.
-		for (const name of ["id", "name", "options", "required"] as const) {
+		for (const name of ["id", "name", "options", "required", "kind", "min", "max", "step", "value"] as const) {
 			const value = props[name];
 			if (value !== undefined && value.k !== "const") {
 				this.say("error", "invalid_literal", `A <${node.tag}>'s ${name} must be plain, not worked out.`);
@@ -226,6 +235,7 @@ class Compiler {
 			}
 		}
 		if (node.tag === "form") return this.form(node, props, form);
+		if ((node.tag === "checkbox" || node.tag === "slider") && form === null) return this.standalone(node, props);
 		if ((FIELD_TAGS as readonly string[]).includes(node.tag)) return this.field(node, props, form);
 		const key = node.tag === "button" && props.onClick !== undefined ? `b${this.buttons++}` : undefined;
 		if (spec.children === "none" && node.children.length > 0) {
@@ -260,6 +270,10 @@ class Compiler {
 				return typeof folded === "boolean" ? { k: "const", v: folded } : wrong("true or false");
 			case "strings":
 				return Array.isArray(folded) && folded.every((item) => typeof item === "string") ? { k: "const", v: folded } : wrong("a list of texts");
+			case "list":
+				return Array.isArray(folded) && (folded.every((item) => typeof item === "number") || folded.every((item) => item !== null && typeof item === "object" && !Array.isArray(item)))
+					? { k: "const", v: folded }
+					: wrong("a list of numbers or of tables");
 			case "enum":
 				return typeof folded === "string" && spec.values?.includes(folded) === true
 					? { k: "const", v: folded }
@@ -323,13 +337,15 @@ class Compiler {
 		const tol = props.tol?.k === "const" && typeof props.tol.v === "number" ? props.tol.v : undefined;
 		const explain = props.explain?.k === "const" && typeof props.explain.v === "string" ? props.explain.v : undefined;
 		const label = props.label?.k === "const" && typeof props.label.v === "string" ? props.label.v : null;
+		const control = this.control(node, props);
+		if (control === null) return null;
 		const field: Field = {
 			key,
 			form: form.id,
 			name,
 			label,
 			tag: node.tag as Field["tag"],
-			required: props.required?.k === "const" ? props.required.v !== false : true,
+			required: props.required?.k === "const" ? props.required.v !== false : node.tag !== "checkbox" && node.tag !== "slider",
 			graded,
 			...(graded ? { answer: (answer as { v: Value }).v } : {}),
 			...(tol !== undefined ? { tol } : {}),
@@ -337,7 +353,61 @@ class Compiler {
 		};
 		form.fields.push(field);
 		this.stateKeys.push(key);
+		if (control !== undefined) {
+			this.controls[key] = control.spec;
+			this.initial[key] = control.initial;
+		}
 		return { t: "el", tag: node.tag, props, children: [], key };
+	}
+
+	/** A checkbox or slider's range and starting value; undefined for any other field, null when it can't be used. */
+	private control(node: Extract<RawNode, { t: "el" }>, props: Record<string, PropValue>): { spec: ControlSpec; initial: Value } | null | undefined {
+		if (node.tag === "checkbox") return { spec: { kind: "checkbox" }, initial: false };
+		if (node.tag !== "slider") return undefined;
+		const number = (name: string) => (props[name]?.k === "const" && typeof props[name].v === "number" ? props[name].v : undefined);
+		const min = number("min");
+		const max = number("max");
+		const step = number("step");
+		if (min === undefined || max === undefined || !(min < max)) {
+			this.say("error", "invalid_literal", "A <slider> needs a min below its max.");
+			return null;
+		}
+		if (step !== undefined && !(step > 0)) {
+			this.say("error", "invalid_literal", "A <slider>'s step must be above 0.");
+			return null;
+		}
+		const start = number("value");
+		return { spec: { kind: "slider", min, max, step: step ?? 1 }, initial: Math.min(max, Math.max(min, start ?? min)) };
+	}
+
+	/** A checkbox or slider outside a form: state named by its name, declared here when nothing declared it. */
+	private standalone(node: Extract<RawNode, { t: "el" }>, props: Record<string, PropValue>): Node | null {
+		const name = String((props.name as { v: Value }).v);
+		if (!STATE_NAME.test(name)) {
+			this.say("error", "invalid_literal", `A <${node.tag}> outside a form is state, so its name is a word of letters, digits and _, such as seats.`);
+			return null;
+		}
+		for (const given of ["answer", "tol", "explain"]) {
+			if (props[given] !== undefined) {
+				this.say("warning", "unknown_prop", `A <${node.tag}> outside a form isn't checked, so its ${given} is dropped.`);
+				delete props[given];
+			}
+		}
+		const control = this.control(node, props);
+		if (control === undefined || control === null) return null;
+		const known = this.controls[name];
+		if (known !== undefined && known.kind !== control.spec.kind) {
+			this.say("error", "duplicate_field", `${name} is a ${known.kind}, and can't be a ${control.spec.kind} too.`);
+			return null;
+		}
+		this.controls[name] ??= control.spec;
+		if (!this.stateKeys.includes(name)) {
+			this.stateKeys.push(name);
+			this.initial[name] = control.initial;
+			const literal: Expr = typeof control.initial === "boolean" ? { t: "bool", v: control.initial } : { t: "num", v: control.initial as number };
+			this.before.push({ t: "decl", key: name, e: literal, state: true });
+		}
+		return { t: "el", tag: node.tag, props, children: [], key: name };
 	}
 
 	/** Looks over an expression: only builtins may be called, each with the arguments it takes. */
@@ -417,6 +487,12 @@ function blockOf(node: RenderNode): string {
 					return markdownOf(node.children);
 				case "button":
 					return "";
+				case "badge":
+				case "checkbox":
+				case "slider":
+					return inlineEl(node, true);
+				case "chart":
+					return chartOf(node);
 				default:
 					// A field on its own, or a row or cell outside its table, shows as its blank.
 					return node.children.length > 0 ? inline(node.children) : "___";
@@ -430,12 +506,44 @@ function inline(children: RenderNode[]): string {
 		.map((child) => {
 			if (child.t === "md" || child.t === "text") return child.text;
 			if (child.tag === "button") return "";
+			if (child.tag === "badge" || child.tag === "checkbox" || child.tag === "slider" || child.tag === "chart") return inlineEl(child);
 			if (child.children.length > 0 && (child.tag === "row" || child.tag === "cell" || child.tag === "box" || child.tag === "title" || child.tag === "text")) {
 				return inline(child.children);
 			}
 			return "___";
 		})
 		.join("");
+}
+
+type El = Extract<RenderNode, { t: "el" }>;
+
+/** A badge, checkbox or slider as a line of Markdown: **text**, [x] label, label: value unit. */
+function inlineEl(node: El, bullet = false): string {
+	const label = String(node.props.label ?? node.props.name ?? "");
+	switch (node.tag) {
+		case "badge":
+			return `**${inline(node.children).trim()}**`;
+		case "checkbox":
+			return `${bullet ? "- " : ""}[${node.props.value === true ? "x" : " "}] ${label}`;
+		case "slider": {
+			const unit = node.props.unit === undefined ? "" : ` ${String(node.props.unit)}`;
+			return `${label}: ${stringOf(node.props.value ?? null)}${unit}`;
+		}
+		default:
+			return chartOf(node).replace(/\n+/g, " ");
+	}
+}
+
+/** A chart as the table of its data, under its title. */
+function chartOf(node: El): string {
+	const data = Array.isArray(node.props.data) ? node.props.data : [];
+	const cell = (value: Value) => stringOf(value).replace(/\|/g, "\\|");
+	const rows = data.map((point) => {
+		const { x = null, y = null } = point !== null && typeof point === "object" && !Array.isArray(point) ? point : {};
+		return `| ${cell(x)} | ${cell(y)} |`;
+	});
+	const table = [`| ${cell(node.props.x ?? "")} | ${cell(node.props.y ?? "")} |`, "| --- | --- |", ...rows].join("\n");
+	return node.props.title === undefined ? table : `**${stringOf(node.props.title)}**\n\n${table}`;
 }
 
 function tableOf(node: Extract<RenderNode, { t: "el" }>): string {
@@ -460,7 +568,9 @@ function formOf(node: Extract<RenderNode, { t: "el" }>): string {
 			if (text.trim() !== "") blocks.push(text.trim());
 			continue;
 		}
-		if ((FIELD_TAGS as readonly string[]).includes(child.tag)) {
+		if (child.tag === "checkbox" || child.tag === "slider") {
+			blocks.push(inlineEl(child, true));
+		} else if ((FIELD_TAGS as readonly string[]).includes(child.tag)) {
 			blocks.push(`- ${child.props.label === undefined ? String(child.props.name ?? "") : String(child.props.label)}: ___`);
 		} else if (child.tag !== "button") {
 			// A table or box keeps its own markdown, with its fields as blanks.

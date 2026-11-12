@@ -8,11 +8,11 @@
  * tree until the form is revealed, so nothing puts it on the page.
  */
 
-import { MAX_DEPTH, MAX_STATE_BYTES, MAX_TEXT_CHARS } from "./limits";
+import { MAX_CHART_POINTS, MAX_DEPTH, MAX_STATE_BYTES, MAX_TEXT_CHARS } from "./limits";
 import type { ActionName, Node, NodePart, UiProgram } from "./program";
 import type { Expr } from "./parse";
 import type { FormSpec, UiState, Value } from "./value";
-import { evalExpr, EvalError, formReady, gradeForm, initialUiState, stringOf, Steps, truthy } from "./value";
+import { coerceControl, evalExpr, EvalError, formReady, gradeForm, initialUiState, numberOf, stringOf, Steps, truthy } from "./value";
 
 /** An action to run, with its arguments worked out, and the form it belongs to. */
 export type Action = { name: ActionName; args: Value[]; form: string | null };
@@ -25,7 +25,7 @@ export type RenderNode =
 
 /** What happened, as the app reports it to the block: a field filled in, a form submitted, a button clicked. */
 export type UiEvent =
-	| { type: "change"; key: string; value: string }
+	| { type: "change"; key: string; value: string | number | boolean }
 	| { type: "submit"; form: string }
 	| { type: "click"; key: string }
 	| { type: "reveal"; form: string };
@@ -51,8 +51,14 @@ export function evaluate(program: UiProgram, given: UiState, event: UiEvent | nu
 	const steps = new Steps();
 	try {
 		if (event?.type === "change") {
-			if (event.value.length > MAX_TEXT_CHARS) throw new EvalError(`A text value may be at most ${MAX_TEXT_CHARS} characters.`);
-			state.values[event.key] = event.value;
+			const control = Object.hasOwn(program.controls, event.key) ? program.controls[event.key] : undefined;
+			if (control !== undefined) {
+				state.values[event.key] = coerceControl(control, event.value);
+			} else {
+				if (typeof event.value !== "string") throw new EvalError("That field holds text.");
+				if (event.value.length > MAX_TEXT_CHARS) throw new EvalError(`A text value may be at most ${MAX_TEXT_CHARS} characters.`);
+				state.values[event.key] = event.value;
+			}
 		}
 		if (event?.type === "submit" || event?.type === "reveal") {
 			const spec = program.forms[event.form];
@@ -159,7 +165,8 @@ class Renderer {
 		// Forms, fields and buttons carry their key, so the app can tell its events apart.
 		if (node.key !== undefined) props.key = node.key;
 		if (node.tag === "form") return this.form(node, props, depth);
-		if (node.tag === "number" || node.tag === "input" || node.tag === "select") {
+		if (node.tag === "chart") this.chart(props);
+		if (node.tag === "number" || node.tag === "input" || node.tag === "select" || node.tag === "checkbox" || node.tag === "slider") {
 			const key = node.key;
 			if (key !== undefined) {
 				const formId = this.currentForm ?? key.slice(0, Math.max(0, key.lastIndexOf(".")));
@@ -170,7 +177,8 @@ class Renderer {
 					for (const secret of ["answer", "tol", "explain"]) delete props[secret];
 				}
 				props.required = this.program.forms[formId]?.fields.find((field) => field.key === key)?.required ?? true;
-				props.value = stringOf(this.state.values[key] ?? "");
+				const held = this.state.values[key] ?? "";
+				props.value = node.tag === "checkbox" ? held === true : node.tag === "slider" ? (numberOf(held) ?? Number(props.min)) : stringOf(held);
 				props.locked = submitted !== undefined;
 				props.graded = submitted?.graded[key] === true;
 			}
@@ -178,6 +186,31 @@ class Renderer {
 		const children = this.nodes(node.children, depth + 1);
 		this.fire(node, null);
 		return { t: "el", tag: node.tag, props, children };
+	}
+
+	/** Puts a chart's data in the one shape the app draws, a list of {x, y} with y a number, and says what x and y are. */
+	private chart(props: Record<string, Value>): void {
+		if (!["bar", "line", "pie"].includes(String(props.kind))) throw new EvalError('A chart is "bar", "line" or "pie".');
+		const data = props.data;
+		if (!Array.isArray(data)) throw new EvalError("A chart's data is a list.");
+		if (data.length > MAX_CHART_POINTS) throw new EvalError(`A chart may have at most ${MAX_CHART_POINTS} points.`);
+		const x = props.x === undefined ? null : stringOf(props.x);
+		const y = props.y === undefined ? null : stringOf(props.y);
+		const points = data.map((item, index): Value => {
+			if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+				if (x === null || y === null) throw new EvalError("A chart of tables needs its x and y.");
+				const height = Object.hasOwn(item, y) ? numberOf(item[y]!) : null;
+				if (height === null) throw new EvalError(`A chart's ${y} is a number in every item.`);
+				return { x: stringOf(Object.hasOwn(item, x) ? item[x]! : null), y: height };
+			}
+			const height = typeof item === "number" ? item : null;
+			if (height === null) throw new EvalError("A chart's data is a list of numbers or of tables.");
+			return { x: String(index + 1), y: height };
+		});
+		if (props.kind === "pie" && points.some((point) => (point as { y: number }).y < 0)) throw new EvalError("A pie chart's values can't be negative.");
+		props.data = points;
+		props.x = x ?? "#";
+		props.y = y ?? "value";
 	}
 
 	private form(node: Extract<Node, { t: "el" }>, props: Record<string, Value>, depth: number): RenderNode | null {

@@ -1,5 +1,5 @@
 /**
- * The catalog of native components a ```ui block may draw, version 1: the
+ * The catalog of native components a ```ui block may draw, version 2: the
  * tags, their props and what each is for. The web app has a React component
  * for each tag and nothing else renders, so a block can only draw what is
  * here. The same table checks a block at compile time, describes the
@@ -7,7 +7,7 @@
  */
 
 /** What a prop's value is, as written in a tag. */
-export type PropKind = "string" | "number" | "boolean" | "strings" | "enum" | "actions";
+export type PropKind = "string" | "number" | "boolean" | "strings" | "enum" | "list" | "actions";
 
 export type PropSpec = {
 	kind: PropKind;
@@ -27,7 +27,7 @@ export type TagSpec = {
 	children: Children;
 };
 
-export const CATALOG_VERSION = 1;
+export const CATALOG_VERSION = 2;
 
 /** The tags a ```ui block may use, with their props. */
 export const CATALOG: Record<string, TagSpec> = {
@@ -117,6 +117,51 @@ export const CATALOG: Record<string, TagSpec> = {
 		},
 		children: "none",
 	},
+	checkbox: {
+		description: "A box the person ticks. Outside a form it is state named name, a true or false that {@let} values can read; in a form it is a field. With answer it is checked on submit.",
+		props: {
+			name: { kind: "string", required: true, description: "The state's name, or the field's name within its form." },
+			label: { kind: "string", description: "What the box is called, shown beside it and in the form's summary." },
+			answer: { kind: "boolean", description: "Whether it should be ticked, checked on submit." },
+			explain: { kind: "string", description: "Shown with the mark when the answer is wrong." },
+			required: { kind: "boolean", description: "Whether the form can be submitted with this box unticked; default false. Write required={true} for a box that must be ticked." },
+		},
+		children: "none",
+	},
+	slider: {
+		description: "A number the person picks along a range, shown beside the slider. Outside a form it is state named name, a number that {@let} values can read; in a form it is a field. Not checked unless it has an answer.",
+		props: {
+			name: { kind: "string", required: true, description: "The state's name, or the field's name within its form." },
+			label: { kind: "string", description: "What the slider is called, shown above it and in the form's summary." },
+			min: { kind: "number", required: true, description: "The lowest value." },
+			max: { kind: "number", required: true, description: "The highest value; above min." },
+			step: { kind: "number", description: "The distance between values; default 1." },
+			value: { kind: "number", description: "What it starts at; default min." },
+			unit: { kind: "string", description: "Shown after the value, such as \"seats\"." },
+			answer: { kind: "number", description: "The number it is checked against on submit." },
+			tol: { kind: "number", description: "How far off it may be; default 0, exact." },
+			explain: { kind: "string", description: "Shown with the mark when the answer is wrong." },
+		},
+		children: "none",
+	},
+	badge: {
+		description: "A small label, such as a status.",
+		props: {
+			tone: { kind: "enum", values: ["default", "muted", "good", "bad", "warn"], description: "What the label means: neutral, quiet, good, bad or a warning." },
+		},
+		children: "text",
+	},
+	chart: {
+		description: "A chart of a list, drawn again as the state it reads changes, with its data as a table for those who can't see it.",
+		props: {
+			kind: { kind: "enum", values: ["bar", "line", "pie"], required: true, description: "The kind of chart." },
+			data: { kind: "list", required: true, description: "A list of numbers, or of tables with the x and y names as keys, such as [{month: \"Jan\", sales: 4}]." },
+			x: { kind: "string", description: "The key of each table that labels it; not needed for a list of numbers." },
+			y: { kind: "string", description: "The key of each table that holds its number; not needed for a list of numbers." },
+			title: { kind: "string", description: "What the chart shows." },
+		},
+		children: "none",
+	},
 	button: {
 		description: "A button that acts without the model: copy something, show a form's answers, or send a turn.",
 		props: {
@@ -139,6 +184,8 @@ function propSyntax(spec: PropSpec): string {
 			return '["a", "b"]';
 		case "enum":
 			return spec.values ? spec.values.map((value) => `"${value}"`).join(" | ") : "enum";
+		case "list":
+			return "{list}";
 		case "actions":
 			return "[action(), …]";
 	}
@@ -207,7 +254,7 @@ export function uiBlockReference(): string {
 		`The components (v${CATALOG_VERSION}):`,
 		...tags,
 		`Plain text inside the block is Markdown. {expr} interpolates an expression: literals, + - * / % == != < <= > >= && || ! ?:, member and index access, and the builtins ${builtins}. An expression that reads a form is checked again as the person fills it in.`,
-		'A statement sits alone on its line: {@state name = expr} declares state the person can change (input values are state too), {@let name = expr} a value derived each time. Blocks: {#if expr}…{:else}…{/if} and {#each list as item, i}…{/each}.',
+		'A statement sits alone on its line: {@state name = expr} declares state the person can change (input values are state too), {@let name = expr} a value derived each time. A <checkbox> or <slider> outside a form is state of its own name (a true or false, a number) that expressions read and that charts and text follow live, such as {@state seats = 8} <slider name="seats" min={1} max={50}/> {@let price = seats * 29}; <chart kind="bar" data={rows} x="k" y="v"/> draws a list of tables, and sum(map(rows, "v")) adds up one of their keys. Blocks: {#if expr}…{:else}…{/if} and {#each list as item, i}…{/each}.',
 		`A handler is an action list, such as onSubmit={[reveal(), issueNewTurn(formSummary("id"))]}. Actions: ${actions}. Pim runs them in the app without asking you, so keep them to what the person is doing.`,
 		"Example:",
 		UI_EXAMPLE,

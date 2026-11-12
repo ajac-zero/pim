@@ -429,6 +429,7 @@ describe("the coding threads API", () => {
 			state: "cached",
 			key: environment.key,
 			source: "settings",
+			pool: codingWorkspaces.id,
 			builtAt,
 			provisionMs,
 			setupMs,

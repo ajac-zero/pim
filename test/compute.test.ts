@@ -10,6 +10,8 @@ import {
 	prepareComputeProvider,
 	withoutSecrets,
 } from "../src/compute";
+import { DEFAULT_POOLS } from "../src/coding/pools-default";
+import { type SandboxPool, resolvePools } from "../src/coding/pools";
 import { workspaceBackends } from "../src/coding/workspace/registry";
 import type { Pim } from "../src/pim";
 import { OWNER, ROOT, say, toolUse } from "./helpers";
@@ -166,6 +168,119 @@ describe("which backends coding threads have", () => {
 		expect(workspaceBackends(environment(), [cloudflare(true), manager({ codingSandbox: false })]).ids()).toEqual(["cloudflare"]);
 	});
 });
+
+describe("sandbox pools", () => {
+	/** The structured lines the Gallery logged with `method`, of one event. */
+	const logged = (spy: { mock: { calls: unknown[][] } }, event: string) =>
+		spy.mock.calls.flatMap(([line]) => (typeof line === "string" && line.startsWith("{") ? [JSON.parse(line)] : [])).filter((line) => line.event === event);
+
+	const pool = (id: string, provider: string, size: number, priority: number, extra: Partial<SandboxPool> = {}): SandboxPool => ({
+		id,
+		provider,
+		size,
+		priority,
+		config: {},
+		enabled: true,
+		...extra,
+	});
+
+	it("start from the checked-in defaults, put in once on first use and never again", async () => {
+		const store = gallery();
+		expect(await store.sandboxPools()).toEqual(DEFAULT_POOLS);
+		// Read again: still the two, not added to.
+		expect(await store.sandboxPools()).toHaveLength(2);
+		expect(await store.sandboxPool("compose")).toEqual(DEFAULT_POOLS[0]);
+		expect(await store.sandboxPool("cloudflare")).toEqual(DEFAULT_POOLS[1]);
+		expect(await store.sandboxPool("nope")).toBeNull();
+		// Each Gallery of its own starts the same way.
+		expect(await gallery().sandboxPools()).toEqual(DEFAULT_POOLS);
+	});
+
+	it("keep the admin's changes: an edit stays, and an emptied registry stays empty", async () => {
+		const store = gallery();
+		await store.upsertSandboxPool("compose", { size: 5, enabled: false }, "admin");
+		await store.upsertSandboxPool(null, { id: "cloudflare-b", provider: "cloudflare", size: 1, priority: 3, config: { image: "pim-workspace:local" } }, "admin");
+		const kept = (await store.sandboxPools()) as SandboxPool[];
+		expect(kept.find((candidate) => candidate.id === "compose")).toMatchObject({ size: 5, enabled: false, priority: 1 });
+		expect(kept.find((candidate) => candidate.id === "cloudflare-b")).toEqual({
+			id: "cloudflare-b",
+			provider: "cloudflare",
+			size: 1,
+			priority: 3,
+			config: { image: "pim-workspace:local" },
+			enabled: true,
+		});
+		// A change to a pool that isn't there is no add.
+		expect(await store.upsertSandboxPool("nope", { size: 4 }, "admin")).toBeNull();
+		// Emptying the registry is the admin's choice too: the defaults aren't put back.
+		for (const candidate of kept) expect(await store.removeSandboxPool(candidate.id, "admin")).toBe(true);
+		expect(await store.sandboxPools()).toEqual([]);
+		expect(await store.removeSandboxPool("compose", "admin")).toBe(false);
+	});
+
+	it("check what the admin gives, and keep every write in the admin's audit trail", async () => {
+		const store = gallery();
+		// An error crosses the Durable Object's boundary as a rejected promise: read its message.
+		const add = async (input: Record<string, unknown>) => store.upsertSandboxPool(null, input, "admin").then(
+			() => "added",
+			(error: Error) => error.message,
+		);
+		expect(await add({ id: "Big Pool", provider: "compose", size: 2, priority: 1 })).toMatch(/id must be a slug/);
+		expect(await add({ id: "compose", provider: "compose", size: 2, priority: 1 })).toMatch(/already here: change it instead/);
+		expect(await add({ id: "daytona", size: 2, priority: 1 })).toMatch(/provider is required/);
+		expect(await add({ id: "daytona", provider: "Daytona", size: 2, priority: 1 })).toMatch(/provider must be a slug/);
+		expect(await add({ id: "daytona", provider: "daytona", priority: 1 })).toMatch(/size is required/);
+		expect(await add({ id: "daytona", provider: "daytona", size: 0, priority: 1 })).toMatch(/size must be a whole number of at least 1/);
+		expect(await add({ id: "daytona", provider: "daytona", size: 1.5, priority: 1 })).toMatch(/size must be a whole number/);
+		expect(await add({ id: "daytona", provider: "daytona", size: 2 })).toMatch(/priority is required/);
+		expect(await add({ id: "daytona", provider: "daytona", size: 2, priority: 1.5 })).toMatch(/priority must be a whole number/);
+		expect(await add({ id: "daytona", provider: "daytona", size: 2, priority: 1, config: ["nope"] })).toMatch(/config must be an object/);
+		expect(await add({ id: "daytona", provider: "daytona", size: 2, priority: 1, enabled: "yes" })).toMatch(/enabled must be true or false/);
+		// A pool's id is its name for good.
+		expect(await store.upsertSandboxPool("compose", { id: "compose-2" }, "admin").then(() => "changed", (error: Error) => error.message)).toMatch(/id cannot be changed/);
+
+		const log = vi.spyOn(console, "log");
+		try {
+			await store.upsertSandboxPool(null, { id: "daytona", provider: "daytona", size: 2, priority: 1 }, "admin");
+			await store.upsertSandboxPool("daytona", { size: 3 }, "the-admin");
+			await store.removeSandboxPool("daytona", "the-admin");
+			expect(logged(log, "pim.sandbox_pool_added")).toEqual([{ event: "pim.sandbox_pool_added", pool: "daytona", by: "admin" }]);
+			expect(logged(log, "pim.sandbox_pool_changed")).toEqual([{ event: "pim.sandbox_pool_changed", pool: "daytona", by: "the-admin" }]);
+			expect(logged(log, "pim.sandbox_pool_removed")).toEqual([{ event: "pim.sandbox_pool_removed", pool: "daytona", by: "the-admin" }]);
+		} finally {
+			log.mockRestore();
+		}
+	});
+
+	it("resolve into the ordered pools placement will use, saying why it left the rest out", () => {
+		const stored = [
+			pool("cloudflare", "cloudflare", 2, 2),
+			pool("compose", "compose", 2, 1),
+			pool("compose-b", "compose", 2, 1),
+			pool("cloudflare-cold", "cloudflare", 2, 1, { enabled: false }),
+			pool("daytona", "daytona", 2, 1),
+		];
+		// The lowest priority first, ties by id, whatever order they were kept in; a disabled pool or one whose provider the deployment doesn't have says why.
+		expect(resolvePools(stored, ["compose", "cloudflare"])).toEqual({
+			pools: [pool("compose", "compose", 2, 1), pool("compose-b", "compose", 2, 1), pool("cloudflare", "cloudflare", 2, 2)],
+			skipped: [
+				{ pool: pool("cloudflare-cold", "cloudflare", 2, 1, { enabled: false }), reason: "disabled" },
+				{ pool: pool("daytona", "daytona", 2, 1), reason: "provider_unavailable" },
+			],
+		});
+		// No provider available leaves every pool out, a disabled one saying so before its provider is missed.
+		const none = resolvePools(stored, []);
+		expect(none.pools).toEqual([]);
+		expect(none.skipped.map((candidate) => [candidate.pool.id, candidate.reason])).toEqual([
+			["cloudflare-cold", "disabled"],
+			["compose", "provider_unavailable"],
+			["compose-b", "provider_unavailable"],
+			["daytona", "provider_unavailable"],
+			["cloudflare", "provider_unavailable"],
+		]);
+	});
+});
+
 
 describe("quotas", () => {
 	const begin = (store: ReturnType<typeof gallery>, thread: string, quota: Partial<ComputeQuota> | null, now: number, user = "ann", provider = "fake") =>

@@ -28,6 +28,7 @@ import { detectConfiguredSetup, detectRepository, environmentBrief, type Provisi
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { CHATGPT_PROVIDER } from "../chatgpt";
 import { piProvider } from "../providers";
+import { environmentNotices, stepRecord } from "./environment-phase";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
 import {
@@ -1070,12 +1071,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const queue = thread.slot === "queued" ? await codingScheduler(this.env, thread.space).position(thread.threadId) : null;
 		// For amp-http orb threads, display as 'amp-orbs' in pool/provider
 		const displayProvider = thread.providerId === "amp-http" ? "amp-orbs" : thread.providerId;
+		// A failed environment is shown, not hidden, while nothing else says what the thread is waiting on.
+		const environmentFailed = thread.environment.state === "failed" && !thread.stateReason && thread.state !== "failed" && thread.state !== "archived";
 		return {
 			threadId: thread.threadId,
 			activity: await this.activity(),
 			state: thread.state,
-			stateReason: thread.stateReason,
-			stateDetail: thread.stateDetail,
+			stateReason: environmentFailed ? "environment_failed" : thread.stateReason,
+			stateDetail: environmentFailed ? (thread.environment.error ?? null) : thread.stateDetail,
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch, baseSha: thread.baseSha },
 			profile: thread.profile,
 			resolvedProfile: thread.resolvedProfile,
@@ -1142,8 +1145,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.#live();
 		if (thread.currentOperation) throw new Error("This coding thread's turn is under way: rebuild its environment between turns");
 		const provider = this.workspaceProviders().get(thread.providerId);
-		if (!provider.capabilities.environmentSnapshots) throw new Error("This coding thread's workspace backend keeps no environments");
-		if (thread.environment.key) await provider.deleteEnvironment(thread.space, thread.environment.key);
+		if (provider.capabilities.environmentSnapshots && thread.environment.key) await provider.deleteEnvironment(thread.space, thread.environment.key);
 		this.#setEnvironment({ state: "building", rebuildRequested: true, error: undefined });
 		this.#kick();
 		return this.store.required().environment;
@@ -1383,6 +1385,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async transcript(): Promise<TranscriptMessage[]> {
 		await this.lifecycle.start();
 		const messages = transcriptOf(await this.harness.messages());
+		// The environment phase comes before the harness's first reply: by time, but never after the first thing the person said.
+		const firstReply = messages.findIndex((entry) => entry.role === "assistant" || entry.role === "tool");
+		const firstSaid = messages.findIndex((entry) => entry.role === "user");
+		let cursor = 0;
+		for (const notice of environmentNotices(this.store.environmentEvents())) {
+			let at = messages.findIndex((entry) => entry.timestamp >= notice.timestamp);
+			if (firstSaid >= 0 && (firstReply < 0 || notice.timestamp <= messages[firstReply]!.timestamp) && (at < 0 || at > firstSaid)) at = firstSaid;
+			at = Math.max(at < 0 ? messages.length : at, cursor);
+			messages.splice(at, 0, notice);
+			cursor = at + 1;
+		}
 		for (const [index, notice] of this.store.profileNotices().entries()) {
 			const { provider, model, source } = notice.profile;
 			const message: TranscriptMessage = { id: `model-resolved-${notice.seq}`, role: "notice", parts: [{ type: "text", text: `Model: ${provider} · ${model} · ${source ?? "source unknown"}` }], timestamp: notice.at };
@@ -3623,21 +3636,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * runs the script and keeps a snapshot; while another of their threads
 	 * holds the lock it waits for that one's snapshot, a bounded time.
 	 * Nothing here fails the thread: a failure is recorded and the thread
-	 * goes on in its workspace as it is. Only a stop is thrown. A backend
-	 * that keeps no environments says so on the environment instead, and
-	 * the thread works in a plain workspace.
+	 * goes on in its workspace as it is. Only a stop is thrown. Every
+	 * backend runs the same lifecycle; one that keeps no snapshots
+	 * (`capabilities.environmentSnapshots`) builds in place each time, with
+	 * no restore, no snapshot and no cross-thread lock.
 	 */
 	async #prepareEnvironment(): Promise<void> {
 		const thread = this.store.required();
 		const current = thread.environment;
 		const provider = this.workspaceProviders().get(thread.providerId);
-		if (!provider.capabilities.environmentSnapshots) {
-			// Distinct from "none", which means the repository declares no setup: here the backend itself can't keep environments.
-			if (current.state !== "unsupported") {
-				this.#setEnvironment({ state: "unsupported", reason: `The workspace backend ${provider.id} keeps no environments`, key: null, source: null, preparedAt: this.now(), error: undefined });
-			}
-			return;
-		}
+		const snapshots = provider.capabilities.environmentSnapshots;
 		const rebuild = current.rebuildRequested;
 		if (!rebuild && current.preparedAt !== null) return;
 		// A thread that already worked without one (it began before environments, or was called off while one was readied) gets none unless asked.
@@ -3695,12 +3703,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return;
 		}
 		const source = setup?.source ?? null;
+		this.store.recordEvent("environment.started", { pool: scope.pool, provider: provider.id, key, source, snapshots });
 		if (!rebuild && current.state === "restoring" && current.restoredFromKey === key) {
 			this.#restored(key, source, scope.pool);
 			return;
 		}
 		// A rebuild runs the script in the thread's own workspace; a new thread may start over from someone's snapshot.
-		let restore = !rebuild;
+		let restore = !rebuild && snapshots;
 		const scheduler = codingScheduler(this.env, thread.space);
 		const deadline = performance.now() + BUILD_LOCK_MS;
 		for (;;) {
@@ -3718,8 +3727,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				// The restore failed and the workspace is a plain clone: build it here instead.
 				restore = false;
 			}
-			// An environment whose snapshot wasn't worth keeping is set up by each thread, so there is nothing to wait for.
-			if (!rebuild && (await scheduler.environmentSnapshotSkipped(key))) {
+			// A backend that keeps no snapshots builds in place, and so does one whose environment's snapshot wasn't worth keeping: there is nothing to wait for.
+			if (!snapshots || (!rebuild && (await scheduler.environmentSnapshotSkipped(key)))) {
 				await this.#buildEnvironment(provider, workspace, owner, key, setup, plan, { snapshot: false, ...scope });
 				return;
 			}
@@ -3740,7 +3749,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			}
 			await sleep(this.environmentPollMs(), signal);
 			if (signal.aborted) throw new Error(ENVIRONMENT_STOPPED);
-			restore = !rebuild;
+			restore = !rebuild && snapshots;
 		}
 	}
 
@@ -3749,6 +3758,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const env = this.store.required().environment;
 		const cached = <T extends { status: string }>(item: T): T => (item.status === "pending" ? { ...item, status: "cached" } : item);
 		this.#setEnvironment({ state: "cached", pool, key, source, readyFrom: "snapshot", preparedAt: this.now(), error: undefined, toolchains: env.toolchains.map(cached), dependencies: env.dependencies.map(cached) });
+		this.store.recordEvent("environment.step", stepRecord({ step: "restore", command: `restore the environment snapshot ${key.slice(0, 12)}`, outcome: "ok", exitCode: null, ms: env.restoreMs ?? 0, output: "" }));
 		this.store.recordEvent("environment.restored", { key });
 	}
 
@@ -3766,10 +3776,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 		this.#setEnvironment({ state: "building", pool: o.pool, key, source: setup?.source ?? null, error: undefined });
 		const started = performance.now();
 		const provisionFailures = await this.#provision(workspace, plan);
-		const result = setup ? await runSetup(workspace, setup.script, { cwd: REPO_DIR }) : ({ outcome: "ok" } as const);
+		const result = setup ? await runSetup(workspace, setup.script, { cwd: REPO_DIR }) : null;
+		if (setup && result && result.outcome !== "stopped") {
+			this.store.recordEvent("environment.step", stepRecord({ step: "setup", command: setup.script.trim(), outcome: result.outcome, exitCode: result.exitCode, ms: result.ms, output: result.output, outputChars: result.outputChars }));
+		}
 		const setupMs = Math.round(performance.now() - started);
-		if (result.outcome === "stopped") throw new Error(ENVIRONMENT_STOPPED);
-		if (result.outcome === "failed") {
+		if (result?.outcome === "stopped") throw new Error(ENVIRONMENT_STOPPED);
+		if (result?.outcome === "failed") {
 			this.#setEnvironment({ setupMs });
 			this.#environmentFailed(key, result.error);
 			return;
@@ -3828,10 +3841,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (step.needs.some((tool) => missing.has(tool))) {
 				failures++;
 				this.#setItems(step.id, { status: "skipped" });
+				this.store.recordEvent("environment.step", stepRecord({ step: "provision", command: step.script, outcome: "skipped", exitCode: null, ms: 0, output: "" }));
 				continue;
 			}
 			const result = await runProvisionStep(workspace, step, { cwd: REPO_DIR, env: SETUP_ENV, signal: this.#kill.signal });
 			if (result.outcome === "stopped") throw new Error(ENVIRONMENT_STOPPED);
+			this.store.recordEvent("environment.step", stepRecord({ step: "provision", command: step.script, outcome: result.outcome, exitCode: result.exitCode, ms: result.ms, output: result.output, outputChars: result.outputChars }));
 			if (result.outcome === "ok") {
 				this.#setItems(step.id, { status: "installed" });
 				continue;

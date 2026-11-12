@@ -8,7 +8,14 @@
  * can throw past it; what it couldn't make sense of becomes a diagnostic.
  */
 
-import { MAX_DEPTH, MAX_NODES } from "./limits";
+import { MAX_DEPTH, MAX_NODES, MAX_SOURCE_BYTES } from "./limits";
+
+/** How tall one expression's tree may be, which bounds the recursion that checks and works it out. */
+const MAX_EXPR_DEPTH = 100;
+/** How many warnings a block collects; errors are always kept, so a block's validity never depends on the cap. */
+const MAX_WARNINGS = 100;
+/** How many characters failed constructs may have read in all, a few times the longest source. */
+const MAX_REREAD = 8 * MAX_SOURCE_BYTES;
 
 /** A property a model may not name, because reaching it would reach the interpreter's own machinery. */
 const FORBIDDEN = new Set(["__proto__", "constructor", "prototype"]);
@@ -91,6 +98,11 @@ class Parser {
 	private count = 0;
 	/** Set once the tree is over a limit; parsing goes on, but adds nothing. */
 	private full = false;
+	/** Where each line starts, worked out when a diagnostic first needs a line. */
+	private lineStarts: number[] | null = null;
+	private warnings = 0;
+	/** How much source constructs that failed had read, which is read again as text: bounded, so many broken tags can't make the parse quadratic. */
+	private reread = 0;
 
 	constructor(
 		private readonly source: string,
@@ -105,15 +117,33 @@ class Parser {
 
 	/** The line a position is on, for diagnostics about what was read up to it. */
 	private lineAt(pos: number): number {
-		let line = 1;
-		for (let i = 0; i < pos && i < this.source.length; i++) {
-			if (this.source[i] === "\n") line++;
+		if (this.lineStarts === null) {
+			this.lineStarts = [0];
+			for (let i = 0; i < this.source.length; i++) {
+				if (this.source[i] === "\n") this.lineStarts.push(i + 1);
+			}
 		}
-		return line;
+		// The last line that starts at or before pos.
+		let low = 0;
+		let high = this.lineStarts.length - 1;
+		const at = Math.min(pos, this.source.length);
+		while (low < high) {
+			const middle = (low + high + 1) >> 1;
+			if (this.lineStarts[middle]! <= at) low = middle;
+			else high = middle - 1;
+		}
+		return low + 1;
 	}
 
 	private say(code: string, message: string, pos: number, severity: "error" | "warning" = "warning") {
+		if (severity === "warning" && ++this.warnings > MAX_WARNINGS) return;
 		this.diagnostics.push({ code, message, line: this.lineAt(pos), severity });
+	}
+
+	/** Gives up on the rest of the source, once a limit is past: what is read so far stands. */
+	private stop(): void {
+		this.full = true;
+		this.pos = this.source.length;
 	}
 
 	/**
@@ -141,7 +171,12 @@ class Parser {
 
 	/** Rewinds to before a construct that failed, so its text is read as text. */
 	private rewind(start: number): void {
+		this.reread += Math.max(0, this.pos - start);
 		this.pos = start;
+		if (this.reread > MAX_REREAD) {
+			this.say("too_complex", "the block has too many tags and braces that never close", start, "error");
+			this.stop();
+		}
 	}
 
 	private skipSpace(): void {
@@ -167,17 +202,21 @@ class Parser {
 
 	expression(depth = 0): Expr {
 		if (depth > 64) throw new Broken();
-		return this.ternary(depth);
+		const expr = this.ternary(depth);
+		// Chains of operators and members are read in a loop, so only the finished tree says how tall it is.
+		if (depth === 0 && height(expr) > MAX_EXPR_DEPTH) throw new Broken();
+		return expr;
 	}
 
 	private ternary(depth: number): Expr {
+		if (depth > 64) throw new Broken();
 		const cond = this.binary(0, depth);
 		this.skipSpace();
 		if (!this.eat("?")) return cond;
-		const then = this.ternary(depth);
+		const then = this.ternary(depth + 1);
 		this.skipSpace();
 		if (!this.eat(":")) throw new Broken();
-		return { t: "cond", if: cond, then, else: this.ternary(depth) };
+		return { t: "cond", if: cond, then, else: this.ternary(depth + 1) };
 	}
 
 	/** Binary operators by level, tightest last. */
@@ -207,8 +246,9 @@ class Parser {
 
 	private unary(depth: number): Expr {
 		this.skipSpace();
-		if (this.eat("!")) return { t: "un", op: "!", of: this.unary(depth) };
-		if (this.eat("-")) return { t: "un", op: "-", of: this.unary(depth) };
+		if (depth > 64) throw new Broken();
+		if (this.eat("!")) return { t: "un", op: "!", of: this.unary(depth + 1) };
+		if (this.eat("-")) return { t: "un", op: "-", of: this.unary(depth + 1) };
 		return this.postfix(this.primary(depth), depth);
 	}
 
@@ -423,9 +463,9 @@ class Parser {
 		return nodes;
 	}
 
-	/** Adds a node, keeping to the limits; an element or block over its depth limit comes out empty. */
+	/** Adds a node, keeping to the limits: once the tree is full, or the block too deep, nothing more is added. */
 	private add(nodes: RawNode[], node: RawNode, depth: number): void {
-		if (depth >= MAX_DEPTH || this.full) return;
+		if (this.full) return;
 		if (++this.count > MAX_NODES) {
 			this.full = true;
 			this.say("too_many_nodes", `the block has more than ${MAX_NODES} nodes`, this.pos, "error");
@@ -508,7 +548,11 @@ class Parser {
 				const cond = this.expression();
 				this.skipSpace();
 				if (!this.eat("}")) throw new Broken();
-				if (depth >= MAX_DEPTH) this.say("too_deep", `the block nests deeper than ${MAX_DEPTH}`, start, "error");
+				if (depth >= MAX_DEPTH) {
+					this.say("too_deep", `the block nests deeper than ${MAX_DEPTH}`, start, "error");
+					this.stop();
+					return null;
+				}
 				const then = this.nodes(["{:else}", "{/if}"], md, depth + 1);
 				const other = this.eat("{:else}") ? this.nodes(["{/if}"], md, depth + 1) : [];
 				if (!this.eat("{/if}")) this.say("unterminated_block", "a {#if} ends where the source does", start);
@@ -531,7 +575,11 @@ class Parser {
 				}
 				this.skipSpace();
 				if (!this.eat("}")) throw new Broken();
-				if (depth >= MAX_DEPTH) this.say("too_deep", `the block nests deeper than ${MAX_DEPTH}`, start, "error");
+				if (depth >= MAX_DEPTH) {
+					this.say("too_deep", `the block nests deeper than ${MAX_DEPTH}`, start, "error");
+					this.stop();
+					return null;
+				}
 				const body = this.nodes(["{/each}"], md, depth + 1);
 				if (!this.eat("{/each}")) this.say("unterminated_block", "an {#each} ends where the source does", start);
 				return { t: "each", list, item, index, body };
@@ -594,7 +642,11 @@ class Parser {
 			if (!this.cutOff()) this.rewind(start);
 			return null;
 		}
-		if (depth >= MAX_DEPTH) this.say("too_deep", `the block nests deeper than ${MAX_DEPTH}`, start, "error");
+		if (depth >= MAX_DEPTH) {
+			this.say("too_deep", `the block nests deeper than ${MAX_DEPTH}`, start, "error");
+			this.stop();
+			return null;
+		}
 		const children = this.nodes([`</${tag[1]}>`], md, depth + 1);
 		if (!this.eat(`</${tag[1]}>`)) {
 			this.say("unterminated_tag", `the <${tag[1]}> element ends where the source does`, start);
@@ -603,6 +655,29 @@ class Parser {
 		}
 		return { t: "el", tag: tag[1]!, props, children };
 	}
+}
+
+/** How tall an expression's tree is, counted without recursion. */
+function height(expr: Expr): number {
+	let tallest = 0;
+	const todo: [Expr, number][] = [[expr, 1]];
+	for (let next = todo.pop(); next !== undefined; next = todo.pop()) {
+		const [node, level] = next;
+		tallest = Math.max(tallest, level);
+		if (tallest > MAX_EXPR_DEPTH) return tallest;
+		const children: Expr[] =
+			node.t === "arr" ? node.items
+			: node.t === "obj" ? node.entries.map(([, value]) => value)
+			: node.t === "member" ? [node.of]
+			: node.t === "index" ? [node.of, node.at]
+			: node.t === "un" ? [node.of]
+			: node.t === "bin" ? [node.a, node.b]
+			: node.t === "cond" ? [node.if, node.then, node.else]
+			: node.t === "call" ? node.args
+			: [];
+		for (const child of children) todo.push([child, level + 1]);
+	}
+	return tallest;
 }
 
 /** Whether a node draws nothing: text of only space. */

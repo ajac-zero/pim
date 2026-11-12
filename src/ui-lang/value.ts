@@ -392,10 +392,10 @@ export function evalExpr(
 				case "formSummary": {
 					if (forms === null || state === null) throw new EvalError("That is only known while the block runs.");
 					const id = stringOf(args[0]!);
-					const spec = forms[id];
+					const spec = Object.hasOwn(forms, id) ? forms[id] : undefined;
 					if (spec === undefined) throw new EvalError(`No form is called ${id}.`);
-					if (expr.name === "submitted") return state.submitted[id] !== undefined;
-					const submitted = state.submitted[id];
+					const submitted = Object.hasOwn(state.submitted, id) ? state.submitted[id] : undefined;
+					if (expr.name === "submitted") return submitted !== undefined;
 					if (expr.name === "count") return spec.fields.filter((field) => field.graded).length;
 					if (submitted === undefined) throw new EvalError(`The form ${id} has not been submitted.`);
 					if (expr.name === "score") return spec.fields.filter((field) => field.graded && submitted.graded[field.key]).length;

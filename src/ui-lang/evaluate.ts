@@ -61,7 +61,7 @@ export function evaluate(program: UiProgram, given: UiState, event: UiEvent | nu
 			}
 		}
 		if (event?.type === "submit" || event?.type === "reveal") {
-			const spec = program.forms[event.form];
+			const spec = Object.hasOwn(program.forms, event.form) ? program.forms[event.form] : undefined;
 			if (spec === undefined) throw new EvalError(`No form is called ${event.form}.`);
 			if (event.type === "reveal") {
 				state.revealed[event.form] = true;

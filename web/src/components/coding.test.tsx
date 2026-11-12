@@ -2141,7 +2141,9 @@ describe("the environment", () => {
       stateReason: "environment_failed",
       stateDetail: error,
     });
-    expect(await screen.findByText("The environment's setup failed.")).toBeTruthy();
+    expect(
+      await screen.findByText("The environment's setup failed."),
+    ).toBeTruthy();
     expect(screen.getAllByText(error).length).toBeGreaterThan(0);
     expect(api.rebuildEnvironment).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));

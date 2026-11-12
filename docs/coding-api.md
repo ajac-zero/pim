@@ -52,7 +52,7 @@ type CodingThreadSummary = {
   branch: string;           // "pim/<slug>-<id prefix>"
   task: string;             // the task it was started with, at most 2,000 characters
   state: CodingThreadState;
-  stateReason: string | null; // such as "budget", "no_backend", "aborted", "cancelled", "no_capacity", "login_required"
+  stateReason: string | null; // such as "budget", "no_backend", "aborted", "cancelled", "no_capacity", "login_required", "environment_failed" (the environment's setup failed and the thread went on without it; `stateDetail` is the error; retry with POST …/environment/rebuild)
   queue: QueuePlace | null;
   createdBy: CodingCreator;
   parent: string | null;    // the thread that started this one
@@ -108,8 +108,8 @@ type CodingThreadView = {
  * reference.md, and coding-environment.md). Durations are milliseconds; times are ms since the epoch.
  */
 type CodingEnvironment = {
-  state: "none" | "unsupported" | "restoring" | "cached" | "building" | "failed"; // none: nothing to provision and no setup script; unsupported: the workspace backend keeps no environments (reason says why); failed: the setup script failed (a failed provisioning step is on its item)
-  reason?: string;               // why the backend can't keep environments, when the state is "unsupported"
+  state: "none" | "unsupported" | "restoring" | "cached" | "building" | "failed"; // none: nothing to provision and no setup script; unsupported: no longer produced (every backend runs the lifecycle; a backend without snapshots builds in place), kept for threads saved before; failed: the setup script failed (a failed provisioning step is on its item)
+  reason?: string;               // why, for a thread saved as "unsupported"
   key: string | null;           // 64 hex digits: the person, the repository, the provisioning steps, the script, its lockfiles and the workspace image
   source: "settings" | "env" | "repository" | "mise" | "devcontainer" | null; // the person's setting, the repository's .pim/env.json `setup`, its .pim/setup.sh, its mise task `setup`, or its dev container's lifecycle commands (the first that exists); null without a setup
   pool: string | null;          // the sandbox pool whose snapshot this is: the one the thread restored from or, cold-provisioned, keeps its snapshot for; null until ready. With readyFrom, it says whether the thread restored or cold-provisioned in that pool
@@ -165,7 +165,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 | GET | `/coding/threads/:id/tests` | | `{ runs: [{ seq, command, exitCode, timedOut, startedAt, durationMs, summary: { format, passed, failed, skipped, total } \| null, output }] }`, oldest first; `output` is the end of what it printed |
 | GET | `/coding/threads/:id/log` | `?since=<seq>` | `{ events: CodingEvent[], next }`: the thread's log after `since` (0), at most 500, and the `since` for the next page. See below |
 | GET | `/coding/threads/:id/events` | `Accept: text/event-stream` for SSE | The live stream, as below, until the client closes it |
-| POST | `/coding/threads/:id/steer` | `{ text, interrupt?, operationId? }` | `CodingThreadView`. During a turn the text joins it after its current tool round, or with `interrupt` stops it and starts a new turn with the text; between turns it starts the next one. A `claude-code`, `codex` or `amp` thread takes no input mid-turn: the text is its next turn, which resumes the CLI's session |
+| POST | `/coding/threads/:id/steer` | `{ text, interrupt?, operationId? }` (the `coding_steer` tool also takes `retry_environment`: true runs the environment setup again, as `POST …/environment/rebuild`, and `text` is then optional; with neither, `400 invalid`: "Say something, or set retry_environment") | `CodingThreadView`. During a turn the text joins it after its current tool round, or with `interrupt` stops it and starts a new turn with the text; between turns it starts the next one. A `claude-code`, `codex` or `amp` thread takes no input mid-turn: the text is its next turn, which resumes the CLI's session |
 | POST | `/coding/threads/:id/abort` | | `CodingThreadView`: stops the turn under way and every command it runs, and withdraws inputs waiting |
 | POST | `/coding/threads/:id/continue` | `{ budgetUsd?, operationId? }` | `CodingThreadView`: goes on after a failure or a stop, with a bigger budget if given. A thread `waiting_input` for a login goes on with the input it waited with |
 | POST | `/coding/threads/:id/cancel` | | `CodingThreadView`: a thread whose task hasn't started yet (`queued` or `provisioning`) leaves the queue or gives its slot back, withdraws its inputs, and ends with `thread.turn_ended`, `outcome: "cancelled"`; it is then `idle` with `stateReason: "cancelled"`. Again, it changes nothing. A thread whose turn started: `not_cancellable` |
@@ -191,6 +191,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 - `app.budget_stop`: `data: { budgetUsd, spentUsd }`. Threads stopped before 2026-11-10 at a token ceiling also have `tokens` and `tokenCeiling`.
 - `thread.pushed`: `data: { repo, branch, before, after, outcome }`, where `outcome` is `created`, `updated` or `unchanged`.
 - `thread.merged`: `data: { repo, branch, before, after, outcome, rebased }`, a merge into the default branch (`branch`); `rebased` says whether the thread's commits were rebased onto it first. A rebase also adds a checkpoint, `Rebased onto <branch>`.
+- `environment.started`: `data: { pool, provider, key, source, snapshots }`, once the environment's key is known; `snapshots` is whether the backend keeps environment snapshots. `environment.step`: `data: { step: "restore" | "provision" | "setup", command, outcome: "ok" | "failed" | "skipped", exitCode, ms, output, outputChars, truncated }`, one for the restore, each provisioning step and the setup script; `command` is at most 240 characters and `output` the last 2048 characters of what it printed, cleaned and redacted. They show in the transcript as notices (`id: "environment-<seq>"`) before the agent's first message. A failed setup (`environment.failed`) sets `stateReason: "environment_failed"` until it is retried.
 - `environment.built`, `environment.restored`: `data: { key, setupMs?, snapshotKept? }`, the environment was set up (and its snapshot kept, unless `snapshotKept` is false), or restored from the person's snapshot.
 - `environment.detected`: `data: { toolchains, dependencies }` (comma-separated tool names), a repository with no `.pim/env.json` whose files named what to install.
 - `environment.failed`: `data: { key, error }`; `environment.restore_failed`: `data: { key, error }`, a snapshot that couldn't be restored, after which the thread cloned as usual.

@@ -21,6 +21,8 @@ import {
 	snapshotWorthKeeping,
 } from "./environment-cache";
 import { detectConfiguredSetup, detectRepository, environmentBrief, type ProvisionStep, pendingItems, provisionPlan, runProvisionStep, stepOf, unpinnedKeyParts, workspaceFiles } from "./repo-environment";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { CHATGPT_PROVIDER } from "../chatgpt";
 import { piProvider } from "../providers";
 import { projectEntries, type TranscriptMessage } from "../transcript";
 import { failedResponse, wrapStreams } from "../usage";
@@ -558,9 +560,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * the deployment's own binding; a provider the person or the admin added
 	 * (`own:` or `shared:`) is read from the space's Pim over RPC, key and
 	 * all, and kept only in this isolate's memory: never in this object's
-	 * tables, and never logged. The ChatGPT plan isn't offered: its tokens
-	 * are refreshed in the space's own credential store, and a second
-	 * refresher would race it.
+	 * tables, and never logged. The ChatGPT plan is offered too: its tokens
+	 * are refreshed in the space's own credential store, so a thread asks the
+	 * space's Pim for the current one on each request and never refreshes.
 	 */
 	protected async modelProvider(space: string, providerId: string): Promise<Provider> {
 		if (providerId === CLOUDFLARE_PROVIDER_ID) {
@@ -569,6 +571,22 @@ export class CodingThreadDO extends DurableObject<Env> {
 			return createAI({ binding }).provider;
 		}
 		const pim = await getAgentByName(this.env.Pim, space);
+		if (providerId === CHATGPT_PROVIDER) {
+			// The plan's token is refreshed by the space's Pim, once, and asked for on each request.
+			return {
+				...openaiProvider(),
+				auth: {
+					apiKey: {
+						name: "OpenAI (ChatGPT plan)",
+						resolve: async () => {
+							const apiKey = await (await getAgentByName(this.env.Pim, space)).codingChatgptToken();
+							if (!apiKey) throw new Error("The space's ChatGPT plan isn't signed in");
+							return { auth: { apiKey } };
+						},
+					},
+				},
+			};
+		}
 		const provider = await pim.codingModelProvider(providerId);
 		if (!provider) throw new Error(`The space has no model provider ${providerId}`);
 		return piProvider(providerId, provider);

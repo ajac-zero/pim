@@ -1551,13 +1551,24 @@ export class Pim extends DurableAgent<Env> {
 
 	/**
 	 * The model a coding thread started without one runs on: the space's, as
-	 * agents without a model of their own use it, or the deployment's default
-	 * when that is a ChatGPT plan model, which coding threads can't call.
+	 * agents without a model of their own use it, the ChatGPT plan's included.
+	 * Never the deployment's default in its place: that is Workers AI, which
+	 * the person doesn't want coding threads on.
 	 */
 	async codingDefaultProfile(): Promise<{ providerId: string; model: string }> {
-		const chosen = this.chosenModel();
-		const model = chosen.provider === CHATGPT_PROVIDER ? this.defaultModel() : chosen;
+		const model = this.chosenModel();
 		return { providerId: model.provider, model: model.id };
+	}
+
+	/**
+	 * The ChatGPT plan's access token, for a coding thread's model calls
+	 * (src/coding/thread-do.ts), which keep it in memory for the one request.
+	 * Refreshed here, through the space's one catalog, so a thread never
+	 * refreshes it and never races this Pim's own refresh. Null when not signed in.
+	 */
+	async codingChatgptToken(): Promise<string | null> {
+		if (this.#closed()) return null;
+		return (await this.modelCatalog().getAuth(CHATGPT_PROVIDER))?.auth.apiKey ?? null;
 	}
 
 	/** The space's coding threads changed (one started, changed state or archived): open pages refresh their lists, as for a chat. */

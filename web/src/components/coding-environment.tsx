@@ -296,6 +296,68 @@ function ProvisionList({
   );
 }
 
+/** A failed environment setup, with its error: the thread went on without it, and the person can run the setup again. */
+export function EnvironmentFailedBanner({
+  thread,
+}: {
+  thread: CodingThreadView;
+}) {
+  const { t } = useI18n();
+  const api = useCodingApi();
+  const queryClient = useQueryClient();
+  const env = thread.environment;
+  const retry = useMutation({
+    mutationFn: () => api.rebuildEnvironment(thread.id),
+    onSuccess: (environment) =>
+      queryClient.setQueryData<CodingThreadView>(
+        ["coding", "thread", thread.id],
+        (current) => (current ? { ...current, environment } : current),
+      ),
+  });
+  if (env.state !== "failed" || thread.state === "archived") return null;
+  const turnRunning =
+    thread.state === "running" || thread.currentOperation !== null;
+  return (
+    <section
+      aria-live="polite"
+      className="flex flex-col gap-2 rounded-2xl bg-destructive/10 px-4 py-3"
+    >
+      <p className="flex items-start gap-2 text-[15px] text-destructive">
+        <TriangleAlert className="mt-1 size-4 shrink-0" />
+        {t("codingEnvFailedBanner")}
+      </p>
+      {env.error && (
+        <p className="whitespace-pre-wrap break-words text-muted-foreground text-sm">
+          {env.error}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          disabled={turnRunning || retry.isPending}
+          onClick={() => retry.mutate()}
+        >
+          {t("codingEnvRetry")}
+        </Button>
+        {turnRunning && (
+          <p className="text-muted-foreground text-xs">
+            {t("codingEnvRebuildTurn")}
+          </p>
+        )}
+        {retry.error && (
+          <p role="alert" className="text-destructive text-sm">
+            {codingErrorCode(retry.error) === "conflict"
+              ? t("codingEnvRebuildConflict")
+              : retry.error.message}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function RebuildEnvironment({
   thread,
   env,

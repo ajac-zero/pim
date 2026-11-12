@@ -246,8 +246,10 @@ function seededState(
       ),
     };
     state.revealed[block] = true;
+    // Only the form's own fields: a trailer is text of a turn, and may name anything.
+    const keys = new Set(spec.fields.map((field) => field.key));
     for (const [key, value] of Object.entries(response.values)) {
-      state.values[key] = value;
+      if (keys.has(key)) state.values[key] = value;
     }
   }
   return state;

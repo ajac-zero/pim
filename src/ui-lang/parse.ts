@@ -609,7 +609,8 @@ class Parser {
 			return null;
 		}
 		this.pos += tag[0].length;
-		const props: Record<string, Expr> = {};
+		// Without a prototype, so a prop called `__proto__` is a prop to be refused, not a way to set one.
+		const props: Record<string, Expr> = Object.create(null);
 		try {
 			for (;;) {
 				this.skipSpace();

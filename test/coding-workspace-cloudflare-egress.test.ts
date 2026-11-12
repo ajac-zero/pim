@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { handleEgress } from "../cloudflare-egress";
 import type { EgressPolicy } from "../src/coding/workspace/types";
 
@@ -67,5 +67,31 @@ describe("Cloudflare container egress", () => {
 	it("uses fresh policies so revoked credentials cannot remain in an old intercept", async () => {
 		const revoked = { allow: [] };
 		expect((await handleEgress(new Request("https://api.example/api/git"), revoked, "api.example")).status).toBe(403);
+	});
+	it("forwards an allowed GET and an allowed WebSocket upgrade, returning the 101 untouched", async () => {
+		const amp = { allow: ["ampcode.com", "*.ampcode.com"] };
+		const get = await handleEgress(new Request("https://ampcode.com/"), amp, "*", async () => new Response("ok"));
+		expect(get.status).toBe(200);
+		const upgrade = new Request("https://ampcode.com/", { headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": "k", "sec-websocket-extensions": "permessage-deflate" } });
+		let sent: Request | undefined;
+		const switching = { status: 101, webSocket: {}, headers: new Headers() } as unknown as Response;
+		const response = await handleEgress(upgrade, amp, "*", async (input) => {
+			sent = input as Request;
+			return switching;
+		});
+		expect(response).toBe(switching);
+		expect(sent?.headers.get("upgrade")).toBe("websocket");
+		expect(sent?.headers.get("sec-websocket-key")).toBe("k");
+		expect(sent?.headers.has("sec-websocket-extensions")).toBe(false);
+	});
+	it("logs a denied host with its protocol, method and Upgrade header, and marks the 403 as Pim's", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const response = await handleEgress(new Request("https://evil.example/", { method: "GET", headers: { upgrade: "websocket" } }), { allow: ["ampcode.com"] }, "*", async () => {
+			throw new Error("must not forward");
+		});
+		expect(response.status).toBe(403);
+		expect(response.headers.get("x-pim-egress")).toBe("denied");
+		expect(JSON.parse(warn.mock.calls[0]![0] as string)).toMatchObject({ event: "pim.coding.egress_denied", host: "evil.example", protocol: "https:", method: "GET", upgrade: "websocket", reason: "host not in allowlist" });
+		warn.mockRestore();
 	});
 });

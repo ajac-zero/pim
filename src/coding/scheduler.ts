@@ -1,3 +1,5 @@
+import { closedPool, poolAvailable, poolResult, reservePool, type PoolBreaker } from "./pool-breaker";
+
 /**
  * The slots of a space's coding sessions. A coding thread needs a workspace
  * (a container or sandbox) while it works, and a space may hold only so many
@@ -72,6 +74,10 @@
  */
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS pim_coding_pool_breakers (
+	pool TEXT PRIMARY KEY,
+	state TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pim_coding_queue (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
 	thread_id TEXT NOT NULL UNIQUE,
@@ -124,6 +130,7 @@ CREATE TABLE IF NOT EXISTS pim_coding_provider_conditions (
 
 /** Every table the scheduler keeps. */
 export const CODING_SCHEDULER_TABLES = [
+	"pim_coding_pool_breakers",
 	"pim_coding_queue",
 	"pim_coding_slots",
 	"pim_coding_pools",
@@ -365,10 +372,12 @@ export class CodingScheduler {
 			if (!slot) return { pool: null, admitted: [] };
 			const now = this.#options.now();
 			for (const pool of pools) {
-				if (pool === slot.pool || this.#free(pool) <= 0) continue;
+				if (pool === slot.pool || this.#free(pool) <= 0 || !poolAvailable(this.#breaker(pool), now)) continue;
 				// A thread queued for this pool would have taken its free slot, unless a gate refused it, as it refuses this one.
 				const entry: QueueEntry = { threadId, pool, reason: "slots_full", priority: 0, queuedAt: now, deadlineAt: now };
 				if (refusalOf(this.#gates(), entry, this.#conditions(pool))) continue;
+				this.#saveBreaker(String(slot.pool), poolResult(this.#breaker(String(slot.pool)), threadId, "ignored", now));
+				this.#reservePool(pool, threadId);
 				this.#sql.exec("UPDATE pim_coding_slots SET pool = ? WHERE thread_id = ?", pool, threadId);
 				return { pool, admitted: this.#admit() };
 			}
@@ -376,9 +385,41 @@ export class CodingScheduler {
 		});
 	}
 
+	/** Pools placement must skip now, including one whose probe is in flight. */
+	unhealthyPools(pools: readonly string[]): string[] {
+		return pools.filter((pool) => !poolAvailable(this.#breaker(pool), this.#options.now()));
+	}
+
+	/** Records workspace infrastructure outcomes, not repository or harness errors. */
+	workspaceResult(threadId: string, result: "success" | "failure" | "ignored"): string[] {
+		return this.#options.transaction(() => {
+			const slot = this.#slot(threadId);
+			if (slot?.pool) {
+				const pool = String(slot.pool);
+				this.#saveBreaker(pool, poolResult(this.#breaker(pool), threadId, result, this.#options.now()));
+			}
+			return this.#admit();
+		});
+	}
+
+	#breaker(pool: string): PoolBreaker {
+		const row = this.#sql.exec("SELECT state FROM pim_coding_pool_breakers WHERE pool = ?", pool).toArray()[0];
+		return row ? JSON.parse(String(row.state)) as PoolBreaker : closedPool();
+	}
+
+	#saveBreaker(pool: string, state: PoolBreaker): void {
+		this.#sql.exec("INSERT INTO pim_coding_pool_breakers (pool, state) VALUES (?, ?) ON CONFLICT (pool) DO UPDATE SET state = excluded.state", pool, JSON.stringify(state));
+	}
+
+	#reservePool(pool: string, threadId: string): void {
+		this.#saveBreaker(pool, reservePool(this.#breaker(pool), threadId));
+	}
+
 	/** Frees the thread's slot, if it has one, and admits the queue's head while slots are free. Returns the threads admitted. */
 	release(threadId: string): string[] {
 		return this.#options.transaction(() => {
+			const slot = this.#slot(threadId);
+			if (slot?.pool) this.#saveBreaker(String(slot.pool), poolResult(this.#breaker(String(slot.pool)), threadId, "ignored", this.#options.now()));
 			this.#sql.exec("DELETE FROM pim_coding_slots WHERE thread_id = ?", threadId);
 			return this.#admit();
 		});
@@ -570,7 +611,13 @@ export class CodingScheduler {
 	 */
 	#admit(): string[] {
 		const now = this.#options.now();
+		// A sweep or reconciliation may have removed the probe's slot.
+		for (const row of this.#sql.exec("SELECT pool, state FROM pim_coding_pool_breakers").toArray()) {
+			const state = JSON.parse(String(row.state)) as PoolBreaker;
+			if (state.probe !== null && !this.#slot(state.probe)) this.#saveBreaker(String(row.pool), poolResult(state, state.probe, "ignored", now));
+		}
 		return this.#plan().admitted.map(({ entry, pool }) => {
+			this.#reservePool(pool, entry.threadId);
 			this.#sql.exec("DELETE FROM pim_coding_queue WHERE thread_id = ?", entry.threadId);
 			this.#sql.exec(
 				"INSERT INTO pim_coding_slots (thread_id, pool, acquired_at, state, activity, activity_since) VALUES (?, ?, ?, 'admitted', 'running', ?)",
@@ -593,6 +640,7 @@ export class CodingScheduler {
 	 */
 	#plan(extra: ReadonlyMap<string, number> = new Map()): Plan {
 		const free = new Map<string, number>();
+		const probes = new Set<string>();
 		const freeOf = (pool: string) => free.get(pool) ?? this.#free(pool) + (extra.get(pool) ?? 0);
 		const conditions = new Map<string, AdmissionConditions>();
 		const held = new Map<string, Refusal>();
@@ -603,6 +651,10 @@ export class CodingScheduler {
 			let waitsOn: { pool: string; refusal: Refusal } | undefined;
 			let takes: string | undefined;
 			for (const pool of [entry.pool, ...(entry.overflow ?? [])]) {
+				if (!poolAvailable(this.#breaker(pool), this.#options.now()) || probes.has(pool)) {
+					waitsOn ??= { pool, refusal: { ok: false, reason: "unhealthy" } };
+					continue;
+				}
 				if (freeOf(pool) <= 0) continue;
 				if (!conditions.has(pool)) conditions.set(pool, this.#conditions(pool));
 				const refusal = held.get(pool) ?? refusalOf(this.#gates(), { ...entry, pool }, conditions.get(pool)!);
@@ -614,6 +666,7 @@ export class CodingScheduler {
 				waitsOn ??= { pool, refusal };
 			}
 			if (takes !== undefined) {
+				if (this.#breaker(takes).retryAt !== null) probes.add(takes);
 				free.set(takes, freeOf(takes) - 1);
 				admitted.push({ entry, pool: takes });
 			} else if (waitsOn) {

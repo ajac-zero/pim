@@ -83,7 +83,7 @@ function readConfig(value: unknown): Readonly<Record<string, unknown>> {
 export const comparePools = (a: SandboxPool, b: SandboxPool) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 /** Why a pool was left out of the ones coding threads may be placed in. */
-export type PoolSkipReason = "disabled" | "provider_unavailable";
+export type PoolSkipReason = "disabled" | "provider_unavailable" | "unhealthy";
 
 /** A pool placement won't use, and why. */
 export type SkippedPool = { readonly pool: SandboxPool; readonly reason: PoolSkipReason };

@@ -4,6 +4,8 @@ A coding thread is an agent that works on a GitHub repository in a workspace of 
 
 Each thread belongs to the space that started it. Every route checks that the thread is in the caller's space: another space's thread, or one that doesn't exist, is `404`.
 
+Placement skips an unhealthy pool with `placement.skipped[].reason: "unhealthy"`. Three consecutive workspace infrastructure failures open a pool for five minutes; after that only one thread probes it. A successful workspace start closes it, and a failed probe restarts the cooldown. Capacity and low-disk refusals do not count. A thread pinned to an open pool stays queued with `queue.reason: "unhealthy"` rather than failing or moving to another pool, subject to the usual queue deadline. Breaker state belongs to the space’s scheduler and survives its restart.
+
 ## Errors
 
 Every error is JSON with the HTTP status:
@@ -82,7 +84,7 @@ type CodingThreadView = {
   provider: string;           // the same as `workspaceProvider`: the sandbox provider's id, such as "compose" or "cloudflare"
   pool: string;               // the pool it takes slots from: a pool of the deployment's registry (see coding-pools.md), or its provider's id while one provider is one pool
   placementReason: "pinned" | "priority" | "overflow"; // pinned: the start named it; priority: the first pool with room; overflow: moved on from a full one
-  placement: { kind: "pinned" | "priority" | "overflow"; pool: string; provider: string; priority: number; skipped: { pool: string; reason: "disabled" | "provider_unavailable" | "full" }[] } | null;
+  placement: { kind: "pinned" | "priority" | "overflow"; pool: string; provider: string; priority: number; skipped: { pool: string; reason: "disabled" | "provider_unavailable" | "unhealthy" | "full" }[] } | null;
   // the same as `placementReason` in full: the pool it took a slot in, the provider behind it, where the pool stands among the deployment's pools, and the pools it couldn't and why. Null until the thread is placed
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;

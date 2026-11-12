@@ -353,3 +353,26 @@ describe("the workspace manager's capacity", () => {
 		expect(await stub.refreshConditions(health(30, 4))).toEqual(["d"]);
 	});
 });
+
+it("skips an open pool over RPC and recovers one queued probe through the alarm", async () => {
+	const stub = space();
+	for (let i = 0; i < 3; i++) {
+		await stub.request("fail", { pool: "first" });
+		await stub.workspaceResult("fail", "failure");
+		await stub.release("fail");
+	}
+	expect(await stub.request("overflow", { pool: "first", overflow: ["second"] })).toEqual({ status: "admitted", pool: "second" });
+	expect(await stub.request("probe", { pool: "first" })).toMatchObject({ status: "queued", reason: "unhealthy" });
+	await stub.request("behind", { pool: "first" });
+	codingSchedulers.now = START + 5 * MINUTE;
+	await runDurableObjectAlarm(stub);
+	expect(heard).toContain("admitted:probe");
+	expect(await stub.position("behind")).toMatchObject({ reason: "unhealthy" });
+	await stub.workspaceResult("probe", "failure");
+	await stub.release("probe");
+	codingSchedulers.now += 5 * MINUTE;
+	await runDurableObjectAlarm(stub);
+	expect(heard).toContain("admitted:behind");
+	await stub.workspaceResult("behind", "success");
+	expect(await stub.unhealthyPools(["first"])).toEqual([]);
+});

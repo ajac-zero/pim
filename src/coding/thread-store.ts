@@ -36,7 +36,7 @@ export type CodingProviderKind = "workspace" | "agent-hosted";
 export type PlacementReason = "pinned" | "priority" | "overflow";
 
 /** A pool the thread couldn't be placed in, and why: switched off, without a provider the deployment has, or full when it walked past it. */
-export type PlacementSkip = { readonly pool: string; readonly reason: "disabled" | "provider_unavailable" | "full" };
+export type PlacementSkip = { readonly pool: string; readonly reason: "disabled" | "provider_unavailable" | "unhealthy" | "full" };
 
 /**
  * Where the thread was placed and why: the pool it took a slot in, the

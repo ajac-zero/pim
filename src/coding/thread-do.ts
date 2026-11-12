@@ -105,6 +105,7 @@ import {
 	WorkspaceLimitError,
 	WorkspaceLostError,
 	WorkspacePathError,
+	WorkspaceUnsupportedError,
 	type Workspace,
 	type WorkspaceProvider,
 	type WorkspaceRef,
@@ -201,6 +202,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	#configured: string | null = null;
 	/** The compute providers the admin set up, as last read from the Gallery, and when. */
 	#compute: { providers: readonly ComputeProvider[]; at: number } = { providers: [], at: 0 };
+	/** The pools the scheduler most recently reported unhealthy during placement. */
+	#unhealthyPools = new Set<string>();
 	/** The sandbox pools the thread may take a slot in, as last read from the Gallery, and when. */
 	#pools: { pools: readonly PlacementPool[]; skipped: readonly SkippedPool[]; at: number } | null = null;
 	/**
@@ -1725,7 +1728,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			await codingScheduler(this.env, thread.space).release(thread.threadId);
 			return;
 		}
-		this.#holdSlot(pool);
+		await this.#holdSlot(pool);
 		this.#kick();
 	}
 
@@ -2090,6 +2093,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.placed || thread.slot !== "held") return false;
 		const { pool, overflow } = this.#placement(thread, null);
 		if (overflow.length === 0) return false;
+		this.#unhealthyPools = new Set(await codingScheduler(this.env, thread.space).unhealthyPools([pool, ...overflow]));
 		const moved = await codingScheduler(this.env, thread.space).move(thread.threadId, overflow);
 		if (moved === null) return false;
 		this.ctx.storage.transactionSync(() => {
@@ -2125,7 +2129,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (this.store.required().slot === "queued") this.store.update({ slot: "none" });
 			throw error;
 		}
-		if (result.status === "admitted") this.#holdSlot(result.pool);
+		if (result.status === "admitted") await this.#holdSlot(result.pool);
 		// Admission may have been told meanwhile, by a notice that came while the request was answered.
 		else if (this.store.required().slot === "queued") {
 			this.ctx.storage.transactionSync(() => {
@@ -2141,10 +2145,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * thread that took one of its overflow is placed there for good, with the
 	 * pools it walked past, full, in its placement.
 	 */
-	#holdSlot(pool = this.store.required().poolId): void {
+	async #holdSlot(pool = this.store.required().poolId): Promise<void> {
 		const thread = this.store.required();
 		if (thread.slot === "held") return;
 		const pools = this.#placementPools();
+		this.#unhealthyPools = new Set(await codingScheduler(this.env, thread.space).unhealthyPools(pools.pools.map((candidate) => candidate.id)));
 		const provider = this.#providerOf(pool, pools);
 		const walk = thread.placed ? undefined : this.#placement(thread, null);
 		const order = walk ? [walk.pool, ...walk.overflow] : [thread.poolId];
@@ -2184,7 +2189,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			priority: pools.pools.find((candidate) => candidate.id === poolId)?.priority ?? 0,
 			skipped: [
 				...pools.skipped.map(({ pool, reason }) => ({ pool: pool.id, reason })),
-				...full.map((pool) => ({ pool, reason: "full" as const })),
+				...full.map((pool) => ({ pool, reason: this.#unhealthyPools.has(pool) ? "unhealthy" as const : "full" as const })),
 			],
 		};
 	}
@@ -2951,6 +2956,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await root.submit({ type: "write", entry: { kind, data } }, BACKGROUND_CONTEXT);
 	}
 
+	/** An open pool is waited for, or walked past before first placement, rather than failing its thread. */
+	async #waitForUnhealthyPool(thread: CodingThreadRow): Promise<boolean> {
+		if (thread.state === "archived" || (await codingScheduler(this.env, thread.space).unhealthyPools([thread.poolId])).length === 0) return false;
+		await codingScheduler(this.env, thread.space).release(thread.threadId);
+		this.store.update({ slot: "none", slotSince: null });
+		await this.#requestSlot();
+		if (this.store.required().slot === "held") this.#kick();
+		return true;
+	}
+
 	async #provisioningFailed(error: unknown): Promise<void> {
 		const thread = this.store.required();
 		const lowDisk = error instanceof ComposeManagerError && error.code === "low_disk";
@@ -2965,12 +2980,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.#kick();
 				return;
 			}
+			if (await this.#waitForUnhealthyPool(thread)) return;
 			// Not rewritten while it holds, so the wait counts toward the thread being stuck.
 			const waiting = lowDisk ? "low_disk" : "workspace_capacity";
 			if (thread.stateReason !== waiting) this.store.update({ stateReason: waiting });
 			await this.#schedule(Date.now() + HEARTBEAT_MS);
 			return;
 		}
+		if (await this.#waitForUnhealthyPool(thread)) return;
 		// A workspace found down is made again from its volume; while a thread goes on after one, a backend it can't reach is waited for, longer each time. A few times in a row at most.
 		const resuming = this.store.nextInput()?.operationId.startsWith(RESUME_PREFIX) === true;
 		if (thread.state !== "archived" && (error instanceof WorkspaceLostError || (resuming && error instanceof ComposeManagerError && error.status >= 500))) {
@@ -3146,16 +3163,28 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return this.#opening;
 	}
 
+	/** Only provider operations can trip the pool breaker; refusals and caller errors cannot. */
+	async #poolAttempt<T>(thread: CodingThreadRow, work: () => Promise<T>): Promise<T> {
+		try {
+			return await work();
+		} catch (error) {
+			const refused = error instanceof WorkspaceCapacityError || error instanceof WorkspaceLimitError || error instanceof WorkspaceUnsupportedError || error instanceof WorkspacePathError || error instanceof WorkspaceFileError ||
+				(error instanceof ComposeManagerError && (error.code === "low_disk" || (error.status >= 400 && error.status < 500 && error.status !== 408)));
+			await codingScheduler(this.env, thread.space).workspaceResult(thread.threadId, refused ? "ignored" : "failure");
+			throw error;
+		}
+	}
+
 	async #openWorkspace(options: { restoreFrom?: EnvironmentSnapshot }): Promise<Workspace> {
 		const thread = this.store.required();
 		if (thread.slot !== "held") throw new Error("The coding thread holds no workspace slot now");
 		const provider = this.workspaceProviders().get(thread.providerId);
 		if (this.#open && thread.workspaceRef?.id === this.#open.id) return this.#open.workspace;
-		let workspace = thread.workspaceRef ? await provider.get(thread.workspaceRef) : null;
+		let workspace = thread.workspaceRef ? await this.#poolAttempt(thread, () => provider.get(thread.workspaceRef!)) : null;
 		// A restart between the manager making the container and this thread saving its ref, or the manager's own restart, leaves the session running: it is taken up again, and only a session that is not there is provisioned.
 		if (!workspace && !thread.workspaceRef) {
 			const ref = { id: thread.threadId, providerId: thread.providerId, sessionId: thread.threadId };
-			workspace = await provider.get(ref);
+			workspace = await this.#poolAttempt(thread, () => provider.get(ref));
 			if (workspace) this.store.update({ workspaceRef: ref, placed: true });
 		}
 		const started = workspace ? null : performance.now();
@@ -3167,7 +3196,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			// Creating twice for one session is one workspace, so a restart mid-create makes no second one.
 			let ref: WorkspaceRef;
 			try {
-				ref = await this.#createWorkspace(provider, thread, options.restoreFrom, wallClockMin);
+				ref = await this.#poolAttempt(thread, () => this.#createWorkspace(provider, thread, options.restoreFrom, wallClockMin));
 			} catch (error) {
 				await this.#releaseCompute("failed");
 				throw error;
@@ -3182,16 +3211,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ workspaceRef: ref, placed: true });
 			workspace = await provider.get(ref);
 			if (!workspace) throw new Error("The workspace provider lost the workspace it just made");
-		} else if ((await workspace.status()).state === "stopped") {
+		} else if ((await this.#poolAttempt(thread, () => workspace!.status())).state === "stopped") {
 			await this.#reserveCompute(thread, true);
 			counted = true;
 			try {
-				await workspace.start();
+				await this.#poolAttempt(thread, () => workspace!.start());
 			} catch (error) {
 				await this.#releaseCompute("failed");
 				throw error;
 			}
 		}
+		await codingScheduler(this.env, thread.space).workspaceResult(thread.threadId, "success");
 		// A workspace found running, such as after a restart, is counted as it is, with no check: it runs already.
 		if (!counted) await this.#reserveCompute(thread, false);
 		// A workspace made now starts a session; one found with none recorded (made before they were) is taken to have just begun one.

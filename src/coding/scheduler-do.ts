@@ -116,6 +116,17 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 		return result;
 	}
 
+	unhealthyPools(pools: readonly string[]): string[] {
+		return this.#scheduler.unhealthyPools(pools);
+	}
+
+	async workspaceResult(threadId: string, result: "success" | "failure" | "ignored"): Promise<string[]> {
+		return this.#changed(() => {
+			const admitted = this.#scheduler.workspaceResult(threadId, result);
+			return { result: admitted, admitted };
+		});
+	}
+
 	/** Frees the thread's slot, and tells the threads admitted into it. */
 	async release(threadId: string): Promise<string[]> {
 		return this.#changed(() => {

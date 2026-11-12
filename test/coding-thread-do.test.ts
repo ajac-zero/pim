@@ -1454,6 +1454,31 @@ describe("a coding thread with an overflow provider", () => {
 		await first.stub.archive();
 	});
 
+	it("skips an unhealthy pool in placement and queues a pin until its probe succeeds", async () => {
+		const { compose } = providers();
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		for (let i = 0; i < 2; i++) {
+			await scheduler.request("fail", { pool: "compose" });
+			await scheduler.workspaceResult("fail", "failure");
+			await scheduler.release("fail");
+		}
+		vi.spyOn(compose, "create").mockRejectedValueOnce(new Error("Workspace start failed"));
+		codingFaux.setResponses([fauxAssistantMessage("Overflow done."), fauxAssistantMessage("Probe done.")]);
+		const plain = await startThread({ space });
+		await turns(plain.id, 1);
+		expect(await plain.stub.status()).toMatchObject({ pool: "cloudflare", placement: { skipped: [{ pool: "compose", reason: "unhealthy" }] } });
+		const pinned = await startThread({ space, pool: "compose" });
+		expect(await pinned.stub.status()).toMatchObject({ state: "queued", queue: { reason: "unhealthy" } });
+		codingSchedulers.now = Date.now() + 5 * 60_000 + 1_000;
+		onTestFinished(() => { codingSchedulers.now = null; });
+		await runDurableObjectAlarm(scheduler);
+		await turns(pinned.id, 1);
+		expect(await scheduler.unhealthyPools(["compose"])).toEqual([]);
+		codingSchedulers.now = null;
+		for (const each of [plain, pinned]) await each.stub.archive();
+	});
+
 	it("places a pinned thread only on its pool, though the manager has room, and says why", async () => {
 		const { compose, cloudflare } = providers();
 		codingFaux.setResponses([fauxAssistantMessage("Pinned done."), fauxAssistantMessage("Default done.")]);

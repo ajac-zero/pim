@@ -925,3 +925,27 @@ describe("the coding scheduler", () => {
 		);
 	});
 });
+
+describe("pool circuit breakers", () => {
+	it("persists failures, skips only the unhealthy pool, and admits one recovery probe", async () => {
+		await withScheduler(({ scheduler, clock, make }) => {
+			scheduler.setPools([{ id: "first", provider: "sandbox", size: 3, priority: 1 }, { id: "second", provider: "sandbox", size: 3, priority: 2 }]);
+			for (let i = 0; i < 3; i++) {
+				expect(scheduler.request("fail", { pool: "first" }).status).toBe("admitted");
+				scheduler.workspaceResult("fail", "failure");
+				scheduler.release("fail");
+			}
+			const restarted = make({ defaultLimit: 3 });
+			expect(restarted.unhealthyPools(["first", "second"])).toEqual(["first"]);
+			expect(restarted.request("overflow", { pool: "first", overflow: ["second"] })).toEqual({ status: "admitted", pool: "second" });
+			expect(restarted.request("pinned", { pool: "first" })).toMatchObject({ status: "queued", reason: "unhealthy" });
+			restarted.request("behind", { pool: "first" });
+			clock.now += 5 * MINUTE;
+			expect(restarted.tick().admitted).toEqual(["pinned"]);
+			expect(restarted.position("behind")).toMatchObject({ reason: "unhealthy" });
+			expect(make().unhealthyPools(["first"])).toEqual(["first"]);
+			expect(restarted.workspaceResult("pinned", "success")).toEqual(["behind"]);
+			expect(restarted.unhealthyPools(["first"])).toEqual([]);
+		}, 3);
+	});
+});

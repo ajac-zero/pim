@@ -841,3 +841,21 @@ describe("the new components' fallback", () => {
     );
   });
 });
+
+describe("the docs' ui examples", () => {
+  it("compile and draw", () => {
+    const docs = readFileSync(
+      new URL("../../../docs/reference.md", import.meta.url),
+      "utf8",
+    );
+    const blocks = [...docs.matchAll(/```ui\n([\s\S]*?)\n```/g)].map(
+      (match) => match[1] ?? "",
+    );
+    expect(blocks.length).toBeGreaterThanOrEqual(2);
+    for (const source of blocks) {
+      const program = programOf(source);
+      expect(program.diagnostics, source).toEqual([]);
+      expect(drawn(source, undefined, program).tree.length).toBeGreaterThan(0);
+    }
+  });
+});

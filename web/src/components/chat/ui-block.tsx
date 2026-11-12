@@ -77,8 +77,52 @@ const Events = createContext<UiEvents>({
 /** How often a block still being written is compiled again, at most. */
 export const COMPILE_EVERY_MS = 250;
 
-/** What the person typed into a block while it streamed, by message and place, for the block drawn anew when the stream ends and the message is drawn another way. */
-const carried = new Map<string, UiState["values"]>();
+/**
+ * What the person typed into a block while it streamed, by message and place,
+ * for the block drawn anew when the stream ends and the message is drawn
+ * another way. An entry whose block goes while the stream is still going waits
+ * `CARRY_FOR_MS` for the block that replaces it, then is dropped, so nothing
+ * typed into a block that never comes back is kept for good.
+ */
+const carried = new Map<
+  string,
+  { values: UiState["values"]; expires: ReturnType<typeof setTimeout> | null }
+>();
+
+/** How long what was typed waits for the block that replaces its own: the new one draws within a compile or two. */
+export const CARRY_FOR_MS = 5000;
+
+/** What was typed in the block at `key`, made if there is none yet and kept for as long as a block holds it. */
+function claimCarried(
+  key: string,
+  values: UiState["values"] = {},
+): UiState["values"] {
+  let entry = carried.get(key);
+  if (entry === undefined) {
+    entry = { values, expires: null };
+    carried.set(key, entry);
+  }
+  if (entry.expires !== null) clearTimeout(entry.expires);
+  entry.expires = null;
+  return entry.values;
+}
+
+/** The block that held what was typed at `key` is gone before its stream finished: it is dropped unless a block claims it in time. */
+function releaseCarried(key: string, values: UiState["values"]): void {
+  const entry = carried.get(key);
+  if (entry === undefined || entry.values !== values) return;
+  if (entry.expires !== null) clearTimeout(entry.expires);
+  entry.expires = setTimeout(() => {
+    if (carried.get(key) === entry) carried.delete(key);
+  }, CARRY_FOR_MS);
+}
+
+/** What was typed at `key` is no longer wanted. */
+function dropCarried(key: string): void {
+  const entry = carried.get(key);
+  if (entry?.expires != null) clearTimeout(entry.expires);
+  carried.delete(key);
+}
 
 /**
  * The program of a block as it is written. Once it is complete it is compiled
@@ -254,9 +298,8 @@ function UiProgramView({
   const { t } = useI18n();
   /** What the person has set, by state key. A program that replaces this one starts from its own initial state and takes these over it. */
   const [typed] = useState(() => {
-    const values = (carryKey && carried.get(carryKey)) || {};
-    if (carryKey && !complete) carried.set(carryKey, values);
-    return values;
+    if (!carryKey) return {};
+    return complete ? (carried.get(carryKey)?.values ?? {}) : claimCarried(carryKey);
   });
   const [seed] = useState(() =>
     withTyped(seededState(program, reply.submitted), program, typed),
@@ -376,12 +419,20 @@ function UiProgramView({
     if (next.error === null) show(next);
   }
 
+  // A block that goes while its message is still arriving doesn't keep what was typed in it for good (see `carried`).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `typed` is the same object for as long as the block lives
+  useEffect(() => {
+    if (!carryKey || complete) return;
+    claimCarried(carryKey, typed);
+    return () => releaseCarried(carryKey, typed);
+  }, [carryKey, complete]);
+
   // The block is whole: what the person typed while it streamed is kept, under its final id.
   // biome-ignore lint/correctness/useExhaustiveDependencies: only when it becomes complete
   useEffect(() => {
     if (!complete) return;
     if (touched.current) keep(viewRef.current.state);
-    if (carryKey) carried.delete(carryKey);
+    if (carryKey) dropCarried(carryKey);
   }, [complete]);
 
   const events: UiEvents = {

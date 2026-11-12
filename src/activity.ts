@@ -1,13 +1,5 @@
-import type { Turn, TurnStep } from "./diagnostics";
-
-/** The same bounded, redacted activity record for diagnostics and the web app. Times are epoch ms. */
-export type Activity = {
-	readonly running: boolean;
-	readonly lastActivityAt: number;
-	readonly current: readonly { name: string; summary: string; startedAt: number; elapsedMs: number; timeoutMs: number | null }[];
-	readonly steps: readonly TurnStep[];
-	readonly stalls: readonly { key: string; reason: string; since: number }[];
-};
+import type { Activity, Turn } from "./activity-types";
+export type { Activity } from "./activity-types";
 
 /** A quiet command is worth investigating after five minutes, a quiet coding thread after fifteen. */
 export function activityOf(turns: readonly Turn[], now: number, options: { running: boolean; startedAt: number; lastOutputAt?: number; coding?: boolean; quietMs?: number }): Activity {

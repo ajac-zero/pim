@@ -44,3 +44,12 @@ Paths are absolute or relative to the root. Anything that resolves outside it, i
 ```sh
 cd workspace-agentd && node --test
 ```
+
+Exec timeouts apply to the detached process group, not just the shell. At the
+command's `timeoutMs`, agentd sends SIGTERM, then SIGKILL after two seconds if
+needed, and returns an exit event with `timedOut: true`. If the main process
+exits but children keep stdout or stderr open, a 200 ms drain grace kills the
+remaining group so the response can finish. The exec tests exercise both a
+shell and child ignoring SIGTERM and a child holding stdout open after its
+parent exits. These guarantees cover the command's process group; a process
+that deliberately creates a separate session is outside that group.

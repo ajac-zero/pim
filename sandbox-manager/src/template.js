@@ -76,6 +76,8 @@ export function parseCreate(body, allowedImages, defaultDiskMiB = DEFAULT_DISK_M
 	const filled = { diskMiB: defaultDiskMiB, ...limits }
 	for (const [k, [lo, hi]] of Object.entries(BOUNDS)) {
 		const v = filled[k]
+		// cpu and memMiB are optional: left out, the manager gives the session its share of the host.
+		if (v === undefined && (k === 'cpu' || k === 'memMiB')) continue
 		if (typeof v !== 'number' || !Number.isFinite(v) || v < lo || v > hi) throw new HttpError(400, `limits.${k} must be a number in [${lo}, ${hi}]`)
 		if (k !== 'cpu' && !Number.isInteger(v)) throw new HttpError(400, `limits.${k} must be an integer`)
 	}
@@ -88,7 +90,7 @@ export function parseCreate(body, allowedImages, defaultDiskMiB = DEFAULT_DISK_M
 	return {
 		sessionId,
 		image,
-		limits: { cpu: filled.cpu, memMiB: filled.memMiB, diskMiB: filled.diskMiB, pids: filled.pids },
+		limits: { ...(filled.cpu !== undefined && { cpu: filled.cpu }), ...(filled.memMiB !== undefined && { memMiB: filled.memMiB }), diskMiB: filled.diskMiB, pids: filled.pids },
 		egressAllow: [...new Set(egressAllow)],
 		...(userId !== undefined && { userId }),
 		...(repo !== undefined && { repo }),
@@ -110,7 +112,8 @@ export function cacheVolume(params) {
 // because the proxy's address changes when it is re-attached to the session network.
 export const proxyEnv = (proxyUrl) => ({ HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, http_proxy: proxyUrl, https_proxy: proxyUrl, NO_PROXY: '' })
 
-// opts: { proxyUrl, quotaMode: 'volume' | 'measure' | 'tmpfs', nonce, token, agentdPort }
+// opts: { proxyUrl, quotaMode: 'volume' | 'measure' | 'tmpfs', nonce, token, agentdPort, compute: { cpu, memMiB } }
+// `compute` is what the manager grants the container, worked out from the host (see `sandboxLimits`).
 export function buildSpec(params, opts) {
 	const { sessionId, image, limits } = params
 	const n = names(sessionId)
@@ -155,9 +158,9 @@ export function buildSpec(params, opts) {
 					CapDrop: ['ALL'],
 					SecurityOpt: ['no-new-privileges'],
 					PidsLimit: limits.pids,
-					Memory: limits.memMiB * MiB,
-					MemorySwap: limits.memMiB * MiB,
-					NanoCpus: Math.round(limits.cpu * 1e9),
+					Memory: opts.compute.memMiB * MiB,
+					MemorySwap: opts.compute.memMiB * MiB,
+					NanoCpus: Math.round(opts.compute.cpu * 1e9),
 					Tmpfs: { '/tmp': 'rw,nosuid,nodev,size=64m' },
 					Mounts: [
 						{ Type: 'volume', Source: n.volume, Target: '/workspace', VolumeOptions: { Labels: labels } },

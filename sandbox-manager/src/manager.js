@@ -88,6 +88,25 @@ export async function detectQuotaMode(docker) {
 	}
 }
 
+// What the manager, egress proxy, Docker socket proxy and the OS keep for themselves, out of the
+// host's CPUs and memory, before the rest is shared among the session slots.
+export const RESERVE_CPU = 1
+export const RESERVE_MEM_MIB = 2048
+// No session gets less than this, however many slots there are.
+export const MIN_SANDBOX_CPU = 1
+export const MIN_SANDBOX_MEM_MIB = 1024
+// The most disk the kept (stopped) workspace volumes may hold together: this many bytes, or this
+// share of the disk they and the free space add up to, whichever is smaller.
+export const KEPT_VOLUMES_MAX_BYTES = 20 * 2 ** 30
+export const KEPT_VOLUMES_MAX_DISK_SHARE = 0.3
+
+// The CPU and memory one session may use: the host's, less the reserve, divided by the slots.
+export function sandboxLimits(hostCpus, hostMemBytes, slots) {
+	const cpu = Math.max(MIN_SANDBOX_CPU, Math.floor(((hostCpus - RESERVE_CPU) / slots) * 100) / 100)
+	const memMiB = Math.max(MIN_SANDBOX_MEM_MIB, Math.floor((hostMemBytes / MiB - RESERVE_MEM_MIB) / slots))
+	return { cpu, memMiB }
+}
+
 // The default MAX_CONCURRENT: one session per CPU, each assumed to need 1.5 GiB of memory after
 // reserving 1 GiB for the host, clamped to 1..8. For example 2 vCPU / 3 GiB gives 1, 4 / 16 gives 4.
 const validLimit = (n) => Number.isInteger(n) && n >= 1 && n <= 16
@@ -130,6 +149,32 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		runtimeMax = undefined
 	}
 	const limit = () => runtimeMax ?? cfg.maxConcurrent
+	const hostCpus = cfg.hostCpus ?? os.availableParallelism()
+	const hostMemBytes = cfg.hostMemBytes ?? os.totalmem()
+	// Each session's share at the current slot limit; it follows the limit when PUT /config moves it.
+	const share = () => sandboxLimits(hostCpus, hostMemBytes, limit())
+	const logShare = (why) => {
+		const c = share()
+		console.log(`sandbox limits (${why}): ${c.cpu} CPUs and ${c.memMiB} MiB per session, ${limit()} slots on ${hostCpus} CPUs and ${Math.round(hostMemBytes / MiB)} MiB`)
+	}
+	logShare('start')
+	// What a new session gets: its share, or what the request asks for when that is less, and never
+	// more than the live and starting sessions leave of the host. Sessions started under another slot
+	// limit keep what they were given, so a raised limit cannot book the same CPU twice. The minimums
+	// win over the leftover, so a host too small for its slots still runs them.
+	const compute = (params, id) => {
+		const d = share()
+		let cpu = hostCpus - RESERVE_CPU
+		let mem = hostMemBytes / MiB - RESERVE_MEM_MIB
+		for (const [sid, x] of [...sessions, ...creating]) {
+			if (sid === id) continue
+			cpu -= x.compute?.cpu ?? d.cpu
+			mem -= x.compute?.memMiB ?? d.memMiB
+		}
+		const capCpu = Math.max(MIN_SANDBOX_CPU, Math.min(d.cpu, Math.floor(cpu * 100) / 100))
+		const capMem = Math.max(MIN_SANDBOX_MEM_MIB, Math.min(d.memMiB, Math.floor(mem)))
+		return { cpu: Math.min(params.limits.cpu ?? capCpu, capCpu), memMiB: Math.min(params.limits.memMiB ?? capMem, capMem) }
+	}
 	const configView = () => ({
 		maxConcurrent: limit(),
 		source: runtimeMax !== undefined ? 'runtime' : (cfg.maxConcurrentSource ?? 'default'),
@@ -143,6 +188,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		await writeFile(tmp, JSON.stringify({ maxConcurrent: body.maxConcurrent }), { flush: true })
 		await rename(tmp, configFile)
 		runtimeMax = body.maxConcurrent
+		logShare('slot limit changed')
 		return configView()
 	}
 	// The cache volumes of live and starting sessions, which the env cache's GC never evicts.
@@ -232,6 +278,9 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			await step(() => docker.request('DELETE', `/volumes/${n.marker}`))
 			await step(() => docker.request('POST', '/volumes/create', { Name: n.marker, Labels: { [LABEL_KEPT]: id, [LABEL_KEPT_INFO]: JSON.stringify(keep.info) } }))
 		}
+		// A session being kept is stopped first, so its processes get to exit and its CPU and memory
+		// are freed before the container is removed. Only the volume stays.
+		if (keep) await step(() => docker.request('POST', `/containers/${n.container}/stop?t=10`))
 		await step(() => docker.request('DELETE', `/containers/${n.container}?force=true&v=true`))
 		// A container that is not on the network (a recreated one) fails to disconnect; removing the
 		// network below reports anything still attached.
@@ -248,7 +297,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 	}
 
 	// `restoreFrom` ({key}) fills a new workspace from the user's snapshot before the container starts.
-	async function doCreate(params, restoreFrom) {
+	async function doCreate(params, restoreFrom, granted) {
 		const id = params.sessionId
 		const n = names(id)
 		const resuming = kept.has(id)
@@ -256,7 +305,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			await ensureImage(docker, params.image)
 			const nonce = randomBytes(12).toString('hex')
 			const token = tokenFor(id, nonce)
-			const base = { quotaMode: cfg.quotaMode, nonce, token, agentdPort }
+			const base = { quotaMode: cfg.quotaMode, nonce, token, agentdPort, compute: granted }
 			// Creating a volume that exists returns it, so a kept workspace is reused as it is.
 			const { volume, network } = buildSpec(params, { ...base, proxyUrl: cfg.proxyUrl })
 			await docker.request('POST', '/volumes/create', volume)
@@ -278,7 +327,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			const info = await docker.request('GET', `/containers/${container.name}/json`)
 			const ip = info.NetworkSettings.Networks[n.network].IPAddress
 			await proxyAdmin.set(ip, params.egressAllow)
-			const s = { params, createdAt: kept.get(id)?.createdAt ?? now(), lastUsed: now(), ip, proxyIp, token, egress: true, disk: null, ...(restored && { restoredFrom: restored.key }) }
+			const s = { params, compute: granted, createdAt: kept.get(id)?.createdAt ?? now(), lastUsed: now(), ip, proxyIp, token, egress: true, disk: null, ...(restored && { restoredFrom: restored.key }) }
 			await agentd.ready(target(s), cfg.agentdReadyMs ?? 30000)
 			if (resuming) {
 				await docker.request('DELETE', `/volumes/${n.marker}`).catch(() => {})
@@ -392,12 +441,13 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			const detail = `${by.live} live workspaces ${by.liveMiB} MiB, ${by.kept} stopped workspaces ${by.keptMiB} MiB, snapshots and caches ${by.envMiB} MiB`
 			throw new HttpError(507, `workspace disk would exceed ${cfg.maxTotalWorkspaceMiB} MiB (${detail}; ${totalMiB} MiB reserved, ${need} MiB requested)`, { code: 'workspace_quota', reservedMiB: totalMiB, requestedMiB: need, maxTotalMiB: cfg.maxTotalWorkspaceMiB, ...by })
 		}
+		const granted = compute(params, id)
 		const promise = (async () => {
 			const free = await freeDiskPct()
 			if (free < cfg.minFreePct) throw lowDisk(free)
-			return doCreate(params, restoreFrom)
+			return doCreate(params, restoreFrom, granted)
 		})()
-		creating.set(id, { params, promise })
+		creating.set(id, { params, compute: granted, promise })
 		try {
 			return await promise
 		} finally {
@@ -428,6 +478,24 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		const info = params && { params, createdAt: s?.createdAt ?? k?.createdAt ?? null, keptAt: now(), reason, diskBytes: s?.disk?.rootBytes ?? k?.diskBytes ?? null }
 		if (info) kept.set(id, info)
 		await teardown(id, { ip: s?.ip, keep: info ? { info } : true })
+		await enforceKeptCap().catch((e) => console.error('capping kept workspaces:', e.message))
+	}
+
+	// Removes the longest-kept workspace volumes until the rest fit the cap. A workspace being
+	// resumed is still listed as kept while its container starts, and is never removed.
+	async function enforceKeptCap() {
+		const fs = await statfsFn(cfg.dockerRoot)
+		const keptBytes = (k) => (typeof k.diskBytes === 'number' ? k.diskBytes : k.params.limits.diskMiB * MiB)
+		let total = 0
+		for (const k of kept.values()) total += keptBytes(k)
+		const cap = cfg.keptVolumesMaxBytes ?? Math.min(KEPT_VOLUMES_MAX_BYTES, (Number(fs.bavail) * Number(fs.bsize ?? 4096) + total) * KEPT_VOLUMES_MAX_DISK_SHARE)
+		for (const [id, k] of [...kept].sort(([, a], [, b]) => a.keptAt - b.keptAt)) {
+			if (total <= cap) return
+			if (sessions.has(id) || creating.has(id)) continue
+			console.warn(`removing kept workspace ${id}: kept workspaces use ${total} bytes, cap ${cap}`)
+			total -= keptBytes(k)
+			await remove(id).catch(() => {})
+		}
 	}
 
 	// Stops a session and keeps its files; stopping a stopped session does nothing.
@@ -530,7 +598,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			let error
 			await measure(s).catch((e) => (error = e.message))
 			const d = s.disk ?? {}
-			return { ...base(s.params), state: 'running', reason: null, diskBytes: d.rootBytes ?? null, diskFreeBytes: d.diskFreeBytes ?? null, activeExecs: d.activeExecs ?? null, measuredAt: d.measuredAt ?? null, ...(error && { error }) }
+			return { ...base(s.params), compute: s.compute ?? share(), state: 'running', reason: null, diskBytes: d.rootBytes ?? null, diskFreeBytes: d.diskFreeBytes ?? null, activeExecs: d.activeExecs ?? null, measuredAt: d.measuredAt ?? null, ...(error && { error }) }
 		}
 		const c = creating.get(id)
 		if (c) return { ...base(c.params), state: 'creating', reason: null, diskBytes: null, diskFreeBytes: null, activeExecs: null, measuredAt: null }
@@ -677,6 +745,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 		for (const [id, s] of [...sessions]) if (now() - s.lastUsed > cfg.idleMin * 60000) await remove(id).catch(() => {})
 		if (cfg.keptVolumeDays) for (const [id, k] of [...kept]) if (now() - k.keptAt > cfg.keptVolumeDays * 86400000) await remove(id).catch(() => {})
 		await reconcileKept().catch((e) => console.error('measuring kept workspaces:', e.message))
+		await enforceKeptCap().catch((e) => console.error('capping kept workspaces:', e.message))
 		await env.gc().catch((e) => console.error('collecting snapshots and caches:', e.message))
 	}
 
@@ -688,6 +757,7 @@ export function createManager({ docker, cfg, proxyAdmin, statfsFn = statfs, now 
 			freeDiskPct: Math.round((await freeDiskPct().catch(() => NaN)) * 10) / 10,
 			maxConcurrent: limit(),
 			maxConcurrentSource: configView().source,
+			sandbox: { ...share(), hostCpus, hostMemMiB: Math.round(hostMemBytes / MiB), reserveCpu: RESERVE_CPU, reserveMemMiB: RESERVE_MEM_MIB },
 			running,
 			free: Math.max(0, limit() - running),
 			sessions: sessions.size,

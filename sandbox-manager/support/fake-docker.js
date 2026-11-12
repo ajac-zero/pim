@@ -126,6 +126,14 @@ export async function startFakeDocker({ runtimes = { runc: {}, runsc: {} }, prob
 			const list = [...containers.values()].filter((c) => byLabel(url.searchParams, c.body.Labels))
 			return out(200, list.map((c) => ({ Id: c.id, Names: [`/${c.name}`], State: c.state, Created: Math.floor((c.created ?? 0) / 1000), Labels: c.body.Labels, NetworkSettings: networksOf(c) })))
 		}
+		if ((m = /^POST \/containers\/([^/]+)\/stop$/.exec(key))) {
+			const c = containers.get(m[1])
+			if (!c) return out(404, { message: 'no such container' })
+			c.state = 'exited'
+			await c.agentd?.close()
+			c.agentd = null
+			return out(204)
+		}
 		if ((m = /^DELETE \/containers\/([^/]+)$/.exec(key))) {
 			const name = m[1].replace(/^id-/, '')
 			const c = containers.get(name)

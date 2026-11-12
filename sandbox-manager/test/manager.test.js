@@ -6,7 +6,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, test } from 'node:test'
 import { createAgentd } from '../../workspace-agentd/server.mjs'
 import { Docker } from '../src/docker.js'
-import { createManager, defaultMaxConcurrent, detectQuotaMode, selfCheck } from '../src/manager.js'
+import { createManager, defaultMaxConcurrent, detectQuotaMode, sandboxLimits, selfCheck } from '../src/manager.js'
 import { exit } from '../support/fake-agentd.js'
 import { startFakeDocker } from '../support/fake-docker.js'
 
@@ -14,10 +14,10 @@ const IMAGE = 'registry.example/sandbox@sha256:abc'
 const MiB = 1024 * 1024
 const limits = { cpu: 1.5, memMiB: 512, diskMiB: 1024, pids: 128 }
 const good = { sessionId: 'abc-1', image: IMAGE, limits, egressAllow: ['github.com', '*.npmjs.org'] }
-const cfg = { dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-data-')), token: 't0ken', agentdSecret: 's3cret', allowedImages: [IMAGE], dockerRoot: '/', minFreePct: 15, maxConcurrent: 2, idleMin: 30, proxyUrl: 'http://egress-proxy:3128', proxyContainer: 'egress-proxy', quotaMode: 'measure', agentdReadyMs: 2000, execGraceMs: 200 }
+const cfg = { dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-data-')), token: 't0ken', agentdSecret: 's3cret', allowedImages: [IMAGE], dockerRoot: '/', minFreePct: 15, maxConcurrent: 2, idleMin: 30, proxyUrl: 'http://egress-proxy:3128', proxyContainer: 'egress-proxy', hostCpus: 8, hostMemBytes: 18 * 2 ** 30, quotaMode: 'measure', agentdReadyMs: 2000, execGraceMs: 200 }
 
 let fake, mgr, proxy, base
-const statfsFn = async () => ({ bavail: 50, blocks: 100 })
+const statfsFn = async () => ({ bavail: 50, blocks: 100, bsize: 2 ** 30 })
 const make = (over = {}, opts = {}) => createManager({ docker: new Docker(fake.path), cfg: { ...cfg, ...over }, proxyAdmin: proxy, statfsFn, agentdAddress: fake.agentdAddress, ...opts })
 async function call(method, path, body, headers = {}, host = '127.0.0.1') {
 	const r = await fetch(`http://${host}:${mgr.server.address().port}${path}`, { method, headers: { authorization: 'Bearer t0ken', ...headers }, body: body === undefined ? undefined : typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body) })
@@ -339,7 +339,7 @@ describe('sessions', () => {
 	test('health reports runsc, disk and session count', async () => {
 		await call('POST', '/sessions', good)
 		const r = await call('GET', '/health', undefined, { authorization: '' })
-		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, maxConcurrentSource: 'default', running: 1, free: 1, sessions: 1, reserved: { liveMiB: 1024, live: 1, keptMiB: 0, kept: 0, envMiB: 0, totalMiB: 1024 }, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
+		assert.deepEqual(r.json, { version: 'unknown', runsc: true, freeDiskPct: 50, maxConcurrent: 2, maxConcurrentSource: 'default', sandbox: { cpu: 3.5, memMiB: 8192, hostCpus: 8, hostMemMiB: 18432, reserveCpu: 1, reserveMemMiB: 2048 }, running: 1, free: 1, sessions: 1, reserved: { liveMiB: 1024, live: 1, keptMiB: 0, kept: 0, envMiB: 0, totalMiB: 1024 }, snapshotBytes: 0, cacheBytes: 0, snapshotCount: 0 })
 	})
 	test('health includes version from BUILD_SHA env', async () => {
 		process.env.BUILD_SHA = 'abc1234'
@@ -349,6 +349,59 @@ describe('sessions', () => {
 		} finally {
 			delete process.env.BUILD_SHA
 		}
+	})
+})
+
+describe('per-session CPU and memory', () => {
+	const GiB = 2 ** 30
+	test('sandboxLimits shares the host less the reserve among the slots, with floors', () => {
+		const table = [
+			[4, 16, 1, 3, 14336], // the reserve is 1 CPU and 2 GiB
+			[4, 16, 2, 1.5, 7168],
+			[4, 16, 3, 1, 4778], // 1 CPU, and 14 GiB / 3 rounded down
+			[16, 64, 4, 3.75, 15872],
+			[8, 32, 16, 1, 1920], // below the 1 CPU floor
+			[2, 3, 1, 1, 1024], // a host smaller than the reserve still gets the floors
+			[2, 4, 4, 1, 1024], // 512 MiB each, lifted to the floor
+		]
+		for (const [cpus, mem, slots, cpu, memMiB] of table) assert.deepEqual(sandboxLimits(cpus, mem * GiB, slots), { cpu, memMiB }, `${cpus} CPUs ${mem} GiB ${slots} slots`)
+	})
+
+	describe('applied by the manager', () => {
+		afterEach(() => teardown())
+		const noLimits = { ...good, limits: { diskMiB: 1024, pids: 128 } }
+		const hostCfg = { dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-host-')), hostCpus: 4, hostMemBytes: 16 * GiB, maxConcurrent: 1 }
+		const granted = (id) => {
+			const h = fake.containers.get(`pim-s-${id}`).body.HostConfig
+			return { cpu: h.NanoCpus / 1e9, memMiB: h.Memory / MiB, swap: h.MemorySwap / MiB }
+		}
+		test('a request without cpu and memory gets the share; larger requests are clamped; smaller ones stand', async () => {
+			await setup(hostCfg)
+			assert.equal((await call('POST', '/sessions', noLimits)).status, 201)
+			assert.deepEqual(granted('abc-1'), { cpu: 3, memMiB: 14336, swap: 14336 })
+			const h = (await call('GET', '/health')).json
+			assert.deepEqual(h.sandbox, { cpu: 3, memMiB: 14336, hostCpus: 4, hostMemMiB: 16384, reserveCpu: 1, reserveMemMiB: 2048 })
+			assert.deepEqual((await call('GET', '/sessions/abc-1/status')).json.compute, { cpu: 3, memMiB: 14336 })
+			await call('DELETE', '/sessions/abc-1')
+			await call('POST', '/sessions', { ...good, limits: { ...limits, cpu: 4, memMiB: 8192 } })
+			assert.deepEqual(granted('abc-1'), { cpu: 3, memMiB: 8192, swap: 8192 })
+			await call('DELETE', '/sessions/abc-1')
+			await call('POST', '/sessions', { ...good, limits: { ...limits, cpu: 2, memMiB: 8192 } })
+			assert.deepEqual(granted('abc-1').cpu, 2)
+		})
+		test('the share follows the slot limit, and a raised limit never books a running session\'s CPU twice', async () => {
+			await setup(hostCfg)
+			await call('POST', '/sessions', noLimits)
+			assert.equal((await call('PUT', '/config', { maxConcurrent: 3 })).status, 200)
+			assert.deepEqual((await call('GET', '/health')).json.sandbox.cpu, 1)
+			assert.deepEqual((await call('GET', '/health')).json.sandbox.memMiB, 4778)
+			// abc-1 still holds 3 CPUs and 14 GiB, so the next sessions get the floors, not a share of what it holds.
+			await call('POST', '/sessions', { ...noLimits, sessionId: 'abc-2' })
+			assert.deepEqual(granted('abc-2'), { cpu: 1, memMiB: 1024, swap: 1024 })
+			await call('DELETE', '/sessions/abc-1')
+			await call('POST', '/sessions', { ...noLimits, sessionId: 'abc-3' })
+			assert.deepEqual(granted('abc-3'), { cpu: 1, memMiB: 4778, swap: 4778 })
+		})
 	})
 })
 
@@ -489,7 +542,7 @@ describe('exec and files through agentd', () => {
 	test('status reports state and disk use measured by agentd', async () => {
 		agent.status = { ...agent.status, rootBytes: 1234, diskFreeBytes: 99, activeExecs: 1 }
 		const r = await call('GET', '/sessions/abc-1/status')
-		assert.deepEqual({ ...r.json, measuredAt: typeof r.json.measuredAt }, { sessionId: 'abc-1', state: 'running', reason: null, quotaMode: 'measure', diskBytes: 1234, diskQuotaBytes: 1024 * MiB, diskFreeBytes: 99, activeExecs: 1, measuredAt: 'number' })
+		assert.deepEqual({ ...r.json, measuredAt: typeof r.json.measuredAt }, { sessionId: 'abc-1', compute: { cpu: 1.5, memMiB: 512 }, state: 'running', reason: null, quotaMode: 'measure', diskBytes: 1234, diskQuotaBytes: 1024 * MiB, diskFreeBytes: 99, activeExecs: 1, measuredAt: 'number' })
 		assert.equal((await call('GET', '/sessions/nope/status')).status, 404)
 	})
 })
@@ -520,6 +573,25 @@ describe('session lifecycle', () => {
 		const fresh = make()
 		await fresh.reconcile()
 		assert.deepEqual(fresh.list().map((x) => [x.sessionId, x.state]), [['a-stop', 'stopped'], ['b-run', 'running'], ['c-kept', 'gone'], ['d-new', 'running']])
+	})
+	test('stopping stops the container, then removes it, freeing its CPU and memory; only the volume stays', async () => {
+		await call('POST', '/sessions', good)
+		const from = fake.calls.length
+		await call('POST', '/sessions/abc-1/stop')
+		const calls = fake.calls.slice(from).filter((c) => c.path.startsWith('/containers/pim-s-abc-1'))
+		assert.deepEqual(calls.map((c) => `${c.method} ${c.path.split('?')[0]}`), ['POST /containers/pim-s-abc-1/stop', 'DELETE /containers/pim-s-abc-1'])
+		assert.ok(!fake.containers.has('pim-s-abc-1'))
+		assert.ok(fake.volumes.has('pim-ws-abc-1'))
+		// The slot and its compute go to the next session; nothing of the stopped one counts.
+		const small = { dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-lim-')), hostCpus: 3, hostMemBytes: 4 * 2 ** 30 + 2048 * MiB, maxConcurrent: 1 }
+		const m = make(small)
+		await m.reconcile()
+		await m.createSession({ ...good, sessionId: 'abc-2', limits: { diskMiB: 64, pids: 64 } })
+		await m.stop('abc-2')
+		await m.createSession({ ...good, sessionId: 'abc-3', limits: { diskMiB: 64, pids: 64 } })
+		const h = fake.containers.get('pim-s-abc-3').body.HostConfig
+		assert.deepEqual([h.NanoCpus, h.Memory], [2e9, 4096 * MiB])
+		assert.ok(!fake.containers.has('pim-s-abc-2'))
 	})
 	test('stop keeps the files and frees the slot; start brings the session back', async () => {
 		await call('POST', '/sessions', good)
@@ -659,6 +731,49 @@ describe('disk governance', () => {
 		fresh.kept.get('abc-1').keptAt -= 8 * 86400000
 		await fresh.reap()
 		assert.equal(fake.volumes.size, 0)
+	})
+})
+
+describe('kept volume cap', () => {
+	const GiB = 2 ** 30
+	const disk = 1024 // MiB each
+	beforeEach(() => setup({ maxConcurrent: 5, maxTotalWorkspaceMiB: 0 }))
+	afterEach(() => teardown())
+	const create = (id) => call('POST', '/sessions', { ...good, sessionId: id, limits: { ...limits, diskMiB: disk } })
+	test('stopping evicts the longest-kept volumes first when the total passes the cap, never one in use', async () => {
+		// Room for two 1 GiB volumes.
+		let t = 1000
+		const clock = make({ dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-cap-')), maxConcurrent: 5, keptVolumesMaxBytes: 2 * GiB }, { now: () => t++ })
+		await clock.reconcile()
+		for (const id of ['k-1', 'k-2', 'k-3', 'live-1']) {
+			await clock.createSession({ ...good, sessionId: id, limits: { ...limits, diskMiB: disk } })
+			const agent = fake.agentd(`pim-s-${id}`)
+			agent.status = { ...agent.status, rootBytes: GiB } // each uses 1 GiB
+		}
+		await clock.stop('k-1')
+		await clock.stop('k-2')
+		assert.ok(fake.volumes.has('pim-ws-k-1') && fake.volumes.has('pim-ws-k-2'), 'two fit')
+		await clock.stop('k-3') // 3 GiB of 1 GiB quotas: k-1 is the oldest
+		assert.ok(!fake.volumes.has('pim-ws-k-1') && !fake.volumes.has('pim-kept-k-1'), 'oldest evicted')
+		assert.ok(fake.volumes.has('pim-ws-k-2') && fake.volumes.has('pim-ws-k-3'))
+		assert.ok(fake.volumes.has('pim-ws-live-1') && fake.containers.has('pim-s-live-1'), 'a running session is untouched')
+		assert.deepEqual(clock.list().map((x) => [x.sessionId, x.state]).sort(), [['k-2', 'stopped'], ['k-3', 'stopped'], ['live-1', 'running']])
+		await clock.stop('live-1')
+		assert.ok(!fake.volumes.has('pim-ws-k-2'))
+		assert.ok(fake.volumes.has('pim-ws-k-3') && fake.volumes.has('pim-ws-live-1'))
+	})
+	test('without a configured cap it is 30% of the disk the volumes and free space share', async () => {
+		// 50 GiB free; kept 1 GiB quota each: cap = 0.3 * (50 + kept) GiB, so 15 GiB holds 14 more.
+		const small = make({ dataDir: mkdtempSync(path.join(os.tmpdir(), 'mgr-cap-')), maxConcurrent: 5 })
+		await small.reconcile()
+		for (const id of ['k-1', 'k-2']) {
+			await small.createSession({ ...good, sessionId: id, limits: { ...limits, diskMiB: disk } })
+			const agent = fake.agentd(`pim-s-${id}`)
+			agent.status = { ...agent.status, rootBytes: GiB }
+		}
+		await small.stop('k-1')
+		await small.stop('k-2')
+		assert.ok(fake.volumes.has('pim-ws-k-1') && fake.volumes.has('pim-ws-k-2'))
 	})
 })
 

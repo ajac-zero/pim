@@ -63,7 +63,7 @@ usual update, `git pull && sandbox-manager/up.sh`, is the only step; see
 | `DISK_CHECK_SEC` | 60 | How often every workspace is measured |
 | `WORKSPACE_TMPFS` | 0 | `1` makes `/workspace` a size-capped tmpfs volume (quota mode `tmpfs`: enforced, but counts against RAM) |
 | `IDLE_MIN` | 30 | Reaper removes sessions idle longer than this |
-| `KEPT_VOLUME_DAYS` | 7 | Reaper removes kept workspace volumes older than this; `0` keeps them until deleted |
+| `KEPT_VOLUME_DAYS` | 7 | Reaper removes kept workspace volumes older than this; `0` keeps them until deleted. Together the kept volumes are also capped at the smaller of 20 GiB and 30% of what they and the free disk add up to: past it, the longest-kept go first, never one being resumed |
 | `PROBE_IMAGE` | `busybox:1.36` | Image for the startup gVisor probe |
 | `MANAGER_CONTAINER` | unset | This manager's container name, when it runs in Docker; it attaches itself to each session network to reach agentd. Compose sets `sandbox-manager` |
 | `AGENTD_PORT` | 8787 | Port agentd listens on in the sandbox |
@@ -91,7 +91,7 @@ All routes except `/health` need `Authorization: Bearer $MANAGER_TOKEN`. Errors 
 | `GET /config` | | `{maxConcurrent, source: "env"\|"default"\|"runtime", envValue}`: the live-session limit in force and where it comes from; `envValue` is `MAX_CONCURRENT` or `null` |
 | `PUT /config` | `{maxConcurrent}` (integer 1–16) | The same shape, 200. Persisted in `DATA_DIR/config.json`, wins over `MAX_CONCURRENT` (also after a restart) and applies to the next create; running sessions are never stopped. Other keys or values: 400 |
 | `GET /sessions` | | Every known session, sorted by id: `[{sessionId, image, limits, egressAllow, state, ...}]` |
-| `POST /sessions` | `{sessionId, image?, limits:{cpu,memMiB,diskMiB?,pids}, egressAllow?, userId?, repo?, hasRuntimeSecrets?, restoreFrom?:{key}}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
+| `POST /sessions` | `{sessionId, image?, limits:{cpu?,memMiB?,diskMiB?,pids}, egressAllow?, userId?, repo?, hasRuntimeSecrets?, restoreFrom?:{key}}` | 201 created, 200 already there (or a stopped one resumed with new parameters), 409 different parameters |
 | `POST /snapshots` | `{userId, repo, key, sessionId, exclude?}` | 201 the new snapshot, 200 the one already there for `key` |
 | `GET /snapshots` | `?userId=&repo=` (`repo` optional) | The user's snapshots, newest first: `[{key, repo, size, sha256, format, contentBytes, excluded, exclude, omitted, createdAt, lastUsedAt}]` |
 | `DELETE /snapshots/:key` | `?userId=` | `{deleted}`; 409 `snapshot_in_use` while it is being restored |
@@ -129,7 +129,7 @@ gone, `reason`, `keptAt` and `keptVolume`:
 | `gone` | `kept_volume` | Deleted with `keepVolume`: only in the list and in status; `GET /sessions/:id`, stop and start give 404; a create with the same id reuses the volume |
 | `gone` | `crashed` | Its container had died when the manager restarted (it crashed, or the host restarted): kept as for `kept_volume`, so a create with the same id resumes it with its files |
 
-Stop removes the container (its processes die) and frees its `MAX_CONCURRENT` slot; its disk
+Stop stops the container (`docker stop`), then removes it, so its CPU and memory are free at once and only the volume stays on disk, and frees its `MAX_CONCURRENT` slot; its disk
 quota stays reserved. The state survives a manager restart (see Kept volumes).
 `/status` measures a running session now (`error` is set if agentd did not answer) and does not
 count as use for the idle reaper.
@@ -165,6 +165,13 @@ needs `recursive=1` (otherwise 409). `stat` describes a symlink itself rather th
 `type` is `file`, `dir` or `symlink`.
 
 Limits: `cpu` 0.1–4, `memMiB` 64–8192, `diskMiB` 64–20480, `pids` 16–2048.
+
+`cpu` and `memMiB` are optional and are clamped to the session's share of the host: the host's CPUs and
+memory, less a reserve for the manager, egress proxy, Docker socket proxy and OS (1 CPU, 2 GiB), divided by
+the slot limit, with a floor of 1 CPU and 1 GiB. A 4 CPU / 16 GiB host with one slot gives 3 CPUs and 14 GiB.
+The share is worked out at start and again when `PUT /config` changes the slot limit; the manager logs it,
+and `/health` (`sandbox`) and each session's `/status` (`compute`) report it. A new session never gets more
+than the running ones leave, so raising the limit does not book the same CPU twice.
 
 Coding threads start from the defaults in `src/coding/thread-do.ts` (4096 MiB of memory), then apply
 per-repository overrides (`REPO_LIMIT_OVERRIDES`, keyed by lowercase `owner/name`; `ajac-zero/pim` gets

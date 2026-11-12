@@ -41,6 +41,8 @@ const BLOCKED: readonly RegExp[] = [
 	/^\/mcp\/events\//,
 	// An agent must not approve or deny its own requests.
 	/^\/approvals\/:id\/(approve|deny)$/,
+	// An agent must not fill in or submit a form that was drawn for the person.
+	/^\/messages\/:message\/ui-state/,
 ];
 
 /** The class of a route, by its method and pattern. */

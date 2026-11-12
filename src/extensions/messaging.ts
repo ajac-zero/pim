@@ -132,6 +132,11 @@ function blockMarkdown({ kind, items }: ReplyBlock): string {
 /** A ```ui fence, alone on its lines. */
 const UI_BLOCK = /```ui[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/g;
 
+/** The source of each ```ui block in a message, in order. */
+export function uiSourcesOf(message: string): string[] {
+	return [...message.matchAll(UI_BLOCK)].map((match) => match[1]!);
+}
+
 /**
  * What's wrong with a reply's ```ui blocks, as the model can read and fix.
  * Only the diagnostics come back — never the compiled block — so the model's

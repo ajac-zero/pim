@@ -221,3 +221,12 @@ describe("the space's fallback models through the app's routes", () => {
 		expect(cleared.body).toMatchObject({ status: 200, body: { models: [] } });
 	});
 });
+
+describe("what ui blocks hold through the app's routes", () => {
+	it("blocks the majordomo from filling in or submitting a form drawn for the person", async () => {
+		const { routes } = (await run("ui_routes", {})).body as { routes: { method: string; path: string; class: string }[] };
+		const ui = routes.filter((route) => route.path.startsWith("/messages/:message/ui-state"));
+		expect(ui.map((route) => route.method).sort()).toEqual(["GET", "PUT"]);
+		expect(ui.map((route) => route.class)).toEqual(["blocked", "blocked"]);
+	});
+});

@@ -25,7 +25,7 @@ export { parse } from "./parse";
 export type { Diagnostic, Expr, RawNode } from "./parse";
 export type { ActionName, ActionSpec, Node, PropValue, UiProgram } from "./program";
 export { checkUiState, isStorable, MAX_STORED_LIST, storableState, uiBlockId } from "./state";
-export { extraState, splitUiResponse, stateSummary, uiResponseOf, uiTurn } from "./response";
+export { extraState, splitUiResponse, stateSummary, turnFits, uiResponseOf, uiTurn } from "./response";
 export type { UiResponse } from "./response";
 export { formSummary, gradeField, initialUiState, numberOf, stringOf } from "./value";
 export type { Field, FormSpec, UiState, Value } from "./value";

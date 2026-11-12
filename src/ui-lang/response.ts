@@ -6,7 +6,7 @@
  * person's message, and answers it from the readable part.
  */
 
-import { MAX_RESPONSE_STATE_BYTES } from "./limits";
+import { MAX_RESPONSE_STATE_BYTES, MAX_TURN_BYTES } from "./limits";
 import { fieldsOf, type UiProgram } from "./program";
 import { isStorable } from "./state";
 import { stringOf, type UiState, type Value } from "./value";
@@ -34,12 +34,15 @@ export type UiResponse = {
 export function extraState(program: UiProgram, state: UiState): Record<string, Value> {
 	const inForms = new Set(fieldsOf(program).map((field) => field.key));
 	const kept: Record<string, Value> = {};
+	// The size the trailer's JSON object will have: its braces, then each "key":value and the commas between.
 	let bytes = 2;
 	for (const key of program.stateKeys) {
 		const value = state.values[key];
 		if (inForms.has(key) || value === undefined || !isStorable(value)) continue;
-		bytes += new TextEncoder().encode(JSON.stringify([key, value])).length + 1;
-		if (bytes > MAX_RESPONSE_STATE_BYTES) break;
+		const entry = new TextEncoder().encode(`${JSON.stringify(key)}:${JSON.stringify(value)}`).length;
+		const next = bytes + entry + (Object.keys(kept).length > 0 ? 1 : 0);
+		if (next > MAX_RESPONSE_STATE_BYTES) break;
+		bytes = next;
 		kept[key] = value;
 	}
 	return kept;
@@ -100,6 +103,11 @@ export function splitUiResponse(text: string): { readable: string; response: UiR
 	const response = uiResponseOf(text);
 	if (response === null) return null;
 	return { readable: text.replace(TRAILER, "").trim(), response };
+}
+
+/** Whether a turn is small enough to send. */
+export function turnFits(turn: string): boolean {
+	return new TextEncoder().encode(turn).length <= MAX_TURN_BYTES;
 }
 
 /** A turn as a form sends it: its readable Markdown, then its trailer. */

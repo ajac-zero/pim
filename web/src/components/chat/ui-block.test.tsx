@@ -29,6 +29,7 @@ import {
   compile,
   evaluate,
   initialState,
+  MAX_TURN_BYTES,
   type UiResponse,
   uiBlockId,
   uiResponseOf,
@@ -264,6 +265,35 @@ describe("a ui block in a reply", () => {
       values: { "f.a": "x" },
       state: { seats: 12, annual: true },
     });
+  });
+
+  it("sends a turn of exactly the most a turn may be, and refuses one byte more", async () => {
+    const turnOf = async (padding: number) => {
+      cleanup();
+      const send = vi.fn().mockResolvedValue(undefined);
+      shown(
+        `<form id="f" submitLabel="Send" onSubmit={[issueNewTurn("${"a".repeat(padding)}")]}><input name="a"/></form>`,
+        { send },
+      );
+      fireEvent.change(field("f.a"), { target: { value: "x" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      return send;
+    };
+    // What a turn is besides its padding, measured from one with none.
+    const bare = await turnOf(0);
+    await waitFor(() => expect(bare).toHaveBeenCalledTimes(1));
+    const overhead = new TextEncoder().encode(bare.mock.calls[0]?.[0]).length;
+    const at = await turnOf(MAX_TURN_BYTES - overhead);
+    await waitFor(() => expect(at).toHaveBeenCalledTimes(1));
+    expect(new TextEncoder().encode(at.mock.calls[0]?.[0]).length).toBe(
+      MAX_TURN_BYTES,
+    );
+    const over = await turnOf(MAX_TURN_BYTES - overhead + 1);
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.getByRole("alert").textContent).toContain("too long to send");
+    expect(over).not.toHaveBeenCalled();
+    // The form is open again, to be answered shorter.
+    expect(field("f.a").disabled).toBe(false);
   });
 
   it("sends once however many times a filled form is submitted", async () => {

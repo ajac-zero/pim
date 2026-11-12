@@ -259,7 +259,10 @@ export async function repositorySetupScript(workspace: Workspace, root: string):
 }
 
 /** How a setup run ended: it worked, it failed (with what to tell the person), or the thread stopped it. */
-export type SetupResult = { readonly outcome: "ok" } | { readonly outcome: "failed"; readonly error: string } | { readonly outcome: "stopped" };
+export type SetupResult =
+	| { readonly outcome: "ok"; readonly exitCode: 0; readonly ms: number; readonly output: string; readonly outputChars: number }
+	| { readonly outcome: "failed"; readonly error: string; readonly exitCode: number | null; readonly ms: number; readonly output: string; readonly outputChars: number }
+	| { readonly outcome: "stopped" };
 
 /**
  * Runs a setup script with bash in the repository's directory. It runs as
@@ -271,16 +274,22 @@ export type SetupResult = { readonly outcome: "ok" } | { readonly outcome: "fail
  */
 export async function runSetup(workspace: Workspace, script: string, o: { cwd: string; timeoutMs?: number; signal?: AbortSignal }): Promise<SetupResult> {
 	let tail = "";
+	let outputChars = 0;
+	const started = performance.now();
 	let exit: Extract<ExecEvent, { type: "exit" }> | null = null;
 	for await (const event of workspace.exec(["bash", "-c", script], { cwd: o.cwd, timeoutMs: o.timeoutMs ?? SETUP_TIMEOUT_MS, env: SETUP_ENV, signal: o.signal })) {
 		if (event.type === "exit") exit = event;
-		else tail = (tail + event.data).slice(-OUTPUT_TAIL_CHARS);
+		else {
+			tail = (tail + event.data).slice(-OUTPUT_TAIL_CHARS);
+			outputChars += event.data.length;
+		}
 	}
-	if (exit?.code === 0) return { outcome: "ok" };
+	const ms = Math.round(performance.now() - started);
+	if (exit?.code === 0) return { outcome: "ok", exitCode: 0, ms, output: tail, outputChars };
 	if (exit && exit.code === null && !exit.timedOut) return { outcome: "stopped" };
 	const minutes = Math.round((o.timeoutMs ?? SETUP_TIMEOUT_MS) / 60_000);
 	const how = exit === null ? "ended without an exit" : exit.timedOut ? `ran out of time after ${minutes} minutes` : `exited ${exit.code}`;
-	return { outcome: "failed", error: environmentError(`The setup script ${how}`, tail) };
+	return { outcome: "failed", error: environmentError(`The setup script ${how}`, tail), exitCode: exit?.code ?? null, ms, output: tail, outputChars };
 }
 
 /** The whole environment a setup script is given on top of the workspace's own. */

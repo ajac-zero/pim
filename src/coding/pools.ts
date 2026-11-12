@@ -1,0 +1,126 @@
+import { HttpError } from "../http";
+
+/**
+ * Sandbox pools: the named groups of coding sandboxes a deployment offers
+ * coding threads, kept by the admin in the Gallery (`sandbox_pools`). A pool
+ * names a provider (a workspace backend's id, such as "compose" or
+ * "cloudflare"; several pools may share one), how many threads may run in it
+ * at once, and where it stands among the others: lower `priority` first.
+ *
+ * Today a pool id is its provider's id and placement knows nothing of this
+ * file yet (src/coding/workspace/registry.ts); the table is the first step of
+ * prioritized pools, and `resolvePools` is what placement will read.
+ */
+
+/** A pool as the admin keeps it, in the Gallery's `sandbox_pools` table. */
+export type SandboxPool = {
+	/** Its name, a slug the admin chooses, such as "compose" or "cloudflare-2". */
+	readonly id: string;
+	/** The workspace backend it runs on (a `WorkspaceProvider.id`), such as "compose" or "cloudflare". Several pools may share one. */
+	readonly provider: string;
+	/** How many coding threads may hold a slot in it at once. */
+	readonly size: number;
+	/** Where it stands among the pools: the thread takes the lowest number first. */
+	readonly priority: number;
+	/** Whatever else the pool's provider takes, kept as given and unused yet. */
+	readonly config: Readonly<Record<string, unknown>>;
+	/** Whether coding threads may be placed in it. A pool switched off stays kept. */
+	readonly enabled: boolean;
+};
+
+/** What adding or changing a pool gives; a field left out keeps what it was. */
+export type SandboxPoolInput = {
+	readonly id?: unknown;
+	readonly provider?: unknown;
+	readonly size?: unknown;
+	readonly priority?: unknown;
+	readonly config?: unknown;
+	readonly enabled?: unknown;
+};
+
+/** The most either id may be. */
+const MAX_ID = 40;
+
+/** A pool or provider id: lowercase letters, digits and single hyphens inside, such as "cloudflare-2". */
+const isSlug = (value: string) => /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) && value.length <= MAX_ID;
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+const slug = (value: unknown, field: string): string => {
+	if (typeof value !== "string" || !isSlug(value.trim())) throw new HttpError(400, `${field} must be a slug: lowercase letters, digits and single hyphens inside, at most ${MAX_ID} characters`);
+	return value.trim();
+};
+
+const whole = (value: unknown, field: string, min?: number): number => {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || (min !== undefined && value < min)) {
+		throw new HttpError(400, min === undefined ? `${field} must be a whole number` : `${field} must be a whole number of at least ${min}`);
+	}
+	return value;
+};
+
+/** Checks a new pool, or a change to `existing`, and returns it as it will be kept. */
+export function prepareSandboxPool(input: SandboxPoolInput, existing: SandboxPool | null): SandboxPool {
+	const id = input.id === undefined ? existing?.id : slug(input.id, "id");
+	if (id === undefined) throw new HttpError(400, "id is required");
+	if (existing && id !== existing.id) throw new HttpError(400, "A pool's id cannot be changed. Remove it and add another instead.");
+	const provider = input.provider === undefined ? existing?.provider : slug(input.provider, "provider");
+	if (provider === undefined) throw new HttpError(400, "provider is required");
+	const size = input.size === undefined ? existing?.size : whole(input.size, "size", 1);
+	if (size === undefined) throw new HttpError(400, "size is required");
+	const priority = input.priority === undefined ? existing?.priority : whole(input.priority, "priority");
+	if (priority === undefined) throw new HttpError(400, "priority is required");
+	const config = input.config === undefined ? (existing?.config ?? {}) : readConfig(input.config);
+	if (input.enabled !== undefined && typeof input.enabled !== "boolean") throw new HttpError(400, "enabled must be true or false");
+	return { id, provider, size, priority, config, enabled: (input.enabled as boolean | undefined) ?? existing?.enabled ?? true };
+}
+
+function readConfig(value: unknown): Readonly<Record<string, unknown>> {
+	if (!isObject(value)) throw new HttpError(400, "config must be an object");
+	return value;
+}
+
+/** How pools stand against each other: the lowest priority first, ties by id. */
+export const comparePools = (a: SandboxPool, b: SandboxPool) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+/** Why a pool was left out of the ones coding threads may be placed in. */
+export type PoolSkipReason = "disabled" | "provider_unavailable";
+
+/** A pool placement won't use, and why. */
+export type SkippedPool = { readonly pool: SandboxPool; readonly reason: PoolSkipReason };
+
+/** What `resolvePools` found: the pools to place threads in, in order, and the rest with why. */
+export type ResolvedPools = {
+	/** The enabled pools whose provider is available, the lowest priority first, ties by id. */
+	readonly pools: readonly SandboxPool[];
+	/** Every pool left out, with why: switched off, or naming a provider the deployment doesn't have. */
+	readonly skipped: readonly SkippedPool[];
+};
+
+/**
+ * Orders the stored pools for placement: the enabled ones whose provider is
+ * among `availableProviders` (workspace backend ids, such as the registry's),
+ * the lowest priority first and ties by id; every pool left out comes with
+ * why. Pure: placement will call it with what it reads, and nothing reads it
+ * yet.
+ */
+export function resolvePools(storedPools: readonly SandboxPool[], availableProviders: readonly string[]): ResolvedPools {
+	const available = new Set(availableProviders);
+	const ordered = [...storedPools].sort(comparePools);
+	const pools: SandboxPool[] = [];
+	const skipped: SkippedPool[] = [];
+	for (const pool of ordered) {
+		if (!pool.enabled) skipped.push({ pool, reason: "disabled" });
+		else if (!available.has(pool.provider)) skipped.push({ pool, reason: "provider_unavailable" });
+		else pools.push(pool);
+	}
+	return { pools, skipped };
+}
+
+/**
+ * Keeps a write to the pools in the admin's trail of structured events, as
+ * its routes do for every admin write (../accounts.ts): what changed, and who
+ * by, as the admin's owner id.
+ */
+export function auditPoolWrite(action: "added" | "changed" | "removed", pool: string, by: string): void {
+	console.log(JSON.stringify({ event: `pim.sandbox_pool_${action}`, pool, by }));
+}

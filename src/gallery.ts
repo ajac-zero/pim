@@ -14,6 +14,8 @@ import {
 	prepareComputeProvider,
 	resolveQuota,
 } from "./compute";
+import { auditPoolWrite, comparePools, type SandboxPool, type SandboxPoolInput, prepareSandboxPool } from "./coding/pools";
+import { DEFAULT_POOLS } from "./coding/pools-default";
 import { type CustomProvider, MAX_PROVIDERS, type ProviderInput, prepareProvider } from "./providers";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 import { APP_CATEGORIES, type AppCategory } from "./extensions/define";
@@ -322,6 +324,11 @@ CREATE TABLE IF NOT EXISTS compute_providers (
 CREATE TABLE IF NOT EXISTS compute_settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sandbox_pools (
+	id TEXT PRIMARY KEY,
+	pool TEXT NOT NULL,
+	created_at INTEGER NOT NULL
 );
 `;
 
@@ -653,6 +660,71 @@ export class Gallery extends DurableObject<Env> {
 		const quota = resolveQuota(this.computeQuota(), parseComputeQuota(change));
 		this.#sql("INSERT INTO compute_settings (key, value) VALUES ('quota', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", JSON.stringify(quota));
 		return quota;
+	}
+
+	// Sandbox pools (./coding/pools.ts): the groups of coding sandboxes the admin keeps over the deployment's workspace providers, several pools to a provider. Kept here for placement to read; it still places as it did.
+
+	#poolsSeeded = false;
+
+	/**
+	 * Puts the default pools in (./coding/pools-default.ts) the first time the
+	 * registry is used, and never again: only while the table is empty, so the
+	 * admin's changes stay theirs, even emptying the registry.
+	 */
+	#seedSandboxPools(): void {
+		if (this.#poolsSeeded) return;
+		this.#poolsSeeded = true;
+		if (this.#sql("SELECT 1 FROM compute_settings WHERE key = 'sandbox_pools_seeded'").toArray().length) return;
+		if (!this.#sql("SELECT 1 FROM sandbox_pools").toArray().length) {
+			const now = Date.now();
+			for (const pool of DEFAULT_POOLS) this.#sql("INSERT INTO sandbox_pools (id, pool, created_at) VALUES (?, ?, ?)", pool.id, JSON.stringify(pool), now);
+		}
+		this.#sql("INSERT INTO compute_settings (key, value) VALUES ('sandbox_pools_seeded', '1')");
+	}
+
+	/** The sandbox pools in the order they stand: the lowest priority first, ties by id. */
+	sandboxPools(): SandboxPool[] {
+		this.#seedSandboxPools();
+		return this.#sql("SELECT pool FROM sandbox_pools")
+			.toArray()
+			.map((row) => JSON.parse(String(row.pool)) as SandboxPool)
+			.sort(comparePools);
+	}
+
+	/** One sandbox pool, or null when there is none with that id. */
+	sandboxPool(id: string): SandboxPool | null {
+		this.#seedSandboxPools();
+		const [row] = this.#sql("SELECT pool FROM sandbox_pools WHERE id = ?", id).toArray();
+		return row ? (JSON.parse(String(row.pool)) as SandboxPool) : null;
+	}
+
+	/**
+	 * The admin adds a sandbox pool, or changes the one with that id: `id` is
+	 * null to add. Null when there is no pool `id`. Every write is kept in the
+	 * admin's audit trail, by `by` (the admin's owner id).
+	 */
+	upsertSandboxPool(id: string | null, input: SandboxPoolInput, by: string): SandboxPool | null {
+		this.#seedSandboxPools();
+		const existing = id === null ? null : this.sandboxPool(id);
+		if (id !== null && !existing) return null;
+		const pool = prepareSandboxPool(input, existing);
+		if (!existing && this.sandboxPool(pool.id)) throw new HttpError(409, `The pool ${pool.id} is already here: change it instead.`);
+		this.#sql(
+			"INSERT INTO sandbox_pools (id, pool, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET pool = excluded.pool",
+			pool.id,
+			JSON.stringify(pool),
+			Date.now(),
+		);
+		auditPoolWrite(existing ? "changed" : "added", pool.id, by);
+		return pool;
+	}
+
+	/** Takes a sandbox pool away. Threads already running in it go on until they stop. Every write is kept in the admin's audit trail, by `by`. */
+	removeSandboxPool(id: string, by: string): boolean {
+		this.#seedSandboxPools();
+		const removed = this.#sql("DELETE FROM sandbox_pools WHERE id = ?", id).rowsWritten > 0;
+		if (removed) auditPoolWrite("removed", id, by);
+		return removed;
 	}
 
 	/** A workspace is about to run: checks the person's quota and records the start, together (./compute-ledger.ts). A null quota records without checking. */

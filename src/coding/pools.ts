@@ -7,9 +7,9 @@ import { HttpError } from "../http";
  * "cloudflare"; several pools may share one), how many threads may run in it
  * at once, and where it stands among the others: lower `priority` first.
  *
- * Today a pool id is its provider's id and placement knows nothing of this
- * file yet (src/coding/workspace/registry.ts); the table is the first step of
- * prioritized pools, and `resolvePools` is what placement will read.
+ * Placement reads the registry through `placementPools`: the coding
+ * scheduler counts its slots per pool (./scheduler.ts), and a thread asks for
+ * a slot in a pool, which may be one of several on one provider.
  */
 
 /** A pool as the admin keeps it, in the Gallery's `sandbox_pools` table. */
@@ -83,7 +83,7 @@ function readConfig(value: unknown): Readonly<Record<string, unknown>> {
 export const comparePools = (a: SandboxPool, b: SandboxPool) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
 /** Why a pool was left out of the ones coding threads may be placed in. */
-export type PoolSkipReason = "disabled" | "provider_unavailable";
+export type PoolSkipReason = "disabled" | "provider_unavailable" | "unhealthy";
 
 /** A pool placement won't use, and why. */
 export type SkippedPool = { readonly pool: SandboxPool; readonly reason: PoolSkipReason };
@@ -100,8 +100,7 @@ export type ResolvedPools = {
  * Orders the stored pools for placement: the enabled ones whose provider is
  * among `availableProviders` (workspace backend ids, such as the registry's),
  * the lowest priority first and ties by id; every pool left out comes with
- * why. Pure: placement will call it with what it reads, and nothing reads it
- * yet.
+ * why. Pure: placement calls it with what it reads.
  */
 export function resolvePools(storedPools: readonly SandboxPool[], availableProviders: readonly string[]): ResolvedPools {
 	const available = new Set(availableProviders);
@@ -114,6 +113,36 @@ export function resolvePools(storedPools: readonly SandboxPool[], availableProvi
 		else pools.push(pool);
 	}
 	return { pools, skipped };
+}
+
+/** A pool as placement sees it: its id, the provider behind it, how many slots it holds, and where it stands among the pools. */
+export type PlacementPool = {
+	/** Its id: what a thread names to pin itself to it, and what the scheduler counts its slots by. */
+	readonly id: string;
+	/** The workspace backend it runs on; several pools may share one. */
+	readonly provider: string;
+	/** How many coding threads may hold a slot in it at once; null when the provider's own limit decides, as while one provider is one pool. */
+	readonly size: number | null;
+	/** Where it stands among the pools: the thread takes the lowest number first. */
+	readonly priority: number;
+};
+
+/**
+ * The pools a thread may take a slot in, and the ones it can't and why: the
+ * registry's (`resolvePools`) when it has usable pools, and otherwise one per
+ * available provider, its id the provider's, in the registry's order —
+ * exactly as placement ran before pools, when a pool was its provider. A
+ * deployment whose registry has no usable pools, such as one whose Gallery
+ * rows never made it or whose pools name providers it doesn't have, places
+ * threads as it always did.
+ */
+export function placementPools(storedPools: readonly SandboxPool[], availableProviders: readonly string[]): { readonly pools: readonly PlacementPool[]; readonly skipped: readonly SkippedPool[] } {
+	const resolved = resolvePools(storedPools, availableProviders);
+	if (resolved.pools.length > 0) return { pools: resolved.pools, skipped: resolved.skipped };
+	return {
+		pools: availableProviders.map((provider, index) => ({ id: provider, provider, size: null, priority: index + 1 })),
+		skipped: resolved.skipped,
+	};
 }
 
 /**

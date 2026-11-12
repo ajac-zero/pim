@@ -662,7 +662,7 @@ export class Gallery extends DurableObject<Env> {
 		return quota;
 	}
 
-	// Sandbox pools (./coding/pools.ts): the groups of coding sandboxes the admin keeps over the deployment's workspace providers, several pools to a provider. Kept here for placement to read; it still places as it did.
+	// Sandbox pools (./coding/pools.ts): the groups of coding sandboxes the admin keeps over the deployment's workspace providers, several pools to a provider. Kept here for placement to read: threads take slots by the registry, each pool's size its limit.
 
 	#poolsSeeded = false;
 

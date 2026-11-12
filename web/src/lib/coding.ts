@@ -223,6 +223,14 @@ export type CodingThreadView = {
   provider: string;
   pool: string;
   placementReason: "pinned" | "priority" | "overflow";
+  /** The same, in full: the pool and the provider behind it, the pool's priority, and the pools it couldn't and why. Null until the thread is placed. */
+  placement: {
+    kind: "pinned" | "priority" | "overflow";
+    pool: string;
+    provider: string;
+    priority: number;
+    skipped: { pool: string; reason: string }[];
+  } | null;
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
   budgetUsd: number | null;

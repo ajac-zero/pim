@@ -42,7 +42,7 @@ async function withScheduler(work: (context: Context) => void, defaultLimit = 1)
 
 const running = (scheduler: CodingScheduler) => scheduler.snapshot().running.map((slot) => slot.threadId);
 const queued = (scheduler: CodingScheduler) => scheduler.snapshot().queued.map((entry) => entry.threadId);
-const ask = (scheduler: CodingScheduler, ...threadIds: string[]) => threadIds.map((id) => scheduler.request(id, { provider: "sandbox" }));
+const ask = (scheduler: CodingScheduler, ...threadIds: string[]) => threadIds.map((id) => scheduler.request(id, { pool: "sandbox" }));
 const place = (scheduler: CodingScheduler, id: string) => scheduler.position(id)?.position ?? null;
 const reasons = (scheduler: CodingScheduler) => scheduler.snapshot().queued.map((entry) => `${entry.threadId}:${entry.reason}`);
 const SIX_HOURS = 6 * 60 * 60 * 1000;
@@ -74,7 +74,7 @@ class Model {
 	request(id: string): RequestResult {
 		if (!this.running.has(id) && !this.queue.includes(id)) this.queue.push(id);
 		this.#admit();
-		return this.running.has(id) ? { status: "admitted", provider: "sandbox" } : { status: "queued", position: this.queue.indexOf(id) + 1, reason: this.reason(id) };
+		return this.running.has(id) ? { status: "admitted", pool: "sandbox" } : { status: "queued", position: this.queue.indexOf(id) + 1, reason: this.reason(id) };
 	}
 	/** A thread waits for the gate only when a slot is free for it. */
 	reason(id: string): string {
@@ -125,7 +125,7 @@ describe("the coding scheduler", () => {
 					if (roll < 0.05) {
 						scheduler = make({ defaultLimit: limit });
 					} else if (roll < 0.55) {
-						expect(scheduler.request(id, { provider: "sandbox" }), where).toEqual(model.request(id));
+						expect(scheduler.request(id, { pool: "sandbox" }), where).toEqual(model.request(id));
 					} else if (roll < 0.62) {
 						// The disk and the budget come and go, each low about a fifth of the time.
 						const lowDisk = next() < 0.2;
@@ -159,14 +159,14 @@ describe("the coding scheduler", () => {
 
 	it("admits strictly in the order threads asked, not by their ids", async () => {
 		await withScheduler(({ scheduler, clock }) => {
-			expect(scheduler.request("r", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
+			expect(scheduler.request("r", { pool: "sandbox" })).toEqual({ status: "admitted", pool: "sandbox" });
 			// z and a ask in the same millisecond; m later.
 			expect(ask(scheduler, "z", "a")).toEqual([
 				{ status: "queued", position: 1, reason: "slots_full" },
 				{ status: "queued", position: 2, reason: "slots_full" },
 			]);
 			clock.now += 1;
-			expect(scheduler.request("m", { provider: "sandbox", reason: "resume" })).toEqual({ status: "queued", position: 3, reason: "resume" });
+			expect(scheduler.request("m", { pool: "sandbox", reason: "resume" })).toEqual({ status: "queued", position: 3, reason: "resume" });
 			expect(queued(scheduler)).toEqual(["z", "a", "m"]);
 			expect(scheduler.release("r")).toEqual(["z"]);
 			expect(scheduler.release("z")).toEqual(["a"]);
@@ -196,18 +196,18 @@ describe("the coding scheduler", () => {
 
 	it("answers a request asked again the same way, without queueing or admitting twice", async () => {
 		await withScheduler(({ scheduler, clock }) => {
-			expect(scheduler.request("a", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
-			expect(scheduler.request("a", { provider: "other" })).toEqual({ status: "admitted", provider: "sandbox" });
-			expect(scheduler.request("b", { provider: "sandbox", reason: "first", deadlineMs: 1_000 })).toEqual({ status: "queued", position: 1, reason: "first" });
+			expect(scheduler.request("a", { pool: "sandbox" })).toEqual({ status: "admitted", pool: "sandbox" });
+			expect(scheduler.request("a", { pool: "other" })).toEqual({ status: "admitted", pool: "sandbox" });
+			expect(scheduler.request("b", { pool: "sandbox", reason: "first", deadlineMs: 1_000 })).toEqual({ status: "queued", position: 1, reason: "first" });
 			clock.now += 500;
-			expect(scheduler.request("b", { provider: "other", reason: "second", deadlineMs: 60_000 })).toEqual({ status: "queued", position: 1, reason: "first" });
+			expect(scheduler.request("b", { pool: "other", reason: "second", deadlineMs: 60_000 })).toEqual({ status: "queued", position: 1, reason: "first" });
 			const snapshot = scheduler.snapshot();
-			expect(snapshot.running).toEqual([{ threadId: "a", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "running", activitySince: START }]);
-			expect(snapshot.queued).toEqual([{ threadId: "b", provider: "sandbox", reason: "first", priority: 0, queuedAt: START, deadlineAt: START + 1_000 }]);
+			expect(snapshot.running).toEqual([{ threadId: "a", pool: "sandbox", acquiredAt: START, state: "admitted", activity: "running", activitySince: START }]);
+			expect(snapshot.queued).toEqual([{ threadId: "b", pool: "sandbox", reason: "first", priority: 0, queuedAt: START, deadlineAt: START + 1_000 }]);
 			expect(scheduler.release("a")).toEqual(["b"]);
-			expect(scheduler.request("b", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
+			expect(scheduler.request("b", { pool: "sandbox" })).toEqual({ status: "admitted", pool: "sandbox" });
 			expect(scheduler.release("a")).toEqual([]);
-			expect(scheduler.snapshot().running).toEqual([{ threadId: "b", provider: "sandbox", acquiredAt: START + 500, state: "admitted", activity: "running", activitySince: START + 500 }]);
+			expect(scheduler.snapshot().running).toEqual([{ threadId: "b", pool: "sandbox", acquiredAt: START + 500, state: "admitted", activity: "running", activitySince: START + 500 }]);
 			expect(queued(scheduler)).toEqual([]);
 		});
 	});
@@ -219,10 +219,10 @@ describe("the coding scheduler", () => {
 				const before = scheduler.snapshot();
 				const again = make();
 				expect(again.snapshot()).toEqual(before);
-				expect(again.request("a", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
-				expect(again.request("c", { provider: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+				expect(again.request("a", { pool: "sandbox" })).toEqual({ status: "admitted", pool: "sandbox" });
+				expect(again.request("c", { pool: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
 				expect(() => make({ crash: true }).release("a")).toThrow("crash before commit");
-				expect(() => make({ crash: true }).request("f", { provider: "sandbox" })).toThrow("crash before commit");
+				expect(() => make({ crash: true }).request("f", { pool: "sandbox" })).toThrow("crash before commit");
 				expect(make().snapshot()).toEqual(before);
 			},
 			2,
@@ -239,13 +239,13 @@ describe("the coding scheduler", () => {
 				expect(restarted.reconcile(["b", "c", "x"])).toEqual({ released: ["a"], adopted: ["c", "x"], admitted: [] });
 				const snapshot = restarted.snapshot();
 				expect(snapshot.running).toEqual([
-					{ threadId: "b", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "running", activitySince: START },
-					{ threadId: "c", provider: "sandbox", acquiredAt: START + 10, state: "adopted", activity: "running", activitySince: START + 10 },
-					{ threadId: "x", provider: null, acquiredAt: START + 10, state: "adopted", activity: "running", activitySince: START + 10 },
+					{ threadId: "b", pool: "sandbox", acquiredAt: START, state: "admitted", activity: "running", activitySince: START },
+					{ threadId: "c", pool: "sandbox", acquiredAt: START + 10, state: "adopted", activity: "running", activitySince: START + 10 },
+					{ threadId: "x", pool: null, acquiredAt: START + 10, state: "adopted", activity: "running", activitySince: START + 10 },
 				]);
 				expect(snapshot.queued).toEqual([]);
-				// Three running against a limit of two, x on whichever provider: nothing is admitted until two of them end.
-				expect(restarted.request("e", { provider: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+				// Three running against a limit of two, x on whichever pool: nothing is admitted until two of them end.
+				expect(restarted.request("e", { pool: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
 				expect(restarted.release("b")).toEqual([]);
 				expect(restarted.release("x")).toEqual(["e"]);
 				// Run again with the same answer, it changes nothing.
@@ -259,45 +259,144 @@ describe("the coding scheduler", () => {
 		);
 	});
 
-	it("counts slots per provider, overflows a thread to the next of its providers with room, and queues it only when all are full", async () => {
+	it("counts slots per pool, overflows a thread to the next of its pools with room, and queues it only when all are full", async () => {
 		await withScheduler(({ make }) => {
 			const scheduler = make({ defaultLimit: 2, limits: { cloud: 3 } });
-			const both = { provider: "compose", overflow: ["cloud"] };
-			for (const id of ["a", "b"]) expect(scheduler.request(id, both)).toEqual({ status: "admitted", provider: "compose" });
+			const both = { pool: "compose", overflow: ["cloud"] };
+			for (const id of ["a", "b"]) expect(scheduler.request(id, both)).toEqual({ status: "admitted", pool: "compose" });
 			// The compose slots are the space's limit of two; the cloud has three of its own.
-			for (const id of ["c", "d", "e"]) expect(scheduler.request(id, both)).toEqual({ status: "admitted", provider: "cloud" });
+			for (const id of ["c", "d", "e"]) expect(scheduler.request(id, both)).toEqual({ status: "admitted", pool: "cloud" });
 			expect(scheduler.request("f", both)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
-			expect(scheduler.request("g", { provider: "compose" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
-			expect(scheduler.request("h", { provider: "cloud" })).toEqual({ status: "queued", position: 3, reason: "slots_full" });
-			expect(scheduler.snapshot().queued[0]).toMatchObject({ threadId: "f", provider: "compose", overflow: ["cloud"] });
-			// A freed cloud slot goes to f, whichever provider f asked for first, and not to g; h waits behind f.
+			expect(scheduler.request("g", { pool: "compose" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
+			expect(scheduler.request("h", { pool: "cloud" })).toEqual({ status: "queued", position: 3, reason: "slots_full" });
+			expect(scheduler.snapshot().queued[0]).toMatchObject({ threadId: "f", pool: "compose", overflow: ["cloud"] });
+			// A freed cloud slot goes to f, whichever pool f asked for first, and not to g; h waits behind f.
 			expect(scheduler.release("c")).toEqual(["f"]);
-			expect(scheduler.slot("f")).toMatchObject({ provider: "cloud" });
+			expect(scheduler.slot("f")).toMatchObject({ pool: "cloud" });
 			expect(scheduler.release("a")).toEqual(["g"]);
 			expect(scheduler.setLimit(4, "cloud")).toEqual(["h"]);
-			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["b:compose", "d:cloud", "e:cloud", "f:cloud", "g:compose", "h:cloud"]);
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.pool}`)).toEqual(["b:compose", "d:cloud", "e:cloud", "f:cloud", "g:compose", "h:cloud"]);
 			// The cloud's limit is its own: the space's doesn't change it, and it survives a restart.
 			expect(scheduler.setLimit(1)).toEqual([]);
 			expect(make({ defaultLimit: 2 }).request("i", both)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
 		});
 	});
 
-	it("moves a slot to the first other provider with room, and admits the queue into the one it leaves", async () => {
+	it("counts slots per pool of the registry, two on one provider each with its own size, and queues a thread only when all are full", async () => {
+		await withScheduler(({ make }) => {
+			const scheduler = make({ defaultLimit: 3 });
+			// Two pools share the manager's provider, and a third is on another: each pool's size is its limit.
+			const pools = [
+				{ id: "dev", provider: "compose", size: 2, priority: 1 },
+				{ id: "ci", provider: "compose", size: 1, priority: 2 },
+				{ id: "burst", provider: "cloud", size: 2, priority: 3 },
+			];
+			scheduler.setPools(pools);
+			const walk = { pool: "dev", overflow: ["ci", "burst"] };
+			for (const id of ["a", "b"]) expect(scheduler.request(id, walk)).toEqual({ status: "admitted", pool: "dev" });
+			// The dev pool is full at its size of two, so the thread walks on to ci, and then to burst.
+			expect(scheduler.request("c", walk)).toEqual({ status: "admitted", pool: "ci" });
+			expect(scheduler.request("d", walk)).toEqual({ status: "admitted", pool: "burst" });
+			expect(scheduler.request("e", walk)).toEqual({ status: "admitted", pool: "burst" });
+			expect(scheduler.request("f", walk)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+			// A freed slot goes to the waiting thread, whichever pool freed it.
+			expect(scheduler.release("c")).toEqual(["f"]);
+			expect(scheduler.slot("f")).toMatchObject({ pool: "ci" });
+			// Each pool's size is its limit, and the provider's own caps it: with the manager's at two, dev holds two and ci one.
+			expect(scheduler.setLimit(1, "compose")).toEqual([]);
+			expect(scheduler.release("a")).toEqual([]);
+			expect(scheduler.request("g", walk)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+			// The sizes and the cap survive a restart.
+			expect(make({ defaultLimit: 3 }).request("h", walk)).toEqual({ status: "queued", position: 2, reason: "slots_full" });
+		});
+	});
+
+	it("holds every pool of the provider whose conditions say so, and caps each of its pools by its limit", async () => {
+		await withScheduler(({ make }) => {
+			const scheduler = make({ defaultLimit: 3 });
+			const pools = [
+				{ id: "dev", provider: "compose", size: 2, priority: 1 },
+				{ id: "ci", provider: "compose", size: 1, priority: 2 },
+			];
+			scheduler.setPools(pools);
+			// The manager's disk is low, so both of its pools hold their queues, set by either of them.
+			expect(scheduler.setConditions({ lowDisk: true, budgetCapped: false, detail: "5% free" }, "dev")).toEqual([]);
+			expect(scheduler.request("a", { pool: "dev" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "5% free" });
+			expect(scheduler.request("b", { pool: "ci" })).toEqual({ status: "queued", position: 2, reason: "low_disk", detail: "5% free" });
+			expect(scheduler.conditions("ci")).toEqual({ lowDisk: true, budgetCapped: false, detail: "5% free" });
+			// The manager's own limit of one caps each of its pools, so both waiting threads go to work, one to a pool.
+			expect(scheduler.setLimit(1, "compose")).toEqual([]);
+			scheduler.setConditions({ lowDisk: false, budgetCapped: false }, "ci");
+			expect(scheduler.request("a", { pool: "dev" })).toEqual({ status: "admitted", pool: "dev" });
+			expect(scheduler.request("b", { pool: "ci" })).toEqual({ status: "admitted", pool: "ci" });
+			expect(scheduler.request("c", { pool: "dev" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+		});
+	});
+
+	it("takes a provider's id as a pool from before the registry, moving the slots and queue places to that provider's first pool", async () => {
+		await runInDurableObject(env.Pim.getByName(`coding-${crypto.randomUUID()}`), (_pim: Pim, state) => {
+			// The tables as they were before pools, keyed by provider: a slot held, a thread queued.
+			state.storage.sql.exec(
+				"CREATE TABLE pim_coding_queue (seq INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, queued_at INTEGER NOT NULL, reason TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, deadline_at INTEGER NOT NULL)",
+			);
+			state.storage.sql.exec("INSERT INTO pim_coding_queue (thread_id, provider, queued_at, reason, priority, deadline_at) VALUES ('q', 'compose', 1, 'slots_full', 0, 9)");
+			state.storage.sql.exec(
+				"CREATE TABLE pim_coding_slots (thread_id TEXT PRIMARY KEY, provider TEXT, acquired_at INTEGER NOT NULL, state TEXT NOT NULL, activity TEXT NOT NULL, activity_since INTEGER NOT NULL)",
+			);
+			state.storage.sql.exec("INSERT INTO pim_coding_slots (thread_id, provider, acquired_at, state, activity, activity_since) VALUES ('s', 'compose', 1, 'admitted', 'running', 1)");
+			const now = 1;
+			const scheduler = new CodingScheduler(state.storage.sql, { transaction: (run) => run(), now: () => now });
+			expect(scheduler.slot("s")).toMatchObject({ pool: "compose" });
+			expect(scheduler.position("q")).toMatchObject({ position: 1 });
+			// A registry that names the provider takes the held slot and the queued place over into its first pool, so neither is stranded.
+			const pools = [
+				{ id: "dev", provider: "compose", size: 1, priority: 1 },
+				{ id: "ci", provider: "compose", size: 1, priority: 2 },
+			];
+			scheduler.setPools(pools);
+			expect(scheduler.request("t", { pool: "dev" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
+			expect(scheduler.slot("s")).toMatchObject({ pool: "dev" });
+			expect(scheduler.snapshot().queued).toEqual([
+				expect.objectContaining({ threadId: "q", pool: "dev" }),
+				expect.objectContaining({ threadId: "t", pool: "dev" }),
+			]);
+			// Reconcile still releases the slot of a thread that is gone, leaked by the change or not.
+			expect(scheduler.reconcile(["t"])).toMatchObject({ released: ["s"], adopted: ["t"] });
+			expect(scheduler.slot("t")).toMatchObject({ pool: "dev" });
+		});
+	});
+
+	it("queues a thread whatever its pool, in a queue table that still has the old NOT NULL provider column beside pool", async () => {
+		await runInDurableObject(env.Pim.getByName(`coding-${crypto.randomUUID()}`), (_pim: Pim, state) => {
+			state.storage.sql.exec(
+				"CREATE TABLE pim_coding_queue (seq INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL UNIQUE, provider TEXT NOT NULL, pool TEXT, queued_at INTEGER NOT NULL, reason TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, deadline_at INTEGER NOT NULL)",
+			);
+			state.storage.sql.exec("INSERT INTO pim_coding_queue (thread_id, provider, queued_at, reason, priority, deadline_at) VALUES ('old', 'compose', 1, 'slots_full', 0, 9)");
+			const scheduler = new CodingScheduler(state.storage.sql, { transaction: (run) => run(), now: () => 1, defaultLimit: 0 });
+			scheduler.setPools([{ id: "dev", provider: "compose", size: 1, priority: 1 }]);
+			expect(scheduler.request("pool-only", { pool: "dev" })).toMatchObject({ status: "queued" });
+			expect(scheduler.request("provider-only", { pool: "compose" })).toMatchObject({ status: "queued" });
+			expect(scheduler.request("neither", { pool: "dev", overflow: [] })).toMatchObject({ status: "queued" });
+			expect(scheduler.snapshot().queued.map((entry) => entry.threadId)).toEqual(["old", "pool-only", "provider-only", "neither"]);
+		});
+	});
+
+	it("moves a slot to the first other pool with room, and admits the queue into the one it leaves", async () => {
 		await withScheduler(({ make }) => {
 			const scheduler = make({ defaultLimit: 1, limits: { cloud: 1 } });
-			expect(scheduler.request("a", { provider: "compose", overflow: ["cloud"] })).toEqual({ status: "admitted", provider: "compose" });
-			expect(scheduler.request("q", { provider: "compose" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
-			expect(scheduler.move("a", ["compose", "cloud"])).toEqual({ provider: "cloud", admitted: ["q"] });
-			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["a:cloud", "q:compose"]);
-			// Every provider is full: nothing moves.
-			expect(scheduler.move("q", ["cloud"])).toEqual({ provider: null, admitted: [] });
-			expect(scheduler.move("nobody", ["cloud"])).toEqual({ provider: null, admitted: [] });
+			expect(scheduler.request("a", { pool: "compose", overflow: ["cloud"] })).toEqual({ status: "admitted", pool: "compose" });
+			expect(scheduler.request("q", { pool: "compose" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+			expect(scheduler.move("a", ["compose", "cloud"])).toEqual({ pool: "cloud", admitted: ["q"] });
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.pool}`)).toEqual(["a:cloud", "q:compose"]);
+			// Every pool is full: nothing moves.
+			expect(scheduler.move("q", ["cloud"])).toEqual({ pool: null, admitted: [] });
+			expect(scheduler.move("nobody", ["cloud"])).toEqual({ pool: null, admitted: [] });
 			// A gate that holds the cloud up holds a move there too.
 			scheduler.release("a");
 			scheduler.setConditions({ lowDisk: true, budgetCapped: false }, "cloud");
-			expect(scheduler.move("q", ["cloud"])).toEqual({ provider: null, admitted: [] });
+			expect(scheduler.move("q", ["cloud"])).toEqual({ pool: null, admitted: [] });
 			scheduler.setConditions({ lowDisk: false, budgetCapped: false }, "cloud");
-			expect(scheduler.move("q", ["cloud"])).toEqual({ provider: "cloud", admitted: [] });
+			expect(scheduler.move("q", ["cloud"])).toEqual({ pool: "cloud", admitted: [] });
 		});
 	});
 
@@ -306,11 +405,11 @@ describe("the coding scheduler", () => {
 			expect(scheduler.setConditions({ lowDisk: true, budgetCapped: false, detail: "5% free" }, "compose")).toEqual([]);
 			expect(scheduler.conditions("compose")).toEqual({ lowDisk: true, budgetCapped: false, detail: "5% free" });
 			expect(scheduler.conditions("cloud")).toEqual({ lowDisk: false, budgetCapped: false });
-			expect(scheduler.request("a", { provider: "compose" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "5% free" });
-			expect(scheduler.request("b", { provider: "compose", overflow: ["cloud"] })).toEqual({ status: "admitted", provider: "cloud" });
+			expect(scheduler.request("a", { pool: "compose" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "5% free" });
+			expect(scheduler.request("b", { pool: "compose", overflow: ["cloud"] })).toEqual({ status: "admitted", pool: "cloud" });
 			// The space's conditions hold every provider without its own.
 			expect(scheduler.setConditions({ lowDisk: false, budgetCapped: true })).toEqual([]);
-			expect(scheduler.request("c", { provider: "vm" })).toEqual({ status: "queued", position: 2, reason: "budget_cap" });
+			expect(scheduler.request("c", { pool: "vm" })).toEqual({ status: "queued", position: 2, reason: "budget_cap" });
 			expect(scheduler.setConditions({ lowDisk: false, budgetCapped: false }, "compose")).toEqual(["a"]);
 		});
 	});
@@ -318,12 +417,12 @@ describe("the coding scheduler", () => {
 	it("takes threads out of the queue once their deadline comes, in queue order", async () => {
 		await withScheduler(({ scheduler, clock }) => {
 			ask(scheduler, "r");
-			scheduler.request("a", { provider: "sandbox", deadlineMs: 1_000 });
-			scheduler.request("b", { provider: "sandbox" });
+			scheduler.request("a", { pool: "sandbox", deadlineMs: 1_000 });
+			scheduler.request("b", { pool: "sandbox" });
 			clock.now += 100;
-			scheduler.request("c", { provider: "sandbox", reason: "resume", deadlineMs: 400 });
+			scheduler.request("c", { pool: "sandbox", reason: "resume", deadlineMs: 400 });
 			expect(scheduler.expire(START + 499)).toEqual([]);
-			expect(scheduler.expire(START + 500)).toEqual([{ threadId: "c", provider: "sandbox", reason: "resume", priority: 0, queuedAt: START + 100, deadlineAt: START + 500 }]);
+			expect(scheduler.expire(START + 500)).toEqual([{ threadId: "c", pool: "sandbox", reason: "resume", priority: 0, queuedAt: START + 100, deadlineAt: START + 500 }]);
 			expect(queued(scheduler)).toEqual(["a", "b"]);
 			clock.now = START + 5_000;
 			expect(scheduler.expire().map((entry) => entry.threadId)).toEqual(["a"]);
@@ -352,12 +451,12 @@ describe("the coding scheduler", () => {
 	it("puts higher priority first, and first come, first served within a priority", async () => {
 		await withScheduler(({ scheduler, clock }) => {
 			ask(scheduler, "r");
-			scheduler.request("a", { provider: "sandbox" });
-			scheduler.request("b", { provider: "sandbox", priority: -1 });
+			scheduler.request("a", { pool: "sandbox" });
+			scheduler.request("b", { pool: "sandbox", priority: -1 });
 			clock.now += 1;
-			scheduler.request("c", { provider: "sandbox", priority: 5 });
-			scheduler.request("d", { provider: "sandbox" });
-			expect(scheduler.request("e", { provider: "sandbox", priority: 5 })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
+			scheduler.request("c", { pool: "sandbox", priority: 5 });
+			scheduler.request("d", { pool: "sandbox" });
+			expect(scheduler.request("e", { pool: "sandbox", priority: 5 })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
 			expect(queued(scheduler)).toEqual(["c", "e", "a", "d", "b"]);
 			expect(["c", "e", "a", "d", "b"].map((id) => place(scheduler, id))).toEqual([1, 2, 3, 4, 5]);
 			expect(scheduler.release("r")).toEqual(["c"]);
@@ -401,7 +500,7 @@ describe("the coding scheduler", () => {
 					{ status: "queued", position: 3, reason: "slots_full" },
 				]);
 				expect(scheduler.position("b")).toEqual({ position: 2, reason, detail: "the detail" });
-				expect(scheduler.snapshot().queued[0]).toEqual({ threadId: "a", provider: "sandbox", reason, detail: "the detail", priority: 0, queuedAt: START, deadlineAt: START + SIX_HOURS });
+				expect(scheduler.snapshot().queued[0]).toEqual({ threadId: "a", pool: "sandbox", reason, detail: "the detail", priority: 0, queuedAt: START, deadlineAt: START + SIX_HOURS });
 				// Nothing else that admits lets anyone past it.
 				expect(scheduler.release("nobody")).toEqual([]);
 				expect(scheduler.setLimit(2)).toEqual([]);
@@ -438,26 +537,26 @@ describe("the coding scheduler", () => {
 		});
 	});
 
-	it("holds a provider's share of the queue behind a thread a gate refuses, even threads the gate would let through, and lets other providers admit", async () => {
+	it("holds a pool's share of the queue behind a thread a gate refuses, even threads the gate would let through, and lets other pools admit", async () => {
 		await withScheduler(({ make }) => {
 			let vmDown = true;
-			const vmGate: AdmissionGate = { check: (entry) => (entry.provider === "vm" && entry.threadId === "v" && vmDown ? { ok: false, reason: "provider_down", detail: "vm is down" } : { ok: true }) };
+			const vmGate: AdmissionGate = { check: (entry) => (entry.pool === "vm" && entry.threadId === "v" && vmDown ? { ok: false, reason: "provider_down", detail: "vm is down" } : { ok: true }) };
 			const scheduler = make({ defaultLimit: 2, gates: [vmGate] });
-			expect(scheduler.request("v", { provider: "vm" })).toEqual({ status: "queued", position: 1, reason: "provider_down", detail: "vm is down" });
+			expect(scheduler.request("v", { pool: "vm" })).toEqual({ status: "queued", position: 1, reason: "provider_down", detail: "vm is down" });
 			// w would be let through, but waits behind v; the second free slot waits for it too.
-			expect(scheduler.request("w", { provider: "vm" })).toEqual({ status: "queued", position: 2, reason: "provider_down", detail: "vm is down" });
-			expect(scheduler.request("u", { provider: "vm" })).toEqual({ status: "queued", position: 3, reason: "slots_full" });
+			expect(scheduler.request("w", { pool: "vm" })).toEqual({ status: "queued", position: 2, reason: "provider_down", detail: "vm is down" });
+			expect(scheduler.request("u", { pool: "vm" })).toEqual({ status: "queued", position: 3, reason: "slots_full" });
 			// The sandbox's slots are its own, and nothing holds them up.
 			expect(ask(scheduler, "s1", "s2", "s3")).toEqual([
-				{ status: "admitted", provider: "sandbox" },
-				{ status: "admitted", provider: "sandbox" },
+				{ status: "admitted", pool: "sandbox" },
+				{ status: "admitted", pool: "sandbox" },
 				{ status: "queued", position: 4, reason: "slots_full" },
 			]);
 			// A thread that may also run on the sandbox waits for whichever frees first, and the vm's free slots wait for v and w, not for it.
-			expect(scheduler.request("o", { provider: "vm", overflow: ["sandbox"] })).toEqual({ status: "queued", position: 5, reason: "slots_full" });
+			expect(scheduler.request("o", { pool: "vm", overflow: ["sandbox"] })).toEqual({ status: "queued", position: 5, reason: "slots_full" });
 			expect(scheduler.release("s1")).toEqual(["s3"]);
 			expect(scheduler.release("s2")).toEqual(["o"]);
-			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["o:sandbox", "s3:sandbox"]);
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.pool}`)).toEqual(["o:sandbox", "s3:sandbox"]);
 			expect(reasons(scheduler)).toEqual(["v:provider_down", "w:provider_down", "u:slots_full"]);
 			// The gate's world changes outside the scheduler; the next tick sees it.
 			vmDown = false;
@@ -470,7 +569,7 @@ describe("the coding scheduler", () => {
 		await withScheduler(({ scheduler, clock, make }) => {
 			ask(scheduler, "r", "a");
 			clock.now = START + 60 * 60 * 1000;
-			scheduler.request("b", { provider: "sandbox", deadlineMs: 8 * 60 * 60 * 1000 });
+			scheduler.request("b", { pool: "sandbox", deadlineMs: 8 * 60 * 60 * 1000 });
 			scheduler.setConditions({ lowDisk: true, budgetCapped: false, detail: "5% free" });
 			// a waited for a slot first, then for the disk once r ended.
 			expect(scheduler.release("r")).toEqual([]);
@@ -478,21 +577,21 @@ describe("the coding scheduler", () => {
 			expect(scheduler.tick(START + SIX_HOURS - 1)).toEqual({ expired: [], admitted: [], released: [] });
 			clock.now = START + SIX_HOURS;
 			expect(scheduler.tick()).toEqual({
-				expired: [{ threadId: "a", provider: "sandbox", reason: "low_disk", detail: "5% free", priority: 0, queuedAt: START, deadlineAt: START + SIX_HOURS }],
+				expired: [{ threadId: "a", pool: "sandbox", reason: "low_disk", detail: "5% free", priority: 0, queuedAt: START, deadlineAt: START + SIX_HOURS }],
 				admitted: [],
 				released: [],
 			});
 			expect(reasons(scheduler)).toEqual(["b:low_disk"]);
 			// c waits for the disk behind b, then, once b takes the slot, for a slot.
-			expect(scheduler.request("c", { provider: "sandbox" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
+			expect(scheduler.request("c", { pool: "sandbox" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
 			expect(scheduler.setConditions({ lowDisk: false, budgetCapped: false })).toEqual(["b"]);
 			expect(scheduler.tick(START + 2 * SIX_HOURS)).toEqual({
-				expired: [{ threadId: "c", provider: "sandbox", reason: "slots_full", priority: 0, queuedAt: START + SIX_HOURS, deadlineAt: START + 2 * SIX_HOURS }],
+				expired: [{ threadId: "c", pool: "sandbox", reason: "slots_full", priority: 0, queuedAt: START + SIX_HOURS, deadlineAt: START + 2 * SIX_HOURS }],
 				admitted: [],
 				released: [],
 			});
 			const quick = make({ defaultDeadlineMs: 60_000 });
-			quick.request("d", { provider: "sandbox" });
+			quick.request("d", { pool: "sandbox" });
 			expect(quick.snapshot().queued[0]?.deadlineAt).toBe(clock.now + 60_000);
 			expect(() => make({ defaultDeadlineMs: -1 })).toThrow(RangeError);
 		});
@@ -507,7 +606,7 @@ describe("the coding scheduler", () => {
 				expect(before.queued.map((entry) => entry.reason)).toEqual(["low_disk", "low_disk", "slots_full"]);
 				const again = make();
 				expect(again.snapshot()).toEqual(before);
-				expect(again.request("a", { provider: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "9% free" });
+				expect(again.request("a", { pool: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "9% free" });
 				expect(again.reconcile([])).toEqual({ released: [], adopted: [], admitted: [] });
 				expect(again.tick()).toEqual({ expired: [], admitted: [], released: [] });
 				expect(() => make({ crash: true }).setConditions({ lowDisk: false, budgetCapped: false })).toThrow("crash before commit");
@@ -543,7 +642,7 @@ describe("the coding scheduler", () => {
 					if (roll < 0.04) {
 						scheduler = make(options);
 					} else if (roll < 0.3) {
-						scheduler.request(pick(), { provider: "sandbox" });
+						scheduler.request(pick(), { pool: "sandbox" });
 					} else if (roll < 0.36) {
 						const lowDisk = next() < 0.3;
 						const budgetCapped = next() < 0.15;
@@ -622,7 +721,7 @@ describe("the coding scheduler", () => {
 			ask(scheduler, "q");
 			expect(scheduler.setActivity("a", "idle")).toBe(true);
 			const idle = clock.now;
-			expect(scheduler.snapshot().running).toEqual([{ threadId: "a", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "idle", activitySince: idle }]);
+			expect(scheduler.snapshot().running).toEqual([{ threadId: "a", pool: "sandbox", acquiredAt: START, state: "admitted", activity: "idle", activitySince: idle }]);
 			expect(scheduler.sweep(idle + 10 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
 			// A turn a minute before the 10 are up, then idle again: they start over.
 			clock.now = idle + 9 * MINUTE;
@@ -633,7 +732,7 @@ describe("the coding scheduler", () => {
 			expect(scheduler.sweep(clock.now + 10 * MINUTE - 1)).toEqual({ released: [], admitted: [] });
 			clock.now += 10 * MINUTE;
 			expect(scheduler.tick()).toEqual({ expired: [], admitted: ["q"], released: [{ threadId: "a", why: "idle" }] });
-			expect(scheduler.snapshot().running).toEqual([{ threadId: "q", provider: "sandbox", acquiredAt: clock.now, state: "admitted", activity: "running", activitySince: clock.now }]);
+			expect(scheduler.snapshot().running).toEqual([{ threadId: "q", pool: "sandbox", acquiredAt: clock.now, state: "admitted", activity: "running", activitySince: clock.now }]);
 			// With no one queued, an idle slot is given back all the same, any time after its 10 minutes.
 			scheduler.setActivity("q", "idle");
 			expect(scheduler.sweep(clock.now + 2 * SIX_HOURS)).toEqual({ released: [{ threadId: "q", why: "idle" }], admitted: [] });
@@ -660,7 +759,7 @@ describe("the coding scheduler", () => {
 			ask(scheduler, "b", "c");
 			expect(scheduler.tick()).toEqual({ expired: [], admitted: ["b"], released: [{ threadId: "a", why: "preempted" }] });
 			// The caller checkpoints a's workspace, and a asks again ahead of c.
-			expect(scheduler.request("a", { provider: "sandbox", priority: PREEMPT_RESUME_PRIORITY, reason: "resume" })).toEqual({ status: "queued", position: 1, reason: "resume" });
+			expect(scheduler.request("a", { pool: "sandbox", priority: PREEMPT_RESUME_PRIORITY, reason: "resume" })).toEqual({ status: "queued", position: 1, reason: "resume" });
 			expect(queued(scheduler)).toEqual(["a", "c"]);
 			scheduler.setActivity("b", "waiting");
 			const waiting = clock.now;
@@ -718,14 +817,14 @@ describe("the coding scheduler", () => {
 		await withScheduler(({ scheduler, clock }) => {
 			ask(scheduler, "r", "a");
 			clock.now += 1;
-			const resume = { provider: "sandbox", priority: PREEMPT_RESUME_PRIORITY, reason: "resume" };
+			const resume = { pool: "sandbox", priority: PREEMPT_RESUME_PRIORITY, reason: "resume" };
 			expect(scheduler.request("p1", resume)).toEqual({ status: "queued", position: 1, reason: "resume" });
 			clock.now += 1;
 			ask(scheduler, "b");
 			// p3 asks in the same millisecond as p2.
 			expect(scheduler.request("p2", resume)).toEqual({ status: "queued", position: 2, reason: "resume" });
 			expect(scheduler.request("p3", resume)).toEqual({ status: "queued", position: 3, reason: "resume" });
-			expect(scheduler.request("c", { provider: "sandbox", priority: 5 })).toEqual({ status: "queued", position: 4, reason: "slots_full" });
+			expect(scheduler.request("c", { pool: "sandbox", priority: 5 })).toEqual({ status: "queued", position: 4, reason: "slots_full" });
 			expect(queued(scheduler)).toEqual(["p1", "p2", "p3", "c", "a", "b"]);
 			expect(["r", "p1", "p2", "p3", "c", "a"].map((id) => scheduler.release(id))).toEqual([["p1"], ["p2"], ["p3"], ["c"], ["a"], ["b"]]);
 		});
@@ -770,7 +869,7 @@ describe("the coding scheduler", () => {
 				scheduler.setActivity(id, activity);
 			}
 			ask(scheduler, "x", "y");
-			scheduler.request("v", { provider: "sandbox" });
+			scheduler.request("v", { pool: "sandbox" });
 			ask(scheduler, "w");
 			clock.now += 5 * MINUTE;
 			// x and y can start; v can't, and holds up w behind it.
@@ -790,11 +889,11 @@ describe("the coding scheduler", () => {
 		});
 	});
 
-	it("preempts only on the provider the queue waits for, and on an overflow's when its own has no one to preempt", async () => {
+	it("preempts only on the pool the queue waits for, and on an overflow's when its own has no one to preempt", async () => {
 		await withScheduler(({ scheduler, clock }) => {
 			scheduler.setLimit(1, "cloud");
-			expect(scheduler.request("s", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
-			expect(scheduler.request("c", { provider: "cloud" })).toEqual({ status: "admitted", provider: "cloud" });
+			expect(scheduler.request("s", { pool: "sandbox" })).toEqual({ status: "admitted", pool: "sandbox" });
+			expect(scheduler.request("c", { pool: "cloud" })).toEqual({ status: "admitted", pool: "cloud" });
 			clock.now += 1;
 			scheduler.setActivity("c", "waiting");
 			clock.now += 1;
@@ -804,9 +903,9 @@ describe("the coding scheduler", () => {
 			clock.now += 5 * MINUTE;
 			expect(scheduler.sweep()).toEqual({ released: [{ threadId: "s", why: "preempted" }], admitted: ["q"] });
 			// o would rather run on the sandbox, where q runs and no one waits; the cloud's slot is taken from c.
-			scheduler.request("o", { provider: "sandbox", overflow: ["cloud"] });
+			scheduler.request("o", { pool: "sandbox", overflow: ["cloud"] });
 			expect(scheduler.sweep()).toEqual({ released: [{ threadId: "c", why: "preempted" }], admitted: ["o"] });
-			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.provider}`)).toEqual(["o:cloud", "q:sandbox"]);
+			expect(scheduler.snapshot().running.map((slot) => `${slot.threadId}:${slot.pool}`)).toEqual(["o:cloud", "q:sandbox"]);
 		});
 	});
 
@@ -820,8 +919,8 @@ describe("the coding scheduler", () => {
 				scheduler.setActivity("b", "waiting");
 				const before = scheduler.snapshot();
 				expect(before.running).toEqual([
-					{ threadId: "a", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "idle", activitySince: START + 1_000 },
-					{ threadId: "b", provider: "sandbox", acquiredAt: START, state: "admitted", activity: "waiting", activitySince: START + 2_000 },
+					{ threadId: "a", pool: "sandbox", acquiredAt: START, state: "admitted", activity: "idle", activitySince: START + 1_000 },
+					{ threadId: "b", pool: "sandbox", acquiredAt: START, state: "admitted", activity: "waiting", activitySince: START + 2_000 },
 				]);
 				expect(() => make({ crash: true }).setActivity("a", "running")).toThrow("crash before commit");
 				expect(() => make({ crash: true }).sweep(START + SIX_HOURS)).toThrow("crash before commit");
@@ -839,5 +938,29 @@ describe("the coding scheduler", () => {
 			},
 			2,
 		);
+	});
+});
+
+describe("pool circuit breakers", () => {
+	it("persists failures, skips only the unhealthy pool, and admits one recovery probe", async () => {
+		await withScheduler(({ scheduler, clock, make }) => {
+			scheduler.setPools([{ id: "first", provider: "sandbox", size: 3, priority: 1 }, { id: "second", provider: "sandbox", size: 3, priority: 2 }]);
+			for (let i = 0; i < 3; i++) {
+				expect(scheduler.request("fail", { pool: "first" }).status).toBe("admitted");
+				scheduler.workspaceResult("fail", "failure");
+				scheduler.release("fail");
+			}
+			const restarted = make({ defaultLimit: 3 });
+			expect(restarted.unhealthyPools(["first", "second"])).toEqual(["first"]);
+			expect(restarted.request("overflow", { pool: "first", overflow: ["second"] })).toEqual({ status: "admitted", pool: "second" });
+			expect(restarted.request("pinned", { pool: "first" })).toMatchObject({ status: "queued", reason: "unhealthy" });
+			restarted.request("behind", { pool: "first" });
+			clock.now += 5 * MINUTE;
+			expect(restarted.tick().admitted).toEqual(["pinned"]);
+			expect(restarted.position("behind")).toMatchObject({ reason: "unhealthy" });
+			expect(make().unhealthyPools(["first"])).toEqual(["first"]);
+			expect(restarted.workspaceResult("pinned", "success")).toEqual(["behind"]);
+			expect(restarted.unhealthyPools(["first"])).toEqual([]);
+		}, 3);
 	});
 });

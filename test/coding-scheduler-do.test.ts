@@ -50,10 +50,10 @@ describe("a space's coding scheduler", () => {
 	it("answers every method over RPC, with a limit of 2 set", async () => {
 		const stub = space();
 		await stub.setLimit(2);
-		expect(await stub.request("a", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
-		expect(await stub.request("b", { provider: "sandbox" })).toEqual({ status: "admitted", provider: "sandbox" });
-		expect(await stub.request("c", { provider: "sandbox", reason: "resume" })).toEqual({ status: "queued", position: 1, reason: "resume" });
-		expect(await stub.request("d", { provider: "sandbox" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
+		expect(await stub.request("a", { pool: "sandbox" })).toEqual({ status: "admitted", pool: "sandbox" });
+		expect(await stub.request("b", { pool: "sandbox" })).toEqual({ status: "admitted", pool: "sandbox" });
+		expect(await stub.request("c", { pool: "sandbox", reason: "resume" })).toEqual({ status: "queued", position: 1, reason: "resume" });
+		expect(await stub.request("d", { pool: "sandbox" })).toEqual({ status: "queued", position: 2, reason: "slots_full" });
 		expect(await stub.position("d")).toEqual({ position: 2, reason: "slots_full" });
 		expect(await stub.cancel("d")).toBe(true);
 		expect(await stub.position("d")).toBeNull();
@@ -62,7 +62,7 @@ describe("a space's coding scheduler", () => {
 		const snapshot = await stub.snapshot();
 		expect(snapshot.limit).toBe(2);
 		expect(snapshot.running.map((slot) => `${slot.threadId}:${slot.activity}`)).toEqual(["a:waiting", "b:running"]);
-		expect(snapshot.queued).toEqual([{ threadId: "c", provider: "sandbox", reason: "resume", priority: 0, queuedAt: START, deadlineAt: START + 6 * 60 * MINUTE }]);
+		expect(snapshot.queued).toEqual([{ threadId: "c", pool: "sandbox", reason: "resume", priority: 0, queuedAt: START, deadlineAt: START + 6 * 60 * MINUTE }]);
 		for (const ms of [10, 20, 30, 40, 50]) await stub.recordDuration(ms);
 		expect(await stub.etaMs(1)).toBe(15);
 		expect(await stub.setConditions({ lowDisk: true, budgetCapped: false, detail: "3% free" })).toEqual([]);
@@ -70,7 +70,7 @@ describe("a space's coding scheduler", () => {
 		expect(await stub.position("c")).toEqual({ position: 1, reason: "low_disk", detail: "3% free" });
 		expect(await stub.setConditions({ lowDisk: false, budgetCapped: false })).toEqual(["c"]);
 		codingSchedulers.now = START + 5 * MINUTE;
-		expect(await stub.request("e", { provider: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
+		expect(await stub.request("e", { pool: "sandbox" })).toEqual({ status: "queued", position: 1, reason: "slots_full" });
 		expect(await stub.sweep()).toEqual({ released: [{ threadId: "a", why: "preempted" }], admitted: ["e"] });
 		expect(await stub.reconcile(["b", "e", "x"])).toEqual({ released: ["c"], adopted: ["x"], admitted: [] });
 		expect(await stub.release("x")).toEqual([]);
@@ -80,15 +80,15 @@ describe("a space's coding scheduler", () => {
 	it("sets its alarm 30 seconds on while a thread is queued or a slot's thread is idle or waiting, and none with nothing to do", async () => {
 		const stub = space();
 		await stub.setLimit(2);
-		await stub.request("a", { provider: "sandbox" });
-		await stub.request("b", { provider: "sandbox" });
+		await stub.request("a", { pool: "sandbox" });
+		await stub.request("b", { pool: "sandbox" });
 		// Two threads running: nothing for a tick to do.
 		expect(await alarmOf(stub)).toBeNull();
-		await stub.request("c", { provider: "sandbox" });
+		await stub.request("c", { pool: "sandbox" });
 		expect(await alarmOf(stub)).toBe(START + TICK_MS);
 		// Asking again later doesn't put off a tick already set.
 		codingSchedulers.now = START + 10_000;
-		await stub.request("d", { provider: "sandbox" });
+		await stub.request("d", { pool: "sandbox" });
 		expect(await alarmOf(stub)).toBe(START + TICK_MS);
 		expect(await stub.cancel("d")).toBe(true);
 		expect(await stub.cancel("c")).toBe(true);
@@ -109,9 +109,9 @@ describe("a space's coding scheduler", () => {
 	it("expires and admits on its alarm by the clock, and tells each thread", async () => {
 		const stub = space();
 		await stub.setLimit(1);
-		await stub.request("a", { provider: "sandbox" });
-		await stub.request("b", { provider: "sandbox", deadlineMs: MINUTE });
-		await stub.request("c", { provider: "sandbox" });
+		await stub.request("a", { pool: "sandbox" });
+		await stub.request("b", { pool: "sandbox", deadlineMs: MINUTE });
+		await stub.request("c", { pool: "sandbox" });
 		await stub.setActivity("a", "idle");
 		codingSchedulers.now = START + MINUTE - 1;
 		await runDurableObjectAlarm(stub);
@@ -135,8 +135,8 @@ describe("a space's coding scheduler", () => {
 	it("tells a thread admitted by another's release on the next alarm, which it sets at once", async () => {
 		const stub = space();
 		await stub.setLimit(1);
-		await stub.request("a", { provider: "sandbox" });
-		await stub.request("b", { provider: "sandbox" });
+		await stub.request("a", { pool: "sandbox" });
+		await stub.request("b", { pool: "sandbox" });
 		codingSchedulers.now = START + 5_000;
 		expect(await stub.release("a")).toEqual(["b"]);
 		expect(await outbox(stub)).toEqual(["admitted:b:0"]);
@@ -150,14 +150,14 @@ describe("a space's coding scheduler", () => {
 	it("delivers every notice at least once through failures and restarts, with the same key each time, and each thread's in order", async () => {
 		const stub = space();
 		await stub.setLimit(1);
-		await stub.request("a", { provider: "sandbox" });
-		await stub.request("b", { provider: "sandbox" });
+		await stub.request("a", { pool: "sandbox" });
+		await stub.request("b", { pool: "sandbox" });
 		await stub.setActivity("a", "waiting");
 		// a is preempted for b, and asks again; then b ends, and a is admitted.
 		codingSchedulers.now = START + 5 * MINUTE;
 		expect(await stub.sweep()).toEqual({ released: [{ threadId: "a", why: "preempted" }], admitted: ["b"] });
-		await stub.request("a", { provider: "sandbox", priority: 1000 });
-		await stub.request("c", { provider: "sandbox" });
+		await stub.request("a", { pool: "sandbox", priority: 1000 });
+		await stub.request("c", { pool: "sandbox" });
 		expect(await stub.release("b")).toEqual(["a"]);
 		expect(await outbox(stub)).toEqual(["released:a:0", "admitted:b:0", "admitted:a:0"]);
 
@@ -214,13 +214,13 @@ describe("a notice that keeps failing", () => {
 	it("is tried 20 times, then kept dead: never tried again, logged once, holding up neither the thread's later notices nor the alarm", async () => {
 		const stub = space();
 		await stub.setLimit(1);
-		await stub.request("a", { provider: "sandbox" });
-		await stub.request("b", { provider: "sandbox" });
+		await stub.request("a", { pool: "sandbox" });
+		await stub.request("b", { pool: "sandbox" });
 		await stub.setActivity("a", "waiting");
 		// a is preempted for b and asks again; b ends, and a is admitted: a's release then its admission.
 		codingSchedulers.now = START + 5 * MINUTE;
 		await stub.sweep();
-		await stub.request("a", { provider: "sandbox", priority: 1000 });
+		await stub.request("a", { pool: "sandbox", priority: 1000 });
 		expect(await stub.release("b")).toEqual(["a"]);
 		// a's thread never takes the news of its release, but takes everything else.
 		let tries = 0;
@@ -306,31 +306,31 @@ describe("the workspace manager's capacity", () => {
 		const falling = space();
 		await falling.setLimit(3);
 		await falling.setConditions({ lowDisk: true, budgetCapped: false });
-		for (const id of ["a", "b", "c"]) await falling.request(id, { provider: "sandbox" });
+		for (const id of ["a", "b", "c"]) await falling.request(id, { pool: "sandbox" });
 		expect(await falling.refreshConditions(health(50, 1), 2)).toEqual(["a"]);
 		// The limit rises as the disk runs low: no one is admitted.
 		const rising = space();
 		await rising.setLimit(1);
-		for (const id of ["a", "b", "c"]) await rising.request(id, { provider: "sandbox" });
+		for (const id of ["a", "b", "c"]) await rising.request(id, { pool: "sandbox" });
 		expect(await rising.refreshConditions(health(5, 4), 4)).toEqual([]);
 		expect(await rising.position("b")).toEqual({ position: 1, reason: "low_disk", detail: "5% of the disk free" });
 		expect(await rising.refreshConditions(health(40, 4), 4)).toEqual(["b", "c"]);
 	});
 
-	it("keeps the sandbox manager's limit and disk to its own slots, gives Cloudflare 20 of its own, and tells a thread admitted from the queue its provider", async () => {
+	it("keeps the sandbox manager's limit and disk to its own slots, gives Cloudflare 20 of its own, and tells a thread admitted from the queue its pool", async () => {
 		const stub = space();
-		const overflow = { provider: "compose", overflow: ["cloudflare"] };
-		codingSchedulers.notifier = { ...recorder, admitted: (threadId, key, provider) => void (heard.push(`admitted:${threadId}:${provider}`), keys.push(key)) };
+		const overflow = { pool: "compose", overflow: ["cloudflare"] };
+		codingSchedulers.notifier = { ...recorder, admitted: (threadId, key, pool) => void (heard.push(`admitted:${threadId}:${pool}`), keys.push(key)) };
 		// The manager's disk is low: its threads wait, and those that may overflow run on Cloudflare.
 		expect(await stub.refreshConditions(health(5, 2), DEFAULT_SPACE_CAP, "compose")).toEqual([]);
-		expect(await stub.request("pinned", { provider: "compose" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "5% of the disk free" });
-		expect(await stub.request("a", overflow)).toEqual({ status: "admitted", provider: "cloudflare" });
+		expect(await stub.request("pinned", { pool: "compose" })).toEqual({ status: "queued", position: 1, reason: "low_disk", detail: "5% of the disk free" });
+		expect(await stub.request("a", overflow)).toEqual({ status: "admitted", pool: "cloudflare" });
 		expect(await stub.refreshConditions(health(80, 2), DEFAULT_SPACE_CAP, "compose")).toEqual(["pinned"]);
-		expect(await stub.request("b", overflow)).toEqual({ status: "admitted", provider: "compose" });
+		expect(await stub.request("b", overflow)).toEqual({ status: "admitted", pool: "compose" });
 		// The manager's limit of 2 is the compose slots', not the space's: Cloudflare's 20 are its own.
 		expect((await stub.snapshot()).limit).toBe(DEFAULT_SPACE_CAP);
 		expect(PROVIDER_SPACE_CAPS.cloudflare).toBe(20);
-		for (let i = 1; i < 20; i++) expect(await stub.request(`c${i}`, overflow)).toEqual({ status: "admitted", provider: "cloudflare" });
+		for (let i = 1; i < 20; i++) expect(await stub.request(`c${i}`, overflow)).toEqual({ status: "admitted", pool: "cloudflare" });
 		expect(await stub.request("late", overflow)).toEqual({ status: "queued", position: 1, reason: "slots_full" });
 		// The first slot to free is the compose one: the notice says so.
 		expect(await stub.release("b")).toEqual(["late"]);
@@ -342,14 +342,37 @@ describe("the workspace manager's capacity", () => {
 		const stub = space();
 		await stub.setLimit(2);
 		await stub.setConditions({ lowDisk: false, budgetCapped: false, detail: "kept" });
-		for (const id of ["a", "b", "c"]) await stub.request(id, { provider: "sandbox" });
+		for (const id of ["a", "b", "c"]) await stub.request(id, { pool: "sandbox" });
 		expect(await stub.onManagerError("capacity")).toEqual([]);
 		expect(await stub.onManagerError("something_else")).toEqual([]);
 		expect(await stub.release("a")).toEqual(["c"]);
-		await stub.request("d", { provider: "sandbox" });
+		await stub.request("d", { pool: "sandbox" });
 		expect(await stub.onManagerError("low_disk")).toEqual([]);
 		expect(await stub.release("b")).toEqual([]);
 		expect(await stub.position("d")).toEqual({ position: 1, reason: "low_disk" });
 		expect(await stub.refreshConditions(health(30, 4))).toEqual(["d"]);
 	});
+});
+
+it("skips an open pool over RPC and recovers one queued probe through the alarm", async () => {
+	const stub = space();
+	for (let i = 0; i < 3; i++) {
+		await stub.request("fail", { pool: "first" });
+		await stub.workspaceResult("fail", "failure");
+		await stub.release("fail");
+	}
+	expect(await stub.request("overflow", { pool: "first", overflow: ["second"] })).toEqual({ status: "admitted", pool: "second" });
+	expect(await stub.request("probe", { pool: "first" })).toMatchObject({ status: "queued", reason: "unhealthy" });
+	await stub.request("behind", { pool: "first" });
+	codingSchedulers.now = START + 5 * MINUTE;
+	await runDurableObjectAlarm(stub);
+	expect(heard).toContain("admitted:probe");
+	expect(await stub.position("behind")).toMatchObject({ reason: "unhealthy" });
+	await stub.workspaceResult("probe", "failure");
+	await stub.release("probe");
+	codingSchedulers.now += 5 * MINUTE;
+	await runDurableObjectAlarm(stub);
+	expect(heard).toContain("admitted:behind");
+	await stub.workspaceResult("behind", "success");
+	expect(await stub.unhealthyPools(["first"])).toEqual([]);
 });

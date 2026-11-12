@@ -135,6 +135,13 @@ const view = (overrides: Partial<CodingThreadView> = {}): CodingThreadView => ({
   provider: "manager",
   pool: "manager",
   placementReason: "priority",
+  placement: {
+    kind: "priority",
+    pool: "manager",
+    provider: "manager",
+    priority: 1,
+    skipped: [],
+  },
   slot: "held",
   queue: null,
   budgetUsd: 3,
@@ -876,6 +883,43 @@ describe("a thread's page", () => {
       name: /Started from a chat/,
     });
     expect(started.getAttribute("href")).toBe("/chat/chat-1");
+  });
+
+  it("shows the pool a thread runs in, its priority, and why it is there", async () => {
+    const { api } = fakeApi(
+      view({
+        pool: "big",
+        provider: "compose",
+        workspaceProvider: "compose",
+        placementReason: "overflow",
+        placement: {
+          kind: "overflow",
+          pool: "big",
+          provider: "compose",
+          priority: 2,
+          skipped: [
+            { pool: "small", reason: "full" },
+            { pool: "off", reason: "disabled" },
+          ],
+        },
+      }),
+      [
+        {
+          id: "1",
+          role: "user",
+          parts: [{ type: "text", text: "Fix the flaky date test" }],
+          timestamp: 1,
+        },
+      ],
+    );
+    threadPage(api);
+    // The pool it took a slot in, with why and where the pool stands, and the provider behind it in the tooltip.
+    const pool = await screen.findByText("big");
+    const item = pool.closest("div");
+    expect(item?.getAttribute("title")).toBe(
+      "Its workspace runs in the pool big on Sandbox manager (overflow, priority 2)",
+    );
+    expect(item?.textContent).toBe("Runs onbig · overflow · priority 2");
   });
 
   it("follows the live stream, opening it again when it ends, without repeating rows", async () => {

@@ -1,20 +1,29 @@
+import { closedPool, poolAvailable, poolResult, reservePool, type PoolBreaker } from "./pool-breaker";
+
 /**
  * The slots of a space's coding sessions. A coding thread needs a workspace
  * (a container or sandbox) while it works, and a space may hold only so many
- * at once on each workspace provider: that provider's limit. A thread asks
+ * at once in each of its sandbox pools: the pool's limit. A thread asks
  * for a slot (`request`) and either gets one or waits in a queue; when it
  * gives its slot back (`release`), the queue's head takes it. The queue is
  * ordered by priority, highest first, then by when each thread asked; every
  * thread has priority 0 unless its caller says otherwise, so the queue is
  * first come, first served.
  *
- * Slots are counted per provider: a thread on one provider never takes a
- * slot of another's. A thread names the provider it would run on and, when
- * it may run elsewhere, its overflow: the providers to take a slot on
- * instead, in order, when its own has none free. It waits in the queue only
- * when none of them has a slot for it, and takes the first that frees. Each
- * provider has the space's limit unless it has one of its own (`setLimit`
- * with a provider, or the options' `limits`).
+ * Slots are counted per pool: a thread in one pool never takes a slot of
+ * another's. Several pools may share one provider (the workspace backend
+ * behind them, ./pools.ts); the scheduler knows a pool only by its id, its
+ * size and its provider, as the caller last set them (`setPools`).
+ * A thread names the pool it would take a slot in and, when it may run
+ * elsewhere, its overflow: the pools to take a slot on instead, in order,
+ * when its own has none free. It waits in the queue only when none of them
+ * has a slot for it, and takes the first that frees.
+ *
+ * Each pool has the space's limit, capped by its own size and by its
+ * provider's own limit (`setLimit` with a pool or a provider, or the
+ * options' `limits`); a pool the registry doesn't name is limited as its key
+ * was before pools, which is what the fallback runs on: one pool per
+ * provider, its id the provider's, and each provider's limit its own.
  *
  * Everything is kept in the space's SQLite database, and every change that
  * admits a thread is one transaction (`options.transaction`), so a crash
@@ -27,17 +36,17 @@
  * low on disk, or the space has reached its spending cap, starting another
  * session would fail. Before admitting a thread, the scheduler asks each of
  * its admission gates in order, and the first that refuses keeps the thread
- * in the queue. A refused thread holds up the provider it was refused for,
- * even for threads behind it a gate would let through, so each provider's
- * share of the queue stays first come, first served; other providers go on
- * admitting. The threads a free slot is waiting for are told the refusal's
- * reason, such as `low_disk`, and the rest `slots_full`: a gate's reason is
- * shown only when a slot is actually free, so with every slot taken everyone
- * waits for `slots_full` whatever the gates say. Gates decide from the
- * conditions the caller last set (`setConditions`), for the space or for one
- * provider, such as the disk of the sandbox manager's machine; they are kept
- * in the database with the rest, so admission stays one transaction and a
- * restart doesn't forget the disk is full.
+ * in the queue. A refused thread holds up the pool it was refused for, even
+ * for threads behind it a gate would let through, so each pool's share of the
+ * queue stays first come, first served; other pools go on admitting. The
+ * threads a free slot is waiting for are told the refusal's reason, such as
+ * `low_disk`, and the rest `slots_full`: a gate's reason is shown only when a
+ * slot is actually free, so with every slot taken everyone waits for
+ * `slots_full` whatever the gates say. Gates decide from the conditions the
+ * caller last set (`setConditions`), for the space or for one provider, such
+ * as the disk of the sandbox manager's machine; pools on one provider share
+ * its conditions. They are kept in the database with the rest, so admission
+ * stays one transaction and a restart doesn't forget the disk is full.
  *
  * Every queued thread has a deadline, 6 hours unless it or the options say
  * otherwise; `tick` takes out the threads past theirs, each with the reason
@@ -58,16 +67,21 @@
  * destroying it, and later asks again for the preempted thread with
  * `PREEMPT_RESUME_PRIORITY`.
  *
- * Nothing here knows what a provider is or starts a workspace. Each space's
+ * Nothing here starts a workspace; a pool's provider is a name the caller
+ * set. Each space's
  * scheduler lives in its own Durable Object (./scheduler-do.ts), which ticks
  * it and tells threads what happened to them.
  */
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS pim_coding_pool_breakers (
+	pool TEXT PRIMARY KEY,
+	state TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pim_coding_queue (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
 	thread_id TEXT NOT NULL UNIQUE,
-	provider TEXT NOT NULL,
+	pool TEXT NOT NULL,
 	queued_at INTEGER NOT NULL,
 	reason TEXT NOT NULL,
 	priority INTEGER NOT NULL DEFAULT 0,
@@ -76,11 +90,17 @@ CREATE TABLE IF NOT EXISTS pim_coding_queue (
 CREATE INDEX IF NOT EXISTS pim_coding_queue_by_order ON pim_coding_queue (priority DESC, queued_at, seq);
 CREATE TABLE IF NOT EXISTS pim_coding_slots (
 	thread_id TEXT PRIMARY KEY,
-	provider TEXT,
+	pool TEXT,
 	acquired_at INTEGER NOT NULL,
 	state TEXT NOT NULL,
 	activity TEXT NOT NULL,
 	activity_since INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pim_coding_pools (
+	pool TEXT PRIMARY KEY,
+	provider TEXT NOT NULL,
+	size INTEGER NOT NULL,
+	priority INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pim_coding_config (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -110,8 +130,10 @@ CREATE TABLE IF NOT EXISTS pim_coding_provider_conditions (
 
 /** Every table the scheduler keeps. */
 export const CODING_SCHEDULER_TABLES = [
+	"pim_coding_pool_breakers",
 	"pim_coding_queue",
 	"pim_coding_slots",
+	"pim_coding_pools",
 	"pim_coding_config",
 	"pim_coding_durations",
 	"pim_coding_conditions",
@@ -174,7 +196,7 @@ export type AdmissionConditions = {
 /** A refusal's reason is what the thread waits for, such as `low_disk` or `budget_cap`. */
 export type AdmissionVerdict = { readonly ok: true } | { readonly ok: false; readonly reason: string; readonly detail?: string };
 
-/** Decides whether a queued thread may take a free slot on `entry.provider`, from the entry and the conditions the caller last set for that provider. It must not wait on anything, so admission stays one transaction. */
+/** Decides whether a queued thread may take a free slot in `entry.pool`, from the entry and the conditions the caller last set for that pool's provider. It must not wait on anything, so admission stays one transaction. */
 export type AdmissionGate = { readonly check: (entry: QueueEntry, conditions: AdmissionConditions) => AdmissionVerdict };
 
 /** Refuses while the workspace manager is low on disk. */
@@ -183,10 +205,18 @@ export const lowDiskGate: AdmissionGate = { check: (_entry, conditions) => refus
 /** Refuses while the space is at its spending cap. */
 export const budgetCapGate: AdmissionGate = { check: (_entry, conditions) => refuseIf(conditions.budgetCapped, "budget_cap", conditions) };
 
-export type SlotRequest = {
-	/** The provider the thread would run on. */
+/** A pool the scheduler counts slots by, as the caller last read the registry (./pools.ts): its id, the provider behind it, how many threads may hold a slot in it at once, and where it stands among the pools. */
+export type SchedulerPool = {
+	readonly id: string;
 	readonly provider: string;
-	/** Where else it may run, in order, when `provider` has no free slot for it (none). */
+	readonly size: number;
+	readonly priority: number;
+};
+
+export type SlotRequest = {
+	/** The pool the thread would take a slot in. */
+	readonly pool: string;
+	/** Where else it may run, in order, when `pool` has no free slot for it (none). */
 	readonly overflow?: readonly string[];
 	/** Why the thread is waiting while every slot is taken, as its caller would tell the person ("slots_full"). A gate's reason takes its place while that gate holds the thread up. */
 	readonly reason?: string;
@@ -199,13 +229,13 @@ export type SlotRequest = {
 /** A queued thread's place, from 1 at the queue's head, and what it is waiting for now. */
 export type QueuePlace = { readonly position: number; readonly reason: string; readonly detail?: string };
 
-/** Admitted, with the provider the slot is on: the one asked for, one of its overflow, or, for a thread that held a slot already, that slot's. */
-export type RequestResult = { readonly status: "admitted"; readonly provider: string } | ({ readonly status: "queued" } & QueuePlace);
+/** Admitted, with the pool the slot is in: the one asked for, one of its overflow, or, for a thread that held a slot already, that slot's. */
+export type RequestResult = { readonly status: "admitted"; readonly pool: string } | ({ readonly status: "queued" } & QueuePlace);
 
-/** A slot taken: `admitted` from the queue, or `adopted` by `reconcile` from a workspace found running, whose provider may be unknown: such a slot counts against every provider's limit, as it may be any's. */
+/** A slot taken: `admitted` from the queue, or `adopted` by `reconcile` from a workspace found running, whose pool may be unknown: such a slot counts against every pool's limit, as it may be any's. */
 export type Slot = {
 	readonly threadId: string;
-	readonly provider: string | null;
+	readonly pool: string | null;
 	readonly acquiredAt: number;
 	readonly state: "admitted" | "adopted";
 	/** What its thread is doing, as its caller last said, and since when; `running` since `acquiredAt` until then. */
@@ -228,7 +258,7 @@ export type Sweep = {
 
 export type QueueEntry = {
 	readonly threadId: string;
-	readonly provider: string;
+	readonly pool: string;
 	/** Where else it may run, in order; left out when nowhere. */
 	readonly overflow?: readonly string[];
 	/** What it is waiting for now: the reason a gate refuses the queue's head when a free slot waits for this thread, otherwise its request's. When it expires, what it was last waiting for. */
@@ -263,8 +293,8 @@ type Row = Record<string, SqlStorageValue>;
 
 type Refusal = Extract<AdmissionVerdict, { ok: false }>;
 
-/** What admission would do now: the threads it would admit, each with the provider its slot is on, and why the threads a free slot waits for are held up. */
-type Plan = { readonly admitted: { readonly entry: QueueEntry; readonly provider: string }[]; readonly refused: ReadonlyMap<string, Refusal> };
+/** What admission would do now: the threads it would admit, each with the pool its slot is in, and why the threads a free slot waits for are held up. */
+type Plan = { readonly admitted: { readonly entry: QueueEntry; readonly pool: string }[]; readonly refused: ReadonlyMap<string, Refusal> };
 
 export class CodingScheduler {
 	readonly #sql: CodingSql;
@@ -282,29 +312,38 @@ export class CodingScheduler {
 		// Queues from before overflow have no column for it.
 		const columns = new Set(this.#sql.exec("PRAGMA table_info(pim_coding_queue)").toArray().map((row) => String(row.name)));
 		if (!columns.has("overflow")) this.#sql.exec("ALTER TABLE pim_coding_queue ADD COLUMN overflow TEXT");
+		// Slots and queues from before pools are keyed by provider; the same column keeps them, named for the pool it holds now, so a thread running or waiting through the change keeps its place.
+		for (const table of ["pim_coding_queue", "pim_coding_slots"]) {
+			const keyed = new Set(this.#sql.exec(`PRAGMA table_info(${table})`).toArray().map((row) => String(row.name)));
+			if (keyed.has("provider") && !keyed.has("pool")) this.#sql.exec(`ALTER TABLE ${table} RENAME COLUMN provider TO pool`);
+			// A table that has both columns, a `provider` that is NOT NULL and so refuses every insert of a pool, loses the old one: its pool column holds the place.
+			else if (keyed.has("provider") && keyed.has("pool")) {
+				this.#sql.exec(`UPDATE ${table} SET pool = provider WHERE pool IS NULL`);
+				this.#sql.exec(`ALTER TABLE ${table} DROP COLUMN provider`);
+			}
+		}
 	}
 
 	/**
-	 * Gives the thread a slot on its provider, or else on the first of its
-	 * overflow, where one is free, no one ahead of it waits for that provider
-	 * and the gates let it through; or puts it in the queue. Asking again
-	 * changes nothing: a thread with a slot is told it's admitted, on that
-	 * slot's provider, and a queued one keeps its place, providers, reason and
-	 * deadline.
+	 * Gives the thread a slot in its pool, or else in the first of its
+	 * overflow, where one is free, no one ahead of it waits for that pool and
+	 * the gates let it through; or puts it in the queue. Asking again changes
+	 * nothing: a thread with a slot is told it's admitted, in that slot's
+	 * pool, and a queued one keeps its place, pools, reason and deadline.
 	 */
 	request(threadId: string, request: SlotRequest): RequestResult {
 		if (request.deadlineMs !== undefined) duration(request.deadlineMs, "deadlineMs");
 		if (request.priority !== undefined && !Number.isSafeInteger(request.priority)) throw new RangeError("priority must be an integer");
 		return this.#options.transaction((): RequestResult => {
 			const held = this.#slot(threadId);
-			if (held) return { status: "admitted", provider: held.provider === null ? request.provider : String(held.provider) };
+			if (held) return { status: "admitted", pool: held.pool === null ? request.pool : String(held.pool) };
 			if (!this.#entry(threadId)) {
 				const now = this.#options.now();
-				const overflow = (request.overflow ?? []).filter((provider, index, all) => provider !== request.provider && all.indexOf(provider) === index);
+				const overflow = (request.overflow ?? []).filter((pool, index, all) => pool !== request.pool && all.indexOf(pool) === index);
 				this.#sql.exec(
-					"INSERT INTO pim_coding_queue (thread_id, provider, overflow, queued_at, reason, priority, deadline_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+					"INSERT INTO pim_coding_queue (thread_id, pool, overflow, queued_at, reason, priority, deadline_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 					threadId,
-					request.provider,
+					request.pool,
 					overflow.length === 0 ? null : JSON.stringify(overflow),
 					now,
 					request.reason ?? "slots_full",
@@ -315,7 +354,7 @@ export class CodingScheduler {
 			this.#admit();
 			const entry = this.#entry(threadId);
 			if (entry) return { status: "queued", ...this.#placeOf(entry) };
-			return { status: "admitted", provider: String(this.#slot(threadId)!.provider) };
+			return { status: "admitted", pool: String(this.#slot(threadId)!.pool) };
 		});
 	}
 
@@ -326,32 +365,66 @@ export class CodingScheduler {
 	}
 
 	/**
-	 * Moves the thread's slot to the first of `providers` with a slot free
-	 * that the gates let it take, as when its provider turned out to be full
-	 * after all, and admits the queue into the slot it leaves. Returns the
-	 * provider it moved to, or null when none had room or it holds no slot,
-	 * which changes nothing.
+	 * Moves the thread's slot to the first of `pools` with a slot free that
+	 * the gates let it take, as when its pool turned out to be full after all,
+	 * and admits the queue into the slot it leaves. Returns the pool it moved
+	 * to, or null when none had room or it holds no slot, which changes
+	 * nothing.
 	 */
-	move(threadId: string, providers: readonly string[]): { readonly provider: string | null; readonly admitted: string[] } {
+	move(threadId: string, pools: readonly string[]): { readonly pool: string | null; readonly admitted: string[] } {
 		return this.#options.transaction(() => {
 			const slot = this.#slot(threadId);
-			if (!slot) return { provider: null, admitted: [] };
+			if (!slot) return { pool: null, admitted: [] };
 			const now = this.#options.now();
-			for (const provider of providers) {
-				if (provider === slot.provider || this.#free(provider) <= 0) continue;
-				// A thread queued for this provider would have taken its free slot, unless a gate refused it, as it refuses this one.
-				const entry: QueueEntry = { threadId, provider, reason: "slots_full", priority: 0, queuedAt: now, deadlineAt: now };
-				if (refusalOf(this.#gates(), entry, this.#conditions(provider))) continue;
-				this.#sql.exec("UPDATE pim_coding_slots SET provider = ? WHERE thread_id = ?", provider, threadId);
-				return { provider, admitted: this.#admit() };
+			for (const pool of pools) {
+				if (pool === slot.pool || this.#free(pool) <= 0 || !poolAvailable(this.#breaker(pool), now)) continue;
+				// A thread queued for this pool would have taken its free slot, unless a gate refused it, as it refuses this one.
+				const entry: QueueEntry = { threadId, pool, reason: "slots_full", priority: 0, queuedAt: now, deadlineAt: now };
+				if (refusalOf(this.#gates(), entry, this.#conditions(pool))) continue;
+				this.#saveBreaker(String(slot.pool), poolResult(this.#breaker(String(slot.pool)), threadId, "ignored", now));
+				this.#reservePool(pool, threadId);
+				this.#sql.exec("UPDATE pim_coding_slots SET pool = ? WHERE thread_id = ?", pool, threadId);
+				return { pool, admitted: this.#admit() };
 			}
-			return { provider: null, admitted: [] };
+			return { pool: null, admitted: [] };
 		});
+	}
+
+	/** Pools placement must skip now, including one whose probe is in flight. */
+	unhealthyPools(pools: readonly string[]): string[] {
+		return pools.filter((pool) => !poolAvailable(this.#breaker(pool), this.#options.now()));
+	}
+
+	/** Records workspace infrastructure outcomes, not repository or harness errors. */
+	workspaceResult(threadId: string, result: "success" | "failure" | "ignored"): string[] {
+		return this.#options.transaction(() => {
+			const slot = this.#slot(threadId);
+			if (slot?.pool) {
+				const pool = String(slot.pool);
+				this.#saveBreaker(pool, poolResult(this.#breaker(pool), threadId, result, this.#options.now()));
+			}
+			return this.#admit();
+		});
+	}
+
+	#breaker(pool: string): PoolBreaker {
+		const row = this.#sql.exec("SELECT state FROM pim_coding_pool_breakers WHERE pool = ?", pool).toArray()[0];
+		return row ? JSON.parse(String(row.state)) as PoolBreaker : closedPool();
+	}
+
+	#saveBreaker(pool: string, state: PoolBreaker): void {
+		this.#sql.exec("INSERT INTO pim_coding_pool_breakers (pool, state) VALUES (?, ?) ON CONFLICT (pool) DO UPDATE SET state = excluded.state", pool, JSON.stringify(state));
+	}
+
+	#reservePool(pool: string, threadId: string): void {
+		this.#saveBreaker(pool, reservePool(this.#breaker(pool), threadId));
 	}
 
 	/** Frees the thread's slot, if it has one, and admits the queue's head while slots are free. Returns the threads admitted. */
 	release(threadId: string): string[] {
 		return this.#options.transaction(() => {
+			const slot = this.#slot(threadId);
+			if (slot?.pool) this.#saveBreaker(String(slot.pool), poolResult(this.#breaker(String(slot.pool)), threadId, "ignored", this.#options.now()));
 			this.#sql.exec("DELETE FROM pim_coding_slots WHERE thread_id = ?", threadId);
 			return this.#admit();
 		});
@@ -378,13 +451,15 @@ export class CodingScheduler {
 
 	/**
 	 * Sets how many slots the space has on each provider without a limit of
-	 * its own, or, with `provider`, that provider's own. Raising it admits from
+	 * its own, or, with a pool or a provider, that one's own: a pool's size
+	 * and its provider's limit each cap its own slots. Raising it admits from
 	 * the queue; lowering it stops no one, and admits no one until enough
 	 * slots are released. Returns the threads admitted.
 	 */
-	setLimit(limit: number, provider?: string): string[] {
+	setLimit(limit: number, poolOrProvider?: string): string[] {
 		count(limit, "limit");
 		return this.#options.transaction(() => {
+			const provider = poolOrProvider === undefined ? undefined : this.#providerOf(poolOrProvider);
 			if (provider === undefined) this.#sql.exec("INSERT INTO pim_coding_config (id, slot_limit) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET slot_limit = excluded.slot_limit", limit);
 			else this.#sql.exec("INSERT INTO pim_coding_provider_limits (provider, slot_limit) VALUES (?, ?) ON CONFLICT (provider) DO UPDATE SET slot_limit = excluded.slot_limit", provider, limit);
 			return this.#admit();
@@ -393,14 +468,15 @@ export class CodingScheduler {
 
 	/**
 	 * Sets the conditions the gates decide from, for every provider without
-	 * conditions of its own or, with `provider`, for that one, and admits
-	 * whoever they now let through. The caller sets `lowDisk` for the sandbox
-	 * manager's provider while its `/health` reports under 15% of its disk
-	 * free or it refuses a workspace with `low_disk`, and `budgetCapped` while
-	 * the space is at a spending cap. Returns the threads admitted.
+	 * conditions of its own or, with a pool or a provider, for that one, and
+	 * admits whoever they now let through. The caller sets `lowDisk` for the
+	 * sandbox manager's provider while its `/health` reports under 15% of its
+	 * disk free or it refuses a workspace with `low_disk`, and `budgetCapped`
+	 * while the space is at a spending cap. Returns the threads admitted.
 	 */
-	setConditions(conditions: AdmissionConditions, provider?: string): string[] {
+	setConditions(conditions: AdmissionConditions, poolOrProvider?: string): string[] {
 		return this.#options.transaction(() => {
+			const provider = poolOrProvider === undefined ? undefined : this.#providerOf(poolOrProvider);
 			const values = [conditions.lowDisk ? 1 : 0, conditions.budgetCapped ? 1 : 0, conditions.detail ?? null];
 			if (provider === undefined) {
 				this.#sql.exec(
@@ -418,9 +494,9 @@ export class CodingScheduler {
 		});
 	}
 
-	/** The conditions the gates decide from for `provider`, or for every provider without its own, as `setConditions` last set them: none hold the queue up until it is called. */
-	conditions(provider?: string): AdmissionConditions {
-		return this.#conditions(provider);
+	/** The conditions the gates decide from for `poolOrProvider`'s provider, or for every provider without its own, as `setConditions` last set them: none hold the queue up until it is called. */
+	conditions(poolOrProvider?: string): AdmissionConditions {
+		return this.#conditions(poolOrProvider);
 	}
 
 	/** Takes out of the queue every thread whose deadline is at or before `now`, and returns them, in queue order, for the caller to tell. */
@@ -492,9 +568,9 @@ export class CodingScheduler {
 				const entry = this.#entry(threadId);
 				this.#sql.exec("DELETE FROM pim_coding_queue WHERE thread_id = ?", threadId);
 				this.#sql.exec(
-					"INSERT INTO pim_coding_slots (thread_id, provider, acquired_at, state, activity, activity_since) VALUES (?, ?, ?, 'adopted', 'running', ?)",
+					"INSERT INTO pim_coding_slots (thread_id, pool, acquired_at, state, activity, activity_since) VALUES (?, ?, ?, 'adopted', 'running', ?)",
 					threadId,
-					entry ? entry.provider : null,
+					entry ? entry.pool : null,
 					now,
 					now,
 				);
@@ -533,19 +609,25 @@ export class CodingScheduler {
 	}
 
 	/**
-	 * Moves queued threads into slots, in queue order, while their providers
-	 * have slots free and the gates let them through. A thread a gate refuses
-	 * stays, and no one behind it goes ahead of it on that provider. Its
-	 * callers run it in their transaction.
+	 * Moves queued threads into slots, in queue order, while their pools have
+	 * slots free and the gates let them through. A thread a gate refuses
+	 * stays, and no one behind it goes ahead of it on that pool. Its callers
+	 * run it in their transaction.
 	 */
 	#admit(): string[] {
 		const now = this.#options.now();
-		return this.#plan().admitted.map(({ entry, provider }) => {
+		// A sweep or reconciliation may have removed the probe's slot.
+		for (const row of this.#sql.exec("SELECT pool, state FROM pim_coding_pool_breakers").toArray()) {
+			const state = JSON.parse(String(row.state)) as PoolBreaker;
+			if (state.probe !== null && !this.#slot(state.probe)) this.#saveBreaker(String(row.pool), poolResult(state, state.probe, "ignored", now));
+		}
+		return this.#plan().admitted.map(({ entry, pool }) => {
+			this.#reservePool(pool, entry.threadId);
 			this.#sql.exec("DELETE FROM pim_coding_queue WHERE thread_id = ?", entry.threadId);
 			this.#sql.exec(
-				"INSERT INTO pim_coding_slots (thread_id, provider, acquired_at, state, activity, activity_since) VALUES (?, ?, ?, 'admitted', 'running', ?)",
+				"INSERT INTO pim_coding_slots (thread_id, pool, acquired_at, state, activity, activity_since) VALUES (?, ?, ?, 'admitted', 'running', ?)",
 				entry.threadId,
-				provider,
+				pool,
 				now,
 				now,
 			);
@@ -554,40 +636,46 @@ export class CodingScheduler {
 	}
 
 	/**
-	 * What admission would do with `extra` more slots free on the providers it
-	 * names: each queued thread, in order, takes a slot on the first of its
-	 * providers with one free whose gates let it through. A provider whose
-	 * gates refuse a thread is held up for everyone behind it, and the free
-	 * slot waits for that thread: the threads a free slot waits for are told
-	 * the gate's reason, and the rest wait for a slot.
+	 * What admission would do with `extra` more slots free on the pools it
+	 * names: each queued thread, in order, takes a slot in the first of its
+	 * pools with one free whose gates let it through. A pool whose gates refuse
+	 * a thread is held up for everyone behind it, and the free slot waits for
+	 * that thread: the threads a free slot waits for are told the gate's
+	 * reason, and the rest wait for a slot.
 	 */
 	#plan(extra: ReadonlyMap<string, number> = new Map()): Plan {
 		const free = new Map<string, number>();
-		const freeOf = (provider: string) => free.get(provider) ?? this.#free(provider) + (extra.get(provider) ?? 0);
+		const probes = new Set<string>();
+		const freeOf = (pool: string) => free.get(pool) ?? this.#free(pool) + (extra.get(pool) ?? 0);
 		const conditions = new Map<string, AdmissionConditions>();
 		const held = new Map<string, Refusal>();
 		const admitted: Plan["admitted"] = [];
 		const refused = new Map<string, Refusal>();
 		for (const row of this.#sql.exec(`SELECT * FROM pim_coding_queue ${ORDER}`).toArray()) {
 			const entry = entryOf(row);
-			let waitsOn: { provider: string; refusal: Refusal } | undefined;
+			let waitsOn: { pool: string; refusal: Refusal } | undefined;
 			let takes: string | undefined;
-			for (const provider of [entry.provider, ...(entry.overflow ?? [])]) {
-				if (freeOf(provider) <= 0) continue;
-				if (!conditions.has(provider)) conditions.set(provider, this.#conditions(provider));
-				const refusal = held.get(provider) ?? refusalOf(this.#gates(), { ...entry, provider }, conditions.get(provider)!);
+			for (const pool of [entry.pool, ...(entry.overflow ?? [])]) {
+				if (!poolAvailable(this.#breaker(pool), this.#options.now()) || probes.has(pool)) {
+					waitsOn ??= { pool, refusal: { ok: false, reason: "unhealthy" } };
+					continue;
+				}
+				if (freeOf(pool) <= 0) continue;
+				if (!conditions.has(pool)) conditions.set(pool, this.#conditions(pool));
+				const refusal = held.get(pool) ?? refusalOf(this.#gates(), { ...entry, pool }, conditions.get(pool)!);
 				if (!refusal) {
-					takes = provider;
+					takes = pool;
 					break;
 				}
-				held.set(provider, refusal);
-				waitsOn ??= { provider, refusal };
+				held.set(pool, refusal);
+				waitsOn ??= { pool, refusal };
 			}
 			if (takes !== undefined) {
+				if (this.#breaker(takes).retryAt !== null) probes.add(takes);
 				free.set(takes, freeOf(takes) - 1);
-				admitted.push({ entry, provider: takes });
+				admitted.push({ entry, pool: takes });
 			} else if (waitsOn) {
-				free.set(waitsOn.provider, freeOf(waitsOn.provider) - 1);
+				free.set(waitsOn.pool, freeOf(waitsOn.pool) - 1);
 				refused.set(entry.threadId, waitsOn.refusal);
 			}
 		}
@@ -606,26 +694,26 @@ export class CodingScheduler {
 		const admitted = this.#admit();
 		const stale = this.#sql
 			.exec(
-				"SELECT thread_id, provider FROM pim_coding_slots WHERE activity = 'waiting' AND activity_since <= ? ORDER BY activity_since, acquired_at, thread_id",
+				"SELECT thread_id, pool FROM pim_coding_slots WHERE activity = 'waiting' AND activity_since <= ? ORDER BY activity_since, acquired_at, thread_id",
 				now - (this.#options.waitingGraceMs ?? DEFAULT_WAITING_GRACE_MS),
 			)
 			.toArray()
-			.filter((row) => row.provider !== null);
+			.filter((row) => row.pool !== null);
 		if (stale.length === 0) return { released, admitted };
-		// Admission leaves no slot free with an admissible thread queued, so a preempted slot goes to a queued thread only when its provider's slots are exactly full; over the limit after a restart, it would go to no one.
+		// Admission leaves no slot free with an admissible thread queued, so a preempted slot goes to a queued thread only when that pool's slots are exactly full; over the limit after a restart, it would go to no one.
 		const extra = new Map<string, number>();
 		for (const row of stale) {
-			const provider = String(row.provider);
-			if (this.#free(provider) === 0) extra.set(provider, (extra.get(provider) ?? 0) + 1);
+			const pool = String(row.pool);
+			if (this.#free(pool) === 0) extra.set(pool, (extra.get(pool) ?? 0) + 1);
 		}
-		// How many of the queue would go to work on each full provider were its stale slots free: as many are preempted, the longest waiting first.
+		// How many of the queue would go to work on each full pool were its stale slots free: as many are preempted, the longest waiting first.
 		const wanted = new Map<string, number>();
-		for (const { provider } of this.#plan(extra).admitted) if (extra.has(provider)) wanted.set(provider, (wanted.get(provider) ?? 0) + 1);
+		for (const { pool } of this.#plan(extra).admitted) if (extra.has(pool)) wanted.set(pool, (wanted.get(pool) ?? 0) + 1);
 		for (const row of stale) {
-			const provider = String(row.provider);
-			const left = wanted.get(provider) ?? 0;
+			const pool = String(row.pool);
+			const left = wanted.get(pool) ?? 0;
 			if (left <= 0) continue;
-			wanted.set(provider, left - 1);
+			wanted.set(pool, left - 1);
 			this.#sql.exec("DELETE FROM pim_coding_slots WHERE thread_id = ?", row.thread_id);
 			released.push({ threadId: String(row.thread_id), why: "preempted" });
 		}
@@ -648,18 +736,21 @@ export class CodingScheduler {
 			.map((row) => waiting(entryOf(row), refused));
 	}
 
-	/** How many slots `provider` has free: its limit less the slots on it and those whose provider isn't known, which may be on it. Below zero after a restart adopted more than the limit. */
-	#free(provider: string): number {
-		return this.#limitOf(provider) - Number(this.#sql.exec("SELECT COUNT(*) AS n FROM pim_coding_slots WHERE provider = ? OR provider IS NULL", provider).one().n);
+	/** How many slots `pool` has free: its limit less the slots in it and those whose pool isn't known, which may be in it. Below zero after a restart adopted more than the limit. */
+	#free(pool: string): number {
+		return this.#limitOf(pool) - Number(this.#sql.exec("SELECT COUNT(*) AS n FROM pim_coding_slots WHERE pool = ? OR pool IS NULL", pool).one().n);
 	}
 
 	#gates(): readonly AdmissionGate[] {
 		return this.#options.gates ?? [lowDiskGate, budgetCapGate];
 	}
 
-	/** The conditions set for `provider`, or else for every provider. */
-	#conditions(provider?: string): AdmissionConditions {
-		const own = provider === undefined ? undefined : this.#sql.exec("SELECT * FROM pim_coding_provider_conditions WHERE provider = ?", provider).toArray()[0];
+	/**
+	 * The conditions set for `pool`'s provider, or else for every provider:
+	 * pools on one provider share its machine's conditions.
+	 */
+	#conditions(pool?: string): AdmissionConditions {
+		const own = pool === undefined ? undefined : this.#sql.exec("SELECT * FROM pim_coding_provider_conditions WHERE provider = ?", this.#providerOf(pool)).toArray()[0];
 		const row = own ?? this.#sql.exec("SELECT * FROM pim_coding_conditions WHERE id = 1").toArray()[0];
 		if (!row) return { lowDisk: false, budgetCapped: false };
 		return { lowDisk: row.low_disk === 1, budgetCapped: row.budget_capped === 1, ...(row.detail === null ? {} : { detail: String(row.detail) }) };
@@ -671,10 +762,75 @@ export class CodingScheduler {
 		return row ? Number(row.slot_limit) : (this.#options.defaultLimit ?? 1);
 	}
 
-	#limitOf(provider: string): number {
+	/**
+	 * How many slots `pool` has: its own size, capped by its provider's limit
+	 * (the manager's, or the space's), when the registry names it; otherwise
+	 * the limit of its key, which before pools was its provider's.
+	 */
+	#limitOf(pool: string): number {
+		const own = this.#poolRow(pool);
+		const provider = own ? String(own.provider) : pool;
 		const row = this.#sql.exec("SELECT slot_limit FROM pim_coding_provider_limits WHERE provider = ?", provider).toArray()[0];
-		if (row) return Number(row.slot_limit);
-		return this.#options.limits && Object.hasOwn(this.#options.limits, provider) ? this.#options.limits[provider]! : this.#limit();
+		const capped = row ? Number(row.slot_limit) : this.#options.limits && Object.hasOwn(this.#options.limits, provider) ? this.#options.limits[provider]! : this.#limit();
+		if (own) return Math.min(Number(own.size), capped);
+		return capped;
+	}
+
+	/** The registry's row for `pool`, or undefined when it names none: the fallback's keys have none. */
+	#poolRow(pool: string): Row | undefined {
+		return this.#sql.exec("SELECT * FROM pim_coding_pools WHERE pool = ?", pool).toArray()[0];
+	}
+
+	/** The provider behind `pool`: the registry's when it names the pool, and otherwise the key itself, as before pools. */
+	#providerOf(pool: string): string {
+		const row = this.#poolRow(pool);
+		return row ? String(row.provider) : pool;
+	}
+
+	/**
+	 * Brings the pool registry (./pools.ts) up to date with what the caller
+	 * read: each pool's size is its limit, and the pools resolve to their
+	 * providers, so the conditions and limits set per provider reach every
+	 * pool on it. An empty list is the fallback: one pool per provider, its
+	 * id the provider's, limited as before pools. Growing a pool admits from
+	 * the queue; shrinking stops no one. Returns the threads admitted.
+	 */
+	setPools(pools: readonly SchedulerPool[]): string[] {
+		for (const pool of pools) {
+			if (!isKey(pool.id) || !isKey(pool.provider)) throw new RangeError("a pool's id and provider must be non-empty text");
+			count(pool.size, `the size of ${pool.id}`);
+		}
+		return this.#options.transaction(() => {
+			this.#setPools(pools);
+			return this.#admit();
+		});
+	}
+
+	/**
+	 * Brings the pool registry up to date with what the caller read: each
+	 * pool's size is its limit, and the pools resolve to their providers. A
+	 * key from before the registry — a provider's id, when a pool was its
+	 * provider — becomes that provider's first pool, so no slot held or place
+	 * in the queue through the change is stranded; a key that names no pool
+	 * and no provider stays, counted against no pool, until `reconcile`
+	 * releases it. Its callers run it in their transaction.
+	 */
+	#setPools(pools: readonly SchedulerPool[]): void {
+		const ids = new Set(pools.map((pool) => pool.id));
+		const firstOfProvider = new Map<string, string>();
+		for (const pool of [...pools].sort((a, b) => a.priority - b.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
+			if (!firstOfProvider.has(pool.provider)) firstOfProvider.set(pool.provider, pool.id);
+		}
+		if (pools.length > 0) {
+			for (const table of ["pim_coding_queue", "pim_coding_slots"] as const) {
+				for (const [provider, to] of firstOfProvider) {
+					if (ids.has(provider)) continue;
+					this.#sql.exec(`UPDATE ${table} SET pool = ? WHERE pool = ?`, to, provider);
+				}
+			}
+		}
+		this.#sql.exec("DELETE FROM pim_coding_pools");
+		for (const pool of pools) this.#sql.exec("INSERT INTO pim_coding_pools (pool, provider, size, priority) VALUES (?, ?, ?, ?)", pool.id, pool.provider, pool.size, pool.priority);
 	}
 
 	#slot(threadId: string): Row | undefined {
@@ -710,7 +866,7 @@ function entryOf(row: Row): QueueEntry {
 	const overflow = row.overflow === null || row.overflow === undefined ? [] : (JSON.parse(String(row.overflow)) as string[]);
 	return {
 		threadId: String(row.thread_id),
-		provider: String(row.provider),
+		pool: String(row.pool),
 		...(overflow.length === 0 ? {} : { overflow }),
 		reason: String(row.reason),
 		priority: Number(row.priority),
@@ -722,7 +878,7 @@ function entryOf(row: Row): QueueEntry {
 function slotOf(row: Row): Slot {
 	return {
 		threadId: String(row.thread_id),
-		provider: row.provider === null ? null : String(row.provider),
+		pool: row.pool === null ? null : String(row.pool),
 		acquiredAt: Number(row.acquired_at),
 		state: String(row.state) as Slot["state"],
 		activity: String(row.activity) as SlotActivity,
@@ -746,6 +902,9 @@ function refusalOf(gates: readonly AdmissionGate[], entry: QueueEntry, condition
 	}
 	return undefined;
 }
+
+/** A pool's id or its provider: short non-empty text, so the scheduler's tables stay well-formed. */
+const isKey = (value: string) => value.length > 0 && value.length <= 128;
 
 function refuseIf(refused: boolean, reason: string, conditions: AdmissionConditions): AdmissionVerdict {
 	if (!refused) return { ok: true };

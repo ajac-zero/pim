@@ -1337,19 +1337,38 @@ function ThreadSummary({ thread }: { thread: CodingThreadView }) {
       </div>
       <div
         className="inline-flex items-center gap-1"
-        title={t("codingRunsOnWhy", {
-          provider: workspaceProviderName(thread.provider),
-          reason: t(PLACEMENT_REASON_KEYS[thread.placementReason]),
-        })}
+        title={
+          thread.placement
+            ? t("codingRunsInPoolWhy", {
+                pool: thread.placement.pool,
+                provider: workspaceProviderName(thread.placement.provider),
+                reason: t(PLACEMENT_REASON_KEYS[thread.placementReason]),
+                priority: thread.placement.priority,
+              })
+            : t("codingRunsOnWhy", {
+                provider: workspaceProviderName(thread.provider),
+                reason: t(PLACEMENT_REASON_KEYS[thread.placementReason]),
+              })
+        }
       >
         <dt className="sr-only">{t("codingWorkspaceProvider")}</dt>
         <Server className="size-3.5 shrink-0" />
         <dd>
-          {workspaceProviderName(thread.provider)}
+          {thread.placement
+            ? thread.placement.pool
+            : workspaceProviderName(thread.provider)}
           {thread.placementReason !== "priority" && (
             <span className="text-muted-foreground/70">
               {" · "}
               {t(PLACEMENT_REASON_KEYS[thread.placementReason])}
+            </span>
+          )}
+          {thread.placement && (
+            <span className="text-muted-foreground/70">
+              {" · "}
+              {t("codingPoolPriority", {
+                priority: thread.placement.priority,
+              })}
             </span>
           )}
         </dd>

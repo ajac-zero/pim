@@ -32,10 +32,26 @@ export const CODING_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code", 
  */
 export type CodingProviderKind = "workspace" | "agent-hosted";
 
-/** Which model a thread runs on, by the space's provider id (such as `own:anthropic`) and the model's id there. */
+/** Why the thread is in the pool it is in: the start named it, it took the first pool with room, or it moved on from a full one. */
 export type PlacementReason = "pinned" | "priority" | "overflow";
 
 export type ResolvedProfile = { readonly provider: string; readonly model: string; readonly source: "explicit" | "space default" | "harness default" | null };
+/** A pool the thread couldn't be placed in, and why: switched off, without a provider the deployment has, or full when it walked past it. */
+export type PlacementSkip = { readonly pool: string; readonly reason: "disabled" | "provider_unavailable" | "unhealthy" | "full" };
+
+/**
+ * Where the thread was placed and why: the pool it took a slot in, the
+ * provider behind it, the pool's priority, and the pools it couldn't and
+ * why. Kept as it was when the thread was placed, and told in the status as
+ * `placement`, next to the plainer `placementReason`.
+ */
+export type ThreadPlacement = {
+	readonly kind: PlacementReason;
+	readonly pool: string;
+	readonly provider: string;
+	readonly priority: number;
+	readonly skipped: readonly PlacementSkip[];
+};
 
 export type AgentProfile = { readonly providerId: string; readonly model: string; readonly thinking?: ModelThinkingLevel };
 
@@ -81,6 +97,12 @@ export type CodingThreadRow = {
 	readonly harness: CodingHarness;
 	/** The workspace provider's id: where the thread runs, or would first try to while it has made no workspace. */
 	readonly providerId: string;
+	/**
+	 * The sandbox pool the thread takes slots in (./pools.ts), which may be
+	 * one of several on that provider; a thread from before pools has its
+	 * provider's id, as one provider was one pool.
+	 */
+	readonly poolId: string;
 	/** What kind of provider runs the thread (see `CodingProviderKind`): a workspace, or an agent-hosted orb. */
 	readonly providerKind: CodingProviderKind;
 	/**
@@ -103,8 +125,10 @@ export type CodingThreadRow = {
 	readonly orbCostNote: string | null;
 	/** Whether the thread stays on its provider: once it made a workspace there, whose files and environment are kept there, or when it was started on that provider by name. Until then it may run on another provider when its own is full. */
 	readonly placed: boolean;
-	/** Why the thread is on its provider: `pinned` when the caller named it, `priority` when it took the first provider with room, `overflow` when it moved to a later one because the first had none. */
+	/** Why the thread is on its pool: `pinned` when the caller named it, `priority` when it took the first pool with room, `overflow` when it moved to a later one because the first had none. */
 	readonly placementReason: PlacementReason;
+	/** The same, in full: which pool and provider, the pool's priority, and the pools it couldn't and why. Null until the thread is placed. */
+	readonly placement: ThreadPlacement | null;
 	readonly workspaceRef: WorkspaceRef | null;
 	readonly state: CodingThreadState;
 	/** Why the thread failed, such as `budget`, `no_backend` or `queue_expired`; null otherwise. */
@@ -189,6 +213,8 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	agent_profile TEXT NOT NULL,
 	harness TEXT NOT NULL DEFAULT 'pi',
 	provider_id TEXT NOT NULL,
+	pool_id TEXT,
+	placement TEXT,
 	provider_kind TEXT NOT NULL DEFAULT 'workspace',
 	orb TEXT,
 	orb_last_message TEXT,
@@ -362,6 +388,9 @@ export class CodingThreadStore {
 		if (!inbox.has("retried")) this.#sql.exec("ALTER TABLE coding_inbox ADD COLUMN retried INTEGER NOT NULL DEFAULT 0");
 		// What kind of provider runs the thread: a workspace, or an agent-hosted orb driven through a client (./orb/).
 		if (!columns.has("provider_kind")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'workspace'");
+		// The sandbox pool the thread takes slots in, and its placement in full: null for a thread from before pools, whose pool is its provider.
+		if (!columns.has("pool_id")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pool_id TEXT");
+		if (!columns.has("placement")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN placement TEXT");
 		// The agent-hosted thread, as JSON: null for a thread that runs in a workspace.
 		if (!columns.has("orb")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN orb TEXT");
 		// The last of the orb's messages mirrored into the conversation, and the cost its agent reported: null without either.
@@ -383,18 +412,19 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "resolvedProfile" | "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
+		thread: Omit<CodingThreadRow, "resolvedProfile" | "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "placement" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
 			consecutiveInterrupts?: number;
 			providerInstance?: string;
 			placed?: boolean;
 			providerKind?: CodingProviderKind;
 			orb?: OrbThread | null;
+			poolId?: string;
 		},
 	): void {
 		const now = this.#now();
 		this.#sql.exec(
-			`INSERT INTO coding_thread (thread_id, space, repo_url, provider_instance, base_ref, branch, agent_profile, harness, provider_id, provider_kind, orb, placed, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO coding_thread (thread_id, space, repo_url, provider_instance, base_ref, branch, agent_profile, harness, provider_id, pool_id, provider_kind, orb, placed, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			thread.threadId,
 			thread.space,
 			thread.repoUrl,
@@ -404,6 +434,7 @@ export class CodingThreadStore {
 			JSON.stringify(thread.profile),
 			thread.harness,
 			thread.providerId,
+			thread.poolId ?? thread.providerId,
 			thread.providerKind ?? "workspace",
 			thread.orb === undefined || thread.orb === null ? null : JSON.stringify(thread.orb),
 			thread.placed ? 1 : 0,
@@ -422,7 +453,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "resolvedProfile" | "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "resolvedProfile" | "state" | "stateReason" | "stateDetail" | "providerId" | "poolId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "placement" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.resolvedProfile !== undefined) columns.resolved_profile = change.resolvedProfile === null ? null : JSON.stringify(change.resolvedProfile);
@@ -430,6 +461,7 @@ export class CodingThreadStore {
 		if (change.stateReason !== undefined) columns.state_reason = change.stateReason;
 		if (change.stateDetail !== undefined) columns.state_detail = change.stateDetail;
 		if (change.providerId !== undefined) columns.provider_id = change.providerId;
+		if (change.poolId !== undefined) columns.pool_id = change.poolId;
 		if (change.providerKind !== undefined) columns.provider_kind = change.providerKind;
 		if (change.orb !== undefined) columns.orb = change.orb === null ? null : JSON.stringify(change.orb);
 		if (change.orbLastMessage !== undefined) columns.orb_last_message = change.orbLastMessage;
@@ -437,6 +469,7 @@ export class CodingThreadStore {
 		if (change.orbCostNote !== undefined) columns.orb_cost_note = change.orbCostNote;
 		if (change.placed !== undefined) columns.placed = change.placed ? 1 : 0;
 		if (change.placementReason !== undefined) columns.placement_reason = change.placementReason;
+		if (change.placement !== undefined) columns.placement = change.placement === null ? null : JSON.stringify(change.placement);
 		if (change.baseSha !== undefined) columns.base_sha = change.baseSha;
 		if (change.workspaceRef !== undefined) columns.workspace_ref = change.workspaceRef === null ? null : JSON.stringify(change.workspaceRef);
 		if (change.slot !== undefined) columns.slot = change.slot;
@@ -703,6 +736,8 @@ function threadOf(row: Row): CodingThreadRow {
 		resolvedProfile: row.resolved_profile == null ? null : JSON.parse(String(row.resolved_profile)) as ResolvedProfile,
 		harness: String(row.harness) as CodingHarness,
 		providerId: String(row.provider_id),
+		// A thread from before pools has no pool of its own: its pool is its provider's.
+		poolId: text(row.pool_id) ?? String(row.provider_id),
 		providerKind: (text(row.provider_kind) ?? "workspace") as CodingProviderKind,
 		orb: row.orb === null || row.orb === undefined ? null : (JSON.parse(String(row.orb)) as OrbThread),
 		orbLastMessage: text(row.orb_last_message),
@@ -710,6 +745,7 @@ function threadOf(row: Row): CodingThreadRow {
 		orbCostNote: text(row.orb_cost_note),
 		placed: row.placed === 1,
 		placementReason: (text(row.placement_reason) ?? "priority") as PlacementReason,
+		placement: row.placement === null || row.placement === undefined ? null : (JSON.parse(String(row.placement)) as ThreadPlacement),
 		workspaceRef: row.workspace_ref === null ? null : (JSON.parse(String(row.workspace_ref)) as WorkspaceRef),
 		state: String(row.state) as CodingThreadState,
 		stateReason: text(row.state_reason),

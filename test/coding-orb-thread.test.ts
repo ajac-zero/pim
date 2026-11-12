@@ -204,6 +204,24 @@ describe("an agent-hosted coding thread", () => {
 		expect(String(notice[0]!.data?.message)).toContain("takes no messages");
 	});
 
+	it("waits out a cloud it can't be reached, and starts no second orb once it can", async () => {
+		const fake = new FakeOrbClient();
+		const { stub } = await orbThread(fake);
+		fake.unreachable("start", true);
+		await heartbeat(stub);
+		// Nothing was changed and nothing was made: the turn waits, it doesn't fail.
+		expect(await stub.status()).toMatchObject({ state: "provisioning", stateReason: "orb_unreachable", currentOperation: null, inbox: 1 });
+		expect(fake.started).toHaveLength(0);
+		fake.unreachable("start", false);
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ state: "running", currentOperation: expect.any(String) });
+		// A look that can't reach the cloud ends nothing either: the turn goes on.
+		fake.unreachable("state", true);
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ state: "running", currentOperation: expect.any(String) });
+		expect(fake.started).toHaveLength(1);
+	});
+
 	it("fails cleanly when this Pim has no orb client, saying the agent-hosted provider isn't available", async () => {
 		const { stub } = await orbThread(new FakeOrbClient());
 		codingOrbs.factory = null;

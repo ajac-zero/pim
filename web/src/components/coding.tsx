@@ -303,6 +303,15 @@ function ThreadRow({ thread }: { thread: CodingThreadSummary }) {
               {t("codingQueuePosition", { position: thread.queue.position })}
             </span>
           )}
+          {/* Where the thread was placed when it took its slot, and why, once it has been. */}
+          {thread.provider && thread.placementReason && (
+            <span className="min-w-0 truncate">
+              {t("codingPlacement", {
+                provider: workspaceProviderName(thread.provider),
+                reason: thread.placementReason,
+              })}
+            </span>
+          )}
           <span>{spendText(thread, t, money)}</span>
           <span>{date(thread.createdAt)}</span>
         </span>
@@ -1298,6 +1307,15 @@ function ThreadTitle({ thread }: { thread: CodingThreadView }) {
         <Badge variant="secondary" className="text-[11px]">
           {t("giteaTitle")}
         </Badge>
+      )}
+      {/* Where the thread was placed when it took its slot, and why, once it has been. */}
+      {thread.provider && thread.placementReason && (
+        <span className="min-w-0 truncate text-[13px] font-normal text-muted-foreground">
+          {t("codingPlacement", {
+            provider: workspaceProviderName(thread.provider),
+            reason: thread.placementReason,
+          })}
+        </span>
       )}
     </>
   );

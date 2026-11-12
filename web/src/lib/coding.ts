@@ -70,6 +70,11 @@ export type CodingThreadSummary = {
   task: string;
   state: CodingThreadState;
   stateReason: string | null;
+  /** The workspace provider the thread was placed on when it took its slot, and why it runs there; null until it has been placed. */
+  provider: string | null;
+  /** The pool of workspaces it runs in: its provider, until pools are more than one. */
+  pool: string | null;
+  placementReason: string | null;
   queue: QueuePlace | null;
   createdBy: CodingCreator;
   parent: string | null;
@@ -214,6 +219,11 @@ export type CodingThreadView = {
   profile: AgentProfile;
   harness: CodingHarness;
   workspaceProvider: string;
+  /** The workspace provider the thread was placed on when it took its slot, and why it runs there; null until it has been placed. */
+  provider: string | null;
+  /** The pool of workspaces it runs in: its provider, until pools are more than one. */
+  pool: string | null;
+  placementReason: string | null;
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
   budgetUsd: number | null;

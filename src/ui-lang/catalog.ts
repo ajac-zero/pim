@@ -72,7 +72,7 @@ export const CATALOG: Record<string, TagSpec> = {
 		children: "any",
 	},
 	form: {
-		description: "A form its fields answer: it checks each field that has an answer when it is submitted, shows the marks and locks itself.",
+		description: "A form its fields answer: it can be submitted once every required field is filled in, then checks each field that has an answer, shows the marks and locks itself.",
 		props: {
 			id: { kind: "string", required: true, description: "The form's own id, which names its answers in later turns." },
 			title: { kind: "string", description: "What the form is called, in its summary and its fallback text." },
@@ -89,6 +89,7 @@ export const CATALOG: Record<string, TagSpec> = {
 			answer: { kind: "number", description: "The number it is checked against." },
 			tol: { kind: "number", description: "How far off it may be; default 0, exact." },
 			explain: { kind: "string", description: "Shown with the mark when the answer is wrong." },
+			required: { kind: "boolean", description: "Whether the form can be submitted with this field empty; default true, so every field must be filled in. Write required={false} for an optional one." },
 		},
 		children: "none",
 	},
@@ -100,6 +101,7 @@ export const CATALOG: Record<string, TagSpec> = {
 			placeholder: { kind: "string", description: "A hint shown in the empty field." },
 			answer: { kind: "string", description: "The text it is checked against." },
 			explain: { kind: "string", description: "Shown with the mark when the answer is wrong." },
+			required: { kind: "boolean", description: "Whether the form can be submitted with this field empty; default true, so every field must be filled in. Write required={false} for an optional one." },
 		},
 		children: "none",
 	},
@@ -111,6 +113,7 @@ export const CATALOG: Record<string, TagSpec> = {
 			options: { kind: "strings", required: true, description: "The choices, in order." },
 			answer: { kind: "string", description: "The option it is checked against." },
 			explain: { kind: "string", description: "Shown with the mark when the answer is wrong." },
+			required: { kind: "boolean", description: "Whether the form can be submitted with this field empty; default true, so every field must be filled in. Write required={false} for an optional one." },
 		},
 		children: "none",
 	},
@@ -131,7 +134,7 @@ function propSyntax(spec: PropSpec): string {
 		case "number":
 			return "{5}";
 		case "boolean":
-			return "={true}";
+			return "{true}";
 		case "strings":
 			return '["a", "b"]';
 		case "enum":

@@ -12,7 +12,7 @@ import { MAX_DEPTH, MAX_STATE_BYTES, MAX_TEXT_CHARS } from "./limits";
 import type { ActionName, Node, NodePart, UiProgram } from "./program";
 import type { Expr } from "./parse";
 import type { FormSpec, UiState, Value } from "./value";
-import { evalExpr, EvalError, gradeForm, initialUiState, stringOf, Steps, truthy } from "./value";
+import { evalExpr, EvalError, formReady, gradeForm, initialUiState, stringOf, Steps, truthy } from "./value";
 
 /** An action to run, with its arguments worked out, and the form it belongs to. */
 export type Action = { name: ActionName; args: Value[]; form: string | null };
@@ -62,6 +62,7 @@ export function evaluate(program: UiProgram, given: UiState, event: UiEvent | nu
 			} else {
 				const values: Record<string, Value> = {};
 				for (const field of spec.fields) values[field.key] = state.values[field.key] ?? "";
+				if (!formReady(spec, values)) throw new EvalError("Fill in every field to submit.");
 				state.submitted[event.form] = { values, graded: gradeForm(spec, values) };
 				state.revealed[event.form] = true;
 			}
@@ -168,6 +169,7 @@ class Renderer {
 					// Until its form is revealed, an answer is for checking, not for the page.
 					for (const secret of ["answer", "tol", "explain"]) delete props[secret];
 				}
+				props.required = this.program.forms[formId]?.fields.find((field) => field.key === key)?.required ?? true;
 				props.value = stringOf(this.state.values[key] ?? "");
 				props.locked = submitted !== undefined;
 				props.graded = submitted?.graded[key] === true;
@@ -183,6 +185,8 @@ class Renderer {
 		if (id === "") return null;
 		props.locked = this.state.submitted[id] !== undefined;
 		props.revealed = this.state.revealed[id] === true;
+		const spec = this.program.forms[id];
+		props.ready = spec === undefined || formReady(spec, this.state.values);
 		const outer = this.currentForm;
 		this.currentForm = id;
 		const children = this.nodes(node.children, depth + 1);

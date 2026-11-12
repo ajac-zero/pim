@@ -55,6 +55,17 @@ const field = (key: string) =>
     `[data-field="${key}"] input, [data-field="${key}"] select`,
   ) as HTMLInputElement | HTMLSelectElement;
 
+const fillAll = () => {
+  fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+  fireEvent.change(field("knn.d2"), { target: { value: "7" } });
+  fireEvent.change(field("knn.pred"), { target: { value: "B" } });
+};
+
+const submitButton = () =>
+  screen.getByRole("button", {
+    name: "Check and send",
+  }) as HTMLButtonElement;
+
 describe("a ui block in a reply", () => {
   it("draws its table and form, keeping its answers off the page", () => {
     const { container } = shown(UI_EXAMPLE);
@@ -121,7 +132,7 @@ describe("a ui block in a reply", () => {
   it("unlocks the form and says so when the send fails", async () => {
     const send = vi.fn().mockRejectedValue(new Error("offline"));
     shown(UI_EXAMPLE, { send });
-    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    fillAll();
     submit();
     await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
     expect(screen.getByRole("alert").textContent).toContain("Couldn't send");
@@ -129,6 +140,50 @@ describe("a ui block in a reply", () => {
     expect(field("knn.d1").disabled).toBe(false);
     submit();
     await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps submit disabled, with a hint, until every required field is filled", () => {
+    shown(UI_EXAMPLE);
+    expect(submitButton().disabled).toBe(true);
+    expect(submitButton().getAttribute("aria-describedby")).toBeTruthy();
+    expect(screen.getByText("Fill in every field to submit")).toBeTruthy();
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    fireEvent.change(field("knn.pred"), { target: { value: "B" } });
+    expect(submitButton().disabled).toBe(true);
+    // A number field must hold a finite number.
+    fireEvent.change(field("knn.d2"), { target: { value: "1e999" } });
+    expect(submitButton().disabled).toBe(true);
+    fireEvent.change(field("knn.d2"), { target: { value: "7" } });
+    expect(submitButton().disabled).toBe(false);
+    expect(screen.queryByText("Fill in every field to submit")).toBeNull();
+  });
+
+  it("lets a field marked required={false} stay blank", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    shown(
+      [
+        '<form id="f" submitLabel="Check and send" onSubmit={[issueNewTurn(formSummary("f"))]}>',
+        '  <input name="a" label="A"/><input name="note" label="Note" required={false}/>',
+        "</form>",
+      ].join("\n"),
+      { send },
+    );
+    expect(submitButton().disabled).toBe(true);
+    fireEvent.change(field("f.a"), { target: { value: "x" } });
+    expect(submitButton().disabled).toBe(false);
+    submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+  });
+
+  it("sends once however many times a filled form is submitted", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    shown(UI_EXAMPLE, { send });
+    fillAll();
+    submit();
+    submit();
+    fireEvent.submit(document.querySelector("form") as HTMLFormElement);
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(submitButton().disabled).toBe(true);
   });
 
   it("re-locks a form its chat already answered, without sending anything", () => {

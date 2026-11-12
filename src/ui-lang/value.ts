@@ -24,6 +24,8 @@ export type Field = {
 	label: string | null;
 	/** The kind of input it is. */
 	tag: "number" | "input" | "select";
+	/** Whether the form can't be submitted while it is empty; true unless the tag says required={false}. */
+	required: boolean;
 	/** Whether submitting checks it: it has an answer. */
 	graded: boolean;
 	/** What it is checked against. */
@@ -189,6 +191,18 @@ export function gradeField(field: Field, value: Value): boolean {
 		return stringOf(value).trim().toLowerCase() === stringOf(field.answer ?? "").trim().toLowerCase();
 	}
 	return stringOf(value) === stringOf(field.answer ?? "");
+}
+
+/** Whether a required field holds a valid value: text that isn't blank, and for a number a finite one. */
+function filled(field: Field, value: Value | undefined): boolean {
+	const text = stringOf(value ?? "").trim();
+	if (text === "") return false;
+	return field.tag !== "number" || Number.isFinite(Number(text));
+}
+
+/** Whether every required field of a form holds a valid value, so it may be submitted. */
+export function formReady(spec: FormSpec, values: Record<string, Value>): boolean {
+	return spec.fields.every((field) => !field.required || filled(field, values[field.key]));
 }
 
 /** How each field of a form did, by its key. */

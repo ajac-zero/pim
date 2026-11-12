@@ -283,7 +283,15 @@ describe("the ui language's interpreter", () => {
 
   it("keeps an answer off the page until the form is revealed", () => {
     const program = programOf(EXAMPLE);
-    const before = evaluate(program, initialState(program), null);
+    let filled = initialState(program);
+    for (const [key, value] of [
+      ["knn.d1", "5"],
+      ["knn.d2", "12"],
+      ["knn.pred", "A"],
+    ] as const) {
+      filled = evaluate(program, filled, { type: "change", key, value }).state;
+    }
+    const before = evaluate(program, filled, null);
     expect(JSON.stringify(before.tree)).not.toContain("13");
     expect(JSON.stringify(before.tree)).not.toContain("(2-1)²+(3-1)²");
     const after = evaluate(program, before.state, {
@@ -293,6 +301,44 @@ describe("the ui language's interpreter", () => {
     const json = JSON.stringify(after.tree);
     expect(json).toContain("13");
     expect(json).toContain("(2-1)²+(3-1)²");
+  });
+
+  it("makes every field required unless it says required={false}", () => {
+    const program = programOf(
+      [
+        '<form id="f">',
+        '  <number name="n"/><input name="a"/><input name="b" required={false}/>',
+        '  <select name="s" options={["x", "y"]}/>',
+        "</form>",
+      ].join("\n"),
+    );
+    expect(program.forms.f?.fields.map((field) => field.required)).toEqual([
+      true,
+      true,
+      false,
+      true,
+    ]);
+    const ready = (values: Record<string, string>) => {
+      let state = initialState(program);
+      for (const [key, value] of Object.entries(values)) {
+        state = evaluate(program, state, { type: "change", key, value }).state;
+      }
+      const form = evaluate(program, state, null).tree.find(
+        (node) => node.t === "el" && node.tag === "form",
+      );
+      return form?.t === "el" ? form.props.ready : undefined;
+    };
+    expect(ready({})).toBe(false);
+    expect(ready({ "f.n": "1", "f.a": "x" })).toBe(false);
+    expect(ready({ "f.n": "abc", "f.a": "x", "f.s": "y" })).toBe(false);
+    expect(ready({ "f.n": "Infinity", "f.a": "x", "f.s": "y" })).toBe(false);
+    expect(ready({ "f.n": "1", "f.a": "  ", "f.s": "y" })).toBe(false);
+    expect(ready({ "f.n": "1.5", "f.a": "x", "f.s": "y" })).toBe(true);
+    const submitted = evaluate(program, initialState(program), {
+      type: "submit",
+      form: "f",
+    });
+    expect(submitted.error).toBe("Fill in every field to submit.");
   });
 
   it("gives up on a block that takes too many steps, without throwing", () => {
@@ -466,6 +512,7 @@ describe("the ui language's own code", () => {
 
   it("describes the catalog to the model, from the catalog", () => {
     const reference = uiBlockReference();
+    expect(reference).toContain("required?={true}");
     expect(reference).toContain("<form");
     expect(reference).toContain("reveal()");
     expect(reference).toContain("formSummary");

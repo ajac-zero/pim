@@ -984,8 +984,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			});
 			this.#recordResolved(profile.providerId, profile.model, cli ? input.profile?.providerId === cli.id ? "explicit" : "harness default" : input.profile ? "explicit" : "space default");
 			this.store.update({
-				placementReason: pin ? "pinned" : "priority",
-				placement: this.#placementObject(pin ? "pinned" : "priority", poolId, [poolId], pools),
+				placementReason: orb || pin ? "pinned" : "priority",
+				placement: orb ? { kind: "pinned", pool: "amp-orbs", provider: "amp-orbs", priority: 0, skipped: [] } : this.#placementObject(pin ? "pinned" : "priority", poolId, [poolId], pools),
 			});
 			this.store.enqueue(input.operationId, task);
 			if (input.rebuildEnvironment) {
@@ -1065,6 +1065,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
 		const queue = thread.slot === "queued" ? await codingScheduler(this.env, thread.space).position(thread.threadId) : null;
+		// For amp-http orb threads, display as 'amp-orbs' in pool/provider
+		const displayProvider = thread.providerId === "amp-http" ? "amp-orbs" : thread.providerId;
 		return {
 			threadId: thread.threadId,
 			activity: await this.activity(),
@@ -1075,9 +1077,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 			profile: thread.profile,
 			resolvedProfile: thread.resolvedProfile,
 			harness: thread.harness,
-			workspaceProvider: thread.providerId,
-			provider: thread.providerId,
-			pool: thread.poolId,
+			workspaceProvider: displayProvider,
+			provider: displayProvider,
+			pool: thread.providerId === "amp-http" ? displayProvider : thread.poolId,
 			placementReason: thread.placementReason,
 			placement: thread.placement,
 			providerKind: thread.providerKind,

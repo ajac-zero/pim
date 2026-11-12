@@ -67,9 +67,9 @@ export type StartCodingThread = {
 	readonly budgetUsd?: number;
 	readonly parent?: string;
 	readonly operationId?: string;
-	/** Pins the thread to a pool (a coding sandbox provider's id, such as `compose` or `cloudflare`): it runs only there, and queues when it is full. Refused if the space has no such pool enabled. Left out, the thread takes the first pool with room. */
+	/** Pins the thread to a pool by its id, such as `compose` or `cloudflare-2`: it runs only there, and queues when it is full. Refused if the space has no such pool enabled. Left out, the thread takes the first pool with room, by priority. */
 	readonly pool?: string;
-	/** Pins the thread to a provider, such as `compose` or `cloudflare`. Same as `pool`; naming both, they must agree. */
+	/** Pins the thread to a provider, such as `compose` or `cloudflare`: its first pool. Naming both `pool` and `provider`, they must agree. */
 	readonly provider?: string;
 	/** When true, start with a freshly rebuilt environment, skipping any cached snapshot. Default false. */
 	readonly rebuildEnvironment?: boolean;

@@ -1835,6 +1835,9 @@ const translations = {
     codingWorkspaceProvider: "Runs on",
     codingRunsOn: "Its workspace runs on {provider}",
     codingRunsOnWhy: "Its workspace runs on {provider} ({reason})",
+    codingRunsInPoolWhy:
+      "Its workspace runs in the pool {pool} on {provider} ({reason}, priority {priority})",
+    codingPoolPriority: "priority {priority}",
     codingPlacementPinned: "pinned",
     codingPlacementPriority: "first choice",
     codingPlacementOverflow: "overflow",
@@ -3867,6 +3870,9 @@ const translations = {
     codingRunsOn: "Su espacio de trabajo se ejecuta en {provider}",
     codingRunsOnWhy:
       "Su espacio de trabajo se ejecuta en {provider} ({reason})",
+    codingRunsInPoolWhy:
+      "Su espacio de trabajo se ejecuta en el grupo {pool} de {provider} ({reason}, prioridad {priority})",
+    codingPoolPriority: "prioridad {priority}",
     codingPlacementPinned: "fijado",
     codingPlacementPriority: "primera opción",
     codingPlacementOverflow: "desbordamiento",

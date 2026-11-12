@@ -147,6 +147,9 @@ const DEFAULT_DEADLINE_MS = 30 * 60 * 1000;
 
 /** How long a slot's thread may be idle before it gives the slot back, and how long one waiting for the person keeps it before it may be preempted, when the options don't say (10 and 5 minutes). */
 const DEFAULT_IDLE_MS = 10 * 60 * 1000;
+
+/** The idle grace used by coding thread objects and their space scheduler. */
+export const IDLE_SLOT_GRACE_MS = 2 * 60_000;
 const DEFAULT_WAITING_GRACE_MS = 5 * 60 * 1000;
 
 /** The legacy priority recorded for resumed requests; it no longer changes FIFO order. */

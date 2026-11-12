@@ -57,7 +57,7 @@ import {
 	verifyGatewayToken,
 } from "./model-gateway";
 import { DEFAULT_SPACE_CAP, type ManagerHealth } from "./provider-capacity";
-import { PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
+import { IDLE_SLOT_GRACE_MS, PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { BranchMovedError, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
 import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
@@ -685,7 +685,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				(thread.slot === "held" && thread.environment.rebuildRequested) ||
 				(thread.slot === "queued" && this.#healthOf(thread) !== null));
 		// The heartbeat, the session's next due time and the compute cap are one timer: the earliest of them. A turn on an agent-hosted thread is polled at its own interval.
-		const wakes = [busy ? Date.now() + (thread?.providerKind === "agent-hosted" ? this.orbPollMs() : HEARTBEAT_MS) : Infinity, this.#nextSessionWake(thread) ?? Infinity, this.#capWake() ?? Infinity];
+		const idleWake = thread?.idleSince !== null && thread?.idleSince !== undefined && thread.slot === "held" ? Date.now() + Math.max(0, thread.idleSince + IDLE_SLOT_GRACE_MS - this.now()) : Infinity;
+		const wakes = [idleWake, busy ? Date.now() + (thread?.providerKind === "agent-hosted" ? this.orbPollMs() : HEARTBEAT_MS) : Infinity, this.#nextSessionWake(thread) ?? Infinity, this.#capWake() ?? Infinity];
 		const next = Math.min(...wakes);
 		return next === Infinity ? undefined : { rescheduleAt: Math.max(Date.now() + 1_000, next) };
 	}
@@ -1790,18 +1791,27 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.store.thread();
 		if (!thread || !this.store.firstNotice(key) || thread.slot !== "held") return;
-		if (thread.currentOperation) {
+		if (thread.currentOperation || this.store.inboxSize() > 0 || thread.environment.rebuildRequested || this.#resuming) {
 			// It reported itself idle or waiting just before a turn began: ask for the slot back in FIFO order.
 			console.warn(JSON.stringify({ event: "pim.coding.released_running", thread: thread.threadId, why: released.why }));
 			this.store.update({ slot: "none", resumePriority: true });
 			await this.#requestSlot();
+			this.#kick();
 			return;
 		}
 		// Idle or preempted, the work is committed and bundled first, best effort, so it outlives the kept volume should that be reclaimed.
 		await this.#checkpoint(null).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.checkpoint_failed", thread: thread.threadId, error: String(error) })));
 		await this.#autosave();
-		await this.#dropWorkspace({ keepVolume: true });
-		this.store.update({ slot: "none", slotSince: null, resumePriority: released.why === "preempted" });
+		const current = this.store.required();
+		if (current.currentOperation || this.store.inboxSize() > 0 || current.environment.rebuildRequested || this.#resuming) {
+			this.store.update({ slot: "none", resumePriority: true });
+			await this.#requestSlot();
+			this.#kick();
+			return;
+		}
+		if (released.why === "idle") await this.#suspendWorkspace();
+		else await this.#dropWorkspace({ keepVolume: true });
+		this.store.update({ slot: "none", slotSince: null, idleSince: null, resumePriority: released.why === "preempted" });
 		this.#recordDuration(thread);
 	}
 
@@ -1996,6 +2006,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			thread = this.store.thread();
 			if (!thread || thread.state === "failed" || thread.state === "archived" || thread.state === "waiting_input") return;
 		}
+		// Pending inputs, even in backoff, keep the slot busy rather than idle.
+		if (this.store.inboxSize() > 0 && thread.slot === "held" && thread.idleSince !== null) await this.#report("running");
 		// An input held for a retry's backoff waits for it.
 		const held = this.store.nextInput();
 		if (held && held.notBefore > Date.now()) {
@@ -2007,6 +2019,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const rebuild = thread.environment.rebuildRequested;
 		// A tool waiting for the workspace needs it made too, though no turn follows, even if it stops waiting before it is made.
 		if (!work && !rebuild && !this.#resuming) {
+			await this.#releaseIdle();
 			if (thread.state === "provisioning" && thread.slot !== "held") this.store.update({ state: "idle" });
 			return;
 		}
@@ -2280,7 +2293,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.#dropWorkspace(options).catch((error) => console.warn(JSON.stringify({ event: "pim.coding.destroy_failed", thread: thread.threadId, error: String(error) })));
 		if (thread.slot === "held") {
 			await codingScheduler(this.env, thread.space).release(thread.threadId);
-			this.store.update({ slot: "none", slotSince: null });
+			this.store.update({ slot: "none", slotSince: null, idleSince: null });
 			this.#recordDuration(thread);
 		}
 	}
@@ -2292,9 +2305,43 @@ export class CodingThreadDO extends DurableObject<Env> {
 			.catch(() => {});
 	}
 
+	/** Suspends an unused workspace, keeping its ref or volume for the next steer. */
+	async #suspendWorkspace(): Promise<void> {
+		const thread = this.store.required();
+		const provider = this.workspaceProviders().get(thread.providerId);
+		this.#open = null;
+		if (thread.workspaceRef && provider.capabilities.suspendResume) {
+			await provider.suspend(thread.workspaceRef);
+			await this.#releaseCompute("suspend");
+		} else await this.#dropWorkspace({ keepVolume: true });
+	}
+
+	/** Gives an idle slot back after its grace, without interrupting pending work. */
+	async #releaseIdle(): Promise<void> {
+		const idle = () => {
+			const thread = this.store.required();
+			return thread.state === "idle" && thread.slot === "held" && !thread.currentOperation && this.store.inboxSize() === 0 && !thread.environment.rebuildRequested && !this.#resuming;
+		};
+		if (!idle()) return;
+		const thread = this.store.required();
+		if (thread.idleSince === null) return this.#report("idle");
+		if (this.now() < thread.idleSince + IDLE_SLOT_GRACE_MS) return;
+		await this.#checkpoint(null).catch(() => {});
+		await this.#autosave();
+		if (!idle()) return;
+		await this.#suspendWorkspace();
+		this.store.update({ slot: "none", slotSince: null, idleSince: null });
+		await codingScheduler(this.env, thread.space).release(thread.threadId);
+		this.#recordDuration(thread);
+		this.store.recordEvent("workspace.suspended", { reason: "idle" });
+	}
+
 	async #report(activity: SlotActivity): Promise<void> {
 		const thread = this.store.required();
 		if (thread.slot !== "held") return;
+		const idleSince = activity === "idle" ? thread.idleSince ?? this.now() : null;
+		this.store.update({ idleSince });
+		if (idleSince !== null) await this.#schedule(Date.now() + Math.max(0, idleSince + IDLE_SLOT_GRACE_MS - this.now()));
 		await codingScheduler(this.env, thread.space)
 			.setActivity(thread.threadId, activity)
 			.catch((error) => console.warn(JSON.stringify({ event: "pim.coding.activity_failed", thread: thread.threadId, error: String(error) })));

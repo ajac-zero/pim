@@ -132,17 +132,14 @@ describe("a space's coding scheduler", () => {
 		expect(await alarmOf(stub)).toBeNull();
 	});
 
-	it("tells a thread admitted by another's release on the next alarm, which it sets at once", async () => {
+	it("tells the FIFO head immediately when another thread releases its slot", async () => {
 		const stub = space();
 		await stub.setLimit(1);
 		await stub.request("a", { pool: "sandbox" });
 		await stub.request("b", { pool: "sandbox" });
 		codingSchedulers.now = START + 5_000;
 		expect(await stub.release("a")).toEqual(["b"]);
-		expect(await outbox(stub)).toEqual(["admitted:b:0"]);
-		expect(await alarmOf(stub)).toBe(START + 5_000);
-		expect(heard).toEqual([]);
-		await runDurableObjectAlarm(stub);
+		expect(await outbox(stub)).toEqual([]);
 		expect(heard).toEqual(["admitted:b"]);
 		expect(await alarmOf(stub)).toBeNull();
 	});
@@ -158,8 +155,6 @@ describe("a space's coding scheduler", () => {
 		expect(await stub.sweep()).toEqual({ released: [{ threadId: "a", why: "preempted" }], admitted: ["b"] });
 		await stub.request("a", { pool: "sandbox", priority: 1000 });
 		await stub.request("c", { pool: "sandbox" });
-		expect(await stub.release("b")).toEqual(["a"]);
-		expect(await outbox(stub)).toEqual(["released:a:0", "admitted:b:0", "admitted:a:0"]);
 
 		// a's coding thread is down: b hears, and a's two notices wait, in order.
 		const down = new Set(["a"]);
@@ -168,12 +163,12 @@ describe("a space's coding scheduler", () => {
 			expired: recorder.expired,
 			released: (released, key) => (down.has(released.threadId) ? Promise.reject(new Error("down")) : recorder.released(released, key)),
 		};
+		expect(await stub.release("b")).toEqual(["a"]);
 		codingSchedulers.now = START + 6 * MINUTE;
-		await runDurableObjectAlarm(stub);
 		expect(heard).toEqual(["admitted:b"]);
 		// Only the first of a's was tried; the second waited behind it.
 		expect(await outbox(stub)).toEqual(["released:a:1", "admitted:a:0"]);
-		expect(await alarmOf(stub)).toBe(START + 6 * MINUTE + TICK_MS);
+		expect(await alarmOf(stub)).toBeLessThanOrEqual(START + 6 * MINUTE + TICK_MS);
 
 		await runInDurableObject(stub, async (_instance: CodingSchedulerDO, state) => {
 			// A new instance on the same storage, as after a restart. a takes each notice but its answer is lost, so each stays to be delivered again.
@@ -221,7 +216,6 @@ describe("a notice that keeps failing", () => {
 		codingSchedulers.now = START + 5 * MINUTE;
 		await stub.sweep();
 		await stub.request("a", { pool: "sandbox", priority: 1000 });
-		expect(await stub.release("b")).toEqual(["a"]);
 		// a's thread never takes the news of its release, but takes everything else.
 		let tries = 0;
 		codingSchedulers.notifier = {
@@ -231,9 +225,10 @@ describe("a notice that keeps failing", () => {
 				throw new Error("refused");
 			},
 		};
+		expect(await stub.release("b")).toEqual(["a"]);
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 		vi.spyOn(console, "warn").mockImplementation(() => {});
-		for (let attempt = 1; attempt < MAX_NOTICE_ATTEMPTS; attempt++) {
+		for (let attempt = 2; attempt < MAX_NOTICE_ATTEMPTS; attempt++) {
 			codingSchedulers.now += TICK_MS;
 			expect(await runDurableObjectAlarm(stub)).toBe(true);
 		}

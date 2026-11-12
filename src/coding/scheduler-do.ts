@@ -7,6 +7,7 @@ import { cliHarness } from "./harness";
 import { HarnessLoginFlow, type LoginStatus } from "./harness/login";
 import { DEFAULT_SPACE_CAP, type ManagerHealth, PROVIDER_SPACE_CAPS, ProviderCapacity } from "./provider-capacity";
 import {
+	IDLE_SLOT_GRACE_MS,
 	type AdmissionConditions,
 	CodingScheduler,
 	type QueueEntry,
@@ -82,6 +83,7 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 			transaction: (work) => ctx.storage.transactionSync(work),
 			now: () => this.now(),
 			defaultLimit: DEFAULT_SPACE_CAP,
+			idleMs: IDLE_SLOT_GRACE_MS,
 			limits: PROVIDER_SPACE_CAPS,
 		});
 		this.#threads = new CodingThreadIndex(ctx.storage.sql);
@@ -129,10 +131,13 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 
 	/** Frees the thread's slot, and tells the threads admitted into it. */
 	async release(threadId: string): Promise<string[]> {
-		return this.#changed(() => {
+		const admitted = await this.#changed(() => {
 			const admitted = this.#scheduler.release(threadId);
 			return { result: admitted, admitted };
 		});
+		await this.#deliver();
+		await this.#schedule(false);
+		return admitted;
 	}
 
 	async cancel(threadId: string): Promise<boolean> {

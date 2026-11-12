@@ -720,7 +720,7 @@ describe("a coding thread", () => {
 		await expect(inside(second.stub, (thread) => thread.steer("More?", { operationId: "late" }))).rejects.toThrow("archived");
 	});
 
-	it("checkpoints and gives its workspace up when its slot is taken back while it waits, then asks again at the head of the queue", async () => {
+	it("checkpoints and gives its workspace up when its slot is taken back while it waits, then asks again in FIFO order", async () => {
 		const space = `space-${crypto.randomUUID()}`;
 		const scheduler = codingScheduler(env, space);
 		await scheduler.setLimit(1);
@@ -752,23 +752,31 @@ describe("a coding thread", () => {
 		await first.stub.archive();
 	});
 
-	it("fails when it waits in the queue past its deadline", async () => {
+	it("retries no capacity once for another 30 minutes then fails and notifies once", async () => {
 		const space = `space-${crypto.randomUUID()}`;
 		const scheduler = codingScheduler(env, space);
-		await scheduler.setLimit(1);
-		codingFaux.setResponses([fauxAssistantMessage("First done.")]);
-		const first = await startThread({ space });
-		await turns(first.id, 1);
+		await scheduler.setLimit(0);
 		const second = await startThread({ space });
 		expect(second.status.state).toBe("queued");
-		// Seven hours on: the second waited past its six, and the first was idle past its ten minutes.
-		codingSchedulers.now = Date.now() + 7 * 60 * 60_000;
+		const initial = (await scheduler.snapshot()).queued[0]!;
+		codingSchedulers.now = initial.deadlineAt - 1;
+		await runDurableObjectAlarm(scheduler);
+		expect((await second.stub.status()).stateReason).not.toBe("no_capacity");
+		codingSchedulers.now = initial.deadlineAt;
+		await runDurableObjectAlarm(scheduler);
+		expect(await second.stub.status()).toMatchObject({ state: "queued", stateReason: "no_capacity", slot: "queued", inbox: 1, stateDetail: expect.stringContaining("Retrying automatically") });
+		const retry = (await scheduler.snapshot()).queued[0]!;
+		expect(retry.queuedAt).toBe(initial.deadlineAt);
+		expect(retry.deadlineAt - retry.queuedAt).toBe(30 * 60_000);
+		// Redelivery of the first notice cannot consume the second attempt.
+		await second.stub.expired(initial, `coding:expired:${second.id}:1`);
+		codingSchedulers.now = retry.deadlineAt;
 		await runDurableObjectAlarm(scheduler);
 		codingSchedulers.now = null;
-		expect(await second.stub.status()).toMatchObject({ state: "failed", stateReason: "queue_expired:slots_full", slot: "none", inbox: 1 });
-		expect(await first.stub.status()).toMatchObject({ state: "idle", slot: "none" });
+		expect(await second.stub.status()).toMatchObject({ state: "failed", stateReason: "no_capacity", slot: "none", inbox: 1, stateDetail: expect.stringContaining("fake: full") });
 		expect(await scheduler.snapshot()).toMatchObject({ running: [], queued: [] });
-		expect(codingEvents.filter((event) => event.threadId === second.id)).toEqual([expect.objectContaining({ outcome: "error", reason: "queue_expired:slots_full", state: "failed" })]);
+		expect(await sql(second.stub, "SELECT kind FROM coding_event WHERE kind = 'thread.no_capacity'")).toHaveLength(2);
+		expect(codingEvents.filter((event) => event.threadId === second.id)).toEqual([expect.objectContaining({ outcome: "error", reason: "no_capacity", state: "failed" })]);
 	});
 
 	it("fails a thread stuck provisioning for too long, once, and leaves queued, and waiting threads be", async () => {

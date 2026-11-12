@@ -52,7 +52,7 @@ type CodingThreadSummary = {
   branch: string;           // "pim/<slug>-<id prefix>"
   task: string;             // the task it was started with, at most 2,000 characters
   state: CodingThreadState;
-  stateReason: string | null; // such as "budget", "no_backend", "aborted", "cancelled", "queue_expired:slots_full", "login_required"
+  stateReason: string | null; // such as "budget", "no_backend", "aborted", "cancelled", "no_capacity", "login_required"
   queue: QueuePlace | null;
   createdBy: CodingCreator;
   parent: string | null;    // the thread that started this one
@@ -179,6 +179,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 `CodingEvent` is `{ seq, kind, at, provider, model, input, output, cacheRead, cacheWrite, costUsd, data }`. `kind` is one of:
 
 - `model_call`: one call to the model, with its tokens and cost. `data` is null for the thread's own calls; a call a CLI in the workspace made through the model gateway has `data: { via: "gateway", api, pricing, pricedAs?, estimated? }` (see Model gateway for coding threads in [reference.md](reference.md)).
+- `thread.no_capacity`: `data: { attempt, retrying, pools, message }`: a 30-minute queue window expired with no capacity. `pools` is a readable list of pool ids and skip reasons; `message` includes corrective actions. The first timeout automatically requeues at the FIFO tail for another 30 minutes, retaining `stateReason: "no_capacity"` and the message in `stateDetail`. The second fails with that reason and emits the normal `thread.turn_ended` failure to wake the parent/chat. Admission or manually continuing after failure resets the retry limit. This window is a constant, not a deployment flag.
 - `thread.queued`: `data: { position, reason }`, each time the thread waits for a slot.
 - `thread.turn_started`: `data: { operationId }`.
 - `thread.turn_ended`: `data: { type, threadId, space, operationId, outcome, reason?, checkpoint?, at }`, where `outcome` is `completed`, `error`, `cancelled` or `needs_approval`.

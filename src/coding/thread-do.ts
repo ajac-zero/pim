@@ -1737,8 +1737,18 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.store.thread();
 		if (!thread || !this.store.firstNotice(key) || thread.slot !== "queued") return;
-		this.store.update({ slot: "none" });
-		await this.#fail(`queue_expired:${entry.reason}`, `The thread waited in the queue too long (${entry.reason}) and left it`, false);
+		const skipped = new Map<string, string>((entry.skipped ?? [entry.pool, ...(entry.overflow ?? [])].map((pool) => ({ pool, reason: "full" }))).map(({ pool, reason }) => [pool, reason]));
+		for (const { pool, reason } of this.#placementPools().skipped) skipped.set(pool.id, reason);
+		const attempt = thread.noCapacityTimeouts + 1;
+		const detail = `No sandbox capacity after 30 minutes: ${[...skipped].map(([pool, reason]) => `${pool}: ${reason}`).join(", ")}. Free a slot, enable a pool, or check pool health. ${attempt === 1 ? "Retrying automatically for another 30 minutes." : "Automatic retry exhausted; continue the thread to try again."}`;
+		this.ctx.storage.transactionSync(() => {
+			this.store.update({ slot: "none", noCapacityTimeouts: attempt, stateReason: "no_capacity", stateDetail: detail });
+			this.store.recordEvent("thread.no_capacity", { attempt, retrying: attempt === 1, pools: [...skipped].map(([pool, reason]) => `${pool}: ${reason}`).join(", "), message: detail });
+		});
+		if (attempt === 1) {
+			await this.#requestSlot();
+			this.#kick();
+		} else await this.#fail("no_capacity", detail, false);
 	}
 
 	/** The scheduler's notice: it took the thread's slot back, after the thread was idle or waited for the person too long. */
@@ -1747,7 +1757,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.thread();
 		if (!thread || !this.store.firstNotice(key) || thread.slot !== "held") return;
 		if (thread.currentOperation) {
-			// It reported itself idle or waiting just before a turn began: ask for the slot back, at the head of the queue.
+			// It reported itself idle or waiting just before a turn began: ask for the slot back in FIFO order.
 			console.warn(JSON.stringify({ event: "pim.coding.released_running", thread: thread.threadId, why: released.why }));
 			this.store.update({ slot: "none", resumePriority: true });
 			await this.#requestSlot();
@@ -1891,6 +1901,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** A failed or stopped thread with new input waits for a slot again. Runs in the caller's transaction. */
 	#reopen(): void {
 		const thread = this.store.required();
+		if (thread.state === "failed" && thread.stateReason === "no_capacity") this.store.update({ noCapacityTimeouts: 0 });
 		if (thread.state === "failed" || thread.state === "waiting_input" || (thread.state === "idle" && thread.slot === "none")) this.store.update({ state: thread.slot === "queued" ? "queued" : "provisioning", stateReason: null, stateDetail: null, budgetStopped: false });
 	}
 
@@ -2159,6 +2170,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 				slot: "held",
 				slotSince: this.now(),
 				resumePriority: false,
+				noCapacityTimeouts: 0,
+				stateReason: null,
+				stateDetail: null,
 				poolId: pool,
 				providerId: provider,
 				placementReason: kind,

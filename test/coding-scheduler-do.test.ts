@@ -62,7 +62,7 @@ describe("a space's coding scheduler", () => {
 		const snapshot = await stub.snapshot();
 		expect(snapshot.limit).toBe(2);
 		expect(snapshot.running.map((slot) => `${slot.threadId}:${slot.activity}`)).toEqual(["a:waiting", "b:running"]);
-		expect(snapshot.queued).toEqual([{ threadId: "c", pool: "sandbox", reason: "resume", priority: 0, queuedAt: START, deadlineAt: START + 6 * 60 * MINUTE }]);
+		expect(snapshot.queued).toEqual([{ threadId: "c", pool: "sandbox", reason: "resume", priority: 0, queuedAt: START, deadlineAt: START + 30 * MINUTE }]);
 		for (const ms of [10, 20, 30, 40, 50]) await stub.recordDuration(ms);
 		expect(await stub.etaMs(1)).toBe(15);
 		expect(await stub.setConditions({ lowDisk: true, budgetCapped: false, detail: "3% free" })).toEqual([]);
@@ -121,12 +121,12 @@ describe("a space's coding scheduler", () => {
 		expect(heard).toEqual(["expired:b:slots_full"]);
 		expect((await stub.snapshot()).queued.map((entry) => entry.threadId)).toEqual(["c"]);
 		expect(await alarmOf(stub)).toBe(START + MINUTE + TICK_MS);
-		codingSchedulers.now = START + 30 * MINUTE;
+		codingSchedulers.now = START + 20 * MINUTE;
 		await runDurableObjectAlarm(stub);
 		expect(heard).toEqual(["expired:b:slots_full", "released:a:idle", "admitted:c"]);
 		expect(new Set(keys).size).toBe(3);
 		const { running, queued } = await stub.snapshot();
-		expect(running.map((slot) => `${slot.threadId}:${slot.activity}:${slot.acquiredAt}`)).toEqual([`c:running:${START + 30 * MINUTE}`]);
+		expect(running.map((slot) => `${slot.threadId}:${slot.activity}:${slot.acquiredAt}`)).toEqual([`c:running:${START + 20 * MINUTE}`]);
 		expect(queued).toEqual([]);
 		expect(await outbox(stub)).toEqual([]);
 		expect(await alarmOf(stub)).toBeNull();

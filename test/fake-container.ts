@@ -8,6 +8,9 @@ export function fakeContainers() {
 	const hosts = new Map<string, ContainerHost>();
 	const ids = new Set<string>();
 	const policies = new Map<string, EgressPolicy>();
+	/** What kills a command, by the id its client gave it. */
+	const cancellations = new Map<string, AbortController>();
+	const cancellation = (id: string) => cancellations.get(id) ?? cancellations.set(id, new AbortController()).get(id)!;
 	const catalog: ContainerCatalog = {
 		add: async (id) => {
 			ids.add(id);
@@ -35,12 +38,17 @@ export function fakeContainers() {
 				if (!ws) return Response.json({ error: "not_found" }, { status: 404 });
 				const url = new URL(request.url);
 				const p = url.searchParams.get("path") ?? "/workspace";
+				// Like agentd, a command is killed by its id, even when the cancellation arrives before the command has started.
+				if (request.method === "DELETE" && url.pathname.startsWith("/exec/")) {
+					cancellation(decodeURIComponent(url.pathname.slice("/exec/".length))).abort();
+					return Response.json({ ok: true });
+				}
 				try {
 					switch (`${request.method} ${url.pathname}`) {
 						case "POST /exec": {
-							const body = (await request.json()) as { cmd: string[]; timeoutMs: number; cwd?: string; env?: Record<string, string>; stdin?: string };
+							const body = (await request.json()) as { id: string; cmd: string[]; timeoutMs: number; cwd?: string; env?: Record<string, string>; stdin?: string };
 							const events = [];
-							for await (const event of ws.exec(body.cmd, { ...body, signal: request.signal })) events.push(JSON.stringify(event));
+							for await (const event of ws.exec(body.cmd, { ...body, signal: cancellation(body.id).signal })) events.push(JSON.stringify(event));
 							return new Response(`${events.join("\n")}\n`);
 						}
 						case "GET /file":

@@ -35,6 +35,9 @@ export const fakePushFailures = new Map<string, { times: number; stderr: string 
 
 type Files = Record<string, string>;
 
+/** What each remote's branches hold after pushes, by URL then branch: the tip, and the commits behind it, for a later fetch of the branch from another workspace. */
+export const fakeRemoteBranches = new Map<string, Map<string, { tip: string; commits: Record<string, { files: Record<string, string>; parent: string | null }> }>>();
+
 let commits = 0;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -130,6 +133,18 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			const helper = global[`credential.${origin}.helper`]?.includes(`!node ${WORKSPACE_GIT_AUTH_DIR}/helper.mjs`) && grant.url === origin && grant.token?.startsWith("pimgit_");
 			if (!injected && !helper && !env.GIT_CONFIG_VALUE_0?.startsWith("Authorization: Bearer ")) return { stderr: "fatal: could not read Username for 'https://pim.invalid': terminal prompts disabled\n", code: 128 };
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
+			// `fetch origin +refs/heads/<branch>:<ref>`: a branch pushed before, with its commits.
+			const wanted = rest.find((arg) => arg.includes("refs/heads/"));
+			if (wanted) {
+				const remote = fakeRemoteBranches.get(origin)?.get(wanted.replace(/^\+/, "").split(":")[0]!.slice("refs/heads/".length));
+				if (!remote) return { stderr: "fatal: couldn't find remote ref\n", code: 128 };
+				for (const [sha, each] of Object.entries(remote.commits)) {
+					await write(workspace, objects(sha), JSON.stringify(each.files));
+					if (each.parent) await write(workspace, `${objects(sha)}.parent`, each.parent);
+				}
+				await write(workspace, `${cwd}/.git/${wanted.split(":")[1]}`, remote.tip);
+				return {};
+			}
 			if (!files) return { stderr: "fatal: could not read from remote\n", code: 128 };
 			const dest = rest.find((arg) => arg.includes(":"))?.split(":")[1];
 			if (dest) {
@@ -163,7 +178,13 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 				return { stderr: `${sent}${failing.stderr}`, code: 1 };
 			}
 			const refspec = rest[1] ?? "";
-			fakePushes.push({ url: origin, refspec, sha: await read(workspace, `${cwd}/.git/HEAD`), env });
+			const sha = await read(workspace, `${cwd}/.git/HEAD`);
+			fakePushes.push({ url: origin, refspec, sha, env });
+			const carried: Record<string, { files: Files; parent: string | null }> = {};
+			for (const each of await lineage(sha)) carried[each] = { files: await commit(each).catch(() => ({})), parent: await read(workspace, `${objects(each)}.parent`).catch(() => null) };
+			const branches = fakeRemoteBranches.get(origin) ?? new Map();
+			branches.set(refspec.split("refs/heads/")[1] ?? "", { tip: sha, commits: carried });
+			fakeRemoteBranches.set(origin, branches);
 			return {};
 		}
 		case "checkout": {
@@ -188,6 +209,8 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 		}
 		case "merge-base": {
 			// `merge-base A B`: the nearest commit each descends from, where commits made here follow the one before.
+			// `merge-base --is-ancestor A B`: success when B's history has A.
+			if (rest[0] === "--is-ancestor") return (await lineage(rest[2]!)).includes(rest[1]!) ? {} : { code: 1 };
 			const [a, b] = rest as [string, string];
 			const [chainA, chainB] = [await lineage(a), await lineage(b)];
 			const common = chainA.find((sha) => chainB.includes(sha));
@@ -211,6 +234,17 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			const sha = `c${String(++commits).padStart(7, "0")}`;
 			await write(workspace, objects(sha), JSON.stringify(merged));
 			await write(workspace, `${objects(sha)}.parent`, base);
+			await write(workspace, `${cwd}/.git/HEAD`, sha);
+			return {};
+		}
+		case "cat-file":
+			return (await read(workspace, objects(rest[1]!.replace(/\^\{commit\}$/, ""))).then(() => true, () => false)) ? {} : { stderr: "fatal: Not a valid object name\n", code: 128 };
+		case "merge": {
+			// `merge --ff-only <sha>`: the branch moves to it, the files with it.
+			const sha = rest.at(-1)!;
+			const head = await read(workspace, `${cwd}/.git/HEAD`);
+			if (!(await lineage(sha)).includes(head)) return { stderr: "fatal: Not possible to fast-forward, aborting.\n", code: 128 };
+			for (const [path, text] of Object.entries(await commit(sha))) await write(workspace, `${cwd}/${path}`, text);
 			await write(workspace, `${cwd}/.git/HEAD`, sha);
 			return {};
 		}

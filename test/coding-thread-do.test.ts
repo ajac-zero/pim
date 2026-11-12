@@ -18,7 +18,7 @@ import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
 import { type FakeCommandHandler, type FakeCommandResult, FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { DEFAULT_WORKSPACE_IMAGE, NO_BACKEND_MESSAGE, NoWorkspaceBackendError, workspaceBackends, workspaceRegistry } from "../src/coding/workspace/registry";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
-import { fakeCloneFailures, fakeClones, fakeGit, fakePushes, fakePushFailures, fakeRemotes } from "./fake-git";
+import { fakeCloneFailures, fakeClones, fakeGit, fakePushes, fakePushFailures, fakeRemoteBranches, fakeRemotes } from "./fake-git";
 import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
 import { fakeContainers } from "./fake-container";
 import { prepareComputeProvider } from "../src/compute";
@@ -94,6 +94,9 @@ const sql = (stub: Stub, query: string) => runInDurableObject(stub, (_instance: 
 const sent = (context: Context) => JSON.stringify(context);
 
 beforeEach(() => {
+	fakePushes.length = 0;
+	fakePushFailures.clear();
+	fakeRemoteBranches.clear();
 	codingBackends.registry = null;
 	codingBackends.production = false;
 	codingCompute.providers = null;
@@ -209,6 +212,109 @@ describe("a coding thread's automatic push", () => {
 		expect(log.map((event) => (event.data as { failures: number }).failures)).toEqual([1, 2, 3, 4]);
 		expect(final.lastPushedSha).toBeNull();
 		expect(codingEvents.filter((event) => event.threadId === final.threadId)).toMatchObject([{ outcome: "completed" }]);
+	});
+
+	const notices = async (stub: Stub) => (await inside(stub, (thread) => thread.transcript())).filter((message) => message.role === "notice").map((message) => message.parts.map((part) => ("text" in part ? part.text : "")).join(""));
+
+	it("tells the transcript once per failure streak, and once when a push works again, and flags unpushed commits", async () => {
+		fakePushFailures.set(BROKER_URL, { times: 100, stderr: "remote: rejected\n" });
+		codingThreadClock.now = 1_000_000;
+		const { id, stub, final } = await run([...commit("a"), ...commit("b"), fauxAssistantMessage("Done.")]);
+		const failed = (await notices(stub)).filter((text) => text.startsWith("Couldn't save commits to GitHub"));
+		expect(failed).toHaveLength(1);
+		expect(failed[0]).toMatch(/remote: rejected; \d failures; the work is still in the workspace$/);
+		expect(final).toMatchObject({ lastPushedSha: null, unpushed: true });
+		fakePushFailures.clear();
+		codingFaux.setResponses([...commit("c"), fauxAssistantMessage("More.")]);
+		await stub.steer("More.", { operationId: "more" });
+		await turns(id, 2);
+		const after = await stub.status();
+		expect(after).toMatchObject({ unpushed: false, lastPushedSha: after.checkpoint!.sha });
+		const texts = await notices(stub);
+		expect(texts.filter((text) => text.startsWith("Couldn't save"))).toHaveLength(1);
+		expect(texts.filter((text) => text.startsWith("Saved commits to GitHub at "))).toEqual([`Saved commits to GitHub at ${after.lastPushedSha!.slice(0, 7)}`]);
+	});
+
+	it("says nothing for a failure that the next push mends at once", async () => {
+		fakePushFailures.set(BROKER_URL, { times: 1, stderr: "remote: busy\n" });
+		const { stub } = await run([...commit("one"), fauxAssistantMessage("Done.")]);
+		expect((await notices(stub)).filter((text) => /GitHub/.test(text))).toEqual([]);
+	});
+
+	it("pushes the work still unpushed when a turn is stopped", async () => {
+		codingThreadClock.now = 1_000_000;
+		codingFaux.setResponses([...commit("a"), toolUse("write", { path: "loose.txt", content: "x\n" }), toolUse("bash", { command: "sleep 30" })]);
+		const { id, stub } = await startThread();
+		await vi.waitFor(async () => expect(await sql(stub, "SELECT tool FROM coding_tool_journal")).toHaveLength(4), { timeout: 10_000, interval: 20 });
+		await stub.abort();
+		await turns(id, 1);
+		const status = await stub.status();
+		expect(fakePushes).toHaveLength(2);
+		expect(status).toMatchObject({ lastPushedSha: status.checkpoint!.sha, unpushed: false });
+	});
+
+	it("pushes the work an idle slot's reclaim checkpoints", async () => {
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const { id, stub } = await startThread({ space });
+		await turns(id, 1);
+		await (await workspaceOf(id)).writeFile(`${REPO_DIR}/notes.txt`, new TextEncoder().encode("Draft\n"));
+		codingSchedulers.now = Date.now() + 2 * 60_000 + 1_000;
+		await scheduler.sweep();
+		await runDurableObjectAlarm(scheduler);
+		codingSchedulers.now = null;
+		const status = await stub.status();
+		expect(status).toMatchObject({ slot: "none" });
+		expect(fakePushes).toHaveLength(1);
+		expect(status.lastPushedSha).toBe(status.checkpoint!.sha);
+		await stub.archive();
+	});
+
+	/** A thread that pushed one commit, whose workspace and volume are then lost, with its autosave dropped unless kept. Gives the pushed sha. */
+	const lose = async (keepAutosave = false) => {
+		codingFaux.setResponses([...commit("one"), fauxAssistantMessage("Done."), fauxAssistantMessage("Back.")]);
+		const { id, stub } = await startThread();
+		await turns(id, 1);
+		const pushed = (await stub.status()).lastPushedSha!;
+		if (!keepAutosave) await sql(stub, "DELETE FROM coding_autosave");
+		await codingWorkspaces.destroy((await codingWorkspaces.list({ sessionId: id }))[0]!.ref);
+		codingWorkspaces.loseVolume(id);
+		return { id, stub, pushed };
+	};
+	const recovery = async (stub: Stub) => (await stub.log()).filter((event) => event.kind === "workspace.push_recovery").map((event) => event.data);
+
+	it("fast-forwards a recreated workspace to the pushed commit when there is no newer autosave", async () => {
+		const { id, stub, pushed } = await lose();
+		await stub.steer("Carry on.", { operationId: "resume" });
+		await turns(id, 2);
+		expect(await recovery(stub)).toEqual([expect.objectContaining({ sha: pushed, outcome: "fast_forwarded" })]);
+		expect(await fileIn(id, "one.txt")).toBe("one\n");
+		await stub.archive();
+	});
+
+	it("leaves a newer autosave alone", async () => {
+		const { id, stub } = await lose(true);
+		// The pushed commit is an older one than the autosave's.
+		await sql(stub, "UPDATE coding_thread SET last_pushed_sha = 'base0000'");
+		await stub.steer("Carry on.", { operationId: "resume" });
+		await turns(id, 2);
+		expect(await recovery(stub)).toEqual([expect.objectContaining({ sha: "base0000", outcome: "autosave_newer" })]);
+		expect(await fileIn(id, "one.txt")).toBe("one\n");
+		await stub.archive();
+	});
+
+	it("doesn't move to a pushed commit that isn't a descendant of the restored HEAD, and goes on", async () => {
+		const { id, stub } = await lose();
+		fakeRemoteBranches.get(BROKER_URL)!.get((await stub.status()).repo.branch)!.tip = "x0000000";
+		fakeRemoteBranches.get(BROKER_URL)!.get((await stub.status()).repo.branch)!.commits = { x0000000: { files: { "other.txt": "o\n" }, parent: null } };
+		await sql(stub, "UPDATE coding_thread SET last_pushed_sha = 'x0000000'");
+		await stub.steer("Carry on.", { operationId: "resume" });
+		await turns(id, 2);
+		expect(await recovery(stub)).toEqual([expect.objectContaining({ sha: "x0000000", outcome: "not_descendant" })]);
+		await expect(fileIn(id, "one.txt")).rejects.toThrow();
+		expect(await stub.status()).toMatchObject({ state: "idle" });
+		await stub.archive();
 	});
 });
 
@@ -1138,6 +1244,8 @@ describe("a coding thread on a provider with sessions, keepalives and egress inj
 		expect(await printedOf((await provider.get(ref))!, ["ps"])).not.toContain("daemon");
 		const checkpoints = await stub.checkpoints();
 		expect(checkpoints.length).toBeGreaterThanOrEqual(2);
+		// The move pushed what it checkpointed, before the turn's end did.
+		expect(fakePushes[0]!.sha).toBe(checkpoints[0]!.sha);
 		// It is past the first session's cap now, and still works: the new session is what counts.
 		codingThreadClock.now = t0 + 70_000;
 		expect(await fileOn(provider, id, "a.txt")).toBe("before\n");
@@ -2799,6 +2907,18 @@ describe("a Claude Code thread", () => {
 		expect(saved.nodes.has(`${REPO_DIR}/node_modules/.modules.yaml`)).toBe(true);
 		expect([...saved.nodes.keys()].filter((path) => path.startsWith("/workspace/.claude"))).toEqual([]);
 		expect(JSON.stringify([...saved.nodes.values()].map((node) => ("data" in node ? decoder.decode(node.data) : "")))).not.toContain("sk-ant-");
+	});
+
+	it("pushes the thread's branch at the end of a CLI turn", async () => {
+		claude = async ({ workspace }) => {
+			await workspace.writeFile(`${REPO_DIR}/greet.ts`, encoder.encode("export const greet = 1;\n"));
+			return { stdout: claudeFixture("turn") };
+		};
+		const { id, stub } = await startClaude();
+		await turns(id, 1);
+		const status = await stub.status();
+		expect(fakePushes.map((push) => push.refspec)).toEqual([`HEAD:refs/heads/${status.repo.branch}`]);
+		expect(status).toMatchObject({ lastPushedSha: status.checkpoint!.sha, unpushed: false });
 	});
 
 	it("runs a turn with the person's login, and keeps its transcript, cost, tests, checkpoint and refreshed login, then resumes it", async () => {

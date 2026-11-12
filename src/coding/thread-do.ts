@@ -3653,6 +3653,35 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.recordEvent("workspace.restored", { from, ...(from === "autosave" && saved ? { savedAt: saved.savedAt } : {}) });
 		});
 		console.warn(JSON.stringify({ event: "pim.coding.workspace_restored", thread: thread.threadId, from }));
+		await this.#recoverPushed(workspace, thread);
+	}
+
+	/**
+	 * After a lost workspace was restored: brings in the commits the thread had pushed to its own branch. The
+	 * branch is fetched through the broker and fast-forwarded to `lastPushedSha`, only when that commit descends from
+	 * the restored HEAD, so a newer autosave (which already has it, or went past it) is never overridden and nothing
+	 * is reset or forced. When it can't be done an event says why, and the thread goes on as restored.
+	 */
+	async #recoverPushed(workspace: Workspace, thread: CodingThreadRow): Promise<void> {
+		const pushed = this.store.required().lastPushedSha;
+		if (!pushed) return;
+		const skip = (outcome: string, error?: unknown): void => void this.store.recordEvent("workspace.push_recovery", { sha: pushed, outcome, ...(error ? { error: redactSecrets(errorText(error)).slice(0, 300) } : {}) });
+		try {
+			const head = (await git(workspace, ["rev-parse", "HEAD"])).trim();
+			if (head === pushed) return;
+			const { token, auth } = await this.#brokerAccess(thread);
+			const ref = "refs/pim/pushed-branch";
+			await git(workspace, ["fetch", "origin", `+refs/heads/${thread.branch}:${ref}`], { timeoutMs: CLONE_TIMEOUT_MS, env: auth, secret: token });
+			if (!(await git(workspace, ["cat-file", "-e", `${pushed}^{commit}`]).then(() => true, () => false))) return skip("not_on_remote");
+			// The restored work already has the pushed commits, or went past them: it is the newer.
+			if (await git(workspace, ["merge-base", "--is-ancestor", pushed, head]).then(() => true, () => false)) return skip("autosave_newer");
+			if (!(await git(workspace, ["merge-base", "--is-ancestor", head, pushed]).then(() => true, () => false))) return skip("not_descendant");
+			await git(workspace, ["merge", "--ff-only", pushed]);
+			this.store.recordEvent("workspace.push_recovery", { sha: pushed, outcome: "fast_forwarded", from: head });
+		} catch (error) {
+			if (error instanceof WorkspaceLostError) throw error;
+			skip("failed", error);
+		}
 	}
 
 	/**

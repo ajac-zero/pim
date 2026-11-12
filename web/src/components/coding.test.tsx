@@ -1052,6 +1052,96 @@ describe("the repository address", () => {
 });
 
 describe("the harness", () => {
+  it("keeps model notices visible and refreshes the model when a live turn changes it", async () => {
+    const initial: TranscriptMessage = {
+      id: "model-resolved-1",
+      role: "notice",
+      parts: [
+        { type: "text", text: "Model: openai · gpt-6.1-sol · space default" },
+      ],
+      timestamp: 1,
+    };
+    const changed: TranscriptMessage = {
+      id: "model-resolved-2",
+      role: "notice",
+      parts: [
+        { type: "text", text: "Model: cloudflare · fallback · space default" },
+      ],
+      timestamp: 2,
+    };
+    const { api, connections } = fakeApi(
+      view({
+        state: "running",
+        currentOperation: "op",
+        resolvedProfile: {
+          provider: "openai",
+          model: "gpt-6.1-sol",
+          source: "space default",
+        },
+      }),
+      [initial],
+    );
+    threadPage(api);
+    expect(
+      (
+        await screen.findByText("Model: openai · gpt-6.1-sol · space default")
+      ).getAttribute("data-kind"),
+    ).toBe("notice");
+    await waitFor(() => expect(connections).toHaveLength(1));
+    api.thread.mockResolvedValue(
+      view({
+        state: "running",
+        currentOperation: "op",
+        resolvedProfile: {
+          provider: "cloudflare",
+          model: "fallback",
+          source: "space default",
+        },
+      }),
+    );
+    api.transcript.mockResolvedValue({ messages: [initial, changed] });
+    connections[0]?.send({
+      type: "events",
+      events: [
+        {
+          type: "message_end",
+          entry: assistantEntry("3", [{ type: "text", text: "Done." }]),
+        },
+      ],
+    } as unknown as CodingStreamMessage);
+    expect(
+      (
+        await screen.findByText("Model: cloudflare · fallback · space default")
+      ).getAttribute("data-kind"),
+    ).toBe("notice");
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("banner")).getByText(
+          "cloudflare · fallback · space default",
+        ),
+      ).toBeTruthy(),
+    );
+    expect(
+      screen.getAllByText("Model: openai · gpt-6.1-sol · space default"),
+    ).toHaveLength(1);
+  });
+
+  it.each(["space default", "explicit"] as const)(
+    "shows the resolved model and its %s source in the header",
+    async (source) => {
+      const { api } = fakeApi(
+        view({
+          resolvedProfile: { provider: "openai", model: "gpt-6.1-sol", source },
+        }),
+      );
+      threadPage(api);
+      const header = await screen.findByRole("banner");
+      expect(
+        within(header).getByText(`openai · gpt-6.1-sol · ${source}`),
+      ).toBeTruthy();
+    },
+  );
+
   it("is named with its mark in the thread's header", async () => {
     const { api } = fakeApi(view({ harness: "claude-code" }));
     threadPage(api);

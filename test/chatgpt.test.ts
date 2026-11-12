@@ -1,8 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { type ChatGPTCredential, verifyIdToken } from "../src/chatgpt";
 import { api, OWNER, post, say, toolUse } from "./helpers";
 import { faux, type Pim } from "./worker";
+import type { CodingThreadView } from "../src/coding/api";
+import { fakeRemotes } from "./fake-git";
 
 /*
  * A scripted OpenAI behind `fetch`: the token endpoint, its signing keys, the
@@ -149,7 +151,9 @@ beforeEach(() => {
 				}
 				return calls.at(-1)!.body.includes("You name chats")
 					? textStream("Weekly Plan")
-					: responseStream("Hello from Sol");
+					: JSON.parse(calls.at(-1)!.body).tools?.some((tool: { name: string }) => tool.name === "send_to_user")
+						? responseStream("Hello from Sol")
+						: textStream("Reviewed the README.");
 			default:
 				return new Response("not found", { status: 404 });
 		}
@@ -311,6 +315,19 @@ describe("Sign in with ChatGPT", () => {
 			return { id: provider.id, key: (await provider.auth.apiKey!.resolve()).auth.apiKey };
 		});
 		expect(resolved).toEqual({ id: "openai", key: "access-1" });
+
+		fakeRemotes.set("https://pim.test/api/coding/git/acme/demo.git", { "README.md": "# Demo\n" });
+		const started = await post<CodingThreadView>("/coding/threads", { repo: "https://github.com/acme/demo", task: "Review the README" });
+		expect(started.status).toBe(201);
+		onTestFinished(async () => { await post(`/coding/threads/${started.body.id}/archive`); });
+		const identity = { provider: "openai", model: "gpt-6.1-sol", source: "space default" };
+		expect(started.body.resolvedProfile).toEqual(identity);
+		await vi.waitFor(async () => expect((await api<CodingThreadView>(`/coding/threads/${started.body.id}`)).body).toMatchObject({ state: "idle" }), { timeout: 15_000 });
+		const current = await api<CodingThreadView>(`/coding/threads/${started.body.id}`);
+		expect(current.body.resolvedProfile).toEqual(identity);
+		expect(callsTo("/v1/responses").at(-1)?.headers.authorization).toBe("Bearer access-1");
+		const transcript = await api<{ messages: { role: string; parts: unknown[] }[] }>(`/coding/threads/${started.body.id}/transcript`);
+		expect(transcript.body.messages[0]).toMatchObject({ role: "notice", parts: [{ type: "text", text: "Model: openai · gpt-6.1-sol · space default" }] });
 	});
 
 	it("refreshes an expired token once, however many sessions need it at the same time", async () => {

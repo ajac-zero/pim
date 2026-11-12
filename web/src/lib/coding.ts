@@ -62,6 +62,7 @@ export type AgentProfile = {
 };
 
 export type CodingThreadSummary = {
+  resolvedProfile?: CodingThreadView["resolvedProfile"];
   id: string;
   url: string;
   repo: string;
@@ -212,6 +213,11 @@ export type CodingThreadView = {
   stateDetail: string | null;
   repo: { url: string; ref: string; branch: string; baseSha: string | null };
   profile: AgentProfile;
+  resolvedProfile?: {
+    provider: string;
+    model: string;
+    source: "explicit" | "space default" | "harness default" | null;
+  } | null;
   harness: CodingHarness;
   workspaceProvider: string;
   provider: string;

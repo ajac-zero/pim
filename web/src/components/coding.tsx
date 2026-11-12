@@ -1299,6 +1299,12 @@ function ThreadTitle({ thread }: { thread: CodingThreadView }) {
       >
         {repoName(thread.repo.url)}
       </a>
+      {thread.resolvedProfile && (
+        <Badge variant="secondary" className="text-[13px] font-normal">
+          {thread.resolvedProfile.provider} · {thread.resolvedProfile.model} ·{" "}
+          {thread.resolvedProfile.source ?? "source unknown"}
+        </Badge>
+      )}
       {isGiteaRepo(thread.repo.url) && (
         <Badge variant="secondary" className="text-[11px]">
           {t("giteaTitle")}
@@ -1856,11 +1862,15 @@ function useLiveTranscript(id: string, follow: boolean) {
     dispatch(message);
     const invalidate = (part: string) =>
       queryClient.invalidateQueries({ queryKey: ["coding", part, id] });
-    if (message.type === "snapshot") invalidate("thread");
+    if (message.type === "snapshot") {
+      invalidate("thread");
+      invalidate("transcript");
+    }
     if (message.type !== "events") return;
     for (const event of message.events) {
       if (event.type === "run_start" || event.type === "message_end") {
         invalidate("thread");
+        invalidate("transcript");
       }
       if (event.type === "run_end") {
         invalidate("thread");

@@ -153,6 +153,7 @@ describe("an agent-hosted coding thread", () => {
 		fake.say(orb(), "assistant", "Halfway.");
 		await heartbeat(stub);
 		expect(await said(stub)).toEqual([
+			["notice", [{ type: "text", text: "Model: coding-faux · coder · explicit" }]],
 			["user", [{ type: "text", text: TASK }]],
 			["assistant", [{ type: "text", text: "Halfway." }]],
 		]);
@@ -163,6 +164,7 @@ describe("an agent-hosted coding thread", () => {
 		fake.setState(orb(), "idle");
 		await heartbeat(after);
 		expect(await said(after)).toEqual([
+			["notice", [{ type: "text", text: "Model: coding-faux · coder · explicit" }]],
 			["user", [{ type: "text", text: TASK }]],
 			["assistant", [{ type: "text", text: "Halfway." }]],
 			["assistant", [{ type: "text", text: "Done." }]],

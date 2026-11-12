@@ -22,7 +22,7 @@ const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 
 /** The kinds of thing `pim_diagnostics` reports on, which its `kind` chooses between. */
-export const DIAGNOSTIC_KINDS = ["now", "runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
+export const DIAGNOSTIC_KINDS = ["now", "stalls", "runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
 export type DiagnosticKind = (typeof DIAGNOSTIC_KINDS)[number];
 
 const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie|bearer/i;
@@ -396,8 +396,15 @@ async function now(sources: DiagnosticSources, _since: number, limit: number): P
 	return section(items.slice(0, limit), items.length);
 }
 
+async function stalls(sources: DiagnosticSources, since: number, limit: number): Promise<Section> {
+	const live = await now(sources, since, MAX_LIMIT);
+	const items = live.items.filter((item) => (item as Activity).stalls?.length);
+	return section(items.slice(0, limit), items.length, "Tools: past declared timeout or quiet for five minutes. Running coding threads: no transcript activity for fifteen minutes. Heartbeats wake the parent once per stall; this report is read-only.");
+}
+
 const READERS: Record<DiagnosticKind, (sources: DiagnosticSources, since: number, limit: number, chat: string | null) => Section | Promise<Section>> = {
 	now,
+	stalls,
 	runs,
 	turns,
 	triggers,

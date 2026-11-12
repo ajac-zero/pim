@@ -623,6 +623,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// Bounded, as a job must be: work still going after this goes on outside it.
 		await this.#failIfStuck();
 		await this.#keepSessionAlive();
+		if (this.store.thread()?.state === "running") {
+			const activity = await this.activity();
+			if (activity.stalls.length) await (await getAgentByName(this.env.Pim, this.store.required().space)).codingStalled(this.store.required().threadId, activity);
+		}
 		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
 		if (thread?.currentOperation && Date.now() - this.#autosavedAt >= this.autosaveMs()) void this.#autosave();

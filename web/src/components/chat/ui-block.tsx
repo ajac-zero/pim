@@ -24,11 +24,11 @@ import {
   evaluate,
   extraState,
   initialState,
-  MAX_TURN_BYTES,
   type RenderNode,
   stateSummary,
   storableState,
   stringOf,
+  turnFits,
   type UiEvent,
   type UiProgram,
   type UiResponse,
@@ -480,7 +480,7 @@ function UiProgramView({
         .filter((part) => part !== "")
         .join("\n\n");
       const turn = uiTurn(readable, response);
-      if (turn.length > MAX_TURN_BYTES) {
+      if (!turnFits(turn)) {
         unlock(form);
         setProblem(t("uiTurnTooLong"));
         continue;

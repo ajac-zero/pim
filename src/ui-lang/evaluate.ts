@@ -75,7 +75,7 @@ export function evaluate(program: UiProgram, given: UiState, event: UiEvent | nu
 		}
 		const renderer = new Renderer(program, state, event, actions, steps);
 		const tree = renderer.all(program.nodes);
-		if (JSON.stringify(state).length > MAX_STATE_BYTES) {
+		if (new TextEncoder().encode(JSON.stringify(state)).length > MAX_STATE_BYTES) {
 			throw new EvalError(`The block's state is larger than ${MAX_STATE_BYTES} bytes.`);
 		}
 		return { tree, state, actions, error: null };

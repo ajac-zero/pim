@@ -3,6 +3,7 @@ import {
   memo,
   type ReactNode,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -11,6 +12,8 @@ import { Markdown } from "~/components/chat/markdown";
 import { Reply } from "~/components/chat/reply-blocks";
 import { useI18n } from "~/components/i18n";
 import { Button } from "~/components/ui/button";
+import { pim, type StoredUiState } from "~/lib/pim-api";
+import { loadUiStates, UiStateWriter } from "~/lib/ui-state";
 import { cn } from "~/lib/utils";
 import {
   type Action,
@@ -20,11 +23,13 @@ import {
   initialState,
   MAX_TURN_BYTES,
   type RenderNode,
+  storableState,
   stringOf,
   type UiEvent,
   type UiProgram,
   type UiResponse,
   type UiState,
+  uiBlockId,
   uiTurn,
 } from "../../../../src/ui-lang";
 
@@ -35,6 +40,9 @@ import {
  * code of the model's runs, only its expressions. What its handler asked for
  * comes back as actions, which the app runs: a form's turn goes through the
  * composer's own send path, once, with the form locked until it is placed.
+ * What a block holds is kept by Pim as it changes (see lib/ui-state.ts), so a
+ * reload draws it as it was; the answers a chat's later turns carry still lock
+ * a form where a save was lost.
  */
 
 /** A ```ui fence, as the model wrote it. */
@@ -86,15 +94,19 @@ export const UiBlock = memo(function UiBlock({
       </div>
     );
   }
-  return <UiProgramView program={program} />;
+  return <UiProgramView program={program} block={uiBlockId(source)} />;
 });
 
-/** The state a block starts with, relocked for any form its chat already answered. */
+/** The state a block starts with: what Pim kept of it, relocked for any form its chat already answered. */
 function seededState(
   program: UiProgram,
   submitted: ReadonlyMap<string, UiResponse> | undefined,
+  stored?: StoredUiState["state"],
 ): UiState {
   const state = initialState(program);
+  Object.assign(state.values, stored?.values);
+  Object.assign(state.revealed, stored?.revealed);
+  Object.assign(state.submitted, stored?.submitted);
   for (const [block, response] of submitted ?? []) {
     const spec = program.forms[block];
     if (spec === undefined) continue;
@@ -115,7 +127,14 @@ function seededState(
 }
 
 /** One whole block, holding its state between the events that change it. */
-function UiProgramView({ program }: { program: UiProgram }) {
+function UiProgramView({
+  program,
+  block,
+}: {
+  program: UiProgram;
+  /** Its id within its message (see `uiBlockId`), which Pim keeps its state under. */
+  block: string;
+}) {
   const reply = useContext(Reply);
   const { t } = useI18n();
   const [seed] = useState(() => seededState(program, reply.submitted));
@@ -126,6 +145,51 @@ function UiProgramView({ program }: { program: UiProgram }) {
   const [problem, setProblem] = useState<string | null>(null);
   const sending = useRef(false);
   const [busy, setBusy] = useState(false);
+  /** Whether the person has changed anything since the block was drawn: what Pim kept then doesn't replace it. */
+  const touched = useRef(false);
+  /** How many handlers' actions are being run, one inside another. */
+  const acting = useRef(0);
+
+  // Only a message the person can talk in is theirs to keep state for: a public copy has no Pim to ask.
+  const message =
+    reply.send !== undefined ? reply.messageId?.split(":")[0] : undefined;
+  const messageRef = useRef(message);
+  messageRef.current = message;
+  const writer = useRef<UiStateWriter | null>(null);
+  if (writer.current === null) {
+    writer.current = new UiStateWriter(
+      (version, state, submitted) =>
+        pim.saveUiState(messageRef.current as string, block, {
+          version,
+          state,
+          submitted,
+        }),
+      // Submitted from elsewhere: it is as it was submitted here too.
+      (stored) => draw(seededState(program, reply.submitted, stored.state)),
+    );
+  }
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read once, when the block is drawn; `draw` and `reply` only reach the state it is drawn from.
+  useEffect(() => {
+    const saving = writer.current;
+    if (message === undefined) return;
+    let current = true;
+    loadUiStates(message)
+      .then((blocks) => {
+        const stored = blocks[block];
+        if (!current || stored === undefined) return;
+        saving?.adopt(stored.version);
+        if (!touched.current)
+          draw(seededState(program, reply.submitted, stored.state));
+      })
+      // Not there to read: the block is as the message drew it, and what is typed is still saved.
+      .catch(() => {});
+    return () => {
+      current = false;
+      // Leaving the page or the chat doesn't lose the last change.
+      saving?.flush();
+    };
+  }, [message, block, program]);
 
   const show = (next: Evaluation) => {
     viewRef.current = next;
@@ -133,7 +197,24 @@ function UiProgramView({ program }: { program: UiProgram }) {
   };
 
   /** Draws the block again from a state of the web's own making, such as unlocked after a failed send. */
-  const draw = (state: UiState) => show(evaluate(program, state, null));
+  const draw = (state: UiState) => {
+    show(evaluate(program, state, null));
+  };
+
+  /** Has Pim keep the state: for good once every form is answered and nothing is left to send. */
+  const keep = (state: UiState) => {
+    // Not while a handler's actions are being run: whether a turn is left to send isn't known until they have been.
+    if (message === undefined || acting.current > 0) return;
+    const forms = Object.keys(program.forms);
+    const done =
+      forms.length > 0 &&
+      forms.every((form) => state.submitted[form] !== undefined) &&
+      !sending.current;
+    writer.current?.write(storableState(state), {
+      submitted: done,
+      now: done,
+    });
+  };
 
   const run = (event: UiEvent) => {
     const next = evaluate(program, viewRef.current.state, event);
@@ -142,8 +223,15 @@ function UiProgramView({ program }: { program: UiProgram }) {
       return;
     }
     setProblem(null);
+    touched.current = true;
     show(next);
-    runActions(next.actions, event);
+    acting.current += 1;
+    try {
+      runActions(next.actions, event);
+    } finally {
+      acting.current -= 1;
+    }
+    keep(viewRef.current.state);
   };
 
   const events: UiEvents = {
@@ -163,6 +251,7 @@ function UiProgramView({ program }: { program: UiProgram }) {
     delete freed.submitted[form];
     delete freed.revealed[form];
     draw(freed);
+    keep(freed);
   };
 
   /** Runs what a handler asked for, as data; one turn sends once. */
@@ -211,7 +300,12 @@ function UiProgramView({ program }: { program: UiProgram }) {
       setBusy(true);
       void reply
         .send(turn)
-        .then(() => setProblem(null))
+        .then(() => {
+          setProblem(null);
+          // Placed: the form is answered for good.
+          sending.current = false;
+          keep(viewRef.current.state);
+        })
         .catch(() => {
           unlock(form);
           setProblem(t("uiSendFailed"));

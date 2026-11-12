@@ -1,5 +1,7 @@
 # Amp threads
 
+This page describes the **workspace** Amp harness. For `harness: "amp", provider: "orbs"`, Pim instead uses only the HTTPS External API from the Worker, with no sandbox slot: see [coding-orbs.md](coding-orbs.md). Both reuse the same Amp Connect credential.
+
 A coding thread started with `harness: "amp"` is run by Amp's `amp` CLI, unmodified, inside the thread's own workspace, signed in with the person's own Amp access token. It is the third CLI harness, after Claude Code and Codex, and goes through the same framework: [coding-claude-code.md](coding-claude-code.md) explains the runner, steering, aborts, restarts and the vault. This page covers what is Amp's own: its command, how an untrusted repository is kept from configuring it, its events, its token, what it costs, and the image.
 
 Everything below was checked against `@ampcode/cli` 0.0.1794240032-ga42e06 (npm's `latest` on 2026-11-09; the old `@sourcegraph/amp` package is now an alias of it), its `--help`, Amp's docs (execute mode, streaming JSON, configuration, plugins, MCP), and by running the CLI in the workspace image built from this repository with a fake token against a local stand-in for ampcode.com. No run has been made with a real token: see [What is verified](#what-is-verified).

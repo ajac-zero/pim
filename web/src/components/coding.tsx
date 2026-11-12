@@ -141,10 +141,15 @@ const isActive = (state: CodingThreadState) => ACTIVE_STATES.includes(state);
 
 /** What a thread has spent: nothing is known of what a CLI that reports no cost spends, and a thread without a budget has no "of". */
 function spendText(
-  thread: Pick<CodingThreadSummary, "harness" | "spentUsd" | "budgetUsd">,
+  thread: Pick<CodingThreadSummary, "harness" | "spentUsd" | "budgetUsd"> & {
+    providerKind?: "workspace" | "agent-hosted";
+    cost?: number | null;
+  },
   t: ReturnType<typeof useI18n>["t"],
   money: (usd: number) => string,
 ) {
+  if (thread.providerKind === "agent-hosted")
+    return thread.cost == null ? t("codingSpentUnmetered") : money(thread.cost);
   if (thread.harness === "amp" || thread.harness === "codex")
     return t("codingSpentUnmetered");
   if (thread.budgetUsd === null)
@@ -476,6 +481,18 @@ export function StartThreadForm() {
         value={form.harness ?? "pi"}
         onChange={(harness) => setForm((current) => ({ ...current, harness }))}
       />
+      {form.harness === "amp" && (
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={form.orbs ?? false}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, orbs: event.target.checked }))
+            }
+          />
+          Run on Amp Orbs (no Pim sandbox)
+        </label>
+      )}
       {form.harness && form.harness !== "pi" && (
         <HarnessConnectPanel key={form.harness} harness={form.harness} />
       )}
@@ -1553,7 +1570,7 @@ function ThreadControls({
       (thread.stateReason === "aborted" || thread.stateReason === "cancelled"));
   return (
     <div className="flex shrink-0 items-center self-center">
-      {stopped && !continuing && (
+      {stopped && !continuing && thread.provider !== "amp-http" && (
         <ContinueButton thread={thread} onExpand={() => setContinuing(true)} />
       )}
       {!waiting && <PushButton thread={thread} push={push} />}
@@ -1608,7 +1625,11 @@ function ThreadActions({
       <PushStatus push={push} />
       {confirming && (
         <Confirm
-          text={t("codingArchiveConfirm")}
+          text={
+            thread.provider === "amp-http"
+              ? "Archive in Pim only? Stopping or archiving on Amp is not supported by Amp's HTTP API yet; the Amp run will continue."
+              : t("codingArchiveConfirm")
+          }
           action={t("codingArchive")}
           destructive
           pending={archive.isPending}
@@ -2148,6 +2169,25 @@ function SteerForm({
     onSuccess: update,
     onError: (_error, text) => setFill({ text, id: Date.now() }),
   });
+  if (thread.provider === "amp-http")
+    return (
+      <p className="py-3 text-muted-foreground text-sm">
+        Steering and stopping are not supported by Amp's HTTP API yet.
+        {thread.orb && (
+          <>
+            {" "}
+            <a
+              className="underline"
+              href={thread.orb.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open on Amp
+            </a>
+          </>
+        )}
+      </p>
+    );
   if (thread.state === "archived" || thread.state === "failed") return null;
   const working =
     thread.state === "running" || thread.currentOperation !== null;

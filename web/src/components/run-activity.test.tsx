@@ -107,3 +107,11 @@ it("reads live activity from the chat API and isolates cached records by chat", 
   view.unmount();
   client.clear();
 });
+
+it("renders nothing when a list row has no activity", () => {
+  const { container } = render(
+    <RunActivity activity={undefined} timeline={false} />,
+  );
+  expect(container.childElementCount).toBe(0);
+  expect(screen.queryByRole("status")).toBeNull();
+});

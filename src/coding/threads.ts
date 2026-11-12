@@ -62,9 +62,24 @@ export function summaryOf(thread: Listed): CodingThreadSummary {
 	};
 }
 
-/** The space's threads, newest first. */
+/** The space's threads, newest first. Only running threads are woken for activity, at most eight at once. */
 export async function listThreads(env: Env, space: string): Promise<CodingThreadSummary[]> {
-	return Promise.all((await codingScheduler(env, space).threads()).map(async (thread) => ({ ...summaryOf(thread), activity: await codingThread(env, thread.threadId).activity() })));
+	const threads = await codingScheduler(env, space).threads();
+	const items = threads.map(summaryOf);
+	const running = threads.flatMap((thread, index) => thread.state === "running" ? [index] : []);
+	let next = 0;
+	const worker = async () => {
+		while (next < running.length) {
+			const index = running[next++]!;
+			try {
+				items[index] = { ...items[index]!, activity: await codingThread(env, threads[index]!.threadId).activity() };
+			} catch {
+				// Activity is best-effort: a broken thread must not hide the space's list.
+			}
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(8, running.length) }, worker));
+	return items;
 }
 
 /** A thread of the space in full: its own status, with what the list says of it. */

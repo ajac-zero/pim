@@ -1,5 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { redactSecrets } from "./hostops";
+import { redact } from "./coding/tools/output";
 import { DELIVERY_REMINDER } from "./transcript";
 
 /**
@@ -27,7 +28,8 @@ const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credentia
 
 /** `text` with what looks like a secret, an address or an email taken out, and cut to `max` characters. */
 export function scrub(text: string, max = TEXT_LENGTH): string {
-	const clean = redactSecrets(text)
+	const clean = redact(redactSecrets(text.replace(/\b(authorization\s*[:=]\s*)(?:bearer\s+|basic\s+|token\s+)?[^\s"']+/gi, "$1[redacted]")))
+		.replace(/\b([\w-]*(?:token|secret|password|api[_-]?key)[\w-]*)\s*[=:]\s*("[^"\n]*"|'[^'\n]*'|[^\s;]+)/gi, "$1=[redacted]")
 		// Addresses keep their path but not the host, the credentials in them, or what follows `?`.
 		.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>/?#]*([^\s"'<>?#]*)[^\s"'<>]*/gi, (_url, path: string) => `[address]${path}`)
 		.replace(/\b((?:pass(?:word)?|secret|token|api[_-]?key|authorization|credential)s?)\s*[=:]\s*\S+/gi, "$1=[redacted]")
@@ -42,6 +44,12 @@ export function scrubValue(value: unknown, depth = 0): unknown {
 	if (depth > 4) return "[deep]";
 	if (Array.isArray(value)) return value.slice(0, 50).map((item) => scrubValue(item, depth + 1));
 	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SECRET_KEY.test(key) ? "[redacted]" : scrubValue(item, depth + 1)]));
+}
+
+/** Only operational arguments belong here, never request bodies, prompts or environment values. */
+export function toolSummary(input: Record<string, unknown>): string {
+	const fields = ["command", "cmd", "thread", "threadId", "thread_id", "url", "path", "file_path", "cwd", "timeout", "timeoutMs"];
+	return scrub(fields.filter((key) => input[key] !== undefined).map((key) => 	typeof input[key] === "string" ? key + "=" + input[key] : key + "=" + JSON.stringify(input[key])).join(" "), 200);
 }
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -106,7 +114,7 @@ export type CallApproval = { readonly id: string; readonly status: string; reado
 /** One step of a turn: a model call, failed ones included, or a tool call, with how long it took; null while it goes on, or for a model call that didn't say. */
 export type TurnStep =
 	| { readonly kind: "model"; readonly at: number; readonly ms: number | null; readonly model: string; readonly stop: string; readonly error: string | null }
-	| { readonly kind: "tool"; readonly at: number; readonly ms: number | null; readonly name: string; readonly error: boolean; readonly approval: (CallApproval & { readonly waitedMs: number }) | null };
+	| { readonly kind: "tool"; readonly at: number; readonly ms: number | null; readonly name: string; readonly summary: string; readonly timeoutMs: number | null; readonly exitCode: number | null; readonly outputBytes: number | null; readonly error: boolean; readonly approval: (CallApproval & { readonly waitedMs: number }) | null };
 
 /**
  * One turn of a chat, from what started it to its last step: how long its model
@@ -156,7 +164,9 @@ export function turnsOf(messages: readonly Message[], approvals: ReadonlyMap<str
 			const approval = approvals.get(call.id);
 			// A call left without its result or decision when the chat stopped took no time after.
 			const waitedMs = approval ? Math.max(0, (approval.decidedAt ?? (busy ? now : approval.createdAt)) - approval.createdAt) : 0;
-			turn.steps.push({ kind: "tool", at: answered, ms: result ? Math.max(0, result.timestamp - answered) : null, name: call.name, error: result?.isError ?? false, approval: approval ? { ...approval, waitedMs } : null });
+			turn.steps.push({ kind: "tool", at: answered, ms: result ? Math.max(0, result.timestamp - answered) : null, name: call.name, summary: toolSummary(call.arguments), timeoutMs: typeof call.arguments.timeoutMs === "number" ? call.arguments.timeoutMs : typeof call.arguments.timeout === "number" ? call.arguments.timeout * 1000 : null,
+				exitCode: result && typeof (result.details as Record<string, unknown> | undefined)?.exitCode === "number" ? (result.details as { exitCode: number }).exitCode : null,
+				outputBytes: result ? new TextEncoder().encode(JSON.stringify(result.content)).byteLength : null, error: result?.isError ?? false, approval: approval ? { ...approval, waitedMs } : null });
 			roundEnd = Math.max(roundEnd, result?.timestamp ?? (busy ? now : answered));
 			waited += waitedMs;
 		}
@@ -264,6 +274,9 @@ async function turns({ turns: read }: DiagnosticSources, since: number, limit: n
 						at: iso(step.at),
 						ms: step.ms,
 						name: step.name,
+						summary: step.summary,
+						exit_code: step.exitCode,
+						output_bytes: step.outputBytes,
 						...(step.error ? { error: true } : {}),
 						...(step.approval ? { approval: { id: step.approval.id, status: step.approval.status, decided_by: step.approval.decidedBy, waited_ms: step.approval.waitedMs } } : {}),
 					},

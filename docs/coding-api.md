@@ -100,7 +100,8 @@ type CodingThreadView = {
  * reference.md, and coding-environment.md). Durations are milliseconds; times are ms since the epoch.
  */
 type CodingEnvironment = {
-  state: "none" | "restoring" | "cached" | "building" | "failed"; // none: nothing to provision and no setup script, or a backend that keeps no environments; failed: the setup script failed (a failed provisioning step is on its item)
+  state: "none" | "unsupported" | "restoring" | "cached" | "building" | "failed"; // none: nothing to provision and no setup script; unsupported: the workspace backend keeps no environments (reason says why); failed: the setup script failed (a failed provisioning step is on its item)
+  reason?: string;               // why the backend can't keep environments, when the state is "unsupported"
   key: string | null;           // 64 hex digits: the person, the repository, the provisioning steps, the script, its lockfiles and the workspace image
   source: "settings" | "repository" | "mise" | "devcontainer" | null; // the person's setting, the repository's .pim/setup.sh, its mise task `setup`, or its dev container's lifecycle commands (the first that exists); null without a setup
   builtAt: number | null;       // when the snapshot the thread has was made

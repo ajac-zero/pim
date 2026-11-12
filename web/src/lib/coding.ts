@@ -97,7 +97,14 @@ export type CodingCheckpoint = {
 
 /** The repository's prepared environment in a thread's workspace (docs/coding-api.md). Durations are milliseconds. */
 export type CodingEnvironment = {
-  state: "none" | "restoring" | "cached" | "building" | "failed";
+  state:
+    | "none"
+    | "unsupported"
+    | "restoring"
+    | "cached"
+    | "building"
+    | "failed";
+  reason?: string;
   key: string | null;
   source: "settings" | "repository" | "mise" | "devcontainer" | null;
   builtAt: number | null;

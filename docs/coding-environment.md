@@ -33,7 +33,7 @@ The steps run one after another with bash in the checkout, as the setup script d
 
 A step that fails is recorded on the toolchain or dependencies it installs, with the end of what it printed, and the thread goes on: a failed step never fails the thread. Dependencies that need a toolchain that couldn't be installed are skipped. No snapshot is kept when a step failed, so the person's next thread tries again, as one would after a network failure; a rebuild tries again in the same thread. A failing setup script is still the environment's failure, as before.
 
-A repository with nothing to install and no setup script has no environment (`state: "none"`), but its checks are still found and told to the agent.
+A repository with nothing to install and no setup script has no environment (`state: "none"`), but its checks are still found and told to the agent. A workspace backend that keeps no environments says so instead (`state: "unsupported"`, with its `reason`), and the thread works in its plain workspace.
 
 ## The cache key
 

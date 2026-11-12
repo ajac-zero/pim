@@ -709,12 +709,14 @@ function short(text: string, max: number): string {
 
 /** What a thread's environment has, for the coding agent's instructions: its toolchains, what couldn't be installed, and the commands the repository checks itself with. Null when nothing was found. */
 export function environmentBrief(env: {
+	readonly reason?: string;
 	readonly toolchains: readonly EnvironmentToolchain[];
 	readonly dependencies: readonly EnvironmentDependencies[];
 	readonly testCommands: readonly TestCommand[];
 	readonly notes: readonly string[];
 }): string | null {
 	const lines: string[] = [];
+	if (env.reason) lines.push(`${env.reason}, so the workspace has only what the image brings.`);
 	const broken = (each: { status: ProvisionStatus }) => each.status === "failed" || each.status === "skipped";
 	const ready = env.toolchains.filter((each) => !broken(each));
 	if (ready.length > 0) {

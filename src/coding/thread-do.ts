@@ -2818,13 +2818,21 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * runs the script and keeps a snapshot; while another of their threads
 	 * holds the lock it waits for that one's snapshot, a bounded time.
 	 * Nothing here fails the thread: a failure is recorded and the thread
-	 * goes on in its workspace as it is. Only a stop is thrown.
+	 * goes on in its workspace as it is. Only a stop is thrown. A backend
+	 * that keeps no environments says so on the environment instead, and
+	 * the thread works in a plain workspace.
 	 */
 	async #prepareEnvironment(): Promise<void> {
 		const thread = this.store.required();
 		const current = thread.environment;
 		const provider = this.workspaceProviders().get(thread.providerId);
-		if (!provider.capabilities.environmentSnapshots) return;
+		if (!provider.capabilities.environmentSnapshots) {
+			// Distinct from "none", which means the repository declares no setup: here the backend itself can't keep environments.
+			if (current.state !== "unsupported") {
+				this.#setEnvironment({ state: "unsupported", reason: `The workspace backend ${provider.id} keeps no environments`, key: null, source: null, preparedAt: this.now(), error: undefined });
+			}
+			return;
+		}
 		const rebuild = current.rebuildRequested;
 		if (!rebuild && current.preparedAt !== null) return;
 		// A thread that already worked without one (it began before environments, or was called off while one was readied) gets none unless asked.

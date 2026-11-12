@@ -79,6 +79,8 @@ function EnvironmentChip({
         return t("codingEnvRestoring");
       case "failed":
         return t("codingEnvFailed");
+      case "unsupported":
+        return t("codingEnvUnsupported");
       default:
         return t("codingEnvNone");
     }
@@ -101,6 +103,7 @@ function EnvironmentChip({
           className={cn(
             "inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring",
             env.state === "none" && "text-muted-foreground",
+            env.state === "unsupported" && "text-muted-foreground",
             warn && "border-destructive/50 text-destructive",
           )}
         >
@@ -126,6 +129,9 @@ function EnvironmentChip({
           >
             {env.error}
           </p>
+        )}
+        {env.reason && (
+          <p className="mt-2 text-muted-foreground">{env.reason}</p>
         )}
         {env.source && (
           <p className="mt-2 text-muted-foreground">

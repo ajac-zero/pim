@@ -297,6 +297,22 @@ describe("Sign in with ChatGPT", () => {
 		expect(callsTo("/v1/responses")).toHaveLength(2);
 	});
 
+	it("starts coding threads on the space's ChatGPT model, never on Workers AI, and gives them the plan's token, which the space's Pim refreshes", async () => {
+		await api("/model", { method: "PUT", body: JSON.stringify({ provider: "openai", id: "gpt-6.1-sol" }) });
+		const pim = env.Pim.getByName(OWNER);
+		expect(await pim.codingDefaultProfile()).toEqual({ providerId: "openai", model: "gpt-6.1-sol" });
+		expect(await pim.codingChatgptToken()).toBe("access-1");
+
+		// A thread resolves the provider from that token, asked for on each request.
+		const thread = env.CodingThread.getByName("chatgpt-profile");
+		const resolved = await runInDurableObject(thread, async (instance) => {
+			type Reach = { modelProvider(space: string, id: string): Promise<{ id: string; auth: { apiKey?: { resolve(): Promise<{ auth: { apiKey?: string } }> } } }> };
+			const provider = await (instance as unknown as Reach).modelProvider(OWNER, "openai");
+			return { id: provider.id, key: (await provider.auth.apiKey!.resolve()).auth.apiKey };
+		});
+		expect(resolved).toEqual({ id: "openai", key: "access-1" });
+	});
+
 	it("refreshes an expired token once, however many sessions need it at the same time", async () => {
 		await runInDurableObject(env.Pim.getByName(OWNER), async (instance: Pim) => {
 			await instance.credentials.modify("openai", async (current) => ({ ...current!, expires: Date.now() - 1 }) as ChatGPTCredential);
@@ -385,6 +401,9 @@ describe("Sign in with ChatGPT", () => {
 		const { body } = await api("/chatgpt", { method: "DELETE" });
 		expect(body).toEqual({ connected: false, email: null });
 		expect((await api("/model")).body.model.id).toBe("faux-model");
+		// Coding threads follow: no token, and the space's own model.
+		expect(await env.Pim.getByName(OWNER).codingChatgptToken()).toBeNull();
+		expect(await env.Pim.getByName(OWNER).codingDefaultProfile()).toEqual({ providerId: "faux", model: "faux-model" });
 		// The utility model too, though the choice is kept for when the plan is back.
 		expect((await api("/model")).body.utility.model).toMatchObject({ provider: "utility", id: "utility-model" });
 		expect((await api("/model/utility", { method: "PUT", body: JSON.stringify({ provider: "openai", id: "gpt-6.1-sol" }) })).status).toBe(409);

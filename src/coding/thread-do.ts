@@ -266,6 +266,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return Math.min(120_000, Math.floor(maxMs / 5));
 	}
 
+	/** How long a turn that failed for a transient error waits before it is retried: 30 to 60 seconds. */
+	protected retryDelayMs(): number {
+		return RETRY_BASE_MS + Math.random() * RETRY_JITTER_MS;
+	}
+
 	/** The clock the thread's records go by. */
 	protected now(): number {
 		return Date.now();
@@ -926,6 +931,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.currentOperation) await this.#stopTurn();
 		this.#assertBudget(this.store.required());
 		this.ctx.storage.transactionSync(() => {
+			// What the person says supersedes a retry waiting for its backoff.
+			this.store.releaseRetries();
 			this.store.enqueue(options.operationId, text);
 			this.#reopen();
 		});
@@ -1737,6 +1744,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 			thread = this.store.thread();
 			if (!thread || thread.state === "failed" || thread.state === "archived" || thread.state === "waiting_input") return;
 		}
+		// An input held for a retry's backoff waits for it.
+		const held = this.store.nextInput();
+		if (held && held.notBefore > Date.now()) {
+			await this.#schedule(held.notBefore);
+			return;
+		}
 		const work = this.store.inboxSize() > 0;
 		// A rebuild of the environment needs the workspace as a turn does.
 		const rebuild = thread.environment.rebuildRequested;
@@ -2260,6 +2273,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			loop = unproductive > MAX_SESSION_RESTARTS;
 			this.store.update({ session: { ...prior, restartCheckpoint: sha, unproductiveRestarts: unproductive } });
 		}
+		if (await this.#retryTransient(operation, thread, result, { budget, login, lost, expired })) return;
 		const isInterrupted = result.reason === "interrupted" || lost || expired;
 		const maxInterrupts = MAX_RESUMES;
 		const shouldAutoResume = isInterrupted && (expired ? !loop : thread.consecutiveInterrupts < maxInterrupts) && thread.state !== "archived";
@@ -2359,6 +2373,34 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.#emit(event);
 	}
 
+	/**
+	 * A turn that failed for a transient error, such as a model provider's 5xx
+	 * or rate limit or a dropped connection, is retried once after a backoff, in
+	 * the same workspace, so its committed and uncommitted work is kept. The
+	 * retry is a turn like any other, so its spend counts once, as it is made,
+	 * and the budget is checked before it starts. A turn begun as a retry that
+	 * fails too, one the person stopped, and one that failed for anything else
+	 * is left as it ended. The original error is recorded as `thread.retrying`.
+	 */
+	async #retryTransient(operation: string, thread: CodingThreadRow, result: TurnResult, skip: { budget: boolean; login: boolean; lost: boolean; expired: boolean }): Promise<boolean> {
+		if (result.status === "done" || skip.budget || skip.login || skip.lost || skip.expired || thread.state === "archived") return false;
+		if (operation.startsWith(RETRY_PREFIX) || this.#userStop === operation || this.#cycling) return false;
+		const detail = result.detail ?? (result.reason === "model_error" ? this.#modelError : null) ?? undefined;
+		if (!isTransient(result.reason, detail)) return false;
+		if (this.#budgetSpent(thread)) return false;
+		const notBefore = Date.now() + this.retryDelayMs();
+		const error = (detail ?? result.reason ?? "error").slice(0, 500);
+		this.ctx.storage.transactionSync(() => {
+			this.store.enqueue(`${RETRY_PREFIX}${operation}`, CONTINUE_TEXT, { notBefore });
+			this.store.update({ currentOperation: null, state: "idle", stateReason: "retrying", stateDetail: error });
+			this.store.recordEvent("thread.retrying", { operationId: operation, reason: result.reason ?? "error", error, retryAt: notBefore });
+		});
+		console.warn(JSON.stringify({ event: "pim.coding.turn_retry", thread: thread.threadId, reason: result.reason, error: error.slice(0, 300) }));
+		await this.#report("idle");
+		await this.#schedule(notBefore);
+		return true;
+	}
+
 	/** The end of what the coding agent last said, for whoever hears of its turn's end. */
 	async #lastSaid(): Promise<string | null> {
 		const messages = projectEntries(await this.harness.messages());
@@ -2451,6 +2493,18 @@ export class CodingThreadDO extends DurableObject<Env> {
 		console.warn(JSON.stringify({ event: "pim.coding.provisioning_failed", thread: thread.threadId, error: String(error) }));
 		if (thread.state === "archived") return;
 		const aborted = error instanceof Error && / was stopped:/.test(error.message);
+		// A transient failure to ready the workspace or harness, such as the manager being briefly down, is tried again once after a backoff, the input kept.
+		const next = this.store.nextInput();
+		if (next && !next.retried && !aborted && !(error instanceof NoWorkspaceBackendError || error instanceof ComputeQuotaError) && isTransient("workspace", errorText(error))) {
+			const notBefore = Date.now() + this.retryDelayMs();
+			this.ctx.storage.transactionSync(() => {
+				this.store.holdForRetry(next.seq, notBefore);
+				this.store.update({ stateReason: "retrying", stateDetail: errorText(error).slice(0, 500) });
+				this.store.recordEvent("thread.retrying", { operationId: next.operationId, reason: "workspace", error: errorText(error).slice(0, 500), retryAt: notBefore });
+			});
+			await this.#schedule(notBefore);
+			return;
+		}
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
 		if (aborted) {
 			this.store.update({ state: "idle", stateReason: "aborted" });
@@ -2562,7 +2616,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		});
 	}
 
+	/** What the model's last failed call said, which pi's `model_error` turn end doesn't carry. */
+	#modelError: string | null = null;
+
 	#recordCall(model: Model<Api>, message: AssistantMessage): void {
+		this.#modelError = message.stopReason === "error" ? (message.errorMessage ?? null) : null;
 		const usage = { input: message.usage?.input ?? 0, output: message.usage?.output ?? 0, cacheRead: message.usage?.cacheRead ?? 0, cacheWrite: message.usage?.cacheWrite ?? 0 };
 		this.store.recordModelCall(model.provider, model.id, usage, costOf(model, usage));
 	}
@@ -3485,6 +3543,28 @@ const UNLIMITED_TOKEN_MS = 7 * 24 * 60 * 60_000;
 
 /** Marks the operation of a turn the thread began itself, after one stalled. */
 const AUTO_CONTINUE_PREFIX = "auto-continue:";
+
+/** The operations of turns retried after a transient error, and the backoff before one: 30 to 60 seconds. */
+const RETRY_PREFIX = "retry-";
+const RETRY_BASE_MS = 30_000;
+const RETRY_JITTER_MS = 30_000;
+
+/** Errors a retry can't help: the credentials, the request, the budget or the person. */
+const PERMANENT_ERROR = /unauthori[sz]ed|forbidden|authenticat|invalid[ _-]?(api[ _-]?key|request|token|param)|api key|permission|budget|usage limit|quota|credit|billing|context (length|window)|too (long|large)|not found|\b(40[0-9]|41[0-9]|42[0-8]|4[3-9][0-9])\b/i;
+/** Errors that come and go: provider trouble, rate limits and a connection that dropped. */
+const TRANSIENT_ERROR = /\b(429|5\d\d)\b|rate.?limit|too many requests|overload|server error|bad gateway|unavailable|temporar|timed? ?out|timeout|network|connection|websocket|socket|ECONN\w*|ETIMEDOUT|EAI_AGAIN|fetch failed|capacity|internal error|try again|manager|workspace|container|sandbox/i;
+
+/**
+ * Whether a failed turn's error is worth a retry. A model error is, unless what it says is permanent; a
+ * harness or workspace error is only when it reads as transient.
+ */
+export function isTransient(reason: string | undefined, detail: string | undefined): boolean {
+	const text = detail ?? "";
+	if (PERMANENT_ERROR.test(text) && !/\b429\b/.test(text)) return false;
+	if (reason === "model_error") return true;
+	if (reason !== "harness_error" && reason !== "workspace" && reason !== "error") return false;
+	return TRANSIENT_ERROR.test(text);
+}
 
 /** The operations of turns a thread goes on with by itself after an interruption, and how many it goes on with in a row. */
 const RESUME_PREFIX = "resume-";

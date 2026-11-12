@@ -13,6 +13,7 @@ import {
   uiResponseOf,
   uiTurn,
 } from "../../../src/ui-lang/response";
+import { checkUiState } from "../../../src/ui-lang/state";
 
 /** The example the whole feature must handle, as a block's source. */
 const EXAMPLE = UI_EXAMPLE;
@@ -92,7 +93,7 @@ describe("the ui language's parser", () => {
 
 describe("the ui language's validator", () => {
   it("refuses a component the catalog doesn't have", () => {
-    const program = programOf("<box><chart/></box>");
+    const program = programOf("<box><gauge/></box>");
     expect(program.valid).toBe(false);
     expect(program.diagnostics).toContainEqual(
       expect.objectContaining({ code: "unknown_tag", severity: "error" }),
@@ -517,5 +518,326 @@ describe("the ui language's own code", () => {
     expect(reference).toContain("reveal()");
     expect(reference).toContain("formSummary");
     expect(reference).toContain(EXAMPLE);
+  });
+});
+
+/** The warnings and errors a block's compile gave, by code. */
+const codes = (source: string) =>
+  programOf(source).diagnostics.map((diagnostic) => diagnostic.code);
+
+describe("the catalog's checkbox, slider, badge and chart", () => {
+  it("checks a checkbox's props", () => {
+    expect(
+      codes('<form id="f"><checkbox name="a" label="A" answer={true}/></form>'),
+    ).toEqual([]);
+    expect(codes('<form id="f"><checkbox label="A"/></form>')).toContain(
+      "missing_prop",
+    );
+    // An answer of the wrong kind, and a prop it doesn't take, are dropped and said.
+    expect(
+      codes(
+        '<form id="f"><checkbox name="a" answer="yes" min={1}/></form>',
+      ).sort(),
+    ).toEqual(["invalid_literal", "unknown_prop"]);
+    // A form field's answer, or state's name, must be plain.
+    expect(
+      codes(
+        '{@state n = true}<form id="f"><checkbox name="a" required={n}/></form>',
+      ),
+    ).toContain("invalid_literal");
+  });
+
+  it("checks a slider's range, step and name", () => {
+    expect(
+      codes('<slider name="n" min={0} max={10} step={2} value={4} unit="x"/>'),
+    ).toEqual([]);
+    expect(codes('<slider name="n" min={0}/>')).toContain("missing_prop");
+    expect(programOf('<slider name="n" min={5} max={5}/>').valid).toBe(false);
+    expect(programOf('<slider name="n" min={0} max={5} step={0}/>').valid).toBe(
+      false,
+    );
+    expect(
+      programOf('<slider name="n" min={0} max={5} value="3"/>').diagnostics.map(
+        (d) => d.code,
+      ),
+    ).toContain("invalid_literal");
+    // Outside a form the name is a word an expression can read.
+    expect(programOf('<slider name="a b" min={0} max={5}/>').valid).toBe(false);
+    // Outside a form nothing grades it.
+    expect(codes('<slider name="n" min={0} max={5} answer={3}/>')).toContain(
+      "unknown_prop",
+    );
+    expect(
+      programOf('<checkbox name="n"/><slider name="n" min={0} max={5}/>').valid,
+    ).toBe(false);
+  });
+
+  it("declares the state a checkbox or slider outside a form holds", () => {
+    const program = programOf(
+      '<slider name="seats" min={1} max={50} value={8}/><checkbox name="on"/>',
+    );
+    expect(program.stateKeys).toEqual(["seats", "on"]);
+    expect(program.initial).toEqual({ seats: 8, on: false });
+    expect(program.controls).toEqual({
+      seats: { kind: "slider", min: 1, max: 50, step: 1 },
+      on: { kind: "checkbox" },
+    });
+  });
+
+  it("checks a badge's tone and a chart's kind and data", () => {
+    expect(codes('<badge tone="good">Ok</badge>')).toEqual([]);
+    expect(codes('<badge tone="loud">Ok</badge>')).toContain("invalid_literal");
+    expect(codes('<chart kind="bar" data={[1, 2]}/>')).toEqual([]);
+    expect(
+      codes('<chart kind="bar" data={[{a: 1}]} x="a" y="a" title="T"/>'),
+    ).toEqual([]);
+    expect(codes("<chart data={[1]}/>")).toContain("missing_prop");
+    expect(codes('<chart kind="donut" data={[1]}/>')).toContain(
+      "invalid_literal",
+    );
+    expect(codes('<chart kind="bar"/>')).toContain("missing_prop");
+    expect(codes('<chart kind="bar" data={["a"]}/>')).toContain(
+      "invalid_literal",
+    );
+    expect(codes('<chart kind="bar" data={[1]} color="red"/>')).toContain(
+      "unknown_prop",
+    );
+  });
+
+  it("gives up on a chart whose data can't be drawn", () => {
+    const bad = (source: string) =>
+      evaluate(programOf(source), initialState(programOf(source)), null).error;
+    expect(bad('{@state d = 5}\n<chart kind="bar" data={d}/>')).toContain(
+      "list",
+    );
+    expect(bad('{@state d = [1]}\n<chart kind="bar" data={d}/>')).toBeNull();
+    expect(
+      bad('{@state d = [{a: "x"}]}\n<chart kind="bar" data={d} x="a"/>'),
+    ).toContain("x and y");
+    expect(
+      bad(
+        '{@state d = [{a: "x", b: "no"}]}\n<chart kind="bar" data={d} x="a" y="b"/>',
+      ),
+    ).toContain("number");
+    expect(bad('{@state d = [1, -1]}\n<chart kind="pie" data={d}/>')).toContain(
+      "negative",
+    );
+  });
+});
+
+describe("the interpreter's lists of tables", () => {
+  const rows =
+    '{@state rows = [{name: "Ann", n: 3, ok: true}, {name: "Bo", n: 4, ok: false}, {name: "Cy", n: 5, ok: true}]}';
+
+  it("walks a list of tables with each, and in the fallback", () => {
+    const source = `${rows}\n{#each rows as row, i}{i}. {row.name} has {row.n}\n{/each}`;
+    const drawn1 = drawn(source);
+    expect(textOf(drawn1.tree).join("")).toContain("0. Ann has 3");
+    expect(textOf(drawn1.tree).join("")).toContain("2. Cy has 5");
+    expect(drawn1.program.fallbackMarkdown).toBe(
+      "0. Ann has 3\n\n1. Bo has 4\n\n2. Cy has 5",
+    );
+    const inBox = `${rows}\n<box>{#each rows as row}<text>{row.name}</text>{/each}</box>`;
+    expect(programOf(inBox).fallbackMarkdown).toBe("Ann\n\nBo\n\nCy");
+  });
+
+  it("sums, maps, filters and joins over them", () => {
+    const text = (expression: string) =>
+      textOf(drawn(`${rows}\n{${expression}}`).tree)
+        .join("")
+        .trim();
+    expect(text('sum(map(rows, "n"))')).toBe("12");
+    expect(text('join(map(rows, "name"), ", ")')).toBe("Ann, Bo, Cy");
+    expect(text('len(filter(rows, "ok"))')).toBe("2");
+    expect(text('sum(map(filter(rows, "ok"), "n"))')).toBe("8");
+    expect(text('join(map(filter(rows, "ok"), "name"), "+")')).toBe("Ann+Cy");
+    expect(text("rows[1].name")).toBe("Bo");
+    // A key the items lack is nothing, which a sum refuses.
+    expect(() => text('sum(map(rows, "zip"))')).toThrow("number");
+    expect(text('join(map(rows, "zip"), "-")')).toBe("--");
+  });
+});
+
+describe("a checkbox and a slider as state", () => {
+  const calculator = [
+    "{@state seats = 8}",
+    '<slider name="seats" label="Seats" min={1} max={50} unit="seats"/>',
+    "{@let price = seats * 29}",
+    "<text>{seats} seats cost {price}</text>",
+  ].join("\n");
+
+  it("derives values live as the slider moves, snapped and kept in range", () => {
+    const program = programOf(calculator);
+    expect(program.valid).toBe(true);
+    const at = (value: string | number) => {
+      const next = evaluate(program, initialState(program), {
+        type: "change",
+        key: "seats",
+        value,
+      });
+      return { next, text: textOf(next.tree).join("").trim() };
+    };
+    expect(
+      textOf(evaluate(program, initialState(program), null).tree)
+        .join("")
+        .trim(),
+    ).toBe("8 seats cost 232");
+    expect(at(10).text).toBe("10 seats cost 290");
+    expect(at("12").text).toBe("12 seats cost 348");
+    expect(at(2.6).next.state.values.seats).toBe(3);
+    expect(at(500).next.state.values.seats).toBe(50);
+    expect(at(-4).next.state.values.seats).toBe(1);
+    expect(at("lots").next.error).toContain("number");
+  });
+
+  it("derives values from a checkbox, which only holds true or false", () => {
+    const program = programOf(
+      '<checkbox name="vat" label="Add VAT"/>\n{@let total = vat ? 120 : 100}\nTotal {total}',
+    );
+    const on = evaluate(program, initialState(program), {
+      type: "change",
+      key: "vat",
+      value: true,
+    });
+    expect(textOf(on.tree).join("|")).toContain("Total 120");
+    expect(
+      evaluate(program, on.state, { type: "change", key: "vat", value: false })
+        .state.values.vat,
+    ).toBe(false);
+    expect(
+      evaluate(program, initialState(program), {
+        type: "change",
+        key: "vat",
+        value: "maybe",
+      }).error,
+    ).toContain("true or false");
+  });
+
+  it("checks a form's checkbox and slider on submit, and counts a required checkbox as unfilled until ticked", () => {
+    const source = [
+      '<form id="f">',
+      '<checkbox name="agree" label="I agree" required={true}/>',
+      '<checkbox name="spam" answer={false}/>',
+      '<slider name="n" min={0} max={10} answer={4} tol={1}/>',
+      '<slider name="free" min={0} max={10}/>',
+      "</form>",
+    ].join("");
+    const program = programOf(source);
+    expect(program.valid).toBe(true);
+    const fields = Object.fromEntries(
+      (program.forms.f?.fields ?? []).map((field) => [
+        field.name,
+        field.required,
+      ]),
+    );
+    // A checkbox and a slider are optional unless the checkbox says so.
+    expect(fields).toEqual({ agree: true, spam: false, n: false, free: false });
+    const start = initialState(program);
+    expect(
+      evaluate(program, start, { type: "submit", form: "f" }).error,
+    ).toContain("Fill in");
+    let state = evaluate(program, start, {
+      type: "change",
+      key: "f.agree",
+      value: true,
+    }).state;
+    state = evaluate(program, state, {
+      type: "change",
+      key: "f.n",
+      value: 5,
+    }).state;
+    const done = evaluate(program, state, { type: "submit", form: "f" });
+    expect(done.error).toBeNull();
+    expect(done.state.submitted.f?.graded).toEqual({
+      "f.spam": true,
+      "f.n": true,
+    });
+    const wrong = evaluate(
+      program,
+      evaluate(program, state, { type: "change", key: "f.n", value: 8 }).state,
+      { type: "submit", form: "f" },
+    );
+    expect(wrong.state.submitted.f?.graded["f.n"]).toBe(false);
+  });
+
+  it("keeps the answers off the page until a form is revealed", () => {
+    const program = programOf(
+      '<form id="f"><checkbox name="c" answer={true}/><slider name="s" min={0} max={9} answer={7}/></form>',
+    );
+    const json = JSON.stringify(
+      evaluate(program, initialState(program), null).tree,
+    );
+    expect(json).not.toContain('"answer"');
+    expect(program.fallbackMarkdown).not.toContain("7");
+  });
+});
+
+describe("what state a block may keep", () => {
+  const program = programOf(
+    [
+      '<slider name="seats" min={1} max={50}/><checkbox name="on"/>',
+      '<form id="f"><checkbox name="c"/><slider name="s" min={0} max={9}/></form>',
+    ].join("\n"),
+  );
+
+  it("takes a slider's and a checkbox's value, outside a form or in one", () => {
+    expect(
+      checkUiState(program, {
+        values: { seats: 12, on: true, "f.c": true, "f.s": 9 },
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("refuses a value a control can't hold, and a key the block lacks", () => {
+    for (const values of [
+      { seats: "12" },
+      { seats: 51 },
+      { seats: 0 },
+      { on: "true" },
+      { "f.c": 1 },
+      { "f.s": 10 },
+      { nope: 1 },
+    ]) {
+      expect(checkUiState(program, { values }).ok, JSON.stringify(values)).toBe(
+        false,
+      );
+    }
+    const submitted = { f: { values: { "f.s": 99 }, graded: {} } };
+    expect(checkUiState(program, { submitted }).ok).toBe(false);
+  });
+});
+
+describe("the new components' fallback", () => {
+  it("reads as Markdown", () => {
+    const source = [
+      '<badge tone="good">Paid</badge>',
+      '<checkbox name="a" label="Send receipt"/>',
+      '<checkbox name="b" label="Done" />',
+      '<slider name="seats" label="Seats" min={1} max={50} value={8} unit="seats"/>',
+      '<chart kind="bar" title="Sales" data={[{m: "Jan", v: 4}, {m: "Feb", v: 7}]} x="m" y="v"/>',
+      '<chart kind="line" data={[3, 5]}/>',
+    ].join("\n");
+    expect(programOf(source).fallbackMarkdown).toBe(
+      [
+        "**Paid**",
+        "- [ ] Send receipt",
+        "- [ ] Done",
+        "Seats: 8 seats",
+        "**Sales**\n\n| m | v |\n| --- | --- |\n| Jan | 4 |\n| Feb | 7 |",
+        "| # | value |\n| --- | --- |\n| 1 | 3 |\n| 2 | 5 |",
+      ].join("\n\n"),
+    );
+    expect(
+      programOf('{@state on = true}\n<checkbox name="on" label="On"/>')
+        .fallbackMarkdown,
+    ).toBe("- [x] On");
+  });
+
+  it("puts a form's checkbox and slider among its fields, and a badge in a cell", () => {
+    const source =
+      '<form id="f"><checkbox name="c" label="C"/><slider name="s" label="S" min={0} max={3} value={2}/></form><table head={["A"]}><row><cell><badge tone="bad">No</badge></cell></row></table>';
+    expect(programOf(source).fallbackMarkdown).toBe(
+      ["Form f", "- [ ] C", "S: 2", "| A |\n| --- |\n| **No** |"].join("\n\n"),
+    );
   });
 });

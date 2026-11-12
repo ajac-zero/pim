@@ -19,3 +19,5 @@ export const MAX_TEXT_CHARS = 2000;
 export const MAX_TURN_BYTES = 16 * 1024;
 /** How many steps one evaluation of a block may take. */
 export const STEP_BUDGET = 50_000;
+/** How many points a chart may draw. */
+export const MAX_CHART_POINTS = 200;

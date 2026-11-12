@@ -23,7 +23,7 @@ export type Field = {
 	/** What it is called, when it says. */
 	label: string | null;
 	/** The kind of input it is. */
-	tag: "number" | "input" | "select";
+	tag: "number" | "input" | "select" | "checkbox" | "slider";
 	/** Whether the form can't be submitted while it is empty; true unless the tag says required={false}. */
 	required: boolean;
 	/** Whether submitting checks it: it has an answer. */
@@ -35,6 +35,27 @@ export type Field = {
 	/** Shown when its answer is wrong. */
 	explain?: string;
 };
+
+/** A checkbox or slider, which holds a true or false or a number, not text: what its value may be. */
+export type ControlSpec = { kind: "checkbox" } | { kind: "slider"; min: number; max: number; step: number };
+
+/** What a control holds given something the person did, kept to what it may be: a slider's value within its range and on its step. Throws when it can't be. */
+export function coerceControl(control: ControlSpec, given: Value): Value {
+	if (control.kind === "checkbox") {
+		if (given === true || given === "true") return true;
+		if (given === false || given === "false") return false;
+		throw new EvalError("A checkbox is true or false.");
+	}
+	let number = numberOf(given);
+	if (number === null || !Number.isFinite(number)) throw new EvalError("A slider holds a number.");
+	number = control.min + Math.round((number - control.min) / control.step) * control.step;
+	return Number(Math.min(control.max, Math.max(control.min, number)).toPrecision(12));
+}
+
+/** Whether a control's kept value is one it could hold. */
+export function controlValueOk(control: ControlSpec, value: Value): boolean {
+	return control.kind === "checkbox" ? typeof value === "boolean" : typeof value === "number" && value >= control.min && value <= control.max;
+}
 
 /** A form as the language sees it: its id, its title and its fields. */
 export type FormSpec = { id: string; title: string | null; fields: Field[] };
@@ -181,7 +202,8 @@ export function valueOf(state: UiState, key: string): string {
 
 /** Whether a field's answer is right: numbers within tol, text trimmed and regardless of case, choices exact. */
 export function gradeField(field: Field, value: Value): boolean {
-	if (field.tag === "number") {
+	if (field.tag === "checkbox") return value === (field.answer === true);
+	if (field.tag === "number" || field.tag === "slider") {
 		const answer = numberOf(field.answer ?? null);
 		const given = numberOf(value);
 		const tol = field.tol ?? 0;
@@ -195,6 +217,8 @@ export function gradeField(field: Field, value: Value): boolean {
 
 /** Whether a required field holds a valid value: text that isn't blank, and for a number a finite one. */
 function filled(field: Field, value: Value | undefined): boolean {
+	if (field.tag === "checkbox") return value === true;
+	if (field.tag === "slider") return true;
 	const text = stringOf(value ?? "").trim();
 	if (text === "") return false;
 	return field.tag !== "number" || Number.isFinite(Number(text));

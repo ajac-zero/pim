@@ -753,7 +753,7 @@ describe("conversation", () => {
 	});
 
 	it("checks a ```ui block when it is sent, refusing what can't be drawn and noting what still can", async () => {
-		const bad = "Here you go:\n\n```ui\n<form id=\"quiz\"><chart/></form>\n```";
+		const bad = "Here you go:\n\n```ui\n<form id=\"quiz\"><gauge/></form>\n```";
 		const good = ["Try it:", "", "```ui", '<form id="quiz" title="Capitals" submitLabel="Check">', '  <input name="city" label="Capital of Portugal" answer="Lisbon" hint="h"/>', "</form>", "```"].join("\n");
 		faux.setResponses([
 			toolUse("send_to_user", { message: bad }),
@@ -766,7 +766,7 @@ describe("conversation", () => {
 		);
 		// The refused one says what Pim's compiler found, without the compiled block.
 		expect(results[0]).toContain("Not sent: a ```ui block");
-		expect(results[0]).toContain("<chart> is not one of the components a ui block may draw.");
+		expect(results[0]).toContain("<gauge> is not one of the components a ui block may draw.");
 		expect(results[0]).not.toContain("forms");
 		// The good one sends, with only its diagnostics going back to the model.
 		const sent = JSON.parse(results[1]!) as { sent: string; uiNotes: string[] };
@@ -1149,6 +1149,17 @@ describe("what a ui block holds", () => {
 		// Scalars and short lists are kept as they were.
 		const kept = { values: { volume: [1, "two", null, true] }, revealed: {}, submitted: {} };
 		expect((await put(message, block, { version: 0, state: kept })).body.state).toEqual(kept);
+	});
+
+	it("keeps a slider's and a checkbox's value outside a form, and refuses one they can't hold", async () => {
+		const calculator = ["{@state seats = 8}", '<slider name="seats" min={1} max={50}/>', '<checkbox name="annual"/>', "{@let price = seats * 29}", "{price}"].join("\n");
+		const { message } = await sent(`Try it:\n\n\`\`\`ui\n${calculator}\n\`\`\``);
+		const id = uiBlockId(calculator);
+		const state = (values: Record<string, unknown>) => ({ values, revealed: {}, submitted: {} });
+		expect((await put(message, id, { version: 0, state: state({ seats: 12, annual: true }) })).body).toMatchObject({ version: 1, state: state({ seats: 12, annual: true }) });
+		for (const values of [{ seats: "12" }, { seats: 51 }, { seats: 0.5 }, { annual: "true" }, { annual: 1 }]) {
+			expect((await put(message, id, { version: 1, state: state(values) })).status, JSON.stringify(values)).toBe(400);
+		}
 	});
 
 	it("keeps a block's state to 32 KB", async () => {

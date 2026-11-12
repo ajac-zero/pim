@@ -64,7 +64,7 @@ export function summaryOf(thread: Listed): CodingThreadSummary {
 
 /** The space's threads, newest first. */
 export async function listThreads(env: Env, space: string): Promise<CodingThreadSummary[]> {
-	return (await codingScheduler(env, space).threads()).map(summaryOf);
+	return Promise.all((await codingScheduler(env, space).threads()).map(async (thread) => ({ ...summaryOf(thread), activity: await codingThread(env, thread.threadId).activity() })));
 }
 
 /** A thread of the space in full: its own status, with what the list says of it. */

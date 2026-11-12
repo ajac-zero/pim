@@ -1,3 +1,5 @@
+import { ActivityWatch, activityOf, type Activity } from "../activity";
+import { turnsOf } from "../diagnostics";
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type Api, type AssistantMessage, createAssistantMessageEventStream, type Message, type Model, type Provider } from "@earendil-works/pi-ai";
@@ -993,12 +995,24 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return [...resolved][0];
 	}
 
+	readonly #activityWatch = new ActivityWatch(this.ctx.storage.sql);
+
+	/** Current activity from the harness transcript, including output that has not completed a tool result yet. */
+	async activity(): Promise<Activity> {
+		await this.lifecycle.start();
+		const thread = this.store.required();
+		const now = this.now();
+		const turns = turnsOf((await this.harness.messages()).flatMap((entry) => entry.model ?? []), new Map(), now, thread.state === "running");
+		return activityOf(turns, now, { running: thread.state === "running", startedAt: turns.at(-1)?.startedAt ?? thread.updatedAt, lastOutputAt: this.#activityWatch.lastOutput("thread"), coding: true });
+	}
+
 	async status(): Promise<CodingThreadStatus> {
 		await this.lifecycle.start();
 		const thread = this.store.required();
 		const queue = thread.slot === "queued" ? await codingScheduler(this.env, thread.space).position(thread.threadId) : null;
 		return {
 			threadId: thread.threadId,
+			activity: await this.activity(),
 			state: thread.state,
 			stateReason: thread.stateReason,
 			stateDetail: thread.stateDetail,
@@ -2712,6 +2726,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Tells whoever follows the thread live. */
 	#tellLive(message: CodingLiveMessage): void {
+		this.#activityWatch.output("thread", this.now());
 		for (const listener of this.#liveListeners) listener(message);
 	}
 
@@ -3884,6 +3899,7 @@ export type StartThread = {
 };
 
 export type CodingThreadStatus = {
+	readonly activity: Activity;
 	readonly threadId: string;
 	readonly state: CodingThreadState;
 	readonly stateReason: string | null;

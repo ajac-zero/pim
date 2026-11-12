@@ -2124,6 +2124,18 @@ export class Pim extends DurableAgent<Env> {
 				await this.schedule(REPLY_PUSH_DELAY_SECONDS, REPLY_PUSH_CALLBACK, { session, at, body: body.slice(0, 500) }, { idempotent: true });
 			},
 			posted: (session, message, at, images) => this.#posted(session, message, at, images),
+			messageOfCall: async (session, callId) => {
+				const entries = await this.harness.session(session).messages();
+				return entries.findLast((entry) => entry.model?.[0]?.role === "assistant" && entry.model[0].content.some((part) => part.type === "toolCall" && part.id === callId))?.id.toString();
+			},
+			uiBlocksOf: async (session, message) => {
+				try {
+					return { blocks: await this.#uiBlocks(message, session) };
+				} catch (error) {
+					if (error instanceof HttpError && error.status === 404) return { error: `No message ${message} in this chat.` };
+					throw error;
+				}
+			},
 			maySkip: (session, input) => {
 				const seat = this.#rooms.of(session);
 				if (!seat) return false;
@@ -6064,14 +6076,16 @@ export class Pim extends DurableAgent<Env> {
 	 * a group chat. The person's own messages draw nothing, and a message of
 	 * a chat that isn't theirs, or is gone, is not found.
 	 */
-	async #uiBlocks(id: string): Promise<Map<string, UiProgram>> {
+	async #uiBlocks(id: string, within?: string): Promise<Map<string, UiProgram>> {
 		const found = /^[1-9]\d*$/.test(id) ? await (await this.harness.storage()).entry(Number(id) as EntryId, BACKGROUND_CONTEXT) : undefined;
 		const conversation = found ? String(found.entry.conversationId) : undefined;
 		if (
 			!found ||
 			conversation === undefined ||
 			this.#hiddenSessions().has(conversation) ||
-			!(await this.harness.sessions.list()).some((candidate) => candidate.id === conversation)
+			!(await this.harness.sessions.list()).some((candidate) => candidate.id === conversation) ||
+			// An agent reads only its own chat, or the room it speaks in.
+			(within !== undefined && conversation !== within && conversation !== this.#rooms.of(within)?.room)
 		) {
 			throw new HttpError(404, `No message ${id}`);
 		}

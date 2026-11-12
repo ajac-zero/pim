@@ -1,4 +1,5 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
+import type { UiProgram } from "../ui-lang";
 import type { Approval, ApprovalMember, Notification, PimStore, ToolPermission } from "../store";
 import type { ShownWidget, ToolWidget } from "./define";
 
@@ -62,6 +63,15 @@ export type PimServices = {
 	keepWidget(session: string, widget: ToolWidget): string;
 	/** The refs of the widgets kept from tool results in a chat. */
 	keptWidgets(session: string): string[];
+	/** The id of the transcript message that holds a tool call of a chat (the one the person's app and the ui-state routes know it by), or undefined when it isn't in the chat's transcript. */
+	messageOfCall(session: string, callId: string): Promise<string | undefined>;
+	/**
+	 * The compiled ```ui blocks of a message, by their ids, for an agent of
+	 * `session` to read the state of: only a message of that chat, or of the
+	 * room it is in, is found; any other message, in any other chat or space,
+	 * or none, comes back as `error` without saying which.
+	 */
+	uiBlocksOf(session: string, message: string): Promise<{ blocks: Map<string, UiProgram> } | { error: string }>;
 	/** Of the images a reply would show, those no tool's result in its chat gave (send_to_user's own refusals aside). */
 	unseenImages(session: string, urls: readonly string[]): Promise<string[]>;
 	/**

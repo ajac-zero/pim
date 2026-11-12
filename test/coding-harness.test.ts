@@ -4,6 +4,7 @@ import { AMP_FLAGS, amp, ampLogFile } from "../src/coding/harness/amp";
 import { authEnv } from "../src/coding/harness/auth";
 import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/coding/harness/codex";
 import { cliHarness } from "../src/coding/harness/index";
+import { describeModelFailure, parseModelFailure } from "../src/coding/model-error";
 import { type HarnessAuth, HarnessRunner, LineBuffer, type RunRecord, recoverRun, type RunnerDeps } from "../src/coding/harness/runner";
 import type { CliHarness, HarnessEvent, HarnessFiles, HarnessTurn } from "../src/coding/harness/types";
 import { mistralVibe, VIBE_FLAGS, VIBE_SESSIONS, VibeStreamParser, vibeRunDir } from "../src/coding/harness/vibe";
@@ -1364,5 +1365,30 @@ describe("an Amp run", () => {
 			const { workspace, log } = scripted(script);
 			expect(await (await ready(ampDeps(workspace, log).options)).run(AMP_TURN, 60_000)).toMatchObject(expected);
 		}
+	});
+});
+
+describe("a model failure, read from what a provider or CLI said", () => {
+	it("is read into the HTTP status, error type, code and message, whichever shape it came in", () => {
+		const cases: [unknown, unknown][] = [
+			[`429 {"error":{"message":"Slow down","type":"rate_limit_error","code":"rate_limited"}}`, { status: 429, type: "rate_limit_error", code: "rate_limited", message: "Slow down" }],
+			[`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},"status":529}`, { status: 529, type: "overloaded_error", message: "Overloaded" }],
+			["API Error: HTTP 503 Service Unavailable", { status: 503, message: "API Error: HTTP 503 Service Unavailable" }],
+			["connection reset", { message: "connection reset" }],
+			[Object.assign(new Error("Forbidden"), { status: 403 }), { status: 403, message: "Forbidden" }],
+		];
+		for (const [raw, expected] of cases) expect(parseModelFailure(raw)).toEqual(expected);
+	});
+
+	it("is described with its credentials taken out and cut to a sane length", () => {
+		expect(describeModelFailure(`401 {"error":{"message":"Bad key","type":"authentication_error"}}`)).toBe("HTTP 401 (authentication_error): Bad key");
+		const secrets = describeModelFailure("failed: Authorization: Bearer abcdefghijklmnop1234 and x-api-key: k-123456789 at https://x.test/v1?key=AIzaSyABCDEFGH1234 with sk-ant-api03-abcdefghijklmnopqrstuv");
+		expect(secrets).not.toMatch(/abcdefghijklmnop1234|k-123456789|AIzaSyABCDEFGH1234|sk-ant-api03/);
+		expect(describeModelFailure(`500 ${"x".repeat(5000)}`).length).toBeLessThanOrEqual(500);
+	});
+
+	it("says so when there is nothing to read", () => {
+		expect(describeModelFailure("", "Codex exited 2")).toBe("Codex exited 2");
+		expect(describeModelFailure("  ")).toBe("the provider gave no error message");
 	});
 });

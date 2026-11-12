@@ -372,7 +372,7 @@ describe("a coding thread", () => {
 		]);
 		const { id, stub, input } = await startThread();
 		const [failed] = await turns(id, 1);
-		expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });
+		expect(failed).toMatchObject({ outcome: "error", reason: "model_error", detail: expect.stringContaining("invalid request: unknown parameter") });
 		// Told once: the turn's end is the only event for it.
 		await stub.status();
 		expect(codingEvents.filter((event) => event.threadId === id)).toHaveLength(1);
@@ -385,6 +385,29 @@ describe("a coding thread", () => {
 		expect(ended).toMatchObject({ outcome: "completed", operationId: "continue-1" });
 		expect(resumed).toContain(CONTINUE_TEXT);
 		expect(await stub.status()).toMatchObject({ state: "idle", slot: "held", stateReason: null });
+	});
+
+	it("says what the provider answered when a turn fails with a model error", async () => {
+		const key = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+		codingFaux.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: `400 {"error":{"message":"Incorrect API key provided: ${key}","type":"invalid_request_error","code":"invalid_api_key"}}` }),
+		]);
+		const { id, stub } = await startThread();
+		const [failed] = await turns(id, 1);
+		const detail = "HTTP 400 (invalid_request_error, code invalid_api_key): Incorrect API key provided: [REDACTED]";
+		expect(failed).toMatchObject({ outcome: "error", reason: "model_error", detail: expect.stringContaining(detail) });
+		const status = await stub.status();
+		expect(status).toMatchObject({ state: "failed", stateReason: "model_error", stateDetail: expect.stringContaining(detail) });
+		expect(status.stateDetail).not.toContain(key);
+	});
+
+	it("never leaves a model error without a detail, even when the provider said nothing", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "" })]);
+		const { id, stub } = await startThread();
+		const [failed] = await turns(id, 1);
+		expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });
+		expect(failed!.detail).toMatch(/ended with no error message/);
+		expect((await stub.status()).stateDetail).toMatch(/ended with no error message/);
 	});
 
 	it("stops at its budget before the next model call", async () => {

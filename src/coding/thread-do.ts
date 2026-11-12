@@ -520,7 +520,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/**
 	 * Where the workspace clones the repository from: the git broker on this
 	 * Pim (./git-broker/), with a broker token for this thread and this
-	 * repository alone. Clone commands use a header, never a credential in
+	 * repository alone. It is a push token for the thread's own branch, and
+	 * can push nothing else. Clone commands use a header, never a credential in
 	 * the URL or arguments. Agent access uses injection or the global Git
 	 * credential helper, and no token is recorded in thread events.
 	 */
@@ -529,7 +530,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const repo = provider.parseRepoUrl(thread.repoUrl, brokerPolicy(this.env));
 		const origin = deploymentSettings(this.env).publicUrl;
 		if (!origin) throw new Error("PIM_PUBLIC_URL isn't set, so the workspace can't reach Pim's git broker");
-		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo, instance: provider.instance.id, ...(renewable ? { renewUntil: Date.now() + 12 * 60 * 60_000 } : {}) });
+		const token = await issueBrokerToken(await brokerTokenKey(this.env), { sessionId: thread.threadId, repo, instance: provider.instance.id, branch: thread.branch, ...(renewable ? { renewUntil: Date.now() + 12 * 60 * 60_000 } : {}) });
 		const instance = provider.instance.id === GITHUB_INSTANCE_ID ? "" : `/${provider.instance.id}`;
 		return { url: `${origin}/api${GIT_BROKER_PATH}${instance}/${repo.owner}/${repo.name}.git`, token };
 	}
@@ -1481,6 +1482,13 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (error instanceof GitBrokerError && error.status === 403) return { ok: false, code: "push_refused", message: error.message };
 			return { ok: false, code: "conflict", message: errorText(error) };
 		}
+	}
+
+	/** Logs a push the workspace made itself through the git broker (./git-broker/routes.ts), which has checked it. */
+	async recordSandboxPush(event: { repo: string; branch: string; before: string | null; after: string; outcome: string }): Promise<void> {
+		await this.lifecycle.start();
+		if (event.branch !== this.store.required().branch) return;
+		this.store.recordEvent("thread.pushed", { repo: event.repo, branch: event.branch, before: event.before, after: event.after, outcome: event.outcome });
 	}
 
 	/**
@@ -3517,6 +3525,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/** Refreshes agent git access before a turn, after preparing the environment snapshot. */
 	async #prepareWorkspaceGit(workspace: Workspace, thread: CodingThreadRow): Promise<void> {
+		// Commits and pushes from the workspace are Pim's, as its checkpoints are.
+		await git(workspace, ["config", "--global", "user.name", GIT_IDENTITY_NAME]);
+		await git(workspace, ["config", "--global", "user.email", GIT_IDENTITY_EMAIL]);
 		if (this.workspaceProviders().get(thread.providerId).capabilities.egressInjection) {
 			await this.#brokerAccess(thread);
 			return;
@@ -4412,6 +4423,9 @@ const lostDetail = (last?: string | null) => (last ? `${lostTooOften(MAX_RESUMES
 
 /** How often a running turn's work is autosaved, where it is kept in the workspace, the index it is added with, and the most of it this object keeps. */
 const AUTOSAVE_MS = 3 * 60_000;
+/** The git identity of Pim's own commits (checkpoints, autosaves), also set globally in the workspace so the agent's commits and pushes work. */
+const GIT_IDENTITY_NAME = "Pim";
+const GIT_IDENTITY_EMAIL = "coding@pim.invalid";
 const AUTOSAVE_REF = "refs/pim/autosave";
 const AUTOSAVE_INDEX = ".git/pim-autosave-index";
 const MAX_AUTOSAVE_BYTES = 1024 * 1024;

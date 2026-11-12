@@ -1,4 +1,4 @@
-// The helper holds only a bounded, read-only broker grant. It never prints diagnostics
+// The helper holds only a bounded broker grant: it reads the repository and pushes the thread's own branch. It never prints diagnostics
 // from the broker or puts a credential in an argument or environment variable.
 export const WORKSPACE_GIT_AUTH_DIR = "/workspace/.config/pim/git";
 

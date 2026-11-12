@@ -14,10 +14,12 @@ import { GITHUB_INSTANCE, type GitProvider, type ProviderInstance, type Provider
  * session and one repository (`issueBrokerToken`). The broker clones and
  * fetches for it through GitHub's smart HTTP protocol, with a read-only
  * installation token for that one repository, or anonymously when the
- * GitHub App isn't installed on it (public repositories). It never pushes:
- * GitHub's receive-pack is not proxied.
+ * GitHub App isn't installed on it (public repositories). A push token, which
+ * `issueBrokerToken` makes when given a `branch` (the thread's own), also lets
+ * the workspace push that one branch, fast-forward only, through the broker's
+ * receive-pack (`checkPushScope`); a read token never pushes.
  *
- * Pushing is Pim's to do (`pushBranch`), when the person approves it or an agent's coding tool runs. The
+ * Any other push is Pim's to do (`pushBranch`), when the person approves it or an agent's coding tool runs. The
  * workspace hands Pim a git bundle (`git bundle create <file>
  * origin/<branch>..<branch>`, or the whole branch for a new one): one file,
  * made with git's own tools, that names the branch's new commit and holds
@@ -139,7 +141,7 @@ export const MAX_BROKER_TOKEN_TTL_MS = 12 * 60 * 60_000;
 const SESSION_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** What a broker token lets its holder do: fetch `repo` (`owner/name`, lowercase) for `sessionId` until `expiresAt`. */
-export type BrokerClaims = { readonly sessionId: string; readonly repo: string; readonly expiresAt: number; readonly instance: string; readonly renewUntil?: number };
+export type BrokerClaims = { readonly sessionId: string; readonly repo: string; readonly expiresAt: number; readonly instance: string; readonly renewUntil?: number; /** The one branch (without `refs/heads/`) this token may push; absent on a read token, which can't push. */ readonly pushBranch?: string };
 
 /** The key broker tokens are signed with, derived from `secret` for this use alone. */
 export async function brokerKey(secret: string | Uint8Array): Promise<CryptoKey> {
@@ -152,14 +154,15 @@ export async function brokerKey(secret: string | Uint8Array): Promise<CryptoKey>
 /** A token for the workspace of coding session `sessionId` to fetch `repo` with, for `ttlMs` (an hour unless given, 12 hours at most). */
 export async function issueBrokerToken(
 	key: CryptoKey,
-	grant: { sessionId: string; repo: RepoRef; /** A git provider instance's id; GitHub unless given. */ instance?: string; ttlMs?: number; now?: number; renewUntil?: number },
+	grant: { sessionId: string; repo: RepoRef; /** A git provider instance's id; GitHub unless given. */ instance?: string; ttlMs?: number; now?: number; renewUntil?: number; /** Makes it a push token: it may also push this one branch of the repository. */ branch?: string },
 ): Promise<string> {
 	const now = grant.now ?? Date.now();
 	const ttl = grant.ttlMs ?? BROKER_TOKEN_TTL_MS;
 	if (!SESSION_ID.test(grant.sessionId)) throw new GitBrokerError(400, "That isn't a coding session's ID");
 	if (!Number.isFinite(ttl) || ttl <= 0 || ttl > MAX_BROKER_TOKEN_TTL_MS) throw new GitBrokerError(400, "A broker token lasts from a moment to 12 hours");
 	if (grant.renewUntil !== undefined && (!Number.isFinite(grant.renewUntil) || grant.renewUntil <= now || grant.renewUntil > now + MAX_BROKER_TOKEN_TTL_MS)) throw new GitBrokerError(400, "Invalid renewal deadline");
-	const claims = { v: 1, renew: grant.renewUntil, sid: grant.sessionId, repo: grant.repo.fullName.toLowerCase(), exp: Math.min(now + ttl, grant.renewUntil ?? Infinity), ...(grant.instance && grant.instance !== GITHUB_INSTANCE.id ? { inst: grant.instance } : {}) };
+	if (grant.branch !== undefined) checkBranchName(grant.branch);
+	const claims = { v: 1, renew: grant.renewUntil, sid: grant.sessionId, repo: grant.repo.fullName.toLowerCase(), exp: Math.min(now + ttl, grant.renewUntil ?? Infinity), ...(grant.branch !== undefined ? { br: grant.branch } : {}), ...(grant.instance && grant.instance !== GITHUB_INSTANCE.id ? { inst: grant.instance } : {}) };
 	const signed = `${TOKEN_PREFIX}${base64UrlEncode(encoder.encode(JSON.stringify(claims)))}`;
 	const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(signed)));
 	return `${signed}.${base64UrlEncode(mac)}`;
@@ -173,9 +176,9 @@ export async function verifyBrokerToken(key: CryptoKey, token: string, now = Dat
 	try {
 		if (!(await crypto.subtle.verify("HMAC", key, base64UrlDecode(mac), encoder.encode(`${TOKEN_PREFIX}${payload}`)))) return null;
 		const claims = JSON.parse(new TextDecoder().decode(base64UrlDecode(payload))) as Record<string, unknown>;
-		const { v, sid, repo, exp, inst, renew } = claims;
-		if ((renew !== undefined && (typeof renew !== "number" || !Number.isFinite(renew))) || v !== 1 || typeof sid !== "string" || typeof repo !== "string" || typeof exp !== "number" || (inst !== undefined && typeof inst !== "string")) return null;
-		return exp > now ? { sessionId: sid, repo, expiresAt: exp, instance: inst ?? GITHUB_INSTANCE.id, ...(typeof renew === "number" ? { renewUntil: renew } : {}) } : null;
+		const { v, sid, repo, exp, inst, renew, br } = claims;
+		if ((renew !== undefined && (typeof renew !== "number" || !Number.isFinite(renew))) || v !== 1 || typeof sid !== "string" || typeof repo !== "string" || typeof exp !== "number" || (inst !== undefined && typeof inst !== "string") || (br !== undefined && typeof br !== "string")) return null;
+		return exp > now ? { sessionId: sid, repo, expiresAt: exp, instance: inst ?? GITHUB_INSTANCE.id, ...(typeof renew === "number" ? { renewUntil: renew } : {}), ...(br !== undefined ? { pushBranch: br } : {}) } : null;
 	} catch {
 		return null;
 	}
@@ -183,7 +186,7 @@ export async function verifyBrokerToken(key: CryptoKey, token: string, now = Dat
 
 // Git's wire formats
 
-const ZERO = "0".repeat(40);
+export const ZERO = "0".repeat(40);
 const SHA = /^[0-9a-f]{40}$/;
 const FLUSH = encoder.encode("0000");
 
@@ -228,6 +231,63 @@ export function parseAdvertisement(bytes: Uint8Array): { refs: Map<string, strin
 		if (ref !== "capabilities^{}") refs.set(ref, sha);
 	}
 	return { refs, capabilities };
+}
+
+// Pushes from a workspace
+
+/** The most ref updates one receive-pack request may list before the broker stops reading. */
+const MAX_PUSH_COMMANDS = 100;
+
+export type PushCommand = { readonly old: string; readonly new: string; readonly ref: string };
+
+/**
+ * The ref updates at the head of a receive-pack request (pkt-lines of
+ * `<old> <new> <ref>`, the first followed by NUL and capabilities, up to a
+ * flush), and where the pack starts. Anything else in that position (shallow
+ * lines, push certificates, a missing flush) is refused, so what the broker
+ * checks is exactly what GitHub is shown.
+ */
+export function parseReceivePackRequest(bytes: Uint8Array): { commands: PushCommand[]; capabilities: string[]; packOffset: number } {
+	const bad = (why: string) => new GitBrokerError(400, `That isn't a push the broker understands: ${why}`);
+	const commands: PushCommand[] = [];
+	let capabilities: string[] = [];
+	let at = 0;
+	for (;;) {
+		const header = latin1(bytes.subarray(at, at + 4));
+		if (!/^[0-9a-f]{4}$/i.test(header)) throw bad("the command list isn't in git's format");
+		const length = Number.parseInt(header, 16);
+		if (length === 0) return { commands, capabilities, packOffset: at + 4 };
+		if (length < 5 || at + length > bytes.length) throw bad("the command list isn't in git's format");
+		if (commands.length >= MAX_PUSH_COMMANDS) throw bad("too many ref updates");
+		const line = latin1(bytes.subarray(at + 4, at + length)).replace(/\n$/, "");
+		const [command, caps, ...extra] = line.split("\0");
+		if (extra.length > 0 || (commands.length > 0 && caps !== undefined)) throw bad("the command list isn't in git's format");
+		if (caps !== undefined) capabilities = caps.split(" ").filter(Boolean);
+		const match = /^([0-9a-f]{40}) ([0-9a-f]{40}) (\S+)$/.exec(command!);
+		if (!match) throw bad("expected `<old> <new> <ref>`");
+		commands.push({ old: match[1]!, new: match[2]!, ref: match[3]! });
+		at += length;
+	}
+}
+
+/**
+ * Refuses a push from a workspace unless it is exactly one update of the
+ * token's own branch: not any other ref (the default branch, other `pim/`
+ * branches, tags), not a delete, and from the branch's current tip (`tip`,
+ * null when it doesn't exist) or a creation. The client's old value must
+ * equal the tip, so a stale view of the branch is refused.
+ */
+export function checkPushScope(commands: readonly PushCommand[], capabilities: readonly string[], branch: string, tip: string | null, policy: Pick<BrokerPolicy, "branchPrefix">): PushCommand {
+	const own = `refs/heads/${checkBranch(branch, policy)}`;
+	if (commands.length !== 1) throw new GitBrokerError(403, `A workspace pushes one ref at a time: its own branch, ${own}`);
+	const command = commands[0]!;
+	if (command.ref !== own) throw new GitBrokerError(403, `This workspace may push only its own branch, ${own}, not ${command.ref.slice(0, 200)}`);
+	if (command.new === ZERO) throw new GitBrokerError(403, `A workspace can't delete ${own}`);
+	if (capabilities.some((capability) => capability === "push-options" || capability.startsWith("push-cert"))) throw new GitBrokerError(403, "The broker takes no push options or certificates");
+	if (command.old !== (tip ?? ZERO)) {
+		throw new GitBrokerError(409, tip === null ? `${own} doesn't exist on the remote, so the push can't start from ${command.old}: fetch it and push again` : command.old === ZERO ? `${own} already exists on the remote: fetch it, rebase onto it, and push again` : `${own} on the remote is at ${tip}, not ${command.old}: fetch it, rebase onto it, and push again; the broker takes no force pushes`);
+	}
+	return command;
 }
 
 /** A git bundle: the refs it names, the commits it needs the receiver to have, and its pack. */

@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
-import { compile, uiBlockId, uiBlockReference, type UiProgram } from "../ui-lang";
+import { closedUiSources, compile, uiBlockIds, uiBlockReference, type UiProgram } from "../ui-lang";
 import { DELIVERY_REMINDER } from "../transcript";
 import { widgetMarkdown } from "./define";
 import { json, type PimServices, text } from "./services";
@@ -133,10 +133,8 @@ function blockMarkdown({ kind, items }: ReplyBlock): string {
 /** A ```ui fence, alone on its lines. */
 const UI_BLOCK = /```ui[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/g;
 
-/** The source of each ```ui block in a message, in order. */
-export function uiSourcesOf(message: string): string[] {
-	return [...message.matchAll(UI_BLOCK)].map((match) => match[1]!);
-}
+/** The source of each whole ```ui block in a message, in order: the ones the app draws from it. */
+export const uiSourcesOf = closedUiSources;
 
 /**
  * What's wrong with a reply's ```ui blocks, as the model can read and fix.
@@ -145,8 +143,8 @@ export function uiSourcesOf(message: string): string[] {
  */
 export function uiDiagnostics(message: string): { error?: string; notes?: string[] } {
 	const notes: string[] = [];
-	for (const [, body] of message.matchAll(UI_BLOCK)) {
-		for (const diagnostic of compile(body!).diagnostics) {
+	for (const body of uiSourcesOf(message)) {
+		for (const diagnostic of compile(body).diagnostics) {
 			const said = `a \`\`\`ui block${diagnostic.line > 0 ? ` (line ${diagnostic.line})` : ""} ${diagnostic.message}`;
 			if (diagnostic.severity === "error") return { error: said };
 			notes.push(said);
@@ -276,7 +274,10 @@ export function messagingExtension(services: PimServices) {
 			// What the widgets showed, and where the images' copies are, go back to the model too, so it knows what the person saw; the app draws them from here.
 			const missing = channel === "email" ? [] : pictured.filter((url) => !images[url]);
 			// Where the person's ui blocks can be read back with ui_state: this message's id, and each block's id with a short label.
-			const uiBlocks = channel === "email" ? [] : uiSourcesOf(message).map((source) => ({ id: uiBlockId(source), label: uiBlockLabel(compile(source)) }));
+			const uiBlocks = channel === "email" ? [] : (() => {
+				const sources = uiSourcesOf(message);
+				return uiBlockIds(sources).map((id, index) => ({ id, label: uiBlockLabel(compile(sources[index]!)) }));
+			})();
 			const messageId = uiBlocks.length > 0 ? await services.messageOfCall(session, api.callId) : undefined;
 			const result = {
 				sent,

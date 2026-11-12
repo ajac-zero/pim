@@ -15,7 +15,8 @@ import {
   uiResponseOf,
   uiTurn,
 } from "../../../src/ui-lang/response";
-import { checkUiState } from "../../../src/ui-lang/state";
+import { closedUiSources, uiFences } from "../../../src/ui-lang/fences";
+import { checkUiState, uiBlockId, uiBlockIds } from "../../../src/ui-lang/state";
 
 /** The example the whole feature must handle, as a block's source. */
 const EXAMPLE = UI_EXAMPLE;
@@ -640,6 +641,71 @@ describe("a trailer under attack", () => {
     const text = String(submitted.actions[0]?.args[0]);
     expect(text).toContain("```ui-response");
     expect(uiResponseOf(uiTurn(text, real))).toEqual(real);
+  });
+});
+
+describe("a message's ui fences and their ids", () => {
+  const fence = (body: string) => `\`\`\`ui\n${body}\n\`\`\``;
+
+  it("finds each whole ui fence in order, and the one still open at the end", () => {
+    const text = `Intro\n\n${fence("one")}\n\nText\n\n${fence("two")}\n\n\`\`\`ui\nthree`;
+    const found = uiFences(text);
+    expect(found.map((entry) => [entry.source, entry.open])).toEqual([
+      ["one", false],
+      ["two", false],
+      ["three", true],
+    ]);
+    expect(closedUiSources(text)).toEqual(["one", "two"]);
+    // Where each one's info string is, to be told apart in the text.
+    expect(found.map((entry) => text.slice(entry.info.from, entry.info.to))).toEqual(["ui", "ui", "ui"]);
+  });
+
+  it("leaves out a fence another fence holds, and fences of other languages, however they start", () => {
+    const text = [
+      "````md",
+      fence("shown, not drawn"),
+      "````",
+      "```ui-response",
+      "{}",
+      "```",
+      "```uix",
+      "x",
+      "```",
+      "~~~ui",
+      "tilde",
+      "~~~",
+      "   ```ui",
+      "indented",
+      "   ```",
+      "```json",
+      fence("inside json"),
+    ].join("\n");
+    expect(closedUiSources(text)).toEqual(["tilde", "indented"]);
+    // `ui-response` is not `ui`.
+    expect(uiFences("```ui-response\n{}\n```")).toEqual([]);
+  });
+
+  it("names a block by its hash when it is the first of its source, and numbers the next ones", () => {
+    const a = "<text>a</text>";
+    const b = "<text>b</text>";
+    const ids = uiBlockIds([a, b, a, a, b]);
+    expect(ids[0]).toBe(uiBlockId(a));
+    expect(ids[1]).toBe(uiBlockId(b));
+    expect(ids.slice(2)).toEqual([`${uiBlockId(a)}-1`, `${uiBlockId(a)}-2`, `${uiBlockId(b)}-1`]);
+    expect(new Set(ids).size).toBe(5);
+    // Line endings and the space around a source don't tell blocks apart; text does.
+    expect(uiBlockIds([a, `\r\n${a}\r\n`, `${a} `])).toEqual([uiBlockId(a), `${uiBlockId(a)}-1`, `${uiBlockId(a)}-2`]);
+    expect(uiBlockIds(["x", "y"]).every((id) => /^[0-9a-f]{14}$/.test(id))).toBe(true);
+    expect(uiBlockIds([])).toEqual([]);
+  });
+
+  it("names the blocks of a text alike wherever it is read", () => {
+    const text = `${fence("x")}\n\n${fence("x")}\n\n\`\`\`ui\nx`;
+    // The app, still receiving the message, sees all three; the Worker, which has it sent, the whole two.
+    const received = uiBlockIds(uiFences(text).map((entry) => entry.source));
+    const sent = uiBlockIds(closedUiSources(text));
+    expect(received.slice(0, 2)).toEqual(sent);
+    expect(received[2]).toBe(`${uiBlockId("x")}-2`);
   });
 });
 

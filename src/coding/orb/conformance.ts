@@ -15,6 +15,12 @@ import { type OrbClient, OrbLostError, type OrbMessage, type OrbMethod, OrbUnrea
 export type OrbScript<C extends OrbClient> = {
 	/** Puts the thread in this state, as its agent's work would. */
 	setState?: (client: C, threadId: string, state: OrbState) => void | Promise<void>;
+	/**
+	 * The states the script's `setState` can put a thread in, when its agent's
+	 * cloud reports fewer than all of them (an orb that never waits on an
+	 * approval); every state when absent.
+	 */
+	states?: readonly OrbState[];
 	/** Adds to the thread's transcript, as the agent's reply or the person's words would. */
 	say?: (client: C, threadId: string, role: "user" | "assistant", text: string) => void | Promise<void>;
 	/** Makes the thread take the messages steered to it as its next turn, which a real agent decides on its own. */
@@ -83,7 +89,15 @@ export function runOrbClientConformanceSuite<C extends OrbClient>(name: string, 
 				const k = key();
 				const first = await start(client, k);
 				script.unreachable!(client, "start", true);
-				await expect(start(client, k)).rejects.toBeInstanceOf(OrbUnreachableError);
+				// A retry while the cloud is unreachable either fails, or is answered from the thread the key already kept — a client that needs no cloud to say so. Either way it starts nothing.
+				const retry = await start(client, k).then(
+					(thread) => thread,
+					(error) => {
+						expect(error).toBeInstanceOf(OrbUnreachableError);
+						return first;
+					},
+				);
+				expect(retry).toEqual(first);
 				script.unreachable!(client, "start", false);
 				// The retry is the thread that was started, and it is still the only one.
 				expect(await start(client, k)).toEqual(first);
@@ -134,7 +148,7 @@ export function runOrbClientConformanceSuite<C extends OrbClient>(name: string, 
 				const first = await client.state(threadId);
 				expect(first.state === "working" || first.state === "idle" || first.state === "awaiting_approval" || first.state === "error" || first.state === "unknown").toBe(true);
 				expect(first.lastEventAt === null || Number.isFinite(first.lastEventAt)).toBe(true);
-				for (const state of ["working", "awaiting_approval", "error", "idle"] as const) {
+				for (const state of script.states ?? ["working", "awaiting_approval", "error", "idle"]) {
 					await script.setState!(client, threadId, state);
 					expect(await client.state(threadId)).toMatchObject({ state });
 				}
@@ -170,7 +184,7 @@ export function runOrbClientConformanceSuite<C extends OrbClient>(name: string, 
 			async () => {
 				const client = makeClient();
 				const { threadId } = await start(client);
-				script.lose!(client, threadId);
+				await script.lose!(client, threadId);
 				await expect(client.state(threadId)).rejects.toBeInstanceOf(OrbLostError);
 				await expect(client.messages(threadId)).rejects.toBeInstanceOf(OrbLostError);
 				if (capabilities.steer) await expect(client.steer(threadId, "anyone there?")).rejects.toBeInstanceOf(OrbLostError);

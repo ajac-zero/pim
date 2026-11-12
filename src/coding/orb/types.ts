@@ -60,7 +60,7 @@ export type OrbCapabilities = {
 export type OrbMethod = "start" | "steer" | "stop" | "state" | "messages" | "usage";
 
 /** How a client failed, as a caller can tell apart without matching on a message. */
-export type OrbErrorCode = "orb_unreachable" | "orb_unsupported" | "orb_lost";
+export type OrbErrorCode = "orb_auth" | "orb_unreachable" | "orb_unsupported" | "orb_lost";
 
 /** Every failure an orb client reports. Clients throw these, never a bare string or a plain `Error`, so a caller can tell what went wrong from the type. */
 export class OrbError extends Error {
@@ -78,6 +78,14 @@ export class OrbUnreachableError extends OrbError {
 	constructor(message = "Can't reach the agent's cloud just now") {
 		super(message, "orb_unreachable");
 		this.name = "OrbUnreachableError";
+	}
+}
+
+/** The person's login with the agent's cloud was refused: a token missing, wrong or expired, which only they can fix. Nothing was changed. */
+export class OrbAuthError extends OrbError {
+	constructor(message = "The agent's cloud refused this sign-in") {
+		super(message, "orb_auth");
+		this.name = "OrbAuthError";
 	}
 }
 

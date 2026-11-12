@@ -106,7 +106,7 @@ nonstandard ports, and injects only into HTTPS requests with a matching
 normalized path. Redirects are returned for a new policy check. A WebSocket
 upgrade is answered with a 101 of the handler's own, relaying the destination's
 socket through, so the relay's life is logged; Amp's page
-([coding-amp.md](coding-amp.md)) explains it and the events. The intercepts
+([coding-orbs.md](coding-orbs.md)) explains Amp's agent-hosted Orbs. The intercepts
 are reinstalled whenever the workspace is created, resumed or given a new
 policy, and again when the Durable Object starts over a container that is still
 running, so a container is never left deciding requests with an older

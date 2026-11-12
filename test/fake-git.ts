@@ -135,9 +135,8 @@ export const fakeGit: FakeCommandHandler = async ({ argv, cwd, env, workspace })
 			const files = fakeRemotes.get(await read(workspace, `${cwd}/.git/origin`));
 			// `fetch origin +refs/heads/<branch>:<ref>`: a branch pushed before, with its commits.
 			const wanted = rest.find((arg) => arg.includes("refs/heads/"));
-			if (wanted) {
-				const remote = fakeRemoteBranches.get(origin)?.get(wanted.replace(/^\+/, "").split(":")[0]!.slice("refs/heads/".length));
-				if (!remote) return { stderr: "fatal: couldn't find remote ref\n", code: 128 };
+			const remote = wanted ? fakeRemoteBranches.get(origin)?.get(wanted.replace(/^\+/, "").split(":")[0]!.slice("refs/heads/".length)) : undefined;
+			if (wanted && remote) {
 				for (const [sha, each] of Object.entries(remote.commits)) {
 					await write(workspace, objects(sha), JSON.stringify(each.files));
 					if (each.parent) await write(workspace, `${objects(sha)}.parent`, each.parent);

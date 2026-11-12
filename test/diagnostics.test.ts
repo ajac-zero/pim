@@ -270,6 +270,12 @@ describe("tool input summaries", () => {
 		const { toolSummary, turnsOf } = await import("../src/diagnostics");
 		const summary = toolSummary({ command: `curl -H 'Authorization: Bearer synthetic-value' https://example.invalid/x?key=synthetic-value; TOKEN='synthetic value' echo ok`, body: "private body", thread_id: "thread-1" });
 		expect(summary).not.toContain("synthetic");
+		for (const command of [
+			"curl -H 'Authorization: Bearer synthetic-value'",
+			"Authorization='Basic synthetic value' curl /x",
+			'curl -d \'{"api_key":"synthetic value"}\' https://example.invalid/x?anything=synthetic-value',
+			"run --access-token 'synthetic value'",
+		]) expect(toolSummary({ command })).not.toContain("synthetic");
 		expect(summary).not.toContain("private body");
 		expect(summary).toContain("/x");
 		expect(toolSummary({ command: "x".repeat(300) }).length).toBeLessThanOrEqual(201);
@@ -324,5 +330,21 @@ describe("stall detection", () => {
 		expect(activity(900101, 900000).stalls[0]?.reason).toBe("past declared timeout");
 		expect(activity(900101).stalls).toHaveLength(2);
 		expect(activity(900101, 900000, true).stalls).toEqual([]);
+	});
+});
+
+describe("shared coding diagnostics", () => {
+	it("uses exactly the API activity record in now, coding and stalls, regardless of the since window", async () => {
+		const { diagnose } = await import("../src/diagnostics");
+		const activity = { running: true, lastActivityAt: 100, current: [{ name: "test", summary: "command=vitest run", startedAt: 100, elapsedMs: 1000000, timeoutMs: 900000 }], steps: [], stalls: [{ key: "tool:1", reason: "past declared timeout", since: 100 }] };
+		const sources = {
+			now: 1000000,
+			turns: async () => [],
+			codingThreads: async () => [{ threadId: "coding-test", harness: "pi", state: "running", stateReason: null, task: "Run the test", updatedAt: 100, spentUsd: 0, budgetUsd: null, activity }],
+		} as unknown as import("../src/diagnostics").DiagnosticSources;
+		const report = await diagnose(sources, { kind: "now", since: "1m" });
+		expect(report.sections.now?.items).toEqual([{ source: "coding", thread: "coding-test", ...activity }]);
+		expect((await diagnose(sources, { kind: "stalls" })).sections.stalls?.items).toEqual(report.sections.now?.items);
+		expect((await diagnose(sources, { kind: "coding" })).sections.coding?.items[0]).toMatchObject({ activity });
 	});
 });

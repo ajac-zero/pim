@@ -3434,8 +3434,8 @@ describe("a coding thread's compute", () => {
 		const [row] = await rows(thread.id);
 		expect(row).toMatchObject({ end_reason: null, cap_at: expect.any(Number) });
 		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
-		// Before its time, nothing happens at a heartbeat.
-		codingThreadClock.now = Date.now() + 5 * MINUTE;
+		// Before its time, and inside the two-minute idle grace, nothing happens at a heartbeat.
+		codingThreadClock.now = Date.now() + 1 * MINUTE;
 		await heartbeat(thread.stub);
 		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
 		// Past it, the provider is told to delete the workspace and the ledger ends the stretch as stopped.
@@ -3461,10 +3461,11 @@ describe("a coding thread's compute", () => {
 	it("lets a thread on a fresh deployment run past 120 minutes: there is no limit until the admin sets one", async () => {
 		const thread = await idle();
 		expect(await rows(thread.id)).toEqual([{ end_reason: null, cap_at: null }]);
+		// Only the idle grace ends the stretch, as a suspend; no limit stops the workspace or marks the thread.
 		codingThreadClock.now = Date.now() + 300 * MINUTE;
 		await heartbeat(thread.stub);
 		expect(await codingWorkspaces.list({ sessionId: thread.id })).toHaveLength(1);
-		expect(await rows(thread.id)).toEqual([{ end_reason: null, cap_at: null }]);
+		expect(await rows(thread.id)).toEqual([{ end_reason: "suspend", cap_at: null }]);
 		expect(await thread.stub.status()).toMatchObject({ state: "idle", stateReason: null });
 	});
 

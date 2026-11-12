@@ -33,6 +33,7 @@ import { ComputerDisplayChip } from "~/components/computer-display-chip";
 import { FileView } from "~/components/file-view";
 import { useI18n } from "~/components/i18n";
 import { Loader2, Pin, Users } from "~/components/icons";
+import { ChatRunActivity } from "~/components/run-activity";
 import { Button } from "~/components/ui/button";
 import { ResizeHandle, useStoredSize } from "~/components/ui/resize-handle";
 import { useElementHeight } from "~/hooks/use-element-size";
@@ -379,6 +380,9 @@ function ChatPage() {
                 </div>
               </div>
             )}
+            <div className="mx-auto w-full max-w-4xl shrink-0 px-4 py-1">
+              <ChatRunActivity key={sessionId} chat={sessionId} />
+            </div>
             {/* Until its snapshot arrives a chat opened for the first time
              * would look empty; a message just sent is already worth showing. */}
             {ready && (loaded || pending.length > 0) ? (

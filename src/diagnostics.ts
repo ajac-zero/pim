@@ -1,3 +1,5 @@
+import type { CallApproval, Turn, TurnStep } from "./activity-types";
+export type { CallApproval, Turn, TurnStep } from "./activity-types";
 import { activityOf, type Activity } from "./activity";
 import type { Message } from "@earendil-works/pi-ai";
 import { redactSecrets } from "./hostops";
@@ -109,29 +111,6 @@ CREATE TABLE IF NOT EXISTS pim_diagnostic_events (
 	}
 }
 
-/** An approval as a turn's timeline reads it, by the call that filed it. */
-export type CallApproval = { readonly id: string; readonly status: string; readonly createdAt: number; readonly decidedAt: number | null; readonly decidedBy: string | null };
-
-/** One step of a turn: a model call, failed ones included, or a tool call, with how long it took; null while it goes on, or for a model call that didn't say. */
-export type TurnStep =
-	| { readonly kind: "model"; readonly at: number; readonly ms: number | null; readonly model: string; readonly stop: string; readonly error: string | null }
-	| { readonly kind: "tool"; readonly at: number; readonly ms: number | null; readonly name: string; readonly summary: string; readonly timeoutMs: number | null; readonly exitCode: number | null; readonly outputBytes: number | null; readonly error: boolean; readonly approval: (CallApproval & { readonly waitedMs: number }) | null };
-
-/**
- * One turn of a chat, from what started it to its last step: how long its model
- * calls took, how long its tool calls ran apart from waiting for approvals, how
- * long those waits were, and its steps.
- */
-export type Turn = {
-	readonly startedAt: number;
-	readonly endedAt: number;
-	readonly inProgress: boolean;
-	readonly modelMs: number;
-	readonly toolsMs: number;
-	readonly approvalsMs: number;
-	readonly steps: readonly TurnStep[];
-};
-
 /**
  * A chat's turns, from its messages in order: each begins with a message to
  * the agent, other than Pim's reminder to deliver, and goes on to the next.
@@ -165,7 +144,7 @@ export function turnsOf(messages: readonly Message[], approvals: ReadonlyMap<str
 			const approval = approvals.get(call.id);
 			// A call left without its result or decision when the chat stopped took no time after.
 			const waitedMs = approval ? Math.max(0, (approval.decidedAt ?? (busy ? now : approval.createdAt)) - approval.createdAt) : 0;
-			turn.steps.push({ kind: "tool", at: answered, ms: result ? Math.max(0, result.timestamp - answered) : null, name: call.name, summary: toolSummary(call.arguments), timeoutMs: typeof call.arguments.timeoutMs === "number" ? call.arguments.timeoutMs : typeof call.arguments.timeout === "number" ? call.arguments.timeout * 1000 : null,
+			turn.steps.push({ kind: "tool", id: call.id, at: answered, ms: result ? Math.max(0, result.timestamp - answered) : null, name: call.name, summary: toolSummary(call.arguments), timeoutMs: typeof call.arguments.timeoutMs === "number" ? call.arguments.timeoutMs : typeof call.arguments.timeout === "number" ? call.arguments.timeout * 1000 : null,
 				exitCode: result && typeof (result.details as Record<string, unknown> | undefined)?.exitCode === "number" ? (result.details as { exitCode: number }).exitCode : null,
 				outputBytes: result ? new TextEncoder().encode(JSON.stringify(result.content)).byteLength : null, error: result?.isError ?? false, approval: approval ? { ...approval, waitedMs } : null });
 			roundEnd = Math.max(roundEnd, result?.timestamp ?? (busy ? now : answered));

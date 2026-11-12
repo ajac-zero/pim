@@ -80,7 +80,7 @@ type CodingThreadView = {
   profile: AgentProfile;
   workspaceProvider: string; // the backend it runs on, such as "compose" or "cloudflare"; while it waits for its first slot, the one it tries first
   provider: string;           // the same as `workspaceProvider`: the sandbox provider's id, such as "compose" or "cloudflare"
-  pool: string;               // the pool it takes slots from: its provider's id
+  pool: string;               // the pool it takes slots from: its provider's id (the registry of pools a deployment may have is separate: see coding-pools.md)
   placementReason: "pinned" | "priority" | "overflow"; // pinned: the start named it; priority: the first pool with room; overflow: moved on from a full one
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;

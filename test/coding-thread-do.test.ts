@@ -9,7 +9,7 @@ import { brokerTokenKey } from "../src/coding/git-broker/routes";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type EnvironmentKeyInput, environmentKey, estimatedRestoreMs, lockfileHashes, SETUP_ENV, snapshotWorthKeeping } from "../src/coding/environment-cache";
 import { PROVISION_ENV } from "../src/coding/repo-environment";
-import { CONTINUE_TEXT, cliInstructions, codingThread, LOST_RESUME_TEXT, SESSION_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
+import { CONTINUE_TEXT, cliInstructions, codingThread, isTransient, LOST_RESUME_TEXT, SESSION_RESUME_TEXT, type StartThread, threadLimits } from "../src/coding/thread-do";
 import { REPO_DIR } from "../src/coding/tools";
 import { codingVault } from "../src/coding/vault/vault";
 import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
@@ -96,6 +96,7 @@ beforeEach(() => {
 	codingSchedulers.now = null;
 	codingThreadClock.now = null;
 	codingTimings.resumeWaitMs = 120_000;
+	codingTimings.retryMs = 30_000;
 	codingEvents.length = 0;
 });
 
@@ -223,6 +224,7 @@ describe("a coding thread", () => {
 		const url = "https://pim.test/api/coding/git/acme/blocked.git";
 		fakeRemotes.set(url, { "README.md": "# Blocked\n" });
 		fakeCloneFailures.set(url, { times: 10, stderr: "error: RPC failed; HTTP 503 curl 22\nfatal: the remote end hung up\n" });
+		codingTimings.retryMs = 50;
 		const { stub } = await startThread({ repo: "https://github.com/acme/blocked" });
 		const failed = await vi.waitFor(
 			async () => {
@@ -233,7 +235,9 @@ describe("a coding thread", () => {
 			{ timeout: 10_000, interval: 50 },
 		);
 		expect(failed.stateDetail).toContain("git clone exited 128: error: RPC failed; HTTP 503");
-		expect(fakeClones.filter((each) => each.url === url)).toHaveLength(4);
+		// Four tries, then the whole provisioning once more after a backoff, which fares no better.
+		expect(fakeClones.filter((each) => each.url === url)).toHaveLength(8);
+		expect((await stub.log()).filter((event) => event.kind === "thread.retrying")).toHaveLength(1);
 		fakeCloneFailures.delete(url);
 		// A missing repository is not retried.
 		const clones = fakeClones.length;
@@ -408,6 +412,90 @@ describe("a coding thread", () => {
 		expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });
 		expect(failed!.detail).toMatch(/ended with no error message/);
 		expect((await stub.status()).stateDetail).toMatch(/ended with no error message/);
+	});
+
+	describe("when a turn fails for a transient error", () => {
+		const providerDown = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "The model stream ended unexpectedly" });
+
+		it("retries it once after a backoff in the same workspace, records the original error, and charges nothing twice", async () => {
+			codingTimings.retryMs = 200;
+			let retried = "";
+			codingFaux.setResponses([
+				toolUse("bash", { command: "echo kept" }),
+				providerDown(),
+				(context) => {
+					retried = sent(context);
+					return fauxAssistantMessage("Carried on.");
+				},
+			]);
+			const { id, stub } = await startThread({ profile: { providerId: "coding-faux", model: "pricey" }, budgetUsd: 1_000_000 });
+			const [ended] = await turns(id, 1);
+			expect(ended).toMatchObject({ outcome: "completed" });
+			expect(ended!.operationId).toMatch(/^retry-/);
+			expect(retried).toContain(CONTINUE_TEXT);
+			// The failed turn never reached the supervisor as a failure.
+			expect(codingEvents.filter((event) => event.threadId === id && event.outcome === "error")).toEqual([]);
+			// The retry went on in the one workspace, .
+			expect(await codingWorkspaces.list({ sessionId: id })).toHaveLength(1);
+			const log = await stub.log();
+			expect(log.find((event) => event.kind === "thread.retrying")?.data).toMatchObject({ reason: "model_error", error: expect.stringContaining("ended unexpectedly") });
+			// Each model call is recorded once, and spend is the sum of them.
+			const calls = log.filter((event) => event.kind === "model_call");
+			expect((await stub.status()).spentUsd).toBeCloseTo(calls.reduce((sum, event) => sum + (event.costUsd ?? 0), 0), 6);
+			expect(await stub.status()).toMatchObject({ state: "idle", stateReason: null });
+		});
+
+		it("waits out the backoff before retrying", async () => {
+			codingTimings.retryMs = 60_000;
+			codingFaux.setResponses([providerDown(), fauxAssistantMessage("Never asked.")]);
+			const { stub } = await startThread();
+			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ stateReason: "retrying", inbox: 1 }), { timeout: 10_000, interval: 10 });
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			expect(await stub.status()).toMatchObject({ stateReason: "retrying", inbox: 1 });
+			// A person's message goes at once and withdraws the retry.
+			codingFaux.setResponses([fauxAssistantMessage("Heard you.")]);
+			await stub.steer("Never mind, do this", { operationId: "steer-now" });
+			await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ state: "idle", stateReason: null, inbox: 0 }), { timeout: 10_000, interval: 20 });
+		});
+
+		it("retries only once: a failed retry leaves the thread failed", async () => {
+			codingTimings.retryMs = 50;
+			codingFaux.setResponses([providerDown(), providerDown()]);
+			const { id, stub } = await startThread();
+			const [failed] = await turns(id, 1);
+			expect(failed).toMatchObject({ outcome: "error", reason: "model_error", operationId: expect.stringMatching(/^retry-/) });
+			expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "model_error", inbox: 0 });
+			expect((await stub.log()).filter((event) => event.kind === "thread.retrying")).toHaveLength(1);
+		});
+
+		it.each([
+			["a rejected key", "401 Unauthorized: invalid api key"],
+			["a bad request", "400 Bad Request: messages must not be empty"],
+			["a usage limit", "usage limit reached for this month"],
+		])("does not retry %s", async (_name, errorMessage) => {
+			codingFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage })]);
+			const { id, stub } = await startThread();
+			const [failed] = await turns(id, 1);
+			expect(failed).toMatchObject({ outcome: "error", reason: "model_error" });
+			expect((await stub.log()).filter((event) => event.kind === "thread.retrying")).toEqual([]);
+			expect(await stub.status()).toMatchObject({ state: "failed", stateReason: "model_error" });
+		});
+
+		it("tells transient errors from permanent ones", () => {
+			// pi-ai retries many of these inside a model call; what reaches a thread is what it gave up on.
+			expect(isTransient("model_error", "429 Too Many Requests")).toBe(true);
+			expect(isTransient("model_error", "502 Bad Gateway")).toBe(true);
+			expect(isTransient("model_error", "")).toBe(true);
+			expect(isTransient("harness_error", "WebSocket connection failed")).toBe(true);
+			expect(isTransient("harness_error", "Amp exited without a result: read ECONNRESET")).toBe(true);
+			expect(isTransient("workspace", "Workspace manager unavailable (503)")).toBe(true);
+			expect(isTransient("model_error", "403 Forbidden")).toBe(false);
+			expect(isTransient("model_error", "Coding thread out of budget: spent $2")).toBe(false);
+			expect(isTransient("harness_error", "Claude Code usage limit reached: resets at 5pm")).toBe(false);
+			expect(isTransient("harness_error", "Amp exited without a result: crashed")).toBe(false);
+			expect(isTransient("aborted", "connection closed")).toBe(false);
+			expect(isTransient("max_turns", "The turn reached its most steps")).toBe(false);
+		});
 	});
 
 	it("stops at its budget before the next model call", async () => {
@@ -2752,7 +2840,7 @@ describe("an Amp thread", () => {
 	const started: Stub[] = [];
 	const runs: { argv: string[]; env: Record<string, string> }[] = [];
 	// What the next `amp` turn or `amp threads archive` does, set by the test that needs a failure.
-	let behavior: { turn: "ok" | "crash" | "max-turns"; archive: "ok" | "fail" | "throw" } = { turn: "ok", archive: "ok" };
+	let behavior: { turn: "ok" | "crash" | "ws-down" | "max-turns"; archive: "ok" | "fail" | "throw" } = { turn: "ok", archive: "ok" };
 	const unarchives: string[][] = [];
 	codingWorkspaces.register("amp", ({ argv, env }) => {
 		if (argv.includes("--unarchive")) {
@@ -2765,6 +2853,7 @@ describe("an Amp thread", () => {
 			return behavior.archive === "fail" ? { stderr: "boom", exitCode: 1 } : {};
 		}
 		if (behavior.turn === "max-turns") return { stdout: ampFixture("max-turns.jsonl") };
+		if (behavior.turn === "ws-down") return { stderr: "WebSocket connection failed", exitCode: 1 };
 		return behavior.turn === "crash" ? { stderr: "crashed", exitCode: 1 } : { stdout: ampFixture("turn.jsonl") };
 	});
 	const archiveRuns = () => runs.filter((run) => run.argv[1] === "threads" && run.argv[2] === "archive");
@@ -2851,6 +2940,26 @@ describe("an Amp thread", () => {
 		// Archiving again changes nothing.
 		await stub.archive();
 		expect(archiveRuns()).toHaveLength(1);
+	});
+
+	it("retries a turn once after the Amp harness's connection fails, then leaves a second failure for the person", async () => {
+		await saveKey();
+		codingTimings.retryMs = 100;
+		behavior.turn = "ws-down";
+		const { id, stub } = await startAmp();
+		await vi.waitFor(async () => expect(await stub.status()).toMatchObject({ stateReason: "retrying" }), { timeout: 10_000, interval: 20 });
+		behavior.turn = "ok";
+		const [ended] = await turns(id, 1);
+		expect(ended).toMatchObject({ outcome: "completed" });
+		expect((await stub.log()).find((event) => event.kind === "thread.retrying")?.data).toMatchObject({ reason: "harness_error", error: expect.stringContaining("WebSocket connection failed") });
+
+		// A retry that fails too is the turn's end: one retry per failing turn.
+		behavior.turn = "ws-down";
+		await stub.steer("Again", { operationId: "steer-ws" });
+		const [, failed] = await turns(id, 2);
+		expect(failed).toMatchObject({ outcome: "error", reason: "harness_error", operationId: expect.stringMatching(/^retry-/) });
+		expect((await stub.log()).filter((event) => event.kind === "thread.retrying")).toHaveLength(2);
+		expect(await stub.status()).toMatchObject({ state: "failed" });
 	});
 
 	it("archives its Amp thread when a turn fails, and a thread that never started one has nothing to archive", async () => {

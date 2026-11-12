@@ -135,7 +135,8 @@ export type CodingEvent = {
 export type EventData = Readonly<Record<string, string | number | boolean | null>>;
 
 /** A thread's input waiting for its turn: the task, a message the person sent between turns, or a request to go on. */
-export type InboxItem = { readonly seq: number; readonly operationId: string; readonly text: string };
+/** An input waiting for a turn. `notBefore` holds it until then (a retry's backoff); `retried` is set once its failure has been retried automatically. */
+export type InboxItem = { readonly seq: number; readonly operationId: string; readonly text: string; readonly notBefore: number; readonly retried: boolean };
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS coding_thread (
@@ -308,6 +309,10 @@ export class CodingThreadStore {
 		if (!columns.has("pull_request_number")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_number INTEGER");
 		// Whether the thread stays on its provider; threads from before overflow stay where they are.
 		if (!columns.has("placed")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN placed INTEGER NOT NULL DEFAULT 1");
+		// Automatic retries hold an input until its backoff has passed, and remember it was retried.
+		const inbox = new Set(this.#sql.exec("PRAGMA table_info(coding_inbox)").toArray().map((row) => String(row.name)));
+		if (!inbox.has("not_before")) this.#sql.exec("ALTER TABLE coding_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0");
+		if (!inbox.has("retried")) this.#sql.exec("ALTER TABLE coding_inbox ADD COLUMN retried INTEGER NOT NULL DEFAULT 0");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -393,13 +398,24 @@ export class CodingThreadStore {
 	}
 
 	/** Adds an input to wait for the thread's next turn; an operation already added isn't added again. */
-	enqueue(operationId: string, text: string): void {
-		this.#sql.exec("INSERT INTO coding_inbox (operation_id, text) VALUES (?, ?) ON CONFLICT (operation_id) DO NOTHING", operationId, text);
+	enqueue(operationId: string, text: string, retry?: { notBefore: number }): void {
+		this.#sql.exec("INSERT INTO coding_inbox (operation_id, text, not_before, retried) VALUES (?, ?, ?, ?) ON CONFLICT (operation_id) DO NOTHING", operationId, text, retry?.notBefore ?? 0, retry ? 1 : 0);
+	}
+
+	/** Holds the input until `notBefore`, and marks it retried. */
+	holdForRetry(seq: number, notBefore: number): void {
+		this.#sql.exec("UPDATE coding_inbox SET not_before = ?, retried = 1 WHERE seq = ?", notBefore, seq);
+	}
+
+	/** A person has said something: automatic retries waiting for their backoff are withdrawn, and held inputs go at once. */
+	releaseRetries(): void {
+		this.#sql.exec("DELETE FROM coding_inbox WHERE operation_id LIKE 'retry-%'");
+		this.#sql.exec("UPDATE coding_inbox SET not_before = 0");
 	}
 
 	nextInput(): InboxItem | null {
 		const row = this.#sql.exec("SELECT * FROM coding_inbox ORDER BY seq LIMIT 1").toArray()[0];
-		return row ? { seq: Number(row.seq), operationId: String(row.operation_id), text: String(row.text) } : null;
+		return row ? { seq: Number(row.seq), operationId: String(row.operation_id), text: String(row.text), notBefore: Number(row.not_before), retried: Number(row.retried) === 1 } : null;
 	}
 
 	dequeue(seq: number): void {

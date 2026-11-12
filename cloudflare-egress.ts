@@ -7,9 +7,12 @@ const log = (event: string, request: Request, url: URL | undefined, more: Record
 /**
  * Decides one request a Cloudflare container sends out, and forwards it when the policy allows its host. Each
  * intercept is scoped to its connection target, never to the untrusted Host header. A WebSocket upgrade is an
- * ordinary request here: the forwarded fetch answers 101 with a socket, which is returned as it is. Every denial is
- * logged with its reason, host, protocol, method and Upgrade header, and answers 403 with `x-pim-egress: denied` so
- * a 403 from Pim is told apart from one the destination sent (logged as `pim.coding.egress_upstream_refused`).
+ * ordinary request here: the forwarded fetch answers 101 with a socket, which is returned as it is. Every request is
+ * logged, with its destination's status, but never with anything of the request's own that could hold a secret: no
+ * path or query (Amp's upgrade URL carries an `rvt-token`), no headers (Pim's carry its tokens), no body. A denial
+ * says so with its reason and answers 403 with `x-pim-egress: denied`, so a 403 from Pim is told apart from one the
+ * destination sent (logged as `pim.coding.egress_upstream_refused`, and as `pim.coding.egress_allowed` with its
+ * status like any other pass).
  */
 export async function handleEgress(request: Request, policy: EgressPolicy, target: string, forward: typeof fetch = fetch): Promise<Response> {
 	const url = new URL(request.url);
@@ -29,6 +32,8 @@ export async function handleEgress(request: Request, policy: EgressPolicy, targe
 	// Credentials are only injected over TLS. Redirects must be rechecked by the intercept.
 	if (url.protocol === "https:") for (const [name, value] of Object.entries(injectedHeaders(policy, url.hostname, url.pathname))) headers.set(name, value);
 	const response = await forward(new Request(request, { headers, redirect: "manual" }), { redirect: "manual" });
+	// What the destination answered. The request's own path, query and headers stay out of it: they hold tokens.
+	log("pim.coding.egress_allowed", request, url, { status: response.status, target });
 	if (response.status === 401 || response.status === 403)
 		log("pim.coding.egress_upstream_refused", request, url, { status: response.status, server: response.headers.get("server"), via: response.headers.get("via"), cfRay: response.headers.get("cf-ray") });
 	return response;

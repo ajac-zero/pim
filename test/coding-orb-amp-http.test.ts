@@ -147,4 +147,57 @@ describe("AmpHttpOrbClient", () => {
 		fetcher.mockResolvedValue(json({}, 404));
 		await expect(client.state("missing")).rejects.toBeInstanceOf(OrbLostError);
 	});
+
+	describe("diagnosable failures", () => {
+		const logs = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+		const parsed = (spy: ReturnType<typeof logs>) => spy.mock.calls.map(([line]) => JSON.parse(String(line)));
+		const secretly = "sgamp_saved Bearer sgamp_saved";
+		const secondStart = async (client: AmpHttpOrbClient) => (await client.start(start).catch(() => null), await client.start(start).then(() => "", (e: Error) => e.message));
+		it("keeps a fetch exception's cause for the second start, redacted", async () => {
+			const spy = logs();
+			let now = 1000;
+			const { client, fetcher, store } = fixture({ now: () => now });
+			fetcher.mockImplementation(async () => { now += 30_012; throw new TypeError(`fetch failed ${secretly}`); });
+			const message = await secondStart(client);
+			expect(message).toContain("Amp start outcome is uncertain (first attempt: fetch failed [redacted] Bearer [redacted] after 30012ms); check Amp before starting another thread");
+			const log = parsed(spy)[0];
+			expect(log).toMatchObject({ event: "pim.coding.amp_http_failed", op: "POST /threads", errName: "TypeError", elapsedMs: 30_012, attempt: 1 });
+			expect(JSON.stringify([...spy.mock.calls, message, [...store.values]])).not.toContain("sgamp_saved");
+			expect(JSON.stringify(await store.get("amp:retry:/threads"))).toContain("fetch failed");
+		});
+		it("keeps a 500 body", async () => {
+			const spy = logs();
+			const { client, fetcher, store } = fixture();
+			fetcher.mockResolvedValue(new Response(`boom ${secretly} ${"x".repeat(500)}`, { status: 500 }));
+			const message = await secondStart(client);
+			expect(message).toContain("HTTP 500: boom [redacted] Bearer [redacted]");
+			expect(parsed(spy)[0]).toMatchObject({ status: 500, attempt: 1 });
+			expect(parsed(spy)[0].errMessage.length).toBeLessThanOrEqual(200);
+			expect(JSON.stringify([...spy.mock.calls, message, [...store.values]])).not.toContain("sgamp_saved");
+		});
+		it("keeps status and snippet for invalid JSON", async () => {
+			const spy = logs();
+			const { client, fetcher } = fixture();
+			fetcher.mockResolvedValue(new Response("not json sgamp_saved", { status: 200 }));
+			await expect(client.start(start)).rejects.toThrow("invalid JSON (status 200: not json [redacted])");
+			expect(await client.start(start).catch((e: Error) => e.message)).toContain("first attempt: invalid JSON (status 200: not json [redacted])");
+			expect(parsed(spy)[0]).toMatchObject({ status: 200, errMessage: "invalid JSON" });
+			expect(JSON.stringify(spy.mock.calls)).not.toContain("sgamp_saved");
+		});
+		it("keeps a 502 HTML snippet", async () => {
+			const spy = logs();
+			const { client, fetcher } = fixture();
+			fetcher.mockResolvedValue(new Response("<html><body>Bad Gateway</body></html>", { status: 502 }));
+			expect(await secondStart(client)).toContain("HTTP 502: <html><body>Bad Gateway</body></html>");
+			expect(parsed(spy)[0]).toMatchObject({ status: 502 });
+		});
+		it("keeps the cause for an invalid thread handle", async () => {
+			const spy = logs();
+			const { client, fetcher } = fixture();
+			fetcher.mockResolvedValue(json({ thread: { id: 5 } }, 201));
+			await expect(client.start(start)).rejects.toThrow("invalid thread handle (status 201");
+			expect(await client.start(start).catch((e: Error) => e.message)).toContain("first attempt: invalid thread handle (status 201");
+			expect(parsed(spy)[0]).toMatchObject({ event: "pim.coding.amp_http_failed" });
+		});
+	});
 });

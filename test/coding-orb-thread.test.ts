@@ -313,4 +313,23 @@ describe("Amp HTTP placement", () => {
 			await vault.delete(OWNER, "amp");
 		}
 	});
+
+	it("shows the first attempt's cause in the failed thread's detail", async () => {
+		const vault = codingVault(env);
+		await vault.saveApiKey(OWNER, "amp", "sgamp_DETAIL_TOKEN");
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw new TypeError("fetch failed"); });
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		try {
+			await stub.start(startInput(id, { space: OWNER, harness: "amp", provider: "orbs" }));
+			await heartbeat(stub);
+			await heartbeat(stub);
+			const status = JSON.stringify(await stub.status());
+			expect(status).toContain("first attempt: fetch failed after");
+			expect(status).not.toContain("sgamp_DETAIL_TOKEN");
+		} finally {
+			await vault.delete(OWNER, "amp");
+		}
+	});
 });

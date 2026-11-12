@@ -21,6 +21,12 @@ const STORAGE_KEY = "pim-locale";
 
 const translations = {
   en: {
+    activityNow: "Now running",
+    activityWorking: "Working",
+    activityLast: "Last activity",
+    activityTimeline: "Step timeline",
+    activityStalled: "Stalled",
+    activityExit: "Exit",
     approvalRequested: "Pim needs your approval",
     approve: "Approve",
     alwaysApprove: "Always approve",
@@ -2029,6 +2035,12 @@ const translations = {
     codingTestOutput: "Output",
   },
   es: {
+    activityNow: "En ejecución",
+    activityWorking: "Trabajando",
+    activityLast: "Última actividad",
+    activityTimeline: "Cronología de pasos",
+    activityStalled: "Sin progreso",
+    activityExit: "Salida",
     approvalRequested: "Pim necesita tu aprobación",
     approve: "Aprobar",
     alwaysApprove: "Aprobar siempre",

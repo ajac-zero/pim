@@ -1,3 +1,5 @@
+import { codingThread } from "./coding/thread-do";
+import { ActivityWatch, activityOf, type Activity } from "./activity";
 import { Workspace } from "@cloudflare/computer";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Api, JsonValue, Model } from "@earendil-works/pi-ai";
@@ -4670,6 +4672,29 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	readonly #runWatch = new RunWatch(this.ctx.storage.sql);
+	readonly #activityWatch = new ActivityWatch(this.ctx.storage.sql);
+
+	/** A stalled coding thread wakes its parent, or the majordomo for a thread started by the person. */
+	async codingStalled(threadId: string, activity: Activity): Promise<void> {
+		const thread = await codingScheduler(this.env, this.name).thread(threadId);
+		if (!thread) return;
+		const creator = thread.createdBy;
+		await this.#notifyStalls(			`coding:${threadId}`, activity, creator.type === "agent" ? creator.chat : this.store.publicId(ROOT_SESSION), creator.type === "agent" ? creator.agent : undefined);
+	}
+
+	async #notifyStalls(source: string, activity: Activity, chat = this.store.publicId(ROOT_SESSION), agent?: string): Promise<void> {
+		for (const stall of activity.stalls) {
+			const key = `stall:${source}:${stall.key}`;
+			if (!this.#activityWatch.claim(key, Date.now())) continue;
+			this.#note("activity_stalled", { source, reason: stall.reason, since: stall.since });
+			try {
+				await this.codingTurnEnded(chat, `[Coding thread ${source}] Stalled: ${stall.reason}. Last activity: ${new Date(activity.lastActivityAt).toISOString()}. ${activity.current.map((tool) => `${tool.name}: ${tool.summary} (${Math.floor(tool.elapsedMs / 1000)} s)`).join("; ")}`, key, agent);
+			} catch (error) {
+				this.#activityWatch.retry(key);
+				throw error;
+			}
+		}
+	}
 
 	/**
 	 * Looks at the runs again in a while, once, whoever asks: a space with no
@@ -4704,6 +4729,9 @@ export class Pim extends DurableAgent<Env> {
 			const live = await pi.snapshot(LiveDoc, Number(session) as ConversationId, BACKGROUND_CONTEXT);
 			if (live?.run === undefined) continue;
 			seen.add(session);
+			const turns = (await this.#turns(this.store.publicId(session), 0)).map((item) => item.turn);
+			const activity = activityOf(turns, now, { running: true, startedAt: turns.at(-1)?.startedAt ?? now });
+			await this.#notifyStalls(`chat:${this.store.publicId(session)}`, activity);
 			// In task order: a restart lists them in another.
 			const unchanged = await this.#runWatch.observe(session, runKey(live.run), JSON.stringify([[...group].sort((a, b) => a.record.id - b.record.id).map((task) => [task.record.id, task.state.kind]), live]), now);
 			if (group.some((task) => task.state.kind === "suspended") || live.generation?.retry !== undefined || live.generation?.deferred !== undefined || live.compactions?.some((compaction) => compaction.retry !== undefined)) continue;
@@ -5094,7 +5122,7 @@ export class Pim extends DurableAgent<Env> {
 				chatId: (session) => this.store.publicId(session),
 				triggerFailures: (since, limit) => (this.triggerEngine() ? triggerFailures(this.ctx.storage.sql, since, limit) : null),
 				connectors: () => this.apps.servers(),
-				codingThreads: async () => (await codingScheduler(this.env, this.name).threads()).map((thread) => ({ ...thread })),
+				codingThreads: async () => Promise.all((await codingScheduler(this.env, this.name).threads()).map(async (thread) => ({ ...thread, activity: await codingThread(this.env, thread.threadId).activity() }))),
 			},
 			query,
 		);
@@ -6637,6 +6665,15 @@ export class Pim extends DurableAgent<Env> {
 				// A watch delivers to its chat only: it goes with it.
 				await this.#stopConnectorTriggers((_source, destination) => destination.type === "existing_chat" && destination.chatId === id);
 				return { deleted: true };
+			},
+		],
+		[
+			"GET",
+			"/sessions/:session/activity",
+			async ({ session }) => {
+				await this.#session(session!);
+				const turns = (await this.#turns(session!, 0)).map((item) => item.turn);
+				return activityOf(turns, Date.now(), { running: turns.at(-1)?.inProgress ?? false, startedAt: turns.at(-1)?.startedAt ?? 0 });
 			},
 		],
 		[

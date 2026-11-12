@@ -120,6 +120,27 @@ describe('exec', () => {
 		assert.equal((await exec({ cmd: 'ls' })).status, 400)
 		assert.equal((await exec({ cmd: ['ls'], timeoutMs: undefined })).status, 400)
 	})
+
+	test('timeout escalates to SIGKILL when both the shell and its child ignore SIGTERM', { timeout: 8000 }, async () => {
+		const started = Date.now()
+		const ev = await events(await exec({ cmd: ['sh', '-c', "trap '' TERM; sleep 61 & echo $ $!; wait"], timeoutMs: 400 }))
+		assert.deepEqual(ev.at(-1), { type: 'exit', code: null, signal: 'SIGKILL', timedOut: true })
+		assert.ok(Date.now() - started < 5000, 'timeout must return, not wait for inherited stdout to close')
+		const pids = ev.filter((e) => e.type === 'stdout').map((e) => e.data).join('').trim().split(/\s+/).map(Number)
+		assert.equal(pids.length, 2)
+		for (const pid of pids) assert.equal(alive(pid), false, 'the entire process group must be dead')
+	})
+
+	test('drains and kills children holding stdout open after their parent exits', { timeout: 8000 }, async () => {
+		const started = Date.now()
+		const ev = await events(await exec({ cmd: ['sh', '-c', "trap '' TERM; sleep 61 & echo $!; exit 0"], timeoutMs: 1000 }))
+		assert.equal(ev.at(-1).code, 0)
+		assert.equal(ev.at(-1).timedOut, false)
+		assert.ok(Date.now() - started < 3000, 'a leftover stdout pipe must not hang exec')
+		const pid = Number(ev.find((e) => e.type === 'stdout').data.trim())
+		assert.equal(alive(pid), false)
+	})
+
 	test('timeout kills the whole process group', async () => {
 		const ev = await events(await exec({ cmd: ['sh', '-c', 'sleep 61 & echo $!; wait'], timeoutMs: 400 }))
 		const pid = Number(ev[0].data)

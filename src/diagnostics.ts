@@ -1,5 +1,9 @@
+import type { CallApproval, Turn, TurnStep } from "./activity-types";
+export type { CallApproval, Turn, TurnStep } from "./activity-types";
+import { activityOf, type Activity } from "./activity";
 import type { Message } from "@earendil-works/pi-ai";
 import { redactSecrets } from "./hostops";
+import { redact } from "./coding/tools/output";
 import { DELIVERY_REMINDER } from "./transcript";
 
 /**
@@ -20,14 +24,17 @@ const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 
 /** The kinds of thing `pim_diagnostics` reports on, which its `kind` chooses between. */
-export const DIAGNOSTIC_KINDS = ["runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
+export const DIAGNOSTIC_KINDS = ["now", "stalls", "runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
 export type DiagnosticKind = (typeof DIAGNOSTIC_KINDS)[number];
 
 const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie|bearer/i;
 
 /** `text` with what looks like a secret, an address or an email taken out, and cut to `max` characters. */
 export function scrub(text: string, max = TEXT_LENGTH): string {
-	const clean = redactSecrets(text)
+	const clean = redact(redactSecrets(text
+		.replace(/\b(authorization["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|(?:bearer|basic|token)\s+[^\s"']+|[^\s"']+)/gi, "$1[redacted]")
+		.replace(/\b([\w-]*(?:token|secret|password|api[_-]?key)[\w-]*["']?)(?:\s*[=:]\s*|\s+)("[^"\n]*"|'[^'\n]*'|[^\s;"']+)/gi, "$1=[redacted]")))
+		.replace(/\b([\w-]*(?:token|secret|password|api[_-]?key)[\w-]*)\s*[=:]\s*("[^"\n]*"|'[^'\n]*'|[^\s;]+)/gi, "$1=[redacted]")
 		// Addresses keep their path but not the host, the credentials in them, or what follows `?`.
 		.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>/?#]*([^\s"'<>?#]*)[^\s"'<>]*/gi, (_url, path: string) => `[address]${path}`)
 		.replace(/\b((?:pass(?:word)?|secret|token|api[_-]?key|authorization|credential)s?)\s*[=:]\s*\S+/gi, "$1=[redacted]")
@@ -42,6 +49,18 @@ export function scrubValue(value: unknown, depth = 0): unknown {
 	if (depth > 4) return "[deep]";
 	if (Array.isArray(value)) return value.slice(0, 50).map((item) => scrubValue(item, depth + 1));
 	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SECRET_KEY.test(key) ? "[redacted]" : scrubValue(item, depth + 1)]));
+}
+
+/** Only operational arguments belong here, never request bodies, prompts or environment values. */
+export function toolSummary(input: Record<string, unknown>): string {
+	const fields = ["command", "cmd", "thread", "threadId", "thread_id", "url", "path", "file_path", "cwd", "timeout", "timeoutMs", "timeout_ms"];
+	return scrub(fields.filter((key) => input[key] !== undefined).map((key) => typeof input[key] === "string" ? key + "=" + input[key] : key + "=" + JSON.stringify(input[key])).join(" "), 200);
+}
+
+/** Pi uses seconds; Claude Code's Bash tool and explicit millisecond fields use milliseconds. */
+export function toolTimeout(name: string, input: Record<string, unknown>): number | null {
+	const ms = input.timeoutMs ?? input.timeout_ms ?? (typeof input.timeout === "number" ? input.timeout * (name === "Bash" ? 1 : 1000) : null);
+	return typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
 const iso = (ms: number | null | undefined) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
@@ -100,29 +119,6 @@ CREATE TABLE IF NOT EXISTS pim_diagnostic_events (
 	}
 }
 
-/** An approval as a turn's timeline reads it, by the call that filed it. */
-export type CallApproval = { readonly id: string; readonly status: string; readonly createdAt: number; readonly decidedAt: number | null; readonly decidedBy: string | null };
-
-/** One step of a turn: a model call, failed ones included, or a tool call, with how long it took; null while it goes on, or for a model call that didn't say. */
-export type TurnStep =
-	| { readonly kind: "model"; readonly at: number; readonly ms: number | null; readonly model: string; readonly stop: string; readonly error: string | null }
-	| { readonly kind: "tool"; readonly at: number; readonly ms: number | null; readonly name: string; readonly error: boolean; readonly approval: (CallApproval & { readonly waitedMs: number }) | null };
-
-/**
- * One turn of a chat, from what started it to its last step: how long its model
- * calls took, how long its tool calls ran apart from waiting for approvals, how
- * long those waits were, and its steps.
- */
-export type Turn = {
-	readonly startedAt: number;
-	readonly endedAt: number;
-	readonly inProgress: boolean;
-	readonly modelMs: number;
-	readonly toolsMs: number;
-	readonly approvalsMs: number;
-	readonly steps: readonly TurnStep[];
-};
-
 /**
  * A chat's turns, from its messages in order: each begins with a message to
  * the agent, other than Pim's reminder to deliver, and goes on to the next.
@@ -143,7 +139,7 @@ export function turnsOf(messages: readonly Message[], approvals: ReadonlyMap<str
 		if (message.role !== "assistant" || !turn) continue;
 		const ms = message.durationMs ?? null;
 		const answered = message.timestamp + (ms ?? 0);
-		turn.steps.push({ kind: "model", at: message.timestamp, ms, model: message.model, stop: message.stopReason, error: message.errorMessage ?? null });
+		turn.steps.push({ kind: "model", at: message.timestamp, ms, model: message.model, stop: message.stopReason, error: message.errorMessage ? scrub(message.errorMessage) : null });
 		turn.modelMs += ms ?? 0;
 		turn.endedAt = Math.max(turn.endedAt, answered);
 		const calls = message.content.flatMap((part) => (part.type === "toolCall" ? [part] : []));
@@ -156,7 +152,9 @@ export function turnsOf(messages: readonly Message[], approvals: ReadonlyMap<str
 			const approval = approvals.get(call.id);
 			// A call left without its result or decision when the chat stopped took no time after.
 			const waitedMs = approval ? Math.max(0, (approval.decidedAt ?? (busy ? now : approval.createdAt)) - approval.createdAt) : 0;
-			turn.steps.push({ kind: "tool", at: answered, ms: result ? Math.max(0, result.timestamp - answered) : null, name: call.name, error: result?.isError ?? false, approval: approval ? { ...approval, waitedMs } : null });
+			turn.steps.push({ kind: "tool", id: call.id, at: answered, ms: result ? Math.max(0, result.timestamp - answered) : null, name: call.name, summary: toolSummary(call.arguments), timeoutMs: toolTimeout(call.name, call.arguments),
+				exitCode: result && typeof (result.details as Record<string, unknown> | undefined)?.exitCode === "number" ? (result.details as { exitCode: number }).exitCode : null,
+				outputBytes: result ? new TextEncoder().encode(JSON.stringify(result.content)).byteLength : null, error: result?.isError ?? false, approval: approval ? { ...approval, waitedMs } : null });
 			roundEnd = Math.max(roundEnd, result?.timestamp ?? (busy ? now : answered));
 			waited += waitedMs;
 		}
@@ -188,7 +186,7 @@ export type DiagnosticSources = {
 	/** What went wrong with the space's triggers (see ./triggers/failures.ts) since the window began, or null where triggers are off. */
 	triggerFailures(since: number, limit: number): readonly Readonly<Record<string, string | number | null>>[] | null;
 	/** The space's coding threads. */
-	codingThreads(): Promise<readonly { threadId: string; harness: string; state: string; stateReason: string | null; task: string; updatedAt: number; spentUsd: number; budgetUsd: number | null }[]>;
+	codingThreads(): Promise<readonly { threadId: string; harness: string; state: string; stateReason: string | null; task: string; updatedAt: number; spentUsd: number; budgetUsd: number | null; activity?: Activity }[]>;
 };
 
 export type Section = { readonly count: number; readonly items: readonly unknown[]; readonly note?: string };
@@ -264,6 +262,10 @@ async function turns({ turns: read }: DiagnosticSources, since: number, limit: n
 						at: iso(step.at),
 						ms: step.ms,
 						name: step.name,
+						summary: step.summary,
+						timeout_ms: step.timeoutMs,
+						exit_code: step.exitCode,
+						output_bytes: step.outputBytes,
 						...(step.error ? { error: true } : {}),
 						...(step.approval ? { approval: { id: step.approval.id, status: step.approval.status, decided_by: step.approval.decidedBy, waited_ms: step.approval.waitedMs } } : {}),
 					},
@@ -343,6 +345,7 @@ async function coding({ codingThreads }: DiagnosticSources, since: number, limit
 		updated_at: iso(thread.updatedAt),
 		spent_usd: thread.spentUsd,
 		budget_usd: thread.budgetUsd,
+		activity: thread.activity,
 	}));
 	return section(items, threads.length);
 }
@@ -375,7 +378,22 @@ function events({ events: log }: DiagnosticSources, since: number, limit: number
 	return section(items, items.length, `The log keeps the last ${EVENT_KEEP} events.`);
 }
 
+async function now(sources: DiagnosticSources, _since: number, limit: number): Promise<Section> {
+	const chats = (await sources.turns(null, 0)).filter(({ turn }) => turn.inProgress).map(({ chat, agent, turn }) => ({ source: "chat", chat, agent, ...activityOf([turn], sources.now, { running: true, startedAt: turn.startedAt }) }));
+	const threads = (await sources.codingThreads()).filter((thread) => thread.state === "running").map((thread) => ({ source: "coding", thread: thread.threadId, ...thread.activity }));
+	const items = [...chats, ...threads];
+	return section(items.slice(0, limit), items.length);
+}
+
+async function stalls(sources: DiagnosticSources, since: number, limit: number): Promise<Section> {
+	const live = await now(sources, since, MAX_LIMIT);
+	const items = live.items.filter((item) => (item as Activity).stalls?.length);
+	return section(items.slice(0, limit), items.length, "Tools: past declared timeout or quiet for five minutes. Running coding threads: no transcript activity for fifteen minutes. Heartbeats wake the parent once per stall; this report is read-only.");
+}
+
 const READERS: Record<DiagnosticKind, (sources: DiagnosticSources, since: number, limit: number, chat: string | null) => Section | Promise<Section>> = {
+	now,
+	stalls,
 	runs,
 	turns,
 	triggers,

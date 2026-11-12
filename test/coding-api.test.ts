@@ -1,3 +1,5 @@
+import type { Activity } from "../src/activity-types";
+import { listThreads } from "../src/coding/threads";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { getAgentByName } from "agents";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
@@ -10,7 +12,7 @@ import { DEFAULT_SPACE_CAP } from "../src/coding/provider-capacity";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type CodingEventSink, codingThread } from "../src/coding/thread-do";
 import { turnEndedMessage } from "../src/coding/supervisor";
-import { CodingThreadIndex } from "../src/coding/thread-index";
+import { CodingThreadIndex, type IndexedThread } from "../src/coding/thread-index";
 import { CodingThreadStore } from "../src/coding/thread-store";
 import type { ComputeQuota } from "../src/compute";
 import type { Pim } from "../src/pim";
@@ -708,6 +710,21 @@ describe("an agent's coding tools", () => {
 		await runInDurableObject(codingThread(env, id), (thread: CodingThreadDO) => (thread as unknown as { eventSink(): CodingEventSink }).eventSink().emit(ended!));
 		await settled(chat);
 		expect((await messagesOf(chat, "user")).filter((text) => text.includes("[Coding thread"))).toHaveLength(1);
+		// A stall uses the same parent-wake path, with a durable claim even across repeated heartbeat checks.
+		let stalled = "";
+		faux.setResponses([(context) => {
+			stalled = lastUserText(context.messages);
+			return toolUse("send_to_user", { message: "Checking the slow command." });
+		}]);
+		const activity = { running: true, lastActivityAt: 100, current: [{ name: "test", summary: "command=vitest run", startedAt: 100, elapsedMs: 901000, timeoutMs: 900000 }], steps: [], stalls: [{ key: "tool:100:test", reason: "past declared timeout", since: 100 }] };
+		const pim = await getAgentByName(env.Pim, OWNER);
+		await pim.codingStalled(id, activity);
+		await pim.codingStalled(id, activity);
+		await settled(chat);
+		expect(stalled).toContain("past declared timeout");
+		expect(stalled).toContain("command=vitest run");
+		expect((await messagesOf(chat, "user")).filter((text) => text.includes("Stalled:"))).toHaveLength(1);
+
 	});
 
 	it("started by a guest agent in a group chat belong to that chat, and wake that agent in it when a turn ends", async () => {
@@ -947,4 +964,65 @@ describe("what an agent hears of a coding thread's failure", () => {
 		expect(message).not.toContain("Detail:");
 		expect(message).not.toContain("retry once");
 	});
+});
+
+describe("listing thread activity", () => {
+	const activity: Activity = { running: true, lastActivityAt: 100, current: [], steps: [], stalls: [] };
+	const listed = (state: IndexedThread["state"], index: number): import("../src/coding/thread-index").IndexedThread & { queue: null } => ({
+		threadId: `list-thread-${index}`, createdBy: { type: "person" }, parent: null, chat: null, harness: "pi", task: "Run a test", repo: REPO, ref: "main", branch: "pim/test", state, stateReason: null, spentUsd: 0, budgetUsd: null, createdAt: index, updatedAt: index, lastTurnEndedAt: null, lastSeenAt: null, queue: null,
+	});
+	const listEnv = (threads: ReturnType<typeof listed>[], read: (id: string) => Promise<typeof activity>) => {
+		const get = vi.fn((id: string) => ({ activity: () => read(id) }));
+		const bindings = {
+			CodingScheduler: { getByName: () => ({ threads: async () => threads }) },
+			CodingThread: { getByName: get },
+		} as unknown as Env;
+		return { bindings, get };
+	};
+
+	it("reads activity only for running threads and leaves every other state unwoken", async () => {
+		const threads = (["idle", "running", "archived", "failed", "queued", "waiting_input", "provisioning", "running"] as const).map(listed);
+		const { bindings, get } = listEnv(threads, async () => activity);
+		const items = await listThreads(bindings, "list-space");
+		expect(get.mock.calls.map(([id]) => id)).toEqual(["list-thread-1", "list-thread-7"]);
+		expect(items.map((item) => item.id)).toEqual(threads.map((thread) => thread.threadId));
+		for (const item of items) expect(item.activity).toEqual(item.state === "running" ? activity : undefined);
+	}, 10_000);
+
+	it("bounds activity reads to eight and keeps listing after one fails", async () => {
+		const threads = Array.from({ length: 19 }, (_, index) => listed("running", index));
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		let started!: () => void;
+		const firstWave = new Promise<void>((resolve) => { started = resolve; });
+		let active = 0;
+		let peak = 0;
+		const { bindings, get } = listEnv(threads, async (id) => {
+			active++;
+			peak = Math.max(peak, active);
+			if (active === 8) started();
+			try {
+				await gate;
+				if (id === "list-thread-3") throw new Error("Thread unavailable");
+				return activity;
+			} finally {
+				active--;
+			}
+		});
+		const pending = listThreads(bindings, "list-space");
+		await firstWave;
+		try {
+			expect(get).toHaveBeenCalledTimes(8);
+			expect(active).toBe(8);
+		} finally {
+			release();
+		}
+		const items = await pending;
+		expect(peak).toBe(8);
+		expect(active).toBe(0);
+		expect(get).toHaveBeenCalledTimes(19);
+		expect(items.map((item) => item.id)).toEqual(threads.map((thread) => thread.threadId));
+		expect(items[3]?.activity).toBeUndefined();
+		expect(items.filter((item) => item.activity === activity)).toHaveLength(18);
+	}, 10_000);
 });

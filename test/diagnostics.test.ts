@@ -112,7 +112,7 @@ describe("the majordomo's diagnostics tools", () => {
 			);
 		});
 		const report = await ask("pim_diagnostics", { since: "1h" });
-		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "provider_cooldowns", "runs", "triggers", "turns"]);
+		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "now", "provider_cooldowns", "runs", "stalls", "triggers", "turns"]);
 		expect(report).toMatchObject({ limit: 20, generated_at: expect.any(String), since: expect.any(String) });
 		expect(report.sections.model_calls.items[0]).toMatchObject({ why: "stopped with error", provider: "test", model: "m", run_kind: "interactive", latency_ms: 90_000 });
 		expect(report.sections.events.items[0]).toMatchObject({ kind: "slow_request", detail: { method: "GET", path: "/api/sessions", ms: 7000, api_key: "[redacted]" } });
@@ -262,5 +262,114 @@ describe("scrub", () => {
 		const text = scrub(`Bearer ${SECRET} fetch https://user:pw@${PUBLIC_HOST}:8443/a/b?token=${SECRET} failed for me@example.org, password=hunter2`);
 		expect(text).toBe("Bearer [redacted] fetch [address]/a/b failed for [email], password=[redacted]");
 		expect(scrub("x".repeat(500))).toHaveLength(301);
+	});
+});
+
+describe("tool input summaries", () => {
+	it("keeps operational arguments, redacts before truncating, and never includes bodies", async () => {
+		const { toolSummary, turnsOf } = await import("../src/diagnostics");
+		const summary = toolSummary({ command: `curl -H 'Authorization: Bearer synthetic-value' https://example.invalid/x?key=synthetic-value; TOKEN='synthetic value' echo ok`, body: "private body", thread_id: "thread-1" });
+		expect(summary).not.toContain("synthetic");
+		for (const command of [
+			"curl -H 'Authorization: Bearer synthetic-value'",
+			"Authorization='Basic synthetic value' curl /x",
+			'curl -d \'{"api_key":"synthetic value"}\' https://example.invalid/x?anything=synthetic-value',
+			"run --access-token 'synthetic value'",
+		]) expect(toolSummary({ command })).not.toContain("synthetic");
+		expect(summary).not.toContain("private body");
+		expect(summary).toContain("/x");
+		expect(toolSummary({ command: "x".repeat(300) }).length).toBeLessThanOrEqual(201);
+		const messages = [
+			{ role: "user", content: "go", timestamp: 0 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "call", name: "bash", arguments: { command: "echo ok", timeout: 3 } }], timestamp: 10 },
+			{ role: "toolResult", toolCallId: "call", content: [{ type: "text", text: "ok" }], details: { exitCode: 0 }, timestamp: 20 },
+		] as Message[];
+		expect(turnsOf(messages, new Map(), 30, false)[0]?.steps[1]).toMatchObject({ summary: "command=echo ok timeout=3", exitCode: 0, outputBytes: 29, timeoutMs: 3000 });
+	});
+});
+
+describe("the shared activity view", () => {
+	it("shows parallel pending tools, completed durations and durable last output", async () => {
+		const { activityOf, ActivityWatch } = await import("../src/activity");
+		const { turnsOf } = await import("../src/diagnostics");
+		const messages = [
+			{ role: "user", content: "go", timestamp: 100 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "a", name: "bash", arguments: { command: "echo ok", timeout: 900 } }, { type: "toolCall", id: "b", name: "read", arguments: { path: "README.md" } }], timestamp: 200 },
+			{ role: "toolResult", toolCallId: "b", content: [], timestamp: 300 },
+		] as Message[];
+		const activity = activityOf(turnsOf(messages, new Map(), 1000, true), 1000, { running: true, startedAt: 100, lastOutputAt: 800 });
+		expect(activity.current).toEqual([{ id: "a", name: "bash", summary: "command=echo ok timeout=900", startedAt: 200, elapsedMs: 800, timeoutMs: 900000 }]);
+		expect(activity.lastActivityAt).toBe(800);
+		expect(activity.steps[2]?.ms).toBe(100);
+		expect(activityOf([], 1000, { running: false, startedAt: 100 }).current).toEqual([]);
+		await inPim((pim) => {
+			const watch = new ActivityWatch((pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql);
+			watch.output("test", 800);
+			expect(new ActivityWatch((pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql).lastOutput("test")).toBe(800);
+		});
+	});
+
+	it("exposes the same data on the chat's authorized API", async () => {
+		const response = await api(`/sessions/${ROOT}/activity`);
+		expect(response.status).toBe(200);
+		expect(response.body).toMatchObject({ current: expect.any(Array), steps: expect.any(Array), lastActivityAt: expect.any(Number) });
+	});
+});
+
+describe("stall detection", () => {
+	it("checks declared timeouts, quiet tools and quiet coding transcripts without flagging approvals", async () => {
+		const { activityOf } = await import("../src/activity");
+		const { turnsOf } = await import("../src/diagnostics");
+		const messages = [
+			{ role: "user", content: "go", timestamp: 0 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "a", name: "test", arguments: { command: "vitest run", timeout: 900 } }], timestamp: 100 },
+		] as Message[];
+		const activity = (now: number, lastOutputAt = 100, approval = false) => activityOf(turnsOf(messages, approval ? new Map([["a", { id: "ap", status: "pending", createdAt: 100, decidedAt: null, decidedBy: null }]]) : new Map(), now, true), now, { running: true, startedAt: 0, lastOutputAt, coding: !approval });
+		expect(activity(300100).stalls).toEqual([]);
+		expect(activity(300101).stalls[0]?.reason).toBe("no output for five minutes");
+		expect(activity(900101, 900000).stalls[0]?.reason).toBe("past declared timeout");
+		expect(activity(900101).stalls).toHaveLength(2);
+		expect(activity(900101, 900000, true).stalls).toEqual([]);
+	});
+});
+
+describe("shared coding diagnostics", () => {
+	it("uses exactly the API activity record in now, coding and stalls, regardless of the since window", async () => {
+		const { diagnose } = await import("../src/diagnostics");
+		const activity = { running: true, lastActivityAt: 100, current: [{ name: "test", summary: "command=vitest run", startedAt: 100, elapsedMs: 1000000, timeoutMs: 900000 }], steps: [], stalls: [{ key: "tool:1", reason: "past declared timeout", since: 100 }] };
+		const sources = {
+			now: 1000000,
+			turns: async () => [],
+			codingThreads: async () => [{ threadId: "coding-test", harness: "pi", state: "running", stateReason: null, task: "Run the test", updatedAt: 100, spentUsd: 0, budgetUsd: null, activity }],
+		} as unknown as import("../src/diagnostics").DiagnosticSources;
+		const report = await diagnose(sources, { kind: "now", since: "1m" });
+		expect(report.sections.now?.items).toEqual([{ source: "coding", thread: "coding-test", ...activity }]);
+		expect((await diagnose(sources, { kind: "stalls" })).sections.stalls?.items).toEqual(report.sections.now?.items);
+		expect((await diagnose(sources, { kind: "coding" })).sections.coding?.items[0]).toMatchObject({ activity });
+	});
+});
+
+describe("parallel command silence", () => {
+	it("does not let output from another tool hide a silent command", async () => {
+		const { activityOf } = await import("../src/activity");
+		const { turnsOf } = await import("../src/diagnostics");
+		const messages = [
+			{ role: "user", content: "go", timestamp: 100 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "quiet", name: "bash", arguments: { command: "quiet" } }, { type: "toolCall", id: "loud", name: "bash", arguments: { command: "loud" } }], timestamp: 200 },
+		] as Message[];
+		const activity = activityOf(turnsOf(messages, new Map(), 400000, true), 400000, { running: true, startedAt: 100, lastOutputAt: 399000, outputByCall: { loud: 399000 } });
+		expect(activity.stalls).toEqual([{ key: "tool:quiet", reason: "no output for five minutes", since: 200 }]);
+	});
+});
+
+
+describe("harness timeout units", () => {
+	it("normalizes Pi seconds and Claude Bash milliseconds without guessing missing timeouts", async () => {
+		const { toolTimeout } = await import("../src/diagnostics");
+		expect(toolTimeout("bash", { timeout: 900 })).toBe(900000);
+		expect(toolTimeout("Bash", { timeout: 900000 })).toBe(900000);
+		expect(toolTimeout("shell", { timeout_ms: 900000 })).toBe(900000);
+		expect(toolTimeout("bash", {})).toBeNull();
+		expect(toolTimeout("bash", { timeout: -1 })).toBeNull();
 	});
 });

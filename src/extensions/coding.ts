@@ -51,6 +51,7 @@ function brief(view: CodingThreadView) {
 		repo: view.repo.url,
 		branch: view.repo.branch,
 		provider: view.provider,
+		resolved_profile: view.resolvedProfile,
 		pool: view.pool,
 		placement_reason: view.placementReason,
 		task: view.task.length > 300 ? `${view.task.slice(0, 300)}…` : view.task,
@@ -164,6 +165,7 @@ export const coding = definePimExtension({
 							threads: threads.slice(0, MAX_LISTED).map((thread) => ({
 								thread_id: thread.id,
 								status: thread.state,
+								resolved_profile: thread.resolvedProfile ?? null,
 								repo: thread.repo,
 								branch: thread.branch,
 								task: thread.task.length > 120 ? `${thread.task.slice(0, 120)}…` : thread.task,

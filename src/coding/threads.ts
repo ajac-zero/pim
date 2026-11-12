@@ -53,6 +53,7 @@ export function summaryOf(thread: Listed): CodingThreadSummary {
 		parent: thread.parent,
 		chat: thread.chat,
 		harness: thread.harness,
+		resolvedProfile: thread.resolvedProfile ?? null,
 		spentUsd: thread.spentUsd,
 		budgetUsd: thread.budgetUsd,
 		createdAt: thread.createdAt,

@@ -35,6 +35,8 @@ export type CodingProviderKind = "workspace" | "agent-hosted";
 /** Which model a thread runs on, by the space's provider id (such as `own:anthropic`) and the model's id there. */
 export type PlacementReason = "pinned" | "priority" | "overflow";
 
+export type ResolvedProfile = { readonly provider: string; readonly model: string; readonly source: "explicit" | "space default" | "harness default" | null };
+
 export type AgentProfile = { readonly providerId: string; readonly model: string; readonly thinking?: ModelThinkingLevel };
 
 /** How far a thread's workspace may go, as the workspace spec takes it. `wallClockMin` is a turn's time limit in minutes, null for none: threads have none unless given one. */
@@ -74,6 +76,8 @@ export type CodingThreadRow = {
 	readonly baseSha: string | null;
 	readonly branch: string;
 	readonly profile: AgentProfile;
+	/** The last model resolved for execution; null for threads predating recording. */
+	readonly resolvedProfile: ResolvedProfile | null;
 	readonly harness: CodingHarness;
 	/** The workspace provider's id: where the thread runs, or would first try to while it has made no workspace. */
 	readonly providerId: string;
@@ -330,6 +334,7 @@ export class CodingThreadStore {
 	/** Brings an older thread's tables up to date. Columns added after the first schema go here, as `ALTER TABLE` behind a check. */
 	#migrate(): void {
 		const columns = new Set(this.#sql.exec("PRAGMA table_info(coding_thread)").toArray().map((row) => String(row.name)));
+		if (!columns.has("resolved_profile")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN resolved_profile TEXT");
 		if (!columns.has("harness")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 		// The nonce the thread's model gateway tokens carry (./model-gateway.ts): null until one is minted, and again once they are revoked.
 		if (!columns.has("gateway_nonce")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN gateway_nonce TEXT");
@@ -378,7 +383,7 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
+		thread: Omit<CodingThreadRow, "resolvedProfile" | "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote"> & {
 			consecutiveInterrupts?: number;
 			providerInstance?: string;
 			placed?: boolean;
@@ -417,9 +422,10 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "resolvedProfile" | "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "orbLastMessage" | "orbCostUsd" | "orbCostNote" | "placed" | "placementReason" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
+		if (change.resolvedProfile !== undefined) columns.resolved_profile = change.resolvedProfile === null ? null : JSON.stringify(change.resolvedProfile);
 		if (change.state !== undefined) columns.state = change.state;
 		if (change.stateReason !== undefined) columns.state_reason = change.stateReason;
 		if (change.stateDetail !== undefined) columns.state_detail = change.stateDetail;
@@ -532,6 +538,12 @@ export class CodingThreadStore {
 	lastTurnEndedAt(): number | null {
 		const at = this.#sql.exec("SELECT MAX(at) AS at FROM coding_event WHERE kind = 'thread.turn_ended'").one().at;
 		return at === null ? null : Number(at);
+	}
+
+	/** Model identity changes, without the log's page limit. */
+	profileNotices(): { seq: number; at: number; profile: ResolvedProfile }[] {
+		return this.#sql.exec("SELECT seq, at, data FROM coding_event WHERE kind = 'model.resolved' ORDER BY seq").toArray()
+			.map((row) => ({ seq: Number(row.seq), at: Number(row.at), profile: JSON.parse(String(row.data)) as ResolvedProfile }));
 	}
 
 	events(since = 0, limit = 500): CodingEvent[] {
@@ -688,6 +700,7 @@ function threadOf(row: Row): CodingThreadRow {
 		baseSha: text(row.base_sha),
 		branch: String(row.branch),
 		profile: JSON.parse(String(row.agent_profile)) as AgentProfile,
+		resolvedProfile: row.resolved_profile == null ? null : JSON.parse(String(row.resolved_profile)) as ResolvedProfile,
 		harness: String(row.harness) as CodingHarness,
 		providerId: String(row.provider_id),
 		providerKind: (text(row.provider_kind) ?? "workspace") as CodingProviderKind,

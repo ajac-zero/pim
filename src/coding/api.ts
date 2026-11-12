@@ -1,6 +1,6 @@
 import type { CodingThreadStatus } from "./thread-do";
 import type { QueuePlace } from "./scheduler";
-import type { AgentProfile, CodingHarness, CodingThreadState } from "./thread-store";
+import type { AgentProfile, ResolvedProfile, CodingHarness, CodingThreadState } from "./thread-store";
 
 /**
  * The coding threads API, under `/api/coding/threads`: what the web app and
@@ -30,6 +30,7 @@ export type CodingThreadSummary = {
 	/** The chat it was started from, under which the chat list shows it; null for one started elsewhere. */
 	readonly chat: string | null;
 	readonly harness: CodingHarness;
+	readonly resolvedProfile?: ResolvedProfile | null;
 	readonly spentUsd: number;
 	/** The most it may spend on its model; null when none was set. */
 	readonly budgetUsd: number | null;

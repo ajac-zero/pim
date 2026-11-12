@@ -150,10 +150,10 @@ describe("the coding threads API", () => {
 		});
 		// What the web app reads of it.
 		const log = (await api<{ events: { kind: string }[]; next: number }>(`/coding/threads/${first.body.id}/log`)).body;
-		expect(log.events.map((event) => event.kind)).toEqual(["thread.turn_started", "model_call", "thread.turn_ended"]);
+		expect(log.events.map((event) => event.kind)).toEqual(["model.resolved", "thread.turn_started", "model_call", "thread.turn_ended"]);
 		expect((await api(`/coding/threads/${first.body.id}/log?since=${log.next}`)).body).toEqual({ events: [], next: log.next });
 		const { messages } = (await api<{ messages: { role: string }[] }>(`/coding/threads/${first.body.id}/transcript`)).body;
-		expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(messages.map((message) => message.role)).toEqual(["notice", "user", "assistant"]);
 		expect((await api(`/coding/threads/${first.body.id}/tests`)).body).toEqual({ runs: [] });
 		const sse = await exports.default.fetch(new Request(apiUrl(`/coding/threads/${first.body.id}/events`), { headers: { Authorization: `Bearer ${TOKEN}`, accept: "text/event-stream" } }));
 		expect(sse.headers.get("content-type")).toBe("text/event-stream");
@@ -265,6 +265,7 @@ describe("the coding threads API", () => {
 		const queued = await start({ task: "Write the docs" });
 		expect(queued).toMatchObject({ status: "queued", state: "queued", position: 1, reason: "slots_full", queue: { position: 1, reason: "slots_full" } });
 		expect((await api<{ events: { kind: string; data: unknown }[] }>(`/coding/threads/${queued.id}/log`)).body.events).toEqual([
+			expect.objectContaining({ kind: "model.resolved", data: { provider: "coding-faux", model: "coder", source: "explicit" } }),
 			expect.objectContaining({ kind: "thread.queued", data: { position: 1, reason: "slots_full" } }),
 		]);
 		await vi.waitFor(async () => {
@@ -782,8 +783,8 @@ describe("an agent's coding tools", () => {
 		]);
 		await say("How are the coding threads?");
 		const [list, status, steered, push, missing] = results.map((result) => JSON.parse(result));
-		expect(list.threads[0]).toEqual(expect.objectContaining({ thread_id: thread.id, repo: REPO, status: "idle" }));
-		expect(status).toMatchObject({ thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, budget_usd: null, environment: { state: "none" } });
+		expect(list.threads[0]).toEqual(expect.objectContaining({ resolved_profile: { provider: "coding-faux", model: "coder", source: "explicit" }, thread_id: thread.id, repo: REPO, status: "idle" }));
+		expect(status).toMatchObject({ resolved_profile: { provider: "coding-faux", model: "coder", source: "explicit" }, thread_id: thread.id, url: `https://pim.test/coding/${thread.id}`, status: "idle", branch: thread.repo.branch, budget_usd: null, environment: { state: "none" } });
 		expect(steered).toMatchObject({ thread_id: thread.id });
 		// Refused before anyone is asked.
 		expect(push).toEqual({ error: "github_app_not_configured", message: "GitHub App not configured: ask the Pim owner to set it up" });
@@ -843,7 +844,7 @@ describe("an agent's coding tools", () => {
 			total: 2,
 		});
 		// The whole page has both turns' answers, and one message read whole is its text, uncut.
-		expect(whole).toMatchObject({ total: 4 });
+		expect(whole).toMatchObject({ total: 5 });
 		expect(whole!.messages.map((message) => message.text)).toContain("Looked again.");
 		expect(output).toBe("Added the greeting.");
 		// Another space's thread is not this space's, however asked.

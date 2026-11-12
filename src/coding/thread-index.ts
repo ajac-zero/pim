@@ -1,5 +1,5 @@
 import type { CodingCreator } from "./api";
-import type { CodingHarness, CodingThreadState } from "./thread-store";
+import type { CodingHarness, CodingThreadState, ResolvedProfile } from "./thread-store";
 
 /**
  * A space's list of its coding threads, in its scheduler's Durable Object
@@ -19,6 +19,7 @@ export type IndexedThread = {
 	/** The chat it was started from, which the chat list shows it under as a subthread; null for one started elsewhere. */
 	readonly chat: string | null;
 	readonly harness: CodingHarness;
+	readonly resolvedProfile?: ResolvedProfile | null;
 	readonly task: string;
 	readonly repo: string;
 	readonly ref: string;
@@ -40,7 +41,7 @@ export type IndexedThread = {
 export type ThreadRegistration = Pick<IndexedThread, "threadId" | "createdBy" | "parent" | "chat" | "harness" | "task" | "repo" | "ref" | "budgetUsd" | "createdAt">;
 
 /** What the thread's object says of itself as its state changes. */
-export type ThreadRecord = Pick<IndexedThread, "threadId" | "repo" | "ref" | "branch" | "state" | "stateReason" | "spentUsd" | "budgetUsd" | "createdAt" | "updatedAt" | "lastTurnEndedAt">;
+export type ThreadRecord = Pick<IndexedThread, "threadId" | "repo" | "ref" | "branch" | "state" | "stateReason" | "spentUsd" | "budgetUsd" | "createdAt" | "updatedAt" | "lastTurnEndedAt" | "resolvedProfile">;
 
 /** The most of a task the list keeps. */
 export const MAX_TASK_CHARS = 2000;
@@ -75,6 +76,7 @@ export class CodingThreadIndex {
 		sql.exec(THREAD_INDEX_SCHEMA);
 		// Columns added after the first schema.
 		const columns = new Set(sql.exec("PRAGMA table_info(pim_coding_threads)").toArray().map((column) => column.name));
+		if (!columns.has("resolved_profile")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN resolved_profile TEXT");
 		if (!columns.has("chat")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN chat TEXT");
 		if (!columns.has("harness")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN harness TEXT NOT NULL DEFAULT 'pi'");
 		if (!columns.has("last_turn_ended_at")) sql.exec("ALTER TABLE pim_coding_threads ADD COLUMN last_turn_ended_at INTEGER");
@@ -106,8 +108,9 @@ export class CodingThreadIndex {
 	/** Brings a thread's row up to date, unless it has a newer one already. A thread never entered stays out. */
 	record(thread: ThreadRecord): void {
 		this.#sql.exec(
-			`UPDATE pim_coding_threads SET repo = ?, ref = ?, branch = ?, state = ?, state_reason = ?, spent_usd = ?, budget_usd = ?, created_at = ?, updated_at = ?, last_turn_ended_at = COALESCE(?, last_turn_ended_at)
+			`UPDATE pim_coding_threads SET resolved_profile = ?, repo = ?, ref = ?, branch = ?, state = ?, state_reason = ?, spent_usd = ?, budget_usd = ?, created_at = ?, updated_at = ?, last_turn_ended_at = COALESCE(?, last_turn_ended_at)
 			WHERE thread_id = ? AND updated_at <= ?`,
+			thread.resolvedProfile == null ? null : JSON.stringify(thread.resolvedProfile),
 			thread.repo,
 			thread.ref,
 			thread.branch,
@@ -147,6 +150,7 @@ function indexedOf(row: Record<string, SqlStorageValue>): IndexedThread {
 		parent: row.parent === null ? null : String(row.parent),
 		chat: row.chat === null ? null : String(row.chat),
 		harness: String(row.harness) as CodingHarness,
+		resolvedProfile: row.resolved_profile == null ? null : JSON.parse(String(row.resolved_profile)) as ResolvedProfile,
 		task: String(row.task),
 		repo: String(row.repo),
 		ref: String(row.ref),

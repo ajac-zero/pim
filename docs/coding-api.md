@@ -78,6 +78,7 @@ type CodingThreadView = {
   stateDetail: string | null; // what to tell the person, such as how to set up a workspace backend; for a `model_error`, the provider's HTTP status, error type and code and message, secrets taken out and cut to 500 characters (or the provider and model when it said nothing)
   repo: { url: string; ref: string; branch: string; baseSha: string | null };
   profile: AgentProfile;
+  resolvedProfile: { provider: string; model: string; source: "explicit" | "space default" | "harness default" | null } | null;
   workspaceProvider: string; // the backend it runs on, such as "compose" or "cloudflare"; while it waits for its first slot, the one it tries first
   provider: string;           // the same as `workspaceProvider`: the sandbox provider's id, such as "compose" or "cloudflare"
   pool: string;               // the pool it takes slots from: its provider's id (the registry of pools a deployment may have is separate: see coding-pools.md)
@@ -174,6 +175,7 @@ Paths are under `/api`. Bodies are JSON. `operationId` makes a call idempotent: 
 
 `CodingEvent` is `{ seq, kind, at, provider, model, input, output, cacheRead, cacheWrite, costUsd, data }`. `kind` is one of:
 
+- `model.resolved`: `data: { provider, model, source }`, recorded at start and whenever the runtime identity changes. The thread page shows these as model notices.
 - `model_call`: one call to the model, with its tokens and cost. `data` is null for the thread's own calls; a call a CLI in the workspace made through the model gateway has `data: { via: "gateway", api, pricing, pricedAs?, estimated? }` (see Model gateway for coding threads in [reference.md](reference.md)).
 - `thread.queued`: `data: { position, reason }`, each time the thread waits for a slot.
 - `thread.turn_started`: `data: { operationId }`.
@@ -211,7 +213,8 @@ POST /api/coding/threads
 ```
 
 - `repo` must be `https://github.com/<owner>/<name>` (`invalid`), and one the deployment allows (`forbidden`).
-- `profile` is the thread's model. Without one, it is the space's default model, the one its chats use when an agent has none of its own (`GET /api/model`'s `model`), unless that is a ChatGPT plan model, which coding threads can't use: then it is the deployment's default.
+- `profile` is the thread's model. Without one, it is the space's default model, the one its chats use when an agent has none of its own (`GET /api/model`'s `model`), including a ChatGPT plan model; it does not substitute Workers AI.
+- `resolvedProfile` records the provider and model resolved at start and updates on each model call (and when a CLI reports its model). `source` is `explicit` for a named profile or `space default` for the space model; a CLI using its own default says `harness default`. A CLI that has not reported its model yet says `default`, not an invented model name. Older threads have null until observed, with a null source when their original choice is unknown. This is separate from `provider` and `pool`, which name compute, not the model provider. The header badge, transcript notices and `coding_status` (`resolved_profile`) expose it.
 - `budgetUsd` is the most it spends on its model; without it a thread has no budget and runs until it finishes. With one, at it the thread stops, `failed` with `stateReason: "budget"`, until continued with a bigger one. Not enforced for Codex and Amp, which report no cost.
 - `parent` must be a thread of this space (`not_found`).
 - `harness` is the coding agent that runs it: `pi` by default, `claude-code`, Anthropic's Claude Code CLI ([coding-claude-code.md](coding-claude-code.md)), or `codex`, OpenAI's Codex CLI ([coding-codex.md](coding-codex.md)), each run in the thread's workspace with the person's own subscription, or `mistral-vibe`, Mistral's Vibe CLI ([coding-vibe.md](coding-vibe.md)), or `amp`, Amp's CLI ([coding-amp.md](coding-amp.md)), each run with the person's own API key. A `claude-code` thread's `profile` is `{ providerId: "claude-code", model: "default" }`, the CLI's own model, unless it is given one with that `providerId`, whose `model` the CLI is asked for (`--model`); a `codex` thread's likewise, with `providerId: "codex"` (`-m`), and a `mistral-vibe` thread's with `providerId: "mistral-vibe"` and one of Vibe's model aliases (`--model`, on a new session only). An `amp` thread's `model` is one of Amp's modes, `low`, `medium`, `high` or `ultra` (`--mode`), or `default` for Amp's; another fails its turn.

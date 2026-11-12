@@ -1,3 +1,5 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { CodingThreadStore } from "../src/coding/thread-store";
 import { injectedHeaders } from "../src/coding/workspace/egress";
 import { handleGitBroker } from "../src/coding/git-broker/routes";
 import type { Context } from "@earendil-works/pi-ai";
@@ -564,7 +566,7 @@ describe("a coding thread", () => {
 		expect(status).toMatchObject({ state: "failed", stateReason: "budget", slot: "none" });
 		// The one call it made cost $1 a token, past the budget; the next was never sent.
 		expect(status.spentUsd).toBeGreaterThanOrEqual(1);
-		expect((await stub.log()).map((event) => event.kind)).toEqual(["thread.turn_started", "model_call", "thread.turn_ended", "app.budget_stop"]);
+		expect((await stub.log()).map((event) => event.kind)).toEqual(["model.resolved", "thread.turn_started", "model_call", "thread.turn_ended", "app.budget_stop"]);
 		const transcript = await inside(stub, (thread) => thread.transcript());
 		expect(transcript.at(-1)).toMatchObject({ role: "notice", parts: [{ type: "text", text: expect.stringMatching(/^Stopped: the thread spent \$\d+\.\d\d of its \$0\.5 budget\.$/) }] });
 		expect((await codingScheduler(env, input.space).snapshot()).running).toEqual([]);
@@ -1608,6 +1610,52 @@ describe("a coding thread with an overflow provider", () => {
 });
 
 describe("a coding thread's model", () => {
+	it("records the space default at start and the actual model on later calls, once per change, across eviction", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("First."), fauxAssistantMessage("Second."), fauxAssistantMessage("Third.")]);
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		const status = await inside(stub, async (thread) => {
+			vi.spyOn(thread as unknown as { defaultProfile(space: string): Promise<typeof CODER> }, "defaultProfile").mockResolvedValue(CODER);
+			return thread.start(startInput(id, { profile: undefined }));
+		});
+		expect(status.resolvedProfile).toEqual({ provider: "coding-faux", model: "coder", source: "space default" });
+		await turns(id, 1);
+		// A runtime model change, such as a fallback, must not be mistaken for the requested profile.
+		await inside(stub, async (thread) => {
+			const root = await (await thread.harness.pi()).root(BACKGROUND_CONTEXT);
+			await root.configure({ model: { provider: "coding-faux", modelId: "pricey" } }, BACKGROUND_CONTEXT);
+		});
+		await stub.steer("Again.", { operationId: "second" });
+		await turns(id, 2);
+		expect((await stub.status()).resolvedProfile).toEqual({ provider: "coding-faux", model: "pricey", source: "space default" });
+		await stub.steer("Once more.", { operationId: "third" });
+		await turns(id, 3);
+		const notices = (await inside(stub, (thread) => thread.transcript())).filter((message) => message.role === "notice");
+		expect(notices.map((message) => message.parts)).toEqual([
+			[{ type: "text", text: "Model: coding-faux · coder · space default" }],
+			[{ type: "text", text: "Model: coding-faux · pricey · space default" }],
+		]);
+		expect((await stub.log()).filter((event) => event.kind === "model.resolved")).toHaveLength(2);
+		await runInDurableObject(stub, (_thread: CodingThreadDO, state) => state.abort("evicted")).catch(() => {});
+		const restored = codingThread(env, id);
+		expect((await restored.status()).resolvedProfile).toEqual({ provider: "coding-faux", model: "pricey", source: "space default" });
+		expect((await inside(restored, (thread) => thread.transcript())).filter((message) => message.role === "notice")).toEqual(notices);
+		await restored.archive();
+	});
+
+	it("migrates an older thread without guessing its profile source", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const { id, stub } = await startThread();
+		await turns(id, 1);
+		await runInDurableObject(stub, (_thread: CodingThreadDO, state) => {
+			state.storage.sql.exec("ALTER TABLE coding_thread DROP COLUMN resolved_profile");
+			const migrated = new CodingThreadStore(state.storage.sql);
+			expect(migrated.required().profile).toEqual(CODER);
+			expect(migrated.required().resolvedProfile).toBeNull();
+		});
+		await stub.archive();
+	});
+
 	it("is the space's own provider, called with its key, which the thread never stores", async () => {
 		const key = "sk-coding-secret-4f9a";
 		const authorizations: (string | null)[] = [];
@@ -1633,6 +1681,7 @@ describe("a coding thread's model", () => {
 		expect(ended!.outcome).toBe("completed");
 		expect(authorizations).toEqual([`Bearer ${key}`]);
 		expect((await stub.status()).profile).toEqual({ providerId, model: "coder-1" });
+		expect((await stub.status()).resolvedProfile).toEqual({ provider: providerId, model: "coder-1", source: "explicit" });
 		const stored = await everything(stub);
 		expect(stored).toContain("All done.");
 		expect(stored).not.toContain(key);
@@ -2290,9 +2339,9 @@ describe("a Claude Code thread", () => {
 		await expect((await workspaceOf(id)).readFile(CREDENTIALS)).rejects.toThrow();
 		expect(await everything(stub)).not.toContain("sk-ant-");
 		// The transcript, as the web app shows it: the task, the agent's text, its tools with their results.
-		const transcript = await inside(stub, (thread) => thread.transcript());
+		const transcript = (await inside(stub, (thread) => thread.transcript())).filter((message) => message.role !== "notice");
 		expect(transcript.map((message) => message.role)).toEqual(["user", "assistant", "assistant", "assistant", "tool", "assistant", "tool", "assistant", "tool", "assistant"]);
-		expect(transcript[0]!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
+		expect(transcript.find((message) => message.role === "user")!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
 		expect(transcript[3]!.parts).toEqual([{ type: "tool-call", id: "toolu_01Bash", name: "Bash", arguments: { command: "npm test", description: "Run the tests" } }]);
 		expect(transcript[4]!.parts[0]).toMatchObject({ type: "tool-result", id: "toolu_01Bash", name: "Bash", error: true });
 		// What it cost as the CLI estimated it, its test run, its retry and refusal, and its checkpoint's diff.
@@ -2801,7 +2850,7 @@ describe("a Codex thread", () => {
 		const tables = await everything(stub);
 		for (const secret of ["eyJ-", "rt_original", "rt_rotated"]) expect(tables).not.toContain(secret);
 		const transcript = await inside(stub, (thread) => thread.transcript());
-		expect(transcript[0]!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
+		expect(transcript.find((message) => message.role === "user")!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
 		expect(transcript.flatMap((message) => message.parts).find((part) => part.type === "tool-call" && part.name === "shell")).toMatchObject({ arguments: { command: "npm test" } });
 		expect(transcript.at(-1)!.parts).toEqual([{ type: "text", text: "Fixed `greet` to include the name; the greeting test passes now." }]);
 		// Its tokens as Codex counted them, at no cost, as it estimates none; its tests; its notices and retries.
@@ -3062,7 +3111,7 @@ describe("an Amp thread", () => {
 			["npm test", 0],
 		]);
 		const transcript = await inside(stub, (thread) => thread.transcript());
-		expect(transcript[0]!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
+		expect(transcript.find((message) => message.role === "user")!.parts).toEqual([{ type: "text", text: "Fix the greeting test" }]);
 		expect(transcript.flatMap((message) => message.parts).find((part) => part.type === "tool-call" && part.name === "shell_command")).toMatchObject({ arguments: { command: "npm test" } });
 
 		// A steer is the next turn, which goes on with Amp's thread.

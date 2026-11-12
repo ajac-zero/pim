@@ -72,6 +72,7 @@ import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, t
 import { supervisorSink } from "./supervisor";
 import {
 	type AgentProfile,
+	type ResolvedProfile,
 	type Checkpoint,
 	type CodingEvent,
 	type CodingHarness,
@@ -884,6 +885,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				budgetUsd,
 				startOperation: input.operationId,
 			});
+			this.#recordResolved(profile.providerId, profile.model, cli && profile.model === "default" ? "harness default" : input.profile ? "explicit" : "space default");
 			if (pin !== undefined) this.store.update({ placementReason: "pinned" });
 			this.store.enqueue(input.operationId, task);
 			if (input.rebuildEnvironment) {
@@ -941,6 +943,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			stateDetail: thread.stateDetail,
 			repo: { url: thread.repoUrl, ref: thread.baseRef, branch: thread.branch, baseSha: thread.baseSha },
 			profile: thread.profile,
+			resolvedProfile: thread.resolvedProfile,
 			harness: thread.harness,
 			workspaceProvider: thread.providerId,
 			provider: thread.providerId,
@@ -1214,7 +1217,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 	/** The conversation as the web app shows chats, with the thread's own notices, such as a budget stop. */
 	async transcript(): Promise<TranscriptMessage[]> {
 		await this.lifecycle.start();
-		return transcriptOf(await this.harness.messages());
+		const messages = transcriptOf(await this.harness.messages());
+		for (const [index, notice] of this.store.profileNotices().entries()) {
+			const { provider, model, source } = notice.profile;
+			const message: TranscriptMessage = { id: `model-resolved-${notice.seq}`, role: "notice", parts: [{ type: "text", text: `Model: ${provider} · ${model} · ${source ?? "source unknown"}` }], timestamp: notice.at };
+			const before = index === 0 ? 0 : messages.findIndex((entry) => !entry.id.startsWith("model-resolved-") && entry.timestamp >= notice.at);
+			messages.splice(before < 0 ? messages.length : before, 0, message);
+		}
+		return messages;
 	}
 
 	/**
@@ -1606,6 +1616,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				release();
 				return gatewayError(family, 403, "no_credential", `The space has no ${family === "anthropic" ? "Anthropic" : "OpenAI API"} key: add one in Pim's Settings → Model`);
 			}
+			if (api !== "anthropic-count-tokens") this.#recordResolved(credential.providerId, read.model);
 			const started = this.now();
 			return await forwardToProvider({
 				family,
@@ -1717,6 +1728,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 					if (!thread) return;
 					await codingScheduler(this.env, thread.space).recordThread({
 						threadId: thread.threadId,
+						resolvedProfile: thread.resolvedProfile,
 						repo: thread.repoUrl,
 						ref: thread.baseRef,
 						branch: thread.branch,
@@ -2560,6 +2572,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async #onCliEvent(event: CliEvent): Promise<void> {
 		switch (event.type) {
 			case "session": {
+				if (event.model) this.#recordResolved(this.store.required().harness, event.model);
 				const known = this.store.harnessSession();
 				if (known?.sessionId !== event.sessionId) this.store.setHarnessSession({ sessionId: event.sessionId, costUsd: 0, usage: null });
 				return;
@@ -2568,6 +2581,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 				this.#tellLive({ type: "partial", kind: event.kind, text: event.text });
 				return;
 			case "assistant":
+				if (event.message.model && event.message.model !== "unknown") this.#recordResolved(event.message.provider, event.message.model);
+				await this.#writeMessage(event.message);
+				return;
 			case "tool_result":
 				await this.#writeMessage(event.message);
 				return;
@@ -2989,6 +3005,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				events.end(message);
 				return events;
 			}
+			this.#recordResolved(model.provider, model.id);
 			// A failure says what the provider said, so the turn's detail is never empty.
 			const events = explainFailures(stream(model, context, { ...(options as object), maxTokens: codingMaxTokens(model) }), model);
 			events.result().then(
@@ -2996,6 +3013,17 @@ export class CodingThreadDO extends DurableObject<Env> {
 				(error) => console.warn(JSON.stringify({ event: "pim.coding.model_error", provider: model.provider, model: model.id, error: String(error).slice(0, 500) })),
 			);
 			return events;
+		});
+	}
+
+	/** Records the identity at execution, not just the profile requested at start. */
+	#recordResolved(provider: string, model: string, source?: ResolvedProfile["source"]): void {
+		const previous = this.store.required().resolvedProfile;
+		const resolved: ResolvedProfile = { provider, model, source: source === undefined ? previous?.source ?? null : source };
+		if (previous?.provider === provider && previous.model === model && previous.source === resolved.source) return;
+		this.ctx.storage.transactionSync(() => {
+			this.store.update({ resolvedProfile: resolved });
+			this.store.recordEvent("model.resolved", resolved);
 		});
 	}
 
@@ -3749,6 +3777,7 @@ export type CodingThreadStatus = {
 	readonly stateDetail: string | null;
 	readonly repo: { readonly url: string; readonly ref: string; readonly branch: string; readonly baseSha: string | null };
 	readonly profile: AgentProfile;
+	readonly resolvedProfile: ResolvedProfile | null;
 	readonly harness: CodingHarness;
 	readonly workspaceProvider: string;
 	/** Where the thread runs (or would first try to): the same as `workspaceProvider`, named as the coding API's callers pin it. */

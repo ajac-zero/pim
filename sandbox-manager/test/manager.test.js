@@ -1058,7 +1058,8 @@ describe('with the real workspace-agentd', () => {
 			await m.reconcile()
 			m.server.listen(0, '127.0.0.1', () => console.log(m.server.address().port))
 		`], { stdio: ['ignore', 'pipe', 'inherit'] })
-		const port = Number(await new Promise((r) => child.stdout.once('data', (d) => r(String(d).trim()))))
+		// The manager logs its limits at start; the port is the line that is only digits.
+		const port = await new Promise((r) => child.stdout.on('data', (d) => String(d).split('\n').map((l) => l.trim()).filter((l) => /^\d+$/.test(l)).forEach((l) => r(Number(l)))))
 		const dir = path.join(root, 'pim-s-abc-1')
 		const cmd = ['sh', '-c', 'echo $$; while [ ! -f go ]; do sleep 0.05; done; echo finished']
 		const startTurn = async (headers) => {

@@ -37,7 +37,7 @@ export function RunActivity({
         )}
         {activity.current.map((tool) => (
           <span
-            key={`${tool.startedAt}:${tool.name}`}
+            key={tool.id ?? `${tool.startedAt}:${tool.name}`}
             className="min-w-0 break-words"
           >
             {t("activityNow")}:{" "}

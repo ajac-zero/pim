@@ -81,6 +81,8 @@ export type CodingToolsDeps = {
 	onTestRun?: (run: TestRun) => void;
 	/** Told of output as `bash` and `test` print it. */
 	sink?: (event: CodingOutputEvent) => void;
+	/** Activity of a raw output chunk, even before a full line can be safely redacted and streamed. No content is passed. */
+	onActivity?: (callId: string) => void;
 	/** Who commits made with `git` are by. */
 	gitIdentity?: { name: string; email: string };
 };
@@ -363,6 +365,7 @@ export function createCodingTools(deps: CodingToolsDeps): ToolRegistration[] {
 			timeoutMs: timeoutS * 1000,
 			signal: context.abortSignal,
 			onOutput: (data) => {
+				deps.onActivity?.(api.callId);
 				tail.push(data);
 				forSummary?.push(data);
 				live.push(data);

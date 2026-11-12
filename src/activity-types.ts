@@ -25,7 +25,7 @@ export type Turn = {
 export type Activity = {
 	readonly running: boolean;
 	readonly lastActivityAt: number;
-	readonly current: readonly { name: string; summary: string; startedAt: number; elapsedMs: number; timeoutMs: number | null }[];
+	readonly current: readonly { id?: string; name: string; summary: string; startedAt: number; elapsedMs: number; timeoutMs: number | null }[];
 	readonly steps: readonly TurnStep[];
 	readonly stalls: readonly { key: string; reason: string; since: number }[];
 };

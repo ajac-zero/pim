@@ -9,7 +9,9 @@ import { compile } from "../../../src/ui-lang/compile";
 import { evaluate, initialState } from "../../../src/ui-lang/evaluate";
 import type { Node, UiProgram } from "../../../src/ui-lang/program";
 import {
+  extraState,
   splitUiResponse,
+  stateSummary,
   uiResponseOf,
   uiTurn,
 } from "../../../src/ui-lang/response";
@@ -482,6 +484,68 @@ describe("the ui-response trailer", () => {
       "| Field | Answer |\n| --- | --- |\n| d1 | 5 ✓ |\n\nScore: 1 / 1",
     );
     expect(split?.response.block).toBe("knn");
+  });
+
+  it("carries the block's other state, and still reads a trailer that has none", () => {
+    const withState = {
+      ...response,
+      state: { seats: 12, annual: true, picks: ["a", "b"] },
+    };
+    expect(uiResponseOf(uiTurn("Sent.", withState))).toEqual(withState);
+    // An old trailer has no state; one whose state isn't a record of storable values is read as one without.
+    expect(uiResponseOf(uiTurn("Sent.", response))).toEqual(response);
+    const old =
+      '```ui-response\n{"block":"knn","messageId":"m1","values":{"knn.d1":"5"},"graded":{"knn.d1":true}}\n```';
+    expect(uiResponseOf(old)).toEqual(response);
+    const bad =
+      '```ui-response\n{"block":"knn","values":{},"graded":{},"state":{"x":{"deep":1}}}\n```';
+    expect(uiResponseOf(bad)).toEqual({ block: "knn", values: {}, graded: {} });
+  });
+
+  it("leaves a form's own fields out of the other state, and caps its size", () => {
+    const program = programOf(
+      [
+        "{@state seats = 8}",
+        '<slider name="seats" min={1} max={50}/>',
+        '{@state note = ""}',
+        '<form id="f"><input name="a" label="A"/></form>',
+      ].join("\n"),
+    );
+    const state = {
+      values: { seats: 12, note: "x".repeat(2000), "f.a": "typed" },
+      revealed: {},
+      submitted: {},
+    };
+    expect(extraState(program, state)).toEqual({
+      seats: 12,
+      note: "x".repeat(2000),
+    });
+    const many = programOf(
+      Array.from({ length: 6 }, (_, index) => `{@state s${index} = ""}`).join(
+        "\n",
+      ),
+    );
+    const full = {
+      values: Object.fromEntries(
+        Array.from({ length: 6 }, (_, index) => [
+          `s${index}`,
+          "y".repeat(1000),
+        ]),
+      ),
+      revealed: {},
+      submitted: {},
+    };
+    // Keys that would pass 4 KB are dropped, in declaration order, never cut in half.
+    expect(Object.keys(extraState(many, full))).toEqual([
+      "s0",
+      "s1",
+      "s2",
+      "s3",
+    ]);
+    expect(stateSummary({ seats: 12, ok: true })).toBe(
+      "Other values in the block:\n\n- seats: 12\n- ok: true",
+    );
+    expect(stateSummary({})).toBe("");
   });
 
   it("keeps a fence that only looks like one, and a broken one, out", () => {

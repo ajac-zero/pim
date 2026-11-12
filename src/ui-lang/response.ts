@@ -6,6 +6,11 @@
  * person's message, and answers it from the readable part.
  */
 
+import { MAX_RESPONSE_STATE_BYTES } from "./limits";
+import { fieldsOf, type UiProgram } from "./program";
+import { isStorable } from "./state";
+import { stringOf, type UiState, type Value } from "./value";
+
 /** How a form was answered, as its trailer says. */
 export type UiResponse = {
 	/** The form's id, the block it answers. */
@@ -16,7 +21,35 @@ export type UiResponse = {
 	values: Record<string, string>;
 	/** How each graded field did, by its key. */
 	graded: Record<string, boolean>;
+	/** What the rest of the block held when the form was sent, by key: its sliders, checkboxes and declared state. Old trailers have none. */
+	state?: Record<string, Value>;
 };
+
+/**
+ * What a block holds outside its forms' fields, for a turn to carry: its
+ * sliders, checkboxes and declared state, in the order the block declares
+ * them. Whatever would take the whole beyond MAX_RESPONSE_STATE_BYTES is
+ * left out, so a block can't make a turn larger than the app will send.
+ */
+export function extraState(program: UiProgram, state: UiState): Record<string, Value> {
+	const inForms = new Set(fieldsOf(program).map((field) => field.key));
+	const kept: Record<string, Value> = {};
+	let bytes = 2;
+	for (const key of program.stateKeys) {
+		const value = state.values[key];
+		if (inForms.has(key) || value === undefined || !isStorable(value)) continue;
+		bytes += new TextEncoder().encode(JSON.stringify([key, value])).length + 1;
+		if (bytes > MAX_RESPONSE_STATE_BYTES) break;
+		kept[key] = value;
+	}
+	return kept;
+}
+
+/** That state as a readable Markdown list, or nothing when there is none. */
+export function stateSummary(state: Record<string, Value>): string {
+	const lines = Object.entries(state).map(([key, value]) => `- ${key}: ${stringOf(value).replace(/\r?\n/g, " ")}`);
+	return lines.length === 0 ? "" : ["Other values in the block:", "", ...lines].join("\n");
+}
 
 /** The fence a trailer rides in, alone on its lines. */
 const TRAILER = /```ui-response[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*(?:\r?\n|$)/g;
@@ -33,6 +66,10 @@ function marks(value: unknown): value is Record<string, boolean> {
 	return Object.values(value).every((field) => typeof field === "boolean");
 }
 
+function isStateRecord(value: unknown): value is Record<string, Value> {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.values(value).every(isStorable);
+}
+
 /** The last trailer in a message, or null when it has none. */
 export function uiResponseOf(text: string): UiResponse | null {
 	for (const match of text.matchAll(TRAILER)) {
@@ -41,9 +78,16 @@ export function uiResponseOf(text: string): UiResponse | null {
 		try {
 			const parsed: unknown = JSON.parse(body);
 			if (typeof parsed !== "object" || parsed === null) continue;
-			const { block, messageId, values, graded } = parsed as Record<string, unknown>;
+			const { block, messageId, values, graded, state } = parsed as Record<string, unknown>;
 			if (typeof block !== "string" || !strings(values) || !marks(graded)) continue;
-			return { block, values, graded, ...(messageId !== undefined && typeof messageId === "string" ? { messageId } : {}) };
+			return {
+				block,
+				values,
+				graded,
+				...(messageId !== undefined && typeof messageId === "string" ? { messageId } : {}),
+				// A trailer without state, or with state that isn't a record of storable values, is read as one without.
+				...(isStateRecord(state) ? { state } : {}),
+			};
 		} catch {
 			// Not a trailer: a fence that only looks like one.
 		}

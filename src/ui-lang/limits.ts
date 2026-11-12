@@ -17,6 +17,8 @@ export const MAX_STATE_BYTES = 32 * 1024;
 export const MAX_TEXT_CHARS = 2000;
 /** How long the turn a form sends may be. */
 export const MAX_TURN_BYTES = 16 * 1024;
+/** How much of a block's other state (sliders, checkboxes, declared values) a form's turn carries, as JSON. */
+export const MAX_RESPONSE_STATE_BYTES = 4 * 1024;
 /** How many steps one evaluation of a block may take. */
 export const STEP_BUDGET = 50_000;
 /** How many points a chart may draw. */

@@ -23,9 +23,11 @@ import {
   compile,
   type Evaluation,
   evaluate,
+  extraState,
   initialState,
   MAX_TURN_BYTES,
   type RenderNode,
+  stateSummary,
   storableState,
   stringOf,
   type UiEvent,
@@ -297,7 +299,13 @@ function UiProgramView({
         values,
         graded: submitted.graded,
       };
-      const turn = uiTurn(stringOf(action.args[0] ?? ""), response);
+      // The rest of the block's state goes along, so the agent hears the sliders and checkboxes as they stood.
+      const extra = extraState(program, viewRef.current.state);
+      if (Object.keys(extra).length > 0) response.state = extra;
+      const readable = [stringOf(action.args[0] ?? ""), stateSummary(extra)]
+        .filter((part) => part !== "")
+        .join("\n\n");
+      const turn = uiTurn(readable, response);
       if (turn.length > MAX_TURN_BYTES) {
         unlock(form);
         setProblem(t("uiTurnTooLong"));

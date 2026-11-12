@@ -14,6 +14,7 @@ export type { Action, Evaluation, RenderNode, UiEvent } from "./evaluate";
 export {
 	MAX_DEPTH,
 	MAX_NODES,
+	MAX_RESPONSE_STATE_BYTES,
 	MAX_SOURCE_BYTES,
 	MAX_STATE_BYTES,
 	MAX_TEXT_CHARS,
@@ -24,7 +25,7 @@ export { parse } from "./parse";
 export type { Diagnostic, Expr, RawNode } from "./parse";
 export type { ActionName, ActionSpec, Node, PropValue, UiProgram } from "./program";
 export { checkUiState, isStorable, MAX_STORED_LIST, storableState, uiBlockId } from "./state";
-export { splitUiResponse, uiResponseOf, uiTurn } from "./response";
+export { extraState, splitUiResponse, stateSummary, uiResponseOf, uiTurn } from "./response";
 export type { UiResponse } from "./response";
 export { formSummary, gradeField, initialUiState, numberOf, stringOf } from "./value";
 export type { Field, FormSpec, UiState, Value } from "./value";

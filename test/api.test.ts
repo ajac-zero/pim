@@ -7,6 +7,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
+import { uiBlockId } from "../src/ui-lang";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, textOf, TOKEN, toolUse, triggersOn, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
@@ -1060,5 +1061,136 @@ describe("a slow or restarted space", () => {
 		} finally {
 			log.mockRestore();
 		}
+	});
+});
+
+describe("what a ui block holds", () => {
+	const source = ["{@state volume = 3}", '<form id="quiz" submitLabel="Check">', '  <input name="city" label="Capital" answer="Lisbon" hint="h"/>', "</form>"].join("\n");
+	const block = uiBlockId(source);
+	const draft = { values: { volume: 7, "quiz.city": "Lis" }, revealed: {}, submitted: {} };
+	const answered = {
+		values: { volume: 7, "quiz.city": "Lisbon" },
+		revealed: { quiz: true },
+		submitted: { quiz: { values: { "quiz.city": "Lisbon" }, graded: { "quiz.city": true } } },
+	};
+
+	/** A chat whose agent sent the block, and the id of the message that did. */
+	async function sent(message = `Try it:\n\n\`\`\`ui\n${source}\n\`\`\``) {
+		faux.setResponses([toolUse("send_to_user", { message })]);
+		const { id: session } = (await post("/sessions")).body;
+		await say("Quiz me", session);
+		const messages = (await api(`/sessions/${session}/messages`)).body.messages as TranscriptMessage[];
+		const reply = messages.find((candidate) => candidate.parts.some((part) => part.type === "tool-call" && part.name === "send_to_user"))!;
+		return { session, message: reply.id };
+	}
+	const put = (message: string, id: string, body: unknown) => api(`/messages/${message}/ui-state/${id}`, { method: "PUT", body: JSON.stringify(body) });
+
+	it("keeps a block's state under its version, and reads it back with the message's other blocks", async () => {
+		const { message } = await sent();
+		expect((await api(`/messages/${message}/ui-state`)).body).toEqual({ blocks: {} });
+		const first = await put(message, block, { version: 0, state: draft });
+		expect(first).toMatchObject({ status: 200, body: { version: 1, submitted: false, state: draft } });
+		const second = await put(message, block, { version: 1, state: { ...draft, values: { ...draft.values, "quiz.city": "Lisb" } } });
+		expect(second.body.version).toBe(2);
+		const { blocks } = (await api(`/messages/${message}/ui-state`)).body;
+		expect(Object.keys(blocks)).toEqual([block]);
+		expect(blocks[block]).toMatchObject({ version: 2, submitted: false, state: { values: { volume: 7, "quiz.city": "Lisb" } } });
+	});
+
+	it("answers a stale version with 409 and what is kept, and keeps it", async () => {
+		const { message } = await sent();
+		await put(message, block, { version: 0, state: draft });
+		const stale = await put(message, block, { version: 0, state: answered });
+		expect(stale.status).toBe(409);
+		expect(stale.body.current).toMatchObject({ version: 1, submitted: false, state: draft });
+		// A version from the future is as stale as one from the past.
+		expect((await put(message, block, { version: 5, state: draft })).status).toBe(409);
+		expect((await api(`/messages/${message}/ui-state`)).body.blocks[block].state).toEqual(draft);
+	});
+
+	it("refuses every write to a block once it is submitted", async () => {
+		const { message } = await sent();
+		const done = await put(message, block, { version: 0, state: answered, submitted: true });
+		expect(done.body).toMatchObject({ version: 1, submitted: true });
+		const after = await put(message, block, { version: 1, state: draft });
+		expect(after.status).toBe(409);
+		expect(after.body.current).toMatchObject({ version: 1, submitted: true, state: answered });
+		expect((await put(message, block, { version: 1, state: answered, submitted: true })).status).toBe(409);
+		// It can't be marked submitted with no form answered.
+		const other = await sent();
+		expect((await put(other.message, block, { version: 0, state: draft, submitted: true })).status).toBe(400);
+	});
+
+	it("takes only blocks the message has, and only the keys of the block", async () => {
+		const { message } = await sent();
+		expect((await put(message, "0000000000000a", { version: 0, state: draft })).status).toBe(404);
+		for (const state of [
+			{ values: { stranger: "x" } },
+			{ values: { "quiz.nope": "x" } },
+			{ revealed: { other: true } },
+			{ revealed: { quiz: false } },
+			{ submitted: { other: { values: {}, graded: {} } } },
+			{ submitted: { quiz: { values: { "quiz.nope": "x" }, graded: {} } } },
+			{ submitted: { quiz: { values: {}, graded: { "quiz.city": "yes" } } } },
+			{ values: { volume: { nested: 1 } } },
+			{ values: { volume: [[1]] } },
+			{ values: { volume: Array.from({ length: 65 }, () => 1) } },
+			{ values: { volume: "x".repeat(2001) } },
+			{ extra: {} },
+			[],
+			"text",
+		]) {
+			expect((await put(message, block, { version: 0, state })).status, JSON.stringify(state).slice(0, 60)).toBe(400);
+		}
+		// A number can't be infinite: JSON has no such number, so it arrives as null at most.
+		expect((await api(`/messages/${message}/ui-state/${block}`, { method: "PUT", body: '{"version":0,"state":{"values":{"volume":1e999}}}' })).status).toBe(400);
+		expect((await put(message, block, { version: "0", state: draft })).status).toBe(400);
+		expect((await api(`/messages/${message}/ui-state`)).body).toEqual({ blocks: {} });
+		// Scalars and short lists are kept as they were.
+		const kept = { values: { volume: [1, "two", null, true] }, revealed: {}, submitted: {} };
+		expect((await put(message, block, { version: 0, state: kept })).body.state).toEqual(kept);
+	});
+
+	it("keeps a block's state to 32 KB", async () => {
+		const many = (long: number) => ({ values: { volume: "x".repeat(long), "quiz.city": "y".repeat(long) }, revealed: {}, submitted: {} });
+		const { message } = await sent();
+		// 2 x 2000 characters is well within; what pushes past 32 KB is the many answers a form keeps.
+		const lists = (items: number) => ({
+			values: Object.fromEntries([["volume", Array.from({ length: 64 }, () => "z".repeat(2000))]]),
+			revealed: {},
+			submitted: { quiz: { values: { "quiz.city": Array.from({ length: items }, () => "z".repeat(2000)) }, graded: {} } },
+		});
+		expect((await put(message, block, { version: 0, state: many(2000) })).status).toBe(200);
+		const tooBig = await put(message, block, { version: 1, state: lists(64) });
+		expect(tooBig.status).toBe(400);
+		expect(tooBig.body.error).toContain("32768 bytes");
+		expect((await api(`/messages/${message}/ui-state`)).body.blocks[block].version).toBe(1);
+	});
+
+	it("tells its blocks apart by their source, in a message that has several", async () => {
+		const other = '<form id="two"><input name="a" label="A" answer="1" hint="h"/></form>';
+		const { message } = await sent(`\`\`\`ui\n${source}\n\`\`\`\n\nAnd:\n\n\`\`\`ui\n${other}\n\`\`\``);
+		const second = uiBlockId(other);
+		expect((await put(message, second, { version: 0, state: { values: { "two.a": "1" } } })).status).toBe(200);
+		expect((await put(message, second, { version: 0, state: { values: { "two.a": "2" } } })).status).toBe(409);
+		expect((await put(message, block, { version: 0, state: { values: { "two.a": "1" } } })).status).toBe(400);
+		expect((await put(message, block, { version: 0, state: draft })).status).toBe(200);
+	});
+
+	it("knows no message that isn't an agent's with a block in a chat of the person's", async () => {
+		const { session, message } = await sent();
+		const person = (await api(`/sessions/${session}/messages`)).body.messages.find((candidate: TranscriptMessage) => candidate.role === "user");
+		expect((await put(person.id, block, { version: 0, state: draft })).status).toBe(404);
+		for (const id of ["nope", "0", "999999999", "1.5"]) expect((await api(`/messages/${id}/ui-state`)).status).toBe(404);
+		expect((await api(`/messages/${message}/ui-state/${block}`)).status).toBe(405);
+		// Without the token nothing is read or written.
+		const bare = await exports.default.fetch(apiUrl(`/messages/${message}/ui-state/${block}`), { method: "PUT", body: JSON.stringify({ version: 0, state: draft }) });
+		expect(bare.status).toBe(401);
+		expect((await exports.default.fetch(apiUrl(`/messages/${message}/ui-state`))).status).toBe(401);
+		// A deleted chat's messages are gone.
+		await put(message, block, { version: 0, state: draft });
+		expect((await api(`/sessions/${session}`, { method: "DELETE" })).status).toBe(200);
+		expect((await api(`/messages/${message}/ui-state`)).status).toBe(404);
+		expect((await put(message, block, { version: 1, state: draft })).status).toBe(404);
 	});
 });

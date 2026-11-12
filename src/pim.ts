@@ -441,6 +441,12 @@ const NO_WORKERS_AI = {
 const UTILITY_MODEL_KEY = "utility_model";
 /** `pim_meta` keys of the messages suggested under a chat (see `Pim.#suggestions`) start with this, then its session id. */
 const SUGGESTIONS_KEY = "suggestions:";
+/** Where the sweep of what ui blocks held in messages that are gone left off, and when it last ran. */
+const UI_SWEEP_CURSOR_KEY = "ui_state_sweep_cursor";
+const UI_SWEPT_KEY = "ui_state_swept_at";
+/** How many messages a sweep looks at, and how long it waits before the next unless a chat was deleted. */
+const UI_SWEEP_MESSAGES = 25;
+const UI_SWEEP_EVERY_MS = 10 * 60_000;
 /** The numbered title a fork starts with, by session, until the person's first message in it names it anew. */
 const FORK_KEY = "fork:";
 /** Meta marking a coding thread's turn whose end has woken the agent's chat, by the turn's key (`codingTurnEnded`). */
@@ -6081,6 +6087,44 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
+	 * The transcript entry a message id names, when it is in one of the person's
+	 * chats that is still there. `chats` is what those are, when the caller has
+	 * it already, as a sweep that asks about many messages does.
+	 */
+	async #uiMessage(id: string, chats?: { hidden: Set<string>; ids: Set<string> }) {
+		const found = /^[1-9]\d*$/.test(id) ? await (await this.harness.storage()).entry(Number(id) as EntryId, BACKGROUND_CONTEXT) : undefined;
+		if (!found) return undefined;
+		const conversation = String(found.entry.conversationId);
+		const hidden = chats?.hidden ?? this.#hiddenSessions();
+		const ids = chats?.ids ?? new Set((await this.harness.sessions.list()).map((candidate) => candidate.id));
+		return hidden.has(conversation) || !ids.has(conversation) ? undefined : found;
+	}
+
+	/**
+	 * Forgets what ```ui blocks held in messages that are gone, such as those of
+	 * a deleted chat: the state is kept by message id, and nothing else says
+	 * when a message goes. It looks at a bounded number of messages each time,
+	 * where it left off, so any amount of leftover state is cleared over a few
+	 * runs and none takes long; and at most once in `UI_SWEEP_EVERY_MS` unless
+	 * `now` says a chat was just deleted. Returns how many messages' state it
+	 * forgot.
+	 */
+	async #sweepUiState({ now = false } = {}): Promise<number> {
+		const at = Date.now();
+		if (!now && at - Number(this.store.meta(UI_SWEPT_KEY) ?? 0) < UI_SWEEP_EVERY_MS) return 0;
+		this.store.setMeta(UI_SWEPT_KEY, String(at));
+		const after = this.store.meta(UI_SWEEP_CURSOR_KEY) ?? "";
+		let messages = this.store.uiStateMessages(after, UI_SWEEP_MESSAGES);
+		// At the end of what is kept, the next run starts again from the first.
+		this.store.setMeta(UI_SWEEP_CURSOR_KEY, messages.length < UI_SWEEP_MESSAGES ? "" : (messages[messages.length - 1] as string));
+		if (messages.length === 0) return 0;
+		const chats = { hidden: this.#hiddenSessions(), ids: new Set((await this.harness.sessions.list()).map((candidate) => candidate.id)) };
+		messages = (await Promise.all(messages.map(async (message) => ((await this.#uiMessage(message, chats)) === undefined ? message : null)))).filter((message) => message !== null);
+		for (const message of messages) this.store.deleteUiStates(message);
+		return messages.length;
+	}
+
+	/**
 	 * The ```ui blocks of an agent's message, compiled, by their ids (see
 	 * `uiBlockId`), when it is a message of one of the person's chats: what
 	 * an agent sent with send_to_user, or its text, or another agent's post in
@@ -6088,13 +6132,11 @@ export class Pim extends DurableAgent<Env> {
 	 * a chat that isn't theirs, or is gone, is not found.
 	 */
 	async #uiBlocks(id: string, within?: string): Promise<Map<string, UiProgram>> {
-		const found = /^[1-9]\d*$/.test(id) ? await (await this.harness.storage()).entry(Number(id) as EntryId, BACKGROUND_CONTEXT) : undefined;
+		const found = await this.#uiMessage(id);
 		const conversation = found ? String(found.entry.conversationId) : undefined;
 		if (
 			!found ||
 			conversation === undefined ||
-			this.#hiddenSessions().has(conversation) ||
-			!(await this.harness.sessions.list()).some((candidate) => candidate.id === conversation) ||
 			// An agent reads only its own chat, or the room it speaks in.
 			(within !== undefined && conversation !== within && conversation !== this.#rooms.of(within)?.room)
 		) {
@@ -6572,6 +6614,7 @@ export class Pim extends DurableAgent<Env> {
 				this.store.deleteMeta(`${FORK_KEY}${id}`);
 				this.chatLinks.delete(id);
 				await this.#deleteImages(id);
+				await this.#sweepUiState({ now: true }).catch(() => 0);
 				const visit = this.visits.bySession(id);
 				if (visit) this.visits.setSession(visit.ownerId, null);
 				// Nothing keeps working in a chat the user can no longer see, nor in the tasks it handed out, nor do the other agents in it.
@@ -6640,7 +6683,10 @@ export class Pim extends DurableAgent<Env> {
 					);
 				}
 				if (body.submitted === true && Object.keys(checked.state.submitted).length === 0) throw new HttpError(400, "A block with no form submitted can't be marked submitted");
-				return this.store.setUiState(message!, block!, checked.state, body.submitted === true, current?.version ?? 0);
+				const kept = this.store.setUiState(message!, block!, checked.state, body.submitted === true, current?.version ?? 0);
+				// A write is a good time to tidy: what a deleted chat left behind goes, a few messages at a time.
+				await this.#sweepUiState().catch(() => 0);
+				return kept;
 			},
 		],
 		[

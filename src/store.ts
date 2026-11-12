@@ -986,6 +986,19 @@ export class PimStore {
 		return row ? uiStateOf(row) : undefined;
 	}
 
+	/** Up to `limit` of the messages that have state kept, in order, after the message `after`. */
+	uiStateMessages(after: string, limit: number): string[] {
+		return this.#sql
+			.exec("SELECT DISTINCT message FROM pim_ui_state WHERE message > ? ORDER BY message LIMIT ?", after, limit)
+			.toArray()
+			.map((row) => String(row.message));
+	}
+
+	/** Forgets what the blocks of a message held. */
+	deleteUiStates(message: string): void {
+		this.#sql.exec("DELETE FROM pim_ui_state WHERE message = ?", message);
+	}
+
 	/** Keeps a block's state as its next version. The caller has checked the version it was written over. */
 	setUiState(message: string, block: string, state: unknown, submitted: boolean, previous: number): UiStateRecord {
 		const version = previous + 1;

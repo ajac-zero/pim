@@ -11,6 +11,12 @@ import { api, apiUrl, OWNER, pairTestComputer, pendingApproval, post, ROOT, say,
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { faux, napper, type Pim, utility } from "./worker";
 
+// This file makes more requests for its one person than API_LIMITER's 600 a minute when it runs slowly, as on a shared CI runner, and the tests that came
+// after the limit was reached were refused with a 429. The limit has its own tests (test/auth.test.ts).
+beforeEach(() => {
+	vi.spyOn(env.API_LIMITER, "limit").mockResolvedValue({ success: true });
+});
+
 /** The prompt sections sent last: pi sends the whole prompt once, then only what changed. */
 const system = (messages: readonly Message[]) => JSON.stringify(messages.filter((message) => message.role === "system").at(-1));
 

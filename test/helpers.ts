@@ -228,8 +228,10 @@ export async function messagesOf(session: string, role: "user" | "assistant" | "
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	// Every scripted model response was used: the space did what the test expected.
-	expect(faux.getPendingResponseCount()).toBe(0);
+	// Every scripted model response was used: the space did what the test expected. Unused ones are dropped first, so a test that failed midway doesn't fail the tests after it.
+	const pending = faux.getPendingResponseCount();
+	faux.setResponses([]);
+	expect(pending).toBe(0);
 });
 
 /** Opens a WebSocket at `path` in the API with `token`. */

@@ -224,7 +224,7 @@ import { HARNESSES, type Harness as CodingHarness, isHarness } from "./coding/va
 import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcript";
-import { checkUiState, compile, uiBlockId, type UiProgram } from "./ui-lang";
+import { checkUiState, compile, uiBlockIds, type UiProgram } from "./ui-lang";
 import { RunWatch, runKey, stoppable } from "./run-guard";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import type { RunTags } from "./model-calls";
@@ -6091,18 +6091,28 @@ export class Pim extends DurableAgent<Env> {
 		}
 		const blocks = new Map<string, UiProgram>();
 		for (const message of projectEntries([found.entry])) {
+			// Each text is drawn by itself, so its blocks are told apart within it; consecutive text parts are one text, as the app joins them.
 			const texts: string[] = [];
+			let run = "";
+			const flush = () => {
+				if (run !== "") texts.push(run);
+				run = "";
+			};
 			for (const part of message.parts) {
-				if (message.role === "assistant" && part.type === "text") texts.push(part.text);
+				if (message.role === "assistant" && part.type === "text") run += part.text;
 				if (message.role === "assistant" && part.type === "tool-call" && part.name === SEND_TO_USER) {
+					flush();
 					const sent = (part.arguments as { message?: unknown } | null)?.message;
 					if (typeof sent === "string") texts.push(sent);
 				}
 				if (message.role === "user" && part.type === "text" && ROOM_POST.test(part.text)) texts.push(part.text.replace(ROOM_POST, ""));
 			}
-			for (const source of texts.flatMap(uiSourcesOf)) {
-				const block = uiBlockId(source);
-				if (!blocks.has(block)) blocks.set(block, compile(source));
+			flush();
+			for (const text of texts) {
+				const sources = uiSourcesOf(text);
+				uiBlockIds(sources).forEach((block, index) => {
+					if (!blocks.has(block)) blocks.set(block, compile(sources[index]!));
+				});
 			}
 		}
 		return blocks;

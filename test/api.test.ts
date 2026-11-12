@@ -8,7 +8,7 @@ import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
 import type { TranscriptMessage } from "../src/transcript";
-import { uiBlockId } from "../src/ui-lang";
+import { uiBlockId, uiBlockIds } from "../src/ui-lang";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, textOf, TOKEN, toolUse, triggersOn, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 
@@ -1187,6 +1187,39 @@ describe("what a ui block holds", () => {
 		expect((await put(message, second, { version: 0, state: { values: { "two.a": "2" } } })).status).toBe(409);
 		expect((await put(message, block, { version: 0, state: { values: { "two.a": "1" } } })).status).toBe(400);
 		expect((await put(message, block, { version: 0, state: draft })).status).toBe(200);
+	});
+
+	it("tells two blocks of one source apart: the first keeps the id it always had, the next ones take a number", async () => {
+		const { message, session } = await sent(`\`\`\`ui\n${source}\n\`\`\`\n\nAgain:\n\n\`\`\`ui\n${source}\n\`\`\`\n\nAnd once more, with other spacing:\n\n\`\`\`ui\n\n${source}\n\n\`\`\``);
+		const ids = [block, `${block}-1`, `${block}-2`];
+		expect(uiBlockIds([source, source, ` ${source} `])).toEqual(ids);
+		// What the agent was told when it sent them.
+		const result = JSON.parse(
+			((await api(`/sessions/${session}/messages`)).body.messages as TranscriptMessage[])
+				.flatMap((candidate) => candidate.parts.flatMap((part) => (part.type === "tool-result" && part.name === "send_to_user" ? [part.content.map((content) => (content.type === "text" ? content.text : "")).join("")] : [])))
+				.at(-1)!,
+		) as { uiBlocks: { id: string }[] };
+		expect(result.uiBlocks.map((entry) => entry.id)).toEqual(ids);
+		// Each is kept apart.
+		expect((await put(message, ids[0]!, { version: 0, state: draft })).status).toBe(200);
+		expect((await put(message, ids[1]!, { version: 0, state: answered, submitted: true })).status).toBe(200);
+		// A second write to the first finds only its own version; the second's submission locks only the second.
+		expect((await put(message, ids[0]!, { version: 1, state: { ...draft, values: { ...draft.values, "quiz.city": "Li" } } })).status).toBe(200);
+		expect((await put(message, ids[1]!, { version: 1, state: draft })).status).toBe(409);
+		expect((await put(message, ids[2]!, { version: 0, state: draft })).status).toBe(200);
+		const { blocks } = (await api(`/messages/${message}/ui-state`)).body;
+		expect(Object.keys(blocks).sort()).toEqual([...ids].sort());
+		expect(blocks[ids[0]!]).toMatchObject({ version: 2, submitted: false });
+		expect(blocks[ids[1]!]).toMatchObject({ version: 1, submitted: true });
+		// There is no fourth.
+		expect((await put(message, `${block}-3`, { version: 0, state: draft })).status).toBe(404);
+		expect((await put(message, `${block}-0`, { version: 0, state: draft })).status).toBe(404);
+	});
+
+	it("doesn't count a fence that only shows one, or one of another language, as a block", async () => {
+		const { message } = await sent(`\`\`\`\`md\n\`\`\`ui\n${source}\n\`\`\`\n\`\`\`\`\n\n\`\`\`ui-response\n{"block":"x","values":{},"graded":{}}\n\`\`\`\n\n\`\`\`ui\n${source}\n\`\`\``);
+		expect((await put(message, block, { version: 0, state: draft })).status).toBe(200);
+		expect((await put(message, `${block}-1`, { version: 0, state: draft })).status).toBe(404);
 	});
 
 	describe("read back by the agent with ui_state", () => {

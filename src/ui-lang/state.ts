@@ -13,7 +13,7 @@ import { controlValueOk, type UiState, type Value } from "./value";
 /** How many items a list kept in a block's state may have. */
 export const MAX_STORED_LIST = 64;
 
-/** What a block is called within its message: a short hash of its source, which both sides work out alike. */
+/** What a block is called when it is the only one of its source in its message: a short hash of the source, which both sides work out alike. */
 export function uiBlockId(given: string): string {
 	// Line endings and the space around a block's source don't tell it apart.
 	const source = given.replace(/\r\n/g, "\n").trim();
@@ -28,6 +28,23 @@ export function uiBlockId(given: string): string {
 	a = Math.imul(a ^ (a >>> 16), 2246822507) ^ Math.imul(b ^ (b >>> 13), 3266489909);
 	b = Math.imul(b ^ (b >>> 16), 2246822507) ^ Math.imul(a ^ (a >>> 13), 3266489909);
 	return (4294967296 * (2097151 & b) + (a >>> 0)).toString(16).padStart(14, "0");
+}
+
+/**
+ * The ids of the blocks of one message, by their sources in order, so that
+ * two blocks of one source are two blocks. The first of a source is its hash
+ * alone, as every block was called before blocks of one source were told
+ * apart, so what Pim kept under that id still reads; the n-th after it is the
+ * hash and `-n`. The Worker and the web app both name blocks with this.
+ */
+export function uiBlockIds(sources: readonly string[]): string[] {
+	const seen = new Map<string, number>();
+	return sources.map((source) => {
+		const hash = uiBlockId(source);
+		const occurrence = seen.get(hash) ?? 0;
+		seen.set(hash, occurrence + 1);
+		return occurrence === 0 ? hash : `${hash}-${occurrence}`;
+	});
 }
 
 type Scalar = string | number | boolean | null;

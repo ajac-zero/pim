@@ -385,6 +385,49 @@ describe("what a ui block holds, kept by Pim", () => {
     expect(field("knn.d1").disabled).toBe(false);
   });
 
+  it("keeps two blocks of one source apart: each draws and saves under its own id", async () => {
+    const twice = `\`\`\`ui\n${UI_EXAMPLE}\n\`\`\`\n\nAnd again:\n\n\`\`\`ui\n${UI_EXAMPLE}\n\`\`\``;
+    const held = (d1: string) => ({
+      version: 2,
+      state: { values: { "knn.d1": d1 }, revealed: {}, submitted: {} },
+      submitted: false,
+      updatedAt: 0,
+    });
+    // The first keeps the id every block had; the second's is that and its number.
+    kept[BLOCK] = held("5");
+    kept[`${BLOCK}-1`] = held("9");
+    const draw = () => (
+      <QueryClientProvider client={new QueryClient()}>
+        <ReplyImages images={{}} streaming={false} send={vi.fn()} messageId="m1">
+          <Markdown text={twice} />
+        </ReplyImages>
+      </QueryClientProvider>
+    );
+    const view = render(draw());
+    const d1s = () =>
+      [...document.querySelectorAll<HTMLInputElement>('[data-field="knn.d1"] input')];
+    await waitFor(() => expect(d1s().map((input) => input.value)).toEqual(["5", "9"]));
+    // Changing the second saves the second, and only it.
+    fireEvent.change(d1s()[1] as HTMLInputElement, { target: { value: "7" } });
+    view.unmount();
+    await waitFor(() => expect(saveUiState).toHaveBeenCalledTimes(1));
+    expect(saveUiState.mock.calls[0]?.[1]).toBe(`${BLOCK}-1`);
+    expect(kept[BLOCK]?.state.values).toEqual({ "knn.d1": "5" });
+    expect(kept[`${BLOCK}-1`]?.state.values).toMatchObject({ "knn.d1": "7" });
+  });
+
+  it("still reads what Pim kept under a block's id from before blocks of one source were told apart", async () => {
+    // The only block of its source has the id it always had.
+    kept[BLOCK] = {
+      version: 1,
+      state: { values: { "knn.d1": "4" }, revealed: {}, submitted: {} },
+      submitted: false,
+      updatedAt: 0,
+    };
+    shown(UI_EXAMPLE, { send: vi.fn() });
+    await waitFor(() => expect(field("knn.d1").value).toBe("4"));
+  });
+
   it("keeps what the person typed over what Pim answers late with", async () => {
     kept[BLOCK] = {
       version: 3,
@@ -816,6 +859,42 @@ describe("a ui block while its message streams", () => {
     rerender(view(`${fence(UI_EXAMPLE)}\n\`\`\``, false));
     expect(compiled.at(-1)).toEqual({ source: UI_EXAMPLE, partial: false });
     expect(fields()).toBe(3);
+  });
+
+  it("draws an open fence that briefly equals an earlier whole one as the open one, and leaves the earlier whole", async () => {
+    const source = '<form id="f" submitLabel="Go"><input name="a" required={false}/></form>';
+    // The second fence has been written exactly as far as the first, and not yet closed.
+    const text = `\`\`\`ui\n${source}\n\`\`\`\n\nAgain:\n\n\`\`\`ui\n${source}`;
+    compiled.length = 0;
+    render(view(text, true));
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('[data-part="submit"]')];
+    expect(buttons).toHaveLength(2);
+    // The first is whole: it can be submitted. The second is still arriving: it can't.
+    expect(buttons.map((button) => button.disabled)).toEqual([false, true]);
+    expect(compiled.filter((entry) => entry.partial)).toHaveLength(1);
+    expect(compiled.filter((entry) => !entry.partial)).toHaveLength(1);
+  });
+
+  it("carries what is typed in each of two identical blocks to the block that replaces it", async () => {
+    const source = '<form id="f"><input name="a" label="A"/></form>';
+    const both = (second: string, streaming: boolean) =>
+      `\`\`\`ui\n${source}\n\`\`\`\n\nAgain:\n\n\`\`\`ui\n${second}${streaming ? "" : "\n```"}`;
+    const { rerender } = render(view(both(source, true), true));
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    const inputs = () => [...document.querySelectorAll<HTMLInputElement>('[data-field="f.a"] input')];
+    expect(inputs()).toHaveLength(2);
+    fireEvent.change(inputs()[1] as HTMLInputElement, { target: { value: "second" } });
+    rerender(view(both(source, false), false));
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    // What was typed in the second is still in the second, and not in the first.
+    expect(inputs().map((input) => input.value)).toEqual(["", "second"]);
   });
 
   it("keeps a value typed mid-stream through later compiles and the end, and saves it under the final id", async () => {

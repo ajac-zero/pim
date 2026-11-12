@@ -77,44 +77,6 @@ const Events = createContext<UiEvents>({
 /** How often a block still being written is compiled again, at most. */
 export const COMPILE_EVERY_MS = 250;
 
-/**
- * The ```ui fences of a message's text, in order, and whether the last of
- * them is still open, as a message streaming in has it. Only the last fence
- * can be open, so this is how a block tells the one being written from the
- * finished ones around it.
- */
-export function uiFences(text: string): { sources: string[]; open: boolean } {
-  const sources: string[] = [];
-  let fence: { mark: string; length: number; ui: boolean } | null = null;
-  let from = 0;
-  let offset = 0;
-  for (const line of text.split("\n")) {
-    const found = /^ {0,3}(`{3,}|~{3,})\s*(\w*)/.exec(line);
-    if (found) {
-      const mark = found[1] as string;
-      if (fence === null) {
-        fence = {
-          mark: mark[0] as string,
-          length: mark.length,
-          ui: found[2] === "ui",
-        };
-        from = offset + line.length + 1;
-      } else if (
-        mark[0] === fence.mark &&
-        mark.length >= fence.length &&
-        line.trim() === mark
-      ) {
-        if (fence.ui)
-          sources.push(text.slice(from, Math.max(from, offset - 1)));
-        fence = null;
-      }
-    }
-    offset += line.length + 1;
-  }
-  if (fence?.ui) sources.push(text.slice(from));
-  return { sources, open: fence?.ui === true };
-}
-
 /** What the person typed into a block while it streamed, by message and place, for the block drawn anew when the stream ends and the message is drawn another way. */
 const carried = new Map<string, UiState["values"]>();
 
@@ -178,6 +140,7 @@ export const UiBlock = memo(function UiBlock({
   fallback,
   open: openInText = false,
   slot,
+  block,
 }: {
   source: string;
   /** Its source as a code block, kept for where nothing else can be shown. */
@@ -186,6 +149,8 @@ export const UiBlock = memo(function UiBlock({
   open?: boolean;
   /** Which of its message's ui blocks it is, by order. */
   slot?: number;
+  /** Its id within its message (see `uiBlockIds`), which Pim keeps its state under. */
+  block?: string;
 }) {
   const { streaming, messageId } = useContext(Reply);
   const { t } = useI18n();
@@ -213,7 +178,7 @@ export const UiBlock = memo(function UiBlock({
   return (
     <UiProgramView
       program={program}
-      block={uiBlockId(source)}
+      block={block ?? uiBlockId(source)}
       complete={complete}
       carryKey={
         messageId !== undefined && slot !== undefined

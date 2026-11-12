@@ -28,7 +28,7 @@ import {
   isReplyBlock,
   ReplyBlock,
 } from "~/components/chat/reply-blocks";
-import { isUiBlock, UiBlock, uiFences } from "~/components/chat/ui-block";
+import { isUiBlock, UiBlock } from "~/components/chat/ui-block";
 import { FileKindIcon } from "~/components/file-kind-icon";
 import { FileLink } from "~/components/file-link";
 import { useI18n } from "~/components/i18n";
@@ -50,6 +50,11 @@ import {
 } from "~/lib/queries";
 import { newChatSearch } from "~/lib/start-chat";
 import { cn } from "~/lib/utils";
+import {
+  type UiFence,
+  uiBlockIds,
+  uiFences,
+} from "../../../../src/ui-lang";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** A chat an agent names in its text: by its id, or by its address. */
@@ -648,9 +653,24 @@ function SvgDrawing({
 const Fences = createContext<{
   safe: boolean;
   drawings: boolean;
-  /** The ```ui fences of the text, and whether the last is still open. */
-  ui: { sources: string[]; open: boolean };
-}>({ safe: false, drawings: false, ui: { sources: [], open: false } });
+  /** The ids of the text's ```ui fences, by their order (see `uiBlockIds`), and whether the last is still open. */
+  ui: { ids: string[]; open: boolean };
+}>({ safe: false, drawings: false, ui: { ids: [], open: false } });
+
+/**
+ * Tells each ```ui fence of a text which of them it is, in the fence's own
+ * info string, as `ui slot=2`: Streamdown draws blocks apart from one another
+ * and hands each fence only its own text, which two fences can share.
+ */
+function slotted(text: string, fences: readonly UiFence[]): string {
+  let out = "";
+  let at = 0;
+  fences.forEach((fence, slot) => {
+    out += `${text.slice(at, fence.info.from)}ui slot=${slot}`;
+    at = fence.info.to;
+  });
+  return out + text.slice(at);
+}
 
 /**
  * A fenced code block. It is a component of its own, outside `Markdown`, so
@@ -658,9 +678,11 @@ const Fences = createContext<{
  * ```ui one, is kept between tokens, with what the person has typed in it,
  * rather than made anew each time the text grows.
  */
-function Fence({ className, children }: ComponentProps<"code">) {
+function Fence(props: ComponentProps<"code">) {
+  const { className, children } = props;
   const { safe, drawings, ui } = useContext(Fences);
-  const match = /language-(\w+)/.exec(String(className ?? ""));
+  // The whole of the language: `ui-response` is not `ui`.
+  const match = /language-(\S+)/.exec(String(className ?? ""));
   const language = (match?.[1] ?? "text") as BundledLanguage;
   const source = String(children ?? "").replace(/\n$/, "");
   const code = (
@@ -686,15 +708,22 @@ function Fence({ className, children }: ComponentProps<"code">) {
     return <ReplyBlock kind={language} source={source} fallback={code} />;
   }
   if (isUiBlock(language)) {
-    const last = ui.sources.length - 1;
-    const open = ui.open && source.trim() === ui.sources[last]?.trim();
-    const slot = open
-      ? last
-      : Math.max(
-          0,
-          ui.sources.findIndex((one) => one.trim() === source.trim()),
-        );
-    return <UiBlock source={source} fallback={code} open={open} slot={slot} />;
+    // Which of the text's ui fences it is, from the info string `slotted` wrote; a fence it didn't find (inside a quote, say) has none.
+    const meta = (
+      props as { node?: { properties?: { metastring?: unknown } } }
+    ).node?.properties?.metastring;
+    const found = /\bslot=(\d+)/.exec(String(meta ?? ""))?.[1];
+    const slot = found === undefined ? undefined : Number(found);
+    const open = slot !== undefined && ui.open && slot === ui.ids.length - 1;
+    return (
+      <UiBlock
+        source={source}
+        fallback={code}
+        open={open}
+        slot={slot}
+        block={slot === undefined ? undefined : ui.ids[slot]}
+      />
+    );
   }
   return language === "mermaid" ? (
     <Diagram source={source} fallback={code} />
@@ -740,11 +769,18 @@ export const Markdown = memo(function Markdown({
   drawings?: boolean;
 }) {
   const safe = untrusted || bubble;
-  // The ```ui fences of the text, and whether its last is still being written.
-  const ui = useMemo(() => {
+  // The ```ui fences of the text: their ids, whether the last is still being written, and the text with each told which it is.
+  const fenced = useMemo(() => {
     const fences = uiFences(text);
-    return { ...fences, open: fences.open && streaming === true };
-  }, [text, streaming]);
+    return {
+      ui: {
+        ids: uiBlockIds(fences.map((fence) => fence.source)),
+        open: fences[fences.length - 1]?.open === true && streaming === true,
+      },
+      text: safe ? text : slotted(text, fences),
+    };
+  }, [text, streaming, safe]);
+  const ui = fenced.ui;
   const tone = bubble ? TONES.bubble : TONES.page;
   // One object for as long as the text is drawn the same way, so the blocks Streamdown draws with it
   // keep their state between the tokens of a message, rather than being made anew each time.
@@ -902,7 +938,7 @@ export const Markdown = memo(function Markdown({
             : { remarkPlugins: chatRemarkPlugins })}
           components={components}
         >
-          {mathDelimiters(text)}
+          {mathDelimiters(fenced.text)}
         </Streamdown>
       </div>
     </Fences.Provider>

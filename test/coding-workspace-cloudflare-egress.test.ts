@@ -78,25 +78,40 @@ describe("Cloudflare container egress", () => {
 		expect((await handleEgress(new Request("https://api.example/api/git"), revoked, "api.example")).status).toBe(403);
 	});
 	it("forwards an allowed GET and an allowed WebSocket upgrade, returning the 101 untouched", async () => {
-		const amp = ampThread();
-		const get = await handleEgress(new Request("https://ampcode.com/"), amp, "*", async (request) => {
-			// The harness's own host gets none of the credentials, which are for Pim's hosts alone.
-			expect((request as Request).headers.has("authorization")).toBe(false);
-			expect((request as Request).headers.has("x-api-key")).toBe(false);
-			return new Response("ok");
-		});
-		expect(get.status).toBe(200);
-		const upgrade = new Request("https://ampcode.com/", { headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": "k", "sec-websocket-extensions": "permessage-deflate" } });
-		let sent: Request | undefined;
-		const switching = { status: 101, webSocket: {}, headers: new Headers() } as unknown as Response;
-		const response = await handleEgress(upgrade, amp, "*", async (input) => {
-			sent = input as Request;
-			return switching;
-		});
-		expect(response).toBe(switching);
-		expect(sent?.headers.get("upgrade")).toBe("websocket");
-		expect(sent?.headers.get("sec-websocket-key")).toBe("k");
-		expect(sent?.headers.has("sec-websocket-extensions")).toBe(false);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const amp = ampThread();
+			const get = await handleEgress(new Request("https://ampcode.com/"), amp, "*", async (request) => {
+				// The harness's own host gets none of the credentials, which are for Pim's hosts alone.
+				expect((request as Request).headers.has("authorization")).toBe(false);
+				expect((request as Request).headers.has("x-api-key")).toBe(false);
+				return new Response("ok");
+			});
+			expect(get.status).toBe(200);
+			// Amp's own upgrade URL, whose query carries the thread's revocation token.
+			const upgrade = new Request("https://ampcode.com/?rvt-token=hush", { headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": "k", "sec-websocket-extensions": "permessage-deflate" } });
+			let sent: Request | undefined;
+			const switching = { status: 101, webSocket: {}, headers: new Headers() } as unknown as Response;
+			const response = await handleEgress(upgrade, amp, "*", async (input) => {
+				sent = input as Request;
+				return switching;
+			});
+			expect(response).toBe(switching);
+			expect(sent?.headers.get("upgrade")).toBe("websocket");
+			expect(sent?.headers.get("sec-websocket-key")).toBe("k");
+			expect(sent?.headers.has("sec-websocket-extensions")).toBe(false);
+			// The destination's status is logged for each pass, with nothing of the request that could hold a token.
+			const lines = warn.mock.calls.map((call) => JSON.parse(call[0] as string));
+			expect(lines).toEqual([
+				expect.objectContaining({ event: "pim.coding.egress_allowed", host: "ampcode.com", method: "GET", status: 200, target: "*" }),
+				expect.objectContaining({ event: "pim.coding.egress_allowed", host: "ampcode.com", method: "GET", upgrade: "websocket", status: 101, target: "*" }),
+			]);
+			for (const line of lines) expect(Object.keys(line)).not.toContain("path");
+			expect(JSON.stringify(lines)).not.toContain("rvt-token");
+			expect(JSON.stringify(lines)).not.toContain("hush");
+		} finally {
+			warn.mockRestore();
+		}
 	});
 	it("logs a denied host with its protocol, method and Upgrade header, and marks the 403 as Pim's", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

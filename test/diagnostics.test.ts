@@ -264,3 +264,20 @@ describe("scrub", () => {
 		expect(scrub("x".repeat(500))).toHaveLength(301);
 	});
 });
+
+describe("tool input summaries", () => {
+	it("keeps operational arguments, redacts before truncating, and never includes bodies", async () => {
+		const { toolSummary, turnsOf } = await import("../src/diagnostics");
+		const summary = toolSummary({ command: `curl -H 'Authorization: Bearer synthetic-value' https://example.invalid/x?key=synthetic-value; TOKEN='synthetic value' echo ok`, body: "private body", thread_id: "thread-1" });
+		expect(summary).not.toContain("synthetic");
+		expect(summary).not.toContain("private body");
+		expect(summary).toContain("/x");
+		expect(toolSummary({ command: "x".repeat(300) }).length).toBeLessThanOrEqual(201);
+		const messages = [
+			{ role: "user", content: "go", timestamp: 0 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "call", name: "bash", arguments: { command: "echo ok", timeout: 3 } }], timestamp: 10 },
+			{ role: "toolResult", toolCallId: "call", content: [{ type: "text", text: "ok" }], details: { exitCode: 0 }, timestamp: 20 },
+		] as Message[];
+		expect(turnsOf(messages, new Map(), 30, false)[0]?.steps[1]).toMatchObject({ summary: "command=echo ok timeout=3", exitCode: 0, outputBytes: 29, timeoutMs: 3000 });
+	});
+});

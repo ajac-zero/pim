@@ -103,7 +103,10 @@ Containers start with Internet access disabled. Two catch-all intercepts, HTTP
 and HTTPS, cover every host: the handler checks the URL against the latest policy
 (and the connection target, which for the catch-all is any host), refuses
 nonstandard ports, and injects only into HTTPS requests with a matching
-normalized path. Redirects are returned for a new policy check. The intercepts
+normalized path. Redirects are returned for a new policy check. A WebSocket
+upgrade is answered with a 101 of the handler's own, relaying the destination's
+socket through, so the relay's life is logged; Amp's page
+([coding-amp.md](coding-amp.md)) explains it and the events. The intercepts
 are reinstalled whenever the workspace is created, resumed or given a new
 policy, and again when the Durable Object starts over a container that is still
 running, so a container is never left deciding requests with an older

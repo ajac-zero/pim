@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import { Auth } from "../src/auth";
 import type { Directory, RegistrationPolicy } from "../src/directory";
 import { z } from "zod";
+import type { TranscriptMessage } from "../src/transcript";
+import { uiBlockId } from "../src/ui-lang";
 import { faux, Pim } from "./worker";
 import { Authenticator } from "./webauthn";
 import { ORIGIN, Browser, register, addPasskey, signIn, person, rootOf, directory, OPEN, freshDirectory, operator, admin, holdings, makeDue, withAgentMethod, toolUse, makeArtifact, type Registered } from "./people-support";
@@ -263,6 +265,26 @@ describe("isolation between people", () => {
 		const [ianHost, joHost] = [await hostId(ian.browser), await hostId(jo.browser)];
 		expect(ianHost).toMatch(/^urn:uuid:/);
 		expect(joHost).not.toBe(ianHost);
+	});
+
+	it("what a ui block holds in a message stays with the owner of its chat", async () => {
+		const nell = await person("nell");
+		const owen = await person("owen");
+		const source = '<form id="quiz"><input name="city" label="Capital" answer="Lisbon" hint="h"/></form>';
+		faux.setResponses([toolUse("send_to_user", { message: `\`\`\`ui\n${source}\n\`\`\`` })]);
+		const root = await rootOf(nell.browser);
+		await nell.browser.json(`/api/sessions/${root}/messages`, { method: "POST", json: { content: "Quiz me", wait: true } });
+		const reply = ((await nell.browser.json(`/api/sessions/${root}/messages`)).body.messages as TranscriptMessage[]).find((message) => message.role === "assistant")!;
+		const block = uiBlockId(source);
+		const state = { values: { "quiz.city": "Lis" } };
+		const path = `/api/messages/${reply.id}/ui-state`;
+		const saved = await nell.browser.json(`${path}/${block}`, { method: "PUT", json: { version: 0, state } });
+		expect(saved).toMatchObject({ status: 200, body: { version: 1, state: { values: state.values } } });
+		// Owen's space has no such message: it names no block of Nell's, and what Nell's holds is never read there.
+		expect((await owen.browser.json(`${path}/${block}`, { method: "PUT", json: { version: 0, state } })).status).toBe(404);
+		expect(JSON.stringify((await owen.browser.json(path)).body)).not.toContain("Lis");
+		expect((await new Browser().json(path)).status).toBe(401);
+		expect((await nell.browser.json(path)).body.blocks[block].state.values).toEqual(state.values);
 	});
 
 	it("connected apps, schedules and settings stay with their owner", async () => {

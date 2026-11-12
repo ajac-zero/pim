@@ -159,7 +159,7 @@ import {
 	toolName,
 	toText,
 } from "./extensions/mcp";
-import { MESSAGING_EXTENSION, messagingExtension, NOT_DELIVERED, plainReply, SEND_TO_USER } from "./extensions/messaging";
+import { MESSAGING_EXTENSION, messagingExtension, NOT_DELIVERED, plainReply, SEND_TO_USER, uiSourcesOf } from "./extensions/messaging";
 import { CREATE_MEMORY_SCOPE, createOptMem, type MemoryAccess, type MemoryScope, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, EVERYONE_SCOPE, entryLine, MAX_NAMED_SCOPES, MAX_SCOPE_NAME, PRIVATE_SCOPE } from "./extensions/optmem/store";
@@ -224,6 +224,7 @@ import { HARNESSES, type Harness as CodingHarness, isHarness } from "./coding/va
 import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcript";
+import { checkUiState, compile, uiBlockId, type UiProgram } from "./ui-lang";
 import { RunWatch, runKey, stoppable } from "./run-guard";
 import { ARTIFACT_ASK, conversationText, DESCRIBE_WORK, IMPROVE_PROMPT, NAME_CHAT, type StructuredUtilityTask, MAX_SUGGESTIONS, SUGGEST_PROMPTS, SUMMARIZE_CHAT, type UtilityTask, withJsonSchema } from "./utility";
 import type { RunTags } from "./model-calls";
@@ -6056,6 +6057,43 @@ export class Pim extends DurableAgent<Env> {
 		return link ? { ...link, url: `${this.deployment().publicUrl}/shared/${this.name}/${link.id}` } : null;
 	}
 
+	/**
+	 * The ```ui blocks of an agent's message, compiled, by their ids (see
+	 * `uiBlockId`), when it is a message of one of the person's chats: what
+	 * an agent sent with send_to_user, or its text, or another agent's post in
+	 * a group chat. The person's own messages draw nothing, and a message of
+	 * a chat that isn't theirs, or is gone, is not found.
+	 */
+	async #uiBlocks(id: string): Promise<Map<string, UiProgram>> {
+		const found = /^[1-9]\d*$/.test(id) ? await (await this.harness.storage()).entry(Number(id) as EntryId, BACKGROUND_CONTEXT) : undefined;
+		const conversation = found ? String(found.entry.conversationId) : undefined;
+		if (
+			!found ||
+			conversation === undefined ||
+			this.#hiddenSessions().has(conversation) ||
+			!(await this.harness.sessions.list()).some((candidate) => candidate.id === conversation)
+		) {
+			throw new HttpError(404, `No message ${id}`);
+		}
+		const blocks = new Map<string, UiProgram>();
+		for (const message of projectEntries([found.entry])) {
+			const texts: string[] = [];
+			for (const part of message.parts) {
+				if (message.role === "assistant" && part.type === "text") texts.push(part.text);
+				if (message.role === "assistant" && part.type === "tool-call" && part.name === SEND_TO_USER) {
+					const sent = (part.arguments as { message?: unknown } | null)?.message;
+					if (typeof sent === "string") texts.push(sent);
+				}
+				if (message.role === "user" && part.type === "text" && ROOM_POST.test(part.text)) texts.push(part.text.replace(ROOM_POST, ""));
+			}
+			for (const source of texts.flatMap(uiSourcesOf)) {
+				const block = uiBlockId(source);
+				if (!blocks.has(block)) blocks.set(block, compile(source));
+			}
+		}
+		return blocks;
+	}
+
 	/** A session's name and activity, under its public id. */
 	#sessionInfo(session: string) {
 		const info = this.store.sessionInfo(session);
@@ -6535,6 +6573,39 @@ export class Pim extends DurableAgent<Env> {
 					this.harness.pending({ session: id }),
 				]);
 				return { session, busy, pending, messages: projectEntries(entries) };
+			},
+		],
+		// What a ```ui block of a message holds, kept as the person changes it so that a reload finds it as it was.
+		[
+			"GET",
+			"/messages/:message/ui-state",
+			async ({ message }) => {
+				await this.#uiBlocks(message!);
+				return { blocks: this.store.uiStates(message!) };
+			},
+		],
+		[
+			"PUT",
+			"/messages/:message/ui-state/:block",
+			async ({ message, block }, request) => {
+				this.#assertOpen();
+				const program = (await this.#uiBlocks(message!)).get(block!);
+				if (program === undefined) throw new HttpError(404, `Message ${message} has no ui block ${block}`);
+				const body = await readJson<{ version: unknown; state: unknown; submitted: unknown }>(request);
+				if (!Number.isInteger(body.version) || (body.version as number) < 0) throw new HttpError(400, "version must be the version you last read, 0 for none");
+				if (body.submitted !== undefined && typeof body.submitted !== "boolean") throw new HttpError(400, "submitted must be true or false");
+				const checked = checkUiState(program, body.state);
+				if (!checked.ok) throw new HttpError(400, checked.error);
+				const current = this.store.uiState(message!, block!);
+				// A block that was submitted stays as it was submitted; one written since the version the caller read isn't overwritten unseen.
+				if (current?.submitted || (current?.version ?? 0) !== body.version) {
+					return Response.json(
+						{ error: current?.submitted ? "This block was submitted and can't be changed" : "This block was saved since the version you sent", current: current ?? null },
+						{ status: 409 },
+					);
+				}
+				if (body.submitted === true && Object.keys(checked.state.submitted).length === 0) throw new HttpError(400, "A block with no form submitted can't be marked submitted");
+				return this.store.setUiState(message!, block!, checked.state, body.submitted === true, current?.version ?? 0);
 			},
 		],
 		[

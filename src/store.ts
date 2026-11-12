@@ -259,12 +259,28 @@ CREATE TABLE IF NOT EXISTS pim_ui_audit (
 	status INTEGER NOT NULL,
 	keys TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_ui_state (
+	message TEXT NOT NULL,
+	block TEXT NOT NULL,
+	version INTEGER NOT NULL,
+	state TEXT NOT NULL,
+	submitted INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (message, block)
+);
 `;
 
 /** How many of the majordomo's writes through the app's routes are kept. */
 export const UI_AUDIT_ROWS = 10_000;
 
+/** What the app keeps of one ```ui block of a message: its state, how many times it was saved, and whether it was submitted for good. */
+export type UiStateRecord = { version: number; state: unknown; submitted: boolean; updatedAt: number };
+
 export type UiAuditEntry = { at: string; agent: string; method: string; path: string; status: number; keys: string[] };
+
+function uiStateOf(row: Row): UiStateRecord {
+	return { version: Number(row.version), state: JSON.parse(String(row.state)), submitted: Number(row.submitted) === 1, updatedAt: Number(row.updated_at) };
+}
 
 function goalOf(row: Row): Goal {
 	return {
@@ -378,6 +394,7 @@ export class PimStore {
 			pim_emails: "emails sent",
 			pim_push_subscriptions: "push subscriptions",
 			pim_ui_audit: "writes the majordomo made through the app's routes",
+			pim_ui_state: "what ui blocks in chats hold",
 			pim_artifacts: "apps",
 			pim_artifact_versions: "app versions",
 			pim_artifact_deleted: "deleted app ids",
@@ -954,6 +971,35 @@ export class PimStore {
 			.exec("SELECT * FROM pim_ui_audit ORDER BY id DESC LIMIT ?", limit)
 			.toArray()
 			.map((row) => ({ at: String(row.at), agent: String(row.agent), method: String(row.method), path: String(row.path), status: Number(row.status), keys: JSON.parse(String(row.keys)) as string[] }));
+	}
+
+	// What ```ui blocks hold (./ui-lang/state.ts), by the message they were drawn in and their id in it
+
+	/** What the blocks of a message hold, by block id. */
+	uiStates(message: string): Record<string, UiStateRecord> {
+		const rows = this.#sql.exec("SELECT * FROM pim_ui_state WHERE message = ?", message).toArray();
+		return Object.fromEntries(rows.map((row) => [String(row.block), uiStateOf(row)]));
+	}
+
+	uiState(message: string, block: string): UiStateRecord | undefined {
+		const [row] = this.#sql.exec("SELECT * FROM pim_ui_state WHERE message = ? AND block = ?", message, block).toArray();
+		return row ? uiStateOf(row) : undefined;
+	}
+
+	/** Keeps a block's state as its next version. The caller has checked the version it was written over. */
+	setUiState(message: string, block: string, state: unknown, submitted: boolean, previous: number): UiStateRecord {
+		const version = previous + 1;
+		const updatedAt = Date.now();
+		this.#sql.exec(
+			"INSERT OR REPLACE INTO pim_ui_state (message, block, version, state, submitted, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+			message,
+			block,
+			version,
+			JSON.stringify(state),
+			submitted ? 1 : 0,
+			updatedAt,
+		);
+		return { version, state, submitted, updatedAt };
 	}
 
 	// Notifications

@@ -1512,6 +1512,24 @@ describe("a coding thread's environment", () => {
 		expect((await stub.log()).find((event) => event.kind === "environment.built")?.data).toMatchObject({ key });
 	});
 
+	it("says a backend that keeps no environments is unsupported, with why, and works without one", async () => {
+		const backend = new FakeWorkspaceProvider({ id: "no-environments" });
+		backend.register("git", fakeGit);
+		backend.capabilities.environmentSnapshots = false;
+		codingBackends.registry = workspaceRegistry([backend]);
+		const { repo } = envRepo();
+		codingFaux.setResponses([fauxAssistantMessage("Worked without one.")]);
+		const { id, stub } = await startThread({ repo });
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		const { environment } = await stub.status();
+		expect(environment).toMatchObject({ state: "unsupported", reason: "The workspace backend no-environments keeps no environments", key: null, source: null, rebuildRequested: false });
+		expect(environment.preparedAt).toEqual(expect.any(Number));
+		expect(environment.error).toBeUndefined();
+		// Nothing was set up: the script never ran, and no snapshot was kept.
+		expect(setups).toHaveLength(0);
+		expect(backend.environments.size).toBe(0);
+	});
+
 	it("starts the person's next thread from the snapshot, checked out afresh, and another person's from scratch", async () => {
 		const { repo, fullName, remote } = envRepo();
 		const space = `space-${crypto.randomUUID()}`;

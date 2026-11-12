@@ -784,6 +784,58 @@ describe("an agent's coding tools", () => {
 		expect((await view(thread.id)).state).toBe("archived");
 	});
 
+	it("read what a thread said, and no other space's thread", async () => {
+		// A thread with two turns: the task and a steering, each answered.
+		codingFaux.setResponses([fauxAssistantMessage("Added the greeting."), fauxAssistantMessage("Looked again.")]);
+		const thread = await start();
+		await turns(thread.id, 1);
+		await post(`/coding/threads/${thread.id}/steer`, { text: "Look again." });
+		await turns(thread.id, 2);
+		// Another person's space has a thread of its own, which this space's agent must not find.
+		const theirs = await asOther("/coding/threads", { method: "POST", body: JSON.stringify({ repo: REPO, task: "Their own task", profile: CODER }) });
+		expect(theirs.status).toBe(201);
+		const theirId = ((await theirs.json()) as CodingThreadView).id;
+
+		const answers: string[] = [];
+		const lastResult = (context: Parameters<FauxResponseFactory>[0]) => {
+			const result = context.messages.findLast((message) => message.role === "toolResult");
+			const text = result?.role === "toolResult" && result.content[0]?.type === "text" ? result.content[0].text : "";
+			if (text) answers.push(text);
+			return text;
+		};
+		let whole: { messages: { id: string; role: string; text: string }[]; total: number } | undefined;
+		faux.setResponses([
+			toolUse("coding_transcript", { thread_id: thread.id, role: "user" }),
+			(context) => (lastResult(context), toolUse("coding_transcript", { thread_id: thread.id })),
+			(context) => {
+				const page = JSON.parse(lastResult(context)) as { messages: { id: string; role: string; text: string }[]; total: number };
+				whole = page;
+				const answer = page.messages.find((message) => message.role === "assistant" && message.text === "Added the greeting.");
+				return toolUse("coding_transcript_output", { thread_id: thread.id, id: answer!.id });
+			},
+			(context) => (lastResult(context), toolUse("coding_transcript", { thread_id: theirId, role: "user" })),
+			(context) => (lastResult(context), toolUse("send_to_user", { message: "Read it." })),
+		]);
+		await say("What did the coding thread say?");
+		const ofUser = JSON.parse(answers[0]!);
+		const output = answers[2]!;
+		const denied = JSON.parse(answers[3]!);
+		// The role filter keeps what the thread was told, oldest first, and counts just those.
+		expect(ofUser).toEqual({
+			messages: [
+				{ id: expect.any(String), role: "user", text: "Add a greeting" },
+				{ id: expect.any(String), role: "user", text: "Look again." },
+			],
+			total: 2,
+		});
+		// The whole page has both turns' answers, and one message read whole is its text, uncut.
+		expect(whole).toMatchObject({ total: 4 });
+		expect(whole!.messages.map((message) => message.text)).toContain("Looked again.");
+		expect(output).toBe("Added the greeting.");
+		// Another space's thread is not this space's, however asked.
+		expect(denied).toEqual({ error: "not_found", message: `No coding thread ${theirId}` });
+	});
+
 	it("start on the space's own model unless told another", async () => {
 		expect(await (await getAgentByName(env.Pim, OWNER)).codingDefaultProfile()).toEqual({ providerId: "faux", model: "faux-model" });
 	});

@@ -1,6 +1,7 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, type FauxResponseFactory, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { getAgentByName } from "agents";
 import { CompactionTask } from "@earendil-works/pi-durable";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
@@ -1186,6 +1187,92 @@ describe("what a ui block holds", () => {
 		expect((await put(message, second, { version: 0, state: { values: { "two.a": "2" } } })).status).toBe(409);
 		expect((await put(message, block, { version: 0, state: { values: { "two.a": "1" } } })).status).toBe(400);
 		expect((await put(message, block, { version: 0, state: draft })).status).toBe(200);
+	});
+
+	describe("read back by the agent with ui_state", () => {
+		const calculator = ["{@state seats = 8}", '<slider name="seats" min={1} max={50}/>', '<checkbox name="annual"/>', "{seats}"].join("\n");
+		const fenced = (body: string) => `Try it:\n\n\`\`\`ui\n${body}\n\`\`\``;
+		const resultsOf = async (session: string, tool: string) =>
+			((await api(`/sessions/${session}/messages`)).body.messages as TranscriptMessage[]).flatMap((message) =>
+				message.parts.flatMap((part) => (part.type === "tool-result" && part.name === tool ? [part.content.map((content) => (content.type === "text" ? content.text : "")).join("")] : [])),
+			);
+		/** The agent of `session` calls ui_state with these arguments; what it was told comes back. */
+		async function asks(session: string, args: Record<string, string>) {
+			faux.setResponses([toolUse("ui_state", args), toolUse("send_to_user", { message: "Looked." })]);
+			await say("What did I change?", session);
+			return (await resultsOf(session, "ui_state")).at(-1)!;
+		}
+
+		it("tells the agent the message and block ids when it sends a block, and returns what the person set", async () => {
+			const { session, message } = await sent(fenced(calculator));
+			const id = uiBlockId(calculator);
+			const told = JSON.parse((await resultsOf(session, "send_to_user"))[0]!) as { message: string; uiBlocks: { id: string; label: string }[] };
+			expect(told).toMatchObject({ sent: "Sent.", message, uiBlocks: [{ id, label: "seats: 8" }] });
+			// Nothing changed yet.
+			expect(JSON.parse(await asks(session, { message }))).toMatchObject({ blocks: [{ block: id, values: {}, submitted: false, updatedAt: null }] });
+			const state = { values: { seats: 12, annual: true }, revealed: {}, submitted: {} };
+			await put(message, id, { version: 0, state });
+			const read = JSON.parse(await asks(session, { message, block: id }));
+			expect(read.blocks).toEqual([{ block: id, label: "seats: 8", values: { seats: 12, annual: true }, submitted: false, submittedForms: [], updatedAt: expect.stringMatching(/^20\d\d-/) }]);
+			expect(read.summary).toContain("seats = 12, annual = true");
+		});
+
+		it("reports a submitted form's id and a title", async () => {
+			const { session, message } = await sent();
+			await put(message, block, { version: 0, state: answered, submitted: true });
+			const read = JSON.parse(await asks(session, { message }));
+			expect(read.blocks[0]).toMatchObject({ block, label: "form quiz", submitted: true, submittedForms: ["quiz"], values: { volume: 7, "quiz.city": "Lisbon" } });
+		});
+
+		it("denies a message of another chat or space, or none, and finds no blocks in the person's own words", async () => {
+			const first = await sent();
+			const other = await sent();
+			expect(await asks(first.session, { message: other.message })).toBe(`No message ${other.message} in this chat.`);
+			const person = ((await api(`/sessions/${first.session}/messages`)).body.messages as TranscriptMessage[]).find((candidate) => candidate.role === "user")!;
+			// The person's own words draw no blocks, so there is nothing to read.
+			expect(await asks(first.session, { message: person.id })).toBe("That message has no ui blocks.");
+			for (const message of ["999999999", "nope", "0"]) expect(await asks(first.session, { message })).toBe(`No message ${message} in this chat.`);
+			expect(await asks(first.session, { message: first.message, block: "0000000000000a" })).toContain("has no ui block 0000000000000a");
+			// A chat in someone else's space: its message id means nothing here, and a stranger's state isn't read.
+			const directory = env.Directory.getByName("directory");
+			const registered = await directory.register({ username: "stranger", ip: "192.0.2.7", policy: { mode: "open", maxAccounts: null, perAddressPerDay: 100 } });
+			if (!registered.ok) throw new Error(registered.error);
+			const stranger = registered.account.ownerId;
+			await directory.activate(stranger);
+			await (await getAgentByName(env.Pim, stranger)).provision({ ownerId: stranger, username: "stranger" });
+			const theirToken = (await env.Auth.getByName(stranger).createToken(stranger, "tests", Date.now())).token;
+			const theirs = async (path: string, init: RequestInit = {}) =>
+				(await exports.default.fetch(new Request(apiUrl(path), { ...init, headers: { Authorization: `Bearer ${theirToken}`, "content-type": "application/json" } }))).json() as Promise<any>;
+			faux.setResponses([toolUse("send_to_user", { message: fenced(calculator) })]);
+			const chat = (await theirs("/sessions", { method: "POST", body: "{}" })).id;
+			await theirs(`/sessions/${chat}/messages`, { method: "POST", body: JSON.stringify({ content: "Hi", wait: true }) });
+			const theirMessage = ((await theirs(`/sessions/${chat}/messages`)).messages as TranscriptMessage[]).find((candidate) => candidate.parts.some((part) => part.type === "tool-call" && part.name === "send_to_user"))!;
+			expect(await asks(first.session, { message: theirMessage.id })).toBe(`No message ${theirMessage.id} in this chat.`);
+		});
+
+		it("cuts a large result to fit, and offers a block by its id", async () => {
+			const long = Array.from({ length: 6 }, (_, index) => `{@state note${index} = ""}`).join("\n") + "\n{note0}";
+			const { session, message } = await sent(fenced(long));
+			const id = uiBlockId(long);
+			const values = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [`note${index}`, "n".repeat(1900)]));
+			expect((await put(message, id, { version: 0, state: { values, revealed: {}, submitted: {} } })).status).toBe(200);
+			const read = await asks(session, { message });
+			expect(read.length).toBeLessThanOrEqual(8000);
+			const parsed = JSON.parse(read);
+			expect(parsed.note).toContain("Cut to fit");
+			expect(Object.keys(parsed.blocks[0].values).length).toBeLessThan(6);
+		});
+
+		it("has no way to write: the tool takes no state, and the person's block is the same after", async () => {
+			const { session, message } = await sent(fenced(calculator));
+			const id = uiBlockId(calculator);
+			const state = { values: { seats: 3 }, revealed: {}, submitted: {} };
+			await put(message, id, { version: 0, state });
+			await asks(session, { message, block: id, values: JSON.stringify({ seats: 40 }) } as Record<string, string>);
+			expect((await api(`/messages/${message}/ui-state`)).body.blocks[id]).toMatchObject({ version: 1, state });
+			const tools = (await import("../src/extensions/messaging")).messagingExtension({} as never).tools!.find((tool) => tool.name === "ui_state")!;
+			expect(Object.keys((tools.parameters as { properties: object }).properties)).toEqual(["message", "block"]);
+		});
 	});
 
 	it("knows no message that isn't an agent's with a block in a chat of the person's", async () => {

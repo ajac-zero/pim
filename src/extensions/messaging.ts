@@ -1,15 +1,16 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
-import { compile, uiBlockReference } from "../ui-lang";
+import { compile, uiBlockId, uiBlockReference, type UiProgram } from "../ui-lang";
 import { DELIVERY_REMINDER } from "../transcript";
 import { widgetMarkdown } from "./define";
-import { type PimServices, text } from "./services";
+import { json, type PimServices, text } from "./services";
 
 /** Why a run fails when the agent keeps answering without send_to_user: trying the model again wouldn't help. */
 export const NOT_DELIVERED = "The agent did not deliver its reply with send_to_user.";
 
 /** The tool Pim speaks with: the person sees what it sends, and nothing else it writes. */
 export const SEND_TO_USER = "send_to_user";
+export const UI_STATE = "ui_state";
 export const MESSAGING_EXTENSION = "pim.messaging";
 
 /** How many widgets one message can carry. */
@@ -171,6 +172,17 @@ export function plainReply(message: string): string {
 	});
 }
 
+/** What a block is called to an agent: its forms by title or id, else the start of what it shows. */
+export function uiBlockLabel(program: UiProgram): string {
+	const forms = Object.values(program.forms).map((form) => (form.title ? `${form.title} (form ${form.id})` : `form ${form.id}`));
+	if (forms.length > 0) return forms.join(", ");
+	const first = program.fallbackMarkdown.split(/\r?\n/).map((line) => line.replace(/^[#>*\-\s|]+/, "").trim()).find((line) => line !== "");
+	return first === undefined ? "ui block" : first.length > 60 ? `${first.slice(0, 59)}…` : first;
+}
+
+/** The most a ui_state result may be, characters: a block's state may be 32 KB, and a message has several blocks. */
+export const MAX_UI_STATE_CHARS = 8000;
+
 /** An email's subject when the model gives none: the message's first line. */
 function headline(message: string): string {
 	const line = message.trim().split(/\r?\n/)[0]!.replace(/^[#>*\-\s]+/, "").trim();
@@ -187,7 +199,7 @@ export function messagingExtension(services: PimServices) {
 				"To show pictures, such as an image search's results, put a ```gallery block: a JSON array of { image, caption?, url? }, where url is the page it's from. " +
 				"To show a video, such as an exercise demonstration, put a ```videos block: a JSON array of { url, title? } of YouTube watch, youtu.be or shorts addresses of real videos a tool's result gave you, never made up; it plays in the chat only when the person chooses, and other links stay ordinary Markdown links. " +
 				"To draw a diagram, such as a flowchart, a sequence or a timeline, put a ```mermaid block of Mermaid source in it; the person sees it drawn. " +
-				"To draw a small interactive piece, such as a quiz, a checklist or a form the person fills in and sends back as a turn, put a ```ui block of ui source in it, alone on its lines. " + uiBlockReference() + " " +
+				"To draw a small interactive piece, such as a quiz, a checklist or a form the person fills in and sends back as a turn, put a ```ui block of ui source in it, alone on its lines; to see what the person changed in one without a submit, call ui_state. " + uiBlockReference() + " " +
 				"An image must be an address a tool's result in this chat gave you, such as a page's image from fetch_url, never one you made up; Pim shows a copy of it.",
 		}),
 		complete: Type.Optional(Type.Boolean({ description: "Finish this turn (default true). Set false only for a progress update; send the final answer in a separate call with no other tools." })),
@@ -263,8 +275,12 @@ export function messagingExtension(services: PimServices) {
 			if (channel !== "email") await services.posted(session, message, responseAt, images);
 			// What the widgets showed, and where the images' copies are, go back to the model too, so it knows what the person saw; the app draws them from here.
 			const missing = channel === "email" ? [] : pictured.filter((url) => !images[url]);
+			// Where the person's ui blocks can be read back with ui_state: this message's id, and each block's id with a short label.
+			const uiBlocks = channel === "email" ? [] : uiSourcesOf(message).map((source) => ({ id: uiBlockId(source), label: uiBlockLabel(compile(source)) }));
+			const messageId = uiBlocks.length > 0 ? await services.messageOfCall(session, api.callId) : undefined;
 			const result = {
 				sent,
+				...(messageId !== undefined ? { message: messageId, uiBlocks } : {}),
 				...(shown.length > 0 ? { widgets: shown } : {}),
 				...(Object.keys(images).length > 0 ? { images } : {}),
 				...(missing.length > 0 ? { notShown: `${missing.join(", ")}: not an image Pim could load` } : {}),
@@ -275,9 +291,64 @@ export function messagingExtension(services: PimServices) {
 		},
 	});
 
+	// What the person has done in a ui block of this chat, read without a submit. Read-only: nothing here writes a block's state, which stays the person's.
+	const uiState = defineTool({
+		name: UI_STATE,
+		description:
+			"Read what the person has set in the ```ui blocks of a message you sent in this chat, without waiting for a submit: sliders, checkboxes, drafts and submitted forms, with when each block last changed. " +
+			"The message id and each block's id are in send_to_user's result.",
+		parameters: Type.Object({
+			message: Type.String({ minLength: 1, maxLength: 40, description: "The id of a message you sent with send_to_user, from its result." }),
+			block: Type.Optional(Type.String({ maxLength: 40, description: "Only this block, by the id send_to_user's result gave." })),
+		}),
+		replay: "safe",
+		async execute({ message, block }, api) {
+			const found = await services.uiBlocksOf(String(api.conversationId), message.trim());
+			if ("error" in found) return text(found.error, true);
+			if (block !== undefined && !found.blocks.has(block)) return text(`Message ${message} has no ui block ${block}. Its blocks: ${[...found.blocks.keys()].join(", ") || "none"}.`, true);
+			const kept = services.store.uiStates(message.trim());
+			const entries = [...found.blocks].filter(([id]) => block === undefined || id === block).map(([id, program]) => {
+				const record = kept[id];
+				const state = (record?.state ?? {}) as { values?: Record<string, unknown>; submitted?: Record<string, unknown> };
+				return {
+					block: id,
+					label: uiBlockLabel(program),
+					values: state.values ?? {},
+					submitted: record?.submitted ?? false,
+					submittedForms: Object.keys(state.submitted ?? {}),
+					updatedAt: record === undefined ? null : new Date(record.updatedAt).toISOString(),
+				};
+			});
+			if (entries.length === 0) return text("That message has no ui blocks.");
+			const render = (shown: typeof entries) => ({
+				summary: shown
+					.map((entry) => {
+						const values = Object.entries(entry.values).map(([key, value]) => `${key} = ${JSON.stringify(value)}`);
+						const when = entry.updatedAt === null ? "not changed yet" : `changed ${entry.updatedAt}`;
+						return `- ${entry.label} [${entry.block}], ${when}${entry.submitted ? ", submitted" : ""}: ${values.length > 0 ? values.join(", ") : "no values"}`;
+					})
+					.join("\n"),
+				blocks: shown,
+			});
+			// A large result is cut to fit: whole blocks from the end first, then half of the last block's values at a time.
+			let shown = entries;
+			let result = render(shown);
+			let cut = "";
+			while (JSON.stringify(result).length > MAX_UI_STATE_CHARS) {
+				const last = shown[shown.length - 1]!;
+				const keys = Object.keys(last.values);
+				if (shown.length === 1 && keys.length === 0) break;
+				cut = "Cut to fit: ask for one block by its id to read more.";
+				shown = shown.length > 1 ? shown.slice(0, -1) : [{ ...last, values: Object.fromEntries(Object.entries(last.values).slice(0, Math.floor(keys.length / 2))) }];
+				result = render(shown);
+			}
+			return json({ ...result, ...(cut ? { note: cut } : {}) });
+		},
+	});
+
 	return defineExtension({
 		name: MESSAGING_EXTENSION,
-		tools: [sendToUser],
+		tools: [sendToUser, uiState],
 		hooks: [
 			hook(GenerationTask, {
 				async beforeRequest({ messages }, api, context) {

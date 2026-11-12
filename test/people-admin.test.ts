@@ -842,7 +842,7 @@ describe("circles and visits", () => {
 			expect(system).toContain("Tasca do Chico");
 			expect(system).not.toContain("0420");
 			// The circle's tools, and the visitor's own way to be answered.
-			expect(offered.sort()).toEqual(["calendar_create_event", "calendar_find_events", "current_time", "recall", "send_to_user"]);
+			expect(offered.sort()).toEqual(["calendar_create_event", "calendar_find_events", "current_time", "recall", "send_to_user", "ui_state"]);
 			expect(await transcript(ben.browser, session)).toContain("Events on monday: dentist at 9.");
 			const usage = async (browser: Browser) => (await browser.json("/api/usage")).body.today;
 			expect(await usage(ben.browser)).toMatchObject({ runs: 1, modelRequests: 2 });

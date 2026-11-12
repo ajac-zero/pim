@@ -276,7 +276,7 @@ describe("Amp HTTP placement", () => {
 		const stub = codingThread(env, id);
 		await stub.start(startInput(id, { harness: "amp", provider: "orbs" }));
 		await heartbeat(stub);
-		expect(await stub.status()).toMatchObject({ providerKind: "agent-hosted", state: "running", slot: "none" });
+		expect(await stub.status()).toMatchObject({ providerKind: "agent-hosted", provider: "amp-orbs", pool: "amp-orbs", state: "running", slot: "none" });
 		expect(fake.started).toHaveLength(1);
 	});
 
@@ -290,7 +290,7 @@ describe("Amp HTTP placement", () => {
 		try {
 			await stub.start(startInput(id, { space: OWNER, harness: "amp", provider: "orbs" }));
 			await heartbeat(stub);
-			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", stateDetail: AMP_HTTP_AUTH_REJECTED, slot: "none", provider: "amp-http", inbox: 1 });
+			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", stateDetail: AMP_HTTP_AUTH_REJECTED, slot: "none", provider: "amp-orbs", pool: "amp-orbs", inbox: 1 });
 			expect(fetcher.mock.calls[0]?.[0]).toBe("https://ampcode.com/api/v2/threads");
 			expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: `Bearer ${saved}` });
 			fetcher.mockImplementation(async (url) => String(url).endsWith("/threads") ? Response.json({ thread: { id: "T-http", url: "https://ampcode.com/threads/T-http" } }, { status: 201 }) : String(url).endsWith("/messages") ? Response.json({ messages: [] }) : Response.json({ thread: { agentState: { state: "working" } } }));

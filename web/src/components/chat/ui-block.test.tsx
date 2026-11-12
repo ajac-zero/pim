@@ -28,6 +28,7 @@ import {
   initialState,
   type UiResponse,
   uiBlockId,
+  uiResponseOf,
   uiTurn,
 } from "../../../../src/ui-lang";
 import { UI_EXAMPLE } from "../../../../src/ui-lang/catalog";
@@ -219,6 +220,34 @@ describe("a ui block in a reply", () => {
     expect(submitButton().disabled).toBe(false);
     submit();
     await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+  });
+
+  it("sends a slider and a checkbox outside the form with the turn", async () => {
+    const send = vi.fn().mockResolvedValue(undefined);
+    shown(
+      [
+        "{@state seats = 8}",
+        '<slider name="seats" min={1} max={50}/>',
+        '<checkbox name="annual"/>',
+        '<form id="f" submitLabel="Check and send" onSubmit={[issueNewTurn(formSummary("f"))]}>',
+        '  <input name="a" label="A"/>',
+        "</form>",
+      ].join("\n"),
+      { send },
+    );
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.change(field("f.a"), { target: { value: "x" } });
+    submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    const turn = send.mock.calls[0]?.[0] ?? "";
+    expect(turn).toContain("- seats: 12");
+    expect(turn).toContain("- annual: true");
+    expect(uiResponseOf(turn)).toMatchObject({
+      block: "f",
+      values: { "f.a": "x" },
+      state: { seats: 12, annual: true },
+    });
   });
 
   it("sends once however many times a filled form is submitted", async () => {

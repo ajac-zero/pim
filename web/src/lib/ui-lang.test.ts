@@ -643,6 +643,175 @@ describe("a trailer under attack", () => {
   });
 });
 
+describe("names every object inherits", () => {
+  const NAMES = ["__proto__", "constructor", "prototype"];
+
+  /** Nothing a probe did may have reached what every object shares. */
+  const untouched = () => {
+    expect(Object.keys(Object.prototype)).toEqual([]);
+    expect(Object.getPrototypeOf(Object.prototype)).toBeNull();
+    const plain: Record<string, unknown> = {};
+    for (const name of ["polluted", "pwned", "x", "a"]) {
+      expect(plain[name], name).toBeUndefined();
+    }
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "polluted")).toBe(false);
+  };
+
+  /** Compiles and draws a block, with a few events, and says what it gave; none of it may throw. */
+  const probe = (source: string) => {
+    const program = compile(source);
+    const keys = [...NAMES, "toString", "hasOwnProperty", ...program.stateKeys, ...Object.keys(program.forms)];
+    const results = [null, ...keys.flatMap((key): Parameters<typeof evaluate>[2][] => [
+      { type: "change", key, value: "x" },
+      { type: "change", key, value: true },
+      { type: "submit", form: key },
+      { type: "reveal", form: key },
+      { type: "click", key },
+    ])].map((event) => evaluate(program, initialState(program), event));
+    untouched();
+    return { program, results, drawn: results[0]! };
+  };
+
+  it("refuses them as state names, and as the names of forms and standalone controls", () => {
+    for (const name of NAMES) {
+      for (const source of [
+        `{@state ${name} = 1}`,
+        `{@let ${name} = 1}`,
+        `{#each [1] as ${name}}{/each}`,
+        `{#each [1] as x, ${name}}{/each}`,
+      ]) {
+        const { program } = probe(source);
+        expect(program.stateKeys, source).not.toContain(name);
+        expect(program.diagnostics.length, source).toBeGreaterThan(0);
+      }
+      for (const source of [
+        `<form id="${name}"><input name="a"/></form>`,
+        `<slider name="${name}" min={0} max={9}/>`,
+        `<checkbox name="${name}"/>`,
+      ]) {
+        const { program } = probe(source);
+        expect(program.valid, source).toBe(false);
+        expect(Object.keys(program.forms), source).toEqual([]);
+        expect(program.stateKeys, source).toEqual([]);
+        expect(Object.keys(program.controls), source).toEqual([]);
+      }
+    }
+  });
+
+  it("takes them as the names of fields, which are kept under their form's", () => {
+    for (const name of NAMES) {
+      const { program, results } = probe(`<form id="f"><input name="${name}" label="L"/></form>`);
+      expect(program.valid, name).toBe(true);
+      expect(program.stateKeys, name).toEqual([`f.${name}`]);
+      const typed = evaluate(program, initialState(program), { type: "change", key: `f.${name}`, value: "x" });
+      expect(Object.hasOwn(typed.state.values, `f.${name}`), name).toBe(true);
+      expect(typed.state.values[`f.${name}`], name).toBe("x");
+      // An event for a key the block doesn't have is refused, not kept under a name every object has.
+      for (const result of results.slice(1)) {
+        if (result.error === null) {
+          expect(Object.keys(result.state.values).every((key) => program.stateKeys.includes(key)), name).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("doesn't take them as a tag or a prop", () => {
+    for (const name of NAMES) {
+      const tag = probe(`<${name}>x</${name}>`);
+      // A word of the catalog's own kind is an unknown tag; one that isn't a tag's name at all stays text.
+      expect(tag.program.nodes.some((node) => node.t === "el"), name).toBe(false);
+      expect(tag.program.diagnostics.length, name).toBeGreaterThan(0);
+      const prop = probe(`<box ${name}="x"><text>y</text></box>`);
+      expect(prop.program.diagnostics.map((d) => d.code), name).toContain("unknown_prop");
+      expect(prop.program.valid, name).toBe(true);
+    }
+  });
+
+  it("doesn't take them as a member or as an object's key", () => {
+    for (const name of NAMES) {
+      for (const source of [
+        `{[1].${name}}`,
+        `{"abc".${name}}`,
+        `{ {a: 1}.${name} }`,
+        `{@state o = {a: 1}}\n{o.${name}}`,
+        `{[1]["${name}"]}`,
+        `{ {"${name}": 1} }`,
+        `{ {${name}: 1} }`,
+        `{ {a: {${name}: {polluted: true}}} }`,
+        `{@let o = {a: 1}}\n{#each o.${name} as x}{/each}`,
+      ]) {
+        const { program, drawn } = probe(source);
+        // Dropped as text with a diagnostic, never worked out to something of the language's own machinery.
+        expect(program.diagnostics.length, source).toBeGreaterThan(0);
+        expect(drawn.error, source).toBeNull();
+        expect(program.fallbackMarkdown, source).not.toMatch(/function|\[object|native code/i);
+      }
+    }
+  });
+
+  it("refuses a name worked out at run time, for a list, text or table", () => {
+    for (const name of NAMES) {
+      for (const holder of ["[1]", '"abc"', "{a: 1}"]) {
+        const { results } = probe(`{@let n = "${name}"}\n{${holder}[n]}`);
+        expect(results[0]?.error, `${holder}[${name}]`).toContain("not the block's to read");
+      }
+    }
+    // map and filter read a table's own key, by a name given as text: only its own.
+    const mapped = probe('{@let rows = [{a: 1}, {b: 2}]}\n{join(map(rows, "constructor"), ",")}\n{len(filter(rows, "__proto__"))}');
+    expect(mapped.results[0]?.error).toBeNull();
+    expect(mapped.program.fallbackMarkdown).toBe(",\n0");
+  });
+
+  it("says no form is called by them, whatever the object they come from holds", () => {
+    for (const name of [...NAMES, "toString", "hasOwnProperty", "valueOf"]) {
+      for (const call of ["submitted", "score", "count", "formSummary"]) {
+        const { results } = probe(`<form id="f"><input name="a"/></form>\n{${call}("${name}")}`);
+        expect(results[0]?.error, `${call}("${name}")`).toBe(`No form is called ${name}.`);
+      }
+    }
+    // Events for such a form are refused too, not run.
+    const { program } = probe('<form id="f"><input name="a"/></form>');
+    for (const name of [...NAMES, "toString"]) {
+      for (const type of ["submit", "reveal"] as const) {
+        const result = evaluate(program, initialState(program), { type, form: name });
+        expect(result.error, `${type} ${name}`).toBe(`No form is called ${name}.`);
+      }
+    }
+  });
+
+  it("keeps a state they name out of what may be kept", () => {
+    const program = compile('{@state seats = 8}\n<form id="f"><input name="a"/></form>');
+    // JSON.parse makes `__proto__` a key of its own, as a request body can.
+    const bodies = [
+      '{"values":{"__proto__":"x"}}',
+      '{"values":{"constructor":"x"}}',
+      '{"__proto__":{"values":{"seats":9}}}',
+      '{"revealed":{"__proto__":true}}',
+      '{"revealed":{"constructor":true}}',
+      '{"submitted":{"__proto__":{"values":{},"graded":{}}}}',
+      '{"submitted":{"constructor":{"values":{},"graded":{}}}}',
+      '{"submitted":{"f":{"values":{"__proto__":"x"},"graded":{}}}}',
+      '{"submitted":{"f":{"values":{},"graded":{"constructor":true}}}}',
+    ];
+    for (const body of bodies) {
+      const checked = checkUiState(program, JSON.parse(body));
+      expect(checked.ok, body).toBe(false);
+    }
+    untouched();
+  });
+
+  it("keeps a trailer's names of this kind to its own values", () => {
+    const parsed = uiResponseOf(
+      '```ui-response\n{"block":"f","values":{"__proto__":"x","constructor":"y"},"graded":{"__proto__":true},"state":{"__proto__":{"polluted":true}}}\n```',
+    );
+    // The state of that shape isn't storable, and is read as none; the values are the trailer's own keys.
+    expect(parsed?.state).toBeUndefined();
+    expect(Object.getPrototypeOf(parsed?.values)).toBe(Object.prototype);
+    expect(Object.hasOwn(parsed?.values ?? {}, "__proto__")).toBe(true);
+    untouched();
+  });
+});
+
 describe("the ui language's own code", () => {
   /** What nothing that draws a model's block may use: each runs, or injects, what it is given as code or markup. */
   const FORBIDDEN: Record<string, RegExp> = {

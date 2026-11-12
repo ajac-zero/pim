@@ -467,6 +467,41 @@ describe("what a ui block holds, kept by Pim", () => {
     expect(saveUiState).not.toHaveBeenCalled();
   });
 
+  it("takes only a form's own fields from the answers its chat holds, so Pim isn't sent keys it would refuse", async () => {
+    const source = [
+      '<slider name="seats" min={1} max={50}/>',
+      '<form id="f" onSubmit={[issueNewTurn(formSummary("f"))]}><input name="a"/></form>',
+    ].join("\n");
+    const response: UiResponse = {
+      block: "f",
+      messageId: "m1",
+      values: { "f.a": "typed", bogus: "1", constructor: "2" },
+      graded: {},
+    };
+    const parsed = uiResponseOf(
+      uiTurn("Answers", JSON.parse(JSON.stringify(response))),
+    ) as UiResponse;
+    // A key a turn's JSON gives as its own, as `__proto__` is when parsed.
+    Object.defineProperty(parsed.values, "__proto__", {
+      value: "3",
+      enumerable: true,
+    });
+    shown(source, {
+      send: vi.fn(),
+      submitted: new Map([["f", parsed]]),
+    });
+    expect(field("f.a").value).toBe("typed");
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "12" } });
+    await act(async () => {
+      await vi.waitFor(() => expect(saveUiState).toHaveBeenCalled(), {
+        timeout: 3000,
+      });
+    });
+    const saved = saveUiState.mock.calls[0]?.[2].state.values ?? {};
+    expect(Object.keys(saved).sort()).toEqual(["f.a", "seats"]);
+    expect(checkUiState(compile(source), { values: saved }).ok).toBe(true);
+  });
+
   it("marks the block submitted once its turn was sent, and not before", async () => {
     let placed = () => {};
     const send = vi.fn(

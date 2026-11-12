@@ -55,6 +55,7 @@ export function evaluate(program: UiProgram, given: UiState, event: UiEvent | nu
 			if (control !== undefined) {
 				state.values[event.key] = coerceControl(control, event.value);
 			} else {
+				if (!program.stateKeys.includes(event.key)) throw new EvalError(`The block has no field called ${event.key}.`);
 				if (typeof event.value !== "string") throw new EvalError("That field holds text.");
 				if (event.value.length > MAX_TEXT_CHARS) throw new EvalError(`A text value may be at most ${MAX_TEXT_CHARS} characters.`);
 				state.values[event.key] = event.value;

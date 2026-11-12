@@ -1,3 +1,4 @@
+import { activityOf, type Activity } from "./activity";
 import type { Message } from "@earendil-works/pi-ai";
 import { redactSecrets } from "./hostops";
 import { redact } from "./coding/tools/output";
@@ -21,7 +22,7 @@ const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 
 /** The kinds of thing `pim_diagnostics` reports on, which its `kind` chooses between. */
-export const DIAGNOSTIC_KINDS = ["runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
+export const DIAGNOSTIC_KINDS = ["now", "runs", "turns", "triggers", "model_calls", "provider_cooldowns", "coding", "connectors", "approvals", "events"] as const;
 export type DiagnosticKind = (typeof DIAGNOSTIC_KINDS)[number];
 
 const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credential|cookie|bearer/i;
@@ -151,7 +152,7 @@ export function turnsOf(messages: readonly Message[], approvals: ReadonlyMap<str
 		if (message.role !== "assistant" || !turn) continue;
 		const ms = message.durationMs ?? null;
 		const answered = message.timestamp + (ms ?? 0);
-		turn.steps.push({ kind: "model", at: message.timestamp, ms, model: message.model, stop: message.stopReason, error: message.errorMessage ?? null });
+		turn.steps.push({ kind: "model", at: message.timestamp, ms, model: message.model, stop: message.stopReason, error: message.errorMessage ? scrub(message.errorMessage) : null });
 		turn.modelMs += ms ?? 0;
 		turn.endedAt = Math.max(turn.endedAt, answered);
 		const calls = message.content.flatMap((part) => (part.type === "toolCall" ? [part] : []));
@@ -198,7 +199,7 @@ export type DiagnosticSources = {
 	/** What went wrong with the space's triggers (see ./triggers/failures.ts) since the window began, or null where triggers are off. */
 	triggerFailures(since: number, limit: number): readonly Readonly<Record<string, string | number | null>>[] | null;
 	/** The space's coding threads. */
-	codingThreads(): Promise<readonly { threadId: string; harness: string; state: string; stateReason: string | null; task: string; updatedAt: number; spentUsd: number; budgetUsd: number | null }[]>;
+	codingThreads(): Promise<readonly { threadId: string; harness: string; state: string; stateReason: string | null; task: string; updatedAt: number; spentUsd: number; budgetUsd: number | null; activity?: Activity }[]>;
 };
 
 export type Section = { readonly count: number; readonly items: readonly unknown[]; readonly note?: string };
@@ -388,7 +389,15 @@ function events({ events: log }: DiagnosticSources, since: number, limit: number
 	return section(items, items.length, `The log keeps the last ${EVENT_KEEP} events.`);
 }
 
+async function now(sources: DiagnosticSources, _since: number, limit: number): Promise<Section> {
+	const chats = (await sources.turns(null, 0)).filter(({ turn }) => turn.inProgress).map(({ chat, agent, turn }) => ({ source: "chat", chat, agent, ...activityOf([turn], sources.now, { running: true, startedAt: turn.startedAt }) }));
+	const threads = (await sources.codingThreads()).filter((thread) => thread.state === "running").map((thread) => ({ source: "coding", thread: thread.threadId, ...thread.activity }));
+	const items = [...chats, ...threads];
+	return section(items.slice(0, limit), items.length);
+}
+
 const READERS: Record<DiagnosticKind, (sources: DiagnosticSources, since: number, limit: number, chat: string | null) => Section | Promise<Section>> = {
+	now,
 	runs,
 	turns,
 	triggers,

@@ -112,7 +112,7 @@ describe("the majordomo's diagnostics tools", () => {
 			);
 		});
 		const report = await ask("pim_diagnostics", { since: "1h" });
-		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "provider_cooldowns", "runs", "triggers", "turns"]);
+		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "now", "provider_cooldowns", "runs", "triggers", "turns"]);
 		expect(report).toMatchObject({ limit: 20, generated_at: expect.any(String), since: expect.any(String) });
 		expect(report.sections.model_calls.items[0]).toMatchObject({ why: "stopped with error", provider: "test", model: "m", run_kind: "interactive", latency_ms: 90_000 });
 		expect(report.sections.events.items[0]).toMatchObject({ kind: "slow_request", detail: { method: "GET", path: "/api/sessions", ms: 7000, api_key: "[redacted]" } });
@@ -279,5 +279,33 @@ describe("tool input summaries", () => {
 			{ role: "toolResult", toolCallId: "call", content: [{ type: "text", text: "ok" }], details: { exitCode: 0 }, timestamp: 20 },
 		] as Message[];
 		expect(turnsOf(messages, new Map(), 30, false)[0]?.steps[1]).toMatchObject({ summary: "command=echo ok timeout=3", exitCode: 0, outputBytes: 29, timeoutMs: 3000 });
+	});
+});
+
+describe("the shared activity view", () => {
+	it("shows parallel pending tools, completed durations and durable last output", async () => {
+		const { activityOf, ActivityWatch } = await import("../src/activity");
+		const { turnsOf } = await import("../src/diagnostics");
+		const messages = [
+			{ role: "user", content: "go", timestamp: 100 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "a", name: "bash", arguments: { command: "echo ok", timeout: 900 } }, { type: "toolCall", id: "b", name: "read", arguments: { path: "README.md" } }], timestamp: 200 },
+			{ role: "toolResult", toolCallId: "b", content: [], timestamp: 300 },
+		] as Message[];
+		const activity = activityOf(turnsOf(messages, new Map(), 1000, true), 1000, { running: true, startedAt: 100, lastOutputAt: 800 });
+		expect(activity.current).toEqual([{ name: "bash", summary: "command=echo ok timeout=900", startedAt: 200, elapsedMs: 800, timeoutMs: 900000 }]);
+		expect(activity.lastActivityAt).toBe(800);
+		expect(activity.steps[2]?.ms).toBe(100);
+		expect(activityOf([], 1000, { running: false, startedAt: 100 }).current).toEqual([]);
+		await inPim((pim) => {
+			const watch = new ActivityWatch((pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql);
+			watch.output("test", 800);
+			expect(new ActivityWatch((pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql).lastOutput("test")).toBe(800);
+		});
+	});
+
+	it("exposes the same data on the chat's authorized API", async () => {
+		const response = await api(`/sessions/${ROOT}/activity`);
+		expect(response.status).toBe(200);
+		expect(response.body).toMatchObject({ current: expect.any(Array), steps: expect.any(Array), lastActivityAt: expect.any(Number) });
 	});
 });

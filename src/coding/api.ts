@@ -1,3 +1,4 @@
+import type { Activity } from "../activity";
 import type { CodingThreadStatus } from "./thread-do";
 import type { QueuePlace } from "./scheduler";
 import type { AgentProfile, CodingHarness, CodingThreadState } from "./thread-store";
@@ -15,6 +16,7 @@ export type CodingCreator = { readonly type: "person" } | { readonly type: "agen
 
 /** A thread as the space's list has it. */
 export type CodingThreadSummary = {
+	readonly activity?: Activity;
 	readonly id: string;
 	/** The web app's page for it: `/coding/<id>`. */
 	readonly url: string;

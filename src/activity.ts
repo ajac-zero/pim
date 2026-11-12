@@ -1,0 +1,39 @@
+import type { Turn, TurnStep } from "./diagnostics";
+
+/** The same bounded, redacted activity record for diagnostics and the web app. Times are epoch ms. */
+export type Activity = {
+	readonly running: boolean;
+	readonly lastActivityAt: number;
+	readonly current: readonly { name: string; summary: string; startedAt: number; elapsedMs: number; timeoutMs: number | null }[];
+	readonly steps: readonly TurnStep[];
+	readonly stalls: readonly { key: string; reason: string; since: number }[];
+};
+
+/** A quiet command is worth investigating after five minutes, a quiet coding thread after fifteen. */
+export function activityOf(turns: readonly Turn[], now: number, options: { running: boolean; startedAt: number; lastOutputAt?: number; coding?: boolean; quietMs?: number }): Activity {
+	const turn = turns.at(-1);
+	const steps = turn?.steps ?? [];
+	const lastActivityAt = Math.max(options.startedAt, options.lastOutputAt ?? 0, ...steps.map((step) => step.at + (step.ms ?? 0)));
+	const current = options.running ? steps.flatMap((step) => step.kind === "tool" && step.ms === null && step.approval?.status !== "pending" ? [{ name: step.name, summary: step.summary, startedAt: step.at, elapsedMs: Math.max(0, now - step.at), timeoutMs: step.timeoutMs }] : []) : [];
+	const stalls: { key: string; reason: string; since: number }[] = [];
+	for (const tool of current) {
+		const timeout = tool.timeoutMs !== null && tool.elapsedMs > tool.timeoutMs;
+		const quiet = now - Math.max(tool.startedAt, lastActivityAt) > (options.quietMs ?? 5 * 60_000);
+		if (timeout || quiet) stalls.push({ key: `tool:${tool.startedAt}:${tool.name}`, reason: timeout ? "past declared timeout" : "no output for five minutes", since: tool.startedAt });
+	}
+	if (options.running && options.coding && now - lastActivityAt > 15 * 60_000) stalls.push({ key: `transcript:${options.startedAt}`, reason: "running with no transcript activity for fifteen minutes", since: lastActivityAt });
+	return { running: options.running, lastActivityAt, current, steps: steps.slice(-120), stalls };
+}
+
+/** Durable output timestamps, independent of heartbeat and scheduler updates. No command text is stored. */
+export class ActivityWatch {
+	constructor(readonly sql: SqlStorage) {
+		sql.exec("CREATE TABLE IF NOT EXISTS pim_activity (id TEXT PRIMARY KEY, output_at INTEGER NOT NULL)");
+	}
+	output(id: string, at: number): void {
+		this.sql.exec("INSERT INTO pim_activity (id, output_at) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET output_at = excluded.output_at", id, at);
+	}
+	lastOutput(id: string): number {
+		return Number(this.sql.exec("SELECT output_at FROM pim_activity WHERE id = ?", id).toArray()[0]?.output_at ?? 0);
+	}
+}

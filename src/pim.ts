@@ -1,3 +1,5 @@
+import { codingThread } from "./coding/thread-do";
+import { activityOf } from "./activity";
 import { Workspace } from "@cloudflare/computer";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Api, JsonValue, Model } from "@earendil-works/pi-ai";
@@ -5094,7 +5096,7 @@ export class Pim extends DurableAgent<Env> {
 				chatId: (session) => this.store.publicId(session),
 				triggerFailures: (since, limit) => (this.triggerEngine() ? triggerFailures(this.ctx.storage.sql, since, limit) : null),
 				connectors: () => this.apps.servers(),
-				codingThreads: async () => (await codingScheduler(this.env, this.name).threads()).map((thread) => ({ ...thread })),
+				codingThreads: async () => Promise.all((await codingScheduler(this.env, this.name).threads()).map(async (thread) => ({ ...thread, activity: await codingThread(this.env, thread.threadId).activity() }))),
 			},
 			query,
 		);
@@ -6637,6 +6639,15 @@ export class Pim extends DurableAgent<Env> {
 				// A watch delivers to its chat only: it goes with it.
 				await this.#stopConnectorTriggers((_source, destination) => destination.type === "existing_chat" && destination.chatId === id);
 				return { deleted: true };
+			},
+		],
+		[
+			"GET",
+			"/sessions/:session/activity",
+			async ({ session }) => {
+				await this.#session(session!);
+				const turns = (await this.#turns(session!, 0)).map((item) => item.turn);
+				return activityOf(turns, Date.now(), { running: turns.at(-1)?.inProgress ?? false, startedAt: turns.at(-1)?.startedAt ?? 0 });
 			},
 		],
 		[

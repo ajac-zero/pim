@@ -64,6 +64,7 @@ import type { Fetch, GitHubApp } from "./git-broker/github-app";
 import { brokerTokenKey, deploymentGitHubApp, deploymentProviders, GIT_BROKER_PATH } from "./git-broker/routes";
 import { authEnv } from "./harness/auth";
 import { type CliHarness, cliHarness } from "./harness";
+import { describeModelFailure, explainFailures } from "./model-error";
 import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
 import { supervisorSink } from "./supervisor";
 import {
@@ -2322,6 +2323,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				: null;
 		const state: CodingThreadState = outcome === "error" ? "failed" : login ? "waiting_input" : "idle";
 		const said = await this.#lastSaid().catch(() => null);
+		// pi's result for a model error carries no detail: the provider's words are in the failed response it recorded, or, when it said nothing, the provider and model are what is known.
+		if (reason === "model_error" && !result.detail?.trim()) result = { ...result, detail: (await this.#lastModelError().catch(() => null)) ?? describeModelFailure("", `${thread.profile.providerId} ${thread.profile.model} ended the turn with an error and no message`) };
 		const detail = loop ? `The sandbox's session reached its time limit ${MAX_SESSION_RESTARTS + 1} times in a row without the thread committing anything new, so it stopped; continue it, or ask for less per turn` : outcome === "completed" ? null : exhausted && lost ? lostDetail(result.detail) : (result.detail ?? thread.stateDetail)?.slice(0, DETAIL_MAX);
 		const stop = budget ? { budgetUsd: thread.budgetUsd ?? 0, spentUsd: thread.spentUsd } : null;
 		const event: TurnEndedEvent = {
@@ -2367,6 +2370,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 				.join("\n")
 				.trim();
 			if (text) return text.length > SAID_CHARS ? `…${text.slice(-SAID_CHARS)}` : text;
+		}
+		return null;
+	}
+
+	/** What the last failed model response of pi's said, as `explainFailures` wrote it; null when none is recorded. */
+	async #lastModelError(): Promise<string | null> {
+		const entries = await this.harness.messages();
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const message = entries[index]!.model?.[0];
+			if (message?.role === "assistant" && message.stopReason === "error") return message.errorMessage?.trim() ? message.errorMessage.slice(0, DETAIL_MAX) : null;
 		}
 		return null;
 	}
@@ -2539,7 +2552,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 				events.end(message);
 				return events;
 			}
-			const events = stream(model, context, { ...(options as object), maxTokens: codingMaxTokens(model) });
+			// A failure says what the provider said, so the turn's detail is never empty.
+			const events = explainFailures(stream(model, context, { ...(options as object), maxTokens: codingMaxTokens(model) }), model);
 			events.result().then(
 				(message) => this.#recordCall(model, message),
 				(error) => console.warn(JSON.stringify({ event: "pim.coding.model_error", provider: model.provider, model: model.id, error: String(error).slice(0, 500) })),

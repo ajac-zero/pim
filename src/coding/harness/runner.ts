@@ -1,3 +1,4 @@
+import { describeModelFailure, isModelFailure, MODEL_ERROR_MAX, redactSecrets } from "../model-error";
 import { redact } from "../tools/output";
 import { parseTestSummary, type TestRun } from "../tools";
 import type { Restored } from "../vault/inject";
@@ -247,6 +248,7 @@ export class HarnessRunner {
 			sessionUsage: null as HarnessUsage | null,
 			authFailed: null as string | null,
 			stderr: "",
+			retry: null as string | null,
 			exit: null as { code: number | null; timedOut?: boolean } | null,
 			lines: record.lines,
 		};
@@ -275,6 +277,9 @@ export class HarnessRunner {
 						break;
 					case "auth_failed":
 						seen.authFailed = event.message;
+						break;
+					case "retry":
+						seen.retry = `${event.status ? `HTTP ${event.status} ` : ""}${event.error}`.trim();
 						break;
 					case "result":
 						seen.result = event;
@@ -366,6 +371,7 @@ export class HarnessRunner {
 
 		const { sessionId, model, result, authFailed, stderr, exit, sessionUsage, lines: count } = seen;
 		const ended = (reason: RunFailure, detail: string): RunResult => ({ status: "unanswered", reason, detail, sessionId, sessionCostUsd: result?.sessionCostUsd ?? null, usage: sum(usage), sessionUsage, model, lines: count });
+		const how = exit === null ? "ended without an exit" : exit.code === null ? "was killed" : `exited ${exit.code}`;
 		if (this.#aborted) return ended("aborted", "Stopped");
 		if (this.#timedOut) return ended("timeout", `The turn ran out of time after ${Math.round((timeoutMs ?? 0) / 60_000)} minutes`);
 		// A command the workspace itself cut off, short of any limit of the turn's: say how long it really ran, not what the turn's limit was.
@@ -376,13 +382,13 @@ export class HarnessRunner {
 			if (result.ok) return { status: "done", sessionId, sessionCostUsd: result.sessionCostUsd, usage: sum(usage), sessionUsage, model, lines: count };
 			if (result.reason === "budget") return ended("budget", "The turn reached its budget");
 			if (result.reason === "max_turns") return ended("max_turns", "The turn reached its most steps");
-			const text = redact([...result.errors, result.text ?? ""].join("\n").trim()).slice(0, 500);
+			const said = [...result.errors, result.text ?? ""].join("\n").trim();
+			const text = describeModelFailure(said || seen.retry || "", `${harness.name} reported an error (it ${how})${stderr.trim() ? `: ${stderr.trim().slice(-300)}` : ""}`);
 			// A subscription's usage cap isn't a fault: say so, keeping the vendor's own words (they name when it resets).
 			if (/usage limit|hit your limit|limit reached|resets? (at|in|on)|out of credits|no paid credits/i.test(text)) return ended("harness_error", `${harness.name} usage limit reached: ${text}`);
-			return ended("harness_error", text || `${harness.name} reported an error`);
+			return ended("harness_error", text);
 		}
-		const how = exit === null ? "ended without an exit" : exit.code === null ? "was killed" : `exited ${exit.code}`;
-		return ended("harness_error", `${harness.name} ${how} without a result${stderr.trim() ? `: ${redact(stderr.trim()).slice(-500)}` : ""}`);
+		return ended("harness_error", `${harness.name} ${how} without a result${stderr.trim() ? `: ${isModelFailure(stderr) ? describeModelFailure(stderr.trim().slice(-2000)) : redactSecrets(stderr.trim()).slice(-MODEL_ERROR_MAX)}` : ""}`);
 	}
 
 	/** Records a run of tests: a shell command that runs a test runner, or printed a test summary. */

@@ -190,7 +190,8 @@ export type GatewayErrorCode =
 	| "no_credential"
 	| "upstream_refused_key"
 	| "upstream_unreachable"
-	| "upstream_timeout";
+	| "upstream_timeout"
+	| "upstream_error";
 
 const ANTHROPIC_TYPES: Record<number, string> = {
 	400: "invalid_request_error",
@@ -588,6 +589,8 @@ export async function forwardToProvider(input: ForwardInput): Promise<Response> 
 			return gatewayError(family, 502, "upstream_refused_key", `The model provider refused the space's ${family} key (HTTP ${upstream.status}): check it in Pim's Settings → Model`);
 		}
 		if (upstream.status >= 300 && upstream.status < 400) return gatewayError(family, 502, "upstream_unreachable", `The model provider answered with a redirect (HTTP ${upstream.status})`);
+		// An empty body would leave the CLI with nothing to say of the failure.
+		if (!text.trim()) return gatewayError(family, upstream.status, "upstream_error", `The model provider answered HTTP ${upstream.status} with no body`);
 		return new Response(text.replaceAll(credential.key, "[redacted]"), { status: upstream.status, headers: downstreamHeaders(upstream.headers) });
 	}
 	const streamed = (upstream.headers.get("content-type") ?? "").toLowerCase().startsWith("text/event-stream");

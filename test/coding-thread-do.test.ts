@@ -1429,7 +1429,7 @@ describe("a coding thread with an overflow provider", () => {
 		const id = crypto.randomUUID();
 		const stub = codingThread(env, id);
 		await expect(inside(stub, (thread) => thread.start(startInput(id, { pool: "cloudflare" })))).rejects.toThrow(/Unknown or disabled pool "cloudflare".*"compose"/);
-		await expect(inside(stub, (thread) => thread.store.thread())).resolves.toBeNull();
+		await expect(inside(stub, async (thread) => thread.store.thread())).resolves.toBeNull();
 	});
 
 	it("keeps a pinned thread on its pool when it resumes, and records that an unpinned one overflowed", async () => {

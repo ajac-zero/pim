@@ -72,6 +72,8 @@ import { authEnv } from "./harness/auth";
 import { type CliHarness, cliHarness } from "./harness";
 import { AmpHttpOrbClient, AMP_HTTP_UNSUPPORTED } from "./orb/amp-http";
 import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "./orb/types";
+
+const LEGACY_AMP_WORKSPACE_MESSAGE = "legacy Amp workspace thread; start a new Amp (Orbs) thread";
 import { describeModelFailure, explainFailures } from "./model-error";
 import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
 import { supervisorSink } from "./supervisor";
@@ -952,7 +954,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const poolId = orb ? "amp-http" : first ? first.id : providerId;
 		const harness = input.harness ?? "pi";
 		const cli = cliHarness(harness);
-		if (harness !== "pi" && !cli) throw new Error("harness not yet available");
+		// amp harness uses agent-hosted Orbs, so it doesn't have a CLI harness entry but is still valid
+		if (harness !== "pi" && harness !== "amp" && !cli) throw new Error("harness not yet available");
 		// A CLI harness picks its own model: a profile of its own names one, any other means its default.
 		const profile = cli
 			? { providerId: cli.id, model: input.profile?.providerId === cli.id ? input.profile.model : "default" }
@@ -1146,6 +1149,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return this.store.required().environment;
 	}
 
+	/** Returns true if the thread is a legacy workspace Amp harness thread (before amp used agent-hosted Orbs). */
+	#isLegacyAmpWorkspace(thread: CodingThreadRow): boolean {
+		return thread.harness === "amp" && thread.providerKind === "workspace";
+	}
+
 	/**
 	 * Tells the thread something. During a turn it joins the turn after its
 	 * current tool round, or with `interrupt` stops the turn and starts a new
@@ -1155,6 +1163,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.#live();
 		if (!text.trim()) throw new Error("Say something");
+		if (this.#isLegacyAmpWorkspace(thread)) throw new Error(LEGACY_AMP_WORKSPACE_MESSAGE);
 		if (thread.providerKind === "agent-hosted") return this.#steerOrb(thread, text, options);
 		if (thread.currentOperation && !options.interrupt) {
 			if (cliHarness(thread.harness)) {
@@ -1202,8 +1211,20 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const client = await this.#orbClient();
 		const orb = thread.orb;
 		if (client !== null && orb !== null && client.capabilities().steer) {
-			await client.steer(orb.threadId, text);
-			this.store.recordEvent("orb.steered", { operationId: options.operationId, provider: client.id, orb: orb.threadId });
+			try {
+				await client.steer(orb.threadId, text);
+				this.store.recordEvent("orb.steered", { operationId: options.operationId, provider: client.id, orb: orb.threadId });
+			} catch (error) {
+				if (error instanceof OrbUnsupportedError) {
+					this.ctx.storage.transactionSync(() => {
+						this.store.releaseRetries();
+						this.store.enqueue(options.operationId, text);
+						this.store.recordEvent("orb.steer_unsupported", { operationId: options.operationId, message: error.message, provider: client.id });
+					});
+					return this.status();
+				}
+				throw error;
+			}
 			return this.status();
 		}
 		const why = client === null ? AGENT_HOSTED_UNAVAILABLE : orb === null ? "This agent-hosted thread has no orb yet" : `${client.id} takes no messages for a thread while it runs`;
@@ -1219,6 +1240,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async abort(): Promise<CodingThreadStatus> {
 		await this.lifecycle.start();
 		const thread = this.#live();
+		if (this.#isLegacyAmpWorkspace(thread)) throw new Error(LEGACY_AMP_WORKSPACE_MESSAGE);
 		if (thread.providerId === "amp-http") throw new OrbUnsupportedError(AMP_HTTP_UNSUPPORTED);
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
 		// Whatever runs in the workspace loses its model at once.
@@ -1280,6 +1302,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async continue(options: { operationId: string; budgetUsd?: number }): Promise<CodingThreadStatus> {
 		await this.lifecycle.start();
 		const thread = this.#live();
+		if (this.#isLegacyAmpWorkspace(thread)) throw new Error(LEGACY_AMP_WORKSPACE_MESSAGE);
 		if (thread.currentOperation) {
 			if (thread.providerKind === "agent-hosted" && thread.stateReason === "login_required") {
 				this.store.update({ state: "running", stateReason: null, stateDetail: null });
@@ -2665,7 +2688,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 			await client.stop(orb.threadId);
 			this.store.recordEvent("orb.stopped", { provider: client.id, orb: orb.threadId });
 		} catch (error) {
-			console.warn(JSON.stringify({ event: "pim.coding.orb_stop_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+			if (error instanceof OrbUnsupportedError) {
+				this.store.recordEvent("orb.stop_unsupported", { provider: client.id, message: error.message, orb: orb.threadId });
+			} else {
+				console.warn(JSON.stringify({ event: "pim.coding.orb_stop_failed", thread: thread.threadId, error: errorText(error).slice(0, 300) }));
+			}
 		}
 	}
 

@@ -16,6 +16,7 @@ import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } fr
 import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO } from "../src/coding/thread-do";
 import type { Fetch, GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "../src/coding/model-gateway";
+import type { OrbClientFactory } from "../src/coding/orb/types";
 import type { ComputeProvider, ComputeQuota } from "../src/compute";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
@@ -365,6 +366,13 @@ export const codingCompute: { providers: readonly ComputeProvider[] | null } = {
 /** A stand-in for the deployment's Cloudflare Containers bindings, so threads on the overflow provider work against in-memory containers (test/fake-container.ts). */
 export const codingContainers: { service: ReturnType<typeof fakeContainers> | null } = { service: null };
 
+/**
+ * The orb clients agent-hosted threads run on in tests (test/coding-orb-thread.test.ts): none until a test
+ * registers a factory, as a deployment has none until a later slice adds the real one. A thread that runs in
+ * the agent's cloud fails saying the agent-hosted provider isn't available without one.
+ */
+export const codingOrbs: { factory: OrbClientFactory | null } = { factory: null };
+
 /** What every space may use of compute in thread tests, in place of its Pim's answer, until a test sets one (test/coding-thread-do.test.ts). */
 export const codingQuota: { quota: ComputeQuota | null } = { quota: null };
 
@@ -376,7 +384,7 @@ export const codingEvents: CodingThreadEvent[] = [];
  * workspace that fails and doesn't answer for a second counts as down; a running turn's work is autosaved every three
  * minutes, which a test may set to 0, to autosave at each heartbeat.
  */
-export const codingTimings = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, resumeWaitMs: 120_000, retryMs: 30_000 };
+export const codingTimings = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, resumeWaitMs: 120_000, retryMs: 30_000, orbPollMs: 30_000 };
 
 /** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
 export const codingThreadClock: { now: number | null } = { now: null };
@@ -460,6 +468,16 @@ export class CodingThreadDO extends RealCodingThreadDO {
 
 	protected override resumeWaitMs(): number {
 		return codingTimings.resumeWaitMs;
+	}
+
+	/** How often a test has an agent-hosted thread's turn looked at. */
+	protected override orbPollMs(): number {
+		return codingTimings.orbPollMs;
+	}
+
+	/** The orb clients a test registered, as a deployment's factory would answer with. */
+	protected override orbClients(): OrbClientFactory | null {
+		return codingOrbs.factory;
 	}
 
 	/** A thread waiting for another's environment looks for it often. */

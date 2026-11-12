@@ -951,7 +951,7 @@ describe("what an agent hears of a coding thread's failure", () => {
 describe("Amp HTTP API controls", () => {
 	it("places Amp Orbs without a slot and returns typed unsupported for steer and abort", async () => {
 		const thread = await start({ harness: "amp", provider: "orbs" });
-		expect(thread).toMatchObject({ providerKind: "agent-hosted", provider: "amp-http", slot: "none" });
+		expect(thread).toMatchObject({ providerKind: "agent-hosted", provider: "amp-orbs", pool: "amp-orbs", slot: "none" });
 		for (const [verb, body] of [["steer", { text: "hi" }], ["abort", {}]] as const) {
 			const result = await post(`/coding/threads/${thread.id}/${verb}`, body);
 			expect(result.status).toBe(409);

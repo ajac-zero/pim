@@ -1,6 +1,6 @@
 import { base64UrlDecode } from "../../auth/encoding";
 import { dispatch, type Route } from "../../http";
-import { type BrokerClaims, brokerKey, GitBrokerError, type RepoRef, repoRef, issueBrokerToken, verifyBrokerToken } from "./broker";
+import { type BrokerClaims, brokerKey, checkPushScope, GitBrokerError, MAX_PUSH_BYTES, parseAdvertisement, parseReceivePackRequest, type RepoRef, repoRef, issueBrokerToken, verifyBrokerToken, ZERO } from "./broker";
 import { type BrokerPolicy, brokerPolicy, GITEA_INSTANCE_ID, giteaBaseUrl, giteaConfig, githubAppConfig, githubAppStatus } from "./config";
 import { GiteaConnection, type GiteaBackend, giteaKeyFrom, GiteaNotConnectedError } from "./gitea-connection";
 import { giteaInstance, GiteaProvider } from "./gitea-provider";
@@ -13,9 +13,12 @@ import { basicAuth, GITHUB_INSTANCE_ID, type GitProvider, ProviderRegistry } fro
  * cloning and fetching, at `/api/coding/git/<owner>/<name>.git`, for a
  * workspace that holds a broker token for that repository (./broker.ts).
  * Git sends the token as the password of HTTP basic auth (any user name),
- * or as a bearer token (`http.extraHeader`). Only `git-upload-pack` is
- * served, so the workspace can read the repository and never write to it;
- * pushes are Pim's own, after approval (`pushBranch`).
+ * or as a bearer token (`http.extraHeader`). `git-upload-pack` is served
+ * for any broker token. `git-receive-pack` is served only for a push token,
+ * which names the thread's own branch, and only for one fast-forward
+ * update of that branch (`checkPushScope`), checked here before the push
+ * is forwarded; the GitHub (or Gitea) credential that writes never leaves
+ * Pim. Pushes of other refs, and merges, are Pim's, after approval.
  *
  * The broker asks GitHub with a read-only installation token for that
  * repository when the GitHub App is installed on it, and anonymously
@@ -45,6 +48,10 @@ export type GitBrokerDeps = {
 	readonly random?: () => number;
 	readonly maxRequestBytes?: number;
 	readonly maxResponseBytes?: number;
+	/** The most a workspace's push may weigh; `MAX_PUSH_BYTES` unless given. */
+	readonly maxPushBytes?: number;
+	/** Told when a workspace's push of its thread's branch succeeded, to log it on the thread. */
+	readonly onPushed?: (event: { sessionId: string; repo: string; branch: string; before: string | null; after: string; outcome: "created" | "updated" | "unchanged" }) => Promise<void>;
 };
 
 const text = (status: number, message: string, headers: Record<string, string> = {}) =>
@@ -136,9 +143,9 @@ function providerOf(deps: GitBrokerDeps, instance: string): GitProvider {
 }
 
 /** How the broker signs in to GitHub for `repo`: a read-only token when the App is installed on it, else nothing. */
-async function credentials(provider: GitProvider, repo: RepoRef): Promise<string | null> {
+async function credentials(provider: GitProvider, repo: RepoRef, access: "read" | "write" = "read"): Promise<string | null> {
 	try {
-		const credential = await provider.credential(repo, "read");
+		const credential = await provider.credential(repo, access);
 		return credential && basicAuth(credential);
 	} catch (error) {
 		if (error instanceof GiteaNotConnectedError) throw error;
@@ -179,12 +186,12 @@ async function proxy(
 	admitted: { repo: RepoRef; claims: BrokerClaims; provider: GitProvider },
 	request: Request,
 	path: string,
-	init: { method: string; body?: Uint8Array; contentType: string; expected: string },
+	init: { method: string; body?: Uint8Array; contentType: string; expected: string; access?: "read" | "write" },
 ): Promise<Response> {
 	const { repo, claims, provider } = admitted;
 	const name = provider.instance.label;
 	const headers: Record<string, string> = { "User-Agent": "git/pim-git-broker", Accept: init.expected };
-	const authorization = await credentials(provider, repo);
+	const authorization = await credentials(provider, repo, init.access);
 	if (authorization) headers.Authorization = authorization;
 	if (init.body) headers["Content-Type"] = init.contentType;
 	const encoding = request.headers.get("Content-Encoding");
@@ -234,6 +241,83 @@ async function proxy(
 	return new Response(body, { status: 200, headers: { "Content-Type": init.expected, "Cache-Control": "no-cache" } });
 }
 
+/** The answer that refuses a push to a token that isn't a push token, or null. */
+function pushRefusal(claims: BrokerClaims): Response | null {
+	return claims.pushBranch ? null : text(403, "This broker token is read-only: it can't push. Pim pushes for the workspace once the person approves");
+}
+
+/** The tip of `ref` on the host now (null if it has no such ref), from its receive-pack advertisement, for the write credential. */
+async function remoteTip(deps: GitBrokerDeps, provider: GitProvider, repo: RepoRef, ref: string): Promise<string | null> {
+	const authorization = await credentials(provider, repo, "write");
+	const send = deps.fetch ?? ((input, init) => fetch(input, init));
+	let answer: Response;
+	try {
+		({ answer } = await askWithRetries(deps, () =>
+			send(`${provider.gitUrl(repo)}/info/refs?service=git-receive-pack`, {
+				headers: { "User-Agent": "git/pim-git-broker", ...(authorization ? { Authorization: authorization } : {}) },
+				redirect: "manual",
+			}),
+		));
+	} catch {
+		throw new GitBrokerError(502, `${provider.instance.label} couldn't be reached`);
+	}
+	if (answer.status !== 200 || answer.headers.get("Content-Type")?.split(";")[0]!.trim() !== "application/x-git-receive-pack-advertisement") {
+		await answer.body?.cancel();
+		throw new GitBrokerError(502, `${provider.instance.label} answered HTTP ${answer.status} when asked for ${repo.fullName}'s branches`);
+	}
+	return parseAdvertisement(new Uint8Array(await answer.arrayBuffer())).refs.get(ref) ?? null;
+}
+
+/** A workspace's push: checked against its token's scope before anything is forwarded, then proxied, and logged on the thread if it succeeded. */
+async function receivePack(deps: GitBrokerDeps, admitted: { repo: RepoRef; claims: BrokerClaims; provider: GitProvider }, request: Request): Promise<Response> {
+	const { repo, claims, provider } = admitted;
+	const refused = pushRefusal(claims);
+	if (refused) return refused;
+	if (request.headers.get("Content-Type") !== "application/x-git-receive-pack-request") return text(415, "This takes git's receive-pack requests");
+	if (request.headers.get("Content-Encoding")) return text(415, "The broker takes push requests uncompressed");
+	const max = deps.maxPushBytes ?? MAX_PUSH_BYTES;
+	let body: Uint8Array;
+	try {
+		body = await readCapped(request, max);
+	} catch (error) {
+		if (error instanceof GitBrokerError && error.status === 413) throw new GitBrokerError(413, `The push is larger than the ${max} bytes the broker takes from a workspace`);
+		throw error;
+	}
+	const { commands, capabilities } = parseReceivePackRequest(body);
+	const branch = claims.pushBranch!;
+	const ref = `refs/heads/${branch}`;
+	// Scope first, so a push of any other ref is refused without asking the host anything; then against the host's tip.
+	checkPushScope(commands, capabilities, branch, commands[0]?.old === ZERO ? null : commands[0]?.old ?? null, deps.policy);
+	const tip = await remoteTip(deps, provider, repo, ref);
+	const command = checkPushScope(commands, capabilities, branch, tip, deps.policy);
+	const answer = await proxy(deps, admitted, request, "/git-receive-pack", {
+		method: "POST",
+		body,
+		contentType: "application/x-git-receive-pack-request",
+		expected: "application/x-git-receive-pack-result",
+		access: "write",
+	});
+	const outcome = command.old === command.new ? "unchanged" : tip === null ? "created" : "updated";
+	const log = (result: string) => console.log(JSON.stringify({ event: "pim.git_broker.sandbox_push", session: claims.sessionId, repo: repo.fullName, branch, outcome: result }));
+	if (answer.status !== 200) {
+		log("failed");
+		return answer;
+	}
+	// The report is small; read it to learn whether the host took the push, while the workspace gets it unchanged.
+	const report = new TextDecoder("latin1").decode(await answer.clone().arrayBuffer());
+	if (!report.includes("unpack ok") || !report.includes(`ok ${ref}\n`)) {
+		log("refused");
+		return answer;
+	}
+	log(outcome);
+	try {
+		await deps.onPushed?.({ sessionId: claims.sessionId, repo: repo.fullName, branch, before: tip, after: command.new, outcome });
+	} catch (error) {
+		console.error(JSON.stringify({ event: "pim.git_broker.push_unrecorded", session: claims.sessionId, error: error instanceof Error ? error.message : String(error) }));
+	}
+	return answer;
+}
+
 /**
  * The broker's routes, under `/api`. Nothing else is public. GitHub's
  * repositories are at `<owner>/<name>.git`; another instance's at
@@ -252,7 +336,7 @@ export function gitBrokerRoutes(deps: GitBrokerDeps): Route[] {
 				if (!until || until <= now) return text(403, "Prepare the workspace in Pim to renew git access");
 				const token = await issueBrokerToken(deps.key, {
 					sessionId: admitted.claims.sessionId, repo: admitted.repo, instance: admitted.claims.instance,
-					now, ttlMs: Math.min(60 * 60_000, until - now), renewUntil: until,
+					now, ttlMs: Math.min(60 * 60_000, until - now), renewUntil: until, ...(admitted.claims.pushBranch ? { branch: admitted.claims.pushBranch } : {}),
 				});
 				return Response.json({ token }, { headers: { "Cache-Control": "no-store" } });
 			},
@@ -263,14 +347,32 @@ export function gitBrokerRoutes(deps: GitBrokerDeps): Route[] {
 			async (params, request, url) => {
 				const admitted = await admit(deps, params, request);
 				if (admitted instanceof Response) return admitted;
-				if (url.searchParams.get("service") !== "git-upload-pack") {
-					return text(403, "The broker only clones and fetches: Pim pushes for the workspace once the person approves");
+				const service = url.searchParams.get("service");
+				if (service === "git-receive-pack") {
+					const refused = pushRefusal(admitted.claims);
+					if (refused) return refused;
+					return proxy(deps, admitted, request, "/info/refs?service=git-receive-pack", {
+						method: "GET",
+						contentType: "",
+						expected: "application/x-git-receive-pack-advertisement",
+						access: "write",
+					});
 				}
+				if (service !== "git-upload-pack") return text(403, "The broker serves git fetches and a thread's own pushes only");
 				return proxy(deps, admitted, request, "/info/refs?service=git-upload-pack", {
 					method: "GET",
 					contentType: "",
 					expected: "application/x-git-upload-pack-advertisement",
 				});
+			},
+		],
+		[
+			"POST",
+			`${GIT_BROKER_PATH}${repoPath}/git-receive-pack`,
+			async (params, request) => {
+				const admitted = await admit(deps, params, request);
+				if (admitted instanceof Response) return admitted;
+				return receivePack(deps, admitted, request);
 			},
 		],
 		[
@@ -362,5 +464,5 @@ export function deploymentProviders(env: Env, options: { fetch?: Fetch; app?: Gi
 
 /** The broker, as the Worker serves it at `/api` + `path`. */
 export async function serveGitBroker(request: Request, env: Env, path: string): Promise<Response> {
-	return handleGitBroker(request, path, { key: await brokerTokenKey(env), app: deploymentGitHubApp(env), policy: brokerPolicy(env), providers: deploymentProviders(env) });
+	return handleGitBroker(request, path, { key: await brokerTokenKey(env), app: deploymentGitHubApp(env), policy: brokerPolicy(env), providers: deploymentProviders(env), onPushed: ({ sessionId, ...event }) => env.CodingThread.getByName(sessionId).recordSandboxPush(event) });
 }

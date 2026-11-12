@@ -127,7 +127,7 @@ Tests use a fake remote service for client conformance and a fake native API for
 lifecycle failures. These do not prove image startup, snapshot availability,
 network interception or billing against a live Cloudflare account.
 
-Compose has no native injection. It writes a short-lived, read-only broker
+Compose has no native injection. It writes a short-lived broker
 credential to `/workspace/.config/pim/git/credential.json` (mode 0600) and installs
 a URL-scoped Git credential helper beside it. Both files are excluded from
 Compose environment snapshots. See [in-workspace Git access](coding-environment.md#in-workspace-git-access).

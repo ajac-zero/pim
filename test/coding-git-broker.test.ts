@@ -8,7 +8,9 @@ import {
 	checkBranch,
 	GitBrokerError,
 	issueBrokerToken,
+	checkPushScope,
 	parseBundle,
+	parseReceivePackRequest,
 	parseRepoUrl,
 	pktLine,
 	preparePush,
@@ -718,7 +720,7 @@ describe("the clone and fetch proxy", () => {
 		const { ask } = await brokerFor(github);
 		expect((await ask("/coding/git/acme/gears.git/info/refs?service=git-upload-pack")).status).toBe(403);
 		expect((await ask("/coding/git/acme/widgets.git/info/refs?service=git-receive-pack")).status).toBe(403);
-		expect((await ask("/coding/git/acme/widgets.git/git-receive-pack", { method: "POST", body: "x" })).status).toBe(404);
+		expect((await ask("/coding/git/acme/widgets.git/git-receive-pack", { method: "POST", body: "x" })).status).toBe(403);
 		expect((await ask("/coding/git/acme/widgets.git/HEAD")).status).toBe(404);
 		expect((await ask("/coding/git/127.0.0.1/widgets.git/info/refs?service=git-upload-pack")).status).toBe(400);
 		expect(github.calls).toHaveLength(0);
@@ -906,5 +908,188 @@ describe("git provider instances", () => {
 		expect(pr).toEqual({ url: "https://github.com/acme/widgets/pull/7", number: 7 });
 		expect(seen!.url).toBe("https://api.github.com/repos/acme/widgets/pulls");
 		expect(JSON.parse(String(seen!.init!.body))).toEqual({ head: "pim/x", base: "main", title: "T", body: "B" });
+	});
+});
+
+const OWN = "pim/fix-1a2b3c4d";
+const RECEIVE = "/coding/git/acme/widgets.git/git-receive-pack";
+const RECEIVE_REFS = "/coding/git/acme/widgets.git/info/refs?service=git-receive-pack";
+const PACK = encoder.encode("PACK-bytes");
+
+/** A receive-pack request body: each update (old, new, ref), a flush, and a pack. */
+const pushBody = (updates: [string, string, string][], { caps = "report-status side-band-64k agent=git/2", pack = PACK } = {}) =>
+	joined(...updates.map(([old, next, ref], index) => pktLine(`${old} ${next} ${ref}${index === 0 ? `\0${caps}` : ""}\n`)), encoder.encode("0000"), pack);
+
+describe("a workspace's push: the command list", () => {
+	it("reads the commands, their capabilities and where the pack starts", () => {
+		const parsed = parseReceivePackRequest(pushBody([[ZERO, SHA("b"), `refs/heads/${OWN}`], [SHA("a"), ZERO, "refs/tags/v1"]]));
+		expect(parsed.commands).toEqual([
+			{ old: ZERO, new: SHA("b"), ref: `refs/heads/${OWN}` },
+			{ old: SHA("a"), new: ZERO, ref: "refs/tags/v1" },
+		]);
+		expect(parsed.capabilities).toEqual(["report-status", "side-band-64k", "agent=git/2"]);
+		const single = pushBody([[ZERO, SHA("b"), "refs/heads/x"]]);
+		expect(new TextDecoder().decode(single.subarray(parseReceivePackRequest(single).packOffset))).toBe("PACK-bytes");
+	});
+
+	it("refuses what isn't a command list", () => {
+		for (const body of [
+			encoder.encode(""),
+			encoder.encode("zzzz"),
+			encoder.encode("0008abcd"),
+			joined(pktLine(`shallow ${SHA("a")}\n`), encoder.encode("0000")),
+			joined(pktLine(`${ZERO} ${SHA("b")} refs/heads/x\0report-status\n`), pktLine(`${ZERO} ${SHA("b")} refs/heads/y\0caps\n`), encoder.encode("0000")),
+			joined(pktLine(`${ZERO} ${SHA("b")} refs/heads/x\n`)),
+			joined(pktLine(`${ZERO} nothex refs/heads/x\n`), encoder.encode("0000")),
+		]) {
+			expect(() => parseReceivePackRequest(body)).toThrow(GitBrokerError);
+		}
+	});
+});
+
+describe("a workspace's push: scope", () => {
+	const check = (old: string, next: string, ref: string, tip: string | null = SHA("a"), caps: string[] = ["report-status"]) => checkPushScope([{ old, new: next, ref }], caps, OWN, tip, POLICY);
+	const refused = (run: () => unknown, status: number) => {
+		try {
+			run();
+		} catch (error) {
+			expect(error).toBeInstanceOf(GitBrokerError);
+			expect((error as GitBrokerError).status).toBe(status);
+			return (error as GitBrokerError).message;
+		}
+		throw new Error("was allowed");
+	};
+
+	it("allows a fast-forward of its own branch, and creating it", () => {
+		expect(check(SHA("a"), SHA("b"), `refs/heads/${OWN}`)).toEqual({ old: SHA("a"), new: SHA("b"), ref: `refs/heads/${OWN}` });
+		expect(check(ZERO, SHA("b"), `refs/heads/${OWN}`, null).new).toBe(SHA("b"));
+	});
+
+	it("refuses the default branch, other pim/ branches and tags", () => {
+		expect(refused(() => check(SHA("a"), SHA("b"), "refs/heads/main"), 403)).toContain("only its own branch");
+		expect(refused(() => check(SHA("a"), SHA("b"), "refs/heads/pim/other-99999999"), 403)).toContain("only its own branch");
+		expect(refused(() => check(ZERO, SHA("b"), "refs/tags/v1", null), 403)).toContain("only its own branch");
+	});
+
+	it("refuses deleting, even its own branch", () => {
+		expect(refused(() => check(SHA("a"), ZERO, `refs/heads/${OWN}`), 403)).toContain("delete");
+		expect(refused(() => check(SHA("a"), ZERO, "refs/heads/main"), 403)).toContain("only its own branch");
+	});
+
+	it("refuses an update that doesn't start from the remote's tip, as a force push or a stale one does", () => {
+		expect(refused(() => check(SHA("c"), SHA("b"), `refs/heads/${OWN}`), 409)).toContain("force");
+		expect(refused(() => check(ZERO, SHA("b"), `refs/heads/${OWN}`), 409)).toContain("already exists");
+		expect(refused(() => check(SHA("a"), SHA("b"), `refs/heads/${OWN}`, null), 409)).toContain("doesn't exist");
+	});
+
+	it("refuses several updates, push options, and a token naming a protected branch", () => {
+		const ref = `refs/heads/${OWN}`;
+		refused(() => checkPushScope([{ old: SHA("a"), new: SHA("b"), ref }, { old: SHA("a"), new: SHA("b"), ref: "refs/heads/main" }], [], OWN, SHA("a"), POLICY), 403);
+		refused(() => check(SHA("a"), SHA("b"), ref, SHA("a"), ["push-options"]), 403);
+		refused(() => checkPushScope([{ old: SHA("a"), new: SHA("b"), ref: "refs/heads/main" }], [], "main", SHA("a"), POLICY), 403);
+	});
+});
+
+describe("a workspace's push through the broker", () => {
+	async function pushingBroker(branches: Record<string, string>, overrides: Partial<GitBrokerDeps> = {}, grant: { branch?: string } = { branch: OWN }) {
+		const github = pushingGitHub(branches);
+		const pushed: unknown[] = [];
+		const broker = await brokerFor(github, {
+			app: appWith(github.fetch, { now: NOW }, { installationId: "77" }),
+			onPushed: async (event) => void pushed.push(event),
+			...overrides,
+		});
+		const token = await issueBrokerToken(broker.key, { sessionId: "T-123", repo: WIDGETS, now: NOW, ...grant });
+		const push = (body: Uint8Array, auth = `Bearer ${token}`) => broker.ask(RECEIVE, { method: "POST", body, headers: { "Content-Type": "application/x-git-receive-pack-request" } }, auth);
+		return { ...broker, github, pushed, token, push };
+	}
+	const received = (github: ReturnType<typeof fakeGitHub>) => github.calls.filter((call) => call.url.endsWith("/git-receive-pack"));
+
+	it("forwards a fast-forward of its own branch with the write credential and logs it", async () => {
+		const { push, github, pushed } = await pushingBroker({ [`refs/heads/${OWN}`]: SHA("a") });
+		const body = pushBody([[SHA("a"), SHA("b"), `refs/heads/${OWN}`]]);
+		const response = await push(body);
+		expect(response.status).toBe(200);
+		expect(await bodyText(response)).toContain(`ok refs/heads/${OWN}`);
+		const forwarded = received(github);
+		expect(forwarded).toHaveLength(1);
+		expect(forwarded[0]!.body).toEqual(body);
+		expect(forwarded[0]!.headers.get("authorization")).toBe(`Basic ${btoa(`x-access-token:${APP_TOKEN}`)}`);
+		const minted = github.calls.find((call) => call.url.endsWith("/access_tokens"))!;
+		expect(JSON.parse(new TextDecoder().decode(minted.body)).permissions).toEqual({ contents: "write" });
+		expect(pushed).toEqual([{ sessionId: "T-123", repo: "acme/widgets", branch: OWN, before: SHA("a"), after: SHA("b"), outcome: "updated" }]);
+	});
+
+	it("creates its branch when the remote has none", async () => {
+		const { push, pushed } = await pushingBroker({ "refs/heads/trunk": SHA("a") });
+		expect((await push(pushBody([[ZERO, SHA("b"), `refs/heads/${OWN}`]]))).status).toBe(200);
+		expect(pushed).toEqual([expect.objectContaining({ before: null, after: SHA("b"), outcome: "created" })]);
+	});
+
+	it("serves the receive-pack advertisement to a push token only", async () => {
+		const { ask, token, github } = await pushingBroker({ [`refs/heads/${OWN}`]: SHA("a") });
+		const response = await ask(RECEIVE_REFS, {}, `Bearer ${token}`);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toBe("application/x-git-receive-pack-advertisement");
+		expect(github.calls.at(-1)!.headers.get("authorization")).toBe(`Basic ${btoa(`x-access-token:${APP_TOKEN}`)}`);
+	});
+
+	it("forwards nothing for main, another pim/ branch, a tag or a delete", async () => {
+		const { push, github, pushed } = await pushingBroker({ [`refs/heads/${OWN}`]: SHA("a"), "refs/heads/main": SHA("a") });
+		for (const update of [
+			[SHA("a"), SHA("b"), "refs/heads/main"],
+			[ZERO, SHA("b"), "refs/heads/pim/other-99999999"],
+			[ZERO, SHA("b"), "refs/tags/v1"],
+			[SHA("a"), ZERO, `refs/heads/${OWN}`],
+		] as [string, string, string][]) {
+			expect((await push(pushBody([update]))).status).toBe(403);
+		}
+		expect(github.calls).toHaveLength(0);
+		expect(pushed).toEqual([]);
+	});
+
+	it("refuses a force or stale update of its own branch before forwarding", async () => {
+		const { push, github, pushed } = await pushingBroker({ [`refs/heads/${OWN}`]: SHA("a") });
+		const response = await push(pushBody([[SHA("c"), SHA("b"), `refs/heads/${OWN}`]]));
+		expect(response.status).toBe(409);
+		expect(received(github)).toHaveLength(0);
+		expect(pushed).toEqual([]);
+	});
+
+	it("doesn't log a push the host refused", async () => {
+		const github = pushingGitHub({ [`refs/heads/${OWN}`]: SHA("a") }, { [`POST ${GIT}/git-receive-pack`]: () => report("unpack ok", `ng refs/heads/${OWN} hook declined`) });
+		const pushed: unknown[] = [];
+		const { ask, key } = await brokerFor(github, { app: appWith(github.fetch, { now: NOW }, { installationId: "77" }), onPushed: async (event) => void pushed.push(event) });
+		const token = await issueBrokerToken(key, { sessionId: "T-123", repo: WIDGETS, now: NOW, branch: OWN });
+		const body = pushBody([[SHA("a"), SHA("b"), `refs/heads/${OWN}`]]);
+		const response = await ask(RECEIVE, { method: "POST", body, headers: { "Content-Type": "application/x-git-receive-pack-request" } }, `Bearer ${token}`);
+		expect(response.status).toBe(200);
+		expect(pushed).toEqual([]);
+	});
+
+	it("caps the size of a push", async () => {
+		const { push, github } = await pushingBroker({ [`refs/heads/${OWN}`]: SHA("a") }, { maxPushBytes: 200 });
+		const response = await push(pushBody([[SHA("a"), SHA("b"), `refs/heads/${OWN}`]], { pack: new Uint8Array(500) }));
+		expect(response.status).toBe(413);
+		expect(github.calls).toHaveLength(0);
+	});
+
+	it("never lets a read token push, or see the receive-pack advertisement", async () => {
+		const { push, ask, github, key } = await pushingBroker({ [`refs/heads/${OWN}`]: SHA("a") }, {}, {});
+		const read = await issueBrokerToken(key, { sessionId: "T-123", repo: WIDGETS, now: NOW });
+		const response = await push(pushBody([[SHA("a"), SHA("b"), `refs/heads/${OWN}`]]), `Bearer ${read}`);
+		expect(response.status).toBe(403);
+		expect((await ask(RECEIVE_REFS, {}, `Bearer ${read}`)).status).toBe(403);
+		expect(github.calls).toHaveLength(0);
+	});
+
+	it("keeps the push scope when a token is renewed, and a read token stays read", async () => {
+		const { ask, key } = await pushingBroker({});
+		for (const branch of [OWN, undefined]) {
+			const renewable = await issueBrokerToken(key, { sessionId: "T-123", repo: WIDGETS, now: NOW, renewUntil: NOW + 3 * 60 * 60_000, ...(branch ? { branch } : {}) });
+			const response = await ask("/coding/git/acme/widgets.git/credential", { method: "POST" }, `Bearer ${renewable}`);
+			const { token } = (await response.json()) as { token: string };
+			expect((await verifyBrokerToken(key, token, NOW))?.pushBranch).toBe(branch);
+		}
 	});
 });

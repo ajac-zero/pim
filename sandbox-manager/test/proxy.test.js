@@ -39,11 +39,11 @@ describe('egress proxy', () => {
 		new Promise((resolve) => {
 			const req = http.request({ host: '127.0.0.1', port, method: 'CONNECT', path: target })
 			req.on('connect', (res, socket) => {
-				if (res.statusCode !== 200) return socket.destroy(), resolve({ status: res.statusCode })
+				if (res.statusCode !== 200) return socket.destroy(), resolve({ status: res.statusCode, denied: res.headers['x-pim-egress'] })
 				socket.write('ping')
 				socket.once('data', (d) => (socket.destroy(), resolve({ status: res.statusCode, data: d.toString() })))
 			})
-			req.on('response', (res) => resolve({ status: res.statusCode }))
+			req.on('response', (res) => resolve({ status: res.statusCode, denied: res.headers['x-pim-egress'] }))
 			req.end()
 		})
 
@@ -51,18 +51,18 @@ describe('egress proxy', () => {
 		assert.equal((await admin('PUT', { hosts: ['github.com'] }, 'wrong')).status, 401)
 		assert.equal((await admin('PUT', { hosts: ['github.com', '*.github.com'] })).status, 200)
 	})
-	test('tunnels to allowlisted hosts on 443 only', async () => {
+	test('tunnels to allowlisted hosts on 443 only, and marks each refusal as the proxy\u2019s', async () => {
 		assert.deepEqual(await connect('github.com:443'), { status: 200, data: 'echo:ping' })
-		assert.equal((await connect('github.com:22')).status, 403)
+		assert.deepEqual(await connect('github.com:22'), { status: 403, denied: 'denied' })
 	})
 	test('denies unlisted hosts, IP literals, localhost, and names that resolve to private addresses', async () => {
 		for (const t of ['evil.com:443', '93.184.216.34:443', '127.0.0.1:443', '169.254.169.254:443', 'localhost:443', '[::1]:443', 'sneaky.github.com:443']) {
-			assert.equal((await connect(t)).status, 403, t)
+			assert.deepEqual(await connect(t), { status: 403, denied: 'denied' }, t)
 		}
 	})
 	test('sources without an allowlist are denied, and plain HTTP is refused', async () => {
 		await admin('DELETE')
-		assert.equal((await connect('github.com:443')).status, 403)
+		assert.deepEqual(await connect('github.com:443'), { status: 403, denied: 'denied' })
 		const r = await fetch(`http://127.0.0.1:${port}/`)
 		assert.equal(r.status, 405)
 	})

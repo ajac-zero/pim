@@ -2,6 +2,8 @@
 // neighbour is this proxy. The allowlist is per source IP (the session container's address
 // on the shared network), set by the manager through an authenticated admin endpoint.
 // Only HTTPS tunnels (CONNECT to :443) are supported; plain http:// requests get 405.
+// Every refusal answers 403 with `x-pim-egress: denied`, so a 403 from Pim is told apart
+// from one the destination sent.
 import dns from 'node:dns/promises'
 import http from 'node:http'
 import net from 'node:net'
@@ -38,7 +40,8 @@ export function createProxy({ adminToken, lookup = (h) => dns.lookup(h, { all: t
 		res.writeHead(405, { 'content-type': 'text/plain' }).end('only CONNECT to :443 is supported\n')
 	})
 	proxy.on('connect', async (req, client, head) => {
-		const deny = (code, why) => client.end(`HTTP/1.1 ${code} ${why}\r\nconnection: close\r\n\r\n`)
+		// Every refusal is marked as the proxy's, so a 403 from Pim is told apart from one the destination sent.
+		const deny = (code, why) => client.end(`HTTP/1.1 ${code} ${why}\r\nx-pim-egress: denied\r\nconnection: close\r\n\r\n`)
 		client.on('error', () => {})
 		try {
 			const m = /^([^:\[\]]+):(\d+)$/.exec(req.url ?? '')

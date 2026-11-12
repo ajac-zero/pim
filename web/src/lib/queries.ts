@@ -256,6 +256,14 @@ export const deploymentQuery = () =>
 export const computeQuery = () =>
   queryOptions({ queryKey: ["compute"], queryFn: admin.compute });
 
+/** The sandbox pools with their live state: the admin's view, read again every few seconds. */
+export const sandboxPoolsQuery = () =>
+  queryOptions({
+    queryKey: ["compute", "pools"],
+    queryFn: admin.sandboxPools,
+    refetchInterval: 10_000,
+  });
+
 /** Pim's built-in apps and which are on: the admin's view. */
 export const adminBuiltinAppsQuery = () =>
   queryOptions({

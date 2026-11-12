@@ -100,6 +100,65 @@ describe("the admin", () => {
 		expect((await admin("/api/admin/providers/team-gpu", { method: "DELETE" })).status).toBe(404);
 	});
 
+	it("keeps the sandbox pools: live state, validation, and never the last usable pool", async () => {
+		const ann = await person("pools-ann");
+		const input = { kind: "compose", settings: { managerUrl: "https://manager.example.test" }, credentials: { token: "mgr-secret-token-92" } };
+		const audit = vi.spyOn(console, "log");
+		expect((await ann.browser.json("/api/admin/coding/pools")).status).toBe(403);
+		expect((await ann.browser.json("/api/admin/coding/pools", { method: "POST", json: { id: "x", provider: "compose", size: 1, priority: 1 } })).status).toBe(403);
+		expect((await new Browser().json("/api/admin/coding/pools")).status).toBe(401);
+		await admin("/api/admin/compute/providers", { method: "POST", json: input });
+		try {
+			const listed = (await admin("/api/admin/coding/pools")).body.pools as Record<string, unknown>[];
+			expect(listed).toContainEqual({
+				id: "compose",
+				provider: "compose",
+				size: 2,
+				priority: 1,
+				enabled: true,
+				config: {},
+				providerAvailable: true,
+				slots: { held: 0, free: 2 },
+				queued: 0,
+				breaker: { state: "healthy", retryAt: null },
+			});
+			expect(listed.find((pool) => pool.id === "cloudflare")).toMatchObject({ providerAvailable: false });
+
+			// Validation: slug, known provider, whole sizes and priorities, and no second pool of the same id.
+			const add = (json: Record<string, unknown>) => admin("/api/admin/coding/pools", { method: "POST", json });
+			const good = { id: "compose-2", provider: "compose", size: 3, priority: 5, config: { image: "x", apiToken: "hidden-value-1" } };
+			expect((await add({ ...good, id: "Bad Id" })).status).toBe(400);
+			expect((await add({ ...good, provider: "nope" })).status).toBe(400);
+			expect((await add({ ...good, size: 0 })).status).toBe(400);
+			expect((await add({ ...good, size: 1.5 })).status).toBe(400);
+			expect((await add({ ...good, size: 100000 })).status).toBe(400);
+			expect((await add({ ...good, priority: "first" })).status).toBe(400);
+			const created = await add(good);
+			expect(created).toMatchObject({ status: 201, body: { pool: { id: "compose-2", size: 3, priority: 5, config: { image: "x" }, slots: { held: 0, free: 3 } } } });
+			expect(JSON.stringify(created.body)).not.toContain("hidden-value-1");
+			expect((await add(good)).status).toBe(409);
+
+			const changed = await admin("/api/admin/coding/pools/compose-2", { method: "PATCH", json: { size: 4, enabled: false } });
+			expect(changed).toMatchObject({ status: 200, body: { pool: { size: 4, enabled: false, priority: 5 } } });
+			expect((await admin("/api/admin/coding/pools/nope", { method: "PATCH", json: { size: 4 } })).status).toBe(404);
+			expect((await admin("/api/admin/coding/pools/compose-2", { method: "PATCH", json: { provider: "nope" } })).status).toBe(400);
+
+			// The last enabled pool with an available provider stays: the cloudflare pool's provider isn't here, so it doesn't count.
+			expect((await admin("/api/admin/coding/pools/compose", { method: "PATCH", json: { enabled: false } })).status).toBe(409);
+			expect((await admin("/api/admin/coding/pools/compose", { method: "DELETE" })).status).toBe(409);
+			await admin("/api/admin/coding/pools/compose-2", { method: "PATCH", json: { enabled: true } });
+			expect((await admin("/api/admin/coding/pools/compose", { method: "DELETE" })).body).toEqual({ deleted: true });
+			expect((await admin("/api/admin/coding/pools/compose-2", { method: "DELETE" })).status).toBe(409);
+			expect((await admin("/api/admin/coding/pools/compose", { method: "DELETE" })).status).toBe(404);
+
+			const events = audit.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("pim.sandbox_pool_"));
+			expect(events.map((line) => JSON.parse(line).event)).toEqual(expect.arrayContaining(["pim.sandbox_pool_added", "pim.sandbox_pool_changed", "pim.sandbox_pool_removed"]));
+		} finally {
+			audit.mockRestore();
+			await admin("/api/admin/compute/providers/compose", { method: "DELETE" });
+		}
+	});
+
 	it("sets up compute providers for everyone's coding sandboxes without ever showing a credential, and limits what each person may use", async () => {
 		const ann = await person("compute-ann");
 		const secret = "mgr-secret-token-91";

@@ -1,4 +1,5 @@
 import { closedPool, poolAvailable, poolResult, reservePool, type PoolBreaker } from "./pool-breaker";
+import type { PoolLiveState } from "./pools";
 
 /**
  * The slots of a space's coding sessions. A coding thread needs a workspace
@@ -438,6 +439,22 @@ export class CodingScheduler {
 	position(threadId: string): QueuePlace | null {
 		const entry = this.#entry(threadId);
 		return entry ? this.#placeOf(entry) : null;
+	}
+
+	/** Each of `pools`' slots held, threads queued for it by name, and circuit breaker, for the admin's view. */
+	poolStates(pools: readonly string[]): Record<string, PoolLiveState> {
+		return this.#options.transaction(() => {
+			const now = this.#options.now();
+			const slots = this.#sql.exec("SELECT * FROM pim_coding_slots").toArray().map(slotOf);
+			const queue = this.#queue();
+			return Object.fromEntries(
+				pools.map((pool) => {
+					const { retryAt } = this.#breaker(pool);
+					const state = retryAt === null ? "healthy" : now < retryAt ? "open" : "half_open";
+					return [pool, { held: slots.filter((slot) => slot.pool === pool).length, queued: queue.filter((entry) => entry.pool === pool).length, breaker: { state, retryAt } }];
+				}),
+			);
+		});
 	}
 
 	snapshot(): SchedulerSnapshot {

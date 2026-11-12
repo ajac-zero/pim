@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Section } from "~/components/account-settings";
 import { type TranslationKey, useI18n } from "~/components/i18n";
 import { Loader2, Plus, Server } from "~/components/icons";
+import { SandboxPoolsPart } from "~/components/sandbox-pools";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -42,6 +43,7 @@ export function ComputeSection() {
   return (
     <div className="space-y-10">
       <ProvidersPart providers={data.providers} kinds={data.kinds} />
+      <SandboxPoolsPart />
       <QuotaPart quota={data.quota} />
       <UsagePart usage={data.usage} />
     </div>

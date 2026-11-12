@@ -21,6 +21,7 @@ import {
 	type SlotRequest,
 	type Sweep,
 } from "./scheduler";
+import type { PoolLiveState } from "./pools";
 import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRegistration } from "./thread-index";
 import type { Harness } from "./vault/harnesses";
 import { codingVault } from "./vault/vault";
@@ -148,6 +149,10 @@ export class CodingSchedulerDO extends DurableObject<Env> {
 
 	position(threadId: string): QueuePlace | null {
 		return this.#scheduler.position(threadId);
+	}
+
+	poolStates(pools: readonly string[]): Record<string, PoolLiveState> {
+		return this.#scheduler.poolStates(pools);
 	}
 
 	snapshot(): SchedulerSnapshot {

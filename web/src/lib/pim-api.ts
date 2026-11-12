@@ -996,6 +996,34 @@ export type ComputeProviderInput = {
   agentComputer?: boolean;
 };
 
+/** A sandbox pool as the admin sees it, with where it stands now in the admin's own space. */
+export type SandboxPool = {
+  id: string;
+  provider: string;
+  size: number;
+  priority: number;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  /** Whether this deployment has the pool's provider. */
+  providerAvailable: boolean;
+  slots: { held: number; free: number };
+  /** Threads queued for the pool by name. */
+  queued: number;
+  breaker: {
+    state: "healthy" | "open" | "half_open";
+    retryAt: number | null;
+  };
+};
+
+export type SandboxPoolInput = {
+  id?: string;
+  provider?: string;
+  size?: number;
+  priority?: number;
+  enabled?: boolean;
+  config?: Record<string, unknown>;
+};
+
 /** Everyone's sandbox minutes this month. */
 export type ComputeDeploymentUsage = {
   month: string;
@@ -2510,6 +2538,22 @@ export const admin = {
     }),
   /** Compute providers for everyone's coding sandboxes, the default quota, and everyone's usage this month. */
   compute: () => call<ComputeOverview>("/admin/compute"),
+  sandboxPools: () => call<{ pools: SandboxPool[] }>("/admin/coding/pools"),
+  addSandboxPool: (input: SandboxPoolInput) =>
+    call<{ pool: SandboxPool }>("/admin/coding/pools", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  updateSandboxPool: (id: string, input: SandboxPoolInput) =>
+    call<{ pool: SandboxPool }>(
+      `/admin/coding/pools/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(input) },
+    ),
+  removeSandboxPool: (id: string) =>
+    call<{ deleted: boolean }>(
+      `/admin/coding/pools/${encodeURIComponent(id)}`,
+      { method: "DELETE", body: "{}" },
+    ),
   addComputeProvider: (input: ComputeProviderInput) =>
     call<{ provider: ComputeProvider }>("/admin/compute/providers", {
       method: "POST",

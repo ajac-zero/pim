@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ComputeSection } from "~/components/compute-settings";
-import type { ComputeOverview } from "~/lib/pim-api";
+import type { ComputeOverview, SandboxPool } from "~/lib/pim-api";
 
 afterEach(() => {
   cleanup();
@@ -55,6 +55,33 @@ const overview = (): ComputeOverview => ({
   },
 });
 
+const pools = (): SandboxPool[] => [
+  {
+    id: "compose",
+    provider: "compose",
+    size: 2,
+    priority: 1,
+    enabled: true,
+    config: {},
+    providerAvailable: true,
+    slots: { held: 1, free: 1 },
+    queued: 0,
+    breaker: { state: "healthy", retryAt: null },
+  },
+  {
+    id: "cloudflare",
+    provider: "cloudflare",
+    size: 4,
+    priority: 2,
+    enabled: true,
+    config: {},
+    providerAvailable: true,
+    slots: { held: 0, free: 4 },
+    queued: 3,
+    breaker: { state: "open", retryAt: Date.now() + 245_000 },
+  },
+];
+
 /** A Pim that answers the admin's compute routes, recording each request and its body. */
 function server() {
   const writes: { route: string; body: unknown }[] = [];
@@ -68,6 +95,8 @@ function server() {
     vi.fn(async (input: string, init?: RequestInit) => {
       const route = `${init?.method ?? "GET"} ${input}`;
       if (route === "GET /api/admin/compute") return reply(overview());
+      if (route === "GET /api/admin/coding/pools")
+        return reply({ pools: pools() });
       writes.push({
         route,
         body: init?.body ? JSON.parse(String(init.body)) : null,
@@ -80,6 +109,13 @@ function server() {
             ms: 12,
           },
         });
+      if (
+        route.startsWith("PATCH /api/admin/coding/pools/") ||
+        route === "POST /api/admin/coding/pools"
+      )
+        return reply({ pool: pools()[0] });
+      if (route === "DELETE /api/admin/coding/pools/cloudflare")
+        return reply({ deleted: true });
       if (route === "PUT /api/admin/compute/quota")
         return reply({ quota: overview().quota });
       return reply({ error: "Not found" }, 404);
@@ -103,7 +139,9 @@ describe("Settings → Compute", () => {
   it("lists providers by whether their credentials are set, checks one, and shows the month's usage", async () => {
     const writes = server();
     show();
-    const providers = within(await screen.findByRole("list"));
+    const providers = within(
+      await screen.findByRole("list", { name: "Compute providers" }),
+    );
     expect(providers.getByText("Team sandboxes")).toBeTruthy();
     expect(
       providers.getByText(/Sandbox manager · https:\/\/manager\.example\.test/),
@@ -158,5 +196,58 @@ describe("Settings → Compute", () => {
     const token = screen.getByLabelText("Token");
     expect((token as HTMLInputElement).type).toBe("password");
     expect((token as HTMLInputElement).value).toBe("");
+  });
+
+  it("shows each pool's live state, and changes its switch, size and priority, adds and removes pools", async () => {
+    const writes = server();
+    show();
+    const list = within(
+      await screen.findByRole("list", { name: "Sandbox pools" }),
+    );
+    expect(list.getByText("1/2 in use")).toBeTruthy();
+    expect(list.getByText("3 queued")).toBeTruthy();
+    expect(list.getByText(/Unhealthy, retry in 4:0\d/)).toBeTruthy();
+
+    fireEvent.click(list.getByRole("switch", { name: "Use compose" }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({
+      route: "PATCH /api/admin/coding/pools/compose",
+      body: { enabled: false },
+    });
+
+    // Size and priority save together, and only once changed.
+    expect(list.queryByRole("button", { name: "Save cloudflare" })).toBeNull();
+    fireEvent.change(list.getByLabelText("Size of cloudflare"), {
+      target: { value: "6" },
+    });
+    fireEvent.change(list.getByLabelText("Priority of cloudflare"), {
+      target: { value: "0" },
+    });
+    fireEvent.click(list.getByRole("button", { name: "Save cloudflare" }));
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({
+      route: "PATCH /api/admin/coding/pools/cloudflare",
+      body: { size: 6, priority: 0 },
+    });
+
+    fireEvent.click(list.getByRole("button", { name: "Remove cloudflare" }));
+    await waitFor(() => expect(writes).toHaveLength(3));
+    expect(writes[2]?.route).toBe("DELETE /api/admin/coding/pools/cloudflare");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add a pool" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "burst" },
+    });
+    fireEvent.change(screen.getByLabelText("Provider"), {
+      target: { value: "compose" },
+    });
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Add a pool" }).at(-1)!,
+    );
+    await waitFor(() => expect(writes).toHaveLength(4));
+    expect(writes[3]).toEqual({
+      route: "POST /api/admin/coding/pools",
+      body: { id: "burst", provider: "compose", size: 2, priority: 10 },
+    });
   });
 });

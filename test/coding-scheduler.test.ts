@@ -984,9 +984,14 @@ describe("pool circuit breakers", () => {
 			expect(restarted.request("overflow", { pool: "first", overflow: ["second"] })).toEqual({ status: "admitted", pool: "second" });
 			expect(restarted.request("pinned", { pool: "first" })).toMatchObject({ status: "queued", reason: "unhealthy" });
 			restarted.request("behind", { pool: "first" });
+			expect(restarted.poolStates(["first", "second"])).toMatchObject({
+				first: { held: 0, queued: 2, breaker: { state: "open", retryAt: clock.now + 5 * MINUTE } },
+				second: { held: 1, queued: 0, breaker: { state: "healthy", retryAt: null } },
+			});
 			clock.now += 5 * MINUTE;
 			expect(restarted.tick().admitted).toEqual(["pinned"]);
 			expect(restarted.position("behind")).toMatchObject({ reason: "unhealthy" });
+			expect(restarted.poolStates(["first"]).first).toMatchObject({ held: 1, queued: 1, breaker: { state: "half_open" } });
 			expect(make().unhealthyPools(["first"])).toEqual(["first"]);
 			expect(restarted.workspaceResult("pinned", "success")).toEqual(["behind"]);
 			expect(restarted.unhealthyPools(["first"])).toEqual([]);

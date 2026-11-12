@@ -38,6 +38,9 @@ export type SandboxPoolInput = {
 	readonly enabled?: unknown;
 };
 
+/** The most threads one pool may hold at once. */
+export const MAX_POOL_SIZE = 1000;
+
 /** The most either id may be. */
 const MAX_ID = 40;
 
@@ -66,6 +69,7 @@ export function prepareSandboxPool(input: SandboxPoolInput, existing: SandboxPoo
 	const provider = input.provider === undefined ? existing?.provider : slug(input.provider, "provider");
 	if (provider === undefined) throw new HttpError(400, "provider is required");
 	const size = input.size === undefined ? existing?.size : whole(input.size, "size", 1);
+	if (size !== undefined && size > MAX_POOL_SIZE) throw new HttpError(400, `size must be at most ${MAX_POOL_SIZE}`);
 	if (size === undefined) throw new HttpError(400, "size is required");
 	const priority = input.priority === undefined ? existing?.priority : whole(input.priority, "priority");
 	if (priority === undefined) throw new HttpError(400, "priority is required");
@@ -165,3 +169,20 @@ export function placementPools(storedPools: readonly SandboxPool[], availablePro
 export function auditPoolWrite(action: "added" | "changed" | "removed", pool: string, by: string): void {
 	console.log(JSON.stringify({ event: `pim.sandbox_pool_${action}`, pool, by }));
 }
+
+/** A pool's config with every value that looks like a credential left out, for the admin's view. */
+export function publicPoolConfig(config: Readonly<Record<string, unknown>>): Record<string, unknown> {
+	return Object.fromEntries(Object.entries(config).filter(([key]) => !/secret|token|key|password|credential|auth/i.test(key)));
+}
+
+/** Where a pool's circuit breaker stands: `open` while cooling down, `half_open` once the cooldown is over and a probe may go. */
+export type PoolHealth = "healthy" | "open" | "half_open";
+
+/** A pool's live state in one space's scheduler. */
+export type PoolLiveState = {
+	/** Slots threads hold in the pool now. */
+	readonly held: number;
+	/** Queued threads that named the pool. */
+	readonly queued: number;
+	readonly breaker: { readonly state: PoolHealth; readonly retryAt: number | null };
+};

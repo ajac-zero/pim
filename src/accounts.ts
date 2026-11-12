@@ -10,6 +10,9 @@ import { HttpError } from "./http";
 import { MAX_YOUR_NAME } from "./majordomo";
 import { providerInfo } from "./providers";
 import { checkCompute, COMPUTE_KINDS, computeProviderInfo, parseComputeQuota } from "./compute";
+import { codingScheduler } from "./coding/scheduler-do";
+import { type PlacementPool, placementPools, prepareSandboxPool, publicPoolConfig, resolvePools, type SandboxPool } from "./coding/pools";
+import { workspaceBackends } from "./coding/workspace/registry";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";
 import { claimWindowOpen, limited } from "./runtime";
@@ -744,6 +747,41 @@ async function computeOverview(env: Env) {
 	};
 }
 
+/** The ids of the workspace providers this deployment has: its backends and the compute providers the admin added. */
+/** The pool registry. The Gallery's RPC types a pool's free-form config as not serializable, so it is typed here. */
+const storedPools = (env: Env) => gallery(env).sandboxPools() as unknown as Promise<SandboxPool[]>;
+
+async function providerIds(env: Env): Promise<string[]> {
+	return workspaceBackends(env, await gallery(env).computeProviders()).ids();
+}
+
+/** Gives the admin's own space's scheduler the registry as it now stands, so a change takes effect at once; other spaces read it again within a minute. */
+async function pushPools(env: Env, space: string, stored: readonly SandboxPool[], providers: readonly string[]): Promise<void> {
+	const registry = placementPools(stored, providers).pools.filter((pool): pool is PlacementPool & { size: number } => pool.size !== null);
+	await codingScheduler(env, space).setPools(registry).catch((error: unknown) => console.warn(JSON.stringify({ event: "pim.coding.pools_set_failed", error: String(error).slice(0, 300) })));
+}
+
+/** The pools with where each stands in the admin's own space: the slots held, the queue, the circuit breaker, and whether its provider is available. */
+async function poolsOverview(env: Env, space: string) {
+	const [stored, providers] = await Promise.all([storedPools(env), providerIds(env)]);
+	const live = await codingScheduler(env, space).poolStates(stored.map((pool) => pool.id));
+	return stored.map((pool) => {
+		const state = live[pool.id]!;
+		return {
+			id: pool.id,
+			provider: pool.provider,
+			size: pool.size,
+			priority: pool.priority,
+			enabled: pool.enabled,
+			config: publicPoolConfig(pool.config),
+			providerAvailable: providers.includes(pool.provider),
+			slots: { held: state.held, free: Math.max(0, pool.size - state.held) },
+			queued: state.queued,
+			breaker: state.breaker,
+		};
+	});
+}
+
 /** Everyone's sandbox minutes this month, with each of the biggest users named. */
 async function computeStats(env: Env) {
 	const usage = await gallery(env).computeUsage();
@@ -893,6 +931,34 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 				if (!provider) return fail(404, "No such compute provider");
 				return json({ health: await checkCompute(provider, env) });
 			}
+			// Sandbox pools (./coding/pools.ts): the groups of coding sandboxes, with how each stands now in the admin's own space.
+			if (route === "GET /coding/pools") return json({ pools: await poolsOverview(env, admin.ownerId) });
+			const poolRoute = /^\/admin\/coding\/pools\/([^/]+)$/.exec(path);
+			if (route === "POST /coding/pools" || (poolRoute && (request.method === "PATCH" || request.method === "DELETE"))) {
+				const id = poolRoute ? decodeURIComponent(poolRoute[1]!) : null;
+				const [stored, providers] = await Promise.all([storedPools(env), providerIds(env)]);
+				const existing = stored.find((pool) => pool.id === id) ?? null;
+				if (id !== null && !existing) return fail(404, "No such pool");
+				const given = request.method === "DELETE" ? null : await body();
+				let after: SandboxPool[];
+				try {
+					const next = given && prepareSandboxPool(given, existing);
+					if (next && !providers.includes(next.provider)) return fail(400, `provider must be one of: ${providers.join(", ") || "none: this deployment has no workspace provider"}`);
+					if (next && !existing && stored.some((pool) => pool.id === next.id)) return fail(409, `The pool ${next.id} is already here: change it instead.`);
+					after = stored.filter((pool) => pool.id !== id);
+					if (next) after.push(next);
+				} catch (error) {
+					return rpcFailure(error);
+				}
+				if (hasUsablePool(stored, providers) && !hasUsablePool(after, providers)) {
+					return fail(409, "This is the last enabled pool with an available provider: keep it, or add or enable another pool first.");
+				}
+				const result = await (given ? gallery(env).upsertSandboxPool(id, given, admin.ownerId) : gallery(env).removeSandboxPool(id!, admin.ownerId)).catch((error: unknown) => rpcFailure(error));
+				if (result instanceof Response) return result;
+				await pushPools(env, admin.ownerId, await storedPools(env), providers);
+				if (!given) return json({ deleted: true });
+				return json({ pool: (await poolsOverview(env, admin.ownerId)).find((pool) => pool.id === (id ?? (given.id as string).trim())) }, id ? 200 : 201);
+			}
 			if (route === "PUT /compute/quota") {
 				const { quota } = await body();
 				const applied = await gallery(env).setComputeQuota(quota).catch((error: unknown) => rpcFailure(error));
@@ -970,3 +1036,6 @@ export function adminApi(env: Env, admin: Account, request: Request, viaSession:
 		}
 	};
 }
+
+/** Whether the pools leave a thread somewhere to go: at least one enabled pool whose provider is available. */
+const hasUsablePool = (pools: readonly SandboxPool[], providers: readonly string[]) => resolvePools(pools, providers).pools.length > 0;

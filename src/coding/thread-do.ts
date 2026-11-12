@@ -287,6 +287,11 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return RETRY_BASE_MS + Math.random() * RETRY_JITTER_MS;
 	}
 
+	/** How long a turn a rate limit stopped waits before its `attempt`th retry: longer than one blip's, and growing. */
+	protected rateLimitRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+		return rateLimitRetryDelayMs(attempt, retryAfterMs);
+	}
+
 	/** The clock the thread's records go by. */
 	protected now(): number {
 		return Date.now();
@@ -2718,25 +2723,34 @@ export class CodingThreadDO extends DurableObject<Env> {
 
 	/**
 	 * A turn that failed for a transient error, such as a model provider's 5xx
-	 * or rate limit or a dropped connection, is retried once after a backoff, in
-	 * the same workspace, so its committed and uncommitted work is kept. The
-	 * retry is a turn like any other, so its spend counts once, as it is made,
-	 * and the budget is checked before it starts. A turn begun as a retry that
+	 * or a dropped connection, is retried once after a backoff, in the same
+	 * workspace, so its committed and uncommitted work is kept. The retry is a
+	 * turn like any other, so its spend counts once, as it is made, and the
+	 * budget is checked before it starts. A rate limit is shared by every
+	 * thread on the account, so it outlasts one backoff: a turn it stopped is
+	 * retried up to `RATE_LIMIT_RETRIES` times in a row, each after a longer
+	 * wait, and never less than the `retry-after` the provider asked for; the
+	 * retries are counted by the `retry-` prefixes on the operation's id, so a
+	 * turn that succeeds starts the count over. A turn begun as a retry that
 	 * fails too, one the person stopped, and one that failed for anything else
-	 * is left as it ended. The original error is recorded as `thread.retrying`.
+	 * is left as it ended. The original error is recorded as `thread.retrying`,
+	 * with which retry it waits for.
 	 */
 	async #retryTransient(operation: string, thread: CodingThreadRow, result: TurnResult, skip: { budget: boolean; login: boolean; lost: boolean; expired: boolean }): Promise<boolean> {
 		if (result.status === "done" || skip.budget || skip.login || skip.lost || skip.expired || thread.state === "archived") return false;
-		if (operation.startsWith(RETRY_PREFIX) || this.#userStop === operation || this.#cycling) return false;
+		if (this.#userStop === operation || this.#cycling) return false;
 		const detail = result.detail ?? (result.reason === "model_error" ? this.#modelError : null) ?? undefined;
 		if (!isTransient(result.reason, detail)) return false;
 		if (this.#budgetSpent(thread)) return false;
-		const notBefore = Date.now() + this.retryDelayMs();
 		const error = (detail ?? result.reason ?? "error").slice(0, 500);
+		const rateLimited = RATE_LIMIT_ERROR.test(error);
+		const attempt = retryCount(operation) + 1;
+		if (attempt > (rateLimited ? RATE_LIMIT_RETRIES : 1)) return false;
+		const notBefore = Date.now() + (rateLimited ? this.rateLimitRetryDelayMs(attempt, retryAfterMs(error)) : this.retryDelayMs());
 		this.ctx.storage.transactionSync(() => {
 			this.store.enqueue(`${RETRY_PREFIX}${operation}`, CONTINUE_TEXT, { notBefore });
 			this.store.update({ currentOperation: null, state: "idle", stateReason: "retrying", stateDetail: error });
-			this.store.recordEvent("thread.retrying", { operationId: operation, reason: result.reason ?? "error", error, retryAt: notBefore });
+			this.store.recordEvent("thread.retrying", { operationId: operation, reason: result.reason ?? "error", error, retryAt: notBefore, attempt });
 		});
 		console.warn(JSON.stringify({ event: "pim.coding.turn_retry", thread: thread.threadId, reason: result.reason, error: error.slice(0, 300) }));
 		await this.#report("idle");
@@ -3923,6 +3937,38 @@ const RETRY_PREFIX = "retry-";
 const RETRY_BASE_MS = 30_000;
 const RETRY_JITTER_MS = 30_000;
 
+/** What an error says when a provider's per-minute cap stopped a turn: a rate limit the whole account shares, so one thread's backoff outlasts it. */
+const RATE_LIMIT_ERROR = /rate.?limit|\b429\b|too many requests|per min/i;
+/** How many times in a row a turn a rate limit stopped is retried: more than a blip gets, because the cap is the account's, not this thread's. */
+const RATE_LIMIT_RETRIES = 6;
+/** The wait before each of those retries: 60 s, half again more each time, at most 5 minutes, and up to 10 s of jitter on top. */
+const RATE_LIMIT_RETRY_BASE_MS = 60_000;
+const RATE_LIMIT_RETRY_GROWTH = 1.5;
+const RATE_LIMIT_RETRY_MAX_MS = 5 * 60_000;
+const RATE_LIMIT_RETRY_JITTER_MS = 10_000;
+
+/** How many retries in a row an operation already is, counted by the `retry-` prefixes piled on its id; a turn that succeeds begins with a fresh id, so the count starts over. */
+function retryCount(operation: string): number {
+	let count = 0;
+	while (operation.startsWith(RETRY_PREFIX)) {
+		count++;
+		operation = operation.slice(RETRY_PREFIX.length);
+	}
+	return count;
+}
+
+/** A provider's `retry-after` as its error's words give it, in ms; null when it says none or no plain count of seconds. */
+export function retryAfterMs(error: string): number | null {
+	const seconds = /retry[ _-]?after["':= ]*["']?(\d+)/i.exec(error)?.[1];
+	return seconds ? Number(seconds) * 1000 : null;
+}
+
+/** How long a turn a rate limit stopped waits before its `attempt`th retry: a backoff that grows with each retry, plus jitter, and never less than the provider's `retry-after`. */
+export function rateLimitRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+	const backoff = Math.min(RATE_LIMIT_RETRY_BASE_MS * RATE_LIMIT_RETRY_GROWTH ** (attempt - 1), RATE_LIMIT_RETRY_MAX_MS) + Math.random() * RATE_LIMIT_RETRY_JITTER_MS;
+	return Math.max(backoff, retryAfterMs ?? 0);
+}
+
 /** Errors a retry can't help: the credentials, the request, the budget or the person. */
 const PERMANENT_ERROR = /unauthori[sz]ed|forbidden|authenticat|invalid[ _-]?(api[ _-]?key|request|token|param)|api key|permission|budget|usage limit|quota|credit|billing|context (length|window)|too (long|large)|not found|\b(40[0-9]|41[0-9]|42[0-8]|4[3-9][0-9])\b/i;
 /** Errors that come and go: provider trouble, rate limits and a connection that dropped. */
@@ -4041,9 +4087,9 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 	});
 }
 
-/** pi's run policy for coding threads: a few retries for transient model errors. */
+/** pi's run policy for coding threads: a few retries for transient model errors, waiting longer between them than pi's own default, since what reaches a thread is what pi gave up on. */
 const CODING_SETTINGS: HarnessSettings = {
-	retry: { enabled: true, maxRetries: 3, baseDelayMs: 1000 },
+	retry: { enabled: true, maxRetries: 4, baseDelayMs: 2000 },
 	progress: { partialIntervalMs: 250, outputIntervalMs: 250 },
 };
 

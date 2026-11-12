@@ -466,6 +466,11 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		return codingTimings.retryMs;
 	}
 
+	/** A rate limited turn is retried after a moment too, longer each time, so tests don't wait out minutes. */
+	protected override rateLimitRetryDelayMs(attempt: number, _retryAfterMs: number | null): number {
+		return codingTimings.retryMs * attempt;
+	}
+
 	protected override resumeWaitMs(): number {
 		return codingTimings.resumeWaitMs;
 	}

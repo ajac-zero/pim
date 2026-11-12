@@ -29,9 +29,17 @@ export function activityOf(turns: readonly Turn[], now: number, options: { runni
 export class ActivityWatch {
 	constructor(readonly sql: SqlStorage) {
 		sql.exec("CREATE TABLE IF NOT EXISTS pim_activity (id TEXT PRIMARY KEY, output_at INTEGER NOT NULL)");
+		sql.exec("CREATE TABLE IF NOT EXISTS pim_stall_notices (id TEXT PRIMARY KEY, at INTEGER NOT NULL)");
 	}
 	output(id: string, at: number): void {
 		this.sql.exec("INSERT INTO pim_activity (id, output_at) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET output_at = excluded.output_at", id, at);
+	}
+	/** Claims a notice before waking its parent, so overlapping heartbeat jobs never send it twice. */
+	claim(key: string, at: number): boolean {
+		return this.sql.exec("INSERT OR IGNORE INTO pim_stall_notices (id, at) VALUES (?, ?) RETURNING id", key, at).toArray().length > 0;
+	}
+	retry(key: string): void {
+		this.sql.exec("DELETE FROM pim_stall_notices WHERE id = ?", key);
 	}
 	lastOutput(id: string): number {
 		return Number(this.sql.exec("SELECT output_at FROM pim_activity WHERE id = ?", id).toArray()[0]?.output_at ?? 0);

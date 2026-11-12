@@ -707,6 +707,21 @@ describe("an agent's coding tools", () => {
 		await runInDurableObject(codingThread(env, id), (thread: CodingThreadDO) => (thread as unknown as { eventSink(): CodingEventSink }).eventSink().emit(ended!));
 		await settled(chat);
 		expect((await messagesOf(chat, "user")).filter((text) => text.includes("[Coding thread"))).toHaveLength(1);
+		// A stall uses the same parent-wake path, with a durable claim even across repeated heartbeat checks.
+		let stalled = "";
+		faux.setResponses([(context) => {
+			stalled = lastUserText(context.messages);
+			return toolUse("send_to_user", { message: "Checking the slow command." });
+		}]);
+		const activity = { running: true, lastActivityAt: 100, current: [{ name: "test", summary: "command=vitest run", startedAt: 100, elapsedMs: 901000, timeoutMs: 900000 }], steps: [], stalls: [{ key: "tool:100:test", reason: "past declared timeout", since: 100 }] };
+		const pim = await getAgentByName(env.Pim, OWNER);
+		await pim.codingStalled(id, activity);
+		await pim.codingStalled(id, activity);
+		await settled(chat);
+		expect(stalled).toContain("past declared timeout");
+		expect(stalled).toContain("command=vitest run");
+		expect((await messagesOf(chat, "user")).filter((text) => text.includes("Stalled:"))).toHaveLength(1);
+
 	});
 
 	it("started by a guest agent in a group chat belong to that chat, and wake that agent in it when a turn ends", async () => {

@@ -112,7 +112,7 @@ describe("the majordomo's diagnostics tools", () => {
 			);
 		});
 		const report = await ask("pim_diagnostics", { since: "1h" });
-		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "now", "provider_cooldowns", "runs", "triggers", "turns"]);
+		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "now", "provider_cooldowns", "runs", "stalls", "triggers", "turns"]);
 		expect(report).toMatchObject({ limit: 20, generated_at: expect.any(String), since: expect.any(String) });
 		expect(report.sections.model_calls.items[0]).toMatchObject({ why: "stopped with error", provider: "test", model: "m", run_kind: "interactive", latency_ms: 90_000 });
 		expect(report.sections.events.items[0]).toMatchObject({ kind: "slow_request", detail: { method: "GET", path: "/api/sessions", ms: 7000, api_key: "[redacted]" } });
@@ -307,5 +307,22 @@ describe("the shared activity view", () => {
 		const response = await api(`/sessions/${ROOT}/activity`);
 		expect(response.status).toBe(200);
 		expect(response.body).toMatchObject({ current: expect.any(Array), steps: expect.any(Array), lastActivityAt: expect.any(Number) });
+	});
+});
+
+describe("stall detection", () => {
+	it("checks declared timeouts, quiet tools and quiet coding transcripts without flagging approvals", async () => {
+		const { activityOf } = await import("../src/activity");
+		const { turnsOf } = await import("../src/diagnostics");
+		const messages = [
+			{ role: "user", content: "go", timestamp: 0 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "a", name: "test", arguments: { command: "vitest run", timeout: 900 } }], timestamp: 100 },
+		] as Message[];
+		const activity = (now: number, lastOutputAt = 100, approval = false) => activityOf(turnsOf(messages, approval ? new Map([["a", { id: "ap", status: "pending", createdAt: 100, decidedAt: null, decidedBy: null }]]) : new Map(), now, true), now, { running: true, startedAt: 0, lastOutputAt, coding: !approval });
+		expect(activity(300100).stalls).toEqual([]);
+		expect(activity(300101).stalls[0]?.reason).toBe("no output for five minutes");
+		expect(activity(900101, 900000).stalls[0]?.reason).toBe("past declared timeout");
+		expect(activity(900101).stalls).toHaveLength(2);
+		expect(activity(900101, 900000, true).stalls).toEqual([]);
 	});
 });

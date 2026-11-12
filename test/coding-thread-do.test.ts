@@ -1364,6 +1364,18 @@ describe("a coding thread with an overflow provider", () => {
 	}
 	const on = async (provider: FakeWorkspaceProvider, id: string) => (await provider.list({ sessionId: id })).length;
 	const slots = async (space: string) => (await codingScheduler(env, space).snapshot()).running.map((slot) => `${slot.threadId}:${slot.pool}`);
+	/** Sets the Gallery's sandbox pool registry as a test wants it, and gives back what restores it, for `onTestFinished`. */
+	const setPools = async (pools: readonly { id: string; provider: string; size: number; priority: number; enabled?: boolean }[]) => {
+		const gallery = env.Gallery.getByName("gallery");
+		const write = async (list: readonly { id: string; provider: string; size: number; priority: number; enabled?: boolean }[]) => {
+			const now = (await gallery.sandboxPools()) as { id: string }[];
+			for (const pool of now) if (!list.some((candidate) => candidate.id === pool.id)) await gallery.removeSandboxPool(pool.id, "tester");
+			for (const pool of list) await gallery.upsertSandboxPool(now.some((kept) => kept.id === pool.id) ? pool.id : null, pool, "tester");
+		};
+		const before = await gallery.sandboxPools();
+		await write(pools);
+		return async () => write(before);
+	};
 	const ledger = (id: string) =>
 		runInDurableObject(env.Gallery.getByName("gallery"), (_instance: unknown, state: DurableObjectState) =>
 			state.storage.sql.exec("SELECT provider, end_reason FROM compute_usage WHERE thread_id = ? ORDER BY id", id).toArray(),
@@ -1480,6 +1492,120 @@ describe("a coding thread with an overflow provider", () => {
 		const stub = codingThread(env, id);
 		await expect(inside(stub, (thread) => thread.start(startInput(id, { pool: "cloudflare" })))).rejects.toThrow(/Unknown or disabled pool "cloudflare".*"compose"/);
 		await expect(inside(stub, async (thread) => thread.store.thread())).resolves.toBeNull();
+	});
+
+	it("places by the pool registry: two pools on one provider each with its own size, and a thread overflows by priority", async () => {
+		providers();
+		const restore = await setPools([
+			{ id: "big", provider: "compose", size: 2, priority: 1 },
+			{ id: "small", provider: "compose", size: 1, priority: 2 },
+			{ id: "cloudflare", provider: "cloudflare", size: 2, priority: 3 },
+		]);
+		onTestFinished(restore);
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Second done."), fauxAssistantMessage("Third done."), fauxAssistantMessage("Fourth done.")]);
+		const first = await startThread({ space });
+		const second = await startThread({ space });
+		for (const each of [first, second]) {
+			await turns(each.id, 1);
+			expect(await each.stub.status()).toMatchObject({
+				pool: "big",
+				provider: "compose",
+				placementReason: "priority",
+				placement: { kind: "priority", pool: "big", provider: "compose", priority: 1, skipped: [] },
+			});
+		}
+		// The big pool is full at its size of two, so the third takes the small one, still on the manager, before Cloudflare's.
+		const third = await startThread({ space });
+		await turns(third.id, 1);
+		expect(await third.stub.status()).toMatchObject({
+			pool: "small",
+			provider: "compose",
+			placementReason: "overflow",
+			placement: { kind: "overflow", pool: "small", provider: "compose", priority: 2, skipped: [{ pool: "big", reason: "full" }] },
+		});
+		expect(await slots(space)).toEqual(expect.arrayContaining([`${first.id}:big`, `${second.id}:big`, `${third.id}:small`]));
+		// Both of the manager's pools are full: the fourth goes on to Cloudflare's.
+		const fourth = await startThread({ space });
+		await turns(fourth.id, 1);
+		expect(await fourth.stub.status()).toMatchObject({ pool: "cloudflare", provider: "cloudflare" });
+		for (const each of [first, second, third, fourth]) await each.stub.archive();
+	});
+
+	it("pins a thread to a pool by its id, and a provider's id to that provider's first pool", async () => {
+		providers();
+		const restore = await setPools([
+			{ id: "big", provider: "compose", size: 2, priority: 2 },
+			{ id: "small", provider: "compose", size: 1, priority: 1 },
+			{ id: "cloudflare", provider: "cloudflare", size: 2, priority: 3 },
+		]);
+		onTestFinished(restore);
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("Big done."), fauxAssistantMessage("Small done.")]);
+		// A pool's id, whatever the case: only there, though the small pool has room and stands first.
+		const pinned = await startThread({ space, pool: "Big" });
+		expect(pinned.status).toMatchObject({
+			pool: "big",
+			provider: "compose",
+			placementReason: "pinned",
+			placement: { kind: "pinned", pool: "big", provider: "compose", priority: 2, skipped: [] },
+		});
+		await turns(pinned.id, 1);
+		// A provider's id names that provider's first pool, the small one.
+		const byProvider = await startThread({ space, provider: "compose" });
+		expect(byProvider.status).toMatchObject({ pool: "small", provider: "compose", placementReason: "pinned" });
+		await turns(byProvider.id, 1);
+		// The small pool is full at its size of one: a thread pinned there queues rather than overflowing.
+		const queued = await startThread({ space, pool: "small" });
+		expect(queued.status).toMatchObject({ state: "queued", slot: "queued", pool: "small", placementReason: "pinned" });
+		expect((await codingScheduler(env, space).snapshot()).queued[0]).toMatchObject({ threadId: queued.id, pool: "small" });
+		expect((await codingScheduler(env, space).snapshot()).queued[0]!.overflow).toBeUndefined();
+		for (const each of [pinned, byProvider, queued]) await each.stub.archive();
+	});
+
+	it("resumes a thread from before pools, whose pool is its provider, where it made its workspace", async () => {
+		const { compose, cloudflare } = providers();
+		const space = `space-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, space);
+		codingFaux.setResponses([fauxAssistantMessage("First done."), fauxAssistantMessage("Again.")]);
+		const thread = await startThread({ space });
+		await turns(thread.id, 1);
+		expect(await thread.stub.status()).toMatchObject({ pool: "compose", provider: "compose" });
+		// A thread stored before pools has no pool of its own and no placement: its pool is its provider's id.
+		await runInDurableObject(thread.stub, (_instance: CodingThreadDO, state) => {
+			state.storage.sql.exec("UPDATE coding_thread SET pool_id = NULL, placement = NULL");
+		});
+		expect(await thread.stub.status()).toMatchObject({ pool: "compose", provider: "compose", placement: null });
+		codingSchedulers.now = Date.now() + 10 * 60_000 + 1_000;
+		await scheduler.sweep();
+		await runDurableObjectAlarm(scheduler);
+		codingSchedulers.now = null;
+		await thread.stub.steer("Carry on.", { operationId: "resume" });
+		await turns(thread.id, 2);
+		// It asks for its slot in the same pool, and the one it gets counts there, though Cloudflare has room.
+		expect(await thread.stub.status()).toMatchObject({ pool: "compose", provider: "compose", slot: "held", placementReason: "priority" });
+		expect(await slots(space)).toEqual([`${thread.id}:compose`]);
+		expect(await on(cloudflare, thread.id)).toBe(0);
+		await thread.stub.archive();
+	});
+
+	it("places as it did before pools when the registry has no pool it can use", async () => {
+		providers();
+		const restore = await setPools([{ id: "elsewhere", provider: "daytona", size: 3, priority: 1 }]);
+		onTestFinished(restore);
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("Done.")]);
+		const thread = await startThread({ space });
+		await turns(thread.id, 1);
+		// One pool per provider, its id the provider's, in the registry's order; the pool the deployment lacks is named with why.
+		expect(await thread.stub.status()).toMatchObject({
+			pool: "compose",
+			provider: "compose",
+			placementReason: "priority",
+			placement: { kind: "priority", pool: "compose", provider: "compose", priority: 1, skipped: [{ pool: "elsewhere", reason: "provider_unavailable" }] },
+		});
+		expect(await slots(space)).toEqual([`${thread.id}:compose`]);
+		await thread.stub.archive();
 	});
 
 	it("keeps a pinned thread on its pool when it resumes, and records that an unpinned one overflowed", async () => {

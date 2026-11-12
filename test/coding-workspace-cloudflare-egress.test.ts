@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleEgress } from "../cloudflare-egress";
+import { egressPolicy, gatewayInjection, gitBrokerInjection } from "../src/coding/workspace/egress";
 import type { EgressPolicy } from "../src/coding/workspace/types";
 
 const policy: EgressPolicy = { allow: ["allowed.example", "*.packages.example"], inject: [{ host: "api.example", pathPrefix: "/api/git", headers: { authorization: "Bearer test-secret" } }] };
+
+/** What an Amp thread's workspace gets (`#spec` in src/coding/thread-do.ts): the common hosts, the harness's own, and the credentials its proxy injects. */
+const ampThread = (): EgressPolicy =>
+	egressPolicy({
+		allow: ["registry.npmjs.org", "pypi.org", "pim.example.test", "ampcode.com", "*.ampcode.com"],
+		inject: [gitBrokerInjection("https://pim.example.test", "/api/coding/git", "git-token"), gatewayInjection("https://pim.example.test", "/api/coding/gateway", "anthropic", "gateway-token")],
+	});
+
 describe("Cloudflare container egress", () => {
 	it("injects outside the workspace, replaces supplied headers and never follows redirects", async () => {
 		let sent: Request | undefined;
@@ -69,8 +78,13 @@ describe("Cloudflare container egress", () => {
 		expect((await handleEgress(new Request("https://api.example/api/git"), revoked, "api.example")).status).toBe(403);
 	});
 	it("forwards an allowed GET and an allowed WebSocket upgrade, returning the 101 untouched", async () => {
-		const amp = { allow: ["ampcode.com", "*.ampcode.com"] };
-		const get = await handleEgress(new Request("https://ampcode.com/"), amp, "*", async () => new Response("ok"));
+		const amp = ampThread();
+		const get = await handleEgress(new Request("https://ampcode.com/"), amp, "*", async (request) => {
+			// The harness's own host gets none of the credentials, which are for Pim's hosts alone.
+			expect((request as Request).headers.has("authorization")).toBe(false);
+			expect((request as Request).headers.has("x-api-key")).toBe(false);
+			return new Response("ok");
+		});
 		expect(get.status).toBe(200);
 		const upgrade = new Request("https://ampcode.com/", { headers: { upgrade: "websocket", connection: "Upgrade", "sec-websocket-key": "k", "sec-websocket-extensions": "permessage-deflate" } });
 		let sent: Request | undefined;

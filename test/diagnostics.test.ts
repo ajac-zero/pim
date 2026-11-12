@@ -361,3 +361,15 @@ describe("parallel command silence", () => {
 		expect(activity.stalls).toEqual([{ key: "tool:quiet", reason: "no output for five minutes", since: 200 }]);
 	});
 });
+
+
+describe("harness timeout units", () => {
+	it("normalizes Pi seconds and Claude Bash milliseconds without guessing missing timeouts", async () => {
+		const { toolTimeout } = await import("../src/diagnostics");
+		expect(toolTimeout("bash", { timeout: 900 })).toBe(900000);
+		expect(toolTimeout("Bash", { timeout: 900000 })).toBe(900000);
+		expect(toolTimeout("shell", { timeout_ms: 900000 })).toBe(900000);
+		expect(toolTimeout("bash", {})).toBeNull();
+		expect(toolTimeout("bash", { timeout: -1 })).toBeNull();
+	});
+});

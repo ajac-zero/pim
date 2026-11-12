@@ -7,12 +7,14 @@ import { type CodingThreadView, threadPath } from "../coding/api";
 import { cliHarness } from "../coding/harness";
 import { codingThread } from "../coding/thread-do";
 import { CodingError, calling, listThreads, liveThread, ownedThread, startThread, threadView } from "../coding/threads";
+import { OUTPUT_LINES, pageTranscript, TRANSCRIPT_MAX_PAGE, TRANSCRIPT_PAGE, transcriptOutput } from "../coding/transcript";
+import type { TranscriptMessage } from "../transcript";
 import { defineGatedAction, definePimExtension } from "./define";
 import { json, text } from "./services";
 
 /**
  * Coding threads for every agent: it can start one on a GitHub or Gitea repository,
- * follow it, steer it, read its diff and tests, stop it, archive it, and
+ * follow it, steer it, read its diff, its tests and what it said, stop it, archive it, and
  * push its branch or merge it into the default branch without asking, and open a pull request once the person approves. A thread an agent starts is recorded as
  * started by that agent from that chat, which is woken when each of the
  * thread's turns ends (src/coding/supervisor.ts). The tools reach only the
@@ -30,6 +32,12 @@ const COMMIT = /^[0-9a-zA-Z]{4,64}$/;
 const MAX_LISTED = 20;
 
 const link = (threadId: string) => `${deploymentSettings(env).publicUrl ?? ""}${threadPath(threadId)}`;
+
+/** A thread's transcript, typed by hand as the API route has it: the transcript's type is too deep for the RPC stub's. */
+async function threadTranscript(env: Env, threadId: string): Promise<TranscriptMessage[]> {
+	const stub = codingThread(env, threadId) as unknown as { transcript(): Promise<TranscriptMessage[]> };
+	return await stub.transcript();
+}
 
 /** What the model reads of a thread: enough to decide what to do next. */
 function brief(view: CodingThreadView) {
@@ -207,6 +215,47 @@ export const coding = definePimExtension({
 								output: run.output.length > MAX_TEST_OUTPUT_CHARS ? `…${run.output.slice(-MAX_TEST_OUTPUT_CHARS)}` : run.output,
 							})),
 						);
+					});
+				},
+			}),
+			defineTool({
+				name: "coding_transcript",
+				description: `What a coding thread said: the task it was given, what its agent answered, the commands it ran and what they printed, and its notices. Messages come oldest first, \`limit\` (${TRANSCRIPT_PAGE} by default, at most ${TRANSCRIPT_MAX_PAGE}) from \`offset\` (0 by default); the answer says how many there are in all and where the next page starts. \`role\` reads only one kind of message (user, assistant, tool or notice), and \`summary\` one line of each, to see the shape of the conversation first. Long messages are cut; coding_transcript_output reads one whole by its id.`,
+				parameters: Type.Object({
+					thread_id: ThreadId,
+					offset: Type.Optional(Type.Integer({ minimum: 0, description: "The first message to show, counting from 0; the oldest by default." })),
+					limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TRANSCRIPT_MAX_PAGE, description: `How many messages to show; ${TRANSCRIPT_PAGE} by default.` })),
+					role: Type.Optional(
+						Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool"), Type.Literal("notice")], {
+							description: "Only messages of this kind: user is what it was told, assistant what it said and the tools it called, tool what those printed, notice what Pim added.",
+						}),
+					),
+					summary: Type.Optional(Type.Boolean({ description: "One line of each message, instead of the whole of each." })),
+				}),
+				replay: "safe",
+				async execute({ thread_id, offset, limit, role, summary }) {
+					return answer(async () => {
+						const { threadId } = await ownedThread(env, space, thread_id);
+						return json(pageTranscript(await threadTranscript(env, threadId), { offset, limit, role, summary }));
+					});
+				},
+			}),
+			defineTool({
+				name: "coding_transcript_output",
+				description: `One message of a coding thread's transcript whole, by the id coding_transcript gave it: the whole of what it said, of a command it ran or of what that printed, which the transcript had cut. Paged by lines like read: up to ${OUTPUT_LINES} lines and about 30 KB from offset (line 1 by default), and it says how to read on when there is more.`,
+				parameters: Type.Object({
+					thread_id: ThreadId,
+					id: Type.String({ description: "The message's id, as coding_transcript gave it." }),
+					offset: Type.Optional(Type.Integer({ minimum: 1, description: "The first line to read, counting from 1." })),
+					limit: Type.Optional(Type.Integer({ minimum: 1, maximum: OUTPUT_LINES, description: `How many lines to read; ${OUTPUT_LINES} by default.` })),
+				}),
+				replay: "safe",
+				async execute({ thread_id, id, offset, limit }) {
+					return answer(async () => {
+						const { threadId } = await ownedThread(env, space, thread_id);
+						const output = transcriptOutput(await threadTranscript(env, threadId), id, { offset, limit });
+						if (output === null) throw new CodingError(404, `No message ${id} in coding thread ${threadId}'s transcript`, "not_found");
+						return text(output);
 					});
 				},
 			}),

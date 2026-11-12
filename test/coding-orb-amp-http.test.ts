@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AmpHttpOrbClient, AMP_HTTP_AUTH_REJECTED, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
 import { runOrbClientConformanceSuite } from "../src/coding/orb/conformance";
 import { OrbAuthError, OrbLostError, OrbUnreachableError, OrbUnsupportedError } from "../src/coding/orb/types";
@@ -149,6 +149,8 @@ describe("AmpHttpOrbClient", () => {
 	});
 
 	describe("diagnosable failures", () => {
+		// spyOn on an already-spied console.warn returns the same spy, so calls would leak between tests.
+		afterEach(() => vi.restoreAllMocks());
 		const logs = () => vi.spyOn(console, "warn").mockImplementation(() => {});
 		const parsed = (spy: ReturnType<typeof logs>) => spy.mock.calls.map(([line]) => JSON.parse(String(line)));
 		const secretly = "sgamp_saved Bearer sgamp_saved";

@@ -43,6 +43,7 @@ import {
   Upload,
 } from "~/components/icons";
 import { EmptyState, Page } from "~/components/page";
+import { RunActivity } from "~/components/run-activity";
 import { Confirm } from "~/components/triggers";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -289,6 +290,7 @@ function ThreadRow({ thread }: { thread: CodingThreadSummary }) {
             {repoName(thread.repo)}
           </span>
         </span>
+        <RunActivity activity={thread.activity} timeline={false} />
         <span className="truncate text-[13px] text-muted-foreground">
           {thread.task}
         </span>
@@ -1197,6 +1199,7 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
   const top = (
     <>
       <ThreadSummary thread={thread} />
+      <RunActivity activity={thread.activity} />
       <StateNotice thread={thread} />
       <EnvironmentSection thread={thread} />
       <ThreadActions thread={thread} controls={controls} />

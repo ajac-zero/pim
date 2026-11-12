@@ -2128,3 +2128,39 @@ describe("the environment", () => {
     });
   });
 });
+
+describe("live coding activity", () => {
+  const activity = {
+    running: true,
+    lastActivityAt: Date.now() - 1000000,
+    current: [
+      {
+        name: "test",
+        summary: "command=vitest run",
+        startedAt: Date.now() - 1000000,
+        elapsedMs: 1000000,
+        timeoutMs: 900000,
+      },
+    ],
+    steps: [],
+    stalls: [{ key: "test:1", reason: "past declared timeout", since: 1 }],
+  };
+  it("shows the command, elapsed time, last activity and stalled badge on the list", async () => {
+    const { api } = fakeApi();
+    api.list.mockResolvedValue({
+      threads: [summary({ state: "running", activity })],
+    });
+    renderWith(api, CodingPage);
+    await screen.findByText("Stalled");
+    expect(screen.getByText(/command=vitest run/)).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toMatch(/10\d{2} s/);
+    expect(screen.getByText(/Last activity:/)).toBeTruthy();
+  });
+  it("shows the same server activity on the thread page", async () => {
+    const { api } = fakeApi(view({ state: "running", activity }));
+    threadPage(api);
+    await screen.findByText("Stalled");
+    expect(screen.getByText(/command=vitest run/)).toBeTruthy();
+    expect(screen.getByText(/Last activity:/)).toBeTruthy();
+  });
+});

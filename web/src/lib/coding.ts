@@ -4,6 +4,7 @@ import { queryOptions } from "@tanstack/react-query";
 import type { TranslationKey } from "~/components/i18n";
 import { ApiError, call, SignInRequired } from "~/lib/pim-api";
 import { applyChanges } from "~/lib/pim-view";
+import type { Activity } from "../../../src/activity-types";
 import {
   type MessagePart,
   projectEntries,
@@ -62,6 +63,7 @@ export type AgentProfile = {
 };
 
 export type CodingThreadSummary = {
+  activity?: Activity;
   id: string;
   url: string;
   repo: string;
@@ -200,6 +202,7 @@ export function formatAgo(at: number, now: number, locale: string): string {
 }
 
 export type CodingThreadView = {
+  activity?: Activity;
   id: string;
   threadId: string;
   url: string;

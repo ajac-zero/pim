@@ -4,7 +4,7 @@ A coding thread started with `harness: "claude-code"` is run by Anthropic's `cla
 
 ## The framework
 
-Any CLI that works in a workspace is a `CliHarness` (`src/coding/harness/types.ts`): how a turn is started (`buildCommand`), how a line of its output reads (`parser().parseLine`, into `HarnessEvent`s), optionally what it left in the workspace once it exited (`parser().finish`), the environment and egress it needs, how its process is signalled, and how it signs in (`login`, or an API key's variable, `apiKeyEnv`). `cliHarness(id)` in `src/coding/harness/index.ts` lists the ones there are: `claude-code`, `codex` ([coding-codex.md](coding-codex.md)), `mistral-vibe` ([coding-vibe.md](coding-vibe.md)) and `amp` ([coding-amp.md](coding-amp.md)).
+Any CLI that works in a workspace is a `CliHarness` (`src/coding/harness/types.ts`): how a turn is started (`buildCommand`), how a line of its output reads (`parser().parseLine`, into `HarnessEvent`s), optionally what it left in the workspace once it exited (`parser().finish`), the environment and egress it needs, how its process is signalled, and how it signs in (`login`, or an API key's variable, `apiKeyEnv`). `cliHarness(id)` in `src/coding/harness/index.ts` lists the ones there are: `claude-code`, `codex` ([coding-codex.md](coding-codex.md)), and `mistral-vibe` ([coding-vibe.md](coding-vibe.md)). Amp now uses agent-hosted Orbs by default ([coding-orbs.md](coding-orbs.md)).
 
 `HarnessRunner` (`src/coding/harness/runner.ts`) runs one turn for `CodingThreadDO` when `thread.harness !== "pi"`:
 

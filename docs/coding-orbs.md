@@ -10,7 +10,7 @@ The conformance suite (`src/coding/orb/conformance.ts`) checks the contract. Cap
 
 ## Amp over HTTPS
 
-`AmpHttpOrbClient` (`src/coding/orb/amp-http.ts`) uses only fetch from the Worker/DO to Amp's HTTPS External API. It never starts a CLI, opens a WebSocket, or holds a sandbox slot. Start with `harness: "amp", provider: "orbs"` (`amp-http` is also accepted), or choose **Run on Amp Orbs** in the coding start form. Without that placement, the existing [Amp workspace harness](coding-amp.md) is unchanged.
+`AmpHttpOrbClient` (`src/coding/orb/amp-http.ts`) uses only fetch from the Worker/DO to Amp's HTTPS External API. It never starts a CLI, opens a WebSocket, or holds a sandbox slot. The **workspace Amp harness is retired**; `harness: "amp"` now defaults to agent-hosted Orbs (amp-http) with no sandbox slot. Old threads that used the workspace Amp harness remain readable. See [coding-amp.md](coding-amp.md) for legacy information.
 
 The bearer is **the same saved credential as the coding page's Amp Connect field**: `codingVault.loadApiKey(space, "amp")`. There is no second PAT or Connect UI. A missing token waits in `login_required`. A 401/403 also waits there and says:
 

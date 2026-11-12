@@ -1,5 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AMP_HTTP_AUTH_REJECTED } from "../src/coding/orb/amp-http";
+import { codingVault } from "../src/coding/vault/vault";
+import { OWNER } from "./helpers";
 import { FakeOrbClient } from "../src/coding/orb/fake";
 import { codingThread, type StartThread } from "../src/coding/thread-do";
 import { type CodingThreadDO, codingEvents, codingOrbs, codingTimings } from "./worker";
@@ -260,5 +263,54 @@ describe("what an agent-hosted thread reports about itself", () => {
 		expect(await stub.status()).toMatchObject({ cost: null, costNote: "fake reports no usage for its threads, so what this one cost isn't known." });
 		// Its tests are its agent's word too: Pim ran none and reports none.
 		expect(await stub.tests()).toEqual([]);
+	});
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+describe("Amp HTTP placement", () => {
+	it("starts Amp Orbs without a sandbox backend, slot or workspace", async () => {
+		const fake = new FakeOrbClient();
+		codingOrbs.factory = () => fake;
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		await stub.start(startInput(id, { harness: "amp", provider: "orbs" }));
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ providerKind: "agent-hosted", state: "running", slot: "none" });
+		expect(fake.started).toHaveLength(1);
+	});
+
+	it("reads the same Amp Connect credential, maps rejection, and refuses HTTP steering/stopping", async () => {
+		const vault = codingVault(env);
+		const saved = "sgamp_HTTP_SHARED_CONNECT_TOKEN";
+		await vault.saveApiKey(OWNER, "amp", saved);
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({}, { status: 403 }));
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		try {
+			await stub.start(startInput(id, { space: OWNER, harness: "amp", provider: "orbs" }));
+			await heartbeat(stub);
+			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", stateDetail: AMP_HTTP_AUTH_REJECTED, slot: "none", provider: "amp-http", inbox: 1 });
+			expect(fetcher.mock.calls[0]?.[0]).toBe("https://ampcode.com/api/v2/threads");
+			expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: `Bearer ${saved}` });
+			fetcher.mockImplementation(async (url) => String(url).endsWith("/threads") ? Response.json({ thread: { id: "T-http", url: "https://ampcode.com/threads/T-http" } }, { status: 201 }) : String(url).endsWith("/messages") ? Response.json({ messages: [] }) : Response.json({ thread: { agentState: { state: "working" } } }));
+			await stub.continue({ operationId: "reconnected" });
+			await heartbeat(stub);
+			expect(await stub.status()).toMatchObject({ state: "running", providerKind: "agent-hosted", slot: "none", inbox: 0 });
+			await expect(inside(stub, (thread) => thread.steer("hi", { operationId: "steer" }))).rejects.toThrow("not supported by Amp's HTTP API yet");
+			await expect(inside(stub, (thread) => thread.abort())).rejects.toThrow("not supported by Amp's HTTP API yet");
+			expect(await stub.status()).toMatchObject({ state: "running", currentOperation: startInput(id).operationId });
+			expect(fetcher.mock.calls.every(([, init]) => init?.method !== "DELETE")).toBe(true);
+			fetcher.mockImplementation(async () => Response.json({}, { status: 401 }));
+			await heartbeat(stub);
+			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", currentOperation: startInput(id).operationId });
+			fetcher.mockImplementation(async (url) => String(url).endsWith("/messages") ? Response.json({ messages: [] }) : Response.json({ thread: { agentState: { state: "idle" } } }));
+			await stub.continue({ operationId: "reconnected-again" });
+			await heartbeat(stub);
+			expect(await stub.status()).toMatchObject({ state: "idle", slot: "none", currentOperation: null, cost: null });
+			expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+		} finally {
+			await vault.delete(OWNER, "amp");
+		}
 	});
 });

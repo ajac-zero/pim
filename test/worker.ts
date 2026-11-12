@@ -482,7 +482,7 @@ export class CodingThreadDO extends RealCodingThreadDO {
 
 	/** The orb clients a test registered, as a deployment's factory would answer with. */
 	protected override orbClients(): OrbClientFactory | null {
-		return codingOrbs.factory;
+		return codingOrbs.factory ?? super.orbClients();
 	}
 
 	/** A thread waiting for another's environment looks for it often. */

@@ -300,7 +300,9 @@ function UiProgramView({
   /** What the person has set, by state key. A program that replaces this one starts from its own initial state and takes these over it. */
   const [typed] = useState(() => {
     if (!carryKey) return {};
-    return complete ? (carried.get(carryKey)?.values ?? {}) : claimCarried(carryKey);
+    return complete
+      ? (carried.get(carryKey)?.values ?? {})
+      : claimCarried(carryKey);
   });
   const [seed] = useState(() =>
     withTyped(seededState(program, reply.submitted), program, typed),

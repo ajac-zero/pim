@@ -21,8 +21,8 @@ import {
 } from "vitest";
 import { UserMessage } from "~/components/chat/items";
 import { Markdown } from "~/components/chat/markdown";
-import { CARRY_FOR_MS } from "~/components/chat/ui-block";
 import { ReplyImages } from "~/components/chat/reply-blocks";
+import { CARRY_FOR_MS } from "~/components/chat/ui-block";
 import type { MessageItem } from "~/lib/openresponses";
 import { ApiError, pim, type StoredUiState } from "~/lib/pim-api";
 import {
@@ -399,15 +399,25 @@ describe("what a ui block holds, kept by Pim", () => {
     kept[`${BLOCK}-1`] = held("9");
     const draw = () => (
       <QueryClientProvider client={new QueryClient()}>
-        <ReplyImages images={{}} streaming={false} send={vi.fn()} messageId="m1">
+        <ReplyImages
+          images={{}}
+          streaming={false}
+          send={vi.fn()}
+          messageId="m1"
+        >
           <Markdown text={twice} />
         </ReplyImages>
       </QueryClientProvider>
     );
     const view = render(draw());
-    const d1s = () =>
-      [...document.querySelectorAll<HTMLInputElement>('[data-field="knn.d1"] input')];
-    await waitFor(() => expect(d1s().map((input) => input.value)).toEqual(["5", "9"]));
+    const d1s = () => [
+      ...document.querySelectorAll<HTMLInputElement>(
+        '[data-field="knn.d1"] input',
+      ),
+    ];
+    await waitFor(() =>
+      expect(d1s().map((input) => input.value)).toEqual(["5", "9"]),
+    );
     // Changing the second saves the second, and only it.
     fireEvent.change(d1s()[1] as HTMLInputElement, { target: { value: "7" } });
     view.unmount();
@@ -657,9 +667,10 @@ const slider = (name: string) =>
 describe("a button that opens an address", () => {
   const source = [
     '{@state dest = "https://example.com/docs?a=1&b=2#top"}',
-    '<button onClick={[openUrl(dest)]}>Open the docs</button>',
+    "<button onClick={[openUrl(dest)]}>Open the docs</button>",
   ].join("\n");
-  const open = () => fireEvent.click(screen.getByRole("button", { name: "Open the docs" }));
+  const open = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Open the docs" }));
   /** The browser's confirm and open, which the test environment lacks, as the person answers the first. */
   const browser = (answer: boolean) => {
     const confirm = vi.fn((_message?: string) => answer);
@@ -679,7 +690,9 @@ describe("a button that opens an address", () => {
     expect(confirm).not.toHaveBeenCalled();
     open();
     expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm.mock.calls[0]?.[0]).toContain("https://example.com/docs?a=1&b=2#top");
+    expect(confirm.mock.calls[0]?.[0]).toContain(
+      "https://example.com/docs?a=1&b=2#top",
+    );
     expect(opened).toHaveBeenCalledTimes(1);
     expect(opened).toHaveBeenCalledWith(
       "https://example.com/docs?a=1&b=2#top",
@@ -700,7 +713,11 @@ describe("a button that opens an address", () => {
     // What Pim kept is no more trusted than the block's own text.
     kept[uiBlockId(source)] = {
       version: 1,
-      state: { values: { dest: "javascript:alert(1)" }, revealed: {}, submitted: {} },
+      state: {
+        values: { dest: "javascript:alert(1)" },
+        revealed: {},
+        submitted: {},
+      },
       submitted: false,
       updatedAt: 0,
     };
@@ -716,7 +733,9 @@ describe("a button that opens an address", () => {
 
   it("is refused when the block is compiled if its address is plain and wrong, and then draws without the click", () => {
     const { confirm, opened } = browser(true);
-    shown('<button onClick={[openUrl("javascript:alert(1)")]}>Open the docs</button>');
+    shown(
+      '<button onClick={[openUrl("javascript:alert(1)")]}>Open the docs</button>',
+    );
     open();
     expect(confirm).not.toHaveBeenCalled();
     expect(opened).not.toHaveBeenCalled();
@@ -932,7 +951,8 @@ describe("a ui block while its message streams", () => {
   });
 
   it("draws an open fence that briefly equals an earlier whole one as the open one, and leaves the earlier whole", async () => {
-    const source = '<form id="f" submitLabel="Go"><input name="a" required={false}/></form>';
+    const source =
+      '<form id="f" submitLabel="Go"><input name="a" required={false}/></form>';
     // The second fence has been written exactly as far as the first, and not yet closed.
     const text = `\`\`\`ui\n${source}\n\`\`\`\n\nAgain:\n\n\`\`\`ui\n${source}`;
     compiled.length = 0;
@@ -940,7 +960,9 @@ describe("a ui block while its message streams", () => {
     await act(async () => {
       vi.advanceTimersByTime(300);
     });
-    const buttons = [...document.querySelectorAll<HTMLButtonElement>('[data-part="submit"]')];
+    const buttons = [
+      ...document.querySelectorAll<HTMLButtonElement>('[data-part="submit"]'),
+    ];
     expect(buttons).toHaveLength(2);
     // The first is whole: it can be submitted. The second is still arriving: it can't.
     expect(buttons.map((button) => button.disabled)).toEqual([false, true]);
@@ -956,9 +978,15 @@ describe("a ui block while its message streams", () => {
     await act(async () => {
       vi.advanceTimersByTime(300);
     });
-    const inputs = () => [...document.querySelectorAll<HTMLInputElement>('[data-field="f.a"] input')];
+    const inputs = () => [
+      ...document.querySelectorAll<HTMLInputElement>(
+        '[data-field="f.a"] input',
+      ),
+    ];
     expect(inputs()).toHaveLength(2);
-    fireEvent.change(inputs()[1] as HTMLInputElement, { target: { value: "second" } });
+    fireEvent.change(inputs()[1] as HTMLInputElement, {
+      target: { value: "second" },
+    });
     rerender(view(both(source, false), false));
     await act(async () => {
       vi.advanceTimersByTime(300);
@@ -970,7 +998,10 @@ describe("a ui block while its message streams", () => {
   it("carries nothing on when a block goes mid-stream, but to the block that replaces it in the same commit", async () => {
     const source = '<form id="f"><input name="a" label="A"/></form>';
     const text = fence(source);
-    const input = () => document.querySelector<HTMLInputElement>('[data-field="f.a"] input') as HTMLInputElement;
+    const input = () =>
+      document.querySelector<HTMLInputElement>(
+        '[data-field="f.a"] input',
+      ) as HTMLInputElement;
     const mounted = async (element: ReactElement) => {
       const shown = render(element);
       await act(async () => {

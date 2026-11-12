@@ -123,6 +123,7 @@ describe("MAX_DEPTH", () => {
           {
             t: "if",
             cond: { t: "bool", v: true },
+            // biome-ignore lint/suspicious/noThenProperty: the program's own name for the branch an {#if} takes
             then: nodes,
             other: [],
           },
@@ -220,17 +221,23 @@ describe("MAX_STATE_BYTES", () => {
   it("counts bytes, as when it is kept", () => {
     const empty = bytes(run('{@state s = ""}').result.state);
     // Two bytes each: half what the characters would fill.
-    const at = run(`{@state s = "${"é".repeat((MAX_STATE_BYTES - empty) / 2)}"}`);
+    const at = run(
+      `{@state s = "${"é".repeat((MAX_STATE_BYTES - empty) / 2)}"}`,
+    );
     expect(bytes(at.result.state)).toBe(MAX_STATE_BYTES);
     expect(at.result.error).toBeNull();
-    const over = run(`{@state s = "${"é".repeat((MAX_STATE_BYTES - empty) / 2)}a"}`);
+    const over = run(
+      `{@state s = "${"é".repeat((MAX_STATE_BYTES - empty) / 2)}a"}`,
+    );
     expect(over.result.error).not.toBeNull();
   });
 
   it("takes exactly that many bytes when it is kept, and refuses one more", () => {
     // Sixteen texts of 2000 characters, then the rest in a last one.
     const names = Array.from({ length: 17 }, (_, index) => `s${index}`);
-    const program = compile(names.map((name) => `{@state ${name} = ""}`).join("\n"));
+    const program = compile(
+      names.map((name) => `{@state ${name} = ""}`).join("\n"),
+    );
     const state = (last: number) => ({
       values: Object.fromEntries(
         names.map((name, index) => [
@@ -307,7 +314,9 @@ describe("MAX_RESPONSE_STATE_BYTES, the state a form's turn carries", () => {
   });
 
   const names = ["a", "b", "c"];
-  const program = compile(names.map((name) => `{@state ${name} = ""}`).join("\n"));
+  const program = compile(
+    names.map((name) => `{@state ${name} = ""}`).join("\n"),
+  );
   const carried = (last: number) => {
     const values = {
       a: "x".repeat(MAX_TEXT_CHARS),

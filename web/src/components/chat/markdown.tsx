@@ -50,11 +50,7 @@ import {
 } from "~/lib/queries";
 import { newChatSearch } from "~/lib/start-chat";
 import { cn } from "~/lib/utils";
-import {
-  type UiFence,
-  uiBlockIds,
-  uiFences,
-} from "../../../../src/ui-lang";
+import { type UiFence, uiBlockIds, uiFences } from "../../../../src/ui-lang";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** A chat an agent names in its text: by its id, or by its address. */
@@ -709,9 +705,8 @@ function Fence(props: ComponentProps<"code">) {
   }
   if (isUiBlock(language)) {
     // Which of the text's ui fences it is, from the info string `slotted` wrote; a fence it didn't find (inside a quote, say) has none.
-    const meta = (
-      props as { node?: { properties?: { metastring?: unknown } } }
-    ).node?.properties?.metastring;
+    const meta = (props as { node?: { properties?: { metastring?: unknown } } })
+      .node?.properties?.metastring;
     const found = /\bslot=(\d+)/.exec(String(meta ?? ""))?.[1];
     const slot = found === undefined ? undefined : Number(found);
     const open = slot !== undefined && ui.open && slot === ui.ids.length - 1;

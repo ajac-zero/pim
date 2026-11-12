@@ -16,11 +16,12 @@ import { CodingSchedulerDO as RealCodingSchedulerDO, type SchedulerNotifier } fr
 import { type CodingEventSink, type CodingThreadEvent, CodingThreadDO as RealCodingThreadDO } from "../src/coding/thread-do";
 import type { Fetch, GitHubApp } from "../src/coding/git-broker/github-app";
 import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "../src/coding/model-gateway";
-import type { ComputeQuota } from "../src/compute";
+import type { ComputeProvider, ComputeQuota } from "../src/compute";
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
 import { workspaceRegistry, type WorkspaceProviderRegistry } from "../src/coding/workspace/registry";
 import type { Provider } from "@earendil-works/pi-ai";
 import { loginProvider } from "./fake-claude-login";
+import { fakeContainers } from "./fake-container";
 import { fakeGit } from "./fake-git";
 
 export { default, Auth, Directory, Gallery, HostOps } from "../src/index";
@@ -351,8 +352,18 @@ export const codingLogins = loginProvider();
 export const codingWorkspaces = new FakeWorkspaceProvider();
 codingWorkspaces.register("git", fakeGit);
 
-/** The workspace backends coding threads have: the in-memory one unless a test sets others, such as the Compose provider on a stubbed manager. */
-export const codingBackends: { registry: WorkspaceProviderRegistry | null } = { registry: null };
+/**
+ * The workspace backends coding threads have: the in-memory one unless a test sets others, such as the Compose provider
+ * on a stubbed manager. `production` has the thread's object build them as a deployment does, from its bindings and the
+ * compute providers a test sets (`codingCompute`), so a thread the admin's overflow provider runs on is placed as for real.
+ */
+export const codingBackends: { registry: WorkspaceProviderRegistry | null; production: boolean } = { registry: null, production: false };
+
+/** The compute providers a test has the admin set up, as the Gallery would answer with; none unless a test sets them. */
+export const codingCompute: { providers: readonly ComputeProvider[] | null } = { providers: null };
+
+/** A stand-in for the deployment's Cloudflare Containers bindings, so threads on the overflow provider work against in-memory containers (test/fake-container.ts). */
+export const codingContainers: { service: ReturnType<typeof fakeContainers> | null } = { service: null };
 
 /** What every space may use of compute in thread tests, in place of its Pim's answer, until a test sets one (test/coding-thread-do.test.ts). */
 export const codingQuota: { quota: ComputeQuota | null } = { quota: null };
@@ -371,12 +382,30 @@ export const codingTimings = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 *
 export const codingThreadClock: { now: number | null } = { now: null };
 
 export class CodingThreadDO extends RealCodingThreadDO {
+	constructor(ctx: DurableObjectState, env: Env) {
+		// With the containers stood in, the object answers as one whose Worker has the Cloudflare Containers bindings.
+		super(
+			ctx,
+			codingContainers.service
+				? {
+						...env,
+						WorkspaceContainer: { getByName: codingContainers.service.containerFor } as unknown as Env["WorkspaceContainer"],
+						WorkspaceCatalog: { getByName: () => codingContainers.service!.catalog } as unknown as Env["WorkspaceCatalog"],
+					}
+				: env,
+		);
+	}
+
 	protected override now(): number {
 		return codingThreadClock.now ?? super.now();
 	}
 
 	protected override workspaceProviders(): WorkspaceProviderRegistry {
-		return codingBackends.registry ?? workspaceRegistry([codingWorkspaces]);
+		return codingBackends.production ? super.workspaceProviders() : (codingBackends.registry ?? workspaceRegistry([codingWorkspaces]));
+	}
+
+	protected override async computeProviders(): Promise<readonly ComputeProvider[]> {
+		return codingCompute.providers ?? super.computeProviders();
 	}
 
 	protected override async computeQuota(space: string): Promise<ComputeQuota> {

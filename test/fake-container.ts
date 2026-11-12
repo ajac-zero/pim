@@ -1,4 +1,5 @@
 import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
+import { egressPolicy } from "../src/coding/workspace/egress";
 import type { ContainerHost, ContainerCatalog } from "../src/coding/workspace/cloudflare";
 import { WorkspaceNotFoundError, type WorkspaceSpec, type WorkspaceRef, type EgressPolicy, type WorkspaceInfo } from "../src/coding/workspace/types";
 
@@ -85,7 +86,10 @@ export function fakeContainers() {
 				await backend.keepAlive(ref);
 			},
 			setEgress: async (policy) => {
-				if (!(await backend.get(ref))) throw new WorkspaceNotFoundError();
+				const ws = await backend.get(ref);
+				if (!ws) throw new WorkspaceNotFoundError();
+				// As the Containers provider's proxy would: the policy the thread set is the one its requests are made under.
+				ws.egress = egressPolicy(policy);
 				policies.set(id, policy);
 			},
 			snapshot: async () => (await (await backend.get(ref))!.snapshot()).id,
@@ -96,5 +100,5 @@ export function fakeContainers() {
 		hosts.set(id, host);
 		return host;
 	};
-	return { containerFor, catalog, policies };
+	return { containerFor, catalog, policies, backend };
 }

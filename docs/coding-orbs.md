@@ -28,6 +28,17 @@ What the CLI does is the client's contract: a start's first stream-json line nam
 
 `test/coding-orb-amp-cli.test.ts` runs the conformance suite against it, with a `FakeCommandRunner` (`test/fake-command-runner.ts`) that scripts the CLI's output, exit codes and delays: no real `amp` and no network anywhere in the tests, so what the real CLI does with a real token is not verified there.
 
+## The ref checks
+
+An agent-hosted thread's agent clones the repository itself and may push with its own credentials — to a branch of its own, to another one, even to the repository's default branch. None of that is Pim's push (`pushBranch` in the git broker), so Pim can't prevent it; what Pim can do is *detect and show it*, computing everything from git rather than trusting the agent. `src/coding/orb/git-check.ts` is that, as a pure module plus the thin `checkRefs` a thread's loop will call around a turn (snapshot the refs before it, compare after it) in a later slice:
+
+- `snapshotRefs` reads the repository's branches through an injected `RefReader` — the seam a later slice fills with a reader that reaches the repository as the broker's read path does, and the in-memory fake (`src/coding/orb/fake-refs.ts`, with scriptable remotes) that tests use.
+- `compareRefs` diffs two snapshots into a `RefReport`: the default branch and every other branch that moved, was made or was deleted, each with the commits it moved by (capped at 50, `truncated` saying there were more) and their authors, and `forcePushed` for any move that isn't a fast-forward.
+- `orbDiff` is Pim's own diff of what the orb produced, from the thread's base commit to a branch (or a commit id) as the remote has it — the same call whether the orb pushed to its own branch or to the default branch — capped as a workspace thread's diffs are, with a stat counted from the whole of it.
+- `describeRefReport` words a report for the thread's notice, honestly: it says what moved and whose commits did it, never that Pim stopped it, and commits to the default branch are always said to be *not necessarily the orb's* unless every one is by the author the thread knows its agent commits as.
+
+`test/coding-orb-git.test.ts` covers it against the fake, with no network: no movement, pushes to the default branch and to the thread's own, a force push, new and deleted branches, a capped commit list, several pushes in one turn, and a concurrent push by someone else — reported as a default-branch move with its author, not attributed to the orb.
+
 ## What is honest about it
 
 - **Costs are the agent's word.** The client reports what the agent's cloud says it spent; the thread can't measure the run itself, as it can in a workspace it owns. A client that reports no cost answers `null`, and a budget can't be held to that.
@@ -38,4 +49,4 @@ What the CLI does is the client's contract: a start's first stream-json line nam
 
 ## What is not there yet
 
-This slice adds the kind, the interface, the fake client and the Amp CLI client above — which still has no runner that runs the CLI for it (the real one execs `amp` inside a Pim sandbox; a later slice) and so is not yet reachable from a thread. There is no way to start a thread as agent-hosted from the API or the UI, no pool placement or scheduler slot for orbs, and no provider registry for them: a thread record *can* say `providerKind: "agent-hosted"` and its orb, and nothing yet makes one say so. Those come in later slices. There is no feature flag or opt-in to add: this is additive code, on by default and inert until a later slice wires it.
+This slice adds the kind, the interface, the fake client and the Amp CLI client above — which still has no runner that runs the CLI for it (the real one execs `amp` inside a Pim sandbox; a later slice) and so is not yet reachable from a thread. The ref checks are the same: a pure module and a fake, with no real `RefReader` yet (one that reads a repository's refs and diffs through the broker's read path, with the GitHub App's installation token) and no call to them from a thread's loop. There is no way to start a thread as agent-hosted from the API or the UI, no pool placement or scheduler slot for orbs, and no provider registry for them: a thread record *can* say `providerKind: "agent-hosted"` and its orb, and nothing yet makes one say so. Those come in later slices. There is no feature flag or opt-in to add: this is additive code, on by default and inert until a later slice wires it.

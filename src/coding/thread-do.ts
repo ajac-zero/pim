@@ -268,6 +268,10 @@ export class CodingThreadDO extends DurableObject<Env> {
 					journal: this.#journal,
 					onTestRun: (run) => this.store.addTestRun(run),
 					sink: (event) => this.#tellLive({ type: "output", ...event }),
+					onActivity: (callId) => {
+						this.#activityWatch.output("thread", this.now());
+						this.#activityWatch.output(callId, this.now());
+					},
 				}),
 			});
 			return Harness.open(storage, { models: this.#meter(this.#models), registry: this.registry, settings: CODING_SETTINGS }, context);
@@ -1007,7 +1011,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const thread = this.store.required();
 		const now = this.now();
 		const turns = turnsOf((await this.harness.messages()).flatMap((entry) => entry.model ?? []), new Map(), now, thread.state === "running");
-		return activityOf(turns, now, { running: thread.state === "running", startedAt: turns.at(-1)?.startedAt ?? thread.updatedAt, lastOutputAt: this.#activityWatch.lastOutput("thread"), coding: true });
+		return activityOf(turns, now, { running: thread.state === "running", startedAt: turns.at(-1)?.startedAt ?? thread.updatedAt, lastOutputAt: this.#activityWatch.lastOutput("thread"), coding: true,
+			outputByCall: cliHarness(thread.harness) ? undefined : Object.fromEntries((turns.at(-1)?.steps ?? []).flatMap((step) => step.kind === "tool" ? [[step.id, this.#activityWatch.lastOutput(step.id)]] : [])), });
 	}
 
 	async status(): Promise<CodingThreadStatus> {

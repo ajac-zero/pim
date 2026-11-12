@@ -2,16 +2,17 @@ import type { Activity, Turn } from "./activity-types";
 export type { Activity } from "./activity-types";
 
 /** A quiet command is worth investigating after five minutes, a quiet coding thread after fifteen. */
-export function activityOf(turns: readonly Turn[], now: number, options: { running: boolean; startedAt: number; lastOutputAt?: number; coding?: boolean; quietMs?: number }): Activity {
+export function activityOf(turns: readonly Turn[], now: number, options: { running: boolean; startedAt: number; lastOutputAt?: number; coding?: boolean; quietMs?: number; outputByCall?: Readonly<Record<string, number>> }): Activity {
 	const turn = turns.at(-1);
 	const steps = turn?.steps ?? [];
 	const lastActivityAt = Math.max(options.startedAt, options.lastOutputAt ?? 0, ...steps.map((step) => step.at + (step.ms ?? 0)));
-	const current = options.running ? steps.flatMap((step) => step.kind === "tool" && step.ms === null && step.approval?.status !== "pending" ? [{ name: step.name, summary: step.summary, startedAt: step.at, elapsedMs: Math.max(0, now - step.at), timeoutMs: step.timeoutMs }] : []) : [];
+	const current = options.running ? steps.flatMap((step) => step.kind === "tool" && step.ms === null && step.approval?.status !== "pending" ? [{ id: step.id, name: step.name, summary: step.summary, startedAt: step.at, elapsedMs: Math.max(0, now - step.at), timeoutMs: step.timeoutMs }] : []) : [];
 	const stalls: { key: string; reason: string; since: number }[] = [];
 	for (const tool of current) {
 		const timeout = tool.timeoutMs !== null && tool.elapsedMs > tool.timeoutMs;
-		const quiet = now - Math.max(tool.startedAt, lastActivityAt) > (options.quietMs ?? 5 * 60_000);
-		if (timeout || quiet) stalls.push({ key: `tool:${tool.startedAt}:${tool.name}`, reason: timeout ? "past declared timeout" : "no output for five minutes", since: tool.startedAt });
+		const outputAt = options.outputByCall === undefined ? lastActivityAt : options.outputByCall[tool.id] ?? tool.startedAt;
+		const quiet = now - Math.max(tool.startedAt, outputAt) > (options.quietMs ?? 5 * 60_000);
+		if (timeout || quiet) stalls.push({ key: `tool:${tool.id}`, reason: timeout ? "past declared timeout" : "no output for five minutes", since: tool.startedAt });
 	}
 	if (options.running && options.coding && now - lastActivityAt > 15 * 60_000) stalls.push({ key: `transcript:${options.startedAt}`, reason: "running with no transcript activity for fifteen minutes", since: lastActivityAt });
 	return { running: options.running, lastActivityAt, current, steps: steps.slice(-120), stalls };

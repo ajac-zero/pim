@@ -298,7 +298,7 @@ describe("the shared activity view", () => {
 			{ role: "toolResult", toolCallId: "b", content: [], timestamp: 300 },
 		] as Message[];
 		const activity = activityOf(turnsOf(messages, new Map(), 1000, true), 1000, { running: true, startedAt: 100, lastOutputAt: 800 });
-		expect(activity.current).toEqual([{ name: "bash", summary: "command=echo ok timeout=900", startedAt: 200, elapsedMs: 800, timeoutMs: 900000 }]);
+		expect(activity.current).toEqual([{ id: "a", name: "bash", summary: "command=echo ok timeout=900", startedAt: 200, elapsedMs: 800, timeoutMs: 900000 }]);
 		expect(activity.lastActivityAt).toBe(800);
 		expect(activity.steps[2]?.ms).toBe(100);
 		expect(activityOf([], 1000, { running: false, startedAt: 100 }).current).toEqual([]);
@@ -346,5 +346,18 @@ describe("shared coding diagnostics", () => {
 		expect(report.sections.now?.items).toEqual([{ source: "coding", thread: "coding-test", ...activity }]);
 		expect((await diagnose(sources, { kind: "stalls" })).sections.stalls?.items).toEqual(report.sections.now?.items);
 		expect((await diagnose(sources, { kind: "coding" })).sections.coding?.items[0]).toMatchObject({ activity });
+	});
+});
+
+describe("parallel command silence", () => {
+	it("does not let output from another tool hide a silent command", async () => {
+		const { activityOf } = await import("../src/activity");
+		const { turnsOf } = await import("../src/diagnostics");
+		const messages = [
+			{ role: "user", content: "go", timestamp: 100 },
+			{ role: "assistant", content: [{ type: "toolCall", id: "quiet", name: "bash", arguments: { command: "quiet" } }, { type: "toolCall", id: "loud", name: "bash", arguments: { command: "loud" } }], timestamp: 200 },
+		] as Message[];
+		const activity = activityOf(turnsOf(messages, new Map(), 400000, true), 400000, { running: true, startedAt: 100, lastOutputAt: 399000, outputByCall: { loud: 399000 } });
+		expect(activity.stalls).toEqual([{ key: "tool:quiet", reason: "no output for five minutes", since: 200 }]);
 	});
 });

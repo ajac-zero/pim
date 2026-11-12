@@ -523,3 +523,22 @@ describe("reading test summaries", () => {
 		expect(parseTestSummary("")).toBeUndefined();
 	});
 });
+
+describe("raw command activity", () => {
+	it("reports partial-line output activity without passing content or waiting for a newline", async () => {
+		const active: string[] = [];
+		const { call, sunk } = await setup({
+			deps: { onActivity: (callId) => active.push(callId) },
+			workspace: (inner) => Object.assign(Object.create(inner) as Workspace, {
+				exec: async function* () {
+					yield { type: "stdout", data: "partial" };
+					expect(active).toEqual(["call-1"]);
+					expect(sunk).toEqual([]);
+					yield { type: "exit", code: 0 };
+				},
+			}),
+		});
+		await call("bash", { command: "test-command" });
+		expect(sunk).toEqual(["partial"]);
+	});
+});

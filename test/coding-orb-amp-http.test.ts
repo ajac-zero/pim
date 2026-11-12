@@ -25,6 +25,19 @@ function fixture(options: Partial<AmpHttpOptions> = {}) {
 runOrbClientConformanceSuite("Amp HTTP", () => fixture().client, { project: "acme/demo" });
 
 describe("AmpHttpOrbClient", () => {
+	it("uses redirect: manual like Workers require, and fails a 302 without following it", async () => {
+		const calls: string[] = [];
+		const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+			if (init?.redirect !== "manual") throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+			calls.push(String(url));
+			return new Response(null, { status: 302, headers: { Location: "https://evil.example/steal" } });
+		});
+		const store = new MemoryStore();
+		const client = new AmpHttpOrbClient({ store, token: async () => "sgamp_saved", fetch: fetcher });
+		await expect(client.start(start)).rejects.toMatchObject({ code: "orb_request", message: "Amp HTTP API redirected unexpectedly (302)" });
+		expect(calls).toEqual(["https://ampcode.com/api/v2/threads"]);
+		expect(JSON.stringify([...store.values])).not.toContain("sgamp_saved");
+	});
 	it("calls the global fetch without the client as `this` when none is injected", async () => {
 		const original = globalThis.fetch;
 		const stub = vi.fn(function (this: unknown) {

@@ -149,7 +149,7 @@ export class AmpHttpOrbClient implements OrbClient {
 		const op = `${(init.method ?? "GET").toUpperCase()} ${path.startsWith("https:") ? new URL(path).pathname : path.split("?")[0]}`;
 		const attempt = (retry?.attempts ?? 0) + 1;
 		try {
-			response = await this.#fetch(path.startsWith("https:") ? path : `https://ampcode.com/api/v2${path}`, { ...init, redirect: "error", signal: AbortSignal.timeout(30_000), headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers } });
+			response = await this.#fetch(path.startsWith("https:") ? path : `https://ampcode.com/api/v2${path}`, { ...init, redirect: "manual", signal: AbortSignal.timeout(30_000), headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers } });
 		} catch (error) {
 			const elapsedMs = this.#now() - began;
 			const errName = error instanceof Error ? error.name : "Error";
@@ -159,6 +159,12 @@ export class AmpHttpOrbClient implements OrbClient {
 		}
 		this.#lastStatus = response.status;
 		const elapsedMs = this.#now() - began;
+		// Workers reject redirect: "error", so redirects are not followed (the bearer never reaches the target) and fail here.
+		if ((response.type as string) === "opaqueredirect" || (response.status >= 300 && response.status <= 399)) {
+			this.#log(op, { status: response.status, errMessage: "redirected unexpectedly" }, elapsedMs, attempt);
+			this.#failure = `HTTP ${response.status}: redirected unexpectedly after ${elapsedMs}ms`;
+			throw new OrbError(`Amp HTTP API redirected unexpectedly (${response.status})`, "orb_request");
+		}
 		if (!response.ok && response.status !== 404 && response.status !== 401 && response.status !== 403) {
 			const body = snippet(await response.text().catch(() => ""));
 			this.#log(op, { status: response.status, ...(body ? { errMessage: body } : {}) }, elapsedMs, attempt);

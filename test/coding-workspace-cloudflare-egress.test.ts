@@ -108,4 +108,27 @@ describe("Cloudflare container egress", () => {
 		expect(JSON.parse(warn.mock.calls[0]![0] as string)).toMatchObject({ event: "pim.coding.egress_denied", host: "evil.example", protocol: "https:", method: "GET", upgrade: "websocket", reason: "host not in allowlist" });
 		warn.mockRestore();
 	});
+	it("marks every denial as Pim's, an upgrade's included", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			// Every reason the proxy can refuse a request for, on a bare GET and on a WebSocket upgrade.
+			const cases: [Request, string][] = [
+				[new Request("https://denied.example/"), "host not in allowlist"],
+				[new Request("https://allowed.example:8443/"), "port"],
+				[new Request("ftp://allowed.example/"), "protocol"],
+				[new Request("https://user:pass@allowed.example/"), "credentials in URL"],
+				[new Request("https://denied.example/", { headers: { upgrade: "websocket", connection: "Upgrade" } }), "host not in allowlist"],
+			];
+			for (const [request, reason] of cases) {
+				const response = await handleEgress(request, { allow: ["allowed.example"] }, "*", async () => {
+					throw new Error("must not forward");
+				});
+				expect(response.status).toBe(403);
+				expect(response.headers.get("x-pim-egress")).toBe("denied");
+				expect(JSON.parse(warn.mock.calls.at(-1)![0] as string)).toMatchObject({ event: "pim.coding.egress_denied", reason });
+			}
+		} finally {
+			warn.mockRestore();
+		}
+	});
 });

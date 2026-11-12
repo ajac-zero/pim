@@ -1222,6 +1222,52 @@ describe("what a ui block holds", () => {
 		expect((await put(message, `${block}-1`, { version: 0, state: draft })).status).toBe(404);
 	});
 
+	describe("state left behind by messages that are gone", () => {
+		const inStore = <T>(read: (store: Pim["store"]) => T) => runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => read(instance.store));
+		/** The seeded messages that still have state. */
+		const strays = (messages: string[]) => inStore((store) => messages.filter((message) => Object.keys(store.uiStates(message)).length > 0));
+		const delete_ = async (chat: string) => expect((await api(`/sessions/${chat}`, { method: "DELETE" })).status).toBe(200);
+
+		it("is forgotten when its chat is deleted, a few messages at a time, and the state of chats that are there stays", async () => {
+			const kept = await sent();
+			const gone = await sent();
+			await put(kept.message, block, { version: 0, state: draft });
+			await put(gone.message, block, { version: 0, state: draft });
+			// Messages no chat has: far more than one sweep looks at.
+			const seeded = Array.from({ length: 70 }, (_, index) => String(9_000_001 + index));
+			await inStore((store) => seeded.forEach((message) => store.setUiState(message, block, draft, false, 0)));
+			expect(await strays(seeded)).toHaveLength(70);
+			// Deleting a chat sweeps once, and a sweep looks at no more than 25 messages.
+			await delete_(gone.session);
+			const afterOne = await strays(seeded);
+			expect(afterOne.length).toBeGreaterThanOrEqual(70 - 25);
+			// Each deletion goes on from where the last left off, until none is left.
+			for (let round = 0; round < 12 && (await strays(seeded)).length > 0; round++) {
+				const { id } = (await post("/sessions")).body;
+				await delete_(id);
+			}
+			expect(await strays(seeded)).toEqual([]);
+			// The deleted chat's own message went with them, and the other chat's stayed as it was.
+			expect(await inStore((store) => store.uiStates(gone.message))).toEqual({});
+			expect(await inStore((store) => store.uiStates(kept.message))).toMatchObject({ [block]: { version: 1, state: draft } });
+		});
+
+		it("is looked for at most once in ten minutes when a block is saved", async () => {
+			const { message } = await sent();
+			const ghosts = ["9100001", "9100002"];
+			// A deletion has just swept, so the next sweep waits; the ghosts are not noticed by a save.
+			await delete_((await post("/sessions")).body.id);
+			await inStore((store) => ghosts.forEach((ghost) => store.setUiState(ghost, block, draft, false, 0)));
+			await put(message, block, { version: 0, state: draft });
+			expect(await strays(ghosts)).toEqual(ghosts);
+			// Ten minutes on, a save sweeps.
+			await inStore((store) => store.setMeta("ui_state_swept_at", String(Date.now() - 11 * 60_000)));
+			await inStore((store) => store.setMeta("ui_state_sweep_cursor", ""));
+			await put(message, block, { version: 1, state: { ...draft, values: { ...draft.values, volume: 8 } } });
+			expect(await strays(ghosts)).toEqual([]);
+		});
+	});
+
 	describe("read back by the agent with ui_state", () => {
 		const calculator = ["{@state seats = 8}", '<slider name="seats" min={1} max={50}/>', '<checkbox name="annual"/>', "{seats}"].join("\n");
 		const fenced = (body: string) => `Try it:\n\n\`\`\`ui\n${body}\n\`\`\``;

@@ -25,6 +25,20 @@ function fixture(options: Partial<AmpHttpOptions> = {}) {
 runOrbClientConformanceSuite("Amp HTTP", () => fixture().client, { project: "acme/demo" });
 
 describe("AmpHttpOrbClient", () => {
+	it("calls the default global fetch without binding it to the client", async () => {
+		const stub = vi.fn(function (this: unknown) {
+			if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation: function called with incorrect `this` reference");
+			return Promise.resolve(json({ thread: { id: "T-1", url: "https://ampcode.com/threads/T-1" } }, 201));
+		});
+		vi.stubGlobal("fetch", stub);
+		try {
+			const client = new AmpHttpOrbClient({ store: new MemoryStore(), token: async () => "sgamp_saved" });
+			await expect(client.start(start)).resolves.toMatchObject({ threadId: "T-1" });
+			expect(stub).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
 	it("uses only the documented POST fields and the saved Amp bearer, and keeps the handle before polling", async () => {
 		const { client, fetcher, store } = fixture();
 		const thread = await client.start({ ...start, mode: "smart", title: "Fix" });

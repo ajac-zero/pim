@@ -254,6 +254,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		this.lifecycle.use(this.harness);
+		// The admin's compute providers are read before the object answers anything, so every use of its workspace finds the backend the admin added: an RPC call such as a diff, a push, a merge or a resume, an alarm, a job — also on an instance that never ran a turn, whose `#compute` would otherwise still be empty. `#refreshCompute` keeps its throttle, and leaves what was read when the Gallery can't be reached.
+		ctx.blockConcurrencyWhile(() => this.#refreshCompute());
 	}
 
 	/** How often a running turn tells a provider that needs it (`capabilities.keepAlive`) that the workspace is in use. */

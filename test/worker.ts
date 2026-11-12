@@ -387,11 +387,11 @@ export class CodingThreadDO extends RealCodingThreadDO {
 		super(
 			ctx,
 			codingContainers.service
-				? {
+				? ({
 						...env,
-						WorkspaceContainer: { getByName: codingContainers.service.containerFor } as unknown as Env["WorkspaceContainer"],
-						WorkspaceCatalog: { getByName: () => codingContainers.service!.catalog } as unknown as Env["WorkspaceCatalog"],
-					}
+						WorkspaceContainer: { getByName: codingContainers.service.containerFor },
+						WorkspaceCatalog: { getByName: () => codingContainers.service!.catalog },
+					} as Env)
 				: env,
 		);
 	}

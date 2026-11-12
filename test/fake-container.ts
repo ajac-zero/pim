@@ -86,10 +86,10 @@ export function fakeContainers() {
 				await backend.keepAlive(ref);
 			},
 			setEgress: async (policy) => {
-				const ws = await backend.get(ref);
-				if (!ws) throw new WorkspaceNotFoundError();
+				const workspace = await backend.get(ref);
+				if (!workspace) throw new WorkspaceNotFoundError();
 				// As the Containers provider's proxy would: the policy the thread set is the one its requests are made under.
-				ws.egress = egressPolicy(policy);
+				(workspace as unknown as { egress: EgressPolicy }).egress = egressPolicy(policy);
 				policies.set(id, policy);
 			},
 			snapshot: async () => (await (await backend.get(ref))!.snapshot()).id,

@@ -1874,6 +1874,7 @@ function useLiveTranscript(id: string, follow: boolean) {
       }
       if (event.type === "run_end") {
         invalidate("thread");
+        invalidate("transcript");
         invalidate("diff");
         invalidate("tests");
       }

@@ -2321,7 +2321,7 @@ describe("a Claude Code thread", () => {
 		const [ended] = await turns(id, 1);
 		const status = await stub.status();
 		expect(ended).toMatchObject({ outcome: "completed", checkpoint: status.checkpoint!.sha, said: "Fixed `greet` to include the name; the greeting test passes now." });
-		expect(status).toMatchObject({ state: "idle", harness: "claude-code", profile: { providerId: "claude-code", model: "default" }, currentOperation: null });
+		expect(status).toMatchObject({ state: "idle", harness: "claude-code", profile: { providerId: "claude-code", model: "default" }, resolvedProfile: { provider: "claude-code", model: "claude-sonnet-5", source: "harness default" }, currentOperation: null });
 		// The CLI ran in the checkout, signed in with the person's login, a new session, and no telemetry.
 		const [first] = runs;
 		expect(first).toMatchObject({ cwd: REPO_DIR, login: LOGIN, env: { HOME: "/workspace", CLAUDE_CONFIG_DIR: "/workspace/.claude", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" } });
@@ -2835,7 +2835,7 @@ describe("a Codex thread", () => {
 		const [ended] = await turns(id, 1);
 		const status = await stub.status();
 		expect(ended).toMatchObject({ outcome: "completed", said: "Fixed `greet` to include the name; the greeting test passes now." });
-		expect(status).toMatchObject({ state: "idle", harness: "codex", profile: { providerId: "codex", model: "default" } });
+		expect(status).toMatchObject({ state: "idle", harness: "codex", profile: { providerId: "codex", model: "default" }, resolvedProfile: { provider: "codex", model: "default", source: "harness default" } });
 		const [first] = runs;
 		expect(first).toMatchObject({ cwd: REPO_DIR, login: LOGIN, env: { HOME: "/workspace", CODEX_HOME: "/workspace/.codex" } });
 		expect(first!.argv.slice(0, 2)).toEqual(["codex", "exec"]);

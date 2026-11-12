@@ -885,7 +885,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 				budgetUsd,
 				startOperation: input.operationId,
 			});
-			this.#recordResolved(profile.providerId, profile.model, cli && profile.model === "default" ? "harness default" : input.profile ? "explicit" : "space default");
+			this.#recordResolved(profile.providerId, profile.model, cli ? input.profile?.providerId === cli.id ? "explicit" : "harness default" : input.profile ? "explicit" : "space default");
 			if (pin !== undefined) this.store.update({ placementReason: "pinned" });
 			this.store.enqueue(input.operationId, task);
 			if (input.rebuildEnvironment) {
@@ -1221,7 +1221,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		for (const [index, notice] of this.store.profileNotices().entries()) {
 			const { provider, model, source } = notice.profile;
 			const message: TranscriptMessage = { id: `model-resolved-${notice.seq}`, role: "notice", parts: [{ type: "text", text: `Model: ${provider} · ${model} · ${source ?? "source unknown"}` }], timestamp: notice.at };
-			const before = index === 0 ? 0 : messages.findIndex((entry) => !entry.id.startsWith("model-resolved-") && entry.timestamp >= notice.at);
+			const before = index === 0 && source !== null ? 0 : messages.findIndex((entry) => !entry.id.startsWith("model-resolved-") && entry.timestamp >= notice.at);
 			messages.splice(before < 0 ? messages.length : before, 0, message);
 		}
 		return messages;
@@ -2580,10 +2580,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 			case "delta":
 				this.#tellLive({ type: "partial", kind: event.kind, text: event.text });
 				return;
-			case "assistant":
-				if (event.message.model && event.message.model !== "unknown") this.#recordResolved(event.message.provider, event.message.model);
+			case "assistant": {
+				// Parsers use the harness's name until the CLI reports a model; that is not an observed model.
+				const harness = this.store.required().harness;
+				const model = event.message.model;
+				if (model && model !== "unknown" && model !== harness && !(harness === "claude-code" && model === "claude")) this.#recordResolved(event.message.provider, model);
 				await this.#writeMessage(event.message);
 				return;
+			}
 			case "tool_result":
 				await this.#writeMessage(event.message);
 				return;

@@ -51,7 +51,7 @@ export type DetectedDependencies = {
 	readonly needs: readonly string[];
 };
 
-export type TestCommandSource = "mise" | "make" | "package.json" | "ci" | "default";
+export type TestCommandSource = "mise" | "make" | "package.json" | "ci" | "default" | "pim";
 
 /** A command the repository checks itself with: its tests, linters and type checks. */
 export type TestCommand = { readonly command: string; readonly source: TestCommandSource; readonly from: string };

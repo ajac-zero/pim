@@ -1,3 +1,4 @@
+import type { EnvService } from "./env-config";
 import type { EnvironmentDependencies, EnvironmentToolchain, TestCommand } from "./repo-environment";
 import type { ExecEvent, Workspace } from "./workspace/types";
 
@@ -37,8 +38,8 @@ export type CodingEnvironment = {
 	readonly reason?: string;
 	/** The environment's key, once the repository is checked out and the setup script found; null without one. */
 	readonly key: string | null;
-	/** Where the setup script came from: the person's setting for the repository, or `.pim/setup.sh` in it. */
-	readonly source: "settings" | "repository" | "mise" | "devcontainer" | null;
+	/** Where the setup script came from: the person's setting for the repository, `.pim/env.json` or `.pim/setup.sh` in it, or its mise or dev container configuration. */
+	readonly source: "settings" | "env" | "repository" | "mise" | "devcontainer" | null;
 	/** When the snapshot the thread has was made. */
 	readonly builtAt: number | null;
 	/** The snapshot the workspace was restored from, which may be an older key's when the repository moved on. */
@@ -71,6 +72,10 @@ export type CodingEnvironment = {
 	readonly testCommands: readonly TestCommand[];
 	/** What was found and isn't provisioned, such as the services its CI starts. */
 	readonly notes: readonly string[];
+	/** The services `.pim/env.json` declares; they are described, not started. */
+	readonly services: readonly EnvService[];
+	/** The paths `.pim/env.json` says are worth caching between threads. */
+	readonly cachePaths: readonly string[];
 };
 
 /** A thread whose environment nothing has happened to yet. */
@@ -94,6 +99,8 @@ export const NO_ENVIRONMENT: CodingEnvironment = {
 	dependencies: [],
 	testCommands: [],
 	notes: [],
+	services: [],
+	cachePaths: [],
 };
 
 /** The setup script a repository can carry, relative to its root. */
@@ -176,6 +183,66 @@ export async function lockfileHashes(workspace: Workspace, root: string): Promis
 	};
 	await visit(root, "", true);
 	return hashes;
+}
+
+/** A glob as a regular expression over repository paths: `*` stands for any characters within one name, `**` for any number of directories, so `a/**` followed by `/b` also matches `a/b`. */
+export function globRegExp(pattern: string): RegExp {
+	let source = "";
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i]!;
+		if (char === "*" && pattern[i + 1] === "*") {
+			if (pattern[i + 2] === "/") {
+				source += "(?:.*/)?";
+				i += 2;
+			} else {
+				source += ".*";
+				i += 1;
+			}
+		} else if (char === "*") source += "[^/]*";
+		else source += char.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+	}
+	return new RegExp(`^${source}$`);
+}
+
+const MAX_CACHE_KEY_FILES = 200;
+const MAX_CACHE_KEY_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_CACHE_KEY_DEPTH = 6;
+
+/**
+ * The SHA-256 of each file the `.pim/env.json` `cacheKeys` patterns match, named `env:<path>` so they sit beside the lockfiles in the key. A pattern with no `*` names one file; the others are matched while walking the repository up to 6 directories deep, skipping dot-directories and `node_modules`. At most 200 files of 2 MiB each are hashed. A pattern that matches nothing is returned in `missing`, and the key leaves it out.
+ */
+export async function cacheKeyHashes(workspace: Workspace, root: string, patterns: readonly string[]): Promise<{ hashes: Record<string, string>; missing: string[] }> {
+	const hashes: Record<string, string> = {};
+	const matched = new Set<string>();
+	const plain = (pattern: string) => pattern.replace(/^\.\//, "");
+	const hash = async (path: string) => {
+		if (`env:${path}` in hashes || Object.keys(hashes).length >= MAX_CACHE_KEY_FILES) return;
+		try {
+			const stat = await workspace.stat(`${root}/${path}`);
+			if (stat.type === "file" && stat.size <= MAX_CACHE_KEY_FILE_BYTES) hashes[`env:${path}`] = await sha256Hex(await workspace.readFile(`${root}/${path}`));
+		} catch {}
+	};
+	const globs = patterns.filter((pattern) => pattern.includes("*")).map((pattern) => ({ pattern, regexp: globRegExp(plain(pattern)) }));
+	for (const pattern of patterns) if (!pattern.includes("*")) await hash(plain(pattern));
+	const visit = async (dir: string, prefix: string, depth: number) => {
+		let entries: Awaited<ReturnType<Workspace["list"]>>;
+		try {
+			entries = await workspace.list(dir);
+		} catch {
+			return;
+		}
+		for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+			const path = `${prefix}${entry.name}`;
+			if (entry.type === "file") {
+				const hits = globs.filter((each) => each.regexp.test(path));
+				for (const hit of hits) matched.add(hit.pattern);
+				if (hits.length > 0) await hash(path);
+			} else if (entry.type === "dir" && depth < MAX_CACHE_KEY_DEPTH && !entry.name.startsWith(".") && entry.name !== "node_modules") await visit(`${dir}/${entry.name}`, `${path}/`, depth + 1);
+		}
+	};
+	if (globs.length > 0) await visit(root, "", 1);
+	const missing = patterns.filter((pattern) => (pattern.includes("*") ? !matched.has(pattern) : !(`env:${plain(pattern)}` in hashes)));
+	return { hashes, missing };
 }
 
 /** The repository's own setup script, or null when it has none. Throws when it is bigger than `MAX_SETUP_SCRIPT_BYTES`. */

@@ -611,6 +611,32 @@ describe("a thread's page", () => {
     await waitFor(() => expect(api.abort).toHaveBeenCalledWith("t1"));
   });
 
+  it("hides steering and stopping for Amp HTTP and links to the remote thread", async () => {
+    const { api } = fakeApi(
+      view({
+        harness: "amp",
+        provider: "amp-http",
+        providerKind: "agent-hosted",
+        state: "running",
+        currentOperation: "op",
+        orb: { url: "https://ampcode.com/threads/T-http" },
+      }),
+    );
+    threadPage(api);
+    expect(
+      await screen.findByText(
+        /Steering and stopping are not supported by Amp's HTTP API yet/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByPlaceholderText(/^Steer the coding agent/)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Stop generating" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Open on Amp" }).getAttribute("href"),
+    ).toBe("https://ampcode.com/threads/T-http");
+  });
+
   it("asks what to do next in an idle thread, with no Stop", async () => {
     const { api } = fakeApi();
     threadPage(api);
@@ -1907,6 +1933,32 @@ describe("connecting with an API key", () => {
     expect(
       (panel.getByLabelText("Access token") as HTMLInputElement).value,
     ).toBe("");
+  });
+
+  it("starts Amp on Orbs using the existing Connect field", async () => {
+    const api = keyApi("amp");
+    renderWith(api, CodingPage, "/coding");
+    fireEvent.click(await screen.findByRole("radio", { name: "Amp" }));
+    expect(
+      await screen.findByRole("region", { name: "Connect Amp" }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "Run on Amp Orbs (no Pim sandbox)",
+      }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: /Repository/ }), {
+      target: { value: "https://github.com/acme/widgets" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Task/ }), {
+      target: { value: "Fix it" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.start).mock.calls[0]?.[0]).toMatchObject({
+      harness: "amp",
+      provider: "orbs",
+    });
   });
 
   it("says why a key was refused, keeping the field to fix it", async () => {

@@ -246,6 +246,10 @@ export type CodingThreadView = {
     priority: number;
     skipped: { pool: string; reason: string }[];
   } | null;
+  providerKind?: "workspace" | "agent-hosted";
+  orb?: { url: string } | null;
+  cost?: number | null;
+  costNote?: string | null;
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
   budgetUsd: number | null;
@@ -261,6 +265,7 @@ export type CodingThreadView = {
 };
 
 export type StartCodingThread = {
+  provider?: string;
   repo: string;
   ref?: string;
   task: string;
@@ -307,6 +312,7 @@ export type CodingPushRequested = {
 
 export type CodingErrorCode =
   | "invalid"
+  | "unsupported"
   | "forbidden"
   | "not_found"
   | "archived"
@@ -695,6 +701,7 @@ export const isGiteaRepo = (url: string) =>
   new URL(url).hostname !== "github.com";
 
 export type StartForm = {
+  orbs?: boolean;
   repo: string;
   ref: string;
   task: string;
@@ -744,6 +751,7 @@ export function startInput(
     ...(ref ? { ref } : {}),
     ...(budget ? { budgetUsd: Number(budget) } : {}),
     ...(form.harness && form.harness !== "pi" ? { harness: form.harness } : {}),
+    ...(form.harness === "amp" && form.orbs ? { provider: "orbs" } : {}),
     operationId,
   };
 }

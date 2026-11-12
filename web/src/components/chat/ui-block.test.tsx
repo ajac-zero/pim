@@ -21,6 +21,7 @@ import {
 } from "vitest";
 import { UserMessage } from "~/components/chat/items";
 import { Markdown } from "~/components/chat/markdown";
+import { CARRY_FOR_MS } from "~/components/chat/ui-block";
 import { ReplyImages } from "~/components/chat/reply-blocks";
 import type { MessageItem } from "~/lib/openresponses";
 import { ApiError, pim, type StoredUiState } from "~/lib/pim-api";
@@ -895,6 +896,47 @@ describe("a ui block while its message streams", () => {
     });
     // What was typed in the second is still in the second, and not in the first.
     expect(inputs().map((input) => input.value)).toEqual(["", "second"]);
+  });
+
+  it("carries nothing on when a block goes mid-stream, but to the block that replaces it in the same commit", async () => {
+    const source = '<form id="f"><input name="a" label="A"/></form>';
+    const text = fence(source);
+    const input = () => document.querySelector<HTMLInputElement>('[data-field="f.a"] input') as HTMLInputElement;
+    const mounted = async (element: ReactElement) => {
+      const shown = render(element);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      return shown;
+    };
+    // Replaced in one commit, as when the message is drawn anew: what was typed comes along, and again to the next.
+    const first = await mounted(<div key="one">{view(text, true)}</div>);
+    fireEvent.change(input(), { target: { value: "typed" } });
+    first.rerender(<div key="two">{view(text, true)}</div>);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(input().value).toBe("typed");
+    first.rerender(<div key="three">{view(text, true)}</div>);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(input().value).toBe("typed");
+    // Gone with the stream unfinished, and nothing waits for a block that never comes.
+    first.unmount();
+    await act(async () => {
+      vi.advanceTimersByTime(CARRY_FOR_MS - 1);
+    });
+    const soon = await mounted(view(text, true));
+    // A block that comes back in time still finds it.
+    expect(input().value).toBe("typed");
+    soon.unmount();
+    await act(async () => {
+      vi.advanceTimersByTime(CARRY_FOR_MS + 1);
+    });
+    const later = await mounted(view(text, true));
+    expect(input().value).toBe("");
+    later.unmount();
   });
 
   it("keeps a value typed mid-stream through later compiles and the end, and saves it under the final id", async () => {

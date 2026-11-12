@@ -259,7 +259,7 @@ describe("broker tokens", () => {
 		});
 		expect((await ask("/coding/git/acme/other.git/credential", token)).status).toBe(403);
 		expect((await ask("/coding/git/other/acme/widgets.git/credential", token)).status).toBe(403);
-		expect((await ask("/coding/git/acme/widgets.git/git-receive-pack", token)).status).toBe(404);
+		expect((await ask("/coding/git/acme/widgets.git/git-receive-pack", token)).status).toBe(403);
 		now = NOW + 60 * 60_000;
 		expect((await ask(path, original)).status).toBe(401);
 		now = until - 1;

@@ -239,25 +239,33 @@ describe("fuzzing the ui language", () => {
     }
   });
 
-  it("survives a valid program mutated at random", () => {
-    for (const [name, source] of Object.entries(CORPUS)) {
-      for (let seed = 1; seed <= 400 * SCALE; seed++) {
-        const random = seeded(seed * 7919);
-        exercise(random, mutate(random, source), `${name} seed ${seed}`);
+  it(
+    "survives a valid program mutated at random",
+    () => {
+      for (const [name, source] of Object.entries(CORPUS)) {
+        for (let seed = 1; seed <= 400 * SCALE; seed++) {
+          const random = seeded(seed * 7919);
+          exercise(random, mutate(random, source), `${name} seed ${seed}`);
+        }
       }
-    }
-  }, 60_000 * SCALE);
+    },
+    60_000 * SCALE,
+  );
 
-  it("survives random text built from the language's own pieces", () => {
-    for (let seed = 1; seed <= 300 * SCALE; seed++) {
-      const random = seeded(seed * 104729);
-      const length = 1 + random.int(60);
-      const source = Array.from({ length }, () => random.pick(TOKENS)).join(
-        random.pick(["", " ", "\n"]),
-      );
-      exercise(random, source, `tokens seed ${seed}`);
-    }
-  }, 60_000 * SCALE);
+  it(
+    "survives random text built from the language's own pieces",
+    () => {
+      for (let seed = 1; seed <= 300 * SCALE; seed++) {
+        const random = seeded(seed * 104729);
+        const length = 1 + random.int(60);
+        const source = Array.from({ length }, () => random.pick(TOKENS)).join(
+          random.pick(["", " ", "\n"]),
+        );
+        exercise(random, source, `tokens seed ${seed}`);
+      }
+    },
+    60_000 * SCALE,
+  );
 
   it("is deterministic: the same source compiles and draws the same", () => {
     for (let seed = 1; seed <= 60; seed++) {
@@ -337,7 +345,9 @@ describe("the interpreter against independent arithmetic", () => {
       const signs: string[] = [];
       ops.forEach((op, index) => {
         const term = terms[index + 1] as number;
-        if (op === "*") products[products.length - 1] = (products[products.length - 1] as number) * term;
+        if (op === "*")
+          products[products.length - 1] =
+            (products[products.length - 1] as number) * term;
         else {
           signs.push(op);
           products.push(term);

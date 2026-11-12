@@ -173,6 +173,8 @@ describe("the coding threads API", () => {
 		expect(await refused({ budgetUsd: 0 })).toEqual([400, "invalid"]);
 		expect(await refused({ profile: { providerId: "coding-faux" } })).toEqual([400, "invalid"]);
 		expect(await refused({ parent: "nobody" })).toEqual([404, "not_found"]);
+		expect(await refused({ pool: "nowhere" })).toEqual([400, "invalid"]);
+		expect(await refused({ pool: 7 })).toEqual([400, "invalid"]);
 		expect((await api<{ threads: unknown[] }>("/coding/threads")).body.threads).toHaveLength(before);
 	});
 
@@ -219,6 +221,16 @@ describe("the coding threads API", () => {
 		const unknown = await post("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, harness: "vim" });
 		expect([unknown.status, unknown.body.code]).toEqual([400, "invalid"]);
 		expect((await api<{ threads: unknown[] }>("/coding/threads")).body.threads).toHaveLength(listed.length);
+	});
+
+	it("pins a thread to a pool of the space, and shows where it runs and why", async () => {
+		codingFaux.setResponses([fauxAssistantMessage("Nothing to change.")]);
+		const pinned = await start({ pool: codingWorkspaces.id });
+		expect(pinned).toMatchObject({ provider: codingWorkspaces.id, pool: codingWorkspaces.id, placementReason: "pinned" });
+		await turns(pinned.id, 1);
+		expect(await view(pinned.id)).toMatchObject({ provider: codingWorkspaces.id, placementReason: "pinned" });
+		const refused = await post("/coding/threads", { repo: REPO, task: "Add a greeting", profile: CODER, provider: "nowhere" });
+		expect(refused.body.error).toMatch(/Unknown or disabled pool "nowhere"/);
 	});
 
 	it("starts a Claude Code or Codex thread on the CLI's own model, which waits for the person's login while they have none", async () => {
@@ -408,6 +420,8 @@ describe("the coding threads API", () => {
 		await say("Is its environment ready?");
 		const { builtAt, provisionMs, setupMs, snapshotMs, preparedAt } = environment;
 		for (const value of [builtAt, provisionMs, setupMs, snapshotMs, preparedAt]) expect(value).toEqual(expect.any(Number));
+		// It says where the thread runs and why, too.
+		expect(JSON.parse(told)).toMatchObject({ provider: codingWorkspaces.id, pool: codingWorkspaces.id, placement_reason: "priority" });
 		expect(JSON.parse(told).environment).toEqual({
 			state: "cached",
 			key: environment.key,

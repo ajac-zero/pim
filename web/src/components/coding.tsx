@@ -1326,13 +1326,22 @@ function ThreadSummary({ thread }: { thread: CodingThreadView }) {
       </div>
       <div
         className="inline-flex items-center gap-1"
-        title={t("codingRunsOn", {
-          provider: workspaceProviderName(thread.workspaceProvider),
+        title={t("codingRunsOnWhy", {
+          provider: workspaceProviderName(thread.provider),
+          reason: t(PLACEMENT_REASON_KEYS[thread.placementReason]),
         })}
       >
         <dt className="sr-only">{t("codingWorkspaceProvider")}</dt>
         <Server className="size-3.5 shrink-0" />
-        <dd>{workspaceProviderName(thread.workspaceProvider)}</dd>
+        <dd>
+          {workspaceProviderName(thread.provider)}
+          {thread.placementReason !== "priority" && (
+            <span className="text-muted-foreground/70">
+              {" · "}
+              {t(PLACEMENT_REASON_KEYS[thread.placementReason])}
+            </span>
+          )}
+        </dd>
       </div>
       <div className="inline-flex items-center gap-1">
         <dt className="sr-only">{t("codingSpend")}</dt>
@@ -1684,6 +1693,12 @@ function ContinueForm({
     </form>
   );
 }
+
+const PLACEMENT_REASON_KEYS = {
+  pinned: "codingPlacementPinned",
+  priority: "codingPlacementPriority",
+  overflow: "codingPlacementOverflow",
+} as const satisfies Record<string, TranslationKey>;
 
 const PUSH_PROBLEM: Partial<Record<string, TranslationKey>> = {
   nothing_to_push: "codingNothingToPush",

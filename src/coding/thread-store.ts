@@ -33,6 +33,8 @@ export const CODING_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code", 
 export type CodingProviderKind = "workspace" | "agent-hosted";
 
 /** Which model a thread runs on, by the space's provider id (such as `own:anthropic`) and the model's id there. */
+export type PlacementReason = "pinned" | "priority" | "overflow";
+
 export type AgentProfile = { readonly providerId: string; readonly model: string; readonly thinking?: ModelThinkingLevel };
 
 /** How far a thread's workspace may go, as the workspace spec takes it. `wallClockMin` is a turn's time limit in minutes, null for none: threads have none unless given one. */
@@ -84,6 +86,8 @@ export type CodingThreadRow = {
 	readonly orb: OrbThread | null;
 	/** Whether the thread stays on its provider: once it made a workspace there, whose files and environment are kept there, or when it was started on that provider by name. Until then it may run on another provider when its own is full. */
 	readonly placed: boolean;
+	/** Why the thread is on its provider: `pinned` when the caller named it, `priority` when it took the first provider with room, `overflow` when it moved to a later one because the first had none. */
+	readonly placementReason: PlacementReason;
 	readonly workspaceRef: WorkspaceRef | null;
 	readonly state: CodingThreadState;
 	/** Why the thread failed, such as `budget`, `no_backend` or `queue_expired`; null otherwise. */
@@ -329,6 +333,8 @@ export class CodingThreadStore {
 		if (!columns.has("pull_request_number")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_number INTEGER");
 		// Whether the thread stays on its provider; threads from before overflow stay where they are.
 		if (!columns.has("placed")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN placed INTEGER NOT NULL DEFAULT 1");
+		// Why the thread is on its provider; threads from before placements were recorded took the default.
+		if (!columns.has("placement_reason")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN placement_reason TEXT NOT NULL DEFAULT 'priority'");
 		// Automatic retries hold an input until its backoff has passed, and remember it was retried.
 		const inbox = new Set(this.#sql.exec("PRAGMA table_info(coding_inbox)").toArray().map((row) => String(row.name)));
 		if (!inbox.has("not_before")) this.#sql.exec("ALTER TABLE coding_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0");
@@ -352,7 +358,7 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "providerKind" | "orb"> & {
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "placementReason" | "providerKind" | "orb"> & {
 			consecutiveInterrupts?: number;
 			providerInstance?: string;
 			placed?: boolean;
@@ -391,7 +397,7 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "placed" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "placed" | "placementReason" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
@@ -401,6 +407,7 @@ export class CodingThreadStore {
 		if (change.providerKind !== undefined) columns.provider_kind = change.providerKind;
 		if (change.orb !== undefined) columns.orb = change.orb === null ? null : JSON.stringify(change.orb);
 		if (change.placed !== undefined) columns.placed = change.placed ? 1 : 0;
+		if (change.placementReason !== undefined) columns.placement_reason = change.placementReason;
 		if (change.baseSha !== undefined) columns.base_sha = change.baseSha;
 		if (change.workspaceRef !== undefined) columns.workspace_ref = change.workspaceRef === null ? null : JSON.stringify(change.workspaceRef);
 		if (change.slot !== undefined) columns.slot = change.slot;
@@ -663,6 +670,7 @@ function threadOf(row: Row): CodingThreadRow {
 		providerKind: (text(row.provider_kind) ?? "workspace") as CodingProviderKind,
 		orb: row.orb === null || row.orb === undefined ? null : (JSON.parse(String(row.orb)) as OrbThread),
 		placed: row.placed === 1,
+		placementReason: (text(row.placement_reason) ?? "priority") as PlacementReason,
 		workspaceRef: row.workspace_ref === null ? null : (JSON.parse(String(row.workspace_ref)) as WorkspaceRef),
 		state: String(row.state) as CodingThreadState,
 		stateReason: text(row.state_reason),

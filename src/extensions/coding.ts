@@ -50,6 +50,9 @@ function brief(view: CodingThreadView) {
 		...(view.queue ? { position: view.queue.position, waiting_for: view.queue.reason } : {}),
 		repo: view.repo.url,
 		branch: view.repo.branch,
+		provider: view.provider,
+		pool: view.pool,
+		placement_reason: view.placementReason,
 		task: view.task.length > 300 ? `${view.task.slice(0, 300)}…` : view.task,
 		turn_under_way: view.currentOperation !== null,
 		inputs_waiting: view.inbox,
@@ -107,10 +110,12 @@ export const coding = definePimExtension({
 					),
 					budget: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "The most it may spend on its model, in US dollars. None by default: a thread runs until it finishes. Only Pi, Claude Code and Mistral Vibe report what they spend; for Codex and Amp the budget is ignored." })),
 					parent: Type.Optional(Type.String({ description: "The thread this one continues from, if any." })),
+					pool: Type.Optional(Type.String({ description: "Pin the thread to one sandbox pool by id, such as compose or cloudflare: it is placed only there and queues if that pool is full. An unknown or disabled pool is refused. Leave it out to take the first pool with room." })),
+					provider: Type.Optional(Type.String({ description: "Pin the thread to one sandbox provider, such as compose or cloudflare. Same as pool." })),
 					rebuildEnvironment: Type.Optional(Type.Boolean({ description: "When true, start with a freshly rebuilt environment, skipping any cached snapshot. Default false." })),
 				}),
 				replay: "safe",
-				async execute({ repo, ref, task, profile, harness, budget, parent, rebuildEnvironment }, api, context) {
+				async execute({ repo, ref, task, profile, harness, budget, parent, pool, provider, rebuildEnvironment }, api, context) {
 					// The same call run again starts the same thread.
 					const operationId = await api.memo("operation", crypto.randomUUID(), context);
 					const { chat, agent } = conversationOf(String(api.conversationId));
@@ -126,6 +131,8 @@ export const coding = definePimExtension({
 								...(harness ? { harness } : {}),
 								...(budget !== undefined ? { budgetUsd: budget } : {}),
 								...(parent ? { parent } : {}),
+								...(pool ? { pool } : {}),
+								...(provider ? { provider } : {}),
 								...(rebuildEnvironment !== undefined ? { rebuildEnvironment } : {}),
 								operationId,
 							},
@@ -137,6 +144,9 @@ export const coding = definePimExtension({
 							status: view.state,
 							...(view.queue ? { position: view.queue.position, waiting_for: view.queue.reason } : {}),
 							branch: view.repo.branch,
+							provider: view.provider,
+							pool: view.pool,
+							placement_reason: view.placementReason,
 						});
 					});
 				},

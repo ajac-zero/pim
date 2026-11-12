@@ -214,6 +214,9 @@ export type CodingThreadView = {
   profile: AgentProfile;
   harness: CodingHarness;
   workspaceProvider: string;
+  provider: string;
+  pool: string;
+  placementReason: "pinned" | "priority" | "overflow";
   slot: "none" | "queued" | "held";
   queue: QueuePlace | null;
   budgetUsd: number | null;

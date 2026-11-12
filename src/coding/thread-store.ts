@@ -4,6 +4,7 @@ import { type CodingEnvironment, NO_ENVIRONMENT } from "./environment-cache";
 import type { RunRecord } from "./harness/runner";
 import type { HarnessUsage } from "./harness/types";
 import type { JournalEntry, TestRun as ToolTestRun, TestSummary } from "./tools";
+import type { OrbThread } from "./orb/types";
 import type { WorkspaceRef } from "./workspace/types";
 
 /**
@@ -20,6 +21,16 @@ export type CodingThreadState = "provisioning" | "queued" | "idle" | "running" |
 export type CodingHarness = "pi" | "claude-code" | "codex" | "mistral-vibe" | "amp";
 
 export const CODING_HARNESSES: readonly CodingHarness[] = ["pi", "claude-code", "codex", "mistral-vibe", "amp"];
+
+/**
+ * What kind of provider runs a thread's agent: a workspace Pim made for it,
+ * which it execs into, or an agent-hosted orb, which runs in the agent's own
+ * cloud and Pim drives through a client (./orb/types.ts). A thread record
+ * says the kind, and for an agent-hosted one the orb it runs on; the kind
+ * also decides what the record's `providerId` names: a workspace provider or
+ * an orb client.
+ */
+export type CodingProviderKind = "workspace" | "agent-hosted";
 
 /** Which model a thread runs on, by the space's provider id (such as `own:anthropic`) and the model's id there. */
 export type AgentProfile = { readonly providerId: string; readonly model: string; readonly thinking?: ModelThinkingLevel };
@@ -64,6 +75,13 @@ export type CodingThreadRow = {
 	readonly harness: CodingHarness;
 	/** The workspace provider's id: where the thread runs, or would first try to while it has made no workspace. */
 	readonly providerId: string;
+	/** What kind of provider runs the thread (see `CodingProviderKind`): a workspace, or an agent-hosted orb. */
+	readonly providerKind: CodingProviderKind;
+	/**
+	 * The agent-hosted thread the thread runs on, when its `providerKind` is "agent-hosted": its id on the
+	 * agent's own cloud and where the person watches it. Null for a thread that runs in a workspace.
+	 */
+	readonly orb: OrbThread | null;
 	/** Whether the thread stays on its provider: once it made a workspace there, whose files and environment are kept there, or when it was started on that provider by name. Until then it may run on another provider when its own is full. */
 	readonly placed: boolean;
 	readonly workspaceRef: WorkspaceRef | null;
@@ -149,6 +167,8 @@ CREATE TABLE IF NOT EXISTS coding_thread (
 	agent_profile TEXT NOT NULL,
 	harness TEXT NOT NULL DEFAULT 'pi',
 	provider_id TEXT NOT NULL,
+	provider_kind TEXT NOT NULL DEFAULT 'workspace',
+	orb TEXT,
 	workspace_ref TEXT,
 	state TEXT NOT NULL,
 	state_reason TEXT,
@@ -308,6 +328,10 @@ export class CodingThreadStore {
 		if (!columns.has("pull_request_number")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN pull_request_number INTEGER");
 		// Whether the thread stays on its provider; threads from before overflow stay where they are.
 		if (!columns.has("placed")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN placed INTEGER NOT NULL DEFAULT 1");
+		// What kind of provider runs the thread: a workspace, or an agent-hosted orb driven through a client (./orb/).
+		if (!columns.has("provider_kind")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'workspace'");
+		// The agent-hosted thread, as JSON: null for a thread that runs in a workspace.
+		if (!columns.has("orb")) this.#sql.exec("ALTER TABLE coding_thread ADD COLUMN orb TEXT");
 	}
 
 	thread(): CodingThreadRow | null {
@@ -323,16 +347,18 @@ export class CodingThreadStore {
 	}
 
 	create(
-		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed"> & {
+		thread: Omit<CodingThreadRow, "baseSha" | "workspaceRef" | "stateReason" | "stateDetail" | "spentUsd" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session" | "createdAt" | "updatedAt" | "providerInstance" | "placed" | "providerKind" | "orb"> & {
 			consecutiveInterrupts?: number;
 			providerInstance?: string;
 			placed?: boolean;
+			providerKind?: CodingProviderKind;
+			orb?: OrbThread | null;
 		},
 	): void {
 		const now = this.#now();
 		this.#sql.exec(
-			`INSERT INTO coding_thread (thread_id, space, repo_url, provider_instance, base_ref, branch, agent_profile, harness, provider_id, placed, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO coding_thread (thread_id, space, repo_url, provider_instance, base_ref, branch, agent_profile, harness, provider_id, provider_kind, orb, placed, state, created_by, parent_thread, limits, budget_usd, start_operation, consecutive_interrupts, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			thread.threadId,
 			thread.space,
 			thread.repoUrl,
@@ -342,6 +368,8 @@ export class CodingThreadStore {
 			JSON.stringify(thread.profile),
 			thread.harness,
 			thread.providerId,
+			thread.providerKind ?? "workspace",
+			thread.orb === undefined || thread.orb === null ? null : JSON.stringify(thread.orb),
 			thread.placed ? 1 : 0,
 			thread.state,
 			thread.createdBy,
@@ -358,13 +386,15 @@ export class CodingThreadStore {
 
 	/** Sets the given fields of the thread's row. */
 	update(
-		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "placed" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
+		change: Partial<Pick<CodingThreadRow, "state" | "stateReason" | "stateDetail" | "providerId" | "providerKind" | "orb" | "placed" | "baseSha" | "workspaceRef" | "slot" | "slotSince" | "resumePriority" | "currentOperation" | "budgetStopped" | "budgetUsd" | "environment" | "consecutiveInterrupts" | "pullRequest" | "session">>,
 	): void {
 		const columns: Record<string, SqlStorageValue> = {};
 		if (change.state !== undefined) columns.state = change.state;
 		if (change.stateReason !== undefined) columns.state_reason = change.stateReason;
 		if (change.stateDetail !== undefined) columns.state_detail = change.stateDetail;
 		if (change.providerId !== undefined) columns.provider_id = change.providerId;
+		if (change.providerKind !== undefined) columns.provider_kind = change.providerKind;
+		if (change.orb !== undefined) columns.orb = change.orb === null ? null : JSON.stringify(change.orb);
 		if (change.placed !== undefined) columns.placed = change.placed ? 1 : 0;
 		if (change.baseSha !== undefined) columns.base_sha = change.baseSha;
 		if (change.workspaceRef !== undefined) columns.workspace_ref = change.workspaceRef === null ? null : JSON.stringify(change.workspaceRef);
@@ -614,6 +644,8 @@ function threadOf(row: Row): CodingThreadRow {
 		profile: JSON.parse(String(row.agent_profile)) as AgentProfile,
 		harness: String(row.harness) as CodingHarness,
 		providerId: String(row.provider_id),
+		providerKind: (text(row.provider_kind) ?? "workspace") as CodingProviderKind,
+		orb: row.orb === null || row.orb === undefined ? null : (JSON.parse(String(row.orb)) as OrbThread),
 		placed: row.placed === 1,
 		workspaceRef: row.workspace_ref === null ? null : (JSON.parse(String(row.workspace_ref)) as WorkspaceRef),
 		state: String(row.state) as CodingThreadState,

@@ -99,12 +99,16 @@ promise transparent recovery from those losses.
 
 ## Egress
 
-Containers start with Internet access disabled. Each allowed target gets HTTP
-and HTTPS intercepts bound to that target. The handler checks the URL against both
-the connection target and the latest policy, refuses nonstandard ports, and
-injects only into HTTPS requests with a matching normalized path. Redirects are
-returned for a new policy check. Removed targets still fail closed through old
-intercepts; no policy or injection credentials are put in the container.
+Containers start with Internet access disabled. Two catch-all intercepts, HTTP
+and HTTPS, cover every host: the handler checks the URL against the latest policy
+(and the connection target, which for the catch-all is any host), refuses
+nonstandard ports, and injects only into HTTPS requests with a matching
+normalized path. Redirects are returned for a new policy check. The intercepts
+are reinstalled whenever the workspace is created, resumed or given a new
+policy, and again when the Durable Object starts over a container that is still
+running, so a container is never left deciding requests with an older
+deployment's handler; no policy or injection credentials are put in the
+container.
 The policy, including gateway and broker tokens in `Saved.spec.egress.inject`,
 is persisted in the workspace's own Durable Object storage. These credentials
 are thread-scoped and expire; they are replaced when access is refreshed and

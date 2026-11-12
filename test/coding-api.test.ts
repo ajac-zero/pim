@@ -947,3 +947,17 @@ describe("what an agent hears of a coding thread's failure", () => {
 		expect(message).not.toContain("retry once");
 	});
 });
+
+describe("Amp HTTP API controls", () => {
+	it("places Amp Orbs without a slot and returns typed unsupported for steer and abort", async () => {
+		const thread = await start({ harness: "amp", provider: "orbs" });
+		expect(thread).toMatchObject({ providerKind: "agent-hosted", provider: "amp-http", slot: "none" });
+		for (const [verb, body] of [["steer", { text: "hi" }], ["abort", {}]] as const) {
+			const result = await post(`/coding/threads/${thread.id}/${verb}`, body);
+			expect(result.status).toBe(409);
+			expect(result.body).toMatchObject({ code: "unsupported", error: "not supported by Amp's HTTP API yet" });
+		}
+		const refused = await post("/coding/threads", { repo: REPO, task: "Fix it", harness: "pi", provider: "orbs" });
+		expect(refused.status).toBe(400);
+	});
+});

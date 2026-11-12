@@ -3598,7 +3598,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 			if (config === null && envConfig.error === undefined) {
 				if (profile.toolchains.length > 0 || profile.dependencies.length > 0) {
 					const toolchains = profile.toolchains.map((each) => (each.version === null ? each.tool : `${each.tool} ${each.version}`)).join(", ") || "no toolchains";
-					notes.push(`detected: ${toolchains}, installing with ${profile.dependencies.map((each) => each.command).join(", ") || "no dependency installs"}`);
+					const installs = profile.dependencies.map((each) => each.command).join(", ");
+					notes.push(`detected: ${toolchains}${installs ? `, installing with ${installs}` : ""}`);
 					this.store.recordEvent("environment.detected", { toolchains: profile.toolchains.map((each) => each.tool).join(","), dependencies: profile.dependencies.map((each) => each.tool).join(",") });
 				}
 			}

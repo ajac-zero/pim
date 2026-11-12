@@ -2092,6 +2092,33 @@ describe("a coding thread's environment", () => {
 		expect((await stub.log()).find((event) => event.kind === "environment.built")?.data).toMatchObject({ key });
 	});
 
+	it("runs a repository's .pim/env.json setup, hashes its cacheKeys into the key, and shows its checks and services", async () => {
+		const schema = "create table t (id int);\n";
+		const env = {
+			setup: ["pnpm install --frozen-lockfile", "pnpm run build"],
+			cacheKeys: ["db/schema.sql", "gone.txt"],
+			cachePaths: ["node_modules"],
+			services: [{ name: "web", command: "pnpm dev", port: 5173, preview: true }],
+			check: ["pnpm typecheck", "pnpm test"],
+		};
+		const { repo, fullName } = envRepo({ ".pim/env.json": JSON.stringify(env), "db/schema.sql": schema });
+		const space = `space-${crypto.randomUUID()}`;
+		codingFaux.setResponses([fauxAssistantMessage("Ready.")]);
+		const { id, stub } = await startThread({ repo, space });
+		expect((await turns(id, 1))[0]!.outcome).toBe("completed");
+		const { environment } = await stub.status();
+		// Its setup ran in place of .pim/setup.sh, and the schema's contents are in the key beside the lockfiles.
+		const script = "set -e\npnpm install --frozen-lockfile\npnpm run build\n";
+		expect(setups.map((each) => each.argv)).toEqual([["bash", "-c", script]]);
+		const key = await environmentKey({ userId: space, repo: fullName, provision: [], setupScript: script, setupSource: "env", lockfiles: { "pnpm-lock.yaml": await sha256(LOCK), "web/package-lock.json": await sha256(WEB_LOCK), "env:db/schema.sql": await sha256(schema) }, image: DEFAULT_WORKSPACE_IMAGE });
+		expect(environment).toMatchObject({ state: "cached", key, source: "env", cachePaths: ["node_modules"], services: env.services });
+		expect(environment.testCommands).toEqual([
+			{ command: "pnpm typecheck", source: "pim", from: ".pim/env.json" },
+			{ command: "pnpm test", source: "pim", from: ".pim/env.json" },
+		]);
+		expect(environment.notes).toEqual([".pim/env.json: the cache key \"gone.txt\" matches no file and is left out"]);
+	});
+
 	it("says a backend that keeps no environments is unsupported, with why, and works without one", async () => {
 		const backend = new FakeWorkspaceProvider({ id: "no-environments" });
 		backend.register("git", fakeGit);
@@ -2423,7 +2450,7 @@ describe("a coding thread's environment", () => {
 		expect(environment.toolchains).toEqual([{ tool: "go", version: "1.22.5", source: "manifest", from: "go.mod", status: "installed" }]);
 		expect(environment.dependencies).toEqual([{ tool: "go", command: "go mod download", from: "go.sum", status: "installed" }]);
 		expect(environment.testCommands.map((each) => each.command)).toEqual(["make test", "make lint", "go vet ./...", "go test -race -count=1 ./..."]);
-		expect(environment.notes).toEqual([expect.stringContaining("starts the services postgres, redis")]);
+		expect(environment.notes).toEqual([expect.stringContaining("starts the services postgres, redis"), "detected: go 1.22.5, installing with go mod download"]);
 		expect(snapshotsOf(space)).toHaveLength(1);
 		// The agent was told before its first turn: its toolchain, and the commands to check its work with.
 		expect(prompt).toContain("go 1.22.5 (from go.mod)");

@@ -439,6 +439,7 @@ describe("the coding threads API", () => {
 			snapshotKept: true,
 			readyFrom: "setup",
 			cache_hit: false,
+			notes: ["detected: go 1.22"],
 			toolchains: [{ tool: "go", version: "1.22", source: "manifest", from: "go.mod", status: "installed" }],
 			testCommands: [
 				{ command: "go vet ./...", source: "default", from: "go.mod" },

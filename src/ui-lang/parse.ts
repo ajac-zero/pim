@@ -95,6 +95,8 @@ class Parser {
 	constructor(
 		private readonly source: string,
 		private readonly diagnostics: Diagnostic[],
+		/** Whether the source is a block still being written, which ends wherever the writer has got to. */
+		private readonly partial = false,
 	) {}
 
 	private rest(): string {
@@ -112,6 +114,15 @@ class Parser {
 
 	private say(code: string, message: string, pos: number, severity: "error" | "warning" = "warning") {
 		this.diagnostics.push({ code, message, line: this.lineAt(pos), severity });
+	}
+
+	/**
+	 * Whether a construct that failed was cut off by the end of a block still
+	 * being written. If so, all of it is dropped, rather than left as text.
+	 */
+	private cutOff(): boolean {
+		if (!this.partial || this.pos < this.source.length) return false;
+		return true;
 	}
 
 	/** Reads past `text` when it is next. */
@@ -433,6 +444,10 @@ class Parser {
 			if (!this.eat("}")) throw new Broken();
 			return { e: expr };
 		} catch {
+			if (this.cutOff()) {
+				this.say("unterminated_braced_value", "a {…} ends where the source does", start);
+				return null;
+			}
 			this.say("invalid_expression", "a {…} didn't parse as an expression", start);
 			this.rewind(start);
 			return null;
@@ -468,6 +483,10 @@ class Parser {
 			}
 			return { t: "decl", state: kind === "state", name, value };
 		} catch {
+			if (this.cutOff()) {
+				this.say("unterminated_statement", "a {@…} statement ends where the source does", start);
+				return null;
+			}
 			this.say("unterminated_statement", "a {@…} statement didn't parse", start);
 			this.rewind(start);
 			return null;
@@ -519,6 +538,10 @@ class Parser {
 			}
 			throw new Broken();
 		} catch {
+			if (this.cutOff()) {
+				this.say("unterminated_block", "a {#…} tag ends where the source does", start);
+				return null;
+			}
 			this.say("invalid_block", "a {#…} block didn't parse", start);
 			this.rewind(start);
 			return null;
@@ -529,7 +552,14 @@ class Parser {
 	private element(md: boolean, depth: number): RawNode | null {
 		const start = this.pos;
 		const tag = /^<([a-z][a-z0-9]*)/.exec(this.rest());
-		if (tag === null) return null;
+		if (tag === null) {
+			// A `<` that is the last thing written is the start of a tag.
+			if (this.partial && this.rest() === "<") {
+				this.say("unterminated_tag", "a tag starts where the source ends", start);
+				this.pos = this.source.length;
+			}
+			return null;
+		}
 		this.pos += tag[0].length;
 		const props: Record<string, Expr> = {};
 		try {
@@ -561,22 +591,34 @@ class Parser {
 		} catch {
 			// A tag still being written is dropped; the source before it stands.
 			this.say("unterminated_tag", `the <${tag[1]}> tag ends where the source does`, start);
-			this.rewind(start);
+			if (!this.cutOff()) this.rewind(start);
 			return null;
 		}
 		if (depth >= MAX_DEPTH) this.say("too_deep", `the block nests deeper than ${MAX_DEPTH}`, start, "error");
 		const children = this.nodes([`</${tag[1]}>`], md, depth + 1);
-		if (!this.eat(`</${tag[1]}>`)) this.say("unterminated_tag", `the <${tag[1]}> element ends where the source does`, start);
+		if (!this.eat(`</${tag[1]}>`)) {
+			this.say("unterminated_tag", `the <${tag[1]}> element ends where the source does`, start);
+			// An element still being written is closed if it has content, and dropped if it has none.
+			if (this.partial && children.every(isBlank)) return null;
+		}
 		return { t: "el", tag: tag[1]!, props, children };
 	}
 }
 
+/** Whether a node draws nothing: text of only space. */
+function isBlank(node: RawNode): boolean {
+	return (node.t === "md" || node.t === "text") && node.parts.every((part) => "c" in part && part.c.trim() === "");
+}
+
 /**
  * Parses a block's source. What it can't read whole it repairs as the part
- * that is complete, and says so; nothing throws.
+ * that is complete, and says so; nothing throws. With `partial`, the source
+ * is a block still being written: what is cut off at its end, an unfinished
+ * tag, statement or `{…}`, is dropped, an open element with content is
+ * closed, and one without is dropped. The text so far is kept.
  */
-export function parse(source: string): Parsed {
+export function parse(source: string, options: { partial?: boolean } = {}): Parsed {
 	const diagnostics: Diagnostic[] = [];
-	const nodes = new Parser(source, diagnostics).all();
+	const nodes = new Parser(source, diagnostics, options.partial === true).all();
 	return { nodes, diagnostics };
 }

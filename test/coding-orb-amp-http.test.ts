@@ -115,6 +115,22 @@ describe("AmpHttpOrbClient", () => {
 		expect(await absent.client.usage("T")).toBeNull();
 		expect(absent.fetcher).not.toHaveBeenCalled();
 	});
+	it("retries a definitive 429 creation rejection after backoff, but never a 5xx creation outcome", async () => {
+		let now = 0;
+		const { client, fetcher } = fixture({ now: () => now });
+		fetcher.mockImplementation(async () => json({}, 429, { "Retry-After": "90" }));
+		await expect(client.start(start)).rejects.toMatchObject({ retryAfterMs: 90_000 });
+		await expect(client.start(start)).rejects.toBeInstanceOf(OrbUnreachableError);
+		now = 90_000;
+		fetcher.mockImplementation(async () => json({ thread: { id: "T-ok", url: "https://ampcode.com/threads/T-ok" } }, 201));
+		expect(await client.start(start)).toMatchObject({ threadId: "T-ok" });
+		expect(fetcher).toHaveBeenCalledTimes(2);
+		const uncertain = fixture();
+		uncertain.fetcher.mockImplementation(async () => json({}, 503));
+		await expect(uncertain.client.start(start)).rejects.toBeInstanceOf(OrbUnreachableError);
+		await expect(uncertain.client.start(start)).rejects.toMatchObject({ code: "orb_start_uncertain" });
+		expect(uncertain.fetcher).toHaveBeenCalledTimes(1);
+	});
 	it("honors Retry-After, bounds retries, and maps a missing thread", async () => {
 		let now = 0;
 		const { client, fetcher } = fixture({ now: () => now });

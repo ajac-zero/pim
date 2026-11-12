@@ -5,6 +5,7 @@ import { threadPath } from "./api";
 import { GitBrokerError } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";
 import { deploymentProviders } from "./git-broker/routes";
+import { AMP_HTTP_UNSUPPORTED } from "./orb/amp-http";
 import { cliHarness } from "./harness";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { codingThread } from "./thread-do";
@@ -132,6 +133,7 @@ export async function startThread(env: Env, space: string, input: Partial<StartC
 		const given = input[field];
 		if (given !== undefined && (typeof given !== "string" || !given.trim() || given.length > 100)) throw invalid(`${field} must be the name of a coding sandbox pool, such as compose or cloudflare`);
 	}
+	if ([input.pool, input.provider].some((name) => name === "orbs" || name === "amp-http") && harness !== "amp") throw invalid("Orbs requires harness amp");
 	const operationId = input.operationId ?? crypto.randomUUID();
 	const threadId = await codingThreadId(space, operationId);
 	const scheduler = codingScheduler(env, space);
@@ -197,7 +199,7 @@ export function refusal(error: unknown): CodingError {
 	if (error instanceof CodingError) return error;
 	const message = error instanceof Error ? error.message : String(error);
 	// The thread's own budget refusal, such as a CLI harness's token ceiling, which the route can't check before calling it.
-	return new CodingError(409, message, /: continue it with a bigger one$/.test(message) ? "budget_spent" : "conflict");
+	return new CodingError(409, message, message === AMP_HTTP_UNSUPPORTED ? "unsupported" : /: continue it with a bigger one$/.test(message) ? "budget_spent" : "conflict");
 }
 
 /** Wraps `view` for a thread's call: its refusals come back as conflicts. */

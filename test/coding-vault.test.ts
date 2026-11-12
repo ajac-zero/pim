@@ -757,3 +757,23 @@ describe("signing in to Codex", () => {
 		await api(`/coding/threads/${id}/archive`, { method: "POST" });
 	});
 });
+
+describe("optional Amp HTTP usage credentials", () => {
+	it("seals M2M credentials separately from the existing Amp Connect token and does not list them as a harness", async () => {
+		const vault = codingVault(env);
+		const record = await vault.backend.read(OWNER, "amp-http-m2m");
+		expect(await vault.loadAmpM2m(OWNER)).toBeNull();
+		const pat = "sgamp_SHARED_CONNECT_TOKEN_0123456789";
+		await vault.saveApiKey(OWNER, "amp", pat);
+		expect(await vault.saveAmpM2m(OWNER, { clientId: "amp-client", clientSecret: MARKER }, record.version)).toMatchObject({ ok: true });
+		expect(await vault.loadAmpM2m(OWNER)).toEqual({ clientId: "amp-client", clientSecret: MARKER });
+		expect(await vault.loadApiKey(OWNER, "amp")).toBe(pat);
+		expect((await vault.status(OWNER)).map((entry) => entry.harness)).not.toContain("amp-http-m2m");
+		const sealed = (await vault.backend.read(OWNER, "amp-http-m2m")).sealed!;
+		expect(decoder.decode(sealed)).not.toContain(MARKER);
+		await expect(openBlob(await vault.key(), { userId: other, harness: "amp-http-m2m" }, sealed)).rejects.toBeInstanceOf(VaultUnreadableError);
+		const version = (await vault.backend.read(OWNER, "amp-http-m2m")).version;
+		await vault.backend.write(OWNER, "amp-http-m2m", await sealBlob(await vault.key(), { userId: OWNER, harness: "amp-http-m2m" }, encoder.encode("null")), 4, version);
+		expect(await vault.loadAmpM2m(OWNER)).toBeNull();
+	});
+});

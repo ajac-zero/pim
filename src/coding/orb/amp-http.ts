@@ -41,6 +41,7 @@ export class AmpHttpOrbClient implements OrbClient {
 	async stop(_id: string): Promise<void> { throw new OrbUnsupportedError(AMP_HTTP_UNSUPPORTED); }
 
 	async start(start: OrbStart): Promise<OrbThread> {
+		const project = projectName(start.project);
 		const key = `amp:start:${start.idempotencyKey}`;
 		const previous = await this.options.store.get(key) as StartRecord | null;
 		if (previous && "thread" in previous) return previous.thread;
@@ -52,7 +53,7 @@ export class AmpHttpOrbClient implements OrbClient {
 			throw new OrbError("Amp start outcome is uncertain; check Amp before starting another thread", "orb_start_uncertain");
 		}
 		try {
-			const body = { project: projectName(start.project), message: start.prompt, ...(start.mode ? { agentMode: start.mode } : {}), ...(start.title ? { title: start.title } : {}) };
+			const body = { project, message: start.prompt, ...(start.mode ? { agentMode: start.mode } : {}), ...(start.title ? { title: start.title } : {}) };
 			const answer = await this.#request("/threads", { method: "POST", body: JSON.stringify(body) });
 			const thread = object(answer.thread);
 			if (typeof thread.id !== "string" || typeof thread.url !== "string") throw new OrbError("Amp returned an invalid thread handle; check Amp before starting another thread", "orb_start_uncertain");
@@ -64,7 +65,7 @@ export class AmpHttpOrbClient implements OrbClient {
 		} catch (error) {
 			// Only a definitive rejection permits another POST. Network failures,
 			// malformed success responses and 5xx leave the reservation intact.
-			if (error instanceof OrbAuthError || error instanceof AmpRateLimitError) await this.options.store.put(key, null);
+			if (error instanceof OrbAuthError || error instanceof AmpRateLimitError || error instanceof AmpBeforeSendError) await this.options.store.put(key, null);
 			throw error;
 		}
 	}
@@ -128,7 +129,8 @@ export class AmpHttpOrbClient implements OrbClient {
 		if (token === null) throw new OrbAuthError("Connect Amp using the existing Amp Connect field on the coding page");
 		const key = `amp:retry:${path}`;
 		const retry = await this.options.store.get(key) as { attempts: number; at: number } | null;
-		if (retry && retry.at > this.#now()) throw new OrbUnreachableError("Amp HTTP API is backing off", retry.at - this.#now());
+		if (retry && retry.attempts > 6) throw new OrbError("Amp HTTP API retry limit reached", "orb_retry_exhausted");
+		if (retry && retry.at > this.#now()) throw new AmpBeforeSendError("Amp HTTP API is backing off", retry.at - this.#now());
 		let response: Response;
 		try {
 			response = await this.#fetch(path.startsWith("https:") ? path : `https://ampcode.com/api/v2${path}`, { ...init, redirect: "error", signal: AbortSignal.timeout(30_000), headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers } });
@@ -145,7 +147,10 @@ export class AmpHttpOrbClient implements OrbClient {
 
 	async #retry(key: string, retry: { attempts: number; at: number } | null, response: Response | null): Promise<never> {
 		const attempts = (retry?.attempts ?? 0) + 1;
-		if (attempts > 6) throw new OrbError("Amp HTTP API retry limit reached", "orb_retry_exhausted");
+		if (attempts > 6) {
+			await this.options.store.put(key, { attempts, at: 0 });
+			throw new OrbError("Amp HTTP API retry limit reached", "orb_retry_exhausted");
+		}
 		const header = response?.headers.get("Retry-After");
 		const seconds = header ? Number(header) : NaN;
 		const requested = header ? (Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - this.#now()) : 0;
@@ -155,6 +160,7 @@ export class AmpHttpOrbClient implements OrbClient {
 	}
 }
 class AmpRateLimitError extends OrbUnreachableError {}
+class AmpBeforeSendError extends OrbUnreachableError {}
 
 /** The API accepts namespace/name, not a repository URL. */
 export function projectName(project: string): string {

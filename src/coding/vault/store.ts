@@ -1,6 +1,6 @@
 import { MAX_ARCHIVE_BYTES } from "./archive";
 import { SEAL_OVERHEAD } from "./crypto";
-import type { Harness } from "./harnesses";
+import type { CodingVaultKey, Harness } from "./harnesses";
 
 /**
  * The vault's entries in a space's own database (the Pim Durable Object's,
@@ -50,7 +50,7 @@ export class VaultStore {
 		this.#sql.exec(SCHEMA);
 	}
 
-	#row(harness: Harness): Row | undefined {
+	#row(harness: CodingVaultKey): Row | undefined {
 		return this.#sql.exec<Row>("SELECT version, sealed, byte_length, updated_at FROM pim_coding_vault WHERE harness = ?", harness).toArray()[0];
 	}
 
@@ -66,13 +66,13 @@ export class VaultStore {
 		};
 	}
 
-	read(harness: Harness): VaultRecord {
+	read(harness: CodingVaultKey): VaultRecord {
 		const row = this.#row(harness);
 		return { version: row ? Number(row.version) : 0, sealed: row?.sealed != null ? new Uint8Array(row.sealed) : null };
 	}
 
 	/** Stores a sealed blob of an archive of `byteLength` bytes, if the entry is still at `expectedVersion`. */
-	write(harness: Harness, sealed: Uint8Array, byteLength: number, expectedVersion: number, now: number): VaultWriteResult {
+	write(harness: CodingVaultKey, sealed: Uint8Array, byteLength: number, expectedVersion: number, now: number): VaultWriteResult {
 		if (!(sealed instanceof Uint8Array) || sealed.byteLength > MAX_SEALED_BYTES) throw new Error(`A vault entry holds at most ${MAX_SEALED_BYTES} bytes`);
 		if (!Number.isInteger(byteLength) || byteLength < 0 || sealed.byteLength !== byteLength + SEAL_OVERHEAD) throw new Error("A vault entry's size doesn't match its blob");
 		if (!Number.isInteger(expectedVersion) || expectedVersion < 0) throw new Error("A vault write names the version it read");

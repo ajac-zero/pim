@@ -7,15 +7,57 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from "vitest";
 import { UserMessage } from "~/components/chat/items";
 import { Markdown } from "~/components/chat/markdown";
 import { ReplyImages } from "~/components/chat/reply-blocks";
 import type { MessageItem } from "~/lib/openresponses";
-import { type UiResponse, uiTurn } from "../../../../src/ui-lang";
+import { ApiError, pim, type StoredUiState } from "~/lib/pim-api";
+import {
+  compile,
+  evaluate,
+  initialState,
+  type UiResponse,
+  uiBlockId,
+  uiTurn,
+} from "../../../../src/ui-lang";
 import { UI_EXAMPLE } from "../../../../src/ui-lang/catalog";
 
-afterEach(cleanup);
+/** What Pim keeps of the blocks of message m1, as the API would hold it. */
+let kept: Record<string, StoredUiState>;
+let saveUiState: MockInstance<typeof pim.saveUiState>;
+
+beforeEach(() => {
+  kept = {};
+  vi.spyOn(pim, "uiStates").mockImplementation(async () =>
+    structuredClone(kept),
+  );
+  saveUiState = vi
+    .spyOn(pim, "saveUiState")
+    .mockImplementation(async (_message, block, body) => {
+      kept[block] = {
+        version: body.version + 1,
+        state: body.state,
+        submitted: body.submitted,
+        updatedAt: 0,
+      };
+      return structuredClone(kept[block] as StoredUiState);
+    });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 /** A block, in a message that can send turns the way the chat does. */
 function shown(
@@ -45,6 +87,9 @@ function shown(
     </QueryClientProvider>,
   );
 }
+
+/** The id Pim keeps the example's state under. */
+const BLOCK = uiBlockId(UI_EXAMPLE);
 
 const submit = () =>
   fireEvent.click(screen.getByRole("button", { name: "Check and send" }));
@@ -238,5 +283,193 @@ describe("the turn a form sends", () => {
     // The trailer the answers rode in is nowhere on the page.
     expect(container.innerHTML).not.toContain("ui-response");
     expect(container.innerHTML).not.toContain("messageId");
+  });
+});
+
+describe("what a ui block holds, kept by Pim", () => {
+  it("draws a draft again after the block is shown anew, from what Pim kept", async () => {
+    const first = shown(UI_EXAMPLE, { send: vi.fn() });
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    fireEvent.change(field("knn.pred"), { target: { value: "B" } });
+    // Leaving the chat saves the last change without waiting for a pause.
+    first.unmount();
+    await waitFor(() => expect(saveUiState).toHaveBeenCalledTimes(1));
+    expect(kept[BLOCK]?.state.values).toMatchObject({
+      "knn.d1": "5",
+      "knn.pred": "B",
+    });
+    shown(UI_EXAMPLE, { send: vi.fn() });
+    await waitFor(() => expect(field("knn.d1").value).toBe("5"));
+    expect(field("knn.pred").value).toBe("B");
+    // A draft isn't a submission: still open to change.
+    expect(field("knn.d1").disabled).toBe(false);
+  });
+
+  it("keeps what the person typed over what Pim answers late with", async () => {
+    kept[BLOCK] = {
+      version: 3,
+      state: { values: { "knn.d1": "9" }, revealed: {}, submitted: {} },
+      submitted: false,
+      updatedAt: 0,
+    };
+    shown(UI_EXAMPLE, { send: vi.fn() });
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(field("knn.d1").value).toBe("5");
+  });
+
+  it("saves once after a pause, whatever was typed in between", async () => {
+    vi.useFakeTimers();
+    shown(UI_EXAMPLE, { send: vi.fn() });
+    for (const value of ["1", "12", "123"]) {
+      fireEvent.change(field("knn.d1"), { target: { value } });
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    // 200 ms after the last change, 600 after the first: nothing yet.
+    expect(saveUiState).not.toHaveBeenCalled();
+    // Typing wasn't blocked: the field holds what was typed.
+    expect(field("knn.d1").value).toBe("123");
+    await vi.advanceTimersByTimeAsync(300);
+    expect(saveUiState).toHaveBeenCalledTimes(1);
+    expect(saveUiState).toHaveBeenCalledWith("m1", BLOCK, {
+      version: 0,
+      state: expect.objectContaining({
+        values: expect.objectContaining({ "knn.d1": "123" }),
+      }),
+      submitted: false,
+    });
+  });
+
+  it("tries a write that failed again, slower each time, then goes on from the version it holds", async () => {
+    vi.useFakeTimers();
+    saveUiState
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new ApiError(502, "bad gateway"));
+    shown(UI_EXAMPLE, { send: vi.fn() });
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saveUiState).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(saveUiState).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saveUiState).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(saveUiState).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(saveUiState).toHaveBeenCalledTimes(3);
+    // Every try carried the same state, over the version Pim never confirmed.
+    const tries = saveUiState.mock.calls.map(([, , body]) => body);
+    expect(new Set(tries.map((body) => JSON.stringify(body))).size).toBe(1);
+    expect(tries[0]?.version).toBe(0);
+    expect(kept[BLOCK]?.state.values?.["knn.d1"]).toBe("5");
+    // Saved: nothing more is sent.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(saveUiState).toHaveBeenCalledTimes(3);
+  });
+
+  it("locks a form from what Pim kept as submitted, with no trailer in the chat", async () => {
+    const program = compile(UI_EXAMPLE);
+    let state = initialState(program);
+    for (const [key, value] of [
+      ["knn.d1", "5"],
+      ["knn.d2", "13"],
+      ["knn.pred", "A"],
+    ] as const)
+      state = evaluate(program, state, { type: "change", key, value }).state;
+    state = evaluate(program, state, { type: "submit", form: "knn" }).state;
+    kept[BLOCK] = { version: 4, state, submitted: true, updatedAt: 0 };
+    const send = vi.fn();
+    shown(UI_EXAMPLE, { send });
+    await waitFor(() => expect(field("knn.d1").disabled).toBe(true));
+    expect(field("knn.d1").value).toBe("5");
+    expect(screen.getByText(/Score: 3 \/ 3/)).toBeTruthy();
+    expect(send).not.toHaveBeenCalled();
+    expect(saveUiState).not.toHaveBeenCalled();
+  });
+
+  it("marks the block submitted once its turn was sent, and not before", async () => {
+    let placed = () => {};
+    const send = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          placed = resolve;
+        }),
+    );
+    shown(UI_EXAMPLE, { send });
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    submit();
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    // Locked here, but the turn isn't placed: Pim holds it as an answer still open.
+    expect(saveUiState.mock.calls.every(([, , body]) => !body.submitted)).toBe(
+      true,
+    );
+    placed();
+    await waitFor(() =>
+      expect(saveUiState.mock.lastCall?.[2]).toMatchObject({
+        submitted: true,
+        state: { submitted: { knn: expect.anything() } },
+      }),
+    );
+    expect(kept[BLOCK]?.submitted).toBe(true);
+  });
+
+  it("doesn't mark it submitted when the turn failed to send, and lets the form be answered again", async () => {
+    shown(UI_EXAMPLE, {
+      send: vi.fn().mockRejectedValue(new Error("offline")),
+    });
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    submit();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    await waitFor(() => expect(kept[BLOCK]?.state.submitted).toEqual({}));
+    expect(kept[BLOCK]?.submitted).toBe(false);
+  });
+
+  it("stops writing and locks what a stale write finds submitted elsewhere", async () => {
+    const program = compile(UI_EXAMPLE);
+    const answered = evaluate(program, initialState(program), {
+      type: "submit",
+      form: "knn",
+    }).state;
+    saveUiState.mockRejectedValueOnce(
+      new ApiError(409, "submitted", {
+        current: { version: 7, state: answered, submitted: true, updatedAt: 0 },
+      }),
+    );
+    shown(UI_EXAMPLE, { send: vi.fn() });
+    fireEvent.change(field("knn.d1"), { target: { value: "9" } });
+    await waitFor(() => expect(field("knn.d1").disabled).toBe(true), {
+      timeout: 2000,
+    });
+    expect(saveUiState).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps nothing for a copy that can't send turns", async () => {
+    shown(UI_EXAMPLE);
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    expect(pim.uiStates).not.toHaveBeenCalled();
+    expect(saveUiState).not.toHaveBeenCalled();
+  });
+
+  it("goes over a block saved from elsewhere since, the last writer winning", async () => {
+    vi.useFakeTimers();
+    saveUiState.mockRejectedValueOnce(
+      new ApiError(409, "saved since", {
+        current: {
+          version: 5,
+          state: { values: {}, revealed: {}, submitted: {} },
+          submitted: false,
+          updatedAt: 0,
+        },
+      }),
+    );
+    shown(UI_EXAMPLE, { send: vi.fn() });
+    fireEvent.change(field("knn.d1"), { target: { value: "5" } });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saveUiState).toHaveBeenCalledTimes(2);
+    expect(saveUiState.mock.calls.map(([, , body]) => body.version)).toEqual([
+      0, 5,
+    ]);
+    expect(kept[BLOCK]?.state.values?.["knn.d1"]).toBe("5");
   });
 });

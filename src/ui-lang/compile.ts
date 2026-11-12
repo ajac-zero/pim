@@ -218,7 +218,7 @@ class Compiler {
 			}
 		}
 		// What a form is called, what a field is called and what a choice offers must be written plainly.
-		for (const name of ["id", "name", "options"] as const) {
+		for (const name of ["id", "name", "options", "required"] as const) {
 			const value = props[name];
 			if (value !== undefined && value.k !== "const") {
 				this.say("error", "invalid_literal", `A <${node.tag}>'s ${name} must be plain, not worked out.`);
@@ -329,6 +329,7 @@ class Compiler {
 			name,
 			label,
 			tag: node.tag as Field["tag"],
+			required: props.required?.k === "const" ? props.required.v !== false : true,
 			graded,
 			...(graded ? { answer: (answer as { v: Value }).v } : {}),
 			...(tol !== undefined ? { tol } : {}),

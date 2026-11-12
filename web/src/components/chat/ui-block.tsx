@@ -358,12 +358,14 @@ function Node({
     case "form": {
       const id = String(props.id ?? "");
       const isLocked = props.locked === true;
+      const ready = props.ready !== false;
+      const hintId = `${id}-ready-hint`;
       return (
         <form
           data-form={id}
           onSubmit={(event) => {
             event.preventDefault();
-            if (!isLocked) events.submit(id);
+            if (!isLocked && ready) events.submit(id);
           }}
           className="min-w-0"
         >
@@ -372,11 +374,17 @@ function Node({
             <Button
               type="submit"
               size="sm"
-              disabled={isLocked || locked}
+              disabled={isLocked || locked || !ready}
+              aria-describedby={!isLocked && !ready ? hintId : undefined}
               data-part="submit"
             >
               {String(props.submitLabel ?? t("uiSubmit"))}
             </Button>
+            {!isLocked && !ready && (
+              <span id={hintId} className="text-[13px] text-muted-foreground">
+                {t("uiFillIn")}
+              </span>
+            )}
             {locked && (
               <span className="text-[13px] text-muted-foreground">
                 {t("uiSending")}
@@ -423,6 +431,7 @@ function Field({
   const value = props.value === undefined ? "" : String(props.value);
   const isLocked = props.locked === true;
   const graded = props.graded === true;
+  const required = props.required !== false;
   const revealed = props.answer !== undefined;
   const change = (next: string) => events.change(key, next);
   const field =
@@ -431,6 +440,7 @@ function Field({
         value={value}
         disabled={isLocked}
         aria-label={label}
+        aria-required={required}
         onChange={(event) => change(event.currentTarget.value)}
         className="h-10 w-full min-w-0 rounded-xl border border-input bg-background px-3 text-[15px] outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -448,6 +458,7 @@ function Field({
         disabled={isLocked}
         readOnly={locked}
         aria-label={label}
+        aria-required={required}
         placeholder={
           props.placeholder === undefined ? "" : String(props.placeholder)
         }

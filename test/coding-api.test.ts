@@ -1030,14 +1030,14 @@ describe("listing thread activity", () => {
 });
 
 describe("Amp HTTP API controls", () => {
-	it("places Amp Orbs without a slot and returns typed unsupported for steer and abort", async () => {
+	it("places Amp Orbs without a slot and accepts steer and returns typed unsupported for abort", async () => {
 		const thread = await start({ harness: "amp", provider: "orbs" });
 		expect(thread).toMatchObject({ providerKind: "agent-hosted", provider: "amp-orbs", pool: "amp-orbs", slot: "none" });
-		for (const [verb, body] of [["steer", { text: "hi" }], ["abort", {}]] as const) {
-			const result = await post(`/coding/threads/${thread.id}/${verb}`, body);
-			expect(result.status).toBe(409);
-			expect(result.body).toMatchObject({ code: "unsupported", error: "not supported by Amp's HTTP API yet" });
-		}
+		const steered = await post(`/coding/threads/${thread.id}/steer`, { text: "hi" });
+		expect(steered.status).toBe(200);
+		const result = await post(`/coding/threads/${thread.id}/abort`, {});
+		expect(result.status).toBe(409);
+		expect(result.body).toMatchObject({ code: "unsupported", error: "not supported by Amp: archiving may not halt a running agent" });
 		const refused = await post("/coding/threads", { repo: REPO, task: "Fix it", harness: "pi", provider: "orbs" });
 		expect(refused.status).toBe(400);
 	});

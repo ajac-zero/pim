@@ -279,7 +279,7 @@ describe("Amp HTTP placement", () => {
 		expect(fake.started).toHaveLength(1);
 	});
 
-	it("reads the same Amp Connect credential, maps rejection, and refuses HTTP steering/stopping", async () => {
+	it("reads the same Amp Connect credential, maps rejection, and steers through sendMessageToThread but refuses abort", async () => {
 		const vault = codingVault(env);
 		const saved = "sgamp_HTTP_SHARED_CONNECT_TOKEN";
 		await vault.saveApiKey(OWNER, "amp", saved);
@@ -290,24 +290,34 @@ describe("Amp HTTP placement", () => {
 			await stub.start(startInput(id, { space: OWNER, harness: "amp", provider: "orbs" }));
 			await heartbeat(stub);
 			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", stateDetail: expect.stringContaining('Amp rejected the saved token (HTTP 403): {"error":"scope missing"}'), slot: "none", provider: "amp-orbs", pool: "amp-orbs", inbox: 1 });
-			expect(fetcher.mock.calls[0]?.[0]).toBe("https://ampcode.com/api/v2/threads");
-			expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: `Bearer ${saved}` });
-			fetcher.mockImplementation(async (url) => String(url).endsWith("/threads") ? Response.json({ thread: { id: "T-http", url: "https://ampcode.com/threads/T-http" } }, { status: 201 }) : String(url).endsWith("/messages") ? Response.json({ messages: [] }) : Response.json({ thread: { agentState: { state: "working" } } }));
+			expect(fetcher.mock.calls[0]?.[0]).toBe("https://ampcode.com/api/internal?resolveProjectByRepositoryURLs");
+			expect(fetcher.mock.calls[0]?.[1]?.headers).toEqual({ Authorization: `Bearer ${saved}`, "content-type": "application/json" });
+			const method = (init?: RequestInit) => JSON.parse(String(init?.body)).method as string;
+			const tail = (state: string) => Response.json({ ok: true, result: { thread: { data: { meta: { lastKnownAgentState: { state } } } }, messages: [] } });
+			let agent = "working";
+			fetcher.mockImplementation(async (_url, init) => ({
+				resolveProjectByRepositoryURLs: () => Response.json({ ok: true, result: { projectID: "P-1" } }),
+				createRemoteExecutorThread: () => Response.json({ ok: true, result: { threadID: "T-http", url: "https://ampcode.com/threads/T-http" } }),
+				sendMessageToThread: () => Response.json({ ok: true, result: { threadID: "T-http", latestCursor: "1" } }),
+				getThreadTail: () => tail(agent),
+			})[method(init) as "getThreadTail"]());
 			await stub.continue({ operationId: "reconnected" });
 			await heartbeat(stub);
 			expect(await stub.status()).toMatchObject({ state: "running", providerKind: "agent-hosted", slot: "none", inbox: 0 });
-			await expect(inside(stub, (thread) => thread.steer("hi", { operationId: "steer" }))).rejects.toThrow("not supported by Amp's HTTP API yet");
-			await expect(inside(stub, (thread) => thread.abort())).rejects.toThrow("not supported by Amp's HTTP API yet");
+			await inside(stub, (thread) => thread.steer("hi", { operationId: "steer" }));
+			expect(fetcher.mock.calls.map(([, init]) => method(init))).toContain("sendMessageToThread");
+			await expect(inside(stub, (thread) => thread.abort())).rejects.toThrow("not supported by Amp");
 			expect(await stub.status()).toMatchObject({ state: "running", currentOperation: startInput(id).operationId });
 			expect(fetcher.mock.calls.every(([, init]) => init?.method !== "DELETE")).toBe(true);
 			fetcher.mockImplementation(async () => Response.json({}, { status: 401 }));
 			await heartbeat(stub);
 			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", currentOperation: startInput(id).operationId });
-			fetcher.mockImplementation(async (url) => String(url).endsWith("/messages") ? Response.json({ messages: [] }) : Response.json({ thread: { agentState: { state: "idle" } } }));
+			agent = "idle";
+			fetcher.mockImplementation(async (_url, init) => tail(agent));
 			await stub.continue({ operationId: "reconnected-again" });
 			await heartbeat(stub);
 			expect(await stub.status()).toMatchObject({ state: "idle", slot: "none", currentOperation: null, cost: null });
-			expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+			expect(fetcher.mock.calls.filter(([, init]) => method(init) === "createRemoteExecutorThread")).toHaveLength(1);
 		} finally {
 			await vault.delete(OWNER, "amp");
 		}
@@ -317,7 +327,10 @@ describe("Amp HTTP placement", () => {
 		const vault = codingVault(env);
 		await vault.saveApiKey(OWNER, "amp", "sgamp_DETAIL_TOKEN");
 		vi.spyOn(console, "warn").mockImplementation(() => {});
-		vi.spyOn(globalThis, "fetch").mockImplementation(async () => { throw new TypeError("fetch failed"); });
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+			if (JSON.parse(String(init?.body)).method === "resolveProjectByRepositoryURLs") return Response.json({ ok: true, result: { projectID: "P-1" } });
+			throw new TypeError("fetch failed");
+		});
 		const id = crypto.randomUUID();
 		const stub = codingThread(env, id);
 		try {

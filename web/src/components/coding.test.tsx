@@ -611,7 +611,7 @@ describe("a thread's page", () => {
     await waitFor(() => expect(api.abort).toHaveBeenCalledWith("t1"));
   });
 
-  it("hides steering and stopping for Amp HTTP and links to the remote thread", async () => {
+  it("allows steering Amp HTTP threads but offers no Stop", async () => {
     const { api } = fakeApi(
       view({
         harness: "amp",
@@ -624,17 +624,11 @@ describe("a thread's page", () => {
     );
     threadPage(api);
     expect(
-      await screen.findByText(
-        /Steering and stopping are not supported by Amp's HTTP API yet/,
-      ),
+      await screen.findByPlaceholderText(/^Steer the coding agent/),
     ).toBeTruthy();
-    expect(screen.queryByPlaceholderText(/^Steer the coding agent/)).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Stop generating" }),
     ).toBeNull();
-    expect(
-      screen.getByRole("link", { name: "Open on Amp" }).getAttribute("href"),
-    ).toBe("https://ampcode.com/threads/T-http");
   });
 
   it("asks what to do next in an idle thread, with no Stop", async () => {

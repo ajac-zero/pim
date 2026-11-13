@@ -39,6 +39,8 @@ export type OrbConformanceOptions<C extends OrbClient> = {
 	script?: OrbScript<C>;
 	/** A project accepted by this provider. */
 	project?: string;
+	/** False for a client whose stop only archives the thread and may not halt a running agent (Amp); true by default. */
+	stopHalts?: boolean;
 };
 
 /** Every message of a thread, read a page at a time: each call asks for what follows the last message received, until one returns none. */
@@ -137,7 +139,7 @@ export function runOrbClientConformanceSuite<C extends OrbClient>(name: string, 
 			await client.stop(threadId);
 			await client.stop(threadId);
 			// Stopping cancels the run, so the thread is no longer working.
-			expect((await client.state(threadId)).state).not.toBe("working");
+			if (opts.stopHalts !== false) expect((await client.state(threadId)).state).not.toBe("working");
 		});
 
 		gated(

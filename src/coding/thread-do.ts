@@ -340,14 +340,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return this.env.Gallery.getByName("gallery").computeProviders();
 	}
 
-	/** Amp HTTP uses the existing Amp Connect credential, directly from the coding vault. */
+	/** Amp's internal API client uses the existing Amp Connect credential, directly from the coding vault. */
 	protected orbClients(): OrbClientFactory | null {
 		return async ({ space, providerId }) => {
 			if (providerId !== "amp-http") return null;
 			const vault = codingVault(this.env);
-			const m2m = await vault.loadAmpM2m(space);
 			return new AmpHttpOrbClient({
-				...(m2m ? { m2m: async () => m2m } : {}),
 				token: () => vault.loadApiKey(space, "amp"),
 				store: {
 					get: async (key) => (await this.ctx.storage.get(key)) ?? null,
@@ -1212,7 +1210,6 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * turn instead of being lost.
 	 */
 	async #steerOrb(thread: CodingThreadRow, text: string, options: { interrupt?: boolean; operationId: string }): Promise<CodingThreadStatus> {
-		if (thread.providerId === "amp-http") throw new OrbUnsupportedError(AMP_HTTP_UNSUPPORTED);
 		if (thread.currentOperation === null) {
 			this.#assertBudget(this.store.required());
 			this.ctx.storage.transactionSync(() => {
@@ -1349,7 +1346,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		if (thread.currentOperation) await this.#stopTurn();
 		this.#killCommands();
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
-		this.store.update({ state: "archived", stateReason: null, ...(thread.providerId === "amp-http" ? { stateDetail: `Archived in Pim only; stopping or archiving on Amp is ${AMP_HTTP_UNSUPPORTED}. The Amp run is left running.` } : {}) });
+		this.store.update({ state: "archived", stateReason: null });
 		await this.#archiveHarnessSession(thread);
 		// An agent-hosted thread is archived on the agent's site too, so it leaves the person's list there.
 		if (thread.providerKind === "agent-hosted") await this.#stopOrb();

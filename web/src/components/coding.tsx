@@ -1619,7 +1619,7 @@ function ThreadActions({
         <Confirm
           text={
             thread.provider === "amp-http"
-              ? "Archive in Pim only? Stopping or archiving on Amp is not supported by Amp's HTTP API yet; the Amp run will continue."
+              ? "Archive this thread? It is archived on Amp too, but archiving may not halt a run that is still going."
               : t("codingArchiveConfirm")
           }
           action={t("codingArchive")}
@@ -2161,25 +2161,6 @@ function SteerForm({
     onSuccess: update,
     onError: (_error, text) => setFill({ text, id: Date.now() }),
   });
-  if (thread.provider === "amp-http")
-    return (
-      <p className="py-3 text-muted-foreground text-sm">
-        Steering and stopping are not supported by Amp's HTTP API yet.
-        {thread.orb && (
-          <>
-            {" "}
-            <a
-              className="underline"
-              href={thread.orb.url}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open on Amp
-            </a>
-          </>
-        )}
-      </p>
-    );
   if (thread.state === "archived" || thread.state === "failed") return null;
   const working =
     thread.state === "running" || thread.currentOperation !== null;
@@ -2188,7 +2169,8 @@ function SteerForm({
       draftKey={thread.id}
       fill={fill}
       busy={working && !abort.isPending}
-      onStop={() => abort.mutate()}
+      // Amp has no cancel call, so there is no Stop for its threads; archiving is the only way to end one.
+      onStop={thread.provider === "amp-http" ? undefined : () => abort.mutate()}
       hideAttach
       onSend={(content) => {
         const text = textOf(content).trim();

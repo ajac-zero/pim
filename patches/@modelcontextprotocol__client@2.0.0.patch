@@ -1,8 +1,41 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index 635f1c0134274c89e7efbcae2adf3d9ecba575ee..f3924ed4a52210fbd1e4cdf5cb36abf71afdacba 100644
+index 635f1c0134274c89e7efbcae2adf3d9ecba575ee..d93e4a18122a5622ada01b62b13f9b3aee5c42e1 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
-@@ -5374,7 +5374,8 @@ var StreamableHTTPClientTransport = class {
+@@ -245,15 +245,24 @@ function isOAuthClientProvider(provider) {
+ * `WWW-Authenticate` parameters from the 401 response and runs {@linkcode auth}.
+ * Used by {@linkcode adaptOAuthProvider} to bridge `OAuthClientProvider` to `AuthProvider`.
+ */
++// Each provider's re-authorization under way. Requests refused together wait for the same one: a refresh token
++// may work only once, and some servers (Firecrawl's) revoke the whole grant when one is used twice.
++const unauthorizedFlights = /* @__PURE__ */ new WeakMap();
+ async function handleOAuthUnauthorized(provider, ctx, extraAuthOptions) {
+-	const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
+-	if (await auth(provider, {
+-		serverUrl: ctx.serverUrl,
+-		resourceMetadataUrl,
+-		scope,
+-		fetchFn: ctx.fetchFn,
+-		...extraAuthOptions
+-	}) !== "AUTHORIZED") throw new UnauthorizedError();
++	const pending = unauthorizedFlights.get(provider);
++	if (pending) return pending;
++	const flight = (async () => {
++		const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
++		if (await auth(provider, {
++			serverUrl: ctx.serverUrl,
++			resourceMetadataUrl,
++			scope,
++			fetchFn: ctx.fetchFn,
++			...extraAuthOptions
++		}) !== "AUTHORIZED") throw new UnauthorizedError();
++	})().finally(() => unauthorizedFlights.delete(provider));
++	unauthorizedFlights.set(provider, flight);
++	return flight;
+ }
+ /**
+ * Adapts an `OAuthClientProvider` to the minimal `AuthProvider` interface that
+@@ -5374,7 +5383,8 @@ var StreamableHTTPClientTransport = class {
  						return this._send(message, options, isAuthRetry, stepUpRetries + 1);
  					}
  				}
@@ -13,10 +46,43 @@ index 635f1c0134274c89e7efbcae2adf3d9ecba575ee..f3924ed4a52210fbd1e4cdf5cb36abf7
  					const requests = (Array.isArray(message) ? message : [message]).filter((m) => require_src.isJSONRPCRequest(m));
  					if (require_src.isJSONRPCErrorResponse(parsed) && requests.some((r) => r.id === parsed.id)) {
 diff --git a/dist/index.mjs b/dist/index.mjs
-index f02ce3ca394e826fc27c9848dbe9a214bf6ba7a9..a8174c5acbfb6012557874c2c192cacc3a89677a 100644
+index f02ce3ca394e826fc27c9848dbe9a214bf6ba7a9..a0972be7e27729483364cb1edcbda13226043740 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -5371,7 +5371,8 @@ var StreamableHTTPClientTransport = class {
+@@ -242,15 +242,24 @@ function isOAuthClientProvider(provider) {
+ * `WWW-Authenticate` parameters from the 401 response and runs {@linkcode auth}.
+ * Used by {@linkcode adaptOAuthProvider} to bridge `OAuthClientProvider` to `AuthProvider`.
+ */
++// Each provider's re-authorization under way. Requests refused together wait for the same one: a refresh token
++// may work only once, and some servers (Firecrawl's) revoke the whole grant when one is used twice.
++const unauthorizedFlights = /* @__PURE__ */ new WeakMap();
+ async function handleOAuthUnauthorized(provider, ctx, extraAuthOptions) {
+-	const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
+-	if (await auth(provider, {
+-		serverUrl: ctx.serverUrl,
+-		resourceMetadataUrl,
+-		scope,
+-		fetchFn: ctx.fetchFn,
+-		...extraAuthOptions
+-	}) !== "AUTHORIZED") throw new UnauthorizedError();
++	const pending = unauthorizedFlights.get(provider);
++	if (pending) return pending;
++	const flight = (async () => {
++		const { resourceMetadataUrl, scope } = extractWWWAuthenticateParams(ctx.response);
++		if (await auth(provider, {
++			serverUrl: ctx.serverUrl,
++			resourceMetadataUrl,
++			scope,
++			fetchFn: ctx.fetchFn,
++			...extraAuthOptions
++		}) !== "AUTHORIZED") throw new UnauthorizedError();
++	})().finally(() => unauthorizedFlights.delete(provider));
++	unauthorizedFlights.set(provider, flight);
++	return flight;
+ }
+ /**
+ * Adapts an `OAuthClientProvider` to the minimal `AuthProvider` interface that
+@@ -5371,7 +5380,8 @@ var StreamableHTTPClientTransport = class {
  						return this._send(message, options, isAuthRetry, stepUpRetries + 1);
  					}
  				}

@@ -108,7 +108,7 @@ settings:
 patchedDependencies:
   '@earendil-works/pi-ai@1.1.0': 8c0a59933c48ffb5e8d57121b35f9d2fb88de25007e2862718fa170a2d9c626d
   '@earendil-works/pi-durable@1.1.0': 503ff837453f96f1cd53cd7953631837c65b3f0f6f21f2abc87e5038147bfb6b
-  '@modelcontextprotocol/client@2.0.0': 0ed8e32e19859fcdcef88228be981b03663ea020635c64ba04624db55cfd1a07
+  '@modelcontextprotocol/client@2.0.0': ff658c913bd07fb86f5fe73e0d75dc176edd87996d24834f6494ca5b84ab5a6e
   agents@0.27.0: d9c90ca9edccbb0f0887d06edf83881b952a9771775d7d711254ccd1109e9cd0
 
 importers:
@@ -135,7 +135,7 @@ importers:
         version: 1.1.0(patch_hash=503ff837453f96f1cd53cd7953631837c65b3f0f6f21f2abc87e5038147bfb6b)(@aws-sdk/credential-provider-node@3.972.84)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.4.3))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@7.29.1)(ws@8.22.0)(zod@4.4.3)
       '@modelcontextprotocol/client':
         specifier: 2.0.0
-        version: 2.0.0(patch_hash=0ed8e32e19859fcdcef88228be981b03663ea020635c64ba04624db55cfd1a07)
+        version: 2.0.0(patch_hash=ff658c913bd07fb86f5fe73e0d75dc176edd87996d24834f6494ca5b84ab5a6e)
       '@modelcontextprotocol/server':
         specifier: 2.0.0
         version: 2.0.0
@@ -156,7 +156,7 @@ importers:
         version: 2.12.0(@opentelemetry/api@1.9.1)
       agents:
         specifier: 0.27.0
-        version: 0.27.0(patch_hash=d9c90ca9edccbb0f0887d06edf83881b952a9771775d7d711254ccd1109e9cd0)(039207921bfbdad46884baa7dd352b4f)
+        version: 0.27.0(patch_hash=d9c90ca9edccbb0f0887d06edf83881b952a9771775d7d711254ccd1109e9cd0)(8f0c9f9035a33bcb8041eeea5f0d74b7)
       lib0:
         specifier: ^0.2.119
         version: 0.2.119
@@ -6650,7 +6650,7 @@ snapshots:
 
   '@mixmark-io/domino@2.2.0': {}
 
-  '@modelcontextprotocol/client@2.0.0(patch_hash=0ed8e32e19859fcdcef88228be981b03663ea020635c64ba04624db55cfd1a07)':
+  '@modelcontextprotocol/client@2.0.0(patch_hash=ff658c913bd07fb86f5fe73e0d75dc176edd87996d24834f6494ca5b84ab5a6e)':
     dependencies:
       '@modelcontextprotocol/core': 2.0.0
       cross-spawn: 7.0.6
@@ -8242,11 +8242,11 @@ snapshots:
 
   agent-base@9.0.0: {}
 
-  agents@0.27.0(patch_hash=d9c90ca9edccbb0f0887d06edf83881b952a9771775d7d711254ccd1109e9cd0)(039207921bfbdad46884baa7dd352b4f):
+  agents@0.27.0(patch_hash=d9c90ca9edccbb0f0887d06edf83881b952a9771775d7d711254ccd1109e9cd0)(8f0c9f9035a33bcb8041eeea5f0d74b7):
     dependencies:
       '@babel/plugin-proposal-decorators': 8.0.2(@babel/core@8.0.6)
       '@cfworker/json-schema': 4.1.1
-      '@modelcontextprotocol/client': 2.0.0(patch_hash=0ed8e32e19859fcdcef88228be981b03663ea020635c64ba04624db55cfd1a07)
+      '@modelcontextprotocol/client': 2.0.0(patch_hash=ff658c913bd07fb86f5fe73e0d75dc176edd87996d24834f6494ca5b84ab5a6e)
       '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.4.3)
       '@modelcontextprotocol/server': 2.0.0
       '@rolldown/plugin-babel': 0.2.4(@babel/core@8.0.6)(rolldown@1.2.12)(vite@8.3.3(@types/node@26.6.4)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))

@@ -27,6 +27,7 @@ import {
 	ROOT_CONVERSATION_ID,
 	UsageDoc,
 } from "@earendil-works/pi-durable";
+import { SdkHttpError, UnauthorizedError } from "@modelcontextprotocol/client";
 import { type AgentMcpOAuthProvider, Agent as DurableAgent, type Connection, type ConnectionContext, DurableObjectOAuthClientProvider, getAgentByName, type WSMessage } from "agents";
 import { type PiModel, PiHarness, type PiOperationResult, type PiReceipt, ROOT_SESSION } from "agents/harness/pi";
 import { CLOUDFLARE_PROVIDER_ID, createAI } from "agents/models/pi-ai";
@@ -774,7 +775,23 @@ export class Pim extends DurableAgent<Env> {
 				return { content: [{ type: "text", text: refusal }], isError: true };
 			}
 			if (this.nativeApps.has(serverId)) return this.nativeApps.call(serverId, name, args);
-			return this.mcp.callTool({ serverId, name, arguments: args });
+			const call = () => this.mcp.callTool({ serverId, name, arguments: args });
+			try {
+				return await call();
+			} catch (error) {
+				if (!UnauthorizedError.isInstance(error) && !(SdkHttpError.isInstance(error) && error.status === 401)) throw error;
+				// The connector refused the sign-in, which expired or was revoked. Connecting again finds out whether
+				// it still works; when it doesn't, the connection waits for the person to sign in again, with a new
+				// link, instead of showing as connected.
+				const again = await this.mcp.connectToServer(serverId);
+				if (again.state === "connected" && (await this.mcp.discoverIfConnected(serverId))?.success) return call();
+				const app = this.apps.servers().find((server) => server.id === serverId)?.name ?? serverId;
+				const next =
+					again.state === "authenticating"
+						? `The person must sign in to ${app} again before it can be used. Give them this link: ${again.authUrl}`
+						: `${app} could not connect again${again.state === "failed" ? `: ${again.error}` : ""}.`;
+				return { content: [{ type: "text", text: `${app} refused its sign-in. ${next}` }], isError: true };
+			}
 		},
 		connect: (app) => this.connectApp(app),
 		capabilities: (serverId) => this.mcp.mcpConnections[serverId]?.serverCapabilities as McpCapabilities | undefined,

@@ -84,10 +84,13 @@ const SERVERS: Record<string, () => McpServer> = {
  * do. Studio: the same as Forge, but its OAuth server, like Amp's, takes a
  * client metadata document, which it fetches. All three say they take those
  * documents. They record the token requests and registrations they get.
+ * Board's tokens are like Firecrawl's: refresh tokens rotate and work once,
+ * and reusing one revokes the sign-in.
  */
 const forgeGrants: Record<string, string>[] = [];
 let forgeRegistrations = 0;
 const boardRegistrations: Record<string, unknown>[] = [];
+const boardTokens = { issued: 0, access: null as string | null, refresh: null as string | null };
 
 async function forge(request: Request): Promise<Response> {
 	const { origin, pathname } = new URL(request.url);
@@ -98,7 +101,8 @@ async function forge(request: Request): Promise<Response> {
 		return Response.json({ ...metadata, client_id: "board-client" }, { status: 201 });
 	}
 	if (pathname === "/mcp") {
-		if (request.headers.get("authorization") !== "Bearer forge-token") {
+		const token = host === "board" ? boardTokens.access : "forge-token";
+		if (token === null || request.headers.get("authorization") !== `Bearer ${token}`) {
 			return new Response("Unauthorized", {
 				status: 401,
 				headers: { "www-authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"` },
@@ -130,6 +134,15 @@ async function forge(request: Request): Promise<Response> {
 				return Response.json({ error: "invalid_client" }, { status: 401 });
 			}
 			return Response.json({ access_token: "forge-token", token_type: "bearer" });
+		}
+		if (host === "board") {
+			if (form.grant_type === "refresh_token" && form.refresh_token !== boardTokens.refresh) {
+				Object.assign(boardTokens, { access: null, refresh: null });
+				return Response.json({ error: "invalid_grant" }, { status: 400 });
+			}
+			const n = ++boardTokens.issued;
+			Object.assign(boardTokens, { access: `board-${n}`, refresh: `board-refresh-${n}` });
+			return Response.json({ access_token: boardTokens.access, refresh_token: boardTokens.refresh, token_type: "bearer", expires_in: 3600 });
 		}
 		if (form.client_id !== "forge-client" || form.client_secret !== "forge-secret") return Response.json({ error: "invalid_client" }, { status: 401 });
 		if (form.code !== "good") return Response.json({ error: "invalid_grant" }, { status: 400 });
@@ -494,6 +507,38 @@ describe("connected apps (MCP)", () => {
 		expect(boardRegistrations).toHaveLength(1);
 		expect(boardRegistrations[0]).toMatchObject({ client_name: "Pim", redirect_uris: [`https://pim.test/mcp/callback/${OWNER}`] });
 		expect(boardRegistrations[0]).not.toHaveProperty("client_uri");
+		expect((await api("/mcp/board", { method: "DELETE" })).status).toBe(200);
+	});
+
+	it("refreshes a sign-in once for calls refused together, and asks for a new sign-in once the connector refuses it", async () => {
+		const board = async () => (await api("/mcp")).body.servers.find((server: { id: string }) => server.id === "board");
+		const signIn = async (authUrl: string) => {
+			await exports.default.fetch(url(`/mcp/callback/${OWNER}?state=${new URL(authUrl).searchParams.get("state")}&code=good`));
+			await runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.mcp.waitForConnections({ timeout: 10_000 }));
+		};
+		const search = () => runInDurableObject(env.Pim.getByName(OWNER), (instance: Pim) => instance.apps.call("board", "search", { query: "cards" }));
+		await signIn((await post("/mcp", { app: "test.ledger/board" })).body.authUrl);
+		expect(await board()).toMatchObject({ state: "ready" });
+
+		// The access token expired: both calls wait for one refresh, since a second use of the refresh token would revoke the sign-in.
+		boardTokens.access = "expired";
+		const refreshes = forgeGrants.length;
+		const results = await Promise.all([search(), search()]);
+		expect(results.map((result) => result.content?.[0])).toEqual([0, 1].map(() => ({ type: "text", text: "No notes match cards." })));
+		expect(forgeGrants.slice(refreshes)).toEqual([expect.objectContaining({ grant_type: "refresh_token", refresh_token: "board-refresh-1" })]);
+
+		// Revoked: the call says to sign in again, and the connector waits for that sign-in instead of showing as connected.
+		Object.assign(boardTokens, { access: null, refresh: null });
+		const refused = await search();
+		const waiting = await board();
+		expect(waiting).toMatchObject({ state: "authenticating", authUrl: expect.stringContaining("https://board.example.test/login/authorize?") });
+		expect(refused).toEqual({
+			content: [{ type: "text", text: `Board refused its sign-in. The person must sign in to Board again before it can be used. Give them this link: ${waiting.authUrl}` }],
+			isError: true,
+		});
+		await signIn(waiting.authUrl);
+		expect(await board()).toMatchObject({ state: "ready" });
+		expect((await search()).content).toEqual([{ type: "text", text: "No notes match cards." }]);
 		expect((await api("/mcp/board", { method: "DELETE" })).status).toBe(200);
 	});
 

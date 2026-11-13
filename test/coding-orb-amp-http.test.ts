@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AmpHttpOrbClient, AMP_HTTP_AUTH_REJECTED, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
+import { AmpHttpOrbClient, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
 import { runOrbClientConformanceSuite } from "../src/coding/orb/conformance";
 import { OrbAuthError, OrbLostError, OrbUnreachableError, OrbUnsupportedError } from "../src/coding/orb/types";
 
@@ -65,10 +65,24 @@ describe("AmpHttpOrbClient", () => {
 		const missing = fixture({ token: async () => null });
 		await expect(missing.client.start(start)).rejects.toBeInstanceOf(OrbAuthError);
 		expect(missing.fetcher).not.toHaveBeenCalled();
-		for (const status of [401, 403]) {
+		const cases: [number, unknown, string][] = [[401, { status: 401, message: "Unauthorized" }, "Unauthorized"], [403, { error: "needs scope sgamp_saved" }, "needs scope"]];
+		for (const [status, body, text] of cases) {
 			const { client, fetcher } = fixture();
-			fetcher.mockResolvedValue(json({ secret: "sgamp_saved" }, status));
-			await expect(client.start(start)).rejects.toMatchObject({ code: "orb_auth", message: AMP_HTTP_AUTH_REJECTED });
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			fetcher.mockResolvedValue(json(body, status, { "www-authenticate": "Bearer realm=x", "x-request-id": "req-1" }));
+			const error = await client.start(start).catch((e) => e);
+			const logged = warn.mock.calls.map((c) => String(c[0])).join("\n");
+			warn.mockRestore();
+			expect(error).toBeInstanceOf(OrbAuthError);
+			expect(error.message).toContain(`HTTP ${status}`);
+			expect(error.message).toContain(text);
+			expect(error.message).not.toContain("sgamp_saved");
+			expect(error.message).not.toContain("PAT");
+			expect(logged).toContain("pim.coding.amp_http_failed");
+			expect(logged).toContain(`"status":${status}`);
+			expect(logged).toContain(text);
+			expect(logged).toContain("req-1");
+			expect(logged).not.toContain("sgamp_saved");
 		}
 	});
 	it("polls through missing and early idle states, persists working, and waits two minutes on Amp errors", async () => {

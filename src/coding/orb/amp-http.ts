@@ -3,7 +3,6 @@
 import { OrbAuthError, OrbError, OrbLostError, OrbUnreachableError, OrbUnsupportedError, type OrbClient, type OrbMessage, type OrbStart, type OrbStatus, type OrbThread, type OrbUsage } from "./types";
 
 export const AMP_HTTP_UNSUPPORTED = "not supported by Amp's HTTP API yet";
-export const AMP_HTTP_AUTH_REJECTED = "Amp rejected the saved token for the HTTP API; a PAT with amp.api:threads:create + amp.api:threads:view is needed, save it in the same Amp Connect field";
 
 /** Stored in the thread DO. claim must atomically insert only when absent. */
 export interface AmpHttpStore {
@@ -23,7 +22,7 @@ export type AmpHttpOptions = {
 type Progress = { startedAt: number; working: boolean; errorAt: number | null };
 type StartRecord = { pending: true; failure?: string } | { thread: OrbThread };
 type Retry = { attempts: number; at: number; failure?: string };
-const redact = (text: string): string => text.replace(/sgamp_[A-Za-z0-9_.-]*/g, "[redacted]").replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]");
+const redact = (text: string): string => text.replace(/sgamp_[A-Za-z0-9_.-]*/g, "[redacted]").replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]").replace(/(client_secret["']?\s*[=:]\s*["']?)[^\s"'&,;]+/gi, "$1[redacted]");
 const snippet = (text: string): string => redact(text).replace(/\s+/g, " ").trim().slice(0, 200);
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const timestamp = (value: unknown): number | null => {
@@ -174,7 +173,19 @@ export class AmpHttpOrbClient implements OrbClient {
 			this.#failure = failure;
 			throw new OrbError(`Amp HTTP API rejected the request (${response.status}${body ? `: ${body}` : ""})`, "orb_request");
 		}
-		if (response.status === 401 || response.status === 403) throw new OrbAuthError(bearer === undefined ? AMP_HTTP_AUTH_REJECTED : "Amp M2M authentication rejected");
+		if (response.status === 401 || response.status === 403) {
+			const secrets = [token, init.body instanceof URLSearchParams ? undefined : new URLSearchParams(String(init.body ?? "")).get("client_secret")];
+			let body = redact(await response.text().catch(() => ""));
+			for (const secret of secrets) if (secret) body = body.split(secret).join("[redacted]");
+			body = body.replace(/\s+/g, " ").trim().slice(0, 500);
+			const headers: Record<string, string> = {};
+			for (const name of ["www-authenticate", "x-request-id", "cf-ray"]) {
+				const value = response.headers.get(name);
+				if (value) headers[name] = redact(value).slice(0, 200);
+			}
+			this.#log(op, { status: response.status, ...(body ? { errMessage: body } : {}), ...(Object.keys(headers).length ? { headers } : {}) }, elapsedMs, attempt);
+			throw new OrbAuthError(`${bearer === undefined ? "Amp rejected the saved token" : "Amp rejected the M2M token request"} (HTTP ${response.status})${body ? `: ${body}` : ""}`);
+		}
 		if (response.status === 404) throw new OrbLostError();
 		await this.options.store.put(key, null);
 		const text = await response.text().catch(() => "");
@@ -187,7 +198,7 @@ export class AmpHttpOrbClient implements OrbClient {
 		}
 	}
 
-	#log(op: string, detail: { status?: number; errName?: string; errMessage?: string }, elapsedMs: number, attempt: number): void {
+	#log(op: string, detail: { status?: number; errName?: string; errMessage?: string; headers?: Record<string, string> }, elapsedMs: number, attempt: number): void {
 		console.warn(JSON.stringify({ event: "pim.coding.amp_http_failed", op, ...detail, elapsedMs, attempt }));
 	}
 

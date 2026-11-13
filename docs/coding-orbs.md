@@ -14,9 +14,9 @@ The conformance suite (`src/coding/orb/conformance.ts`) checks the contract. Cap
 
 The bearer is **the same saved credential as the coding page's Amp Connect field**: `codingVault.loadApiKey(space, "amp")`. There is no second PAT or Connect UI. A missing token waits in `login_required`. A 401/403 also waits there and says:
 
-> Amp rejected the saved token for the HTTP API; a PAT with amp.api:threads:create + amp.api:threads:view is needed, save it in the same Amp Connect field
+> Amp rejected the saved token (HTTP <status>): <redacted body snippet>
 
-Tokens and response bodies are never included in client errors or logs. Reconnecting through the existing field resumes threads waiting for the login.
+Amp's docs currently describe `Authorization: Bearer <token>` with a personal access token scope for `POST /api/v2/threads`, but the saved Connect token (the `sgamp_` Settings access token) is tried as-is, and Amp's actual rejection text is shown in the thread's status detail and transcript notice. The same status, a body snippet (500 chars) and safe headers (`www-authenticate`, `x-request-id`, `cf-ray`) go to the `pim.coding.amp_http_failed` warn log. Tokens, Bearer values and client secrets are redacted everywhere. Reconnecting through the existing field resumes threads waiting for the login.
 
 ### Creation and retries
 

@@ -1,6 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AMP_HTTP_AUTH_REJECTED } from "../src/coding/orb/amp-http";
 import { codingVault } from "../src/coding/vault/vault";
 import { OWNER } from "./helpers";
 import { FakeOrbClient } from "../src/coding/orb/fake";
@@ -284,13 +283,13 @@ describe("Amp HTTP placement", () => {
 		const vault = codingVault(env);
 		const saved = "sgamp_HTTP_SHARED_CONNECT_TOKEN";
 		await vault.saveApiKey(OWNER, "amp", saved);
-		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({}, { status: 403 }));
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ error: "scope missing" }, { status: 403 }));
 		const id = crypto.randomUUID();
 		const stub = codingThread(env, id);
 		try {
 			await stub.start(startInput(id, { space: OWNER, harness: "amp", provider: "orbs" }));
 			await heartbeat(stub);
-			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", stateDetail: AMP_HTTP_AUTH_REJECTED, slot: "none", provider: "amp-orbs", pool: "amp-orbs", inbox: 1 });
+			expect(await stub.status()).toMatchObject({ state: "waiting_input", stateReason: "login_required", stateDetail: expect.stringContaining('Amp rejected the saved token (HTTP 403): {"error":"scope missing"}'), slot: "none", provider: "amp-orbs", pool: "amp-orbs", inbox: 1 });
 			expect(fetcher.mock.calls[0]?.[0]).toBe("https://ampcode.com/api/v2/threads");
 			expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: `Bearer ${saved}` });
 			fetcher.mockImplementation(async (url) => String(url).endsWith("/threads") ? Response.json({ thread: { id: "T-http", url: "https://ampcode.com/threads/T-http" } }, { status: 201 }) : String(url).endsWith("/messages") ? Response.json({ messages: [] }) : Response.json({ thread: { agentState: { state: "working" } } }));

@@ -452,6 +452,7 @@ export class Computer {
 		if (count === undefined) return false;
 		if (count > 1) this.#watching.set(path, count - 1);
 		else this.#watching.delete(path);
+		// Known and left alone: an unwatch landing while a reconnect's `watch` of this path is in flight (not yet counted in #resuming) can leave the computer one ref above the space's, until the next reconnect's `unwatch_all`.
 		// A watch that a reconnect hasn't asked the computer for yet is just forgotten; an offline computer has dropped its watches already.
 		const issued = this.#resuming.get(path);
 		if (issued !== undefined && issued < count) return count > 1;

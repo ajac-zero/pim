@@ -65,16 +65,22 @@ export function useAgentModel(agentId: string | undefined) {
  * The model one chat runs on and the means to change it for this chat alone:
  * its own choice if it has one, else its agent's, else the default model.
  * `fallback` is what "Default" in the menu goes back to: the agent's model.
+ * With `member`, it is that agent's conversation in a group chat; the choice is
+ * still the chat's, never the agent's own.
  */
 export function useSessionModel(
   sessionId: string,
   agentId: string | undefined,
+  member = false,
 ) {
   const queryClient = useQueryClient();
   const { data: settings } = useQuery(modelQuery());
   const { data: agents } = useQuery(agentsQuery());
   const { data: sessions } = useQuery(sessionsQuery());
-  const shown = sessions?.find((session) => session.id === sessionId)?.model;
+  const session = sessions?.find((candidate) => candidate.id === sessionId);
+  const shown = member
+    ? session?.room?.members.find((seat) => seat.id === agentId)?.model
+    : session?.model;
   const own = agents?.find((agent) => agent.id === agentId)?.model;
   const find = (
     model: Pick<ModelInfo, "provider" | "id"> | undefined | null,
@@ -87,7 +93,9 @@ export function useSessionModel(
       : undefined;
   const choose = useMutation({
     mutationFn: (model: Pick<ModelInfo, "provider" | "id"> | null) =>
-      pim.chooseSessionModel(sessionId, model),
+      member
+        ? pim.chooseRoomMemberModel(sessionId, agentId ?? "", model)
+        : pim.chooseSessionModel(sessionId, model),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
     onError: (error) => toast.error(error.message),
   });

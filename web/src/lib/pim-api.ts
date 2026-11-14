@@ -59,6 +59,8 @@ export type Room = {
     busy: boolean;
     held: boolean;
     error: string | null;
+    /** The model its conversation in the chat runs on, and whether it was chosen for this chat alone. */
+    model: { model: ModelInfo; override: boolean };
   }[];
 };
 
@@ -2285,6 +2287,19 @@ export const pim = {
   ) =>
     call<{ model: ModelInfo }>(
       `/sessions/${encodeURIComponent(session)}/model`,
+      {
+        method: "PUT",
+        body: JSON.stringify(model ?? { provider: null, id: null }),
+      },
+    ),
+  /** Chooses the model of an agent besides the host in a group chat, for this chat alone; null follows the agent's again. */
+  chooseRoomMemberModel: (
+    session: string,
+    agent: string,
+    model: Pick<ModelInfo, "provider" | "id"> | null,
+  ) =>
+    call<{ model: ModelInfo }>(
+      `/sessions/${encodeURIComponent(session)}/room/members/${encodeURIComponent(agent)}/model`,
       {
         method: "PUT",
         body: JSON.stringify(model ?? { provider: null, id: null }),

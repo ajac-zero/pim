@@ -615,7 +615,6 @@ const translations = {
     model: "Model",
     modelChanged: "Agents without a model of their own now use {model}",
     chooseModel: "Model: {model}",
-    modelForAgent: "Model for {name}",
     modelForChat: "Model for this chat with {name}",
     agentModels: "Models",
     fallbackModelsHint:
@@ -2687,7 +2686,6 @@ const translations = {
     model: "Modelo",
     modelChanged: "Los agentes sin modelo propio ahora usan {model}",
     chooseModel: "Modelo: {model}",
-    modelForAgent: "Modelo de {name}",
     modelForChat: "Modelo de este chat con {name}",
     agentModels: "Modelos",
     fallbackModelsHint:

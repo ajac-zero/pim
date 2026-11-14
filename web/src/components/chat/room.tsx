@@ -5,7 +5,6 @@ import { ThinkingDot } from "~/components/chat/items";
 import {
   ModelMark,
   ModelMenuItems,
-  useAgentModel,
   useSessionModel,
 } from "~/components/chat/model-menu";
 import { useI18n } from "~/components/i18n";
@@ -204,17 +203,18 @@ function Person({
   onRemove,
 }: {
   person: { id: string; name: string; host: boolean };
-  /** The chat, whose model the host's list chooses; the others' agents have a chat of their own in it, which is not reachable, so theirs is chosen for the agent. */
+  /** The chat, whose models these lists choose: each agent's in it, for this chat alone. */
   session: string;
   agent: Agent | undefined;
   removing: boolean;
   onRemove: () => void;
 }) {
   const { t } = useI18n();
-  const own = useAgentModel(person.id);
-  const chat = useSessionModel(session, person.id);
-  const { settings, current, pinned, choose } = person.host ? chat : own;
-  const fallback = person.host ? chat.fallback : undefined;
+  const { settings, current, pinned, fallback, choose } = useSessionModel(
+    session,
+    person.id,
+    !person.host,
+  );
   return (
     <div className="flex items-center gap-2 px-1">
       <DropdownMenuSub>
@@ -233,15 +233,13 @@ function Person({
           )}
         </DropdownMenuSubTrigger>
         {/* Radix can't be told a side, so the right edge is made too crowded to open on: the list opens left of the menu and doesn't cover the rest of the row. */}
-        {settings && current && (
+        {settings && current && fallback && (
           <DropdownMenuSubContent
             collisionPadding={{ right: 1000 }}
             className="w-72 max-w-[calc(100vw-2rem)]"
           >
             <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
-              {t(person.host ? "modelForChat" : "modelForAgent", {
-                name: person.name,
-              })}
+              {t("modelForChat", { name: person.name })}
             </DropdownMenuLabel>
             <ModelMenuItems
               settings={settings}

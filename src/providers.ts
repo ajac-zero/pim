@@ -7,6 +7,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { HttpError } from "./http";
+import { withTypedToolSchemas } from "./typed-schemas";
 
 /**
  * Model providers people add in Settings → Model: built-in services with
@@ -363,13 +364,29 @@ export function piProvider(catalogId: string, provider: CustomProvider): Provide
  * makes for that model, which depend on its compat flags: a model that takes
  * only adaptive thinking is refused a thinking budget. A custom model has
  * none of its own, so they come from pi-ai's catalog when it knows the id.
+ *
+ * Any other model there, such as Gemini behind a gateway that speaks the
+ * Messages API, is sent tool schemas with a type on every node, which Gemini
+ * needs and JSON Schema doesn't (see ./typed-schemas.ts). Claude's requests
+ * are sent as pi-ai makes them.
  */
 function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>): StreamFunction<Api, T> {
 	return (model, context, options) => lazyStream(model, async () => {
 		const known = (await knownModels()).get(model.id);
 		const catalogued = known?.api === "anthropic-messages" ? { ...model, compat: known.compat, thinkingLevelMap: known.thinkingLevelMap } : model;
-		return stream(catalogued, withoutEmptyAnswers(context, catalogued), withoutThinkingMidToolRound(context, options));
+		const claude = known?.api === "anthropic-messages" || /claude/i.test(model.id);
+		const sent = withoutThinkingMidToolRound(context, options);
+		return stream(catalogued, withoutEmptyAnswers(context, catalogued), claude ? sent : withTypedTools(sent));
 	});
+}
+
+/** `options` whose request, once whoever else reads it has, goes with its tool schemas typed throughout. */
+function withTypedTools<T extends StreamOptions>(options: T | undefined): T {
+	const onPayload = options?.onPayload;
+	return {
+		...options,
+		onPayload: async (params: unknown, model: Model<Api>) => withTypedToolSchemas((await onPayload?.(params, model)) ?? params),
+	} as T;
 }
 
 /**

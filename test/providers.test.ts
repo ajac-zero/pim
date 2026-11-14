@@ -3,6 +3,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { piProvider, prepareProvider } from "../src/providers";
+import { typedSchema } from "../src/typed-schemas";
 import { api, OWNER, post, say, toolUse } from "./helpers";
 import { completionStream, faux, type Pim } from "./worker";
 
@@ -12,7 +13,7 @@ import { completionStream, faux, type Pim } from "./worker";
  * and lists more models than Pim offers unasked.
  */
 
-type Call = { url: string; authorization: string | null; headers?: Record<string, string>; body: any };
+type Call = { url: string; authorization: string | null; headers?: Record<string, string>; body: any; raw?: string };
 
 let calls: Call[];
 let claudeFails = false;
@@ -76,8 +77,9 @@ beforeEach(() => {
 				calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body: null });
 				return Response.json({ data: [{ id: "claude-sonnet-5-5" }] });
 			}
-			const body = await request.json<{ model: string }>();
-			calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body });
+			const raw = await request.text();
+			const body = JSON.parse(raw) as { model: string };
+			calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body, raw });
 			if (claudeFails) return Response.json({ type: "error", error: { type: "invalid_request_error", message: "thinking is wrong" } }, { status: 400 });
 			return builtinStream(url, body.model);
 		}
@@ -104,6 +106,57 @@ beforeEach(() => {
 		return new Response("not found", { status: 404 });
 	});
 });
+
+/** Firecrawl's people_company_enrich input schema as its MCP server lists it (its `people` and a sibling, trimmed of other fields). */
+const FIRECRAWL_ENRICH = {
+	$schema: "https://json-schema.org/draft/2020-12/schema",
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		people: {
+			description: "People to enrich. People and companies together are at most 10 per call.",
+			minItems: 1,
+			maxItems: 10,
+			type: "array",
+			items: {
+				anyOf: [
+					{ required: ["linkedin_url"], properties: { linkedin_url: { pattern: "\\S" } } },
+					{ required: ["email"], properties: { email: { pattern: "\\S" } } },
+					{ required: ["phone"], properties: { phone: { pattern: "\\S" } } },
+					{ required: ["name", "company"], properties: { name: { pattern: "\\S" }, company: { pattern: "\\S" } } },
+					{ required: ["name", "domain"], properties: { name: { pattern: "\\S" }, domain: { pattern: "\\S" } } },
+					{ required: ["first_name", "last_name", "company"], properties: { first_name: { pattern: "\\S" }, last_name: { pattern: "\\S" }, company: { pattern: "\\S" } } },
+					{ required: ["first_name", "last_name", "domain"], properties: { first_name: { pattern: "\\S" }, last_name: { pattern: "\\S" }, domain: { pattern: "\\S" } } },
+				],
+				type: "object",
+				properties: {
+					name: { description: "Full name.", type: "string" },
+					first_name: { type: "string" },
+					last_name: { type: "string" },
+					company: { description: "Employer name or domain.", type: "string" },
+					domain: { description: "Employer domain, e.g. example.com.", type: "string" },
+					linkedin_url: { description: "LinkedIn profile URL.", type: "string" },
+					email: { description: "Any email known for the person.", type: "string" },
+					phone: { description: "Any phone number known for the person.", type: "string" },
+				},
+				additionalProperties: false,
+			},
+		},
+		verified_only: { type: "boolean", description: "Return only verified emails." },
+	},
+};
+
+/** The paths of the schema nodes in `schema` without a `type`. */
+function untyped(schema: any, path = ""): string[] {
+	if (typeof schema !== "object" || schema === null) return [];
+	const at = (key: string) => (path ? `${path}.${key}` : key);
+	return [
+		...(schema.type === undefined ? [path || "(root)"] : []),
+		...Object.entries(schema.properties ?? {}).flatMap(([name, child]) => untyped(child, at(`properties.${name}`))),
+		...(schema.items && typeof schema.items === "object" ? untyped(schema.items, at("items")) : []),
+		...["anyOf", "oneOf", "allOf"].flatMap((key) => (schema[key] ?? []).flatMap((branch: unknown, n: number) => untyped(branch, at(`${key}[${n}]`)))),
+	];
+}
 
 const put = (path: string, body: unknown) => api(path, { method: "PUT", body: JSON.stringify(body) });
 
@@ -147,6 +200,87 @@ describe("A person's own model providers", () => {
 		// Once the person says something new, it thinks again.
 		await models.completeSimple(model, { messages: [user, chatgpt, result, { ...user, content: "Thanks" }] }, { reasoning: "low" });
 		expect(calls.at(-1)!.body.thinking.type).toBe("enabled");
+	});
+
+	it("types every node of a tool schema for a model other than Claude, and sends Claude's request as pi-ai makes it", async () => {
+		const provider = await prepareProvider({ name: "Gateway", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set());
+		const models = createModels();
+		models.setProvider(piProvider("own:gateway", provider));
+		const claude = models.getModel("own:gateway", "claude-sonnet-5-5")!;
+		const tool = { name: "firecrawl_people_company_enrich", description: "Enrich people.", parameters: FIRECRAWL_ENRICH as never };
+		const ask = async (model: typeof claude) => {
+			let built: Record<string, unknown> | undefined;
+			await models.completeSimple(model, { systemPrompt: "Be helpful.", messages: [{ role: "user", content: "Who is Jane?", timestamp: 1 }], tools: [tool] }, {
+				onPayload: (params) => {
+					built = JSON.parse(JSON.stringify(params));
+					return undefined;
+				},
+			});
+			const { betas: _betas, ...body } = built!;
+			return { built: body, sent: calls.at(-1)! };
+		};
+
+		// Claude's request is the one pi-ai built, to the byte, with the connector's schema as it gave it.
+		const forClaude = await ask(claude);
+		expect(forClaude.sent.raw).toBe(JSON.stringify(forClaude.built));
+		expect(forClaude.sent.body.tools[0].input_schema).toEqual({ type: "object", properties: FIRECRAWL_ENRICH.properties, required: [] });
+
+		// Gemini behind the same gateway gets every node typed, and the constraint-only branches folded into the person's fields.
+		const forGemini = await ask({ ...claude, id: "gemini-4-argon" });
+		expect(forGemini.sent.raw).not.toBe(JSON.stringify(forGemini.built));
+		const people = forGemini.sent.body.tools[0].input_schema.properties.people;
+		expect(people).toEqual(typedSchema(FIRECRAWL_ENRICH.properties.people));
+		expect(people.items.anyOf).toBeUndefined();
+		expect(untyped(forGemini.sent.body.tools[0].input_schema)).toEqual([]);
+		// The rest of the request is what pi-ai built.
+		const { tools: _sent, ...rest } = forGemini.sent.body;
+		const { tools: _built, ...built } = forGemini.built;
+		expect(rest).toEqual(built);
+		// The tool's own schema, which checks the model's arguments, is left as it was.
+		expect(tool.parameters).toEqual(FIRECRAWL_ENRICH);
+	});
+
+	it("gives a type to every node of Firecrawl's people schema, and to nodes that only imply one", () => {
+		const people = FIRECRAWL_ENRICH.properties.people;
+		// The person's fields stay as Firecrawl typed them; its branches, which only say which fields go together, go.
+		expect(typedSchema(people)).toEqual({ ...people, items: { type: "object", properties: people.items.properties, additionalProperties: false } });
+		const typed = typedSchema({
+			type: "object",
+			$defs: { place: { properties: { city: { pattern: "\\S" } } } },
+			properties: {
+				any: {},
+				said: { description: "Anything." },
+				fields: { properties: { a: { type: "string" } } },
+				list: { items: { enum: [1, 2] } },
+				code: { pattern: "^[A-Z]+$" },
+				kind: { const: true },
+				ratio: { minimum: 0 },
+				maybe: { anyOf: [{ type: "integer" }, { type: "null" }] },
+				either: { anyOf: [{ required: ["a"] }, { required: ["b"] }] },
+				value: { anyOf: [{ type: "string" }, { type: "number" }, {}] },
+				nullable: { type: ["string", "null"] },
+				home: { $ref: "#/$defs/place" },
+				tags: { type: "array" },
+			},
+		});
+		expect(typed.properties).toEqual({
+			any: { type: "string" },
+			said: { description: "Anything.", type: "string" },
+			fields: { type: "object", properties: { a: { type: "string" } } },
+			list: { type: "array", items: { enum: [1, 2], type: "integer" } },
+			code: { pattern: "^[A-Z]+$", type: "string" },
+			kind: { const: true, type: "boolean" },
+			ratio: { minimum: 0, type: "number" },
+			maybe: { type: "integer" },
+			either: { type: "object", anyOf: [{ type: "object", required: ["a"] }, { type: "object", required: ["b"] }] },
+			// Alternatives of different types keep their own; Gemini takes `anyOf` in place of a type.
+			value: { anyOf: [{ type: "string" }, { type: "number" }, { type: "string" }] },
+			nullable: { type: "string" },
+			home: { type: "object", properties: { city: { pattern: "\\S", type: "string" } } },
+			tags: { type: "array", items: { type: "string" } },
+		});
+		expect(typed.$defs).toBeUndefined();
+		expect(untyped(typed)).toEqual(["properties.value"]);
 	});
 
 	it("keeps a system update ahead of an answer on a Claude endpoint when another provider's answer was only reasoning", async () => {

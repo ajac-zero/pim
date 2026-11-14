@@ -3,10 +3,13 @@ import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { Activity } from "../src/activity";
+import { activityOf } from "../src/activity";
+import { codingScheduler } from "../src/coding/scheduler-do";
 import { EVENT_KEEP, scrub } from "../src/diagnostics";
 import type { Pim } from "../src/pim";
 import type { Approval } from "../src/store";
-import { api, apiUrl, OWNER, post, ROOT, say, settled, systemPrompt, toolUse } from "./helpers";
+import { api, apiUrl, messagesOf, OWNER, post, ROOT, say, settled, systemPrompt, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 const TOOLS = ["pim_diagnostics", "pim_health"];
@@ -374,7 +377,7 @@ describe("parallel command silence", () => {
 			{ role: "assistant", content: [{ type: "toolCall", id: "quiet", name: "bash", arguments: { command: "quiet" } }, { type: "toolCall", id: "loud", name: "bash", arguments: { command: "loud" } }], timestamp: 200 },
 		] as Message[];
 		const activity = activityOf(turnsOf(messages, new Map(), 400000, true), 400000, { running: true, startedAt: 100, lastOutputAt: 399000, outputByCall: { loud: 399000 } });
-		expect(activity.stalls).toEqual([{ key: "tool:quiet", reason: "no output for five minutes", since: 200 }]);
+		expect(activity.stalls).toEqual([{ key: "tool:quiet:200", reason: "no output for five minutes", since: 200 }]);
 	});
 });
 
@@ -387,5 +390,71 @@ describe("harness timeout units", () => {
 		expect(toolTimeout("shell", { timeout_ms: 900000 })).toBe(900000);
 		expect(toolTimeout("bash", {})).toBeNull();
 		expect(toolTimeout("bash", { timeout: -1 })).toBeNull();
+	});
+});
+
+describe("stall notices", () => {
+	const quiet = (key: string): Activity => ({ running: true, lastActivityAt: 1_000, current: [{ id: "c", name: "bash", summary: "make", startedAt: 1_000, elapsedMs: 600_000, timeoutMs: null }], steps: [], stalls: [{ key, reason: "no output for five minutes", since: 1_000 }] });
+	const told = async (chat: string) => (await messagesOf(chat, "user")).filter((text) => text.includes("Stalled:")).length;
+
+	/** A coding thread in `state`, started by `createdBy`, in the space's list as starting one does. */
+	async function thread(createdBy: { type: "person" } | { type: "agent"; agent: string; chat: string }, state = "running") {
+		const threadId = `T-${crypto.randomUUID()}`;
+		const scheduler = codingScheduler(env, OWNER);
+		await scheduler.registerThread({ threadId, createdBy, chat: null, harness: "pi", parent: null, task: "t", repo: "https://github.com/acme/demo", ref: "main", budgetUsd: 1, createdAt: Date.now() });
+		await scheduler.recordThread({ threadId, repo: "https://github.com/acme/demo", ref: "main", branch: "main", state: state as "running", stateReason: null, spentUsd: 0, budgetUsd: 1, createdAt: Date.now(), updatedAt: Date.now() + 1, lastTurnEndedAt: null });
+		return threadId;
+	}
+	const stalled = (threadId: string, key: string) => inPim((pim) => pim.codingStalled(threadId, quiet(key)));
+	const reply = () => faux.setResponses([toolUse("send_to_user", { message: "Noted." })]);
+	const agentChat = async () => {
+		const agent = (await post("/agents", { name: "Parent", instructions: "Starts threads." })).body.id;
+		return { agent, chat: (await post("/sessions", { agent })).body.id as string };
+	};
+
+	it("tells only the chat of the agent that started the thread, once per quiet spell, and a reply starts no further notice", async () => {
+		const parent = await agentChat();
+		const other = await agentChat();
+		const id = await thread({ type: "agent", ...parent });
+		reply();
+		await stalled(id, "tool:c:1000");
+		await settled(parent.chat);
+		expect(await told(parent.chat)).toBe(1);
+		// The same stall seen again by later heartbeats is not told again, and the agent's reply is no new stall.
+		await stalled(id, "tool:c:1000");
+		await inPim((pim) => pim.watchRuns());
+		await settled(parent.chat);
+		expect(await told(parent.chat)).toBe(1);
+		// Progress and quiet again is a new spell.
+		reply();
+		await stalled(id, "tool:c:9000");
+		await settled(parent.chat);
+		expect(await told(parent.chat)).toBe(2);
+		// No other chat heard of it.
+		expect([await told(other.chat), await told(ROOT)]).toEqual([0, 0]);
+	});
+
+	it("drops a stall of a thread the person started, one that is no longer running, and one whose parent chat is gone", async () => {
+		const parent = await agentChat();
+		const gone = await agentChat();
+		await api(`/sessions/${gone.chat}`, { method: "DELETE" });
+		const ids = [
+			await thread({ type: "person" }),
+			await thread({ type: "agent", ...parent }, "idle"),
+			await thread({ type: "agent", ...parent }, "archived"),
+			await thread({ type: "agent", ...gone }),
+			await thread({ type: "agent", agent: parent.agent, chat: "no-such-chat" }),
+			`T-${crypto.randomUUID()}`,
+		];
+		for (const id of ids) await stalled(id, "tool:c:1000");
+		expect([await told(parent.chat), await told(ROOT)]).toEqual([0, 0]);
+	});
+
+	it("keys a stall by the output it follows, so only progress followed by quiet is a new one", () => {
+		const turn = { startedAt: 0, steps: [{ kind: "tool", id: "c", name: "bash", summary: "make", at: 0, ms: null, timeoutMs: null }] } as never;
+		const key = (output: number) => activityOf([turn], 600_000, { running: true, startedAt: 0, outputByCall: { c: output } }).stalls.map((stall) => stall.key);
+		expect(key(0)).toEqual(key(0));
+		expect(key(0)).not.toEqual(key(1_000));
+		expect(key(500_000)).toEqual([]);
 	});
 });

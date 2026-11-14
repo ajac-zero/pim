@@ -291,8 +291,12 @@ without observed output. A running coding thread is also stalled after
 fifteen minutes without transcript/output activity. Heartbeats are not
 output: a live scheduler cannot make a silent command look healthy. A stall
 is a warning, not proof that the process is dead; commands may legitimately
-be quiet. Parent agents receive a notice once per stall, through the same
-wake path as turn completion; threads started by the person notify the
-majordomo instead. The existing chat watchdog's stop policy is unchanged.
+be quiet. The agent that started a running coding thread receives a notice
+once per quiet spell (again only after the thread makes progress and goes
+quiet anew), through the same wake path as turn completion. A thread the
+person started, a thread that is no longer running, and a parent chat that
+is gone get none, and no chat is ever told of another chat's long tool call:
+the stall only shows in the chat's own activity. The existing chat
+watchdog's stop policy is unchanged.
 CLI and agent-hosted harnesses can only expose tool calls and activity that
 they report; absence of command details is shown as working, never invented.

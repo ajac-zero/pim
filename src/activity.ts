@@ -1,7 +1,7 @@
 import type { Activity, Turn } from "./activity-types";
 export type { Activity } from "./activity-types";
 
-/** A quiet command is worth investigating after five minutes, a quiet coding thread after fifteen. */
+/** Each stall has a key that changes when the thing stalled makes progress and goes quiet again, so a notice is sent once per quiet spell. A quiet command is worth investigating after five minutes, a quiet coding thread after fifteen. */
 export function activityOf(turns: readonly Turn[], now: number, options: { running: boolean; startedAt: number; lastOutputAt?: number; coding?: boolean; quietMs?: number; outputByCall?: Readonly<Record<string, number>> }): Activity {
 	const turn = turns.at(-1);
 	const steps = turn?.steps ?? [];
@@ -12,9 +12,9 @@ export function activityOf(turns: readonly Turn[], now: number, options: { runni
 		const timeout = tool.timeoutMs !== null && tool.elapsedMs > tool.timeoutMs;
 		const outputAt = options.outputByCall === undefined ? lastActivityAt : options.outputByCall[tool.id] ?? tool.startedAt;
 		const quiet = now - Math.max(tool.startedAt, outputAt) > (options.quietMs ?? 5 * 60_000);
-		if (timeout || quiet) stalls.push({ key: `tool:${tool.id}`, reason: timeout ? "past declared timeout" : "no output for five minutes", since: tool.startedAt });
+		if (timeout || quiet) stalls.push({ key: timeout ? `tool:${tool.id}` : `tool:${tool.id}:${Math.max(tool.startedAt, outputAt)}`, reason: timeout ? "past declared timeout" : "no output for five minutes", since: tool.startedAt });
 	}
-	if (options.running && options.coding && now - lastActivityAt > 15 * 60_000) stalls.push({ key: `transcript:${options.startedAt}`, reason: "running with no transcript activity for fifteen minutes", since: lastActivityAt });
+	if (options.running && options.coding && now - lastActivityAt > 15 * 60_000) stalls.push({ key: `transcript:${lastActivityAt}`, reason: "running with no transcript activity for fifteen minutes", since: lastActivityAt });
 	return { running: options.running, lastActivityAt, current, steps: steps.slice(-120), stalls };
 }
 

@@ -687,6 +687,7 @@ const translations = {
     providerLimitsNone:
       "Name the models above to set theirs. To set the ones it lists, save first and edit it.",
     providerContextWindow: "Context window",
+    providerMaxTokens: "Longest answer",
     providerPriceInput: "Input $",
     providerPriceOutput: "Output $",
     providerPriceCacheRead: "Cache read $",
@@ -2746,6 +2747,7 @@ const translations = {
     providerLimitsNone:
       "Nombra los modelos arriba para indicar los suyos. Para los que lista, guarda primero y edítalo.",
     providerContextWindow: "Ventana de contexto",
+    providerMaxTokens: "Respuesta más larga",
     providerPriceInput: "Entrada $",
     providerPriceOutput: "Salida $",
     providerPriceCacheRead: "Lectura de caché $",

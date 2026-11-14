@@ -28,8 +28,8 @@ import { withPlainToolResults, withTypedToolSchemas } from "./typed-schemas";
 /** A model's price in dollars per million tokens, as pi-ai takes it. */
 export type ModelCost = { readonly input: number; readonly output: number; readonly cacheRead: number; readonly cacheWrite: number };
 
-/** What the person set for a custom endpoint's model where the server can't say: its real context window and its price. */
-export type ModelOverride = { readonly contextWindow?: number; readonly cost?: ModelCost };
+/** What the person set for a custom endpoint's model where the server can't say: its real context window, its longest answer and its price. */
+export type ModelOverride = { readonly contextWindow?: number; readonly maxTokens?: number; readonly cost?: ModelCost };
 
 /** A model on a provider, with what Pim needs to know about it. */
 export type ProviderModel = {
@@ -110,6 +110,13 @@ export const MAX_PROVIDERS = 20;
 const MAX_LISTED = 50;
 const MAX_CHOSEN = 50;
 const MODEL_ID = /^[A-Za-z0-9][\w.:@/+-]{0,199}$/;
+/**
+ * What a model with no metadata gets. pi sends a model's `maxTokens` as the
+ * request's output limit (max_tokens, max_completion_tokens or maxOutputTokens),
+ * so this is also the output limit of its chats; reasoning tokens count in it.
+ * Nothing in the code says a larger limit is safe for an unknown model, so it
+ * stays; a person can set the real one as the model's `maxTokens` override.
+ */
 const DEFAULTS = { contextWindow: 128_000, maxTokens: 8_192 };
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -137,7 +144,7 @@ function knownModels(): Promise<Map<string, Model<Api>>> {
  * A model as a server listed it (OpenRouter, vLLM and llama.cpp say more than
  * most), or as pi-ai knows it, or with defaults.
  */
-function describe(id: string, listed: Record<string, unknown> | undefined, known: Model<Api> | undefined, override?: ModelOverride): ProviderModel {
+export function describe(id: string, listed: Record<string, unknown> | undefined, known: Model<Api> | undefined, override?: ModelOverride): ProviderModel {
 	const architecture = isObject(listed?.architecture) ? listed.architecture : undefined;
 	const modalities = Array.isArray(architecture?.input_modalities) ? architecture.input_modalities : undefined;
 	const parameters = Array.isArray(listed?.supported_parameters) ? listed.supported_parameters : undefined;
@@ -145,12 +152,22 @@ function describe(id: string, listed: Record<string, unknown> | undefined, known
 	const meta = isObject(listed?.meta) ? listed.meta : undefined;
 	// OpenRouter's context_length, vLLM's max_model_len, and llama.cpp's n_ctx, the context it serves the model with.
 	const contextWindow = override?.contextWindow ?? count(listed?.context_length) ?? count(listed?.max_model_len) ?? count(meta?.n_ctx) ?? known?.contextWindow ?? DEFAULTS.contextWindow;
-	const maxTokens = count(top?.max_completion_tokens) ?? known?.maxTokens ?? DEFAULTS.maxTokens;
+	// The longest answer: the person's setting, then what the server lists (OpenRouter's top_provider.max_completion_tokens, max_completion_tokens and max_output_tokens as LiteLLM and vLLM-style gateways give them, Gemini's outputTokenLimit, max_tokens), then pi-ai's catalog.
+	const maxTokens =
+		override?.maxTokens ??
+		count(top?.max_completion_tokens) ??
+		count(listed?.max_completion_tokens) ??
+		count(listed?.max_output_tokens) ??
+		count(listed?.outputTokenLimit) ??
+		count(listed?.max_tokens) ??
+		known?.maxTokens ??
+		DEFAULTS.maxTokens;
 	return {
 		id,
 		name: typeof listed?.name === "string" && listed.name.trim() ? listed.name.trim() : (known?.name ?? id),
 		contextWindow,
-		maxTokens: Math.min(maxTokens, contextWindow),
+		// An answer is never the whole context: a limit that large leaves no room for the input, so half is kept.
+		maxTokens: maxTokens < contextWindow ? maxTokens : Math.floor(contextWindow / 2),
 		images: modalities ? modalities.includes("image") : (known?.input.includes("image") ?? false),
 		reasoning: parameters ? parameters.includes("reasoning") : (known?.reasoning ?? false),
 		...(override?.cost && { cost: override.cost }),
@@ -189,8 +206,9 @@ function readOverrides(value: unknown): Record<string, ModelOverride> {
 	const overrides: Record<string, ModelOverride> = {};
 	for (const [id, entry] of Object.entries(value)) {
 		if (!MODEL_ID.test(id) || !isObject(entry)) throw new HttpError(400, "overrides must be an object of settings by model id");
-		const { contextWindow, cost } = entry;
+		const { contextWindow, maxTokens, cost } = entry;
 		if (contextWindow !== undefined && !count(contextWindow)) throw new HttpError(400, `${id}'s contextWindow must be a whole number of tokens`);
+		if (maxTokens !== undefined && !count(maxTokens)) throw new HttpError(400, `${id}'s maxTokens must be a whole number of tokens`);
 		let price: ModelCost | undefined;
 		if (cost !== undefined) {
 			if (!isObject(cost)) throw new HttpError(400, `${id}'s cost must be an object`);
@@ -201,7 +219,9 @@ function readOverrides(value: unknown): Record<string, ModelOverride> {
 			};
 			price = { input: dollars("input"), output: dollars("output"), cacheRead: dollars("cacheRead"), cacheWrite: dollars("cacheWrite") };
 		}
-		if (contextWindow !== undefined || price) overrides[id] = { ...(contextWindow !== undefined && { contextWindow: contextWindow as number }), ...(price && { cost: price }) };
+		if (contextWindow !== undefined || maxTokens !== undefined || price) {
+			overrides[id] = { ...(contextWindow !== undefined && { contextWindow: contextWindow as number }), ...(maxTokens !== undefined && { maxTokens: maxTokens as number }), ...(price && { cost: price }) };
+		}
 	}
 	return overrides;
 }

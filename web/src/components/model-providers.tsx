@@ -204,13 +204,14 @@ function CustomProvider({
 const PRICES = ["input", "output", "cacheRead", "cacheWrite"] as const;
 
 /** A custom endpoint's model settings as the form edits them: text, so a field can be empty. */
-type Limits = { contextWindow: string } & Record<
+type Limits = { contextWindow: string; maxTokens: string } & Record<
   (typeof PRICES)[number],
   string
 >;
 
 const limitsOf = (override?: ModelOverride): Limits => ({
   contextWindow: override?.contextWindow?.toString() ?? "",
+  maxTokens: override?.maxTokens?.toString() ?? "",
   input: override?.cost?.input.toString() ?? "",
   output: override?.cost?.output.toString() ?? "",
   cacheRead: override?.cost?.cacheRead.toString() ?? "",
@@ -226,6 +227,7 @@ function overridesOf(limits: Record<string, Limits>) {
       ...(entry.contextWindow.trim() && {
         contextWindow: Number(entry.contextWindow),
       }),
+      ...(entry.maxTokens.trim() && { maxTokens: Number(entry.maxTokens) }),
       ...(priced && {
         cost: {
           input: Number(entry.input) || 0,
@@ -235,7 +237,11 @@ function overridesOf(limits: Record<string, Limits>) {
         },
       }),
     };
-    if (override.contextWindow !== undefined || override.cost)
+    if (
+      override.contextWindow !== undefined ||
+      override.maxTokens !== undefined ||
+      override.cost
+    )
       overrides[id] = override;
   }
   return overrides;
@@ -302,6 +308,9 @@ function ProviderForm({
           contextWindow:
             provider?.models.find((model) => model.id === id)?.contextWindow ??
             128_000,
+          maxTokens:
+            provider?.models.find((model) => model.id === id)?.maxTokens ??
+            8_192,
         }))
       : (provider?.models ?? []);
   const preset = catalog?.providers.find((entry) => entry.id === kind);
@@ -581,6 +590,7 @@ function ProviderForm({
                 });
               const inputs = [
                 ["contextWindow", t("providerContextWindow"), "1"],
+                ["maxTokens", t("providerMaxTokens"), "1"],
                 ["input", t("providerPriceInput"), "any"],
                 ["output", t("providerPriceOutput"), "any"],
                 ["cacheRead", t("providerPriceCacheRead"), "any"],
@@ -591,7 +601,7 @@ function ProviderForm({
                   <span className="block truncate font-mono text-xs">
                     {model.id}
                   </span>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
                     {inputs.map(([field, label, step]) => (
                       <label key={field} className="block space-y-0.5">
                         <span className="text-muted-foreground text-xs">
@@ -607,7 +617,9 @@ function ProviderForm({
                           placeholder={
                             field === "contextWindow"
                               ? model.contextWindow.toString()
-                              : "0"
+                              : field === "maxTokens"
+                                ? model.maxTokens.toString()
+                                : "0"
                           }
                           className="h-8 text-xs"
                         />

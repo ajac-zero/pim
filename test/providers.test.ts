@@ -2,7 +2,8 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { piProvider, prepareProvider } from "../src/providers";
+import { getBuiltinModels } from "../src/provider-catalog";
+import { describe as describeModel, piProvider, prepareProvider } from "../src/providers";
 import { typedSchema } from "../src/typed-schemas";
 import { api, OWNER, post, say, toolUse } from "./helpers";
 import { completionStream, faux, type Pim } from "./worker";
@@ -566,7 +567,7 @@ describe("A person's own model providers", () => {
 			models: [
 				{ id: "local-model", name: "local-model", contextWindow: 128_000, maxTokens: 8_192, images: false, reasoning: false },
 				{ id: "vision-model", name: "Vision", contextWindow: 32_768, maxTokens: 8_192, images: true, reasoning: false },
-				{ id: "served-model", name: "served-model", contextWindow: 4_096, maxTokens: 4_096, images: false, reasoning: false },
+				{ id: "served-model", name: "served-model", contextWindow: 4_096, maxTokens: 2_048, images: false, reasoning: false },
 			],
 		});
 
@@ -777,4 +778,31 @@ describe("A person's own model providers", () => {
 		await put("/model", { provider: "faux", id: "faux-model" });
 		expect((await api("/providers/cloud", { method: "DELETE" })).body).toEqual({ deleted: true });
 	});
+});
+
+describe("a model's output limit", () => {
+	const catalog = (provider: "anthropic" | "openai" | "google" | "openrouter", id: string) => (getBuiltinModels(provider) as any[]).find((model) => model.id === id);
+	// Each row: what the server lists, the catalog's model, the person's override, and the context window and output limit Pim keeps.
+	const rows: [string, Record<string, unknown> | undefined, any, any, number, number][] = [
+		["anthropic catalog", undefined, catalog("anthropic", "claude-sonnet-4-6"), undefined, 1_000_000, 128_000],
+		["openai catalog", undefined, catalog("openai", "gpt-4.1"), undefined, 1_047_576, 32_768],
+		["google catalog", undefined, catalog("google", "gemini-2.5-flash"), undefined, 1_048_576, 65_536],
+		["openrouter listing beats the catalog", { context_length: 200_000, top_provider: { max_completion_tokens: 64_000 } }, catalog("openrouter", "openai/gpt-4.1"), undefined, 200_000, 64_000],
+		["gateway listing, max_output_tokens", { id: "gemini-4-argon", max_output_tokens: 65_536, context_length: 1_000_000 }, undefined, undefined, 1_000_000, 65_536],
+		["gateway listing, Gemini's outputTokenLimit", { outputTokenLimit: 32_768 }, undefined, undefined, 128_000, 32_768],
+		["custom endpoint with no metadata", { id: "gemini-4-argon" }, undefined, undefined, 128_000, 8_192],
+		["override beats the listing", { max_output_tokens: 8_000 }, undefined, { maxTokens: 40_000 }, 128_000, 40_000],
+		["output as large as the context is halved", { context_length: 16_000, max_completion_tokens: 16_000 }, undefined, undefined, 16_000, 8_000],
+		["output larger than the context is halved", { max_model_len: 10_000, max_output_tokens: 64_000 }, undefined, undefined, 10_000, 5_000],
+		["tiny context", { max_model_len: 4_096 }, undefined, undefined, 4_096, 2_048],
+		["override larger than a context override", undefined, undefined, { contextWindow: 20_000, maxTokens: 50_000 }, 20_000, 10_000],
+	];
+	it.each(rows)("resolves for %s", (_name, listed, known, override, contextWindow, maxTokens) => {
+		expect(describeModel("m", listed, known, override)).toMatchObject({ contextWindow, maxTokens });
+	}, 10_000);
+
+	it("takes a person's output limit only as a whole number of tokens", async () => {
+		const bad = await prepareProvider({ name: "x", url: "http://localhost:1234/v1", models: ["local-model"], overrides: { "local-model": { maxTokens: 1.5 } } }, null, new Set()).catch((error) => error);
+		expect(bad.message).toContain("maxTokens must be a whole number");
+	}, 10_000);
 });

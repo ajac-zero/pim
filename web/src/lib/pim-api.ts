@@ -19,6 +19,8 @@ export type Session = {
   updatedAt: number | null;
   responseAt: number | null;
   unread: boolean;
+  /** The model the chat runs on, and whether it was chosen for this chat alone rather than followed from its agent. */
+  model?: { model: ModelInfo; override: boolean };
   /** Archived by hand, or two weeks without activity with nothing unread or running: listed apart until it is active again. */
   archived?: boolean;
   /** A conversation with someone else's space, shared with you; null for your own chats. */
@@ -2276,6 +2278,18 @@ export const pim = {
       method: "PUT",
       body: JSON.stringify(model ?? { provider: null, id: null }),
     }),
+  /** Chooses the model of one chat, over its agent's; null follows the agent's again. */
+  chooseSessionModel: (
+    session: string,
+    model: Pick<ModelInfo, "provider" | "id"> | null,
+  ) =>
+    call<{ model: ModelInfo }>(
+      `/sessions/${encodeURIComponent(session)}/model`,
+      {
+        method: "PUT",
+        body: JSON.stringify(model ?? { provider: null, id: null }),
+      },
+    ),
   setAgentFallbacks: (
     agent: string,
     models: Pick<ModelInfo, "provider" | "id">[],

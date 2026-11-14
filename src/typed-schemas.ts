@@ -165,3 +165,43 @@ export function withTypedToolSchemas<P>(params: P): P {
 	if (!Array.isArray(tools)) return params;
 	return { ...params, tools: tools.map((tool) => (isSchema(tool) && isSchema(tool.input_schema) ? { ...tool, input_schema: typedSchema(tool.input_schema) } : tool)) };
 }
+
+const isEmptyText = (block: unknown) => isSchema(block) && block.type === "text" && typeof block.text === "string" && block.text.trim() === "";
+
+/** A failed tool's text, said to have failed once. */
+const failed = (text: string) => (!text.trim() ? "Error" : /^\s*error\b/i.test(text) ? text : `Error: ${text}`);
+
+/** A tool result as a gateway's translation for another vendor takes it: without `is_error`, which it refuses, and with a failure said in its text instead. */
+function plainToolResult(block: Schema): Schema {
+	const { is_error, ...result } = block;
+	let content = Array.isArray(result.content) ? result.content.filter((part) => !isEmptyText(part)) : result.content;
+	if (is_error === true) {
+		if (typeof content === "string") content = failed(content);
+		else if (Array.isArray(content)) {
+			const at = content.findIndex((part) => isSchema(part) && part.type === "text");
+			content = at < 0 ? [{ type: "text", text: "Error" }, ...content] : content.map((part, n) => (n === at ? { ...part, text: failed(String(part.text)) } : part));
+		} else content = "Error";
+	}
+	if (Array.isArray(content) && content.length === 0) content = "";
+	return { ...result, content };
+}
+
+/**
+ * A Messages request's conversation as a gateway translates it for a vendor other than Anthropic: its tool results
+ * carry no `is_error` ("tool_result is_error is not supported for GCP Vertex AI translation"), a failure being said
+ * in the result's text, and no message holds an empty text block, which has no counterpart there. The rest is left
+ * as pi-ai made it, which already turns another model's thinking into text, drops images for a model that takes
+ * none, and answers a tool call left without a result.
+ */
+export function withPlainToolResults<P>(params: P): P {
+	const messages = (params as { messages?: unknown }).messages;
+	if (!Array.isArray(messages)) return params;
+	return {
+		...params,
+		messages: messages.map((message) => {
+			if (!isSchema(message) || !Array.isArray(message.content)) return message;
+			const content = message.content.filter((block) => !isEmptyText(block)).map((block) => (isSchema(block) && block.type === "tool_result" ? plainToolResult(block) : block));
+			return content.length > 0 ? { ...message, content } : message;
+		}),
+	};
+}

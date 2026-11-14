@@ -7,7 +7,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { HttpError } from "./http";
-import { withTypedToolSchemas } from "./typed-schemas";
+import { withPlainToolResults, withTypedToolSchemas } from "./typed-schemas";
 
 /**
  * Model providers people add in Settings → Model: built-in services with
@@ -367,8 +367,9 @@ export function piProvider(catalogId: string, provider: CustomProvider): Provide
  *
  * Any other model there, such as Gemini behind a gateway that speaks the
  * Messages API, is sent tool schemas with a type on every node, which Gemini
- * needs and JSON Schema doesn't (see ./typed-schemas.ts). Claude's requests
- * are sent as pi-ai makes them.
+ * needs and JSON Schema doesn't, and tool results without `is_error`, which
+ * the gateway's translation refuses (see ./typed-schemas.ts). Claude's
+ * requests are sent as pi-ai makes them.
  */
 function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>): StreamFunction<Api, T> {
 	return (model, context, options) => lazyStream(model, async () => {
@@ -380,12 +381,12 @@ function withKnownCompat<T extends StreamOptions>(stream: StreamFunction<Api, T>
 	});
 }
 
-/** `options` whose request, once whoever else reads it has, goes with its tool schemas typed throughout. */
+/** `options` whose request, once whoever else reads it has, goes with its tool schemas typed throughout and its tool results plain. */
 function withTypedTools<T extends StreamOptions>(options: T | undefined): T {
 	const onPayload = options?.onPayload;
 	return {
 		...options,
-		onPayload: async (params: unknown, model: Model<Api>) => withTypedToolSchemas((await onPayload?.(params, model)) ?? params),
+		onPayload: async (params: unknown, model: Model<Api>) => withPlainToolResults(withTypedToolSchemas((await onPayload?.(params, model)) ?? params)),
 	} as T;
 }
 

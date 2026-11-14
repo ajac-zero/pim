@@ -17,6 +17,8 @@ type Call = { url: string; authorization: string | null; headers?: Record<string
 
 let calls: Call[];
 let claudeFails = false;
+/** A tool call the Messages gateway answers its next request with, in place of send_to_user. */
+let gatewayCall: { name: string; input: Record<string, unknown> } | undefined;
 
 const CLOUD_MODELS = [{ id: "gpt-4.1" }, ...Array.from({ length: 59 }, (_, n) => ({ id: `cloud-model-${n}` }))];
 
@@ -33,14 +35,14 @@ const BUILTINS = [
 ] as const;
 
 /** Native provider streams that ask Pim to deliver a message, rather than just emit text. */
-function builtinStream(url: URL, model: string): Response {
+function builtinStream(url: URL, model: string, call = { name: "send_to_user", input: {} as Record<string, unknown> }): Response {
 	const message = `Hello from ${url.host}`;
-	const args = JSON.stringify({ message });
+	const args = JSON.stringify(call.name === "send_to_user" ? { message } : call.input);
 	let events: Record<string, unknown>[];
 	if (url.pathname.endsWith("/messages")) {
 		events = [
 			{ type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", content: [], model, usage: { input_tokens: 10, output_tokens: 0 } } },
-			{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "send_to_user", input: {} } },
+			{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: call.name === "send_to_user" ? "toolu_1" : "toolu_2", name: call.name, input: {} } },
 			{ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: args } },
 			{ type: "content_block_stop", index: 0 },
 			{ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 3 } },
@@ -82,7 +84,9 @@ beforeEach(() => {
 			const body = JSON.parse(raw) as { model: string };
 			calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body, raw });
 			if (claudeFails) return Response.json({ type: "error", error: { type: "invalid_request_error", message: "thinking is wrong" } }, { status: 400 });
-			return builtinStream(url, body.model);
+			const call = gatewayCall;
+			gatewayCall = undefined;
+			return builtinStream(url, body.model, call);
 		}
 		if (url.origin !== "http://localhost:1234" && url.origin !== "https://models.test") return realFetch(input, init);
 		const body = request.method === "POST" ? await request.json<{ model: string }>() : null;
@@ -188,6 +192,43 @@ function vertexViolations(schema: any, path = "(root)"): string[] {
 	return found;
 }
 
+/**
+ * What a gateway's translation of a Messages conversation for Vertex refuses or has no counterpart for: `is_error` on a
+ * tool result, empty text, thinking and its signatures, a role or block it doesn't know, a tool_use id Anthropic's own
+ * rules refuse, and a tool result that answers no tool_use of the message before it.
+ */
+function messageViolations(messages: any[]): string[] {
+	const found: string[] = [];
+	let open = new Set<string>();
+	messages.forEach((message, m) => {
+		const blocks: any[] = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+		if (message.role !== "user" && message.role !== "assistant") found.push(`messages[${m}]: role ${message.role}`);
+		if (!Array.isArray(blocks) || blocks.length === 0) {
+			found.push(`messages[${m}]: no content`);
+			return;
+		}
+		blocks.forEach((block, b) => {
+			const at = `messages[${m}].content[${b}]`;
+			const known = message.role === "user" ? ["text", "image", "tool_result"] : ["text", "tool_use"];
+			if (!known.includes(block.type)) found.push(`${at}: ${block.type} in a ${message.role} message`);
+			if ("signature" in block) found.push(`${at}: signature`);
+			if (block.type === "text" && !block.text.trim()) found.push(`${at}: empty text`);
+			if (block.type === "tool_use" && !/^[a-zA-Z0-9_-]{1,64}$/.test(block.id)) found.push(`${at}: tool_use id ${block.id}`);
+			if (block.type !== "tool_result") return;
+			if ("is_error" in block) found.push(`${at}: is_error`);
+			if (!open.has(block.tool_use_id)) found.push(`${at}: answers no tool_use before it`);
+			if (Array.isArray(block.content)) {
+				block.content.forEach((part: any, p: number) => {
+					if (part.type !== "text" && part.type !== "image") found.push(`${at}.content[${p}]: ${part.type}`);
+					if (part.type === "text" && !part.text.trim()) found.push(`${at}.content[${p}]: empty text`);
+				});
+			} else if (typeof block.content !== "string") found.push(`${at}: content neither text nor blocks`);
+		});
+		open = new Set(message.role === "assistant" ? blocks.filter((block) => block.type === "tool_use").map((block) => block.id) : []);
+	});
+	return found;
+}
+
 const put = (path: string, body: unknown) => api(path, { method: "PUT", body: JSON.stringify(body) });
 
 describe("A person's own model providers", () => {
@@ -267,6 +308,72 @@ describe("A person's own model providers", () => {
 		expect(tool.parameters).toEqual(FIRECRAWL_ENRICH);
 	});
 
+	it("sends a model other than Claude its failed tool results as text that says so, and Claude's with is_error as pi-ai makes them", async () => {
+		const provider = await prepareProvider({ name: "Gateway", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set());
+		const models = createModels();
+		models.setProvider(piProvider("own:gateway", provider));
+		const claude = models.getModel("own:gateway", "claude-sonnet-5-5")!;
+		expect(claude.input).toContain("image");
+		const call = (id: string) => ({ type: "toolCall" as const, id, name: "lookup", arguments: { who: "Jane" } });
+		const result = (id: string, isError: boolean, ...content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]) => ({
+			role: "toolResult" as const,
+			toolCallId: id,
+			toolName: "lookup",
+			content,
+			isError,
+			timestamp: 1,
+		});
+		// An earlier turn on another model, which thought and called four tools: three failed, one with a screenshot and an empty text.
+		const earlier = {
+			...fauxAssistantMessage([{ type: "thinking", thinking: "Let me look.", thinkingSignature: "sig-1" }, call("toolu_a"), call("toolu_b"), call("toolu_c"), call("toolu_d")], { stopReason: "toolUse" }),
+			provider: "anthropic",
+			api: "anthropic-messages" as const,
+			model: "claude-opus-4-6",
+		};
+		const messages = [
+			{ role: "user" as const, content: "Look Jane up", timestamp: 1 },
+			earlier,
+			result("toolu_a", true, { type: "text", text: "Not found" }),
+			result("toolu_b", true, { type: "image", data: "aGk=", mimeType: "image/png" }, { type: "text", text: "" }, { type: "text", text: "Timed out" }),
+			result("toolu_c", true, { type: "text", text: "Error: no such person" }),
+			result("toolu_d", false, { type: "text", text: "Found Jane" }),
+			{ role: "user" as const, content: "And?", timestamp: 2 },
+		];
+		const ask = async (model: typeof claude) => {
+			let built: any;
+			await models.completeSimple(model, { systemPrompt: "Be helpful.", messages }, {
+				onPayload: (params) => {
+					built = JSON.parse(JSON.stringify(params));
+					return undefined;
+				},
+			});
+			const { betas: _betas, ...body } = built;
+			return { built: body, sent: calls.at(-1)! };
+		};
+
+		// Claude's request is the one pi-ai built, to the byte, is_error and all.
+		const forClaude = await ask(claude);
+		expect(forClaude.sent.raw).toBe(JSON.stringify(forClaude.built));
+		expect(forClaude.built.messages[2].content.map((block: { is_error: boolean }) => block.is_error)).toEqual([true, true, true, false]);
+		expect(messageViolations(forClaude.built.messages)).toEqual(expect.arrayContaining(["messages[2].content[0]: is_error", "messages[2].content[1].content[1]: empty text"]));
+
+		// Gemini behind the same gateway is told in each failed result's text, once, and never sent is_error or an empty text.
+		const forGemini = await ask({ ...claude, id: "gemini-4-argon" });
+		const sent = forGemini.sent.body.messages;
+		expect(sent[2].content).toEqual([
+			{ type: "tool_result", tool_use_id: "toolu_a", content: "Error: Not found" },
+			{ type: "tool_result", tool_use_id: "toolu_b", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "aGk=" } }, { type: "text", text: "Error: Timed out" }] },
+			{ type: "tool_result", tool_use_id: "toolu_c", content: "Error: no such person" },
+			{ type: "tool_result", tool_use_id: "toolu_d", content: "Found Jane" },
+		]);
+		expect(messageViolations(sent)).toEqual([]);
+		// The rest of the request is what pi-ai built.
+		expect(sent.filter((_: unknown, n: number) => n !== 2)).toEqual(forGemini.built.messages.filter((_: unknown, n: number) => n !== 2));
+		const { messages: _sent, ...rest } = forGemini.sent.body;
+		const { messages: _built, ...built } = forGemini.built;
+		expect(rest).toEqual(built);
+	});
+
 	it("rewrites Firecrawl's people schema and Pim's own unions to Vertex's rules", () => {
 		const people = FIRECRAWL_ENRICH.properties.people;
 		// The person's fields stay as Firecrawl typed them; its branches, which only say which fields go together, go.
@@ -337,11 +444,13 @@ describe("A person's own model providers", () => {
 		]);
 	});
 
-	it("sends a Gemini model behind a Messages gateway every tool of an agent's turn in a form Vertex takes", async () => {
+	it("sends a Gemini model behind a Messages gateway every tool and message of an agent's turn in a form Vertex takes", async () => {
 		await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.enableTriggerEngine());
 		expect((await post("/providers", { name: "Gateway", url: "https://gateway.test", key: "gateway-key", api: "anthropic-messages" })).status).toBe(200);
 		const session = (await post("/sessions")).body.id;
 		expect((await put(`/sessions/${session}/model`, { provider: "own:gateway", id: "gemini-4-argon" })).status).toBe(200);
+		// Gemini first calls a tool with arguments its schema refuses, which fails, and then answers.
+		gatewayCall = { name: "fetch_url", input: { url: "nope" } };
 		await say("Hello?", session);
 		const sent = calls.findLast((call) => call.url.startsWith("https://gateway.test/v1/messages"))!.body;
 		expect(sent.model).toBe("gemini-4-argon");
@@ -350,6 +459,9 @@ describe("A person's own model providers", () => {
 		expect(names).toEqual(expect.arrayContaining(["create_agent", "update_agent", "create_trigger", "update_trigger", "test_trigger", "http_request"]));
 		expect(sent.tools.length).toBeGreaterThan(40);
 		expect(sent.tools.flatMap((tool: { name: string; input_schema: unknown }) => vertexViolations(tool.input_schema, tool.name))).toEqual([]);
+		const failed = sent.messages.flatMap((message: { content: unknown }) => (Array.isArray(message.content) ? message.content : [])).find((block: { type: string }) => block.type === "tool_result");
+		expect(failed).toMatchObject({ tool_use_id: "toolu_2", content: expect.stringMatching(/^Error: .*Validation failed for tool "fetch_url"/s) });
+		expect(messageViolations(sent.messages)).toEqual([]);
 		await api(`/sessions/${session}`, { method: "DELETE" });
 		await api("/providers/gateway", { method: "DELETE" });
 	});

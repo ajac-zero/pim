@@ -6,6 +6,7 @@ import { CompactionTask } from "@earendil-works/pi-durable";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
+import { NOT_DELIVERED } from "../src/extensions/messaging";
 import type { Approval } from "../src/store";
 import { api, lastUserText, messagesOf, OWNER, pendingApproval, post, ROOT, say, scripts, settled, speaker, systemPrompt, TOKEN, toolUse, url } from "./helpers";
 import { faux, type Pim, spans } from "./worker";
@@ -1107,6 +1108,16 @@ describe("a group chat", () => {
 		expect((await api(`/sessions/${session}/room/members/${coach.id}/retry`, { method: "POST" })).status).toBe(409);
 		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: false, error: null }]);
 
+		// An agent that ended its turn without sending a reply is held too, with its error, and nothing asks it again by itself.
+		scripts({ Coach: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: NOT_DELIVERED })] });
+		await say("@Coach and Saturday?", session);
+		await quiet(session);
+		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: true, error: NOT_DELIVERED }]);
+		scripts({ Coach: [as("Coach", "Saturday is long.")] });
+		expect((await api(`/sessions/${session}/room/members/${coach.id}/retry`, { method: "POST" })).status).toBe(200);
+		await quiet(session);
+		expect(await messagesOf(session, "user")).toContain("[From Coach]\nSaturday is long.");
+
 		// Mentioned again while held, it answers too.
 		scripts({ Coach: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: "subscription_sharing_usage_limit_exceeded" })] });
 		await say("@Coach and Friday?", session);
@@ -1249,6 +1260,18 @@ describe("tasks whose model can't answer", () => {
 		expect(update).toContain("didn't finish");
 		// Not a word of the provider's own error reaches the agent.
 		expect(update).not.toContain("subscription_sharing");
+	});
+
+	it("fail for their requester when the agent ends its turn without a reply, instead of being held", async () => {
+		const agent = await planner("Silent trip planner");
+		const session = (await post("/sessions", { agent: agent.id })).body.id;
+		scripts({
+			lead: [() => toolUse("delegate", { tasks: [{ to: "Researcher", task: "Find a flight." }] }), () => toolUse("send_to_user", { message: "I asked." }), () => toolUse("send_to_user", { message: "It failed." })],
+			Researcher: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: NOT_DELIVERED })],
+		});
+		await say("Find me a flight.", session);
+		await settled(session);
+		expect((await tasksOf(session)).map((task) => task.state)).toEqual(["failed"]);
 	});
 
 	it("fail for their requester when waiting for their run throws, instead of staying at work", async () => {

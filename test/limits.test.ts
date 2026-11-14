@@ -5,9 +5,11 @@ import {
 	createAssistantMessageEventStream,
 	type Model,
 } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NOT_DELIVERED } from "../src/extensions/messaging";
 import { ModelCallLedger } from "../src/model-calls";
 import { type Limits, UNLIMITED, UsageMeter } from "../src/usage";
 import { exports } from "cloudflare:workers";
@@ -204,6 +206,22 @@ describe("limits", () => {
 		expect((await api(`/sessions/${ROOT}/messages`)).body.busy).toBe(false);
 		// Nothing is held any more.
 		expect((await post(`/sessions/${ROOT}/retry`)).status).toBe(409);
+	});
+
+	it("hold a chat whose agent ended its turn without a reply, and ask again only when the person says to", async () => {
+		faux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: NOT_DELIVERED })]);
+		const started = Date.now();
+		const sent = await post(`/sessions/${ROOT}/messages`, { content: "Are you there?" });
+		await vi.waitFor(async () => {
+			const listed = (await api<{ sessions: { id: string; held: boolean }[] }>("/sessions")).body.sessions;
+			expect(listed.find((session) => session.id === ROOT)).toMatchObject({ held: true });
+		});
+		// Held at once, not retried for seconds, and nothing asks the model again by itself.
+		expect(Date.now() - started).toBeLessThan(3_000);
+		expect(faux.state.callCount).toBe(1);
+		faux.setResponses([toolUse("send_to_user", { message: "Here." })]);
+		expect((await post(`/sessions/${ROOT}/retry`)).status).toBe(200);
+		expect((await api(`/sessions/${ROOT}/operations/${sent.body.operationId}?timeout=20000`)).body).toMatchObject({ status: "done" });
 	});
 
 	it("cap open chats", async () => {

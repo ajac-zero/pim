@@ -113,6 +113,7 @@ const PROBLEM_TEXT: Record<ModelProblem, TranslationKey> = {
   unauthorized: "modelUnauthorized",
   too_long: "modelTooLong",
   busy: "modelBusy",
+  undelivered: "modelUndelivered",
   other: "modelOther",
 };
 
@@ -144,7 +145,7 @@ function postedImages(text: string): Record<string, string> {
  * the run is held, and the settings or the plan's usage page where they help.
  * `name` is the agent it is about in a group chat.
  */
-function ModelErrorNotice({
+export function ModelErrorNotice({
   error: shownError,
   held,
   retrying,

@@ -224,6 +224,7 @@ export type ModelProblem =
   | "unauthorized"
   | "too_long"
   | "busy"
+  | "undelivered"
   | "other";
 
 /**
@@ -266,6 +267,8 @@ const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
     "too_long",
     /context.?(length|window)|maximum context|too many tokens|prompt is too long/i,
   ],
+  // NOT_DELIVERED in src/extensions/messaging.ts: the agent ended its turn without sending a reply.
+  ["undelivered", /did not deliver its reply/i],
   [
     "busy",
     /rate.?limit|too many requests|\b429\b|overloaded|capacity|\b50[0234]\b|unavailable|timed? ?out|network|fetch failed|connection/i,

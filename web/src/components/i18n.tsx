@@ -604,6 +604,8 @@ const translations = {
       "This chat is too long for the model, so Pim couldn't answer. Start a new chat.",
     modelBusy:
       "The model provider is busy or unreachable, so Pim couldn't answer. Try again in a moment.",
+    modelUndelivered:
+      "The agent ended its turn without sending a reply. Try again.",
     modelOther:
       "The model couldn't answer. Try again, or switch models in Settings.",
     notAnswered: "Not answered: {reason}",
@@ -2660,6 +2662,8 @@ const translations = {
       "Este chat es demasiado largo para el modelo, así que Pim no pudo responder. Empieza un chat nuevo.",
     modelBusy:
       "El proveedor del modelo está ocupado o no responde, así que Pim no pudo responder. Inténtalo de nuevo en un momento.",
+    modelUndelivered:
+      "El agente terminó su turno sin enviar una respuesta. Inténtalo de nuevo.",
     modelOther:
       "El modelo no pudo responder. Inténtalo de nuevo o cambia de modelo en Configuración.",
     notAnswered: "Sin respuesta: {reason}",

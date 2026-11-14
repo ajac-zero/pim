@@ -72,10 +72,11 @@ beforeEach(() => {
 			calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body });
 			return builtinStream(url, body.model);
 		}
-		if (url.origin === "https://claude.test") {
+		// A Messages gateway: claude.test serves Claude, gateway.test Gemini beside it.
+		if (url.origin === "https://claude.test" || url.origin === "https://gateway.test") {
 			if (url.pathname === "/v1/models") {
 				calls.push({ url: request.url, authorization: request.headers.get("authorization"), headers: Object.fromEntries(request.headers), body: null });
-				return Response.json({ data: [{ id: "claude-sonnet-5-5" }] });
+				return Response.json({ data: url.origin === "https://claude.test" ? [{ id: "claude-sonnet-5-5" }] : [{ id: "claude-sonnet-5-5" }, { id: "gemini-4-argon" }] });
 			}
 			const raw = await request.text();
 			const body = JSON.parse(raw) as { model: string };
@@ -146,16 +147,45 @@ const FIRECRAWL_ENRICH = {
 	},
 };
 
-/** The paths of the schema nodes in `schema` without a `type`. */
-function untyped(schema: any, path = ""): string[] {
-	if (typeof schema !== "object" || schema === null) return [];
-	const at = (key: string) => (path ? `${path}.${key}` : key);
-	return [
-		...(schema.type === undefined ? [path || "(root)"] : []),
-		...Object.entries(schema.properties ?? {}).flatMap(([name, child]) => untyped(child, at(`properties.${name}`))),
-		...(schema.items && typeof schema.items === "object" ? untyped(schema.items, at("items")) : []),
-		...["anyOf", "oneOf", "allOf"].flatMap((key) => (schema[key] ?? []).flatMap((branch: unknown, n: number) => untyped(branch, at(`${key}[${n}]`)))),
-	];
+/**
+ * What Vertex AI refuses in a function declaration's schema, by path: written from its rules, not from the code that
+ * meets them. A node with `anyOf` has nothing else and at least two branches; any other node has one of Gemini's types
+ * and only the fields its Schema has for that type; `enum` lists strings on a string; `format` is one Gemini knows for
+ * the type; an array has `items`; `required` names only fields in `properties`. An object's `properties` may be empty:
+ * Pim's own tools send `{}` there, and the gateway took it.
+ */
+const VERTEX_TYPE_FIELDS: Record<string, string[]> = {
+	string: ["enum", "format", "minLength", "maxLength", "pattern"],
+	number: ["format", "minimum", "maximum"],
+	integer: ["format", "minimum", "maximum"],
+	boolean: [],
+	array: ["items", "minItems", "maxItems"],
+	object: ["properties", "required", "minProperties", "maxProperties"],
+};
+const VERTEX_ANY_TYPE = ["type", "description", "title", "nullable", "default"];
+const VERTEX_FORMATS: Record<string, string[]> = { string: ["enum", "date-time"], number: ["float", "double"], integer: ["int32", "int64"] };
+function vertexViolations(schema: any, path = "(root)"): string[] {
+	if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return [`${path}: not a schema`];
+	if ("anyOf" in schema) {
+		const others = Object.keys(schema).filter((key) => key !== "anyOf");
+		return [
+			...(others.length > 0 ? [`${path}: ${others.join(", ")} beside anyOf`] : []),
+			...(!Array.isArray(schema.anyOf) || schema.anyOf.length < 2 ? [`${path}: anyOf of fewer than two`] : []),
+			...(Array.isArray(schema.anyOf) ? schema.anyOf.flatMap((branch: unknown, n: number) => vertexViolations(branch, `${path}.anyOf[${n}]`)) : []),
+		];
+	}
+	const fields = VERTEX_TYPE_FIELDS[schema.type];
+	if (!fields) return [`${path}: type ${JSON.stringify(schema.type)}`];
+	const found: string[] = [];
+	for (const key of Object.keys(schema)) if (!VERTEX_ANY_TYPE.includes(key) && !fields.includes(key)) found.push(`${path}: ${key} on ${schema.type}`);
+	if ("enum" in schema && (!Array.isArray(schema.enum) || schema.enum.length === 0 || schema.enum.some((value: unknown) => typeof value !== "string"))) found.push(`${path}: enum of other than strings`);
+	if ("format" in schema && !VERTEX_FORMATS[schema.type]?.includes(schema.format)) found.push(`${path}: format ${schema.format} on ${schema.type}`);
+	if ("nullable" in schema && typeof schema.nullable !== "boolean") found.push(`${path}: nullable not a boolean`);
+	if (schema.type === "array") found.push(...("items" in schema ? vertexViolations(schema.items, `${path}.items`) : [`${path}: array without items`]));
+	const properties = schema.properties ?? {};
+	for (const name of schema.required ?? []) if (!(name in properties)) found.push(`${path}: requires ${name}, which isn't in properties`);
+	for (const [name, child] of Object.entries(properties)) found.push(...vertexViolations(child, `${path}.${name}`));
+	return found;
 }
 
 const put = (path: string, body: unknown) => api(path, { method: "PUT", body: JSON.stringify(body) });
@@ -202,7 +232,7 @@ describe("A person's own model providers", () => {
 		expect(calls.at(-1)!.body.thinking.type).toBe("enabled");
 	});
 
-	it("types every node of a tool schema for a model other than Claude, and sends Claude's request as pi-ai makes it", async () => {
+	it("sends a model other than Claude tool schemas Vertex takes, and Claude's request as pi-ai makes it", async () => {
 		const provider = await prepareProvider({ name: "Gateway", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" }, null, new Set());
 		const models = createModels();
 		models.setProvider(piProvider("own:gateway", provider));
@@ -225,13 +255,10 @@ describe("A person's own model providers", () => {
 		expect(forClaude.sent.raw).toBe(JSON.stringify(forClaude.built));
 		expect(forClaude.sent.body.tools[0].input_schema).toEqual({ type: "object", properties: FIRECRAWL_ENRICH.properties, required: [] });
 
-		// Gemini behind the same gateway gets every node typed, and the constraint-only branches folded into the person's fields.
+		// Gemini behind the same gateway gets a schema Vertex takes, the constraint-only branches folded into the person's fields.
 		const forGemini = await ask({ ...claude, id: "gemini-4-argon" });
-		expect(forGemini.sent.raw).not.toBe(JSON.stringify(forGemini.built));
-		const people = forGemini.sent.body.tools[0].input_schema.properties.people;
-		expect(people).toEqual(typedSchema(FIRECRAWL_ENRICH.properties.people));
-		expect(people.items.anyOf).toBeUndefined();
-		expect(untyped(forGemini.sent.body.tools[0].input_schema)).toEqual([]);
+		expect(vertexViolations(forGemini.sent.body.tools[0].input_schema)).toEqual([]);
+		expect(forGemini.sent.body.tools[0].input_schema.properties.people).toEqual(typedSchema(FIRECRAWL_ENRICH.properties.people));
 		// The rest of the request is what pi-ai built.
 		const { tools: _sent, ...rest } = forGemini.sent.body;
 		const { tools: _built, ...built } = forGemini.built;
@@ -240,47 +267,91 @@ describe("A person's own model providers", () => {
 		expect(tool.parameters).toEqual(FIRECRAWL_ENRICH);
 	});
 
-	it("gives a type to every node of Firecrawl's people schema, and to nodes that only imply one", () => {
+	it("rewrites Firecrawl's people schema and Pim's own unions to Vertex's rules", () => {
 		const people = FIRECRAWL_ENRICH.properties.people;
 		// The person's fields stay as Firecrawl typed them; its branches, which only say which fields go together, go.
-		expect(typedSchema(people)).toEqual({ ...people, items: { type: "object", properties: people.items.properties, additionalProperties: false } });
+		expect(typedSchema(people)).toEqual({
+			type: "array",
+			description: people.description,
+			minItems: 1,
+			maxItems: 10,
+			items: { type: "object", properties: people.items.properties },
+		});
 		const typed = typedSchema({
 			type: "object",
-			$defs: { place: { properties: { city: { pattern: "\\S" } } } },
+			$schema: "https://json-schema.org/draft/2020-12/schema",
+			$defs: { place: { properties: { city: { pattern: "\\S" } }, additionalProperties: false } },
+			required: ["color", "missing"],
 			properties: {
+				// create_agent's color, the union Vertex refused with "When using any_of, it must be the only field set".
+				color: { anyOf: [{ type: "string", const: "gray" }, { type: "string", const: "red" }], description: "The color behind its emoji." },
+				at: { anyOf: [{ type: "integer", description: "Milliseconds." }, { type: "string", format: "date-time" }], description: "When." },
+				either: { type: "object", properties: { a: { type: "string" } }, anyOf: [{ type: "object", properties: { b: { type: "number" } } }, { type: "object", properties: { c: { type: "boolean" } } }] },
+				level: { enum: [1, 2, 3], description: "How loud." },
 				any: {},
 				said: { description: "Anything." },
-				fields: { properties: { a: { type: "string" } } },
-				list: { items: { enum: [1, 2] } },
-				code: { pattern: "^[A-Z]+$" },
+				code: { pattern: "^[A-Z]+$", format: "uri", minimum: 1 },
 				kind: { const: true },
-				ratio: { minimum: 0 },
+				ratio: { minimum: 0, exclusiveMaximum: 1, multipleOf: 0.1 },
 				maybe: { anyOf: [{ type: "integer" }, { type: "null" }] },
-				either: { anyOf: [{ required: ["a"] }, { required: ["b"] }] },
-				value: { anyOf: [{ type: "string" }, { type: "number" }, {}] },
-				nullable: { type: ["string", "null"] },
+				nullable: { type: ["string", "null"], default: null },
 				home: { $ref: "#/$defs/place" },
-				tags: { type: "array" },
+				tags: { type: "array", uniqueItems: true },
+				map: { type: "object", patternProperties: { "^.*$": {} }, additionalProperties: true },
+				both: { allOf: [{ properties: { x: { type: "string" } }, required: ["x"] }, { properties: { y: { type: "integer", default: 2 } } }] },
 			},
 		});
-		expect(typed.properties).toEqual({
-			any: { type: "string" },
-			said: { description: "Anything.", type: "string" },
-			fields: { type: "object", properties: { a: { type: "string" } } },
-			list: { type: "array", items: { enum: [1, 2], type: "integer" } },
-			code: { pattern: "^[A-Z]+$", type: "string" },
-			kind: { const: true, type: "boolean" },
-			ratio: { minimum: 0, type: "number" },
-			maybe: { type: "integer" },
-			either: { type: "object", anyOf: [{ type: "object", required: ["a"] }, { type: "object", required: ["b"] }] },
-			// Alternatives of different types keep their own; Gemini takes `anyOf` in place of a type.
-			value: { anyOf: [{ type: "string" }, { type: "number" }, { type: "string" }] },
-			nullable: { type: "string" },
-			home: { type: "object", properties: { city: { pattern: "\\S", type: "string" } } },
-			tags: { type: "array", items: { type: "string" } },
+		expect(typed).toEqual({
+			type: "object",
+			required: ["color"],
+			properties: {
+				color: { type: "string", enum: ["gray", "red"], description: "The color behind its emoji." },
+				at: { anyOf: [{ type: "integer", description: "Milliseconds." }, { type: "string", format: "date-time", description: "When." }] },
+				either: {
+					anyOf: [
+						{ type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+						{ type: "object", properties: { a: { type: "string" }, c: { type: "boolean" } } },
+					],
+				},
+				level: { type: "integer", description: "How loud. One of: 1, 2, 3." },
+				any: { type: "string" },
+				said: { type: "string", description: "Anything." },
+				code: { type: "string", pattern: "^[A-Z]+$" },
+				kind: { type: "boolean", description: "One of: true." },
+				ratio: { type: "number", minimum: 0 },
+				maybe: { type: "integer" },
+				nullable: { type: "string" },
+				home: { type: "object", properties: { city: { type: "string", pattern: "\\S" } } },
+				tags: { type: "array", items: { type: "string" } },
+				map: { type: "object" },
+				both: { type: "object", properties: { x: { type: "string" }, y: { type: "integer", default: 2 } }, required: ["x"] },
+			},
 		});
-		expect(typed.$defs).toBeUndefined();
-		expect(untyped(typed)).toEqual(["properties.value"]);
+		expect(vertexViolations(typed)).toEqual([]);
+		// The validator does catch what Vertex refused.
+		expect(vertexViolations({ type: "string", anyOf: [{ type: "string" }, { type: "integer" }] })).toEqual(["(root): type beside anyOf"]);
+		expect(vertexViolations({ type: "object", properties: { p: { anyOf: [{ pattern: "\\S" }] } }, required: ["q"] })).toEqual([
+			"(root): requires q, which isn't in properties",
+			"(root).p: anyOf of fewer than two",
+			"(root).p.anyOf[0]: type undefined",
+		]);
+	});
+
+	it("sends a Gemini model behind a Messages gateway every tool of an agent's turn in a form Vertex takes", async () => {
+		await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.enableTriggerEngine());
+		expect((await post("/providers", { name: "Gateway", url: "https://gateway.test", key: "gateway-key", api: "anthropic-messages" })).status).toBe(200);
+		const session = (await post("/sessions")).body.id;
+		expect((await put(`/sessions/${session}/model`, { provider: "own:gateway", id: "gemini-4-argon" })).status).toBe(200);
+		await say("Hello?", session);
+		const sent = calls.findLast((call) => call.url.startsWith("https://gateway.test/v1/messages"))!.body;
+		expect(sent.model).toBe("gemini-4-argon");
+		const names = sent.tools.map((tool: { name: string }) => tool.name);
+		// The tools whose schemas Vertex refused, or that hold unions, are among them.
+		expect(names).toEqual(expect.arrayContaining(["create_agent", "update_agent", "create_trigger", "update_trigger", "test_trigger", "http_request"]));
+		expect(sent.tools.length).toBeGreaterThan(40);
+		expect(sent.tools.flatMap((tool: { name: string; input_schema: unknown }) => vertexViolations(tool.input_schema, tool.name))).toEqual([]);
+		await api(`/sessions/${session}`, { method: "DELETE" });
+		await api("/providers/gateway", { method: "DELETE" });
 	});
 
 	it("keeps a system update ahead of an answer on a Claude endpoint when another provider's answer was only reasoning", async () => {

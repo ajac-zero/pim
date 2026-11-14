@@ -1,7 +1,7 @@
 import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import { type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
-import { type Computer, DEFAULT_COMMAND_MS, MAX_COMMAND_MS } from "../computer";
+import { type Computer, DEFAULT_COMMAND_MS, FileConflictError, MAX_COMMAND_MS } from "../computer";
 import { FILES_ROOT, filesPath } from "../files";
 import { defineGatedAction, type GatedAction } from "./approvals";
 import { text } from "./services";
@@ -53,20 +53,71 @@ function outside(args: Record<string, unknown>): string | null {
 	return null;
 }
 
+const EXPECTED_HASH = {
+	type: "string",
+	description: `The sha256 of the file as you last read it (file_read gives it), or "absent" to only create a new file. If the file has changed since, nothing is written and the result is a conflict: read the file again and redo the change.`,
+} as const;
+
+const sha256Hex = async (bytes: Uint8Array): Promise<string> =>
+	Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+
 function definitions(services: FileServices) {
-	const { tools, execute } = createPiTools({ workspace: { fs: services.computer.fs }, root: FILES_ROOT, exec: {} });
+	const declared = createPiTools({ workspace: { fs: { ...services.computer.fs, writeFile: async () => {} } }, root: FILES_ROOT, exec: {} }).tools;
 	const run = async (name: WorkspaceTool, args: Record<string, unknown>, id: string, signal?: AbortSignal): Promise<ToolExecutionResult> => {
 		const problem = outside(args);
 		if (problem) return text(problem, true);
 		if (CHANGES.has(name)) services.assertOpen();
+		const { expectedHash, ...rest } = args;
+		const given = typeof expectedHash === "string" && expectedHash !== "" ? expectedHash : undefined;
+		// The library's tools write through this file system: each write is held to the hash the call gave, or, for an edit, to that of the bytes it read.
+		const fs = services.computer.fs;
+		let read: string | undefined;
+		let conflict: FileConflictError | undefined;
+		const { execute } = createPiTools({
+			workspace: {
+				fs: {
+					...fs,
+					readFile: async (path: string, options?: { byteOffset?: number; byteLength?: number }) => {
+						const stream = await fs.readFile(path, options);
+						if (name !== "edit" || options) return stream;
+						const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+						read = await sha256Hex(bytes);
+						return new Response(bytes).body!;
+					},
+					writeFile: async (path: string, content: Uint8Array | string, options: { mode?: number } = {}): Promise<void> => {
+						const expected = given ?? (name === "edit" ? read : undefined);
+						try {
+							await fs.writeFile(path, content, expected === undefined ? options : { ...options, expectedHash: expected });
+						} catch (error) {
+							if (error instanceof FileConflictError) conflict = error;
+							throw error;
+						}
+					},
+				},
+			},
+			root: FILES_ROOT,
+			exec: {},
+		});
 		try {
-			const result = await execute({ id, name, arguments: args }, { abortSignal: signal });
-			return { content: result.content as ToolExecutionResult["content"], ...(result.isError ? { isError: true } : {}) };
+			// A read says which file it saw, for a later write to name; the hash is taken first, so a change in between shows as a conflict then.
+			const sha256 = name === "read" ? await fs.stat(rest.path as string).then((stat) => stat.sha256, () => null) : null;
+			const result = await execute({ id, name, arguments: rest }, { abortSignal: signal });
+			if (conflict) return text(JSON.stringify(conflict.conflict), true);
+			const content = result.content as ToolExecutionResult["content"];
+			if (sha256 !== null && !result.isError) return { content: [...(content ?? []), { type: "text", text: `sha256 of the whole file: ${sha256}` }] };
+			return { content, ...(result.isError ? { isError: true } : {}) };
 		} catch (error) {
 			return text(error instanceof Error ? error.message : String(error), true);
 		}
 	};
-	return { tools: tools.filter((tool): tool is typeof tool & { name: WorkspaceTool } => tool.name in NAMES), run };
+	const tools = declared
+		.filter((tool): tool is typeof tool & { name: WorkspaceTool } => tool.name in NAMES)
+		.map((tool) => {
+			if (tool.name !== "write" && tool.name !== "edit") return tool;
+			const parameters = tool.parameters as unknown as { properties: Record<string, unknown> };
+			return { ...tool, parameters: { ...parameters, properties: { ...parameters.properties, expectedHash: EXPECTED_HASH } } };
+		});
+	return { tools, run };
 }
 
 /** The file tools, while the person has a computer; without one, the extension is there with none, so chats get them once it's paired. */

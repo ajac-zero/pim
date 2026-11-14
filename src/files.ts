@@ -23,6 +23,9 @@ export type FileEntry = {
 	readonly updatedAt: string;
 };
 
+/** A file as `write` leaves it: its entry, and the hash and time a later conditional write names. */
+export type WrittenFile = FileEntry & { readonly sha256: string | null; readonly mtime: number };
+
 /** The most entries a folder lists in the app. */
 const MAX_LISTED = 1000;
 
@@ -103,6 +106,14 @@ export function fileHeaders(file: { name: string; size: number; type: string }, 
 	return headers;
 }
 
+/** A file's hash as an `ETag`: strong, so quoted. */
+export const etagOf = (sha256: string): string => `"${sha256}"`;
+
+/** The hashes a validator header (`If-Match`, `If-None-Match`) lists, without quotes or `W/`; "*" stands for itself. */
+export function etags(header: string | null): string[] {
+	return (header ?? "").split(",").map((tag) => tag.trim().replace(/^W\//, "").replace(/^"(.*)"$/, "$1")).filter((tag) => tag !== "");
+}
+
 /** The bytes a `Range` header asks for in a file of `size` bytes: null when it asks for the whole file or something else, "unsatisfiable" when it lies past the end. */
 export function byteRange(header: string | null, size: number): { start: number; end: number } | "unsatisfiable" | null {
 	const match = /^bytes=(\d*)-(\d*)$/.exec(header?.trim() ?? "");
@@ -180,13 +191,13 @@ export class Files {
 	}
 
 	/** A file's bytes and what to serve them as; with `range`, only those bytes (inclusive), as a player asks for them to seek. */
-	async read(path: unknown, range?: { start: number; end: number }): Promise<{ path: string; name: string; size: number; type: string; body: ReadableStream<Uint8Array> }> {
+	async read(path: unknown, range?: { start: number; end: number }): Promise<{ path: string; name: string; size: number; type: string; sha256: string | null; body: ReadableStream<Uint8Array> }> {
 		const file = checkedPath(path);
 		const name = file.slice(file.lastIndexOf("/") + 1);
 		try {
 			const stat = await this.#fs.stat(file);
 			if (!stat.isFile) throw new HttpError(404, `No file ${file}`);
-			return { path: file, name, size: stat.size, type: fileType(name), body: await this.#fs.readFile(file, range && { byteOffset: range.start, byteLength: range.end - range.start + 1 }) };
+			return { path: file, name, size: stat.size, type: fileType(name), sha256: stat.sha256, body: await this.#fs.readFile(file, range && { byteOffset: range.start, byteLength: range.end - range.start + 1 }) };
 		} catch (error) {
 			throw answer(error, `No file ${file}`);
 		}
@@ -197,8 +208,24 @@ export class Files {
 		return new Uint8Array(await new Response((await this.read(path)).body).arrayBuffer());
 	}
 
-	/** Saves `body` at `path`, making its folders, and replacing a file already there. */
-	async write(path: unknown, body: Uint8Array): Promise<FileEntry> {
+	/** A file's size, time and sha256 (null past 5 MiB), without its bytes. */
+	async stat(path: unknown): Promise<{ path: string; size: number; mtime: number; sha256: string | null }> {
+		const file = checkedPath(path);
+		try {
+			const stat = await this.#fs.stat(file);
+			if (!stat.isFile) throw new HttpError(404, `No file ${file}`);
+			return { path: file, size: stat.size, mtime: stat.mtime, sha256: stat.sha256 };
+		} catch (error) {
+			throw answer(error, `No file ${file}`);
+		}
+	}
+
+	/**
+	 * Saves `body` at `path`, making its folders, and replacing a file already
+	 * there. With `expectedHash` (a sha256, or "absent" for a new file) it only
+	 * does when the file is as expected, and otherwise throws a `FileConflictError`.
+	 */
+	async write(path: unknown, body: Uint8Array, options: { expectedHash?: string } = {}): Promise<WrittenFile> {
 		const file = checkedPath(path);
 		if (file === FILES_ROOT) throw new HttpError(400, "path must name a file");
 		const existing = await this.#fs.stat(file).catch((error) => {
@@ -206,15 +233,14 @@ export class Files {
 			throw answer(error, `No file ${file}`);
 		});
 		if (existing?.isDirectory) throw new HttpError(409, `${file} is a folder`);
-		let stat;
+		let written;
 		try {
 			await this.#fs.mkdir(file.slice(0, file.lastIndexOf("/")), { recursive: true });
-			await this.#fs.writeFile(file, body);
-			stat = await this.#fs.stat(file);
+			written = await this.#fs.writeFile(file, body, options);
 		} catch (error) {
 			throw answer(error, `No folder for ${file}`);
 		}
-		return { name: file.slice(file.lastIndexOf("/") + 1), path: file, type: "file", size: stat.size, updatedAt: new Date(stat.mtime).toISOString() };
+		return { name: file.slice(file.lastIndexOf("/") + 1), path: file, type: "file", size: written.size, updatedAt: new Date(written.mtime).toISOString(), sha256: written.sha256, mtime: written.mtime };
 	}
 
 	/** Whether there is a file or folder at `path`. */

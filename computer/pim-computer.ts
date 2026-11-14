@@ -32,7 +32,7 @@
 
 import { Buffer } from "node:buffer";
 import type { ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -53,11 +53,31 @@ export const MAX_READ_BYTES = 1_048_576;
 /** A failure the space gets back, with a code like Node's (`ENOENT`) where there is one. */
 export class CallError extends Error {
 	readonly code: string | undefined;
-	constructor(message: string, code?: string) {
+	/** Set when a write's condition wasn't met: the space turns it into a typed conflict. */
+	readonly conflict: FileConflict | undefined;
+	constructor(message: string, code?: string, conflict?: FileConflict) {
 		super(message);
 		this.code = code;
+		this.conflict = conflict;
 	}
 }
+
+/** The largest file whose sha256 `stat` and `write` give: the hash is the whole file's bytes, so bigger files have none. */
+export const HASH_MAX_BYTES = 5 * 1_048_576;
+
+/** Why a conditional write didn't happen, with what the file is now (null where it isn't there, or has no hash). */
+export type FileConflict = {
+	readonly error: "conflict";
+	readonly code: "hash_mismatch" | "missing" | "exists";
+	readonly path: string;
+	readonly expectedHash: string;
+	readonly currentHash: string | null;
+	readonly currentSize: number | null;
+	readonly currentMtime: number | null;
+};
+
+/** What a write gives back: the file as it is now. */
+export type WriteResult = { readonly path: string; readonly sha256: string | null; readonly size: number; readonly mtime: number };
 
 /** What a command run gives back. */
 export type ExecResult = {
@@ -177,7 +197,7 @@ export class Link {
 		const { id } = message;
 		this.#call(message.op, (message.args ?? {}) as Args).then(
 			(result) => this.#send(JSON.stringify({ type: "reply", id, result })),
-			(error: CallError) => this.#send(JSON.stringify({ type: "reply", id, error: { message: error.message, code: error.code } })),
+			(error: CallError) => this.#send(JSON.stringify({ type: "reply", id, error: { message: error.message, code: error.code, ...(error.conflict ? { conflict: error.conflict } : {}) } })),
 		);
 	}
 
@@ -370,6 +390,62 @@ async function local(machine: Machine, virtual: unknown): Promise<string> {
 	}
 }
 
+function sha256(bytes: Uint8Array): string {
+	return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * Puts a file at `file` that nothing sees half written: its content goes to a
+ * file beside it, which is synced and then renamed over it, with the mode the
+ * file had (or `mode` for a new one). A link there is followed, so the
+ * link's target is the one replaced. `expected` is a condition on what's
+ * there: a sha256 it must have, or "absent" for a file that mustn't exist; the
+ * file is read again right before the rename. A writer that renames its own
+ * file between that read and the rename is the race left: the compare and the
+ * rename are two steps, as a file system has no compare-and-swap.
+ */
+async function replace(virtual: string, file: string, source: { data: Buffer } | { temp: string }, expected: string | undefined, mode: number | undefined): Promise<WriteResult> {
+	// A dangling link has no target to follow: it is replaced, not written through.
+	const target = await fs.realpath(file).catch((error) => {
+		if ((error as { code?: string }).code === "ENOENT") return file;
+		throw error;
+	});
+	const temp = "temp" in source ? source.temp : path.join(path.dirname(target), `.${path.basename(target)}.pim-${randomUUID()}`);
+	try {
+		if (!("temp" in source)) {
+			const handle = await fs.open(temp, "wx", mode ?? 0o666);
+			try {
+				await handle.writeFile(source.data);
+				await handle.sync();
+			} finally {
+				await handle.close();
+			}
+		}
+		const before = await fs.stat(target).catch((error) => {
+			if ((error as { code?: string }).code === "ENOENT") return null;
+			throw error;
+		});
+		if (before?.isDirectory()) throw new CallError(`EISDIR: is a directory, open '${virtual}'`, "EISDIR");
+		if (expected !== undefined) {
+			const now = before;
+			const hash = now && now.size <= HASH_MAX_BYTES ? sha256(await fs.readFile(target)) : null;
+			const code = now === null ? (expected === "absent" ? undefined : "missing") : expected === "absent" ? "exists" : hash === expected ? undefined : "hash_mismatch";
+			if (code) {
+				const conflict: FileConflict = { error: "conflict", code, path: virtual, expectedHash: expected, currentHash: hash, currentSize: now?.size ?? null, currentMtime: now?.mtimeMs ?? null };
+				throw new CallError(`${virtual} ${code === "exists" ? "already exists" : code === "missing" ? "is gone" : "changed since it was read"}`, "conflict", conflict);
+			}
+		}
+		if (before) await fs.chmod(temp, before.mode & 0o7777);
+		const written = await fs.stat(temp);
+		const hash = written.size <= HASH_MAX_BYTES ? sha256("data" in source ? source.data : await fs.readFile(temp)) : null;
+		await fs.rename(temp, target);
+		return { path: virtual, sha256: hash, size: written.size, mtime: written.mtimeMs };
+	} catch (error) {
+		await fs.rm(temp, { force: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
 /** A Node error as the space reads it: its code, and the space's path instead of this machine's. */
 function failure(error: unknown, virtual: string): CallError {
 	if (error instanceof CallError) return error;
@@ -488,6 +564,7 @@ export async function handle(machine: Machine, op: string, args: Args): Promise<
 					isFile: stat.isFile(),
 					isDirectory: stat.isDirectory(),
 					isSymbolicLink: link.isSymbolicLink(),
+					sha256: stat.isFile() && stat.size <= HASH_MAX_BYTES ? sha256(await fs.readFile(file)) : null,
 				};
 			}
 			case "read": {
@@ -508,9 +585,14 @@ export async function handle(machine: Machine, op: string, args: Args): Promise<
 				const file = await local(machine, args.path);
 				const data = Buffer.from(String(args.data ?? ""), "base64");
 				const mode = typeof args.mode === "number" ? args.mode & 0o777 : undefined;
-				if (args.append === true) await fs.appendFile(file, data);
-				else await fs.writeFile(file, data, mode === undefined ? {} : { mode });
-				return null;
+				if (args.append === true) {
+					await fs.appendFile(file, data);
+					return null;
+				}
+				const expected = args.expectedHash === undefined || args.expectedHash === null ? undefined : String(args.expectedHash);
+				// `from` is a file beside the target that was written in parts: it takes the target's place, under the same condition.
+				const from = typeof args.from === "string" ? await local(machine, args.from) : undefined;
+				return await replace(String(args.path), file, from === undefined ? { data } : { temp: from }, expected, mode);
 			}
 			case "mkdir": {
 				await fs.mkdir(await local(machine, args.path), { recursive: args.recursive === true });

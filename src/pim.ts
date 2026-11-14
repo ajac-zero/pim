@@ -183,7 +183,7 @@ import { webExtension } from "./extensions/web";
 import { HostedApps, SESSION_COOKIE as HOSTED_SESSION_COOKIE } from "./hosted";
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerDisplay, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
-import { byteRange, FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
+import { byteRange, etagOf, etags, FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
 import { NOTE_LIVE_PATH, NOTE_TAG, type NotePeer, NoteStore } from "./notes";
 import { BROWSER_LIVE_PATH, BROWSER_TAG, type BrowserInput, type BrowserLiveMessage, PimBrowser } from "./browser";
@@ -7472,18 +7472,44 @@ export class Pim extends DurableAgent<Env> {
 					}
 					const path = url.searchParams.get("path");
 					const whole = await this.files.read(path);
+					const validators: Record<string, string> = whole.sha256 === null ? {} : { etag: etagOf(whole.sha256), "x-file-sha256": whole.sha256 };
+					if (whole.sha256 !== null && !request.headers.has("range") && etags(request.headers.get("if-none-match")).some((tag) => tag === "*" || tag === whole.sha256)) {
+						await whole.body.cancel();
+						return new Response(null, { status: 304, headers: validators });
+					}
 					// A video's playbar seeks with a Range request; answering it with the whole file makes the player snap back.
 					const range = byteRange(request.headers.get("range"), whole.size);
 					if (range === "unsatisfiable") {
 						await whole.body.cancel();
 						return new Response(null, { status: 416, headers: { "content-range": `bytes */${whole.size}` } });
 					}
-					if (!range) return new Response(whole.body, { headers: fileHeaders(whole, url.searchParams.has("download")) });
+					if (!range) {
+						const headers = fileHeaders(whole, url.searchParams.has("download"));
+						for (const [name, value] of Object.entries(validators)) headers.set(name, value);
+						return new Response(whole.body, { headers });
+					}
 					await whole.body.cancel();
 					const part = await this.files.read(path, range);
 					const headers = fileHeaders({ ...part, size: range.end - range.start + 1 }, url.searchParams.has("download"));
+					for (const [name, value] of Object.entries(validators)) headers.set(name, value);
 					headers.set("content-range", `bytes ${range.start}-${range.end}/${part.size}`);
 					return new Response(part.body, { status: 206, headers });
+				}),
+		],
+		// A file's validators without its bytes: ETag and X-File-Sha256 (past 5 MiB, none), X-File-Size and X-File-Mtime.
+		[
+			"HEAD",
+			"/files/content",
+			(_params, _request, url) =>
+				this.#artifactRequest(url, async () => {
+					if (this.guestBot()?.owner !== undefined) throw new HttpError(404, "No such file");
+					const stat = await this.files.stat(url.searchParams.get("path"));
+					const headers = new Headers({ "x-file-size": String(stat.size), "x-file-mtime": String(stat.mtime), "cache-control": "no-store, private" });
+					if (stat.sha256 !== null) {
+						headers.set("etag", etagOf(stat.sha256));
+						headers.set("x-file-sha256", stat.sha256);
+					}
+					return new Response(null, { headers });
 				}),
 		],
 		[
@@ -7496,8 +7522,18 @@ export class Pim extends DurableAgent<Env> {
 					if (Number(request.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES) throw new HttpError(413, tooLarge);
 					const body = new Uint8Array(await request.arrayBuffer());
 					if (body.byteLength > MAX_UPLOAD_BYTES) throw new HttpError(413, tooLarge);
+					// `If-Match` writes only over a file with that hash; `If-None-Match: *` only where there is none. Neither: over whatever is there.
+					const match = etags(request.headers.get("if-match"));
+					const none = etags(request.headers.get("if-none-match"));
+					if (match.length > 1 || (match.length === 1 && !/^[0-9a-f]{64}$/.test(match[0]!))) throw new HttpError(400, "If-Match must be one file hash, as the ETag a read gave");
+					if (none.length > 0 && !(none.length === 1 && none[0] === "*")) throw new HttpError(400, "If-None-Match must be * on a write");
+					if (match.length > 0 && none.length > 0) throw new HttpError(400, "Send If-Match or If-None-Match, not both");
+					const expectedHash = match[0] ?? (none.length > 0 ? "absent" : undefined);
 					// Files are on the person's computer, so they don't count toward the space's storage.
-					return noStore(await this.files.write(url.searchParams.get("path"), body), 201);
+					const written = await this.files.write(url.searchParams.get("path"), body, expectedHash === undefined ? {} : { expectedHash });
+					const response = noStore(written);
+					if (written.sha256 !== null) response.headers.set("etag", etagOf(written.sha256));
+					return response;
 				}),
 		],
 		[

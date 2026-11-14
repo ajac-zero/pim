@@ -3,6 +3,8 @@ export class HttpError extends Error {
 	constructor(
 		readonly status: number,
 		message: string,
+		/** What the API answers with in place of `{ error: message }`. */
+		readonly body?: object,
 	) {
 		super(message);
 	}
@@ -46,7 +48,7 @@ export async function dispatch(routes: readonly Route[], request: Request, path:
 			const result = await handler(params, request, url);
 			return result instanceof Response ? result : json(result ?? null);
 		} catch (error) {
-			if (error instanceof HttpError) return json({ error: error.message }, error.status);
+			if (error instanceof HttpError) return json(error.body ?? { error: error.message }, error.status);
 			console.error("pim request failed", error);
 			return json({ error: error instanceof Error ? error.message : String(error) }, 500);
 		}

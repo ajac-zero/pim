@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { posix } from "node:path";
 import type { Connection } from "agents";
-import type { ExecArgs, ExecResult } from "../computer/pim-computer";
+import type { ExecArgs, ExecResult, FileConflict, WriteResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { HttpError } from "./http";
 
@@ -135,8 +135,16 @@ export type ComputerDisplay = {
 	estimatedWaitSec?: number;
 };
 
+/** A conditional write that didn't happen because the file isn't what the writer expected; the API answers it 409 with `conflict` as its body. */
+export class FileConflictError extends HttpError {
+	constructor(readonly conflict: FileConflict) {
+		super(409, `${conflict.path} is not as expected (${conflict.code})`, conflict);
+	}
+}
+
 /** A failure the computer reported, with its code (`ENOENT`…), which the file tools read. */
-function remoteError(error: { message?: unknown; code?: unknown }): Error {
+function remoteError(error: { message?: unknown; code?: unknown; conflict?: unknown }): Error {
+	if (error.code === "conflict" && error.conflict) return new FileConflictError(error.conflict as FileConflict);
 	return Object.assign(new Error(String(error.message ?? "The computer failed")), typeof error.code === "string" ? { code: error.code } : {});
 }
 
@@ -497,7 +505,7 @@ export class Computer {
 	 */
 	readonly fs = {
 		stat: (path: string) =>
-			this.call<{ size: number; mtime: number; mode: number; isFile: boolean; isDirectory: boolean; isSymbolicLink: boolean }>("stat", { path }),
+			this.call<{ size: number; mtime: number; mode: number; sha256: string | null; isFile: boolean; isDirectory: boolean; isSymbolicLink: boolean }>("stat", { path }),
 		readFile: async (path: string, options: { byteOffset?: number; byteLength?: number } = {}): Promise<ReadableStream<Uint8Array>> => {
 			let offset = options.byteOffset ?? 0;
 			const end = options.byteLength === undefined ? Number.POSITIVE_INFINITY : offset + options.byteLength;
@@ -523,12 +531,17 @@ export class Computer {
 				},
 			});
 		},
-		writeFile: async (path: string, content: Uint8Array | string, options: { mode?: number } = {}): Promise<void> => {
+		/**
+		 * Replaces a file, whole or not at all. With `expectedHash`, only if the
+		 * file's sha256 is that, or with "absent", only if there is no file; a
+		 * file that isn't as expected throws a `FileConflictError`.
+		 */
+		writeFile: async (path: string, content: Uint8Array | string, options: { mode?: number; expectedHash?: string } = {}): Promise<WriteResult> => {
 			const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
 			const mode = options.mode === undefined ? {} : { mode: options.mode };
+			const condition = options.expectedHash === undefined ? {} : { expectedHash: options.expectedHash };
 			if (bytes.byteLength <= CHUNK_BYTES) {
-				await this.call("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode });
-				return;
+				return this.call<WriteResult>("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode, ...condition });
 			}
 			// In parts, to a file beside it that takes its place once whole.
 			const slash = path.lastIndexOf("/");
@@ -538,7 +551,7 @@ export class Computer {
 					const data = Buffer.from(bytes.subarray(start, start + CHUNK_BYTES)).toString("base64");
 					await this.call("write", { path: temporary, data, append: start > 0, ...mode });
 				}
-				await this.call("rename", { from: temporary, to: path });
+				return await this.call<WriteResult>("write", { path, from: temporary, ...mode, ...condition });
 			} catch (error) {
 				await this.call("rm", { path: temporary, force: true }).catch(() => undefined);
 				throw error;

@@ -6,6 +6,7 @@ import {
   ModelMark,
   ModelMenuItems,
   useAgentModel,
+  useSessionModel,
 } from "~/components/chat/model-menu";
 import { useI18n } from "~/components/i18n";
 import { Lock, Plus, X } from "~/components/icons";
@@ -153,6 +154,7 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
             key={person.id}
             person={person}
             agent={look(person.id)}
+            session={sessionId}
             removing={remove.isPending}
             onRemove={() => remove.mutate(person.id)}
           />
@@ -197,16 +199,22 @@ export function RoomMenu({ sessionId }: { sessionId: string }) {
 function Person({
   person,
   agent,
+  session,
   removing,
   onRemove,
 }: {
   person: { id: string; name: string; host: boolean };
+  /** The chat, whose model the host's list chooses; the others' agents have a chat of their own in it, which is not reachable, so theirs is chosen for the agent. */
+  session: string;
   agent: Agent | undefined;
   removing: boolean;
   onRemove: () => void;
 }) {
   const { t } = useI18n();
-  const { settings, current, pinned, choose } = useAgentModel(person.id);
+  const own = useAgentModel(person.id);
+  const chat = useSessionModel(session, person.id);
+  const { settings, current, pinned, choose } = person.host ? chat : own;
+  const fallback = person.host ? chat.fallback : undefined;
   return (
     <div className="flex items-center gap-2 px-1">
       <DropdownMenuSub>
@@ -231,12 +239,15 @@ function Person({
             className="w-72 max-w-[calc(100vw-2rem)]"
           >
             <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
-              {t("modelForAgent", { name: person.name })}
+              {t(person.host ? "modelForChat" : "modelForAgent", {
+                name: person.name,
+              })}
             </DropdownMenuLabel>
             <ModelMenuItems
               settings={settings}
               current={current}
               pinned={pinned}
+              fallback={fallback}
               choose={choose.mutate}
             />
           </DropdownMenuSubContent>

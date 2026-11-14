@@ -526,6 +526,7 @@ function ChatPage() {
                       ? undefined
                       : (session?.agent ?? undefined)
                   }
+                  session={sessionId}
                   disabled={!ready}
                   uploads={!!session && !session.visit}
                   disclaimer={

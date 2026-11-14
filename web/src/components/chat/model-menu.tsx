@@ -9,7 +9,7 @@ import {
   DropdownMenuSeparator,
 } from "~/components/ui/dropdown-menu";
 import { type ModelInfo, type ModelSettings, pim } from "~/lib/pim-api";
-import { agentsQuery, modelQuery } from "~/lib/queries";
+import { agentsQuery, modelQuery, sessionsQuery } from "~/lib/queries";
 import { modelName } from "~/lib/utils";
 
 /** A model's logo; a custom provider's models have one logo for all. */
@@ -62,6 +62,45 @@ export function useAgentModel(agentId: string | undefined) {
 }
 
 /**
+ * The model one chat runs on and the means to change it for this chat alone:
+ * its own choice if it has one, else its agent's, else the default model.
+ * `fallback` is what "Default" in the menu goes back to: the agent's model.
+ */
+export function useSessionModel(
+  sessionId: string,
+  agentId: string | undefined,
+) {
+  const queryClient = useQueryClient();
+  const { data: settings } = useQuery(modelQuery());
+  const { data: agents } = useQuery(agentsQuery());
+  const { data: sessions } = useQuery(sessionsQuery());
+  const shown = sessions?.find((session) => session.id === sessionId)?.model;
+  const own = agents?.find((agent) => agent.id === agentId)?.model;
+  const find = (
+    model: Pick<ModelInfo, "provider" | "id"> | undefined | null,
+  ) =>
+    model
+      ? settings?.choices.find(
+          (choice) =>
+            choice.provider === model.provider && choice.id === model.id,
+        )
+      : undefined;
+  const choose = useMutation({
+    mutationFn: (model: Pick<ModelInfo, "provider" | "id"> | null) =>
+      pim.chooseSessionModel(sessionId, model),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sessions"] }),
+    onError: (error) => toast.error(error.message),
+  });
+  return {
+    settings,
+    current: find(shown?.model) ?? shown?.model ?? find(own) ?? settings?.model,
+    pinned: shown?.override ?? false,
+    fallback: find(own) ?? settings?.model,
+    choose,
+  };
+}
+
+/**
  * What to choose from for one agent: "Default", which follows Settings →
  * Model, then each model, and a link to Settings for more.
  */
@@ -70,10 +109,13 @@ export function ModelMenuItems({
   current,
   pinned,
   choose,
+  fallback = settings.model,
 }: {
   settings: ModelSettings;
   current: ModelInfo;
   pinned: boolean;
+  /** The model "Default" stands for; the default model unless a chat's agent has its own. */
+  fallback?: ModelInfo;
   choose: (model: Pick<ModelInfo, "provider" | "id"> | null) => void;
 }) {
   const { t } = useI18n();
@@ -87,11 +129,11 @@ export function ModelMenuItems({
       >
         <ModelMark
           settings={settings}
-          model={settings.model}
+          model={fallback}
           className="size-5 text-foreground"
         />
         <span className="min-w-0 flex-1 truncate">
-          {modelName(settings.model.name)}
+          {modelName(fallback.name)}
           <span className="ml-2 text-muted-foreground text-xs">
             {t("defaultModelTag")}
           </span>

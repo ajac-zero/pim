@@ -8,7 +8,7 @@ import { ArtifactIcon } from "~/components/artifact-icon";
 import {
   ModelMark,
   ModelMenuItems,
-  useAgentModel,
+  useSessionModel,
 } from "~/components/chat/model-menu";
 import { FileKindIcon } from "~/components/file-kind-icon";
 import { useI18n } from "~/components/i18n";
@@ -87,11 +87,16 @@ export interface ComposerProps {
   /** Beside the attach buttons, such as whom a new chat is with. */
   controls?: ReactNode;
   /**
-   * The agent the chat is with, whose model the picker chooses and whose connectors
-   * an @ offers; none shows no picker, as in a group chat, which has it in
-   * the header.
+   * The agent the chat is with, whose connectors an @ offers and whose model
+   * the chat starts on; none shows no picker, as in a group chat, which has it
+   * in the header.
    */
   agent?: Pick<Agent, "id" | "name">;
+  /**
+   * The chat's id, whose model the picker chooses for this chat alone. A
+   * chat not yet started has none, and no picker.
+   */
+  session?: string;
   /** The agents in the chat, which an @ offers to mention. */
   mentions?: readonly Agent[];
   /**
@@ -288,6 +293,7 @@ function ComposerInner({
   fill,
   mentions,
   agent,
+  session,
   controls,
   uploads = false,
   hideAttach = false,
@@ -312,7 +318,10 @@ function ComposerInner({
     if (text) drafts.set(draftKey, text);
     else drafts.delete(draftKey);
   }, [draftKey, text]);
-  const { settings, current, pinned, choose } = useAgentModel(agent?.id);
+  const { settings, current, pinned, fallback, choose } = useSessionModel(
+    session ?? "",
+    agent?.id,
+  );
   const model = current;
   const seesImages = model?.images ?? false;
   const { data: computer } = useQuery({ ...computerQuery(), enabled: uploads });
@@ -855,11 +864,12 @@ function ComposerInner({
                 )}
               </Button>
             )}
-            {settings && current && agent && (
+            {settings && current && fallback && agent && session && (
               <ModelPicker
                 settings={settings}
                 current={current}
                 pinned={pinned}
+                fallback={fallback}
                 choose={choose}
                 agent={agent}
               />
@@ -914,23 +924,26 @@ function ComposerInner({
 }
 
 /**
- * The agent's model, as its logo beside Send, with its name on hover. Choosing
- * here sets the model of this agent alone; "Default" has it follow Settings →
- * Model again, which the menu links to for more models.
+ * The chat's model, as its logo beside Send, with its name on hover. Choosing
+ * here sets the model of this chat alone; "Default" has it follow its agent's
+ * again, which Settings → Model and the agent's settings change.
  */
 function ModelPicker({
   settings,
   current,
   pinned,
+  fallback,
   choose,
   agent,
 }: {
   settings: ModelSettings;
-  /** The model the agent runs on now. */
+  /** The model the chat runs on now. */
   current: ModelInfo;
-  /** Whether it was chosen for this agent, rather than followed from the default. */
+  /** Whether it was chosen for this chat, rather than followed from its agent. */
   pinned: boolean;
-  choose: ReturnType<typeof useAgentModel>["choose"];
+  /** The agent's model, which "Default" goes back to. */
+  fallback: ModelInfo;
+  choose: ReturnType<typeof useSessionModel>["choose"];
   agent: Pick<Agent, "id" | "name">;
 }) {
   const { t } = useI18n();
@@ -971,12 +984,13 @@ function ModelPicker({
         className="w-72 max-w-[calc(100vw-2rem)]"
       >
         <DropdownMenuLabel className="font-normal text-muted-foreground text-xs">
-          {t("modelForAgent", { name: agent.name })}
+          {t("modelForChat", { name: agent.name })}
         </DropdownMenuLabel>
         <ModelMenuItems
           settings={settings}
           current={current}
           pinned={pinned}
+          fallback={fallback}
           choose={choose.mutate}
         />
       </DropdownMenuContent>

@@ -616,6 +616,7 @@ const translations = {
     modelChanged: "Agents without a model of their own now use {model}",
     chooseModel: "Model: {model}",
     modelForAgent: "Model for {name}",
+    modelForChat: "Model for this chat with {name}",
     agentModels: "Models",
     fallbackModelsHint:
       "{name} runs on the first model. If it fails, such as when its quota runs out, it moves on to the next, in order.",
@@ -2687,6 +2688,7 @@ const translations = {
     modelChanged: "Los agentes sin modelo propio ahora usan {model}",
     chooseModel: "Modelo: {model}",
     modelForAgent: "Modelo de {name}",
+    modelForChat: "Modelo de este chat con {name}",
     agentModels: "Modelos",
     fallbackModelsHint:
       "{name} usa el primer modelo. Si falla, por ejemplo al agotarse su cuota, pasa al siguiente, en orden.",

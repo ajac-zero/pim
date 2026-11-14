@@ -5,7 +5,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
-import type { DisplayHost, DriverHost, ExecArgs, ExecResult, ScreenHost } from "../computer/pim-computer";
+import { handle, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, type ScreenHost } from "../computer/pim-computer";
 import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
@@ -167,7 +167,7 @@ describe("the computer", () => {
 
 		// The person uploads one, larger than one message carries; it arrives whole, and the agent reads it.
 		const big = new TextEncoder().encode(`night,price\n${"1,140\n".repeat(400_000)}`);
-		expect((await upload("/workspace/receipts/hotel.csv", big)).status).toBe(201);
+		expect((await upload("/workspace/receipts/hotel.csv", big)).status).toBe(200);
 		expect(new Uint8Array(await fs.readFile(`${ROOT}/receipts/hotel.csv`))).toEqual(big);
 		expect(new Uint8Array(await (await raw("/files/content?path=/workspace/receipts/hotel.csv")).arrayBuffer())).toEqual(big);
 		expect((await fs.readdir(`${ROOT}/receipts`)).length).toBe(1);
@@ -202,6 +202,146 @@ describe("the computer", () => {
 		expect((await callTool("file_write", { path: "/workspace/escape/planted.txt", content: "x" })).isError).toBe(true);
 		await expect(fs.stat(`${ROOT}-outside/planted.txt`)).rejects.toThrow();
 		await fs.rm(`${ROOT}/escape`);
+	});
+
+	describe("conditional writes", () => {
+		const sha = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
+		const put = (path: string, body: BodyInit, headers: Record<string, string> = {}) => raw(`/files/content?path=${encodeURIComponent(path)}`, { method: "PUT", body, headers });
+		const machine = () => ({ root: ROOT, exec: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false }) });
+		const write = (path: string, text: string, extra: Record<string, unknown> = {}) => handle(machine(), "write", { path, data: Buffer.from(text).toString("base64"), ...extra }) as Promise<{ path: string; sha256: string | null; size: number; mtime: number }>;
+		const rejection = async (promise: Promise<unknown>) => promise.then(() => null, (error: Error & { code?: string; conflict?: unknown }) => error);
+
+		it("replaces a file whole, and leaves no temporary file", async () => {
+			await fs.mkdir(`${ROOT}/cas`, { recursive: true });
+			await fs.writeFile(`${ROOT}/cas/run.sh`, "old");
+			const result = await write("/workspace/cas/run.sh", "new content");
+			expect(result).toMatchObject({ path: "/workspace/cas/run.sh", sha256: sha("new content"), size: 11 });
+			expect(await fs.readFile(`${ROOT}/cas/run.sh`, "utf8")).toBe("new content");
+			expect(await fs.readdir(`${ROOT}/cas`)).toEqual(["run.sh"]);
+			// A write that fails (the target is a folder) leaves nothing behind either.
+			await fs.mkdir(`${ROOT}/cas/dir`);
+			expect((await rejection(write("/workspace/cas/dir", "x")))?.code).toBe("EISDIR");
+			expect((await rejection(write("/workspace/cas/nofolder/x", "x")))?.code).toBe("ENOENT");
+			expect((await fs.readdir(`${ROOT}/cas`)).sort()).toEqual(["dir", "run.sh"]);
+		});
+
+		it("gives stat a hash for files up to 5 MiB", async () => {
+			await fs.writeFile(`${ROOT}/cas/hello.txt`, "hello");
+			expect(await handle(machine(), "stat", { path: "/workspace/cas/hello.txt" })).toMatchObject({ sha256: sha("hello"), size: 5 });
+			expect(await handle(machine(), "stat", { path: "/workspace/cas" })).toMatchObject({ sha256: null, isDirectory: true });
+			const big = new Uint8Array(5 * 1_048_576 + 1);
+			await fs.writeFile(`${ROOT}/cas/big.bin`, big);
+			expect(await handle(machine(), "stat", { path: "/workspace/cas/big.bin" })).toMatchObject({ sha256: null });
+			await fs.writeFile(`${ROOT}/cas/edge.bin`, big.subarray(1));
+			expect(await handle(machine(), "stat", { path: "/workspace/cas/edge.bin" })).toMatchObject({ sha256: sha(big.subarray(1)) });
+		});
+
+		it("writes only where the file is as expected, and says how it isn't", async () => {
+			const path = "/workspace/cas/doc.txt";
+			await fs.writeFile(`${ROOT}/cas/doc.txt`, "one");
+			expect(await write(path, "two", { expectedHash: sha("one") })).toMatchObject({ sha256: sha("two") });
+			const stale = await rejection(write(path, "three", { expectedHash: sha("one") }));
+			expect(stale?.conflict).toEqual({ error: "conflict", code: "hash_mismatch", path, expectedHash: sha("one"), currentHash: sha("two"), currentSize: 3, currentMtime: expect.any(Number) });
+			expect(await fs.readFile(`${ROOT}/cas/doc.txt`, "utf8")).toBe("two");
+			expect((await rejection(write("/workspace/cas/nothing.txt", "x", { expectedHash: sha("one") })))?.conflict).toEqual({
+				error: "conflict", code: "missing", path: "/workspace/cas/nothing.txt", expectedHash: sha("one"), currentHash: null, currentSize: null, currentMtime: null,
+			});
+			expect((await rejection(write(path, "x", { expectedHash: "absent" })))?.conflict).toMatchObject({ code: "exists", expectedHash: "absent", currentHash: sha("two"), currentSize: 3 });
+			expect(await write("/workspace/cas/created.txt", "fresh", { expectedHash: "absent" })).toMatchObject({ sha256: sha("fresh") });
+			expect((await rejection(write("/workspace/cas/created.txt", "again", { expectedHash: "absent" })))?.conflict).toMatchObject({ code: "exists" });
+			// A refused write leaves no temporary file.
+			expect((await fs.readdir(`${ROOT}/cas`)).filter((name) => name.includes(".pim-"))).toEqual([]);
+		});
+
+		it("holds chunked writes to the same condition", async () => {
+			const big = new TextEncoder().encode("x".repeat(2_500_000));
+			const path = "/workspace/cas/large.txt";
+			expect((await put(path, big, { "if-none-match": "*" })).status).toBe(200);
+			const again = await put(path, big, { "if-none-match": "*" });
+			expect(again.status).toBe(409);
+			expect(await again.json()).toMatchObject({ error: "conflict", code: "exists", currentSize: 2_500_000 });
+			const next = new TextEncoder().encode("y".repeat(2_500_000));
+			const stale = await put(path, next, { "if-match": `"${sha("nope")}"` });
+			expect(stale.status).toBe(409);
+			expect(await stale.json()).toMatchObject({ code: "hash_mismatch", currentHash: sha(big) });
+			expect(new Uint8Array(await fs.readFile(`${ROOT}/cas/large.txt`))).toEqual(big);
+			const swapped = await put(path, next, { "if-match": `"${sha(big)}"` });
+			expect([swapped.status, swapped.headers.get("etag")]).toEqual([200, `"${sha(next)}"`]);
+			expect(new Uint8Array(await fs.readFile(`${ROOT}/cas/large.txt`))).toEqual(next);
+			expect((await fs.readdir(`${ROOT}/cas`)).filter((name) => name.includes(".pim-"))).toEqual([]);
+		});
+
+		it("still keeps writes inside /workspace", async () => {
+			await fs.mkdir(`${ROOT}-outside`, { recursive: true });
+			await fs.writeFile(`${ROOT}-outside/secret.txt`, "secret");
+			await fs.symlink(`${ROOT}-outside`, `${ROOT}/cas/out`);
+			await fs.symlink(`${ROOT}-outside/secret.txt`, `${ROOT}/cas/leak.txt`);
+			await fs.symlink(`${ROOT}/cas/doc.txt`, `${ROOT}/cas/inside.txt`);
+			for (const path of ["/workspace/../x", "/workspace/cas/../../x", "/workspace/cas/out/x", "/workspace/cas/leak.txt", "/workspace/a\0b"]) {
+				for (const extra of [{}, { expectedHash: "absent" }, { expectedHash: sha("x") }]) {
+					const error = await rejection(write(path, "planted", extra));
+					expect(error, `${path} ${JSON.stringify(extra)}`).not.toBeNull();
+					expect(error?.code).toMatch(/EACCES|EINVAL/);
+				}
+			}
+			expect(await fs.readFile(`${ROOT}-outside/secret.txt`, "utf8")).toBe("secret");
+			await expect(fs.stat(`${ROOT}-outside/x`)).rejects.toThrow();
+			// A link that stays inside is written through to its target, and stays a link.
+			await write("/workspace/cas/inside.txt", "via link", { expectedHash: sha(await fs.readFile(`${ROOT}/cas/doc.txt`)) });
+			expect(await fs.readFile(`${ROOT}/cas/doc.txt`, "utf8")).toBe("via link");
+			expect((await fs.lstat(`${ROOT}/cas/inside.txt`)).isSymbolicLink()).toBe(true);
+			await fs.rm(`${ROOT}/cas/out`);
+			await fs.rm(`${ROOT}/cas/leak.txt`);
+			await fs.rm(`${ROOT}/cas/inside.txt`);
+		});
+
+		it("serves ETags, and answers conditional writes over HTTP", async () => {
+			const path = "/workspace/cas/http.txt";
+			const created = await put(path, "v1", { "if-none-match": "*" });
+			expect([created.status, created.headers.get("etag")]).toEqual([200, `"${sha("v1")}"`]);
+			expect(await created.json()).toMatchObject({ path, sha256: sha("v1"), size: 2, mtime: expect.any(Number) });
+			const read = await raw(`/files/content?path=${path}`);
+			expect([read.headers.get("etag"), read.headers.get("x-file-sha256"), await read.text()]).toEqual([`"${sha("v1")}"`, sha("v1"), "v1"]);
+			const same = await raw(`/files/content?path=${path}`, { headers: { "if-none-match": `"${sha("v1")}"` } });
+			expect(same.status).toBe(304);
+			const head = await raw(`/files/content?path=${path}`, { method: "HEAD" });
+			expect([head.status, head.headers.get("etag"), head.headers.get("x-file-size")]).toEqual([200, `"${sha("v1")}"`, "2"]);
+			expect((await raw("/files/content?path=/workspace/cas/none.txt", { method: "HEAD" })).status).toBe(404);
+
+			const stale = await put(path, "mine", { "if-match": `"${sha("other")}"` });
+			expect(stale.status).toBe(409);
+			expect(await stale.json()).toEqual({ error: "conflict", code: "hash_mismatch", path, expectedHash: sha("other"), currentHash: sha("v1"), currentSize: 2, currentMtime: expect.any(Number) });
+			const gone = await put("/workspace/cas/none.txt", "x", { "if-match": `"${sha("v1")}"` });
+			expect([gone.status, ((await gone.json()) as { code: string }).code]).toEqual([409, "missing"]);
+			expect((await put(path, "mine", { "if-match": `"${sha("v1")}"` })).status).toBe(200);
+			expect(await fs.readFile(`${ROOT}/cas/http.txt`, "utf8")).toBe("mine");
+			// No header: over whatever is there, as before.
+			expect((await put(path, "plain")).status).toBe(200);
+			expect(await fs.readFile(`${ROOT}/cas/http.txt`, "utf8")).toBe("plain");
+			expect((await put(path, "x", { "if-match": "nonsense" })).status).toBe(400);
+			expect((await put("/workspace/../x", "x", { "if-none-match": "*" })).status).toBe(400);
+		});
+
+		it("gives agents the hash on a read, and a conflict where a write or edit is stale", async () => {
+			await fs.writeFile(`${ROOT}/cas/agent.txt`, "alpha beta");
+			const read = await callTool("file_read", { path: "/workspace/cas/agent.txt" });
+			expect(read.text).toContain(`sha256 of the whole file: ${sha("alpha beta")}`);
+
+			const stale = await callTool("file_write", { path: "/workspace/cas/agent.txt", content: "mine", expectedHash: sha("old") });
+			expect(stale.isError).toBe(true);
+			expect(JSON.parse(stale.text)).toEqual({ error: "conflict", code: "hash_mismatch", path: "/workspace/cas/agent.txt", expectedHash: sha("old"), currentHash: sha("alpha beta"), currentSize: 10, currentMtime: expect.any(Number) });
+			expect(await fs.readFile(`${ROOT}/cas/agent.txt`, "utf8")).toBe("alpha beta");
+			expect(JSON.parse((await callTool("file_write", { path: "/workspace/cas/agent.txt", content: "x", expectedHash: "absent" })).text)).toMatchObject({ code: "exists" });
+			expect((await callTool("file_write", { path: "/workspace/cas/agent.txt", content: "gamma", expectedHash: sha("alpha beta") })).isError).toBe(false);
+
+			const edit = { path: "/workspace/cas/agent.txt", edits: [{ oldText: "gamma", newText: "delta" }] };
+			const refused = await callTool("file_edit", { ...edit, expectedHash: sha("alpha beta") });
+			expect(JSON.parse(refused.text)).toMatchObject({ error: "conflict", code: "hash_mismatch", currentHash: sha("gamma") });
+			expect(await fs.readFile(`${ROOT}/cas/agent.txt`, "utf8")).toBe("gamma");
+			// Without a hash the edit is held to what it read: it still works when nothing changed.
+			expect((await callTool("file_edit", edit)).isError).toBe(false);
+			expect(await fs.readFile(`${ROOT}/cas/agent.txt`, "utf8")).toBe("delta");
+		});
 	});
 
 	it("serves files inert, whatever they contain", async () => {

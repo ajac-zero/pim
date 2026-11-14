@@ -35,7 +35,7 @@ import {
 } from "~/components/chat/tasks";
 import { CHATGPT_USAGE_URL } from "~/components/chatgpt-logo";
 import { type TranslationKey, useI18n } from "~/components/i18n";
-import { AlertCircle, ArrowUp, Clock } from "~/components/icons";
+import { AlertCircle, ArrowUp, ChevronRight, Clock } from "~/components/icons";
 import { Button } from "~/components/ui/button";
 import {
   Conversation,
@@ -171,6 +171,18 @@ function ModelErrorNotice({
                 {shownError.code}
               </p>
             )}
+            {/* The provider's own answer, without its credentials: what to read, or pass on, when the problem isn't plain. */}
+            {"detail" in shownError && shownError.detail && (
+              <details className="group text-xs">
+                <summary className="flex cursor-pointer list-none items-center gap-1 rounded-sm text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                  <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
+                  {t("details")}
+                </summary>
+                <pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-background px-3 py-2 font-mono text-[12px] leading-5 whitespace-pre-wrap break-words">
+                  {shownError.detail}
+                </pre>
+              </details>
+            )}
             {(held ||
               shownError.problem === "usage_limit" ||
               shownError.problem === "unauthorized" ||
@@ -266,7 +278,11 @@ export const Thread = memo(function Thread({
   const held = view.retry !== null && view.retry.at === 0;
   const shownError: ViewError | null =
     view.retry !== null && held
-      ? { problem: view.retry.problem, code: view.retry.code }
+      ? {
+          problem: view.retry.problem,
+          code: view.retry.code,
+          detail: view.retry.detail,
+        }
       : view.running
         ? null
         : view.error;

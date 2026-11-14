@@ -228,7 +228,7 @@ export class UsageMeter {
 	 * Writes a settled call to the ledger without holding up its caller: its tags may take a lookup,
 	 * and nothing here may fail the call, so what goes wrong is logged and the call is left unrecorded.
 	 */
-	#recordCall(model: Model<Api>, call: CallInfo, started: number, message: { usage?: ModelUsage; stopReason: string } | undefined): void {
+	#recordCall(model: Model<Api>, call: CallInfo, started: number, message: { usage?: ModelUsage; stopReason: string; errorMessage?: string } | undefined, failure: { error?: string; request?: Record<string, unknown> } = {}): void {
 		const ts = this.#now();
 		void (async () => {
 			try {
@@ -252,6 +252,8 @@ export class UsageMeter {
 					latencyMs: ts - started,
 					shape,
 					plan: this.#subscription(model.provider),
+					error: message?.errorMessage ?? failure.error,
+					request: failure.request,
 				});
 				if (due) this.#rollupDue?.();
 			} catch (error) {
@@ -457,14 +459,14 @@ export class UsageMeter {
 				events.result().then(
 					(message) => {
 						this.settleModel(reserved.reservation, message.usage);
-						this.#recordCall(model, info, started, message);
-						// The chat only says that a request failed; the provider's own words are for whoever runs the deployment.
+						this.#recordCall(model, info, started, message, { request: sent });
+						// The provider's own words are kept with the call, and logged for whoever runs the deployment.
 						if (message.stopReason !== "stop" && message.stopReason !== "toolUse" && message.stopReason !== "length") {
 							console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, stopReason: message.stopReason, error: (message.errorMessage ?? "").slice(0, 1000) }));
 						}
 					},
 					(error) => {
-						this.#recordCall(model, info, started, undefined);
+						this.#recordCall(model, info, started, undefined, { error: String(error), request: sent });
 						console.warn(JSON.stringify({ event: "pim.model_error", ...modelFacts(model), request: sent, error: String(error).slice(0, 1000) }));
 					},
 				);

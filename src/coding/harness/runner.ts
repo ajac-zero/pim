@@ -1,5 +1,5 @@
-import { describeModelFailure, isModelFailure, MODEL_ERROR_MAX, redactSecrets } from "../model-error";
-import { redact } from "../tools/output";
+import { describeModelFailure, isModelFailure, MODEL_ERROR_MAX } from "../model-error";
+import { redact, redactSecrets } from "../tools/output";
 import { parseTestSummary, type TestRun } from "../tools";
 import type { Restored } from "../vault/inject";
 import { harnessEnv, HARNESS_HOME } from "../vault/inject";

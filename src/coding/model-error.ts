@@ -1,6 +1,6 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
-import { redact } from "./tools/output";
+import { redactSecrets } from "./tools/output";
 
 /** The most characters of a model failure that a thread's detail keeps. */
 export const MODEL_ERROR_MAX = 500;
@@ -15,21 +15,6 @@ export type ModelFailure = {
 	readonly code?: string;
 	readonly message: string;
 };
-
-/** Credentials that `redact` doesn't know: bearer tokens, key headers and parameters, and the "Incorrect API key provided" wording. */
-const MORE_SECRETS: readonly (readonly [RegExp, string])[] = [
-	[/\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, "Bearer [REDACTED]"],
-	[/\b((?:proxy-)?authorization|x-api-key|api-key|x-goog-api-key|ocp-apim-subscription-key)(["']?\s*[:=]\s*["']?)[^\s"',;}]+(?:\s+[^\s"',;}]+)?/gi, "$1$2[REDACTED]"],
-	[/([?&](?:key|api_key|apikey|access_token|token)=)[^&\s"']+/gi, "$1[REDACTED]"],
-	[/\b(api key(?: provided)?:?\s+)[^\s"',;}]+/gi, "$1[REDACTED]"],
-];
-
-/** `text` without anything that looks like a credential. */
-export function redactSecrets(text: string): string {
-	let out = text;
-	for (const [pattern, replacement] of MORE_SECRETS) out = out.replace(pattern, replacement);
-	return redact(out);
-}
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const text = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value.trim() : typeof value === "number" ? String(value) : undefined);

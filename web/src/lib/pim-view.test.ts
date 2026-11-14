@@ -991,7 +991,7 @@ describe("errors", () => {
   it("names the ChatGPT usage limit, though it arrives as a 429", () => {
     const detail = `OpenAI API error (429): {"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"The ChatGPT user has reached their Subscription Sharing usage limit."}}
 Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
-    expect(unanswered("model_error", detail).view.error).toEqual({
+    expect(unanswered("model_error", detail).view.error).toMatchObject({
       problem: "usage_limit",
     });
     expect(
@@ -999,17 +999,17 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         "model_error",
         "Pim usage quota exceeded: today's 300 model requests are used up. It resets at midnight UTC.",
       ).view.error,
-    ).toEqual({ problem: "quota" });
+    ).toMatchObject({ problem: "quota" });
     expect(
       unanswered(
         "model_error",
         "OpenAI API error (503): upstream connect error",
       ).view.error,
-    ).toEqual({ problem: "busy" });
+    ).toMatchObject({ problem: "busy" });
   });
 
-  it("keeps no provider text, which can echo the request", () => {
-    const leaky = `OpenAI API error (400): Invalid input near "alice@example.com"; Authorization: Bearer sk-secret-token; see https://api.openai.com/v1/responses?key=abc`;
+  it("shows the provider's own answer, without its credentials", () => {
+    const leaky = `400 {"error":{"code":400,"message":"Invalid JSON payload received. Unknown name \\"patternProperties\\" at 'tools[0].function_declarations[3].parameters': Cannot find field.","status":"INVALID_ARGUMENT"}} Authorization: Bearer sk-secret-token-1234567890abcdef; see https://gateway.example.com/v1/messages?key=AIzaSyA-1234567890abcdefghijklmnopqrstu`;
     const failed = unanswered("model_error", leaky);
     const faulted = run([
       snapshot(),
@@ -1020,30 +1020,31 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         message: leaky,
       }),
     ]);
-    expect(failed.view.error).toEqual({ problem: "other", code: "400" });
-    expect(faulted.view.error).toEqual({ problem: "other", code: "400" });
     const states = [
-      failed,
-      faulted,
+      failed.view.error,
+      faulted.view.error,
       run([
         snapshot({
           generation: { attempt: 1, retry: { at: 5, error: leaky } },
         }),
-      ]),
+      ]).view.retry,
       run([
         snapshot(),
         event({ type: "auto_retry_start", at: 5, errorMessage: leaky }),
-      ]),
+      ]).view.retry,
     ];
-    for (const state of states) {
-      const shown = JSON.stringify(state.view);
-      for (const secret of [
-        "alice@example.com",
-        "sk-secret-token",
-        "https://",
-      ]) {
-        expect(shown).not.toContain(secret);
-      }
+    for (const shown of states) {
+      expect(shown).toMatchObject({
+        problem: "other",
+        code: "400",
+        detail: expect.stringContaining(
+          `Unknown name \\"patternProperties\\" at 'tools[0].function_declarations[3].parameters'`,
+        ),
+      });
+      const text = JSON.stringify(shown);
+      expect(text).not.toContain("sk-secret-token");
+      expect(text).not.toContain("AIzaSy");
+      expect(text).toContain("gateway.example.com/v1/messages?key=[REDACTED]");
     }
   });
 
@@ -1056,7 +1057,7 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         errorMessage: "subscription_sharing_usage_limit_exceeded",
       }),
     ]);
-    expect(held.view.retry).toEqual({ at: 0, problem: "usage_limit" });
+    expect(held.view.retry).toMatchObject({ at: 0, problem: "usage_limit" });
     const resumed = run([
       snapshot(),
       event({ type: "auto_retry_start", at: 0, errorMessage: "x" }),
@@ -1077,7 +1078,7 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
     }
     expect(
       run([snapshot(), fault("pi.generation", unauthorized)]).view.error,
-    ).toEqual({ problem: "unauthorized" });
+    ).toMatchObject({ problem: "unauthorized" });
     expect(
       run([
         snapshot(),
@@ -1086,7 +1087,7 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
           'authentication_error: {"code":"missing_credentials"}',
         ),
       ]).view.error,
-    ).toEqual({ problem: "unauthorized" });
+    ).toMatchObject({ problem: "unauthorized" });
     expect(
       run([
         snapshot(),
@@ -1095,13 +1096,13 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
           '400 {"type":"error","error":{"type":"invalid_request_error","message":"secret detail"}}',
         ),
       ]).view.error,
-    ).toEqual({ problem: "other", code: "400 invalid_request_error" });
+    ).toMatchObject({ problem: "other", code: "400 invalid_request_error" });
     expect(
       run([
         snapshot(),
         fault("pi.compaction", "subscription_sharing_usage_limit_exceeded"),
       ]).view.error,
-    ).toEqual({ problem: "usage_limit" });
+    ).toMatchObject({ problem: "usage_limit" });
   });
 
   it("keeps a fault's problem over the input's later reason, but not over its model error", () => {
@@ -1118,14 +1119,14 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
         fault("pi.generation", "OpenAI API error (401): unauthorized"),
         settle("faulted"),
       ]).view.error,
-    ).toEqual({ problem: "unauthorized" });
+    ).toMatchObject({ problem: "unauthorized" });
     expect(
       run([
         snapshot(),
         fault("pi.tool", "boom"),
         settle("model_error", "subscription_sharing_usage_limit_exceeded"),
       ]).view.error,
-    ).toEqual({ problem: "usage_limit" });
+    ).toMatchObject({ problem: "usage_limit" });
     expect(
       run([
         snapshot(),
@@ -1134,7 +1135,7 @@ Check your ChatGPT usage: https://chatgpt.com/settings/usage`;
           "The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.",
         ),
       ]).view.error,
-    ).toEqual({ problem: "usage_limit" });
+    ).toMatchObject({ problem: "usage_limit" });
   });
 
   it("clears the error when the next run starts", () => {

@@ -368,6 +368,13 @@ describe("A person's own model providers", () => {
 		await api(`/sessions/${held}`, { method: "DELETE" });
 		expect(failure).toMatchObject({ api: "anthropic-messages", baseUrl: "https://claude.test", request: { model: "claude-sonnet-5-5", thinking: { type: "adaptive" } } });
 		expect(JSON.stringify(failure)).not.toContain("Secret words");
+		// The call keeps the provider's whole answer, and the request's settings without its content.
+		const [call] = await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) =>
+			(pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql.exec("SELECT stop_reason, error, request FROM pim_model_calls WHERE provider = 'own:proxy' AND stop_reason = 'error' ORDER BY id DESC LIMIT 1").toArray(),
+		);
+		expect(call).toMatchObject({ stop_reason: "error", error: '400 {"type":"error","error":{"type":"invalid_request_error","message":"thinking is wrong"}}' });
+		expect(JSON.parse(String(call!.request))).toMatchObject({ model: "claude-sonnet-5-5", thinking: { type: "adaptive" } });
+		expect(String(call!.request)).not.toContain("Secret words");
 		// Saving again keeps the API it speaks.
 		expect((await put("/providers/proxy", { name: "Proxy 2" })).body.provider).toMatchObject({ api: "anthropic-messages" });
 		await api("/providers/proxy", { method: "DELETE" });

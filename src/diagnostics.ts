@@ -31,15 +31,32 @@ const SECRET_KEY = /pass(word)?|secret|token|api[_-]?key|authorization|credentia
 
 /** `text` with what looks like a secret, an address or an email taken out, and cut to `max` characters. */
 export function scrub(text: string, max = TEXT_LENGTH): string {
-	const clean = redact(redactSecrets(text
+	const clean = unaddressed(redact(redactSecrets(text
 		.replace(/\b(authorization["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|(?:bearer|basic|token)\s+[^\s"']+|[^\s"']+)/gi, "$1[redacted]")
 		.replace(/\b([\w-]*(?:token|secret|password|api[_-]?key)[\w-]*["']?)(?:\s*[=:]\s*|\s+)("[^"\n]*"|'[^'\n]*'|[^\s;"']+)/gi, "$1=[redacted]")))
 		.replace(/\b([\w-]*(?:token|secret|password|api[_-]?key)[\w-]*)\s*[=:]\s*("[^"\n]*"|'[^'\n]*'|[^\s;]+)/gi, "$1=[redacted]")
-		// Addresses keep their path but not the host, the credentials in them, or what follows `?`.
-		.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>/?#]*([^\s"'<>?#]*)[^\s"'<>]*/gi, (_url, path: string) => `[address]${path}`)
-		.replace(/\b((?:pass(?:word)?|secret|token|api[_-]?key|authorization|credential)s?)\s*[=:]\s*\S+/gi, "$1=[redacted]")
-		.replace(/[^\s@"'<>,;]+@[^\s@"'<>,;]+\.[^\s@"'<>,;]+/g, "[email]");
+		.replace(/\b((?:pass(?:word)?|secret|token|api[_-]?key|authorization|credential)s?)\s*[=:]\s*\S+/gi, "$1=[redacted]"));
 	return clean.length > max ? `${clean.slice(0, max)}…` : clean;
+}
+
+/** `text` without addresses, which keep their path but not the host, the credentials in them, or what follows `?`, and without emails. */
+function unaddressed(text: string): string {
+	return text
+		.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>/?#]*([^\s"'<>?#]*)[^\s"'<>]*/gi, (_url, path: string) => `[address]${path}`)
+		.replace(/[^\s@"'<>,;]+@[^\s@"'<>,;]+\.[^\s@"'<>,;]+/g, "[email]");
+}
+
+/** The most characters of a failed model call's error that the report gives. */
+const MODEL_ERROR_LENGTH = 4_000;
+
+/**
+ * A failed model call's error as the ledger keeps it, already without credentials (see ./model-calls.ts), and without
+ * addresses or emails. It is not scrubbed further: `scrub` takes long ids and words such as `max_tokens` for secrets,
+ * and they are often what a refused request is about.
+ */
+function modelError(text: string): string {
+	const clean = unaddressed(text);
+	return clean.length > MODEL_ERROR_LENGTH ? `${clean.slice(0, MODEL_ERROR_LENGTH)}…` : clean;
 }
 
 /** `value` with every string scrubbed and every secret-looking field left out. */
@@ -293,7 +310,14 @@ const SLOW_CALL_MS = 60_000;
 const COSTLY_CALL_USD = 1;
 
 function modelCalls({ sql }: DiagnosticSources, since: number, limit: number): Section {
-	const columns = "ts, agent_id, run_kind, provider, model, stop_reason, latency_ms, cost_usd, input, output";
+	const columns = "ts, agent_id, run_kind, provider, model, stop_reason, latency_ms, cost_usd, input, output, error, request";
+	const request = (text: unknown) => {
+		try {
+			return JSON.parse(String(text)) as unknown;
+		} catch {
+			return String(text);
+		}
+	};
 	const call = (why: string) => (row: Row) => ({
 		why: why || `stopped with ${String(row.stop_reason)}`,
 		at: iso(Number(row.ts)),
@@ -306,6 +330,8 @@ function modelCalls({ sql }: DiagnosticSources, since: number, limit: number): S
 		cost_usd: row.cost_usd === null ? null : Number(row.cost_usd),
 		input_tokens: Number(row.input),
 		output_tokens: Number(row.output),
+		...(row.error === null ? {} : { error: modelError(String(row.error)) }),
+		...(row.request === null ? {} : { request: request(row.request) }),
 	});
 	const failed = rows(sql, `SELECT ${columns} FROM pim_model_calls WHERE ts >= ? AND stop_reason IN ('error', 'aborted') ORDER BY ts DESC LIMIT ?`, since, limit).map(call(""));
 	const unpriced = rows(sql, `SELECT ${columns} FROM pim_model_calls WHERE ts >= ? AND plan = 0 AND cost_usd IS NULL ORDER BY ts DESC LIMIT ?`, since, limit).map(call("no price for this model"));
@@ -313,7 +339,11 @@ function modelCalls({ sql }: DiagnosticSources, since: number, limit: number): S
 	const costly = rows(sql, `SELECT ${columns} FROM pim_model_calls WHERE ts >= ? AND cost_usd >= ? ORDER BY cost_usd DESC LIMIT ?`, since, COSTLY_CALL_USD, limit).map(call("costly"));
 	const totals = rows(sql, "SELECT COUNT(*) AS calls, COALESCE(SUM(stop_reason IN ('error', 'aborted')), 0) AS errors FROM pim_model_calls WHERE ts >= ?", since)[0]!;
 	const items = [...failed, ...unpriced, ...slow, ...costly];
-	return section(items.slice(0, limit), items.length, `${Number(totals.calls)} calls in the window, ${Number(totals.errors)} of them errors or aborted. Slow is ${SLOW_CALL_MS / 1000} s or more, costly $${COSTLY_CALL_USD} or more.`);
+	return section(
+		items.slice(0, limit),
+		items.length,
+		`${Number(totals.calls)} calls in the window, ${Number(totals.errors)} of them errors or aborted. Slow is ${SLOW_CALL_MS / 1000} s or more, costly $${COSTLY_CALL_USD} or more. A failed call has the provider's error as it answered, and the request's settings without its content.`,
+	);
 }
 
 /**

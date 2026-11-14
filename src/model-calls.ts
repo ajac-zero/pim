@@ -1,11 +1,14 @@
 import type { Usage as ModelUsage } from "@earendil-works/pi-ai";
 import PRICES from "../config/model-prices.json";
+import { redactSecrets } from "./coding/tools/output";
 
 /**
  * One row for every model call, written when the call settles, and the
  * daily rollup of those rows: who spends, by agent, chat, run kind and
  * model. Prices are in config/model-prices.json; a call is priced when it
  * is recorded, and keeps the version of the table that priced it.
+ * A call that failed keeps what the provider answered, without its
+ * credentials, and the settings it was sent, without its content.
  *
  * Recording never throws into the model call: a failure is logged and the
  * call goes on unrecorded.
@@ -105,7 +108,14 @@ export type ModelCall = {
 	readonly shape: RequestShape | undefined;
 	/** The call ran on a subscription (the ChatGPT plan), which bills nothing per call. A custom endpoint is not one: it is priced by model id. */
 	readonly plan: boolean;
+	/** A failed call's error as the provider gave it, such as `400 {"error":{...}}`. */
+	readonly error?: string;
+	/** A failed call's request without its content: its settings, and how many messages and tools it carried. */
+	readonly request?: Record<string, unknown>;
 };
+
+/** The most characters of a failed call's error and request that are kept. */
+export const ERROR_KEEP = 8_000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS pim_model_calls (
@@ -132,7 +142,9 @@ CREATE TABLE IF NOT EXISTS pim_model_calls (
 	tool_schema_bytes INTEGER,
 	cost_usd REAL,
 	price_version TEXT,
-	plan INTEGER NOT NULL DEFAULT 0
+	plan INTEGER NOT NULL DEFAULT 0,
+	error TEXT,
+	request TEXT
 );
 CREATE INDEX IF NOT EXISTS pim_model_calls_by_ts ON pim_model_calls (ts);
 CREATE TABLE IF NOT EXISTS pim_usage_daily (
@@ -243,6 +255,9 @@ export class ModelCallLedger {
 		this.#sql = options.sql;
 		this.#prices = options.prices ?? PRICE_TABLE;
 		this.#sql.exec(SCHEMA);
+		const columns = new Set(this.#sql.exec("PRAGMA table_info(pim_model_calls)").toArray().map((row) => String(row.name)));
+		if (!columns.has("error")) this.#sql.exec("ALTER TABLE pim_model_calls ADD COLUMN error TEXT");
+		if (!columns.has("request")) this.#sql.exec("ALTER TABLE pim_model_calls ADD COLUMN request TEXT");
 		this.#repriceCustomEndpointCalls();
 		this.#dirty = this.#unrolled();
 	}
@@ -272,10 +287,13 @@ export class ModelCallLedger {
 			const price = call.plan ? undefined : priceOf(call.model, this.#prices);
 			const cost = costOf(tokens, price);
 			const { tags, shape } = call;
+			const failed = call.stopReason === "error" || call.stopReason === "aborted";
+			const error = failed && call.error?.trim() ? redactSecrets(call.error.trim()).slice(0, ERROR_KEEP) : null;
+			const request = failed && call.request ? redactSecrets(JSON.stringify(call.request)).slice(0, ERROR_KEEP) : null;
 			this.#sql.exec(
 				`INSERT INTO pim_model_calls (ts, agent_id, chat_id, run_kind, coding_thread_id, schedule_or_trigger_id, parent_run_id, turn_index, provider, model,
-					input, output, cache_read, cache_write_5m, cache_write_1h, stop_reason, latency_ms, prompt_bytes, tool_count, tool_schema_bytes, cost_usd, price_version, plan)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					input, output, cache_read, cache_write_5m, cache_write_1h, stop_reason, latency_ms, prompt_bytes, tool_count, tool_schema_bytes, cost_usd, price_version, plan, error, request)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				call.ts,
 				tags.agentId ?? null,
 				tags.chatId ?? null,
@@ -299,6 +317,8 @@ export class ModelCallLedger {
 				cost,
 				price ? this.#prices.version : null,
 				call.plan ? 1 : 0,
+				error,
+				request,
 			);
 			// One structured line per call, so what was priced (and what was not, and why) can be read from the logs.
 			console.log(

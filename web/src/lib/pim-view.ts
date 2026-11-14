@@ -17,6 +17,7 @@ import {
   type ReasoningItem,
 } from "~/lib/openresponses";
 import type { AgentTask, ApprovalStatus } from "~/lib/pim-api";
+import { redactSecrets } from "../../../src/coding/tools/output";
 import {
   DELIVERY_REMINDER,
   fromPerson,
@@ -207,7 +208,7 @@ export type SessionView = {
   /** The person's messages queued behind the running work, oldest first. */
   queue: readonly QueuedMessage[];
   /** A failed model request to be asked again: at `at`, or, at 0, when the person says so. */
-  retry: { at: number; problem: ModelProblem; code?: string } | null;
+  retry: ({ at: number } & ModelFailure) | null;
   error: ViewError | null;
   /**
    * The utility model's line for each tool call it described, by call id
@@ -216,10 +217,7 @@ export type SessionView = {
   lines: Readonly<Record<string, string>>;
 };
 
-/**
- * Why a model request failed, read from its error text. The text itself is
- * never shown: it is the provider's response, which can echo the request.
- */
+/** Why a model request failed, read from its error text. */
 export type ModelProblem =
   | "usage_limit"
   | "quota"
@@ -228,9 +226,20 @@ export type ModelProblem =
   | "busy"
   | "other";
 
+/**
+ * A failed model request: why, its HTTP status and error type when the
+ * problem is unclassified, and the provider's own answer, its credentials
+ * taken out, for the person to read or pass on.
+ */
+export type ModelFailure = {
+  problem: ModelProblem;
+  code?: string;
+  detail?: string;
+};
+
 export type ViewError =
   /** A failed or faulted model request. */
-  | { problem: ModelProblem; code?: string }
+  | ModelFailure
   /** Any other faulted task, such as a tool's. Its message is never shown. */
   | { taskFailed: true }
   /** pi's code for any other unanswered input. */
@@ -265,8 +274,7 @@ const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
 
 /**
  * An unclassified model error's HTTP status and error type, such as
- * "400 invalid_request_error": enough to tell what went wrong without
- * showing the provider's own text.
+ * "400 invalid_request_error": what went wrong at a glance.
  */
 export function modelErrorCode(text: string): string | undefined {
   const status = /\b([1-5]\d\d)\b/.exec(text)?.[1];
@@ -276,14 +284,21 @@ export function modelErrorCode(text: string): string | undefined {
   return [status, kind].filter(Boolean).join(" ") || undefined;
 }
 
-/** The error a model failure shows: its problem, and for an unclassified one its code. */
-export function modelError(text: string): {
-  problem: ModelProblem;
-  code?: string;
-} {
+/** The most characters of a provider's answer a failure shows. */
+const DETAIL_MAX = 8_000;
+
+/** The error a model failure shows: its problem, for an unclassified one its code, and the provider's answer without its credentials. */
+export function modelError(text: string): ModelFailure {
   const problem = modelProblem(text);
   const code = problem === "other" ? modelErrorCode(text) : undefined;
-  return code ? { problem, code } : { problem };
+  const said = redactSecrets(text.trim());
+  const detail =
+    said.length > DETAIL_MAX ? `${said.slice(0, DETAIL_MAX)}…` : said;
+  return {
+    problem,
+    ...(code ? { code } : {}),
+    ...(detail ? { detail } : {}),
+  };
 }
 
 export function modelProblem(text: string): ModelProblem {

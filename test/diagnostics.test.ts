@@ -90,7 +90,19 @@ describe("the majordomo's diagnostics tools", () => {
 	it("report what went wrong, by kind, with secrets and addresses taken out", async () => {
 		await inPim((pim) => {
 			const now = Date.now();
-			pim.usage.calls.record({ ts: now, tags: { runKind: "interactive" }, provider: "test", model: "m", usage: undefined, stopReason: "error", latencyMs: 90_000, shape: undefined, plan: false });
+			pim.usage.calls.record({
+				ts: now,
+				tags: { runKind: "interactive" },
+				provider: "test",
+				model: "m",
+				usage: undefined,
+				stopReason: "error",
+				latencyMs: 90_000,
+				shape: undefined,
+				plan: false,
+				error: `400 {"error":{"code":400,"message":"Unknown name \\"patternProperties\\" at 'tools[0].function_declarations[3].parameters'; max_tokens 8192 for gemini-4-hydrogen-20261101 from https://${PUBLIC_HOST}/v1 with x-api-key: ${SECRET}","status":"INVALID_ARGUMENT"}}`,
+				request: { model: "gemini-4-hydrogen-20261101", max_tokens: 8192, tools: "31 items" },
+			});
 			pim.providerCooldowns.failed("openai", { message: `You've hit your usage limit (key ${SECRET}). Try again in 42 min.` }, now);
 			pim.diagnosticEvents.record("slow_request", { method: "GET", path: "/api/sessions", ms: 7000, error: `Bearer ${SECRET} from https://${PUBLIC_HOST}/x?key=${SECRET}`, api_key: SECRET });
 			pim.store.requestApproval({ id: "ap-1", session: pim.store.sessionOf(ROOT)!, action: "send_email", tool: null, args: {}, summary: `Send to someone@example.org with token=${SECRET}`, callId: null, createdAt: now, expiresAt: null, onTimeout: "deny" });
@@ -115,6 +127,10 @@ describe("the majordomo's diagnostics tools", () => {
 		expect(Object.keys(report.sections).sort()).toEqual(["approvals", "coding", "connectors", "events", "model_calls", "now", "provider_cooldowns", "runs", "stalls", "triggers", "turns"]);
 		expect(report).toMatchObject({ limit: 20, generated_at: expect.any(String), since: expect.any(String) });
 		expect(report.sections.model_calls.items[0]).toMatchObject({ why: "stopped with error", provider: "test", model: "m", run_kind: "interactive", latency_ms: 90_000 });
+		// A failed call gives the provider's answer and the request's settings, its ids and token counts whole, without credentials or hosts.
+		expect(report.sections.model_calls.items[0].error).toContain(`Unknown name \\"patternProperties\\" at 'tools[0].function_declarations[3].parameters'; max_tokens 8192 for gemini-4-hydrogen-20261101 from [address]/v1`);
+		expect(report.sections.model_calls.items[0].error).toContain('"status":"INVALID_ARGUMENT"');
+		expect(report.sections.model_calls.items[0].request).toEqual({ model: "gemini-4-hydrogen-20261101", max_tokens: 8192, tools: "31 items" });
 		expect(report.sections.events.items[0]).toMatchObject({ kind: "slow_request", detail: { method: "GET", path: "/api/sessions", ms: 7000, api_key: "[redacted]" } });
 		expect(report.sections.triggers.items).toEqual(
 			expect.arrayContaining([

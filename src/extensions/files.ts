@@ -2,6 +2,7 @@ import { createPiTools } from "@cloudflare/computer/tools/pi-ai";
 import { type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { type Computer, DEFAULT_COMMAND_MS, FileConflictError, MAX_COMMAND_MS } from "../computer";
+import { sha256Hex } from "../file-changes";
 import { FILES_ROOT, filesPath } from "../files";
 import { defineGatedAction, type GatedAction } from "./approvals";
 import { text } from "./services";
@@ -42,6 +43,8 @@ export type FileServices = {
 	readonly computer: Computer;
 	/** Throws once the space is being erased: work still under way then writes nothing. */
 	assertOpen(): void;
+	/** A chat's agent just read, wrote, edited or deleted `path`; `sha256` is the file as it read it. Remembering what it saw lets the person's later changes be shown to it (../file-changes.ts). Best effort: a failure is ignored. */
+	saw?(session: string, path: string, sha256?: string): Promise<void>;
 };
 
 /** Says what's wrong with a call's path or folder, or null when each is under `FILES_ROOT`. */
@@ -58,12 +61,9 @@ const EXPECTED_HASH = {
 	description: `The sha256 of the file as you last read it (file_read gives it), or "absent" to only create a new file. If the file has changed since, nothing is written and the result is a conflict: read the file again and redo the change.`,
 } as const;
 
-const sha256Hex = async (bytes: Uint8Array): Promise<string> =>
-	Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (byte) => byte.toString(16).padStart(2, "0")).join("");
-
 function definitions(services: FileServices) {
 	const declared = createPiTools({ workspace: { fs: { ...services.computer.fs, writeFile: async () => {} } }, root: FILES_ROOT, exec: {} }).tools;
-	const run = async (name: WorkspaceTool, args: Record<string, unknown>, id: string, signal?: AbortSignal): Promise<ToolExecutionResult> => {
+	const run = async (name: WorkspaceTool, args: Record<string, unknown>, id: string, signal?: AbortSignal, session?: string): Promise<ToolExecutionResult> => {
 		const problem = outside(args);
 		if (problem) return text(problem, true);
 		if (CHANGES.has(name)) services.assertOpen();
@@ -103,6 +103,9 @@ function definitions(services: FileServices) {
 			const sha256 = name === "read" ? await fs.stat(rest.path as string).then((stat) => stat.sha256, () => null) : null;
 			const result = await execute({ id, name, arguments: rest }, { abortSignal: signal });
 			if (conflict) return text(JSON.stringify(conflict.conflict), true);
+			if (session && services.saw && (name === "read" || name === "write" || name === "edit" || name === "delete") && !result.isError) {
+				await services.saw(session, filesPath(rest.path)!, sha256 ?? undefined).catch(() => undefined);
+			}
 			const content = result.content as ToolExecutionResult["content"];
 			if (sha256 !== null && !result.isError) return { content: [...(content ?? []), { type: "text", text: `sha256 of the whole file: ${sha256}` }] };
 			return { content, ...(result.isError ? { isError: true } : {}) };
@@ -132,7 +135,7 @@ export function filesExtension(services: FileServices) {
 				description: `${tool.description} ${WHERE}`,
 				parameters: tool.parameters as unknown as TSchema,
 				replay: REPLAY_SAFE.has(tool.name) ? "safe" : "unsafe",
-				execute: (args, api, context) => run(tool.name, args as Record<string, unknown>, api.callId, context.abortSignal),
+				execute: (args, api, context) => run(tool.name, args as Record<string, unknown>, api.callId, context.abortSignal, String(api.conversationId)),
 			}),
 		);
 	return defineExtension({ name: FILES_EXTENSION, tools: registrations });
@@ -150,8 +153,8 @@ export function fileDeleteAction(services: FileServices): GatedAction {
 			const { path, recursive } = args as { path?: unknown; recursive?: unknown };
 			return `Delete ${String(path)}${recursive === true ? " and everything in it" : ""}`;
 		},
-		async run(args) {
-			const result = await run("delete", args as Record<string, unknown>, crypto.randomUUID());
+		async run(args, { session }) {
+			const result = await run("delete", args as Record<string, unknown>, crypto.randomUUID(), undefined, session);
 			const said = (result.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 			if (result.isError) throw new Error(said || "The file could not be deleted.");
 			return said || "Deleted.";

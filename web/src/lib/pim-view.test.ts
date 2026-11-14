@@ -8,6 +8,7 @@ import {
   EMPTY_STREAM,
   layoutThread,
   noticeOf,
+  projectMessage,
   reduceAll,
   type StreamState,
   type ThreadEntry,
@@ -15,7 +16,11 @@ import {
   thinkingSince,
   type WorkApproval,
 } from "~/lib/pim-view";
-import { DELIVERY_REMINDER, INTRODUCTION } from "../../../src/transcript";
+import {
+  DELIVERY_REMINDER,
+  FILE_CHANGES,
+  INTRODUCTION,
+} from "../../../src/transcript";
 
 /* Event and entry builders. Casts keep fixtures to the fields the view reads. */
 
@@ -1330,5 +1335,30 @@ describe("a coding thread's turn ending", () => {
   it("leaves other text alone", () => {
     expect(codingNoticeOf("[Coding thread")).toBeNull();
     expect(noticeOf("I started a [Coding thread x] today")).toBeNull();
+  });
+});
+
+describe("files that changed since the agent's last turn", () => {
+  it("shows the person's message without Pim's note of them", () => {
+    const entries = projectMessage(
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `${FILE_CHANGES}\n/workspace/a.ts (changed)\n-x\n+y\n\n`,
+          },
+          { type: "text", text: "Fix the rest" },
+        ],
+        timestamp: 1,
+      },
+      "m1",
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      kind: "item",
+      source: "user",
+      item: { content: [{ type: "input_text", text: "Fix the rest" }] },
+    });
   });
 });

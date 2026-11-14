@@ -368,6 +368,17 @@ export class Computer {
 		else pending.resolve(message.result ?? null);
 	}
 
+	/**
+	 * What this space wrote to a file is told to its watchers as a change: the
+	 * computer doesn't report writes it made for the space, and the app showing
+	 * the file, in this tab or another, reloads it. Returns what was written.
+	 */
+	#wrote(path: string, written: WriteResult): WriteResult {
+		const event: FileEvent = { event: "file_changed", path: posix.normalize(path), kind: "modified", sha256: written.sha256, size: written.size, mtime: written.mtime };
+		for (const listener of [...this.#fileListeners]) listener(event);
+		return written;
+	}
+
 	/** Calls the computer and waits for its answer. */
 	async call<T = unknown>(op: string, args: Record<string, unknown>, timeoutMs = FILE_CALL_MS): Promise<T> {
 		if (!this.paired()) throw new HttpError(404, "No computer is connected. The person can connect one in Settings → Computer.");
@@ -668,7 +679,7 @@ export class Computer {
 			const mode = options.mode === undefined ? {} : { mode: options.mode };
 			const condition = options.expectedHash === undefined ? {} : { expectedHash: options.expectedHash };
 			if (bytes.byteLength <= CHUNK_BYTES) {
-				return this.call<WriteResult>("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode, ...condition });
+				return this.#wrote(path, await this.call<WriteResult>("write", { path, data: Buffer.from(bytes).toString("base64"), ...mode, ...condition }));
 			}
 			// In parts, to a file beside it that takes its place once whole.
 			const slash = path.lastIndexOf("/");
@@ -678,7 +689,7 @@ export class Computer {
 					const data = Buffer.from(bytes.subarray(start, start + CHUNK_BYTES)).toString("base64");
 					await this.call("write", { path: temporary, data, append: start > 0, ...mode });
 				}
-				return await this.call<WriteResult>("write", { path, from: temporary, ...mode, ...condition });
+				return this.#wrote(path, await this.call<WriteResult>("write", { path, from: temporary, ...mode, ...condition }));
 			} catch (error) {
 				await this.call("rm", { path: temporary, force: true }).catch(() => undefined);
 				throw error;

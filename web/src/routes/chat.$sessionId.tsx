@@ -43,6 +43,7 @@ import {
   isFilePath,
   openCanvasTab,
 } from "~/lib/canvas";
+import { canvasSessions, requestReveal } from "~/lib/canvas-live";
 import { pim, type UserContent } from "~/lib/pim-api";
 import { pimClient, textOf, usePimClient } from "~/lib/pim-client";
 import { modelError } from "~/lib/pim-view";
@@ -221,6 +222,46 @@ function ChatPage() {
     // A chat opens with its options box closed, so it doesn't cover the chat.
     writeSummaryOpen(false);
   }, [sessionId]);
+
+  // What agents ask of the canvas: open a file, say what is open or selected.
+  // It answers from what the canvas shows now, read from `canvas`.
+  useEffect(
+    () =>
+      pimClient.listenCanvas((request) => {
+        const {
+          artifact: shownApp,
+          file: shownFile,
+          tabs: open = [],
+        } = canvas.current;
+        if (request.type === "open") {
+          void navigate({
+            to: "/chat/$sessionId",
+            params: { sessionId },
+            search: openCanvasTab({ tabs: open }, request.path),
+            replace: true,
+          });
+          if (request.line) requestReveal(request.path, request.line);
+          return;
+        }
+        const active = shownApp ? null : (shownFile ?? null);
+        const selected =
+          request.what === "selection" && active
+            ? canvasSessions.get(active)?.selection()
+            : null;
+        pimClient.answerCanvas(request.request, {
+          tabs: open.filter(isFilePath).map((path) => ({
+            path,
+            dirty: canvasSessions.get(path)?.dirty ?? false,
+          })),
+          active,
+          ...(request.what === "selection" && {
+            selection:
+              selected && active ? { path: active, ...selected } : null,
+          }),
+        });
+      }),
+    [sessionId, navigate],
+  );
 
   const followed = usePimClient((state) => state.session);
   const followedView = usePimClient((state) => state.view);

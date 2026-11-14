@@ -31,6 +31,15 @@ export const CODING_EVENT = /^\[Coding thread /;
 /** How a message starts that another agent in a group chat said, with its name (see ./rooms.ts). */
 export const ROOM_POST = /^\[From ([^\]\n]+)\]\n?/;
 
+/** How the text part starts that Pim puts before the person's message when files the agent saw changed since its last turn (see ./file-changes.ts); the person's own message follows it, and the app shows only that. */
+export const FILE_CHANGES = "[Files you changed since your last turn]";
+
+/** The person's message without Pim's block of file changes. */
+export function withoutFileChanges<T extends string | readonly (TextContent | ImageContent)[]>(content: T): T {
+	if (typeof content === "string") return content;
+	return (content as readonly (TextContent | ImageContent)[]).filter((part) => !(part.type === "text" && part.text.startsWith(FILE_CHANGES))) as unknown as T;
+}
+
 /** Whether a user-role message's text is the person's own, rather than something Pim or another agent gave the agent. */
 export function fromPerson(text: string): boolean {
 	if (isDeliveryReminder(text) || text.startsWith(INTRODUCTION) || ROOM_POST.test(text)) return false;
@@ -80,7 +89,7 @@ function projectMessage(message: Message, id: string): TranscriptMessage | undef
 			return {
 				id,
 				role: "user",
-				parts: typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content,
+				parts: typeof message.content === "string" ? [{ type: "text", text: message.content }] : withoutFileChanges(message.content),
 				timestamp: message.timestamp,
 			};
 		case "assistant":

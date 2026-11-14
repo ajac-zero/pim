@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { languageOf } from "~/lib/editor-language";
 import { AUTOSAVE_MS, type FileClient, FileSession } from "~/lib/file-session";
 import { decodeFile, joinText } from "~/lib/file-text";
-import { FileConflictError, type FileWrite } from "~/lib/pim-api";
+import { ApiError, FileConflictError, type FileWrite } from "~/lib/pim-api";
 
 /** Starts a save without waiting for the mock server to answer it. */
 const flushNow = async (session: FileSession) => {
@@ -11,6 +11,30 @@ const flushNow = async (session: FileSession) => {
 };
 
 const enc = (text: string) => new TextEncoder().encode(text);
+
+/** The editor as the session sees it, over a document the test holds. */
+function fakeEditor(initial = "") {
+  let doc = initial;
+  const setText = vi.fn((text: string) => {
+    doc = text;
+  });
+  return {
+    handle: {
+      getText: () => doc,
+      setText,
+      getSelection: () => ({
+        from: { line: 1, column: 1 },
+        to: { line: 1, column: 1 },
+        text: "",
+      }),
+      reveal: vi.fn(),
+    },
+    type: (text: string) => {
+      doc = text;
+    },
+    setText,
+  };
+}
 
 /** A mock of the shared file API: PUT answers with the next hash, or 409s. */
 function mockClient(options: { conflictOnce?: FileConflictError } = {}) {
@@ -145,11 +169,12 @@ it("saves unconditionally when the backend sends no hashes", async () => {
 });
 
 it("keeps the buffer on a 409, stops autosave, and resolves both ways", async () => {
-  const conflict = new FileConflictError("hash_mismatch", "theirs", 5, 9);
+  const conflict = new FileConflictError("hash_mismatch", "disk", 5, 9);
   const { client, writes, finish } = mockClient({ conflictOnce: conflict });
   const session = open(client);
-  const setText = vi.fn();
-  session.attach({ getText: () => "", setText });
+  const editor = fakeEditor();
+  session.attach(editor.handle);
+  editor.type("mine");
   session.edit("mine");
   await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
   expect(session.getState().status).toBe("conflict");
@@ -158,25 +183,26 @@ it("keeps the buffer on a 409, stops autosave, and resolves both ways", async ()
   expect(writes).toHaveLength(1);
   expect(session.text).toBe("mine!");
 
-  // Overwrite: If-Match of the conflict's currentHash.
+  // Overwrite: If-Match of what was found on disk.
   void session.overwrite();
   await vi.advanceTimersByTimeAsync(0);
-  expect(writes[1]).toEqual({ text: "mine!", options: { ifMatch: "theirs" } });
+  expect(writes[1]).toEqual({ text: "mine!", options: { ifMatch: "disk" } });
   await finish("h9");
   expect(session.getState().status).toBe("saved");
 });
 
 it("reloads from disk on conflict, replacing the buffer", async () => {
-  const conflict = new FileConflictError("hash_mismatch", "theirs", 5, 9);
+  const conflict = new FileConflictError("hash_mismatch", "disk", 5, 9);
   const { client } = mockClient({ conflictOnce: conflict });
   const session = open(client);
-  const setText = vi.fn();
-  session.attach({ getText: () => "", setText });
+  const editor = fakeEditor();
+  session.attach(editor.handle);
+  editor.type("mine");
   session.edit("mine");
   await session.flush();
   await session.reloadFromDisk();
   expect(client.readFile).toHaveBeenCalledWith("/workspace/a.txt");
-  expect(setText).toHaveBeenCalledWith("disk text\n");
+  expect(editor.setText).toHaveBeenCalledWith("disk text\n");
   expect(session.getState()).toMatchObject({ status: "clean", conflict: null });
 });
 
@@ -214,17 +240,28 @@ it("opens a 1 to 5 MiB file read-only, where edits save nothing", async () => {
   expect(writes).toHaveLength(0);
 });
 
-it("applies external content only when the buffer is clean", async () => {
+/** Makes the next read of the file answer with `text` as hash `hash`. */
+const diskNow = (client: FileClient, text: string, hash: string) =>
+  vi.mocked(client.readFile).mockResolvedValueOnce({
+    bytes: enc(text),
+    sha256: hash,
+  });
+
+const settle = () => vi.advanceTimersByTimeAsync(0);
+
+it("reloads silently when the file changes elsewhere and nothing is unsaved", async () => {
   const { client, finish } = mockClient();
   const session = open(client);
-  const setText = vi.fn();
-  session.attach({ getText: () => "", setText });
-  expect(session.applyExternalContent("\ufefffresh\r\n", "h5")).toBe(true);
-  expect(setText).toHaveBeenCalledWith("fresh\n");
-  session.edit("typing");
-  expect(session.applyExternalContent("other", "h6")).toBe(false);
-  expect(setText).toHaveBeenCalledTimes(1);
+  const editor = fakeEditor("one\n");
+  session.attach(editor.handle);
+  diskNow(client, "\ufefffresh\r\n", "h5");
+  expect(session.fileChanged({ kind: "modified", sha256: "h5" })).toBe(true);
+  await settle();
+  expect(editor.setText).toHaveBeenCalledWith("fresh\n");
+  expect(session.getState().status).toBe("clean");
   // The new hash is the base for the next save, and CRLF/BOM are kept.
+  editor.type("typing");
+  session.edit("typing");
   await flushNow(session);
   await finish("h7");
   expect(client.writeFile).toHaveBeenCalledWith(
@@ -232,6 +269,145 @@ it("applies external content only when the buffer is clean", async () => {
     "\ufefftyping",
     { ifMatch: "h5" },
   );
+});
+
+it("ignores the change its own save made, and reads nothing for it", async () => {
+  const { client, finish } = mockClient();
+  const session = open(client);
+  session.edit("mine");
+  await flushNow(session);
+  // Pim reports the write before the save's answer reaches the page.
+  expect(session.fileChanged({ kind: "modified", sha256: "h1" })).toBe(true);
+  await settle();
+  expect(client.readFile).not.toHaveBeenCalled();
+  await finish("h1");
+  await settle();
+  // Once the save answered, the same report is the session's own.
+  expect(session.fileChanged({ kind: "modified", sha256: "h1" })).toBe(false);
+  expect(client.readFile).not.toHaveBeenCalled();
+  expect(session.getState().status).toBe("saved");
+});
+
+it("merges an outside change to another part of the file into unsaved typing", async () => {
+  const base = "a\nb\nc\nd\ne\n";
+  const { client, writes, finish } = mockClient();
+  const session = open(client, base, "h0");
+  const editor = fakeEditor(base);
+  session.attach(editor.handle);
+  // The person edits line 1; an agent edits line 5.
+  editor.type("A\nb\nc\nd\ne\n");
+  session.edit("A\nb\nc\nd\ne\n");
+  diskNow(client, "a\nb\nc\nd\nE\n", "h2");
+  session.fileChanged({ kind: "modified", sha256: "h2" });
+  await settle();
+  expect(editor.setText).toHaveBeenCalledWith("A\nb\nc\nd\nE\n");
+  expect(session.getState()).toMatchObject({ status: "dirty", disk: null });
+  // Saved against what the agent wrote, so neither overwrites the other.
+  await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+  expect(writes).toEqual([
+    { text: "A\nb\nc\nd\nE\n", options: { ifMatch: "h2" } },
+  ]);
+  await finish("h3");
+  expect(session.getState().status).toBe("saved");
+});
+
+it("keeps unsaved typing as it is when an outside change hits the same lines", async () => {
+  const base = "a\nb\nc\n";
+  const { client, writes, finish } = mockClient();
+  const session = open(client, base, "h0");
+  const editor = fakeEditor(base);
+  session.attach(editor.handle);
+  editor.type("a\nmine\nc\n");
+  session.edit("a\nmine\nc\n");
+  diskNow(client, "a\ntheirs\nc\n", "h2");
+  session.fileChanged({ kind: "modified", sha256: "h2" });
+  await settle();
+  expect(session.getState()).toMatchObject({
+    status: "conflict",
+    disk: { hash: "h2", text: "a\ntheirs\nc\n" },
+  });
+  // Nothing was replaced, and nothing is saved over the agent's version.
+  expect(editor.setText).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 4);
+  expect(writes).toHaveLength(0);
+  expect(session.text).toBe("a\nmine\nc\n");
+
+  // Both sides in the file, to settle by hand.
+  session.markConflicts();
+  expect(editor.setText).toHaveBeenCalledWith(
+    "a\n<<<<<<< mine\nmine\n||||||| earlier\nb\n=======\ntheirs\n>>>>>>> on disk\nc\n",
+  );
+  expect(session.getState().status).toBe("dirty");
+  await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+  expect(writes[0]?.options).toEqual({ ifMatch: "h2" });
+  await finish("h3");
+});
+
+it("overwrites what an outside change left, when the person says so", async () => {
+  const { client, writes, finish } = mockClient();
+  const session = open(client, "a\n", "h0");
+  session.edit("mine\n");
+  diskNow(client, "theirs\n", "h2");
+  session.fileChanged({ kind: "modified", sha256: "h2" });
+  await settle();
+  expect(session.getState().status).toBe("conflict");
+  void session.overwrite();
+  await settle();
+  expect(writes[0]).toEqual({ text: "mine\n", options: { ifMatch: "h2" } });
+  await finish("h3");
+  expect(session.getState().status).toBe("saved");
+});
+
+it("looks at a change that came during a save once the save ends", async () => {
+  const { client, finish } = mockClient();
+  const session = open(client, "a\n", "h0");
+  session.edit("b\n");
+  await flushNow(session);
+  diskNow(client, "elsewhere\n", "h9");
+  session.fileChanged({ kind: "modified", sha256: "h9" });
+  await settle();
+  expect(client.readFile).not.toHaveBeenCalled();
+  await finish("h1");
+  await settle();
+  expect(client.readFile).toHaveBeenCalledTimes(1);
+});
+
+it("merges on a 409 too, when its version differs elsewhere than the typing", async () => {
+  const base = "a\nb\nc\nd\ne\n";
+  const { client, writes, finish } = mockClient({
+    conflictOnce: new FileConflictError("hash_mismatch", "h2", 5, 9),
+  });
+  const session = open(client, base, "h0");
+  const editor = fakeEditor(base);
+  session.attach(editor.handle);
+  editor.type("A\nb\nc\nd\ne\n");
+  session.edit("A\nb\nc\nd\ne\n");
+  diskNow(client, "a\nb\nc\nd\nE\n", "h2");
+  await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+  expect(editor.setText).toHaveBeenCalledWith("A\nb\nc\nd\nE\n");
+  await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+  expect(writes[1]).toEqual({
+    text: "A\nb\nc\nd\nE\n",
+    options: { ifMatch: "h2" },
+  });
+  await finish("h3");
+});
+
+it("keeps unsaved typing when the file is deleted under it", async () => {
+  const { client, writes } = mockClient();
+  const session = open(client);
+  session.edit("mine");
+  vi.mocked(client.readFile).mockRejectedValueOnce(
+    new ApiError(404, "not found"),
+  );
+  session.fileChanged({ kind: "deleted", sha256: null });
+  await settle();
+  expect(session.getState()).toMatchObject({
+    status: "conflict",
+    disk: { hash: null },
+  });
+  void session.overwrite();
+  expect(writes[0]?.options).toEqual({ ifNoneMatch: true });
 });
 
 it("leaves no timers running after dispose", async () => {

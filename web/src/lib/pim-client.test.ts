@@ -184,6 +184,110 @@ describe("the live connection", () => {
   });
 });
 
+describe("watching files", () => {
+  const sent = (socket: FakeSocket) =>
+    socket.sent
+      .filter((data) => data !== "ping")
+      .map((data) => JSON.parse(data));
+
+  it("asks Pim to watch a file for as long as someone here does, and tells them of its changes", () => {
+    const client = new PimClient();
+    client.open("s1");
+    const socket = latest();
+    socket.serve();
+    const first = vi.fn();
+    const second = vi.fn();
+    const stopFirst = client.watchFile("/workspace/./a.ts", first);
+    const stopSecond = client.watchFile("/workspace/a.ts", second);
+    // One watch for both, under the path Pim names.
+    expect(sent(socket)).toEqual([
+      { type: "watch_file", path: "/workspace/a.ts" },
+    ]);
+    socket.say({
+      type: "file_changed",
+      path: "/workspace/a.ts",
+      kind: "modified",
+      sha256: "h1",
+      size: 3,
+    });
+    expect(first).toHaveBeenCalledWith({
+      kind: "modified",
+      sha256: "h1",
+      size: 3,
+    });
+    expect(second).toHaveBeenCalledTimes(1);
+    socket.say({
+      type: "file_changed",
+      path: "/workspace/other.ts",
+      kind: "modified",
+      sha256: "h2",
+      size: 3,
+    });
+    expect(first).toHaveBeenCalledTimes(1);
+
+    // The watch is let go with the last listener.
+    stopFirst();
+    expect(sent(socket)).toHaveLength(1);
+    stopSecond();
+    expect(sent(socket).at(-1)).toEqual({
+      type: "unwatch_file",
+      path: "/workspace/a.ts",
+    });
+  });
+
+  it("watches again on a new connection and when Pim asks", async () => {
+    const client = new PimClient();
+    client.open("s1");
+    const first = latest();
+    first.serve();
+    client.watchFile("/workspace/a.ts", () => {});
+    first.dispatchEvent(new Event("close"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    const second = latest();
+    expect(second).not.toBe(first);
+    second.serve();
+    expect(sent(second)).toEqual([
+      { type: "watch_file", path: "/workspace/a.ts" },
+    ]);
+    second.say({ type: "file_resync" });
+    expect(sent(second)).toHaveLength(2);
+  });
+
+  it("passes on what agents ask of the canvas of the chat on screen, and answers", () => {
+    const client = new PimClient();
+    client.open("s1");
+    const socket = latest();
+    socket.serve();
+    const asked = vi.fn();
+    client.listenCanvas(asked);
+    socket.say({
+      type: "canvas_open",
+      session: "s1",
+      path: "/workspace/a.ts",
+      line: 4,
+    });
+    socket.say({
+      type: "canvas_query",
+      session: "s1",
+      request: "r1",
+      what: "tabs",
+    });
+    // Another chat's asks aren't this canvas's.
+    socket.say({ type: "canvas_open", session: "s2", path: "/workspace/b.ts" });
+    expect(asked.mock.calls).toEqual([
+      [{ type: "open", path: "/workspace/a.ts", line: 4 }],
+      [{ type: "query", request: "r1", what: "tabs" }],
+    ]);
+    client.answerCanvas("r1", { tabs: [], active: null });
+    expect(sent(socket).at(-1)).toEqual({
+      type: "canvas_answer",
+      request: "r1",
+      tabs: [],
+      active: null,
+    });
+  });
+});
+
 describe("sending a message", () => {
   it("tries a send that times out again under the same operation id, then shows it failed until the person retries", async () => {
     const send = hangingSend();

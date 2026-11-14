@@ -740,9 +740,14 @@ const translations = {
     fileEdit: "Edit",
     filePreview: "Preview",
     fileConflict:
-      "This file changed on disk since you opened it. Your edits are kept here, unsaved.",
+      "This file changed on disk where you were editing. Your edits are kept here, unsaved.",
     fileReloadFromDisk: "Reload from disk (discard my edits)",
     fileOverwrite: "Overwrite with mine",
+    fileConflictDeleted:
+      "This file was deleted while you were editing it. Your edits are kept here, unsaved.",
+    fileMarkConflicts: "Show both in the file",
+    fileNoComputer:
+      "Your files are on your computer, and you haven't connected one yet.",
     computer: "Computer",
     settingsComputer: "Computer",
     computerDescription:
@@ -2806,9 +2811,14 @@ const translations = {
     fileEdit: "Editar",
     filePreview: "Vista previa",
     fileConflict:
-      "Este archivo cambió en el disco desde que lo abriste. Tus cambios siguen aquí, sin guardar.",
+      "Este archivo cambió en el disco justo donde editabas. Tus cambios siguen aquí, sin guardar.",
     fileReloadFromDisk: "Recargar del disco (descartar mis cambios)",
     fileOverwrite: "Sobrescribir con lo mío",
+    fileConflictDeleted:
+      "Este archivo se eliminó mientras lo editabas. Tus cambios siguen aquí, sin guardar.",
+    fileMarkConflicts: "Mostrar ambos en el archivo",
+    fileNoComputer:
+      "Tus archivos están en tu computadora, y aún no has conectado una.",
     computer: "Computadora",
     settingsComputer: "Computadora",
     computerDescription:

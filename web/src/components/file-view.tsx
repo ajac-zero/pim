@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
-import { lazy, type ReactNode, Suspense, useState } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { lazy, type ReactNode, Suspense, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
@@ -17,7 +17,7 @@ import type { FileSession, SessionStatus } from "~/lib/file-session";
 import { MAX_VIEWABLE_BYTES } from "~/lib/file-text";
 import { baseName, parentOf, previewOf } from "~/lib/files";
 import { ApiError, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
-import { filesQuery } from "~/lib/queries";
+import { computerQuery, filesQuery } from "~/lib/queries";
 import { useFileSession } from "~/lib/use-file-session";
 import { cn } from "~/lib/utils";
 
@@ -72,9 +72,34 @@ function SaveStatus({ status }: { status: SessionStatus }) {
   );
 }
 
-/** The file changed on disk while it was being edited: keep the buffer, and let the person pick a side. */
+/** Files live on the person's computer: without one there is nothing to open, and the way to get one is shown instead of an error. */
+function NoComputer({ onClose }: { onClose?: () => void }) {
+  const { t } = useI18n();
+  return (
+    <main className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
+      <p className="text-muted-foreground">{t("fileNoComputer")}</p>
+      <Button asChild>
+        <Link
+          to="."
+          search={(prev) => ({ ...prev, dialog: "settings", tab: "computer" })}
+        >
+          {t("connectComputer")}
+        </Link>
+      </Button>
+      {onClose && (
+        <Button variant="outline" onClick={onClose}>
+          {t("close")}
+        </Button>
+      )}
+    </main>
+  );
+}
+
+/** The file changed on disk where it was being edited: the buffer is kept, and the person picks what happens. */
 export function ConflictBanner({ session }: { session: FileSession }) {
   const { t } = useI18n();
+  const { disk } = session.getState();
+  const deleted = disk !== null && disk.hash === null;
   const [busy, setBusy] = useState(false);
   const run = (action: () => Promise<void>) => {
     setBusy(true);
@@ -87,15 +112,29 @@ export function ConflictBanner({ session }: { session: FileSession }) {
       role="alert"
       className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm"
     >
-      <p className="min-w-0 flex-1">{t("fileConflict")}</p>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={busy}
-        onClick={() => run(() => session.reloadFromDisk())}
-      >
-        {t("fileReloadFromDisk")}
-      </Button>
+      <p className="basis-full">
+        {t(deleted ? "fileConflictDeleted" : "fileConflict")}
+      </p>
+      {disk?.text != null && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => session.markConflicts()}
+        >
+          {t("fileMarkConflicts")}
+        </Button>
+      )}
+      {!deleted && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => run(() => session.reloadFromDisk())}
+        >
+          {t("fileReloadFromDisk")}
+        </Button>
+      )}
       <Button
         size="sm"
         disabled={busy}
@@ -137,10 +176,13 @@ export function FileView({
   const entry = listing.data?.entries.find(
     (candidate) => candidate.path === path && candidate.type === "file",
   );
+  // A file deleted under unsaved typing stays open, so the typing isn't lost with it.
+  const keep = useRef(false);
   const { load, state } = useFileSession(
     path,
-    textual && !!entry && entry.size <= MAX_VIEWABLE_BYTES,
+    textual && ((!!entry && entry.size <= MAX_VIEWABLE_BYTES) || keep.current),
   );
+  keep.current = load.phase === "ready" && state.status === "conflict";
   const remove = useMutation({
     mutationFn: () => pim.deleteFile(path),
     onSuccess: () => {
@@ -152,13 +194,15 @@ export function FileView({
     onError: (failure) => toast.error(failure.message),
   });
 
+  const computer = useQuery(computerQuery());
+  if (computer.data?.state === "none") return <NoComputer onClose={onClose} />;
   const error =
     listing.error ?? (load.phase === "failed" ? new Error(load.message) : null);
   if (load.phase === "missing") return <FileMissing onClose={onClose} />;
   if (error && !(error instanceof ApiError && error.status === 404)) {
     return <FileMissing message={error.message} onClose={onClose} />;
   }
-  if (error || (listing.data && !entry))
+  if (error || (listing.data && !entry && !keep.current))
     return <FileMissing onClose={onClose} />;
   const name = baseName(path);
   const showEditor = preview.kind !== "markdown" || editing === path;
@@ -255,7 +299,7 @@ export function FileView({
           preview.kind === "image" && "items-center justify-center",
         )}
       >
-        {!entry ? (
+        {!entry && !keep.current ? (
           <p className="text-muted-foreground text-sm">{t("loading")}</p>
         ) : preview.kind === "image" ? (
           <img
@@ -273,7 +317,7 @@ export function FileView({
           <PdfView
             url={url}
             name={name}
-            version={entry.updatedAt}
+            version={entry?.updatedAt}
             zoom={zoom}
             onZoom={setZoom}
             page={page}
@@ -281,7 +325,7 @@ export function FileView({
             onPages={setPageCount}
           />
         ) : load.phase === "refused" ||
-          (textual && entry.size > MAX_VIEWABLE_BYTES) ? (
+          (textual && (entry?.size ?? 0) > MAX_VIEWABLE_BYTES) ? (
           <p className="m-auto text-muted-foreground text-sm">
             {t("noFilePreview")}
           </p>

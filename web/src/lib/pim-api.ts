@@ -1568,6 +1568,21 @@ export type ServerMessage =
   | { type: "tasks"; session: string }
   | { type: "computer" }
   | { type: "settings" }
+  | {
+      type: "file_changed";
+      path: string;
+      kind: "modified" | "created" | "deleted" | "renamed" | "unwatched";
+      sha256: string | null;
+      size: number | null;
+    }
+  | { type: "file_resync" }
+  | { type: "canvas_open"; session: string; path: string; line?: number }
+  | {
+      type: "canvas_query";
+      session: string;
+      request: string;
+      what: "tabs" | "selection";
+    }
   | { type: "result"; id: string; result: unknown }
   | { type: "error"; id?: string; message: string };
 

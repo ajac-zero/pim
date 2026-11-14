@@ -259,6 +259,14 @@ CREATE TABLE IF NOT EXISTS pim_ui_audit (
 	status INTEGER NOT NULL,
 	keys TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pim_file_seen (
+	session TEXT NOT NULL,
+	path TEXT NOT NULL,
+	sha256 TEXT NOT NULL,
+	text TEXT,
+	seen_at INTEGER NOT NULL,
+	PRIMARY KEY (session, path)
+);
 CREATE TABLE IF NOT EXISTS pim_ui_state (
 	message TEXT NOT NULL,
 	block TEXT NOT NULL,
@@ -390,6 +398,7 @@ export class PimStore {
 			pim_coding_vault: "coding harness logins",
 			pim_app_connections: "connector connections",
 			pim_tool_widgets: "widgets from connectors' results",
+			pim_file_seen: "the files agents last saw",
 			pim_notifications: "notifications",
 			pim_emails: "emails sent",
 			pim_push_subscriptions: "push subscriptions",
@@ -801,6 +810,7 @@ export class PimStore {
 
 	/** pi cannot delete a conversation, so a deleted session is only hidden: from the list and from the API. */
 	deleteSession(id: string): void {
+		this.#sql.exec("DELETE FROM pim_file_seen WHERE session = ?", id);
 		const now = Date.now();
 		this.#sql.exec(
 			"INSERT INTO pim_sessions (id, title, created_at, updated_at, deleted_at) VALUES (?, NULL, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET deleted_at = excluded.deleted_at",
@@ -878,6 +888,37 @@ export class PimStore {
 	keptWidget<T>(session: string, id: string): T | undefined {
 		const [row] = this.#sql.exec("SELECT widget FROM pim_tool_widgets WHERE session = ? AND id = ?", session, id).toArray();
 		return row ? (JSON.parse(String(row.widget)) as T) : undefined;
+	}
+
+	// The files a chat's agent last saw, by path: the hash, and the text when it was small enough to diff against later
+
+	/** Notes that the agent of `session` saw `path` as `sha256` (with its `text`, when kept); the least recently seen past `keep` are forgotten. */
+	keepSeenFile(session: string, path: string, sha256: string, text: string | null, keep: number): void {
+		this.#sql.exec(
+			"INSERT INTO pim_file_seen (session, path, sha256, text, seen_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (session, path) DO UPDATE SET sha256 = excluded.sha256, text = excluded.text, seen_at = excluded.seen_at",
+			session,
+			path,
+			sha256,
+			text,
+			Date.now(),
+		);
+		this.#sql.exec(
+			"DELETE FROM pim_file_seen WHERE session = ? AND path NOT IN (SELECT path FROM pim_file_seen WHERE session = ? ORDER BY seen_at DESC, rowid DESC LIMIT ?)",
+			session,
+			session,
+			keep,
+		);
+	}
+
+	seenFiles(session: string): { path: string; sha256: string; text: string | null }[] {
+		return this.#sql
+			.exec("SELECT path, sha256, text FROM pim_file_seen WHERE session = ? ORDER BY seen_at DESC, rowid DESC", session)
+			.toArray()
+			.map((row) => ({ path: String(row.path), sha256: String(row.sha256), text: row.text === null ? null : String(row.text) }));
+	}
+
+	forgetSeenFile(session: string, path: string): void {
+		this.#sql.exec("DELETE FROM pim_file_seen WHERE session = ? AND path = ?", session, path);
 	}
 
 	// Model credentials, as pi-ai's JSON, by provider id

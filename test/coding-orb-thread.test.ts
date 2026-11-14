@@ -173,6 +173,31 @@ describe("an agent-hosted coding thread", () => {
 		]);
 	});
 
+	it("stores an agent's tool steps as tool calls and results, and writes no empty user message for a result-only one", async () => {
+		const fake = new FakeOrbClient();
+		const { stub, orb } = await orbThread(fake);
+		await heartbeat(stub);
+		fake.say(orb(), "assistant", "Reading.", [
+			{ type: "text", text: "Reading." },
+			{ type: "toolCall", id: "c1", name: "Read", arguments: { path: "a.ts" } },
+			{ type: "toolCall", id: "c2", name: "Bash", arguments: { cmd: "false" } },
+		]);
+		fake.say(orb(), "user", "", [
+			{ type: "toolResult", id: "c1", name: "Read", text: "const a = 1;", isError: false },
+			{ type: "toolResult", id: "c2", name: "Bash", text: "exit 1", isError: true },
+		]);
+		fake.say(orb(), "assistant", "Done.");
+		fake.setState(orb(), "idle");
+		await heartbeat(stub);
+		const stored = (await inside(stub, (thread) => thread.harness.messages())).flatMap((entry) => entry.model ?? []);
+		expect(stored.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "toolResult", "assistant"]);
+		expect(stored[1]).toMatchObject({ role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Reading." }, { type: "toolCall", id: "c1", name: "Read", arguments: { path: "a.ts" } }, { type: "toolCall", id: "c2", name: "Bash", arguments: { cmd: "false" } }] });
+		expect(stored[2]).toMatchObject({ role: "toolResult", toolCallId: "c1", toolName: "Read", isError: false, content: [{ type: "text", text: "const a = 1;" }] });
+		expect(stored[3]).toMatchObject({ role: "toolResult", toolCallId: "c2", toolName: "Bash", isError: true, content: [{ type: "text", text: "exit 1" }] });
+		expect(stored[4]).toMatchObject({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done." }] });
+		expect(stored.filter((message) => message.role === "user")).toHaveLength(1);
+	});
+
 	it("steers a running turn through the client, and aborts it by cancelling the run, then archives it by stopping", async () => {
 		const fake = new FakeOrbClient();
 		const { id, stub, orb } = await orbThread(fake);

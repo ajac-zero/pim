@@ -327,7 +327,7 @@ describe("Amp HTTP placement", () => {
 			await stub.continue({ operationId: "reconnected-again" });
 			await heartbeat(stub);
 			expect(await stub.status()).toMatchObject({ state: "idle", slot: "none", currentOperation: null, cost: null });
-			expect(fetcher.mock.calls.filter(([, init]) => method(init) === "createRemoteExecutorThread")).toHaveLength(1);
+			expect(fetcher.mock.calls.filter(([, init]) => String(init?.body).includes("\"method\":\"createRemoteExecutorThread\"") && method(init) === "createRemoteExecutorThread")).toHaveLength(1);
 		} finally {
 			await vault.delete(OWNER, "amp");
 		}

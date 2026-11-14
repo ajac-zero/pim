@@ -37,6 +37,8 @@ export type ProviderModel = {
 	readonly name: string;
 	readonly contextWindow: number;
 	readonly maxTokens: number;
+	/** Whether `maxTokens` is the fallback for a model with no metadata rather than something known; absent on models stored before it was kept. */
+	readonly maxTokensGuessed?: boolean;
 	readonly images: boolean;
 	readonly reasoning: boolean;
 	/** What the person says it costs, in dollars per million tokens; absent for a model with no price, which is free. */
@@ -113,11 +115,17 @@ const MODEL_ID = /^[A-Za-z0-9][\w.:@/+-]{0,199}$/;
 /**
  * What a model with no metadata gets. pi sends a model's `maxTokens` as the
  * request's output limit (max_tokens, max_completion_tokens or maxOutputTokens),
- * so this is also the output limit of its chats; reasoning tokens count in it.
- * Nothing in the code says a larger limit is safe for an unknown model, so it
- * stays; a person can set the real one as the model's `maxTokens` override.
+ * so this is also the output limit of its chats; reasoning tokens count in it,
+ * and 8192 let a reasoning model spend it all thinking, with no answer or tool
+ * call left. An unknown model gets a quarter of its context window, at most
+ * 32768: room to reason and answer, and always below the window. A person can
+ * set the real limit as the model's `maxTokens` override.
  */
-const DEFAULTS = { contextWindow: 128_000, maxTokens: 8_192 };
+const DEFAULTS = { contextWindow: 128_000 };
+const FALLBACK_MAX_TOKENS = 32_768;
+/** The 8192 that every model without metadata was stored with before the fallback grew. */
+const LEGACY_FALLBACK = 8_192;
+const fallbackMaxTokens = (contextWindow: number) => Math.min(FALLBACK_MAX_TOKENS, Math.floor(contextWindow / 4));
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const count = (value: unknown): number | undefined => (Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined);
@@ -153,21 +161,22 @@ export function describe(id: string, listed: Record<string, unknown> | undefined
 	// OpenRouter's context_length, vLLM's max_model_len, and llama.cpp's n_ctx, the context it serves the model with.
 	const contextWindow = override?.contextWindow ?? count(listed?.context_length) ?? count(listed?.max_model_len) ?? count(meta?.n_ctx) ?? known?.contextWindow ?? DEFAULTS.contextWindow;
 	// The longest answer: the person's setting, then what the server lists (OpenRouter's top_provider.max_completion_tokens, max_completion_tokens and max_output_tokens as LiteLLM and vLLM-style gateways give them, Gemini's outputTokenLimit, max_tokens), then pi-ai's catalog.
-	const maxTokens =
+	const listedMaxTokens =
 		override?.maxTokens ??
 		count(top?.max_completion_tokens) ??
 		count(listed?.max_completion_tokens) ??
 		count(listed?.max_output_tokens) ??
 		count(listed?.outputTokenLimit) ??
 		count(listed?.max_tokens) ??
-		known?.maxTokens ??
-		DEFAULTS.maxTokens;
+		known?.maxTokens;
+	const maxTokens = listedMaxTokens ?? fallbackMaxTokens(contextWindow);
 	return {
 		id,
 		name: typeof listed?.name === "string" && listed.name.trim() ? listed.name.trim() : (known?.name ?? id),
 		contextWindow,
 		// An answer is never the whole context: a limit that large leaves no room for the input, so half is kept.
 		maxTokens: maxTokens < contextWindow ? maxTokens : Math.floor(contextWindow / 2),
+		...(listedMaxTokens === undefined && { maxTokensGuessed: true }),
 		images: modalities ? modalities.includes("image") : (known?.input.includes("image") ?? false),
 		reasoning: parameters ? parameters.includes("reasoning") : (known?.reasoning ?? false),
 		...(override?.cost && { cost: override.cost }),
@@ -314,8 +323,22 @@ export async function prepareProvider(input: ProviderInput, existing: CustomProv
 	return { id, name, url, key, chosen, models, structuredOutput, ...(api && { api }), ...(Object.keys(overrides).length > 0 && { overrides }) };
 }
 
+/**
+ * The output limit a stored model runs with. One whose limit was the fallback
+ * follows the current fallback, so models saved before it grew need no new
+ * save. A model stored before the guess was kept, with 8192 and no override,
+ * is taken for one: that was every model with no metadata, and a server that
+ * truly lists 8192 is rare enough to set it as an override. The catalog can't
+ * be asked here without waiting, so the fallback applies.
+ */
+function outputLimit(overrides: CustomProvider["overrides"], model: ProviderModel): number {
+	if (model.native) return model.maxTokens;
+	const guessed = model.maxTokensGuessed ?? (model.maxTokens === LEGACY_FALLBACK && overrides?.[model.id]?.maxTokens === undefined);
+	return guessed ? fallbackMaxTokens(model.contextWindow) : model.maxTokens;
+}
+
 export function providerInfo({ key, ...provider }: CustomProvider): ProviderInfo {
-	return { ...provider, models: provider.models.map(({ native, ...model }) => model), hasKey: key !== null };
+	return { ...provider, models: provider.models.map(({ native, ...model }) => ({ ...model, maxTokens: outputLimit(provider.overrides, model) })), hasKey: key !== null };
 }
 
 /**
@@ -333,7 +356,7 @@ export function providerModel(catalogId: string, provider: CustomProvider, model
 		input: model.images ? ["text", "image"] : ["text"],
 		reasoning: model.reasoning,
 		contextWindow: model.contextWindow,
-		maxTokens: model.maxTokens,
+		maxTokens: outputLimit(provider.overrides, model),
 		cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		...(provider.api ? {} : { compat: { supportsDeveloperRole: false } }),
 	} as Model<Api>;

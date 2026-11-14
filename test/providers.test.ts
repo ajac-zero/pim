@@ -3,7 +3,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { env, runInDurableObject } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getBuiltinModels } from "../src/provider-catalog";
-import { describe as describeModel, piProvider, prepareProvider } from "../src/providers";
+import { describe as describeModel, piProvider, prepareProvider, providerInfo, providerModel } from "../src/providers";
 import { typedSchema } from "../src/typed-schemas";
 import { api, OWNER, post, say, toolUse } from "./helpers";
 import { completionStream, faux, type Pim } from "./worker";
@@ -565,9 +565,9 @@ describe("A person's own model providers", () => {
 			chosen: null,
 			structuredOutput: false,
 			models: [
-				{ id: "local-model", name: "local-model", contextWindow: 128_000, maxTokens: 8_192, images: false, reasoning: false },
-				{ id: "vision-model", name: "Vision", contextWindow: 32_768, maxTokens: 8_192, images: true, reasoning: false },
-				{ id: "served-model", name: "served-model", contextWindow: 4_096, maxTokens: 2_048, images: false, reasoning: false },
+				{ id: "local-model", name: "local-model", contextWindow: 128_000, maxTokens: 32_000, maxTokensGuessed: true, images: false, reasoning: false },
+				{ id: "vision-model", name: "Vision", contextWindow: 32_768, maxTokens: 8_192, maxTokensGuessed: true, images: true, reasoning: false },
+				{ id: "served-model", name: "served-model", contextWindow: 4_096, maxTokens: 1_024, maxTokensGuessed: true, images: false, reasoning: false },
 			],
 		});
 
@@ -702,7 +702,7 @@ describe("A person's own model providers", () => {
 		await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" });
 		const overrides = { "vision-model": { contextWindow: 200_000, cost: { input: 3, output: 15 } } };
 		const saved = (await put("/providers/home-server", { overrides })).body.provider;
-		expect(saved.models.find((model: { id: string }) => model.id === "vision-model")).toMatchObject({ contextWindow: 200_000, maxTokens: 8_192, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } });
+		expect(saved.models.find((model: { id: string }) => model.id === "vision-model")).toMatchObject({ contextWindow: 200_000, maxTokens: 32_768, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } });
 		// What the server says about the others stays; saving again keeps the settings.
 		expect(saved.models.find((model: { id: string }) => model.id === "served-model")).toMatchObject({ contextWindow: 4_096 });
 		expect((await put("/providers/home-server", { name: "Home" })).body.provider.overrides).toEqual({ "vision-model": { contextWindow: 200_000, cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } } });
@@ -790,15 +790,32 @@ describe("a model's output limit", () => {
 		["openrouter listing beats the catalog", { context_length: 200_000, top_provider: { max_completion_tokens: 64_000 } }, catalog("openrouter", "openai/gpt-4.1"), undefined, 200_000, 64_000],
 		["gateway listing, max_output_tokens", { id: "gemini-4-argon", max_output_tokens: 65_536, context_length: 1_000_000 }, undefined, undefined, 1_000_000, 65_536],
 		["gateway listing, Gemini's outputTokenLimit", { outputTokenLimit: 32_768 }, undefined, undefined, 128_000, 32_768],
-		["custom endpoint with no metadata", { id: "gemini-4-argon" }, undefined, undefined, 128_000, 8_192],
+		["custom endpoint with no metadata", { id: "gemini-4-argon" }, undefined, undefined, 128_000, 32_000],
+		["no metadata, a million-token context", { context_length: 1_000_000 }, undefined, undefined, 1_000_000, 32_768],
 		["override beats the listing", { max_output_tokens: 8_000 }, undefined, { maxTokens: 40_000 }, 128_000, 40_000],
 		["output as large as the context is halved", { context_length: 16_000, max_completion_tokens: 16_000 }, undefined, undefined, 16_000, 8_000],
 		["output larger than the context is halved", { max_model_len: 10_000, max_output_tokens: 64_000 }, undefined, undefined, 10_000, 5_000],
-		["tiny context", { max_model_len: 4_096 }, undefined, undefined, 4_096, 2_048],
+		["tiny context, no output metadata", { max_model_len: 4_096 }, undefined, undefined, 4_096, 1_024],
+		["tiny context, listed output as large", { max_model_len: 4_096, max_output_tokens: 4_096 }, undefined, undefined, 4_096, 2_048],
 		["override larger than a context override", undefined, undefined, { contextWindow: 20_000, maxTokens: 50_000 }, 20_000, 10_000],
 	];
 	it.each(rows)("resolves for %s", (_name, listed, known, override, contextWindow, maxTokens) => {
 		expect(describeModel("m", listed, known, override)).toMatchObject({ contextWindow, maxTokens });
+	}, 10_000);
+
+	it("moves models stored with the old fallback to the new one, and leaves what was set or known", () => {
+		const base = { id: "p", name: "P", url: "http://x/v1", key: null, chosen: null };
+		const stored = { id: "gemini-4-argon", name: "g", contextWindow: 1_000_000, images: false, reasoning: true };
+		const limits = (provider: Parameters<typeof providerInfo>[0]) => [providerInfo(provider).models[0]!.maxTokens, providerModel("own:p", provider, provider.models[0]!).maxTokens];
+		// Saved before the guess was kept: 8192 with no override was the fallback.
+		expect(limits({ ...base, models: [{ ...stored, maxTokens: 8_192 }] })).toEqual([32_768, 32_768]);
+		// The same 8192 as the person's own override stays.
+		expect(limits({ ...base, models: [{ ...stored, maxTokens: 8_192 }], overrides: { "gemini-4-argon": { maxTokens: 8_192 } } })).toEqual([8_192, 8_192]);
+		// Marked as known, 8192 stays; marked as a guess, it follows the fallback whatever it was stored as.
+		expect(limits({ ...base, models: [{ ...stored, maxTokens: 8_192, maxTokensGuessed: false }] })).toEqual([8_192, 8_192]);
+		expect(limits({ ...base, models: [{ ...stored, maxTokens: 4_000, maxTokensGuessed: true }] })).toEqual([32_768, 32_768]);
+		// A legacy model with another limit was listed or known.
+		expect(limits({ ...base, models: [{ ...stored, maxTokens: 65_536 }] })).toEqual([65_536, 65_536]);
 	}, 10_000);
 
 	it("takes a person's output limit only as a whole number of tokens", async () => {

@@ -996,3 +996,87 @@ describe("browser calls name their thread", () => {
 		expect(sent.find((call) => call.op === "browser_disconnect")!.args.channel).toBe(1);
 	});
 });
+
+describe("watching files on the computer", () => {
+	/** A Computer whose one socket answers calls like a computer: `watch` of "/workspace/bad" fails, and `sent` is what it was asked. */
+	function watched() {
+		const meta = new Map<string, string>([["computer_token", "x"]]);
+		const sent: { op: string; path: unknown }[] = [];
+		const computer: Computer = new Computer({
+			meta: { meta: (key) => meta.get(key), setMeta: (key, value) => void meta.set(key, value), deleteMeta: (key) => void meta.delete(key) },
+			sockets: () => [
+				{
+					readyState: WebSocket.OPEN,
+					send: (raw: string) => {
+						const message = JSON.parse(raw) as { type: string; id: string; op: string; args: { path: unknown } };
+						if (message.type !== "call") return;
+						sent.push({ op: message.op, path: message.args.path });
+						const reply =
+							message.op === "watch" && message.args.path === "/workspace/bad"
+								? { error: { message: "too many", code: "EWATCHLIMIT" } }
+								: { result: message.op === "watch" ? { watching: true, sha256: "ab", size: 2, exists: true } : { watching: false } };
+						queueMicrotask(() => computer.receive(JSON.stringify({ type: "reply", id: message.id, ...reply })));
+					},
+				} as never,
+			],
+			screen: () => {},
+		});
+		return { computer, sent };
+	}
+
+	it("hands the computer's change events to subscribers, and ignores events and messages it doesn't know", async () => {
+		const { computer } = watched();
+		const heard: unknown[] = [];
+		const stop = computer.onFileEvent((event) => void heard.push(event));
+		const changed = { type: "event", event: "file_changed", path: "/workspace/a.ts", kind: "modified", sha256: "cd", size: 3, mtime: 5 };
+		computer.receive(JSON.stringify(changed));
+		computer.receive(JSON.stringify({ type: "event", event: "from_the_future", path: "/workspace/a.ts" }));
+		computer.receive(JSON.stringify({ type: "from_the_future" }));
+		computer.receive(JSON.stringify({ type: "event", event: "watch_error", path: "/workspace/b.ts", code: "ENOSPC" }));
+		stop();
+		computer.receive(JSON.stringify(changed));
+		expect(heard).toEqual([
+			{ event: "file_changed", path: "/workspace/a.ts", kind: "modified", sha256: "cd", size: 3, mtime: 5 },
+			{ event: "watch_error", path: "/workspace/b.ts", code: "ENOSPC" },
+		]);
+	});
+
+	it("counts watches, and watches again as often as it was asked when the computer reconnects", async () => {
+		const { computer, sent } = watched();
+		expect(await computer.watch("/workspace/a.ts")).toEqual({ path: "/workspace/a.ts", sha256: "ab", size: 2, exists: true });
+		await computer.watch("/workspace/a.ts");
+		await computer.watch("/workspace/b.ts");
+		await expect(computer.watch("/workspace/bad")).rejects.toMatchObject({ code: "EWATCHLIMIT" });
+		expect(await computer.unwatch("/workspace/b.ts")).toBe(false);
+		expect(await computer.unwatch("/workspace/nope")).toBe(false);
+		sent.length = 0;
+		const resumed: string[] = [];
+		computer.onWatchResumed((state) => void resumed.push(`${state.path} ${state.sha256}`));
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await vi.waitFor(() => expect(resumed).toEqual(["/workspace/a.ts ab"]));
+		expect(sent).toEqual([
+			{ op: "watch", path: "/workspace/a.ts" },
+			{ op: "watch", path: "/workspace/a.ts" },
+		]);
+		// Once more the last unwatch, and nothing is asked for on the next reconnect.
+		expect(await computer.unwatch("/workspace/a.ts")).toBe(true);
+		expect(await computer.unwatch("/workspace/a.ts")).toBe(false);
+		sent.length = 0;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await Promise.resolve();
+		expect(sent).toEqual([]);
+	});
+
+	it("drops a watch the computer can't set up again and a watcher that failed, telling subscribers", async () => {
+		const { computer, sent } = watched();
+		await computer.watch("/workspace/a.ts");
+		await computer.watch("/workspace/b.ts");
+		const heard: unknown[] = [];
+		computer.onFileEvent((event) => void heard.push(event));
+		computer.receive(JSON.stringify({ type: "event", event: "watch_error", path: "/workspace/b.ts", code: "EMFILE" }));
+		sent.length = 0;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await vi.waitFor(() => expect(sent).toEqual([{ op: "watch", path: "/workspace/a.ts" }]));
+		expect(heard).toEqual([{ event: "watch_error", path: "/workspace/b.ts", code: "EMFILE" }]);
+	});
+});

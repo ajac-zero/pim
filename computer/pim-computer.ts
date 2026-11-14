@@ -33,7 +33,7 @@
 import { Buffer } from "node:buffer";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { type FSWatcher, realpathSync, watch } from "node:fs";
+import { type FSWatcher, realpathSync, statSync, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -294,6 +294,7 @@ export class Link {
 		if (op === "ping") return null;
 		if (op === "watch") return this.#watches.watch(args.path);
 		if (op === "unwatch") return this.#watches.unwatch(args.path);
+		if (op === "unwatch_all") return this.#watches.reset();
 		if (op === "write") {
 			const written = await handle(this.#machine, op, args);
 			if (written) await this.#watches.noteWrite(args.path, written as WriteResult);
@@ -479,6 +480,8 @@ function failure(error: unknown, virtual: string): CallError {
 export const WATCH_DEBOUNCE_MS = 100;
 /** The most files one connection may watch at once; the next `watch` fails with `EWATCHLIMIT`. */
 export const MAX_WATCHES = 64;
+/** How many watched files are read and hashed at once; a burst across many files waits its turn. */
+const MAX_CONCURRENT_HASHES = 4;
 
 /** What the space hears when a file it watches changes (or its watcher fails); `path` is the one the space named. */
 export type WatchEvent =
@@ -492,7 +495,21 @@ function signature(state: FileState): string {
 	return state.exists ? (state.sha256 ?? `${state.size}:${state.mtime}`) : "gone";
 }
 
+let hashing = 0;
+const hashQueue: (() => void)[] = [];
+
 async function fileState(file: string): Promise<FileState> {
+	while (hashing >= MAX_CONCURRENT_HASHES) await new Promise<void>((resolve) => hashQueue.push(resolve));
+	hashing++;
+	try {
+		return await readState(file);
+	} finally {
+		hashing--;
+		hashQueue.shift()?.();
+	}
+}
+
+async function readState(file: string): Promise<FileState> {
 	try {
 		const stat = await fs.stat(file);
 		const hash = stat.isFile() && stat.size <= HASH_MAX_BYTES ? sha256(await fs.readFile(file)) : null;
@@ -507,7 +524,7 @@ type Watched = {
 	/** The path as the space first named it, which its events carry. */
 	virtual: string;
 	file: string;
-	watcher: FSWatcher;
+	folder: Folder;
 	timer: ReturnType<typeof setTimeout> | undefined;
 	/** What was last reported (or seeded by `watch`, or written by this computer): events only come from a different state. */
 	last: FileState;
@@ -516,15 +533,32 @@ type Watched = {
 	closed: boolean;
 };
 
+/** The one OS watch on a folder, shared by every watched file in it. */
+type Folder = {
+	dir: string;
+	watcher: FSWatcher;
+	/** The folder's inode when it was watched: a folder deleted and made again (or renamed over) is a different one, and the OS watch on the old goes quiet without an error. */
+	ino: number;
+	timer: ReturnType<typeof setTimeout> | undefined;
+	/** The OS named the folder itself in an event, as it does when the folder is deleted or moved: its watch is made again even when a new folder has the same inode, which is common. */
+	named: boolean;
+	entries: Set<Watched>;
+};
+
 /**
  * The files a space watches. The folder holding each file is what's watched,
  * by name, rather than the file: a write that renames a new file over it (as
  * every write of ours does) leaves a watcher on the file itself on the old
- * one, and a file that isn't there yet is seen when it's made. A watch counts
- * how many times it was asked for, and its watcher closes with the last.
+ * one, and a file that isn't there yet is seen when it's made. Files in one
+ * folder share its watcher. A watch counts how many times it was asked for,
+ * and its file is let go with the last. When a folder's events come, the
+ * folder is looked at again once they are quiet: if it is no longer the same
+ * folder, the watch is made again on the new one, or, with no folder there,
+ * each of its files sends `watch_error` once and is dropped.
  */
 class Watches {
 	readonly #watched = new Map<string, Watched>();
+	readonly #folders = new Map<string, Folder>();
 	readonly #machine: Machine;
 	readonly #emit: (event: WatchEvent) => void;
 
@@ -560,23 +594,64 @@ class Watches {
 		// Another watch for the file may have got here while it was looked at.
 		if (this.#watched.has(file)) return this.watch(virtual);
 		if (this.#watched.size >= MAX_WATCHES) throw new CallError(`At most ${MAX_WATCHES} files can be watched at once`, "EWATCHLIMIT");
-		const made: Watched = { refs: 1, virtual: String(virtual), file, watcher: undefined as never, timer: undefined, last: { exists: false, ino: null, sha256: null, size: null, mtime: null }, chain: Promise.resolve(), closed: false };
+		const made: Watched = { refs: 1, virtual: String(virtual), file, folder: undefined as never, timer: undefined, last: { exists: false, ino: null, sha256: null, size: null, mtime: null }, chain: Promise.resolve(), closed: false };
 		try {
-			made.watcher = watch(path.dirname(file), { persistent: false }, (_event, name) => {
-				if (name === null || name === undefined || String(name) === path.basename(file)) this.#touched(made);
-			});
+			made.folder = this.#folder(path.dirname(file));
 		} catch (error) {
 			throw failure(error, String(virtual));
 		}
-		made.watcher.on("error", (error) => {
-			this.#emit({ type: "event", event: "watch_error", path: made.virtual, code: (error as { code?: string }).code ?? null });
-			this.#release(made);
-		});
+		made.folder.entries.add(made);
 		this.#watched.set(file, made);
 		// The file is read after the watcher starts, so a change in between is not missed; checks wait for it.
 		made.chain = fileState(file).then((state) => void (made.last = state));
 		await made.chain;
 		return this.#answer(made.last);
+	}
+
+	/** The shared watch on a folder, made when its first file is watched. */
+	#folder(dir: string): Folder {
+		const known = this.#folders.get(dir);
+		if (known) return known;
+		const folder: Folder = { dir, watcher: undefined as never, ino: 0, timer: undefined, named: false, entries: new Set() };
+		this.#arm(folder);
+		this.#folders.set(dir, folder);
+		return folder;
+	}
+
+	#arm(folder: Folder): void {
+		folder.watcher = watch(folder.dir, { persistent: false }, (_event, name) => {
+			for (const entry of folder.entries) if (name === null || name === undefined || String(name) === path.basename(entry.file)) this.#touched(entry);
+			// An event that may be the folder itself going away or being replaced is looked at once things are quiet.
+			if (name !== null && name !== undefined && String(name) === path.basename(folder.dir)) folder.named = true;
+			clearTimeout(folder.timer);
+			folder.timer = setTimeout(() => void this.#revalidate(folder), WATCH_DEBOUNCE_MS);
+		});
+		folder.ino = statSync(folder.dir).ino;
+		folder.watcher.on("error", (error) => this.#fail(folder, (error as { code?: string }).code ?? null));
+	}
+
+	#fail(folder: Folder, code: string | null): void {
+		for (const entry of [...folder.entries]) {
+			this.#emit({ type: "event", event: "watch_error", path: entry.virtual, code });
+			this.#release(entry);
+		}
+	}
+
+	async #revalidate(folder: Folder): Promise<void> {
+		if (this.#folders.get(folder.dir) !== folder) return;
+		const now = await fs.stat(folder.dir).catch(() => null);
+		if (this.#folders.get(folder.dir) !== folder || (now && now.ino === folder.ino && !folder.named)) return;
+		folder.named = false;
+		folder.watcher.close();
+		try {
+			if (!now) throw Object.assign(new Error("The folder is gone"), { code: "ENOENT" });
+			this.#arm(folder);
+		} catch (error) {
+			this.#fail(folder, (error as { code?: string }).code ?? null);
+			return;
+		}
+		// The files may have changed while nothing was watching.
+		for (const entry of folder.entries) this.#touched(entry);
 	}
 
 	#answer(state: FileState): { watching: true; sha256: string | null; size: number | null; exists: boolean } {
@@ -606,7 +681,16 @@ class Watches {
 			return;
 		}
 		const entry = this.#watched.get(file);
-		if (entry) entry.last = { exists: true, ino: null, sha256: written.sha256, size: written.size, mtime: written.mtime };
+		if (!entry) return;
+		// Its inode is kept, so the next change from outside is told from a rename by comparing with the file we wrote.
+		const ino = (await fs.stat(file).catch(() => null))?.ino ?? null;
+		entry.last = { exists: true, ino, sha256: written.sha256, size: written.size, mtime: written.mtime };
+	}
+
+	/** Lets every watch go: the space asks again for the ones it still has. */
+	reset(): { watching: false } {
+		this.closeAll();
+		return { watching: false };
 	}
 
 	closeAll(): void {
@@ -616,8 +700,14 @@ class Watches {
 	#release(entry: Watched): void {
 		entry.closed = true;
 		clearTimeout(entry.timer);
-		entry.watcher.close();
 		if (this.#watched.get(entry.file) === entry) this.#watched.delete(entry.file);
+		const folder = entry.folder;
+		folder.entries.delete(entry);
+		if (folder.entries.size === 0) {
+			clearTimeout(folder.timer);
+			folder.watcher.close();
+			if (this.#folders.get(folder.dir) === folder) this.#folders.delete(folder.dir);
+		}
 	}
 
 	#touched(entry: Watched): void {

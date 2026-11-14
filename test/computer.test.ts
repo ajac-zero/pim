@@ -9,7 +9,7 @@ import { handle, type DisplayHost, type DriverHost, type ExecArgs, type ExecResu
 import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
-import { Computer } from "../src/computer";
+import { Computer, MAX_FILE_LISTENERS, MAX_WATCHED_PATHS } from "../src/computer";
 import { api, apiUrl, browserCalls, connectTestComputer, opens, OWNER, pendingApproval, post, ROOT as ROOT_CHAT, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
@@ -1054,7 +1054,9 @@ describe("watching files on the computer", () => {
 		computer.onWatchResumed((state) => void resumed.push(`${state.path} ${state.sha256}`));
 		computer.receive(JSON.stringify({ type: "hello" }));
 		await vi.waitFor(() => expect(resumed).toEqual(["/workspace/a.ts ab"]));
+		// The computer's own set is cleared first, so it can't hold more than the space's.
 		expect(sent).toEqual([
+			{ op: "unwatch_all", path: undefined },
 			{ op: "watch", path: "/workspace/a.ts" },
 			{ op: "watch", path: "/workspace/a.ts" },
 		]);
@@ -1064,7 +1066,7 @@ describe("watching files on the computer", () => {
 		sent.length = 0;
 		computer.receive(JSON.stringify({ type: "hello" }));
 		await Promise.resolve();
-		expect(sent).toEqual([]);
+		expect(sent.filter((call) => call.op === "watch")).toEqual([]);
 	});
 
 	it("drops a watch the computer can't set up again and a watcher that failed, telling subscribers", async () => {
@@ -1076,7 +1078,17 @@ describe("watching files on the computer", () => {
 		computer.receive(JSON.stringify({ type: "event", event: "watch_error", path: "/workspace/b.ts", code: "EMFILE" }));
 		sent.length = 0;
 		computer.receive(JSON.stringify({ type: "hello" }));
-		await vi.waitFor(() => expect(sent).toEqual([{ op: "watch", path: "/workspace/a.ts" }]));
+		await vi.waitFor(() => expect(sent.filter((call) => call.op === "watch")).toEqual([{ op: "watch", path: "/workspace/a.ts" }]));
 		expect(heard).toEqual([{ event: "watch_error", path: "/workspace/b.ts", code: "EMFILE" }]);
+	});
+
+	it("refuses watches and listeners beyond its bounds", async () => {
+		const { computer } = watched();
+		for (let index = 0; index < MAX_WATCHED_PATHS; index++) await computer.watch(`/workspace/f${index}`);
+		await expect(computer.watch("/workspace/more")).rejects.toMatchObject({ code: "EWATCHLIMIT" });
+		// A file already watched can be watched again.
+		await computer.watch("/workspace/f0");
+		for (let index = 0; index < MAX_FILE_LISTENERS; index++) computer.onFileEvent(() => {});
+		expect(() => computer.onFileEvent(() => {})).toThrow(/At most/);
 	});
 });

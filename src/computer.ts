@@ -123,6 +123,10 @@ export type BrowserTransport = {
 	note?: string;
 };
 
+/** The most files the space watches at once, and the most listeners of each kind it keeps. */
+export const MAX_WATCHED_PATHS = 64;
+export const MAX_FILE_LISTENERS = 32;
+
 /** What `watch` says of a file when it starts being watched: the file as it is then. */
 export type WatchState = { readonly path: string; readonly sha256: string | null; readonly size: number | null; readonly exists: boolean };
 
@@ -429,6 +433,7 @@ export class Computer {
 	 * and each `unwatch` takes one away. The file as it is now comes back.
 	 */
 	async watch(path: string): Promise<WatchState> {
+		if (!this.#watching.has(path) && this.#watching.size >= MAX_WATCHED_PATHS) throw Object.assign(new Error(`At most ${MAX_WATCHED_PATHS} files can be watched at once`), { code: "EWATCHLIMIT" });
 		const state = await this.call<Omit<WatchState, "path"> & { watching: true }>("watch", { path });
 		this.#watching.set(path, (this.#watching.get(path) ?? 0) + 1);
 		return { path, sha256: state.sha256, size: state.size, exists: state.exists };
@@ -447,6 +452,7 @@ export class Computer {
 
 	/** Hears of changes to the watched files, and of watchers that failed (which are no longer watched). Returns how to stop. */
 	onFileEvent(listener: (event: FileEvent) => void): () => void {
+		if (this.#fileListeners.size >= MAX_FILE_LISTENERS) throw new Error(`At most ${MAX_FILE_LISTENERS} listeners can hear file events`);
 		this.#fileListeners.add(listener);
 		return () => void this.#fileListeners.delete(listener);
 	}
@@ -456,12 +462,15 @@ export class Computer {
 	 * the file as it is then: changes made while it was away weren't seen.
 	 */
 	onWatchResumed(listener: (state: WatchState) => void): () => void {
+		if (this.#resumedListeners.size >= MAX_FILE_LISTENERS) throw new Error(`At most ${MAX_FILE_LISTENERS} listeners can hear resumed watches`);
 		this.#resumedListeners.add(listener);
 		return () => void this.#resumedListeners.delete(listener);
 	}
 
 	/** The computer connected, with no watches: the space's are asked for again, as many times as it asked. */
 	async #rewatch(): Promise<void> {
+		// The space's set is the truth: whatever the computer holds from before (a watch whose reply was lost) is let go first. A computer that doesn't know the op has nothing to let go of.
+		await this.call("unwatch_all", {}).catch(() => undefined);
 		for (const [path, count] of [...this.#watching]) {
 			try {
 				let state: Omit<WatchState, "path"> | undefined;

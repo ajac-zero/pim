@@ -143,3 +143,57 @@ it("releases every watch when the link closes", async () => {
 	await sleep(400);
 	expect(events()).toEqual([]);
 });
+
+it("keeps watching a file after its folder is deleted and made again", async () => {
+	await fs.mkdir(path.join(root, "d"));
+	await fs.writeFile(path.join(root, "d", "f.txt"), "one");
+	await call("watch", { path: "/workspace/d/f.txt" });
+	await fs.rm(path.join(root, "d"), { recursive: true });
+	await fs.mkdir(path.join(root, "d"));
+	await sleep(400);
+	expect(events().filter((event) => event.event === "watch_error")).toEqual([]);
+	await fs.writeFile(path.join(root, "d", "f.txt"), "two");
+	await vi.waitFor(() => expect(events().find((event) => event.kind === "created")).toMatchObject({ event: "file_changed", sha256: hash("two") }), { timeout: 3000 });
+});
+
+it("says watch_error once, and lets go, when the folder is gone for good", async () => {
+	await fs.mkdir(path.join(root, "g"));
+	await call("watch", { path: "/workspace/g/f.txt" });
+	await fs.rm(path.join(root, "g"), { recursive: true });
+	await vi.waitFor(() => expect(events().filter((event) => event.event === "watch_error")).toHaveLength(1), { timeout: 3000 });
+	expect(events().find((event) => event.event === "watch_error")).toMatchObject({ path: "/workspace/g/f.txt", code: "ENOENT" });
+	await sleep(300);
+	expect(events().filter((event) => event.event === "watch_error")).toHaveLength(1);
+	// The space can watch again once the folder is back.
+	await fs.mkdir(path.join(root, "g"));
+	await call("watch", { path: "/workspace/g/f.txt" });
+});
+
+it("shares a folder's watcher, and keeps it until the last file in it is let go", async () => {
+	await call("watch", { path: "/workspace/s1" });
+	await call("watch", { path: "/workspace/s2" });
+	await call("unwatch", { path: "/workspace/s1" });
+	await fs.writeFile(path.join(root, "s2"), "x");
+	await eventsOf(1);
+	expect(events()[0]).toMatchObject({ path: "/workspace/s2", kind: "created" });
+	await fs.writeFile(path.join(root, "s1"), "x");
+	await sleep(400);
+	expect(events()).toHaveLength(1);
+});
+
+it("tells our own write followed by a change from outside apart from a rename", async () => {
+	await call("watch", { path: "/workspace/w.txt" });
+	await call("write", { path: "/workspace/w.txt", data: Buffer.from("mine").toString("base64") });
+	await sleep(400);
+	expect(events()).toEqual([]);
+	await fs.writeFile(path.join(root, "w.txt"), "theirs");
+	expect((await eventsOf(1))[0]).toMatchObject({ kind: "modified", sha256: hash("theirs") });
+});
+
+it("lets go of every watch on unwatch_all", async () => {
+	await call("watch", { path: "/workspace/u.txt" });
+	await call("unwatch_all", {});
+	await fs.writeFile(path.join(root, "u.txt"), "x");
+	await sleep(400);
+	expect(events()).toEqual([]);
+});

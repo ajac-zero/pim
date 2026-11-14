@@ -1,5 +1,6 @@
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type { AgentEvent, UserInput } from "@earendil-works/pi-durable";
+import type { CanvasAnswer } from "./extensions/canvas";
 import type { Approval, Notification } from "./store";
 
 /**
@@ -40,7 +41,17 @@ export type ClientMessage =
 	/** Follow another session on this socket, starting with its snapshot, without connecting again. */
 	| { readonly type: "follow"; readonly id?: string; readonly session: string }
 	/** Another session's `snapshot` event, as the `result`, without following it: to open it current. */
-	| { readonly type: "snapshot"; readonly id?: string; readonly session: string };
+	| { readonly type: "snapshot"; readonly id?: string; readonly session: string }
+	/**
+	 * Hear of changes to a file the app has open (an absolute path under
+	 * /workspace). Each `watch_file` of a path is one hold, taken away by one
+	 * `unwatch_file`, and all a socket's holds go when it closes. The file as
+	 * it is comes back as a `file_changed`.
+	 */
+	| { readonly type: "watch_file"; readonly id?: string; readonly path: string }
+	| { readonly type: "unwatch_file"; readonly id?: string; readonly path: string }
+	/** The app's answer to a `canvas_query`. */
+	| ({ readonly type: "canvas_answer"; readonly id?: string; readonly request: string } & CanvasAnswer);
 
 /** Server → client. */
 export type ServerMessage =
@@ -72,5 +83,17 @@ export type ServerMessage =
 	| { readonly type: "computer" }
 	/** The person's settings changed, such as the look of the app. */
 	| { readonly type: "settings" }
+	/**
+	 * A file the socket watches changed: `sha256` and `size` are what it is
+	 * now (null when it is gone), and `kind` says how. `unwatched` means the
+	 * computer can no longer watch it, and the socket no longer hears of it.
+	 */
+	| { readonly type: "file_changed"; readonly path: string; readonly kind: "modified" | "created" | "deleted" | "renamed" | "unwatched"; readonly sha256: string | null; readonly size: number | null }
+	/** The server lost track of what the socket watches (it restarted): the app asks for its files again. */
+	| { readonly type: "file_resync" }
+	/** An agent opened a file in the canvas of the chat the socket follows. */
+	| { readonly type: "canvas_open"; readonly session: string; readonly path: string; readonly line?: number }
+	/** An agent asks what the canvas shows, or where the selection is; the app answers with `canvas_answer`. */
+	| { readonly type: "canvas_query"; readonly session: string; readonly request: string; readonly what: "tabs" | "selection" }
 	| { readonly type: "result"; readonly id: string; readonly result: JsonValue }
 	| { readonly type: "error"; readonly id?: string; readonly message: string };

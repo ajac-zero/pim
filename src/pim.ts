@@ -102,6 +102,7 @@ import { artifactsExtension } from "./extensions/artifacts";
 import { NOTES_SKILL, notesExtension } from "./extensions/notes";
 import { BUILTIN_APPS } from "./builtin-apps";
 import { APP_DEPLOY, appDeployAction, hostedExtension } from "./extensions/hosted";
+import { type CanvasAnswer, canvasExtension } from "./extensions/canvas";
 import { type FileServices, fileDeleteAction, filesExtension, SHELL, shellAction } from "./extensions/files";
 import { BROWSER_CLICK, BROWSER_EXTENSION, BROWSER_TYPE, BROWSER_UPLOAD, browserClickAction, browserExtension, browserTypeAction, browserUploadAction } from "./extensions/browser";
 import { DESKTOP_ACT, DESKTOP_EXTENSION, desktopAction, desktopExtension } from "./extensions/desktop";
@@ -181,7 +182,7 @@ import { cancelTask, describeTask, type ScheduleHost, ScheduledTasks, scheduledT
 import type { PimServices } from "./extensions/services";
 import { webExtension } from "./extensions/web";
 import { HostedApps, SESSION_COOKIE as HOSTED_SESSION_COOKIE } from "./hosted";
-import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerDisplay, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
+import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TAG, COMPUTER_TOKEN_HEADER, Computer, type ComputerDisplay, type FileEvent, SCREEN_CLIPBOARD, SCREEN_PING, SCREEN_TAG } from "./computer";
 import { machineName } from "./computer-host";
 import { byteRange, etagOf, etags, FILES_ROOT, Files, fileHeaders, filesPath, MAX_UPLOAD_BYTES } from "./files";
 import { LegacyFiles } from "./legacy-files";
@@ -226,6 +227,7 @@ import { codingScheduler } from "./coding/scheduler-do";
 import { HARNESSES, type CodingVaultKey, type Harness as CodingHarness, isHarness } from "./coding/vault/harnesses";
 import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
+import { changeOf, changesBlock, type FileNow, MAX_SEEN_BYTES, MAX_SEEN_FILES, sha256Hex, textOf as fileTextOf } from "./file-changes";
 import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "./transcript";
 import { checkUiState, compile, uiBlockIds, type UiProgram } from "./ui-lang";
 import { RunWatch, runKey, stoppable } from "./run-guard";
@@ -424,6 +426,8 @@ const STOP_WAIT_MS = 5_000;
 /** How long an agent's run may go without any progress before it is stopped, with a note: a call that never returns can't hold a chat's events for good. A wait for the person, or for a retry, is not a stall. */
 const STALL_MS = 30 * 60 * 1000;
 const WATCHDOG_CALLBACK = "watchRuns";
+/** How long an agent's question about the app's canvas waits for an answer. */
+const CANVAS_ASK_MS = 5_000;
 /** The most chats the diagnostics read the turns of at once, those at work most recently. */
 const TURN_CHATS = 20;
 /** What wakes the chats held on a subscription's usage limit once its cooldown ends (see ./provider-cooldowns.ts). */
@@ -635,7 +639,13 @@ export class Pim extends DurableAgent<Env> {
 	});
 	/** The person's files, on their computer, which they and their agents share (see ./files.ts). */
 	readonly files = new Files(this.computer);
-	readonly #files: FileServices = { computer: this.computer, assertOpen: () => this.#assertOpen() };
+	readonly #files: FileServices = { computer: this.computer, assertOpen: () => this.#assertOpen(), saw: (session, path, sha256) => this.#sawFile(session, path, sha256) };
+	/** The canvas tools' reach into the apps showing a chat (see ./extensions/canvas.ts). */
+	readonly #canvas = { computer: this.computer, open: (session: string, path: string, line?: number) => this.#canvasOpen(session, path, line), ask: (session: string, what: "tabs" | "selection") => this.#canvasAsk(session, what) };
+	/** The files each app socket watches, by connection id, with how many times it asked for each. In memory: a socket that outlives a restart is asked for them again (`file_resync`). */
+	readonly #fileHolds = new Map<string, Map<string, number>>();
+	/** Questions to an app about its canvas, by request id, waiting for its answer. */
+	readonly #canvasAsks = new Map<string, (answer: CanvasAnswer) => void>();
 	/** The apps with a backend on that computer. */
 	readonly hosted = new HostedApps(this.ctx.storage.sql, {
 		computer: this.computer,
@@ -913,6 +923,7 @@ export class Pim extends DurableAgent<Env> {
 			);
 			this.#installNotes();
 			this.registry.install(filesExtension(this.#files));
+			this.registry.install(canvasExtension(this.#canvas));
 			this.registry.install(hostedExtension(this.#hostedServices));
 			this.#installImageGeneration();
 			this.#installBotTools();
@@ -2268,6 +2279,11 @@ export class Pim extends DurableAgent<Env> {
 		void Promise.resolve()
 			.then(() => (this.triggerEngine() ? this.wakeTriggers() : undefined))
 			.catch((error) => console.warn("setting the trigger wake failed", error));
+		// The files apps watch: the computer's watches from before this start have no owner, and each socket that outlived it asks for its own again.
+		this.computer.onFileEvent((event) => this.#fileEvent(event));
+		this.computer.onWatchResumed((state) => this.#fileEvent({ event: "file_changed", path: state.path, kind: state.exists ? "modified" : "deleted", sha256: state.sha256, size: state.size, mtime: null }));
+		void this.computer.call("unwatch_all", {}).catch(() => undefined);
+		for (const connection of this.getConnections<SocketState>()) if (connection.state?.session) this.#send(connection, { type: "file_resync" });
 		// A Sprite Pim started before it kept computers with a host is out of reach: the space has no computer until it gets another.
 		const sprite = this.computer.forgetSprite();
 		if (sprite) console.warn(JSON.stringify({ event: "pim.sprite_forgotten", owner: this.name, sprite }));
@@ -2406,7 +2422,11 @@ export class Pim extends DurableAgent<Env> {
 		if (agent.fallbacks.length > 0 || this.#workspaceFallbacks().length > 0) await this.harness.session(session).setModel(this.#runModel(agent));
 		let receipt: PiReceipt;
 		try {
-			receipt = await this.harness.submit(content, { session, ...options });
+			// Files the agent saw that changed since go before what the person said, as a part of their own: no prompt section, so the prompt cache holds.
+			const changes = from === "user" ? await this.#fileChanges(session) : null;
+			const given = changes ? [{ type: "text" as const, text: changes.block }, ...(typeof content === "string" ? [{ type: "text" as const, text: content }] : content)] : content;
+			receipt = await this.harness.submit(given, { session, ...options });
+			if (receipt.accepted) changes?.seen();
 		} catch (error) {
 			withdraw();
 			throw error;
@@ -2414,6 +2434,62 @@ export class Pim extends DurableAgent<Env> {
 		if (!receipt.accepted) withdraw();
 		else if (this.telemetry.enabled) void this.keepAliveWhile(async () => this.telemetry.settled(session, await this.harness.wait(receipt.operationId, { session })));
 		return receipt;
+	}
+
+	/**
+	 * Remembers that the agent of `session` saw `path` as it is on the computer
+	 * now (or as `sha256`, when it read it): its hash, and its text while it is
+	 * small, to show later what the person changed. A file that is gone, or
+	 * has no hash, is forgotten.
+	 */
+	async #sawFile(session: string, path: string, sha256?: string): Promise<void> {
+		const now = await this.#fileNow(path);
+		if (!now.exists) return this.store.forgetSeenFile(session, path);
+		const same = sha256 === undefined || sha256 === now.sha256;
+		this.store.keepSeenFile(session, path, same ? now.sha256 : sha256, same ? now.text : null, MAX_SEEN_FILES);
+	}
+
+	/** A file on the computer as it is: gone, or its hash and size, and its text when it is small text. A file too big to hash stands for itself by its size and time. */
+	async #fileNow(path: string): Promise<FileNow> {
+		const stat = await this.computer.fs.stat(path).catch(() => null);
+		if (!stat?.isFile) return { exists: false };
+		if (stat.size > MAX_SEEN_BYTES) return { exists: true, sha256: stat.sha256 ?? `${stat.size}:${stat.mtime}`, size: stat.size, text: null };
+		const bytes = new Uint8Array(await new Response(await this.computer.fs.readFile(path)).arrayBuffer());
+		return { exists: true, sha256: await sha256Hex(bytes), size: bytes.byteLength, text: fileTextOf(bytes) };
+	}
+
+	/**
+	 * The block telling the agent of `session` which of the files it saw have
+	 * changed since, and what changed: by the person in the editor, or by any
+	 * program on the computer other than the agent's own file tools. `seen`
+	 * takes the files as they are now for what the agent is about to read, so
+	 * each change is told once. Null with nothing changed, or no computer.
+	 */
+	async #fileChanges(session: string): Promise<{ block: string; seen: () => void } | null> {
+		const known = this.store.seenFiles(session);
+		if (known.length === 0 || !this.computer.paired()) return null;
+		const now = await Promise.all(known.map((file) => this.#fileNow(file.path).catch(() => null)));
+		const changes: string[] = [];
+		const after: { path: string; now: FileNow }[] = [];
+		known.forEach((file, index) => {
+			const here = now[index];
+			if (!here) return;
+			const change = changeOf(file.path, file, here);
+			if (change === null) return;
+			changes.push(change);
+			after.push({ path: file.path, now: here });
+		});
+		const block = changesBlock(changes);
+		if (block === null) return null;
+		return {
+			block,
+			seen: () => {
+				for (const { path, now: here } of after) {
+					if (here.exists) this.store.keepSeenFile(session, path, here.sha256, here.text, MAX_SEEN_FILES);
+					else this.store.forgetSeenFile(session, path);
+				}
+			},
+		};
 	}
 
 	/** Where traces go: the OTLP endpoint the deployment sets, or nowhere. */
@@ -8455,6 +8531,7 @@ export class Pim extends DurableAgent<Env> {
 		if (!this.registry.snapshot().extension("pim.approvals")) return;
 		// Replaced in place, so chats begun before see the change, as they do an approval policy's.
 		this.registry.install(filesExtension(this.#files));
+		this.registry.install(canvasExtension(this.#canvas));
 		this.registry.install(hostedExtension(this.#hostedServices));
 		this.#installImageGeneration();
 		this.#reinstallApprovals();
@@ -9069,7 +9146,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
 		if (this.#isNoteEditor(connection)) return this.#closeNote(connection as Connection<NoteSocketState>);
 		this.#watchRequests.delete(connection.id);
-		await this.#unwatch(connection.id);
+		await Promise.all([this.#unwatch(connection.id), this.#releaseFiles(connection.id)]);
 	}
 
 	async onError(connection: Connection): Promise<void> {
@@ -9078,7 +9155,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#isScreenViewer(connection)) return this.#stopViewing(connection);
 		if (this.#isNoteEditor(connection)) return this.#closeNote(connection as Connection<NoteSocketState>);
 		this.#watchRequests.delete(connection.id);
-		await this.#unwatch(connection.id);
+		await Promise.all([this.#unwatch(connection.id), this.#releaseFiles(connection.id)]);
 	}
 
 	/** The app stopped showing the desktop: its stream closes. */
@@ -9167,6 +9244,15 @@ export class Pim extends DurableAgent<Env> {
 			case "follow":
 				await this.#watch(connection, this.#session(message.session));
 				return null;
+			case "watch_file":
+				await this.#watchFile(connection, message.path);
+				return null;
+			case "unwatch_file":
+				await this.#unwatchFile(connection.id, message.path);
+				return null;
+			case "canvas_answer":
+				this.#canvasAsks.get(message.request)?.(message);
+				return null;
 			case "snapshot": {
 				const stream = await this.harness.session(await this.#session(message.session)).events();
 				await stream.stop();
@@ -9242,6 +9328,78 @@ export class Pim extends DurableAgent<Env> {
 		if (!stream) return;
 		this.#watches.delete(connectionId);
 		await stream.stop();
+	}
+
+	/** The app socket holds a watch on a file of the person's: it hears of changes to it, and of how it is now straight away. */
+	async #watchFile(connection: Connection<SocketState>, requested: unknown): Promise<void> {
+		const path = filesPath(requested);
+		if (path === null) throw new HttpError(400, `path must be an absolute path under ${FILES_ROOT}`);
+		const state = await this.computer.watch(path);
+		const holds = this.#fileHolds.get(connection.id) ?? new Map<string, number>();
+		if (connection.readyState !== WebSocket.OPEN) {
+			// Gone while the computer answered: its holds were let go already, and this one never was.
+			await this.computer.unwatch(path);
+			return;
+		}
+		holds.set(path, (holds.get(path) ?? 0) + 1);
+		this.#fileHolds.set(connection.id, holds);
+		this.#send(connection, { type: "file_changed", path, kind: state.exists ? "modified" : "deleted", sha256: state.sha256, size: state.size });
+	}
+
+	async #unwatchFile(connectionId: string, requested: unknown): Promise<void> {
+		const path = filesPath(requested);
+		const holds = this.#fileHolds.get(connectionId);
+		const count = path === null ? undefined : holds?.get(path);
+		if (path === null || !holds || count === undefined) return;
+		if (count > 1) holds.set(path, count - 1);
+		else holds.delete(path);
+		if (holds.size === 0) this.#fileHolds.delete(connectionId);
+		await this.computer.unwatch(path);
+	}
+
+	/** A socket closed: its holds on files go, and with the last of a file's the computer stops watching it. */
+	async #releaseFiles(connectionId: string): Promise<void> {
+		const holds = this.#fileHolds.get(connectionId);
+		this.#fileHolds.delete(connectionId);
+		for (const [path, count] of holds ?? []) for (let each = 0; each < count; each++) await this.computer.unwatch(path);
+	}
+
+	/** A watched file changed, or can't be watched anymore: the sockets that hold it hear of it. */
+	#fileEvent(event: FileEvent): void {
+		for (const connection of this.getConnections<SocketState>()) {
+			const holds = this.#fileHolds.get(connection.id);
+			if (!holds?.has(event.path)) continue;
+			if (event.event === "watch_error") {
+				holds.delete(event.path);
+				this.#send(connection, { type: "file_changed", path: event.path, kind: "unwatched", sha256: null, size: null });
+			} else this.#send(connection, { type: "file_changed", path: event.path, kind: event.kind, sha256: event.sha256, size: event.size });
+		}
+	}
+
+	/** Tells the apps showing `session` to open a file in the canvas; how many were told. */
+	#canvasOpen(session: string, path: string, line?: number): number {
+		const watchers = this.#watchers(session).filter((connection) => connection.readyState === WebSocket.OPEN);
+		for (const connection of watchers) this.#send(connection, { type: "canvas_open", session: this.store.publicId(session), path, ...(line === undefined ? {} : { line }) });
+		return watchers.length;
+	}
+
+	/** Asks the apps showing `session` about their canvas, and returns the first answer, or null when none comes in a few seconds. */
+	#canvasAsk(session: string, what: "tabs" | "selection"): Promise<CanvasAnswer | null> {
+		const watchers = this.#watchers(session).filter((connection) => connection.readyState === WebSocket.OPEN);
+		if (watchers.length === 0) return Promise.resolve(null);
+		const request = crypto.randomUUID();
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => {
+				this.#canvasAsks.delete(request);
+				resolve(null);
+			}, CANVAS_ASK_MS);
+			this.#canvasAsks.set(request, (answer) => {
+				clearTimeout(timer);
+				this.#canvasAsks.delete(request);
+				resolve(answer);
+			});
+			for (const connection of watchers) this.#send(connection, { type: "canvas_query", session: this.store.publicId(session), request, what });
+		});
 	}
 
 	/** The sockets following `session`. */

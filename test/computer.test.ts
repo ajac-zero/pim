@@ -10,7 +10,8 @@ import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
 import { Computer, MAX_FILE_LISTENERS, MAX_WATCHED_PATHS } from "../src/computer";
-import { api, apiUrl, browserCalls, connectTestComputer, opens, OWNER, pendingApproval, post, ROOT as ROOT_CHAT, say, signedIn, TOKEN, toolUse } from "./helpers";
+import { FILE_CHANGES } from "../src/transcript";
+import { api, apiUrl, browserCalls, connect, connectTestComputer, lastUserText, messagesOf, opens, OWNER, pendingApproval, post, ROOT as ROOT_CHAT, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 
 const agent = () => env.Pim.getByName(OWNER);
@@ -73,11 +74,54 @@ const status = async () => (await api<{ state: string; computer: { hostname: str
 const ran: ExecArgs[] = [];
 let answer: (args: ExecArgs) => ExecResult | Promise<ExecResult> = (args) => ({ exitCode: 0, signal: null, stdout: `ran ${args.command}\n`, stderr: "", timedOut: false, truncated: false });
 
+/**
+ * How many times the space asked the test computer to watch each file, less
+ * those it let go. workerd can't run the operating system's file watches, so
+ * the test computer counts them itself, and says nothing of its own changes;
+ * the tests tell the space of those as the computer's watcher would.
+ */
+const held = new Map<string, number>();
+const stateOf = async (path: string) => {
+	const stat = await handle({ root: `${ROOT}`, exec: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false }) }, "stat", { path }).then(
+		(found) => found as { sha256: string | null; size: number },
+		(error: { code?: string }) => {
+			if (error.code === "ENOENT") return null;
+			throw error;
+		},
+	);
+	return stat ? { watching: true, sha256: stat.sha256, size: stat.size, exists: true } : { watching: true, sha256: null, size: null, exists: false };
+};
+const watchCalls = {
+	watch: async ({ path }: { path: string }) => {
+		const state = await stateOf(path);
+		held.set(path, (held.get(path) ?? 0) + 1);
+		return state;
+	},
+	unwatch: ({ path }: { path: string }) => {
+		const left = (held.get(path) ?? 0) - 1;
+		if (left > 0) held.set(path, left);
+		else held.delete(path);
+		return { watching: left > 0 };
+	},
+	unwatch_all: () => {
+		held.clear();
+		return { watching: false };
+	},
+};
+
 const connectComputer = (token: string, root: string) =>
-	connectTestComputer(token, root, async (args) => {
-		ran.push(args);
-		return answer(args);
-	});
+	connectTestComputer(
+		token,
+		root,
+		async (args) => {
+			ran.push(args);
+			return answer(args);
+		},
+		undefined,
+		undefined,
+		undefined,
+		watchCalls,
+	);
 
 /** The script, request and response files of the `node` command that sends an image request from the computer. */
 const nodeArgs = (command: string) => /^node "(.+)" "(.+)" "(.+)"$/.exec(command)!.slice(1) as [string, string, string];
@@ -98,6 +142,17 @@ describe("a space without a computer", () => {
 		const permissions = (await api("/permissions")).body.tools.map((permission: { name: string }) => permission.name);
 		for (const tool of ["shell", "browser_click"]) expect(permissions).not.toContain(tool);
 		expect((await api("/browser")).body).toEqual({ available: false, page: null });
+	});
+
+	it("has no canvas tools, and an app asking to watch a file is told so without its socket closing", async () => {
+		const tools = await offeredTools();
+		for (const tool of ["canvas_open_file", "canvas_list_open", "canvas_get_selection"]) expect(tools).not.toContain(tool);
+		const { socket, received } = await connect();
+		socket.send(JSON.stringify({ type: "watch_file", id: "w1", path: "/workspace/a.ts" }));
+		await vi.waitFor(() => expect(received).toContainEqual({ type: "error", id: "w1", message: expect.stringContaining("No computer is connected") }));
+		socket.send(JSON.stringify({ type: "resync" }));
+		await vi.waitFor(() => expect(received.filter((message) => message.type === "events").length).toBeGreaterThanOrEqual(2));
+		socket.close();
 	});
 
 	it("keeps the files it had, and moves them to the computer once one connects", async () => {
@@ -1185,5 +1240,236 @@ describe("watching files on the computer", () => {
 		computer.receive(JSON.stringify({ type: "hello" }));
 		await vi.waitFor(() => expect(sent.filter((call) => call.op === "watch")).toHaveLength(2));
 		expect(await computer.unwatch("/workspace/c.ts")).toBe(false);
+	});
+});
+
+describe("the code editor canvas", () => {
+	const sha = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
+	const CODE = "/workspace/code";
+	const fileChanges = (received: { type: string }[]) => received.filter((message): message is { type: string; path: string; kind: string; sha256: string | null; size: number | null } => message.type === "file_changed");
+
+	it("connects a computer of its own for these tests", async () => {
+		const { body } = await post<{ token: string }>("/computer");
+		computer = await connectComputer(body.token, ROOT);
+		await fs.rm(`${ROOT}/code`, { recursive: true, force: true });
+		expect(held.size).toBe(0);
+	});
+
+	it("tells a tab with a file open, at once, when an agent, the person or another program changes it", async () => {
+		const path = `${CODE}/a.ts`;
+		await upload(path, "one\n");
+		const { socket, received } = await connect();
+		socket.send(JSON.stringify({ type: "watch_file", path: `${CODE}/./a.ts` }));
+		// The file as it is comes first, so what changed while the app read it isn't missed.
+		await vi.waitFor(() => expect(fileChanges(received)).toEqual([{ type: "file_changed", path, kind: "modified", sha256: sha("one\n"), size: 4 }]));
+		expect(held.get(path)).toBe(1);
+		const last = () => fileChanges(received).at(-1)?.sha256;
+
+		// An agent's edit.
+		await callTool("file_edit", { path, edits: [{ oldText: "one", newText: "two" }] });
+		await vi.waitFor(() => expect(last()).toBe(sha("two\n")), { timeout: 1000 });
+		// The person's save from this tab or another.
+		await upload(path, "three\n");
+		await vi.waitFor(() => expect(last()).toBe(sha("three\n")), { timeout: 1000 });
+		// A program on the computer, which its own watcher reports.
+		computer.socket.send(JSON.stringify({ type: "event", event: "file_changed", path, kind: "modified", sha256: sha("four\n"), size: 5, mtime: 1 }));
+		await vi.waitFor(() => expect(last()).toBe(sha("four\n")), { timeout: 1000 });
+		// Other files aren't this tab's.
+		await upload(`${CODE}/other.ts`, "x");
+		expect(fileChanges(received).every((message) => message.path === path)).toBe(true);
+
+		// A watcher that fails is told as one that no longer reports.
+		computer.socket.send(JSON.stringify({ type: "event", event: "watch_error", path, code: "ENOSPC" }));
+		await vi.waitFor(() => expect(fileChanges(received).at(-1)).toMatchObject({ path, kind: "unwatched" }));
+		// The computer let go of the file itself.
+		held.delete(path);
+		await callTool("file_edit", { path, edits: [{ oldText: "three", newText: "five" }] });
+		expect(fileChanges(received).at(-1)).toMatchObject({ kind: "unwatched" });
+		socket.close();
+		await vi.waitFor(() => expect(held.size).toBe(0));
+	});
+
+	it("keeps the computer watching a file until the last tab with it open lets go", async () => {
+		const path = `${CODE}/shared.ts`;
+		await upload(path, "x");
+		const first = await connect();
+		const second = await connect();
+		for (const { socket } of [first, second]) socket.send(JSON.stringify({ type: "watch_file", path }));
+		await vi.waitFor(() => expect(held.get(path)).toBe(2));
+		first.socket.close();
+		await vi.waitFor(() => expect(held.get(path)).toBe(1));
+		// A change still reaches the tab left; the closed one hears nothing.
+		await upload(path, "y");
+		await vi.waitFor(() => expect(fileChanges(second.received).at(-1)?.sha256).toBe(sha("y")));
+		expect(fileChanges(first.received).filter((message) => message.sha256 === sha("y"))).toEqual([]);
+		// Closing the tab on the file lets go of it too, without closing the socket.
+		second.socket.send(JSON.stringify({ type: "unwatch_file", path }));
+		await vi.waitFor(() => expect(held.size).toBe(0));
+		second.socket.close();
+	});
+
+	it("refuses to watch what is outside the files, links and dots included, and a file that isn't there is watched until it is", async () => {
+		await fs.mkdir(`${ROOT}-outside`, { recursive: true });
+		await fs.writeFile(`${ROOT}-outside/secret.txt`, "secret");
+		await fs.symlink(`${ROOT}-outside`, `${ROOT}/escape`);
+		const { socket, received } = await connect();
+		for (const [id, path] of [["dots", "/workspace/../etc/passwd"], ["other", "/etc/passwd"], ["link", "/workspace/escape/secret.txt"]]) {
+			socket.send(JSON.stringify({ type: "watch_file", id, path }));
+			await vi.waitFor(() => expect(received.some((message) => message.type === "error" && message.id === id)).toBe(true));
+		}
+		expect(held.size).toBe(0);
+		const refused = await callTool("canvas_open_file", { path: "/workspace/escape/secret.txt" });
+		expect(refused).toMatchObject({ isError: true, text: expect.stringContaining("outside /workspace") });
+		expect(await callTool("canvas_open_file", { path: "/workspace/../etc/passwd" })).toMatchObject({ isError: true, text: expect.stringContaining("not one of the person's files") });
+		expect(received.some((message) => message.type === "canvas_open")).toBe(false);
+		await fs.rm(`${ROOT}/escape`);
+
+		const later = `${CODE}/later.ts`;
+		socket.send(JSON.stringify({ type: "watch_file", path: later }));
+		await vi.waitFor(() => expect(fileChanges(received)).toEqual([{ type: "file_changed", path: later, kind: "deleted", sha256: null, size: null }]));
+		await upload(later, "now");
+		await vi.waitFor(() => expect(fileChanges(received).at(-1)?.sha256).toBe(sha("now")));
+		socket.close();
+		await vi.waitFor(() => expect(held.size).toBe(0));
+	});
+
+	describe("what the person changed since the agent's last turn", () => {
+		const path = `${CODE}/b.ts`;
+		const hears = async (message: string) => {
+			let heard = "";
+			faux.setResponses([
+				(context) => {
+					heard = lastUserText(context.messages);
+					return toolUse("send_to_user", { message: "Seen." });
+				},
+			]);
+			await say(message);
+			return heard;
+		};
+
+		it("is told once, as a short diff before what they said, which the chat doesn't show", async () => {
+			await upload(path, "line 1\nline 2\nline 3\n");
+			expect((await callTool("file_read", { path })).isError).toBe(false);
+			// Nothing has changed: nothing is added.
+			expect(await hears("Anything new?")).toBe("Anything new?");
+
+			await upload(path, "line 1\nline two\nline 3\nline 4\n");
+			const heard = await hears("What changed?");
+			expect(heard).toBe(`${FILE_CHANGES}\n${path} (changed)\n@@ line 2 @@\n-line 2\n+line two\n@@ line 4 @@\n+line 4\n\nWhat changed?`);
+			expect(await hears("And now?")).toBe("And now?");
+			// The app shows the person's own words only.
+			const said = await messagesOf(ROOT_CHAT, "user");
+			expect(said).toContain("What changed?");
+			expect(said.filter((text) => text.includes("Files you changed"))).toEqual([]);
+		});
+
+		it("doesn't count the agent's own writes as the person's changes", async () => {
+			expect((await callTool("file_write", { path, content: "agent wrote this\n" })).isError).toBe(false);
+			expect((await callTool("file_edit", { path, edits: [{ oldText: "this", newText: "that" }] })).isError).toBe(false);
+			expect(await hears("Still fine?")).toBe("Still fine?");
+		});
+
+		it("says only that a file changed when it is binary or large, and when it is gone", async () => {
+			const big = `${CODE}/big.txt`;
+			const binary = `${CODE}/blob.bin`;
+			const gone = `${CODE}/gone.txt`;
+			await upload(big, "a".repeat(70_000));
+			await upload(gone, "bye");
+			await callTool("file_read", { path: big, limit: 1 });
+			await callTool("file_read", { path: gone });
+			await callTool("file_write", { path: binary, content: "text first" });
+			await upload(big, "b".repeat(70_000));
+			await upload(binary, new Uint8Array([0, 1, 2, 3]));
+			await fs.rm(`${ROOT}/code/gone.txt`);
+			const heard = await hears("Look again.");
+			expect(heard).toContain(`${big} (changed, 70000 bytes; no diff shown)`);
+			expect(heard).toContain(`${binary} (changed, 4 bytes; no diff shown)`);
+			expect(heard).toContain(`${gone} (deleted)`);
+			expect(heard.endsWith("\n\nLook again.")).toBe(true);
+			expect(await hears("Once.")).toBe("Once.");
+		});
+
+		it("caps what it tells of many files", async () => {
+			const names = Array.from({ length: 12 }, (_, index) => `${CODE}/many-${index}.txt`);
+			for (const name of names) {
+				await upload(name, "old\n");
+				await callTool("file_read", { path: name });
+			}
+			for (const name of names) await upload(name, "new\n");
+			const heard = await hears("Many.");
+			expect(heard.split("\n").filter((line) => line.endsWith("(changed)"))).toHaveLength(8);
+			expect(heard).toContain("... and 4 more files changed");
+		});
+
+		it("gives an agent whose write is stale the file's own hash in a conflict, never overwriting the person", async () => {
+			await upload(path, "v1\n");
+			const read = await callTool("file_read", { path });
+			const seen = /sha256 of the whole file: (\w+)/.exec(read.text)![1]!;
+			expect(seen).toBe(sha("v1\n"));
+			await upload(path, "the person's v2\n");
+			const stale = await callTool("file_write", { path, content: "agent's v2\n", expectedHash: seen });
+			expect(stale.isError).toBe(true);
+			expect(JSON.parse(stale.text)).toMatchObject({ error: "conflict", code: "hash_mismatch", path, expectedHash: seen, currentHash: sha("the person's v2\n") });
+			expect(await fs.readFile(`${ROOT}/code/b.ts`, "utf8")).toBe("the person's v2\n");
+			await hears("Sync up.");
+		});
+	});
+
+	describe("the agent's tools for the canvas", () => {
+		const asked = async (tool: string, message: string, answer: (query: { request: string; what: string }) => Record<string, unknown>) => {
+			const { socket, received } = await connect();
+			let result = { text: "", isError: false, images: [] as string[] };
+			faux.setResponses([
+				toolUse(tool, {}),
+				(context) => {
+					result = lastToolResult(context.messages);
+					return toolUse("send_to_user", { message: "Done." });
+				},
+			]);
+			const saying = say(message);
+			const query = await vi.waitFor(() => {
+				const found = received.find((each) => each.type === "canvas_query");
+				expect(found).toBeDefined();
+				return found as { request: string; what: string; session: string };
+			});
+			expect(query.session).toBe(ROOT_CHAT);
+			socket.send(JSON.stringify({ type: "canvas_answer", request: query.request, ...answer(query) }));
+			await saying;
+			socket.close();
+			return { result, query };
+		};
+
+		it("opens a file in the canvas of the chat, at a line", async () => {
+			const { socket, received } = await connect();
+			const opened = await callTool("canvas_open_file", { path: `${CODE}/b.ts`, line: 3 });
+			expect(opened).toMatchObject({ isError: false, text: `Opened ${CODE}/b.ts at line 3 in the person's canvas.` });
+			expect(received).toContainEqual({ type: "canvas_open", session: ROOT_CHAT, path: `${CODE}/b.ts`, line: 3 });
+			const missing = await callTool("canvas_open_file", { path: `${CODE}/nothing.ts` });
+			expect(missing.isError).toBe(true);
+			socket.close();
+		});
+
+		it("lists what is open, and reads the selection only when asked", async () => {
+			const tabs = [{ path: `${CODE}/a.ts`, dirty: true }, { path: `${CODE}/b.ts`, dirty: false }];
+			const listed = await asked("canvas_list_open", "What is open?", () => ({ tabs, active: `${CODE}/a.ts` }));
+			expect(listed.query.what).toBe("tabs");
+			expect(listed.result.text).toBe(`${CODE}/a.ts (shown) (unsaved changes)\n${CODE}/b.ts`);
+
+			const picked = await asked("canvas_get_selection", "What did I select?", () => ({
+				tabs,
+				active: `${CODE}/a.ts`,
+				selection: { path: `${CODE}/a.ts`, from: { line: 2, column: 1 }, to: { line: 2, column: 9 }, text: "line two" },
+			}));
+			expect(picked.query.what).toBe("selection");
+			expect(picked.result.text).toBe(`${CODE}/a.ts: selected from line 2, column 1 to line 2, column 9\nline two`);
+		});
+
+		it("says so when no app has the chat open, rather than failing", async () => {
+			// The sockets of the tests before were closed a moment ago.
+			await vi.waitFor(async () => expect(await callTool("canvas_list_open", {})).toMatchObject({ isError: false, text: expect.stringContaining("No app has this chat open") }));
+			for (const [tool, args] of [["canvas_get_selection", {}], ["canvas_open_file", { path: `${CODE}/b.ts` }]] as const) {
+				expect(await callTool(tool, args)).toMatchObject({ isError: false, text: expect.stringContaining("No app has this chat open") });
+			}
+		});
 	});
 });

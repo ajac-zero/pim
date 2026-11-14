@@ -99,6 +99,7 @@ import { cn, modelName } from "~/lib/utils";
 
 export const SETTINGS_TABS = [
   "general",
+  "appearance",
   "model",
   "computer",
   "coding",
@@ -114,6 +115,7 @@ export type SettingsTab = (typeof SETTINGS_TABS)[number];
 
 const TAB_LABELS: Record<SettingsTab, [TranslationKey, LucideIcon]> = {
   general: ["settingsGeneral", SlidersHorizontal],
+  appearance: ["appearance", Sun],
   model: ["settingsModel", Sparkles],
   computer: ["settingsComputer", Server],
   coding: ["coding", Code],
@@ -210,9 +212,9 @@ function SettingsTabs({ initial }: { initial: SettingsTab }) {
             <PreferencesSection />
             <EmailSection />
             <PushSection />
-            <AppearanceSection />
           </>
         )}
+        {tab === "appearance" && <AppearanceSection />}
         {tab === "model" && model && (
           <>
             <section className="mt-10 space-y-3">

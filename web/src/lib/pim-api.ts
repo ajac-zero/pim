@@ -1502,6 +1502,8 @@ export type ProviderModelInfo = {
   name: string;
   contextWindow: number;
   maxTokens: number;
+  /** Where the longest answer came from; "estimated" is a heuristic, not a known limit. */
+  maxTokensSource?: "listing" | "catalog" | "override" | "estimated";
   images: boolean;
   reasoning: boolean;
   cost?: ModelCost;

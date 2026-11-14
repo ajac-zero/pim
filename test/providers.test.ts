@@ -565,9 +565,9 @@ describe("A person's own model providers", () => {
 			chosen: null,
 			structuredOutput: false,
 			models: [
-				{ id: "local-model", name: "local-model", contextWindow: 128_000, maxTokens: 32_000, maxTokensGuessed: true, images: false, reasoning: false },
-				{ id: "vision-model", name: "Vision", contextWindow: 32_768, maxTokens: 8_192, maxTokensGuessed: true, images: true, reasoning: false },
-				{ id: "served-model", name: "served-model", contextWindow: 4_096, maxTokens: 1_024, maxTokensGuessed: true, images: false, reasoning: false },
+				{ id: "local-model", name: "local-model", contextWindow: 128_000, maxTokens: 32_000, maxTokensSource: "estimated", images: false, reasoning: false },
+				{ id: "vision-model", name: "Vision", contextWindow: 32_768, maxTokens: 8_192, maxTokensSource: "estimated", images: true, reasoning: false },
+				{ id: "served-model", name: "served-model", contextWindow: 4_096, maxTokens: 1_024, maxTokensSource: "estimated", images: false, reasoning: false },
 			],
 		});
 
@@ -803,19 +803,29 @@ describe("a model's output limit", () => {
 		expect(describeModel("m", listed, known, override)).toMatchObject({ contextWindow, maxTokens });
 	}, 10_000);
 
-	it("moves models stored with the old fallback to the new one, and leaves what was set or known", () => {
+	it("moves models stored with the old computed 8192 to the heuristic, and keeps what was set, listed or known", () => {
 		const base = { id: "p", name: "P", url: "http://x/v1", key: null, chosen: null };
 		const stored = { id: "gemini-4-argon", name: "g", contextWindow: 1_000_000, images: false, reasoning: true };
-		const limits = (provider: Parameters<typeof providerInfo>[0]) => [providerInfo(provider).models[0]!.maxTokens, providerModel("own:p", provider, provider.models[0]!).maxTokens];
-		// Saved before the guess was kept: 8192 with no override was the fallback.
-		expect(limits({ ...base, models: [{ ...stored, maxTokens: 8_192 }] })).toEqual([32_768, 32_768]);
-		// The same 8192 as the person's own override stays.
-		expect(limits({ ...base, models: [{ ...stored, maxTokens: 8_192 }], overrides: { "gemini-4-argon": { maxTokens: 8_192 } } })).toEqual([8_192, 8_192]);
-		// Marked as known, 8192 stays; marked as a guess, it follows the fallback whatever it was stored as.
-		expect(limits({ ...base, models: [{ ...stored, maxTokens: 8_192, maxTokensGuessed: false }] })).toEqual([8_192, 8_192]);
-		expect(limits({ ...base, models: [{ ...stored, maxTokens: 4_000, maxTokensGuessed: true }] })).toEqual([32_768, 32_768]);
-		// A legacy model with another limit was listed or known.
-		expect(limits({ ...base, models: [{ ...stored, maxTokens: 65_536 }] })).toEqual([65_536, 65_536]);
+		const limit = (provider: Parameters<typeof providerInfo>[0]) => {
+			const shown = providerInfo(provider).models[0]!;
+			expect(providerModel("own:p", provider, provider.models[0]!).maxTokens).toBe(shown.maxTokens);
+			return [shown.maxTokens, shown.maxTokensSource];
+		};
+		// Legacy computed 8192, no override and no source: the old fallback, now the heuristic.
+		expect(limit({ ...base, models: [{ ...stored, maxTokens: 8_192 }] })).toEqual([32_768, "estimated"]);
+		// An explicit override of 8192 is never rewritten, even on a record with no source.
+		expect(limit({ ...base, models: [{ ...stored, maxTokens: 8_192 }], overrides: { "gemini-4-argon": { maxTokens: 8_192 } } })).toEqual([8_192, "override"]);
+		// A listing's own 8192, on a record saved with its source, stays.
+		const listed = describeModel("gemini-4-argon", { max_output_tokens: 8_192, context_length: 1_000_000 }, undefined);
+		expect(limit({ ...base, models: [listed] })).toEqual([8_192, "listing"]);
+		// Another legacy value was listed or known: it stays.
+		expect(limit({ ...base, models: [{ ...stored, maxTokens: 65_536 }] })).toEqual([65_536, undefined]);
+	}, 10_000);
+
+	it("says where the limit came from", () => {
+		const gemini = (getBuiltinModels("google") as any[]).find((model) => model.id === "gemini-2.5-flash");
+		const from = (...args: Parameters<typeof describeModel>) => describeModel(...args).maxTokensSource;
+		expect([from("m", { max_output_tokens: 5_000 }, gemini), from("m", undefined, gemini), from("m", undefined, gemini, { maxTokens: 9_000 }), from("m", undefined, undefined)]).toEqual(["listing", "catalog", "override", "estimated"]);
 	}, 10_000);
 
 	it("takes a person's output limit only as a whole number of tokens", async () => {

@@ -201,6 +201,13 @@ function CustomProvider({
   );
 }
 
+const SOURCES = {
+  listing: "providerMaxTokensListing",
+  catalog: "providerMaxTokensCatalog",
+  override: "providerMaxTokensOverride",
+  estimated: "providerMaxTokensEstimated",
+} as const;
+
 const PRICES = ["input", "output", "cacheRead", "cacheWrite"] as const;
 
 /** A custom endpoint's model settings as the form edits them: text, so a field can be empty. */
@@ -311,6 +318,8 @@ function ProviderForm({
           maxTokens:
             provider?.models.find((model) => model.id === id)?.maxTokens ??
             8_192,
+          maxTokensSource: provider?.models.find((model) => model.id === id)
+            ?.maxTokensSource,
         }))
       : (provider?.models ?? []);
   const preset = catalog?.providers.find((entry) => entry.id === kind);
@@ -588,6 +597,9 @@ function ProviderForm({
                   ...limits,
                   [model.id]: { ...entry, [field]: value },
                 });
+              const shown = entry.maxTokens.trim()
+                ? "override"
+                : model.maxTokensSource;
               const inputs = [
                 ["contextWindow", t("providerContextWindow"), "1"],
                 ["maxTokens", t("providerMaxTokens"), "1"],
@@ -601,7 +613,7 @@ function ProviderForm({
                   <span className="block truncate font-mono text-xs">
                     {model.id}
                   </span>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-6">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                     {inputs.map(([field, label, step]) => (
                       <label key={field} className="block space-y-0.5">
                         <span className="text-muted-foreground text-xs">
@@ -626,6 +638,11 @@ function ProviderForm({
                       </label>
                     ))}
                   </div>
+                  {shown && (
+                    <p className="text-muted-foreground text-xs">
+                      {t("providerMaxTokens")}: {t(SOURCES[shown])}
+                    </p>
+                  )}
                 </div>
               );
             })}

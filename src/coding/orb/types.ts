@@ -33,6 +33,12 @@ export type OrbState = "working" | "idle" | "awaiting_approval" | "error" | "unk
 /** A thread's own state, as `state` reports it. `lastEventAt` is when the agent last did anything, null when the client can't say. */
 export type OrbStatus = { readonly state: OrbState; readonly lastEventAt: number | null };
 
+/** A piece of a message: its words, a tool the agent called, or what a tool answered. */
+export type OrbPart =
+	| { readonly type: "text"; readonly text: string }
+	| { readonly type: "toolCall"; readonly id: string; readonly name: string; readonly arguments: Record<string, unknown> }
+	| { readonly type: "toolResult"; readonly id: string; readonly name: string; readonly text: string; readonly isError: boolean };
+
 /** One message of a thread's transcript, as the agent's cloud reports it. */
 export type OrbMessage = {
 	/** The agent's own id of the message, which `messages` pages by. */
@@ -41,6 +47,8 @@ export type OrbMessage = {
 	/** When the agent's cloud says it was said. */
 	readonly at: number;
 	readonly text: string;
+	/** The message's text and tool steps in order, set when it has tool steps; `text` is then only its words. */
+	readonly parts?: readonly OrbPart[];
 	/** Original provider JSON when its transcript format is not stable. */
 	readonly raw?: unknown;
 };

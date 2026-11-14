@@ -2,7 +2,7 @@ import { ActivityWatch, activityOf, type Activity } from "../activity";
 import { turnsOf } from "../diagnostics";
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type Api, type AssistantMessage, createAssistantMessageEventStream, type Message, type Model, type Provider } from "@earendil-works/pi-ai";
+import { type Api, type AssistantMessage, createAssistantMessageEventStream, type Message, type TextContent, type ToolCall, type Model, type Provider } from "@earendil-works/pi-ai";
 import { createModels, type Models, type MutableModels } from "@earendil-works/pi-ai/models";
 import { createRegistry, type EntryRecord, Harness, type HarnessSettings, section } from "@earendil-works/pi-durable";
 import { getAgentByName } from "agents";
@@ -2643,21 +2643,27 @@ export class CodingThreadDO extends DurableObject<Env> {
 			after = last;
 		}
 		for (const message of read) {
+			const parts = message.parts;
+			const calls = parts?.filter((part) => part.type === "toolCall") ?? [];
+			const results = parts?.flatMap((part) => (part.type === "toolResult" ? [part] : [])) ?? [];
 			// The agent's own words, as they are, without asking the thread's model anything: no provider, model or usage of Pim's is invented for them.
-			const said: Message =
-				message.role === "assistant"
-					? {
-							role: "assistant",
-							content: [{ type: "text", text: message.text }],
-							api: "anthropic-messages",
-							provider: "orb",
-							model: "orb",
-							usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-							stopReason: "stop",
-							timestamp: message.at,
-						}
-					: { role: "user", content: message.text, timestamp: message.at };
-			await this.#writeMessage(said);
+			if (message.role === "assistant" && (message.text || calls.length > 0)) {
+				const content: (TextContent | ToolCall)[] = parts
+					? parts.flatMap<TextContent | ToolCall>((part) => (part.type === "text" ? [{ type: "text" as const, text: part.text }] : part.type === "toolCall" ? [{ type: "toolCall" as const, id: part.id, name: part.name, arguments: part.arguments as Record<string, any> }] : []))
+					: [{ type: "text", text: message.text }];
+				await this.#writeMessage({
+					role: "assistant",
+					content,
+					api: "anthropic-messages",
+					provider: "orb",
+					model: "orb",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+					stopReason: calls.length > 0 ? "toolUse" : "stop",
+					timestamp: message.at,
+				});
+			}
+			for (const result of results) await this.#writeMessage({ role: "toolResult", toolCallId: result.id, toolName: result.name, content: [{ type: "text", text: result.text }], isError: result.isError, timestamp: message.at });
+			if (message.role === "user" && (message.text || results.length === 0)) await this.#writeMessage({ role: "user", content: message.text, timestamp: message.at });
 		}
 		if (after !== before) this.store.update({ orbLastMessage: after });
 	}

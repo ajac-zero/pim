@@ -9,7 +9,7 @@
 // agent. `cancel` is the real Stop: a short-lived WebSocket to Amp's rivet
 // gateway sending the JSON-RPC `client_cancel`. Only Authorization and content-type headers are sent;
 // the CLI's x-amp-* headers were not needed.
-import { OrbAuthError, OrbError, OrbLostError, OrbUnreachableError, OrbUnsupportedError, type OrbClient, type OrbMessage, type OrbStart, type OrbStatus, type OrbThread, type OrbUsage } from "./types";
+import { OrbAuthError, OrbError, OrbLostError, OrbUnreachableError, OrbUnsupportedError, type OrbClient, type OrbMessage, type OrbPart, type OrbStart, type OrbStatus, type OrbThread, type OrbUsage } from "./types";
 
 export const AMP_HTTP_UNSUPPORTED = "not supported by Amp: archiving may not halt a running agent";
 /**
@@ -37,6 +37,8 @@ const DEFAULT_BASE = "https://ampcode.com";
 /** Upper bound on a response body read, and on one transcript message's text. */
 export const AMP_MAX_RESPONSE_BYTES = 2_000_000;
 export const AMP_MAX_MESSAGE_CHARS = 8_000;
+export const AMP_MAX_TOOL_VALUE_CHARS = 500;
+export const AMP_MAX_TOOL_OUTPUT_CHARS = 8_000;
 const TAIL_LIMIT = 200;
 const AGENT_MODES = new Set(["low", "medium", "high", "ultra"]);
 
@@ -72,16 +74,68 @@ const timestamp = (value: unknown): number | null => {
 const userState = () => ({ currentlyVisibleFiles: [], timeZone: "UTC" });
 const textContent = (text: string) => [{ type: "text", text }];
 
-/** Text blocks joined and capped; other block types (tool_use, tool_result…) become a short marker and never throw. */
-function messageText(content: unknown): string {
-	const parts: string[] = [];
+const cap = (text: string, max: number): string => text.length > max ? `${text.slice(0, max)}… [truncated]` : text;
+
+/** Tool input as Pim stores a call's arguments: an object, with long values cut. */
+function toolArguments(input: unknown): Record<string, unknown> {
+	const source = input !== null && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : input === undefined || input === null ? {} : { input };
+	const out: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(source)) {
+		if (typeof value === "string") out[key] = cap(value, AMP_MAX_TOOL_VALUE_CHARS);
+		else if (value !== null && typeof value === "object") {
+			let json = "";
+			try { json = JSON.stringify(value) ?? ""; } catch { /* unserializable */ }
+			out[key] = json.length > AMP_MAX_TOOL_VALUE_CHARS ? cap(json, AMP_MAX_TOOL_VALUE_CHARS) : value;
+		} else out[key] = value;
+	}
+	return out;
+}
+
+/** The text of a tool result's content: a string, or blocks (possibly nested) of text. */
+function resultText(content: unknown, depth = 0): string {
+	if (typeof content === "string") return content;
+	if (depth > 4 || content === null || content === undefined) return "";
+	if (Array.isArray(content)) return content.map((each) => resultText(each, depth + 1)).filter(Boolean).join("\n");
+	const b = object(content);
+	if (typeof b.text === "string") return b.text;
+	for (const key of ["content", "output", "result", "message"]) if (b[key] !== undefined) return resultText(b[key], depth + 1);
+	return "";
+}
+
+const FAILED = new Set(["error", "failed", "cancelled", "canceled", "rejected", "rejected-by-user"]);
+const present = (value: unknown): boolean => value !== undefined && value !== null && value !== false;
+const jsonText = (value: unknown): string => { try { return JSON.stringify(value) ?? ""; } catch { return ""; } };
+
+/** What a tool_result block answered, from its `content`, or Amp's `run: {status, result|error}`. */
+function toolResultPart(b: Record<string, unknown>, names: Map<string, string>): OrbPart | null {
+	const id = [b.toolUseID, b.tool_use_id, b.toolUseId].find((each): each is string => typeof each === "string");
+	if (id === undefined) return null;
+	const run = object(b.run);
+	const status = typeof run.status === "string" ? run.status : "";
+	const isError = b.is_error === true || b.isError === true || present(b.error) || present(run.error) || FAILED.has(status);
+	let text = resultText(b.content) || resultText(run.result) || resultText(run.output);
+	if (!text && isError) text = resultText(b.error) || resultText(run.error) || jsonText(b.error ?? run.error);
+	if (!text && present(run.result)) text = jsonText(run.result);
+	return { type: "toolResult", id, name: names.get(id) ?? "tool", text: cap(text, AMP_MAX_TOOL_OUTPUT_CHARS), isError };
+}
+
+/** Message words capped, and the tool steps apart; other block types become a short marker and never throw. */
+function messageContent(content: unknown, names: Map<string, string>): { text: string; parts: OrbPart[] } {
+	const words: string[] = [];
+	const parts: OrbPart[] = [];
 	for (const block of Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : []) {
 		const b = object(block);
-		if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
-		else if (typeof b.type === "string" && b.type !== "thinking") parts.push(`[${b.type.slice(0, 40)}]`);
+		if (b.type === "text" && typeof b.text === "string") { words.push(b.text); parts.push({ type: "text", text: b.text }); }
+		else if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") {
+			const name = b.name.slice(0, 100);
+			names.set(b.id, name);
+			parts.push({ type: "toolCall", id: b.id, name, arguments: toolArguments(b.input) });
+		} else if (b.type === "tool_result") {
+			const part = toolResultPart(b, names);
+			if (part) parts.push(part); else words.push("[tool_result]");
+		} else if (typeof b.type === "string" && b.type !== "thinking") words.push(`[${b.type.slice(0, 40)}]`);
 	}
-	const text = parts.join("\n");
-	return text.length > AMP_MAX_MESSAGE_CHARS ? `${text.slice(0, AMP_MAX_MESSAGE_CHARS)}… [truncated]` : text;
+	return { text: cap(words.join("\n"), AMP_MAX_MESSAGE_CHARS), parts };
 }
 
 export class AmpHttpOrbClient implements OrbClient {
@@ -267,12 +321,14 @@ export class AmpHttpOrbClient implements OrbClient {
 		}
 		const all: OrbMessage[] = [];
 		const seen = new Set<string>();
+		const names = new Map<string, string>();
 		for (const value of tail.messages) {
 			const message = object(value);
 			const messageId = typeof message.messageId === "string" ? message.messageId : typeof message.messageId === "number" ? String(message.messageId) : null;
 			if (messageId === null || seen.has(messageId)) continue;
 			seen.add(messageId);
-			all.push({ id: messageId, role: message.role === "user" ? "user" : "assistant", at: timestamp(message.createdAt) ?? 0, text: messageText(message.content) });
+			const { text, parts } = messageContent(message.content, names);
+			all.push({ id: messageId, role: message.role === "user" ? "user" : "assistant", at: timestamp(message.createdAt) ?? 0, text, ...(parts.some((part) => part.type !== "text") ? { parts } : {}) });
 		}
 		const index = o.after ? all.findIndex((m) => m.id === o.after) : -1;
 		return all.slice(index + 1);

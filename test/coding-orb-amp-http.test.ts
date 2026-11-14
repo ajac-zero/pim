@@ -1,7 +1,7 @@
 // Contract test for the Amp internal-API client against recorded fixtures
 // (test/fixtures/amp-internal, shapes verified live, tokens redacted).
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AmpCancelError, AmpHttpOrbClient, AMP_CLI_VERSION_LABEL, AMP_MAX_MESSAGE_CHARS, AMP_RIVET_PUBLIC_KEY, type AmpSocket, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
+import { AmpCancelError, AmpHttpOrbClient, AMP_CLI_VERSION_LABEL, AMP_MAX_MESSAGE_CHARS, AMP_MAX_TOOL_OUTPUT_CHARS, AMP_MAX_TOOL_VALUE_CHARS, AMP_RIVET_PUBLIC_KEY, type AmpSocket, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
 import { runOrbClientConformanceSuite } from "../src/coding/orb/conformance";
 import { OrbAuthError, OrbLostError, OrbUnreachableError, OrbUnsupportedError } from "../src/coding/orb/types";
 
@@ -168,14 +168,54 @@ describe("AmpHttpOrbClient contract", () => {
 		expect(await state("idle")).toBe("idle");
 	});
 
+	it("maps tool_use and tool_result blocks to tool calls and outputs", async () => {
+		const { client, fetcher } = fixture();
+		fetcher.mockImplementation(async () => reply("tail-tools"));
+		const all = await client.messages("T-abc-1");
+		expect(all[1]!.text).toBe("Reading.");
+		expect(all[1]!.parts).toEqual([
+			{ type: "text", text: "Reading." },
+			{ type: "toolCall", id: "toolu_1", name: "Read", arguments: { path: "a.ts" } },
+			{ type: "toolCall", id: "toolu_2", name: "Bash", arguments: { cmd: "echo hi" } },
+			{ type: "toolCall", id: "toolu_3", name: "edit_file", arguments: { path: "a.ts", new_str: "LONG" } },
+		]);
+		expect(all[2]!.parts).toEqual([
+			{ type: "toolResult", id: "toolu_1", name: "Read", text: "const a = 1;", isError: false },
+			{ type: "toolResult", id: "toolu_2", name: "Bash", text: "hi\n", isError: false },
+			{ type: "toolResult", id: "toolu_3", name: "edit_file", text: "old_str not found", isError: true },
+		]);
+		expect(all[4]!.parts).toEqual([
+			{ type: "toolResult", id: "toolu_4", name: "Grep", text: "a.ts:1\na.ts:2", isError: false },
+			{ type: "toolResult", id: "toolu_5", name: "Task", text: "nested", isError: true },
+		]);
+		expect(all[0]!.parts).toBeUndefined();
+	});
+
+	it("truncates long tool inputs and outputs with a marker", async () => {
+		const { client, fetcher } = fixture();
+		const long = "x".repeat(AMP_MAX_TOOL_OUTPUT_CHARS + 50);
+		fetcher.mockImplementation(async () => json({ ok: true, result: { thread: {}, messages: [
+			{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "Write", input: { content: long, n: 1, deep: { a: long } } }], messageId: 1 },
+			{ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: long }, { type: "tool_result", tool_use_id: "u", content: "orphan" }], messageId: 2 },
+		] } }));
+		const [call, result] = await client.messages("T-abc-1");
+		const args = (call!.parts![0] as { arguments: Record<string, unknown> }).arguments;
+		expect(args.content).toBe(`${"x".repeat(AMP_MAX_TOOL_VALUE_CHARS)}… [truncated]`);
+		expect(args.n).toBe(1);
+		expect(String(args.deep)).toMatch(/… \[truncated\]$/);
+		const out = result!.parts as unknown as { text: string; name: string }[];
+		expect(out[0]!.text).toBe(`${"x".repeat(AMP_MAX_TOOL_OUTPUT_CHARS)}… [truncated]`);
+		expect(out[1]).toMatchObject({ name: "tool", text: "orphan" });
+	});
+
 	it("maps the transcript, tolerating non-text blocks, and resumes after a message id", async () => {
 		const { client, fetcher } = fixture();
 		fetcher.mockImplementation(async () => reply("tail-idle"));
 		const all = await client.messages("T-abc-1");
 		expect(all.map((m) => [m.id, m.role, m.text])).toEqual([
 			["0", "user", "Fix it"],
-			["1", "assistant", "[tool_use]\nReading."],
-			["2", "user", "[tool_result]"],
+			["1", "assistant", "Reading."],
+			["2", "user", ""],
 			["3", "assistant", "Done.\nAll fixed."],
 		]);
 		expect(all[1]!.at).toBe(1767225610000);

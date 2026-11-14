@@ -131,6 +131,8 @@ export type SessionInfo = {
 	readonly unread: boolean;
 	/** When the user archived it by hand; activity in the session clears it. */
 	readonly archivedAt: number | null;
+	/** The model chosen for this chat alone, over its agent's; null follows the agent's. */
+	readonly model: { provider: string; id: string } | null;
 };
 
 type Row = Record<string, SqlStorageValue>;
@@ -465,6 +467,7 @@ export class PimStore {
 		if (!sessionColumns.includes("read_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN read_at INTEGER");
 		if (!sessionColumns.includes("archived_at")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN archived_at INTEGER");
 		if (!sessionColumns.includes("continued_from")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN continued_from TEXT");
+		if (!sessionColumns.includes("model")) this.#sql.exec("ALTER TABLE pim_sessions ADD COLUMN model TEXT");
 		// Connectors were once called apps: what was chosen or waiting under a tool's old name is kept under its new one.
 		for (const [from, to] of RENAMED_TOOLS) {
 			this.#sql.exec("UPDATE pim_approvals SET action = ? WHERE action = ?", to, from);
@@ -747,8 +750,21 @@ export class PimStore {
 				responseAt: row.response_at === null ? null : Number(row.response_at),
 				unread: Number(row.response_at ?? 0) > Number(row.read_at ?? 0),
 				archivedAt: row.archived_at === null ? null : Number(row.archived_at),
+				model: row.model == null ? null : (JSON.parse(String(row.model)) as { provider: string; id: string }),
 			}
 			: undefined;
+	}
+
+	/** Sets the model of one chat over its agent's; null follows the agent's again. */
+	setSessionModel(id: string, model: { provider: string; id: string } | null): void {
+		const now = Date.now();
+		this.#sql.exec(
+			"INSERT INTO pim_sessions (id, created_at, updated_at, model) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET model = excluded.model",
+			id,
+			now,
+			now,
+			model && JSON.stringify({ provider: model.provider, id: model.id }),
+		);
 	}
 
 	/**

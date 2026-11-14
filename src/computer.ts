@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { posix } from "node:path";
 import type { Connection } from "agents";
-import type { ExecArgs, ExecResult, FileConflict, WriteResult } from "../computer/pim-computer";
+import type { ExecArgs, ExecResult, FileConflict, WatchEvent, WriteResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
 import { HttpError } from "./http";
 
@@ -123,6 +123,12 @@ export type BrowserTransport = {
 	note?: string;
 };
 
+/** What `watch` says of a file when it starts being watched: the file as it is then. */
+export type WatchState = { readonly path: string; readonly sha256: string | null; readonly size: number | null; readonly exists: boolean };
+
+/** A change to a watched file, or the failure of its watcher, as the computer pushes it. */
+export type FileEvent = WatchEvent extends infer E ? (E extends unknown ? Omit<E, "type"> : never) : never;
+
 type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 
 /** One of the computer's per-thread displays, as its displayd reports it. */
@@ -156,6 +162,10 @@ export class Computer {
 	readonly #browsers = new Map<string, { channel: number; transport: BrowserTransport }>();
 	/** Where the desktop's streams go: what a channel's stream says, as text or binary, or null once it's closed. */
 	readonly #screen: (channel: number, data: string | ArrayBuffer | null) => void;
+	/** The files watched, with how many times each was asked for. The computer keeps the same counts for a connection, so they are asked for again when it reconnects. */
+	readonly #watching = new Map<string, number>();
+	readonly #fileListeners = new Set<(event: FileEvent) => void>();
+	readonly #resumedListeners = new Set<(state: WatchState) => void>();
 
 	constructor(options: { meta: Meta; sockets: () => Connection[]; screen: (channel: number, data: string | ArrayBuffer | null) => void }) {
 		this.#meta = options.meta;
@@ -314,6 +324,16 @@ export class Computer {
 			};
 			this.#meta.setMeta(INFO_KEY, JSON.stringify(info));
 			this.#meta.deleteMeta(SETUP_ERROR_KEY);
+			void this.#rewatch();
+			return;
+		}
+		if (message.type === "event") {
+			const event = message as { event?: unknown; path?: unknown };
+			// Events of kinds this doesn't know are for a newer computer, and are ignored.
+			if ((event.event !== "file_changed" && event.event !== "watch_error") || typeof event.path !== "string") return;
+			if (event.event === "watch_error") this.#watching.delete(event.path);
+			const { type: _type, ...rest } = message as { type: unknown } & FileEvent;
+			for (const listener of [...this.#fileListeners]) listener(rest as FileEvent);
 			return;
 		}
 		if (message.type === "screen" || message.type === "screen_closed") {
@@ -401,6 +421,59 @@ export class Computer {
 	/** The text on the computer's clipboard. */
 	async clipboard(display?: string): Promise<string> {
 		return (await this.call("screen_clipboard", display ? { display } : {})) as string;
+	}
+
+	/**
+	 * Starts watching a file on the computer, which may not exist yet: its
+	 * changes come to `onFileEvent`'s listeners. Watching a file again counts,
+	 * and each `unwatch` takes one away. The file as it is now comes back.
+	 */
+	async watch(path: string): Promise<WatchState> {
+		const state = await this.call<Omit<WatchState, "path"> & { watching: true }>("watch", { path });
+		this.#watching.set(path, (this.#watching.get(path) ?? 0) + 1);
+		return { path, sha256: state.sha256, size: state.size, exists: state.exists };
+	}
+
+	/** Takes one watch of a file away; with none left the computer stops watching it. Whether the file is still watched. */
+	async unwatch(path: string): Promise<boolean> {
+		const count = this.#watching.get(path);
+		if (count === undefined) return false;
+		if (count > 1) this.#watching.set(path, count - 1);
+		else this.#watching.delete(path);
+		// An offline computer has dropped its watches already.
+		if (this.#socket()) await this.call("unwatch", { path }).catch(() => undefined);
+		return count > 1;
+	}
+
+	/** Hears of changes to the watched files, and of watchers that failed (which are no longer watched). Returns how to stop. */
+	onFileEvent(listener: (event: FileEvent) => void): () => void {
+		this.#fileListeners.add(listener);
+		return () => void this.#fileListeners.delete(listener);
+	}
+
+	/**
+	 * Hears of each file watched again after the computer reconnected, with
+	 * the file as it is then: changes made while it was away weren't seen.
+	 */
+	onWatchResumed(listener: (state: WatchState) => void): () => void {
+		this.#resumedListeners.add(listener);
+		return () => void this.#resumedListeners.delete(listener);
+	}
+
+	/** The computer connected, with no watches: the space's are asked for again, as many times as it asked. */
+	async #rewatch(): Promise<void> {
+		for (const [path, count] of [...this.#watching]) {
+			try {
+				let state: Omit<WatchState, "path"> | undefined;
+				for (let each = 0; each < count; each++) state = await this.call("watch", { path });
+				if (state) for (const listener of [...this.#resumedListeners]) listener({ path, sha256: state.sha256, size: state.size, exists: state.exists });
+			} catch (error) {
+				// Not watched now: the listeners hear it as a watcher that failed.
+				this.#watching.delete(path);
+				const code = (error as { code?: unknown }).code;
+				for (const listener of [...this.#fileListeners]) listener({ event: "watch_error", path, code: typeof code === "string" ? code : null });
+			}
+		}
 	}
 
 	/** Closes a stream of the desktop. */

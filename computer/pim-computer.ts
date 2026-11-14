@@ -33,7 +33,7 @@
 import { Buffer } from "node:buffer";
 import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { type FSWatcher, realpathSync, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -170,10 +170,13 @@ export class Link {
 	readonly #channels = new Map<string, { id: number; browser: BrowserChannel }>();
 	#next = 1;
 	readonly #screens = new Map<number, ScreenChannel>();
+	/** The files the space watches, whose changes go to it as `event` messages. */
+	readonly #watches: Watches;
 
 	constructor(machine: Machine, send: (message: string | Uint8Array) => void) {
 		this.#machine = machine;
 		this.#send = send;
+		this.#watches = new Watches(machine, (event) => this.#send(JSON.stringify(event)));
 	}
 
 	/** A message from the space: a call, which gets a reply, a DevTools message for the browser, or the person's input to the desktop. */
@@ -206,6 +209,7 @@ export class Link {
 		for (const key of [...this.#channels.keys()]) this.#closeChannel(key);
 		for (const screen of this.#screens.values()) screen.close();
 		this.#screens.clear();
+		this.#watches.closeAll();
 	}
 
 	#closeChannel(key: string): void {
@@ -288,6 +292,13 @@ export class Link {
 		if (op.startsWith("app_")) return appCall(this.#machine, op, args);
 		// The space times its round trip to here, for the Computer dialog.
 		if (op === "ping") return null;
+		if (op === "watch") return this.#watches.watch(args.path);
+		if (op === "unwatch") return this.#watches.unwatch(args.path);
+		if (op === "write") {
+			const written = await handle(this.#machine, op, args);
+			if (written) await this.#watches.noteWrite(args.path, written as WriteResult);
+			return written;
+		}
 		const display = typeof args.display === "string" && args.display !== "" ? args.display : undefined;
 		if (op === "screen_open") return this.#openScreen(args.channel, display);
 		if (op === "displays_list") {
@@ -462,6 +473,173 @@ function failure(error: unknown, virtual: string): CallError {
 	};
 	if (code && reasons[code]) return new CallError(`${code}: ${reasons[code]}${syscall ? `, ${syscall}` : ""} '${virtual}'`, code);
 	return new CallError(error instanceof Error ? error.message : String(error), code);
+}
+
+/** How long a file must be quiet before its change is reported: a burst of writes is one event. */
+export const WATCH_DEBOUNCE_MS = 100;
+/** The most files one connection may watch at once; the next `watch` fails with `EWATCHLIMIT`. */
+export const MAX_WATCHES = 64;
+
+/** What the space hears when a file it watches changes (or its watcher fails); `path` is the one the space named. */
+export type WatchEvent =
+	| { readonly type: "event"; readonly event: "file_changed"; readonly path: string; readonly kind: "modified" | "created" | "deleted" | "renamed"; readonly sha256: string | null; readonly size: number | null; readonly mtime: number | null }
+	| { readonly type: "event"; readonly event: "watch_error"; readonly path: string; readonly code: string | null };
+
+type FileState = { readonly exists: boolean; readonly ino: number | null; readonly sha256: string | null; readonly size: number | null; readonly mtime: number | null };
+
+/** What changes in a file, as far as the space cares: its bytes (or, past the hash limit, its size and time). */
+function signature(state: FileState): string {
+	return state.exists ? (state.sha256 ?? `${state.size}:${state.mtime}`) : "gone";
+}
+
+async function fileState(file: string): Promise<FileState> {
+	try {
+		const stat = await fs.stat(file);
+		const hash = stat.isFile() && stat.size <= HASH_MAX_BYTES ? sha256(await fs.readFile(file)) : null;
+		return { exists: true, ino: stat.ino, sha256: hash, size: stat.size, mtime: stat.mtimeMs };
+	} catch {
+		return { exists: false, ino: null, sha256: null, size: null, mtime: null };
+	}
+}
+
+type Watched = {
+	refs: number;
+	/** The path as the space first named it, which its events carry. */
+	virtual: string;
+	file: string;
+	watcher: FSWatcher;
+	timer: ReturnType<typeof setTimeout> | undefined;
+	/** What was last reported (or seeded by `watch`, or written by this computer): events only come from a different state. */
+	last: FileState;
+	/** The checks run one after another. */
+	chain: Promise<void>;
+	closed: boolean;
+};
+
+/**
+ * The files a space watches. The folder holding each file is what's watched,
+ * by name, rather than the file: a write that renames a new file over it (as
+ * every write of ours does) leaves a watcher on the file itself on the old
+ * one, and a file that isn't there yet is seen when it's made. A watch counts
+ * how many times it was asked for, and its watcher closes with the last.
+ */
+class Watches {
+	readonly #watched = new Map<string, Watched>();
+	readonly #machine: Machine;
+	readonly #emit: (event: WatchEvent) => void;
+
+	constructor(machine: Machine, emit: (event: WatchEvent) => void) {
+		this.#machine = machine;
+		this.#emit = emit;
+	}
+
+	/** Where a file is for certain: a link is followed, as a write does, and a file that isn't there is in its folder as it is now. */
+	async #resolve(virtual: unknown): Promise<string> {
+		const file = await local(this.#machine, virtual);
+		try {
+			return await fs.realpath(file);
+		} catch (error) {
+			if ((error as { code?: string }).code !== "ENOENT") throw failure(error, String(virtual));
+		}
+		try {
+			return path.join(await fs.realpath(path.dirname(file)), path.basename(file));
+		} catch (error) {
+			throw failure(error, String(virtual));
+		}
+	}
+
+	async watch(virtual: unknown): Promise<{ watching: true; sha256: string | null; size: number | null; exists: boolean }> {
+		const file = await this.#resolve(virtual);
+		const known = this.#watched.get(file);
+		if (known) {
+			known.refs++;
+			await known.chain;
+			return this.#answer(known.last);
+		}
+		if ((await fs.stat(file).catch(() => null))?.isDirectory()) throw new CallError(`${String(virtual)} is a directory: only files can be watched`, "EISDIR");
+		// Another watch for the file may have got here while it was looked at.
+		if (this.#watched.has(file)) return this.watch(virtual);
+		if (this.#watched.size >= MAX_WATCHES) throw new CallError(`At most ${MAX_WATCHES} files can be watched at once`, "EWATCHLIMIT");
+		const made: Watched = { refs: 1, virtual: String(virtual), file, watcher: undefined as never, timer: undefined, last: { exists: false, ino: null, sha256: null, size: null, mtime: null }, chain: Promise.resolve(), closed: false };
+		try {
+			made.watcher = watch(path.dirname(file), { persistent: false }, (_event, name) => {
+				if (name === null || name === undefined || String(name) === path.basename(file)) this.#touched(made);
+			});
+		} catch (error) {
+			throw failure(error, String(virtual));
+		}
+		made.watcher.on("error", (error) => {
+			this.#emit({ type: "event", event: "watch_error", path: made.virtual, code: (error as { code?: string }).code ?? null });
+			this.#release(made);
+		});
+		this.#watched.set(file, made);
+		// The file is read after the watcher starts, so a change in between is not missed; checks wait for it.
+		made.chain = fileState(file).then((state) => void (made.last = state));
+		await made.chain;
+		return this.#answer(made.last);
+	}
+
+	#answer(state: FileState): { watching: true; sha256: string | null; size: number | null; exists: boolean } {
+		return { watching: true, sha256: state.sha256, size: state.size, exists: state.exists };
+	}
+
+	async unwatch(virtual: unknown): Promise<{ watching: boolean }> {
+		let file: string;
+		try {
+			file = await this.#resolve(virtual);
+		} catch {
+			return { watching: false };
+		}
+		const entry = this.#watched.get(file);
+		if (!entry) return { watching: false };
+		if (--entry.refs > 0) return { watching: true };
+		this.#release(entry);
+		return { watching: false };
+	}
+
+	/** This computer wrote the file: what it wrote is known, so it isn't a change to report. */
+	async noteWrite(virtual: unknown, written: WriteResult): Promise<void> {
+		let file: string;
+		try {
+			file = await this.#resolve(virtual);
+		} catch {
+			return;
+		}
+		const entry = this.#watched.get(file);
+		if (entry) entry.last = { exists: true, ino: null, sha256: written.sha256, size: written.size, mtime: written.mtime };
+	}
+
+	closeAll(): void {
+		for (const entry of [...this.#watched.values()]) this.#release(entry);
+	}
+
+	#release(entry: Watched): void {
+		entry.closed = true;
+		clearTimeout(entry.timer);
+		entry.watcher.close();
+		if (this.#watched.get(entry.file) === entry) this.#watched.delete(entry.file);
+	}
+
+	#touched(entry: Watched): void {
+		clearTimeout(entry.timer);
+		entry.timer = setTimeout(() => {
+			entry.chain = entry.chain.then(() => this.#check(entry)).catch(() => undefined);
+		}, WATCH_DEBOUNCE_MS);
+	}
+
+	async #check(entry: Watched): Promise<void> {
+		if (entry.closed) return;
+		const now = await fileState(entry.file);
+		if (entry.closed) return;
+		const before = entry.last;
+		if (signature(now) === signature(before)) {
+			entry.last = { ...now, ino: now.ino ?? before.ino };
+			return;
+		}
+		entry.last = now;
+		const kind = !before.exists ? "created" : !now.exists ? "deleted" : before.ino !== null && before.ino !== now.ino ? "renamed" : "modified";
+		this.#emit({ type: "event", event: "file_changed", path: entry.virtual, kind, sha256: now.sha256, size: now.size, mtime: now.exists ? now.mtime : null });
+	}
 }
 
 /** A glob as the tools read it: `*` within a segment, `**` across them, `?` one character. */

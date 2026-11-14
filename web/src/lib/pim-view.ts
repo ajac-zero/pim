@@ -225,6 +225,7 @@ export type ModelProblem =
   | "too_long"
   | "busy"
   | "undelivered"
+  | "out_of_output"
   | "other";
 
 /**
@@ -251,6 +252,8 @@ const MODEL_TASKS = new Set(["pi.generation", "pi.compaction"]);
 
 /** First match wins. */
 const MODEL_PROBLEMS: ReadonlyArray<[ModelProblem, RegExp]> = [
+  // OUT_OF_OUTPUT_TOKENS in src/extensions/messaging.ts: two answers in a row were cut off at the output limit. First, since its limit's digits could read as a status.
+  ["out_of_output", /^The model ran out of output tokens/],
   // Sign in with ChatGPT: the plan's usage, or Pim's own App limit, is used up.
   [
     "usage_limit",

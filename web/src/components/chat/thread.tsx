@@ -114,6 +114,7 @@ const PROBLEM_TEXT: Record<ModelProblem, TranslationKey> = {
   too_long: "modelTooLong",
   busy: "modelBusy",
   undelivered: "modelUndelivered",
+  out_of_output: "modelOutOfOutput",
   other: "modelOther",
 };
 

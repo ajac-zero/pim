@@ -606,6 +606,8 @@ const translations = {
       "The model provider is busy or unreachable, so Pim couldn't answer. Try again in a moment.",
     modelUndelivered:
       "The agent ended its turn without sending a reply. Try again.",
+    modelOutOfOutput:
+      "The model ran out of output tokens before it finished, twice. Ask for something smaller, pick a model with a longer output limit, or set the model's longest answer in Settings. Then try again.",
     modelOther:
       "The model couldn't answer. Try again, or switch models in Settings.",
     notAnswered: "Not answered: {reason}",
@@ -2669,6 +2671,8 @@ const translations = {
       "El proveedor del modelo está ocupado o no responde, así que Pim no pudo responder. Inténtalo de nuevo en un momento.",
     modelUndelivered:
       "El agente terminó su turno sin enviar una respuesta. Inténtalo de nuevo.",
+    modelOutOfOutput:
+      "El modelo se quedó sin tokens de salida antes de terminar, dos veces. Pide algo más pequeño, elige un modelo con un límite de salida mayor o indica la respuesta más larga del modelo en Ajustes. Luego inténtalo de nuevo.",
     modelOther:
       "El modelo no pudo responder. Inténtalo de nuevo o cambia de modelo en Configuración.",
     notAnswered: "Sin respuesta: {reason}",

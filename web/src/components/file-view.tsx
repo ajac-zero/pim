@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { lazy, type ReactNode, Suspense, useState } from "react";
 import { toast } from "sonner";
+import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { Download, Trash2, X } from "~/components/icons";
 import {
@@ -120,6 +121,8 @@ export function FileView({
   const { t } = useI18n();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // Markdown opens rendered; "Edit" swaps in the editor, over the same session, so the buffer survives toggling.
+  const [editing, setEditing] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
   const [page, setPage] = useState(() => savedPdfPage(path));
   const [pageCount, setPageCount] = useState(0);
@@ -158,6 +161,7 @@ export function FileView({
   if (error || (listing.data && !entry))
     return <FileMissing onClose={onClose} />;
   const name = baseName(path);
+  const showEditor = preview.kind !== "markdown" || editing === path;
   const url = fileContentUrl(path);
 
   return (
@@ -169,6 +173,30 @@ export function FileView({
           <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
         )}
         {load.phase === "ready" && <SaveStatus status={state.status} />}
+        {load.phase === "ready" && preview.kind === "markdown" && (
+          <div
+            role="group"
+            aria-label={name}
+            className="flex shrink-0 rounded-md border p-0.5 text-xs"
+          >
+            {[false, true].map((edit) => (
+              <button
+                key={String(edit)}
+                type="button"
+                aria-pressed={showEditor === edit}
+                className={cn(
+                  "rounded px-2 py-0.5",
+                  showEditor === edit
+                    ? "bg-muted font-medium"
+                    : "text-muted-foreground",
+                )}
+                onClick={() => setEditing(edit ? path : null)}
+              >
+                {t(edit ? "fileEdit" : "filePreview")}
+              </button>
+            ))}
+          </div>
+        )}
         {preview.kind === "pdf" && (
           <>
             <PdfPageControls
@@ -263,6 +291,10 @@ export function FileView({
           </p>
         ) : load.phase !== "ready" ? (
           <p className="text-muted-foreground text-sm">{t("loading")}</p>
+        ) : !showEditor ? (
+          <div className="mx-auto w-full max-w-3xl px-2 py-1">
+            <Markdown text={load.session.text} untrusted />
+          </div>
         ) : (
           <Suspense
             fallback={

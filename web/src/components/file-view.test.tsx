@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -9,11 +11,24 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { ConflictBanner } from "~/components/file-view";
+import { ConflictBanner, FileView } from "~/components/file-view";
 import { type FileClient, FileSession } from "~/lib/file-session";
 import { MAX_EDITABLE_BYTES, MAX_VIEWABLE_BYTES } from "~/lib/file-text";
 import { FileConflictError } from "~/lib/pim-api";
+import { filesQuery } from "~/lib/queries";
 import { useFileSession } from "~/lib/use-file-session";
+
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+// A plain textarea stands in for CodeMirror, which needs a real layout engine.
+vi.mock("~/components/file-editor", () => ({
+  default: ({ session }: { session: FileSession }) => (
+    <textarea
+      aria-label="source"
+      defaultValue={session.text}
+      onChange={(event) => session.edit(event.target.value)}
+    />
+  ),
+}));
 
 const read = vi.fn();
 vi.mock("~/lib/pim-api", async (importOriginal) => ({
@@ -120,4 +135,46 @@ it("resolves a conflict through its two buttons with the right requests", async 
   expect(client.readFile).toHaveBeenCalledTimes(1);
   expect(again.text).toBe("disk");
   void act;
+});
+
+it("opens markdown rendered, and keeps the unsaved buffer when toggling to the editor and back", async () => {
+  read.mockResolvedValue({
+    bytes: new TextEncoder().encode("# Title\n"),
+    sha256: "h",
+  });
+  const client = new QueryClient({
+    defaultOptions: { queries: { staleTime: Infinity } },
+  });
+  client.setQueryData(filesQuery("/workspace").queryKey, {
+    path: "/workspace",
+    entries: [
+      {
+        name: "n.md",
+        path: "/workspace/n.md",
+        type: "file",
+        size: 8,
+        updatedAt: "",
+      },
+    ],
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <FileView path="/workspace/n.md" />
+    </QueryClientProvider>,
+  );
+  expect((await screen.findByRole("heading", { name: "Title" })).tagName).toBe(
+    "H1",
+  );
+  expect(screen.queryByLabelText("source")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  const source = await screen.findByLabelText("source");
+  fireEvent.change(source, { target: { value: "# Changed\n" } });
+  fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+  expect(
+    (await screen.findByRole("heading", { name: "Changed" })).tagName,
+  ).toBe("H1");
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  expect(
+    ((await screen.findByLabelText("source")) as HTMLTextAreaElement).value,
+  ).toBe("# Changed\n");
 });

@@ -728,6 +728,8 @@ const translations = {
     fileStatusConflict: "Conflict",
     fileStatusError: "Couldn't save",
     fileStatusReadOnly: "Read-only",
+    fileEdit: "Edit",
+    filePreview: "Preview",
     fileConflict:
       "This file changed on disk since you opened it. Your edits are kept here, unsaved.",
     fileReloadFromDisk: "Reload from disk (discard my edits)",
@@ -2783,6 +2785,8 @@ const translations = {
     fileStatusConflict: "Conflicto",
     fileStatusError: "No se pudo guardar",
     fileStatusReadOnly: "Solo lectura",
+    fileEdit: "Editar",
+    filePreview: "Vista previa",
     fileConflict:
       "Este archivo cambió en el disco desde que lo abriste. Tus cambios siguen aquí, sin guardar.",
     fileReloadFromDisk: "Recargar del disco (descartar mis cambios)",

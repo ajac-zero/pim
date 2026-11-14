@@ -25,6 +25,7 @@ import {
   NOTICE_PREFIXES,
   ROOM_POST,
   reasoningHeadings,
+  withoutFileChanges,
 } from "../../../src/transcript";
 
 /**
@@ -366,7 +367,7 @@ type InboxItem = Extract<AgentEvent, { type: "inbox_update" }>["items"][number];
 function queueOf(items: readonly InboxItem[]): QueuedMessage[] {
   return items.flatMap((item) => {
     if (item.mode === "write") return [];
-    const content = item.content as UserMessage["content"];
+    const content = withoutFileChanges(item.content as UserMessage["content"]);
     const text = textOf(content);
     if (!fromPerson(text)) return [];
     const images =
@@ -443,7 +444,9 @@ function blockItem(
 export function projectMessage(message: Message, key: string): ThreadEntry[] {
   switch (message.role) {
     case "user": {
-      const text = textOf(message.content);
+      // Pim's note of files that changed since the agent's last turn isn't the person's to read.
+      const content = withoutFileChanges(message.content);
+      const text = textOf(content);
       // Pim's own prompts: the majordomo's introduction starts with its message.
       if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION))
         return [];
@@ -466,7 +469,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
           key,
           kind: "item",
           source: "user",
-          item: userItem(message.content, key),
+          item: userItem(content, key),
           at: message.timestamp,
         },
       ];

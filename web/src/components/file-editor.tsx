@@ -21,6 +21,7 @@ import {
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { useEffect, useRef } from "react";
+import { takeReveal } from "~/lib/canvas-live";
 import { loadLanguage } from "~/lib/editor-language";
 import type { EditorHandle, FileSession } from "~/lib/file-session";
 
@@ -134,6 +135,9 @@ function replaceDocument(view: EditorView, next: string) {
 
 const remote = Annotation.define<boolean>();
 
+/** The most of a selection an agent is told. */
+const MAX_SELECTION = 8000;
+
 const readOnlyExtensions = (readOnly: boolean) => [
   EditorState.readOnly.of(readOnly),
   EditorView.editable.of(!readOnly),
@@ -195,8 +199,31 @@ export default function FileEditor({
     const handle: EditorHandle = {
       getText: () => created.state.doc.toString(),
       setText: (text) => replaceDocument(created, text),
+      getSelection: () => {
+        const { doc, selection } = created.state;
+        const place = (at: number) => {
+          const line = doc.lineAt(at);
+          return { line: line.number, column: at - line.from + 1 };
+        };
+        const { from, to } = selection.main;
+        return {
+          from: place(from),
+          to: place(to),
+          text: doc.sliceString(from, Math.min(to, from + MAX_SELECTION)),
+        };
+      },
+      reveal: (line) => {
+        const { doc } = created.state;
+        const at = doc.line(Math.min(Math.max(1, line), doc.lines)).from;
+        created.dispatch({
+          selection: { anchor: at },
+          effects: EditorView.scrollIntoView(at, { y: "center" }),
+        });
+      },
     };
     session.attach(handle);
+    const asked = takeReveal(session.path);
+    if (asked) handle.reveal(asked);
     let cancelled = false;
     void loadLanguage(name).then((extension) => {
       if (!cancelled && extension) {

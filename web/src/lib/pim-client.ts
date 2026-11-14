@@ -78,6 +78,41 @@ export type ClientHandlers = {
   onSettings?: () => void;
 };
 
+/** A change to a file the app watches, as Pim reports it. */
+export type FileChange = {
+  kind: "modified" | "created" | "deleted" | "renamed" | "unwatched";
+  sha256: string | null;
+  size: number | null;
+};
+
+/** What an agent asks of the canvas of the chat on screen. */
+export type CanvasRequest =
+  | { type: "open"; path: string; line?: number }
+  | { type: "query"; request: string; what: "tabs" | "selection" };
+
+/** What the canvas answers a query with: the file tabs, the one shown, and the selection in it when asked for. */
+export type CanvasAnswer = {
+  tabs: { path: string; dirty: boolean }[];
+  active: string | null;
+  selection?: {
+    path: string;
+    from: { line: number; column: number };
+    to: { line: number; column: number };
+    text: string;
+  } | null;
+};
+
+/** A path as Pim names it in a file's events: dots resolved, no repeated slashes. */
+export function canonicalPath(path: string) {
+  const parts: string[] = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+
 const MAX_BACKOFF_MS = 15_000;
 /** How often an open socket is pinged. Pim answers without waking. */
 const HEARTBEAT_MS = 20_000;
@@ -128,7 +163,58 @@ export class PimClient {
   /** The request of each message on its way, by operation id. */
   #sending = new Map<string, AbortController>();
   #listeners = new Set<() => void>();
+  /** Who hears of each watched file, by its canonical path; Pim is asked to watch a file while someone does. */
+  #files = new Map<string, Set<(change: FileChange) => void>>();
+  #canvas = new Set<(request: CanvasRequest) => void>();
   handlers: ClientHandlers = {};
+
+  /**
+   * Hears of changes to a file of yours, and of how it is as soon as the
+   * watch starts. Pim watches the file for as long as anyone here does, and
+   * the watch comes back after a reconnect. Returns how to stop.
+   */
+  watchFile(path: string, listener: (change: FileChange) => void) {
+    const key = canonicalPath(path);
+    let heard = this.#files.get(key);
+    if (!heard) {
+      heard = new Set();
+      this.#files.set(key, heard);
+      this.#sendFile("watch_file", key);
+    }
+    heard.add(listener);
+    return () => {
+      heard.delete(listener);
+      if (heard.size > 0 || this.#files.get(key) !== heard) return;
+      this.#files.delete(key);
+      this.#sendFile("unwatch_file", key);
+    };
+  }
+
+  #sendFile(type: "watch_file" | "unwatch_file", path: string) {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
+      this.#socket.send(JSON.stringify({ type, path }));
+    }
+  }
+
+  /** Asks Pim to watch every file listened for again: it has a new connection, or lost track of the old. */
+  #rewatch() {
+    for (const path of this.#files.keys()) this.#sendFile("watch_file", path);
+  }
+
+  /** Hears of what agents ask of the canvas of the chat on screen. Returns how to stop. */
+  listenCanvas(listener: (request: CanvasRequest) => void) {
+    this.#canvas.add(listener);
+    return () => {
+      this.#canvas.delete(listener);
+    };
+  }
+
+  answerCanvas(request: string, answer: CanvasAnswer) {
+    if (this.#socket?.readyState !== WebSocket.OPEN) return;
+    this.#socket.send(
+      JSON.stringify({ type: "canvas_answer", request, ...answer }),
+    );
+  }
 
   subscribe = (listener: () => void) => {
     this.#listeners.add(listener);
@@ -219,6 +305,7 @@ export class PimClient {
       if (this.#socket !== socket) return;
       this.#attempt = 0;
       this.#set({ connection: "open" });
+      this.#rewatch();
       this.#heartbeat = setInterval(
         () => this.#check(PING_TIMEOUT_MS),
         HEARTBEAT_MS,
@@ -400,6 +487,30 @@ export class PimClient {
       case "settings":
         this.handlers.onSettings?.();
         return;
+      case "file_changed": {
+        const { type: _type, path, ...change } = message;
+        for (const listener of [...(this.#files.get(path) ?? [])]) {
+          listener(change);
+        }
+        return;
+      }
+      case "file_resync":
+        this.#rewatch();
+        return;
+      case "canvas_open":
+      case "canvas_query": {
+        if (message.session !== this.#state.session) return;
+        const request: CanvasRequest =
+          message.type === "canvas_open"
+            ? {
+                type: "open",
+                path: message.path,
+                ...(message.line !== undefined && { line: message.line }),
+              }
+            : { type: "query", request: message.request, what: message.what };
+        for (const listener of [...this.#canvas]) listener(request);
+        return;
+      }
       default:
         return;
     }

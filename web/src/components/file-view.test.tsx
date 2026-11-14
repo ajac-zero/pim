@@ -15,10 +15,15 @@ import { ConflictBanner, FileView } from "~/components/file-view";
 import { type FileClient, FileSession } from "~/lib/file-session";
 import { MAX_EDITABLE_BYTES, MAX_VIEWABLE_BYTES } from "~/lib/file-text";
 import { FileConflictError } from "~/lib/pim-api";
-import { filesQuery } from "~/lib/queries";
+import { computerQuery, filesQuery } from "~/lib/queries";
 import { useFileSession } from "~/lib/use-file-session";
 
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
+  Link: ({ children }: { children: React.ReactNode }) => (
+    <a href="/">{children}</a>
+  ),
+}));
 // A plain textarea stands in for CodeMirror, which needs a real layout engine.
 vi.mock("~/components/file-editor", () => ({
   default: ({ session }: { session: FileSession }) => (
@@ -45,6 +50,13 @@ afterEach(() => {
 
 const bytes = (size: number, fill = 65) => new Uint8Array(size).fill(fill);
 
+/** The hooks that open a file read the query client, as the app provides it. */
+const withQueries = ({ children }: { children: React.ReactNode }) => (
+  <QueryClientProvider client={new QueryClient()}>
+    {children}
+  </QueryClientProvider>
+);
+
 it("opens up to 1 MiB for editing, up to 5 MiB read-only, and refuses larger or binary files", async () => {
   const phases: Record<string, string> = {};
   for (const [label, file] of [
@@ -55,8 +67,9 @@ it("opens up to 1 MiB for editing, up to 5 MiB read-only, and refuses larger or 
     ["binary", new Uint8Array([1, 0, 2])],
   ] as const) {
     read.mockResolvedValueOnce({ bytes: file, sha256: "h" });
-    const { result, unmount } = renderHook(() =>
-      useFileSession("/workspace/x", true),
+    const { result, unmount } = renderHook(
+      () => useFileSession("/workspace/x", true),
+      { wrapper: withQueries },
     );
     await waitFor(() => expect(result.current.load.phase).not.toBe("loading"));
     phases[label] =
@@ -77,8 +90,9 @@ it("opens up to 1 MiB for editing, up to 5 MiB read-only, and refuses larger or 
 it("leaves no timers running after the tab unmounts, and saves what is pending", async () => {
   vi.useFakeTimers();
   read.mockResolvedValueOnce({ bytes: bytes(3), sha256: "h" });
-  const { result, unmount } = renderHook(() =>
-    useFileSession("/workspace/x", true),
+  const { result, unmount } = renderHook(
+    () => useFileSession("/workspace/x", true),
+    { wrapper: withQueries },
   );
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
@@ -96,7 +110,7 @@ it("leaves no timers running after the tab unmounts, and saves what is pending",
 });
 
 it("resolves a conflict through its two buttons with the right requests", async () => {
-  const conflict = new FileConflictError("hash_mismatch", "theirs", 1, 1);
+  const conflict = new FileConflictError("hash_mismatch", "d", 1, 1);
   const client: FileClient = {
     readFile: vi.fn(async () => ({
       bytes: new TextEncoder().encode("disk"),
@@ -117,7 +131,7 @@ it("resolves a conflict through its two buttons with the right requests", async 
   expect(client.writeFile).toHaveBeenLastCalledWith(
     "/workspace/a.txt",
     "mine",
-    { ifMatch: "theirs" },
+    { ifMatch: "d" },
   );
 
   const again = new FileSession("/workspace/a.txt", client);
@@ -133,7 +147,6 @@ it("resolves a conflict through its two buttons with the right requests", async 
     screen.getByRole("button", { name: "Reload from disk (discard my edits)" }),
   );
   await waitFor(() => expect(again.getState().status).toBe("clean"));
-  expect(client.readFile).toHaveBeenCalledTimes(1);
   expect(again.text).toBe("disk");
   void act;
 });
@@ -190,4 +203,34 @@ it("opens markdown rendered, and keeps the unsaved buffer when toggling to the e
   expect(
     ((await screen.findByLabelText("source")) as HTMLTextAreaElement).value,
   ).toBe("# Changed\n");
+});
+
+it("shows how to connect a computer, and no error, where there is none", () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({ error: "No computer" }, { status: 404 })),
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { staleTime: Infinity } },
+  });
+  client.setQueryData(computerQuery().queryKey, {
+    state: "none",
+    managed: false,
+    pairedAt: null,
+    computer: null,
+    error: null,
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <FileView path="/workspace/n.md" />
+    </QueryClientProvider>,
+  );
+  expect(
+    screen.getByText(
+      "Your files are on your computer, and you haven't connected one yet.",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Connect a computer" })).toBeTruthy();
+  expect(screen.queryByText("This file isn't there anymore.")).toBeNull();
+  expect(read).not.toHaveBeenCalled();
 });

@@ -4,7 +4,26 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { FSWatcher } from "node:fs";
 import { Link, MAX_WATCHES, type Machine, WATCH_DEBOUNCE_MS } from "../computer/pim-computer";
+
+const fake = vi.hoisted(() => ({ failStat: false, watchers: [] as unknown[] }));
+vi.mock("node:fs", async (original) => {
+	const actual = await original<typeof import("node:fs")>();
+	return {
+		...actual,
+		statSync: ((...args: Parameters<typeof actual.statSync>) => {
+			if (fake.failStat) throw Object.assign(new Error("gone"), { code: "EIO" });
+			return actual.statSync(...args);
+		}) as typeof actual.statSync,
+		watch: ((...args: Parameters<typeof actual.watch>) => {
+			const watcher = actual.watch(...args);
+			vi.spyOn(watcher, "close");
+			fake.watchers.push(watcher);
+			return watcher;
+		}) as typeof actual.watch,
+	};
+});
 
 let root: string;
 let link: Link;
@@ -196,4 +215,19 @@ it("lets go of every watch on unwatch_all", async () => {
 	await fs.writeFile(path.join(root, "u.txt"), "x");
 	await sleep(400);
 	expect(events()).toEqual([]);
+});
+
+it("closes a watcher it couldn't finish setting up, and leaves no error unhandled", async () => {
+	fake.failStat = true;
+	try {
+		await expect(call("watch", { path: "/workspace/x.txt" })).rejects.toMatchObject({ code: "EIO" });
+	} finally {
+		fake.failStat = false;
+	}
+	const watcher = fake.watchers.at(-1) as FSWatcher;
+	expect(watcher.close).toHaveBeenCalled();
+	// A late error from it has a listener, so it doesn't crash the process.
+	expect(() => watcher.emit("error", new Error("late"))).not.toThrow();
+	// And nothing is left registered: the file can be watched afterwards.
+	await call("watch", { path: "/workspace/x.txt" });
 });

@@ -999,29 +999,33 @@ describe("browser calls name their thread", () => {
 
 describe("watching files on the computer", () => {
 	/** A Computer whose one socket answers calls like a computer: `watch` of "/workspace/bad" fails, and `sent` is what it was asked. */
-	function watched() {
+	function watched(hooks: { hold?: (op: string, path: unknown) => Promise<void> | undefined; offline?: (op: string, path: unknown) => boolean; refuse?: (op: string, path: unknown) => boolean } = {}) {
 		const meta = new Map<string, string>([["computer_token", "x"]]);
 		const sent: { op: string; path: unknown }[] = [];
+		const socket = { readyState: WebSocket.OPEN as number, send: undefined as unknown as (raw: string) => void };
 		const computer: Computer = new Computer({
 			meta: { meta: (key) => meta.get(key), setMeta: (key, value) => void meta.set(key, value), deleteMeta: (key) => void meta.delete(key) },
-			sockets: () => [
-				{
-					readyState: WebSocket.OPEN,
-					send: (raw: string) => {
-						const message = JSON.parse(raw) as { type: string; id: string; op: string; args: { path: unknown } };
-						if (message.type !== "call") return;
-						sent.push({ op: message.op, path: message.args.path });
-						const reply =
-							message.op === "watch" && message.args.path === "/workspace/bad"
-								? { error: { message: "too many", code: "EWATCHLIMIT" } }
-								: { result: message.op === "watch" ? { watching: true, sha256: "ab", size: 2, exists: true } : { watching: false } };
-						queueMicrotask(() => computer.receive(JSON.stringify({ type: "reply", id: message.id, ...reply })));
-					},
-				} as never,
-			],
+			sockets: () => [socket as never],
 			screen: () => {},
 		});
-		return { computer, sent };
+		socket.send = (raw: string) => {
+			const message = JSON.parse(raw) as { type: string; id: string; op: string; args: { path: unknown } };
+			if (message.type !== "call") return;
+			sent.push({ op: message.op, path: message.args.path });
+			const reply =
+				(message.op === "watch" && message.args.path === "/workspace/bad") || hooks.refuse?.(message.op, message.args.path)
+					? { error: { message: "too many", code: "EWATCHLIMIT" } }
+					: { result: message.op === "watch" ? { watching: true, sha256: "ab", size: 2, exists: true } : { watching: false } };
+			const held = hooks.hold?.(message.op, message.args.path);
+			const answer = () => {
+				// A connection that drops before answering fails the call, as the real one does.
+				if (hooks.offline?.(message.op, message.args.path)) socket.readyState = WebSocket.CLOSED;
+				computer.receive(JSON.stringify({ type: "reply", id: message.id, ...reply }));
+			};
+			if (held) void held.then(answer);
+			else queueMicrotask(answer);
+		};
+		return { computer, sent, socket };
 	}
 
 	it("hands the computer's change events to subscribers, and ignores events and messages it doesn't know", async () => {
@@ -1090,5 +1094,96 @@ describe("watching files on the computer", () => {
 		await computer.watch("/workspace/f0");
 		for (let index = 0; index < MAX_FILE_LISTENERS; index++) computer.onFileEvent(() => {});
 		expect(() => computer.onFileEvent(() => {})).toThrow(/At most/);
+	});
+
+	it("refuses watches and listeners beyond its bounds", async () => {
+		const { computer } = watched();
+		for (let index = 0; index < MAX_WATCHED_PATHS; index++) await computer.watch(`/workspace/f${index}`);
+		await expect(computer.watch("/workspace/more")).rejects.toMatchObject({ code: "EWATCHLIMIT" });
+		// A file already watched can be watched again.
+		await computer.watch("/workspace/f0");
+		for (let index = 0; index < MAX_FILE_LISTENERS; index++) computer.onFileEvent(() => {});
+		expect(() => computer.onFileEvent(() => {})).toThrow(/At most/);
+	});
+
+	it("doesn't ask again for a watch let go of while the reconnect was asking", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		let holding = false;
+		const { computer, sent } = watched({ hold: (op, path) => (holding && op === "watch" && path === "/workspace/a.ts" ? gate : undefined) });
+		await computer.watch("/workspace/a.ts");
+		await computer.watch("/workspace/b.ts");
+		await computer.watch("/workspace/b.ts");
+		sent.length = 0;
+		holding = true;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await vi.waitFor(() => expect(sent.map((call) => call.op)).toEqual(["unwatch_all", "watch"]));
+		// b's two watches have not been asked for yet: letting them go asks nothing of the computer.
+		expect(await computer.unwatch("/workspace/b.ts")).toBe(true);
+		expect(await computer.unwatch("/workspace/b.ts")).toBe(false);
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(sent).toEqual([
+			{ op: "unwatch_all", path: undefined },
+			{ op: "watch", path: "/workspace/a.ts" },
+		]);
+	});
+
+	it("keeps a watch when the connection fails while asking again, and asks on the next reconnect", async () => {
+		let drop = false;
+		const { computer, sent, socket } = watched({ offline: (op, path) => drop && op === "watch" && path === "/workspace/a.ts" });
+		await computer.watch("/workspace/a.ts");
+		await computer.watch("/workspace/a.ts");
+		const heard: unknown[] = [];
+		computer.onFileEvent((event) => void heard.push(event));
+		sent.length = 0;
+		drop = true;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		// The second watch of the pair is not asked for on a dead connection, and nothing says the watch failed.
+		expect(sent.filter((call) => call.op === "watch")).toHaveLength(1);
+		expect(heard).toEqual([]);
+		drop = false;
+		socket.readyState = WebSocket.OPEN;
+		sent.length = 0;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await vi.waitFor(() => expect(sent.filter((call) => call.op === "watch")).toHaveLength(2));
+		expect(await computer.unwatch("/workspace/a.ts")).toBe(true);
+	});
+
+	it("gives back the refs of a watch the computer refuses part way, and drops it", async () => {
+		let asked = 0;
+		let refusing = false;
+		const { computer, sent } = watched({ refuse: (op, path) => refusing && op === "watch" && path === "/workspace/a.ts" && ++asked === 2 });
+		await computer.watch("/workspace/a.ts");
+		await computer.watch("/workspace/a.ts");
+		const heard: unknown[] = [];
+		computer.onFileEvent((event) => void heard.push(event));
+		sent.length = 0;
+		refusing = true;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await vi.waitFor(() => expect(heard).toEqual([{ event: "watch_error", path: "/workspace/a.ts", code: "EWATCHLIMIT" }]));
+		expect(sent.map((call) => call.op)).toEqual(["unwatch_all", "watch", "watch", "unwatch"]);
+		expect(await computer.unwatch("/workspace/a.ts")).toBe(false);
+	});
+
+	it("doesn't count a watch made during the reconnect twice", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => (release = resolve));
+		let holding = false;
+		const { computer, sent } = watched({ hold: (op, path) => (holding && op === "watch" && path === "/workspace/a.ts" ? gate : undefined) });
+		await computer.watch("/workspace/a.ts");
+		sent.length = 0;
+		holding = true;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await vi.waitFor(() => expect(sent.map((call) => call.op)).toEqual(["unwatch_all", "watch"]));
+		const made = computer.watch("/workspace/c.ts");
+		release();
+		await made;
+		expect(sent.filter((call) => call.op === "watch" && call.path === "/workspace/c.ts")).toHaveLength(1);
+		sent.length = 0;
+		computer.receive(JSON.stringify({ type: "hello" }));
+		await vi.waitFor(() => expect(sent.filter((call) => call.op === "watch")).toHaveLength(2));
+		expect(await computer.unwatch("/workspace/c.ts")).toBe(false);
 	});
 });

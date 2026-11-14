@@ -619,15 +619,22 @@ class Watches {
 	}
 
 	#arm(folder: Folder): void {
-		folder.watcher = watch(folder.dir, { persistent: false }, (_event, name) => {
+		const watcher = watch(folder.dir, { persistent: false }, (_event, name) => {
 			for (const entry of folder.entries) if (name === null || name === undefined || String(name) === path.basename(entry.file)) this.#touched(entry);
 			// An event that may be the folder itself going away or being replaced is looked at once things are quiet.
 			if (name !== null && name !== undefined && String(name) === path.basename(folder.dir)) folder.named = true;
 			clearTimeout(folder.timer);
 			folder.timer = setTimeout(() => void this.#revalidate(folder), WATCH_DEBOUNCE_MS);
 		});
-		folder.ino = statSync(folder.dir).ino;
-		folder.watcher.on("error", (error) => this.#fail(folder, (error as { code?: string }).code ?? null));
+		// The error listener comes first, and a watcher that can't be set up completely is closed, so none is left running unowned.
+		watcher.on("error", (error) => this.#fail(folder, (error as { code?: string }).code ?? null));
+		try {
+			folder.ino = statSync(folder.dir).ino;
+		} catch (error) {
+			watcher.close();
+			throw error;
+		}
+		folder.watcher = watcher;
 	}
 
 	#fail(folder: Folder, code: string | null): void {

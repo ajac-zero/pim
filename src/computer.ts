@@ -168,6 +168,10 @@ export class Computer {
 	readonly #screen: (channel: number, data: string | ArrayBuffer | null) => void;
 	/** The files watched, with how many times each was asked for. The computer keeps the same counts for a connection, so they are asked for again when it reconnects. */
 	readonly #watching = new Map<string, number>();
+	/** Watch operations that must not overlap: a reconnect's asking again and a person's `watch`. */
+	#queue: Promise<void> = Promise.resolve();
+	/** While a reconnect asks for the watches again: how many of each path's the computer has been asked for so far. */
+	readonly #resuming = new Map<string, number>();
 	readonly #fileListeners = new Set<(event: FileEvent) => void>();
 	readonly #resumedListeners = new Set<(state: WatchState) => void>();
 
@@ -433,10 +437,13 @@ export class Computer {
 	 * and each `unwatch` takes one away. The file as it is now comes back.
 	 */
 	async watch(path: string): Promise<WatchState> {
-		if (!this.#watching.has(path) && this.#watching.size >= MAX_WATCHED_PATHS) throw Object.assign(new Error(`At most ${MAX_WATCHED_PATHS} files can be watched at once`), { code: "EWATCHLIMIT" });
-		const state = await this.call<Omit<WatchState, "path"> & { watching: true }>("watch", { path });
-		this.#watching.set(path, (this.#watching.get(path) ?? 0) + 1);
-		return { path, sha256: state.sha256, size: state.size, exists: state.exists };
+		// Watching waits for a reconnect's watches to be asked for again, so the two never count the same watch.
+		return this.#serial(async () => {
+			if (!this.#watching.has(path) && this.#watching.size >= MAX_WATCHED_PATHS) throw Object.assign(new Error(`At most ${MAX_WATCHED_PATHS} files can be watched at once`), { code: "EWATCHLIMIT" });
+			const state = await this.call<Omit<WatchState, "path"> & { watching: true }>("watch", { path });
+			this.#watching.set(path, (this.#watching.get(path) ?? 0) + 1);
+			return { path, sha256: state.sha256, size: state.size, exists: state.exists };
+		});
 	}
 
 	/** Takes one watch of a file away; with none left the computer stops watching it. Whether the file is still watched. */
@@ -445,9 +452,22 @@ export class Computer {
 		if (count === undefined) return false;
 		if (count > 1) this.#watching.set(path, count - 1);
 		else this.#watching.delete(path);
-		// An offline computer has dropped its watches already.
+		// A watch that a reconnect hasn't asked the computer for yet is just forgotten; an offline computer has dropped its watches already.
+		const issued = this.#resuming.get(path);
+		if (issued !== undefined && issued < count) return count > 1;
+		if (issued !== undefined) this.#resuming.set(path, issued - 1);
 		if (this.#socket()) await this.call("unwatch", { path }).catch(() => undefined);
 		return count > 1;
+	}
+
+	/** Runs `work` after the watch operations before it, one at a time. */
+	#serial<T>(work: () => Promise<T>): Promise<T> {
+		const run = this.#queue.then(work);
+		this.#queue = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	/** Hears of changes to the watched files, and of watchers that failed (which are no longer watched). Returns how to stop. */
@@ -467,22 +487,46 @@ export class Computer {
 		return () => void this.#resumedListeners.delete(listener);
 	}
 
-	/** The computer connected, with no watches: the space's are asked for again, as many times as it asked. */
-	async #rewatch(): Promise<void> {
-		// The space's set is the truth: whatever the computer holds from before (a watch whose reply was lost) is let go first. A computer that doesn't know the op has nothing to let go of.
-		await this.call("unwatch_all", {}).catch(() => undefined);
-		for (const [path, count] of [...this.#watching]) {
+	/**
+	 * The computer connected, with no watches: the space's are asked for again,
+	 * as many times as it asked, from its live set. A watch the computer
+	 * refuses is dropped, with the refs it did take given back; when the
+	 * connection fails the rest is kept and asked for on the next reconnect.
+	 */
+	#rewatch(): Promise<void> {
+		return this.#serial(async () => {
+			// The space's set is the truth: whatever the computer holds from before (a watch whose reply was lost) is let go first. A computer that doesn't know the op has nothing to let go of.
+			await this.call("unwatch_all", {}).catch(() => undefined);
+			for (const path of this.#watching.keys()) this.#resuming.set(path, 0);
 			try {
-				let state: Omit<WatchState, "path"> | undefined;
-				for (let each = 0; each < count; each++) state = await this.call("watch", { path });
-				if (state) for (const listener of [...this.#resumedListeners]) listener({ path, sha256: state.sha256, size: state.size, exists: state.exists });
-			} catch (error) {
-				// Not watched now: the listeners hear it as a watcher that failed.
-				this.#watching.delete(path);
-				const code = (error as { code?: unknown }).code;
-				for (const listener of [...this.#fileListeners]) listener({ event: "watch_error", path, code: typeof code === "string" ? code : null });
+				for (const path of [...this.#resuming.keys()]) {
+					// Read again each time: the space may have let it go since.
+					let count = this.#watching.get(path);
+					let state: Omit<WatchState, "path"> | undefined;
+					try {
+						while (count !== undefined && (this.#resuming.get(path) ?? 0) < count) {
+							state = await this.call("watch", { path });
+							this.#resuming.set(path, (this.#resuming.get(path) ?? 0) + 1);
+							count = this.#watching.get(path);
+						}
+					} catch (error) {
+						// The connection failed, not the watch: the space still wants it.
+						if (error instanceof HttpError) return;
+						// Not watched now: the refs taken are given back, and the listeners hear it as a watcher that failed.
+						for (let each = this.#resuming.get(path) ?? 0; each > 0; each--) await this.call("unwatch", { path }).catch(() => undefined);
+						this.#watching.delete(path);
+						const code = (error as { code?: unknown }).code;
+						for (const listener of [...this.#fileListeners]) listener({ event: "watch_error", path, code: typeof code === "string" ? code : null });
+						continue;
+					} finally {
+						this.#resuming.delete(path);
+					}
+					if (state && this.#watching.has(path)) for (const listener of [...this.#resumedListeners]) listener({ path, sha256: state.sha256, size: state.size, exists: state.exists });
+				}
+			} finally {
+				this.#resuming.clear();
 			}
-		}
+		});
 	}
 
 	/** Closes a stream of the desktop. */

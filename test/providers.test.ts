@@ -686,6 +686,54 @@ describe("A person's own model providers", () => {
 		expect((await api(`/providers/${home}`, { method: "DELETE" })).status).toBe(200);
 	});
 
+	it("chooses a group chat member's model for that chat alone, and a fork keeps its chat's model", async () => {
+		const home = (await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" })).body.provider.id;
+		const model = (id: string) => ({ provider: `own:${home}`, id });
+		const guide = (await post("/agents", { name: "Guide", instructions: "x" })).body;
+		const buddy = (await post("/agents", { name: "Buddy", instructions: "x" })).body;
+		await put(`/agents/${buddy.id}/model`, model("local-model"));
+		const room = (await post("/sessions", { agent: guide.id })).body.id;
+		const elsewhere = (await post("/sessions", { agent: buddy.id })).body.id;
+		const joined = await post(`/sessions/${room}/room/members`, { agent: buddy.id });
+		expect(joined.status).toBe(200);
+		const seatOf = async () => (await api("/sessions")).body.sessions.find((session: { id: string }) => session.id === room).room.members[0];
+		const memberPut = (agent: string, body: unknown) => put(`/sessions/${room}/room/members/${agent}/model`, body);
+
+		// The seat takes the choice; the agent, its chat elsewhere and the host do not.
+		expect((await memberPut(buddy.id, model("vision-model"))).body.override).toMatchObject({ id: "vision-model" });
+		expect(await seatOf()).toMatchObject({ model: { model: { id: "vision-model" }, override: true } });
+		expect((await api(`/agents/${buddy.id}`)).body.model).toEqual(model("local-model"));
+		const listed = (await api("/sessions")).body.sessions;
+		expect(listed.find((session: { id: string }) => session.id === elsewhere).model).toMatchObject({ model: { id: "local-model" }, override: false });
+		expect(listed.find((session: { id: string }) => session.id === room).model).toMatchObject({ override: false });
+
+		// Errors: an unknown model, the host (which has the chat's own endpoint), and someone not in the chat.
+		expect((await memberPut(buddy.id, { provider: model("nope").provider, id: "nope" })).status).toBe(400);
+		expect((await memberPut(guide.id, model("vision-model"))).status).toBe(404);
+		expect((await memberPut("nobody", model("vision-model"))).status).toBe(404);
+		expect((await put(`/sessions/nobody/room/members/${buddy.id}/model`, model("vision-model"))).status).toBe(404);
+		expect(await seatOf()).toMatchObject({ model: { model: { id: "vision-model" }, override: true } });
+
+		// Cleared, it follows its agent's again.
+		expect((await memberPut(buddy.id, { provider: null, id: null })).body.override).toBeNull();
+		expect(await seatOf()).toMatchObject({ model: { model: { id: "local-model" }, override: false } });
+
+		// A fork starts on the model its chat was given; a fork of a chat that has none follows the agent's.
+		const chat = (await post("/sessions", { agent: buddy.id })).body.id;
+		await put(`/sessions/${chat}/model`, model("vision-model"));
+		await say("Hello?", chat);
+		const messages = (await api(`/sessions/${chat}/messages`)).body.messages as { id: string; role: string }[];
+		const fork = (await post(`/sessions/${chat}/fork`, { at: messages.find((message) => message.role === "assistant")!.id })).body;
+		const shown = async (id: string) => (await api("/sessions")).body.sessions.find((session: { id: string }) => session.id === id).model;
+		expect(await shown(fork.id)).toMatchObject({ model: { id: "vision-model" }, override: true });
+		await put(`/sessions/${chat}/model`, { model: null });
+		expect(await shown(fork.id)).toMatchObject({ model: { id: "vision-model" }, override: true });
+		expect(await shown(chat)).toMatchObject({ model: { id: "local-model" }, override: false });
+		const plain = (await post(`/sessions/${chat}/fork`, { at: messages.find((message) => message.role === "assistant")!.id })).body;
+		expect(await shown(plain.id)).toMatchObject({ model: { id: "local-model" }, override: false });
+		expect((await api(`/providers/${home}`, { method: "DELETE" })).status).toBe(200);
+	});
+
 	it("changes one session's model by {provider, id}, by {model: \"<provider>/<id>\"} with the longest provider prefix, or by a bare default id", async () => {
 		expect((await post("/providers", { builtin: "openrouter", key: "k", models: ["anthropic/claude-sonnet-4.6"] })).status).toBe(200);
 		expect((await post("/providers", { name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" })).status).toBe(200);

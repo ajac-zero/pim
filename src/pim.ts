@@ -3182,6 +3182,8 @@ export class Pim extends DurableAgent<Env> {
 			: init
 				? String((await (await this.harness.pi()).createConversation({ ownership: { kind: "ownerless" }, agent: this.harness.agentDefaults(), init }, BACKGROUND_CONTEXT)).id)
 				: (await this.harness.sessions.create()).id;
+		// A fork keeps the model chosen for the chat it came from.
+		if (from) this.store.setSessionModel(id, this.store.sessionInfo(from.session)?.model ?? null);
 		await this.harness.session(id).setModel(this.sessionModel(id, agent));
 		this.agents.setSession(id, agent.id);
 		this.store.touchSession(id, title);
@@ -4698,14 +4700,14 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** What the chat list says of a room: how agents take turns, and who is in it besides the host, each with whether it is at work. Every chat of the person's with their own agents is a room, with no one but its host at first. */
-	#roomInfo(session: string, busy: ReadonlySet<string>, held: ReadonlyMap<string, string>): { mode: RoomMode; members: { id: string; name: string; busy: boolean; held: boolean; error: string | null }[] } | null {
+	#roomInfo(session: string, busy: ReadonlySet<string>, held: ReadonlyMap<string, string>): { mode: RoomMode; members: { id: string; name: string; busy: boolean; held: boolean; error: string | null; model: { model: ReturnType<typeof describeModel>; override: boolean } }[] } | null {
 		const [host, ...members] = this.#rooms.seats(session);
 		if (!host && !this.#roomable(session)) return null;
 		return {
 			mode: this.#rooms.mode(session),
 			members: members.flatMap((seat) => {
 				const agent = this.agents.get(seat.agent);
-				return agent ? [{ id: agent.id, name: agent.name, busy: busy.has(seat.conversation), held: held.has(seat.conversation), error: held.get(seat.conversation) ?? null }] : [];
+				return agent ? [{ id: agent.id, name: agent.name, busy: busy.has(seat.conversation), held: held.has(seat.conversation), error: held.get(seat.conversation) ?? null, model: this.#sessionModelInfo(seat.conversation) }] : [];
 			}),
 		};
 	}
@@ -5203,6 +5205,9 @@ export class Pim extends DurableAgent<Env> {
 							if (abilities !== null) this.agents.setAbilities(fork.id, abilities);
 							this.store.touchSession(fork.id, this.store.sessionInfo(session)?.title ?? undefined);
 							this.store.continueSession(fork.id, session);
+							// The chat goes on with the model chosen for it.
+							this.store.setSessionModel(fork.id, this.store.sessionInfo(session)?.model ?? null);
+							await this.harness.session(fork.id).setModel(this.sessionModel(fork.id));
 							await (await this.harness.conversation(fork.id)).compact(undefined, BACKGROUND_CONTEXT);
 							this.broadcastMessage({ type: "sessions" });
 						}
@@ -6317,6 +6322,54 @@ export class Pim extends DurableAgent<Env> {
 		return blocks;
 	}
 
+	/** Chooses, or with null clears, the model of one conversation from a request's {provider, id} or {model}. */
+	async #changeSessionModel(id: string, request: Request) {
+		const body = (await readJson<{ provider?: unknown; id?: unknown; model?: unknown }>(request)) ?? {};
+		// Null, or an empty model, clears the chat's own choice: it follows its agent's again.
+		if (body.model === null || body.model === "" || (body.provider === null && body.id === null)) {
+			return { model: describeModel(await this.chooseSessionModel(id, null)), override: null };
+		}
+		const hint = `Send {provider, id} of one of GET /model's choices (for example {"provider":"own:ai-gateway","id":"claude-sonnet-5-5"}), or {model:"<provider>/<id>"}.`;
+		let provider: string | undefined;
+		let modelId: string | undefined;
+		if (typeof body.provider === "string" && typeof body.id === "string") {
+			provider = body.provider;
+			modelId = body.id;
+		} else if (typeof body.model === "string") {
+			// The longest provider id the string starts with, since a model id may hold "/" too.
+			const text = body.model;
+			const known = [this.defaultModel().provider, CHATGPT_PROVIDER, ...this.customProviders().map(({ catalogId }) => catalogId)];
+			provider = known.filter((candidate) => text.startsWith(`${candidate}/`)).sort((a, b) => b.length - a.length)[0];
+			if (provider) modelId = text.slice(provider.length + 1);
+		} else {
+			throw new HttpError(400, hint);
+		}
+		let resolved: PiModel;
+		if (provider && modelId !== undefined) {
+			try {
+				resolved = await this.#choice(provider, modelId);
+			} catch (error) {
+				if (error instanceof HttpError && error.status === 400) throw new HttpError(400, `${error.message}. ${hint}`);
+				throw error;
+			}
+		} else {
+			// A bare Workers AI id, as sessions have always taken.
+			const bare = body.model as string;
+			const allowed = this.#allowedModels();
+			if (allowed && bare !== this.defaultModel().id && !allowed.includes(bare)) {
+				throw new HttpError(403, `${bare} is not available here. ${hint}`);
+			}
+			try {
+				if (!this.#hasWorkersAi()) throw new Error("This Pim has no Workers AI");
+				resolved = this.ai(bare);
+			} catch (error) {
+				throw new HttpError(400, `${errorMessage(error)}. ${hint}`);
+			}
+		}
+		await this.chooseSessionModel(id, resolved);
+		return { model: describeModel(resolved), override: describeModel(resolved) };
+	}
+
 	/** What model a chat runs on, and whether it was chosen for the chat alone. */
 	#sessionModelInfo(session: string): { model: ReturnType<typeof describeModel>; override: boolean } {
 		const chosen = this.store.sessionInfo(session)?.model;
@@ -7009,52 +7062,17 @@ export class Pim extends DurableAgent<Env> {
 		[
 			"PUT",
 			"/sessions/:session/model",
-			async ({ session }, request) => {
+			async ({ session }, request) => this.#changeSessionModel(await this.#session(session!), request),
+		],
+		// A group chat's agent besides its host has a conversation of its own; its model is chosen for that, never for the agent.
+		[
+			"PUT",
+			"/sessions/:session/room/members/:agent/model",
+			async ({ session, agent }, request) => {
 				const id = await this.#session(session!);
-				const body = (await readJson<{ provider?: unknown; id?: unknown; model?: unknown }>(request)) ?? {};
-				// Null, or an empty model, clears the chat's own choice: it follows its agent's again.
-				if (body.model === null || body.model === "" || (body.provider === null && body.id === null)) {
-					return { model: describeModel(await this.chooseSessionModel(id, null)), override: null };
-				}
-				const hint = `Send {provider, id} of one of GET /model's choices (for example {"provider":"own:ai-gateway","id":"claude-sonnet-5-5"}), or {model:"<provider>/<id>"}.`;
-				let provider: string | undefined;
-				let modelId: string | undefined;
-				if (typeof body.provider === "string" && typeof body.id === "string") {
-					provider = body.provider;
-					modelId = body.id;
-				} else if (typeof body.model === "string") {
-					// The longest provider id the string starts with, since a model id may hold "/" too.
-					const text = body.model;
-					const known = [this.defaultModel().provider, CHATGPT_PROVIDER, ...this.customProviders().map(({ catalogId }) => catalogId)];
-					provider = known.filter((candidate) => text.startsWith(`${candidate}/`)).sort((a, b) => b.length - a.length)[0];
-					if (provider) modelId = text.slice(provider.length + 1);
-				} else {
-					throw new HttpError(400, hint);
-				}
-				let resolved: PiModel;
-				if (provider && modelId !== undefined) {
-					try {
-						resolved = await this.#choice(provider, modelId);
-					} catch (error) {
-						if (error instanceof HttpError && error.status === 400) throw new HttpError(400, `${error.message}. ${hint}`);
-						throw error;
-					}
-				} else {
-					// A bare Workers AI id, as sessions have always taken.
-					const bare = body.model as string;
-					const allowed = this.#allowedModels();
-					if (allowed && bare !== this.defaultModel().id && !allowed.includes(bare)) {
-						throw new HttpError(403, `${bare} is not available here. ${hint}`);
-					}
-					try {
-						if (!this.#hasWorkersAi()) throw new Error("This Pim has no Workers AI");
-						resolved = this.ai(bare);
-					} catch (error) {
-						throw new HttpError(400, `${errorMessage(error)}. ${hint}`);
-					}
-				}
-				await this.chooseSessionModel(id, resolved);
-				return { model: describeModel(resolved), override: describeModel(resolved) };
+				const seat = this.#rooms.at(id, agent!);
+				if (!seat || seat.conversation === id) throw new HttpError(404, "No such agent in this chat besides its host");
+				return this.#changeSessionModel(seat.conversation, request);
 			},
 		],
 

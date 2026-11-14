@@ -82,7 +82,7 @@ it("round-trips a BOM and CRLF line endings byte for byte", async () => {
   const session = open(client, original);
   session.edit("one\ntwo\nthree\n");
   await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
-  expect(writes[0].text).toBe("\ufeffone\r\ntwo\r\nthree\r\n");
+  expect(writes[0]?.text).toBe("\ufeffone\r\ntwo\r\nthree\r\n");
   await finish("h1");
   expect(joinText("x\n", { eol: "\n", bom: false })).toBe("x\n");
 });
@@ -109,7 +109,7 @@ it("saves 500 ms after the last keystroke, with If-Match, and takes the new hash
   expect(session.getState().status).toBe("saved");
   session.edit("abc");
   await flushNow(session);
-  expect(writes[1].options).toEqual({ ifMatch: "h1" });
+  expect(writes[1]?.options).toEqual({ ifMatch: "h1" });
 });
 
 it("never saves twice at once and sends the newest buffer next", async () => {
@@ -124,7 +124,7 @@ it("never saves twice at once and sends the newest buffer next", async () => {
   expect(writes).toHaveLength(1);
   await finish("h1");
   expect(writes.map((w) => w.text)).toEqual(["a", "abc"]);
-  expect(writes[1].options).toEqual({ ifMatch: "h1" });
+  expect(writes[1]?.options).toEqual({ ifMatch: "h1" });
   await finish("h2");
   expect(session.getState().status).toBe("saved");
   expect(maxInFlight()).toBe(1);
@@ -188,7 +188,7 @@ it("overwrites a deleted file with If-None-Match", async () => {
   session.edit("mine");
   await session.flush();
   void session.overwrite();
-  expect(writes[1].options).toEqual({ ifNoneMatch: true });
+  expect(writes[1]?.options).toEqual({ ifNoneMatch: true });
 });
 
 it("refuses binary bytes and opens only text", () => {

@@ -611,7 +611,7 @@ describe("a thread's page", () => {
     await waitFor(() => expect(api.abort).toHaveBeenCalledWith("t1"));
   });
 
-  it("allows steering Amp HTTP threads but offers no Stop", async () => {
+  it("allows steering Amp HTTP threads and offers Stop", async () => {
     const { api } = fakeApi(
       view({
         harness: "amp",
@@ -627,8 +627,8 @@ describe("a thread's page", () => {
       await screen.findByPlaceholderText(/^Steer the coding agent/),
     ).toBeTruthy();
     expect(
-      screen.queryByRole("button", { name: "Stop generating" }),
-    ).toBeNull();
+      screen.getByRole("button", { name: "Stop generating" }),
+    ).toBeTruthy();
   });
 
   it("asks what to do next in an idle thread, with no Stop", async () => {

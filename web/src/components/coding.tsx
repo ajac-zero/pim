@@ -1619,7 +1619,7 @@ function ThreadActions({
         <Confirm
           text={
             thread.provider === "amp-http"
-              ? "Archive this thread? It is archived on Amp too, but archiving may not halt a run that is still going."
+              ? "Archive this thread? It is archived on Amp too. Use Stop first to halt a run that is still going."
               : t("codingArchiveConfirm")
           }
           action={t("codingArchive")}
@@ -2169,8 +2169,7 @@ function SteerForm({
       draftKey={thread.id}
       fill={fill}
       busy={working && !abort.isPending}
-      // Amp has no cancel call, so there is no Stop for its threads; archiving is the only way to end one.
-      onStop={thread.provider === "amp-http" ? undefined : () => abort.mutate()}
+      onStop={() => abort.mutate()}
       hideAttach
       onSend={(content) => {
         const text = textOf(content).trim();

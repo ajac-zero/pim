@@ -54,6 +54,8 @@ export type OrbCapabilities = {
 	readonly steer: boolean;
 	/** Whether `stop` works. */
 	readonly stop: boolean;
+	/** Whether `cancel` works: a running turn can be halted without ending the thread. */
+	readonly cancel?: boolean;
 	/** Whether `usage` says anything at all. */
 	readonly usage: boolean;
 };
@@ -78,7 +80,7 @@ export type OrbClientContext = {
 export type OrbClientFactory = (context: OrbClientContext) => OrbClient | null | Promise<OrbClient | null>;
 
 /** The methods a client has, as failures and the conformance suite name them. */
-export type OrbMethod = "start" | "steer" | "stop" | "state" | "messages" | "usage";
+export type OrbMethod = "start" | "steer" | "stop" | "cancel" | "state" | "messages" | "usage";
 
 /** How a client failed, as a caller can tell apart without matching on a message. */
 export type OrbErrorCode = "orb_auth" | "orb_unreachable" | "orb_unsupported" | "orb_lost" | "orb_start_uncertain" | "orb_request" | "orb_retry_exhausted";
@@ -165,6 +167,11 @@ export interface OrbClient {
 	 * `capabilities.stop` is false.
 	 */
 	stop(threadId: string): Promise<void>;
+	/**
+	 * Halts the thread's running turn without archiving it. Optional: present
+	 * when `capabilities.cancel` is true. One attempt; the caller may retry.
+	 */
+	cancel?(threadId: string): Promise<void>;
 	/** Reports what the thread is doing. Never interrupts it; `state` alone never changes anything. */
 	state(threadId: string): Promise<OrbStatus>;
 	/**

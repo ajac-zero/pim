@@ -1253,11 +1253,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.lifecycle.start();
 		const thread = this.#live();
 		if (this.#isLegacyAmpWorkspace(thread)) throw new Error(LEGACY_AMP_WORKSPACE_MESSAGE);
-		if (thread.providerId === "amp-http") throw new OrbUnsupportedError(AMP_HTTP_UNSUPPORTED);
+		// A real cancel, where the agent's cloud has one, runs first: if it fails the turn is left as it is and Stop can be pressed again.
+		const cancelled = thread.currentOperation !== null && await this.#cancelOrb();
 		this.ctx.storage.sql.exec("DELETE FROM coding_inbox");
 		// Whatever runs in the workspace loses its model at once.
 		this.store.setGatewayNonce(null);
-		if (thread.currentOperation) await this.#stopTurn();
+		if (thread.currentOperation) await this.#stopTurn("person", cancelled);
 		else {
 			this.#killCommands();
 			if (thread.slot === "queued") await this.#cancelQueued();
@@ -2698,6 +2699,18 @@ export class CodingThreadDO extends DurableObject<Env> {
 		await this.#fail(reason, detail, false);
 	}
 
+	/** Halts the run on the agent's cloud without archiving the thread there, when its client can (Amp). Returns whether it did; failures propagate. */
+	async #cancelOrb(): Promise<boolean> {
+		const thread = this.store.required();
+		if (thread.providerKind !== "agent-hosted" || thread.orb === null) return false;
+		const client = await this.#orbClient();
+		if (client === null || !client.capabilities().cancel || !client.cancel) return false;
+		// A failure is the person's to see: typed errors propagate and the turn goes on.
+		await client.cancel(thread.orb.threadId);
+		this.store.recordEvent("orb.cancelled", { provider: client.id, orb: thread.orb.threadId });
+		return true;
+	}
+
 	/**
 	 * Ends the thread on the agent's own cloud, as aborting or archiving it
 	 * asks: the run is cancelled and the thread archived there, off the
@@ -3146,14 +3159,14 @@ export class CodingThreadDO extends DurableObject<Env> {
 	}
 
 	/** Stops the turn under way: kills its commands, aborts pi's run and waits for the turn to end. */
-	async #stopTurn(why: "person" | "session" = "person"): Promise<void> {
+	async #stopTurn(why: "person" | "session" = "person", orbCancelled = false): Promise<void> {
 		const thread = this.store.required();
 		const operation = thread.currentOperation;
 		if (why === "person") this.#userStop = operation;
 		// A turn on the agent's cloud ends by ending the whole thread there; nothing of it runs here to stop.
 		if (thread.providerKind === "agent-hosted") {
 			if (operation !== null) {
-				await this.#stopOrb();
+				if (!orbCancelled) await this.#stopOrb();
 				await this.#endTurn(operation, { status: "unanswered", reason: "aborted" });
 			}
 			return;

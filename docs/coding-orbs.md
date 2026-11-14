@@ -4,7 +4,7 @@ An **agent-hosted** thread runs in the vendor's cloud, not a sandbox Pim owns. `
 
 ## The interface
 
-`OrbClient` is the provider-neutral seam: idempotent `start`, `state`, paginated `messages`, optional `steer`, `stop` and `usage`. Capability flags declare which optional verbs work; unsupported calls throw `OrbUnsupportedError`. Authentication, unreachable clouds and deleted threads have typed errors too. Usage is null when unavailable, never invented as zero.
+`OrbClient` is the provider-neutral seam: idempotent `start`, `state`, paginated `messages`, optional `steer`, `stop`, `cancel` and `usage`. Capability flags declare which optional verbs work; unsupported calls throw `OrbUnsupportedError`. Authentication, unreachable clouds and deleted threads have typed errors too. Usage is null when unavailable, never invented as zero.
 
 The conformance suite (`src/coding/orb/conformance.ts`) checks the contract. Capabilities and script hooks gate cases a provider cannot exercise, with explicit skip reasons. `FakeOrbClient` is an in-memory implementation for loop tests.
 
@@ -19,7 +19,8 @@ Every call sends only `Authorization: Bearer <token>` and `content-type: applica
 | start | `resolveProjectByRepositoryURLs` (cached per repository URL, in memory and DO storage), then `createRemoteExecutorThread` |
 | state, messages | `getThreadTail` (state reads 1 message; the transcript 200, or 20 if the response is over the 2 MB cap; message text is truncated to 8000 chars; non-text blocks become `[type]` markers) |
 | steer | `sendMessageToThread` |
-| stop | `archiveThread` with `{thread, archived: true}` |
+| stop (archive) | `archiveThread` with `{thread, archived: true}` |
+| cancel (Stop) | `POST /api/thread-actors`, then a WebSocket `client_cancel` (see below) |
 
 The bearer is **the same saved credential as the coding page's Amp Connect field**: `codingVault.loadApiKey(space, "amp")`. There is no second PAT or Connect UI. A missing token waits in `login_required`. A 401/403 also waits there and says:
 
@@ -37,7 +38,15 @@ The DO alarm polls every 30 seconds. A missing state keeps polling; `working` is
 
 ### Steering and archiving
 
-Steering is supported. **Amp's internal API has no cancel call** (`cancelThread` is "Unknown method"), so the orb's `stop` is `archiveThread`, and the UI and tools label it **archive**, not stop. Archiving may not halt a running agent; this is unverified. Pim's own abort is therefore refused for Amp threads with an `unsupported` explanation, and the UI shows no Stop button for them. DELETE is never used.
+Steering is supported. Amp's internal HTTP API has no cancel call (`cancelThread` is "Unknown method"), so `stop` is `archiveThread` and the UI and tools label it **archive**; it may not halt a running agent. **Stop** is the separate optional `cancel(id)` capability (`capabilities().cancel`), and Pim's abort uses it for Amp threads: it does not archive, the turn ends like any aborted turn (idle), and a failure leaves the turn running so Stop can be pressed again. DELETE is never used.
+
+Cancel goes over a short-lived outbound WebSocket (one attempt, ~10 s):
+
+1. `POST /api/thread-actors` with the saved bearer and `{"threadId","usesThreadActors":true}` returns a `wsToken` (a secret JWT).
+2. `fetch` an Upgrade to `/actors/gateway/threadActor/websocket/?rvt-namespace=default&rvt-method=get&rvt-key=<thread>&rvt-token=<AMP_RIVET_PUBLIC_KEY>&rvt-skip-ready-wait=true` with subprotocols `rivet`, `rivet_encoding.bare`, `rivet_skip_ready_wait`, `rivet_conn_params.<encoded JSON with wsToken>`.
+3. Send `client_cancel` as JSON-RPC and wait for the response with the same id (`{"ok":true}`); notifications such as `pong` and `tool_approval_queue` are ignored. Then close with 1000.
+
+`AMP_RIVET_PUBLIC_KEY` is not a secret (every Amp CLI embeds it). If Amp rotates it the socket closes 1008 `auth.invalid_token` and Pim reports "Amp rejected the rivet key"; re-extract it with `strings $(readlink -f $(which amp)) | grep -oE 'pk_[A-Za-z0-9_]{60,}' | head -1`. The wsToken, the access token and the `rivet_conn_params` subprotocol are redacted from every error and log. Unverified until tried live: Workers' fetch-Upgrade to the gateway in production, and whether the long-lived `sgamp_` token is accepted by `/api/thread-actors`.
 
 ### Usage
 

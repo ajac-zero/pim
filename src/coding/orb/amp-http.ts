@@ -4,13 +4,35 @@
 // is involved, including while a turn is running.
 //
 // Verified live: resolveProjectByRepositoryURLs, createRemoteExecutorThread,
-// getThreadTail, sendMessageToThread, archiveThread. There is no cancelThread:
+// getThreadTail, sendMessageToThread, archiveThread. There is no HTTP cancel:
 // `stop` is archiveThread, which hides the thread but may NOT halt a running
-// agent (unverified). Only Authorization and content-type headers are sent;
+// agent. `cancel` is the real Stop: a short-lived WebSocket to Amp's rivet
+// gateway sending the JSON-RPC `client_cancel`. Only Authorization and content-type headers are sent;
 // the CLI's x-amp-* headers were not needed.
 import { OrbAuthError, OrbError, OrbLostError, OrbUnreachableError, OrbUnsupportedError, type OrbClient, type OrbMessage, type OrbStart, type OrbStatus, type OrbThread, type OrbUsage } from "./types";
 
 export const AMP_HTTP_UNSUPPORTED = "not supported by Amp: archiving may not halt a running agent";
+/**
+ * Amp's rivet gateway public key. Not a secret: the same constant is embedded
+ * for every user in the Amp CLI binary. When Amp rotates it the gateway closes
+ * the socket 1008 `auth.invalid_token`; re-extract it with:
+ *   strings $(readlink -f $(which amp)) | grep -oE 'pk_[A-Za-z0-9_]{60,}' | head -1
+ */
+export const AMP_RIVET_PUBLIC_KEY = "pk_9tm4qz3zrMerdZXTlBRLRsmJIzSQIPH24meKBqiL6vVpscTvc4w1YPiBgymXf9Az";
+/** The Amp CLI version the cancel socket says it is. */
+export const AMP_CLI_VERSION_LABEL = "0.0.1794600035-g3776ae";
+const CANCEL_TIMEOUT_MS = 10_000;
+const AMP_RIVET_KEY_REJECTED = "Amp rejected the rivet key (it may have rotated; see AMP_RIVET_PUBLIC_KEY)";
+
+/** The part of a Workers WebSocket (from `response.webSocket`) that cancel uses. */
+export interface AmpSocket {
+	accept(): void;
+	send(data: string): void;
+	close(code?: number, reason?: string): void;
+	addEventListener(type: "message" | "close" | "error", listener: (event: any) => void): void;
+}
+/** Opens the outbound upgrade; the default is `fetch`, which in Workers answers with `webSocket`. */
+export type AmpConnect = (url: string, init: { headers: Record<string, string> }) => Promise<{ status: number; webSocket?: AmpSocket | null }>;
 const DEFAULT_BASE = "https://ampcode.com";
 /** Upper bound on a response body read, and on one transcript message's text. */
 export const AMP_MAX_RESPONSE_BYTES = 2_000_000;
@@ -32,11 +54,15 @@ export type AmpHttpOptions = {
 	now?: () => number;
 	/** Defaults to https://ampcode.com. */
 	baseUrl?: string;
+	/** Opens the cancel WebSocket. Defaults to a fetch Upgrade. */
+	connect?: AmpConnect;
+	/** How long cancel waits for the answer. Defaults to 10s. */
+	cancelTimeoutMs?: number;
 };
 type Progress = { startedAt: number; working: boolean; errorAt: number | null };
 type StartRecord = { pending: true; failure?: string } | { thread: OrbThread };
 type Retry = { attempts: number; at: number; failure?: string };
-const redact = (text: string): string => text.replace(/sgamp_[A-Za-z0-9_.-]*/g, "[redacted]").replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]");
+const redact = (text: string): string => text.replace(/sgamp_[A-Za-z0-9_.-]*/g, "[redacted]").replace(/eyJ[A-Za-z0-9_.-]+/g, "[redacted]").replace(/rivet_conn_params\.[^\s,"']*/g, "rivet_conn_params.[redacted]").replace(/Bearer\s+[^\s"',;]+/gi, "Bearer [redacted]");
 const snippet = (text: string): string => redact(text).replace(/\s+/g, " ").trim().slice(0, 200);
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const timestamp = (value: unknown): number | null => {
@@ -71,8 +97,8 @@ export class AmpHttpOrbClient implements OrbClient {
 		this.#now = options.now ?? Date.now;
 		this.#base = (options.baseUrl ?? DEFAULT_BASE).replace(/\/+$/, "");
 	}
-	// `stop` is archiveThread: Amp's internal API has no cancel, and archiving may not halt a running agent.
-	capabilities() { return { steer: true, stop: true, usage: false }; }
+	// `stop` is archiveThread (it may not halt a running agent); `cancel` is the real Stop, over a WebSocket.
+	capabilities() { return { steer: true, stop: true, cancel: true, usage: false }; }
 	async usage(_id: string): Promise<OrbUsage | null> { throw new OrbUnsupportedError("Amp's internal API reports no usage"); }
 
 	async start(start: OrbStart): Promise<OrbThread> {
@@ -128,6 +154,86 @@ export class AmpHttpOrbClient implements OrbClient {
 	/** Archives the thread. It may not halt a running agent (unverified). */
 	async stop(id: string): Promise<void> {
 		await this.#call("archiveThread", { thread: id, archived: true }, id);
+	}
+
+	/** Cancels the running turn without archiving: one attempt, never retried here. */
+	async cancel(id: string): Promise<void> {
+		const token = await this.options.token();
+		if (token === null) throw new OrbAuthError("Connect Amp using the existing Amp Connect field on the coding page");
+		let wsToken = "";
+		const clean = (text: string): string => {
+			let out = redact(text);
+			for (const secret of [token, wsToken]) if (secret) out = out.split(secret).join("[redacted]");
+			return out.replace(/\s+/g, " ").trim().slice(0, 200);
+		};
+		const fail = (error: unknown, what: string): never => {
+			if (error instanceof OrbError) throw error;
+			const message = clean(error instanceof Error ? error.message : String(error));
+			console.warn(JSON.stringify({ event: "pim.coding.amp_cancel_failed", what, errMessage: message }));
+			throw new OrbUnreachableError(`Amp cancel failed (${what}): ${message}`);
+		};
+		let response: Response;
+		try {
+			response = await this.#fetch(`${this.#base}/api/thread-actors`, { method: "POST", redirect: "manual", signal: AbortSignal.timeout(30_000), headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ threadId: id, usesThreadActors: true }) });
+		} catch (error) { return fail(error, "thread-actors"); }
+		let text = "";
+		try { text = await readBounded(response); } catch { /* the status says enough */ }
+		if (response.status === 401 || response.status === 403) throw new OrbAuthError(`Amp rejected the saved token (HTTP ${response.status})`);
+		if (response.status === 404) throw new OrbLostError();
+		if (!response.ok) {
+			console.warn(JSON.stringify({ event: "pim.coding.amp_cancel_failed", what: "thread-actors", status: response.status }));
+			throw new AmpCancelError(`Amp thread-actors failed (HTTP ${response.status}): ${clean(text).slice(0, 120)}`);
+		}
+		try { wsToken = String(object(JSON.parse(text)).wsToken ?? ""); } catch { /* handled below */ }
+		if (!wsToken) throw new AmpCancelError("Amp thread-actors returned no wsToken");
+
+		const params = encodeURIComponent(JSON.stringify({ wsToken, clientApplication: { type: "cli", name: "CLI", version: AMP_CLI_VERSION_LABEL }, interactiveClient: true, transport: "json-rpc" }));
+		const protocols = ["rivet", "rivet_encoding.bare", "rivet_skip_ready_wait", `rivet_conn_params.${params}`];
+		const query = `rvt-namespace=default&rvt-method=get&rvt-key=${encodeURIComponent(id)}&rvt-token=${AMP_RIVET_PUBLIC_KEY}&rvt-skip-ready-wait=true`;
+		const url = `${this.#base}/actors/gateway/threadActor/websocket/?${query}`;
+		const connect: AmpConnect = this.options.connect ?? ((u, init) => fetch(u, init) as unknown as ReturnType<AmpConnect>);
+		let upgrade: Awaited<ReturnType<AmpConnect>>;
+		try { upgrade = await connect(url, { headers: { Upgrade: "websocket", "Sec-WebSocket-Protocol": protocols.join(", ") } }); } catch (error) { return fail(error, "upgrade"); }
+		if (upgrade.status === 401 || upgrade.status === 403) throw new OrbAuthError(`Amp rejected the cancel connection (HTTP ${upgrade.status})`);
+		const socket = upgrade.webSocket;
+		if (upgrade.status !== 101 || !socket) throw new AmpCancelError(`Amp did not upgrade the cancel connection (HTTP ${upgrade.status}${socket ? "" : ", no webSocket"})`);
+
+		const requestId = `pim-cancel-${crypto.randomUUID()}`;
+		const timeoutMs = this.options.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await new Promise<void>((resolve, reject) => {
+				timer = setTimeout(() => reject(new OrbUnreachableError(`Amp did not answer the cancel within ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+				socket.addEventListener("message", (event) => {
+					const data = typeof event?.data === "string" ? event.data : null;
+					let frame: Record<string, unknown>;
+					try { frame = object(JSON.parse(data ?? "")); } catch { return; }
+					if (frame.id !== requestId) return;
+					const error = frame.error;
+					if (error !== undefined && error !== null) {
+						const message = clean(String(object(error).message ?? "error"));
+						return reject(new AmpCancelError(`Amp refused the cancel: ${message}`));
+					}
+					if (object(frame.result).ok === true) resolve();
+					else reject(new AmpCancelError("Amp answered the cancel without ok"));
+				});
+				socket.addEventListener("close", (event) => {
+					const reason = clean(String(event?.reason ?? ""));
+					if (event?.code === 1008 && /auth\.invalid_token/.test(reason)) reject(new AmpCancelError(AMP_RIVET_KEY_REJECTED));
+					else reject(new OrbUnreachableError(`Amp closed the cancel connection (${event?.code ?? "?"}${reason ? `: ${reason}` : ""})`));
+				});
+				socket.addEventListener("error", () => reject(new OrbUnreachableError("Amp cancel connection failed")));
+				try {
+					socket.accept();
+					socket.send(JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "client_cancel", params: {} }));
+				} catch (error) { reject(error); }
+			});
+		} catch (error) {
+			return fail(error, "socket");
+		} finally {
+			clearTimeout(timer);
+			try { socket.close(1000, "done"); } catch { /* already closed */ }
+		}
 	}
 
 	async state(id: string): Promise<OrbStatus> {
@@ -295,6 +401,8 @@ export class AmpHttpOrbClient implements OrbClient {
 		throw response?.status === 429 ? new AmpRateLimitError("Amp API is rate limited", delay) : new OrbUnreachableError(`Amp API is temporarily unavailable (${failure})`, delay);
 	}
 }
+/** A cancel Amp refused or could not carry out; the message is already redacted. */
+export class AmpCancelError extends OrbError { constructor(message: string) { super(message, "orb_request"); this.name = "AmpCancelError"; } }
 class AmpRateLimitError extends OrbUnreachableError {}
 class AmpBeforeSendError extends OrbUnreachableError {}
 class AmpRedirectError extends OrbError { constructor(message: string) { super(message, "orb_request"); } }

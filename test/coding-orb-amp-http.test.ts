@@ -1,7 +1,7 @@
 // Contract test for the Amp internal-API client against recorded fixtures
 // (test/fixtures/amp-internal, shapes verified live, tokens redacted).
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AmpHttpOrbClient, AMP_MAX_MESSAGE_CHARS, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
+import { AmpCancelError, AmpHttpOrbClient, AMP_CLI_VERSION_LABEL, AMP_MAX_MESSAGE_CHARS, AMP_RIVET_PUBLIC_KEY, type AmpSocket, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
 import { runOrbClientConformanceSuite } from "../src/coding/orb/conformance";
 import { OrbAuthError, OrbLostError, OrbUnreachableError, OrbUnsupportedError } from "../src/coding/orb/types";
 
@@ -45,7 +45,7 @@ function fixture(options: Partial<AmpHttpOptions> = {}) {
 }
 const bodies = (fetcher: ReturnType<typeof fixture>["fetcher"]) => fetcher.mock.calls.map(([, init]) => JSON.parse(init?.body as string));
 
-runOrbClientConformanceSuite("Amp internal API", () => fixture().client, { project: "acme/demo", stopHalts: false });
+runOrbClientConformanceSuite("Amp internal API", () => fixture().client, { project: "acme/demo", stopHalts: false, cancellable: false });
 
 describe("AmpHttpOrbClient contract", () => {
 	afterEach(() => vi.restoreAllMocks());
@@ -53,7 +53,7 @@ describe("AmpHttpOrbClient contract", () => {
 
 	it("declares steer and stop (archive) but no usage", async () => {
 		const { client } = fixture();
-		expect(client.capabilities()).toEqual({ steer: true, stop: true, usage: false });
+		expect(client.capabilities()).toEqual({ steer: true, stop: true, cancel: true, usage: false });
 		await expect(client.usage("T")).rejects.toBeInstanceOf(OrbUnsupportedError);
 	});
 
@@ -356,5 +356,143 @@ describe("AmpHttpOrbClient contract", () => {
 			expect((error as Error).message).toContain("302");
 			expect((error as Error).message).not.toMatch(/sgamp_saved|secret=abc|evil\.example/);
 		});
+	});
+});
+
+describe("AmpHttpOrbClient cancel (recorded frames, injected WebSocket)", () => {
+	afterEach(() => vi.restoreAllMocks());
+	const WS_TOKEN = `eyJhbGciOiJIUzI1NiJ9.${"A".repeat(300)}.sig`;
+	const actors = { threadId: "T-abc-1", userId: "u", ownerUserId: "u", threadVersion: 1, usesDtw: false, usesThreadActors: true, executorType: "x", agentMode: "medium", wsToken: WS_TOKEN, capability: "write", poolName: "p" };
+
+	class FakeSocket implements AmpSocket {
+		sent: string[] = [];
+		closed: [number | undefined, string | undefined][] = [];
+		accepted = false;
+		#on = new Map<string, (event: any) => void>();
+		constructor(private script: (socket: FakeSocket, frame: any) => void) {}
+		accept() { this.accepted = true; }
+		send(data: string) { this.sent.push(data); const frame = JSON.parse(data); queueMicrotask(() => this.script(this, frame)); }
+		close(code?: number, reason?: string) { this.closed.push([code, reason]); }
+		addEventListener(type: string, listener: (event: any) => void) { this.#on.set(type, listener); }
+		emit(type: string, event: any) { this.#on.get(type)?.(event); }
+		message(frame: unknown) { this.emit("message", { data: typeof frame === "string" ? frame : JSON.stringify(frame) }); }
+	}
+	const ok = (socket: FakeSocket, frame: any) => socket.message({ jsonrpc: "2.0", id: frame.id, result: { ok: true } });
+
+	function setup(script: (socket: FakeSocket, frame: any) => void, o: { upgrade?: { status: number; webSocket?: boolean }; actorsResponse?: () => Response; token?: string | null; timeout?: number } = {}) {
+		const socket = new FakeSocket(script);
+		const fetcher = vi.fn<typeof fetch>(async () => o.actorsResponse?.() ?? Response.json(actors));
+		const connect = vi.fn(async (_url: string, _init: { headers: Record<string, string> }) => ({ status: o.upgrade?.status ?? 101, webSocket: o.upgrade?.webSocket === false ? null : socket }));
+		const client = new AmpHttpOrbClient({ store: new MemoryStore(), token: async () => o.token === undefined ? TOKEN : o.token, fetch: fetcher, connect, cancelTimeoutMs: o.timeout ?? 1000 });
+		return { client, socket, fetcher, connect };
+	}
+	// No secret may be in an error message, or in what was logged.
+	const noSecrets = (error: unknown, warn: ReturnType<typeof vi.spyOn>) => {
+		const all = [String((error as Error).message), JSON.stringify(warn.mock.calls)].join("\n");
+		for (const secret of [TOKEN, WS_TOKEN, "rivet_conn_params.%7B", "eyJ"]) expect(all).not.toContain(secret);
+	};
+
+	it("sends the recorded requests and frame and resolves on {ok:true}", async () => {
+		const { client, socket, fetcher, connect } = setup(ok);
+		await client.cancel("T-abc-1");
+		const [url, init] = fetcher.mock.calls[0]!;
+		expect(url).toBe("https://ampcode.com/api/thread-actors");
+		expect(init?.method).toBe("POST");
+		expect(init?.headers).toEqual({ Authorization: `Bearer ${TOKEN}`, "content-type": "application/json" });
+		expect(JSON.parse(init?.body as string)).toEqual({ threadId: "T-abc-1", usesThreadActors: true });
+		const [wsUrl, wsInit] = connect.mock.calls[0]!;
+		expect(wsUrl).toBe(`https://ampcode.com/actors/gateway/threadActor/websocket/?rvt-namespace=default&rvt-method=get&rvt-key=T-abc-1&rvt-token=${AMP_RIVET_PUBLIC_KEY}&rvt-skip-ready-wait=true`);
+		expect(Object.keys(wsInit.headers).sort()).toEqual(["Sec-WebSocket-Protocol", "Upgrade"]);
+		expect(wsInit.headers.Upgrade).toBe("websocket");
+		const protocols = wsInit.headers["Sec-WebSocket-Protocol"]!.split(", ");
+		expect(protocols.slice(0, 3)).toEqual(["rivet", "rivet_encoding.bare", "rivet_skip_ready_wait"]);
+		expect(protocols).toHaveLength(4);
+		expect(protocols[3]!.startsWith("rivet_conn_params.")).toBe(true);
+		const params = JSON.parse(decodeURIComponent(protocols[3]!.slice("rivet_conn_params.".length)));
+		expect(params).toEqual({ wsToken: WS_TOKEN, clientApplication: { type: "cli", name: "CLI", version: AMP_CLI_VERSION_LABEL }, interactiveClient: true, transport: "json-rpc" });
+		expect(socket.accepted).toBe(true);
+		expect(socket.sent).toHaveLength(1);
+		expect(JSON.parse(socket.sent[0]!)).toEqual({ jsonrpc: "2.0", id: expect.stringMatching(/^pim-cancel-.+/), method: "client_cancel", params: {} });
+		expect(socket.closed).toEqual([[1000, expect.any(String)]]);
+	});
+
+	it("ignores pong, notifications and other ids before the response", async () => {
+		const { client, socket } = setup((s, frame) => {
+			s.message("pong");
+			s.message("not json");
+			s.message({ jsonrpc: "2.0", method: "tool_approval_queue", params: { approvals: [] } });
+			s.message({ jsonrpc: "2.0", id: "someone-else", result: { ok: false } });
+			ok(s, frame);
+		});
+		await client.cancel("T-abc-1");
+		expect(socket.closed).toHaveLength(1);
+	});
+
+	it("fails with the redacted JSON-RPC error message", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { client, socket } = setup((s, frame) => s.message({ jsonrpc: "2.0", id: frame.id, error: { code: -1, message: `nope ${WS_TOKEN} ${TOKEN}` } }));
+		const error = await client.cancel("T-abc-1").catch((e) => e);
+		expect(error).toBeInstanceOf(AmpCancelError);
+		expect(error.message).toContain("nope [redacted]");
+		noSecrets(error, warn);
+		expect(socket.closed).toHaveLength(1);
+	});
+
+	it("times out when no response comes, and still closes the socket", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { client, socket } = setup((s) => s.message("pong"), { timeout: 20 });
+		const error = await client.cancel("T-abc-1").catch((e) => e);
+		expect(error).toBeInstanceOf(OrbUnreachableError);
+		expect(error.message).toContain("did not answer");
+		noSecrets(error, warn);
+		expect(socket.closed).toEqual([[1000, expect.any(String)]]);
+	});
+
+	it.each([[401, OrbAuthError], [403, OrbAuthError], [500, AmpCancelError]])("fails an upgrade answered with %s", async (status, type) => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { client, socket } = setup(ok, { upgrade: { status } });
+		const error = await client.cancel("T-abc-1").catch((e) => e);
+		expect(error).toBeInstanceOf(type);
+		noSecrets(error, warn);
+		expect(socket.sent).toEqual([]);
+	});
+
+	it("fails an upgrade with no webSocket", async () => {
+		const { client } = setup(ok, { upgrade: { status: 101, webSocket: false } });
+		const error = await client.cancel("T-abc-1").catch((e) => e);
+		expect(error).toBeInstanceOf(AmpCancelError);
+		expect(error.message).toContain("no webSocket");
+	});
+
+	it("maps a 1008 auth.invalid_token close to the rotated-key error", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { client, socket } = setup((s) => s.emit("close", { code: 1008, reason: "auth.invalid_token#abc123" }));
+		const error = await client.cancel("T-abc-1").catch((e) => e);
+		expect(error).toBeInstanceOf(AmpCancelError);
+		expect(error.message).toBe("Amp rejected the rivet key (it may have rotated; see AMP_RIVET_PUBLIC_KEY)");
+		noSecrets(error, warn);
+		expect(socket.closed).toHaveLength(1);
+	});
+
+	it("maps thread-actors 401 to an auth error, never opening a socket", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { client, connect } = setup(ok, { actorsResponse: () => Response.json({ error: `bad ${TOKEN}` }, { status: 401 }) });
+		const error = await client.cancel("T-abc-1").catch((e) => e);
+		expect(error).toBeInstanceOf(OrbAuthError);
+		noSecrets(error, warn);
+		expect(connect).not.toHaveBeenCalled();
+	});
+
+	it("maps another thread-actors failure to a typed error", async () => {
+		const { client } = setup(ok, { actorsResponse: () => new Response("boom", { status: 502 }) });
+		const error = await client.cancel("T-abc-1").catch((e) => e);
+		expect(error).toBeInstanceOf(AmpCancelError);
+		expect(error.message).toContain("502");
+	});
+
+	it("needs a saved token", async () => {
+		const { client, fetcher } = setup(ok, { token: null });
+		await expect(client.cancel("T-abc-1")).rejects.toBeInstanceOf(OrbAuthError);
+		expect(fetcher).not.toHaveBeenCalled();
 	});
 });

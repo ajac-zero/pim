@@ -173,7 +173,7 @@ describe("an agent-hosted coding thread", () => {
 		]);
 	});
 
-	it("steers a running turn through the client, and aborts it by stopping the agent's thread, once", async () => {
+	it("steers a running turn through the client, and aborts it by cancelling the run, then archives it by stopping", async () => {
 		const fake = new FakeOrbClient();
 		const { id, stub, orb } = await orbThread(fake);
 		await heartbeat(stub);
@@ -184,12 +184,14 @@ describe("an agent-hosted coding thread", () => {
 		const steered = (await stub.log()).filter((event) => event.kind === "orb.steered");
 		expect(steered).toHaveLength(1);
 		await stub.abort();
-		// The agent's thread is stopped there — cancelling its run — and the turn ends cancelled here.
-		expect(fake.stopCount(orb())).toBe(1);
+		// The run is cancelled there, without archiving, and the turn ends cancelled here.
+		expect(fake.cancelCount(orb())).toBe(1);
+		expect(fake.stopCount(orb())).toBe(0);
 		expect(await stub.status()).toMatchObject({ state: "idle", stateReason: null, currentOperation: null });
 		expect(ended(id)).toEqual([expect.objectContaining({ outcome: "cancelled", state: "idle" })]);
-		// Stopping a stopped thread does nothing: abort and archive both ask, and neither ends anything again.
+		// With no turn under way, abort cancels nothing; archive is what stops the thread.
 		await stub.abort();
+		expect(fake.cancelCount(orb())).toBe(1);
 		await stub.archive();
 		expect(fake.stopCount(orb())).toBe(1);
 		expect(ended(id)).toHaveLength(1);
@@ -279,7 +281,7 @@ describe("Amp HTTP placement", () => {
 		expect(fake.started).toHaveLength(1);
 	});
 
-	it("reads the same Amp Connect credential, maps rejection, and steers through sendMessageToThread but refuses abort", async () => {
+	it("reads the same Amp Connect credential, maps rejection, and steers through sendMessageToThread and keeps the turn when cancel fails", async () => {
 		const vault = codingVault(env);
 		const saved = "sgamp_HTTP_SHARED_CONNECT_TOKEN";
 		await vault.saveApiKey(OWNER, "amp", saved);
@@ -306,7 +308,15 @@ describe("Amp HTTP placement", () => {
 			expect(await stub.status()).toMatchObject({ state: "running", providerKind: "agent-hosted", slot: "none", inbox: 0 });
 			await inside(stub, (thread) => thread.steer("hi", { operationId: "steer" }));
 			expect(fetcher.mock.calls.map(([, init]) => method(init))).toContain("sendMessageToThread");
-			await expect(inside(stub, (thread) => thread.abort())).rejects.toThrow("not supported by Amp");
+			const wsToken = "eyJ.SECRET_WS_TOKEN.sig";
+			fetcher.mockImplementation(async (url) => String(url).endsWith("/api/thread-actors") ? Response.json({ wsToken }) : new Response("no upgrade", { status: 200 }));
+			const cancelFailure = await inside(stub, (thread) => thread.abort()).catch((error: Error) => error);
+			expect(String(cancelFailure)).toContain("did not upgrade");
+			expect(String(cancelFailure)).not.toContain(wsToken);
+			expect(fetcher.mock.calls.some(([url]) => String(url).includes("archiveThread"))).toBe(false);
+			fetcher.mockImplementation(async (_url, init) => ({
+				getThreadTail: () => tail(agent),
+			})[method(init) as "getThreadTail"]());
 			expect(await stub.status()).toMatchObject({ state: "running", currentOperation: startInput(id).operationId });
 			expect(fetcher.mock.calls.every(([, init]) => init?.method !== "DELETE")).toBe(true);
 			fetcher.mockImplementation(async () => Response.json({}, { status: 401 }));

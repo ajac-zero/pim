@@ -50,6 +50,8 @@ type FakeThread = {
 	lost: boolean;
 	/** How many `stop` calls took effect; stopping a stopped thread does nothing, and doesn't count. */
 	stops: number;
+	/** How many `cancel` calls were made. */
+	cancels: number;
 };
 
 export class FakeOrbClient implements OrbClient {
@@ -74,7 +76,7 @@ export class FakeOrbClient implements OrbClient {
 
 	constructor(o: FakeOrbOptions = {}) {
 		this.id = o.id ?? "fake";
-		this.#capabilities = { steer: true, stop: true, usage: true, ...o.capabilities };
+		this.#capabilities = { steer: true, stop: true, cancel: true, usage: true, ...o.capabilities };
 		this.#page = o.page ?? 50;
 		let tick = 0;
 		this.#now = o.now ?? (() => (tick += 1_000));
@@ -101,6 +103,7 @@ export class FakeOrbClient implements OrbClient {
 			stopped: false,
 			lost: false,
 			stops: 0,
+			cancels: 0,
 		};
 		this.#threads.set(threadId, thread);
 		this.#byKey.set(start.idempotencyKey, threadId);
@@ -125,6 +128,15 @@ export class FakeOrbClient implements OrbClient {
 		if (thread.stopped) return;
 		thread.stopped = true;
 		thread.stops++;
+		thread.state = "idle";
+		this.#touch(thread);
+	}
+
+	async cancel(threadId: string): Promise<void> {
+		this.#refuse("cancel");
+		const thread = this.#live(threadId);
+		if (!this.#capabilities.cancel) throw new OrbUnsupportedError("This client can't cancel a thread");
+		thread.cancels++;
 		thread.state = "idle";
 		this.#touch(thread);
 	}
@@ -197,6 +209,11 @@ export class FakeOrbClient implements OrbClient {
 	/** The messages steered to the thread and not taken yet, oldest first. */
 	queued(threadId: string): readonly string[] {
 		return [...this.#live(threadId).queue];
+	}
+
+	/** How many `cancel` calls the thread had. */
+	cancelCount(threadId: string): number {
+		return this.#live(threadId).cancels;
 	}
 
 	/** How many `stop` calls took effect on the thread. */

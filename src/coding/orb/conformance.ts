@@ -41,6 +41,8 @@ export type OrbConformanceOptions<C extends OrbClient> = {
 	project?: string;
 	/** False for a client whose stop only archives the thread and may not halt a running agent (Amp); true by default. */
 	stopHalts?: boolean;
+	/** False for a client whose cancel can't run against the case's stand-in cloud (Amp's has its own contract test). */
+	cancellable?: boolean;
 };
 
 /** Every message of a thread, read a page at a time: each call asks for what follows the last message received, until one returns none. */
@@ -69,7 +71,7 @@ export function runOrbClientConformanceSuite<C extends OrbClient>(name: string, 
 
 	describe(`orb client conformance: ${name}`, () => {
 		it("declares what it can do", () => {
-			expect(capabilities).toEqual({ steer: expect.any(Boolean), stop: expect.any(Boolean), usage: expect.any(Boolean) });
+			expect(capabilities).toEqual({ steer: expect.any(Boolean), stop: expect.any(Boolean), usage: expect.any(Boolean), ...(capabilities.cancel === undefined ? {} : { cancel: expect.any(Boolean) }) });
 		});
 
 		it("starts idempotently on the idempotency key", async () => {
@@ -140,6 +142,15 @@ export function runOrbClientConformanceSuite<C extends OrbClient>(name: string, 
 			await client.stop(threadId);
 			// Stopping cancels the run, so the thread is no longer working.
 			if (opts.stopHalts !== false) expect((await client.state(threadId)).state).not.toBe("working");
+		});
+
+		gated(capabilities.cancel === true && opts.cancellable !== false, "the client can't cancel a thread", "cancels a thread without ending it", async () => {
+			const client = makeClient();
+			const { threadId } = await start(client);
+			await client.cancel!(threadId);
+			expect((await client.state(threadId)).state).not.toBe("working");
+			// Cancelling is not archiving: the thread still answers.
+			await client.messages(threadId);
 		});
 
 		gated(

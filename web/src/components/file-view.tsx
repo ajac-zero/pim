@@ -1,9 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { type ReactNode, useState } from "react";
-import type { BundledLanguage } from "shiki";
+import { lazy, type ReactNode, Suspense, useState } from "react";
 import { toast } from "sonner";
-import { Markdown } from "~/components/chat/markdown";
 import { useI18n } from "~/components/i18n";
 import { Download, Trash2, X } from "~/components/icons";
 import {
@@ -14,14 +12,16 @@ import {
   savePdfPage,
 } from "~/components/pdf-view";
 import { Button } from "~/components/ui/button";
-import { CodeBlock } from "~/components/ui/code-block";
+import type { FileSession, SessionStatus } from "~/lib/file-session";
+import { MAX_VIEWABLE_BYTES } from "~/lib/file-text";
 import { baseName, parentOf, previewOf } from "~/lib/files";
 import { ApiError, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
 import { filesQuery } from "~/lib/queries";
+import { useFileSession } from "~/lib/use-file-session";
 import { cn } from "~/lib/utils";
 
-/** The largest text file the page shows; bigger ones are for downloading. */
-const MAX_TEXT_PREVIEW = 1_000_000;
+// CodeMirror is its own chunk, fetched when a text file first opens.
+const FileEditor = lazy(() => import("~/components/file-editor"));
 
 export function FileMissing({
   message,
@@ -40,6 +40,69 @@ export function FileMissing({
         </Button>
       )}
     </main>
+  );
+}
+
+const STATUS_LABELS = {
+  clean: "fileStatusClean",
+  dirty: "fileStatusDirty",
+  saving: "fileStatusSaving",
+  saved: "fileStatusSaved",
+  conflict: "fileStatusConflict",
+  error: "fileStatusError",
+  readonly: "fileStatusReadOnly",
+} as const;
+
+/** Whether the file's edits are safe: clean, unsaved, being saved, saved, in conflict, failed, or not editable. */
+function SaveStatus({ status }: { status: SessionStatus }) {
+  const { t } = useI18n();
+  if (status === "loading") return null;
+  return (
+    <span
+      role="status"
+      data-status={status}
+      className={cn(
+        "shrink-0 text-muted-foreground text-xs",
+        (status === "conflict" || status === "error") && "text-destructive",
+      )}
+    >
+      {t(STATUS_LABELS[status])}
+    </span>
+  );
+}
+
+/** The file changed on disk while it was being edited: keep the buffer, and let the person pick a side. */
+function ConflictBanner({ session }: { session: FileSession }) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const run = (action: () => Promise<void>) => {
+    setBusy(true);
+    action()
+      .catch((failure: Error) => toast.error(failure.message))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <div
+      role="alert"
+      className="flex flex-wrap items-center gap-2 border-b bg-muted px-4 py-2 text-sm"
+    >
+      <p className="min-w-0 flex-1">{t("fileConflict")}</p>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={busy}
+        onClick={() => run(() => session.reloadFromDisk())}
+      >
+        {t("fileReloadFromDisk")}
+      </Button>
+      <Button
+        size="sm"
+        disabled={busy}
+        onClick={() => run(() => session.overwrite())}
+      >
+        {t("fileOverwrite")}
+      </Button>
+    </div>
   );
 }
 
@@ -65,27 +128,16 @@ export function FileView({
     savePdfPage(path, next);
   };
   const preview = previewOf(baseName(path));
-  const textual = ["markdown", "code", "text"].includes(preview.kind);
+  const textual = ["markdown", "code", "text", "none"].includes(preview.kind);
   // The folder's listing says whether the file is there, and its size.
   const listing = useQuery(filesQuery(parentOf(path) ?? FILES_ROOT));
   const entry = listing.data?.entries.find(
     (candidate) => candidate.path === path && candidate.type === "file",
   );
-  const showText = textual && !!entry && entry.size <= MAX_TEXT_PREVIEW;
-  const content = useQuery({
-    // A newer version of the file is another key, so the page shows what the agent just wrote.
-    queryKey: ["files", "content", path, entry?.updatedAt],
-    enabled: showText,
-    retry: false,
-    queryFn: async () => {
-      const response = await fetch(fileContentUrl(path));
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new ApiError(response.status, t("fileMissing"));
-      }
-      return response.text();
-    },
-  });
+  const { load, state } = useFileSession(
+    path,
+    textual && !!entry && entry.size <= MAX_VIEWABLE_BYTES,
+  );
   const remove = useMutation({
     mutationFn: () => pim.deleteFile(path),
     onSuccess: () => {
@@ -97,7 +149,9 @@ export function FileView({
     onError: (failure) => toast.error(failure.message),
   });
 
-  const error = listing.error ?? content.error;
+  const error =
+    listing.error ?? (load.phase === "failed" ? new Error(load.message) : null);
+  if (load.phase === "missing") return <FileMissing onClose={onClose} />;
   if (error && !(error instanceof ApiError && error.status === 404)) {
     return <FileMissing message={error.message} onClose={onClose} />;
   }
@@ -114,6 +168,7 @@ export function FileView({
         {tabs ?? (
           <h1 className="min-w-0 flex-1 truncate font-semibold">{name}</h1>
         )}
+        {load.phase === "ready" && <SaveStatus status={state.status} />}
         {preview.kind === "pdf" && (
           <>
             <PdfPageControls
@@ -163,9 +218,12 @@ export function FileView({
           </Button>
         )}
       </header>
+      {load.phase === "ready" && state.status === "conflict" && (
+        <ConflictBanner session={load.session} />
+      )}
       <div
         className={cn(
-          "flex min-h-0 flex-1 flex-col overflow-auto p-2 scrollbar-thin md:p-4",
+          "flex min-h-0 min-w-0 flex-1 flex-col overflow-auto p-2 scrollbar-thin md:p-4",
           preview.kind === "image" && "items-center justify-center",
         )}
       >
@@ -194,25 +252,29 @@ export function FileView({
             onPage={turnPage}
             onPages={setPageCount}
           />
-        ) : !showText ? (
+        ) : load.phase === "refused" ||
+          (textual && entry.size > MAX_VIEWABLE_BYTES) ? (
           <p className="m-auto text-muted-foreground text-sm">
             {t("noFilePreview")}
           </p>
-        ) : content.data === undefined ? (
+        ) : !textual ? (
+          <p className="m-auto text-muted-foreground text-sm">
+            {t("noFilePreview")}
+          </p>
+        ) : load.phase !== "ready" ? (
           <p className="text-muted-foreground text-sm">{t("loading")}</p>
-        ) : preview.kind === "markdown" ? (
-          <div className="mx-auto w-full max-w-3xl px-2 py-1">
-            <Markdown text={content.data} untrusted />
-          </div>
         ) : (
-          <CodeBlock
-            code={content.data}
-            language={
-              preview.kind === "code"
-                ? preview.language
-                : ("text" as BundledLanguage)
+          <Suspense
+            fallback={
+              <p className="text-muted-foreground text-sm">{t("loading")}</p>
             }
-          />
+          >
+            <FileEditor
+              session={load.session}
+              name={name}
+              readOnly={state.status === "readonly"}
+            />
+          </Suspense>
         )}
       </div>
     </main>

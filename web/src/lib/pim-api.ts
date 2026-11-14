@@ -1585,6 +1585,95 @@ export class ApiError extends Error {
   }
 }
 
+/** A save refused because the file on disk is not the version the editor started from. */
+export class FileConflictError extends ApiError {
+  constructor(
+    readonly code: "hash_mismatch" | "missing" | "exists",
+    readonly currentHash: string | null,
+    readonly currentSize: number | null,
+    readonly currentMtime: number | null,
+  ) {
+    super(409, "The file changed since it was opened");
+  }
+}
+
+/** The file's bytes, and the hash of them when Pim sends one (it doesn't for files over 5 MiB). */
+export type FileRead = { bytes: Uint8Array; sha256: string | null };
+/** What Pim says of a file it just wrote; `sha256` is null when it sends no hash. */
+export type FileWrite = {
+  path: string;
+  sha256: string | null;
+  size: number;
+  mtime: number;
+};
+
+/** Reads one file's bytes with the hash of them. */
+export async function readFile(path: string): Promise<FileRead> {
+  const response = await fetch(fileContentUrl(path));
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ApiError(response.status, `Pim answered ${response.status}`);
+  }
+  const etag = response.headers
+    .get("etag")
+    ?.replace(/^W\//, "")
+    .replace(/"/g, "");
+  const sha256 = response.headers.get("x-file-sha256") ?? etag ?? null;
+  return { bytes: new Uint8Array(await response.arrayBuffer()), sha256 };
+}
+
+/**
+ * Writes a file's text. `ifMatch` writes only when the file still has that
+ * hash and `ifNoneMatch` only when it doesn't exist; a refusal is a
+ * FileConflictError. Without either the write is unconditional.
+ */
+export async function writeFile(
+  path: string,
+  text: string,
+  options: { ifMatch?: string | null; ifNoneMatch?: boolean } = {},
+): Promise<FileWrite> {
+  const body = new TextEncoder().encode(text);
+  const headers: Record<string, string> = {
+    "content-type": "application/octet-stream",
+  };
+  if (options.ifMatch) headers["if-match"] = `"${options.ifMatch}"`;
+  if (options.ifNoneMatch) headers["if-none-match"] = "*";
+  const response = await fetch(
+    `/api/files/content?path=${encodeURIComponent(path)}`,
+    {
+      method: "PUT",
+      headers,
+      body,
+      // A save as the page hides must outlive it; keepalive bodies are capped at 64 KiB.
+      keepalive: body.byteLength < 60_000,
+    },
+  );
+  const json = (await response.json().catch(() => null)) as Record<
+    string,
+    unknown
+  > | null;
+  if (response.status === 409 && json?.error === "conflict") {
+    throw new FileConflictError(
+      json.code as FileConflictError["code"],
+      (json.currentHash as string | null) ?? null,
+      (json.currentSize as number | null) ?? null,
+      (json.currentMtime as number | null) ?? null,
+    );
+  }
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      (json?.error as string) ?? `Pim answered ${response.status}`,
+    );
+  }
+  return {
+    path: (json?.path as string) ?? path,
+    sha256: (json?.sha256 as string | null | undefined) ?? null,
+    size: (json?.size as number) ?? body.byteLength,
+    mtime: (json?.mtime as number) ?? Date.now(),
+  };
+}
+
 /** The Access sign-in lapsed: the page must reload to sign in again. */
 export class SignInRequired extends Error {
   constructor() {

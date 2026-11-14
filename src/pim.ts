@@ -1377,11 +1377,18 @@ export class Pim extends DurableAgent<Env> {
 	 * on a task: a task or a review has no one watching it, and its requester or caller needs the failure to go on.
 	 */
 	#holdsRun(message: { errorMessage?: string; provider?: string; model?: string }, conversation: string): boolean {
-		// A reply that was never delivered is held for the person like any failure, but nothing resumes it by itself:
-		// not another model, and not a cooldown's end, since asking the same agent again would only repeat it.
+		// A reply that was never delivered is not retried by anything: not by another model, and not at a cooldown's end, since
+		// asking the same agent again would only repeat it. A room's member has no chat of its own to show the failure in, so it is
+		// held for the person to try again. Every other run ends with it: its caller or watcher takes the failure as the answer.
 		const undelivered = message.errorMessage === NOT_DELIVERED;
+		if (undelivered) {
+			const seat = this.#rooms.of(conversation);
+			const held = seat !== undefined && seat.room !== conversation && !this.#taskApart(conversation) && !this.#taskUnderway(conversation);
+			if (held) setTimeout(() => this.broadcastMessage({ type: "sessions" }), 1000);
+			return held;
+		}
 		// Held only for a moment: the agent's next model takes the run over.
-		const next = undelivered ? undefined : this.#nextModel(conversation, message);
+		const next = this.#nextModel(conversation, message);
 		if (next) {
 			void this.keepAliveWhile(() => this.#failOver(conversation, next));
 			return true;
@@ -1389,7 +1396,7 @@ export class Pim extends DurableAgent<Env> {
 		if (this.#taskApart(conversation) || this.#taskUnderway(conversation)) return false;
 		// Held on a subscription's usage limit, the chat goes on by itself: on another model once there is one, else once the limit resets.
 		const provider = message.provider;
-		if (!undelivered && provider !== undefined && this.#subscription(provider) && this.providerCooldowns.active(provider)) {
+		if (provider !== undefined && this.#subscription(provider) && this.providerCooldowns.active(provider)) {
 			void this.keepAliveWhile(() => (this.fallbackModel(provider) ? this.#resumeSoon(conversation) : this.retryAfterCooldown({ provider })));
 		}
 		// The chat list stops showing it as working once the hold is committed, just after this answers.

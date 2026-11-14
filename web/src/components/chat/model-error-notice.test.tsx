@@ -11,9 +11,11 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { ModelErrorNotice } from "~/components/chat/thread";
 import { modelError } from "~/lib/pim-view";
-import { NOT_DELIVERED } from "../../../../src/extensions/messaging";
 
 afterEach(cleanup);
+
+/** NOT_DELIVERED in src/extensions/messaging.ts, which the web app's type check can't import. */
+const NOT_DELIVERED = "The agent did not deliver its reply with send_to_user.";
 
 it("tells a room's group chat that an agent sent no reply, and lets the person try again", async () => {
   const error = modelError(NOT_DELIVERED);

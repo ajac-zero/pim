@@ -4,6 +4,14 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 /** Private harness continuation, never a message from the person. */
 export const DELIVERY_REMINDER = "[Delivery required] Use send_to_user to deliver your answer now. Your ordinary text is private and is not shown to the person. If sending failed, fix the call or explain the problem with a chat message.";
 
+/** What the harness says after an answer was cut off at the output limit, once: a different instruction, since repeating the delivery reminder cannot help a truncated answer. */
+export const LENGTH_REMINDER = "[Delivery required] Your previous output was cut off at the output limit, so nothing from it was sent or run. Deliver a much shorter message with send_to_user now, and do not think at length. Put anything long in smaller pieces, such as an app in several app_create calls.";
+
+/** Whether a user-role message is one of the harness's delivery reminders, not something the person said. */
+export function isDeliveryReminder(text: string): boolean {
+	return text === DELIVERY_REMINDER || text === LENGTH_REMINDER;
+}
+
 /** How the message starts that has the majordomo open its first chat by introducing itself (see ../majordomo.ts); apps don't show it. */
 export const INTRODUCTION = "[Introduction]";
 
@@ -25,7 +33,7 @@ export const ROOM_POST = /^\[From ([^\]\n]+)\]\n?/;
 
 /** Whether a user-role message's text is the person's own, rather than something Pim or another agent gave the agent. */
 export function fromPerson(text: string): boolean {
-	if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION) || ROOM_POST.test(text)) return false;
+	if (isDeliveryReminder(text) || text.startsWith(INTRODUCTION) || ROOM_POST.test(text)) return false;
 	return NOTICE_PREFIXES.every(([prefix]) => !prefix.test(text));
 }
 

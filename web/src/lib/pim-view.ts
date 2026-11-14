@@ -19,7 +19,7 @@ import {
 import type { AgentTask, ApprovalStatus } from "~/lib/pim-api";
 import { redactSecrets } from "../../../src/coding/tools/output";
 import {
-  DELIVERY_REMINDER,
+  isDeliveryReminder,
   fromPerson,
   INTRODUCTION,
   NOTICE_PREFIXES,
@@ -448,7 +448,7 @@ export function projectMessage(message: Message, key: string): ThreadEntry[] {
     case "user": {
       const text = textOf(message.content);
       // Pim's own prompts: the majordomo's introduction starts with its message.
-      if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION))
+      if (isDeliveryReminder(text) || text.startsWith(INTRODUCTION))
         return [];
       const notice = noticeOf(text);
       if (notice)

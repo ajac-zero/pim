@@ -4,7 +4,8 @@ import { CompactionTask } from "@earendil-works/pi-durable";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { DELIVERY_REMINDER } from "../src/transcript";
+import { OUT_OF_OUTPUT_TOKENS } from "../src/extensions/messaging";
+import { DELIVERY_REMINDER, LENGTH_REMINDER } from "../src/transcript";
 import { api, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, toolUse, triggersOn, widgetsShown } from "./helpers";
 import { faux, outbox, type Pim, triggerClock } from "./worker";
 
@@ -354,6 +355,30 @@ describe("sending to the person", () => {
 			toolUse("send_to_user", { message: "A delivered answer." }),
 		]);
 		expect((await post(`/sessions/${ROOT}/messages`, { content: "Try again.", wait: true })).body).toMatchObject({ status: "done", replies: ["A delivered answer."] });
+	});
+
+	it("answers a cut-off with one specific, shorter try, then fails with its own error", async () => {
+		const cutOff = () => fauxAssistantMessage([{ type: "text", text: "Thinking at length..." }, fauxToolCall("app_create", { name: "Half" })], { stopReason: "length" });
+		faux.setResponses([
+			cutOff(),
+			(context) => {
+				expect(lastUserText(context.messages)).toBe(LENGTH_REMINDER);
+				return cutOff();
+			},
+		]);
+		const failed = await post(`/sessions/${ROOT}/messages`, { content: "Build me an app.", wait: true });
+		// Two requests only, no tool of a cut-off call ran, and the error is not the delivery one.
+		expect(failed.body).toMatchObject({ status: "unanswered", replies: [] });
+		const { messages } = (await api<{ messages: { role: string; error?: string }[] }>(`/sessions/${ROOT}/messages`)).body;
+		const errors = messages.flatMap((message) => (message.error ? [message.error] : []));
+		expect(errors.at(-1)).toContain(OUT_OF_OUTPUT_TOKENS);
+		expect(errors.at(-1)).not.toContain("send_to_user");
+
+		// A cut-off that the shorter try answers goes on as usual; the next turn has a fresh budget.
+		faux.setResponses([cutOff(), toolUse("send_to_user", { message: "Short version." })]);
+		expect((await post(`/sessions/${ROOT}/messages`, { content: "Again.", wait: true })).body).toMatchObject({ status: "done", replies: ["Short version."] });
+		faux.setResponses([cutOff(), toolUse("send_to_user", { message: "Short again." })]);
+		expect((await post(`/sessions/${ROOT}/messages`, { content: "Once more.", wait: true })).body).toMatchObject({ status: "done", replies: ["Short again."] });
 	});
 
 	it("emails the person at the address they confirmed, and only there", async () => {

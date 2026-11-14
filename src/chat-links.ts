@@ -1,7 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { type ShownWidget, shownWidgets } from "./extensions/define";
 import { plainReply, SEND_TO_USER } from "./extensions/messaging";
-import { DELIVERY_REMINDER, INTRODUCTION, NOTICE_PREFIXES, ROOM_POST } from "./transcript";
+import { INTRODUCTION, NOTICE_PREFIXES, ROOM_POST, isDeliveryReminder } from "./transcript";
 
 /**
  * Public links to chats. A link shows a copy of the conversation made when
@@ -80,7 +80,7 @@ export function sharedMessages(entries: readonly EntryRecord[]): SharedMessage[]
 		if (entry.kind === "pi.system" || message === undefined) continue;
 		if (message.role === "user") {
 			const text = textOf(message.content);
-			if (text === DELIVERY_REMINDER || text.startsWith(INTRODUCTION) || NOTICE_PREFIXES.some(([prefix]) => prefix.test(text))) continue;
+			if (isDeliveryReminder(text) || text.startsWith(INTRODUCTION) || NOTICE_PREFIXES.some(([prefix]) => prefix.test(text))) continue;
 			// What another agent in a group chat said there; its images' copies are the owner's too.
 			const post = ROOM_POST.exec(text);
 			if (post) {

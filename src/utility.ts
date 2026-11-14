@@ -1,5 +1,5 @@
 import { Type, type TSchema } from "@earendil-works/pi-ai";
-import { DELIVERY_REMINDER, ROOM_POST, type TranscriptMessage } from "./transcript";
+import { isDeliveryReminder, ROOM_POST, type TranscriptMessage } from "./transcript";
 
 /**
  * Side jobs for the utility model: one small, fast model, chosen once per
@@ -97,7 +97,7 @@ export function conversationText(messages: readonly TranscriptMessage[], limit: 
 				.flatMap((part) => (part.type === "text" ? [part.text] : []))
 				.join("\n")
 				.trim();
-			if (text === "" || text === DELIVERY_REMINDER) continue;
+			if (text === "" || isDeliveryReminder(text)) continue;
 			// In a group chat, what another agent said there.
 			const post = ROOM_POST.exec(text);
 			if (post) turns.push(`${post[1]}: ${text.slice(post[0].length).trim()}`);

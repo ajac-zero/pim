@@ -1,7 +1,7 @@
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook } from "@earendil-works/pi-durable";
 import { SEND_TO_USER } from "./extensions/messaging";
-import { DELIVERY_REMINDER, reasoningHeadings } from "./transcript";
+import { isDeliveryReminder, reasoningHeadings } from "./transcript";
 
 /**
  * Progress lines: while an agent works, the person watching its chat reads
@@ -118,7 +118,7 @@ function requestContext(messages: readonly Message[]): string {
 		}
 		if (message.role === "user") {
 			const text = typeof message.content === "string" ? message.content : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-			if (text.trim() === "" || text === DELIVERY_REMINDER) continue;
+			if (text.trim() === "" || isDeliveryReminder(text)) continue;
 			request = clip(text.trim(), 1_000);
 			break;
 		}

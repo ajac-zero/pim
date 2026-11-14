@@ -162,7 +162,7 @@ import {
 	toolName,
 	toText,
 } from "./extensions/mcp";
-import { MESSAGING_EXTENSION, messagingExtension, NOT_DELIVERED, plainReply, SEND_TO_USER, uiSourcesOf } from "./extensions/messaging";
+import { MESSAGING_EXTENSION, messagingExtension, NOT_DELIVERED, OUT_OF_OUTPUT_TOKENS, plainReply, SEND_TO_USER, uiSourcesOf } from "./extensions/messaging";
 import { CREATE_MEMORY_SCOPE, createOptMem, type MemoryAccess, type MemoryScope, memoryWidgets } from "./extensions/optmem";
 import { blockName, halves, parseBlock } from "./extensions/optmem/cover";
 import { byteLength, ENTRY_BYTES, EVERYONE_SCOPE, entryLine, MAX_NAMED_SCOPES, MAX_SCOPE_NAME, PRIVATE_SCOPE } from "./extensions/optmem/store";
@@ -1377,10 +1377,10 @@ export class Pim extends DurableAgent<Env> {
 	 * on a task: a task or a review has no one watching it, and its requester or caller needs the failure to go on.
 	 */
 	#holdsRun(message: { errorMessage?: string; provider?: string; model?: string }, conversation: string): boolean {
-		// A reply that was never delivered is not retried by anything: not by another model, and not at a cooldown's end, since
+		// A reply that was never delivered, or an answer cut off at the output limit twice, is not retried by anything: not by another model, and not at a cooldown's end, since
 		// asking the same agent again would only repeat it. A room's member has no chat of its own to show the failure in, so it is
 		// held for the person to try again. Every other run ends with it: its caller or watcher takes the failure as the answer.
-		const undelivered = message.errorMessage === NOT_DELIVERED;
+		const undelivered = message.errorMessage === NOT_DELIVERED || message.errorMessage?.startsWith(OUT_OF_OUTPUT_TOKENS) === true;
 		if (undelivered) {
 			const seat = this.#rooms.of(conversation);
 			const held = seat !== undefined && seat.room !== conversation && !this.#taskApart(conversation) && !this.#taskUnderway(conversation);

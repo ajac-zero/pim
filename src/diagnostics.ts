@@ -4,7 +4,7 @@ import { activityOf, type Activity } from "./activity";
 import type { Message } from "@earendil-works/pi-ai";
 import { redactSecrets } from "./hostops";
 import { redact } from "./coding/tools/output";
-import { DELIVERY_REMINDER } from "./transcript";
+import { isDeliveryReminder } from "./transcript";
 
 /**
  * What the admin's majordomo reads to debug this Pim without the web app
@@ -149,7 +149,7 @@ export function turnsOf(messages: readonly Message[], approvals: ReadonlyMap<str
 	for (const message of messages) {
 		if (message.role === "user") {
 			const text = typeof message.content === "string" ? message.content : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-			if (text !== DELIVERY_REMINDER) turns.push({ startedAt: message.timestamp, endedAt: message.timestamp, modelMs: 0, toolsMs: 0, approvalsMs: 0, steps: [] });
+			if (!isDeliveryReminder(text)) turns.push({ startedAt: message.timestamp, endedAt: message.timestamp, modelMs: 0, toolsMs: 0, approvalsMs: 0, steps: [] });
 			continue;
 		}
 		const turn = turns.at(-1);

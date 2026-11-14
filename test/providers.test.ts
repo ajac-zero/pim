@@ -638,6 +638,54 @@ describe("A person's own model providers", () => {
 		expect((await say("Still there?", writerChat)).text).toBe("Back on the default.");
 	});
 
+	it("keeps a chat's own model over its agent's, apart from the agent's other chats, until it is cleared", async () => {
+		const home = (await post("/providers", { name: "Home server", url: "http://localhost:1234/v1/" })).body.provider.id;
+		const coach = (await post("/agents", { name: "Trainer", instructions: "x" })).body;
+		const agentPut = (body: unknown) => put(`/agents/${coach.id}/model`, body);
+		const sessionPut = (chat: string, body: unknown) => put(`/sessions/${chat}/model`, body);
+		const shown = async (chat: string) => (await api("/sessions")).body.sessions.find((session: { id: string }) => session.id === chat).model;
+		await agentPut({ provider: `own:${home}`, id: "local-model" });
+		const mine = (await post("/sessions", { agent: coach.id })).body.id;
+		const sibling = (await post("/sessions", { agent: coach.id })).body.id;
+
+		// Only this chat moves; it shows the model as its own, and the sibling shows its agent's.
+		expect((await sessionPut(mine, { provider: `own:${home}`, id: "vision-model" })).body.override).toMatchObject({ id: "vision-model" });
+		expect(await shown(mine)).toMatchObject({ model: { id: "vision-model" }, override: true });
+		expect(await shown(sibling)).toMatchObject({ model: { id: "local-model" }, override: false });
+		expect((await say("Hello?", mine)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "vision-model" });
+		expect((await say("Hello?", sibling)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "local-model" });
+
+		// Changing the agent's model, and the space's, leaves the chat's own choice alone.
+		await agentPut({ provider: `own:${home}`, id: "served-model" });
+		await put("/model", { provider: `own:${home}`, id: "local-model" });
+		expect((await say("Again?", mine)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "vision-model" });
+		expect((await say("Again?", sibling)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "served-model" });
+
+		// A new chat of the agent starts on the agent's model, not on another chat's.
+		const fresh = (await post("/sessions", { agent: coach.id })).body.id;
+		expect(await shown(fresh)).toMatchObject({ model: { id: "served-model" }, override: false });
+
+		// Only a model Pim offers is taken, and a refused one leaves the choice as it was.
+		expect((await sessionPut(mine, { provider: `own:${home}`, id: "nope" })).status).toBe(400);
+		expect((await sessionPut(mine, { provider: `own:${home}` })).status).toBe(400);
+		expect(await shown(mine)).toMatchObject({ model: { id: "vision-model" }, override: true });
+
+		// Null, or an empty model, follows the agent's again.
+		expect((await sessionPut(mine, { provider: null, id: null })).body.override).toBeNull();
+		expect(await shown(mine)).toMatchObject({ model: { id: "served-model" }, override: false });
+		expect((await say("Cleared?", mine)).text).toBe("Hello from home");
+		expect(calls.at(-1)!.body).toMatchObject({ model: "served-model" });
+		await sessionPut(mine, { provider: `own:${home}`, id: "vision-model" });
+		expect((await sessionPut(mine, { model: "" })).body.override).toBeNull();
+		expect((await sessionPut(mine, { model: null })).status).toBe(200);
+		expect((await sessionPut("nonexistent", { model: null })).status).toBe(404);
+		expect((await api(`/providers/${home}`, { method: "DELETE" })).status).toBe(200);
+	});
+
 	it("changes one session's model by {provider, id}, by {model: \"<provider>/<id>\"} with the longest provider prefix, or by a bare default id", async () => {
 		expect((await post("/providers", { builtin: "openrouter", key: "k", models: ["anthropic/claude-sonnet-4.6"] })).status).toBe(200);
 		expect((await post("/providers", { name: "Proxy", url: "https://claude.test", key: "proxy-key", api: "anthropic-messages" })).status).toBe(200);

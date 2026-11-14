@@ -1039,7 +1039,7 @@ describe("a group chat", () => {
 			"@coach plan my first week",
 			"[From Coach]\nStart with 5 km on Monday.",
 		]);
-		expect(await roomOf(session)).toEqual({ mode: "mentions", members: [{ id: coach.id, name: "Coach", busy: false, held: false, error: null }] });
+		expect(await roomOf(session)).toEqual({ mode: "mentions", members: [{ id: coach.id, name: "Coach", busy: false, held: false, error: null, model: expect.any(Object) }] });
 		// What Coach's requests cost is on the chat's bill.
 		expect(await output()).toBeGreaterThan(hostOnly);
 		// Coach's own conversation isn't one of the person's chats.
@@ -1099,20 +1099,20 @@ describe("a group chat", () => {
 		await say("@Coach and Thursday?", session);
 		await quiet(session);
 		// The chat shows it as held, with its error,, and asks it again as the host's Try again does.
-		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: true, error: expect.stringContaining("subscription_sharing") }]);
+		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: true, error: expect.stringContaining("subscription_sharing"), model: expect.any(Object) }]);
 		expect((await api(`/sessions/${session}/room/members/${host.id}/retry`, { method: "POST" })).status).toBe(404);
 		scripts({ Coach: [as("Coach", "Thursday is easy.")] });
 		expect((await api(`/sessions/${session}/room/members/${coach.id}/retry`, { method: "POST" })).status).toBe(200);
 		await quiet(session);
 		expect(await messagesOf(session, "user")).toContain("[From Coach]\nThursday is easy.");
 		expect((await api(`/sessions/${session}/room/members/${coach.id}/retry`, { method: "POST" })).status).toBe(409);
-		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: false, error: null }]);
+		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: false, error: null, model: expect.any(Object) }]);
 
 		// An agent that ended its turn without sending a reply is held too, with its error, and nothing asks it again by itself.
 		scripts({ Coach: [() => fauxAssistantMessage("", { stopReason: "error", errorMessage: NOT_DELIVERED })] });
 		await say("@Coach and Saturday?", session);
 		await quiet(session);
-		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: true, error: NOT_DELIVERED }]);
+		expect((await roomOf(session))?.members).toEqual([{ id: coach.id, name: "Coach", busy: false, held: true, error: NOT_DELIVERED, model: expect.any(Object) }]);
 		scripts({ Coach: [as("Coach", "Saturday is long.")] });
 		expect((await api(`/sessions/${session}/room/members/${coach.id}/retry`, { method: "POST" })).status).toBe(200);
 		await quiet(session);

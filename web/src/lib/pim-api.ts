@@ -1490,7 +1490,11 @@ export type ModelCost = {
 };
 
 /** What the person set for a custom endpoint's model: its real context window, its longest answer and its price. */
-export type ModelOverride = { contextWindow?: number; maxTokens?: number; cost?: ModelCost };
+export type ModelOverride = {
+  contextWindow?: number;
+  maxTokens?: number;
+  cost?: ModelCost;
+};
 
 /** A model on a provider someone added, with what Pim knows about it. */
 export type ProviderModelInfo = {

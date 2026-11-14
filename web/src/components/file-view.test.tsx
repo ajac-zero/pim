@@ -40,6 +40,7 @@ afterEach(() => {
   vi.useRealTimers();
   cleanup();
   read.mockReset();
+  vi.unstubAllGlobals();
 });
 
 const bytes = (size: number, fill = 65) => new Uint8Array(size).fill(fill);
@@ -138,6 +139,18 @@ it("resolves a conflict through its two buttons with the right requests", async 
 });
 
 it("opens markdown rendered, and keeps the unsaved buffer when toggling to the editor and back", async () => {
+  // The edit autosaves; answer the PUT instead of reaching for a real server.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      Response.json({
+        path: "/workspace/n.md",
+        sha256: "n",
+        size: 10,
+        mtime: 1,
+      }),
+    ),
+  );
   read.mockResolvedValue({
     bytes: new TextEncoder().encode("# Title\n"),
     sha256: "h",

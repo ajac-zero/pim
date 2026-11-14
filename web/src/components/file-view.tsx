@@ -72,7 +72,7 @@ function SaveStatus({ status }: { status: SessionStatus }) {
 }
 
 /** The file changed on disk while it was being edited: keep the buffer, and let the person pick a side. */
-function ConflictBanner({ session }: { session: FileSession }) {
+export function ConflictBanner({ session }: { session: FileSession }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const run = (action: () => Promise<void>) => {

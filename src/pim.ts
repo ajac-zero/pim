@@ -1446,7 +1446,7 @@ export class Pim extends DurableAgent<Env> {
 
 	/** The model after the one that failed in the agent's own and fallback models; none when it was the last, or isn't one of them. */
 	#nextModel(conversation: string, failed: { provider?: string; model?: string }): PiModel | undefined {
-		const chain = this.#chain(this.agents.ofSession(conversation));
+		const chain = this.#chain(this.agents.ofSession(conversation), conversation);
 		const at = chain.findIndex((model) => model.provider === failed.provider && model.id === failed.model);
 		if (at < 0) return undefined;
 		// Models of the provider that failed, or is cooling down, are skipped.
@@ -1454,9 +1454,9 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/** The models a run of an agent tries, in order: its own, its fallbacks, then the space's, each once. */
-	#chain(agent: Agent): PiModel[] {
+	#chain(agent: Agent, session?: string): PiModel[] {
 		const chain: PiModel[] = [];
-		for (const model of [this.agentModel(agent), ...this.#fallbackModels(agent), ...this.#workspaceFallbacks()]) {
+		for (const model of [session === undefined ? this.agentModel(agent) : this.sessionModel(session), ...this.#fallbackModels(agent), ...this.#workspaceFallbacks()]) {
 			if (!chain.some((known) => sameModel(known, model))) chain.push(model);
 		}
 		return chain;
@@ -1841,11 +1841,18 @@ export class Pim extends DurableAgent<Env> {
 		return this.chosenModel();
 	}
 
-	/** The model a new run starts on: the agent's own, or while its subscription cools down, the first model of its chain on another provider. */
-	#runModel(agent: Agent): PiModel {
-		const own = this.agentModel(agent);
+	/** The model a chat runs on: the one chosen for it alone, else its agent's, else the space's. One that's gone is not read. */
+	sessionModel(session: string, agent: Agent = this.agents.ofSession(session)): PiModel {
+		const chosen = this.store.sessionInfo(session)?.model;
+		const model = chosen && this.modelCatalog().getModel(chosen.provider, chosen.id);
+		return model || this.agentModel(agent);
+	}
+
+	/** The model a new run starts on: the chat's own, or while its subscription cools down, the first model of its chain on another provider. */
+	#runModel(session: string): PiModel {
+		const own = this.sessionModel(session);
 		if (!this.#subscription(own.provider) || !this.providerCooldowns.active(own.provider)) return own;
-		return this.#chain(agent).find((model) => model.provider !== own.provider && !this.providerCooldowns.active(model.provider)) ?? own;
+		return this.#chain(this.agents.ofSession(session), session).find((model) => model.provider !== own.provider && !this.providerCooldowns.active(model.provider)) ?? own;
 	}
 
 	/** The models the space moves on to, in order, after an agent's own fallbacks; ones that are gone are not read: see `#dropModels`. */
@@ -1902,10 +1909,19 @@ export class Pim extends DurableAgent<Env> {
 		return this.agents.setFallbacks(agent.id, models);
 	}
 
-	/** Puts every session on its agent's model. */
+	/** Makes `model` the model of one chat alone, over its agent's; null follows the agent's again. */
+	async chooseSessionModel(session: string, model: PiModel | null): Promise<PiModel> {
+		this.store.setSessionModel(session, model);
+		const resolved = this.sessionModel(session);
+		await this.harness.session(session).setModel(resolved);
+		this.broadcastMessage({ type: "sessions" });
+		return resolved;
+	}
+
+	/** Puts every session on its own model, else its agent's. */
 	async #syncModels(): Promise<void> {
 		for (const session of await this.harness.sessions.list()) {
-			await this.harness.session(session.id).setModel(this.agentModel(this.agents.ofSession(session.id)));
+			await this.harness.session(session.id).setModel(this.sessionModel(session.id));
 		}
 	}
 
@@ -2428,7 +2444,7 @@ export class Pim extends DurableAgent<Env> {
 		const withdraw = this.telemetry.submitting(session, content, from);
 		// A conversation that moved on to a fallback model tries the agent's own again.
 		const agent = this.agents.ofSession(session);
-		if (agent.fallbacks.length > 0 || this.#workspaceFallbacks().length > 0) await this.harness.session(session).setModel(this.#runModel(agent));
+		if (agent.fallbacks.length > 0 || this.#workspaceFallbacks().length > 0) await this.harness.session(session).setModel(this.#runModel(session));
 		let receipt: PiReceipt;
 		try {
 			// Files the agent saw that changed since go before what the person said, as a part of their own: no prompt section, so the prompt cache holds.
@@ -3127,7 +3143,7 @@ export class Pim extends DurableAgent<Env> {
 			adoptChat: async (chatId, agentId, title) => {
 				const agent = this.agents.get(agentId);
 				if (!agent) throw new Error("The agent was deleted");
-				await this.harness.session(chatId).setModel(this.agentModel(agent));
+				await this.harness.session(chatId).setModel(this.sessionModel(chatId, agent));
 				this.agents.setSession(chatId, agent.id);
 				// A chat deleted since stays deleted.
 				if (!this.store.deletedSessions().has(chatId)) this.store.touchSession(chatId, clipTitle(title));
@@ -3166,7 +3182,7 @@ export class Pim extends DurableAgent<Env> {
 			: init
 				? String((await (await this.harness.pi()).createConversation({ ownership: { kind: "ownerless" }, agent: this.harness.agentDefaults(), init }, BACKGROUND_CONTEXT)).id)
 				: (await this.harness.sessions.create()).id;
-		await this.harness.session(id).setModel(this.agentModel(agent));
+		await this.harness.session(id).setModel(this.sessionModel(id, agent));
 		this.agents.setSession(id, agent.id);
 		this.store.touchSession(id, title);
 		return id;
@@ -4255,7 +4271,7 @@ export class Pim extends DurableAgent<Env> {
 	/** A new chat for a task, with the agent it is for. It is listed once the task is recorded, so a replay leaves no empty chat behind. */
 	async #taskConversation(agent: Agent): Promise<string> {
 		const { id } = await this.harness.sessions.create();
-		await this.harness.session(id).setModel(this.agentModel(agent));
+		await this.harness.session(id).setModel(this.sessionModel(id, agent));
 		this.agents.setSession(id, agent.id);
 		await this.#selectAbilities(id);
 		return id;
@@ -4630,7 +4646,7 @@ export class Pim extends DurableAgent<Env> {
 	async #seat(room: string, agent: Agent): Promise<Seat> {
 		const host = this.agents.ofSession(room);
 		const { id } = await this.harness.sessions.create();
-		await this.harness.session(id).setModel(this.agentModel(agent));
+		await this.harness.session(id).setModel(this.sessionModel(id, agent));
 		this.agents.setSession(id, agent.id);
 		this.#rooms.open(room, host.id);
 		const others = this.#rooms.seats(room);
@@ -6301,6 +6317,13 @@ export class Pim extends DurableAgent<Env> {
 		return blocks;
 	}
 
+	/** What model a chat runs on, and whether it was chosen for the chat alone. */
+	#sessionModelInfo(session: string): { model: ReturnType<typeof describeModel>; override: boolean } {
+		const chosen = this.store.sessionInfo(session)?.model;
+		const model = this.sessionModel(session);
+		return { model: describeModel(model), override: Boolean(chosen && chosen.provider === model.provider && chosen.id === model.id) };
+	}
+
 	/** A session's name and activity, under its public id. */
 	#sessionInfo(session: string) {
 		const info = this.store.sessionInfo(session);
@@ -6517,6 +6540,7 @@ export class Pim extends DurableAgent<Env> {
 						held: held.has(session.id),
 						error: heldErrors.get(session.id) ?? null,
 						title: info?.title ?? null,
+						model: this.#sessionModelInfo(session.id),
 						createdAt: info?.createdAt ?? null,
 						updatedAt: info?.updatedAt ?? null,
 						responseAt: info?.responseAt ?? null,
@@ -6987,7 +7011,11 @@ export class Pim extends DurableAgent<Env> {
 			"/sessions/:session/model",
 			async ({ session }, request) => {
 				const id = await this.#session(session!);
-				const body = await readJson<{ provider?: unknown; id?: unknown; model?: unknown }>(request);
+				const body = (await readJson<{ provider?: unknown; id?: unknown; model?: unknown }>(request)) ?? {};
+				// Null, or an empty model, clears the chat's own choice: it follows its agent's again.
+				if (body.model === null || body.model === "" || (body.provider === null && body.id === null)) {
+					return { model: describeModel(await this.chooseSessionModel(id, null)), override: null };
+				}
 				const hint = `Send {provider, id} of one of GET /model's choices (for example {"provider":"own:ai-gateway","id":"claude-sonnet-5-5"}), or {model:"<provider>/<id>"}.`;
 				let provider: string | undefined;
 				let modelId: string | undefined;
@@ -7025,8 +7053,8 @@ export class Pim extends DurableAgent<Env> {
 						throw new HttpError(400, `${errorMessage(error)}. ${hint}`);
 					}
 				}
-				await this.harness.session(id).setModel(resolved);
-				return { model: describeModel(resolved) };
+				await this.chooseSessionModel(id, resolved);
+				return { model: describeModel(resolved), override: describeModel(resolved) };
 			},
 		],
 

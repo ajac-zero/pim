@@ -24,6 +24,7 @@ import { useEffect, useRef } from "react";
 import { takeReveal } from "~/lib/canvas-live";
 import { loadLanguage } from "~/lib/editor-language";
 import type { EditorHandle, FileSession } from "~/lib/file-session";
+import { EDITOR_FONT_STEP } from "~/lib/file-text";
 
 /*
  * The CodeMirror view of a file's session. It is its own chunk, loaded when a
@@ -78,8 +79,7 @@ const theme = EditorView.theme({
   "&": {
     height: "100%",
     minWidth: "0",
-    // 16px keeps iOS from zooming the page when the editor is focused.
-    fontSize: "16px",
+    fontSize: "var(--editor-font-size, 13px)",
     color: "var(--foreground)",
     backgroundColor: "transparent",
   },
@@ -154,11 +154,18 @@ export default function FileEditor({
   session,
   name,
   readOnly,
+  fontSize,
+  onFontSizeChange,
 }: {
   session: FileSession;
   name: string;
   readOnly: boolean;
+  fontSize: number;
+  /** Called with the next size in px, or null to go back to the default. */
+  onFontSizeChange: (next: number | null) => void;
 }) {
+  const zoom = useRef({ fontSize, onFontSizeChange });
+  zoom.current = { fontSize, onFontSizeChange };
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const language = useRef(new Compartment());
@@ -183,6 +190,31 @@ export default function FileEditor({
           EditorView.lineWrapping,
           theme,
           keymap.of([
+            ...["Mod-=", "Mod-+"].map((key) => ({
+              key,
+              run: () => {
+                zoom.current.onFontSizeChange(
+                  zoom.current.fontSize + EDITOR_FONT_STEP,
+                );
+                return true;
+              },
+            })),
+            {
+              key: "Mod--",
+              run: () => {
+                zoom.current.onFontSizeChange(
+                  zoom.current.fontSize - EDITOR_FONT_STEP,
+                );
+                return true;
+              },
+            },
+            {
+              key: "Mod-0",
+              run: () => {
+                zoom.current.onFontSizeChange(null);
+                return true;
+              },
+            },
             ...searchKeymap,
             ...historyKeymap,
             indentWithTab,
@@ -198,7 +230,20 @@ export default function FileEditor({
               session.edit(update.state.doc.toString());
             }
           }),
-          EditorView.domEventHandlers({ blur: () => void session.flush() }),
+          EditorView.domEventHandlers({
+            blur: () => void session.flush(),
+            wheel: (event) => {
+              if ((!event.ctrlKey && !event.metaKey) || event.deltaY === 0) {
+                return false;
+              }
+              event.preventDefault();
+              zoom.current.onFontSizeChange(
+                zoom.current.fontSize +
+                  (event.deltaY < 0 ? EDITOR_FONT_STEP : -EDITOR_FONT_STEP),
+              );
+              return true;
+            },
+          }),
         ],
       }),
     });
@@ -251,5 +296,16 @@ export default function FileEditor({
     });
   }, [readOnly]);
 
-  return <div ref={host} className="min-h-0 min-w-0 flex-1 overflow-hidden" />;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the size reaches the editor through a CSS variable, so it has to be measured again when it changes.
+  useEffect(() => {
+    view.current?.requestMeasure();
+  }, [fontSize]);
+
+  return (
+    <div
+      ref={host}
+      className="min-h-0 min-w-0 flex-1 overflow-hidden"
+      style={{ "--editor-font-size": `${fontSize}px` } as React.CSSProperties}
+    />
+  );
 }

@@ -19,9 +19,11 @@ const daemon = (file) => file.startsWith("sandbox-manager/") || file.startsWith(
 /** What can change every job's result: the dependencies, the build, the test setup and CI itself. */
 const configuring = (file) => /(^|\/)(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*|wrangler[^/]*\.jsonc|vitest[^/]*\.config\.[^/]*|biome\.json[c]?)$/.test(file) || file.startsWith(".github/");
 
-/** What the web app imports from outside web/ (src/'s shared modules, and the bundle web/ serves from displayd). */
-const sharedWithWeb = (file) =>
-	["src/ui-lang/", "src/transcript.ts", "src/themes.ts", "src/locales.ts", "src/activity-types.ts", "src/coding/vault/harnesses.ts", "src/coding/tools/output.ts", "displayd/bundle."].some((shared) => file.startsWith(shared));
+/** What the web app imports from outside web/: the packages it depends on (@pim/shared and @pim/ui-lang), and the bundle web/ serves from displayd. */
+const sharedWithWeb = (file) => ["packages/shared/", "packages/ui-lang/", "displayd/bundle."].some((shared) => file.startsWith(shared));
+
+/** A package's own tests: no Worker test or type outside the package reads them, unlike its source and its `test/support/` modules, which Worker tests import. */
+const packageTest = (file) => /^packages\/[^/]+\/test\//.test(file) && !file.includes("/test/support/");
 
 /** What the tests that browse with a Chrome (test/browser.test.ts) can reach. */
 const browsing = (file) =>
@@ -37,6 +39,9 @@ export function selectJobs(changed, { main = false } = {}) {
 			for (const job of JOBS) jobs[job] = true;
 		} else if (file.startsWith("web/")) {
 			Object.assign(jobs, { typecheck: true, lint: true, web: true });
+		} else if (packageTest(file)) {
+			// Only the package's own tests read these: its types and its tests, which the unit job runs. Its source also runs under the Worker's tests (below), so the Worker's shards are skipped only for a change that is all tests.
+			Object.assign(jobs, { typecheck: true, unit: true });
 		} else if (daemon(file)) {
 			jobs.daemons = true;
 			// What the Worker's tests and the web app's types read of displayd is its bundle.

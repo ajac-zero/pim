@@ -3,11 +3,11 @@
 // suite every time: `pnpm test:changed`. It diffs against origin/main (HEAD~1 when there is no
 // origin/main, or the ref given as an argument) and picks what to run: the whole suite when
 // configuration changed or nothing maps to a test, otherwise vitest's own --changed over the
-// root project for the Worker's tests, plus the web app's tests when web/ or a file of src/ the web
-// app imports changed, and the daemons' tests when one of them changed. The whole
+// root project for the Worker's tests, plus the web app's tests when web/ or a package it imports changed, the
+// tests of each package under packages/ a change is in, and the daemons' tests when one of them changed. The whole
 // suite itself runs in GitHub CI on the pushed branch, never locally (AGENTS.md).
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readdirSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 /** A file's own name, whatever directory it is in, so web/package.json counts as package.json. */
@@ -29,17 +29,14 @@ function prose(file) {
 	return file.endsWith(".md") || file === "LICENSE" || file.startsWith("docs/") || file.startsWith(".github/");
 }
 
-/** The files and directories of src/ (and displayd's bundle) that web/ imports, so a change to one reaches the web app's tests and types. */
-const SHARED_WITH_WEB = [
-	"src/ui-lang/",
-	"src/transcript.ts",
-	"src/themes.ts",
-	"src/locales.ts",
-	"src/activity-types.ts",
-	"src/coding/vault/harnesses.ts",
-	"src/coding/tools/output.ts",
-	"displayd/bundle.",
-];
+/** The files and directories outside web/ that it imports, so a change to one reaches the web app's tests and types. */
+const SHARED_WITH_WEB = ["packages/shared/", "packages/ui-lang/", "displayd/bundle."];
+
+/** The name of the package a file is in (`@pim/shared` for packages/shared/...), or null. */
+const packageOf = (file) => /^packages\/([^/]+)\//.exec(file)?.[1] ?? null;
+
+/** A package's own tests: only that package's `pnpm --filter @pim/<name> test` reads them, not the root project's, unless they are `test/support/` modules the Worker's tests import. */
+const packageTest = (file) => /^packages\/[^/]+\/test\//.test(file) && !file.includes("/test/support/");
 
 /** The standalone daemons, each with its own `node --test` tests (`pnpm test:daemons`). */
 const DAEMONS = ["displayd/", "sandbox-manager/", "workspace-agentd/"];
@@ -53,11 +50,14 @@ export function selectRuns(changed) {
 	if (!files.length) return { full: true, reason: "nothing changed to diff" };
 	const configuring = files.find((file) => reconfigured(file));
 	if (configuring) return { full: true, reason: `${configuring} changed` };
-	const web = files.some((file) => file.startsWith("web/") || SHARED_WITH_WEB.some((shared) => file.startsWith(shared)));
+	const web = files.some((file) => file.startsWith("web/") || (!packageTest(file) && SHARED_WITH_WEB.some((shared) => file.startsWith(shared))));
 	const daemons = files.some((file) => DAEMONS.some((daemon) => file.startsWith(daemon)));
-	const root = files.some((file) => !file.startsWith("web/") && !prose(file) && (!DAEMONS.some((daemon) => file.startsWith(daemon)) || readByWorkerTests(file)));
-	if (!root && !web && !daemons) return { full: true, reason: "no tests map to what changed" };
-	return { full: false, root, web, daemons };
+	const root = files.some((file) => !file.startsWith("web/") && !prose(file) && !packageTest(file) && (!DAEMONS.some((daemon) => file.startsWith(daemon)) || readByWorkerTests(file)));
+	// Each package a change is in runs its own tests, in seconds; @pim/shared is every other package's dependency, so a change to it runs them all.
+	const changedPackages = [...new Set(files.map(packageOf).filter((name) => name !== null))].sort();
+	const packages = changedPackages.includes("shared") ? readdirSync("packages").sort() : changedPackages;
+	if (!root && !web && !daemons && !packages.length) return { full: true, reason: "no tests map to what changed" };
+	return { full: false, root, web, daemons, packages };
 }
 
 /** Runs one command in the foreground, one at a time as AGENTS.md asks, and returns whether it passed. */
@@ -91,6 +91,10 @@ function main() {
 	if (plan.root) {
 		console.log(`Running the root project's tests changed since ${base}.`);
 		if (!run("pnpm", ["exec", "vitest", "run", "--changed", base])) process.exit(1);
+	}
+	for (const name of plan.packages) {
+		console.log(`Running @pim/${name}'s tests.`);
+		if (!run("pnpm", ["--filter", `@pim/${name}`, "test"])) process.exit(1);
 	}
 	if (plan.web) {
 		console.log("Running the web app's tests.");

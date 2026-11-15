@@ -34,7 +34,16 @@ describe("choosing CI's jobs for a change", () => {
 
 	it("runs the backend's jobs without the browser for the Worker's code, and the web app too for what it imports", () => {
 		expect(running(["src/pim.ts", "test/agents.test.ts"])).toEqual(["lint", "typecheck", "unit", "worker"]);
-		expect(running(["src/ui-lang/parse.ts"])).toEqual(["lint", "typecheck", "unit", "web", "worker"]);
+		expect(running(["packages/ui-lang/src/parse.ts"])).toEqual(["lint", "typecheck", "unit", "web", "worker"]);
+		expect(running(["packages/shared/src/transcript.ts"])).toEqual(["lint", "typecheck", "unit", "web", "worker"]);
+	});
+
+	it("runs a package's source in the Worker's tests too, as the Worker runs it, and only its types and unit tests for a change that is all its own tests", () => {
+		expect(running(["packages/coding/src/pools.ts"])).toEqual(["lint", "typecheck", "unit", "worker"]);
+		expect(running(["packages/triggers/src/store.ts"])).toEqual(["lint", "typecheck", "unit", "worker"]);
+		expect(running(["packages/ui-lang/test/ui-lang.test.ts", "packages/coding/test/pools.test.ts"])).toEqual(["typecheck", "unit"]);
+		// The support modules the Worker's tests import are not the package's alone.
+		expect(running(["packages/coding/test/support/fake-manager.ts"])).toEqual(["lint", "typecheck", "unit", "worker"]);
 	});
 
 	it("runs the browser job only for what browsing reaches", () => {

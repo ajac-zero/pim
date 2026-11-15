@@ -88,9 +88,9 @@ export default defineConfig({
 				test: { name: "browser", ...workerTest, include: live ? [] : ["test/browser.test.ts"] },
 			},
 			{
-				// What needs no workerd: the computer's supervisor of apps, which starts real processes, and the pure
-				// units (the coding workspaces' providers, the harness, the transcript, the triggers' clock) that only
-				// ran in workerd because the Worker project's pattern took them.
+				// What needs no workerd: the computer's supervisor of apps and the triggers' runtime on it, which start
+				// real processes. The pure units of the packages (the coding workspaces' providers, the harness, the
+				// triggers' clock) are in packages/*/test (`pnpm test:packages`).
 				// Their waits poll for the real condition with a 30 s deadline, so a starved 2-vCPU CI runner
 				// (next to the Worker project) can be slow without failing; the test timeout is above it.
 				test: { name: "node", testTimeout: 60_000, include: live ? [] : ["test/*.node.test.ts"] },

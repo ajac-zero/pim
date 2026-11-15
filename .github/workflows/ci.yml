@@ -101,7 +101,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:daemons
 
-  # What runs in Node, with no workerd: the units of the coding workspaces, the harness and the triggers, and what starts real processes.
+  # What runs in Node, with no workerd: the packages' own tests (packages/*, in seconds), and
+  # the root's Node project, which starts real processes (computer/, the supervisor of apps).
   unit:
     needs: scope
     if: needs.scope.outputs.unit == 'true'
@@ -114,6 +115,7 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm test:packages
       - run: pnpm exec vitest run --project node
 
   # The Worker's tests in workerd, a quarter of the files each, so one job's files don't wait for the

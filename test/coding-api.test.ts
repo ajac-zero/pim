@@ -698,6 +698,8 @@ describe("an agent's coding tools", () => {
 		expect(started).toMatchObject({ url: `https://pim.test/coding/${id}`, status: expect.any(String), branch: expect.stringMatching(/^pim\/add-a-greeting-/) });
 		const [ended] = await turns(id, 1);
 		await vi.waitFor(() => expect(woken).not.toBe(""), { timeout: 10_000 });
+		// The wake's turn ends before the test goes on, so it can't take a later test's scripted responses.
+		await settled(chat);
 		expect(woken).toContain(`[Coding thread ${id}] It finished its turn.`);
 		expect(woken).toContain("State: idle. Spent $0.00 of its $1 budget.");
 		expect(woken).toContain(`Link: https://pim.test/coding/${id}`);

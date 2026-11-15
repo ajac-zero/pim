@@ -27,7 +27,7 @@ const packageTest = (file) => /^packages\/[^/]+\/test\//.test(file) && !file.inc
 
 /** What the tests that browse with a Chrome (test/browser.test.ts) can reach. */
 const browsing = (file) =>
-	["src/browser.ts", "src/extensions/browser.ts", "computer/", "test/browser.test.ts", "test/helpers.ts", "test/worker.ts", "scripts/install-test-browser.mjs"].some((path) => file.startsWith(path));
+	["src/browser.ts", "src/extensions/browser.ts", "src/space/routes.ts", "src/space/sockets.ts", "src/space/views.ts", "computer/", "test/browser.test.ts", "test/helpers.ts", "test/worker.ts", "scripts/install-test-browser.mjs"].some((path) => file.startsWith(path));
 
 /** The jobs a change to `changed` needs: every one for a push to main, otherwise those the files can reach. */
 export function selectJobs(changed, { main = false } = {}) {

@@ -1120,6 +1120,18 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 			.filter(([path, source]) => importsTriggers(source as string) || /TriggerCoordinator|TriggerStore|pim_trigger/.test(source as string))
 			.map(([path]) => path);
 		// schedule_task makes its tasks through the triggers' API, in Pim's own extension.
-		expect(users).toEqual(["../src/extensions/app-events.ts", "../src/extensions/schedule.ts", "../src/pim.ts", "../src/store.ts"]);
+		// Pim's own modules, src/space/, hold what Pim does for a space: the bridge (triggers.ts), its routes and the computer's frames, the handoff of a trigger's run to a chat, the abilities that offer triggers' tools, and what diagnostics read of them.
+		expect(users).toEqual([
+			"../src/extensions/app-events.ts",
+			"../src/extensions/schedule.ts",
+			"../src/pim.ts",
+			"../src/space/abilities.ts",
+			"../src/space/conversations.ts",
+			"../src/space/reports.ts",
+			"../src/space/routes.ts",
+			"../src/space/sockets.ts",
+			"../src/space/triggers.ts",
+			"../src/store.ts",
+		]);
 	});
 });

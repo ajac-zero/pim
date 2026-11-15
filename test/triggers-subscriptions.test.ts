@@ -703,14 +703,14 @@ describe("keeping connector events' subscriptions", () => {
 		});
 	});
 
-	it("is constructed only by Pim, which also runs the ingress adapter for connector events", () => {
+	it("is constructed only by Pim's bridge to it (src/space/triggers.ts), which also runs the ingress adapter for connector events", () => {
 		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}", "../packages/*/src/**/*.ts"], { query: "?raw", import: "default", eager: true });
 		const users = (pattern: RegExp) =>
 			Object.entries(files)
 				.filter(([path]) => path !== "../packages/triggers/src/subscriptions.ts")
 				.filter(([, source]) => pattern.test(source as string))
 				.map(([path]) => path);
-		expect(users(/new ConnectorSubscriptionManager\b/)).toEqual(["../src/pim.ts"]);
-		expect(users(/new ConnectorIngress\b/)).toEqual(["../src/pim.ts"]);
+		expect(users(/new ConnectorSubscriptionManager\b/)).toEqual(["../src/space/triggers.ts"]);
+		expect(users(/new ConnectorIngress\b/)).toEqual(["../src/space/triggers.ts"]);
 	});
 });

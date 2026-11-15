@@ -47,10 +47,11 @@ describe("choosing CI's jobs for a change", () => {
 	});
 
 	it("runs the browser job only for what browsing reaches", () => {
-		for (const file of ["src/browser.ts", "src/extensions/browser.ts", "computer/pim-computer.ts", "test/browser.test.ts", "test/helpers.ts", "test/worker.ts"]) {
+		for (const file of ["src/browser.ts", "src/extensions/browser.ts", "src/space/routes.ts", "src/space/sockets.ts", "src/space/views.ts", "computer/pim-computer.ts", "test/browser.test.ts", "test/helpers.ts", "test/worker.ts"]) {
 			expect(running([file])).toContain("browser");
 		}
 		expect(running(["src/coding/thread-do.ts"])).not.toContain("browser");
+		expect(running(["src/space/approvals.ts"])).not.toContain("browser");
 	});
 
 	it("runs every job when the dependencies, the build, the test setup or CI itself change", () => {

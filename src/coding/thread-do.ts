@@ -392,9 +392,16 @@ export class CodingThreadDO extends DurableObject<Env> {
 			let retry = true;
 			if (token) {
 				const image = await fetchAmpImage(attachment.canonical, { token, types: IMAGE_TYPES, maxBytes: MAX_IMAGE_BYTES });
-				// The space's own storage refuses an image it has no room for, which may change.
-				if (image.ok) copy = await (await getAgentByName(this.env.Pim, thread.space)).codingKeepImage(thread.threadId, image.bytes, image.type);
-				else retry = image.retry;
+				if (image.ok) {
+					try {
+						copy = await (await getAgentByName(this.env.Pim, thread.space)).codingKeepImage(thread.threadId, image.bytes, image.type);
+						// The space's own storage refuses an image it has no room for, which may change.
+					} catch (error) {
+						// While a deploy rolls out, the space may still run the version before this method: that is no failure of the attachment, which is tried again once it has rolled.
+						if (error instanceof Error && /does not implement the method/i.test(error.message)) continue;
+						// Whatever else goes wrong keeping it, the message still shows, with Amp's address for now.
+					}
+				} else retry = image.retry;
 			}
 			if (copy !== null) {
 				await this.ctx.storage.put(keys[index]!, copy);

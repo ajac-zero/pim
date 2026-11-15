@@ -484,6 +484,26 @@ describe("Amp attachment images in an agent-hosted thread", () => {
 		expect(await firstText(stub)).toContain(LIGHT);
 	});
 
+	it("shows the transcript, and spends no attempt, while the space still runs a version that can't keep images", async () => {
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
+		const { stub, fake, orb } = await ampThread();
+		fake.say(orb(), "assistant", `![Light](${LIGHT})`);
+		// The space's object, as the version before this one has it: with no such method, or one that fails.
+		const failWith = (error: Error | null) => runInDurableObject(pim(), (instance: Pim) => {
+			if (error) (instance as { codingKeepImage: unknown }).codingKeepImage = async () => { throw error; };
+			else delete (instance as { codingKeepImage?: unknown }).codingKeepImage;
+		});
+		await failWith(new TypeError('The RPC receiver does not implement the method "codingKeepImage".'));
+		await heartbeat(stub);
+		for (let reads = 0; reads < 4; reads++) expect(await firstText(stub)).toContain(LIGHT);
+		// Any other failure to keep it also leaves the message showing.
+		await failWith(new Error("storage down"));
+		expect(await firstText(stub)).toContain(LIGHT);
+		await failWith(null);
+		fetcher.mockClear();
+		expect(await firstText(stub)).toMatch(/!\[Light\]\(\/api\/images\/[\w-]+\)/);
+	});
+
 	it("leaves an image the space has no room for as it is", async () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
 		await runInDurableObject(pim(), (instance: Pim) => instance.setLimits({ storageBytes: instance.storedBytes() + 2 }));

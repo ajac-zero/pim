@@ -1,5 +1,5 @@
 import type { Account } from "../../directory";
-import type { ApiExtension } from "../../gateway";
+import type { ApiExtension } from "../../api-extension";
 import { dispatch, readJson, type Route } from "@pim/shared/http";
 import { cliHarness } from "@pim/coding/harness/index";
 import { validLoginCode } from "@pim/coding/harness/login";

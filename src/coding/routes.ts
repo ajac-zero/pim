@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
 import type { Account } from "../directory";
-import type { ApiExtension } from "../gateway";
+import type { ApiExtension } from "../api-extension";
 import { dispatch, HttpError, readJson, type Route } from "@pim/shared/http";
 import type { TranscriptMessage } from "@pim/shared/transcript";
 import { CODING_API_PATH, CODING_REPOS_PATH, type CodingErrorCode, type CodingPullRequestOpened, type CodingPushRequested, type StartCodingThread } from "./api";

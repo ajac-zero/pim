@@ -1,6 +1,6 @@
 import type { Account } from "../../directory";
 import { deploymentSettings } from "../../deployment";
-import type { ApiExtension } from "../../gateway";
+import type { ApiExtension } from "../../api-extension";
 import { dispatch, HttpError, type Route } from "@pim/shared/http";
 import { deploymentGitea } from "./worker";
 

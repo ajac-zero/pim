@@ -209,9 +209,6 @@ export async function toAgent(request: Request, env: Env, owner: string, path: s
 	}
 }
 
-/** Paths of the API answered before the space: an authorized request for `path` under `/api`. */
-export type ApiExtension = (path: string, request: Request) => Promise<Response | undefined>;
-
 /**
  * A connector's callback or event delivery: `/mcp/callback/<owner>` (GET, the
  * OAuth sign-in's redirect, which the space matches against the callback URL

@@ -2,7 +2,7 @@ import { getAgentByName } from "agents";
 import { BUILTIN_APPS } from "./builtin-apps";
 import { configuredProviders, PROVIDER_IDS, providerName, providerSecrets } from "./auth/oauth";
 import { type AuthSite, clearCookie, fromAnotherSite, ownedCode, SESSION_COOKIE, type Sites, userHandle } from "./auth";
-import type { ApiExtension } from "./gateway";
+import type { ApiExtension } from "./api-extension";
 import { deploymentSettings, readDeployment } from "./deployment";
 import { FRAMED_KINDS, framePage, RUNTIME_PATH, ENTRY_FILES, readFiles, textOf } from "./artifacts";
 import type { AgentIcon, Bot, BotCard, PublishedArtifact } from "./gallery";

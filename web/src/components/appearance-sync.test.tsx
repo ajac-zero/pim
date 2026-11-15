@@ -4,6 +4,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider, useI18n } from "~/components/i18n";
 import { ThemeProvider, useTheme } from "~/components/theme";
+import { resetThemes } from "~/lib/themes";
 
 beforeEach(() => {
   const kept = new Map<string, string>();
@@ -21,6 +22,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetThemes();
   vi.unstubAllGlobals();
   document.documentElement.className = "";
   delete document.documentElement.dataset.theme;
@@ -83,10 +85,10 @@ describe("appearance in settings", () => {
     window.localStorage.setItem("pim-theme", "light");
     window.localStorage.setItem("pim-locale", "en");
     mount({ colorMode: "dark", colorTheme: "nord", locale: "es" });
-    await waitFor(() =>
-      expect(screen.getByTestId("state").textContent).toBe("dark/es"),
-    );
-    expect(document.documentElement.dataset.theme).toBe("nord");
+    await waitFor(() => {
+      expect(screen.getByTestId("state").textContent).toBe("dark/es");
+      expect(document.documentElement.dataset.theme).toBe("nord");
+    });
     expect(document.documentElement.classList.contains("dark")).toBe(true);
     expect(window.localStorage.getItem("pim-theme")).toBe("dark");
     expect(window.localStorage.getItem("pim-color-theme")).toBe("nord");
@@ -123,10 +125,10 @@ describe("appearance in settings", () => {
         locale: "en",
       });
     });
-    await waitFor(() =>
-      expect(screen.getByTestId("state").textContent).toBe("light/en"),
-    );
-    expect(document.documentElement.dataset.theme).toBe("nord");
+    await waitFor(() => {
+      expect(screen.getByTestId("state").textContent).toBe("light/en");
+      expect(document.documentElement.dataset.theme).toBe("nord");
+    });
     expect(document.documentElement.classList.contains("dark")).toBe(false);
   });
 });

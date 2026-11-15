@@ -15,14 +15,30 @@ export type ColorTheme = ThemeList["themes"][number];
 
 let list: Promise<ThemeList> | undefined;
 
-/** This Pim's color themes, fetched once. */
+/**
+ * This Pim's color themes, fetched once. A failed fetch isn't kept, so the
+ * next call tries again.
+ */
 export function loadThemes(): Promise<ThemeList> {
-  list ??= fetch("/api/themes").then(async (response) => {
-    if (!response.ok)
-      throw new Error(`Couldn't load the color themes (${response.status})`);
-    return (await response.json()) as ThemeList;
-  });
-  return list;
+  if (list) return list;
+  const fetched: Promise<ThemeList> = fetch("/api/themes")
+    .then(async (response) => {
+      if (!response.ok)
+        throw new Error(`Couldn't load the color themes (${response.status})`);
+      return (await response.json()) as ThemeList;
+    })
+    .catch((error) => {
+      if (list === fetched) list = undefined;
+      throw error;
+    });
+  list = fetched;
+  return fetched;
+}
+
+/** Forgets the fetched themes, so a test starts without the last one's. */
+export function resetThemes() {
+  list = undefined;
+  code = undefined;
 }
 
 let code:
@@ -41,7 +57,8 @@ let code:
  * the app's colors.
  */
 export function loadCodeThemes() {
-  code ??= Promise.all([loadThemes(), import("shiki")]).then(
+  if (code) return code;
+  const loading = Promise.all([loadThemes(), import("shiki")]).then(
     ([{ themes }, { bundledThemes }]) => {
       const shipped = (code: CodeTheme) =>
         (typeof code === "string" ? code : code.base) in bundledThemes;
@@ -71,7 +88,11 @@ export function loadCodeThemes() {
       return { names, loaders: [...loaders.values()] };
     },
   );
-  return code;
+  code = loading;
+  loading.catch(() => {
+    if (code === loading) code = undefined;
+  });
+  return loading;
 }
 
 /** A recolored code theme, for `mode`: its base's rules, in its colors. */

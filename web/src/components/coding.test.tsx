@@ -18,7 +18,7 @@ import {
   within,
 } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatsPanel } from "~/components/app-sidebar";
 import { WithChatTabs } from "~/components/chat/tabs";
 import {
@@ -59,9 +59,22 @@ import {
   sessionsQuery,
 } from "~/lib/queries";
 import { pinTab, pruneTabs } from "~/lib/tabs";
+import { resetThemes } from "~/lib/themes";
 import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
-afterEach(cleanup);
+// Code blocks load the color themes; with no server here, they get an empty list.
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({ default: "pim", themes: [] })),
+  );
+});
+
+afterEach(() => {
+  cleanup();
+  resetThemes();
+  vi.unstubAllGlobals();
+});
 
 /** One opening of the live stream, which the test feeds and closes. */
 class Connection {

@@ -1,12 +1,12 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
 import type { Activity } from "@pim/shared/activity-types";
+import { maskCode } from "@pim/shared/markdown-code";
 import {
   type MessagePart,
   projectEntries,
   type TranscriptMessage,
 } from "@pim/shared/transcript";
-import { maskCode } from "@pim/shared/markdown-code";
 import { queryOptions } from "@tanstack/react-query";
 import type { TranslationKey } from "~/components/i18n";
 import { ApiError, call, SignInRequired } from "~/lib/pim-api";

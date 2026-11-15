@@ -14,9 +14,9 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { StateBadge } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
-import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { ChatHeader } from "~/components/chat/header";
 import {
   AssistantMessage,
@@ -95,8 +95,8 @@ import {
   START_HARNESSES,
   STATE_TEXT,
   type StartForm,
-  type SuggestedReply,
   type StartProblems,
+  type SuggestedReply,
   startInput,
   startProblems,
   stateReasonKey,

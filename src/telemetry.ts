@@ -12,7 +12,7 @@ import { type AttributeValue, type Attributes, type Context, ROOT_CONTEXT, type 
 import { ExportResultCode } from "@opentelemetry/core";
 import { JsonTraceSerializer } from "@opentelemetry/otlp-transformer";
 import { resourceFromAttributes } from "@opentelemetry/resources";
-import { BatchSpanProcessor, type ReadableSpan, type SpanExporter, TracerProvider } from "@opentelemetry/sdk-trace";
+import { BatchSpanProcessor, type ReadableSpan, SimpleSpanProcessor, type SpanExporter, TracerProvider } from "@opentelemetry/sdk-trace";
 
 /**
  * Pim's traces, in OpenTelemetry's semantic conventions for generative AI
@@ -77,6 +77,19 @@ export function exporterFrom(env: TelemetryEnv): SpanExporter | null {
 	return otlpExporter(url, headers);
 }
 
+/** The tool call whose execution is under way, so work it submits elsewhere joins its trace. */
+const active = new AsyncLocalStorage<Context>();
+
+/**
+ * Runs `work` outside the tool call under way, for work that calls another Durable Object. In workerd,
+ * async context follows an RPC into the same isolate, and work the other object then runs in it (a
+ * continuation, a timer) fails with "Cannot perform I/O on behalf of a different Durable Object"
+ * once this call has finished. What `work` does isn't part of the call's trace.
+ */
+export function outsideTrace<T>(work: () => T): T {
+	return active.exit(work);
+}
+
 /** Who works in a conversation, as its spans name it. */
 export type AgentRef = { readonly id: string; readonly name: string };
 
@@ -91,17 +104,15 @@ export class Telemetry {
 	readonly #idOf: (conversation: string) => string;
 	/** Open runs, by conversation. In memory: a run resumed after an eviction starts a new trace. */
 	readonly #runs = new Map<string, Run>();
-	/** The tool call whose execution is under way, so work it submits elsewhere joins its trace. */
-	readonly #active = new AsyncLocalStorage<Context>();
 
-	constructor(options: { exporter: SpanExporter | null; content: boolean; service: string; instance: string; agentOf: (conversation: string) => AgentRef; idOf: (conversation: string) => string }) {
+	constructor(options: { exporter: SpanExporter | null; batch: boolean; content: boolean; service: string; instance: string; agentOf: (conversation: string) => AgentRef; idOf: (conversation: string) => string }) {
 		this.#content = options.content;
 		this.#agentOf = options.agentOf;
 		this.#idOf = options.idOf;
 		this.#provider = options.exporter
 			? new TracerProvider({
 					resource: resourceFromAttributes({ "service.name": options.service, "service.instance.id": options.instance }),
-					spanProcessors: [new BatchSpanProcessor({ exporter: options.exporter })],
+					spanProcessors: [options.batch ? new BatchSpanProcessor({ exporter: options.exporter }) : new SimpleSpanProcessor({ exporter: options.exporter })],
 				})
 			: null;
 		this.#tracer = this.#provider?.getTracer("pim") ?? null;
@@ -141,7 +152,7 @@ export class Telemetry {
 					...this.#capture("gen_ai.input.messages", () => [{ role: "user", parts: parts(input) }]),
 				},
 			},
-			this.#active.getStore() ?? ROOT_CONTEXT,
+			active.getStore() ?? ROOT_CONTEXT,
 		);
 		const run: Run = { span, context: trace.setSpan(ROOT_CONTEXT, span), operations: 1 };
 		this.#runs.set(conversation, run);
@@ -244,7 +255,7 @@ export class Telemetry {
 				parent,
 			);
 			try {
-				const result = await telemetry.#active.run(trace.setSpan(parent, span), () => tool.execute(args, api, context));
+				const result = await active.run(trace.setSpan(parent, span), () => tool.execute(args, api, context));
 				if (result.isError) {
 					span.setAttribute("error.type", "tool_error");
 					span.setStatus({ code: SpanStatusCode.ERROR, message: textOf(result.content ?? []) });

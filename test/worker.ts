@@ -257,6 +257,10 @@ export class Pim extends RealPim {
 		return { send: async (mail) => void outbox.push(mail) };
 	}
 
+	protected override batchSpans(): boolean {
+		return false;
+	}
+
 	/** Traces go to `spans`. */
 	protected override spanExporter(): SpanExporter {
 		return spans;

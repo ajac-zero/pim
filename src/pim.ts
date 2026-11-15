@@ -691,6 +691,7 @@ export class Pim extends DurableAgent<Env> {
 	/** Traces of the agents' runs, model requests and tool calls, for the deployment's OpenTelemetry backend (./telemetry.ts). */
 	readonly telemetry = new Telemetry({
 		exporter: this.spanExporter(),
+		batch: this.batchSpans(),
 		content: (this.env as TelemetryEnv).OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT === "true",
 		service: (this.env as TelemetryEnv).OTEL_SERVICE_NAME || "pim",
 		instance: this.ctx.id.toString(),
@@ -2515,6 +2516,11 @@ export class Pim extends DurableAgent<Env> {
 				}
 			},
 		};
+	}
+
+	/** Whether spans wait to be sent in batches, as to an OTLP backend; a test's exporter takes each as it ends, with no timers left running. */
+	protected batchSpans(): boolean {
+		return true;
 	}
 
 	/** Where traces go: the OTLP endpoint the deployment sets, or nowhere. */

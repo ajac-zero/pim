@@ -8,6 +8,7 @@ import { cliHarness } from "../coding/harness";
 import { codingThread } from "../coding/thread-do";
 import { CodingError, calling, listThreads, liveThread, ownedThread, startThread, threadView } from "../coding/threads";
 import { OUTPUT_LINES, pageTranscript, TRANSCRIPT_MAX_PAGE, TRANSCRIPT_PAGE, transcriptOutput } from "../coding/transcript";
+import { outsideTrace } from "../telemetry";
 import type { TranscriptMessage } from "../transcript";
 import { defineGatedAction, definePimExtension } from "./define";
 import { json, text } from "./services";
@@ -70,10 +71,10 @@ function brief(view: CodingThreadView) {
 	};
 }
 
-/** A refusal the model can act on, rather than a failed call. */
+/** Runs a tool's work, outside its trace (the work calls other Durable Objects), and answers a refusal as the tool's error. */
 async function answer(work: () => Promise<ReturnType<typeof text>>) {
 	try {
-		return await work();
+		return await outsideTrace(work);
 	} catch (error) {
 		if (error instanceof CodingError) return text(JSON.stringify({ error: error.code, message: error.message }), true);
 		throw error;

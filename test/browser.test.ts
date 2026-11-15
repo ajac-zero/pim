@@ -88,10 +88,10 @@ async function takeOver(session?: string) {
 }
 
 // The browser is the computer's, and so are the person's files.
-let computer: Awaited<ReturnType<typeof pairTestComputer>>;
+let computer: Awaited<ReturnType<typeof pairTestComputer<true>>>;
 let root: string;
 beforeAll(async () => {
-	computer = await pairTestComputer();
+	computer = await pairTestComputer({ browser: true });
 	({ root } = computer);
 });
 

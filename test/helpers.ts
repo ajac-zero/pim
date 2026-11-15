@@ -349,16 +349,24 @@ export async function connectTestComputer(
 	return { socket, closed, root: machine.root };
 }
 
+type TestBrowser = ReturnType<typeof testBrowser>;
+
 /**
- * Pairs a computer with the space and connects it, over a fresh folder, with
- * the tests' Chrome; it runs no commands. `reconnect` connects it again, as
- * pim-computer does after losing its connection, with its browser still
- * running.
+ * Pairs a computer with the space and connects it, over a fresh folder; it
+ * runs no commands. With `browser: true` it has the tests' Chrome, which
+ * only the `browser` project's Worker has (vitest.config.ts); without, it
+ * has no browser and the Worker needs no Chrome. `reconnect` connects it
+ * again, as pim-computer does after losing its connection, with its browser
+ * still running.
  */
-export async function pairTestComputer() {
+export async function pairTestComputer<B extends boolean = false>(options: { browser?: B } = {}) {
+	const computer = await pairComputer(options.browser ? testBrowser() : undefined);
+	return computer as typeof computer & (B extends true ? { browser: TestBrowser } : unknown);
+}
+
+async function pairComputer(browser: TestBrowser | undefined) {
 	const { body } = await post<{ token: string }>("/computer");
 	const root = `/tmp/computer-${crypto.randomUUID()}`;
-	const browser = testBrowser();
 	const connect = () =>
 		connectTestComputer(
 			body.token,

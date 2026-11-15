@@ -25,7 +25,7 @@ function mockHook(response = "order 42 created") {
 const setApprovalTimeout = (ms: number | null) =>
 	runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => {
 		if (ms === null) pim.store.deleteMeta("test:approval-timeout-ms");
-		else pim.store.setMeta("test:approval-timeout-ms", ms);
+		else pim.store.setMeta("test:approval-timeout-ms", String(ms));
 	});
 
 afterEach(() => setApprovalTimeout(null));

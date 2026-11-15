@@ -87,6 +87,7 @@ export interface ConversationsHost {
 	readonly abilities: Map<string, Ability>;
 	readonly rooms: RoomStore;
 	readonly withReplies: (result: PiOperationResult) => Promise<PiOperationResult & { replies: string[]; }>;
+	readonly submitTo: Submit;
 	readonly resumeHeld: (conversation: string) => Promise<boolean>;
 	readonly profile: () => OwnerProfile | null;
 	readonly env: Env;
@@ -575,7 +576,7 @@ export class Conversations {
 			tasks.filter((task) => task.state === "auth-required").map(by),
 		);
 		try {
-			await this.submitTo(await this.carriedOn(requester), text, { operationId: operation, whenBusy: "followUp" }, "task");
+			await this.host.submitTo(await this.carriedOn(requester), text, { operationId: operation, whenBusy: "followUp" }, "task");
 		} catch (error) {
 			console.warn(`giving ${operation} failed`, error);
 			return;
@@ -953,7 +954,7 @@ export class Conversations {
 		const again: [UserInput, string][] = events.map((event) => [event.content, `requeued:${session}:${event.id}`]);
 		if (note !== undefined) again.unshift([note, `stopped:${session}:${Date.now()}`]);
 		for (const [content, operationId] of again) {
-			await this.submitTo(session, content, { operationId, whenBusy: "followUp" }, "pim").catch((error) => {
+			await this.host.submitTo(session, content, { operationId, whenBusy: "followUp" }, "pim").catch((error) => {
 				if (!(error instanceof HttpError)) throw error;
 				console.warn(JSON.stringify({ event: "pim.stop.requeue_skipped", owner: this.host.name, status: error.status }));
 			});

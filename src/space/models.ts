@@ -45,27 +45,35 @@ export interface ModelsHost {
 	readonly keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T>;
 	readonly providerCooldowns: ProviderCooldowns;
 	readonly fallbackModel: (provider: string, session?: string) => Model<Api> | undefined;
+	readonly retryAfterCooldown: ({ provider, until }: { provider: string; until?: number; }) => Promise<void>;
 	readonly closed: () => boolean;
 	readonly schedule: (when: Date | string | number, callback: string, payload?: unknown, options?: { idempotent?: boolean }) => Promise<unknown>;
 	readonly harness: PiHarness;
 	readonly agents: AgentStore;
+	readonly agentModel: (agent: Agent) => PiModel;
+	readonly sessionModel: (session: string, agent?: Agent) => PiModel;
 	readonly note: (event: string, fields: Record<string, unknown>) => void;
 	readonly resumeTask: (session: string, task: TaskId) => ReturnType<PiHarness["resumeTask"]>;
 	readonly credentials: SqlCredentialStore;
 	readonly ai: import("agents/models/pi-ai").AI;
 	readonly chatgpt: ChatGPT;
-	modelCatalog: Models | undefined;
+	catalogKept: Models | undefined;
 	readonly models: () => MutableModels;
 	readonly images: ImageStore;
 	readonly usage: UsageMeter;
 	readonly providerSessions: Map<string, string>;
+	readonly modelCatalog: () => Models;
 	readonly defaultModel: () => PiModel;
+	readonly customProviders: () => { catalogId: string; shared: boolean; provider: CustomProvider; }[];
 	readonly store: PimStore;
+	readonly chooseModel: (model: PiModel | null) => Promise<PiModel>;
 	readonly deployment: () => DeploymentSettings;
 	readonly env: Env;
+	readonly chosenModel: () => PiModel;
 	readonly defaultUtilityModel: () => Model<Api> | undefined;
 	readonly assertOpen: () => void;
 	readonly status: () => OwnerStatus;
+	readonly utilityModel: () => Promise<Model<Api> | undefined>;
 }
 
 export class SpaceModels {
@@ -96,7 +104,7 @@ export class SpaceModels {
 		// Held on a subscription's usage limit, the chat goes on by itself: on another model once there is one, else once the limit resets.
 		const provider = message.provider;
 		if (provider !== undefined && this.subscription(provider) && this.host.providerCooldowns.active(provider)) {
-			void this.host.keepAliveWhile(() => (this.host.fallbackModel(provider) ? this.#resumeSoon(conversation) : this.retryAfterCooldown({ provider })));
+			void this.host.keepAliveWhile(() => (this.host.fallbackModel(provider) ? this.#resumeSoon(conversation) : this.host.retryAfterCooldown({ provider })));
 		}
 		// The chat list stops showing it as working once the hold is committed, just after this answers.
 		setTimeout(() => this.host.broadcastMessage({ type: "sessions" }), 1000);
@@ -144,7 +152,7 @@ export class SpaceModels {
 	/** The models a run of an agent tries, in order: its own, its fallbacks, then the space's, each once. */
 	#chain(agent: Agent, session?: string): PiModel[] {
 		const chain: PiModel[] = [];
-		for (const model of [session === undefined ? this.agentModel(agent) : this.sessionModel(session), ...this.#fallbackModels(agent), ...this.workspaceFallbacks()]) {
+		for (const model of [session === undefined ? this.host.agentModel(agent) : this.host.sessionModel(session), ...this.#fallbackModels(agent), ...this.workspaceFallbacks()]) {
 			if (!chain.some((known) => sameModel(known, model))) chain.push(model);
 		}
 		return chain;
@@ -199,24 +207,24 @@ export class SpaceModels {
 	 * or one that finds the limit, goes to the deployment's default model.
 	 */
 	modelCatalog(): Models {
-		if (!this.host.modelCatalog) {
+		if (!this.host.catalogKept) {
 			this.#models = this.host.models();
 			this.#syncProviders();
 			this.#ownCatalog = this.host.images.resolving(this.host.usage.meter(this.#models));
-			this.host.modelCatalog = failingOver(this.#ownCatalog, {
+			this.host.catalogKept = failingOver(this.#ownCatalog, {
 				cooldowns: this.host.providerCooldowns,
 				subscription: (provider) => this.subscription(provider),
 				fallback: (provider, sessionId) => this.host.fallbackModel(provider, sessionId === undefined ? undefined : this.host.providerSessions.get(sessionId)),
 				cooled: (cooldown) => this.#cooled(cooldown),
 			});
 		}
-		return this.host.modelCatalog;
+		return this.host.catalogKept;
 	}
 
 	/** Notes a subscription's cooldown, and has the chats held on it go on: on the default model at once, or when the cooldown ends. */
 	#cooled({ provider, until, failures, resetFrom }: Cooldown): void {
 		this.host.note("provider_cooldown", { provider, until: new Date(until).toISOString(), failures, resetFrom });
-		void this.host.keepAliveWhile(() => this.retryAfterCooldown({ provider })).catch((error) => console.warn("retrying after a cooldown failed", error));
+		void this.host.keepAliveWhile(() => this.host.retryAfterCooldown({ provider })).catch((error) => console.warn("retrying after a cooldown failed", error));
 	}
 
 	/** The catalog without failing over, for side jobs, which choose their own model when the plan can't answer (see `#askUtility`). */
@@ -236,13 +244,13 @@ export class SpaceModels {
 		// The agent's own fallbacks come first, then the space's, then the deployment's default.
 		const agent = session === undefined ? undefined : this.host.agents.findOfSession(session);
 		const listed = [...(agent ? this.#fallbackModels(agent) : []), ...this.workspaceFallbacks()].find((model) => model.provider !== provider);
-		if (listed) return this.modelCatalog().getModel(listed.provider, listed.id);
+		if (listed) return this.host.modelCatalog().getModel(listed.provider, listed.id);
 		const model = this.host.defaultModel();
 		if (model.provider === provider) return undefined;
 		// Without Workers AI, the default is the first custom provider's model; with none, there is nothing to run.
-		if (!this.hasWorkersAi() && !this.customProviders().some((entry) => entry.provider.models.length > 0)) return undefined;
+		if (!this.hasWorkersAi() && !this.host.customProviders().some((entry) => entry.provider.models.length > 0)) return undefined;
 		// As pi resolves a session's model.
-		return this.modelCatalog().getModel(model.provider, model.id);
+		return this.host.modelCatalog().getModel(model.provider, model.id);
 	}
 
 	/** The catalog before metering, which providers are added to and taken from as they change. */
@@ -261,7 +269,7 @@ export class SpaceModels {
 	#syncProviders(): void {
 		const models = this.#models;
 		if (!models) return;
-		const current = this.customProviders();
+		const current = this.host.customProviders();
 		const gone = models
 			.getProviders()
 			.map((provider) => provider.id)
@@ -273,8 +281,8 @@ export class SpaceModels {
 	/** After providers change: sessions and side jobs on a model that's gone go back to the defaults. */
 	async providersChanged(): Promise<void> {
 		// A catalog not built yet will have them when it is.
-		if (this.host.modelCatalog) this.#syncProviders();
-		const catalog = this.modelCatalog();
+		if (this.host.catalogKept) this.#syncProviders();
+		const catalog = this.host.modelCatalog();
 		const missing = (key: string) => {
 			const json = this.host.store.meta(key);
 			if (json === undefined) return false;
@@ -284,7 +292,7 @@ export class SpaceModels {
 		if (missing(UTILITY_MODEL_KEY)) this.host.store.deleteMeta(UTILITY_MODEL_KEY);
 		this.dropModels(({ provider, id }) => (provider.startsWith(OWN_PROVIDER) || provider.startsWith(SHARED_PROVIDER)) && !catalog.getModel(provider, id));
 		// Without Workers AI, the default is a provider's model, so it changes as providers come and go.
-		if (missing(MODEL_KEY) || (!this.hasWorkersAi() && this.host.store.meta(MODEL_KEY) === undefined)) await this.chooseModel(null);
+		if (missing(MODEL_KEY) || (!this.hasWorkersAi() && this.host.store.meta(MODEL_KEY) === undefined)) await this.host.chooseModel(null);
 	}
 
 	/** The person adds a model provider of their own, or changes one; its models are read from the server again. */
@@ -325,7 +333,7 @@ export class SpaceModels {
 	defaultModel(): PiModel {
 		if (!this.hasWorkersAi()) {
 			// The first model of the first provider: the admin's, then the person's own.
-			for (const { catalogId, provider } of this.customProviders()) {
+			for (const { catalogId, provider } of this.host.customProviders()) {
 				if (provider.models[0]) return providerModel(catalogId, provider, provider.models[0]);
 			}
 		}
@@ -342,7 +350,7 @@ export class SpaceModels {
 		const json = this.host.store.meta(MODEL_KEY);
 		if (json !== undefined) {
 			const { provider, id } = JSON.parse(json) as { provider: string; id: string };
-			const model = this.modelCatalog().getModel(provider, id);
+			const model = this.host.modelCatalog().getModel(provider, id);
 			if (model) return model;
 		}
 		return this.host.defaultModel();
@@ -351,22 +359,22 @@ export class SpaceModels {
 	/** The model an agent's conversations run on: its own, else the space's. One that's gone, or on a plan that isn't connected, is not read: see `#dropModels`. */
 	agentModel(agent: Agent): PiModel {
 		if (agent.model) {
-			const model = this.modelCatalog().getModel(agent.model.provider, agent.model.id);
+			const model = this.host.modelCatalog().getModel(agent.model.provider, agent.model.id);
 			if (model) return model;
 		}
-		return this.chosenModel();
+		return this.host.chosenModel();
 	}
 
 	/** The model a chat runs on: the one chosen for it alone, else its agent's, else the space's. One that's gone is not read. */
 	sessionModel(session: string, agent: Agent = this.host.agents.ofSession(session)): PiModel {
 		const chosen = this.host.store.sessionInfo(session)?.model;
-		const model = chosen && this.modelCatalog().getModel(chosen.provider, chosen.id);
-		return model || this.agentModel(agent);
+		const model = chosen && this.host.modelCatalog().getModel(chosen.provider, chosen.id);
+		return model || this.host.agentModel(agent);
 	}
 
 	/** The model a new run starts on: the chat's own, or while its subscription cools down, the first model of its chain on another provider. */
 	runModel(session: string): PiModel {
-		const own = this.sessionModel(session);
+		const own = this.host.sessionModel(session);
 		if (!this.subscription(own.provider) || !this.host.providerCooldowns.active(own.provider)) return own;
 		return this.#chain(this.host.agents.ofSession(session), session).find((model) => model.provider !== own.provider && !this.host.providerCooldowns.active(model.provider)) ?? own;
 	}
@@ -374,7 +382,7 @@ export class SpaceModels {
 	/** The models the space moves on to, in order, after an agent's own fallbacks; ones that are gone are not read: see `#dropModels`. */
 	workspaceFallbacks(): PiModel[] {
 		const list = JSON.parse(this.host.store.meta(MODEL_FALLBACKS_KEY) ?? "[]") as AgentModel[];
-		return list.flatMap(({ provider, id }) => this.modelCatalog().getModel(provider, id) ?? []);
+		return list.flatMap(({ provider, id }) => this.host.modelCatalog().getModel(provider, id) ?? []);
 	}
 
 	/** Sets the models every agent moves on to after its own fallbacks, from `GET /model`'s choices. */
@@ -386,7 +394,7 @@ export class SpaceModels {
 
 	/** The models an agent moves on to, in order, when its own fails for good; ones that are gone are not read: see `#dropModels`. */
 	#fallbackModels(agent: Agent): PiModel[] {
-		return agent.fallbacks.flatMap((fallback) => this.modelCatalog().getModel(fallback.provider, fallback.id) ?? []);
+		return agent.fallbacks.flatMap((fallback) => this.host.modelCatalog().getModel(fallback.provider, fallback.id) ?? []);
 	}
 
 	/**
@@ -397,7 +405,7 @@ export class SpaceModels {
 		const fallback = this.host.defaultModel();
 		if (provider === fallback.provider && id === fallback.id) return fallback;
 		if (this.hasWorkersAi() && provider === fallback.provider && this.allowedModels()?.includes(id)) return this.host.ai(id);
-		const model = this.modelCatalog().getModel(provider, id);
+		const model = this.host.modelCatalog().getModel(provider, id);
 		if (!model) throw new HttpError(400, `No model ${provider}/${id}`);
 		if (provider === CHATGPT_PROVIDER && !(await this.host.chatgpt.status()).connected) {
 			throw new HttpError(409, "Sign in with ChatGPT first");
@@ -410,7 +418,7 @@ export class SpaceModels {
 		if (model === null) this.host.store.deleteMeta(MODEL_KEY);
 		else this.host.store.setMeta(MODEL_KEY, JSON.stringify({ provider: model.provider, id: model.id }));
 		await this.syncModels();
-		return this.chosenModel();
+		return this.host.chosenModel();
 	}
 
 	/** Makes `model` an agent's; null follows the space's again. */
@@ -428,7 +436,7 @@ export class SpaceModels {
 	/** Makes `model` the model of one chat alone, over its agent's; null follows the agent's again. */
 	async chooseSessionModel(session: string, model: PiModel | null): Promise<PiModel> {
 		this.host.store.setSessionModel(session, model);
-		const resolved = this.sessionModel(session);
+		const resolved = this.host.sessionModel(session);
 		await this.host.harness.session(session).setModel(resolved);
 		this.host.broadcastMessage({ type: "sessions" });
 		return resolved;
@@ -437,7 +445,7 @@ export class SpaceModels {
 	/** Puts every session on its own model, else its agent's. */
 	async syncModels(): Promise<void> {
 		for (const session of await this.host.harness.sessions.list()) {
-			await this.host.harness.session(session.id).setModel(this.sessionModel(session.id));
+			await this.host.harness.session(session.id).setModel(this.host.sessionModel(session.id));
 		}
 	}
 
@@ -462,7 +470,7 @@ export class SpaceModels {
 	memoryModel(): ModelRef | undefined {
 		if (!this.hasWorkersAi()) {
 			// The conversation's own model, unless it is the plan, which is out of quota: then a custom provider's.
-			const alternative = this.#planCooledDown() || this.chosenModel().provider === CHATGPT_PROVIDER ? this.#customFallback() : undefined;
+			const alternative = this.#planCooledDown() || this.host.chosenModel().provider === CHATGPT_PROVIDER ? this.#customFallback() : undefined;
 			return alternative ? { provider: alternative.provider, modelId: alternative.id } : undefined;
 		}
 		const { memoryModel, model: fallback } = this.host.deployment();
@@ -485,7 +493,7 @@ export class SpaceModels {
 	 * which structured jobs need. The deployment's default is the admin's choice.
 	 */
 	utilityProvider(provider: string): boolean {
-		return provider === CHATGPT_PROVIDER || this.customProviders().some((entry) => entry.catalogId === provider && answersInSchema(entry.provider));
+		return provider === CHATGPT_PROVIDER || this.host.customProviders().some((entry) => entry.catalogId === provider && answersInSchema(entry.provider));
 	}
 
 	/**
@@ -516,18 +524,18 @@ export class SpaceModels {
 
 	/** A custom provider's model that answers in a JSON schema, the chosen model's provider first, for when the plan can't be asked. */
 	#customFallback(): Model<Api> | undefined {
-		const chosen = this.chosenModel().provider;
-		const entries = this.customProviders().filter((entry) => answersInSchema(entry.provider));
+		const chosen = this.host.chosenModel().provider;
+		const entries = this.host.customProviders().filter((entry) => answersInSchema(entry.provider));
 		const entry = entries.find((candidate) => candidate.catalogId === chosen) ?? entries[0];
 		const first = entry?.provider.models[0];
-		return entry && first ? this.modelCatalog().getModel(entry.catalogId, first.id) : undefined;
+		return entry && first ? this.host.modelCatalog().getModel(entry.catalogId, first.id) : undefined;
 	}
 
 	async #chosenUtilityModel(): Promise<Model<Api> | undefined> {
 		const json = this.host.store.meta(UTILITY_MODEL_KEY);
 		if (json !== undefined) {
 			const { provider, id } = JSON.parse(json) as { provider: string; id: string };
-			const model = this.modelCatalog().getModel(provider, id);
+			const model = this.host.modelCatalog().getModel(provider, id);
 			if (model && this.utilityProvider(provider) && (provider !== CHATGPT_PROVIDER || (await this.host.chatgpt.status()).connected)) return model;
 		}
 		return this.host.defaultUtilityModel();
@@ -569,9 +577,9 @@ export class SpaceModels {
 	async #askUtility(instructions: string, maxTokens: number, input: string, onPayload?: (payload: unknown, model: Model<Api>) => unknown) {
 		this.host.assertOpen();
 		if (this.host.status() !== "active") throw new HttpError(403, "This space is suspended");
-		const model = await this.utilityModel();
+		const model = await this.host.utilityModel();
 		if (!model) throw new HttpError(503, "This space has no utility model");
-		this.modelCatalog();
+		this.host.modelCatalog();
 		const ask = (asked: Model<Api>) =>
 			this.#ownCatalog!.completeSimple(
 				asked,

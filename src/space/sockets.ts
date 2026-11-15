@@ -47,6 +47,7 @@ export interface SocketsHost {
 	readonly watchRequests: Map<string, object>;
 	readonly computerTriggers: () => ComputerTriggers | null;
 	readonly computerChanged: () => void;
+	readonly broadcastMessage: (message: ServerMessage) => void;
 	readonly keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T>;
 	readonly legacyFiles: LegacyFiles;
 	readonly files: Files;
@@ -385,12 +386,12 @@ export class Sockets {
 	 * files kept in the space before files moved to the computer move there.
 	 */
 	#computerConnected(): void {
-		this.broadcastMessage({ type: "computer" });
+		this.host.broadcastMessage({ type: "computer" });
 		void this.host.keepAliveWhile(async () => {
 			try {
 				if (!(await this.host.legacyFiles.any())) return;
 				const moved = await this.host.legacyFiles.moveTo(this.host.files);
-				if (moved > 0) this.broadcastMessage({ type: "computer" });
+				if (moved > 0) this.host.broadcastMessage({ type: "computer" });
 			} catch (error) {
 				// It goes on from where it stopped the next time the computer connects.
 				console.warn("moving files to the computer failed", error);
@@ -402,7 +403,7 @@ export class Sockets {
 		this.host.computerTriggers()?.closed(connection);
 		this.host.computer.disconnected();
 		this.#closeScreens();
-		this.broadcastMessage({ type: "computer" });
+		this.host.broadcastMessage({ type: "computer" });
 	}
 
 	/**

@@ -42,6 +42,7 @@ export const SWITCHED_TOOLS: readonly { readonly name: string; readonly descript
 
 /** What the space's approvals needs of the space. `Pim` implements it over its own members, so none of them leave it. */
 export interface ApprovalsHost {
+	readonly decideApproval: (id: string, decision: "approve" | "deny", note?: string, auto?: AutoApproval, options?: { inTurn?: boolean; }) => Promise<Approval>;
 	readonly store: PimStore;
 	readonly broadcastMessage: (message: ServerMessage) => void;
 	readonly publicApproval: (approval: Approval) => PublicApproval;
@@ -62,14 +63,18 @@ export interface ApprovalsHost {
 	readonly tasksChanged: (root: string) => void;
 	readonly resumeTask: (session: string, task: TaskId) => ReturnType<PiHarness["resumeTask"]>;
 	readonly harness: PiHarness;
+	readonly setToolPermission: (audience: string, app: string, tool: string, permission: ToolPermission | null) => ToolPermissionInfo;
 	readonly offeredActions: () => GatedAction[];
 	readonly ownActions: readonly GatedAction[];
 	readonly apps: McpBridge;
 	readonly extensions: PimExtensions;
 	readonly abilities: Map<string, Ability>;
 	readonly appsOf: (agent: Agent) => DirectoryApp[];
+	readonly agentSkillsPermission: (agent: Agent) => ToolPermissionInfo;
+	readonly agentToolPermissions: (agent: Agent) => ToolPermissionInfo[];
 	readonly circle: (id: string) => Circle;
 	readonly reinstallApprovals: () => void;
+	readonly toolPermissions: (audience?: string) => ToolPermissionInfo[];
 	readonly closed: () => boolean;
 	readonly agentModel: (agent: Agent) => PiModel;
 	readonly registry: import("@earendil-works/pi-durable").Registry<import("@earendil-works/pi-durable").ToolRegistration>;
@@ -96,7 +101,7 @@ export class Approvals {
 	async approvalFiled(approval: Approval, isNew: boolean): Promise<string | null> {
 		if (approval.status !== "pending") return this.#outcome(approval);
 		if (this.approvalPermission(approval) === "on") {
-			return this.#outcome(await this.decideApproval(approval.id, "approve", undefined, "always", { inTurn: true }));
+			return this.#outcome(await this.host.decideApproval(approval.id, "approve", undefined, "always", { inTurn: true }));
 		}
 		if (isNew && this.#reviewable(approval)) {
 			this.host.store.setApprovalReview(approval.id, { status: "reviewing", note: null });
@@ -258,16 +263,16 @@ export class Approvals {
 		const { app, tool } = this.#approvalTool(approval);
 		const audience = approval.requestedBy?.circle ?? OWNER;
 		// Remembered first, so calls filed while this action runs are not asked about.
-		this.setToolPermission(audience, app, tool, "on");
+		this.host.setToolPermission(audience, app, tool, "on");
 		for (const pending of this.host.store.approvals("pending")) {
 			const other = this.#approvalTool(pending);
 			if (pending.id === id || other.app !== app || other.tool !== tool) continue;
 			if ((pending.requestedBy?.circle ?? OWNER) !== audience) continue;
-			void this.decideApproval(pending.id, "approve", undefined, "always").catch((error) =>
+			void this.host.decideApproval(pending.id, "approve", undefined, "always").catch((error) =>
 				console.warn(`approving ${pending.id} failed`, error),
 			);
 		}
-		return this.decideApproval(id, "approve", note);
+		return this.host.decideApproval(id, "approve", note);
 	}
 
 	// Tool permissions: whether Pim may use each tool that acts on the world or comes from a connector,
@@ -425,14 +430,14 @@ export class Approvals {
 			if (tool !== WRITE_SKILL) throw new HttpError(404, `${agent.name} has no switch for ${tool}`);
 			if (permission === null) this.host.store.clearToolPermission(agentAudience(agent.id), "", WRITE_SKILL);
 			else this.host.store.setToolPermission(agentAudience(agent.id), "", WRITE_SKILL, permission, null);
-			return this.agentSkillsPermission(agent);
+			return this.host.agentSkillsPermission(agent);
 		}
-		const found = this.agentToolPermissions(agent).find((info) => info.app === app && info.tool === tool);
+		const found = this.host.agentToolPermissions(agent).find((info) => info.app === app && info.tool === tool);
 		if (!found) throw new HttpError(404, `${agent.name} has no tool ${tool} in the connector ${app}`);
 		const info = this.host.apps.tools().find((candidate) => candidate.serverId === app && candidate.name === tool)!;
 		if (permission === null) this.host.store.clearToolPermission(agentAudience(agent.id), app, tool);
 		else this.host.store.setToolPermission(agentAudience(agent.id), app, tool, permission, toolDefinition(info));
-		return this.agentToolPermissions(agent).find((candidate) => candidate.app === app && candidate.tool === tool)!;
+		return this.host.agentToolPermissions(agent).find((candidate) => candidate.app === app && candidate.tool === tool)!;
 	}
 
 	/**
@@ -463,7 +468,7 @@ export class Approvals {
 		if (permission === null) this.host.store.clearToolPermission(audience, app, tool);
 		else this.host.store.setToolPermission(audience, app, tool, permission, definition);
 		if (audience === OWNER) this.host.reinstallApprovals();
-		return this.toolPermissions(audience).find((info) => (info.app ?? "") === app && info.tool === tool)!;
+		return this.host.toolPermissions(audience).find((info) => (info.app ?? "") === app && info.tool === tool)!;
 	}
 
 	/**
@@ -496,7 +501,7 @@ export class Approvals {
 		if (this.host.closed()) return;
 		const approval = this.host.store.approval(payload.id);
 		if (approval?.status !== "pending") return;
-		await this.decideApproval(approval.id, approval.onTimeout, undefined, "timeout");
+		await this.host.decideApproval(approval.id, approval.onTimeout, undefined, "timeout");
 	}
 
 	// The majordomo deciding other agents' approval requests for the person.
@@ -583,7 +588,7 @@ export class Approvals {
 			return "Asked the person.";
 		}
 		try {
-			const decided = await this.decideApproval(id, decision, note, "majordomo");
+			const decided = await this.host.decideApproval(id, decision, note, "majordomo");
 			return decided.status === "approved" ? `Approved. Result:\n${decided.result ?? ""}` : "Denied.";
 		} catch (error) {
 			return `It couldn't be decided: ${errorMessage(error)}`;

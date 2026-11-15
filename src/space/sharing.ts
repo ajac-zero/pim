@@ -67,6 +67,7 @@ export interface SharingHost {
 	readonly publicApproval: (approval: Approval) => PublicApproval;
 	readonly deliverNotification: (notification: Notification, options?: { sockets?: boolean; push?: boolean; }) => Promise<void>;
 	readonly expireApproval: (payload: { id: string; }) => Promise<void>;
+	readonly guestBot: () => GuestBot | null;
 	readonly agents: AgentStore;
 	readonly artifactBridge: (key: string, sha: string, op: unknown, args: Record<string, unknown>, shared: (op: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<{ value: unknown; } | { needs: { capability: string; label: string; }; }>;
 	readonly grantArtifact: (key: string, sha: string, capability: unknown) => string;
@@ -80,6 +81,7 @@ export interface SharingHost {
 	readonly chosenModel: () => PiModel;
 	readonly appsOf: (agent: Agent) => DirectoryApp[];
 	readonly imageServices: () => ImageServices | null;
+	readonly shareableTools: (agent: Agent) => BotTool[];
 	readonly agent: (id: string) => Agent;
 	readonly waitingCall: (approval: Pick<Approval, "session" | "callId">) => Promise<TaskId | null>;
 	readonly resumeTask: (session: string, task: TaskId) => ReturnType<PiHarness["resumeTask"]>;
@@ -392,7 +394,7 @@ export class Sharing {
 
 	/** The id of this space's majordomo, which host operations (./hostops.ts) check their caller against; null in an erased or guest's space. */
 	async majordomoId(): Promise<string | null> {
-		if (this.host.closed() || this.guestBot() !== null) return null;
+		if (this.host.closed() || this.host.guestBot() !== null) return null;
 		return this.host.agents.majordomo().id;
 	}
 
@@ -570,7 +572,7 @@ export class Sharing {
 	 */
 	async syncBot(bot: (Omit<Bot, "icon" | "bundle"> & { image: AgentIcon | null }) | null): Promise<void> {
 		this.host.assertOpen();
-		const guest = this.guestBot();
+		const guest = this.host.guestBot();
 		if (!guest) return;
 		if (bot === null) return this.#guestLimit({ dailyMessages: 0, dailyToolCalls: 0 });
 		if (guest.bot !== bot.id || (guest.sharedAt === bot.sharedAt && guest.owner !== undefined)) return;
@@ -754,7 +756,7 @@ export class Sharing {
 	async botTools(agentId: string, names: readonly string[]): Promise<{ tools: BotTool[]; missing: string[] }> {
 		this.host.assertOpen();
 		await this.host.refreshCustomApps();
-		const shareable = this.shareableTools(this.host.agent(agentId));
+		const shareable = this.host.shareableTools(this.host.agent(agentId));
 		const wanted = [...new Set(names)];
 		return {
 			tools: shareable.filter((tool) => wanted.includes(tool.name)),
@@ -873,13 +875,13 @@ export class Sharing {
 	/** In a guest's space: whether a call to one of their bot's tools still waits for the bot's author (`owner`) to decide. */
 	async botCallWaits(owner: string, session: string, callId: string): Promise<boolean> {
 		this.host.assertOpen();
-		return this.guestBot()?.owner === owner && (await this.host.waitingCall({ session, callId })) !== null;
+		return this.host.guestBot()?.owner === owner && (await this.host.waitingCall({ session, callId })) !== null;
 	}
 
 	/** In a guest's space: the bot's author decided about a call that waits for them. It runs again, and finds their decision. */
 	async botToolDecided(owner: string, session: string, callId: string): Promise<void> {
 		this.host.assertOpen();
-		if (this.guestBot()?.owner !== owner) return;
+		if (this.host.guestBot()?.owner !== owner) return;
 		const call = await this.host.waitingCall({ session, callId });
 		if (call) await this.host.resumeTask(session, call);
 	}
@@ -907,7 +909,7 @@ export class Sharing {
 	 * guest's, so that chats begun before a change see it.
 	 */
 	installBotTools(): void {
-		const guest = this.guestBot();
+		const guest = this.host.guestBot();
 		const owner = guest?.owner;
 		this.host.registry.install(
 			botToolsExtension(

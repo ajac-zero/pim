@@ -86,6 +86,7 @@ export interface ReportsHost {
 	readonly skills: SkillStore;
 	readonly getMcpServers: () => import("agents").MCPServersState;
 	readonly images: ImageStore;
+	readonly remainingData: () => Promise<string[]>;
 	erasing: boolean;
 	readonly getConnections: <TState = unknown>(tag?: string) => Iterable<Connection<TState>>;
 	readonly connectorSubscriptionsKept: { readonly engine: TriggerEngine; readonly manager: ConnectorSubscriptionManager; } | undefined;
@@ -415,7 +416,7 @@ export class Reports {
 
 	/** Whether the space is erased, and what of the person's data it still holds; a finished deletion is both. */
 	async erasure(): Promise<{ sealed: boolean; remaining: string[] }> {
-		return { sealed: this.host.store.erasedAt() !== null, remaining: await this.remainingData() };
+		return { sealed: this.host.store.erasedAt() !== null, remaining: await this.host.remainingData() };
 	}
 
 	/**

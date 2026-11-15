@@ -46,11 +46,14 @@ export interface TriggersHost {
 	readonly deliverNotification: (notification: Notification, options?: { sockets?: boolean; push?: boolean; }) => Promise<void>;
 	readonly apps: McpBridge;
 	readonly name: string;
+	readonly triggerEngine: () => TriggerEngine | null;
 	readonly getConnections: <TState = unknown>(tag?: string) => Iterable<Connection<TState>>;
+	readonly wakeTriggers: () => Promise<void>;
 	readonly assertOpen: () => void;
 	readonly registry: import("@earendil-works/pi-durable").Registry<import("@earendil-works/pi-durable").ToolRegistration>;
 	readonly profile: () => OwnerProfile | null;
 	readonly guestBot: () => GuestBot | null;
+	readonly enableTriggerEngine: () => Promise<void>;
 	readonly note: (event: string, fields: Record<string, unknown>) => void;
 	readonly deployment: () => DeploymentSettings;
 	readonly appsOf: (agent: Agent) => DirectoryApp[];
@@ -188,7 +191,7 @@ export class SpaceTriggers {
 	 * exists.
 	 */
 	computerTriggers(): ComputerTriggers | null {
-		const engine = this.triggerEngine();
+		const engine = this.host.triggerEngine();
 		if (!engine) return null;
 		this.#computerTriggersKept ??= new ComputerTriggers(this.host.ctx.storage.sql, {
 			store: engine.store,
@@ -199,7 +202,7 @@ export class SpaceTriggers {
 			tokenDigest: () => this.host.computer.tokenDigest(),
 			socket: (id) => [...this.host.getConnections(COMPUTER_TAG)].find((connection) => connection.id === id && connection.readyState === WebSocket.OPEN),
 			// Renewals and handoffs go by the triggers' wake, an alarm, which outlasts the Durable Object's eviction.
-			wake: () => void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error)),
+			wake: () => void this.host.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error)),
 		});
 		return this.#computerTriggersKept;
 	}
@@ -210,17 +213,17 @@ export class SpaceTriggers {
 		return {
 			request: (triggerId) => {
 				const triggers = this.computerTriggers();
-				const engine = this.triggerEngine();
+				const engine = this.host.triggerEngine();
 				return triggers && engine ? grantRequest(engine.store, this.host.name, triggers.runtimeId(), triggerId) : { refused: off };
 			},
 			granted: (approvalId) => {
 				const triggers = this.computerTriggers();
-				const engine = this.triggerEngine();
+				const engine = this.host.triggerEngine();
 				if (!triggers || !engine) throw new Error(off);
 				const said = recordGrant(engine.store, this.#computerGrants(), approvalId);
 				triggers.refresh();
 				// A trigger pointed at its grant may have work due now, which only the wake hands on.
-				void this.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error));
+				void this.host.wakeTriggers().catch((error) => console.warn("setting the trigger wake failed", error));
 				return said;
 			},
 		};
@@ -249,7 +252,7 @@ export class SpaceTriggers {
 		this.host.store.setMeta(ENGINE_KEY, "on");
 		// Once pi's registry is set up; before, setting it up installs them.
 		if (this.host.registry.snapshot().extension("pim.approvals")) this.installTriggerTools();
-		await this.wakeTriggers();
+		await this.host.wakeTriggers();
 	}
 
 	/**
@@ -267,7 +270,7 @@ export class SpaceTriggers {
 		this.#computerTriggersKept = undefined;
 		this.connectorSubscriptionsKept = undefined;
 		this.installTriggerTools();
-		await this.wakeTriggers();
+		await this.host.wakeTriggers();
 	}
 
 	/**
@@ -281,7 +284,7 @@ export class SpaceTriggers {
 	async ensureTriggerEngine(): Promise<void> {
 		try {
 			if (this.host.closed() || this.host.store.meta(ENGINE_KEY) === "on" || this.host.profile() === null || this.host.guestBot() !== null) return;
-			await this.enableTriggerEngine();
+			await this.host.enableTriggerEngine();
 			console.log(JSON.stringify({ event: "pim.triggers_on", owner: this.host.name }));
 		} catch (error) {
 			this.host.note("triggers_on_failed", { error: String(error) });
@@ -305,7 +308,7 @@ export class SpaceTriggers {
 	 * trigger wake.
 	 */
 	#connectorSubscriptions(): ConnectorSubscriptionManager | null {
-		const engine = this.triggerEngine();
+		const engine = this.host.triggerEngine();
 		if (!engine) return null;
 		if (this.connectorSubscriptionsKept?.engine !== engine) {
 			const request = async (connectorId: string, method: string, params: Record<string, unknown>): Promise<ProviderAnswer<never>> => {
@@ -343,7 +346,7 @@ export class SpaceTriggers {
 	async #syncConnectorSubscriptions(): Promise<void> {
 		try {
 			await this.#connectorSubscriptions()?.tick();
-			await this.wakeTriggers();
+			await this.host.wakeTriggers();
 		} catch (error) {
 			console.warn("keeping connector subscriptions failed", error);
 		}
@@ -359,7 +362,7 @@ export class SpaceTriggers {
 		publicUrl: () => this.host.deployment().publicUrl ?? null,
 		sync: () => this.#syncConnectorSubscriptions(),
 		subscription: (triggerId): WatchSubscription => {
-			const engine = this.triggerEngine();
+			const engine = this.host.triggerEngine();
 			const trigger = engine?.store.get(triggerId);
 			const lastEventAt = engine?.store.sourceState(triggerId)?.lastObservedAt ?? null;
 			const binding = trigger ? this.#connectorSubscriptions()?.bindings(triggerId).filter((candidate) => candidate.generation === trigger.generation).at(-1) : undefined;
@@ -375,7 +378,7 @@ export class SpaceTriggers {
 	 * for a chat deleted, or a connector about to be removed.
 	 */
 	async stopConnectorTriggers(which: (source: ConnectorEventSource, destination: TriggerDestination) => boolean): Promise<void> {
-		const engine = this.triggerEngine();
+		const engine = this.host.triggerEngine();
 		if (!engine) return;
 		let stopped = false;
 		for (const trigger of engine.store.list()) {
@@ -395,7 +398,7 @@ export class SpaceTriggers {
 	 * answers as the adapter says: `410` for a key that names nothing.
 	 */
 	async receiveConnectorEvent(key: string, request: Request): Promise<Response> {
-		const engine = this.triggerEngine();
+		const engine = this.host.triggerEngine();
 		const subscriptions = this.#connectorSubscriptions();
 		if (!engine || !subscriptions) return new Response("Gone", { status: 410 });
 		const sql = this.host.ctx.storage.sql;
@@ -411,7 +414,7 @@ export class SpaceTriggers {
 			kept: (admitted) => new ConnectorEventData(sql).keep({ ...admitted, data: JSON.stringify(admitted.data, null, 2) }),
 		});
 		const outcome = await ingress.receive({ owner: this.host.name, key }, request);
-		if (outcome.disposition === "accepted" && outcome.reason === "admitted") await this.wakeTriggers();
+		if (outcome.disposition === "accepted" && outcome.reason === "admitted") await this.host.wakeTriggers();
 		return ingressResponse(outcome);
 	}
 
@@ -423,7 +426,7 @@ export class SpaceTriggers {
 	 * it exists.
 	 */
 	triggerApi(): TriggerApi | null {
-		const engine = this.triggerEngine();
+		const engine = this.host.triggerEngine();
 		if (!engine || this.host.guestBot()) return null;
 		if (this.#triggerApiKept?.engine !== engine) {
 			this.#triggerApiKept = new TriggerApi(this.host.ctx.storage.sql, {
@@ -431,7 +434,7 @@ export class SpaceTriggers {
 				transaction: (work) => this.host.ctx.storage.transactionSync(work),
 				now: () => this.host.triggerClock(),
 				// The wake is the only thing that ticks the coordinator: a trigger made or changed, through a route or a tool, is due by it.
-				changed: () => this.wakeTriggers(),
+				changed: () => this.host.wakeTriggers(),
 				host: {
 					agentExists: (id) => this.host.agents.get(id) !== undefined,
 					majordomoId: () => this.host.agents.majordomo().id,
@@ -558,12 +561,12 @@ export class SpaceTriggers {
 			if (subscriptions) await this.host.mcp.waitForConnections({ timeout: 20_000 });
 			// Subscriptions first, so a trigger enabled since is subscribed before anything else waits on the connector.
 			await subscriptions?.tick();
-			await this.triggerEngine()?.coordinator.tick();
+			await this.host.triggerEngine()?.coordinator.tick();
 			// What connector events carried is kept a day at most.
-			if (this.triggerEngine()) new ConnectorEventData(this.host.ctx.storage.sql).sweep(this.host.triggerClock());
+			if (this.host.triggerEngine()) new ConnectorEventData(this.host.ctx.storage.sql).sweep(this.host.triggerClock());
 			this.host.usage.calls.rollup(this.host.triggerClock());
 		} finally {
-			await this.wakeTriggers();
+			await this.host.wakeTriggers();
 		}
 	}
 
@@ -575,7 +578,7 @@ export class SpaceTriggers {
 	wakeTriggers(): Promise<void> {
 		const next = this.#triggerWake.then(async () => {
 			// The coordinator's next work, keeping connectors' subscriptions, renewing the computer's lease on its triggers, or sweeping what connector events carried, whichever comes first.
-			const engine = this.triggerEngine();
+			const engine = this.host.triggerEngine();
 			const schedules = await this.host.listSchedules();
 			const due = [
 				engine?.coordinator.nextWakeAt() ?? null,

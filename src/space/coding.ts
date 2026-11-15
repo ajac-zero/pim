@@ -41,6 +41,7 @@ export interface CodingHost {
 	readonly env: Env;
 	readonly activityWatch: ActivityWatch;
 	readonly note: (event: string, fields: Record<string, unknown>) => void;
+	readonly codingTurnEnded: (chat: string, text: string, key: string, agent?: string) => Promise<boolean>;
 }
 
 export class SpaceCoding {
@@ -208,7 +209,7 @@ export class SpaceCoding {
 			if (!this.host.activityWatch.claim(key, Date.now())) continue;
 			this.host.note("activity_stalled", { source, reason: stall.reason, since: stall.since });
 			try {
-				await this.codingTurnEnded(chat, `[Coding thread ${source}] Stalled: ${stall.reason}. Last activity: ${new Date(activity.lastActivityAt).toISOString()}. ${activity.current.map((tool) => `${tool.name}: ${tool.summary} (${Math.floor(tool.elapsedMs / 1000)} s)`).join("; ")}`, key, agent);
+				await this.host.codingTurnEnded(chat, `[Coding thread ${source}] Stalled: ${stall.reason}. Last activity: ${new Date(activity.lastActivityAt).toISOString()}. ${activity.current.map((tool) => `${tool.name}: ${tool.summary} (${Math.floor(tool.elapsedMs / 1000)} s)`).join("; ")}`, key, agent);
 			} catch (error) {
 				this.host.activityWatch.retry(key);
 				throw error;

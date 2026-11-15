@@ -56,6 +56,7 @@ export interface ConnectorsHost {
 	readonly registry: import("@earendil-works/pi-durable").Registry<import("@earendil-works/pi-durable").ToolRegistration>;
 	readonly migrateAlwaysApproved: () => void;
 	readonly services: () => PimServices;
+	readonly appDirectory: () => DirectoryApp[];
 	readonly extensions: PimExtensions;
 	readonly note: (event: string, fields: Record<string, unknown>) => void;
 	readonly reinstallApprovals: () => void;
@@ -162,7 +163,7 @@ export class Connectors {
 			services,
 			this.#appExtras(services),
 			(session) => this.appsOf(this.host.roleOf(session).agent),
-			() => this.appDirectory(),
+			() => this.host.appDirectory(),
 			(session, server, tool) => agentToolPermission(this.host.store, this.host.roleOf(session).agent.id, server, tool).permission,
 		);
 	}
@@ -178,7 +179,7 @@ export class Connectors {
 
 	/** The connectors an agent works with: those it lists. */
 	appsOf(agent: Agent): DirectoryApp[] {
-		const directory = this.appDirectory();
+		const directory = this.host.appDirectory();
 		return [...new Set(agent.apps)].flatMap((ref) => directory.find((app) => app.ref === ref) ?? []);
 	}
 
@@ -313,12 +314,12 @@ export class Connectors {
 		if (!(await this.#ownerIsAdmin())) throw new Error("Only this Pim's admin adds connectors to it.");
 		const url = input.url.trim();
 		await this.refreshCustomApps(true);
-		let app = this.appDirectory().find((candidate) => candidate.url === url);
+		let app = this.host.appDirectory().find((candidate) => candidate.url === url);
 		if (!app) {
 			const added = await this.host.env.Gallery.getByName("gallery").addCustomApp({ name: input.name, url, description: input.description });
 			console.log(JSON.stringify({ event: "pim.app_added", app: added.id, by: this.host.name }));
 			await this.refreshCustomApps(true);
-			app = this.appDirectory().find((candidate) => candidate.ref === `${CUSTOM_APPS}/${added.id}`);
+			app = this.host.appDirectory().find((candidate) => candidate.ref === `${CUSTOM_APPS}/${added.id}`);
 		}
 		if (!app) throw new Error(`${input.name} was added to this Pim, but this space doesn't see it yet. Try again in a minute.`);
 		return app;
@@ -326,7 +327,7 @@ export class Connectors {
 
 	/** Connectors given through the API must be in the directory. */
 	checkApps<T extends { apps: readonly string[] }>(input: T): T {
-		const directory = this.appDirectory();
+		const directory = this.host.appDirectory();
 		const missing = input.apps.find((ref) => !directory.some((app) => app.ref === ref));
 		if (missing) throw new HttpError(400, `This Pim offers no connector ${missing}`);
 		return input;

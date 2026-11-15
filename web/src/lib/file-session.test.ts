@@ -1,7 +1,11 @@
+import { ensureSyntaxTree } from "@codemirror/language";
+import { EditorState } from "@codemirror/state";
+import { highlightTree, tagHighlighter, tags } from "@lezer/highlight";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { languageOf } from "~/lib/editor-language";
+import { languageOf, loadLanguage } from "~/lib/editor-language";
 import { AUTOSAVE_MS, type FileClient, FileSession } from "~/lib/file-session";
 import { decodeFile, joinText } from "~/lib/file-text";
+import { previewOf } from "~/lib/files";
 import { ApiError, FileConflictError, type FileWrite } from "~/lib/pim-api";
 
 /** Starts a save without waiting for the mock server to answer it. */
@@ -91,6 +95,90 @@ it("picks a language by extension, and none for plain text", () => {
   expect(languageOf("notes.txt")).toBeNull();
   expect(languageOf(".ts")).toBeNull();
   expect(languageOf("Makefile")).toBeNull();
+});
+
+it("picks C, C++ and CUDA by extension, ignoring case", () => {
+  for (const ext of ["c", "h", "cpp", "cc", "cxx", "hpp", "hh", "hxx", "inl"]) {
+    expect(languageOf(`a.${ext}`)).toBe("cpp");
+  }
+  expect(languageOf("kernel.CPP")).toBe("cpp");
+  expect(languageOf("a.cu")).toBe("cuda");
+  expect(languageOf("a.CUH")).toBe("cuda");
+  expect(previewOf("a.c")).toEqual({ kind: "code", language: "c" });
+  expect(previewOf("a.hpp")).toEqual({ kind: "code", language: "cpp" });
+  expect(previewOf("a.cu")).toEqual({ kind: "code", language: "cpp" });
+  expect(previewOf("a.cuh")).toEqual({ kind: "code", language: "cpp" });
+});
+
+/** The classes the highlighter gives each token of `doc`, written as `text:class`. */
+async function highlighted(name: string, doc: string) {
+  const extension = await loadLanguage(name);
+  const state = EditorState.create({ doc, extensions: extension ?? [] });
+  const tree = ensureSyntaxTree(state, doc.length, 5000);
+  const found: string[] = [];
+  let errors = 0;
+  tree?.iterate({
+    enter: (node) => {
+      if (node.type.isError) errors++;
+    },
+  });
+  const classes = tagHighlighter([
+    { tag: tags.keyword, class: "keyword" },
+    { tag: tags.meta, class: "meta" },
+    { tag: tags.typeName, class: "type" },
+    { tag: tags.standard(tags.variableName), class: "builtin" },
+    { tag: tags.number, class: "number" },
+    { tag: tags.comment, class: "comment" },
+  ]);
+  if (tree)
+    highlightTree(tree, classes, (from, to, cls) =>
+      found.push(`${doc.slice(from, to)}:${cls}`),
+    );
+  return { found, errors };
+}
+
+it("highlights C++ with its Lezer grammar", async () => {
+  const { found, errors } = await highlighted(
+    "a.cpp",
+    "#include <vector>\ntemplate <typename T>\nconstexpr size_t n = 0x1f; // size\n",
+  );
+  expect(errors).toBe(0);
+  expect(found).toEqual(
+    expect.arrayContaining([
+      "#include:meta",
+      "template:keyword",
+      "constexpr:keyword",
+      "0x1f:number",
+      "// size:comment",
+    ]),
+  );
+});
+
+it("highlights CUDA kernels and launches without parse errors", async () => {
+  const { found } = await highlighted(
+    "a.cu",
+    `#include <cuda_runtime.h>
+__global__ void kernel(const float* __restrict__ x, half* y, int n) {
+  __shared__ float tile[32];
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  float4 v = {1.0f, 0, 0, 0};
+}
+void run() { kernel<<<grid, block, 0, stream>>>(x, y, n); }`,
+  );
+  expect(found).toEqual(
+    expect.arrayContaining([
+      "#include <cuda_runtime.h>:meta",
+      "__global__:keyword",
+      "__restrict__:keyword",
+      "__shared__:keyword",
+      "half:builtin",
+      "blockIdx:builtin",
+      "blockDim:builtin",
+      "threadIdx:builtin",
+      "float4:builtin",
+      "1.0f:number",
+    ]),
+  );
 });
 
 it("round-trips a BOM and CRLF line endings byte for byte", async () => {

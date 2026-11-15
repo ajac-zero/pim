@@ -36,6 +36,22 @@ const CODE: Record<string, BundledLanguage> = {
   toml: "toml",
   sh: "shellscript",
   sql: "sql",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cc: "cpp",
+  cxx: "cpp",
+  hpp: "cpp",
+  hh: "cpp",
+  hxx: "cpp",
+  inl: "cpp",
+  // Shiki has no CUDA grammar; C++ covers its syntax apart from the qualifiers.
+  cu: "cpp",
+  cuh: "cpp",
+  rs: "rust",
+  go: "go",
+  jsx: "jsx",
+  tsx: "tsx",
 };
 const PLAIN = new Set(["txt", "csv", "tsv", "log", "ics", "vcf"]);
 

@@ -720,6 +720,10 @@ describe("an agent's coding tools", () => {
 		}]);
 		const activity = { running: true, lastActivityAt: 100, current: [{ name: "test", summary: "command=vitest run", startedAt: 100, elapsedMs: 901000, timeoutMs: 900000 }], steps: [], stalls: [{ key: "tool:100:test", reason: "past declared timeout", since: 100 }] };
 		const pim = await getAgentByName(env.Pim, OWNER);
+		// Its turn has ended, so it has nothing to stall: no notice. Running again, it can.
+		await pim.codingStalled(id, activity);
+		const row = (await codingScheduler(env, OWNER).thread(id))!;
+		await codingScheduler(env, OWNER).recordThread({ ...row, state: "running", updatedAt: row.updatedAt + 1 });
 		await pim.codingStalled(id, activity);
 		await pim.codingStalled(id, activity);
 		await settled(chat);

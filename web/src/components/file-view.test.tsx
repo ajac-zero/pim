@@ -234,3 +234,64 @@ it("shows how to connect a computer, and no error, where there is none", () => {
   expect(screen.queryByText("This file isn't there anymore.")).toBeNull();
   expect(read).not.toHaveBeenCalled();
 });
+
+it("zooms the code editor from the header, remembers it, and shows the controls for markdown only while editing", async () => {
+  const items = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => items.set(key, value),
+    removeItem: (key: string) => items.delete(key),
+  });
+  read.mockResolvedValue({ bytes: new TextEncoder().encode("x"), sha256: "h" });
+  const client = new QueryClient({
+    defaultOptions: { queries: { staleTime: Infinity } },
+  });
+  const file = (name: string) => ({
+    name,
+    path: `/workspace/${name}`,
+    type: "file" as const,
+    size: 1,
+    updatedAt: "",
+  });
+  client.setQueryData(filesQuery("/workspace").queryKey, {
+    path: "/workspace",
+    entries: [file("a.cu"), file("n.md")],
+  });
+  const view = (path: string) => (
+    <QueryClientProvider client={client}>
+      <FileView path={path} />
+    </QueryClientProvider>
+  );
+  const { unmount } = render(view("/workspace/a.cu"));
+  await screen.findByLabelText("source");
+  expect(screen.getByText("13px")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+  expect(localStorage.getItem("pim-editor-font-size")).toBe("14");
+  fireEvent.click(screen.getByText("14px"));
+  expect(screen.getByText("13px")).toBeTruthy();
+  expect(localStorage.getItem("pim-editor-font-size")).toBeNull();
+  for (let i = 0; i < 5; i++) {
+    fireEvent.click(screen.getByRole("button", { name: "Zoom out" }));
+  }
+  expect(screen.getByText("10px")).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "Zoom out" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  for (let i = 0; i < 20; i++) {
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+  }
+  expect(screen.getByText("24px")).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "Zoom in" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  unmount();
+
+  render(view("/workspace/n.md"));
+  await screen.findByText("x");
+  expect(screen.queryByRole("button", { name: "Zoom in" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  await screen.findByLabelText("source");
+  expect(screen.getByText("24px")).toBeTruthy();
+});

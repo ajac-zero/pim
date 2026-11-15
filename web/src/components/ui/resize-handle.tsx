@@ -11,13 +11,21 @@ export function useStoredSize(
 ): [number, (size: number | null) => void] {
   const stored = useSyncExternalStore(
     subscribe,
-    () => localStorage.getItem(key),
+    () => {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    },
     () => null,
   );
   const size = stored === null ? Number.NaN : Number(stored);
   const set = (next: number | null) => {
-    if (next === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, String(next));
+    try {
+      if (next === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, String(next));
+    } catch {}
     for (const listener of listeners) listener();
   };
   return [Number.isFinite(size) ? size : fallback, set];

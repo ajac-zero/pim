@@ -64,3 +64,23 @@ export function joinText(
     (bom ? "\ufeff" : "") + (eol === "\r\n" ? text.replace(/\n/g, eol) : text)
   );
 }
+
+export const MIN_EDITOR_FONT_SIZE = 10;
+export const MAX_EDITOR_FONT_SIZE = 24;
+export const EDITOR_FONT_STEP = 1;
+export const EDITOR_FONT_SIZE_KEY = "pim-editor-font-size";
+
+export function clampEditorFontSize(size: number) {
+  return Math.min(
+    MAX_EDITOR_FONT_SIZE,
+    Math.max(MIN_EDITOR_FONT_SIZE, Math.round(size)),
+  );
+}
+
+/** 13px like other code views; 16px on phones, so iOS does not zoom the page when the editor is focused. */
+export function defaultEditorFontSize() {
+  return window.matchMedia?.("(max-width: 767px) and (pointer: coarse)")
+    ?.matches
+    ? 16
+    : 13;
+}

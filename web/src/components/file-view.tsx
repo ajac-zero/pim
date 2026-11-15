@@ -13,8 +13,17 @@ import {
   savePdfPage,
 } from "~/components/pdf-view";
 import { Button } from "~/components/ui/button";
+import { useStoredSize } from "~/components/ui/resize-handle";
 import type { FileSession, SessionStatus } from "~/lib/file-session";
-import { MAX_VIEWABLE_BYTES } from "~/lib/file-text";
+import {
+  clampEditorFontSize,
+  defaultEditorFontSize,
+  EDITOR_FONT_SIZE_KEY,
+  EDITOR_FONT_STEP,
+  MAX_EDITOR_FONT_SIZE,
+  MAX_VIEWABLE_BYTES,
+  MIN_EDITOR_FONT_SIZE,
+} from "~/lib/file-text";
 import { baseName, parentOf, previewOf } from "~/lib/files";
 import { ApiError, FILES_ROOT, fileContentUrl, pim } from "~/lib/pim-api";
 import { computerQuery, filesQuery } from "~/lib/queries";
@@ -23,6 +32,62 @@ import { cn } from "~/lib/utils";
 
 // CodeMirror is its own chunk, fetched when a text file first opens.
 const FileEditor = lazy(() => import("~/components/file-editor"));
+
+/** The code editor's font size, kept in this browser and shared by every open file. */
+function useEditorFontSize(): [number, (next: number | null) => void] {
+  const [stored, store] = useStoredSize(
+    EDITOR_FONT_SIZE_KEY,
+    defaultEditorFontSize(),
+  );
+  return [
+    clampEditorFontSize(stored),
+    (next) => store(next === null ? null : clampEditorFontSize(next)),
+  ];
+}
+
+/** Font size buttons for the code editor, kept in the file's header. */
+function EditorFontControls({
+  fontSize,
+  onChange,
+}: {
+  fontSize: number;
+  onChange: (next: number | null) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="flex shrink-0 items-center gap-1 text-sm">
+      <Button
+        size="icon"
+        variant="ghost"
+        className="size-7"
+        aria-label={t("zoomOut")}
+        title={t("zoomOut")}
+        disabled={fontSize <= MIN_EDITOR_FONT_SIZE}
+        onClick={() => onChange(fontSize - EDITOR_FONT_STEP)}
+      >
+        −
+      </Button>
+      <button
+        type="button"
+        className="min-w-10 text-center text-muted-foreground tabular-nums"
+        onClick={() => onChange(null)}
+      >
+        {fontSize}px
+      </button>
+      <Button
+        size="icon"
+        variant="ghost"
+        className="size-7"
+        aria-label={t("zoomIn")}
+        title={t("zoomIn")}
+        disabled={fontSize >= MAX_EDITOR_FONT_SIZE}
+        onClick={() => onChange(fontSize + EDITOR_FONT_STEP)}
+      >
+        +
+      </Button>
+    </div>
+  );
+}
 
 export function FileMissing({
   message,
@@ -163,6 +228,7 @@ export function FileView({
   // Markdown opens rendered; "Edit" swaps in the editor, over the same session, so the buffer survives toggling.
   const [editing, setEditing] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [fontSize, setFontSize] = useEditorFontSize();
   const [page, setPage] = useState(() => savedPdfPage(path));
   const [pageCount, setPageCount] = useState(0);
   const turnPage = (next: number) => {
@@ -252,6 +318,9 @@ export function FileView({
             />
             <PdfZoomControls zoom={zoom} onZoom={setZoom} />
           </>
+        )}
+        {load.phase === "ready" && textual && showEditor && (
+          <EditorFontControls fontSize={fontSize} onChange={setFontSize} />
         )}
         <Button asChild size="icon" variant="ghost" className="size-8 shrink-0">
           <a
@@ -349,6 +418,8 @@ export function FileView({
               session={load.session}
               name={name}
               readOnly={state.status === "readonly"}
+              fontSize={fontSize}
+              onFontSizeChange={setFontSize}
             />
           </Suspense>
         )}

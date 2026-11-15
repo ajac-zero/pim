@@ -74,6 +74,12 @@ describe("architecture", () => {
 		for (const file of collaborators) expect(reach(file).has(pim), `${rel(file)} loads src/pim.ts`).toBe(false);
 	});
 
+	it("keeps the space's collaborators from loading one another in a circle", () => {
+		const loads = (file: string) => importsOf(file).filter(({ typeOnly }) => !typeOnly).flatMap(({ specifier }) => resolve(file, specifier) ?? []);
+		const reaches = (from: string, target: string, seen = new Set<string>()): boolean => loads(from).some((next) => next === target || (!seen.has(next) && seen.add(next) && reaches(next, target, seen)));
+		for (const file of sourcesIn(path.join(root, "src/space"))) expect(reaches(file, file), `${rel(file)} loads itself`).toBe(false);
+	});
+
 	it("gives the packages no import of src/ or web/", () => {
 		const files = fs.readdirSync(path.join(root, "packages")).flatMap((name) => sourcesIn(path.join(root, "packages", name)));
 		expect(files.length).toBeGreaterThan(0);

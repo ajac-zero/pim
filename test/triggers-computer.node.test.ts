@@ -21,12 +21,12 @@ import {
 	runtimeIdOf,
 	sourceConfigHash,
 	TRIGGERS_ENVELOPE,
-} from "../src/triggers/computer";
-import { type ChatCreation, type ChatLookup, type HostPreflight, type RunStatus, type SubmissionLookup, type SubmitResult, type TriggerAgentHost, TriggerCoordinator, type TriggerEvidence } from "../src/triggers/coordinator";
-import { triggerHistory } from "../src/triggers/engine";
+} from "@pim/triggers/computer";
+import { type ChatCreation, type ChatLookup, type HostPreflight, type RunStatus, type SubmissionLookup, type SubmitResult, type TriggerAgentHost, TriggerCoordinator, type TriggerEvidence } from "@pim/triggers/coordinator";
+import { triggerHistory } from "@pim/triggers/engine";
 import { grantRequest, recordGrant } from "../src/triggers/grant-action";
-import { firingText } from "../src/triggers/host";
-import { TriggerStore } from "../src/triggers/store";
+import { firingText } from "@pim/triggers/host";
+import { TriggerStore } from "@pim/triggers/store";
 
 const T0 = Date.UTC(2026, 10, 7);
 const OWNER = `o_${"a".repeat(26)}`;

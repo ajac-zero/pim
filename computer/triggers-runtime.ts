@@ -24,7 +24,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { FileSource, PollSource, ProcessSource, StreamSource } from "../src/triggers/spec.ts";
+import type { FileSource, PollSource, ProcessSource, StreamSource } from "@pim/triggers/spec";
 
 export const PROTOCOL = "triggers.v1";
 

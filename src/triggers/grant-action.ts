@@ -20,9 +20,9 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { approvalNote, fileApproval, type GatedAction } from "../extensions/approvals";
 import { type PimServices, text } from "../extensions/services";
-import { COMPUTER_GRANT_ACTION, type ComputerGrants, type ComputerSource, type GrantScope, sourceConfigHash } from "./computer";
-import { type PollSource, type ProcessSource, runsOnComputer, type StreamSource } from "./spec";
-import type { TriggerStore } from "./store";
+import { COMPUTER_GRANT_ACTION, type ComputerGrants, type ComputerSource, type GrantScope, sourceConfigHash } from "@pim/triggers/computer";
+import { type PollSource, type ProcessSource, runsOnComputer, type StreamSource } from "@pim/triggers/spec";
+import type { TriggerStore } from "@pim/triggers/store";
 
 /** The tool agents ask for a grant with, and the extension that offers it. */
 export const COMPUTER_GRANT_TOOL = "trigger_computer_grant";

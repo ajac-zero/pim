@@ -14,10 +14,10 @@ import {
 	TriggerCoordinator,
 	type TriggerCoordinatorOptions,
 	UNKNOWN_ATTENTION,
-} from "../src/triggers/coordinator";
-import type { TriggerDestination } from "../src/triggers/spec";
-import { TriggerStore } from "../src/triggers/store";
-import { TriggerValidationError } from "../src/triggers/validate";
+} from "@pim/triggers/coordinator";
+import type { TriggerDestination } from "@pim/triggers/spec";
+import { TriggerStore } from "@pim/triggers/store";
+import { TriggerValidationError } from "@pim/triggers/validate";
 
 // These tests build the store and the coordinator on a Durable Object's database of their own (Pim's own engine is tested in test/triggers-host.test.ts),
 // with a fake clock and a fake host; no model, chat or run of Pim's is touched.
@@ -1108,16 +1108,16 @@ BEGIN SELECT RAISE(ABORT, 'a run keeps the chat it was pinned to'); END;
 		});
 	});
 
-	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), into connector watches, which are triggers, and into what a space holds; the preview and the web app don't use it", () => {
-		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
+	it("is wired only into Pim, behind its gate (test/triggers-host.test.ts), into connector watches, which are triggers, and into what a space holds; the preview, the web app and the other packages don't use it", () => {
+		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}", "../packages/*/src/**/*.ts", "!../packages/triggers/src/**"], { query: "?raw", import: "default", eager: true });
 		expect(Object.keys(files)).toContain("../src/pim.ts");
-		// A file uses triggers when it imports a module of src/triggers/ (statically, for its effects, dynamically or to re-export it) or names their classes or tables; a URL such as the web app's `/triggers/<id>` is not a use.
-		const root = new URL("file:///repo/test/");
-		const importsTriggers = (path: string, source: string) =>
-			[...source.matchAll(/\b(?:from|import)\s*\(?\s*["'`]([^"'`]+)["'`]/g)].some(([, specifier]) => specifier!.startsWith(".") && new URL(specifier!, new URL(path, root)).pathname.startsWith("/repo/src/triggers/"));
+		expect(Object.keys(files)).toContain("../packages/shared/src/http.ts");
+		// A file uses triggers when it imports `@pim/triggers` (statically, for its effects, dynamically or to re-export it) or names their classes or tables; a URL such as the web app's `/triggers/<id>` is not a use.
+		const importsTriggers = (source: string) => [...source.matchAll(/\b(?:from|import)\s*\(?\s*["'`]([^"'`]+)["'`]/g)].some(([, specifier]) => /^@pim\/triggers(\/|$)/.test(specifier!));
 		const users = Object.entries(files)
+			// The two files of src/triggers/ are Pim's glue, its gated action and its tools, over the package.
 			.filter(([path]) => !path.startsWith("../src/triggers/"))
-			.filter(([path, source]) => importsTriggers(path, source) || /TriggerCoordinator|TriggerStore|pim_trigger/.test(source))
+			.filter(([path, source]) => importsTriggers(source as string) || /TriggerCoordinator|TriggerStore|pim_trigger/.test(source as string))
 			.map(([path]) => path);
 		// schedule_task makes its tasks through the triggers' API, in Pim's own extension.
 		expect(users).toEqual(["../src/extensions/app-events.ts", "../src/extensions/schedule.ts", "../src/pim.ts", "../src/store.ts"]);

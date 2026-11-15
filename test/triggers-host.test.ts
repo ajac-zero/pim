@@ -4,12 +4,12 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pim } from "../src/pim";
 import { TaskStore } from "../src/tasks";
-import { COMPUTER_TABLES } from "../src/triggers/computer";
-import { TriggerCoordinator, type TriggerRun } from "../src/triggers/coordinator";
-import { ENGINE_TABLES, TRIGGER_TICK_CALLBACK, type TriggerEngine, triggerHistory } from "../src/triggers/engine";
-import { PimTriggerHost, TriggerChatDoc, type TriggerSpace } from "../src/triggers/host";
-import { TriggerStore } from "../src/triggers/store";
-import { SUBSCRIPTION_TABLES } from "../src/triggers/subscriptions";
+import { COMPUTER_TABLES } from "@pim/triggers/computer";
+import { TriggerCoordinator, type TriggerRun } from "@pim/triggers/coordinator";
+import { ENGINE_TABLES, TRIGGER_TICK_CALLBACK, type TriggerEngine, triggerHistory } from "@pim/triggers/engine";
+import { PimTriggerHost, TriggerChatDoc, type TriggerSpace } from "@pim/triggers/host";
+import { TriggerStore } from "@pim/triggers/store";
+import { SUBSCRIPTION_TABLES } from "@pim/triggers/subscriptions";
 import { api, lastUserText, messagesOf, OWNER, pendingApproval, post, ROOT, settled, toolUse } from "./helpers";
 import { faux, triggerClock } from "./worker";
 

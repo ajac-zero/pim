@@ -210,15 +210,15 @@ import { type Agent, type AgentInput, type AgentModel, AgentStore, agentInput, c
 import { ChatLinkStore, LINK_ID, MAX_SHARED_BYTES, type SharedChat, sharedMessages } from "./chat-links";
 import type { AgentIcon, ArtifactToPublish, Bot, BotModel, PublishedAgent } from "./gallery";
 import { MAX_ROOM_DEPTH, mentioned, mentionsPerson, ROOM_ENTRY, ROOM_HISTORY_CHARS, ROOM_NOTICE, ROOM_POST, type RoomMode, RoomStore, roomHistory, roomPost, roomsExtension, type Seat } from "./rooms";
-import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAnswer, TriggerApi, TriggerApiError, triggerBody } from "./triggers/api";
-import { triggerFailures } from "./triggers/failures";
-import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, runtimeIdOf, TRIGGERS_ENVELOPE } from "./triggers/computer";
+import { idempotencyKey, ifMatch, PERSON, queryOf, TRIGGER_PATHS, type TriggerAnswer, TriggerApi, TriggerApiError, triggerBody } from "@pim/triggers/api";
+import { triggerFailures } from "@pim/triggers/failures";
+import { COMPUTER_GRANT_ACTION, ComputerGrants, ComputerTriggers, runtimeIdOf, TRIGGERS_ENVELOPE } from "@pim/triggers/computer";
 import { COMPUTER_GRANT_EXTENSION, type ComputerGrantHost, computerGrantAction, computerGrantExtension, grantRequest, recordGrant } from "./triggers/grant-action";
-import { ENGINE_KEY, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "./triggers/engine";
-import { ConnectorEventData, ConnectorIngress, eventContents, ingressResponse } from "./triggers/connector";
-import { ConnectorSubscriptionManager, type ProviderAnswer, type SubscriptionProvider } from "./triggers/subscriptions";
-import { TriggerChatDoc, type TriggerSpace, type TriggerTakeover } from "./triggers/host";
-import type { ConnectorEventSource, TriggerDestination } from "./triggers/spec";
+import { ENGINE_KEY, TRIGGER_TICK_CALLBACK, TriggerEngine, triggerHistory } from "@pim/triggers/engine";
+import { ConnectorEventData, ConnectorIngress, eventContents, ingressResponse } from "@pim/triggers/connector";
+import { ConnectorSubscriptionManager, type ProviderAnswer, type SubscriptionProvider } from "@pim/triggers/subscriptions";
+import { type StableOperation, TriggerChatDoc, type TriggerSpace, type TriggerTakeover } from "@pim/triggers/host";
+import type { ConnectorEventSource, TriggerDestination } from "@pim/triggers/spec";
 import { TRIGGERS_EXTENSION, triggersExtension } from "./triggers/tools";
 import { fromAgent, MAX_TASK_DEPTH, type Role, type Task, TaskStore, TERMINAL_STATES, tasksExtension, taskUpdate } from "./tasks";
 import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, REVIEW_EXTENSION, reviewExtension, withPreferences } from "./majordomo";
@@ -402,9 +402,6 @@ export type OwnerStatus = "active" | "suspended";
 
 /** What registration tells a space about its owner when it provisions it. */
 export type OwnerProfile = { readonly ownerId: string; readonly username: string };
-
-/** How `submitTo` keeps one key for an operation across retries: `exact` uses the key as given, and `keep` is told the key before the input is submitted. */
-export type StableOperation = { readonly exact: boolean; keep(operationId: string): void };
 
 /** A guest's bot: its id in the gallery, their copy of it, and when the sharing their copy follows was made. */
 /**

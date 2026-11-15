@@ -2,8 +2,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Agent } from "../agents";
 import type { Role } from "../tasks";
-import { API_LIMITS, PERSON, type TriggerActor, type TriggerApi, TriggerApiError } from "../triggers/api";
-import { TRIGGER_LIMITS, type TriggerSpec } from "../triggers/spec";
+import { API_LIMITS, PERSON, type TriggerActor, type TriggerApi, TriggerApiError } from "@pim/triggers/api";
+import { TRIGGER_LIMITS, type TriggerSpec } from "@pim/triggers/spec";
 import { definePimExtension } from "./define";
 import { json, text } from "./services";
 

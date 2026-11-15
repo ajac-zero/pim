@@ -23,7 +23,7 @@ import { type AdapterConfig, type AdapterHealth, type ComputerSource, DEFAULT_LI
 
 /**
  * The bounds a poll is run with. The timing bounds are the space's own
- * (`TRIGGER_DEFAULTS` in src/triggers/spec.ts: at least a minute between
+ * (`TRIGGER_DEFAULTS` in packages/triggers/src/spec.ts: at least a minute between
  * polls, at most a day, and a deadline from 1 to 30 seconds), checked again
  * here because the runtime reads a source's shape and leaves its bounds to
  * the space. The data bounds are what the runtime and the store take.

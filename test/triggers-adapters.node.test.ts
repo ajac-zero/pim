@@ -24,7 +24,7 @@ import {
 	TriggersRuntime,
 	sourceConfigHash,
 } from "../computer/triggers-runtime";
-import { TRIGGER_DEFAULTS, TRIGGER_LIMITS } from "../src/triggers/spec";
+import { TRIGGER_DEFAULTS, TRIGGER_LIMITS } from "@pim/triggers/spec";
 
 const T0 = Date.UTC(2026, 10, 7);
 const SECRET = "s3cr3t-poll-output";

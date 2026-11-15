@@ -12,8 +12,8 @@ import { type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { json, text } from "../extensions/services";
 import type { Role } from "../tasks";
-import { type TriggerActor, type TriggerApi, TriggerApiError } from "./api";
-import { FILE_EVENTS, TRIGGER_LIFECYCLES } from "./spec";
+import { type TriggerActor, type TriggerApi, TriggerApiError } from "@pim/triggers/api";
+import { FILE_EVENTS, TRIGGER_LIFECYCLES } from "@pim/triggers/spec";
 
 export const TRIGGERS_EXTENSION = "pim.triggers";
 

@@ -1,11 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { newSecret, signWebhook } from "../src/extensions/app-events";
+import { newSecret, signWebhook } from "@pim/shared/webhook";
 import type { Pim } from "../src/pim";
-import { type ConnectorStatus, type ConnectorSubscription, ConnectorIngress, type IngressOutcome, ingressResponse, renewalDecision } from "../src/triggers/connector";
-import { TriggerCoordinator, type TriggerAgentHost } from "../src/triggers/coordinator";
-import { triggerHistory } from "../src/triggers/engine";
-import { TriggerStore, type TriggerStoreOptions } from "../src/triggers/store";
+import { type ConnectorStatus, type ConnectorSubscription, ConnectorIngress, type IngressOutcome, ingressResponse, renewalDecision } from "@pim/triggers/connector";
+import { TriggerCoordinator, type TriggerAgentHost } from "@pim/triggers/coordinator";
+import { triggerHistory } from "@pim/triggers/engine";
+import { TriggerStore, type TriggerStoreOptions } from "@pim/triggers/store";
 
 // The ingress adapter on a Durable Object's database of its own, with a fake connector: no route, provider or network is involved.
 

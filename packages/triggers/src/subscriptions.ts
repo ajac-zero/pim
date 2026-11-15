@@ -30,7 +30,7 @@
  * provider's text, and the export leaves out the key and the secret.
  */
 
-import { newSecret as makeSecret } from "../extensions/app-events";
+import { newSecret as makeSecret } from "@pim/shared/webhook";
 import {
 	type ConnectorIngressHost,
 	type ConnectorStatus,

@@ -30,7 +30,8 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Approval } from "../store";
+// What an approval says, as far as a grant reads it (Pim's `Approval` has these and more).
+type Approval = { readonly action: string; readonly status: string; readonly decidedBy: string | null; readonly requestedBy: unknown; readonly args: unknown };
 import { type FileSource, type PollSource, type ProcessSource, runsOnComputer, type StreamSource, type TriggerHealth } from "./spec";
 import type { Admission, AuthorizationRequest, AuthorizationVerdict, Trigger, TriggerStore } from "./store";
 import { TriggerValidationError } from "./validate";

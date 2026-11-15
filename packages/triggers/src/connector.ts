@@ -31,7 +31,7 @@
  * its data, the secret, nor a provider's error text.
  */
 
-import { verifyWebhook } from "../extensions/app-events";
+import { verifyWebhook } from "@pim/shared/webhook";
 import { DELIVERY_TTL_MS } from "./coordinator";
 import type { TriggerLifecycle } from "./spec";
 import { ADMISSION_LIMITS, type Trigger, type TriggerStore } from "./store";

@@ -1,0 +1,25 @@
+{
+  "name": "@pim/triggers",
+  "version": "0.1.0",
+  "description": "Pim's triggers: the spec, conditions, the time scheduler, the store, the coordinator, the HTTP contract and connector ingress. Depends on @pim/shared and never on the Worker.",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.1.0",
+    "@pim/shared": "workspace:*",
+    "agents": "0.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

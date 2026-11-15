@@ -43,9 +43,11 @@ import type { ConversationInit } from "@earendil-works/pi-durable";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { PiReceipt } from "agents/harness/pi";
 import { HttpError } from "@pim/shared/http";
-import type { StableOperation } from "../pim";
 import type { ChatCreation, ChatLookup, HandedSource, HostPreflight, RunStatus, SubmissionLookup, SubmitResult, TriggerAgentHost, TriggerEvidence } from "./coordinator";
 import type { TriggerDestination } from "./spec";
+
+/** How `submitTo` keeps one key for an operation across retries: `exact` uses the key as given, and `keep` is told the key before the input is submitted. */
+export type StableOperation = { readonly exact: boolean; keep(operationId: string): void };
 
 /** In the commit that makes a trigger's chat: the operation it was made for. A fork starts without it. */
 export const TriggerChatDoc = defineDoc<{ operationId: string }>({

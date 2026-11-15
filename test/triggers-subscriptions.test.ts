@@ -1,11 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { signWebhook } from "../src/extensions/app-events";
+import { signWebhook } from "@pim/shared/webhook";
 import type { Pim } from "../src/pim";
-import { type ConnectorStatus, ConnectorIngress, EFFECT_DEADLINE_MS, RENEW_MARGIN_MS } from "../src/triggers/connector";
-import { TriggerCoordinator } from "../src/triggers/coordinator";
-import { triggerHistory } from "../src/triggers/engine";
-import { TriggerStore } from "../src/triggers/store";
+import { type ConnectorStatus, ConnectorIngress, EFFECT_DEADLINE_MS, RENEW_MARGIN_MS } from "@pim/triggers/connector";
+import { TriggerCoordinator } from "@pim/triggers/coordinator";
+import { triggerHistory } from "@pim/triggers/engine";
+import { TriggerStore } from "@pim/triggers/store";
 import {
 	ConnectorSubscriptionManager,
 	type ProviderAnswer,
@@ -14,7 +14,7 @@ import {
 	type SubscribeRequest,
 	type SubscriptionManagerOptions,
 	type UnsubscribeRequest,
-} from "../src/triggers/subscriptions";
+} from "@pim/triggers/subscriptions";
 
 // The subscription manager on a Durable Object's database of its own, with a fake connector: no MCP bridge, route or network is involved.
 
@@ -704,10 +704,10 @@ describe("keeping connector events' subscriptions", () => {
 	});
 
 	it("is constructed only by Pim, which also runs the ingress adapter for connector events", () => {
-		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
+		const files = import.meta.glob(["../src/**/*.ts", "../preview/**/*.ts", "../pim.config.ts", "../test/worker.ts", "../web/src/**/*.{ts,tsx}", "../packages/*/src/**/*.ts"], { query: "?raw", import: "default", eager: true });
 		const users = (pattern: RegExp) =>
 			Object.entries(files)
-				.filter(([path]) => path !== "../src/triggers/subscriptions.ts")
+				.filter(([path]) => path !== "../packages/triggers/src/subscriptions.ts")
 				.filter(([, source]) => pattern.test(source as string))
 				.map(([path]) => path);
 		expect(users(/new ConnectorSubscriptionManager\b/)).toEqual(["../src/pim.ts"]);

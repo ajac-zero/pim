@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { type CronSource, type IntervalSource, type OnceSource, type TimeSource, parseCron, parseTriggerSpec } from "../src/triggers/spec";
-import { type Preview, TIME_LIMITS, describeInstant, isScheduledFiring, previewFirings, resolveLocalTime, selectDueFiring } from "../src/triggers/time";
-import { TriggerValidationError } from "../src/triggers/validate";
+import { type CronSource, type IntervalSource, type OnceSource, type TimeSource, parseCron, parseTriggerSpec } from "../src/spec";
+import { type Preview, TIME_LIMITS, describeInstant, isScheduledFiring, previewFirings, resolveLocalTime, selectDueFiring } from "../src/time";
+import { TriggerValidationError } from "../src/validate";
 
 // The time computation alone (docs/triggers.md). Expected instants were worked out apart from this code, with Temporal and by hand.
 

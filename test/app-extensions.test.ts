@@ -6,7 +6,7 @@ import { createExecutionContext, env, runInDurableObject } from "cloudflare:test
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { newSecret, signWebhook } from "../src/extensions/app-events";
+import { newSecret, signWebhook } from "@pim/shared/webhook";
 import { type Approval, PimStore } from "../src/store";
 import { api, apiUrl, lastUserText, OWNER, pendingApproval, post, ROOT as ROOT_SESSION, say, settled, toolUse, url } from "./helpers";
 import { faux, type Pim, triggerClock } from "./worker";

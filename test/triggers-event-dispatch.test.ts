@@ -13,11 +13,11 @@ import {
 	TriggerCoordinator,
 	type TriggerCoordinatorOptions,
 	type TriggerEvidence,
-} from "../src/triggers/coordinator";
-import { triggerHistory } from "../src/triggers/engine";
-import { firingText } from "../src/triggers/host";
-import type { TriggerDestination } from "../src/triggers/spec";
-import { TriggerStore, type TriggerStoreOptions } from "../src/triggers/store";
+} from "@pim/triggers/coordinator";
+import { triggerHistory } from "@pim/triggers/engine";
+import { firingText } from "@pim/triggers/host";
+import type { TriggerDestination } from "@pim/triggers/spec";
+import { TriggerStore, type TriggerStoreOptions } from "@pim/triggers/store";
 import { api, messagesOf, OWNER, pendingApproval, post, settled, toolUse } from "./helpers";
 import { faux, triggerClock } from "./worker";
 

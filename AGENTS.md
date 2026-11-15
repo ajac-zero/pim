@@ -15,7 +15,7 @@ pnpm test                                 # every test, its three stages at once
 pnpm check                                # typecheck, lint and test, as CI does
 ```
 
-Worker tests run in workerd against `test/worker.ts`: the real Worker, with pi-ai's faux model in place of Workers AI. Tests script the model with `faux.setResponses(...)`, and every scripted response must be used. The browser's tests drive a local Chrome in place of Browser Run; `node scripts/install-test-browser.mjs` puts it where wrangler looks (`.agents/setup` and CI run it). Helpers are in `test/helpers.ts`. Extend an existing test file before adding one. `pnpm test:live` reaches real third-party servers and is opt-in.
+Worker tests run in workerd against `test/worker.ts`: the real Worker, with pi-ai's faux model in place of Workers AI. Tests script the model with `faux.setResponses(...)`, and every scripted response must be used. Vitest has three projects (`vitest.config.ts`): `worker` (workerd, no Chrome), `browser` (only `test/browser.test.ts`, which drives a local Chrome in place of Browser Run through the `BROWSER` binding; `node scripts/install-test-browser.mjs` puts it where wrangler looks, which `.agents/setup` and CI's `browser` job run), and `node` (`test/*.node.test.ts`: what needs no workerd, such as the coding workspaces' providers and what starts real processes). A test that touches neither `cloudflare:test`, `cloudflare:workers` nor `./worker` is a `*.node.test.ts`; `pairTestComputer({ browser: true })` is for the browser project alone. The standalone daemons (`displayd/`, `sandbox-manager/`, `workspace-agentd/`) use `node --test`: `pnpm test:daemons`. Every test's `afterEach` in `test/helpers.ts` and `test/people-support.ts` puts the test Worker's shared state back (`resetTestWorkerState` in `test/worker.ts`), so add a new such global there. Helpers are in `test/helpers.ts`. Extend an existing test file before adding one. `pnpm test:live` reaches real third-party servers and is opt-in.
 
 After editing `wrangler.jsonc`, run `pnpm types` to regenerate `worker-configuration.d.ts`.
 
@@ -29,7 +29,7 @@ pnpm test:changed                         # what a diff since origin/main reache
 # the full suite: GitHub CI, on the pushed branch
 ```
 
-`pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest, wrangler or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root project, and the web app's tests too when `web/` changed.
+`pnpm test:changed` (`scripts/test-changed.mjs`) diffs against origin/main, or HEAD~1 without it, and runs the whole suite when `package.json`, `pnpm-lock.yaml` or any vitest, wrangler or tsconfig config changed, or when nothing maps to a test; otherwise it runs vitest's own `--changed` over the root project, the web app's tests too when `web/` or a file of `src/` it imports changed, and the daemons' tests when one of them changed. CI's `scope` job (`scripts/ci-scope.mjs`) likewise skips jobs a branch's files can't reach (docs only run the identifier check); pushes to `main` run everything.
 
 ## Running Pim
 

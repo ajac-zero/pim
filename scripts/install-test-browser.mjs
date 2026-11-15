@@ -13,6 +13,11 @@ const require = createRequire(import.meta.url);
 const miniflare = readFileSync(require.resolve("miniflare", { paths: [require.resolve("wrangler")] }), "utf8");
 const version = miniflare.match(/BROWSER_VERSION = "([\d.]+)"/)?.[1];
 if (!version) throw new Error("Couldn't find which Chrome miniflare uses.");
+// CI keys its cache of the download on it.
+if (process.argv.includes("--version")) {
+	console.log(version);
+	process.exit(0);
+}
 
 // Chrome for Testing's name for the platform, and @puppeteer/browsers' (wrangler's cache layout).
 const [download, cached] =

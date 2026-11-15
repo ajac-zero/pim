@@ -206,6 +206,16 @@ export class ImageStore {
 		// Content-Length can be missing or wrong, so the body is counted as it arrives.
 		const bytes = await readAtMost(response.body, limit);
 		if (!bytes || bytes.byteLength === 0) return null;
+		return this.#store(session, bytes, type);
+	}
+
+	/** Keeps `bytes` of an image as `session`'s: its URL here, or null when it isn't a PNG, JPEG, WebP or GIF of at most `MAX_IMAGE_BYTES` or `room` bytes. */
+	async keepBytes(session: string, bytes: Uint8Array, type: string, room: number | null): Promise<string | null> {
+		if (!IMAGE_TYPES.includes(type) || bytes.byteLength === 0 || bytes.byteLength > Math.min(MAX_IMAGE_BYTES, room ?? MAX_IMAGE_BYTES)) return null;
+		return this.#store(session, bytes, type);
+	}
+
+	async #store(session: string, bytes: Uint8Array, type: string): Promise<string> {
 		const id = crypto.randomUUID();
 		await this.#bucket.put(this.#key(id), bytes, { httpMetadata: { contentType: type } });
 		this.#sql.exec("INSERT INTO pim_images (id, session, type, bytes, created_at) VALUES (?, ?, ?, ?, ?)", id, session, type, bytes.byteLength, Date.now());

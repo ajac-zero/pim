@@ -6,6 +6,7 @@ import {
   projectEntries,
   type TranscriptMessage,
 } from "@pim/shared/transcript";
+import { maskCode } from "@pim/shared/markdown-code";
 import { queryOptions } from "@tanstack/react-query";
 import type { TranslationKey } from "~/components/i18n";
 import { ApiError, call, SignInRequired } from "~/lib/pim-api";
@@ -1003,7 +1004,14 @@ type ToolResult = Extract<MessagePart, { type: "tool-result" }>;
 /** A row of the transcript on the thread's page. */
 export type TranscriptRow =
   | { key: string; kind: "task" | "steer"; text: string }
-  | { key: string; kind: "text"; text: string; writing: boolean }
+  | {
+      key: string;
+      kind: "text";
+      text: string;
+      writing: boolean;
+      /** What the agent offered the person to say next, with its tags taken out of `text`. */
+      replies: SuggestedReply[];
+    }
   | {
       key: string;
       kind: "tool";
@@ -1061,7 +1069,9 @@ export function transcriptRows(
     message.parts.forEach((part, index) => {
       const key = `${message.id}:${index}`;
       if (part.type === "text" && part.text.trim()) {
-        rows.push({ key, kind: "text", text: part.text, writing: live });
+        const { text, replies } = splitSuggestedReplies(part.text, live);
+        // A message of nothing but suggestions keeps its row, with no text, to say they end the conversation.
+        rows.push({ key, kind: "text", text, writing: live, replies });
       } else if (part.type === "tool-call") {
         rows.push({
           key,
@@ -1177,3 +1187,121 @@ export const codingTestsQuery = (api: CodingApi, id: string) =>
     queryKey: ["coding", "tests", id],
     queryFn: () => api.tests(id).then((body) => body.runs),
   });
+
+/* Suggested replies: what an agent offers the person to say next. */
+
+/** A run of a suggestion's words, with the inline formatting the agent gave it. */
+export type InlineSpan = {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  code?: boolean;
+};
+
+/** One suggested reply: its words as the agent formatted them, and the plain text that is sent. */
+export type SuggestedReply = { spans: InlineSpan[]; prompt: string };
+
+const INLINE: [RegExp, Partial<InlineSpan> | null][] = [
+  [/`([^`]+)`/y, { code: true }],
+  [/\*\*(?=\S)(.+?)(?<=\S)\*\*/y, { bold: true }],
+  [/__(?=\S)(.+?)(?<=\S)__/y, { bold: true }],
+  [/\*(?=\S)(.+?)(?<=\S)\*/y, { italic: true }],
+  [/(?<![\w])_(?=\S)(.+?)(?<=\S)_(?![\w])/y, { italic: true }],
+  // A link or image keeps its label and loses its address.
+  [/!?\[([^\]]*)\]\([^)]*\)/y, null],
+];
+
+/** Inline Markdown as spans: emphasis, code and the labels of links, and nothing that loads or links. */
+export function inlineSpans(
+  raw: string,
+  style: Omit<InlineSpan, "text"> = {},
+): InlineSpan[] {
+  const spans: InlineSpan[] = [];
+  let plain = "";
+  const flush = () => {
+    if (plain) spans.push({ text: plain, ...style });
+    plain = "";
+  };
+  for (let at = 0; at < raw.length; ) {
+    const found =
+      raw[at] === "\\" && at + 1 < raw.length
+        ? null
+        : INLINE.flatMap(([pattern, add]) => {
+            pattern.lastIndex = at;
+            const match = pattern.exec(raw);
+            return match ? [{ match, add }] : [];
+          })[0];
+    if (!found) {
+      // A backslash escapes the character after it.
+      plain += raw[at] === "\\" && at + 1 < raw.length ? raw[++at] : raw[at];
+      at++;
+      continue;
+    }
+    flush();
+    const inner = found.match[1] ?? "";
+    if (found.add?.code) spans.push({ text: inner, ...style, code: true });
+    else spans.push(...inlineSpans(inner, { ...style, ...found.add }));
+    at += found.match[0].length;
+  }
+  flush();
+  return spans;
+}
+
+const OPENING = "<suggested-replies";
+
+/**
+ * A message with its `<suggested-replies>` blocks taken out, and the replies they hold, one per line
+ * (a list marker is dropped). Tags in code are left, as text about them. While the message is being
+ * `writing`, an unclosed block, or the start of its tag, is taken out too, so no tag shows as it arrives.
+ */
+export function splitSuggestedReplies(
+  text: string,
+  writing = false,
+): { text: string; replies: SuggestedReply[] } {
+  if (!text.includes("<")) return { text, replies: [] };
+  const masked = maskCode(text);
+  const cuts: [number, number][] = [];
+  const bodies: string[] = [];
+  let from = 0;
+  for (const match of masked.matchAll(
+    /<suggested-replies(?:\s[^>]*)?>([\s\S]*?)<\/suggested-replies\s*>/gi,
+  )) {
+    cuts.push([match.index, match.index + match[0].length]);
+    bodies.push(
+      text.slice(
+        match.index + match[0].indexOf(">") + 1,
+        match.index + match[0].lastIndexOf("</"),
+      ),
+    );
+    from = match.index + match[0].length;
+  }
+  if (writing) {
+    const open = /<suggested-replies(?:\s[^>]*)?>/i.exec(masked.slice(from));
+    if (open) cuts.push([from + open.index, text.length]);
+    else {
+      const tail = masked.slice(Math.max(from, masked.lastIndexOf("<")));
+      if (tail.length >= 2 && OPENING.startsWith(tail.toLowerCase())) {
+        cuts.push([text.length - tail.length, text.length]);
+      }
+    }
+  }
+  if (cuts.length === 0) return { text, replies: [] };
+  let kept = "";
+  let at = 0;
+  for (const [start, end] of cuts) {
+    const before = text.slice(at, start);
+    kept = kept ? `${kept.trimEnd()}\n\n${before.trimStart()}` : before;
+    at = end;
+  }
+  const after = text.slice(at);
+  kept = kept.trimEnd() + (after.trim() ? `\n\n${after.trimStart()}` : "");
+  const replies = bodies
+    .flatMap((body) => body.split(/\r?\n/))
+    .map((line) => line.trim().replace(/^(?:[-*•]\s+|\d+[.)]\s+)/, ""))
+    .filter(Boolean)
+    .map((line) => {
+      const spans = inlineSpans(line);
+      return { spans, prompt: spans.map((span) => span.text).join("") };
+    });
+  return { text: kept, replies };
+}

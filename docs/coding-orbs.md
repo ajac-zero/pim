@@ -52,6 +52,12 @@ Cancel goes over a short-lived outbound WebSocket (one attempt, ~10 s):
 
 The internal API reports no cost, so usage is not supported and cost remains null, not zero. (The sealed `amp-http-m2m` vault entry from the earlier /api/v2 client is no longer read.) Costs and test outcomes remain the agent's word, not measurements Pim can enforce against a budget.
 
+## Images and suggested replies
+
+An Amp reply may show attachment images (`![Light](https://ampcode.com/user-content/attachments/…)`) that only Amp's signed-in clients can load. The thread copies each into the space's own images (`/api/images/<id>`, kept under the session `coding:<threadId>`, so archiving the thread keeps them) and rewrites the address in the message: while mirroring the orb's messages, and, for threads mirrored before this, the first time `transcript()` is read. `packages/coding/src/orb/amp-attachments.ts` finds them outside code and fetches one with the space's Amp login, which goes to Amp only: a redirect to Amp's own origin is followed with it, one to another HTTPS address once without it, and anything else fails. The image must be a PNG, JPEG, WebP or GIF within the size limit and the space's storage room. The thread remembers each copy (`amp:attachment:<address>`), and an attachment that can't be fetched is tried at most three times, with at most 20 fetches in one read.
+
+The coding thread's page shows only Pim's own images in an agent's text (`Markdown` with `ownImages`); every other image stays its alt text. A reply may end with `<suggested-replies>` and one reply per line: the tags are taken out of the text, and while the thread is idle and the reply is the last row, the lines show as the chat's suggestions do: a click steers the thread with the line's plain text, and ⌘ or Ctrl-click puts it in the message box.
+
 ## Git checks and limits
 
 An orb clones and pushes with its own credentials. Pim cannot enforce its workspace egress or git policies on that cloud. `packages/coding/src/orb/git-check.ts` provides pure ref snapshots, comparisons and diffs, tested with `FakeRefReader`: default-branch moves, force pushes, new/deleted refs, capped commits and concurrent pushes are detected without falsely attributing every change to the orb. These checks still have no live `RefReader` and are not called by the thread loop.

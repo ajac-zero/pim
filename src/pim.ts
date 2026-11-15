@@ -821,6 +821,11 @@ export class Pim extends DurableAgent<Env> {
 		return this.#coding.codingRequestPush(threadId, push);
 	}
 
+	/** An image a coding thread's agent showed, kept as the thread's own (src/space/coding.ts). */
+	async codingKeepImage(threadId: string, bytes: Uint8Array, type: string): Promise<string | null> {
+		return this.#coding.codingKeepImage(threadId, bytes, type);
+	}
+
 	/**
 	 * The coding vault (packages/coding/src/vault/vault.ts) keeps each harness's login here, sealed before
 	 * it arrives: this object stores the blob and its version and never opens it. Only for the vault, over
@@ -2994,6 +2999,7 @@ export class Pim extends DurableAgent<Env> {
 			get env() { return self.env; },
 			get activityWatch() { return self.#activityWatch; },
 			note: (...args) => self.#note(...args),
+			keepImage: (session, bytes, type) => self.images.keepBytes(session, bytes, type, self.#storageRoom()),
 			codingTurnEnded: (...args) => self.codingTurnEnded(...args),
 		};
 	}

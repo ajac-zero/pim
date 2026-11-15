@@ -1,4 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
+import type { Pim } from "../src/pim";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { codingVault } from "../src/coding/vault/worker";
 import { OWNER } from "./helpers";
@@ -377,6 +378,122 @@ describe("Amp HTTP placement", () => {
 			expect(status).not.toContain("sgamp_DETAIL_TOKEN");
 		} finally {
 			await vault.delete(OWNER, "amp");
+		}
+	});
+});
+
+describe("Amp attachment images in an agent-hosted thread", () => {
+	const LIGHT = "https://ampcode.com/user-content/attachments/9fbe-light.png#amp-media-source=file%3A%2F%2F%2Fa.png&amp-media-width=2560";
+	const DARK = "https://ampcode.com/user-content/attachments/bfb0-dark.png#amp-media-width=2560";
+	const REPLY = `![Light](${LIGHT})\n![Dark](${DARK}) ![Light again](${LIGHT})\n![Evil](https://evil.example/p.png)\n\n<suggested-replies>\n**Push the branch**\n</suggested-replies>`;
+	const PNG = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
+	const TOKEN = "sgamp_ATTACHMENT_TOKEN";
+
+	const pim = () => env.Pim.getByName(OWNER);
+	const stored = (url: string) => runInDurableObject(pim(), async (instance: Pim) => {
+		const image = await instance.images.read(url.replace("/api/images/", ""));
+		return image ? { type: image.type, bytes: new Uint8Array(await new Response(image.body).arrayBuffer()) } : null;
+	});
+	const attachmentCalls = (fetcher: { mock: { calls: unknown[][] } }) => fetcher.mock.calls.filter(([url]) => String(url).startsWith("https://ampcode.com/user-content/"));
+
+	async function ampThread() {
+		const fake = new FakeOrbClient({ id: "amp-http" });
+		codingOrbs.factory = () => fake;
+		const id = crypto.randomUUID();
+		const stub = codingThread(env, id);
+		await stub.start(startInput(id, { space: OWNER, harness: "amp", provider: "orbs" }));
+		await heartbeat(stub);
+		return { id, stub, fake, orb: () => fake.started[0]!.threadId };
+	}
+	const firstText = async (stub: Stub) => {
+		const message = (await inside(stub, (thread) => thread.transcript())).find((entry) => entry.role === "assistant");
+		return (message!.parts[0] as { text: string }).text;
+	};
+
+	beforeEach(async () => {
+		await codingVault(env).saveApiKey(OWNER, "amp", TOKEN);
+	});
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await codingVault(env).delete(OWNER, "amp");
+	});
+
+	it("keeps the images a reply shows as the space's own, with the Amp login sent to Amp, each address once, and none from elsewhere", async () => {
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
+		const { stub, fake, orb } = await ampThread();
+		fake.say(orb(), "assistant", REPLY);
+		await heartbeat(stub);
+		// Two attachments, though three images name them, fetched with the person's login and no fragment.
+		const calls = attachmentCalls(fetcher);
+		expect(calls.map(([url]) => url)).toEqual(["https://ampcode.com/user-content/attachments/9fbe-light.png", "https://ampcode.com/user-content/attachments/bfb0-dark.png"]);
+		expect((calls[0]![1] as RequestInit).headers).toMatchObject({ authorization: `Bearer ${TOKEN}` });
+		const text = await firstText(stub);
+		const light = /!\[Light\]\((\/api\/images\/[\w-]+)\)/.exec(text)?.[1];
+		const dark = /!\[Dark\]\((\/api\/images\/[\w-]+)\)/.exec(text)?.[1];
+		expect(light).toBeDefined();
+		expect(text).toContain(`![Light again](${light})`);
+		expect(text).toContain("![Evil](https://evil.example/p.png)");
+		expect(text).toContain("<suggested-replies>");
+		expect(await stored(light!)).toEqual({ type: "image/png", bytes: PNG });
+		expect(await stored(dark!)).toEqual({ type: "image/png", bytes: PNG });
+		// Read again, nothing is fetched.
+		fetcher.mockClear();
+		expect(await firstText(stub)).toBe(text);
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it("copies what an earlier turn left with Amp's addresses the first time the transcript is read, once", async () => {
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
+		await codingVault(env).delete(OWNER, "amp");
+		const { stub, fake, orb } = await ampThread();
+		fake.say(orb(), "assistant", REPLY);
+		await heartbeat(stub);
+		expect(attachmentCalls(fetcher)).toHaveLength(0);
+		expect(await firstText(stub)).toContain(LIGHT);
+		await codingVault(env).saveApiKey(OWNER, "amp", TOKEN);
+		const text = await firstText(stub);
+		expect(text).not.toContain("ampcode.com");
+		expect(text).toMatch(/!\[Light\]\(\/api\/images\/[\w-]+\)/);
+		expect(attachmentCalls(fetcher)).toHaveLength(2);
+		fetcher.mockClear();
+		expect(await firstText(stub)).toBe(text);
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it("gives up on an attachment that is gone, or that is no image, without asking again, and keeps its address", async () => {
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => (String(url).includes("light") ? new Response("no", { status: 404 }) : new Response("<svg/>", { headers: { "content-type": "image/svg+xml" } })));
+		const { stub, fake, orb } = await ampThread();
+		fake.say(orb(), "assistant", REPLY);
+		await heartbeat(stub);
+		expect(await firstText(stub)).toContain(LIGHT);
+		expect(await firstText(stub)).toContain(DARK);
+		const asked = attachmentCalls(fetcher).length;
+		expect(asked).toBe(2);
+		await firstText(stub);
+		expect(attachmentCalls(fetcher)).toHaveLength(asked);
+	});
+
+	it("tries an attachment again after a failure that may pass, a few times", async () => {
+		const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("later", { status: 503 }));
+		const { stub, fake, orb } = await ampThread();
+		fake.say(orb(), "assistant", `![Light](${LIGHT})`);
+		await heartbeat(stub);
+		for (let reads = 0; reads < 5; reads++) await firstText(stub);
+		expect(attachmentCalls(fetcher)).toHaveLength(3);
+		fetcher.mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
+		expect(await firstText(stub)).toContain(LIGHT);
+	});
+
+	it("leaves an image the space has no room for as it is", async () => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(PNG, { headers: { "content-type": "image/png" } }));
+		await runInDurableObject(pim(), (instance: Pim) => instance.setLimits({ storageBytes: instance.storedBytes() + 2 }));
+		try {
+			const { stub, fake, orb } = await ampThread();
+			fake.say(orb(), "assistant", `![Light](${LIGHT})`);
+			await heartbeat(stub);
+			expect(await firstText(stub)).toContain(LIGHT);
+		} finally {
+			await runInDurableObject(pim(), (instance: Pim) => instance.setLimits(null));
 		}
 	});
 });

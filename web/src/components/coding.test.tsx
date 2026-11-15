@@ -658,6 +658,115 @@ describe("a thread's page", () => {
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
+  describe("an agent's reply with images and suggested replies", () => {
+    const OWN = "/api/images/3f1beb2b-bded-4fda-96cc-1af7192f24b6";
+    const REPLY = [
+      `![Light](${OWN}) ![Dark](/api/images/9a1beb2b-bded-4fda-96cc-1af7192f24b7)`,
+      "![Evil](https://evil.example/pixel.png) ![Rel](//evil.example/p.png) ![Api](/api/export) ![Data](data:image/png;base64,AAAA)",
+      "",
+      "<suggested-replies>",
+      "**Push the branch** and open a PR",
+      "Make CUDA qualifiers highlight in previews too",
+      "</suggested-replies>",
+    ].join("\n");
+    const said = (text: string): TranscriptMessage[] => [
+      {
+        id: "1",
+        role: "user",
+        parts: [{ type: "text", text: "Go" }],
+        timestamp: 1,
+      },
+      {
+        id: "2",
+        role: "assistant",
+        parts: [{ type: "text", text }],
+        timestamp: 2,
+      },
+    ];
+
+    it("shows only Pim's own images, no tag, and the suggestions as buttons that steer", async () => {
+      const { api } = fakeApi(view(), said(REPLY));
+      threadPage(api);
+      const first = await screen.findByRole("button", {
+        name: "Push the branch and open a PR",
+      });
+      expect(first.querySelector("strong")?.textContent).toBe(
+        "Push the branch",
+      );
+      expect(
+        screen.getByRole("button", {
+          name: "Make CUDA qualifiers highlight in previews too",
+        }),
+      ).toBeTruthy();
+      const list = screen.getByRole("list", { name: "Conversation" });
+      expect(
+        [...list.querySelectorAll("img")].map((img) => img.getAttribute("src")),
+      ).toEqual([OWN, "/api/images/9a1beb2b-bded-4fda-96cc-1af7192f24b7"]);
+      expect(list.textContent).not.toContain("suggested-replies");
+      expect(list.textContent).not.toContain("Image blocked: Light");
+      expect(list.textContent).toContain("[Image blocked: Evil]");
+
+      fireEvent.click(first);
+      await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(1));
+      expect(api.steer.mock.calls[0]).toEqual([
+        "t1",
+        {
+          text: "Push the branch and open a PR",
+          operationId: expect.any(String),
+        },
+      ]);
+    });
+
+    it("fills the message box instead of sending when ⌘ or Ctrl is held", async () => {
+      const { api } = fakeApi(view(), said(REPLY));
+      threadPage(api);
+      const second = await screen.findByRole("button", {
+        name: "Make CUDA qualifiers highlight in previews too",
+      });
+      fireEvent.click(second, { metaKey: true });
+      const box = await screen.findByPlaceholderText(
+        "Tell the coding agent what to do next…",
+      );
+      await waitFor(() =>
+        expect((box as HTMLTextAreaElement).value).toBe(
+          "Make CUDA qualifiers highlight in previews too",
+        ),
+      );
+      expect(api.steer).not.toHaveBeenCalled();
+    });
+
+    it("hides them while the thread runs, after a newer steer, and in an archived thread, still without the tag", async () => {
+      for (const [thread, messages] of [
+        [view({ state: "running", currentOperation: "op" }), said(REPLY)],
+        [
+          view(),
+          [
+            ...said(REPLY),
+            {
+              id: "3",
+              role: "user" as const,
+              parts: [{ type: "text" as const, text: "Push it" }],
+              timestamp: 3,
+            },
+          ],
+        ],
+        [view({ state: "archived" }), said(REPLY)],
+      ] as const) {
+        const { api } = fakeApi(thread, [...messages]);
+        threadPage(api);
+        const list = await screen.findByRole("list", { name: "Conversation" });
+        await waitFor(() =>
+          expect(list.querySelectorAll("img").length).toBe(2),
+        );
+        expect(
+          screen.queryByRole("button", { name: /Push the branch/ }),
+        ).toBeNull();
+        expect(list.textContent).not.toContain("suggested-replies");
+        cleanup();
+      }
+    });
+  });
+
   it("says a failed thread has no workspace backend and who must set one up", async () => {
     const { api } = fakeApi(
       view({

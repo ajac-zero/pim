@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { base64UrlDecode, base64UrlEncode } from "../src/encoding";
 import { apiKeyProblem, HARNESS_API_KEYS } from "../src/harnesses";
 import { dispatch, HttpError, match, type Route, routeOf } from "../src/http";
+import { maskCode } from "../src/markdown-code";
 import { redact, redactSecrets } from "../src/redact";
 import { pimThemes } from "../src/theme-data/index";
 import { fromPerson } from "../src/transcript";
@@ -91,5 +92,19 @@ describe("the package's boundary", () => {
 				if (specifier.startsWith(".")) expect(new URL(specifier, url).href, file).toMatch(/\/packages\/shared\/src\//);
 			}
 		}
+	});
+});
+
+describe("maskCode", () => {
+	it("blanks fenced code and inline code, keeping every index and line break", () => {
+		const text = "a `b` c\n```js\n<x>\n```\n~~~\n<y>\n~~~\nd ``e ` f`` g";
+		const masked = maskCode(text);
+		expect(masked).toHaveLength(text.length);
+		expect(masked.split("\n").map((line) => line.trim())).toEqual(["a     c", "", "", "", "", "", "", `d${" ".repeat(11)}g`]);
+	});
+
+	it("keeps an unclosed backtick, and a fence's longer closing line", () => {
+		expect(maskCode("it` is")).toBe("it` is");
+		expect(maskCode("````\n```\n````\nx")).toBe("    \n   \n    \nx");
 	});
 });

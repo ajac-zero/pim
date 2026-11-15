@@ -12,6 +12,8 @@ import {
   ndjson,
   parseDiff,
   reduceLive,
+  inlineSpans,
+  splitSuggestedReplies,
   startInput,
   startProblems,
   stateReasonKey,
@@ -450,5 +452,90 @@ describe("codingByChat", () => {
     ]);
     expect([...byChat.keys()].sort()).toEqual(["a", "b"]);
     expect(byChat.get("a")?.map((t) => t.id)).toEqual(["early", "late"]);
+  });
+});
+
+describe("suggested replies", () => {
+  const BLOCK =
+    "<suggested-replies>\n**Push the branch** and open a PR\nMake CUDA qualifiers highlight in previews too\n</suggested-replies>";
+
+  it("takes the block out and keeps each line as a reply, sent without its emphasis", () => {
+    const { text, replies } = splitSuggestedReplies(`Done.\n\n${BLOCK}`);
+    expect(text).toBe("Done.");
+    expect(replies.map((reply) => reply.prompt)).toEqual([
+      "Push the branch and open a PR",
+      "Make CUDA qualifiers highlight in previews too",
+    ]);
+    expect(replies[0]?.spans).toEqual([
+      { text: "Push the branch", bold: true },
+      { text: " and open a PR" },
+    ]);
+  });
+
+  it("drops list markers, blank lines and attributes, and reads any case", () => {
+    const { text, replies } = splitSuggestedReplies(
+      "Ok\n\n<Suggested-Replies kind=x>\n- one\n\n2) two `code`\n• __three__\n</SUGGESTED-REPLIES>",
+    );
+    expect(text).toBe("Ok");
+    expect(replies.map((reply) => reply.prompt)).toEqual([
+      "one",
+      "two code",
+      "three",
+    ]);
+  });
+
+  it("leaves the tags in code, as text about them", () => {
+    const fenced = `How to:\n\n\`\`\`\n${BLOCK}\n\`\`\`\n\nUse \`<suggested-replies>a</suggested-replies>\` so.`;
+    expect(splitSuggestedReplies(fenced)).toEqual({
+      text: fenced,
+      replies: [],
+    });
+  });
+
+  it("hides an unclosed block, and the start of its tag, only while the message is being written", () => {
+    expect(
+      splitSuggestedReplies("Done.\n\n<suggested-replies>\n**Push", true),
+    ).toEqual({ text: "Done.", replies: [] });
+    expect(splitSuggestedReplies("Done.\n\n<suggested-repl", true).text).toBe(
+      "Done.",
+    );
+    expect(splitSuggestedReplies("a <b", true).text).toBe("a <b");
+    const unclosed = "Done.\n\n<suggested-replies>\nPush";
+    expect(splitSuggestedReplies(unclosed).text).toBe(unclosed);
+  });
+
+  it("gives a message of only suggestions an empty text, and a closed block while writing its replies", () => {
+    expect(splitSuggestedReplies(BLOCK, true)).toMatchObject({
+      text: "",
+      replies: [{}, {}],
+    });
+  });
+
+  it("reads emphasis, code and link labels, and escapes", () => {
+    expect(
+      inlineSpans("*a* **b _c_** `d` [e](https://x.test) \\*h\\*"),
+    ).toEqual([
+      { text: "a", italic: true },
+      { text: " " },
+      { text: "b ", bold: true },
+      { text: "c", bold: true, italic: true },
+      { text: " " },
+      { text: "d", code: true },
+      { text: " " },
+      { text: "e" },
+      { text: " *h*" },
+    ]);
+  });
+
+  it("marks the rows it comes from", () => {
+    const rows = transcriptRows([
+      {
+        id: "1",
+        role: "assistant",
+        parts: [{ type: "text", text: BLOCK }],
+        timestamp: 1,
+      },
+    ]);
+    expect(rows).toMatchObject([{ kind: "text", text: "", replies: [{}, {}] }]);
   });
 });

@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner";
 import { StateBadge } from "~/components/app-sidebar";
 import { Composer } from "~/components/chat/composer";
+import { Suggestion, Suggestions } from "~/components/ai-elements/suggestion";
 import { ChatHeader } from "~/components/chat/header";
 import {
   AssistantMessage,
@@ -94,6 +95,7 @@ import {
   START_HARNESSES,
   STATE_TEXT,
   type StartForm,
+  type SuggestedReply,
   type StartProblems,
   startInput,
   startProblems,
@@ -1201,6 +1203,7 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
   const [tab, setTab] = useState("conversation");
   // Above the panels: what the thread works on, why it waits, its environment and what can be done with it.
   const controls = useThreadControls(thread);
+  const { steer, fill, setFill } = useSteer(thread);
   const top = (
     <>
       <ThreadSummary thread={thread} />
@@ -1254,7 +1257,14 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
             >
               {top}
               <Tabs.Content value="conversation" className="outline-none">
-                <Transcript thread={thread} />
+                <Transcript
+                  thread={thread}
+                  onSuggestion={(text, edit) =>
+                    edit
+                      ? setFill({ text, id: Date.now() })
+                      : !steer.isPending && steer.mutate(text)
+                  }
+                />
               </Tabs.Content>
             </ConversationContent>
             <ConversationScrollButton />
@@ -1276,7 +1286,12 @@ function ThreadView({ thread }: { thread: CodingThreadView }) {
       {/* The message box sits under every panel, as a chat's does. */}
       <div className="shrink-0 bg-background pb-2">
         <div className={cn("mx-auto w-full max-w-4xl px-4")}>
-          <SteerForm thread={thread} abort={controls.abort} />
+          <SteerForm
+            thread={thread}
+            abort={controls.abort}
+            steer={steer}
+            fill={fill}
+          />
         </div>
       </div>
     </main>
@@ -1972,9 +1987,28 @@ function useLiveTranscript(id: string, follow: boolean) {
   };
 }
 
-function Transcript({ thread }: { thread: CodingThreadView }) {
+function Transcript({
+  thread,
+  onSuggestion,
+}: {
+  thread: CodingThreadView;
+  onSuggestion: (text: string, edit: boolean) => void;
+}) {
   const { t } = useI18n();
   const live = useLiveTranscript(thread.id, thread.state !== "archived");
+  // What the agent offers to say next is shown only while it is the end of the conversation, and the person can answer it.
+  const last = live.rows[live.rows.length - 1];
+  const suggestions =
+    last?.kind === "text" &&
+    thread.state !== "archived" &&
+    thread.state !== "failed" &&
+    thread.state !== "running" &&
+    thread.currentOperation === null &&
+    !live.running &&
+    live.tools.length === 0 &&
+    !last.writing
+      ? last.replies
+      : [];
   return (
     <div className="flex flex-col gap-3">
       {live.reconnecting && (
@@ -2003,11 +2037,13 @@ function Transcript({ thread }: { thread: CodingThreadView }) {
             "[&>li[data-kind=tool]+li]:-mt-1",
           )}
         >
-          {live.rows.map((row) => (
-            <li key={row.key} data-kind={row.kind}>
-              <Row row={row} />
-            </li>
-          ))}
+          {live.rows
+            .filter((row) => row.kind !== "text" || row.text.trim() !== "")
+            .map((row) => (
+              <li key={row.key} data-kind={row.kind}>
+                <Row row={row} />
+              </li>
+            ))}
           {live.tools.map((tool) => (
             <li key={`running:${tool.callId}`} data-kind="tool">
               <div className="flex flex-col gap-1.5 text-[13px] text-muted-foreground">
@@ -2033,6 +2069,20 @@ function Transcript({ thread }: { thread: CodingThreadView }) {
       {!live.loading && live.rows.length === 0 && live.tools.length === 0 && (
         <p className="text-muted-foreground text-sm">{t("codingNoMessages")}</p>
       )}
+      {suggestions.length > 0 && (
+        <Suggestions className="mt-0 animate-in duration-700 fade-in">
+          {suggestions.map((reply) => (
+            <Suggestion
+              key={reply.prompt}
+              suggestion={reply.prompt}
+              title={t("suggestionHint")}
+              onClick={onSuggestion}
+            >
+              <SuggestedWords reply={reply} />
+            </Suggestion>
+          ))}
+        </Suggestions>
+      )}
     </div>
   );
 }
@@ -2055,6 +2105,7 @@ function Row({ row }: { row: TranscriptRow }) {
             content: [{ type: "output_text", text: row.text }],
           }}
           untrusted
+          ownImages
           streaming={row.writing}
         />
       );
@@ -2137,17 +2188,10 @@ function ToolRow({ row }: { row: Extract<TranscriptRow, { kind: "tool" }> }) {
 }
 
 /** Tells the thread what to do next, in the chat's message box: into the turn under way; its Stop button ends the turn. */
-function SteerForm({
-  thread,
-  abort,
-}: {
-  thread: CodingThreadView;
-  abort: ThreadControlsState["abort"];
-}) {
-  const { t } = useI18n();
+/** The thread's steer: sending the person's words to it, and what failed to send, which goes back in the message box. */
+function useSteer(thread: CodingThreadView) {
   const api = useCodingApi();
   const update = useThreadUpdate(thread.id);
-  // What failed to send goes back in the box, to send again.
   const [fill, setFill] = useState<{ text: string; id: number }>();
   const steer = useMutation({
     mutationFn: (text: string) =>
@@ -2158,6 +2202,37 @@ function SteerForm({
     onSuccess: update,
     onError: (_error, text) => setFill({ text, id: Date.now() }),
   });
+  return { steer, fill, setFill };
+}
+
+/** A suggested reply's words, with the emphasis and code the agent gave them. */
+function SuggestedWords({ reply }: { reply: SuggestedReply }) {
+  return reply.spans.map((span, index) => {
+    const key = `${index}:${span.text}`;
+    if (span.code) {
+      return (
+        <code key={key} className="rounded bg-muted px-1 font-mono text-[13px]">
+          {span.text}
+        </code>
+      );
+    }
+    const text = span.italic ? <em key={key}>{span.text}</em> : span.text;
+    return span.bold ? <strong key={key}>{text}</strong> : text;
+  });
+}
+
+function SteerForm({
+  thread,
+  abort,
+  steer,
+  fill,
+}: {
+  thread: CodingThreadView;
+  abort: ThreadControlsState["abort"];
+  steer: ReturnType<typeof useSteer>["steer"];
+  fill: ReturnType<typeof useSteer>["fill"];
+}) {
+  const { t } = useI18n();
   if (thread.state === "archived" || thread.state === "failed") return null;
   const working =
     thread.state === "running" || thread.currentOperation !== null;

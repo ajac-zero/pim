@@ -58,7 +58,14 @@ const highlight = HighlightStyle.define([
     color: "var(--link)",
   },
   {
-    tag: [tags.typeName, tags.className, tags.tagName],
+    tag: [
+      tags.typeName,
+      tags.className,
+      tags.tagName,
+      tags.namespace,
+      tags.standard(tags.variableName),
+      tags.special(tags.name),
+    ],
     color: "var(--color-agent-teal)",
   },
   { tag: [tags.heading], fontWeight: "600", color: "var(--link)" },

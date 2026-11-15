@@ -2,7 +2,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "../src/agents";
 import { CircleStore } from "../src/circles";
 import { cover } from "../src/extensions/optmem/cover";
@@ -26,17 +26,20 @@ function blockOf(prompt: string): string {
 	return /Compress memories #(\d+-\d+)/.exec(prompt)![1]!;
 }
 
-// The napper answers every compression with `S[a-b]`, unless the test holds that block.
-napper.setResponses(
-	Array.from({ length: 1000 }, () => async (context: { messages: Message[] }) => {
-		const prompt = lastUserText(context.messages);
-		const block = blockOf(prompt);
-		const hold = held.get(block);
-		held.delete(block);
-		const answer = hold ? await hold : `S[${block}]`;
-		naps.push({ block, prompt });
-		return fauxAssistantMessage(answer);
-	}),
+// The napper answers every compression with `S[a-b]`, unless the test holds that block. Each test sets it up
+// again, because the tests' `afterEach` drops the napper's responses.
+beforeEach(() =>
+	napper.setResponses(
+		Array.from({ length: 1000 }, () => async (context: { messages: Message[] }) => {
+			const prompt = lastUserText(context.messages);
+			const block = blockOf(prompt);
+			const hold = held.get(block);
+			held.delete(block);
+			const answer = hold ? await hold : `S[${block}]`;
+			naps.push({ block, prompt });
+			return fauxAssistantMessage(answer);
+		}),
+	),
 );
 
 async function settled() {

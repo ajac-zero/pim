@@ -275,7 +275,9 @@ export class Pim extends RealPim {
 		return models;
 	}
 
+	/** The scripted model, after the real default is worked out as a deployment's is, so a space is made the way it is there. */
 	protected override defaultModel(): PiModel {
+		super.defaultModel();
 		return faux.getModel();
 	}
 

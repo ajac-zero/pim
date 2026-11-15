@@ -177,6 +177,40 @@ const ANY_RESULT = { "~standard": { version: 1, vendor: "pim", validate: (value:
  * resume where they stopped.
  */
 export class Pim extends DurableAgent<Env> {
+	// The collaborators come first: the fields after them, such as `harness`, call Pim's methods that go to them while the space is made.
+	/** The space's approvals and tool permissions (src/space/approvals.ts). */
+	readonly #approvals = new Approvals(this.#approvalsHost());
+
+	/** Tasks, group chats and runs (src/space/conversations.ts). */
+	readonly #conversations = new Conversations(this.#conversationsHost());
+
+	/** The space's models and providers (src/space/models.ts). */
+	readonly #models = new SpaceModels(this.#modelsHost());
+
+	/** The space's connectors (src/space/connectors.ts). */
+	readonly #connectors = new Connectors(this.#connectorsHost());
+
+	/** What the space reports and hands over (src/space/reports.ts). */
+	readonly #reports = new Reports(this.#reportsHost());
+
+	/** The space's abilities, widgets and suggestions (src/space/abilities.ts). */
+	readonly #abilitiesOf = new Abilities(this.#abilitiesHost());
+
+	/** What the API shows of chats and apps (src/space/views.ts). */
+	readonly #views = new Views(this.#viewsHost());
+
+	/** The space's WebSockets (src/space/sockets.ts). */
+	readonly #sockets = new Sockets(this.#socketsHost());
+
+	/** The space's triggers (src/space/triggers.ts). */
+	readonly #triggers = new SpaceTriggers(this.#triggersHost());
+
+	/** The space's side of its coding threads (src/space/coding.ts). */
+	readonly #coding = new SpaceCoding(this.#codingHost());
+
+	/** What the space shares and receives (src/space/sharing.ts). */
+	readonly #sharing = new Sharing(this.#sharingHost());
+
 	readonly store = new PimStore(this.ctx.storage.sql);
 	/** People this space's owner shares it with, in circles. */
 	readonly circles = new CircleStore(this.ctx.storage.sql);
@@ -582,39 +616,6 @@ export class Pim extends DurableAgent<Env> {
 	readonly #watches = new Map<string, AgentEventStream>();
 	/** Each connection's latest watch request: one that finishes setting up after a newer one is dropped. */
 	readonly #watchRequests = new Map<string, object>();
-
-	/** The space's approvals and tool permissions (src/space/approvals.ts). */
-	readonly #approvals = new Approvals(this.#approvalsHost());
-
-	/** Tasks, group chats and runs (src/space/conversations.ts). */
-	readonly #conversations = new Conversations(this.#conversationsHost());
-
-	/** The space's models and providers (src/space/models.ts). */
-	readonly #models = new SpaceModels(this.#modelsHost());
-
-	/** The space's connectors (src/space/connectors.ts). */
-	readonly #connectors = new Connectors(this.#connectorsHost());
-
-	/** What the space reports and hands over (src/space/reports.ts). */
-	readonly #reports = new Reports(this.#reportsHost());
-
-	/** The space's abilities, widgets and suggestions (src/space/abilities.ts). */
-	readonly #abilitiesOf = new Abilities(this.#abilitiesHost());
-
-	/** What the API shows of chats and apps (src/space/views.ts). */
-	readonly #views = new Views(this.#viewsHost());
-
-	/** The space's WebSockets (src/space/sockets.ts). */
-	readonly #sockets = new Sockets(this.#socketsHost());
-
-	/** The space's triggers (src/space/triggers.ts). */
-	readonly #triggers = new SpaceTriggers(this.#triggersHost());
-
-	/** The space's side of its coding threads (src/space/coding.ts). */
-	readonly #coding = new SpaceCoding(this.#codingHost());
-
-	/** What the space shares and receives (src/space/sharing.ts). */
-	readonly #sharing = new Sharing(this.#sharingHost());
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);

@@ -8,7 +8,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   Markdown,
   mentionsUser,
@@ -17,6 +17,20 @@ import {
 import { ReplyImages } from "~/components/chat/reply-blocks";
 import { embedAddress, youtubeId } from "~/components/chat/video-block";
 import { agentsQuery, sessionsQuery } from "~/lib/queries";
+import { resetThemes } from "~/lib/themes";
+
+// Code blocks load the color themes; with no server here, they get an empty list.
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json({ default: "pim", themes: [] })),
+  );
+});
+
+afterEach(() => {
+  resetThemes();
+  vi.unstubAllGlobals();
+});
 
 /** Everything Markdown or raw HTML could use to load, run or send something. */
 const HOSTILE = [

@@ -289,9 +289,9 @@ export class Pim extends RealPim {
 		return this.store.meta("test:no-coding-backend") === undefined ? ["fake"] : [];
 	}
 
-	/** Under `auto`, long enough for a test to answer an approval, short enough to wait out. */
+	/** Under `auto`, long enough for a test to answer an approval, short enough to wait out; a test that waits it out sets `test:approval-timeout-ms` for less. */
 	protected override approvalTimeoutMs(policy = this.settings().approvalPolicy): number | null {
-		return policy === "auto" ? 1_500 : null;
+		return policy === "auto" ? Number(this.store.meta("test:approval-timeout-ms") ?? 1_500) : null;
 	}
 
 	/** What a test sets, as a number of milliseconds, to have a run with no progress for that long stopped; the deployment's otherwise, which no test waits out. */
@@ -388,7 +388,8 @@ export const codingEvents: CodingThreadEvent[] = [];
  * workspace that fails and doesn't answer for a second counts as down; a running turn's work is autosaved every three
  * minutes, which a test may set to 0, to autosave at each heartbeat.
  */
-export const codingTimings = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, autopushMs: 20_000, resumeWaitMs: 120_000, retryMs: 30_000, orbPollMs: 30_000 };
+const DEFAULT_CODING_TIMINGS = { stallMs: 300, lostGraceMs: 1_000, autosaveMs: 3 * 60_000, autopushMs: 20_000, resumeWaitMs: 120_000, retryMs: 30_000, orbPollMs: 30_000 };
+export const codingTimings = { ...DEFAULT_CODING_TIMINGS };
 
 /** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
 export const codingThreadClock: { now: number | null } = { now: null };
@@ -516,3 +517,30 @@ export const codingGateway: { fetch: typeof fetch | null; limits: Partial<Gatewa
 
 /** The GitHub App coding threads push with in tests: none unless a test sets one, and GitHub as a test answers it. */
 export const codingGitHub: { app: GitHubApp | null; fetch: Fetch | null } = { app: null, fetch: null };
+
+/**
+ * Puts what tests change in this file's globals back as it began, and returns how many scripted
+ * responses of the space's model were never used. Every test file calls it after each test, even
+ * one that failed midway, so what that test left behind (unused responses, a clock set on, a
+ * stubbed backend) doesn't fail or change the tests after it.
+ */
+export function resetTestWorkerState(): { pendingResponses: number } {
+	const pendingResponses = faux.getPendingResponseCount();
+	for (const provider of [faux, codingFaux, napper, utility]) provider.setResponses([]);
+	spans.reset();
+	outbox.length = 0;
+	paintings.length = 0;
+	codingEvents.length = 0;
+	triggerClock.offset = 0;
+	Object.assign(codingTimings, DEFAULT_CODING_TIMINGS);
+	Object.assign(codingBackends, { registry: null, production: false });
+	codingCompute.providers = null;
+	codingContainers.service = null;
+	codingOrbs.factory = null;
+	codingQuota.quota = null;
+	codingThreadClock.now = null;
+	Object.assign(codingSchedulers, { now: null, notifier: null });
+	Object.assign(codingGateway, { fetch: null, limits: {} });
+	Object.assign(codingGitHub, { app: null, fetch: null });
+	return { pendingResponses };
+}

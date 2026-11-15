@@ -4,7 +4,7 @@ import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, expect, it } from "vitest";
 import { Auth } from "../src/auth";
 import type { Directory, RegistrationPolicy } from "../src/directory";
-import { faux, Pim } from "./worker";
+import { faux, Pim, resetTestWorkerState } from "./worker";
 import { Authenticator } from "./webauthn";
 
 /**
@@ -16,8 +16,8 @@ import { Authenticator } from "./webauthn";
 export const ORIGIN = "https://pim.test";
 
 afterEach(() => {
-	// Every scripted model response was used.
-	expect(faux.getPendingResponseCount()).toBe(0);
+	// Every scripted model response was used; unused ones are dropped first, so a test that failed midway doesn't fail the tests after it.
+	expect(resetTestWorkerState().pendingResponses).toBe(0);
 });
 
 let browsers = 0;

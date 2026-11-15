@@ -21,6 +21,15 @@ function mockHook(response = "order 42 created") {
 	return hook;
 }
 
+/** Sets how long approvals filed from now on wait under the auto policy; null puts back the test Worker's. */
+const setApprovalTimeout = (ms: number | null) =>
+	runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => {
+		if (ms === null) pim.store.deleteMeta("test:approval-timeout-ms");
+		else pim.store.setMeta("test:approval-timeout-ms", ms);
+	});
+
+afterEach(() => setApprovalTimeout(null));
+
 const policy = (approvalPolicy: string | null) => api("/settings", { method: "PUT", body: JSON.stringify({ approvalPolicy }) });
 
 describe("approvals", () => {
@@ -62,7 +71,7 @@ describe("approvals", () => {
 
 		// A decision is final: no second run of the action, and the timeout that passes later changes nothing.
 		expect((await post(`/approvals/${approval.id}/approve`)).status).toBe(409);
-		await new Promise((resolve) => setTimeout(resolve, 1_600));
+		await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.expireApproval({ id: approval.id }));
 		expect((await api<Approval>(`/approvals/${approval.id}`)).body).toMatchObject({ status: "approved", decidedBy: "user" });
 		expect(hook).toHaveBeenCalledOnce();
 	});
@@ -121,6 +130,7 @@ describe("approvals", () => {
 	});
 
 	it("approves on its own when the user does not answer in time", async () => {
+		await setApprovalTimeout(150);
 		const hook = mockHook();
 		let result = "";
 		faux.setResponses([
@@ -131,16 +141,17 @@ describe("approvals", () => {
 			},
 		]);
 		const said = say("Go.");
-		const approval = await pendingApproval();
-		expect(hook).not.toHaveBeenCalled();
 		expect(await said).toMatchObject({ status: "done", replies: ["Done."] });
 		expect(hook).toHaveBeenCalledOnce();
-		expect(result).toContain("did not respond within 1.5 seconds, so it was approved automatically");
-		expect((await api<Approval>(`/approvals/${approval.id}`)).body).toMatchObject({ status: "approved", decidedBy: "timeout" });
+		expect(result).toContain("did not respond within 0.15 seconds, so it was approved automatically");
+		// Too short a wait to catch the request pending; the approval it left shows who decided it.
+		const [approval] = (await api<{ approvals: Approval[] }>("/approvals?status=approved")).body.approvals;
+		expect(approval).toMatchObject({ summary: expect.stringContaining("hooks.example.test/auto"), decidedBy: "timeout" });
 	});
 
 	it("waits for the user however long under the explicit policy, and a no stops it", async () => {
 		const hook = mockHook();
+		await setApprovalTimeout(100);
 		expect((await policy("explicit")).body).toMatchObject({ approvalPolicy: "explicit", approvalTimeoutSeconds: null });
 		try {
 			// The model is told how an unanswered request ends before it makes one.
@@ -159,7 +170,7 @@ describe("approvals", () => {
 			const approval = await pendingApproval();
 			expect(approval).toMatchObject({ expiresAt: null });
 			// Past the auto policy's timeout, it still waits.
-			await new Promise((resolve) => setTimeout(resolve, 2_000));
+			await new Promise((resolve) => setTimeout(resolve, 300));
 			expect((await api<Approval>(`/approvals/${approval.id}`)).body.status).toBe("pending");
 
 			const denied = await post<Approval>(`/approvals/${approval.id}/deny`);
@@ -247,7 +258,7 @@ describe("a chat that can't be held up", () => {
 
 	it("stops a run that makes no progress, tells the agent, and goes on with what was queued", async () => {
 		const started = stuckPage();
-		await setStall("1500");
+		await setStall("200");
 		const heard: string[] = [];
 		faux.setResponses([
 			toolUse("fetch_url", { url: "https://stuck.example.test/page" }),
@@ -264,9 +275,9 @@ describe("a chat that can't be held up", () => {
 		await vi.waitFor(() => expect(started).toHaveBeenCalled());
 		expect(await wakeFromCodingThread("[Coding thread T-2] It finished its turn.", "coding:T-2:a")).toBe(true);
 		expect(await busy()).toBe(true);
-		// Nothing stops it but the watchdog, after the test agent's 1.5 seconds without progress.
+		// Nothing stops it but the watchdog, after the test agent's 0.2 seconds without progress.
 		await settled();
-		expect(heard[0]).toMatch(/^\[Pim\] Your last turn was stopped: it made no progress for 1.5 seconds/);
+		expect(heard[0]).toMatch(/^\[Pim\] Your last turn was stopped: it made no progress for 0.2 seconds/);
 		expect(heard[1]).toContain("[Coding thread T-2] It finished its turn.");
 	});
 
@@ -284,32 +295,32 @@ describe("a chat that can't be held up", () => {
 		expect((await send("Read the page.")).status).toBe(202);
 		await vi.waitFor(() => expect(started).toHaveBeenCalled());
 		await runInDurableObject(env.Pim.getByName(OWNER), (pim: Pim) => pim.watchRuns());
-		await new Promise((resolve) => setTimeout(resolve, 1_500));
+		await new Promise((resolve) => setTimeout(resolve, 400));
 		// A crash or a deploy restarts the space, and the call it ran starts again, as stuck as before.
 		await abortAllDurableObjects();
 		expect(await busy()).toBe(true);
 		await vi.waitFor(() => expect(started).toHaveBeenCalledTimes(2));
-		// The first look after the restart already finds it stuck for longer than a second.
+		// The first look after the restart already finds it stuck for longer than 0.1 seconds.
 		const stalled = await runInDurableObject(env.Pim.getByName(OWNER), async (pim: Pim) => {
 			const before = Date.now();
-			pim.store.setMeta("test:stall-ms", "1000");
+			pim.store.setMeta("test:stall-ms", "100");
 			await pim.watchRuns();
 			return pim.diagnosticEvents.since(before, 10).filter((event) => event.kind === "run_stalled");
 		});
 		expect(stalled).toHaveLength(1);
 		await settled();
-		expect(heard[0]).toMatch(/^\[Pim\] Your last turn was stopped: it made no progress for 1 second/);
+		expect(heard[0]).toMatch(/^\[Pim\] Your last turn was stopped: it made no progress for 0.1 seconds/);
 	});
 
 	it("leaves a run waiting for the person's decision alone, until Stop", async () => {
 		await policy("explicit");
-		await setStall("1500");
+		await setStall("200");
 		try {
 			faux.setResponses([toolUse("http_request", { method: "POST", url: "https://hooks.example.test/waiting" })]);
 			expect((await send("Go.")).status).toBe(202);
 			const approval = await pendingApproval();
 			// Well past the stall: a wait for the person is no stall.
-			await new Promise((resolve) => setTimeout(resolve, 4_000));
+			await new Promise((resolve) => setTimeout(resolve, 500));
 			expect(await busy()).toBe(true);
 			expect((await api<Approval>(`/approvals/${approval.id}`)).body.status).toBe("pending");
 			expect((await post(`/sessions/${ROOT}/abort`)).status).toBe(200);

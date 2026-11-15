@@ -73,6 +73,8 @@ import { brokerTokenKey, deploymentGitHubApp, deploymentProviders } from "./git-
 import { authEnv } from "@pim/coding/harness/auth";
 import { type CliHarness, cliHarness } from "@pim/coding/harness/index";
 import { AmpHttpOrbClient, AMP_HTTP_UNSUPPORTED } from "@pim/coding/orb/amp-http";
+import { ampAttachments, fetchAmpImage, replaceAmpAttachments } from "@pim/coding/orb/amp-attachments";
+import { IMAGE_TYPES, MAX_IMAGE_BYTES } from "../images";
 import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "@pim/coding/orb/types";
 
 const LEGACY_AMP_WORKSPACE_MESSAGE = "legacy Amp workspace thread; start a new Amp (Orbs) thread";
@@ -359,6 +361,47 @@ export class CodingThreadDO extends DurableObject<Env> {
 				},
 			});
 		};
+	}
+
+	/**
+	 * `text` with the Amp attachment images it shows (`![…](https://ampcode.com/user-content/attachments/…)`)
+	 * replaced by Pim's own copies, which the person's browser can load where it can't load Amp's. Each
+	 * attachment is fetched once, with the space's Amp login, and its copy remembered in the thread's storage;
+	 * one that can't be fetched is tried again a few times, then left as it is. At most `MAX_AMP_FETCHES` are
+	 * fetched at a time, so a message full of them can't stall the thread.
+	 */
+	async #withOwnImages(text: string, budget: { fetches: number }): Promise<string> {
+		const found = ampAttachments(text);
+		if (found.length === 0) return text;
+		const thread = this.store.required();
+		const keys = found.map((attachment) => `${AMP_ATTACHMENT_KEY}${attachment.canonical}`);
+		const known = await this.ctx.storage.get<string | { failed: number }>(keys);
+		const copies = new Map<string, string>();
+		let token: string | null | undefined;
+		for (const [index, attachment] of found.entries()) {
+			const entry = known.get(keys[index]!);
+			if (typeof entry === "string") {
+				copies.set(attachment.url, entry);
+				continue;
+			}
+			const failed = entry?.failed ?? 0;
+			if (failed >= AMP_ATTACHMENT_ATTEMPTS || budget.fetches <= 0) continue;
+			budget.fetches--;
+			token ??= await codingVault(this.env).loadApiKey(thread.space, "amp").catch(() => null);
+			let copy: string | null = null;
+			let retry = true;
+			if (token) {
+				const image = await fetchAmpImage(attachment.canonical, { token, types: IMAGE_TYPES, maxBytes: MAX_IMAGE_BYTES });
+				// The space's own storage refuses an image it has no room for, which may change.
+				if (image.ok) copy = await (await getAgentByName(this.env.Pim, thread.space)).codingKeepImage(thread.threadId, image.bytes, image.type);
+				else retry = image.retry;
+			}
+			if (copy !== null) {
+				await this.ctx.storage.put(keys[index]!, copy);
+				copies.set(attachment.url, copy);
+			} else await this.ctx.storage.put(keys[index]!, { failed: retry ? failed + 1 : AMP_ATTACHMENT_ATTEMPTS });
+		}
+		return replaceAmpAttachments(text, copies);
 	}
 
 	/** How often a turn on an agent-hosted thread is polled: what its client says it is doing. */
@@ -1397,6 +1440,15 @@ export class CodingThreadDO extends DurableObject<Env> {
 	async transcript(): Promise<TranscriptMessage[]> {
 		await this.lifecycle.start();
 		const messages = transcriptOf(await this.harness.messages());
+		// What an Amp thread showed before its attachments were mirrored is mirrored now, once.
+		if (this.store.required().providerId === "amp-http") {
+			const budget = { fetches: MAX_AMP_FETCHES };
+			for (const [at, message] of messages.entries()) {
+				if (message.role !== "assistant") continue;
+				const parts = await Promise.all(message.parts.map(async (part) => (part.type === "text" ? { ...part, text: await this.#withOwnImages(part.text, budget) } : part)));
+				messages[at] = { ...message, parts };
+			}
+		}
 		// The environment phase comes before the harness's first reply: by time, but never after the first thing the person said.
 		const firstReply = messages.findIndex((entry) => entry.role === "assistant" || entry.role === "tool");
 		const firstSaid = messages.findIndex((entry) => entry.role === "user");
@@ -2631,7 +2683,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 	 * kept on the thread's record, so a restart repeats nothing.
 	 */
 	async #mirrorOrb(client: OrbClient, orb: OrbThread): Promise<void> {
-		const before = this.store.required().orbLastMessage;
+		const thread = this.store.required();
+		const before = thread.orbLastMessage;
+		const budget = { fetches: MAX_AMP_FETCHES };
 		let after = before;
 		const read: OrbMessage[] = [];
 		for (let calls = 0; calls < ORB_MESSAGE_PAGES; calls++) {
@@ -2652,6 +2706,9 @@ export class CodingThreadDO extends DurableObject<Env> {
 				const content: (TextContent | ToolCall)[] = parts
 					? parts.flatMap<TextContent | ToolCall>((part) => (part.type === "text" ? [{ type: "text" as const, text: part.text }] : part.type === "toolCall" ? [{ type: "toolCall" as const, id: part.id, name: part.name, arguments: part.arguments as Record<string, any> }] : []))
 					: [{ type: "text", text: message.text }];
+				if (thread.providerId === "amp-http") {
+					for (const part of content) if (part.type === "text") part.text = await this.#withOwnImages(part.text, budget);
+				}
 				await this.#writeMessage({
 					role: "assistant",
 					content,
@@ -4539,6 +4596,11 @@ const ADVANCE_JOB = "advance";
 const HEARTBEAT_MS = 30_000;
 /** How often a turn on an agent-hosted thread is looked at, and how many looks in a row may say the client can't tell what it is doing before the turn is failed as unknown. */
 const ORB_POLL_MS = 30_000;
+/** Where a thread remembers each Amp attachment image's copy in Pim, by the attachment's address without its fragment. */
+const AMP_ATTACHMENT_KEY = "amp:attachment:";
+/** How many times an Amp attachment that couldn't be fetched is tried, and how many are fetched in one message-mirroring or transcript read. */
+const AMP_ATTACHMENT_ATTEMPTS = 3;
+const MAX_AMP_FETCHES = 20;
 const ORB_UNKNOWN_LIMIT = 10;
 /** The most calls one look at an agent-hosted thread's transcript may page through. */
 const ORB_MESSAGE_PAGES = 1_000;

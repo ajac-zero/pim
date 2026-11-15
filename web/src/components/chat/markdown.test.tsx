@@ -774,3 +774,45 @@ describe("mentions of the person", () => {
     ).toBe(true);
   });
 });
+
+describe("untrusted Markdown that may show Pim's own images", () => {
+  const own = "/api/images/3f1beb2b-bded-4fda-96cc-1af7192f24b6";
+  const shown = (text: string) =>
+    renderToStaticMarkup(<Markdown text={text} untrusted ownImages />);
+  const srcs = (html: string) =>
+    elements(html).flatMap((element) =>
+      element.attributes.filter((a) => a.name === "src").map((a) => a.value),
+    );
+
+  it("shows a kept image and nothing else that loads", () => {
+    const html = shown(`${HOSTILE}\n\n![Light](${own})`);
+    expect(srcs(html)).toEqual([own]);
+    expect(html).not.toContain("Image blocked: Light");
+    expect(html).toContain("[Image blocked: tracker]");
+    expect(elements(html).map((element) => element.tag)).not.toContain(
+      "picture",
+    );
+  });
+
+  it("blocks every other address, API path and data URL", () => {
+    const html = shown(
+      [
+        "![a](https://evil.example/pixel.png)",
+        "![b](//evil.example/p.png)",
+        "![c](/api/export)",
+        "![d](/api/images/x/../../export)",
+        "![e](/api/images/abc?x=1)",
+        "![f](data:image/png;base64,AAAA)",
+        '<img src="/api/images/abc">',
+      ].join("\n\n"),
+    );
+    expect(srcs(html)).toEqual([]);
+  });
+
+  it("stays strict without the opt-in", () => {
+    const html = renderToStaticMarkup(
+      <Markdown text={`![Light](${own})`} untrusted />,
+    );
+    expect(srcs(html)).toEqual([]);
+  });
+});

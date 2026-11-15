@@ -41,6 +41,7 @@ export interface CodingHost {
 	readonly env: Env;
 	readonly activityWatch: ActivityWatch;
 	readonly note: (event: string, fields: Record<string, unknown>) => void;
+	readonly keepImage: (session: string, bytes: Uint8Array, type: string) => Promise<string | null>;
 	readonly codingTurnEnded: (chat: string, text: string, key: string, agent?: string) => Promise<boolean>;
 }
 
@@ -92,6 +93,16 @@ export class SpaceCoding {
 	async codingChatgptToken(): Promise<string | null> {
 		if (this.host.closed()) return null;
 		return (await this.host.modelCatalog().getAuth(CHATGPT_PROVIDER))?.auth.apiKey ?? null;
+	}
+
+	/**
+	 * Keeps an image a coding thread's agent showed, such as an Amp attachment the thread fetched with the
+	 * space's Amp login, as the thread's own: its `/api/images/<id>` URL, or null when it isn't an image
+	 * Pim keeps or the space has no room for it. Archiving the thread keeps it, as the transcript stays readable.
+	 */
+	async codingKeepImage(threadId: string, bytes: Uint8Array, type: string): Promise<string | null> {
+		if (this.host.closed()) return null;
+		return this.host.keepImage(`coding:${threadId}`, bytes, type);
 	}
 
 	/** The space's coding threads changed (one started, changed state or archived): open pages refresh their lists, as for a chat. */

@@ -365,6 +365,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   streaming,
   attachments,
   untrusted,
+  ownImages,
   images = {},
   speaker,
   mention,
@@ -388,6 +389,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   streaming?: boolean;
   /** Shown outside the person's own app, as a public link's copy is: as `Markdown`'s untrusted text. */
   untrusted?: boolean;
+  /** With `untrusted`: Pim's own stored images are shown, for a thread only the signed-in person reads. */
+  ownImages?: boolean;
   /** What goes with the message, under its text: its widgets. */
   attachments?: ReactNode;
   /** The copies Pim keeps of the images its cards show, by their addresses on the web; null until they're kept. */
@@ -420,7 +423,12 @@ export const AssistantMessage = memo(function AssistantMessage({
         submitted={submitted}
         messageId={messageId}
       >
-        <Markdown text={text} streaming={streaming} untrusted={untrusted} />
+        <Markdown
+          text={text}
+          streaming={streaming}
+          untrusted={untrusted}
+          ownImages={ownImages}
+        />
       </ReplyImages>
       {attachments}
       <div className="mt-1 flex h-7 items-center gap-1.5 text-muted-foreground text-xs">

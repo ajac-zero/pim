@@ -533,10 +533,35 @@ export const UNTRUSTED_SCHEMA = {
   clobberPrefix: "",
 };
 
+/** Where Pim serves its own images: those a person sent, and the copies Pim keeps of those an agent's reply shows. */
+const OWN_IMAGE = /^\/api\/images\/[\w-]+$/;
+
+/**
+ * `UNTRUSTED_SCHEMA` for text shown to the signed-in person that may show Pim's own stored images, such as
+ * a coding thread's: an image keeps its `src` only when it is one of those, so an address from elsewhere,
+ * another path of the API and a data URL still leave nothing to load.
+ */
+export const OWN_IMAGES_SCHEMA = {
+  ...UNTRUSTED_SCHEMA,
+  attributes: {
+    ...UNTRUSTED_SCHEMA.attributes,
+    img: ["alt", ["src", OWN_IMAGE]],
+  },
+};
+
+const hardening = defaultRehypePlugins.harden
+  ? [defaultRehypePlugins.harden]
+  : [];
+
 const untrustedRehypePlugins: PluggableList = [
   [sanitize, UNTRUSTED_SCHEMA] as Pluggable,
   // Link hardening as well, behind the schema.
-  ...(defaultRehypePlugins.harden ? [defaultRehypePlugins.harden] : []),
+  ...hardening,
+];
+
+const ownImagesRehypePlugins: PluggableList = [
+  [sanitize, OWN_IMAGES_SCHEMA] as Pluggable,
+  ...hardening,
 ];
 
 /** No images: one from elsewhere would be fetched, and could carry what the text knows. Its alt text stands in. */
@@ -550,9 +575,6 @@ const untrustedComponents = {
     );
   },
 };
-
-/** Where Pim serves its own images: those a person sent, and the copies Pim keeps of those an agent's reply shows. */
-const OWN_IMAGE = /^\/api\/images\/[\w-]+$/;
 
 /**
  * Where the app loads an image of an agent's message from, or null when it
@@ -589,6 +611,19 @@ const agentComponents = {
   },
   // A `<picture>`'s sources would load in place of its image.
   source: () => null,
+};
+
+/** `untrustedComponents`, but Pim's own stored images are shown. */
+const ownImagesComponents = {
+  img: (props: object) => {
+    const { src, alt } = props as { src?: unknown; alt?: unknown };
+    const label = typeof alt === "string" ? alt : "";
+    return typeof src === "string" && OWN_IMAGE.test(src) ? (
+      <img src={src} alt={label} className="my-3 max-w-full rounded-xl" />
+    ) : (
+      <span className="text-muted-foreground">[{label || "image"}]</span>
+    );
+  },
 };
 
 /** Colors for text on the canvas or a card, and for text in a person's bubble, which takes them from the bubble's own. */
@@ -734,6 +769,7 @@ export const Markdown = memo(function Markdown({
   untrusted,
   bubble,
   drawings,
+  ownImages,
 }: {
   text: string;
   className?: string;
@@ -762,6 +798,11 @@ export const Markdown = memo(function Markdown({
    * nothing and loads nothing from elsewhere.
    */
   drawings?: boolean;
+  /**
+   * For `untrusted` text shown only to the signed-in person, such as a coding thread's: Pim's own stored
+   * images (`/api/images/<id>`) are shown, and any other image is still replaced by its alt text.
+   */
+  ownImages?: boolean;
 }) {
   const safe = untrusted || bubble;
   // The ```ui fences of the text: their ids, whether the last is still being written, and the text with each told which it is.
@@ -788,7 +829,11 @@ export const Markdown = memo(function Markdown({
       </p>
     );
     return {
-      ...(safe ? untrustedComponents : agentComponents),
+      ...(safe
+        ? ownImages && !bubble
+          ? ownImagesComponents
+          : untrustedComponents
+        : agentComponents),
       h1: ({ children }) => (
         <h1 className="mt-6 mb-3 font-semibold text-2xl">{children}</h1>
       ),
@@ -902,7 +947,7 @@ export const Markdown = memo(function Markdown({
       // `pre` with a bare passthrough (as react-markdown required) drops
       // that tag and silently breaks block-code detection.
     };
-  }, [safe, bubble, tone]);
+  }, [safe, bubble, tone, ownImages]);
   const fences = useMemo(
     () => ({ safe: safe === true, drawings: drawings === true, ui }),
     [safe, drawings, ui],
@@ -927,7 +972,10 @@ export const Markdown = memo(function Markdown({
           skipHtml={safe}
           {...(safe
             ? {
-                rehypePlugins: untrustedRehypePlugins,
+                rehypePlugins:
+                  ownImages && !bubble
+                    ? ownImagesRehypePlugins
+                    : untrustedRehypePlugins,
                 ...(bubble ? { remarkPlugins: bubbleRemarkPlugins } : {}),
               }
             : { remarkPlugins: chatRemarkPlugins })}

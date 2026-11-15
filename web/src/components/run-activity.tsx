@@ -1,7 +1,7 @@
+import type { Activity } from "@pim/shared/activity-types";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { call } from "~/lib/pim-api";
-import type { Activity } from "../../../src/activity-types";
 import { useI18n } from "./i18n";
 
 /** Server-side, redacted activity shared with pim_diagnostics. The browser only advances the clock. */

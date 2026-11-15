@@ -6,7 +6,8 @@ import type { Context, JsonValue } from "@earendil-works/chord";
 import { type TSchema, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import { WORKSPACE_ROOT, type Workspace, WorkspaceFileError, WorkspaceLimitError, WorkspacePathError } from "../workspace/types";
-import { Capture, LineStream, redact } from "./output";
+import { redact } from "@pim/shared/redact";
+import { Capture, LineStream } from "./output";
 import { parseTestSummary, type TestSummary } from "./test-results";
 
 export { type TestSummary, parseTestSummary } from "./test-results";

@@ -1,5 +1,5 @@
 import { diffIndices } from "node-diff3";
-import { FILE_CHANGES } from "./transcript";
+import { FILE_CHANGES } from "@pim/shared/transcript";
 
 /**
  * What an agent is told of the files it has seen that changed since: the

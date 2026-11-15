@@ -1,5 +1,5 @@
 import type { Computer } from "./computer";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * The person's files: a folder on their computer (./computer.ts) that they

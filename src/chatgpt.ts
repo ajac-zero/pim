@@ -1,6 +1,6 @@
 import type { Model, Api, Models, OAuthAuth, OAuthCredential, Provider } from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import type { PimStore } from "./store";
 
 /**

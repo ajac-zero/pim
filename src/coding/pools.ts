@@ -1,4 +1,4 @@
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * Sandbox pools: the named groups of coding sandboxes a deployment offers

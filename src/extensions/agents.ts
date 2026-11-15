@@ -20,7 +20,7 @@ import {
 } from "../agents";
 import { sha256 } from "../artifacts";
 import { FILES_ROOT, type Files, filesPath, imageType } from "../files";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import { majordomoRole } from "../majordomo";
 import { DELEGATE, type Role, taskPreamble } from "../tasks";
 import { approvalNote, defineGatedAction, fileApproval, type GatedAction, ownToolPermission } from "./approvals";

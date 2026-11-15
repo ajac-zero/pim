@@ -1,4 +1,4 @@
-import { base64UrlDecode, base64UrlEncode } from "../../auth/encoding";
+import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 import { GitBrokerError } from "./broker";
 import type { GiteaConfig } from "./config";
 import type { Fetch } from "./github-app";

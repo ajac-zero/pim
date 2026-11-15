@@ -23,7 +23,7 @@ import {
 } from "./scheduler";
 import type { PoolLiveState } from "./pools";
 import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRegistration } from "./thread-index";
-import type { Harness } from "./vault/harnesses";
+import type { Harness } from "@pim/shared/harnesses";
 import { codingVault } from "./vault/vault";
 import { DEFAULT_WORKSPACE_IMAGE, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import type { WorkspaceRef } from "./workspace/types";

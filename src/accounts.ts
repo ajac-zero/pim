@@ -6,7 +6,7 @@ import type { ApiExtension } from "./gateway";
 import { deploymentSettings, readDeployment } from "./deployment";
 import { FRAMED_KINDS, framePage, RUNTIME_PATH, ENTRY_FILES, readFiles, textOf } from "./artifacts";
 import type { AgentIcon, Bot, BotCard, PublishedArtifact } from "./gallery";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import { MAX_YOUR_NAME } from "./majordomo";
 import { providerInfo } from "./providers";
 import { checkCompute, COMPUTE_KINDS, computeProviderInfo, parseComputeQuota } from "./compute";

@@ -24,7 +24,7 @@ import { Buffer } from "node:buffer";
 import { compileJsxApp, dataUrl, inlineCssUrls, inlineScript, resolvePath } from "./artifact-jsx";
 import { FileStore } from "./file-store";
 import { parseManifest } from "./app-manifest";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 export const ARTIFACT_KINDS = ["html", "markdown", "svg", "mermaid", "jsx", "hosted"] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];

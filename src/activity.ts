@@ -1,5 +1,5 @@
-import type { Activity, Turn } from "./activity-types";
-export type { Activity } from "./activity-types";
+import type { Activity, Turn } from "@pim/shared/activity-types";
+export type { Activity } from "@pim/shared/activity-types";
 
 /** Each stall has a key that changes when the thing stalled makes progress and goes quiet again, so a notice is sent once per quiet spell. A quiet command is worth investigating after five minutes, a quiet coding thread after fifteen. */
 export function activityOf(turns: readonly Turn[], now: number, options: { running: boolean; startedAt: number; lastOutputAt?: number; coding?: boolean; quietMs?: number; outputByCall?: Readonly<Record<string, number>> }): Activity {

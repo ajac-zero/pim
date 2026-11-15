@@ -9,7 +9,7 @@ import { codingThread } from "../coding/thread-do";
 import { CodingError, calling, listThreads, liveThread, ownedThread, startThread, threadView } from "../coding/threads";
 import { OUTPUT_LINES, pageTranscript, TRANSCRIPT_MAX_PAGE, TRANSCRIPT_PAGE, transcriptOutput } from "../coding/transcript";
 import { outsideTrace } from "../telemetry";
-import type { TranscriptMessage } from "../transcript";
+import type { TranscriptMessage } from "@pim/shared/transcript";
 import { defineGatedAction, definePimExtension } from "./define";
 import { json, text } from "./services";
 

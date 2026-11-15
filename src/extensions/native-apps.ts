@@ -1,4 +1,4 @@
-import { base64UrlDecode, base64UrlEncode } from "../auth/encoding";
+import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 import type { AppCredential, AppSecrets, AppSignInContext, AppToolContext, NativeAppDefinition, ToolWidget } from "./define";
 import type { McpCallResult, McpToolInfo } from "./mcp";
 

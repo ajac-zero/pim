@@ -1,4 +1,9 @@
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
+import {
+  DELIVERY_REMINDER,
+  FILE_CHANGES,
+  INTRODUCTION,
+} from "@pim/shared/transcript";
 import { describe, expect, it } from "vitest";
 import type { FunctionCallItem } from "~/lib/openresponses";
 import type { AgentTask } from "~/lib/pim-api";
@@ -16,11 +21,6 @@ import {
   thinkingSince,
   type WorkApproval,
 } from "~/lib/pim-view";
-import {
-  DELIVERY_REMINDER,
-  FILE_CHANGES,
-  INTRODUCTION,
-} from "../../../src/transcript";
 
 /* Event and entry builders. Casts keep fixtures to the fields the view reads. */
 

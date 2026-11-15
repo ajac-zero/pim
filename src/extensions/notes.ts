@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import { type ArtifactStore, type ArtifactVersion, checkTitle } from "../artifacts";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import type { NoteStore } from "../notes";
 import { text } from "./services";
 

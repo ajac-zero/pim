@@ -1,5 +1,17 @@
 // @vitest-environment happy-dom
 
+import {
+  checkUiState,
+  compile,
+  evaluate,
+  initialState,
+  MAX_TURN_BYTES,
+  type UiResponse,
+  uiBlockId,
+  uiResponseOf,
+  uiTurn,
+} from "@pim/ui-lang";
+import { UI_EXAMPLE } from "@pim/ui-lang/catalog";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -25,23 +37,11 @@ import { ReplyImages } from "~/components/chat/reply-blocks";
 import { CARRY_FOR_MS } from "~/components/chat/ui-block";
 import type { MessageItem } from "~/lib/openresponses";
 import { ApiError, pim, type StoredUiState } from "~/lib/pim-api";
-import {
-  checkUiState,
-  compile,
-  evaluate,
-  initialState,
-  MAX_TURN_BYTES,
-  type UiResponse,
-  uiBlockId,
-  uiResponseOf,
-  uiTurn,
-} from "../../../../src/ui-lang";
-import { UI_EXAMPLE } from "../../../../src/ui-lang/catalog";
 
 /** What the block was compiled from, each time, so a test can count compiles. */
 const compiled = vi.hoisted(() => [] as { source: string; partial: boolean }[]);
-vi.mock("../../../../src/ui-lang", async (importOriginal) => {
-  const real = await importOriginal<typeof import("../../../../src/ui-lang")>();
+vi.mock("@pim/ui-lang", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@pim/ui-lang")>();
   return {
     ...real,
     compile: (source: string, options?: { partial?: boolean }) => {

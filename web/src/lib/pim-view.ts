@@ -8,6 +8,16 @@ import type {
   EntryRecord,
   MessageChange,
 } from "@earendil-works/pi-durable";
+import { redactSecrets } from "@pim/shared/redact";
+import {
+  fromPerson,
+  INTRODUCTION,
+  isDeliveryReminder,
+  NOTICE_PREFIXES,
+  ROOM_POST,
+  reasoningHeadings,
+  withoutFileChanges,
+} from "@pim/shared/transcript";
 import {
   type FunctionCallItem,
   type FunctionCallOutputItem,
@@ -17,16 +27,6 @@ import {
   type ReasoningItem,
 } from "~/lib/openresponses";
 import type { AgentTask, ApprovalStatus } from "~/lib/pim-api";
-import { redactSecrets } from "../../../src/coding/tools/output";
-import {
-  fromPerson,
-  INTRODUCTION,
-  isDeliveryReminder,
-  NOTICE_PREFIXES,
-  ROOM_POST,
-  reasoningHeadings,
-  withoutFileChanges,
-} from "../../../src/transcript";
 
 /**
  * Folds Pim's WebSocket stream (pi's agent events: a snapshot, then one batch

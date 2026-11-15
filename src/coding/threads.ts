@@ -1,5 +1,5 @@
 import { digestHex } from "../auth/store";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import type { CodingCreator, CodingErrorCode, CodingThreadSummary, CodingThreadView, StartCodingThread } from "./api";
 import { threadPath } from "./api";
 import { GitBrokerError } from "./git-broker/broker";

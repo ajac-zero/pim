@@ -1,7 +1,7 @@
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Extension } from "@earendil-works/pi-durable";
-import type { Theme } from "../themes";
-import type { Route } from "../http";
+import type { Theme } from "@pim/shared/themes";
+import type { Route } from "@pim/shared/http";
 import type { UiAuditEntry } from "../store";
 import type { GatedAction } from "./approvals";
 

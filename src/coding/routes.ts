@@ -1,8 +1,8 @@
 import { getAgentByName } from "agents";
 import type { Account } from "../directory";
 import type { ApiExtension } from "../gateway";
-import { dispatch, HttpError, readJson, type Route } from "../http";
-import type { TranscriptMessage } from "../transcript";
+import { dispatch, HttpError, readJson, type Route } from "@pim/shared/http";
+import type { TranscriptMessage } from "@pim/shared/transcript";
 import { CODING_API_PATH, CODING_REPOS_PATH, type CodingErrorCode, type CodingPullRequestOpened, type CodingPushRequested, type StartCodingThread } from "./api";
 import { GitBrokerError, repoRef } from "./git-broker/broker";
 import { brokerPolicy } from "./git-broker/config";

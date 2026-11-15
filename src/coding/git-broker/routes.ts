@@ -1,5 +1,5 @@
-import { base64UrlDecode } from "../../auth/encoding";
-import { dispatch, type Route } from "../../http";
+import { base64UrlDecode } from "@pim/shared/encoding";
+import { dispatch, type Route } from "@pim/shared/http";
 import { type BrokerClaims, brokerKey, checkPushScope, GitBrokerError, MAX_PUSH_BYTES, parseAdvertisement, parseReceivePackRequest, type RepoRef, repoRef, issueBrokerToken, verifyBrokerToken, ZERO } from "./broker";
 import { type BrokerPolicy, brokerPolicy, GITEA_INSTANCE_ID, giteaBaseUrl, giteaConfig, githubAppConfig, githubAppStatus } from "./config";
 import { GiteaConnection, type GiteaBackend, giteaKeyFrom, GiteaNotConnectedError } from "./gitea-connection";

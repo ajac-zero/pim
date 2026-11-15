@@ -3,7 +3,7 @@ import { posix } from "node:path";
 import type { Connection } from "agents";
 import type { ExecArgs, ExecResult, FileConflict, WatchEvent, WriteResult } from "../computer/pim-computer";
 import { digestHex } from "./auth/store";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * The person's computer: a machine running `pim-computer`

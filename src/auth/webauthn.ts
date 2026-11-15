@@ -10,7 +10,7 @@
  * See https://www.w3.org/TR/webauthn-3/#sctn-rp-operations
  */
 
-import { base64UrlDecode } from "./encoding";
+import { base64UrlDecode } from "@pim/shared/encoding";
 
 /** What this deployment expects a ceremony to be bound to. */
 export type Ceremony = {

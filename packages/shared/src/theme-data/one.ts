@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * One: Atom One Light / One Dark. Light blue is darkened for button/link

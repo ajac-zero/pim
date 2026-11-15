@@ -1,10 +1,10 @@
 import type { Account } from "../../directory";
 import type { ApiExtension } from "../../gateway";
-import { dispatch, readJson, type Route } from "../../http";
+import { dispatch, readJson, type Route } from "@pim/shared/http";
 import { cliHarness } from "../harness";
 import { validLoginCode } from "../harness/login";
 import { codingScheduler } from "../scheduler-do";
-import { apiKeyProblem, CODING_VAULT_PATH, type HarnessLoginStatus, isApiKeyHarness, isHarness } from "./harnesses";
+import { apiKeyProblem, CODING_VAULT_PATH, type HarnessLoginStatus, isApiKeyHarness, isHarness } from "@pim/shared/harnesses";
 import type { VaultStatus } from "./store";
 import { ApiKeyError, codingVault } from "./vault";
 

@@ -1,7 +1,7 @@
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { type ShownWidget, shownWidgets } from "./extensions/define";
 import { plainReply, SEND_TO_USER } from "./extensions/messaging";
-import { INTRODUCTION, NOTICE_PREFIXES, ROOM_POST, isDeliveryReminder } from "./transcript";
+import { INTRODUCTION, NOTICE_PREFIXES, ROOM_POST, isDeliveryReminder } from "@pim/shared/transcript";
 
 /**
  * Public links to chats. A link shows a copy of the conversation made when

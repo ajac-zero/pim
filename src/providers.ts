@@ -6,7 +6,7 @@ import { mistralConversationsApi } from "@earendil-works/pi-ai/api/mistral-conve
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { createProvider } from "@earendil-works/pi-ai/models";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import { withPlainToolResults, withTypedToolSchemas } from "./typed-schemas";
 
 /**

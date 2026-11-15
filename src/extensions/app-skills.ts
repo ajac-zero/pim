@@ -6,7 +6,7 @@ import type { Files } from "../files";
 import type { SkillStore } from "../skills";
 import type { BuiltinSkill } from "./notes";
 import { isTextType } from "../artifacts";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import { text } from "./services";
 
 /**

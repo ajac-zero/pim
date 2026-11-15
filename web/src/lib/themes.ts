@@ -1,10 +1,10 @@
-import type { BundledTheme, ThemeRegistration } from "shiki";
 import {
   type CodeTheme,
   codeKey,
   type RecoloredCodeTheme,
   type ThemeList,
-} from "../../../src/themes";
+} from "@pim/shared/themes";
+import type { BundledTheme, ThemeRegistration } from "shiki";
 
 /**
  * The color themes a person can pick come from the Pim's extensions (see

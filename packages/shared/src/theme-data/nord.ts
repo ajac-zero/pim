@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Nord: Polar Night dark; Snow Storm light (Nord has no official light theme).

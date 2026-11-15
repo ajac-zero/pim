@@ -18,7 +18,7 @@ const server = await createServer({
 });
 try {
   const { ICONS } = await server.ssrLoadModule("/src/components/agent-icon.tsx");
-  const { tokyoNight } = await server.ssrLoadModule("../src/extensions/themes/tokyo-night.ts");
+  const { tokyoNight } = await server.ssrLoadModule("@pim/shared/theme-data/tokyo-night");
   const symbols = {};
   for (const name of Object.keys(ICONS)) {
     const { default: Icon } = await dynamicIconImports[name]();

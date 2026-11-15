@@ -1,10 +1,10 @@
-import type { CallApproval, Turn, TurnStep } from "./activity-types";
-export type { CallApproval, Turn, TurnStep } from "./activity-types";
+import type { CallApproval, Turn, TurnStep } from "@pim/shared/activity-types";
+export type { CallApproval, Turn, TurnStep } from "@pim/shared/activity-types";
 import { activityOf, type Activity } from "./activity";
 import type { Message } from "@earendil-works/pi-ai";
 import { redactSecrets } from "./hostops";
-import { redact } from "./coding/tools/output";
-import { isDeliveryReminder } from "./transcript";
+import { redact } from "@pim/shared/redact";
+import { isDeliveryReminder } from "@pim/shared/transcript";
 
 /**
  * What the admin's majordomo reads to debug this Pim without the web app

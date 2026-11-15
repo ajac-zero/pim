@@ -1,3 +1,4 @@
+import { HARNESS_API_KEYS, HARNESS_DISCLOSURES } from "@pim/shared/harnesses";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Tabs } from "radix-ui";
@@ -106,10 +107,6 @@ import { ApiError, pim, SignInRequired } from "~/lib/pim-api";
 import { textOf } from "~/lib/pim-client";
 import { accountQuery, approvalsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
-import {
-  HARNESS_API_KEYS,
-  HARNESS_DISCLOSURES,
-} from "../../../src/coding/vault/harnesses";
 
 /*
  * Coding threads (docs/coding-api.md): the space's list with a form to start

@@ -1,5 +1,5 @@
 import type { FileEntry, Files } from "./files";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import { MAX_SKILL_BYTES, MAX_SKILL_FILES } from "./skills";
 
 /**

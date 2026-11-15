@@ -1,4 +1,4 @@
-import { type ApiKeyHarness, isApiKeyHarness } from "../vault/harnesses";
+import { type ApiKeyHarness, isApiKeyHarness } from "@pim/shared/harnesses";
 import type { CodingThreadRow } from "../thread-store";
 import type { HarnessAuth } from "./runner";
 import type { CliHarness } from "./types";

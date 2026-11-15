@@ -4,7 +4,7 @@ import { defineExtension, defineTool, section, type ToolExecutionApi } from "@ea
 import { type Agent, type AgentStore, agentInput, agentLabel } from "../agents";
 import { sha256 } from "../artifacts";
 import type { Files } from "../files";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import { readUrl, skillFromFolder, skillFromGitHub } from "../skill-sources";
 import { MAX_SKILL_DESCRIPTION, MAX_SKILL_FILE_CHARS, MAX_SKILL_FILES, MAX_SKILL_INSTRUCTIONS, SKILL_NAME, type SkillFileContent, type SkillStore } from "../skills";
 import type { PimStore } from "../store";

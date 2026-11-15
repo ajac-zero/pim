@@ -8,7 +8,7 @@ import { deploymentSettings } from "../src/deployment";
 import type { ImageModel } from "../src/extensions/image-generation";
 import { serve } from "../src/gateway";
 import { Pim as RealPim } from "../src/pim";
-import { INTRODUCTION } from "../src/transcript";
+import { INTRODUCTION } from "@pim/shared/transcript";
 import { Authenticator } from "../test/webauthn";
 
 export { Auth, CodingSchedulerDO, CodingThreadDO, Directory, Gallery, HostOps } from "../src/index";

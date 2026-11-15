@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { base64UrlEncode } from "./encoding";
+import { base64UrlEncode } from "@pim/shared/encoding";
 import type { PublicKey } from "./webauthn";
 
 /**

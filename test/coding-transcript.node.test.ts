@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import { MESSAGE_CHARS, OUTPUT_LINE_CHARS, pageTranscript, SUMMARY_CHARS, transcriptOutput, transcriptText, TRANSCRIPT_PAGE } from "../src/coding/transcript";
-import type { TranscriptMessage } from "../src/transcript";
+import type { TranscriptMessage } from "@pim/shared/transcript";
 
 // What an agent reads of a coding thread's transcript (src/coding/transcript.ts): the page
 // coding_transcript cuts out of it and the whole of one message coding_transcript_output reads

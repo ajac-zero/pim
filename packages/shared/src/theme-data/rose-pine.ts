@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Rosé Pine: Dawn / Main (not Moon). Dawn subtle, love, gold, rose and foam

@@ -2,9 +2,9 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 import type { Agent } from "./agents";
 import { text } from "./extensions/services";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import { DELEGATE } from "./tasks";
-import { INTRODUCTION } from "./transcript";
+import { INTRODUCTION } from "@pim/shared/transcript";
 
 /**
  * The majordomo: the one agent the person comes to first, for almost

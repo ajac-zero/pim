@@ -1,6 +1,6 @@
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import type { PimStore } from "./store";
-import { LOCALES, type Locale } from "./locales";
+import { LOCALES, type Locale } from "@pim/shared/locales";
 
 /**
  * The person's own settings, kept in their space's database. Until the person

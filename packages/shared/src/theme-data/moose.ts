@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Moose: cool grays, black or white buttons, and softly blue user bubbles; a

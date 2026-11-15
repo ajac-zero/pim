@@ -16,6 +16,11 @@ import { displaydBundle } from "../displayd/bundle.js";
  * Set PIM_API_URL to use another Pim. The token stays in this process; the
  * browser never sees it.
  */
+/** Pim's version, shown in the sidebar. */
+const { version } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
+
 export default defineConfig(({ mode }) => {
   const env = { ...loadEnv(mode, process.cwd(), "PIM_"), ...process.env };
   const target = env.PIM_API_URL ?? "http://localhost:8787";
@@ -36,6 +41,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     define: {
+      __PIM_VERSION__: JSON.stringify(version),
       "import.meta.env.PIM_BUILD": JSON.stringify(
         build.digest("hex").slice(0, 16),
       ),

@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { type Access, MANIFEST_FILE, parseManifest } from "./app-manifest";
 import type { ArtifactStore } from "./artifacts";
 import type { Computer } from "./computer";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * Apps with a backend (the `hosted` kind of app). A version of one is the

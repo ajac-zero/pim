@@ -30,12 +30,12 @@ import { NOTE_LIVE_PATH } from "./notes";
 import { APPS_CALLBACK_PATH, MCP_CALLBACK_PATH, MCP_CLIENT_PATH, MCP_EVENTS_PATH, MCP_SERVER_PATH, OWNER_HEADER, SIGNED_IN_HEADER } from "./pim";
 import { currentSession, fromAnotherSite, handleAuth, sessionClaim, tokenOwner } from "./auth";
 import type { Account } from "./directory";
-import { base64UrlEncode } from "./auth/encoding";
+import { base64UrlEncode } from "@pim/shared/encoding";
 import { isNativeApp } from "./extensions/define";
 import { themes as ownThemes } from "./extensions/themes";
 import { type McpAccess, type McpGrant, serveConsent, serveOAuth } from "./mcp-auth";
 import { admitIngress, limited } from "./runtime";
-import { PimThemes } from "./themes";
+import { PimThemes } from "@pim/shared/themes";
 
 /**
  * Serves a Pim: everyone's web app, sign-in, API and connector callbacks, on one

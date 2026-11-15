@@ -31,6 +31,8 @@
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.15",
     "@lezer/highlight": "^1.2.5",
+    "@pim/shared": "workspace:*",
+    "@pim/ui-lang": "workspace:*",
     "@streamdown/math": "^1.0.3",
     "@tanstack/query-async-storage-persister": "^5.105.3",
     "@tanstack/query-persist-client-core": "^5.105.3",

@@ -1,5 +1,5 @@
+import type { UiState } from "@pim/ui-lang";
 import { ApiError, pim, type StoredUiState } from "~/lib/pim-api";
-import type { UiState } from "../../../src/ui-lang";
 
 /**
  * Keeping what a ```ui block holds on the server, so a reload finds a draft,

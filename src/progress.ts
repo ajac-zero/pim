@@ -1,7 +1,7 @@
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook } from "@earendil-works/pi-durable";
 import { SEND_TO_USER } from "./extensions/messaging";
-import { isDeliveryReminder, reasoningHeadings } from "./transcript";
+import { isDeliveryReminder, reasoningHeadings } from "@pim/shared/transcript";
 
 /**
  * Progress lines: while an agent works, the person watching its chat reads

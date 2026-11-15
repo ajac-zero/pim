@@ -1,19 +1,10 @@
+import { pimThemes } from "@pim/shared/theme-data/index";
+import type { RecoloredCodeTheme } from "@pim/shared/themes";
 import { bundledThemes } from "shiki";
 import { describe, expect, it } from "vitest";
 import { loadRecolored } from "~/lib/themes";
-import type { RecoloredCodeTheme, Theme } from "../../../src/themes";
 
-// Pim's own themes, one per file; the extension that lists them is server code.
-const modules = import.meta.glob<Record<string, Theme>>(
-  [
-    "../../../src/extensions/themes/*.ts",
-    "!../../../src/extensions/themes/index.ts",
-  ],
-  { eager: true },
-);
-const themes = Object.values(modules).flatMap((module) =>
-  Object.values(module),
-);
+const themes = pimThemes;
 const recolored = themes.flatMap((theme) =>
   (["light", "dark"] as const).flatMap((mode) => {
     const code = theme.code[mode];

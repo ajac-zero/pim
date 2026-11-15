@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Everforest: Light / Dark, medium backgrounds. Light green primary, blue

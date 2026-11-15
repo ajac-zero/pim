@@ -1,9 +1,9 @@
 import { getAgentByName } from "agents";
-import { base64UrlDecode } from "../../auth/encoding";
+import { base64UrlDecode } from "@pim/shared/encoding";
 import { codingScheduler } from "../scheduler-do";
 import { ArchiveError, type ArchiveFile, packArchive, unpackArchive } from "./archive";
 import { openBlob, sealBlob, VaultUnreadableError, vaultKey } from "./crypto";
-import { type CodingVaultKey, type ApiKeyHarness, apiKeyProblem, HARNESS_FILES, type Harness, isApiKeyHarness, isHarness, isLoginHarness, type LoginHarness } from "./harnesses";
+import { type CodingVaultKey, type ApiKeyHarness, apiKeyProblem, HARNESS_FILES, type Harness, isApiKeyHarness, isHarness, isLoginHarness, type LoginHarness } from "@pim/shared/harnesses";
 import type { VaultRecord, VaultStatus, VaultWriteResult } from "./store";
 
 /**

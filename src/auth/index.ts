@@ -29,7 +29,7 @@
  *   the person's other device (a phone), which then makes its own passkey.
  */
 
-import { base64UrlDecode, base64UrlEncode } from "./encoding";
+import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 import { type Auth, digestHex, normalizeRecoveryCode, type Passkey } from "./store";
 import { authorizationUrl, exchangeCode, type Identity, isProviderId, type ProviderId, type ProviderSettings, providerName, randomValue } from "./oauth";
 import { ALGORITHMS, type Assertion, type Registration, verifyAssertion, verifyRegistration } from "./webauthn";

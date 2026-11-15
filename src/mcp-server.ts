@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import type { Agent } from "./agents";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * The person's space as an MCP server, at `/mcp`, so MCP clients such as

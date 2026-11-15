@@ -1,6 +1,6 @@
 import { MAX_ARCHIVE_BYTES } from "./archive";
 import { SEAL_OVERHEAD } from "./crypto";
-import type { CodingVaultKey, Harness } from "./harnesses";
+import type { CodingVaultKey, Harness } from "@pim/shared/harnesses";
 
 /**
  * The vault's entries in a space's own database (the Pim Durable Object's,

@@ -1,4 +1,4 @@
-import type { Activity } from "../src/activity-types";
+import type { Activity } from "@pim/shared/activity-types";
 import { listThreads } from "../src/coding/threads";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { getAgentByName } from "agents";
@@ -18,7 +18,7 @@ import type { ComputeQuota } from "../src/compute";
 import type { Pim } from "../src/pim";
 import type { Approval } from "../src/store";
 import type { WorkspaceSpec } from "../src/coding/workspace/types";
-import { CODING_EVENT } from "../src/transcript";
+import { CODING_EVENT } from "@pim/shared/transcript";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
 import { installed } from "./fixtures/repos";

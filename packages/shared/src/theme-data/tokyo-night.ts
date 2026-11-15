@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Tokyo Night: "Night" for dark mode; light mode follows "Day" with darker

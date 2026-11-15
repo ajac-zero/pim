@@ -7,8 +7,8 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { StoredImage } from "../src/images";
-import type { TranscriptMessage } from "../src/transcript";
-import { uiBlockId, uiBlockIds } from "../src/ui-lang";
+import type { TranscriptMessage } from "@pim/shared/transcript";
+import { uiBlockId, uiBlockIds } from "@pim/ui-lang";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, textOf, TOKEN, toolUse, triggersOn, url } from "./helpers";
 import { faux, type Pim, utility } from "./worker";
 

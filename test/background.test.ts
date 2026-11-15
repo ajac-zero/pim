@@ -5,7 +5,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { OUT_OF_OUTPUT_TOKENS } from "../src/extensions/messaging";
-import { DELIVERY_REMINDER, LENGTH_REMINDER } from "../src/transcript";
+import { DELIVERY_REMINDER, LENGTH_REMINDER } from "@pim/shared/transcript";
 import { api, connect, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, toolUse, triggersOn, widgetsShown } from "./helpers";
 import { faux, outbox, type Pim, triggerClock } from "./worker";
 

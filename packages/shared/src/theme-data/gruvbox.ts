@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Gruvbox: Light / Dark, medium contrast. Official hard backgrounds are

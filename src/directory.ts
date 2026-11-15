@@ -1,6 +1,6 @@
 import { getAgentByName } from "agents";
 import { DurableObject } from "cloudflare:workers";
-import { base64UrlEncode } from "./auth/encoding";
+import { base64UrlEncode } from "@pim/shared/encoding";
 import { digestHex } from "./auth/store";
 import { GiteaStore, type GiteaRecord, type GiteaWriteResult } from "./coding/git-broker/gitea-store";
 import { HOST_SEEN_MS, HOST_TOKEN_PREFIX, type HostRequest, type HostStatus, type HostSync, RETAKE_MS } from "./computer-host";

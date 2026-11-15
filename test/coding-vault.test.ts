@@ -8,7 +8,7 @@ import { codingScheduler } from "../src/coding/scheduler-do";
 import { codingThreadId } from "../src/coding/threads";
 import { ArchiveError, type ArchiveFile, MAX_ARCHIVE_BYTES, MAX_ARCHIVE_FILES, packArchive, unpackArchive } from "../src/coding/vault/archive";
 import { openBlob, sealBlob, VaultUnreadableError, vaultKey } from "../src/coding/vault/crypto";
-import { apiKeyProblem, HARNESS_FILES, HARNESSES } from "../src/coding/vault/harnesses";
+import { apiKeyProblem, HARNESS_FILES, HARNESSES } from "@pim/shared/harnesses";
 import { harnessEnv, restoreHarnessCredentials, VaultOwnershipError, writeBackHarnessCredentials } from "../src/coding/vault/inject";
 import { MAX_SEALED_BYTES } from "../src/coding/vault/store";
 import { ApiKeyError, CodingVault, codingVault, type Ownership, spaceVaultBackend, threadOwnership } from "../src/coding/vault/vault";

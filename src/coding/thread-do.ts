@@ -29,7 +29,7 @@ import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { CHATGPT_PROVIDER } from "../chatgpt";
 import { piProvider } from "../providers";
 import { environmentNotices, stepRecord } from "./environment-phase";
-import { projectEntries, type TranscriptMessage } from "../transcript";
+import { projectEntries, type TranscriptMessage } from "@pim/shared/transcript";
 import { failedResponse, wrapStreams } from "../usage";
 import {
 	DEFAULT_GATEWAY_LIMITS,
@@ -96,7 +96,7 @@ import {
 } from "./thread-store";
 import { ownsLegacySnapshots, type PlacementPool, placementPools, type SandboxPool, type SkippedPool } from "./pools";
 import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
-import { isLoginHarness } from "./vault/harnesses";
+import { isLoginHarness } from "@pim/shared/harnesses";
 import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
 import { codingVault, threadOwnership } from "./vault/vault";
 import { ComposeManagerError } from "./workspace/compose";

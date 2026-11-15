@@ -1,8 +1,8 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
-import { closedUiSources, compile, uiBlockIds, uiBlockReference, type UiProgram } from "../ui-lang";
+import { closedUiSources, compile, uiBlockIds, uiBlockReference, type UiProgram } from "@pim/ui-lang";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
-import { DELIVERY_REMINDER, LENGTH_REMINDER } from "../transcript";
+import { DELIVERY_REMINDER, LENGTH_REMINDER } from "@pim/shared/transcript";
 import { widgetMarkdown } from "./define";
 import { json, type PimServices, text } from "./services";
 

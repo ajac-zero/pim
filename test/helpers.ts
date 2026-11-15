@@ -8,7 +8,7 @@ import { afterEach, beforeAll, expect, vi } from "vitest";
 import { type BrowserHost, type DisplayHost, type DriverHost, type ExecArgs, type ExecResult, Link, type Machine, type ScreenHost } from "../computer/pim-computer";
 import { ownedCode } from "../src/auth";
 import type { Approval } from "../src/store";
-import type { TranscriptMessage } from "../src/transcript";
+import type { TranscriptMessage } from "@pim/shared/transcript";
 import { faux, resetTestWorkerState } from "./worker";
 import { Authenticator } from "./webauthn";
 

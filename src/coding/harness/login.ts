@@ -1,4 +1,4 @@
-import { type Harness, isLoginHarness } from "../vault/harnesses";
+import { type Harness, isLoginHarness } from "@pim/shared/harnesses";
 import { harnessEnv, HARNESS_HOME, type Restored, writeBackHarnessCredentials } from "../vault/inject";
 import type { CodingVault } from "../vault/vault";
 import { WORKSPACE_ROOT, type Workspace, type WorkspaceProvider, type WorkspaceRef, type WorkspaceSpec } from "../workspace/types";

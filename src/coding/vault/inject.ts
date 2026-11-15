@@ -1,6 +1,6 @@
 import { WORKSPACE_ROOT, type Workspace, WorkspaceFileError, type WorkspaceRef } from "../workspace/types";
 import { ArchiveError, type ArchiveFile, MAX_ARCHIVE_BYTES, packArchive } from "./archive";
-import { HARNESS_FILES, type Harness, isLoginHarness, type LoginHarness } from "./harnesses";
+import { HARNESS_FILES, type Harness, isLoginHarness, type LoginHarness } from "@pim/shared/harnesses";
 import type { CodingVault, Ownership } from "./vault";
 
 /**

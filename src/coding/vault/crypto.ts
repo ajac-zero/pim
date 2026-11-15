@@ -1,4 +1,4 @@
-import type { CodingVaultKey } from "./harnesses";
+import type { CodingVaultKey } from "@pim/shared/harnesses";
 
 /**
  * How the vault (./vault.ts) encrypts an archive: AES-256-GCM with a random

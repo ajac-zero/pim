@@ -1030,7 +1030,7 @@ export class PimStore {
 			.map((row) => ({ at: String(row.at), agent: String(row.agent), method: String(row.method), path: String(row.path), status: Number(row.status), keys: JSON.parse(String(row.keys)) as string[] }));
 	}
 
-	// What ```ui blocks hold (./ui-lang/state.ts), by the message they were drawn in and their id in it
+	// What ```ui blocks hold (packages/ui-lang/src/state.ts), by the message they were drawn in and their id in it
 
 	/** What the blocks of a message hold, by block id. */
 	uiStates(message: string): Record<string, UiStateRecord> {

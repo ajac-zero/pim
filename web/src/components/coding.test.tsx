@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import type { EntryRecord } from "@earendil-works/pi-durable";
+import { HARNESS_DISCLOSURES } from "@pim/shared/harnesses";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -60,7 +61,6 @@ import {
 } from "~/lib/queries";
 import { pinTab, pruneTabs } from "~/lib/tabs";
 import { resetThemes } from "~/lib/themes";
-import { HARNESS_DISCLOSURES } from "../../../src/coding/vault/harnesses";
 
 // Code blocks load the color themes; with no server here, they get an empty list.
 beforeEach(() => {

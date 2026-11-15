@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, section } from "@earendil-works/pi-durable";
 import { pimOrigin } from "../accounts";
-import { match, type Route } from "../http";
+import { match, type Route } from "@pim/shared/http";
 import { defineGatedAction } from "./approvals";
 import { definePimExtension } from "./define";
 import { json, text } from "./services";

@@ -1,7 +1,7 @@
 import { containerProvider } from "./coding/workspace/cloudflare";
 import { ComposeWorkspaceProvider } from "./coding/workspace/compose";
 import type { WorkspaceProvider } from "./coding/workspace/types";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * Compute providers: the third-party services whose sandboxes run coding

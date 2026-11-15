@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+
+import type { Activity } from "@pim/shared/activity-types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -9,7 +11,6 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { Activity } from "../../../src/activity-types";
 import { ChatRunActivity, RunActivity } from "./run-activity";
 
 const activity: Activity = {

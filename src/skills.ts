@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { fileType, isTextType, sha256 } from "./artifacts";
 import { FileStore } from "./file-store";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * Skills the person's agents write for work they do again and again, such as

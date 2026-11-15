@@ -16,7 +16,7 @@ import {
 	readHostOpsAudit,
 	waitForHostOp,
 } from "../hostops";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import { defineGatedAction } from "./approvals";
 import { definePimExtension } from "./define";
 import { json, text } from "./services";

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { base64UrlDecode } from "../src/auth/encoding";
+import { base64UrlDecode } from "@pim/shared/encoding";
 import {
 	BranchMovedError,
 	brokerKey,

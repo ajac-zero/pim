@@ -10,7 +10,7 @@ import type { Approval } from "../src/store";
 import { COMPUTER_GRANT_ACTION, PROTOCOL, runtimeIdOf, TRIGGERS_ENVELOPE } from "../src/triggers/computer";
 import { TRIGGER_TICK_CALLBACK } from "../src/triggers/engine";
 import { Computer, MAX_FILE_LISTENERS, MAX_WATCHED_PATHS } from "../src/computer";
-import { FILE_CHANGES } from "../src/transcript";
+import { FILE_CHANGES } from "@pim/shared/transcript";
 import { api, apiUrl, browserCalls, connect, connectTestComputer, lastUserText, messagesOf, opens, OWNER, pendingApproval, post, ROOT as ROOT_CHAT, say, signedIn, TOKEN, toolUse } from "./helpers";
 import { faux, paintings, type Pim } from "./worker";
 

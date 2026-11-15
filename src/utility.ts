@@ -1,5 +1,5 @@
 import { Type, type TSchema } from "@earendil-works/pi-ai";
-import { isDeliveryReminder, ROOM_POST, type TranscriptMessage } from "./transcript";
+import { isDeliveryReminder, ROOM_POST, type TranscriptMessage } from "@pim/shared/transcript";
 
 /**
  * Side jobs for the utility model: one small, fast model, chosen once per

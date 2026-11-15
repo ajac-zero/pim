@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Solarized: Light / Dark. Light blue, cyan, red, green and yellow are

@@ -1,6 +1,6 @@
 import type { Api, Model, ModelCost } from "@earendil-works/pi-ai";
 import { calculateCost } from "@earendil-works/pi-ai/models";
-import { base64UrlDecode, base64UrlEncode } from "../auth/encoding";
+import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 
 /**
  * The model gateway: how a vendor CLI in a coding workspace, such as Claude

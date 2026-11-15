@@ -28,7 +28,7 @@ import * as encoding from "lib0/encoding";
 import * as sync from "y-protocols/sync";
 import * as Y from "yjs";
 import { type ArtifactSource, type ArtifactStore, type ArtifactVersion, applyEdits } from "./artifacts";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /** Where an editor opens a note's live document, with `?note=<id>`. */
 export const NOTE_LIVE_PATH = "/notes/live";

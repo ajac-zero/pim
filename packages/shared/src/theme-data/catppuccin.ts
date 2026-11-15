@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Catppuccin: Latte / Mocha. Latte's popover is a lighter base; peach,

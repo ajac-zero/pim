@@ -2,7 +2,7 @@ import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { Computer } from "./computer";
 import type { SqlCredentialStore } from "./credentials";
 import type { ImageModel } from "./extensions/image-generation";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import type { PimStore } from "./store";
 
 /**

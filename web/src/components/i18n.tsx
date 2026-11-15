@@ -1,3 +1,4 @@
+import { LOCALES, type Locale } from "@pim/shared/locales";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
@@ -6,13 +7,11 @@ import {
   useEffect,
   useState,
 } from "react";
-
 import {
   appearanceQueries,
   saveAppearance,
   signedInQuery,
 } from "~/lib/appearance";
-import { LOCALES, type Locale } from "../../../src/locales";
 
 export const locales = LOCALES;
 export type { Locale };

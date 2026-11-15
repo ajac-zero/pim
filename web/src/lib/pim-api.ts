@@ -1,5 +1,5 @@
 import type { AgentEvent } from "@earendil-works/pi-durable";
-import type { UiState } from "../../../src/ui-lang";
+import type { UiState } from "@pim/ui-lang";
 
 /**
  * Pim's REST API, reached through this app's own `/api` path: the app's

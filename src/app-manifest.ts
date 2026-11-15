@@ -1,4 +1,4 @@
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /**
  * The manifest of an app with a backend: `pim.app.json`, the main file of a

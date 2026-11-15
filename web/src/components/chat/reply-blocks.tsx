@@ -1,3 +1,4 @@
+import type { UiResponse } from "@pim/ui-lang";
 import {
   createContext,
   type ReactNode,
@@ -9,7 +10,6 @@ import {
 } from "react";
 import { useTheme } from "~/components/theme";
 import { cn } from "~/lib/utils";
-import type { UiResponse } from "../../../../src/ui-lang";
 import { Video, youtubeId } from "./video-block";
 
 /**

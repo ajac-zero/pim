@@ -16,7 +16,7 @@ import {
 	MAX_ARTIFACT_FILES,
 } from "../artifacts";
 import { JSX_MODULES } from "../artifact-jsx";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import { text } from "./services";
 
 /** What the app tools need from the space. */

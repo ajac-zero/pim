@@ -1,23 +1,4 @@
 import {
-  createContext,
-  lazy,
-  memo,
-  type ReactNode,
-  Suspense,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
-import { Markdown } from "~/components/chat/markdown";
-import { Reply } from "~/components/chat/reply-blocks";
-import type { ChartPoint } from "~/components/chat/ui-chart";
-import { useI18n } from "~/components/i18n";
-import { Button } from "~/components/ui/button";
-import { pim, type StoredUiState } from "~/lib/pim-api";
-import { loadUiStates, UiStateWriter } from "~/lib/ui-state";
-import { cn } from "~/lib/utils";
-import {
   type Action,
   compile,
   type Evaluation,
@@ -37,7 +18,26 @@ import {
   uiBlockId,
   uiTurn,
   type Value,
-} from "../../../../src/ui-lang";
+} from "@pim/ui-lang";
+import {
+  createContext,
+  lazy,
+  memo,
+  type ReactNode,
+  Suspense,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { Markdown } from "~/components/chat/markdown";
+import { Reply } from "~/components/chat/reply-blocks";
+import type { ChartPoint } from "~/components/chat/ui-chart";
+import { useI18n } from "~/components/i18n";
+import { Button } from "~/components/ui/button";
+import { pim, type StoredUiState } from "~/lib/pim-api";
+import { loadUiStates, UiStateWriter } from "~/lib/ui-state";
+import { cn } from "~/lib/utils";
 
 /**
  * A ```ui block of an agent's message, drawn with the app's own components.

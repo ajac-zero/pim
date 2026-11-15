@@ -1,5 +1,5 @@
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
-import type { UiProgram } from "../ui-lang";
+import type { UiProgram } from "@pim/ui-lang";
 import type { Approval, ApprovalMember, Notification, PimStore, ToolPermission } from "../store";
 import type { ShownWidget, ToolWidget } from "./define";
 

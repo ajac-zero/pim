@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import pimConfig from "../pim.config";
 import { isBuiltinApp } from "./builtin-apps";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import { type Admission, ComputeLedger, type ComputeDeploymentUsage, type ComputeUsage, type EndReason } from "./compute-ledger";
 import {
 	type ComputeProvider,

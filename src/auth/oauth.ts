@@ -17,7 +17,7 @@
  * claim without owning.
  */
 
-import { base64UrlDecode, base64UrlEncode } from "./encoding";
+import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 
 export const PROVIDER_IDS = ["google", "github", "oidc"] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];

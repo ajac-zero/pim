@@ -1,5 +1,5 @@
-import { base64UrlDecode, base64UrlEncode } from "../../auth/encoding";
-import { HttpError } from "../../http";
+import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
+import { HttpError } from "@pim/shared/http";
 import { type BrokerPolicy, GitBrokerNotConfiguredError } from "./config";
 import { apiHeaders, type Fetch, GITHUB_API, type GitHubApp } from "./github-app";
 import { GITHUB_INSTANCE, type GitProvider, type ProviderInstance, type ProviderRegistry, basicAuth } from "./provider";

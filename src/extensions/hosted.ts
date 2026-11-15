@@ -4,7 +4,7 @@ import { ACCESS_LEVELS, MANIFEST_FILE, parseManifest } from "../app-manifest";
 import { type ArtifactStore, checkTitle, MAX_ARTIFACT_FILES } from "../artifacts";
 import type { Computer } from "../computer";
 import { FILES_ROOT, filesPath } from "../files";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import { type HostedApps, readFolder } from "../hosted";
 import { defineGatedAction, type GatedAction } from "./approvals";
 import { text } from "./services";

@@ -1,5 +1,5 @@
-import type { TranscriptMessage } from "../transcript";
-import { redact } from "./tools/output";
+import type { TranscriptMessage } from "@pim/shared/transcript";
+import { redact } from "@pim/shared/redact";
 
 /**
  * A coding thread's transcript as an agent reads it (../extensions/coding.ts):

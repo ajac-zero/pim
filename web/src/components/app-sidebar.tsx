@@ -91,7 +91,6 @@ import {
 import { newChatSearch } from "~/lib/start-chat";
 import { CHAT_DRAG_TYPE, pinTab, unpinTab, useTabs } from "~/lib/tabs";
 import { cn } from "~/lib/utils";
-import { version } from "../../../package.json";
 
 type T = ReturnType<typeof useI18n>["t"];
 
@@ -528,7 +527,7 @@ function SidebarLogo() {
         showArrow={false}
         className={SIDEBAR_TOOLTIP_CLASS}
       >
-        v{version}
+        v{__PIM_VERSION__}
       </TooltipContent>
     </Tooltip>
   );

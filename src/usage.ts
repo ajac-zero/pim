@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { Models } from "@earendil-works/pi-ai/models";
 import type { UsageState } from "@earendil-works/pi-durable";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import { ModelCallLedger, type RunTags, shapeOf } from "./model-calls";
 
 /**

@@ -1,4 +1,4 @@
-import { base64UrlEncode } from "../src/auth/encoding";
+import { base64UrlEncode } from "@pim/shared/encoding";
 
 /** Where a passkey is made and used: the relying party's ID and the page's origin. */
 export type Site = { readonly rpId: string; readonly origin: string };

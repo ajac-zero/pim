@@ -1,8 +1,8 @@
 import { getAgentByName } from "agents";
 import { DurableObject } from "cloudflare:workers";
-import { base64UrlEncode } from "./auth/encoding";
+import { base64UrlEncode } from "@pim/shared/encoding";
 import type { Account } from "./directory";
-import { HttpError, json, readJson } from "./http";
+import { HttpError, json, readJson } from "@pim/shared/http";
 import { limited } from "./runtime";
 
 /**

@@ -42,7 +42,7 @@
 import type { ConversationInit } from "@earendil-works/pi-durable";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { PiReceipt } from "agents/harness/pi";
-import { HttpError } from "../http";
+import { HttpError } from "@pim/shared/http";
 import type { StableOperation } from "../pim";
 import type { ChatCreation, ChatLookup, HandedSource, HostPreflight, RunStatus, SubmissionLookup, SubmitResult, TriggerAgentHost, TriggerEvidence } from "./coordinator";
 import type { TriggerDestination } from "./spec";

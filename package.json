@@ -36,6 +36,8 @@
     "@opentelemetry/otlp-transformer": "0.223.0",
     "@opentelemetry/resources": "2.12.0",
     "@opentelemetry/sdk-trace": "2.12.0",
+    "@pim/shared": "workspace:*",
+    "@pim/ui-lang": "workspace:*",
     "agents": "0.27.0",
     "lib0": "^0.2.119",
     "node-diff3": "^4.0.0",

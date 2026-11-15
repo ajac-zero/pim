@@ -9,7 +9,7 @@
 
 import { Buffer } from "node:buffer";
 import { transform } from "sucrase";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 
 /** The modules a JSX app may import, and the runtime file each comes from. */
 const MODULES: Record<string, string> = {

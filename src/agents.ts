@@ -1,7 +1,7 @@
 import { type DirectoryApp, storedApps } from "./extensions/app-directory";
 import { ASSISTANT_INSTRUCTIONS } from "./extensions/assistant";
 import { PRIVATE_SCOPE } from "./extensions/optmem/store";
-import { HttpError } from "./http";
+import { HttpError } from "@pim/shared/http";
 import { SKILL_NAME } from "./skills";
 
 /**

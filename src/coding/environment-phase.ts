@@ -1,6 +1,6 @@
-import type { TranscriptMessage } from "../transcript";
+import type { TranscriptMessage } from "@pim/shared/transcript";
 import type { CodingEvent } from "./thread-store";
-import { redact } from "./tools/output";
+import { redact } from "@pim/shared/redact";
 
 /**
  * The environment phase as the transcript shows it: what the thread did to

@@ -1,5 +1,5 @@
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
-import type { Harness } from "../vault/harnesses";
+import type { Harness } from "@pim/shared/harnesses";
 
 /**
  * The contract between a coding thread and a vendor's coding agent CLI that

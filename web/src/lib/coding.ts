@@ -1,15 +1,15 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { AgentEvent, EntryRecord } from "@earendil-works/pi-durable";
-import { queryOptions } from "@tanstack/react-query";
-import type { TranslationKey } from "~/components/i18n";
-import { ApiError, call, SignInRequired } from "~/lib/pim-api";
-import { applyChanges } from "~/lib/pim-view";
-import type { Activity } from "../../../src/activity-types";
+import type { Activity } from "@pim/shared/activity-types";
 import {
   type MessagePart,
   projectEntries,
   type TranscriptMessage,
-} from "../../../src/transcript";
+} from "@pim/shared/transcript";
+import { queryOptions } from "@tanstack/react-query";
+import type { TranslationKey } from "~/components/i18n";
+import { ApiError, call, SignInRequired } from "~/lib/pim-api";
+import { applyChanges } from "~/lib/pim-view";
 
 /*
  * Coding threads, as the API in docs/coding-api.md gives them: the types,

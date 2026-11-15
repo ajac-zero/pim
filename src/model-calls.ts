@@ -1,6 +1,6 @@
 import type { Usage as ModelUsage } from "@earendil-works/pi-ai";
 import PRICES from "../config/model-prices.json";
-import { redactSecrets } from "./coding/tools/output";
+import { redactSecrets } from "@pim/shared/redact";
 
 /**
  * One row for every model call, written when the call settles, and the

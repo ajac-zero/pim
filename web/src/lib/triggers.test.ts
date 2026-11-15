@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { pimThemes } from "@pim/shared/theme-data/index";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { i18nFor } from "~/components/i18n";
@@ -38,7 +39,6 @@ import {
   pollFixture,
   triggerFixture,
 } from "~/test/trigger-fixtures";
-import type { Theme } from "../../../src/themes";
 
 type Answer = { status: number; body: unknown };
 
@@ -615,15 +615,7 @@ describe("healthChip", () => {
 });
 
 describe("chip colors", () => {
-  const themes = Object.values(
-    import.meta.glob<Record<string, Theme>>(
-      [
-        "../../../src/extensions/themes/*.ts",
-        "!../../../src/extensions/themes/index.ts",
-      ],
-      { eager: true },
-    ),
-  ).flatMap((module) => Object.values(module));
+  const themes = pimThemes;
 
   /** Relative luminance of a hex or neutral OKLCH color, as themes.test.ts reads them. */
   const luminance = (color: string) => {

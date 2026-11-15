@@ -4,8 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { exports } from "cloudflare:workers";
 import { checkToolNames, PimExtensions } from "../src/extensions/define";
 import { themes as ownThemes } from "../src/extensions/themes";
-import { nord } from "../src/extensions/themes/nord";
-import { PimThemes, type Theme, type ThemeList } from "../src/themes";
+import { nord } from "@pim/shared/theme-data/nord";
+import { PimThemes, type Theme, type ThemeList } from "@pim/shared/themes";
 import { api, apiUrl, lastUserText, pendingApproval, post, ROOT, say, scripts, settled, systemPrompt, TOKEN, toolUse, triggersOn, widgetsShown } from "./helpers";
 import { faux, ledger, outbox, utility } from "./worker";
 

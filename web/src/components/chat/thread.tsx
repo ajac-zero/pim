@@ -1,3 +1,4 @@
+import { type UiResponse, uiResponseOf } from "@pim/ui-lang";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
@@ -75,7 +76,6 @@ import {
   appsQuery,
 } from "~/lib/queries";
 import { useForkChat } from "~/lib/start-chat";
-import { type UiResponse, uiResponseOf } from "../../../../src/ui-lang";
 
 /**
  * Tools whose answer names an app's or a note's version, shown as the app itself: one made, changed or shown again.

@@ -1,3 +1,4 @@
+import type { ThemeList } from "@pim/shared/themes";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
@@ -14,7 +15,6 @@ import {
   signedInQuery,
 } from "~/lib/appearance";
 import { type ColorTheme, loadThemes } from "~/lib/themes";
-import type { ThemeList } from "../../../src/themes";
 
 export type ThemePreference = "light" | "dark" | "system";
 

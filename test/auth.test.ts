@@ -4,7 +4,7 @@ import { exports } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Pim } from "../src/pim";
 import { userHandle } from "../src/auth";
-import { base64UrlDecode, base64UrlEncode } from "../src/auth/encoding";
+import { base64UrlDecode, base64UrlEncode } from "@pim/shared/encoding";
 import { derToRaw } from "../src/auth/webauthn";
 import { Directory, RATE_LIMIT_KEYS } from "../src/directory";
 import worker from "../src/index";

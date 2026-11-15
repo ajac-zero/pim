@@ -3,7 +3,7 @@ import { defineExtension, defineTool, section } from "@earendil-works/pi-durable
 import { type Agent, agentCalled } from "./agents";
 import { text } from "./extensions/services";
 import { DELEGATE } from "./tasks";
-import { ROOM_POST, type TranscriptMessage } from "./transcript";
+import { ROOM_POST, type TranscriptMessage } from "@pim/shared/transcript";
 
 export { ROOM_POST };
 

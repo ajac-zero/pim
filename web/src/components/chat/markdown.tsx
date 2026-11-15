@@ -22,6 +22,7 @@ import {
 type PluggableList = NonNullable<StreamdownProps["rehypePlugins"]>;
 type Pluggable = PluggableList[number];
 
+import { type UiFence, uiBlockIds, uiFences } from "@pim/ui-lang";
 import { AgentIcon } from "~/components/agent-icon";
 import {
   Diagram,
@@ -50,7 +51,6 @@ import {
 } from "~/lib/queries";
 import { newChatSearch } from "~/lib/start-chat";
 import { cn } from "~/lib/utils";
-import { type UiFence, uiBlockIds, uiFences } from "../../../../src/ui-lang";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** A chat an agent names in its text: by its id, or by its address. */

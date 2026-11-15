@@ -1,3 +1,4 @@
+import { splitUiResponse, type UiResponse } from "@pim/ui-lang";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { memo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -81,7 +82,6 @@ import type {
 } from "~/lib/pim-view";
 import { agentsQuery } from "~/lib/queries";
 import { cn } from "~/lib/utils";
-import { splitUiResponse, type UiResponse } from "../../../../src/ui-lang";
 
 function useCopy(text: string) {
   const [copied, setCopied] = useState(false);

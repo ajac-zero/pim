@@ -1,4 +1,4 @@
-import { base64UrlEncode } from "../../auth/encoding";
+import { base64UrlEncode } from "@pim/shared/encoding";
 import type { RepoRef } from "./broker";
 import type { GitHubAppConfig } from "./config";
 

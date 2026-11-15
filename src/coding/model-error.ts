@@ -1,6 +1,6 @@
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
-import { redactSecrets } from "./tools/output";
+import { redactSecrets } from "@pim/shared/redact";
 
 /** The most characters of a model failure that a thread's detail keeps. */
 export const MODEL_ERROR_MAX = 500;

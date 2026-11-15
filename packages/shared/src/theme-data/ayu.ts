@@ -1,4 +1,4 @@
-import type { Theme } from "../../themes";
+import type { Theme } from "../themes";
 
 /**
  * Ayu: Light and Mirage. Light semantic/agent colors are darkened and muted

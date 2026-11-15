@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The whole suite's independent stages at once — the internal-identifier check, the root project's
-// Worker tests and the web app's tests — each with its output prefixed with its name, so one stage
+// tests (Worker, browser and Node), the web app's tests and the daemons' tests — each with its output prefixed with its name, so one stage
 // doesn't wait for the ones before it. The full suite is CI's to run, in shards
 // (`.github/workflows/ci.yml`); `pnpm test:serial` runs the same stages one at a time, for a
 // machine too small to hold them side by side (AGENTS.md).
@@ -12,6 +12,7 @@ const stages = [
 	{ name: "identifiers", run: [process.execPath, "scripts/check-internal-identifiers.mjs"] },
 	{ name: "worker", run: ["pnpm", "exec", "vitest", "run"] },
 	{ name: "web", run: ["pnpm", "--filter", "pim-web", "test"] },
+	{ name: "daemons", run: ["pnpm", "test:daemons"] },
 ];
 
 const width = Math.max(...stages.map((stage) => stage.name.length));

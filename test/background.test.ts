@@ -327,6 +327,22 @@ describe("sending to the person", () => {
 		expect(forgot.body).toMatchObject({ status: "done", replies: ["Same as before."] });
 	});
 
+	it("lets a coding thread's stall notice end without a reply, and still asks for one to an ordinary message", async () => {
+		// One scripted response is all a notice may use: a delivery reminder would need a second.
+		faux.setResponses([fauxAssistantMessage("Nothing for the person to act on.")]);
+		const notice = await post(`/sessions/${ROOT}/messages`, { content: "[Coding thread fix-login] Stalled: no output for 10 min. Last activity: 2026-01-01T00:00:00.000Z. shell: npm test (600 s)", wait: true });
+		expect(notice.body).toMatchObject({ status: "done", replies: [] });
+		faux.setResponses([
+			fauxAssistantMessage("Private draft."),
+			(context) => {
+				expect(lastUserText(context.messages)).toBe(DELIVERY_REMINDER);
+				return toolUse("send_to_user", { message: "Here." });
+			},
+		]);
+		const ordinary = await post(`/sessions/${ROOT}/messages`, { content: "Coding thread fix-login Stalled: what is it?", wait: true });
+		expect(ordinary.body).toMatchObject({ status: "done", replies: ["Here."] });
+	});
+
 	it("requires a completing send after a progress update, with or without further tools", async () => {
 		for (const work of [[], [toolUse("current_time", {})]]) {
 			faux.setResponses([

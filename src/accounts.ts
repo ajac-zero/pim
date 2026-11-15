@@ -11,7 +11,7 @@ import { MAX_YOUR_NAME } from "./majordomo";
 import { providerInfo } from "./providers";
 import { checkCompute, COMPUTE_KINDS, computeProviderInfo, parseComputeQuota } from "./compute";
 import { codingScheduler } from "./coding/scheduler-do";
-import { type PlacementPool, placementPools, prepareSandboxPool, publicPoolConfig, resolvePools, type SandboxPool } from "./coding/pools";
+import { type PlacementPool, placementPools, prepareSandboxPool, publicPoolConfig, resolvePools, type SandboxPool } from "@pim/coding/pools";
 import { workspaceBackends } from "./coding/workspace/registry";
 import { parseLimits, UNLIMITED } from "./usage";
 import { type Account, type AccountStatus, type CleanupResult, PENDING_MS, type RegistrationPolicy } from "./directory";

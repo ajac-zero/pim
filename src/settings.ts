@@ -42,7 +42,7 @@ export type Settings = {
 	readonly deviceAlerts: DeviceAlerts;
 	/** How the app looks, on every device. Unset: each browser keeps its own choice, and then the system's mode, the deployment's default theme and the browser's language. */
 	readonly colorMode?: ColorMode;
-	/** The id of one of the deployment's themes (src/themes.ts). */
+	/** The id of one of the deployment's themes (packages/shared/src/themes.ts). */
 	readonly colorTheme?: string;
 	readonly locale?: Locale;
 };

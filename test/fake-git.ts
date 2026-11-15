@@ -1,9 +1,9 @@
-import { WORKSPACE_GIT_AUTH_DIR } from "../src/coding/git-broker/workspace-credential";
-import type { FakeCommandHandler } from "../src/coding/workspace/fake";
-import type { EgressPolicy, Workspace } from "../src/coding/workspace/types";
+import { WORKSPACE_GIT_AUTH_DIR } from "@pim/coding/git-broker/workspace-credential";
+import type { FakeCommandHandler } from "@pim/coding/workspace/fake";
+import type { EgressPolicy, Workspace } from "@pim/coding/workspace/types";
 
 /**
- * A git for the in-memory workspace (src/coding/workspace/fake.ts), enough
+ * A git for the in-memory workspace (packages/coding/src/workspace/fake.ts), enough
  * for a coding thread and its tools: `clone`, `remote set-url`, `fetch`, `checkout -B`,
  * `rev-parse HEAD`, `status`, `add`, `commit`, `diff A B` or `diff`
  * of the working tree, and `update-ref` and `bundle create` for pushes, and for merges

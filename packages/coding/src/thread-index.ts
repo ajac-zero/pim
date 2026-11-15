@@ -1,4 +1,6 @@
-import type { CodingCreator } from "./api";
+/** Who started a thread: the person (the web app or the API), or one of their agents, from a chat. */
+export type CodingCreator = { readonly type: "person" } | { readonly type: "agent"; readonly agent: string; readonly chat: string };
+
 import type { CodingHarness, CodingThreadState, ResolvedProfile } from "./thread-store";
 
 /**

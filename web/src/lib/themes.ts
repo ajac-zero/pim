@@ -8,7 +8,7 @@ import type { BundledTheme, ThemeRegistration } from "shiki";
 
 /**
  * The color themes a person can pick come from the Pim's extensions (see
- * src/themes.ts): the Worker serves their tokens as /api/themes.css, which
+ * packages/shared/src/themes.ts): the Worker serves their tokens as /api/themes.css, which
  * index.html loads before the app draws, and lists them at /api/themes.
  */
 export type ColorTheme = ThemeList["themes"][number];

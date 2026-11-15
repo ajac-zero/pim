@@ -1,12 +1,13 @@
 import type { Account } from "../../directory";
 import type { ApiExtension } from "../../gateway";
 import { dispatch, readJson, type Route } from "@pim/shared/http";
-import { cliHarness } from "../harness";
-import { validLoginCode } from "../harness/login";
+import { cliHarness } from "@pim/coding/harness/index";
+import { validLoginCode } from "@pim/coding/harness/login";
 import { codingScheduler } from "../scheduler-do";
 import { apiKeyProblem, CODING_VAULT_PATH, type HarnessLoginStatus, isApiKeyHarness, isHarness } from "@pim/shared/harnesses";
-import type { VaultStatus } from "./store";
-import { ApiKeyError, codingVault } from "./vault";
+import type { VaultStatus } from "@pim/coding/vault/store";
+import { ApiKeyError } from "@pim/coding/vault/vault";
+import { codingVault } from "./worker";
 
 /**
  * The coding vault's API, `/api/coding/vault`, for the signed-in person's

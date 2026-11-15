@@ -10,8 +10,8 @@ import {
 	prepareComputeProvider,
 	withoutSecrets,
 } from "../src/compute";
-import { DEFAULT_POOLS } from "../src/coding/pools-default";
-import { type SandboxPool, resolvePools } from "../src/coding/pools";
+import { DEFAULT_POOLS } from "@pim/coding/pools-default";
+import { type SandboxPool, resolvePools } from "@pim/coding/pools";
 import { workspaceBackends } from "../src/coding/workspace/registry";
 import type { Pim } from "../src/pim";
 import { OWNER, ROOT, say, toolUse } from "./helpers";

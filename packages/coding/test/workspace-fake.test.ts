@@ -1,7 +1,7 @@
 import { expect } from "vitest";
-import { runConformanceSuite } from "../src/coding/workspace/conformance";
-import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import { type ExecEvent, type Workspace, WorkspaceLimitError } from "../src/coding/workspace/types";
+import { runConformanceSuite } from "../src/workspace/conformance";
+import { FakeWorkspaceProvider } from "../src/workspace/fake";
+import { type ExecEvent, type Workspace, WorkspaceLimitError } from "../src/workspace/types";
 
 // The fake is pure logic, so these run in the Worker pool like the scheduler's tests but touch no binding.
 

@@ -18,7 +18,8 @@ import {
 import { COMPUTER_PATH, COMPUTER_SCREEN_PATH, COMPUTER_TOKEN_HEADER, computerTokenOwner } from "./computer";
 import { readSync } from "./computer-host";
 import { giteaApi } from "./coding/git-broker/gitea-api";
-import { GIT_BROKER_PATH, serveGitBroker } from "./coding/git-broker/routes";
+import { GIT_BROKER_PATH } from "@pim/coding/git-broker/routes";
+import { serveGitBroker } from "./coding/git-broker/worker";
 import { MODEL_GATEWAY_PATH, serveModelGateway } from "./coding/model-gateway";
 import { codingApi } from "./coding/routes";
 import { codingVaultApi } from "./coding/vault/routes";

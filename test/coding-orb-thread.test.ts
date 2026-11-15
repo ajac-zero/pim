@@ -1,8 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { codingVault } from "../src/coding/vault/vault";
+import { codingVault } from "../src/coding/vault/worker";
 import { OWNER } from "./helpers";
-import { FakeOrbClient } from "../src/coding/orb/fake";
+import { FakeOrbClient } from "@pim/coding/orb/fake";
 import { codingThread, type StartThread } from "../src/coding/thread-do";
 import { type CodingThreadDO, codingEvents, codingOrbs, codingTimings } from "./worker";
 

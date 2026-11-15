@@ -1,0 +1,27 @@
+{
+  "name": "@pim/coding",
+  "version": "0.1.0",
+  "description": "Pim's coding subsystem, apart from its two Durable Objects: workspaces, harnesses, orbs, the git broker, the credential vault, tools, pools and the scheduler's queue. Depends on @pim/shared and never on the Worker.",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "exports": {
+    "./support/*": "./test/support/*.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0",
+    "@pim/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

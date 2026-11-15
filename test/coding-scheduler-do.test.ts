@@ -1,7 +1,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { conditionsFromHealth, DEFAULT_SPACE_CAP, type ManagerHealth, PROVIDER_SPACE_CAPS } from "../src/coding/provider-capacity";
-import type { AdmissionConditions } from "../src/coding/scheduler";
+import { conditionsFromHealth, DEFAULT_SPACE_CAP, type ManagerHealth, PROVIDER_SPACE_CAPS } from "@pim/coding/provider-capacity";
+import type { AdmissionConditions } from "@pim/coding/scheduler";
 import { codingScheduler, MAX_NOTICE_ATTEMPTS, type SchedulerNotifier, TICK_MS } from "../src/coding/scheduler-do";
 import { CodingSchedulerDO, codingSchedulers } from "./worker";
 

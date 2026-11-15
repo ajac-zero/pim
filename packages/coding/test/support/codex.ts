@@ -1,4 +1,4 @@
-// What `codex exec --json` prints, for the Codex harness (src/coding/harness/codex.ts). `login` and `expired` are real:
+// What `codex exec --json` prints, for the Codex harness (packages/coding/src/harness/codex.ts). `login` and `expired` are real:
 // what Codex 0.167.0 printed with Pim's flags (docs/coding-codex.md) and no login, and with a ChatGPT login whose
 // refresh token OpenAI refused. `turn` and `failed` are written from its documented schema, `ThreadEvent` in
 // codex-rs/exec/src/exec_events.rs at rust-v0.167.0: `turn` is a whole turn with a notice, a retry, reasoning, a plan, a

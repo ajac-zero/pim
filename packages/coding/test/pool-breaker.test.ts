@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { closedPool, POOL_COOLDOWN_MS, POOL_FAILURE_THRESHOLD, poolAvailable, poolResult, reservePool } from "../src/coding/pool-breaker";
+import { closedPool, POOL_COOLDOWN_MS, POOL_FAILURE_THRESHOLD, poolAvailable, poolResult, reservePool } from "../src/pool-breaker";
 
 describe("a pool's circuit breaker", () => {
 	it("counts consecutive failures, not capacity refusals, and resets on success", () => {

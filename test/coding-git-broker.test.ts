@@ -19,12 +19,13 @@ import {
 	type RepoRef,
 	repoRef,
 	verifyBrokerToken,
-} from "../src/coding/git-broker/broker";
-import { brokerPolicy, GitBrokerNotConfiguredError, type GitHubAppConfig, githubAppConfig, githubAppStatus } from "../src/coding/git-broker/config";
-import { appJwt, GitHubApp, importPrivateKey, RepoNotInstalledError, TOKEN_MARGIN_MS } from "../src/coding/git-broker/github-app";
-import { GitHubProvider } from "../src/coding/git-broker/github-provider";
-import { GITHUB_INSTANCE, type GitProvider, ProviderRegistry, SEEDED_INSTANCES } from "../src/coding/git-broker/provider";
-import { brokerTokenKey, type GitBrokerDeps, handleGitBroker } from "../src/coding/git-broker/routes";
+} from "@pim/coding/git-broker/broker";
+import { brokerPolicy, GitBrokerNotConfiguredError, type GitHubAppConfig, githubAppConfig, githubAppStatus } from "@pim/coding/git-broker/config";
+import { appJwt, GitHubApp, importPrivateKey, RepoNotInstalledError, TOKEN_MARGIN_MS } from "@pim/coding/git-broker/github-app";
+import { GitHubProvider } from "@pim/coding/git-broker/github-provider";
+import { GITHUB_INSTANCE, type GitProvider, ProviderRegistry, SEEDED_INSTANCES } from "@pim/coding/git-broker/provider";
+import { type GitBrokerDeps, handleGitBroker } from "@pim/coding/git-broker/routes";
+import { brokerTokenKey } from "../src/coding/git-broker/worker";
 
 // Every request to GitHub goes to a fake one; nothing here reaches the network.
 

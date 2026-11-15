@@ -1,5 +1,5 @@
 import type { TranscriptMessage } from "@pim/shared/transcript";
-import type { CodingEvent } from "./thread-store";
+import type { CodingEvent } from "@pim/coding/thread-store";
 import { redact } from "@pim/shared/redact";
 
 /**

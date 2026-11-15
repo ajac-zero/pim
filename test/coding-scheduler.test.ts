@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { type AdmissionGate, budgetCapGate, CodingScheduler, lowDiskGate, PREEMPT_RESUME_PRIORITY, type RequestResult, type Slot } from "../src/coding/scheduler";
+import { type AdmissionGate, budgetCapGate, CodingScheduler, lowDiskGate, PREEMPT_RESUME_PRIORITY, type RequestResult, type Slot } from "@pim/coding/scheduler";
 import type { Pim } from "../src/pim";
 
 // These tests build the scheduler on a Durable Object's database of its own, with a fake clock; nothing of Pim's own is touched.

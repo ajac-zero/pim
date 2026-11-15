@@ -50,7 +50,7 @@ Two things are left as they are. Vibe asks `chat.mistral.ai` for the managed con
 
 ## Its output
 
-`VibeStreamParser` in `src/coding/harness/vibe.ts` reads one history entry a line. Each carries the session's id (`sessionId`). Vibe prints an entry when it is complete, not as it is written, so the web app shows a Vibe message when it is done, and a tool call once it has finished, with its result; there are no deltas.
+`VibeStreamParser` in `packages/coding/src/harness/vibe.ts` reads one history entry a line. Each carries the session's id (`sessionId`). Vibe prints an entry when it is complete, not as it is written, so the web app shows a Vibe message when it is done, and a tool call once it has finished, with its result; there are no deltas.
 
 | Vibe prints | Pim makes of it |
 | --- | --- |
@@ -124,7 +124,7 @@ docker run --rm --entrypoint codex pim-workspace:local --version    # codex-cli 
 
 `up.sh` rebuilds `pim-workspace:local` from `../workspace-agentd` (the `workspace-image` service) and recreates the containers whose image changed, leaving the egress proxy alone unless it changed. `git pull` brings the change once it is on the branch the checkout follows; before that, `git fetch origin && git checkout review/coding-h2-vibe`. Workspaces that already exist keep the image they were made with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there.
 
-To move to a newer Vibe, change `VIBE_VERSION`, rebuild, and check `vibe --help` for the flags above, the untrusted checkout (a repository's hooks must not run), the `VIBE_*` settings (`vibe config schema`), and a run's output and export against `src/coding/harness/vibe.ts` and `test/fixtures/vibe/`.
+To move to a newer Vibe, change `VIBE_VERSION`, rebuild, and check `vibe --help` for the flags above, the untrusted checkout (a repository's hooks must not run), the `VIBE_*` settings (`vibe config schema`), and a run's output and export against `packages/coding/src/harness/vibe.ts` and `test/fixtures/vibe/`.
 
 ## How it was checked
 

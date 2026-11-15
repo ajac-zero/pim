@@ -1,12 +1,13 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { BranchMovedError, brokerKey, issueBrokerToken, pktLine, preparePush, pushApprovalRequest, pushBranch, type RepoRef } from "../src/coding/git-broker/broker";
-import { giteaBaseUrl, giteaConfig } from "../src/coding/git-broker/config";
-import { GiteaConnection, GiteaNotConnectedError, giteaKeyFrom, REFRESH_MARGIN_MS } from "../src/coding/git-broker/gitea-connection";
-import { giteaInstance, GiteaProvider } from "../src/coding/git-broker/gitea-provider";
-import { GitHubProvider } from "../src/coding/git-broker/github-provider";
-import { ProviderRegistry } from "../src/coding/git-broker/provider";
-import { type GitBrokerDeps, handleGitBroker, deploymentProviders, directoryGiteaBackend } from "../src/coding/git-broker/routes";
+import { BranchMovedError, brokerKey, issueBrokerToken, pktLine, preparePush, pushApprovalRequest, pushBranch, type RepoRef } from "@pim/coding/git-broker/broker";
+import { giteaBaseUrl, giteaConfig } from "@pim/coding/git-broker/config";
+import { GiteaConnection, GiteaNotConnectedError, giteaKeyFrom, REFRESH_MARGIN_MS } from "@pim/coding/git-broker/gitea-connection";
+import { giteaInstance, GiteaProvider } from "@pim/coding/git-broker/gitea-provider";
+import { GitHubProvider } from "@pim/coding/git-broker/github-provider";
+import { ProviderRegistry } from "@pim/coding/git-broker/provider";
+import { type GitBrokerDeps, handleGitBroker } from "@pim/coding/git-broker/routes";
+import { deploymentProviders, directoryGiteaBackend } from "../src/coding/git-broker/worker";
 import { api } from "./helpers";
 
 // Gitea is always a fake one here: nothing reaches the network. The instance is the one Pim is deployed with.

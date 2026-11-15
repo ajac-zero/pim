@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("the package's boundary", () => {
-	it("imports nothing of the Worker, the web app or another package than @pim/shared, and no Cloudflare module", () => {
+	it("imports nothing of the Worker (src/), the web app or another package than @pim/shared, and no Cloudflare module", () => {
 		const src = resolve(import.meta.dirname, "../src");
 		const files = readdirSync(src, { recursive: true, encoding: "utf8" }).filter((file) => file.endsWith(".ts"));
 		expect(files.length).toBeGreaterThan(10);

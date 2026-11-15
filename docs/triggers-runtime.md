@@ -1,6 +1,6 @@
 # The triggers runtime on the computer
 
-> **On wherever a space's triggers are.** pim-computer loads this runtime as it starts, from beside it or, on an installed computer, from the Pim, which serves it beside `pim-computer.ts` ([Over pim-computer's connection](#over-pim-computers-connection)). It carries `triggers.v1` over pim-computer's own connection, with `poll`, `stream` and `process` observers ([triggers-adapters.md](triggers-adapters.md), [triggers-stream.md](triggers-stream.md)) and the host's grant check. Pim speaks it (`src/triggers/computer.ts`) in every space whose trigger engine is on. No deployment setting turns either side on or off: what keeps a source from running is the person's grant of exactly it, on the computer paired now. What the space must do is [below](#what-the-space-must-do), and where Pim stands on each step is in [In Pim](#in-pim).
+> **On wherever a space's triggers are.** pim-computer loads this runtime as it starts, from beside it or, on an installed computer, from the Pim, which serves it beside `pim-computer.ts` ([Over pim-computer's connection](#over-pim-computers-connection)). It carries `triggers.v1` over pim-computer's own connection, with `poll`, `stream` and `process` observers ([triggers-adapters.md](triggers-adapters.md), [triggers-stream.md](triggers-stream.md)) and the host's grant check. Pim speaks it (`packages/triggers/src/computer.ts`) in every space whose trigger engine is on. No deployment setting turns either side on or off: what keeps a source from running is the person's grant of exactly it, on the computer paired now. What the space must do is [below](#what-the-space-must-do), and where Pim stands on each step is in [In Pim](#in-pim).
 
 Triggers (see [triggers.md](triggers.md)) keep the space's Durable Object as the authority: it stores each trigger, decides which computer sources run, and admits what they observe. This runtime is the other end, on the person's computer. It runs the computer sources (`poll`, `stream`, `process`, `file`) the space wants, and only those; fences anything a stopped or replaced observer still emits; and holds observations in a bounded spool on disk until the space has durably taken them.
 
@@ -11,7 +11,7 @@ Triggers (see [triggers.md](triggers.md)) keep the space's Durable Object as the
 | `TriggersRuntime` | Reconciles observers with what the space wants, under a lease, with grants checked by the host |
 | `ObserverAdapter` | What an observer implements: `poll` and `process` in [triggers-adapters.md](triggers-adapters.md), registered nowhere; fakes for the rest |
 
-The runtime consumes `PollSource`, `StreamSource`, `ProcessSource` and `FileSource` from [`src/triggers/spec.ts`](../src/triggers/spec.ts) as types only, so the file stays loadable in Node alone, as pim-computer is. It changes nothing in `src/triggers/`.
+The runtime consumes `PollSource`, `StreamSource`, `ProcessSource` and `FileSource` from [`packages/triggers/src/spec.ts`](../packages/triggers/src/spec.ts) as types only, so the file stays loadable in Node alone, as pim-computer is. It changes nothing in `src/triggers/`.
 
 ## Authority
 
@@ -232,7 +232,7 @@ Pim does this ([In Pim](#in-pim)). For anything to run, the space's side of the 
 
 ## Meeting the store
 
-When this is turned on, the space's side maps the protocol onto `TriggerStore` (`src/triggers/store.ts`) as it is, without changing it:
+When this is turned on, the space's side maps the protocol onto `TriggerStore` (`packages/triggers/src/store.ts`) as it is, without changing it:
 
 - An `observation` is `admit({ id: triggerId, generation, eventId, observedAt: occurredAt, payload: data, checkpoint })`. `accepted` acks `accepted`; `duplicate` acks `duplicate`; `backpressure` and `inbox_full` ack `deferred`; `not_found`, `deleted`, `stale_generation`, `not_enabled`, `wrong_source`, `out_of_order`, `too_old`, `expired` and a `TriggerValidationError` ack `rejected`. The ack is sent after `transactionSync` returns, so it is durable.
 - A `gap` is `recordGap({ id: triggerId, generation })`, then acked, whatever its reasons, coverage gaps included. A gap with no source marks every computer trigger of the space. A `coalesced` observation should be admitted with `gap: true`, since what it stands for was never seen.
@@ -243,7 +243,7 @@ The spool's time to live (24 hours at most) is well inside the store's replay ho
 
 ### In Pim
 
-`ComputerTriggers` and `ComputerGrants` (`src/triggers/computer.ts`) are the space's side, built by `Pim` in every space whose trigger engine is on ([triggers.md](triggers.md), "In Pim"); no deployment setting is read for them. Where the engine is off, nothing of them is built, a triggers message from the computer goes to `Computer.receive`, which drops it, and no computer source can be enabled. **With no computer paired, they fail closed**: `authorize` checks a grant against the runtime id of the computer paired now, so no grant is current and no computer source can be enabled or its occurrence handed on; the API's `capability` for a poll, stream or process is `draft_only` (`computer_not_paired`), so `delivers` is false and turning one on is refused; `trigger_computer_grant` refuses; and when the computer is removed or another paired (`refresh`, from `Pim`'s handling of either), nothing more is sent to the old one and enabled computer triggers are `waiting_computer`. Step by step:
+`ComputerTriggers` and `ComputerGrants` (`packages/triggers/src/computer.ts`) are the space's side, built by `Pim` in every space whose trigger engine is on ([triggers.md](triggers.md), "In Pim"); no deployment setting is read for them. Where the engine is off, nothing of them is built, a triggers message from the computer goes to `Computer.receive`, which drops it, and no computer source can be enabled. **With no computer paired, they fail closed**: `authorize` checks a grant against the runtime id of the computer paired now, so no grant is current and no computer source can be enabled or its occurrence handed on; the API's `capability` for a poll, stream or process is `draft_only` (`computer_not_paired`), so `delivers` is false and turning one on is refused; `trigger_computer_grant` refuses; and when the computer is removed or another paired (`refresh`, from `Pim`'s handling of either), nothing more is sent to the old one and enabled computer triggers are `waiting_computer`. Step by step:
 
 1. **Routing.** `Pim`'s handling of the computer's socket gives every text message that starts with the envelope to `ComputerTriggers.receive` before anything else reads it. A message over 64 KiB and the envelope, one not ending in `}`, malformed JSON, another protocol, or a frame with a field missing, unknown or of the wrong form, is dropped whole and unanswered. Everything the space sends is one envelope.
 2. **Hello.** A `hello` whose `runtimeId` isn't `runtimeIdOf(Computer.tokenDigest())` (the Binding above, from the digest the space keeps) makes that socket's triggers ignored: nothing of triggers is sent on it.
@@ -263,9 +263,9 @@ What it keeps is in the export (`triggerHistory`) and `PimStore.remainingData`, 
 
 ### Proposed changes to shared modules
 
-None of these are made here; they are for whoever owns those modules to accept or refuse. The second is done in part: `src/triggers/computer.ts` computes `sourceConfigHash`, `grantScopeHash` and the runtime id itself, and its tests check each against the computer's.
+None of these are made here; they are for whoever owns those modules to accept or refuse. The second is done in part: `packages/triggers/src/computer.ts` computes `sourceConfigHash`, `grantScopeHash` and the runtime id itself, and its tests check each against the computer's.
 
-1. **Export the source reader.** `src/triggers/spec.ts` reads a source in `parseSource`, which isn't exported, so the runtime checks a source's shape on its own (`readSource`) and relies on the space having checked its bounds. Exporting `parseSource`, or a `parseComputerSource`, would let both ends read one way, if the runtime may import it as a value.
+1. **Export the source reader.** `packages/triggers/src/spec.ts` reads a source in `parseSource`, which isn't exported, so the runtime checks a source's shape on its own (`readSource`) and relies on the space having checked its bounds. Exporting `parseSource`, or a `parseComputerSource`, would let both ends read one way, if the runtime may import it as a value.
 2. **One digest of a source.** The space has to compute the same `configHash` as `sourceConfigHash` here (SHA-256 of `"triggers.v1/source\n"` and the source as JSON with sorted keys), and the host's check, and the approval that fills `authorizationRef`, should key consent on it. The same goes for `grantScopeHash` (`computer/triggers-host.ts`), which the approval that gives a grant must compute. Putting both beside the spec would keep the ends from drifting.
 3. **Name the generation the grant was checked for.** The store's `AuthorizationRequest` has no `configHash` or scope digest; adding them would let the approval and this runtime's check agree on exactly what was consented to.
 

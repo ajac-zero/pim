@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { egressAllows, egressPolicy, gatewayInjection, gitBrokerInjection, INJECTED_PLACEHOLDER, injectedHeaders, normalizePath, placeSecret } from "../src/coding/workspace/egress";
-import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import type { WorkspaceSpec } from "../src/coding/workspace/types";
+import { egressAllows, egressPolicy, gatewayInjection, gitBrokerInjection, INJECTED_PLACEHOLDER, injectedHeaders, normalizePath, placeSecret } from "../src/workspace/egress";
+import { FakeWorkspaceProvider } from "../src/workspace/fake";
+import type { WorkspaceSpec } from "../src/workspace/types";
 
 const ORIGIN = "https://pim.example.test";
 

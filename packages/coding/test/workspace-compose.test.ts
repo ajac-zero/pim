@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ComposeManagerError, ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
-import { runConformanceSuite } from "../src/coding/workspace/conformance";
-import { ProviderCapacity } from "../src/coding/provider-capacity";
-import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
+import { ComposeManagerError, ComposeWorkspaceProvider } from "../src/workspace/compose";
+import { runConformanceSuite } from "../src/workspace/conformance";
+import { ProviderCapacity } from "../src/provider-capacity";
+import { fakeManager, json, TOKEN, URL_BASE } from "./support/fake-manager";
 import {
 	type ExecEvent,
 	WorkspaceCapacityError,
@@ -11,7 +11,7 @@ import {
 	WorkspaceNotFoundError,
 	WorkspacePathError,
 	type WorkspaceSpec,
-} from "../src/coding/workspace/types";
+} from "../src/workspace/types";
 
 const provider = (manager = fakeManager()) => new ComposeWorkspaceProvider({ managerUrl: URL_BASE, token: TOKEN, fetch: manager.fetch, maxConcurrent: 3 });
 

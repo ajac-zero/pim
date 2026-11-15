@@ -32,7 +32,7 @@ codex exec --json --ignore-user-config --ignore-rules \
 
 ## Its events
 
-`CodexJsonParser` in `src/coding/harness/codex.ts` reads:
+`CodexJsonParser` in `packages/coding/src/harness/codex.ts` reads:
 
 | Codex prints | Pim makes of it |
 | --- | --- |
@@ -74,7 +74,7 @@ OpenAI's docs call device-code sign-in beta; a person may first have to turn it 
 
 Before each turn the login is restored into the thread's workspace and written back after it, as for Claude Code. OpenAI's refresh tokens rotate, and reusing one is a permanent failure, so one Codex run per person at a time (the person's lock) matters more here: two runs refreshing one login would sign each other out.
 
-**API key or gateway (not built).** `authEnv` in `src/coding/harness/auth.ts` is the seam, as for Claude Code: `{ mode: "env", env }` with `OPENAI_API_KEY`/`CODEX_API_KEY`, or Pim's gateway (`OPENAI_BASE_URL`), runs Codex without a login or the lock.
+**API key or gateway (not built).** `authEnv` in `packages/coding/src/harness/auth.ts` is the seam, as for Claude Code: `{ mode: "env", env }` with `OPENAI_API_KEY`/`CODEX_API_KEY`, or Pim's gateway (`OPENAI_BASE_URL`), runs Codex without a login or the lock.
 
 ## Egress
 
@@ -96,7 +96,7 @@ docker run --rm --entrypoint claude pim-workspace:local --version   # 2.1.311 (C
 
 `up.sh` rebuilds the images the compose file builds, `pim-workspace:local` from `../workspace-agentd` included (its `workspace-image` service, which the manager waits for), and recreates the containers whose image changed, leaving the egress proxy alone unless it changed. `git pull` brings the change once it is on the branch the checkout follows; before that, `git fetch origin && git checkout review/coding-s5-codex`. Workspaces that already exist keep the image they were made with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there.
 
-To move to a newer Codex, change `CODEX_VERSION`, rebuild, and check `codex exec --help` for the flags above, the trust behavior (a repository's `.codex/config.toml` MCP server must not start), and a run's JSONL against `src/coding/harness/codex.ts` and `test/fixtures/codex/`.
+To move to a newer Codex, change `CODEX_VERSION`, rebuild, and check `codex exec --help` for the flags above, the trust behavior (a repository's `.codex/config.toml` MCP server must not start), and a run's JSONL against `packages/coding/src/harness/codex.ts` and `test/fixtures/codex/`.
 
 ## Not yet verified
 

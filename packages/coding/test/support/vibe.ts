@@ -1,5 +1,5 @@
 // What Mistral Vibe 3.1.0 printed with `--output streaming` (`*.jsonl`) and wrote to `export.json` (`*.export.json`),
-// for the Vibe harness (src/coding/harness/vibe.ts). All are real: the real `vibe` in the workspace image, run by Pim's
+// for the Vibe harness (packages/coding/src/harness/vibe.ts). All are real: the real `vibe` in the workspace image, run by Pim's
 // runner with its command line, against a mock of Mistral's chat completions API, except `auth`, which is the real
 // api.mistral.ai refusing a made-up key. Only the mock's scenario markers were taken out of the prompts, and each
 // export's `config` was cut down to the models; `turn.meta.json` is the `config` of the copy of the session's journal

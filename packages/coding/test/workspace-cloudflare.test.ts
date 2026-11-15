@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { CloudflareSandboxProvider, type SandboxLike } from "../src/coding/workspace/cloudflare";
-import { runConformanceSuite } from "../src/coding/workspace/conformance";
-import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import { type ExecEvent, WORKSPACE_ROOT, type Workspace, type WorkspaceSpec } from "../src/coding/workspace/types";
+import { CloudflareSandboxProvider, type SandboxLike } from "../src/workspace/cloudflare";
+import { runConformanceSuite } from "../src/workspace/conformance";
+import { FakeWorkspaceProvider } from "../src/workspace/fake";
+import { type ExecEvent, WORKSPACE_ROOT, type Workspace, type WorkspaceSpec } from "../src/workspace/types";
 
 // The SDK is not imported anywhere. These tests run the provider against an in-memory SandboxLike built on the fake workspace: the fake runs the user's commands and holds the files, and a few POSIX utilities the provider uses for file operations (realpath, find, rm, chmod, test) are answered from the fake's file API. Nothing here proves how the real SDK behaves.
 

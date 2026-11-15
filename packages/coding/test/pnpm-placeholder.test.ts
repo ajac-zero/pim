@@ -4,8 +4,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Workspace } from "../src/coding/workspace/types";
-import { pnpmPostinstall, runProvisionStep, verifyTool } from "../src/coding/repo-environment";
+import type { Workspace } from "../src/workspace/types";
+import { pnpmPostinstall, runProvisionStep, verifyTool } from "../src/repo-environment";
 
 let root = "";
 afterEach(() => rmSync(root, { recursive: true, force: true }));

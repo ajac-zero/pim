@@ -1,7 +1,7 @@
-import { LOGIN_CODE_FILE } from "../src/coding/harness/login";
+import { LOGIN_CODE_FILE } from "@pim/coding/harness/login";
 import { codexDeviceLogin, isCodexLogin } from "./fake-codex-login";
-import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import type { ExecEvent, ExecOptions, Workspace, WorkspaceProvider, WorkspaceRef } from "../src/coding/workspace/types";
+import { FakeWorkspaceProvider } from "@pim/coding/workspace/fake";
+import type { ExecEvent, ExecOptions, Workspace, WorkspaceProvider, WorkspaceRef } from "@pim/coding/workspace/types";
 
 /**
  * Claude Code's sign-in, `claude auth login`, as it behaves where the
@@ -9,7 +9,7 @@ import type { ExecEvent, ExecOptions, Workspace, WorkspaceProvider, WorkspaceRef
  * it prints a URL, waits for the code the sign-in page shows on its
  * standard input, and with the right code saves its login in its config
  * directory. Here it runs in an in-memory workspace, where the `sh` loop
- * Pim wraps it in (src/coding/harness/login.ts) is played by reading the
+ * Pim wraps it in (packages/coding/src/harness/login.ts) is played by reading the
  * code file the same way.
  */
 

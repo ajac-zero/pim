@@ -1,9 +1,9 @@
 // Contract test for the Amp internal-API client against recorded fixtures
-// (test/fixtures/amp-internal, shapes verified live, tokens redacted).
+// (packages/coding/test/support/amp-internal, shapes verified live, tokens redacted).
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AmpCancelError, AmpHttpOrbClient, AMP_CLI_VERSION_LABEL, AMP_MAX_MESSAGE_CHARS, AMP_MAX_TOOL_OUTPUT_CHARS, AMP_MAX_TOOL_VALUE_CHARS, AMP_RIVET_PUBLIC_KEY, type AmpSocket, type AmpHttpOptions, type AmpHttpStore } from "../src/coding/orb/amp-http";
-import { runOrbClientConformanceSuite } from "../src/coding/orb/conformance";
-import { OrbAuthError, OrbLostError, OrbUnreachableError, OrbUnsupportedError } from "../src/coding/orb/types";
+import { AmpCancelError, AmpHttpOrbClient, AMP_CLI_VERSION_LABEL, AMP_MAX_MESSAGE_CHARS, AMP_MAX_TOOL_OUTPUT_CHARS, AMP_MAX_TOOL_VALUE_CHARS, AMP_RIVET_PUBLIC_KEY, type AmpSocket, type AmpHttpOptions, type AmpHttpStore } from "../src/orb/amp-http";
+import { runOrbClientConformanceSuite } from "../src/orb/conformance";
+import { OrbAuthError, OrbLostError, OrbUnreachableError, OrbUnsupportedError } from "../src/orb/types";
 
 class MemoryStore implements AmpHttpStore {
 	values = new Map<string, unknown>();
@@ -20,8 +20,8 @@ declare global {
 		glob(patterns: string[], options: { query: "?raw"; import: "default"; eager: true }): Record<string, string>;
 	}
 }
-const raw = import.meta.glob(["./fixtures/amp-internal/*.json"], { query: "?raw", import: "default", eager: true });
-const fixtureText = (name: string) => raw[`./fixtures/amp-internal/${name}.json`]!;
+const raw = import.meta.glob(["./support/amp-internal/*.json"], { query: "?raw", import: "default", eager: true });
+const fixtureText = (name: string) => raw[`./support/amp-internal/${name}.json`]!;
 const fx = (name: string) => JSON.parse(fixtureText(name)) as Record<string, any>;
 const reply = (name: string, status = 200, headers = {}) => new Response(fixtureText(name), { status, headers: { "content-type": "application/json", ...headers } });
 const json = (body: unknown, status = 200, headers = {}) => Response.json(body, { status, headers });

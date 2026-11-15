@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { runOrbClientConformanceSuite } from "../src/coding/orb/conformance";
-import { FakeOrbClient } from "../src/coding/orb/fake";
-import { OrbLostError, OrbUnreachableError } from "../src/coding/orb/types";
+import { runOrbClientConformanceSuite } from "../src/orb/conformance";
+import { FakeOrbClient } from "../src/orb/fake";
+import { OrbLostError, OrbUnreachableError } from "../src/orb/types";
 
 // The fake is pure logic, so it runs in the Worker pool like the workspace fake's tests, touching no binding.
 

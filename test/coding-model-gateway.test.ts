@@ -9,7 +9,7 @@ import {
 	verifyGatewayToken,
 } from "../src/coding/model-gateway";
 import { codingThread } from "../src/coding/thread-do";
-import type { CodingThreadRow } from "../src/coding/thread-store";
+import type { CodingThreadRow } from "@pim/coding/thread-store";
 import { getBuiltinModels } from "../src/provider-catalog";
 import { OWNER, post } from "./helpers";
 import { type CodingThreadDO, codingGateway } from "./worker";

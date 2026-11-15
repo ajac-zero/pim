@@ -7,7 +7,7 @@ is Cloudflare Containers. Both `WorkspaceContainer` and `WorkspaceCatalog` bindi
 are required for A0's `usable` summary. Adding the admin provider alone cannot
 turn on coding tools. Switching it off removes it from the workspace registry.
 
-`src/coding/workspace/cloudflare.ts` is the client. `cloudflare-container.ts` holds
+`packages/coding/src/workspace/cloudflare.ts` is the client. `cloudflare-container.ts` holds
 the lifecycle controller, its Durable Object, a durable listing and the egress
 entrypoint. The client reuses Compose's agentd file and streaming exec protocol,
 including reconnect by exec id, and explicitly kills an exec on cancellation.
@@ -22,7 +22,7 @@ threads go to Cloudflare only when the manager has no slot for them (the
 space's slots there are taken, its health says it is full, or it refuses the
 workspace for capacity or low disk). A thread stays on the backend where it
 made its workspace. Each space has 20 slots on Cloudflare
-(`PROVIDER_SPACE_CAPS` in `src/coding/provider-capacity.ts`), apart from the
+(`PROVIDER_SPACE_CAPS` in `packages/coding/src/provider-capacity.ts`), apart from the
 manager's; people's compute quotas bound them further. When Cloudflare has no
 instance to start a container on, the workspace fails at once as a full backend
 (`WorkspaceCapacityError`): a thread with no workspace yet goes back to the

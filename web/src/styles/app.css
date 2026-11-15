@@ -46,7 +46,7 @@
 
 /*
  * Color themes give every color token below a value. They come from the Pim's
- * extensions (Pim's own are in src/extensions/themes at the repository's
+ * extensions (Pim's own are in packages/shared/src/theme-data at the repository's
  * root), and the Worker serves them as /api/themes.css, which index.html
  * loads; components only use the tokens.
  */

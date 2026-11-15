@@ -1079,7 +1079,7 @@ export function creationKey(): string {
  * (src/triggers/grant-action.ts); the person decides it like any approval.
  */
 
-/** The approval's action a grant comes from (`COMPUTER_GRANT_ACTION` in src/triggers/computer.ts). */
+/** The approval's action a grant comes from (`COMPUTER_GRANT_ACTION` in packages/triggers/src/computer.ts). */
 export const GRANT_ACTION = "trigger_computer_source";
 
 /** What a grant consents to: one source's exact configuration, of one trigger, on one computer. */
@@ -1120,7 +1120,7 @@ function canonical(value: unknown): string {
 
 /**
  * The digest of a computer source's configuration, as Pim and pim-computer
- * compute it (`sourceConfigHash` in src/triggers/computer.ts), so the screen
+ * compute it (`sourceConfigHash` in packages/triggers/src/computer.ts), so the screen
  * can tell whether a request is for the source the trigger has now.
  */
 export async function sourceConfigHash(source: TriggerSource): Promise<string> {

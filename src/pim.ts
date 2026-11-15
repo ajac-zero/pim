@@ -225,7 +225,7 @@ import { DECIDE_APPROVAL, introduction, majordomoPreferences, majordomoStart, RE
 import { Progress } from "./progress";
 import { codingScheduler } from "./coding/scheduler-do";
 import { HARNESSES, type CodingVaultKey, type Harness as CodingHarness, isHarness } from "@pim/shared/harnesses";
-import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "./coding/vault/store";
+import { type VaultRecord, type VaultStatus, VaultStore, type VaultWriteResult } from "@pim/coding/vault/store";
 import { exporterFrom, TELEMETRY_EXTENSION, Telemetry, type TelemetryEnv } from "./telemetry";
 import { changeOf, changesBlock, type FileNow, MAX_SEEN_BYTES, MAX_SEEN_FILES, sha256Hex, textOf as fileTextOf } from "./file-changes";
 import { CODING_EVENT, forkPoint, fromPerson, projectEntries } from "@pim/shared/transcript";
@@ -1690,7 +1690,7 @@ export class Pim extends DurableAgent<Env> {
 	}
 
 	/**
-	 * The coding vault (src/coding/vault/vault.ts) keeps each harness's login
+	 * The coding vault (packages/coding/src/vault/vault.ts) keeps each harness's login
 	 * here, sealed before it arrives: this object stores the blob and its
 	 * version and never opens it. Only for the vault, over RPC; the API
 	 * serves the status alone.

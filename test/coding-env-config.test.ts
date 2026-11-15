@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { chooseSetup, ENV_CONFIG_PATH, MAX_ENV_CONFIG_BYTES, parseEnvConfig } from "../src/coding/env-config";
-import { globRegExp } from "../src/coding/environment-cache";
+import { chooseSetup, ENV_CONFIG_PATH, MAX_ENV_CONFIG_BYTES, parseEnvConfig } from "@pim/coding/env-config";
+import { globRegExp } from "@pim/coding/environment-cache";
 
 // The repository's declarative contract, `.pim/env.json`: read strictly, never throwing.
 

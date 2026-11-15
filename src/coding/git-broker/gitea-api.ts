@@ -2,7 +2,7 @@ import type { Account } from "../../directory";
 import { deploymentSettings } from "../../deployment";
 import type { ApiExtension } from "../../gateway";
 import { dispatch, HttpError, type Route } from "@pim/shared/http";
-import { deploymentGitea } from "./routes";
+import { deploymentGitea } from "./worker";
 
 /**
  * The Gitea connection's API, `/api/coding/gitea`, for people who are signed

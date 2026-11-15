@@ -2,7 +2,7 @@
 
 A coding thread's workspace starts from one image (Node, pnpm, Yarn, git, build tools and the coding CLIs). Most repositories need more: a Go repository needs Go to run `go vet` and its tests. Before a thread's first turn, Pim reads the repository's checkout, installs the toolchains and dependencies it pins, and tells the coding agent which commands check its work. This is always on: there is no flag, setting or variable. It happens inside the thread's own workspace, so nothing is built on the host, and it is part of the thread's environment ([reference.md](reference.md#workspaces-for-coding-threads)), so its result is kept in the person's snapshot and the next thread starts from it.
 
-The code is [`src/coding/repo-environment.ts`](../src/coding/repo-environment.ts) (detection, the steps, and what the agent is told) and `#prepareEnvironment` in [`src/coding/thread-do.ts`](../src/coding/thread-do.ts) (running the steps, the snapshot and the status).
+The code is [`packages/coding/src/repo-environment.ts`](../packages/coding/src/repo-environment.ts) (detection, the steps, and what the agent is told) and `#prepareEnvironment` in [`src/coding/thread-do.ts`](../src/coding/thread-do.ts) (running the steps, the snapshot and the status).
 
 ## What is read
 
@@ -45,7 +45,7 @@ A failed setup script never fails the thread, and is never silent: the thread st
 
 ## The repository's contract: `.pim/env.json`
 
-A repository can say what its environment is instead of leaving Pim to guess. `.pim/env.json` is read from the checkout ([`src/coding/env-config.ts`](../src/coding/env-config.ts)); every field is optional:
+A repository can say what its environment is instead of leaving Pim to guess. `.pim/env.json` is read from the checkout ([`packages/coding/src/env-config.ts`](../packages/coding/src/env-config.ts)); every field is optional:
 
 | Field | Meaning |
 | --- | --- |
@@ -73,7 +73,7 @@ Precedence of the setup, highest first: the person's setting for the repository,
 
 ## The cache key
 
-The environment's key ([`environmentKey`](../src/coding/environment-cache.ts)) covers the steps' commands, which name every version they install, so a new pin in `go.mod`, `.nvmrc`, `packageManager` or anywhere else above is a new environment, and so is a new or removed lockfile. It covers the setup that runs and where it came from (a mise task's file or the dev container's commands count as its content), and, for a toolchain that isn't pinned (`lts`, `stable`, `latest`), the concrete version mise resolves it to (`mise latest node@lts`), so a new release is a new environment; where mise can't resolve it, the key changes every 7 days instead. It also covers the contents of the files `.pim/env.json`'s `cacheKeys` name, and the lockfiles' contents (now with `go.sum`, `bun.lock`, `npm-shrinkwrap.json` and mise's configuration), the setup script, the person, the repository and the workspace image. A change to anything else, such as the code, a Makefile or a workflow, keeps the key and the snapshot. Snapshots are kept per sandbox pool ([coding-pools.md](coding-pools.md#environment-snapshots)). The key also covers the pool, except for a provider's first pool, which keeps the keys made before pools, so those snapshots still resolve. The key's format changed with provisioning, so every snapshot made before it is built once more.
+The environment's key ([`environmentKey`](../packages/coding/src/environment-cache.ts)) covers the steps' commands, which name every version they install, so a new pin in `go.mod`, `.nvmrc`, `packageManager` or anywhere else above is a new environment, and so is a new or removed lockfile. It covers the setup that runs and where it came from (a mise task's file or the dev container's commands count as its content), and, for a toolchain that isn't pinned (`lts`, `stable`, `latest`), the concrete version mise resolves it to (`mise latest node@lts`), so a new release is a new environment; where mise can't resolve it, the key changes every 7 days instead. It also covers the contents of the files `.pim/env.json`'s `cacheKeys` name, and the lockfiles' contents (now with `go.sum`, `bun.lock`, `npm-shrinkwrap.json` and mise's configuration), the setup script, the person, the repository and the workspace image. A change to anything else, such as the code, a Makefile or a workflow, keeps the key and the snapshot. Snapshots are kept per sandbox pool ([coding-pools.md](coding-pools.md#environment-snapshots)). The key also covers the pool, except for a provider's first pool, which keeps the keys made before pools, so those snapshots still resolve. The key's format changed with provisioning, so every snapshot made before it is built once more.
 
 ## The checks the agent is told
 

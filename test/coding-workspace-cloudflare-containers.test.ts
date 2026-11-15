@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { CloudflareContainerProvider, type ContainerHost as ContainerHostApi, containerProvider } from "../src/coding/workspace/cloudflare";
-import { runConformanceSuite } from "../src/coding/workspace/conformance";
+import { CloudflareContainerProvider, type ContainerHost as ContainerHostApi, containerProvider } from "@pim/coding/workspace/cloudflare";
+import { runConformanceSuite } from "@pim/coding/workspace/conformance";
 import { fakeContainers } from "./fake-container";
 import { computeSummary, prepareComputeProvider, workspaceProviderOf } from "../src/compute";
 import { workspaceBackends } from "../src/coding/workspace/registry";
-import { WorkspaceCapacityError, type WorkspaceSpec } from "../src/coding/workspace/types";
+import { WorkspaceCapacityError, type WorkspaceSpec } from "@pim/coding/workspace/types";
 import { ContainerHost, instanceFor } from "../cloudflare-container";
 import { handleEgress } from "../cloudflare-egress";
 

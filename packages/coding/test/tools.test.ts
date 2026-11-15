@@ -1,9 +1,9 @@
 import type { Context } from "@earendil-works/chord";
 import type { ToolExecutionApi, ToolExecutionResult } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { type CodingToolsDeps, createCodingTools, MemoryToolJournal, parseTestSummary, type TestRun } from "../src/coding/tools";
-import { type FakeCommandHandler, FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import type { Workspace, WorkspaceSpec } from "../src/coding/workspace/types";
+import { type CodingToolsDeps, createCodingTools, MemoryToolJournal, parseTestSummary, type TestRun } from "../src/tools/index";
+import { type FakeCommandHandler, FakeWorkspaceProvider } from "../src/workspace/fake";
+import type { Workspace, WorkspaceSpec } from "../src/workspace/types";
 
 // The coding tools over the in-memory fake workspace. Like the workspace's own tests, these run in the Worker pool but touch no binding.
 // The fake's shell knows echo, cat, sleep, exit and `>&2`; tests register stand-ins for rg, git and test runners to check what the tools run and how they read the results.

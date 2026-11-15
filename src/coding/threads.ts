@@ -1,16 +1,17 @@
 import { digestHex } from "../auth/store";
 import { HttpError } from "@pim/shared/http";
-import type { CodingCreator, CodingErrorCode, CodingThreadSummary, CodingThreadView, StartCodingThread } from "./api";
+import type { CodingCreator } from "@pim/coding/thread-index";
+import type { CodingErrorCode, CodingThreadSummary, CodingThreadView, StartCodingThread } from "./api";
 import { threadPath } from "./api";
-import { GitBrokerError } from "./git-broker/broker";
-import { brokerPolicy } from "./git-broker/config";
-import { deploymentProviders } from "./git-broker/routes";
-import { AMP_HTTP_UNSUPPORTED } from "./orb/amp-http";
-import { cliHarness } from "./harness";
+import { GitBrokerError } from "@pim/coding/git-broker/broker";
+import { brokerPolicy } from "@pim/coding/git-broker/config";
+import { deploymentProviders } from "./git-broker/worker";
+import { AMP_HTTP_UNSUPPORTED } from "@pim/coding/orb/amp-http";
+import { cliHarness } from "@pim/coding/harness/index";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
 import { codingThread } from "./thread-do";
-import type { IndexedThread } from "./thread-index";
-import { type AgentProfile, CODING_HARNESSES } from "./thread-store";
+import type { IndexedThread } from "@pim/coding/thread-index";
+import { type AgentProfile, CODING_HARNESSES } from "@pim/coding/thread-store";
 
 /**
  * A space's coding threads as the API (./api.ts) and agents' tools

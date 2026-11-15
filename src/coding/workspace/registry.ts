@@ -1,7 +1,7 @@
 import { COMPUTE_KINDS, type ComputeProvider, workspaceProviderOf, workspaceRole } from "../../compute";
-import { containerProvider } from "./cloudflare";
-import { ComposeWorkspaceProvider } from "./compose";
-import type { WorkspaceProvider } from "./types";
+import { containerProvider } from "@pim/coding/workspace/cloudflare";
+import { ComposeWorkspaceProvider } from "@pim/coding/workspace/compose";
+import type { WorkspaceProvider } from "@pim/coding/workspace/types";
 
 /**
  * The workspace providers a deployment offers coding threads, by id, such as

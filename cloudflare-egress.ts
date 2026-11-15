@@ -1,5 +1,5 @@
-import { egressAllows, injectedHeaders } from "./src/coding/workspace/egress";
-import type { EgressPolicy } from "./src/coding/workspace/types";
+import { egressAllows, injectedHeaders } from "@pim/coding/workspace/egress";
+import type { EgressPolicy } from "@pim/coding/workspace/types";
 
 const log = (event: string, request: Request, url: URL | undefined, more: Record<string, unknown>) =>
 	console.warn(JSON.stringify({ event, host: url?.hostname ?? null, protocol: url?.protocol ?? null, method: request.method, upgrade: request.headers.get("upgrade"), ...more }));

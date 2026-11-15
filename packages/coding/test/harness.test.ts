@@ -1,22 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
-import { CLAUDE_CODE_FLAGS, ClaudeStreamParser, claudeCode } from "../src/coding/harness/claude-code";
-import { authEnv } from "../src/coding/harness/auth";
-import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/coding/harness/codex";
-import { cliHarness } from "../src/coding/harness/index";
-import { describeModelFailure, parseModelFailure } from "../src/coding/model-error";
-import { type HarnessAuth, HarnessRunner, LineBuffer, type RunRecord, recoverRun, type RunnerDeps } from "../src/coding/harness/runner";
-import type { CliHarness, HarnessEvent, HarnessFiles, HarnessTurn } from "../src/coding/harness/types";
-import { mistralVibe, VIBE_FLAGS, VIBE_SESSIONS, VibeStreamParser, vibeRunDir } from "../src/coding/harness/vibe";
-import type { CodingThreadRow } from "../src/coding/thread-store";
-import type { TestRun } from "../src/coding/tools";
-import type { Restored } from "../src/coding/vault/inject";
-import { type ExecEvent, type ExecOptions, type Workspace, WorkspaceFileError } from "../src/coding/workspace/types";
-import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
-import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
-import { VIBE_META, VIBE_SESSION, vibeExport, vibeLines, vibeOutput } from "./fixtures/vibe";
+import { CLAUDE_CODE_FLAGS, ClaudeStreamParser, claudeCode } from "../src/harness/claude-code";
+import { authEnv } from "../src/harness/auth";
+import { CODEX_FLAGS, CodexJsonParser, codex, shellScript } from "../src/harness/codex";
+import { cliHarness } from "../src/harness/index";
+import { describeModelFailure, parseModelFailure } from "../src/model-error";
+import { type HarnessAuth, HarnessRunner, LineBuffer, type RunRecord, recoverRun, type RunnerDeps } from "../src/harness/runner";
+import type { CliHarness, HarnessEvent, HarnessFiles, HarnessTurn } from "../src/harness/types";
+import { mistralVibe, VIBE_FLAGS, VIBE_SESSIONS, VibeStreamParser, vibeRunDir } from "../src/harness/vibe";
+import type { CodingThreadRow } from "../src/thread-store";
+import type { TestRun } from "../src/tools/index";
+import type { Restored } from "../src/vault/inject";
+import { type ExecEvent, type ExecOptions, type Workspace, WorkspaceFileError } from "../src/workspace/types";
+import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./support/claude-code";
+import { CODEX_SESSION, codexFixture, codexLines } from "./support/codex";
+import { VIBE_META, VIBE_SESSION, vibeExport, vibeLines, vibeOutput } from "./support/vibe";
 
 // The CLI harness framework (src/coding/harness/) on its own: Claude Code's command line and stream-json parser against
-// stream-json written from its documented schema (test/fixtures/claude-code/), and the runner against a workspace whose
+// stream-json written from its documented schema (packages/coding/test/support/claude-code/), and the runner against a workspace whose
 // `claude` is a script. How a coding thread uses them is in test/coding-thread-do.test.ts.
 
 const fixture = claudeFixture;

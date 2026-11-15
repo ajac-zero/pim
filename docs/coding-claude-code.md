@@ -4,9 +4,9 @@ A coding thread started with `harness: "claude-code"` is run by Anthropic's `cla
 
 ## The framework
 
-Any CLI that works in a workspace is a `CliHarness` (`src/coding/harness/types.ts`): how a turn is started (`buildCommand`), how a line of its output reads (`parser().parseLine`, into `HarnessEvent`s), optionally what it left in the workspace once it exited (`parser().finish`), the environment and egress it needs, how its process is signalled, and how it signs in (`login`, or an API key's variable, `apiKeyEnv`). `cliHarness(id)` in `src/coding/harness/index.ts` lists the ones there are: `claude-code`, `codex` ([coding-codex.md](coding-codex.md)), and `mistral-vibe` ([coding-vibe.md](coding-vibe.md)). Amp now uses agent-hosted Orbs by default ([coding-orbs.md](coding-orbs.md)).
+Any CLI that works in a workspace is a `CliHarness` (`packages/coding/src/harness/types.ts`): how a turn is started (`buildCommand`), how a line of its output reads (`parser().parseLine`, into `HarnessEvent`s), optionally what it left in the workspace once it exited (`parser().finish`), the environment and egress it needs, how its process is signalled, and how it signs in (`login`, or an API key's variable, `apiKeyEnv`). `cliHarness(id)` in `packages/coding/src/harness/index.ts` lists the ones there are: `claude-code`, `codex` ([coding-codex.md](coding-codex.md)), and `mistral-vibe` ([coding-vibe.md](coding-vibe.md)). Amp now uses agent-hosted Orbs by default ([coding-orbs.md](coding-orbs.md)).
 
-`HarnessRunner` (`src/coding/harness/runner.ts`) runs one turn for `CodingThreadDO` when `thread.harness !== "pi"`:
+`HarnessRunner` (`packages/coding/src/harness/runner.ts`) runs one turn for `CodingThreadDO` when `thread.harness !== "pi"`:
 
 1. **Prepare.** The person's lock for the harness is taken from the space's scheduler (one run per person per harness at a time, since they share one login), then the login is restored from the vault into the workspace. No stored login: the lock is let go and the thread goes to `waiting_input` with `stateReason: "login_required"`. Lock held by another of their threads: the thread stays `running` with `stateReason: "harness_busy"` and tries again at its next heartbeat.
 2. **Run.** The CLI runs through `workspace.exec` in `/workspace/repo` with `HOME=/workspace`, `harnessEnv` (`CLAUDE_CONFIG_DIR=/workspace/.claude`) and the harness's own env. Each line is parsed as it arrives (lines split across chunks are joined). Messages go into the thread's transcript as pi-ai messages (`harness.message` entries), so the web app shows text, thinking, tool calls and their results as it does for Pi; text as it is written goes to live followers as `{ type: "partial" }`; `Bash` calls that ran tests become test runs; retries and refused tools go into the thread's log.
@@ -45,7 +45,7 @@ The flags were checked against Anthropic's docs (code.claude.com: CLI reference,
 
 Checked with the real 2.1.311 CLI in the workspace image: `claude auth login` with stdin a pipe prints `If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?…` then `Paste code here if prompted >`, and reads the code from the pipe once the file appears (a bogus code was refused by Anthropic with "That code wasn't accepted", exit 1). A real sign-in has not been done.
 
-**API key or gateway (not built).** `authEnv(thread)` in `src/coding/harness/auth.ts` is the seam: it returns `{ mode: "subscription" }` for every thread today. Returning `{ mode: "env", env }` instead, such as `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` with `ANTHROPIC_AUTH_TOKEN` for Pim's gateway, runs the CLI with that environment and neither restores a login nor takes the person's lock.
+**API key or gateway (not built).** `authEnv(thread)` in `packages/coding/src/harness/auth.ts` is the seam: it returns `{ mode: "subscription" }` for every thread today. Returning `{ mode: "env", env }` instead, such as `ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` with `ANTHROPIC_AUTH_TOKEN` for Pim's gateway, runs the CLI with that environment and neither restores a login nor takes the person's lock.
 
 ## Egress
 
@@ -68,7 +68,7 @@ docker run --rm --entrypoint claude pim-workspace:local --version   # 2.1.311 (C
 
 Without compose: `docker build -t pim-workspace:local workspace-agentd` from the repository root. Workspaces that already exist keep the image they were created with; a thread gets the new one with its next workspace. If `ALLOWED_IMAGES` pins the image by digest, put the new digest there and restart the manager.
 
-To move to a newer CLI, change `CLAUDE_CODE_VERSION`, rebuild, and check `claude --help` for the flags above and a run's stream-json against `src/coding/harness/claude-code.ts` and its fixtures (`test/fixtures/claude-code/`) before deploying.
+To move to a newer CLI, change `CLAUDE_CODE_VERSION`, rebuild, and check `claude --help` for the flags above and a run's stream-json against `packages/coding/src/harness/claude-code.ts` and its fixtures (`test/fixtures/claude-code/`) before deploying.
 
 ## Not yet verified
 

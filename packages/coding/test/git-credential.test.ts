@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
-import { workspaceCredentialHelper } from "../src/coding/git-broker/workspace-credential";
+import { workspaceCredentialHelper } from "../src/git-broker/workspace-credential";
 
 const exec = promisify(execFile);
 

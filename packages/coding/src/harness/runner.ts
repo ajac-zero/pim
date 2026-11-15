@@ -1,6 +1,6 @@
 import { describeModelFailure, isModelFailure, MODEL_ERROR_MAX } from "../model-error";
 import { redact, redactSecrets } from "@pim/shared/redact";
-import { parseTestSummary, type TestRun } from "../tools";
+import { parseTestSummary, type TestRun } from "../tools/index";
 import type { Restored } from "../vault/inject";
 import { harnessEnv, HARNESS_HOME } from "../vault/inject";
 import { type Workspace, WorkspaceFileError } from "../workspace/types";

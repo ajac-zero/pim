@@ -424,7 +424,7 @@ describe("a grant request", () => {
     grantStanding(trigger, approvals, "hash_now", now);
 
   it("digests a source exactly as Pim does, whatever the order of its fields", async () => {
-    // Pim's digest (src/triggers/computer.ts): SHA-256 of the protocol's prefix and the source with its keys sorted.
+    // Pim's digest (packages/triggers/src/computer.ts): SHA-256 of the protocol's prefix and the source with its keys sorted.
     const expected = (canonical: string) =>
       createHash("sha256")
         .update(`triggers.v1/source\n${canonical}`)

@@ -2,10 +2,10 @@ import { getAgentByName } from "agents";
 import type { ComputeQuota } from "../compute";
 import { DurableObject } from "cloudflare:workers";
 import type { CodingRepoSettings } from "./api";
-import { MAX_SETUP_SCRIPT_BYTES } from "./environment-cache";
-import { cliHarness } from "./harness";
-import { HarnessLoginFlow, type LoginStatus } from "./harness/login";
-import { DEFAULT_SPACE_CAP, type ManagerHealth, PROVIDER_SPACE_CAPS, ProviderCapacity } from "./provider-capacity";
+import { MAX_SETUP_SCRIPT_BYTES } from "@pim/coding/environment-cache";
+import { cliHarness } from "@pim/coding/harness/index";
+import { HarnessLoginFlow, type LoginStatus } from "@pim/coding/harness/login";
+import { DEFAULT_SPACE_CAP, type ManagerHealth, PROVIDER_SPACE_CAPS, ProviderCapacity } from "@pim/coding/provider-capacity";
 import {
 	IDLE_SLOT_GRACE_MS,
 	type AdmissionConditions,
@@ -20,13 +20,13 @@ import {
 	type SlotActivity,
 	type SlotRequest,
 	type Sweep,
-} from "./scheduler";
-import type { PoolLiveState } from "./pools";
-import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRegistration } from "./thread-index";
+} from "@pim/coding/scheduler";
+import type { PoolLiveState } from "@pim/coding/pools";
+import { CodingThreadIndex, type IndexedThread, type ThreadRecord, type ThreadRegistration } from "@pim/coding/thread-index";
 import type { Harness } from "@pim/shared/harnesses";
-import { codingVault } from "./vault/vault";
+import { codingVault } from "./vault/worker";
 import { DEFAULT_WORKSPACE_IMAGE, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
-import type { WorkspaceRef } from "./workspace/types";
+import type { WorkspaceRef } from "@pim/coding/workspace/types";
 
 /**
  * A space's coding scheduler (./scheduler.ts) in a Durable Object of its

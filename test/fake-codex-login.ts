@@ -1,4 +1,4 @@
-import type { ExecEvent, ExecOptions, Workspace } from "../src/coding/workspace/types";
+import type { ExecEvent, ExecOptions, Workspace } from "@pim/coding/workspace/types";
 
 /**
  * Codex's device-code sign-in, `codex login --device-auth`, as 0.167.0

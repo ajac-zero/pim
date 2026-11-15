@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { handleEgress } from "../cloudflare-egress";
-import { egressPolicy, gatewayInjection, gitBrokerInjection } from "../src/coding/workspace/egress";
-import type { EgressPolicy } from "../src/coding/workspace/types";
+import { egressPolicy, gatewayInjection, gitBrokerInjection } from "@pim/coding/workspace/egress";
+import type { EgressPolicy } from "@pim/coding/workspace/types";
 
 const policy: EgressPolicy = { allow: ["allowed.example", "*.packages.example"], inject: [{ host: "api.example", pathPrefix: "/api/git", headers: { authorization: "Bearer test-secret" } }] };
 

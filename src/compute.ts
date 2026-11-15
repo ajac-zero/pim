@@ -1,6 +1,6 @@
-import { containerProvider } from "./coding/workspace/cloudflare";
-import { ComposeWorkspaceProvider } from "./coding/workspace/compose";
-import type { WorkspaceProvider } from "./coding/workspace/types";
+import { containerProvider } from "@pim/coding/workspace/cloudflare";
+import { ComposeWorkspaceProvider } from "@pim/coding/workspace/compose";
+import type { WorkspaceProvider } from "@pim/coding/workspace/types";
 import { HttpError } from "@pim/shared/http";
 
 /**

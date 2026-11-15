@@ -22,9 +22,9 @@ import {
 	SETUP_ENV,
 	SETUP_TIMEOUT_MS,
 	snapshotWorthKeeping,
-} from "./environment-cache";
-import { type ChosenSetup, chooseSetup, type EnvConfig, readEnvConfig } from "./env-config";
-import { detectConfiguredSetup, detectRepository, environmentBrief, type ProvisionStep, pendingItems, provisionPlan, runProvisionStep, stepOf, unpinnedKeyParts, workspaceFiles } from "./repo-environment";
+} from "@pim/coding/environment-cache";
+import { type ChosenSetup, chooseSetup, type EnvConfig, readEnvConfig } from "@pim/coding/env-config";
+import { detectConfiguredSetup, detectRepository, environmentBrief, type ProvisionStep, pendingItems, provisionPlan, runProvisionStep, stepOf, unpinnedKeyParts, workspaceFiles } from "@pim/coding/repo-environment";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { CHATGPT_PROVIDER } from "../chatgpt";
 import { piProvider } from "../providers";
@@ -59,24 +59,25 @@ import {
 	type SandboxModelEnv,
 	verifyGatewayToken,
 } from "./model-gateway";
-import { DEFAULT_SPACE_CAP, type ManagerHealth } from "./provider-capacity";
-import { IDLE_SLOT_GRACE_MS, PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "./scheduler";
+import { DEFAULT_SPACE_CAP, type ManagerHealth } from "@pim/coding/provider-capacity";
+import { IDLE_SLOT_GRACE_MS, PREEMPT_RESUME_PRIORITY, type QueueEntry, type QueuePlace, type Released, type SlotActivity } from "@pim/coding/scheduler";
 import { codingScheduler, codingThreadsChanged } from "./scheduler-do";
-import { BranchMovedError, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "./git-broker/broker";
-import { brokerPolicy, GitBrokerNotConfiguredError } from "./git-broker/config";
-import { WORKSPACE_GIT_AUTH_DIR, workspaceCredentialHelper } from "./git-broker/workspace-credential";
-import { GiteaNotConnectedError } from "./git-broker/gitea-connection";
-import { GITHUB_INSTANCE_ID } from "./git-broker/provider";
-import type { Fetch, GitHubApp } from "./git-broker/github-app";
-import { brokerTokenKey, deploymentGitHubApp, deploymentProviders, GIT_BROKER_PATH } from "./git-broker/routes";
-import { authEnv } from "./harness/auth";
-import { type CliHarness, cliHarness } from "./harness";
-import { AmpHttpOrbClient, AMP_HTTP_UNSUPPORTED } from "./orb/amp-http";
-import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "./orb/types";
+import { BranchMovedError, checkBranch, checkBranchName, GitBrokerError, issueBrokerToken, parseRepoUrl, preparePush, type PushApprovalRequest, pushApprovalRequest, pushBranch, type PushResult, repoDefaultBranch } from "@pim/coding/git-broker/broker";
+import { brokerPolicy, GitBrokerNotConfiguredError } from "@pim/coding/git-broker/config";
+import { WORKSPACE_GIT_AUTH_DIR, workspaceCredentialHelper } from "@pim/coding/git-broker/workspace-credential";
+import { GiteaNotConnectedError } from "@pim/coding/git-broker/gitea-connection";
+import { GITHUB_INSTANCE_ID } from "@pim/coding/git-broker/provider";
+import type { Fetch, GitHubApp } from "@pim/coding/git-broker/github-app";
+import { GIT_BROKER_PATH } from "@pim/coding/git-broker/routes";
+import { brokerTokenKey, deploymentGitHubApp, deploymentProviders } from "./git-broker/worker";
+import { authEnv } from "@pim/coding/harness/auth";
+import { type CliHarness, cliHarness } from "@pim/coding/harness/index";
+import { AmpHttpOrbClient, AMP_HTTP_UNSUPPORTED } from "@pim/coding/orb/amp-http";
+import { type OrbClient, type OrbClientFactory, OrbAuthError, OrbLostError, type OrbMessage, type OrbThread, OrbUnreachableError, OrbUnsupportedError } from "@pim/coding/orb/types";
 
 const LEGACY_AMP_WORKSPACE_MESSAGE = "legacy Amp workspace thread; start a new Amp (Orbs) thread";
-import { describeModelFailure, explainFailures } from "./model-error";
-import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "./harness/runner";
+import { describeModelFailure, explainFailures } from "@pim/coding/model-error";
+import { type HarnessAuth, HarnessRunner, INTERRUPT_GRACE_MS, type RunnerDeps, type RunResult, recoverRun, STALL_MS } from "@pim/coding/harness/runner";
 import { supervisorSink } from "./supervisor";
 import {
 	type AgentProfile,
@@ -93,15 +94,15 @@ import {
 	type ThreadPlacement,
 	type InboxItem,
 	type TestRun,
-} from "./thread-store";
-import { ownsLegacySnapshots, type PlacementPool, placementPools, type SandboxPool, type SkippedPool } from "./pools";
-import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "./tools";
+} from "@pim/coding/thread-store";
+import { ownsLegacySnapshots, type PlacementPool, placementPools, type SandboxPool, type SkippedPool } from "@pim/coding/pools";
+import { type CodingOutputEvent, createCodingTools, REPO_DIR, type ToolJournal } from "@pim/coding/tools/index";
 import { isLoginHarness } from "@pim/shared/harnesses";
-import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "./vault/inject";
-import { codingVault, threadOwnership } from "./vault/vault";
-import { ComposeManagerError } from "./workspace/compose";
+import { HARNESS_HOME, harnessEnv, restoreHarnessCredentials, writeBackHarnessCredentials } from "@pim/coding/vault/inject";
+import { codingVault, threadOwnership } from "./vault/worker";
+import { ComposeManagerError } from "@pim/coding/workspace/compose";
 import { COMPUTE_KINDS, type ComputeProvider, type ComputeQuota } from "../compute";
-import { egressPolicy, gatewayInjection, gitBrokerInjection, placeSecret } from "./workspace/egress";
+import { egressPolicy, gatewayInjection, gitBrokerInjection, placeSecret } from "@pim/coding/workspace/egress";
 import { DEFAULT_WORKSPACE_IMAGE, NoWorkspaceBackendError, workspaceBackends, type WorkspaceProviderRegistry } from "./workspace/registry";
 import {
 	type EgressInjection,
@@ -119,8 +120,8 @@ import {
 	type WorkspaceProvider,
 	type WorkspaceRef,
 	type WorkspaceSpec,
-} from "./workspace/types";
-import type { HarnessEvent as CliEvent, HarnessUsage } from "./harness/types";
+} from "@pim/coding/workspace/types";
+import type { HarnessEvent as CliEvent, HarnessUsage } from "@pim/coding/harness/types";
 
 /**
  * One coding thread, in a Durable Object of its own named by the thread's

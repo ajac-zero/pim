@@ -2,23 +2,23 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { CONTINUE_TEXT, codingThread, LOST_RESUME_TEXT, type StartThread } from "../src/coding/thread-do";
-import { REPO_DIR } from "../src/coding/tools";
-import { codingVault } from "../src/coding/vault/vault";
-import { ComposeWorkspaceProvider } from "../src/coding/workspace/compose";
-import { type FakeCommandHandler, type FakeCommandResult } from "../src/coding/workspace/fake";
+import { REPO_DIR } from "@pim/coding/tools/index";
+import { codingVault } from "../src/coding/vault/worker";
+import { ComposeWorkspaceProvider } from "@pim/coding/workspace/compose";
+import { type FakeCommandHandler, type FakeCommandResult } from "@pim/coding/workspace/fake";
 import { workspaceRegistry } from "../src/coding/workspace/registry";
 import { fakeGit, fakeRemotes } from "./fake-git";
-import { fakeManager, json, TOKEN, URL_BASE } from "./fake-manager";
-import { CLAUDE_SESSION, claudeFixture, claudeLines } from "./fixtures/claude-code";
-import { CODEX_SESSION, codexFixture, codexLines } from "./fixtures/codex";
-import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "./fixtures/vibe";
+import { fakeManager, json, TOKEN, URL_BASE } from "@pim/coding/support/fake-manager";
+import { CLAUDE_SESSION, claudeFixture, claudeLines } from "@pim/coding/support/claude-code";
+import { CODEX_SESSION, codexFixture, codexLines } from "@pim/coding/support/codex";
+import { VIBE_META, VIBE_SESSION, vibeExport, vibeOutput } from "@pim/coding/support/vibe";
 import { api, OWNER } from "./helpers";
 import { type CodingThreadDO, codingBackends, codingEvents, codingThreadClock, codingTimings, codingWorkspaces } from "./worker";
 import { REPO, type Stub, startInput, turns, inside, everything, workspaceOf, sql, sent , capped } from "./coding-thread-support";
 
 describe("a Claude Code thread", () => {
 	// The thread runs `claude` in its in-memory workspace, where it is a script that prints the stream-json of
-	// test/fixtures/claude-code/, and `pkill` tells the script the signal it was sent. Its person is the file's account,
+	// packages/coding/test/support/claude-code/, and `pkill` tells the script the signal it was sent. Its person is the file's account,
 	// `OWNER`, whose space keeps their Claude Code login in the coding vault for real.
 	type Run = { argv: string[]; env: Record<string, string>; cwd: string; login: string };
 	const runs: Run[] = [];
@@ -297,7 +297,7 @@ describe("a Claude Code thread", () => {
 	});
 
 	describe("on the Compose sandbox manager, when its workspace goes down", () => {
-		// The thread's workspaces are the stubbed manager's (test/fake-manager.ts), which a test makes go down: a container
+		// The thread's workspaces are the stubbed manager's (packages/coding/test/support/fake-manager.ts), which a test makes go down: a container
 		// that dies under a turn, a host that comes back with or without the workspace's volume, a manager that restarts.
 		/** The Compose provider on a stubbed manager whose workspaces run the fake git and `claude`. */
 		function compose() {
@@ -568,7 +568,7 @@ describe("a Claude Code thread", () => {
 
 describe("a Codex thread", () => {
 	// The thread runs `codex` in its in-memory workspace, where it is a script that prints the JSONL of
-	// test/fixtures/codex/, and `pkill` records the signal it was sent. The person's Codex login, `auth.json`, is in
+	// packages/coding/test/support/codex/, and `pkill` records the signal it was sent. The person's Codex login, `auth.json`, is in
 	// the coding vault for real.
 	type Run = { argv: string[]; env: Record<string, string>; cwd: string; login: string };
 	const runs: Run[] = [];
@@ -731,7 +731,7 @@ describe("a Codex thread", () => {
 
 describe("a Mistral Vibe thread", () => {
 	// The thread runs Vibe in its in-memory workspace, where `/bin/sh` is a script that prints the streaming output of
-	// test/fixtures/vibe/ and leaves the export.json beside it that Vibe would. The person's API key is in the coding
+	// packages/coding/test/support/vibe/ and leaves the export.json beside it that Vibe would. The person's API key is in the coding
 	// vault for real.
 	type Run = { argv: string[]; env: Record<string, string>; cwd: string };
 	const runs: Run[] = [];

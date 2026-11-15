@@ -1,4 +1,4 @@
-// The space's side of computer triggers (src/triggers/computer.ts), end to end in Node: the real runtime and spool of pim-computer's triggers host (computer/triggers-host.ts) with fake launchers on a fake clock, over a fake connection, against the real TriggerStore, PimStore approvals and grants on a real SQLite file of each test's own. Nothing opens a socket or reaches the network.
+// The space's side of computer triggers (packages/triggers/src/computer.ts), end to end in Node: the real runtime and spool of pim-computer's triggers host (computer/triggers-host.ts) with fake launchers on a fake clock, over a fake connection, against the real TriggerStore, PimStore approvals and grants on a real SQLite file of each test's own. Nothing opens a socket or reaches the network.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";

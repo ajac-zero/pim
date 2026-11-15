@@ -1,7 +1,7 @@
-import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import { egressPolicy } from "../src/coding/workspace/egress";
-import type { ContainerHost, ContainerCatalog } from "../src/coding/workspace/cloudflare";
-import { WorkspaceNotFoundError, type WorkspaceSpec, type WorkspaceRef, type EgressPolicy, type WorkspaceInfo } from "../src/coding/workspace/types";
+import { FakeWorkspaceProvider } from "@pim/coding/workspace/fake";
+import { egressPolicy } from "@pim/coding/workspace/egress";
+import type { ContainerHost, ContainerCatalog } from "@pim/coding/workspace/cloudflare";
+import { WorkspaceNotFoundError, type WorkspaceSpec, type WorkspaceRef, type EgressPolicy, type WorkspaceInfo } from "@pim/coding/workspace/types";
 
 /** A shared remote service for testing clients reconstructed after isolate eviction. */
 export function fakeContainers() {

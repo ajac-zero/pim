@@ -6,22 +6,22 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { exports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingEnvironment, CodingRepoSettings, CodingThreadSummary, CodingThreadView } from "../src/coding/api";
-import { pktLine } from "../src/coding/git-broker/broker";
-import type { GitHubApp } from "../src/coding/git-broker/github-app";
-import { DEFAULT_SPACE_CAP } from "../src/coding/provider-capacity";
+import { pktLine } from "@pim/coding/git-broker/broker";
+import type { GitHubApp } from "@pim/coding/git-broker/github-app";
+import { DEFAULT_SPACE_CAP } from "@pim/coding/provider-capacity";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { type CodingEventSink, codingThread } from "../src/coding/thread-do";
 import { turnEndedMessage } from "../src/coding/supervisor";
-import { CodingThreadIndex, type IndexedThread } from "../src/coding/thread-index";
-import { CodingThreadStore } from "../src/coding/thread-store";
+import { CodingThreadIndex, type IndexedThread } from "@pim/coding/thread-index";
+import { CodingThreadStore } from "@pim/coding/thread-store";
 import type { ComputeQuota } from "../src/compute";
 import type { Pim } from "../src/pim";
 import type { Approval } from "../src/store";
-import type { WorkspaceSpec } from "../src/coding/workspace/types";
+import type { WorkspaceSpec } from "@pim/coding/workspace/types";
 import { CODING_EVENT } from "@pim/shared/transcript";
 import { fakeRemotes, hex40 } from "./fake-git";
 import { api, apiUrl, connect, lastUserText, messagesOf, OWNER, post, say, settled, TOKEN, toolUse } from "./helpers";
-import { installed } from "./fixtures/repos";
+import { installed } from "@pim/coding/support/repos";
 import { type CodingThreadDO, codingEvents, codingFaux, codingGitHub, codingSchedulers, codingWorkspaces, faux } from "./worker";
 
 // The API and the agents' tools over real coding threads: each works in the in-memory workspace with a fake git and the
@@ -976,7 +976,7 @@ describe("what an agent hears of a coding thread's failure", () => {
 
 describe("listing thread activity", () => {
 	const activity: Activity = { running: true, lastActivityAt: 100, current: [], steps: [], stalls: [] };
-	const listed = (state: IndexedThread["state"], index: number): import("../src/coding/thread-index").IndexedThread & { queue: null } => ({
+	const listed = (state: IndexedThread["state"], index: number): import("@pim/coding/thread-index").IndexedThread & { queue: null } => ({
 		threadId: `list-thread-${index}`, createdBy: { type: "person" }, parent: null, chat: null, harness: "pi", task: "Run a test", repo: REPO, ref: "main", branch: "pim/test", state, stateReason: null, spentUsd: 0, budgetUsd: null, createdAt: index, updatedAt: index, lastTurnEndedAt: null, lastSeenAt: null, queue: null,
 	});
 	const listEnv = (threads: ReturnType<typeof listed>[], read: (id: string) => Promise<typeof activity>) => {

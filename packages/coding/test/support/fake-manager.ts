@@ -1,6 +1,6 @@
 import { posix } from "node:path";
-import { FakeWorkspaceProvider } from "../src/coding/workspace/fake";
-import { WorkspaceCapacityError, WorkspaceFileError, WorkspaceLimitError, WorkspaceNotFoundError, WorkspacePathError, type WorkspaceRef, type WorkspaceSpec } from "../src/coding/workspace/types";
+import { FakeWorkspaceProvider } from "../../src/workspace/fake";
+import { WorkspaceCapacityError, WorkspaceFileError, WorkspaceLimitError, WorkspaceNotFoundError, WorkspacePathError, type WorkspaceRef, type WorkspaceSpec } from "../../src/workspace/types";
 
 /** The sandbox-manager's bearer token and address in tests. */
 export const TOKEN = "s3cret-manager-token";

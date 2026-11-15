@@ -1,7 +1,8 @@
+import type { CodingCreator } from "@pim/coding/thread-index";
 import type { Activity } from "../activity";
 import type { CodingThreadStatus } from "./thread-do";
-import type { QueuePlace } from "./scheduler";
-import type { AgentProfile, ResolvedProfile, CodingHarness, CodingThreadState } from "./thread-store";
+import type { QueuePlace } from "@pim/coding/scheduler";
+import type { AgentProfile, ResolvedProfile, CodingHarness, CodingThreadState } from "@pim/coding/thread-store";
 
 /**
  * The coding threads API, under `/api/coding/threads`: what the web app and
@@ -9,10 +10,7 @@ import type { AgentProfile, ResolvedProfile, CodingHarness, CodingThreadState } 
  */
 
 export type { CodingHarness };
-export type { CodingEnvironment, EnvironmentState } from "./environment-cache";
-
-/** Who started a thread: the person (the web app or the API), or one of their agents, from a chat. */
-export type CodingCreator = { readonly type: "person" } | { readonly type: "agent"; readonly agent: string; readonly chat: string };
+export type { CodingEnvironment, EnvironmentState } from "@pim/coding/environment-cache";
 
 /** A thread as the space's list has it. */
 export type CodingThreadSummary = {

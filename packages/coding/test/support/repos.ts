@@ -1,6 +1,6 @@
-// Small repositories, as their files, for detecting what a repository needs (src/coding/repo-environment.ts). Each is
+// Small repositories, as their files, for detecting what a repository needs (packages/coding/src/repo-environment.ts). Each is
 // written the way such a repository usually is, with the files that matter and a few that don't.
-import { verifyTool } from "../../src/coding/repo-environment";
+import { verifyTool } from "../../src/repo-environment";
 
 /** A Go module pinned by its toolchain directive, with a Makefile, a GitHub workflow that starts Postgres, and a Dockerfile. */
 export const GO_REPO: Record<string, string> = {

@@ -14,8 +14,8 @@ import {
 	prepareComputeProvider,
 	resolveQuota,
 } from "./compute";
-import { auditPoolWrite, comparePools, type SandboxPool, type SandboxPoolInput, prepareSandboxPool } from "./coding/pools";
-import { DEFAULT_POOLS } from "./coding/pools-default";
+import { auditPoolWrite, comparePools, type SandboxPool, type SandboxPoolInput, prepareSandboxPool } from "@pim/coding/pools";
+import { DEFAULT_POOLS } from "@pim/coding/pools-default";
 import { type CustomProvider, MAX_PROVIDERS, type ProviderInput, prepareProvider } from "./providers";
 import { appDirectory, type CustomApp, type DirectoryApp, findSiteIcon, storedApps } from "./extensions/app-directory";
 import { APP_CATEGORIES, type AppCategory } from "./extensions/define";

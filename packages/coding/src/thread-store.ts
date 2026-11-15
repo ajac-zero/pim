@@ -3,7 +3,7 @@ import { GITHUB_INSTANCE_ID } from "./git-broker/provider";
 import { type CodingEnvironment, NO_ENVIRONMENT } from "./environment-cache";
 import type { RunRecord } from "./harness/runner";
 import type { HarnessUsage } from "./harness/types";
-import type { JournalEntry, TestRun as ToolTestRun, TestSummary } from "./tools";
+import type { JournalEntry, TestRun as ToolTestRun, TestSummary } from "./tools/index";
 import type { OrbThread } from "./orb/types";
 import type { WorkspaceRef } from "./workspace/types";
 

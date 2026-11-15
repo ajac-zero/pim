@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FakeRefReader } from "../src/coding/orb/fake-refs";
+import { FakeRefReader } from "../src/orb/fake-refs";
 import {
 	checkRefs,
 	compareRefs,
@@ -11,12 +11,12 @@ import {
 	snapshotRefs,
 	type RefReader,
 	type RefSnapshot,
-} from "../src/coding/orb/git-check";
-import type { RepoRef } from "../src/coding/git-broker/broker";
+} from "../src/orb/git-check";
+import type { RepoRef } from "../src/git-broker/broker";
 
-// The ref checks (src/coding/orb/git-check.ts) are pure logic over an
+// The ref checks (packages/coding/src/orb/git-check.ts) are pure logic over an
 // injected reader, so they run here against the in-memory fake
-// (src/coding/orb/fake-refs.ts): no real remote and no network anywhere,
+// (packages/coding/src/orb/fake-refs.ts): no real remote and no network anywhere,
 // so what a real reader would answer from a live repository — GitHub's
 // advertisement, a real git's commits and diffs — is not verified here.
 

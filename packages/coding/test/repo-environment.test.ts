@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { Workspace } from "../src/coding/workspace/types";
-import { environmentKey } from "../src/coding/environment-cache";
-import { ownsLegacySnapshots } from "../src/coding/pools";
-import { detectConfiguredSetup, detectRepository, devcontainerSetupScript, environmentBrief, hasMiseTask, isUnpinned, UNPINNED_TTL_MS, unpinnedKeyParts, makeTargets, nodeRange, pendingItems, pnpmPostinstall, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/coding/repo-environment";
-import { GO_REPO, installed, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./fixtures/repos";
+import type { Workspace } from "../src/workspace/types";
+import { environmentKey } from "../src/environment-cache";
+import { ownsLegacySnapshots } from "../src/pools";
+import { detectConfiguredSetup, detectRepository, devcontainerSetupScript, environmentBrief, hasMiseTask, isUnpinned, UNPINNED_TTL_MS, unpinnedKeyParts, makeTargets, nodeRange, pendingItems, pnpmPostinstall, provisionPlan, pythonRange, type RepoFiles, type RepoProfile, workflowCommands } from "../src/repo-environment";
+import { GO_REPO, installed, MISE_REPO, NPM_REPO, PIP_REPO, PNPM_REPO, RUST_REPO, UV_REPO } from "./support/repos";
 
 // What a coding thread reads from a repository's checkout to provision its workspace and tell its agent how to check
-// its work, over small repositories in test/fixtures/repos.ts. The thread's own tests (coding-thread-do.test.ts) run
+// its work, over small repositories in packages/coding/test/support/repos.ts. The thread's own tests (coding-thread-do.test.ts) run
 // the plan in a workspace.
 
 /** A repository's files from a map of paths to text, listed as a workspace lists them: sorted by name. */

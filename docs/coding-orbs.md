@@ -1,16 +1,16 @@
 # Agent-hosted coding threads (orbs)
 
-An **agent-hosted** thread runs in the vendor's cloud, not a sandbox Pim owns. `providerKind: "agent-hosted"` distinguishes it from a workspace thread. Pim starts and polls the agent through `OrbClient` (`src/coding/orb/types.ts`), with no workspace, commands, environment or scheduler slot. Old thread records remain workspace threads.
+An **agent-hosted** thread runs in the vendor's cloud, not a sandbox Pim owns. `providerKind: "agent-hosted"` distinguishes it from a workspace thread. Pim starts and polls the agent through `OrbClient` (`packages/coding/src/orb/types.ts`), with no workspace, commands, environment or scheduler slot. Old thread records remain workspace threads.
 
 ## The interface
 
 `OrbClient` is the provider-neutral seam: idempotent `start`, `state`, paginated `messages`, optional `steer`, `stop`, `cancel` and `usage`. Capability flags declare which optional verbs work; unsupported calls throw `OrbUnsupportedError`. Authentication, unreachable clouds and deleted threads have typed errors too. Usage is null when unavailable, never invented as zero.
 
-The conformance suite (`src/coding/orb/conformance.ts`) checks the contract. Capabilities and script hooks gate cases a provider cannot exercise, with explicit skip reasons. `FakeOrbClient` is an in-memory implementation for loop tests.
+The conformance suite (`packages/coding/src/orb/conformance.ts`) checks the contract. Capabilities and script hooks gate cases a provider cannot exercise, with explicit skip reasons. `FakeOrbClient` is an in-memory implementation for loop tests.
 
 ## Amp over HTTPS
 
-`AmpHttpOrbClient` (`src/coding/orb/amp-http.ts`) uses only fetch from the Worker/DO to Amp's **internal** HTTPS API (`POST https://ampcode.com/api/internal?<method>`), the one the Amp CLI itself uses. Amp's documented `/api/v2` rejects the `sgamp_` access token with 401, so it is not used. The client never starts a CLI, opens a WebSocket, or holds a sandbox slot. The **workspace Amp harness is retired**; `harness: "amp"` now defaults to agent-hosted Orbs (amp-http) with no sandbox slot. Old threads that used the workspace Amp harness remain readable. See [coding-amp.md](coding-amp.md) for legacy information.
+`AmpHttpOrbClient` (`packages/coding/src/orb/amp-http.ts`) uses only fetch from the Worker/DO to Amp's **internal** HTTPS API (`POST https://ampcode.com/api/internal?<method>`), the one the Amp CLI itself uses. Amp's documented `/api/v2` rejects the `sgamp_` access token with 401, so it is not used. The client never starts a CLI, opens a WebSocket, or holds a sandbox slot. The **workspace Amp harness is retired**; `harness: "amp"` now defaults to agent-hosted Orbs (amp-http) with no sandbox slot. Old threads that used the workspace Amp harness remain readable. See [coding-amp.md](coding-amp.md) for legacy information.
 
 Every call sends only `Authorization: Bearer <token>` and `content-type: application/json`, with body `{"method","params"}`, and gets `{"ok":true,"result"}`, `{"ok":false,"error":{"code","message"}}`, or `{"status","message"}` for 400/401. The base URL is `https://ampcode.com` unless `baseUrl` is given.
 
@@ -54,7 +54,7 @@ The internal API reports no cost, so usage is not supported and cost remains nul
 
 ## Git checks and limits
 
-An orb clones and pushes with its own credentials. Pim cannot enforce its workspace egress or git policies on that cloud. `src/coding/orb/git-check.ts` provides pure ref snapshots, comparisons and diffs, tested with `FakeRefReader`: default-branch moves, force pushes, new/deleted refs, capped commits and concurrent pushes are detected without falsely attributing every change to the orb. These checks still have no live `RefReader` and are not called by the thread loop.
+An orb clones and pushes with its own credentials. Pim cannot enforce its workspace egress or git policies on that cloud. `packages/coding/src/orb/git-check.ts` provides pure ref snapshots, comparisons and diffs, tested with `FakeRefReader`: default-branch moves, force pushes, new/deleted refs, capped commits and concurrent pushes are detected without falsely attributing every change to the orb. These checks still have no live `RefReader` and are not called by the thread loop.
 
 The deployment factory registers Amp HTTP; tests can inject another client. A thread naming an unregistered client fails with `agent-hosted provider not available` rather than crashing.
 

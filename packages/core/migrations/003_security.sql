@@ -37,6 +37,7 @@ CREATE POLICY steward_all ON app.activation FOR ALL TO pim_steward USING (true) 
 CREATE POLICY steward_all ON app.timers FOR ALL TO pim_steward USING (true) WITH CHECK (true);
 CREATE POLICY steward_all ON app.signals FOR ALL TO pim_steward USING (true) WITH CHECK (true);
 CREATE POLICY steward_all ON app.external_ops FOR ALL TO pim_steward USING (true) WITH CHECK (true);
+CREATE POLICY steward_all ON app.projector_cursors FOR ALL TO pim_steward USING (true) WITH CHECK (true);
 CREATE POLICY steward_read ON app.approvals FOR SELECT TO pim_steward USING (true);
 CREATE POLICY steward_read ON rt.commits FOR SELECT TO pim_steward USING (true);
 CREATE POLICY steward_read ON app.tenants FOR SELECT TO pim_steward USING (true);
@@ -47,7 +48,7 @@ GRANT USAGE ON SCHEMA app, rt TO pim_runtime, pim_gate, pim_live, pim_steward, p
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA rt TO pim_runtime;
 GRANT DELETE ON rt.document_revisions TO pim_runtime;
 GRANT SELECT ON app.tenants, app.users, app.commands, app.secrets TO pim_runtime;
-GRANT SELECT, INSERT, UPDATE ON app.chats TO pim_runtime;
+GRANT SELECT, INSERT, UPDATE ON app.chats, app.projector_cursors TO pim_runtime;
 GRANT SELECT, INSERT, UPDATE ON app.activation, app.signals, app.timers, app.external_ops, app.approvals,
 	app.view_streams, app.view_events, app.objects TO pim_runtime;
 GRANT SELECT, INSERT ON app.audit TO pim_runtime;
@@ -64,13 +65,14 @@ GRANT SELECT ON ALL TABLES IN SCHEMA rt TO pim_gate;
 GRANT INSERT ON rt.partitions TO pim_gate;
 
 -- Live reads streams and authenticates the subscriber; it writes nothing.
-GRANT SELECT ON rt.commits, rt.conversation_directory, rt.partitions, app.view_events, app.sessions, app.api_tokens, app.users, app.tenants TO pim_live;
+GRANT SELECT ON rt.commits, rt.conversation_directory, rt.partitions, app.chats, app.view_streams, app.view_events, app.sessions, app.api_tokens, app.users, app.tenants TO pim_live;
 
 -- Steward: lease, activation, timers and reconciliation.
 GRANT SELECT, UPDATE ON rt.partitions TO pim_steward;
 GRANT SELECT ON rt.commits TO pim_steward;
 GRANT SELECT, INSERT, UPDATE ON app.activation, app.timers, app.external_ops, app.signals TO pim_steward;
 GRANT SELECT ON app.approvals, app.tenants TO pim_steward;
+GRANT SELECT, INSERT, UPDATE ON app.projector_cursors TO pim_steward;
 
 -- Maintenance: retention, export and verification.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app, rt TO pim_maint;

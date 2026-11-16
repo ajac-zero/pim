@@ -105,11 +105,15 @@ CREATE TABLE app.chats (
 	partition_id text NOT NULL,
 	conversation_id bigint,
 	parent_chat_id text,
+	title text,
+	-- The newest commit of the family the list projection has seen, and when.
+	last_seq bigint NOT NULL DEFAULT 0,
+	updated_at timestamptz,
 	created_by text NOT NULL,
 	created_at timestamptz NOT NULL DEFAULT now(),
-	PRIMARY KEY (tenant_id, chat_id),
-	UNIQUE (tenant_id, partition_id)
+	PRIMARY KEY (tenant_id, chat_id)
 );
+CREATE INDEX chats_by_partition ON app.chats (tenant_id, partition_id);
 
 -- Durable signals to a family: input, approval decision, trigger firing, cross-family delivery, coding result.
 CREATE TABLE app.signals (
@@ -252,6 +256,13 @@ CREATE TABLE app.view_events (
 	UNIQUE (tenant_id, stream, event_id)
 );
 
+-- How far the projector has read each family's commits. A projection is rebuildable from the commits and records.
+CREATE TABLE app.projector_cursors (
+	partition_id text PRIMARY KEY,
+	tenant_id text NOT NULL,
+	last_seq bigint NOT NULL DEFAULT 0
+);
+
 CREATE TABLE app.audit (
 	audit_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 	tenant_id text NOT NULL,
@@ -260,6 +271,15 @@ CREATE TABLE app.audit (
 	resource text,
 	outcome text NOT NULL,
 	at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Rows of the old system that have no v2 table yet: kept whole and verbatim, so nothing is lost at import, and ported with their feature.
+CREATE TABLE app.legacy_rows (
+	tenant_id text NOT NULL,
+	table_name text NOT NULL,
+	pk text NOT NULL,
+	row jsonb NOT NULL,
+	PRIMARY KEY (tenant_id, table_name, pk)
 );
 
 -- Applied-migration ledger for the import toolkit and the maintenance role.

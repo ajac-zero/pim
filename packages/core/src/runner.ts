@@ -5,7 +5,9 @@ import type pg from "pg";
 import { withTenant } from "./db.ts";
 import type { IdAllocator } from "./ids.ts";
 import { type Lease, claimDue, declareQuiescent, readSignalSeq, releaseLease, renewLease } from "./partitions.ts";
-import { OwnershipLost, PgStorage, type CommitFaults } from "./storage.ts";
+import { OwnershipLost, PgStorage, type CommitFaults, type PgStorageOptions } from "./storage.ts";
+
+type PgStorageOptionsTiming = NonNullable<PgStorageOptions["onCommitTiming"]>;
 
 const ctx = BACKGROUND_CONTEXT;
 
@@ -39,6 +41,7 @@ export interface HostDeps {
 	leaseTtlMs?: number;
 	pollMs?: number;
 	faults?: CommitFaults;
+	onCommitTiming?: PgStorageOptionsTiming;
 	onReport?(error: unknown): void;
 	onLost?(lease: Lease): void;
 	onReleased?(lease: Lease): void;
@@ -85,6 +88,7 @@ export class PartitionHost {
 			home: lease.home,
 			ids: deps.ids,
 			faults: deps.faults,
+			onCommitTiming: deps.onCommitTiming,
 			onCommitted: () => this.nudge(),
 			onOwnershipLost: () => void this.#lose(),
 		});
@@ -246,11 +250,16 @@ export class PartitionHost {
 
 const BUILT_IN: Record<string, SignalHandler> = {
 	async input(signal, { harness, lease, pool }) {
-		const { conversationId, content, whenBusy } = signal.payload as { conversationId: number; content: any; whenBusy?: "steer" | "followUp" | "reject" };
+		const payload = signal.payload as { conversationId?: number; chatId?: string; content: any; whenBusy?: "steer" | "followUp" | "reject" };
+		const { content, whenBusy } = payload;
+		// A message for a chat accepted before its first activation names the chat; the create_chat signal ahead of it in order has made the conversation.
+		const conversationId =
+			payload.conversationId ??
+			(await withTenant(pool, lease.tenantId, (q) => q.get<{ conversation_id: number | null }>("SELECT conversation_id FROM app.chats WHERE tenant_id = $1 AND chat_id = $2", lease.tenantId, payload.chatId), { readOnly: true }))?.conversation_id;
+		if (conversationId === undefined || conversationId === null) throw new Error("The chat has no conversation yet");
 		const conversation = await harness.conversation(conversationId as never, ctx);
 		if (conversation === undefined) throw new Error(`Conversation ${conversationId} is not in partition ${lease.partitionId}`);
 		await conversation.submit({ type: "input", content, requestId: signal.operation_id, ...(whenBusy ? { whenBusy } : {}) }, ctx);
-		void pool;
 	},
 	async create_chat(signal, { harness, storage, lease, pool }) {
 		const { chatId, agent, firstMessage } = signal.payload as { chatId: string; agent?: Record<string, unknown>; firstMessage?: string | null };

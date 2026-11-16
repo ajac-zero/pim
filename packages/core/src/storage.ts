@@ -40,6 +40,8 @@ export interface PgStorageOptions {
 	onCommitted?: (seq: number, summary: readonly CommitChange[]) => void;
 	/** Called when a commit finds the lease or epoch no longer ours. */
 	onOwnershipLost?: (error: OwnershipLost) => void;
+	/** Observability: called with each commit's timings in seconds. `wait` is the time to get a connection. */
+	onCommitTiming?: (timing: { wait: number; total: number; ok: boolean }) => void;
 	/** How long to wait for the previous backend's transaction while resolving an unknown COMMIT. */
 	resolveTimeoutMs?: number;
 }
@@ -170,7 +172,10 @@ export class PgStorage implements Storage {
 
 	async #attempt(writes: readonly StorageWrite[], docActions: Map<number, DocAction>, token: string): Promise<number> {
 		const { pool, tenantId, partitionId } = this.#o;
+		const t0 = performance.now();
 		const client = await pool.connect();
+		const waited = (performance.now() - t0) / 1000;
+		let ok = false;
 		// A backend killed mid-transaction emits on the checked-out client; the failed query reports it.
 		const ignore = () => undefined;
 		client.on("error", ignore);
@@ -216,6 +221,7 @@ export class PgStorage implements Storage {
 			await client.query("COMMIT");
 			await this.#o.faults?.afterCommit?.();
 			this.#o.ids.observe(tenantId, maxId);
+			ok = true;
 			this.#o.onCommitted?.(seq, summary);
 			return seq;
 		} catch (error) {
@@ -235,6 +241,7 @@ export class PgStorage implements Storage {
 		} finally {
 			client.off("error", ignore);
 			client.release(discard ? true : undefined);
+			this.#o.onCommitTiming?.({ wait: waited, total: (performance.now() - t0) / 1000, ok });
 		}
 	}
 

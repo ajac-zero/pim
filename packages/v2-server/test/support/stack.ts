@@ -56,6 +56,8 @@ export type Stack = {
 	runtime: Db;
 	/** Live's pool: a member of `pim_live`. */
 	live: pg.Pool;
+	/** The connection string of a login that is a member of one process role (`gate`, `runtime`, `live`, `forge`, `maintenance`), as that process connects. `super` is the schema owner. */
+	url(role: "super" | "gate" | "runtime" | "live" | "forge" | "maintenance"): string;
 	drop(): Promise<void>;
 };
 
@@ -67,7 +69,8 @@ export async function createStack(): Promise<Stack> {
 	const root = new pg.Client({ connectionString: base });
 	await root.connect();
 	await root.query(`CREATE DATABASE ${name}`);
-	for (const role of ["srv_runtime_app", "srv_live_app"]) await root.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN CREATE ROLE ${role} LOGIN; END IF; END $$`);
+	// One login per process kind, none a superuser or BYPASSRLS, as the deployments create them.
+	for (const kind of ["gate", "runtime", "live", "forge", "maintenance"]) await root.query(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'srv_${kind}_login') THEN CREATE ROLE srv_${kind}_login LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$`);
 	await root.end();
 	const urlFor = (user?: string) => {
 		const url = new URL(base);
@@ -78,14 +81,14 @@ export async function createStack(): Promise<Stack> {
 	// An idle connection that the server drops (the database is dropped under it at teardown) is not a test failure.
 	const admin = new pg.Pool({ connectionString: urlFor(), max: 5 }).on("error", () => {});
 	await migrateAll(admin);
-	await admin.query("GRANT pim_runtime TO srv_runtime_app");
-	await admin.query("GRANT pim_live TO srv_live_app");
-	const runtime = Db.connect({ connectionString: urlFor("srv_runtime_app"), max: 10 });
-	const live = new pg.Pool({ connectionString: urlFor("srv_live_app"), max: 10 }).on("error", () => {});
+	for (const kind of ["gate", "runtime", "live", "forge", "maintenance"]) await admin.query(`GRANT pim_${kind} TO srv_${kind}_login`);
+	const runtime = Db.connect({ connectionString: urlFor("srv_runtime_login"), max: 10 });
+	const live = new pg.Pool({ connectionString: urlFor("srv_live_login"), max: 10 }).on("error", () => {});
 	return {
 		admin,
 		runtime,
 		live,
+		url: (role) => (role === "super" ? urlFor() : urlFor(`srv_${role}_login`)),
 		async drop() {
 			await live.end();
 			await runtime.close();

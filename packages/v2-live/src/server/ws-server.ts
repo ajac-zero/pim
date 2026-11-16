@@ -5,6 +5,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import type { Pool } from "pg";
 import { WebSocket, WebSocketServer } from "ws";
 import { CLOSE_UNAUTHORIZED } from "../contracts.ts";
@@ -25,15 +26,14 @@ function json(response: ServerResponse, status: number, body: unknown): void {
 	response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 }
 
-export async function startLiveServer(hub: LiveHub, pool: Pool, options: { port?: number; host?: string } = {}): Promise<LiveServer> {
+/**
+ * The WebSocket endpoint and the snapshot reads of a Live service, for a host that owns the HTTP server: `upgrade` handles an upgrade request
+ * for one of `paths` (anything else is not its to answer, and it says so), `snapshot` answers `/snapshot/...`. `startLiveServer` hosts them alone;
+ * the `live` role hosts them with its health endpoints, and `all-in-one` beside the Gate.
+ */
+export function liveEndpoint(hub: LiveHub, pool: Pool, options: { paths?: readonly string[] } = {}) {
+	const paths = options.paths ?? ["/live"];
 	const sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
-	const server = createServer(async (request, response) => {
-		try {
-			await snapshot(request, response);
-		} catch {
-			json(response, 500, { error: "Unavailable" });
-		}
-	});
 
 	async function snapshot(request: IncomingMessage, response: ServerResponse): Promise<void> {
 		const url = new URL(request.url ?? "/", "http://live");
@@ -51,11 +51,9 @@ export async function startLiveServer(hub: LiveHub, pool: Pool, options: { port?
 		json(response, 404, { error: "Not found" });
 	}
 
-	server.on("upgrade", (request, socket, head) => {
-		if (new URL(request.url ?? "/", "http://live").pathname !== "/live") {
-			socket.destroy();
-			return;
-		}
+	/** True when the request was for a Live path. */
+	function upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): boolean {
+		if (!paths.includes(new URL(request.url ?? "/", "http://live").pathname)) return false;
 		// The upgrade completes first, so an unauthenticated client gets the close code the app acts on.
 		const principal = hub.identity.authenticate(request).catch(() => null);
 		sockets.handleUpgrade(request, socket, head, (ws) => {
@@ -76,15 +74,31 @@ export async function startLiveServer(hub: LiveHub, pool: Pool, options: { port?
 				for (const frame of early.splice(0)) await connection.receive(frame);
 			});
 		});
-	});
+		return true;
+	}
 
+	return {
+		snapshot: (request: IncomingMessage, response: ServerResponse) => snapshot(request, response).catch(() => json(response, 500, { error: "Unavailable" })),
+		upgrade,
+		close() {
+			for (const client of sockets.clients) if (client.readyState === WebSocket.OPEN) client.terminate();
+			sockets.close();
+		},
+	};
+}
+
+export async function startLiveServer(hub: LiveHub, pool: Pool, options: { port?: number; host?: string } = {}): Promise<LiveServer> {
+	const live = liveEndpoint(hub, pool);
+	const server = createServer((request, response) => void live.snapshot(request, response));
+	server.on("upgrade", (request, socket, head) => {
+		if (!live.upgrade(request, socket, head)) socket.destroy();
+	});
 	await new Promise<void>((resolve) => server.listen(options.port ?? 0, options.host ?? "127.0.0.1", resolve));
 	return {
 		server,
 		port: (server.address() as AddressInfo).port,
 		async close() {
-			for (const client of sockets.clients) if (client.readyState === WebSocket.OPEN) client.terminate();
-			sockets.close();
+			live.close();
 			await new Promise<void>((resolve) => server.close(() => resolve()));
 		},
 	};

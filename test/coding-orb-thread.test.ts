@@ -8,7 +8,7 @@ import { OWNER, apiUrl, TOKEN } from "./helpers";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
 import { OrbAuthError, OrbLostError } from "@pim/coding/orb/types";
 import { codingThread, type StartThread } from "../src/coding/thread-do";
-import { type CodingThreadDO, codingEvents, codingOrbs, codingTimings } from "./worker";
+import { type CodingThreadDO, codingEvents, codingOrbs, codingStalls, codingThreadClock, codingTimings } from "./worker";
 
 // An agent-hosted thread here is a thread record turned into one — there is no way to start one from the
 // API yet — on the fake orb client: it runs its whole turn through the OrbClient interface, with no
@@ -65,6 +65,12 @@ beforeEach(() => {
 	codingTimings.orbPollMs = 30_000;
 	codingTimings.orbSyncTtlMs = 0;
 	codingEvents.length = 0;
+	codingThreadClock.now = null;
+	codingStalls.length = 0;
+});
+
+afterEach(() => {
+	codingThreadClock.now = null;
 });
 
 describe("an agent-hosted coding thread", () => {
@@ -825,5 +831,80 @@ describe("Amp video attachments in an agent-hosted thread", () => {
 		fetcher.mockClear();
 		expect(await read()).toBe(text);
 		expect(fetcher).not.toHaveBeenCalled();
+	});
+});
+
+describe("supervising an agent-hosted thread", () => {
+	const MIN = 60_000;
+	const T0 = 1_800_000_000_000;
+	/** A thread in a clock the test drives, its orb stamping events with the same clock. */
+	async function clocked() {
+		codingThreadClock.now = T0;
+		const fake = new FakeOrbClient({ now: () => codingThreadClock.now! });
+		const made = await orbThread(fake);
+		await heartbeat(made.stub);
+		const advance = (ms: number) => (codingThreadClock.now! += ms);
+		const call = (id: string, name: string, args: Record<string, unknown>) => fake.say(made.orb(), "assistant", "", [{ type: "toolCall", id, name, arguments: args }]);
+		const result = (id: string, name: string) => fake.say(made.orb(), "user", "", [{ type: "toolResult", id, name, text: "ok", isError: false }]);
+		const stalls = async () => (await inside(made.stub, (thread) => thread.activity())).stalls;
+		return { fake, ...made, advance, call, result, stalls };
+	}
+
+	it("raises nothing for a long build polled with shell_command_status, whose timeout_ms is only how long one look waits", async () => {
+		const { stub, advance, call, result, stalls } = await clocked();
+		call("start", "shell_command", { command: "pnpm exec vitest run" });
+		result("start", "shell_command");
+		for (let poll = 0; poll < 6; poll++) {
+			const id = `poll-${poll}`;
+			call(id, "shell_command_status", { pid: 123, timeout_ms: 60_000 });
+			await heartbeat(stub);
+			advance(65_000 + poll * 11_000);
+			expect(await stalls()).toEqual([]);
+			await heartbeat(stub);
+			result(id, "shell_command_status");
+			advance(30_000);
+			await heartbeat(stub);
+		}
+		expect(codingStalls).toEqual([]);
+	});
+
+	it("looks for stalls after mirroring, so a command that finished remotely on this very poll is no stall", async () => {
+		const { fake, orb, stub, advance, call, result } = await clocked();
+		call("t", "Bash", { command: "pnpm test", timeout: 60_000 });
+		await heartbeat(stub);
+		advance(10 * MIN);
+		result("t", "Bash");
+		fake.say(orb(), "assistant", "Done.");
+		fake.setState(orb(), "idle");
+		await heartbeat(stub);
+		expect(await stub.status()).toMatchObject({ state: "idle" });
+		expect(codingStalls).toEqual([]);
+	});
+
+	it("is not hidden by a poll that finds nothing new, and is by one that finds the agent's clock advanced", async () => {
+		const { fake, orb, stub, advance, stalls } = await clocked();
+		// The agent's cloud answers every 30 s that it is working, with no new message and the same last event.
+		for (let elapsed = 0; elapsed < 16 * MIN; elapsed += 30_000) {
+			advance(30_000);
+			await heartbeat(stub);
+		}
+		expect((await stalls()).map((stall) => stall.reason)).toEqual(["running with no transcript activity for fifteen minutes"]);
+		expect(codingStalls.length).toBeGreaterThan(0);
+		// Its last event advancing is progress, with or without a message.
+		await fake.steer(orb(), "still here");
+		await heartbeat(stub);
+		expect(await stalls()).toEqual([]);
+	});
+
+	it("flags no silent command at five minutes, and one with a declared timeout only past it and one poll", async () => {
+		const { advance, call, stub, stalls } = await clocked();
+		call("b", "Bash", { command: "cargo build", timeout: 600_000 });
+		await heartbeat(stub);
+		advance(6 * MIN);
+		expect(await stalls()).toEqual([]);
+		advance(4 * MIN + 34_000);
+		expect(await stalls()).toEqual([]);
+		advance(2_000);
+		expect((await stalls()).map((stall) => stall.reason)).toContain("past declared timeout");
 	});
 });

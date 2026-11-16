@@ -286,17 +286,29 @@ objects. Secret-shaped values, authorization, URL queries and email addresses
 are scrubbed before summaries are cut to about 200 characters. URL hosts stay
 redacted under diagnostics' existing address policy.
 
-A pending tool is stalled past its declared timeout or after five minutes
-without observed output. A running coding thread is also stalled after
-fifteen minutes without transcript/output activity. Heartbeats are not
-output: a live scheduler cannot make a silent command look healthy. A stall
-is a warning, not proof that the process is dead; commands may legitimately
-be quiet. The agent that started a running coding thread receives a notice
-once per quiet spell (again only after the thread makes progress and goes
-quiet anew), through the same wake path as turn completion. A thread the
-person started, a thread that is no longer running, and a parent chat that
-is gone get none, and no chat is ever told of another chat's long tool call:
-the stall only shows in the chat's own activity. The existing chat
+A pending tool is stalled past its declared timeout (on an agent-hosted
+thread, plus one poll interval, since results are mirrored on a poll) or after
+five minutes without observed output. A status or wait tool's `timeout_ms`
+(such as `shell_command_status`) is how long one look waits, not a command
+timeout. A harness that prints nothing until a tool call ends (the CLI
+harnesses and agent-hosted threads) has no quiet-output stall, and a quiet
+command still inside its own declared timeout is shown with
+`actionable: false`. A running coding thread is also stalled after fifteen
+minutes without transcript/output activity. Heartbeats and polls that find
+nothing are not output: only new messages or an advancing last-event time
+from the agent's cloud are progress, so a live scheduler cannot make a silent
+command look healthy. A stall is a warning, not proof that the process is
+dead; commands may legitimately be quiet.
+
+The stalls are judged after the thread's turn has been advanced, so a result
+mirrored on the same poll is not a stall. The agent that started a running
+coding thread is woken at most twice for one quiet spell (the time since the
+thread's last progress): once for the first actionable stall, and once more,
+marked `escalated`, when the spell becomes a command past its declared timeout
+or reaches 45 minutes. Progress, or the turn's end, starts a new spell. A
+thread the person started, a thread that is no longer running, and a parent
+chat that is gone get none, and no chat is ever told of another chat's long
+tool call: the stall only shows in the chat's own activity. The existing chat
 watchdog's stop policy is unchanged.
 CLI and agent-hosted harnesses can only expose tool calls and activity that
 they report; absence of command details is shown as working, never invented.

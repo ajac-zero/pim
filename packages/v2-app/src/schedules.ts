@@ -107,6 +107,19 @@ export class Schedules {
 		return { fired, missed };
 	}
 
+	async list(p: Principal) {
+		await this.authz.enforce(p, "api:read");
+		return this.db.owner(p.ownerId, async (tx) => (await tx.query("SELECT id, kind, spec, target, prompt, next_run_at, enabled FROM pim_app.schedules ORDER BY created_at")).rows.map((r) => ({ id: r.id as string, kind: r.kind as string, spec: r.spec as string, target: r.target as string, prompt: r.prompt as string, nextRunAt: r.next_run_at as Date | null, enabled: r.enabled as boolean })));
+	}
+
+	async remove(p: Principal, id: string): Promise<void> {
+		await this.authz.enforce(p, "api:write");
+		await this.db.owner(p.ownerId, async (tx) => {
+			if (!(await tx.query("DELETE FROM pim_app.schedules WHERE id = $1", [id])).rowCount) throw new NotFoundError("No such schedule");
+			await wake(tx, p.ownerId);
+		});
+	}
+
 	async runs(ownerId: string, scheduleId: string): Promise<{ occurrence: Date; outcome: string }[]> {
 		return this.db.owner(ownerId, async (tx) => {
 			const { rows } = await tx.query("SELECT occurrence, outcome FROM pim_app.schedule_runs WHERE schedule_id = $1 ORDER BY occurrence", [scheduleId]);

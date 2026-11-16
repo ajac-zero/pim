@@ -4,6 +4,7 @@ import { httpStatus, NotFoundError } from "./errors.ts";
 import { makeCtx, type Reply, type Route } from "./http.ts";
 import { authRoutes } from "./routes/auth.ts";
 import { coreRoutes } from "./routes/core.ts";
+import { domainRoutes } from "./routes/domain.ts";
 
 /**
  * The stateless HTTP service. Every handler is a bounded PostgreSQL transaction: nothing here waits on a model, a Harness, a computer or
@@ -17,7 +18,7 @@ export type GateOptions = {
 	routes?: Route[];
 };
 
-export const builtInRoutes: Route[] = [...coreRoutes, ...authRoutes];
+export const builtInRoutes: Route[] = [...domainRoutes, ...coreRoutes, ...authRoutes];
 
 export function createGate(app: App, options: GateOptions = {}): Server {
 	const routes = [...builtInRoutes, ...(options.routes ?? [])];

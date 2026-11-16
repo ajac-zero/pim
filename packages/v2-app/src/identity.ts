@@ -113,6 +113,51 @@ export class Identity {
 		});
 	}
 
+	/** A person deletes their own account (session only). It is gone to every surface at once (410); `purgeOwner` then removes what it held. */
+	async deleteSelf(session: Principal): Promise<void> {
+		await this.authz.enforce(session, "account:delete");
+		await this.db.owner(session.ownerId, async (tx) => {
+			await tx.query("UPDATE pim_app.accounts SET status = 'deleting', status_reason = 'deleted by owner', status_changed_at = now() WHERE owner_id = $1 AND status IN ('active', 'suspended', 'pending')", [session.ownerId]);
+			for (const table of ["browser_sessions", "api_tokens", "token_consumers"]) await tx.query(`UPDATE pim_app.${table} SET revoked_at = coalesce(revoked_at, now()) WHERE owner_id = $1`, [session.ownerId]);
+		}).catch((error) => {
+			if ((error as { code?: string }).code === "P0002") throw new RefusedError("The last admin cannot delete their account.", "last_admin");
+			throw error;
+		});
+	}
+
+	/**
+	 * Removes everything a `deleting` account held, then tombstones it: the account row and its username stay, so the name is never reused. Run by
+	 * maintenance, repeatable. Tables are emptied in passes until the foreign keys let go of the rest.
+	 */
+	async purgeOwner(ownerId: string): Promise<{ deleted: number }> {
+		return this.db.owner(ownerId, async (tx) => {
+			const status = (await tx.query("SELECT status FROM pim_app.accounts WHERE owner_id = $1", [ownerId])).rows[0]?.status;
+			if (status !== "deleting" && status !== "deleted") throw new RefusedError("Only a deleting account is purged.", "not_deleting");
+			const keep = new Set(["accounts", "usernames", "audit_log"]);
+			const tables = (await tx.query("SELECT table_name FROM information_schema.columns WHERE table_schema = 'pim_app' AND column_name = 'owner_id'")).rows.map((r) => r.table_name as string).filter((t) => !keep.has(t));
+			let pending = [...tables];
+			let deleted = 0;
+			for (let pass = 0; pass < 6 && pending.length; pass++) {
+				const next: string[] = [];
+				for (const table of pending) {
+					await tx.query("SAVEPOINT purge");
+					try {
+						deleted += (await tx.query(`DELETE FROM pim_app.${table} WHERE owner_id = $1`, [ownerId])).rowCount ?? 0;
+						await tx.query("RELEASE SAVEPOINT purge");
+					} catch (error) {
+						if ((error as { code?: string }).code !== "23503") throw error;
+						await tx.query("ROLLBACK TO SAVEPOINT purge");
+						next.push(table);
+					}
+				}
+				pending = next;
+			}
+			if (pending.length) throw new Error(`Could not purge ${pending.join(", ")}`);
+			await tx.query("UPDATE pim_app.accounts SET status = 'deleted', status_changed_at = now() WHERE owner_id = $1", [ownerId]);
+			return { deleted };
+		});
+	}
+
 	async setRole(admin: Principal, ownerId: string, role: "admin" | "member" | "guest"): Promise<void> {
 		await this.authz.enforce(admin, "admin:accounts");
 		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.accounts SET role = $2 WHERE owner_id = $1", [ownerId, role])).catch((error) => {

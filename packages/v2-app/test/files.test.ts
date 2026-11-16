@@ -247,7 +247,7 @@ describe("Gate over HTTP", () => {
 		const note = (await (await call("/api/notes", { method: "POST", token, body: JSON.stringify({ title: "n", text: "hi" }) })).json()) as { id: string };
 		expect(((await (await call(`/api/notes/${note.id}`, { token })).json()) as { text: string }).text).toBe("hi");
 		expect((await call("/api/goals", { method: "POST", token, body: JSON.stringify({ title: "g", steps: ["a"] }) })).status).toBe(201);
-		expect((await call("/api/memories", { method: "POST", token, body: JSON.stringify({ title: "m", body: "b" }) })).status).toBe(201);
+		expect((await call("/api/memory/log", { method: "POST", token, body: JSON.stringify({ title: "m", body: "b" }) })).status).toBe(201);
 		// Dependent tools say what is missing; nothing else is affected.
 		expect(() => f.app.relay.require(u.account.ownerId, "desktop_screenshot")).toThrowError(expect.objectContaining({ name: "CapabilityUnavailableError" }));
 		const guest = await member(f.app, f.admin.principal, "guest1");

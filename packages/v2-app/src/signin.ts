@@ -52,7 +52,7 @@ export class SignIn {
 
 	// ---- flows ----
 
-	async startFlow(kind: "challenge" | "oauth" | "consent" | "code", data: object, ttlMs: number, now = new Date()): Promise<string> {
+	async startFlow(kind: "challenge" | "oauth" | "consent" | "code" | "hosted" | "hosted_enter", data: object, ttlMs: number, now = new Date()): Promise<string> {
 		const id = secret();
 		await this.db.anonymous(async (tx) => {
 			await tx.query("DELETE FROM pim_app.auth_flows WHERE expires_at <= $1", [now]);

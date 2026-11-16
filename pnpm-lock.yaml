@@ -287,6 +287,9 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1169.0
         version: 3.1169.0
+      '@pim/triggers':
+        specifier: workspace:*
+        version: link:../triggers
       '@pim/v2-contracts':
         specifier: workspace:*
         version: link:../v2-contracts

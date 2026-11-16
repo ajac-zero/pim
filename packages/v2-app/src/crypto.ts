@@ -125,3 +125,18 @@ export function keyringFromEnv(env: Record<string, string | undefined>): Keyring
 	const current = env.PIM_KEY_CURRENT ?? Object.keys(keys).at(-1) ?? "";
 	return new KeyringCrypto(current, keys);
 }
+
+const b64 = (b: Uint8Array) => Buffer.from(b).toString("base64url");
+const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64url"));
+
+/** A `Sealed` as one string for a text column: `pimenc1.<keyId>.<nonce>.<ciphertext>`. Never contains the plaintext. */
+export async function sealString(crypto: EnvelopeCrypto, plaintext: string, context: string): Promise<string> {
+	const s = await crypto.seal(new TextEncoder().encode(plaintext), context);
+	return `pimenc${s.version}.${b64(Buffer.from(s.keyId))}.${b64(s.nonce)}.${b64(s.ciphertext)}`;
+}
+
+export async function openString(crypto: EnvelopeCrypto, stored: string, context: string): Promise<string> {
+	const [head = "", keyId = "", nonce = "", ciphertext = ""] = stored.split(".");
+	if (!head.startsWith("pimenc")) throw new UnreadableError("Not a sealed value");
+	return new TextDecoder().decode(await crypto.open({ keyId: Buffer.from(unb64(keyId)).toString(), version: Number(head.slice(6)), nonce: unb64(nonce), ciphertext: unb64(ciphertext) }, context));
+}

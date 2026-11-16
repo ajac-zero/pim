@@ -52,20 +52,6 @@ export const coreRoutes: Route[] = [
 		return ok({ ok: true });
 	}),
 	// ---- memories, goals, schedules, notes ----
-	route("GET", "/api/memories", async ({ app, principal, url }) => ok({ memories: await app.memories.recall(await principal(), (url.searchParams.get("scope") ?? "everyone").split(","), url.searchParams.get("q") ?? ".") })),
-	route("POST", "/api/memories", async ({ app, principal, json }) => {
-		const b = await json();
-		return ok({ id: await app.memories.remember(await principal(), String(b.scope ?? "everyone"), String(b.title ?? ""), String(b.body ?? "")) }, 201);
-	}),
-	route("DELETE", "/api/memories/:id", async ({ app, principal, params }) => {
-		await app.memories.forget(await principal(), params[0]!);
-		return ok({ ok: true });
-	}),
-	route("POST", "/api/goals", async ({ app, principal, json }) => {
-		const b = await json();
-		return ok({ id: await app.memories.createGoal(await principal(), String(b.title ?? ""), (b.steps ?? []).map(String)) }, 201);
-	}),
-	route("POST", "/api/schedules", async ({ app, principal, json }) => ok({ id: await app.schedules.create(await principal(), (await json()) as never) }, 201)),
 	route("POST", "/api/notes", async ({ app, principal, json }) => {
 		const b = await json();
 		return ok({ id: await app.canvas.create(await principal(), String(b.title ?? ""), b.text) }, 201);

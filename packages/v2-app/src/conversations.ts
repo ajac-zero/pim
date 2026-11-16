@@ -130,6 +130,50 @@ export class Conversations {
 		});
 	}
 
+	/** `GET /api/sessions`: most recently active first, with what the sidebar shows. `startedBy` names the chat and task that started a chat made for a task. */
+	async list(ownerId: string, opts: { archived?: boolean; limit?: number } = {}) {
+		return this.db.owner(ownerId, async (tx) => {
+			const { rows } = await tx.query(
+				`SELECT c.public_chat_id, c.title, c.kind, c.created_at, c.updated_at, c.response_at, c.read_at, c.archived_at, c.continued_from, c.agent_id, c.room_mode,
+				        t.task_id, t.status AS task_status, t.started_by,
+				        (SELECT coalesce(jsonb_agg(m.member), '[]') FROM pim_app.room_members m WHERE m.public_chat_id = c.public_chat_id) AS members,
+				        (SELECT count(*)::int FROM pim_app.command_inbox i JOIN pim_app.accepted_commands a ON a.command_id = i.command_id AND a.owner_id = i.owner_id WHERE a.public_chat_id = c.public_chat_id) AS queued
+				 FROM pim_app.conversations c LEFT JOIN pim_app.tasks t ON t.task_chat = c.public_chat_id
+				 WHERE c.deleted_at IS NULL AND (c.archived_at IS NOT NULL) = $1 ORDER BY c.updated_at DESC LIMIT $2`,
+				[opts.archived ?? false, Math.min(opts.limit ?? 100, 200)],
+			);
+			return rows.map((r) => ({
+				id: r.public_chat_id as string, title: r.title as string | null, kind: r.kind as string, createdAt: r.created_at as Date, updatedAt: r.updated_at as Date, responseAt: r.response_at as Date | null,
+				unread: r.response_at !== null && (r.read_at === null || r.read_at < r.response_at), archived: r.archived_at !== null, busy: r.queued > 0,
+				agent: r.agent_id as string | null, continuedFrom: r.continued_from as string | null,
+				startedBy: r.task_id ? { session: r.started_by as string, task: r.task_id as string, state: r.task_status as string } : null,
+				room: r.room_mode || r.kind === "group" ? { mode: (r.room_mode as string | null) ?? "host", members: r.members as string[] } : null,
+			}));
+		});
+	}
+
+	/** The latest delivered reply of a chat, which the Runner reports; it is what "unread" is measured against. */
+	async markResponse(ownerId: string, chatId: string, at = new Date()): Promise<void> {
+		await this.db.owner(ownerId, (tx) => tx.query("UPDATE pim_app.conversations SET response_at = $2, updated_at = greatest(updated_at, $2) WHERE public_chat_id = $1", [chatId, at]));
+	}
+
+	async markRead(p: Principal, chatId: string, at = new Date()): Promise<void> {
+		await this.authz.enforce(p, "api:write");
+		await this.db.owner(p.ownerId, async (tx) => {
+			await requireChat(tx, chatId);
+			await tx.query("UPDATE pim_app.conversations SET read_at = $2 WHERE public_chat_id = $1", [chatId, at]);
+		});
+	}
+
+	/** Archives a chat by hand until its next activity. */
+	async archive(p: Principal, chatId: string): Promise<void> {
+		await this.authz.enforce(p, "api:write");
+		await this.db.owner(p.ownerId, async (tx) => {
+			await requireChat(tx, chatId);
+			await tx.query("UPDATE pim_app.conversations SET archived_at = coalesce(archived_at, now()) WHERE public_chat_id = $1", [chatId]);
+		});
+	}
+
 	async get(ownerId: string, chatId: string) {
 		return this.db.owner(ownerId, async (tx) => {
 			const { rows } = await tx.query("SELECT * FROM pim_app.conversations WHERE public_chat_id = $1 AND deleted_at IS NULL", [chatId]);

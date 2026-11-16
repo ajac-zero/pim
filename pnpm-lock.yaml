@@ -297,6 +297,15 @@ importers:
 
   packages/v2-forge:
     dependencies:
+      '@earendil-works/chord':
+        specifier: 1.1.0
+        version: 1.1.0
+      '@earendil-works/pi-ai':
+        specifier: 1.1.0
+        version: 1.1.0
+      '@earendil-works/pi-durable':
+        specifier: 1.1.0
+        version: 1.1.0
       '@pim/coding':
         specifier: workspace:*
         version: link:../coding

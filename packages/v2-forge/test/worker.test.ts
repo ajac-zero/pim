@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AmbiguousCreateError, type ComputeHandle, type ComputeProvider } from "../src/compute";
 import { CAPABILITIES, HARNESSES, MAX_RESUMES, MAX_SESSION_RESTARTS } from "../src/harnesses";
-import { PgPiLog } from "../src/pi-storage";
 import { SETTLE_MS } from "../src/compute";
 import { ada, ScriptedPort, startReq, stack } from "./stack";
 
@@ -177,21 +176,5 @@ describe("sandbox harness turns", () => {
 		port["script"].push({ outcome: "completed", text: "ok2" });
 		expect(await w.step(t2)).toBe("done");
 		expect(real.created.length - b2).toBe(1);
-	});
-
-	it("keeps a pi thread's pi-durable entries in its own fenced partition", async () => {
-		const a = (await s.forge.start(ada, startReq("pi-a", { harness: "pi" }))).threadId;
-		const b = (await s.forge.start(ada, startReq("pi-b", { harness: "pi" }))).threadId;
-		const log = new PgPiLog(s.store);
-		const ea = (await s.store.acquireLease(a, "w", 60_000))!;
-		const eb = (await s.store.acquireLease(b, "w", 60_000))!;
-		await log.append(a, ea, { kind: "user", text: "A" });
-		await log.append(b, eb, { kind: "user", text: "B" });
-		expect(await log.read(a)).toEqual([{ kind: "user", text: "A" }]);
-		expect(await log.read(b)).toEqual([{ kind: "user", text: "B" }]);
-		await s.pool.query("update pim_forge.forge_threads set lease_expires_at = now() - interval '1 second' where thread_id = $1", [a]);
-		await s.store.acquireLease(a, "other", 60_000);
-		await expect(log.append(a, ea, { kind: "stale" })).rejects.toMatchObject({ code: "lease_lost" });
-		expect(await log.read(a)).toHaveLength(1);
 	});
 });

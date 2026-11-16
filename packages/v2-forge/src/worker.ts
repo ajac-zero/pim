@@ -8,7 +8,7 @@ import { type Row, type Queryable } from "./db";
 import { CapabilityUnavailableError, ForgeError, LeaseLostError } from "./errors";
 import { capabilitiesOf, LEGACY_AMP_WORKSPACE_MESSAGE, MAX_RESUMES, MAX_SESSION_RESTARTS, type Harness } from "./harnesses";
 import { type AttachmentFetcher, type Objects, type OrbClients, type TurnPort, type TurnResult } from "./ports";
-import { Provisioner, type ComputeProvider } from "./compute";
+import { Provisioner, type ComputeProvider, type ComputeSpec } from "./compute";
 import { type ForgeScheduler } from "./scheduler";
 import { type ForgeStore, type ThreadRow } from "./store";
 
@@ -18,6 +18,8 @@ export type WorkerDeps = {
 	/** Sandbox harnesses: one port each for pi, claude-code, codex, mistral-vibe. */
 	turns: Partial<Record<Harness, TurnPort>>;
 	compute: ComputeProvider | null;
+	/** What a thread's sandbox is made from: its repository (through the git broker) and egress. */
+	computeSpec?: (thread: ThreadRow) => ComputeSpec;
 	orbs: OrbClients;
 	objects: Objects;
 	attachments?: AttachmentFetcher;
@@ -49,7 +51,7 @@ export class ForgeWorker {
 	constructor(private readonly d: WorkerDeps) {
 		this.holder = d.holder ?? `worker-${randomUUID()}`;
 		this.clock = d.clock ?? Date.now;
-		this.provisioner = d.compute ? new Provisioner(d.store, d.compute, this.clock) : null;
+		this.provisioner = d.compute ? new Provisioner(d.store, d.compute, this.clock, undefined, d.computeSpec) : null;
 	}
 
 	/** Threads that need a step: provisioning, queued and promoted, running (after a crash), with pending input, or with an orb to poll. */
@@ -130,7 +132,7 @@ export class ForgeWorker {
 				return item ?? null;
 			});
 			if (!next) break;
-			await this.runTurn(thread.threadId, epoch, next);
+			if (!(await this.runTurn(thread.threadId, epoch, next))) return "retry";
 		}
 		const after = await store.get(thread.threadId);
 		if (after && after.state === "idle") await scheduler.markIdle(thread.threadId);
@@ -139,13 +141,17 @@ export class ForgeWorker {
 
 	/** A run left `running` by a worker that died: it settles as interrupted, and resumes (bounded) without a turn_ended. */
 	private async recover(threadId: string, epoch: number): Promise<void> {
+		const t0 = (await this.d.store.get(threadId))!;
+		// Outside the transaction: stopping a CLI writes its run's record, which a held row lock would block.
+		const lost = (await this.d.store.db.query<Row>("select operation_id, record from pim_forge.forge_harness_runs where thread_id = $1 and status = 'running'", [threadId])).rows;
+		for (const run of lost) await this.d.turns[t0.harness]?.recover?.({ threadId, operationId: run.operation_id, record: run.record, workspace: t0.workspaceRef }).catch(() => {});
 		await this.d.store.fenced(threadId, epoch, async (q, t) => {
-			const lost = (await q.query<Row>("select * from pim_forge.forge_harness_runs where thread_id = $1 and status = 'running' for update", [threadId])).rows;
 			for (const run of lost) await this.settle(q, t, run.operation_id, { outcome: "interrupted", detail: "interrupted_by_restart" });
 		});
 	}
 
-	private async runTurn(threadId: string, epoch: number, item: { operationId: string; kind: string; payload: any }): Promise<void> {
+	/** Runs one input as a turn; false when the turn couldn't start (the person's login is busy) and the input waits. */
+	private async runTurn(threadId: string, epoch: number, item: { operationId: string; kind: string; payload: any }): Promise<boolean> {
 		const { store } = this.d;
 		const prep = await store.fenced(threadId, epoch, async (q, t) => {
 			const done = (await q.query<Row>("select status from pim_forge.forge_harness_runs where thread_id = $1 and operation_id = $2", [threadId, item.operationId])).rows[0];
@@ -162,18 +168,28 @@ export class ForgeWorker {
 			if (item.payload?.prompt && !item.operationId.startsWith("resume-")) await store.appendEvent(q, threadId, { kind: "message", role: "user", data: { text: item.payload.prompt, operationId: item.operationId } });
 			return { thread: t, sessionId: (session?.session_id as string | undefined) ?? null };
 		});
-		if (!prep) return;
+		if (!prep) return true;
 		await this.d.scheduler.markBusy(threadId);
 		const port = this.d.turns[prep.thread.harness];
 		const abort = new AbortController();
 		let result: TurnResult;
 		try {
 			if (!port) throw new CapabilityUnavailableError("coding:runner", `no turn runner for ${prep.thread.harness}`);
-			result = await port.run({ threadId, operationId: item.operationId, prompt: item.payload?.prompt ?? "Continue.", sessionId: prep.sessionId, resume: prep.sessionId !== null, maxBudgetUsd: prep.thread.budgetUsd === null ? null : Math.max(0, prep.thread.budgetUsd - prep.thread.spentUsd), workspace: prep.thread.workspaceRef, signal: abort.signal });
+			result = await port.run({ threadId, operationId: item.operationId, prompt: item.payload?.prompt ?? "Continue.", sessionId: prep.sessionId, resume: prep.sessionId !== null, maxBudgetUsd: prep.thread.budgetUsd === null ? null : Math.max(0, prep.thread.budgetUsd - prep.thread.spentUsd), workspace: prep.thread.workspaceRef, epoch, signal: abort.signal, emit: (e) => store.fenced(threadId, epoch, (q) => store.appendEvent(q, threadId, e)), recordTest: (r) => store.fenced(threadId, epoch, async (q) => void (await q.query("insert into pim_forge.forge_test_runs (thread_id, seq, command, exit_code, output) select $1, coalesce(max(seq), 0) + 1, $2, $3, $4 from pim_forge.forge_test_runs where thread_id = $1", [threadId, r.command, r.exitCode, r.output.slice(-20_000)]))) });
 		} catch (error) {
 			result = { outcome: "failed", detail: String(error instanceof Error ? error.message : error).slice(0, 500) };
 		}
+		if (result.outcome === "busy") {
+			await store.fenced(threadId, epoch, async (q, t) => {
+				await q.query("delete from pim_forge.forge_harness_runs where thread_id = $1 and operation_id = $2", [threadId, item.operationId]);
+				await q.query("update pim_forge.forge_inbox set status = 'pending' where thread_id = $1 and operation_id = $2", [threadId, item.operationId]);
+				await store.setState(q, threadId, "idle", "harness_busy", result.detail ?? null);
+				void t;
+			});
+			return false;
+		}
 		await store.fenced(threadId, epoch, (q, t) => this.settle(q, t, item.operationId, result));
+		return true;
 	}
 
 	/** Settles a run and moves the thread, in the caller's fenced transaction. An interrupted run never ends the turn: it queues a bounded resume. */
@@ -183,7 +199,7 @@ export class ForgeWorker {
 		const cancelled = t.cancelState !== "none";
 		const status = cancelled ? "cancelled" : r.outcome === "completed" ? "completed" : r.outcome === "interrupted" || r.outcome === "session_limit" ? "interrupted" : "failed";
 		await q.query("update pim_forge.forge_harness_runs set status = $3, ended_at = now() where thread_id = $1 and operation_id = $2", [t.threadId, operationId, status]);
-		if (r.sessionId) await q.query("insert into pim_forge.forge_harness_sessions (thread_id, harness, session_id) values ($1,$2,$3) on conflict (thread_id, harness) do update set session_id = $3, updated_at = now()", [t.threadId, t.harness, r.sessionId]);
+		if (r.sessionId) await q.query("insert into pim_forge.forge_harness_sessions (thread_id, harness, session_id, cost_usd, usage) values ($1,$2,$3,coalesce($4::numeric, 0),$5) on conflict (thread_id, harness) do update set session_id = $3, cost_usd = case when $4::numeric is null then pim_forge.forge_harness_sessions.cost_usd else $4 end, usage = coalesce($5, pim_forge.forge_harness_sessions.usage), updated_at = now()", [t.threadId, t.harness, r.sessionId, r.sessionCostUsd ?? null, r.sessionUsage ?? null]);
 		if (r.costUsd || r.tokensIn || r.tokensOut) await store.appendEvent(q, t.threadId, { kind: "model_call", costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, data: { operationId, via: "harness", harness: t.harness } });
 		if (r.text) {
 			const { text, replies } = splitSuggestedReplies(r.text);

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { type OrbClient } from "@pim/coding/orb/types";
 import { type ObjectMetadata, type ObjectStore } from "@pim/v2-contracts/platform";
 import { type ComputeHandle } from "./compute";
+import { type EventInput } from "./store";
 
 export type TurnRequest = {
 	threadId: string;
@@ -13,12 +14,22 @@ export type TurnRequest = {
 	resume: boolean;
 	maxBudgetUsd: number | null;
 	workspace: ComputeHandle | null;
+	/** The lease epoch the worker holds for this turn; storage written for it is fenced by it. */
+	epoch: number;
 	/** Aborted when the thread is cancelled on this worker. */
 	signal: AbortSignal;
+	/** Records a transcript event of the turn (an assistant message, a tool result, a notice) under the thread's lease; a worker that lost the lease gets an error. */
+	emit(event: EventInput): Promise<unknown>;
+	/** Records a test run the agent made. */
+	recordTest(run: { command: string; exitCode: number | null; output: string }): Promise<void>;
 };
 
 export type TurnResult = {
-	outcome: "completed" | "interrupted" | "failed" | "login_required" | "budget" | "session_limit";
+	/** `busy`: the person's login for the harness is in use by another of their threads; the input waits and nothing is lost. */
+	outcome: "completed" | "interrupted" | "failed" | "login_required" | "budget" | "session_limit" | "busy";
+	/** The vendor session's whole cost and usage so far, kept for the next turn's delta. */
+	sessionCostUsd?: number | null;
+	sessionUsage?: object | null;
 	sessionId?: string | null;
 	costUsd?: number;
 	tokensIn?: number;
@@ -32,6 +43,8 @@ export type TurnResult = {
 /** Runs one turn of a sandbox harness: pi (through its pi-durable partition) or one vendor CLI process per turn through workspace.exec. */
 export interface TurnPort {
 	run(turn: TurnRequest): Promise<TurnResult>;
+	/** Finishes off a run a dead worker left behind (kills the CLI, writes the login back, lets the lock go). */
+	recover?(run: { threadId: string; operationId: string; record: unknown; workspace: ComputeHandle | null }): Promise<void>;
 }
 
 /** The orb client for a thread, or null when the deployment has none (no Amp credential). */

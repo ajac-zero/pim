@@ -44,7 +44,7 @@ export class StallSupervisor {
 		const last = (await this.db.query<Row>("select max(at) a from pim_forge.forge_events where thread_id = $1", [threadId])).rows[0]?.a;
 		const lastActivityAt = Math.max(new Date(t.created_at).getTime(), last ? new Date(last).getTime() : 0);
 		const stalls: Stall[] = [];
-		const open = (await this.db.query<Row>("select call_id, args, at from pim_forge.forge_tool_journal where thread_id = $1 and result is null", [threadId])).rows;
+		const open = (await this.db.query<Row>("select call_id, args, at from pim_forge.forge_tool_journal where thread_id = $1 and (result is null or result ->> 'state' = 'running')", [threadId])).rows;
 		for (const call of open) {
 			const startedAt = new Date(call.at).getTime();
 			const timeoutMs: number | null = call.args?.timeoutMs ?? null;

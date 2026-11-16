@@ -19,7 +19,7 @@ describe("@pim/v2-contracts", () => {
 	it("keeps its migrations in the forge band and records them in the shared ledger", async () => {
 		expect(validateMigrationFiles("forge", readdirSync(new URL("../migrations", import.meta.url).pathname))).toEqual([]);
 		const rows = (await s.pool.query("select number from public.pim_schema_migrations order by number")).rows.map((r) => r.number);
-		expect(rows).toEqual([1, 400, 401, 402, 403, 404]);
+		expect(rows).toEqual([1, 400, 401, 402, 403, 404, 405]);
 	});
 
 	it("agrees with the contracts' capability table except where Forge says why it differs", () => {

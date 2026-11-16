@@ -47,6 +47,7 @@ export type ThreadRow = {
 	budgetUsd: number | null;
 	spentUsd: number;
 	consecutiveInterrupts: number;
+	profile: any;
 	gatewayNonce: string;
 	leaseHolder: string | null;
 	leaseEpoch: number;
@@ -79,6 +80,7 @@ export const toThread = (r: Row): ThreadRow => ({
 	budgetUsd: r.budget_usd === null ? null : Number(r.budget_usd),
 	spentUsd: Number(r.spent_usd),
 	consecutiveInterrupts: r.consecutive_interrupts,
+	profile: r.profile,
 	gatewayNonce: r.gateway_nonce,
 	leaseHolder: r.lease_holder,
 	leaseEpoch: Number(r.lease_epoch),

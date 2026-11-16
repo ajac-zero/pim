@@ -188,6 +188,8 @@ export class Computer {
 	readonly #watching = new Map<string, number>();
 	/** Watch operations that must not overlap: a reconnect's asking again and a person's `watch`. */
 	#queue: Promise<void> = Promise.resolve();
+	/** The desktop streams open now, by channel. */
+	readonly #screens = new Set<number>();
 	/** Set while the space waits to ask the computer to update. */
 	#updateTimer: ReturnType<typeof setTimeout> | undefined;
 	/** While a reconnect asks for the watches again: how many of each path's the computer has been asked for so far. */
@@ -244,7 +246,8 @@ export class Computer {
 	 * here. Never while calls are waiting, which the close would fail.
 	 */
 	#askUpdate(): boolean {
-		if (this.#protocol() >= PROTOCOL_VERSION || this.#pending.size > 0) return false;
+		// Not while a browser automation or a desktop stream is live: the close would cut it, and the update waits for it to end.
+		if (this.#protocol() >= PROTOCOL_VERSION || this.#pending.size > 0 || this.#browsers.size > 0 || this.#screens.size > 0) return false;
 		const asked = Number(this.#meta.meta(UPDATE_ASKED_KEY) ?? 0);
 		if (Date.now() - asked < OUTDATED_RETRY_MS) return false;
 		const socket = this.#socket();
@@ -282,6 +285,7 @@ export class Computer {
 		this.#meta.setMeta(TOKEN_KEY, await digestHex(token));
 		this.#meta.setMeta(PAIRED_AT_KEY, String(now));
 		this.#meta.deleteMeta(INFO_KEY);
+		this.#meta.deleteMeta(UPDATE_ASKED_KEY);
 		this.#meta.deleteMeta(MACHINE_KEY);
 		this.#meta.deleteMeta(SETUP_ERROR_KEY);
 		this.disconnect("A new computer was paired");
@@ -306,6 +310,7 @@ export class Computer {
 		this.#meta.deleteMeta(TOKEN_KEY);
 		this.#meta.deleteMeta(PAIRED_AT_KEY);
 		this.#meta.deleteMeta(INFO_KEY);
+		this.#meta.deleteMeta(UPDATE_ASKED_KEY);
 		this.#meta.deleteMeta(MACHINE_KEY);
 		this.#meta.deleteMeta(SETUP_ERROR_KEY);
 		this.disconnect("The computer was removed");
@@ -313,6 +318,7 @@ export class Computer {
 
 	disconnect(reason: string): void {
 		for (const socket of this.#sockets()) socket.close(REPLACED, reason);
+		this.#stopAsking();
 		this.#failPending();
 	}
 
@@ -343,10 +349,17 @@ export class Computer {
 	/** The connection closed: calls waiting on it fail now rather than at their timeouts. */
 	disconnected(): void {
 		if (this.#socket()) return;
+		this.#stopAsking();
 		this.#failPending();
 	}
 
+	#stopAsking(): void {
+		clearTimeout(this.#updateTimer);
+		this.#updateTimer = undefined;
+	}
+
 	#failPending(): void {
+		this.#screens.clear();
 		for (const thread of [...this.#browsers.keys()]) this.#browserClosed(thread);
 		for (const [id, pending] of this.#pending) {
 			clearTimeout(pending.timer);
@@ -384,6 +397,10 @@ export class Computer {
 				connectedAt: Date.now(),
 			};
 			this.#meta.setMeta(INFO_KEY, JSON.stringify(info));
+			if (info.protocol! >= PROTOCOL_VERSION) {
+				this.#meta.deleteMeta(UPDATE_ASKED_KEY);
+				this.#stopAsking();
+			}
 			this.#meta.deleteMeta(SETUP_ERROR_KEY);
 			// Asked to update, it reconnects and says hello again, and the watches are asked for then.
 			if (!this.#askUpdate()) void this.#rewatch();
@@ -401,7 +418,10 @@ export class Computer {
 		if (message.type === "screen" || message.type === "screen_closed") {
 			const { channel, data } = message as { channel?: unknown; data?: unknown };
 			if (typeof channel !== "number") return;
-			if (message.type === "screen_closed") this.#screen(channel, null);
+			if (message.type === "screen_closed") {
+				this.#screens.delete(channel);
+				this.#screen(channel, null);
+			}
 			else if (typeof data === "string") this.#screen(channel, data);
 			return;
 		}
@@ -463,6 +483,7 @@ export class Computer {
 	 */
 	async openScreen(channel: number, display?: string): Promise<void> {
 		await this.call("screen_open", { channel, ...(display ? { display } : {}) });
+		this.#screens.add(channel);
 	}
 
 	/** The computer's per-thread displays, and the threads queued for one; the primary desktop isn't among them. */
@@ -597,6 +618,7 @@ export class Computer {
 
 	/** Closes a stream of the desktop. */
 	closeScreen(channel: number): void {
+		this.#screens.delete(channel);
 		if (this.#socket()) void this.call("screen_close", { channel }).catch(() => undefined);
 	}
 

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { handle, type Machine, newerProgram } from "../computer/pim-computer";
+import { handle, type Machine, newerProgram, supervision } from "../computer/pim-computer";
 
 let root: string;
 let machine: Machine;
@@ -53,4 +53,12 @@ it("restarts to update only for a program that is not the one running", async ()
 	expect(await newerProgram("https://pim.example", running, serve(" \n"))).toBeNull();
 	expect(await newerProgram("https://pim.example", running, serve("export const v = 2;", 502))).toBeNull();
 	expect(await newerProgram("https://pim.example", running, vi.fn(async () => Promise.reject(new Error("offline"))) as unknown as typeof fetch)).toBeNull();
+});
+
+it("exits to update only where something starts it again", () => {
+	expect(supervision({ PIM_COMPUTER_TOKEN_FILE: "/t" }, 4242, false)).toBe("service");
+	expect(supervision({}, 4242, true)).toBe("container");
+	expect(supervision({}, 1, false)).toBe("container");
+	// A terminal: it stays up, and tells the person to update.
+	expect(supervision({}, 4242, false)).toBeNull();
 });

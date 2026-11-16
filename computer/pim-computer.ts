@@ -3373,12 +3373,18 @@ async function main(): Promise<void> {
 				wait = Math.min(wait * 2, 60_000);
 			};
 			if (event.code === OUTDATED) {
-				// Under the installed service, `run` fetches the newest program at each start, so exiting is the update, when there is a newer one. The space asks once in a while: a computer that can't update goes on, and works as an older one does.
+				// Where something restarts this process (the installed service, whose `run` fetches the newest program at each start, or a container), exiting is the update, when there is a newer one; in a terminal it isn't. The space asks once in a while: a computer that can't update goes on, and works as an older one does.
 				void (async () => {
-					const next = env.PIM_COMPUTER_TOKEN_FILE ? await newerProgram(url, realpathSync(process.argv[1]!)) : null;
+					const running = realpathSync(process.argv[1]!);
+					const how = supervision(env, process.pid, await fs.access("/.dockerenv").then(() => true, () => false));
+					const next = how ? await newerProgram(url, running) : null;
 					if (next === null) {
 						log("Your Pim has a newer pim-computer; run 'pim-computer update' to update.");
 						return retry();
+					}
+					// A container's restart policy starts it again, usually by fetching the program, and the copy written here covers one that doesn't.
+					if (how === "container") {
+						await fs.writeFile(`${running}.next`, next).then(() => fs.rename(`${running}.next`, running)).catch(() => undefined);
 					}
 					log("Your Pim has a newer pim-computer; restarting to update.");
 					await stop();
@@ -3393,6 +3399,15 @@ async function main(): Promise<void> {
 		});
 	};
 	connect();
+}
+
+/**
+ * What restarts this process when it exits: the installed service, a container
+ * (its restart policy), or nothing, as in a terminal, where exiting would end it.
+ */
+export function supervision(env: Record<string, string | undefined>, pid: number, container: boolean): "service" | "container" | null {
+	if (env.PIM_COMPUTER_TOKEN_FILE) return "service";
+	return container || pid === 1 ? "container" : null;
 }
 
 /**

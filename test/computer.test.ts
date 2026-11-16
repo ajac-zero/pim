@@ -1568,4 +1568,27 @@ describe("a computer that speaks protocol 1", () => {
 		expect([read.status, await read.text()]).toEqual([200, "one"]);
 		expect((await closed).code).toBe(OUTDATED);
 	});
+
+	it("waits for a desktop stream to end before asking, and forgets having asked when the computer is current", async () => {
+		await meta((pim) => pim.store.setMeta(ASKED, String(Date.now())));
+		const screen = await connectTestComputer(token, root, noCommands, undefined, undefined, undefined, { screen_open: () => null, screen_close: () => null }, undefined, 1);
+		let closed = false;
+		void screen.closed.then(() => (closed = true));
+		await meta((pim) => pim.computer.openScreen(77));
+		await meta((pim) => pim.store.deleteMeta(ASKED));
+		await get("/workspace/v1/a.txt");
+		await new Promise((resolve) => setTimeout(resolve, 1500));
+		expect(closed).toBe(false);
+		await meta((pim) => pim.computer.closeScreen(77));
+		await get("/workspace/v1/a.txt");
+		expect((await screen.closed).code).toBe(OUTDATED);
+		expect(await meta((pim) => pim.store.meta(ASKED))).toBeDefined();
+		// A computer that says the current protocol clears it, as does pairing another.
+		const current = await connectTestComputer(token, root, noCommands);
+		expect(await meta((pim) => pim.store.meta(ASKED))).toBeUndefined();
+		await meta((pim) => pim.store.setMeta(ASKED, "1"));
+		await post("/computer");
+		expect(await meta((pim) => pim.store.meta(ASKED))).toBeUndefined();
+		current.socket.close();
+	});
 });

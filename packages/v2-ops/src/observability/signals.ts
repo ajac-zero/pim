@@ -1,4 +1,4 @@
-import { type IntervalHistogram, monitorEventLoopDelay } from "node:perf_hooks";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { createServer, type Server } from "node:http";
 import type { Pool } from "pg";
 import { Registry } from "./metrics.ts";
@@ -41,7 +41,7 @@ export type PimMetrics = ReturnType<typeof createPimMetrics>;
 
 /** Samples the event loop with `monitorEventLoopDelay` and publishes p50, p99 and max at every scrape. Returns a stop function. */
 export function monitorEventLoop(metrics: PimMetrics, service: string, resolutionMs = 20): () => void {
-	const histogram: IntervalHistogram = monitorEventLoopDelay({ resolution: resolutionMs });
+	const histogram = monitorEventLoopDelay({ resolution: resolutionMs });
 	histogram.enable();
 	metrics.eventLoopDelay.collect(() => {
 		for (const [quantile, value] of [["0.5", histogram.percentile(50)], ["0.99", histogram.percentile(99)], ["max", histogram.max]] as const) metrics.eventLoopDelay.set(Number.isNaN(value) ? 0 : value / 1e9, { service, quantile });

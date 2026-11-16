@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pim
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - config.yaml
+  - gate.yaml
+  - live.yaml
+  - runner.yaml
+  - forge.yaml
+  - canvas.yaml
+  - relay.yaml
+  - maintenance.yaml
+  - ingress.yaml
+  - nats.yaml
+  - postgres.yaml
+  - migrate-job.yaml
+  - networkpolicy.yaml
+images:
+  - name: registry.example.test/pim
+    newTag: 2.0.0

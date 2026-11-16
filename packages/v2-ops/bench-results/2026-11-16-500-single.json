@@ -1,0 +1,181 @@
+{
+  "profile": "500",
+  "activeStreamingRuns": 500,
+  "tenants": 50,
+  "idleStoredChats": 10000,
+  "idleStoredEntries": 200000,
+  "workload": {
+    "ttftMs": 400,
+    "tokenIntervalMs": 25,
+    "tokensPerTurn": 120,
+    "toolLatencyMs": 300,
+    "turnPauseMs": 200,
+    "partialIntervalMs": 250,
+    "commitMode": "single",
+    "batchWindowMs": 5,
+    "poolSizePerRunner": 16,
+    "errorRate": 0.01
+  },
+  "phases": {
+    "baselineSeconds": 8,
+    "rampSeconds": 6,
+    "loadedSeconds": 25
+  },
+  "environment": {
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "memGb": 7.8,
+    "node": "v26.13.1",
+    "postgres": "17.11",
+    "settings": {
+      "fsync": "on",
+      "full_page_writes": "on",
+      "max_connections": "600",
+      "shared_buffers": "32768",
+      "synchronous_commit": "on",
+      "wal_level": "replica"
+    },
+    "fsyncMedianMs": 0.573
+  },
+  "measuredSeconds": 25,
+  "foreground": {
+    "baseline": {
+      "sidebar": {
+        "n": 1333,
+        "p50": 1.54,
+        "p95": 2.29,
+        "p99": 4.4,
+        "max": 12.72,
+        "mean": 1.64
+      },
+      "session": {
+        "n": 1333,
+        "p50": 1.87,
+        "p95": 2.67,
+        "p99": 4.51,
+        "max": 13.37,
+        "mean": 1.95
+      },
+      "errors": 0
+    },
+    "underLoad": {
+      "sidebar": {
+        "n": 3592,
+        "p50": 1.97,
+        "p95": 8.78,
+        "p99": 18.06,
+        "max": 61.79,
+        "mean": 3.02
+      },
+      "session": {
+        "n": 3593,
+        "p50": 2.4,
+        "p95": 9.4,
+        "p99": 20.39,
+        "max": 41.31,
+        "mean": 3.54
+      },
+      "errors": 0
+    },
+    "slo": {
+      "sidebarP95Ms": 8.78,
+      "sessionP95Ms": 9.4,
+      "absoluteUnder250ms": true,
+      "sidebarRegressionPct": 283,
+      "sessionRegressionPct": 252.3,
+      "relativeWithin20pct": false,
+      "passesBoth": false,
+      "note": "The relative test compares warm p95 under load with warm p95 at baseline, measured in the same run."
+    }
+  },
+  "write": {
+    "commits": 62510,
+    "commitsPerSecondInWindow": 2023.8,
+    "commitsPerSecondPerActiveRun": 4.05,
+    "commitLatencyMsByRunner": [
+      {
+        "n": 15622,
+        "p50": 2.45,
+        "p95": 15.77,
+        "p99": 35.3,
+        "max": 126.21,
+        "mean": 4.76
+      },
+      {
+        "n": 15640,
+        "p50": 2.38,
+        "p95": 13.08,
+        "p99": 29.68,
+        "max": 103.55,
+        "mean": 4.26
+      },
+      {
+        "n": 15621,
+        "p50": 2.41,
+        "p95": 14.72,
+        "p99": 41.2,
+        "max": 143.89,
+        "mean": 4.86
+      },
+      {
+        "n": 15627,
+        "p50": 2.39,
+        "p95": 15.41,
+        "p99": 35.28,
+        "max": 100.71,
+        "mean": 4.61
+      }
+    ],
+    "partialsPerSecondPerRun": 3.09,
+    "fencingRejects": 0,
+    "providerErrors": 41,
+    "turnsCompleted": 3541,
+    "turnsMuchLaterThanTwiceExpected": 0,
+    "expectedTurnMs": 3900,
+    "codingFloodRows": 98680
+  },
+  "postgres": {
+    "transactionsPerSecondIncludingReads": 2523.4,
+    "rowsInsertedPerSecond": 3409.7,
+    "rowsUpdatedPerSecond": 3840.1,
+    "walFsyncsPerSecond": 1191.9,
+    "walFsyncMeanMs": 0.451,
+    "rollbacks": 0
+  },
+  "resources": {
+    "machineCpuBusyPct": 88.3,
+    "postgresRssMbMax": 5041,
+    "nodeProcessesRssMbMax": 1284,
+    "maxEventLoopDelayMs": 71.2,
+    "gatePool": {
+      "total": 4,
+      "idle": 4,
+      "waiting": 0
+    }
+  },
+  "live": {
+    "websocketsOpen": 155,
+    "websocketsRequested": 155,
+    "eventsReceived": 187554,
+    "deliveryLagMs": {
+      "n": 187554,
+      "p50": 1,
+      "p95": 7,
+      "p99": 16,
+      "max": 58,
+      "mean": 1.82
+    },
+    "coalesced": 0,
+    "overflowDisconnects": 0,
+    "liveEventLoopMaxMs": 44.1
+  },
+  "saturation": {
+    "fractionOfTurnsMuchLate": 0,
+    "commitP99Ms": 41.2,
+    "verdict": "keeping up"
+  },
+  "dataRows": {
+    "entries": "226493",
+    "flood": "98920"
+  }
+}

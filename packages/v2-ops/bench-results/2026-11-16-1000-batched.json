@@ -1,0 +1,181 @@
+{
+  "profile": "1000",
+  "activeStreamingRuns": 1000,
+  "tenants": 100,
+  "idleStoredChats": 20000,
+  "idleStoredEntries": 400000,
+  "workload": {
+    "ttftMs": 400,
+    "tokenIntervalMs": 25,
+    "tokensPerTurn": 120,
+    "toolLatencyMs": 300,
+    "turnPauseMs": 200,
+    "partialIntervalMs": 250,
+    "commitMode": "batched",
+    "batchWindowMs": 5,
+    "poolSizePerRunner": 16,
+    "errorRate": 0.01
+  },
+  "phases": {
+    "baselineSeconds": 8,
+    "rampSeconds": 6,
+    "loadedSeconds": 25
+  },
+  "environment": {
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "memGb": 7.8,
+    "node": "v26.13.1",
+    "postgres": "17.11",
+    "settings": {
+      "fsync": "on",
+      "full_page_writes": "on",
+      "max_connections": "600",
+      "shared_buffers": "32768",
+      "synchronous_commit": "on",
+      "wal_level": "replica"
+    },
+    "fsyncMedianMs": 0.591
+  },
+  "measuredSeconds": 25,
+  "foreground": {
+    "baseline": {
+      "sidebar": {
+        "n": 1327,
+        "p50": 1.57,
+        "p95": 2.49,
+        "p99": 3.41,
+        "max": 21.92,
+        "mean": 1.69
+      },
+      "session": {
+        "n": 1327,
+        "p50": 1.85,
+        "p95": 2.88,
+        "p99": 8.17,
+        "max": 26.19,
+        "mean": 2.02
+      },
+      "errors": 0
+    },
+    "underLoad": {
+      "sidebar": {
+        "n": 3493,
+        "p50": 1.87,
+        "p95": 9.65,
+        "p99": 23.96,
+        "max": 70.15,
+        "mean": 3.19
+      },
+      "session": {
+        "n": 3491,
+        "p50": 2.3,
+        "p95": 10.74,
+        "p99": 27.55,
+        "max": 44.87,
+        "mean": 3.72
+      },
+      "errors": 0
+    },
+    "slo": {
+      "sidebarP95Ms": 9.65,
+      "sessionP95Ms": 10.74,
+      "absoluteUnder250ms": true,
+      "sidebarRegressionPct": 286.9,
+      "sessionRegressionPct": 273.1,
+      "relativeWithin20pct": false,
+      "passesBoth": false,
+      "note": "The relative test compares warm p95 under load with warm p95 at baseline, measured in the same run."
+    }
+  },
+  "write": {
+    "commits": 105933,
+    "commitsPerSecondInWindow": 3411.5,
+    "commitsPerSecondPerActiveRun": 3.41,
+    "commitLatencyMsByRunner": [
+      {
+        "n": 26689,
+        "p50": 134.42,
+        "p95": 451.89,
+        "p99": 736.76,
+        "max": 950.89,
+        "mean": 168.94
+      },
+      {
+        "n": 26686,
+        "p50": 126.24,
+        "p95": 709.24,
+        "p99": 1039.5,
+        "max": 1309.51,
+        "mean": 192.43
+      },
+      {
+        "n": 26480,
+        "p50": 161.31,
+        "p95": 469.27,
+        "p99": 585.58,
+        "max": 687.27,
+        "mean": 198.25
+      },
+      {
+        "n": 26078,
+        "p50": 141.01,
+        "p95": 596.13,
+        "p99": 1263.64,
+        "max": 1410.15,
+        "mean": 208.73
+      }
+    ],
+    "partialsPerSecondPerRun": 2.77,
+    "fencingRejects": 0,
+    "providerErrors": 60,
+    "turnsCompleted": 4447,
+    "turnsMuchLaterThanTwiceExpected": 37,
+    "expectedTurnMs": 3900,
+    "codingFloodRows": 146880
+  },
+  "postgres": {
+    "transactionsPerSecondIncludingReads": 610.8,
+    "rowsInsertedPerSecond": 4956.5,
+    "rowsUpdatedPerSecond": 6459.6,
+    "walFsyncsPerSecond": 145.9,
+    "walFsyncMeanMs": 0.794,
+    "rollbacks": 0
+  },
+  "resources": {
+    "machineCpuBusyPct": 97.4,
+    "postgresRssMbMax": 7176,
+    "nodeProcessesRssMbMax": 1543,
+    "maxEventLoopDelayMs": 87.1,
+    "gatePool": {
+      "total": 4,
+      "idle": 4,
+      "waiting": 0
+    }
+  },
+  "live": {
+    "websocketsOpen": 310,
+    "websocketsRequested": 310,
+    "eventsReceived": 317803,
+    "deliveryLagMs": {
+      "n": 317803,
+      "p50": 4,
+      "p95": 20,
+      "p99": 40,
+      "max": 118,
+      "mean": 6.71
+    },
+    "coalesced": 0,
+    "overflowDisconnects": 0,
+    "liveEventLoopMaxMs": 87.1
+  },
+  "saturation": {
+    "fractionOfTurnsMuchLate": 0.008,
+    "commitP99Ms": 1263.64,
+    "verdict": "keeping up"
+  },
+  "dataRows": {
+    "entries": "445264",
+    "flood": "147440"
+  }
+}

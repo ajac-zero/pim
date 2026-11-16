@@ -1,0 +1,96 @@
+# Runs agents: holds partition leases, streams models, commits to PostgreSQL.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pim-runner
+  labels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: runner, pim.dev/tier: control }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: runner }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: runner, pim.dev/tier: control }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: pim
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 150
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: runner }
+      containers:
+        - name: runner
+          image: registry.example.test/pim:2.0.0
+          args: ["runner"]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: metrics, containerPort: 9464 }
+          envFrom:
+            - configMapRef: { name: pim-config }
+          env:
+            - { name: PIM_ROLE, value: runner }
+            - { name: PIM_HTTP_PORT, value: "8080" }
+            - { name: PIM_DATABASE_URL, valueFrom: { secretKeyRef: { name: pim-db, key: runtime-url } } }
+            - { name: PIM_OBJECTS_ENDPOINT, valueFrom: { secretKeyRef: { name: pim-objects, key: endpoint } } }
+            - { name: PIM_OBJECTS_BUCKET, valueFrom: { secretKeyRef: { name: pim-objects, key: bucket } } }
+            - { name: PIM_OBJECTS_ACCESS_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: access-key } } }
+            - { name: PIM_OBJECTS_SECRET_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: secret-key } } }
+            - { name: PIM_INGRESS_SECRET, valueFrom: { secretKeyRef: { name: pim-ingress, key: secret } } }
+            # Envelope keys are mounted as files, one per key id, and read from here: they are never environment variables and never in a ConfigMap.
+            - { name: PIM_KEK_DIR, value: /run/secrets/pim-kek }
+            - { name: PIM_DRAIN_WINDOW_SECONDS, value: "90" }
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "2", memory: 2Gi }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 3, failureThreshold: 40 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+          lifecycle:
+            preStop:
+              exec:
+                # Ask the Runner to stop claiming work and hand its partition leases back, then give the handoff a moment to land.
+                command: ["/bin/sh", "-c", "wget -qO- --post-data='' http://127.0.0.1:8080/drain >/dev/null 2>&1 || true; sleep 5"]
+          volumeMounts:
+            - { name: kek, mountPath: /run/secrets/pim-kek, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: kek
+          secret: { secretName: pim-kek, defaultMode: 0400 }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pim-runner
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: runner }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pim-runner
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: pim-runner }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 65 } }
+  behavior:
+    scaleUp: { stabilizationWindowSeconds: 30, policies: [{ type: Pods, value: 2, periodSeconds: 60 }] }
+    # Each Runner leaves with a lease handoff: scale down one at a time, slowly, after a long quiet window.
+    scaleDown: { stabilizationWindowSeconds: 600, policies: [{ type: Pods, value: 1, periodSeconds: 120 }] }

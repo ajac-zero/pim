@@ -1,0 +1,181 @@
+{
+  "profile": "500",
+  "activeStreamingRuns": 500,
+  "tenants": 50,
+  "idleStoredChats": 10000,
+  "idleStoredEntries": 200000,
+  "workload": {
+    "ttftMs": 400,
+    "tokenIntervalMs": 25,
+    "tokensPerTurn": 120,
+    "toolLatencyMs": 300,
+    "turnPauseMs": 200,
+    "partialIntervalMs": 250,
+    "commitMode": "batched",
+    "batchWindowMs": 5,
+    "poolSizePerRunner": 16,
+    "errorRate": 0.01
+  },
+  "phases": {
+    "baselineSeconds": 8,
+    "rampSeconds": 6,
+    "loadedSeconds": 25
+  },
+  "environment": {
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "memGb": 7.8,
+    "node": "v26.13.1",
+    "postgres": "17.11",
+    "settings": {
+      "fsync": "on",
+      "full_page_writes": "on",
+      "max_connections": "600",
+      "shared_buffers": "32768",
+      "synchronous_commit": "on",
+      "wal_level": "replica"
+    },
+    "fsyncMedianMs": 0.51
+  },
+  "measuredSeconds": 25,
+  "foreground": {
+    "baseline": {
+      "sidebar": {
+        "n": 1324,
+        "p50": 1.58,
+        "p95": 2.48,
+        "p99": 4.33,
+        "max": 9.14,
+        "mean": 1.66
+      },
+      "session": {
+        "n": 1326,
+        "p50": 1.89,
+        "p95": 2.83,
+        "p99": 4.85,
+        "max": 23.81,
+        "mean": 1.99
+      },
+      "errors": 0
+    },
+    "underLoad": {
+      "sidebar": {
+        "n": 4039,
+        "p50": 1.44,
+        "p95": 4.2,
+        "p99": 8.49,
+        "max": 22.37,
+        "mean": 1.85
+      },
+      "session": {
+        "n": 4040,
+        "p50": 1.85,
+        "p95": 4.81,
+        "p99": 11.05,
+        "max": 33.8,
+        "mean": 2.33
+      },
+      "errors": 0
+    },
+    "slo": {
+      "sidebarP95Ms": 4.2,
+      "sessionP95Ms": 4.81,
+      "absoluteUnder250ms": true,
+      "sidebarRegressionPct": 69.1,
+      "sessionRegressionPct": 69.8,
+      "relativeWithin20pct": false,
+      "passesBoth": false,
+      "note": "The relative test compares warm p95 under load with warm p95 at baseline, measured in the same run."
+    }
+  },
+  "write": {
+    "commits": 63523,
+    "commitsPerSecondInWindow": 2056.7,
+    "commitsPerSecondPerActiveRun": 4.11,
+    "commitLatencyMsByRunner": [
+      {
+        "n": 15873,
+        "p50": 10.14,
+        "p95": 44.99,
+        "p99": 151.83,
+        "max": 286.76,
+        "mean": 16.58
+      },
+      {
+        "n": 15897,
+        "p50": 9.29,
+        "p95": 38.64,
+        "p99": 95.86,
+        "max": 195.79,
+        "mean": 13.93
+      },
+      {
+        "n": 15897,
+        "p50": 9.4,
+        "p95": 43.92,
+        "p99": 86.14,
+        "max": 186.7,
+        "mean": 14.46
+      },
+      {
+        "n": 15856,
+        "p50": 11.04,
+        "p95": 56.49,
+        "p99": 245.23,
+        "max": 328.39,
+        "mean": 20.56
+      }
+    ],
+    "partialsPerSecondPerRun": 3.15,
+    "fencingRejects": 0,
+    "providerErrors": 37,
+    "turnsCompleted": 3537,
+    "turnsMuchLaterThanTwiceExpected": 0,
+    "expectedTurnMs": 3900,
+    "codingFloodRows": 101600
+  },
+  "postgres": {
+    "transactionsPerSecondIncludingReads": 957.5,
+    "rowsInsertedPerSecond": 3395.9,
+    "rowsUpdatedPerSecond": 3800.6,
+    "walFsyncsPerSecond": 502.9,
+    "walFsyncMeanMs": 0.332,
+    "rollbacks": 0
+  },
+  "resources": {
+    "machineCpuBusyPct": 77.2,
+    "postgresRssMbMax": 3487,
+    "nodeProcessesRssMbMax": 1377,
+    "maxEventLoopDelayMs": 51.8,
+    "gatePool": {
+      "total": 4,
+      "idle": 4,
+      "waiting": 0
+    }
+  },
+  "live": {
+    "websocketsOpen": 155,
+    "websocketsRequested": 155,
+    "eventsReceived": 190621,
+    "deliveryLagMs": {
+      "n": 190621,
+      "p50": 1,
+      "p95": 3,
+      "p99": 7,
+      "max": 22,
+      "mean": 1.05
+    },
+    "coalesced": 0,
+    "overflowDisconnects": 0,
+    "liveEventLoopMaxMs": 35.2
+  },
+  "saturation": {
+    "fractionOfTurnsMuchLate": 0,
+    "commitP99Ms": 245.23,
+    "verdict": "keeping up"
+  },
+  "dataRows": {
+    "entries": "226552",
+    "flood": "101600"
+  }
+}

@@ -148,7 +148,7 @@ describe("the exporter against the fence worker", () => {
 		await seed(env.Pim.getByName(owner), JOBS);
 		await seed(env.CodingScheduler.getByName(owner), ["CREATE TABLE pim_coding_threads (thread_id TEXT PRIMARY KEY, harness TEXT)", "INSERT INTO pim_coding_threads VALUES ('thr_e1', 'amp')"]);
 		await seed(env.CodingThread.getByName("thr_e1"), ["CREATE TABLE coding_thread (thread_id TEXT PRIMARY KEY, orb TEXT)", "INSERT INTO coding_thread VALUES ('thr_e1', '{\"threadId\":\"T-1\"}')"]);
-		await runInDurableObject(env.WorkspaceCatalog.getByName("workspaces"), (_i, state) => state.storage.put("session:ws_1", true));
+		await runInDurableObject((env as unknown as Record<string, DurableObjectNamespace>).WorkspaceCatalog!.getByName("workspaces"), (_i, state) => state.storage.put("session:ws_1", true));
 		await env.ARTIFACTS.put("own_exp/a/v1/index.html", "<p>x</p>");
 		await env.BLOBS.put("own_exp/big.bin", new Uint8Array(300_000).fill(7), { httpMetadata: { contentType: "video/mp4" } });
 		await env.OAUTH_KV.put("tok:1", JSON.stringify({ hash: "ff" }));

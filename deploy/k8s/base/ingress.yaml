@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pim
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    # WebSockets live for hours: no idle cut-off, and no buffering of streamed responses.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header X-Pim-Client-IP $remote_addr;
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [pim.example.test, content.pim.example.test]
+      secretName: pim-tls
+  rules:
+    - host: pim.example.test
+      http:
+        paths:
+          - { path: /api/ws, pathType: Prefix, backend: { service: { name: pim-live, port: { name: http } } } }
+          - { path: /api/notes/live, pathType: Prefix, backend: { service: { name: pim-canvas, port: { name: http } } } }
+          - { path: /api/computer, pathType: Prefix, backend: { service: { name: pim-relay, port: { name: http } } } }
+          - { path: /api/browser/live, pathType: Prefix, backend: { service: { name: pim-relay, port: { name: http } } } }
+          - { path: /, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }
+    - host: content.pim.example.test
+      http:
+        paths:
+          - { path: /, pathType: Prefix, backend: { service: { name: pim-gate, port: { name: http } } } }

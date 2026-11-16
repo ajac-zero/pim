@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "pim",
+      "credentials": [{ "accessKey": "__ACCESS__", "secretKey": "__SECRET__" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

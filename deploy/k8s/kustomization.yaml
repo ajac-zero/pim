@@ -1,0 +1,7 @@
+# The whole deployment: the control plane (namespace pim) and the sandbox zone (namespace pim-sandboxes).
+# kustomize build deploy/k8s | kubectl apply -f -      (needs the CloudNativePG operator, an ingress controller and cert-manager; see docs/v2-operations.md)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base
+  - sandboxes

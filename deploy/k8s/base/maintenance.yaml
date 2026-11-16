@@ -1,0 +1,64 @@
+# Retention, lease sweeps and export jobs. One instance; connects to PostgreSQL directly.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pim-maintenance
+  labels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: maintenance, pim.dev/tier: control }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: maintenance }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: maintenance, pim.dev/tier: control }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: pim
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: maintenance }
+      containers:
+        - name: maintenance
+          image: registry.example.test/pim:2.0.0
+          args: ["maintenance"]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: metrics, containerPort: 9464 }
+          envFrom:
+            - configMapRef: { name: pim-config }
+          env:
+            - { name: PIM_ROLE, value: maintenance }
+            - { name: PIM_HTTP_PORT, value: "8080" }
+            - { name: PIM_DATABASE_URL, valueFrom: { secretKeyRef: { name: pim-db, key: maintenance-url } } }
+            - { name: PIM_OBJECTS_ENDPOINT, valueFrom: { secretKeyRef: { name: pim-objects, key: endpoint } } }
+            - { name: PIM_OBJECTS_BUCKET, valueFrom: { secretKeyRef: { name: pim-objects, key: bucket } } }
+            - { name: PIM_OBJECTS_ACCESS_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: access-key } } }
+            - { name: PIM_OBJECTS_SECRET_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: secret-key } } }
+            - { name: PIM_INGRESS_SECRET, valueFrom: { secretKeyRef: { name: pim-ingress, key: secret } } }
+            # Envelope keys are mounted as files, one per key id, and read from here: they are never environment variables and never in a ConfigMap.
+            - { name: PIM_KEK_DIR, value: /run/secrets/pim-kek }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: "500m", memory: 512Mi }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 3, failureThreshold: 40 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+          volumeMounts:
+            - { name: kek, mountPath: /run/secrets/pim-kek, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: kek
+          secret: { secretName: pim-kek, defaultMode: 0400 }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }

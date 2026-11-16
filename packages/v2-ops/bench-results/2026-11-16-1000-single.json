@@ -1,0 +1,181 @@
+{
+  "profile": "1000",
+  "activeStreamingRuns": 1000,
+  "tenants": 100,
+  "idleStoredChats": 20000,
+  "idleStoredEntries": 400000,
+  "workload": {
+    "ttftMs": 400,
+    "tokenIntervalMs": 25,
+    "tokensPerTurn": 120,
+    "toolLatencyMs": 300,
+    "turnPauseMs": 200,
+    "partialIntervalMs": 250,
+    "commitMode": "single",
+    "batchWindowMs": 5,
+    "poolSizePerRunner": 16,
+    "errorRate": 0.01
+  },
+  "phases": {
+    "baselineSeconds": 8,
+    "rampSeconds": 6,
+    "loadedSeconds": 25
+  },
+  "environment": {
+    "cpus": 4,
+    "cpuModel": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "memGb": 7.8,
+    "node": "v26.13.1",
+    "postgres": "17.11",
+    "settings": {
+      "fsync": "on",
+      "full_page_writes": "on",
+      "max_connections": "600",
+      "shared_buffers": "32768",
+      "synchronous_commit": "on",
+      "wal_level": "replica"
+    },
+    "fsyncMedianMs": 0.46
+  },
+  "measuredSeconds": 25,
+  "foreground": {
+    "baseline": {
+      "sidebar": {
+        "n": 1294,
+        "p50": 1.79,
+        "p95": 2.84,
+        "p99": 5.07,
+        "max": 16.22,
+        "mean": 1.95
+      },
+      "session": {
+        "n": 1294,
+        "p50": 2.13,
+        "p95": 3.25,
+        "p99": 7.14,
+        "max": 16.64,
+        "mean": 2.29
+      },
+      "errors": 0
+    },
+    "underLoad": {
+      "sidebar": {
+        "n": 1790,
+        "p50": 7.44,
+        "p95": 46.32,
+        "p99": 70.16,
+        "max": 124.86,
+        "mean": 13.36
+      },
+      "session": {
+        "n": 1788,
+        "p50": 7.8,
+        "p95": 45.96,
+        "p99": 67.26,
+        "max": 111.88,
+        "mean": 13.53
+      },
+      "errors": 0
+    },
+    "slo": {
+      "sidebarP95Ms": 46.32,
+      "sessionP95Ms": 45.96,
+      "absoluteUnder250ms": true,
+      "sidebarRegressionPct": 1528.3,
+      "sessionRegressionPct": 1315,
+      "relativeWithin20pct": false,
+      "passesBoth": false,
+      "note": "The relative test compares warm p95 under load with warm p95 at baseline, measured in the same run."
+    }
+  },
+  "write": {
+    "commits": 100321,
+    "commitsPerSecondInWindow": 3313.1,
+    "commitsPerSecondPerActiveRun": 3.31,
+    "commitLatencyMsByRunner": [
+      {
+        "n": 24951,
+        "p50": 156.8,
+        "p95": 471.76,
+        "p99": 577.49,
+        "max": 665.65,
+        "mean": 191.44
+      },
+      {
+        "n": 24513,
+        "p50": 178.39,
+        "p95": 1373.03,
+        "p99": 1554.41,
+        "max": 1667.15,
+        "mean": 349.76
+      },
+      {
+        "n": 25107,
+        "p50": 103.35,
+        "p95": 459.65,
+        "p99": 663.9,
+        "max": 764.82,
+        "mean": 154.46
+      },
+      {
+        "n": 25750,
+        "p50": 143.91,
+        "p95": 602.02,
+        "p99": 793.08,
+        "max": 941.09,
+        "mean": 205.55
+      }
+    ],
+    "partialsPerSecondPerRun": 2.72,
+    "fencingRejects": 0,
+    "providerErrors": 45,
+    "turnsCompleted": 3208,
+    "turnsMuchLaterThanTwiceExpected": 2876,
+    "expectedTurnMs": 3900,
+    "codingFloodRows": 67560
+  },
+  "postgres": {
+    "transactionsPerSecondIncludingReads": 3611.8,
+    "rowsInsertedPerSecond": 2434.8,
+    "rowsUpdatedPerSecond": 6348.6,
+    "walFsyncsPerSecond": 811.8,
+    "walFsyncMeanMs": 1.009,
+    "rollbacks": 0
+  },
+  "resources": {
+    "machineCpuBusyPct": 98.3,
+    "postgresRssMbMax": 5716,
+    "nodeProcessesRssMbMax": 1354,
+    "maxEventLoopDelayMs": 155.3,
+    "gatePool": {
+      "total": 4,
+      "idle": 4,
+      "waiting": 0
+    }
+  },
+  "live": {
+    "websocketsOpen": 310,
+    "websocketsRequested": 310,
+    "eventsReceived": 301305,
+    "deliveryLagMs": {
+      "n": 301305,
+      "p50": 11,
+      "p95": 59,
+      "p99": 87,
+      "max": 118,
+      "mean": 17.99
+    },
+    "coalesced": 0,
+    "overflowDisconnects": 0,
+    "liveEventLoopMaxMs": 110.5
+  },
+  "saturation": {
+    "fractionOfTurnsMuchLate": 0.897,
+    "commitP99Ms": 1554.41,
+    "verdict": "saturated: runs fall behind or the event loop stalls"
+  },
+  "dataRows": {
+    "entries": "441528",
+    "flood": "68160"
+  }
+}

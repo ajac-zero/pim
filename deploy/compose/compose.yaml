@@ -1,0 +1,280 @@
+# Pim, portable: one Docker Compose stack with no Kubernetes, no Temporal and nothing from Cloudflare or AWS.
+#
+#   cp .env.example .env     # then replace every CHANGE_ME
+#   docker compose up -d                        # core: caddy, postgres, pgbouncer, nats, seaweedfs, migrator, gate, live, runner, forge, maintenance
+#   docker compose up -d --scale runner=3       # more Runners; partitions are leased between them
+#   docker compose --profile canvas up -d       # shared-notes canvas server (/api/notes/live)
+#   docker compose --profile computer up -d     # personal-computer relay and TURN (relay, coturn)
+#   docker compose --profile coding up -d       # sandbox-manager for coding workspaces
+#   docker compose --profile observability up -d  # Prometheus (with the alert rules) and Grafana (with the Pim dashboard) on 127.0.0.1:3000
+#
+# The core stack runs with every optional profile off: chat, agents, memory, apps and sharing work without a computer or a coding backend.
+# The Pim image is one image that runs one role per container, chosen by PIM_ROLE (migrator, gate, live, runner, forge, maintenance, canvas, relay).
+# Every role serves GET /healthz on PIM_HTTP_PORT and exits non-zero when it cannot start; see docs/v2-operations.md for the role contract.
+
+name: pim
+
+x-pim: &pim
+  image: ${PIM_IMAGE:?set PIM_IMAGE in .env}
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  networks: [internal]
+  env_file: [.env]
+  environment: &pim-env
+    PIM_PUBLIC_URL: ${PIM_PUBLIC_URL:?set PIM_PUBLIC_URL in .env}
+    PIM_CONTENT_ORIGIN: ${PIM_CONTENT_ORIGIN:-}
+    PIM_APPS_ORIGIN: ${PIM_APPS_ORIGIN:-}
+    # Application traffic goes through PgBouncer in transaction mode; only the migrator and maintenance connect to PostgreSQL directly.
+    PIM_DATABASE_URL: postgres://pim_runtime_role:${PIM_RUNTIME_DB_PASSWORD:?}@pgbouncer:6432/pim
+    PIM_NATS_URL: nats://nats:4222
+    PIM_OBJECTS_ENDPOINT: http://seaweedfs:8333
+    PIM_OBJECTS_BUCKET: ${PIM_OBJECTS_BUCKET:-pim-objects}
+    PIM_OBJECTS_ACCESS_KEY: ${SEAWEED_ACCESS_KEY:?}
+    PIM_OBJECTS_SECRET_KEY: ${SEAWEED_SECRET_KEY:?}
+    # Envelope-encryption key ring: PIM_KEK_<id> is a base64 32-byte key, PIM_KEK_CURRENT names the one that wraps new keys.
+    PIM_KEK_CURRENT: ${PIM_KEK_CURRENT:-k1}
+    PIM_KEK_k1: ${PIM_KEK_K1:?}
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: ${OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT:-false}
+    PIM_METRICS_PORT: "9464"
+    # The proxy sets the client address and this secret on every request; roles answer only requests that carry it (the celld precedent, deploy/celld/caddy/Caddyfile).
+    PIM_INGRESS_SECRET: ${PIM_INGRESS_SECRET:?}
+  depends_on: &pim-deps
+    migrator: { condition: service_completed_successfully }
+    pgbouncer: { condition: service_healthy }
+    nats: { condition: service_healthy }
+    objects-init: { condition: service_completed_successfully }
+
+services:
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      PIM_DOMAIN: ${PIM_DOMAIN:?set PIM_DOMAIN in .env}
+      PIM_CONTENT_DOMAIN: ${PIM_CONTENT_DOMAIN:-content.invalid}
+      PIM_APPS_DOMAIN: ${PIM_APPS_DOMAIN:-apps.invalid}
+      PIM_ACME_EMAIL: ${PIM_ACME_EMAIL:-}
+      PIM_INGRESS_SECRET: ${PIM_INGRESS_SECRET:?}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal, edge]
+    depends_on:
+      gate: { condition: service_healthy }
+      live: { condition: service_healthy }
+
+  postgres:
+    image: postgres:17.2-alpine
+    restart: unless-stopped
+    # Durability is never relaxed here: fsync, full_page_writes and synchronous_commit stay on (see postgres/postgresql.conf).
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?}
+      POSTGRES_DB: pim
+      PIM_MIGRATOR_DB_PASSWORD: ${PIM_MIGRATOR_DB_PASSWORD:?}
+      PIM_APP_DB_PASSWORD: ${PIM_APP_DB_PASSWORD:?}
+      PIM_RUNTIME_DB_PASSWORD: ${PIM_RUNTIME_DB_PASSWORD:?}
+      PIM_READONLY_DB_PASSWORD: ${PIM_READONLY_DB_PASSWORD:?}
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:?}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    shm_size: 256mb
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pim"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p2
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c", "printf '\"pgbouncer_auth\" \"%s\"\\n' \"$$PGBOUNCER_AUTH_PASSWORD\" > /tmp/userlist.txt && exec pgbouncer /etc/pgbouncer/pgbouncer.ini"]
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+    environment:
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:?}
+    networks: [internal]
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nats:
+    image: nats:2.10.22-alpine
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes: ["./nats/nats.conf:/etc/nats/nats.conf:ro"]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80
+    restart: unless-stopped
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json", "-master.volumeSizeLimitMB=1024", "-ip.bind=0.0.0.0"]
+    volumes:
+      - seaweedfs-data:/data
+      - ./seaweedfs/s3.json.template:/etc/seaweedfs/s3.json.template:ro
+    entrypoint: ["/bin/sh", "-c", "sed -e \"s|__ACCESS__|$$SEAWEED_ACCESS_KEY|; s|__SECRET__|$$SEAWEED_SECRET_KEY|\" /etc/seaweedfs/s3.json.template > /etc/seaweedfs/s3.json && exec weed \"$$@\"", "--"]
+    environment:
+      SEAWEED_ACCESS_KEY: ${SEAWEED_ACCESS_KEY:?}
+      SEAWEED_SECRET_KEY: ${SEAWEED_SECRET_KEY:?}
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9333/cluster/status >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  objects-init:
+    image: chrislusf/seaweedfs:3.80
+    restart: "no"
+    # Creates the bucket through SeaweedFS's own shell; idempotent (an existing bucket is left alone).
+    entrypoint: ["/bin/sh", "-c", "echo \"s3.bucket.create -name $$BUCKET\" | weed shell -master=seaweedfs:9333 || true; echo s3.bucket.list | weed shell -master=seaweedfs:9333 | grep -q \"$$BUCKET\""]
+    environment:
+      BUCKET: ${PIM_OBJECTS_BUCKET:-pim-objects}
+    networks: [internal]
+    depends_on:
+      seaweedfs: { condition: service_healthy }
+
+  migrator:
+    <<: *pim
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      <<: *pim-env
+      PIM_ROLE: migrator
+      # The migrator owns the schema, so it connects to PostgreSQL directly (advisory locks and DDL do not belong in transaction pooling).
+      PIM_DATABASE_URL: postgres://pim_migrator:${PIM_MIGRATOR_DB_PASSWORD:?}@postgres:5432/pim
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  gate:
+    <<: *pim
+    command: ["gate"]
+    environment: { <<: *pim-env, PIM_ROLE: gate, PIM_HTTP_PORT: "8080" }
+    depends_on: *pim-deps
+    healthcheck: &http-health
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${PIM_HTTP_PORT_CHECK:-8080}/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  live:
+    <<: *pim
+    command: ["live"]
+    environment: { <<: *pim-env, PIM_ROLE: live, PIM_HTTP_PORT: "8080" }
+    depends_on: *pim-deps
+    healthcheck: *http-health
+
+  runner:
+    <<: *pim
+    command: ["runner"]
+    # Scale with --scale runner=N. A stop gives a Runner time to hand its partition leases back before it is killed.
+    stop_grace_period: 120s
+    environment: { <<: *pim-env, PIM_ROLE: runner, PIM_HTTP_PORT: "8080", PIM_DRAIN_WINDOW_SECONDS: "90" }
+    depends_on: *pim-deps
+    healthcheck: *http-health
+    deploy:
+      replicas: 1
+
+  forge:
+    <<: *pim
+    command: ["forge"]
+    environment: { <<: *pim-env, PIM_ROLE: forge, PIM_HTTP_PORT: "8080" }
+    depends_on: *pim-deps
+    healthcheck: *http-health
+
+  maintenance:
+    <<: *pim
+    command: ["maintenance"]
+    # Retention, vacuum helpers, lease sweeps and export jobs; one instance, connecting to PostgreSQL directly for long statements.
+    environment: { <<: *pim-env, PIM_ROLE: maintenance, PIM_HTTP_PORT: "8080", PIM_DATABASE_URL: "postgres://pim_app_role:${PIM_APP_DB_PASSWORD:?}@postgres:5432/pim" }
+    depends_on: *pim-deps
+    healthcheck: *http-health
+
+  canvas:
+    <<: *pim
+    profiles: [canvas]
+    command: ["canvas"]
+    environment: { <<: *pim-env, PIM_ROLE: canvas, PIM_HTTP_PORT: "8080" }
+    depends_on: *pim-deps
+    healthcheck: *http-health
+
+  relay:
+    <<: *pim
+    profiles: [computer]
+    command: ["relay"]
+    environment: { <<: *pim-env, PIM_ROLE: relay, PIM_HTTP_PORT: "8080", PIM_TURN_URL: "turn:${PIM_DOMAIN}:3478" }
+    depends_on: *pim-deps
+    healthcheck: *http-health
+
+  coturn:
+    image: coturn/coturn:4.6.2-alpine
+    profiles: [computer]
+    restart: unless-stopped
+    network_mode: host
+    command: ["-n", "--realm=${PIM_DOMAIN}", "--use-auth-secret", "--static-auth-secret=${TURN_SHARED_SECRET:?}", "--no-cli", "--fingerprint", "--no-tcp-relay", "--min-port=49160", "--max-port=49200"]
+
+  sandbox-manager:
+    build: { context: ../../sandbox-manager }
+    restart: unless-stopped
+    profiles: [coding]
+    # The sandbox manager starts coding workspaces on a Docker host. It is the only service with the Docker socket, and it is not on the data network.
+    environment: { MANAGER_TOKEN: "${PIM_CODING_MANAGER_TOKEN:?}", ALLOWED_IMAGES: "${PIM_ALLOWED_SANDBOX_IMAGES:-}" }
+    networks: [sandbox, internal]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: [observability]
+    restart: unless-stopped
+    volumes:
+      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/prometheus/pim-alerts.rules.yml:/etc/prometheus/pim-alerts.rules.yml:ro
+      - prometheus-data:/prometheus
+    networks: [internal]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: [observability]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks: [internal]
+    ports: ["127.0.0.1:3000:3000"]
+
+networks:
+  edge: {}
+  # `internal` carries service-to-service traffic; only caddy is on `edge` and publishes ports. `sandbox` is where the sandbox manager's workspaces live: nothing there can reach PostgreSQL, NATS or object storage.
+  internal: {}
+  sandbox: {}
+
+volumes:
+  postgres-data: {}
+  seaweedfs-data: {}
+  caddy-data: {}
+  caddy-config: {}
+  prometheus-data: {}
+  grafana-data: {}

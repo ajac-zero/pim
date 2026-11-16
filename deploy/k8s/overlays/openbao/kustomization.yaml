@@ -1,0 +1,7 @@
+# Secrets from OpenBao (or HashiCorp Vault: the API is the same) through External Secrets Operator. Pim reads ordinary Kubernetes Secrets; the operator writes them
+# from the manager, so no secret is ever in this repository and the envelope key ring can be rotated in OpenBao.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - external-secrets.yaml

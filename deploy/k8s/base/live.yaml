@@ -1,0 +1,98 @@
+# Realtime WebSockets: fans commit events out to browsers, with slow-client coalescing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pim-live
+  labels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: live, pim.dev/tier: control }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: live }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: live, pim.dev/tier: control }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      serviceAccountName: pim
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: live }
+      containers:
+        - name: live
+          image: registry.example.test/pim:2.0.0
+          args: ["live"]
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: metrics, containerPort: 9464 }
+          envFrom:
+            - configMapRef: { name: pim-config }
+          env:
+            - { name: PIM_ROLE, value: live }
+            - { name: PIM_HTTP_PORT, value: "8080" }
+            - { name: PIM_DATABASE_URL, valueFrom: { secretKeyRef: { name: pim-db, key: runtime-url } } }
+            - { name: PIM_OBJECTS_ENDPOINT, valueFrom: { secretKeyRef: { name: pim-objects, key: endpoint } } }
+            - { name: PIM_OBJECTS_BUCKET, valueFrom: { secretKeyRef: { name: pim-objects, key: bucket } } }
+            - { name: PIM_OBJECTS_ACCESS_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: access-key } } }
+            - { name: PIM_OBJECTS_SECRET_KEY, valueFrom: { secretKeyRef: { name: pim-objects, key: secret-key } } }
+            - { name: PIM_INGRESS_SECRET, valueFrom: { secretKeyRef: { name: pim-ingress, key: secret } } }
+            # Envelope keys are mounted as files, one per key id, and read from here: they are never environment variables and never in a ConfigMap.
+            - { name: PIM_KEK_DIR, value: /run/secrets/pim-kek }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 3, failureThreshold: 40 }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10, failureThreshold: 6 }
+          volumeMounts:
+            - { name: kek, mountPath: /run/secrets/pim-kek, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: kek
+          secret: { secretName: pim-kek, defaultMode: 0400 }
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pim-live
+  labels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: live }
+spec:
+  selector: { app.kubernetes.io/name: pim, app.kubernetes.io/component: live }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pim-live
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: pim, app.kubernetes.io/component: live }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pim-live
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: pim-live }
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 65 } }
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 300, policies: [{ type: Pods, value: 1, periodSeconds: 60 }] }

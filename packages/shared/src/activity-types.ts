@@ -27,6 +27,7 @@ export type Activity = {
 	readonly lastActivityAt: number;
 	readonly current: readonly { id?: string; name: string; summary: string; startedAt: number; elapsedMs: number; timeoutMs: number | null }[];
 	readonly steps: readonly TurnStep[];
-	readonly stalls: readonly { key: string; reason: string; since: number }[];
+	/** `actionable: false` marks a stall shown for visibility only, which never wakes a parent: a quiet command still inside its own declared timeout. */
+	readonly stalls: readonly { key: string; reason: string; since: number; actionable?: false }[];
 };
 

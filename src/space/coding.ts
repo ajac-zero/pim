@@ -2,7 +2,7 @@
  * Pim's side of its coding threads (src/coding/): what a thread asks of the space over RPC, such as its model provider and the ChatGPT token,
  * waking the chat that started one, asking to approve a push, noticing a stall, and the vault of the harnesses' logins.
  */
-import { ActivityWatch, type Activity } from "../activity";
+import { ActivityWatch, progressOf, type Activity } from "../activity";
 import type { Models } from "@earendil-works/pi-ai/models";
 import type { PiModel } from "agents/harness/pi";
 import { digestHex } from "../auth/store";
@@ -118,6 +118,8 @@ export class SpaceCoding {
 	 * whether it woke.
 	 */
 	async codingTurnEnded(chat: string, text: string, key: string, agent?: string): Promise<boolean> {
+		const ended = /^coding:([^:]+):/.exec(key);
+		if (ended) this.host.activityWatch.clear(`coding:${ended[1]}`);
 		const named = this.host.store.sessionOf(chat);
 		// A thread recorded under an agent's own conversation in a room belongs to the room's chat.
 		const session = named === undefined ? undefined : (this.host.rooms.of(named)?.room ?? named);
@@ -215,16 +217,18 @@ export class SpaceCoding {
 	}
 
 	async #notifyStalls(source: string, activity: Activity, chat: string, agent?: string): Promise<void> {
-		for (const stall of activity.stalls) {
-			const key = `stall:${source}:${stall.key}`;
-			if (!this.host.activityWatch.claim(key, Date.now())) continue;
-			this.host.note("activity_stalled", { source, reason: stall.reason, since: stall.since });
-			try {
-				await this.host.codingTurnEnded(chat, `[Coding thread ${source}] Stalled: ${stall.reason}. Last activity: ${new Date(activity.lastActivityAt).toISOString()}. ${activity.current.map((tool) => `${tool.name}: ${tool.summary} (${Math.floor(tool.elapsedMs / 1000)} s)`).join("; ")}`, key, agent);
-			} catch (error) {
-				this.host.activityWatch.retry(key);
-				throw error;
-			}
+		const now = Date.now();
+		const { stage, previous } = this.host.activityWatch.episode(source, activity, now);
+		if (stage === 0) return;
+		const actionable = activity.stalls.filter((stall) => stall.actionable !== false);
+		this.host.note("activity_stalled", { source, stage, reasons: actionable.map((stall) => stall.reason), since: Math.min(...actionable.map((stall) => stall.since)) });
+		const key = `stall:${source}:${stage}:${progressOf(activity)}`;
+		const text = `[Coding thread ${source}] Stalled: ${stage === 2 ? "escalated — " : ""}${[...new Set(actionable.map((stall) => stall.reason))].join("; ")}. Last activity: ${new Date(activity.lastActivityAt).toISOString()}. ${activity.current.map((tool) => `${tool.name}: ${tool.summary} (${Math.floor(tool.elapsedMs / 1000)} s)`).join("; ")} Supervision notice ${stage}/2: inspect once if needed; Pim won't wake again for this quiet spell unless it escalates or the turn ends.`;
+		try {
+			await this.host.codingTurnEnded(chat, text, key, agent);
+		} catch (error) {
+			this.host.activityWatch.restore(source, previous);
+			throw error;
 		}
 	}
 }

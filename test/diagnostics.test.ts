@@ -1,15 +1,16 @@
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { Message } from "@earendil-works/pi-ai";
 import { getAgentByName } from "agents";
 import { env, runInDurableObject } from "cloudflare:test";
 import { exports } from "cloudflare:workers";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Activity } from "../src/activity";
-import { activityOf } from "../src/activity";
+import { activityOf, ActivityWatch, ESCALATED_STALL_MS } from "../src/activity";
 import { codingScheduler } from "../src/coding/scheduler-do";
 import { EVENT_KEEP, scrub } from "../src/diagnostics";
 import type { Pim } from "../src/pim";
 import type { Approval } from "../src/store";
-import { api, apiUrl, messagesOf, OWNER, post, ROOT, say, settled, systemPrompt, toolUse } from "./helpers";
+import { api, apiUrl, lastUserText, messagesOf, OWNER, post, ROOT, say, settled, systemPrompt, toolUse } from "./helpers";
 import { faux } from "./worker";
 
 const TOOLS = ["pim_diagnostics", "pim_health"];
@@ -453,6 +454,30 @@ describe("stall notices", () => {
 		expect([await told(other.chat), await told(ROOT)]).toEqual([0, 0]);
 	});
 
+	it("wakes the parent at most twice for one quiet spell, the second time saying it escalated, and neither forces a reply", async () => {
+		const parent = await agentChat();
+		const id = await thread({ type: "agent", ...parent });
+		const noticed: string[] = [];
+		const note = (context: { messages: Message[] }) => {
+			noticed.push(lastUserText(context.messages));
+			return fauxAssistantMessage("Nothing for the person to act on.");
+		};
+		faux.setResponses([note]);
+		await stalled(id, "tool:c:1000");
+		await stalled(id, "tool:c:1000");
+		await settled(parent.chat);
+		faux.setResponses([note]);
+		const hard = { ...quiet("tool:c"), stalls: [{ key: "tool:c", reason: "past declared timeout", since: 1_000 }] };
+		await inPim((pim) => pim.codingStalled(id, hard));
+		await inPim((pim) => pim.codingStalled(id, hard));
+		await settled(parent.chat);
+		expect(await told(parent.chat)).toBe(2);
+		expect(noticed[0]).toMatch(/^\[Coding thread coding:T-[^\]]+\] Stalled: no output for five minutes\./);
+		expect(noticed[0]).toContain("Supervision notice 1/2");
+		expect(noticed[1]).toMatch(/\] Stalled: escalated — past declared timeout\./);
+		expect(noticed[1]).toContain("Supervision notice 2/2");
+	});
+
 	it("drops a stall of a thread the person started, one that is no longer running, and one whose parent chat is gone", async () => {
 		const parent = await agentChat();
 		const gone = await agentChat();
@@ -475,5 +500,73 @@ describe("stall notices", () => {
 		expect(key(0)).toEqual(key(0));
 		expect(key(0)).not.toEqual(key(1_000));
 		expect(key(500_000)).toEqual([]);
+	});
+});
+
+describe("evidence-based stall supervision", () => {
+	const MIN = 60_000;
+	const turnOf = (name: string, timeoutMs: number | null) => ({ startedAt: 0, steps: [{ kind: "tool", id: "c", name, summary: "make", at: 0, ms: null, timeoutMs }] }) as never;
+
+	it("does not take a status tool's poll window for a command timeout", async () => {
+		const { toolTimeout } = await import("../src/diagnostics");
+		for (const name of ["shell_command_status", "wait_session", "notion_notion-wait-session"]) expect(toolTimeout(name, { pid: 1, timeout_ms: 60_000 })).toBeNull();
+		expect(toolTimeout("shell_command", { timeout_ms: 60_000 })).toBe(60_000);
+		expect(toolTimeout("Bash", { timeout: 120_000 })).toBe(120_000);
+	});
+
+	it("shows a quiet command inside its declared timeout without making it actionable, and flags it past the timeout plus the poll grace", () => {
+		const at = (now: number, extra: { timeoutGraceMs?: number; streamsToolOutput?: boolean } = {}) => activityOf([turnOf("bash", 15 * MIN)], now, { running: true, startedAt: 0, ...extra }).stalls;
+		expect(at(6 * MIN)).toEqual([{ key: "tool:c:0", reason: "no output for five minutes", since: 0, actionable: false }]);
+		expect(at(15 * MIN + 1)[0]).toMatchObject({ reason: "past declared timeout" });
+		expect(at(15 * MIN + 1)[0]).not.toHaveProperty("actionable");
+		expect(at(15 * MIN + 34_000, { timeoutGraceMs: 35_000 })[0]?.reason).toBe("no output for five minutes");
+		expect(at(15 * MIN + 36_000, { timeoutGraceMs: 35_000 })[0]?.reason).toBe("past declared timeout");
+		// With no declared timeout the quiet command is actionable, as before.
+		expect(activityOf([turnOf("bash", null)], 6 * MIN, { running: true, startedAt: 0 }).stalls[0]).not.toHaveProperty("actionable");
+	});
+
+	it("flags no quiet command for a harness that prints nothing until a tool call ends", () => {
+		expect(activityOf([turnOf("Bash", null)], 20 * MIN, { running: true, startedAt: 0, streamsToolOutput: false }).stalls).toEqual([]);
+		// Its thread's own silence still counts.
+		expect(activityOf([turnOf("Bash", null)], 20 * MIN, { running: true, startedAt: 0, streamsToolOutput: false, coding: true }).stalls.map((stall) => stall.reason)).toEqual(["running with no transcript activity for fifteen minutes"]);
+	});
+
+	const quiet = (key: string, reason = "no output for five minutes", actionable?: false): Activity => ({ running: true, lastActivityAt: 1_000, current: [], steps: [], stalls: [{ key, reason, since: 1_000, ...(actionable === false ? { actionable } : {}) }] });
+
+	it("wakes once for an unbroken quiet spell however often or in whatever form it is seen, and once more when it escalates", async () => {
+		await inPim((pim) => {
+			const watch = new ActivityWatch((pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql);
+			const stage = (activity: Activity, now: number, source = "coding:e") => watch.episode(source, activity, now).stage;
+			const hang = (now: number) => stage(quiet("tool:c:1000"), now);
+			expect(hang(1_000 + 5 * MIN)).toBe(1);
+			// Twenty heartbeats later, and the same silence joined by the thread's own fifteen-minute stall, are the same spell.
+			for (let tick = 1; tick <= 20; tick++) expect(hang(1_000 + 5 * MIN + tick * 30_000)).toBe(0);
+			expect(stage(quiet("transcript:1000", "running with no transcript activity for fifteen minutes"), 1_000 + 15 * MIN)).toBe(0);
+			// Escalates once the silence reaches the threshold, then never again for this spell.
+			expect(hang(1_000 + ESCALATED_STALL_MS - 1)).toBe(0);
+			expect(hang(1_000 + ESCALATED_STALL_MS)).toBe(2);
+			for (const minutes of [46, 60, 90, 300]) expect(hang(1_000 + minutes * MIN)).toBe(0);
+			// Progress, then quiet again, is a new spell with its own first wake.
+			expect(stage(quiet("tool:c:9000"), 9_000 + 5 * MIN)).toBe(1);
+			// A stall that is only shown, never actionable, wakes nobody.
+			expect(stage(quiet("tool:d:9500", "no output for five minutes", false), 9_500 + 6 * MIN, "coding:other")).toBe(0);
+			// A quiet stall that becomes a command past its timeout escalates at once; one spell, two wakes at most.
+			expect(stage(quiet("tool:c:20000"), 20_000 + 5 * MIN, "coding:hard")).toBe(1);
+			expect(stage(quiet("tool:c", "past declared timeout"), 20_000 + 16 * MIN, "coding:hard")).toBe(2);
+			expect(stage(quiet("tool:c", "past declared timeout"), 20_000 + 17 * MIN, "coding:hard")).toBe(0);
+			// A turn's end clears the spell.
+			watch.clear("coding:hard");
+			expect(stage(quiet("tool:c", "past declared timeout"), 20_000 + 18 * MIN, "coding:hard")).toBe(1);
+		});
+	});
+
+	it("takes the real progress of a thread, not the clock, as the start of a spell", async () => {
+		await inPim((pim) => {
+			const watch = new ActivityWatch((pim as unknown as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql);
+			const hung = (lastActivityAt: number): Activity => ({ ...quiet(`transcript:${lastActivityAt}`, "running with no transcript activity for fifteen minutes"), lastActivityAt });
+			expect(watch.episode("coding:p", hung(5_000), 5_000 + 16 * MIN).stage).toBe(1);
+			expect(watch.episode("coding:p", hung(5_000), 5_000 + 17 * MIN).stage).toBe(0);
+			expect(watch.episode("coding:p", hung(7_000_000), 7_000_000 + 16 * MIN).stage).toBe(1);
+		});
 	});
 });

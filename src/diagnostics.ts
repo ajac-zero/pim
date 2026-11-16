@@ -77,6 +77,8 @@ export function toolSummary(input: Record<string, unknown>): string {
 
 /** Pi uses seconds; Claude Code's Bash tool and explicit millisecond fields use milliseconds. */
 export function toolTimeout(name: string, input: Record<string, unknown>): number | null {
+	// A status or wait tool's timeout is how long one look may wait, not how long a command may run.
+	if (/(?:^|[_-])(?:status|wait)(?:[_-]|$)|wait_session$/i.test(name)) return null;
 	const ms = input.timeoutMs ?? input.timeout_ms ?? (typeof input.timeout === "number" ? input.timeout * (name === "Bash" ? 1 : 1000) : null);
 	return typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : null;
 }

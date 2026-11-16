@@ -428,6 +428,12 @@ export class CodingThreadDO extends DurableObject<Env> {
 		return ORB_SYNC_TTL_MS;
 	}
 
+	/** Tells the space of the thread's stalls, which wakes the chat of the agent that started it. */
+	protected async stalled(activity: Activity): Promise<void> {
+		const thread = this.store.required();
+		await (await getAgentByName(this.env.Pim, thread.space)).codingStalled(thread.threadId, activity);
+	}
+
 	/** How often a turn on an agent-hosted thread is polled: what its client says it is doing. */
 	protected orbPollMs(): number {
 		return ORB_POLL_MS;
@@ -781,11 +787,19 @@ export class CodingThreadDO extends DurableObject<Env> {
 		// Bounded, as a job must be: work still going after this goes on outside it.
 		await this.#failIfStuck();
 		await this.#keepSessionAlive();
+		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
+		// After the advance, so what it mirrored or ended is already known: a tool call that finished remotely on this very poll is not a stall.
 		if (this.store.thread()?.state === "running") {
 			const activity = await this.activity();
-			if (activity.stalls.length) await (await getAgentByName(this.env.Pim, this.store.required().space)).codingStalled(this.store.required().threadId, activity);
+			if (activity.stalls.length) {
+				try {
+					await this.stalled(activity);
+				} catch (error) {
+					// Pim's own object is overloaded just now: the next job looks again, and the notice is not yet claimed.
+					if (!isTransientDoOverload(error)) throw error;
+				}
+			}
 		}
-		await Promise.race([this.#advance(), new Promise((resolve) => setTimeout(resolve, ADVANCE_WAIT_MS))]);
 		const thread = this.store.thread();
 		if (thread?.providerKind !== "agent-hosted" && thread?.currentOperation && Date.now() - this.#autosavedAt >= this.autosaveMs()) void this.#autosave();
 		// A queued thread whose backend reports its health checks it again each time, so a queue held for low disk opens once there is room.
@@ -1140,6 +1154,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 		const now = this.now();
 		const turns = turnsOf((await this.harness.messages()).flatMap((entry) => entry.model ?? []), new Map(), now, thread.state === "running");
 		return activityOf(turns, now, { running: thread.state === "running", startedAt: turns.at(-1)?.startedAt ?? thread.updatedAt, lastOutputAt: this.#activityWatch.lastOutput("thread"), coding: true,
+			timeoutGraceMs: thread.providerKind === "agent-hosted" ? this.orbPollMs() + 5_000 : 0, streamsToolOutput: !cliHarness(thread.harness) && thread.providerKind !== "agent-hosted",
 			outputByCall: cliHarness(thread.harness) ? undefined : Object.fromEntries((turns.at(-1)?.steps ?? []).flatMap((step) => step.kind === "tool" ? [[step.id, this.#activityWatch.lastOutput(step.id)]] : [])), });
 	}
 
@@ -2703,6 +2718,8 @@ export class CodingThreadDO extends DurableObject<Env> {
 		try {
 			await this.#mirrorOrb(client, orb);
 			const status = await client.state(orb.threadId);
+			// Only the agent's own event time is progress: that its cloud answered a poll says nothing about the turn.
+			if (status.lastEventAt !== null && status.lastEventAt > this.#activityWatch.lastOutput("thread")) this.#activityWatch.output("thread", Math.min(this.now(), status.lastEventAt));
 			this.#overload = null;
 			this.store.update(status.state === "awaiting_approval" ? { stateReason: "needs_attention", stateDetail: "The agent needs attention; open its remote thread to review its approval" } : { stateReason: null, stateDetail: null });
 			if (status.state === "idle") {
@@ -2784,6 +2801,7 @@ export class CodingThreadDO extends DurableObject<Env> {
 			this.store.update({ orbLastMessage: message.id });
 		}
 		if (after === before) return false;
+		if (read.length > 0) this.#activityWatch.output("thread", Math.min(this.now(), Math.max(...read.map((message) => message.at))));
 		this.store.update({ orbLastMessage: after });
 		return true;
 	}

@@ -1,3 +1,4 @@
+import type { Activity } from "../src/activity";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import type { HarnessSettings, ModelRef } from "@earendil-works/pi-durable";
@@ -397,6 +398,9 @@ export const codingTimings = { ...DEFAULT_CODING_TIMINGS };
 /** The coding threads' clock in tests: real time until a test sets it, as the stuck timeout needs (test/coding-thread-do.test.ts). */
 export const codingThreadClock: { now: number | null } = { now: null };
 
+/** The stalls coding threads reported to their space, in place of waking a parent (test/coding-orb-thread.test.ts). */
+export const codingStalls: Activity[] = [];
+
 export class CodingThreadDO extends RealCodingThreadDO {
 	constructor(ctx: DurableObjectState, env: Env) {
 		// With the containers stood in, the object answers as one whose Worker has the Cloudflare Containers bindings.
@@ -414,6 +418,10 @@ export class CodingThreadDO extends RealCodingThreadDO {
 
 	protected override now(): number {
 		return codingThreadClock.now ?? super.now();
+	}
+
+	protected override async stalled(activity: Activity): Promise<void> {
+		codingStalls.push(activity);
 	}
 
 	protected override workspaceProviders(): WorkspaceProviderRegistry {

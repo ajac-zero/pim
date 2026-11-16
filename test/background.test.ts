@@ -332,6 +332,9 @@ describe("sending to the person", () => {
 		faux.setResponses([fauxAssistantMessage("Nothing for the person to act on.")]);
 		const notice = await post(`/sessions/${ROOT}/messages`, { content: "[Coding thread fix-login] Stalled: no output for 10 min. Last activity: 2026-01-01T00:00:00.000Z. shell: npm test (600 s)", wait: true });
 		expect(notice.body).toMatchObject({ status: "done", replies: [] });
+		faux.setResponses([fauxAssistantMessage("Nothing for the person to act on.")]);
+		const escalated = await post(`/sessions/${ROOT}/messages`, { content: "[Coding thread coding:T-1] Stalled: escalated — past declared timeout. Last activity: 2026-01-01T00:00:00.000Z. shell: npm test (3600 s) Supervision notice 2/2: inspect once if needed.", wait: true });
+		expect(escalated.body).toMatchObject({ status: "done", replies: [] });
 		faux.setResponses([
 			fauxAssistantMessage("Private draft."),
 			(context) => {

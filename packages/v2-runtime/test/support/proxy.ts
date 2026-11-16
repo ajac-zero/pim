@@ -50,6 +50,8 @@ export class FaultProxy {
 				}
 				return;
 			}
+			// The transaction that wrote a receipt ends here; the next one on this connection is not the pi commit.
+			if (/^Q.{4}(COMMIT|ROLLBACK)\0/s.test(text)) sawReceipt = false;
 			upstream.write(chunk);
 		});
 		upstream.on("data", (chunk) => client.write(chunk));

@@ -13,6 +13,7 @@ import pg from "pg";
 import { ModelAdmission, admitModels, type AdmissionOptions } from "./admission.ts";
 import { type Db } from "./db.ts";
 import { PartitionDirectory } from "./directory.ts";
+import { ExternalOperations } from "./external.ts";
 import { assertDurability, type DurabilityProfile } from "./durability.ts";
 import { type AmbiguousCommit, OwnershipLost } from "./errors.ts";
 import { type Lease, Steward, type StewardOptions } from "./ownership.ts";
@@ -21,9 +22,9 @@ import { type Command, type DurableSignal, PartitionInbox } from "./signals.ts";
 import { PgPiStorage, reconcileAmbiguousCommit, type AmbiguousOutcome } from "./storage.ts";
 
 export type PartitionContext = {
-	readonly tenantId: string;
+	readonly ownerId: string;
 	readonly partitionId: string;
-	/** True only for the tenant's home partition, the one that holds conversation 1. */
+	/** True only for the owner's home partition, the one that holds conversation 1. */
 	readonly home: boolean;
 	readonly lease: Lease;
 };
@@ -32,26 +33,27 @@ export type CommandHandler = (resident: ResidentPartition, command: Command, con
 
 /** Observability: what the Runner did with a partition. */
 export type RunnerEvent =
-	| { type: "activated"; tenantId: string; partitionId: string; epoch: number }
-	| { type: "released"; tenantId: string; partitionId: string; nextDueAt: number | undefined }
-	| { type: "evicted"; tenantId: string; partitionId: string; reason: "idle" | "capacity" }
-	| { type: "fenced"; tenantId: string; partitionId: string; epoch: number; reason: string }
-	| { type: "ambiguous"; tenantId: string; partitionId: string; batchId: string }
-	| { type: "reconciled"; tenantId: string; partitionId: string; batchId: string; outcome: AmbiguousOutcome }
-	| { type: "signal"; tenantId: string; partitionId: string; key: string; result: "resumed" | "requested" | "terminal" | "settled" }
-	| { type: "command"; tenantId: string; partitionId: string; requestId: string; kind: string }
-	| { type: "drained"; tenantId: string; partitionId: string; handedOff: boolean };
+	| { type: "activated"; ownerId: string; partitionId: string; epoch: bigint }
+	| { type: "released"; ownerId: string; partitionId: string; nextDueAt: number | undefined }
+	| { type: "evicted"; ownerId: string; partitionId: string; reason: "idle" | "capacity" }
+	| { type: "fenced"; ownerId: string; partitionId: string; epoch: bigint; reason: string }
+	| { type: "ambiguous"; ownerId: string; partitionId: string; batchId: string }
+	| { type: "reconciled"; ownerId: string; partitionId: string; batchId: string; outcome: AmbiguousOutcome }
+	| { type: "signal"; ownerId: string; partitionId: string; key: string; result: "resumed" | "requested" | "terminal" | "settled" }
+	| { type: "operation"; ownerId: string; partitionId: string; operationId: string; state: string }
+	| { type: "command"; ownerId: string; partitionId: string; commandId: string; kind: string }
+	| { type: "drained"; ownerId: string; partitionId: string; handedOff: boolean };
 
 export type RunnerOptions = {
 	readonly db: Db;
-	readonly steward?: Partial<Omit<StewardOptions, "db">> & { ownerId: string };
+	readonly steward?: Partial<Omit<StewardOptions, "db">> & { holderId: string };
 	/** pi-durable options for one partition. `models` is wrapped by the Runner's admission; the registry must be the same for every partition. */
 	readonly harnessOptions: (partition: PartitionContext) => HarnessOptions;
 	/** The agent and init for the home partition's root conversation; called only for the home partition. */
-	readonly homeRoot?: (tenantId: string) => Parameters<Harness["root"]>[1];
+	readonly homeRoot?: (ownerId: string) => Parameters<Harness["root"]>[1];
 	/** The agent a conversation made by the built-in `create_conversation` command starts with. */
-	readonly chatAgent?: (tenantId: string) => NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]>;
-	/** Handlers for command kinds besides the built-in `submit` and `create_conversation`. */
+	readonly chatAgent?: (ownerId: string) => NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]>;
+	/** Handlers that replace or add to the built-in ones for the contract's command kinds. */
 	readonly commands?: Readonly<Record<string, CommandHandler>>;
 	readonly admission?: AdmissionOptions;
 	/** The most Harnesses resident in this process; default 64. Quiet ones are evicted least-recently-used first. */
@@ -62,8 +64,8 @@ export type RunnerOptions = {
 	readonly longWaitMs?: number;
 	/** The commit durability the deployment promises; checked against the server when the Runner starts. Default `strict`. */
 	readonly durability?: DurabilityProfile;
-	/** Claim only this tenant's partitions; unset claims any (a shared Runner pool). */
-	readonly tenantFilter?: string;
+	/** Claim only this owner's partitions; unset claims any (a shared Runner pool). */
+	readonly ownerFilter?: string;
 	/** The claim and pump interval; default 500 ms. */
 	readonly pollMs?: number;
 	/** Listen for wake notifications besides polling. Polling alone is always enough; default true. */
@@ -73,10 +75,7 @@ export type RunnerOptions = {
 	readonly now?: () => number;
 };
 
-const keyOf = (tenantId: string, partitionId: string): string => `${tenantId}\u0000${partitionId}`;
-
-/** The submit command's payload: input for one conversation of the partition. */
-export type SubmitPayload = { conversationId: number; content: Extract<SubmissionDraft, { type: "input" }>["content"]; whenBusy?: "steer" | "followUp" | "reject" };
+const keyOf = (ownerId: string, partitionId: string): string => `${ownerId}\u0000${partitionId}`;
 
 /**
  * One partition loaded in this process: its fenced storage, its Harness, and the host work around them (the durable
@@ -108,8 +107,8 @@ export class ResidentPartition {
 		this.#touched = runner.clock();
 	}
 
-	get tenantId(): string {
-		return this.lease.tenantId;
+	get ownerId(): string {
+		return this.lease.ownerId;
 	}
 	get partitionId(): string {
 		return this.lease.partitionId;
@@ -138,14 +137,14 @@ export class ResidentPartition {
 	/** Open the storage under the fence, then the Harness; the root exists only on the home partition. */
 	async open(): Promise<void> {
 		const { runner, lease } = this;
-		const partition: PartitionContext = { tenantId: lease.tenantId, partitionId: lease.partitionId, home: this.home, lease };
+		const partition: PartitionContext = { ownerId: lease.ownerId, partitionId: lease.partitionId, home: this.home, lease };
 		// The fence is checked in PostgreSQL before Harness.open reads live tasks, because open rewrites running tasks to pending.
 		this.#storage = await PgPiStorage.openForOwner({ db: runner.db, fence: lease, onFault: (error) => this.#fault(error) });
 		const options = runner.harnessOptions(partition);
-		const models = runner.admission === undefined ? options.models : admitModels(options.models, { admission: runner.admission, tenantId: lease.tenantId, signal: lease.signal });
+		const models = runner.admission === undefined ? options.models : admitModels(options.models, { admission: runner.admission, ownerId: lease.ownerId, signal: lease.signal });
 		const raw = await Harness.open(this.#storage, { ...options, models }, this.context);
 		this.#harness = this.home ? raw : forbidRoot(raw, lease.partitionId);
-		if (this.home) await raw.root(this.context, runner.homeRoot?.(lease.tenantId));
+		if (this.home) await raw.root(this.context, runner.homeRoot?.(lease.ownerId));
 		this.#unsubscribe.push(
 			raw.subscribeCommits((publication) => {
 				this.#dirty = true;
@@ -158,6 +157,8 @@ export class ResidentPartition {
 			}),
 			lease.onLost((reason) => void this.dispose(reason)),
 		);
+		// Whatever the previous owner left in flight outside the database is reconciled, never repeated.
+		for (const operation of await runner.operations.markInterrupted(lease.ownerId, lease.partitionId)) runner.emit({ type: "operation", ownerId: lease.ownerId, partitionId: lease.partitionId, operationId: operation.operationId, state: operation.state });
 		await this.applySignals();
 		this.#harness.resume();
 		this.#ready = true;
@@ -187,8 +188,8 @@ export class ResidentPartition {
 
 	/** Re-apply every unsettled decision, then run pending commands. Returns whether anything was pending. */
 	async #deliver(): Promise<boolean> {
-		const signals = await this.runner.inbox.pendingSignals(this.tenantId, this.partitionId);
-		const commands = await this.runner.inbox.pendingCommands(this.tenantId, this.partitionId);
+		const signals = await this.runner.inbox.pendingSignals(this.ownerId, this.partitionId);
+		const commands = await this.runner.inbox.pendingCommands(this.ownerId, this.partitionId);
 		if (signals.length === 0 && commands.length === 0) return false;
 		this.#touched = this.runner.clock();
 		this.#quietSince = undefined;
@@ -201,7 +202,7 @@ export class ResidentPartition {
 	}
 
 	async #runCommand(command: Command): Promise<void> {
-		const handler = command.kind === "submit" ? submitCommand : command.kind === "create_conversation" ? createConversationCommand : this.runner.commands[command.kind];
+		const handler = command.kind === "create_conversation" ? createConversationCommand : (this.runner.commands[command.kind] ?? BUILTIN_COMMANDS[command.kind]);
 		try {
 			if (handler === undefined) throw new CommandRejected(`No handler for command kind ${command.kind}`);
 			await handler(this, command, this.context);
@@ -210,8 +211,8 @@ export class ResidentPartition {
 			this.runner.report(error);
 		}
 		// Done only after pi has durably admitted it; a crash before this redelivers it, and its requestId deduplicates.
-		await this.runner.inbox.completeCommand(this.tenantId, this.partitionId, command.commandId);
-		this.runner.emit({ type: "command", tenantId: this.tenantId, partitionId: this.partitionId, requestId: command.requestId, kind: command.kind });
+		await this.runner.inbox.completeCommand(this.ownerId, this.partitionId, command.seq);
+		this.runner.emit({ type: "command", ownerId: this.ownerId, partitionId: this.partitionId, commandId: command.commandId, kind: command.kind });
 	}
 
 	/**
@@ -220,15 +221,15 @@ export class ResidentPartition {
 	 * every open until its task has been seen to leave the waiting state.
 	 */
 	async applySignals(pending?: DurableSignal[]): Promise<void> {
-		const signals = pending ?? (await this.runner.inbox.pendingSignals(this.tenantId, this.partitionId));
+		const signals = pending ?? (await this.runner.inbox.pendingSignals(this.ownerId, this.partitionId));
 		for (const signal of signals) {
 			if (this.#awaiting.has(signal.taskId)) continue;
 			const result = await this.#harness.resumeTask(signal.taskId as TaskId, this.context);
-			this.runner.emit({ type: "signal", tenantId: this.tenantId, partitionId: this.partitionId, key: signal.key, result });
+			this.runner.emit({ type: "signal", ownerId: this.ownerId, partitionId: this.partitionId, key: signal.key, result });
 			if (result === "requested") {
 				this.#awaiting.set(signal.taskId, { signal, seenWaiting: false });
 			} else {
-				await this.runner.inbox.settleSignal(this.tenantId, this.partitionId, signal.signalId);
+				await this.runner.inbox.settleSignal(this.ownerId, this.partitionId, signal.signalId);
 			}
 		}
 	}
@@ -241,8 +242,8 @@ export class ResidentPartition {
 		if (!done) return;
 		this.#awaiting.delete(taskId);
 		void this.runner.inbox
-			.settleSignal(this.tenantId, this.partitionId, awaiting.signal.signalId)
-			.then(() => this.runner.emit({ type: "signal", tenantId: this.tenantId, partitionId: this.partitionId, key: awaiting.signal.key, result: "settled" }))
+			.settleSignal(this.ownerId, this.partitionId, awaiting.signal.signalId)
+			.then(() => this.runner.emit({ type: "signal", ownerId: this.ownerId, partitionId: this.partitionId, key: awaiting.signal.key, result: "settled" }))
 			.catch((error: unknown) => this.runner.report(error));
 	}
 
@@ -262,7 +263,7 @@ export class ResidentPartition {
 		if (!this.#dirty && now - this.#lastAssessAt < this.runner.assessEveryMs) return;
 		this.#dirty = false;
 		this.#lastAssessAt = now;
-		const seen = await this.runner.inbox.activationSeq(this.tenantId, this.partitionId);
+		const seen = await this.runner.inbox.activationSeq(this.ownerId, this.partitionId);
 		const assessment = await this.assess();
 		if (assessment.needsOwner) {
 			this.#quietSince = undefined;
@@ -282,8 +283,8 @@ export class ResidentPartition {
 			this.#dirty = true;
 			return false;
 		}
-		this.runner.emit({ type: "released", tenantId: this.tenantId, partitionId: this.partitionId, nextDueAt });
-		this.runner.emit({ type: "evicted", tenantId: this.tenantId, partitionId: this.partitionId, reason });
+		this.runner.emit({ type: "released", ownerId: this.ownerId, partitionId: this.partitionId, nextDueAt });
+		this.runner.emit({ type: "evicted", ownerId: this.ownerId, partitionId: this.partitionId, reason });
 		await this.dispose("released");
 		return true;
 	}
@@ -296,7 +297,7 @@ export class ResidentPartition {
 		}
 		if (this.#faulted !== undefined) return;
 		this.#faulted = error;
-		this.runner.emit({ type: "ambiguous", tenantId: this.tenantId, partitionId: this.partitionId, batchId: error.batchId });
+		this.runner.emit({ type: "ambiguous", ownerId: this.ownerId, partitionId: this.partitionId, batchId: error.batchId });
 		void this.runner.recover(this, error).catch((cause: unknown) => this.runner.report(cause));
 	}
 
@@ -310,7 +311,7 @@ export class ResidentPartition {
 		this.#disposed = true;
 		for (const stop of this.#unsubscribe.splice(0)) stop();
 		if (reason !== "released" && reason !== "recovered" && reason !== "stopped" && reason !== "drain deadline") {
-			this.runner.emit({ type: "fenced", tenantId: this.tenantId, partitionId: this.partitionId, epoch: this.lease.epoch, reason });
+			this.runner.emit({ type: "fenced", ownerId: this.ownerId, partitionId: this.partitionId, epoch: this.lease.epoch, reason });
 		}
 		this.runner.forget(this);
 		try {
@@ -334,32 +335,73 @@ export class CommandRejected extends Error {
 	}
 }
 
-const submitCommand: CommandHandler = async (resident, command, context) => {
-	const payload = command.payload as SubmitPayload;
-	const conversation: Conversation | undefined = await resident.harness.conversation(payload.conversationId as ConversationId, context);
-	if (conversation === undefined) throw new CommandRejected(`Conversation ${payload.conversationId} is not in partition ${resident.partitionId}`);
-	await conversation.submit({ type: "input", content: payload.content, requestId: command.requestId, ...(payload.whenBusy === undefined ? {} : { whenBusy: payload.whenBusy }) }, context);
+type Input = Extract<SubmissionDraft, { type: "input" }>["content"];
+
+const conversationOf = async (resident: ResidentPartition, command: Command, context: Context): Promise<Conversation> => {
+	if (command.conversationId === undefined) throw new CommandRejected(`Command ${command.commandId} names no conversation`);
+	const conversation = await resident.harness.conversation(command.conversationId as ConversationId, context);
+	if (conversation === undefined) throw new CommandRejected(`Conversation ${command.conversationId} is not in partition ${resident.partitionId}`);
+	return conversation;
 };
 
-/** The create_conversation command's payload: a new chat in this partition, optionally named by a public UUID and started with a first input. */
-export type CreateConversationPayload = { publicChatId?: string; firstInput?: SubmitPayload["content"] };
+/** user_message, trigger_fire and coding_wake each put input in front of a conversation; the contract's `piRequestId` deduplicates a redelivery. */
+const inputCommand: CommandHandler = async (resident, command, context) => {
+	const conversation = await conversationOf(resident, command, context);
+	const content = (command.payload.content ?? command.payload.text) as Input | undefined;
+	if (content === undefined) throw new CommandRejected(`Command ${command.commandId} has no content`);
+	const whenBusy = command.payload.whenBusy as "steer" | "followUp" | "reject" | undefined;
+	await conversation.submit({ type: "input", content, requestId: command.piRequestId, ...(whenBusy === undefined ? {} : { whenBusy }) }, context);
+};
+
+/** approval_decision and task_wake become durable signals: the decision is in PostgreSQL before anything acts on it, and is applied now and at every later activation. */
+const signalCommand: CommandHandler = async (resident, command, context) => {
+	const taskId = Number(command.payload.taskId);
+	if (!Number.isSafeInteger(taskId)) throw new CommandRejected(`Command ${command.commandId} names no task`);
+	await resident.runner.inbox.recordSignal(resident.ownerId, resident.partitionId, {
+		key: `${command.kind}:${command.commandId}`,
+		kind: command.kind === "approval_decision" ? "approval" : "resume",
+		taskId,
+		...(typeof command.payload.callId === "string" ? { callId: command.payload.callId } : {}),
+		payload: command.payload,
+	});
+	await resident.applySignals();
+	void context;
+};
+
+const abortCommand: CommandHandler = async (resident, command, context) => {
+	await (await conversationOf(resident, command, context)).abort(context);
+};
+
+const handoffCommand: CommandHandler = async (resident, command, context) => {
+	const handoff = command.payload.handoff;
+	await (await conversationOf(resident, command, context)).reset(typeof handoff === "string" ? handoff : undefined, context);
+};
+
+/** What each contract command kind does in the owning partition. */
+const BUILTIN_COMMANDS: Readonly<Record<string, CommandHandler>> = {
+	user_message: inputCommand,
+	trigger_fire: inputCommand,
+	coding_wake: inputCommand,
+	approval_decision: signalCommand,
+	task_wake: signalCommand,
+	abort: abortCommand,
+	compaction_handoff: handoffCommand,
+};
 
 /**
  * Creates the first conversation of a new family partition. The commit that creates it also writes its directory row, so
  * routing and the conversation appear together; a redelivered command finds the conversation already there.
  */
 const createConversationCommand: CommandHandler = async (resident, command, context) => {
-	const payload = command.payload as CreateConversationPayload;
+	if (command.publicChatId !== undefined) resident.storage.reservePublicChatId(command.publicChatId);
 	const existing = await resident.storage.scanConversations({}, 1, undefined, context);
 	const conversation =
 		existing.items[0] !== undefined
 			? await resident.harness.conversation(existing.items[0].id, context)
-			: await resident.harness.createConversation({ ownership: { kind: "ownerless" }, ...(resident.runner.chatAgent === undefined ? {} : { agent: resident.runner.chatAgent(resident.tenantId) }) }, context);
+			: await resident.harness.createConversation({ ownership: { kind: "ownerless" }, ...(resident.runner.chatAgent === undefined ? {} : { agent: resident.runner.chatAgent(resident.ownerId) }) }, context);
 	if (conversation === undefined) throw new CommandRejected("The new conversation cannot be found");
-	if (payload.publicChatId !== undefined) await resident.runner.directory.registerPublicChat(resident.tenantId, payload.publicChatId, conversation.id).catch(() => {});
-	if (payload.firstInput !== undefined) {
-		await conversation.submit({ type: "input", content: payload.firstInput, requestId: `${command.requestId}:first` }, context);
-	}
+	const first = command.payload.firstInput as Input | null | undefined;
+	if (first !== undefined && first !== null) await conversation.submit({ type: "input", content: first, requestId: `${command.commandId}:first` }, context);
 };
 
 /** The Harness for a non-home partition, with `root()` removed: calling it would create a second conversation 1. */
@@ -387,6 +429,7 @@ export class Runner {
 	readonly steward: Steward;
 	readonly inbox: PartitionInbox;
 	readonly directory: PartitionDirectory;
+	readonly operations: ExternalOperations;
 	readonly admission: ModelAdmission | undefined;
 	readonly commands: Readonly<Record<string, CommandHandler>>;
 	readonly longWaitMs: number;
@@ -406,9 +449,10 @@ export class Runner {
 	constructor(options: RunnerOptions) {
 		this.#options = options;
 		this.db = options.db;
-		this.steward = new Steward({ ownerId: options.steward?.ownerId ?? `runner-${process.pid}-${Math.random().toString(36).slice(2, 8)}`, ...options.steward, db: options.db });
+		this.steward = new Steward({ holderId: options.steward?.holderId ?? `runner-${process.pid}-${Math.random().toString(36).slice(2, 8)}`, ...options.steward, db: options.db });
 		this.inbox = new PartitionInbox(options.db);
 		this.directory = new PartitionDirectory(options.db);
+		this.operations = new ExternalOperations(options.db);
 		this.chatAgent = options.chatAgent;
 		this.admission = options.admission === undefined ? undefined : new ModelAdmission(options.admission);
 		this.commands = options.commands ?? {};
@@ -434,8 +478,8 @@ export class Runner {
 		return [...this.#resident.values()];
 	}
 	/** The loaded partition, once it is open; one still opening is not returned. */
-	resident(tenantId: string, partitionId: string): ResidentPartition | undefined {
-		const resident = this.#resident.get(keyOf(tenantId, partitionId));
+	resident(ownerId: string, partitionId: string): ResidentPartition | undefined {
+		const resident = this.#resident.get(keyOf(ownerId, partitionId));
 		return resident?.ready === true ? resident : undefined;
 	}
 	/** At the bound, a resident that needs no owner is released at once instead of waiting out `idleUnloadMs`, so waiting partitions get its place. */
@@ -443,18 +487,18 @@ export class Runner {
 		return this.#resident.size >= this.maxResident;
 	}
 	forget(resident: ResidentPartition): void {
-		if (this.#resident.get(keyOf(resident.tenantId, resident.partitionId)) === resident) this.#resident.delete(keyOf(resident.tenantId, resident.partitionId));
+		if (this.#resident.get(keyOf(resident.ownerId, resident.partitionId)) === resident) this.#resident.delete(keyOf(resident.ownerId, resident.partitionId));
 	}
 
 	/** Take a specific partition now (when it is free) and load it. */
-	async activate(tenantId: string, partitionId: string): Promise<ResidentPartition | undefined> {
-		const lease = await this.steward.acquire(tenantId, partitionId);
+	async activate(ownerId: string, partitionId: string): Promise<ResidentPartition | undefined> {
+		const lease = await this.steward.acquire(ownerId, partitionId);
 		return lease === undefined ? undefined : this.#load(lease);
 	}
 
 	async #load(lease: Lease): Promise<ResidentPartition> {
 		const resident = new ResidentPartition(this, lease);
-		this.#resident.set(keyOf(lease.tenantId, lease.partitionId), resident);
+		this.#resident.set(keyOf(lease.ownerId, lease.partitionId), resident);
 		try {
 			await resident.open();
 		} catch (error) {
@@ -464,7 +508,7 @@ export class Runner {
 			throw error;
 		}
 		lease.startHeartbeat();
-		this.emit({ type: "activated", tenantId: lease.tenantId, partitionId: lease.partitionId, epoch: lease.epoch });
+		this.emit({ type: "activated", ownerId: lease.ownerId, partitionId: lease.partitionId, epoch: lease.epoch });
 		return resident;
 	}
 
@@ -478,14 +522,14 @@ export class Runner {
 		let outcome: AmbiguousOutcome | undefined;
 		while (outcome === undefined && lease.isLocallyValid()) {
 			try {
-				outcome = await reconcileAmbiguousCommit(this.db, { batchId: error.batchId, backendPid: error.backendPid, tenantId: lease.tenantId, partitionId: lease.partitionId });
+				outcome = await reconcileAmbiguousCommit(this.db, { batchId: error.batchId, backendPid: error.backendPid, ownerId: lease.ownerId, partitionId: lease.partitionId });
 			} catch (cause) {
 				this.report(cause);
 				await new Promise((resolve) => setTimeout(resolve, 100));
 			}
 		}
 		if (outcome === undefined) return;
-		this.emit({ type: "reconciled", tenantId: lease.tenantId, partitionId: lease.partitionId, batchId: error.batchId, outcome });
+		this.emit({ type: "reconciled", ownerId: lease.ownerId, partitionId: lease.partitionId, batchId: error.batchId, outcome });
 		if (lease.isLocallyValid()) await this.#load(lease);
 	}
 
@@ -530,7 +574,7 @@ export class Runner {
 	async #tick(): Promise<void> {
 		try {
 			while (this.#running && !this.steward.draining && this.#resident.size < this.maxResident) {
-				const lease = await this.steward.claimNext(this.#options.tenantFilter === undefined ? {} : { tenantId: this.#options.tenantFilter });
+				const lease = await this.steward.claimNext(this.#options.ownerFilter === undefined ? {} : { ownerId: this.#options.ownerFilter });
 				if (lease === undefined) break;
 				try {
 					await this.#load(lease);
@@ -561,12 +605,12 @@ export class Runner {
 					if (!resident.disposed) await new Promise((resolve) => setTimeout(resolve, 20));
 				}
 				if (resident.disposed) {
-					this.emit({ type: "drained", tenantId: resident.tenantId, partitionId: resident.partitionId, handedOff: false });
+					this.emit({ type: "drained", ownerId: resident.ownerId, partitionId: resident.partitionId, handedOff: false });
 					return;
 				}
 				await resident.dispose("drain deadline");
 				await this.steward.handOff(resident.lease, "drain");
-				this.emit({ type: "drained", tenantId: resident.tenantId, partitionId: resident.partitionId, handedOff: true });
+				this.emit({ type: "drained", ownerId: resident.ownerId, partitionId: resident.partitionId, handedOff: true });
 			}),
 		);
 		await this.stop();

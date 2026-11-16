@@ -2,28 +2,28 @@ import type { AssistantMessageEventStream, Models } from "@earendil-works/pi-ai"
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 export type AdmissionOptions = {
-	/** Model calls in flight across every tenant of this Runner. */
+	/** Model calls in flight across every owner of this Runner. */
 	readonly globalLimit: number;
-	/** The most one tenant may hold at once, so a tenant waiting on slow or rate-limited streams cannot take every slot. */
-	readonly perTenantLimit: number;
-	/** The most one provider may hold at once across tenants; unset for no provider cap. */
+	/** The most one owner may hold at once, so a owner waiting on slow or rate-limited streams cannot take every slot. */
+	readonly perOwnerLimit: number;
+	/** The most one provider may hold at once across owners; unset for no provider cap. */
 	readonly perProviderLimit?: number;
 };
 
 export type Permit = { release(): void };
 
-type Waiter = { tenantId: string; providerId: string; grant: (permit: Permit) => void; cancel: () => void };
+type Waiter = { ownerId: string; providerId: string; grant: (permit: Permit) => void; cancel: () => void };
 
 /**
- * Admission for model calls. A call waits for a slot; slots are handed to tenants in turn, so a tenant with a deep
- * queue does not starve the others, and no tenant or provider holds more than its cap. A permit is held for the life of
+ * Admission for model calls. A call waits for a slot; slots are handed to owners in turn, so a owner with a deep
+ * queue does not starve the others, and no owner or provider holds more than its cap. A permit is held for the life of
  * the call (a stream until it ends), then released.
  */
 export class ModelAdmission {
 	readonly #options: AdmissionOptions;
 	readonly #queues = new Map<string, Waiter[]>();
 	#order: string[] = [];
-	readonly #byTenant = new Map<string, number>();
+	readonly #byOwner = new Map<string, number>();
 	readonly #byProvider = new Map<string, number>();
 	#inFlight = 0;
 
@@ -34,8 +34,8 @@ export class ModelAdmission {
 	get inFlight(): number {
 		return this.#inFlight;
 	}
-	inFlightFor(tenantId: string): number {
-		return this.#byTenant.get(tenantId) ?? 0;
+	inFlightFor(ownerId: string): number {
+		return this.#byOwner.get(ownerId) ?? 0;
 	}
 	get waiting(): number {
 		let n = 0;
@@ -44,38 +44,38 @@ export class ModelAdmission {
 	}
 
 	/** Wait for a permit. Resolves `undefined` when `signal` aborts first: the caller then proceeds without one and lets the provider report the abort. */
-	acquire(tenantId: string, providerId: string, signal?: AbortSignal): Promise<Permit | undefined> {
+	acquire(ownerId: string, providerId: string, signal?: AbortSignal): Promise<Permit | undefined> {
 		if (signal?.aborted) return Promise.resolve(undefined);
 		return new Promise((resolve) => {
 			const waiter: Waiter = {
-				tenantId,
+				ownerId,
 				providerId,
 				grant: (permit) => {
 					signal?.removeEventListener("abort", waiter.cancel);
 					resolve(permit);
 				},
 				cancel: () => {
-					const queue = this.#queues.get(tenantId);
+					const queue = this.#queues.get(ownerId);
 					const index = queue?.indexOf(waiter) ?? -1;
 					if (queue !== undefined && index >= 0) queue.splice(index, 1);
 					resolve(undefined);
 				},
 			};
 			signal?.addEventListener("abort", waiter.cancel, { once: true });
-			let queue = this.#queues.get(tenantId);
+			let queue = this.#queues.get(ownerId);
 			if (queue === undefined) {
 				queue = [];
-				this.#queues.set(tenantId, queue);
-				this.#order.push(tenantId);
+				this.#queues.set(ownerId, queue);
+				this.#order.push(ownerId);
 			}
 			queue.push(waiter);
 			this.#dispatch();
 		});
 	}
 
-	#canStart(tenantId: string, providerId: string): boolean {
+	#canStart(ownerId: string, providerId: string): boolean {
 		if (this.#inFlight >= this.#options.globalLimit) return false;
-		if ((this.#byTenant.get(tenantId) ?? 0) >= this.#options.perTenantLimit) return false;
+		if ((this.#byOwner.get(ownerId) ?? 0) >= this.#options.perOwnerLimit) return false;
 		const cap = this.#options.perProviderLimit;
 		return cap === undefined || (this.#byProvider.get(providerId) ?? 0) < cap;
 	}
@@ -84,32 +84,32 @@ export class ModelAdmission {
 		let progressed = true;
 		while (progressed && this.#inFlight < this.#options.globalLimit) {
 			progressed = false;
-			// One round over the tenants with waiters, each taking at most one slot, starting after the last tenant served.
+			// One round over the owners with waiters, each taking at most one slot, starting after the last owner served.
 			const order = this.#order;
 			for (let i = 0; i < order.length && this.#inFlight < this.#options.globalLimit; i++) {
-				const tenantId = order[i] as string;
-				const queue = this.#queues.get(tenantId);
+				const ownerId = order[i] as string;
+				const queue = this.#queues.get(ownerId);
 				const head = queue?.[0];
-				if (queue === undefined || head === undefined || !this.#canStart(tenantId, head.providerId)) continue;
+				if (queue === undefined || head === undefined || !this.#canStart(ownerId, head.providerId)) continue;
 				queue.shift();
 				this.#start(head);
-				// The served tenant goes to the back of the line.
+				// The served owner goes to the back of the line.
 				this.#order = [...order.slice(i + 1), ...order.slice(0, i + 1)];
 				progressed = true;
 				break;
 			}
 		}
-		for (const [tenantId, queue] of this.#queues) {
+		for (const [ownerId, queue] of this.#queues) {
 			if (queue.length === 0) {
-				this.#queues.delete(tenantId);
-				this.#order = this.#order.filter((id) => id !== tenantId);
+				this.#queues.delete(ownerId);
+				this.#order = this.#order.filter((id) => id !== ownerId);
 			}
 		}
 	}
 
 	#start(waiter: Waiter): void {
 		this.#inFlight++;
-		this.#byTenant.set(waiter.tenantId, (this.#byTenant.get(waiter.tenantId) ?? 0) + 1);
+		this.#byOwner.set(waiter.ownerId, (this.#byOwner.get(waiter.ownerId) ?? 0) + 1);
 		this.#byProvider.set(waiter.providerId, (this.#byProvider.get(waiter.providerId) ?? 0) + 1);
 		let released = false;
 		waiter.grant({
@@ -117,7 +117,7 @@ export class ModelAdmission {
 				if (released) return;
 				released = true;
 				this.#inFlight--;
-				this.#byTenant.set(waiter.tenantId, (this.#byTenant.get(waiter.tenantId) ?? 1) - 1);
+				this.#byOwner.set(waiter.ownerId, (this.#byOwner.get(waiter.ownerId) ?? 1) - 1);
 				this.#byProvider.set(waiter.providerId, (this.#byProvider.get(waiter.providerId) ?? 1) - 1);
 				this.#dispatch();
 			},
@@ -129,12 +129,12 @@ const STREAMS = new Set(["stream", "streamSimple", "streamDeferred"]);
 const CALLS = new Set(["complete", "completeSimple", "fetchDeferred"]);
 
 /**
- * `models` with every call going through `admission` for one tenant, and every call aborted when `signal` does: a
+ * `models` with every call going through `admission` for one owner, and every call aborted when `signal` does: a
  * Runner whose lease was lost cuts its in-flight model streams. Streams are re-emitted from the provider's own stream
  * once a permit is held; the permit is released when the stream ends.
  */
-export function admitModels<M extends Models>(models: M, options: { admission: ModelAdmission; tenantId: string; signal: AbortSignal }): M {
-	const { admission, tenantId, signal } = options;
+export function admitModels<M extends Models>(models: M, options: { admission: ModelAdmission; ownerId: string; signal: AbortSignal }): M {
+	const { admission, ownerId, signal } = options;
 	const withSignal = (callOptions: { signal?: AbortSignal } | undefined): { signal: AbortSignal } & Record<string, unknown> => ({
 		...(callOptions ?? {}),
 		signal: callOptions?.signal === undefined ? signal : AbortSignal.any([callOptions.signal, signal]),
@@ -150,7 +150,7 @@ export function admitModels<M extends Models>(models: M, options: { admission: M
 					const merged = withSignal(callOptions);
 					const outer = createAssistantMessageEventStream();
 					void (async () => {
-						const permit = await admission.acquire(tenantId, model.provider, merged.signal);
+						const permit = await admission.acquire(ownerId, model.provider, merged.signal);
 						try {
 							const inner = call(model, second, merged) as AssistantMessageEventStream;
 							for await (const event of inner) outer.push(event);
@@ -167,7 +167,7 @@ export function admitModels<M extends Models>(models: M, options: { admission: M
 			if (CALLS.has(property)) {
 				return async (model: { provider: string }, second: unknown, callOptions?: { signal?: AbortSignal }): Promise<unknown> => {
 					const merged = withSignal(callOptions);
-					const permit = await admission.acquire(tenantId, model.provider, merged.signal);
+					const permit = await admission.acquire(ownerId, model.provider, merged.signal);
 					try {
 						return await call(model, second, merged);
 					} finally {

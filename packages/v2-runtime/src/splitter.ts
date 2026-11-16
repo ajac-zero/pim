@@ -1,7 +1,7 @@
 import type { ConversationRecord, DocumentRecord, EntryRecord, SubmissionRecord, TaskRecord } from "@earendil-works/pi-durable";
 import type { JsonValue } from "@earendil-works/chord";
+import { createHash } from "node:crypto";
 import { type Db, SCHEMA } from "./db.ts";
-import { HOME_PARTITION_ID } from "./directory.ts";
 import { ident } from "./storage.ts";
 
 const S = SCHEMA;
@@ -9,7 +9,7 @@ const CHUNK = 500;
 
 type AnyTask = TaskRecord<JsonValue, JsonValue, JsonValue>;
 
-/** One tenant's single legacy pi-durable storage (a space's SQLite `pi_*` tables), read into memory. */
+/** One owner's single legacy pi-durable storage (a space's SQLite `pi_*` tables), read into memory. */
 export type LegacySpace = {
 	conversations: ConversationRecord[];
 	entries: { record: EntryRecord; commitSeq: number }[];
@@ -90,15 +90,24 @@ class UnionFind {
 	}
 }
 
-/** The partition a family gets: the home one for the component of conversation 1, otherwise named by its oldest conversation. */
-export const familyPartitionId = (oldestConversationId: number): string => (oldestConversationId === 1 ? HOME_PARTITION_ID : `fam_${oldestConversationId}`);
+/**
+ * The partition a family gets: a UUID derived from the owner and the family's oldest conversation, so importing again
+ * names the same partitions. The family of conversation 1 is the home partition.
+ */
+export function familyPartitionId(ownerId: string, oldestConversationId: number): string {
+	const bytes = createHash("sha1").update(`pim-runtime-family:${ownerId}:${oldestConversationId}`).digest().subarray(0, 16);
+	bytes[6] = (bytes[6]! & 0x0f) | 0x50; // version 5 layout
+	bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+	const hex = bytes.toString("hex");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 /**
  * Compute the conversation families of a legacy space: connected components over fork parents and owner edges. Fails
  * closed when a record names a conversation, entry or task in another component, because that would mean a family
  * cannot be a partition.
  */
-export function planFamilies(space: LegacySpace): FamilyPlan {
+export function planFamilies(space: LegacySpace, ownerId: string): FamilyPlan {
 	const uf = new UnionFind();
 	const conversations = new Map<number, ConversationRecord>();
 	for (const c of space.conversations) {
@@ -120,7 +129,7 @@ export function planFamilies(space: LegacySpace): FamilyPlan {
 		}
 	}
 	const rootOf = (id: number): number => uf.find(id);
-	const partitionForRoot = (root: number): string => familyPartitionId(root);
+	const partitionForRoot = (root: number): string => familyPartitionId(ownerId, root);
 	const sameFamily = (what: string, a: number, b: number): void => {
 		if (rootOf(a) !== rootOf(b)) throw new Error(`${what} crosses conversation families (${a} and ${b})`);
 	};
@@ -170,7 +179,7 @@ export function planFamilies(space: LegacySpace): FamilyPlan {
 		families.push({ partitionId, home: root === 1, conversations: ids });
 		for (const id of ids) partitionOf.set(id, partitionId);
 	}
-	if (!families.some((f) => f.home)) families.unshift({ partitionId: HOME_PARTITION_ID, home: true, conversations: [] });
+	if (!families.some((f) => f.home)) families.unshift({ partitionId: familyPartitionId(ownerId, 1), home: true, conversations: [] });
 	families.sort((a, b) => Number(b.home) - Number(a.home));
 	const taskPartition = new Map<number, string>(space.tasks.map((t) => [t.id, partitionOf.get(t.conversationId) as string]));
 	for (const d of space.documents) {
@@ -182,7 +191,7 @@ export function planFamilies(space: LegacySpace): FamilyPlan {
 }
 
 export type ImportReport = {
-	tenantId: string;
+	ownerId: string;
 	partitions: { partitionId: string; home: boolean; conversations: number; entries: number; tasks: number; submissions: number; documents: number; needsOwner: boolean }[];
 	highWater: number;
 	nextSeq: number;
@@ -193,25 +202,25 @@ const LIVE = new Set(["pending", "running", "waiting", "completing"]);
 /**
  * Split a legacy single-storage space into one partition per conversation family and write it, in one transaction,
  * with every numeric id, `asOf` ancestry, document revision and commit Seq unchanged. Session-scope documents go to the
- * home partition. The tenant's id sequence is seeded above every id and above the legacy `next_id`, so ids minted later
- * cannot collide with imported ones. Refuses a tenant that already has partitions.
+ * home partition. The owner's id sequence is seeded above every id and above the legacy `next_id`, so ids minted later
+ * cannot collide with imported ones. Refuses a owner that already has partitions.
  */
-export async function importLegacySpace(db: Db, tenantId: string, space: LegacySpace): Promise<ImportReport> {
-	const plan = planFamilies(space);
-	return db.transaction(tenantId, async (client) => {
-		const existing = await client.query(`SELECT 1 FROM ${S}.partitions WHERE tenant_id = $1 LIMIT 1`, [tenantId]);
-		if (existing.rowCount !== 0) throw new Error(`Tenant ${tenantId} already has partitions; an import needs an empty tenant`);
+export async function importLegacySpace(db: Db, ownerId: string, space: LegacySpace, options: { publicChatIds?: ReadonlyMap<number, string> } = {}): Promise<ImportReport> {
+	const plan = planFamilies(space, ownerId);
+	return db.transaction(ownerId, async (client) => {
+		const existing = await client.query(`SELECT 1 FROM ${S}.partitions WHERE owner_id = $1 LIMIT 1`, [ownerId]);
+		if (existing.rowCount !== 0) throw new Error(`Owner ${ownerId} already has partitions; an import needs an empty owner`);
 		const maxSeq = Math.max(0, ...space.entries.map((e) => e.commitSeq), ...space.documents.flatMap((d) => [d.record.createdAt, d.record.retiredAt ?? 0, ...d.revisions.map((r) => r.seq)]));
 		const nextSeq = Math.max(space.metadata.nextSeq, maxSeq + 1);
 		const maxId = Math.max(1, ...space.conversations.map((c) => c.id), ...space.entries.map((e) => e.record.id), ...space.tasks.map((t) => t.id), ...space.submissions.map((s) => s.id), ...space.documents.map((d) => d.record.id));
 		const highWater = Math.max(maxId, space.metadata.nextId - 1);
 		if (!Number.isSafeInteger(highWater)) throw new Error("The legacy id space does not fit in a safe integer");
 
-		const report: ImportReport = { tenantId, partitions: [], highWater, nextSeq };
+		const report: ImportReport = { ownerId, partitions: [], highWater, nextSeq };
 		const byPartition = new Map(plan.families.map((f) => [f.partitionId, { entries: 0, tasks: 0, submissions: 0, documents: 0, live: false }]));
-		const home = HOME_PARTITION_ID;
+		const home = plan.families.find((f) => f.home)?.partitionId as string;
 		for (const family of plan.families) {
-			await client.query(`INSERT INTO ${S}.partitions (tenant_id, partition_id, kind, next_seq) VALUES ($1, $2, $3, $4)`, [tenantId, family.partitionId, family.home ? "home" : "family", nextSeq]);
+			await client.query(`INSERT INTO ${S}.partitions (owner_id, partition_id, kind, next_seq) VALUES ($1, $2, $3, $4)`, [ownerId, family.partitionId, family.home ? "home" : "family", nextSeq]);
 		}
 		const ids: { id: number; kind: string; partition: string }[] = [];
 		const stats = (partition: string) => byPartition.get(partition) as { entries: number; tasks: number; submissions: number; documents: number; live: boolean };
@@ -246,44 +255,44 @@ export async function importLegacySpace(db: Db, tenantId: string, space: LegacyS
 		}
 
 		await each(ids, (chunk) =>
-			client.query(`INSERT INTO ${S}.record_ids (tenant_id, id, kind, partition_id) SELECT $1, x.* FROM unnest($2::bigint[], $3::text[], $4::text[]) AS x`, [tenantId, chunk.map((r) => r.id), chunk.map((r) => r.kind), chunk.map((r) => r.partition)]),
+			client.query(`INSERT INTO ${S}.record_ids (owner_id, id, kind, partition_id) SELECT $1, x.id, x.kind, x.p::uuid FROM unnest($2::bigint[], $3::text[], $4::text[]) AS x(id, kind, p)`, [ownerId, chunk.map((r) => r.id), chunk.map((r) => r.kind), chunk.map((r) => r.partition)]),
 		);
 		await each(conversations, async (chunk) => {
 			await client.query(
-				`INSERT INTO ${S}.conversations (tenant_id, partition_id, id, parent_conversation_id, parent_at, owner_conversation_id, owner_task_id, record)
-				 SELECT $1, x.p, x.id, x.pc, x.pa, x.oc, x.ot, x.r FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[], $8::text[]) AS x(p, id, pc, pa, oc, ot, r)`,
-				[tenantId, chunk.map((x) => x.p), chunk.map((x) => x.c.id), chunk.map((x) => x.c.parent?.conversationId ?? null), chunk.map((x) => x.c.parent?.at ?? null), chunk.map((x) => x.c.owner?.conversationId ?? null), chunk.map((x) => x.c.owner?.taskId ?? null), chunk.map((x) => JSON.stringify(x.c))],
+				`INSERT INTO ${S}.conversations (owner_id, partition_id, id, parent_conversation_id, parent_at, owner_conversation_id, owner_task_id, record)
+				 SELECT $1, x.p::uuid, x.id, x.pc, x.pa, x.oc, x.ot, x.r FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[], $8::text[]) AS x(p, id, pc, pa, oc, ot, r)`,
+				[ownerId, chunk.map((x) => x.p), chunk.map((x) => x.c.id), chunk.map((x) => x.c.parent?.conversationId ?? null), chunk.map((x) => x.c.parent?.at ?? null), chunk.map((x) => x.c.owner?.conversationId ?? null), chunk.map((x) => x.c.owner?.taskId ?? null), chunk.map((x) => JSON.stringify(x.c))],
 			);
-			await client.query(`INSERT INTO ${S}.conversation_partitions (tenant_id, conversation_id, partition_id) SELECT $1, x.id, x.p FROM unnest($2::bigint[], $3::text[]) AS x(id, p)`, [tenantId, chunk.map((x) => x.c.id), chunk.map((x) => x.p)]);
+			await client.query(`INSERT INTO ${S}.conversation_partitions (owner_id, conversation_id, partition_id, public_chat_id) SELECT $1, x.id, x.p::uuid, coalesce(x.pc::uuid, gen_random_uuid()) FROM unnest($2::bigint[], $3::text[], $4::text[]) AS x(id, p, pc)`, [ownerId, chunk.map((x) => x.c.id), chunk.map((x) => x.p), chunk.map((x) => options.publicChatIds?.get(x.c.id) ?? null)]);
 		});
 		await each(entries, (chunk) =>
 			client.query(
-				`INSERT INTO ${S}.entries (tenant_id, partition_id, id, conversation_id, head, commit_seq, record)
-				 SELECT $1, x.p, x.id, x.cid, x.h, x.s, x.r FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[], $7::text[]) AS x(p, id, cid, h, s, r)`,
-				[tenantId, chunk.map((x) => x.p), chunk.map((x) => x.e.record.id), chunk.map((x) => x.e.record.conversationId), chunk.map((x) => x.e.record.head ?? null), chunk.map((x) => x.e.commitSeq), chunk.map((x) => JSON.stringify(x.e.record))],
+				`INSERT INTO ${S}.entries (owner_id, partition_id, id, conversation_id, head, commit_seq, record)
+				 SELECT $1, x.p::uuid, x.id, x.cid, x.h, x.s, x.r FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[], $7::text[]) AS x(p, id, cid, h, s, r)`,
+				[ownerId, chunk.map((x) => x.p), chunk.map((x) => x.e.record.id), chunk.map((x) => x.e.record.conversationId), chunk.map((x) => x.e.record.head ?? null), chunk.map((x) => x.e.commitSeq), chunk.map((x) => JSON.stringify(x.e.record))],
 			),
 		);
 		await each(tasks, (chunk) =>
 			client.query(
-				`INSERT INTO ${S}.tasks (tenant_id, partition_id, id, conversation_id, kind, status, outcome_status, abort_requested, background, record)
-				 SELECT $1, x.* FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::text[], $6::text[], $7::text[], $8::boolean[], $9::boolean[], $10::text[]) AS x`,
-				[tenantId, chunk.map((x) => x.p), chunk.map((x) => x.t.id), chunk.map((x) => x.t.conversationId), chunk.map((x) => ident(x.t.kind)), chunk.map((x) => x.t.state.status), chunk.map((x) => x.t.state.outcome?.status ?? null), chunk.map((x) => x.t.abortRequested), chunk.map((x) => x.t.background), chunk.map((x) => JSON.stringify(x.t))],
+				`INSERT INTO ${S}.tasks (owner_id, partition_id, id, conversation_id, kind, status, outcome_status, abort_requested, background, record)
+				 SELECT $1, x.p::uuid, x.id, x.cid, x.kind, x.status, x.outcome, x.abort, x.bg, x.r FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::text[], $6::text[], $7::text[], $8::boolean[], $9::boolean[], $10::text[]) AS x(p, id, cid, kind, status, outcome, abort, bg, r)`,
+				[ownerId, chunk.map((x) => x.p), chunk.map((x) => x.t.id), chunk.map((x) => x.t.conversationId), chunk.map((x) => ident(x.t.kind)), chunk.map((x) => x.t.state.status), chunk.map((x) => x.t.state.outcome?.status ?? null), chunk.map((x) => x.t.abortRequested), chunk.map((x) => x.t.background), chunk.map((x) => JSON.stringify(x.t))],
 			),
 		);
 		await each(submissions, (chunk) =>
 			client.query(
-				`INSERT INTO ${S}.submissions (tenant_id, partition_id, id, conversation_id, status, request_id, record)
-				 SELECT $1, x.* FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::text[], $6::text[], $7::text[]) AS x`,
-				[tenantId, chunk.map((x) => x.p), chunk.map((x) => x.s.id), chunk.map((x) => x.s.conversationId), chunk.map((x) => x.s.status), chunk.map((x) => (x.s.requestId === undefined ? null : ident(x.s.requestId))), chunk.map((x) => JSON.stringify(x.s))],
+				`INSERT INTO ${S}.submissions (owner_id, partition_id, id, conversation_id, status, request_id, record)
+				 SELECT $1, x.p::uuid, x.id, x.cid, x.status, x.req, x.r FROM unnest($2::text[], $3::bigint[], $4::bigint[], $5::text[], $6::text[], $7::text[]) AS x(p, id, cid, status, req, r)`,
+				[ownerId, chunk.map((x) => x.p), chunk.map((x) => x.s.id), chunk.map((x) => x.s.conversationId), chunk.map((x) => x.s.status), chunk.map((x) => (x.s.requestId === undefined ? null : ident(x.s.requestId))), chunk.map((x) => JSON.stringify(x.s))],
 			),
 		);
 		for (const { d, p } of documents) {
 			const { createdAt, retiredAt, ...record } = d.record as DocumentRecord & { history?: string; fork?: string };
 			const scope = d.record.scope;
 			await client.query(
-				`INSERT INTO ${S}.documents (tenant_id, partition_id, id, kind, doc_key, scope_kind, scope_id, history, fork, created_at, retired_at, record) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+				`INSERT INTO ${S}.documents (owner_id, partition_id, id, kind, doc_key, scope_kind, scope_id, history, fork, created_at, retired_at, record) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 				[
-					tenantId,
+					ownerId,
 					p,
 					d.record.id,
 					ident(d.record.kind),
@@ -300,20 +309,20 @@ export async function importLegacySpace(db: Db, tenantId: string, space: LegacyS
 			if (d.revisions.length > 0) {
 				await each(d.revisions, (chunk) =>
 					client.query(
-						`INSERT INTO ${S}.document_revisions (tenant_id, partition_id, document_id, seq, kind, version, content) SELECT $1, $2, $3, x.* FROM unnest($4::bigint[], $5::text[], $6::int[], $7::text[]) AS x`,
-						[tenantId, p, d.record.id, chunk.map((r) => r.seq), chunk.map((r) => r.kind), chunk.map((r) => r.version), chunk.map((r) => JSON.stringify(r.content))],
+						`INSERT INTO ${S}.document_revisions (owner_id, partition_id, document_id, seq, kind, version, content) SELECT $1, $2, $3, x.* FROM unnest($4::bigint[], $5::text[], $6::int[], $7::text[]) AS x`,
+						[ownerId, p, d.record.id, chunk.map((r) => r.seq), chunk.map((r) => r.kind), chunk.map((r) => r.version), chunk.map((r) => JSON.stringify(r.content))],
 					),
 				);
 			}
 		}
 		await client.query(
-			`INSERT INTO ${S}.tenant_id_allocators AS a (tenant_id, high_water) VALUES ($1, $2) ON CONFLICT (tenant_id) DO UPDATE SET high_water = greatest(a.high_water, $2)`,
-			[tenantId, highWater],
+			`INSERT INTO ${S}.owner_id_allocators AS a (owner_id, high_water) VALUES ($1, $2) ON CONFLICT (owner_id) DO UPDATE SET high_water = greatest(a.high_water, $2)`,
+			[ownerId, highWater],
 		);
 		for (const family of plan.families) {
 			const s = stats(family.partitionId);
 			// A partition with unfinished work needs a Runner; the others wait for a signal.
-			await client.query(`INSERT INTO ${S}.due_work (tenant_id, partition_id, state, reason) VALUES ($1, $2, $3, 'imported')`, [tenantId, family.partitionId, s.live || family.home ? "needs_owner" : "quiescent"]);
+			await client.query(`INSERT INTO ${S}.due_work (owner_id, partition_id, state, reason) VALUES ($1, $2, $3, 'imported')`, [ownerId, family.partitionId, s.live || family.home ? "needs_owner" : "quiescent"]);
 			report.partitions.push({ partitionId: family.partitionId, home: family.home, conversations: family.conversations.length, entries: s.entries, tasks: s.tasks, submissions: s.submissions, documents: s.documents, needsOwner: s.live || family.home });
 		}
 		return report;

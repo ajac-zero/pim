@@ -7,8 +7,8 @@ import { StorageRejected } from "@earendil-works/pi-durable";
  */
 export class OwnershipLost extends StorageRejected {
 	readonly partitionId: string;
-	readonly epoch: number;
-	constructor(partitionId: string, epoch: number, message: string, options?: { cause?: unknown }) {
+	readonly epoch: bigint;
+	constructor(partitionId: string, epoch: bigint, message: string, options?: { cause?: unknown }) {
 		super(`Ownership of partition ${partitionId} at epoch ${epoch} was lost: ${message}`, options);
 		this.name = "OwnershipLost";
 		this.partitionId = partitionId;

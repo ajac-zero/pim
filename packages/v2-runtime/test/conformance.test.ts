@@ -12,7 +12,7 @@ afterAll(async () => {
 	await database.drop();
 });
 
-// The upstream suite: every case gets a fresh tenant with a leased home partition, which is where pi's root lives.
+// The upstream suite: every case gets a fresh owner with a leased home partition, which is where pi's root lives.
 registerStorageConformance({ describe, expect, it }, "PgPiStorage", async (use) => {
 	const part = await openTestPartition(database.db);
 	try {

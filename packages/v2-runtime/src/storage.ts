@@ -29,6 +29,7 @@ import {
 	type TaskQuery,
 	type TaskRecord,
 } from "@earendil-works/pi-durable";
+import type { PartitionLease } from "@pim/v2-contracts/runtime-seam";
 import pg from "pg";
 import { type Db, SCHEMA, setLocalSql } from "./db.ts";
 import { AmbiguousCommit, OwnershipLost } from "./errors.ts";
@@ -36,6 +37,8 @@ import { IdAllocator } from "./ids.ts";
 
 const S = SCHEMA;
 const MAX_ID = Number.MAX_SAFE_INTEGER;
+/** The shape version of `runtime_outbox` payloads; a projector reads it before it reads a payload. */
+export const PROJECTION_VERSION = 1;
 
 /**
  * An indexed string (a task or document kind, a document key, a request id) as it is stored: any JavaScript string,
@@ -50,11 +53,9 @@ type DocumentWrite = Extract<StorageWrite, { type: "document.create" | "document
 type DocContent = Extract<StorageWrite, { type: "document.change" }>["content"];
 
 /** What a storage needs to know about the lease that lets it commit: who holds it, at which epoch, and whether it still looks valid locally. */
-export interface OwnerFence {
-	readonly tenantId: string;
-	readonly partitionId: string;
+export interface OwnerFence extends Pick<PartitionLease, "holderId" | "epoch"> {
 	readonly ownerId: string;
-	readonly epoch: number;
+	readonly partitionId: string;
 	/** False once the local view says the lease is gone; a commit then fails without a round trip. */
 	isLocallyValid(): boolean;
 }
@@ -71,20 +72,20 @@ export type PgPiStorageOptions = {
 };
 
 /** What `commit` records about a batch that may or may not have landed. */
-export type AmbiguousBatch = { readonly batchId: string; readonly backendPid: number | undefined; readonly tenantId: string; readonly partitionId: string };
+export type AmbiguousBatch = { readonly batchId: string; readonly backendPid: number | undefined; readonly ownerId: string; readonly partitionId: string };
 
 /**
- * pi-durable's `Storage` over PostgreSQL, for one partition (one conversation family) of one tenant, written by one
+ * pi-durable's `Storage` over PostgreSQL, for one partition (one conversation family) of one owner, written by one
  * fenced owner. The pi records are stored as written (json), with the columns pi's scans need beside them.
  *
  * Reads go through the pool and see committed state. A commit is one transaction that first takes the partition row
- * with `UPDATE ... WHERE owner_epoch = $epoch AND lease_expires_at > clock_timestamp()`, which is both the fence and the
+ * with `UPDATE ... WHERE epoch = $epoch AND lease_expires_at > clock_timestamp()`, which is both the fence and the
  * sequence; a stale owner gets no row and fails with `OwnershipLost` before anything is written.
  */
 export class PgPiStorage implements Storage {
 	readonly db: Db;
 	readonly fence: OwnerFence;
-	readonly tenantId: string;
+	readonly ownerId: string;
 	readonly partitionId: string;
 	readonly #ids: IdAllocator;
 	readonly #beforeCommit: PgPiStorageOptions["beforeCommit"];
@@ -92,15 +93,16 @@ export class PgPiStorage implements Storage {
 	#closed = false;
 	#ambiguous: AmbiguousBatch | undefined;
 	#home: boolean | undefined;
+	#reservedPublicChat: string | undefined;
 
 	constructor(options: PgPiStorageOptions) {
 		this.db = options.db;
 		this.fence = options.fence;
-		this.tenantId = options.fence.tenantId;
+		this.ownerId = options.fence.ownerId;
 		this.partitionId = options.fence.partitionId;
 		this.#beforeCommit = options.beforeCommit;
 		this.#onFault = options.onFault;
-		this.#ids = new IdAllocator(this.db, this.tenantId, () => ({ partitionId: this.partitionId, epoch: this.fence.epoch }), options.idBlockSize);
+		this.#ids = new IdAllocator(this.db, this.ownerId, () => ({ partitionId: this.partitionId, epoch: this.fence.epoch }), options.idBlockSize);
 	}
 
 	/**
@@ -112,36 +114,44 @@ export class PgPiStorage implements Storage {
 		const { fence, db } = options;
 		if (!fence.isLocallyValid()) throw new OwnershipLost(fence.partitionId, fence.epoch, "the local lease has run out");
 		const row = (
-			await db.read<{ ok: boolean; owner_id: string | null; owner_epoch: string; kind: string }>(
-				fence.tenantId,
-				`SELECT (owner_id = $3 AND owner_epoch = $4 AND lease_expires_at > clock_timestamp()) AS ok, owner_id, owner_epoch, kind
-				 FROM ${S}.partitions WHERE tenant_id = $1 AND partition_id = $2`,
-				[fence.tenantId, fence.partitionId, fence.ownerId, fence.epoch],
+			await db.read<{ ok: boolean; holder_id: string | null; epoch: string; kind: string }>(
+				fence.ownerId,
+				`SELECT (holder_id = $3 AND epoch = $4 AND lease_expires_at > clock_timestamp()) AS ok, holder_id, epoch, kind
+				 FROM ${S}.partitions WHERE owner_id = $1 AND partition_id = $2`,
+				[fence.ownerId, fence.partitionId, fence.holderId, fence.epoch],
 			)
 		).rows[0];
-		if (row === undefined) throw new Error(`Partition ${fence.partitionId} of tenant ${fence.tenantId} does not exist`);
-		if (!row.ok) throw new OwnershipLost(fence.partitionId, fence.epoch, `the lease belongs to ${row.owner_id ?? "nobody"} at epoch ${row.owner_epoch}`);
+		if (row === undefined) throw new Error(`Partition ${fence.partitionId} of owner ${fence.ownerId} does not exist`);
+		if (!row.ok) throw new OwnershipLost(fence.partitionId, fence.epoch, `the lease belongs to ${row.holder_id ?? "nobody"} at epoch ${row.epoch}`);
 		const storage = new PgPiStorage(options);
 		storage.#home = row.kind === "home";
-		const mark = await db.read<{ high_water: string }>(fence.tenantId, `SELECT high_water FROM ${S}.tenant_id_allocators WHERE tenant_id = $1`, [fence.tenantId]);
+		const mark = await db.read<{ high_water: string }>(fence.ownerId, `SELECT high_water FROM ${S}.owner_id_allocators WHERE owner_id = $1`, [fence.ownerId]);
 		storage.#ids.startAt(Number(mark.rows[0]?.high_water ?? 1));
 		return storage;
 	}
 
 	/** A storage for reading a partition's committed state without owning it (a projection or a test); every commit through it is fenced out. */
-	static forReading(db: Db, tenantId: string, partitionId: string): PgPiStorage {
-		const fence: OwnerFence = { tenantId, partitionId, ownerId: "reader", epoch: -1, isLocallyValid: () => false };
+	static forReading(db: Db, ownerId: string, partitionId: string): PgPiStorage {
+		const fence: OwnerFence = { ownerId, partitionId, holderId: "reader", epoch: -1n, isLocallyValid: () => false };
 		return new PgPiStorage({ db, fence });
 	}
 
 	get isHome(): Promise<boolean> {
 		if (this.#home !== undefined) return Promise.resolve(this.#home);
 		return this.db
-			.read<{ kind: string }>(this.tenantId, `SELECT kind FROM ${S}.partitions WHERE tenant_id = $1 AND partition_id = $2`, [this.tenantId, this.partitionId])
+			.read<{ kind: string }>(this.ownerId, `SELECT kind FROM ${S}.partitions WHERE owner_id = $1 AND partition_id = $2`, [this.ownerId, this.partitionId])
 			.then((result) => {
 				this.#home = result.rows[0]?.kind === "home";
 				return this.#home;
 			});
+	}
+
+	/**
+	 * The public chat id (a UUID) the next conversation this storage creates will have. Every conversation has one from
+	 * the commit that creates it, because that commit's outbox event carries it; this is how Gate's id is the one used.
+	 */
+	reservePublicChatId(publicChatId: string): void {
+		this.#reservedPublicChat = publicChatId;
 	}
 
 	/** The batch whose outcome is unknown, if a commit failed that way; the storage refuses everything until it is reopened. */
@@ -173,7 +183,7 @@ export class PgPiStorage implements Storage {
 		try {
 			try {
 				const begun = (await client.query(
-					`BEGIN; SELECT pg_backend_pid() AS pid; ${setLocalSql(client, this.tenantId)}; SET LOCAL synchronous_commit TO on`,
+					`BEGIN; SELECT pg_backend_pid() AS pid; ${setLocalSql(client, this.ownerId)}; SET LOCAL synchronous_commit TO on`,
 				)) as unknown as pg.QueryResult<{ pid: number }>[];
 				backendPid = begun[1]?.rows[0]?.pid;
 				const seq = await this.#apply(client, batch, batchId);
@@ -195,7 +205,7 @@ export class PgPiStorage implements Storage {
 				}
 				// COMMIT left this process and the connection failed before an answer came back: unknown.
 				destroy = error instanceof Error ? error : new Error(String(error));
-				this.#ambiguous = { batchId, backendPid, tenantId: this.tenantId, partitionId: this.partitionId };
+				this.#ambiguous = { batchId, backendPid, ownerId: this.ownerId, partitionId: this.partitionId };
 				const ambiguous = new AmbiguousCommit(batchId, backendPid, { cause: error });
 				this.#onFault?.(ambiguous);
 				throw ambiguous;
@@ -206,26 +216,26 @@ export class PgPiStorage implements Storage {
 	}
 
 	async #apply(client: pg.PoolClient, batch: Batch, batchId: string): Promise<number> {
-		const t = this.tenantId;
+		const t = this.ownerId;
 		const p = this.partitionId;
 		// The fence and the sequence in one statement.
 		const fenced = await client.query<{ seq: string; kind: string }>(
 			`UPDATE ${S}.partitions SET next_seq = next_seq + 1
-			 WHERE tenant_id = $1 AND partition_id = $2 AND owner_id = $3 AND owner_epoch = $4 AND lease_expires_at > clock_timestamp()
+			 WHERE owner_id = $1 AND partition_id = $2 AND holder_id = $3 AND epoch = $4 AND lease_expires_at > clock_timestamp()
 			 RETURNING next_seq - 1 AS seq, kind`,
-			[t, p, this.fence.ownerId, this.fence.epoch],
+			[t, p, this.fence.holderId, this.fence.epoch],
 		);
 		const row = fenced.rows[0];
 		if (row === undefined) {
-			const now = await client.query<{ owner_id: string | null; owner_epoch: string; expired: boolean | null }>(
-				`SELECT owner_id, owner_epoch, (lease_expires_at <= clock_timestamp()) AS expired FROM ${S}.partitions WHERE tenant_id = $1 AND partition_id = $2`,
+			const now = await client.query<{ holder_id: string | null; epoch: string; expired: boolean | null }>(
+				`SELECT holder_id, epoch, (lease_expires_at <= clock_timestamp()) AS expired FROM ${S}.partitions WHERE owner_id = $1 AND partition_id = $2`,
 				[t, p],
 			);
 			const cur = now.rows[0];
 			throw new OwnershipLost(
 				p,
 				this.fence.epoch,
-				cur === undefined ? "the partition does not exist" : cur.owner_id === this.fence.ownerId && Number(cur.owner_epoch) === this.fence.epoch ? "the lease expired" : `the lease is now ${cur.owner_id ?? "free"} at epoch ${cur.owner_epoch}`,
+				cur === undefined ? "the partition does not exist" : cur.holder_id === this.fence.holderId && BigInt(cur.epoch) === this.fence.epoch ? "the lease expired" : `the lease is now ${cur.holder_id ?? "free"} at epoch ${cur.epoch}`,
 			);
 		}
 		const seq = Number(row.seq);
@@ -236,7 +246,7 @@ export class PgPiStorage implements Storage {
 		}
 
 		await claimIds(client, t, p, batch);
-		await writeConversations(client, t, p, batch);
+		const usedReserved = await writeConversations(client, t, p, batch, this.#reservedPublicChat);
 		await checkReferences(client, t, p, batch);
 		await writeEntries(client, t, p, batch, seq);
 		await writeTasks(client, t, p, batch);
@@ -244,11 +254,12 @@ export class PgPiStorage implements Storage {
 		await writeDocuments(client, t, p, batch, seq);
 
 		await client.query(
-			`INSERT INTO ${S}.commit_receipts (tenant_id, partition_id, batch_id, commit_seq, owner_id, owner_epoch, write_count) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			[t, p, batchId, seq, this.fence.ownerId, this.fence.epoch, batch.count],
+			`INSERT INTO ${S}.commit_receipts (owner_id, partition_id, batch_id, commit_seq, holder_id, epoch, write_count) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			[t, p, batchId, seq, this.fence.holderId, this.fence.epoch, batch.count],
 		);
-		await client.query(`INSERT INTO ${S}.runtime_outbox (tenant_id, partition_id, seq, changes) VALUES ($1, $2, $3, $4)`, [t, p, seq, JSON.stringify(batch.changes)]);
-		await client.query("SELECT pg_notify('pim_runtime_outbox', $1)", [JSON.stringify({ tenantId: t, partitionId: p, seq })]);
+		await writeOutbox(client, t, p, batch, seq);
+		if (usedReserved) this.#reservedPublicChat = undefined;
+		await client.query("SELECT pg_notify('pim_runtime_outbox', $1)", [JSON.stringify({ ownerId: t, partitionId: p, seq })]);
 		return seq;
 	}
 
@@ -256,20 +267,20 @@ export class PgPiStorage implements Storage {
 
 	#read<R extends pg.QueryResultRow>(text: string, values: unknown[]): Promise<R[]> {
 		this.#assertUsable();
-		return this.db.read<R>(this.tenantId, text, values).then((result) => result.rows);
+		return this.db.read<R>(this.ownerId, text, values).then((result) => result.rows);
 	}
 
 	async conversation(id: ConversationId, _context: Context): Promise<ConversationRecord | undefined> {
 		const rows = await this.#read<{ record: string }>(
-			`SELECT record FROM ${S}.conversations WHERE tenant_id = $1 AND partition_id = $2 AND id = $3`,
-			[this.tenantId, this.partitionId, id],
+			`SELECT record FROM ${S}.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = $3`,
+			[this.ownerId, this.partitionId, id],
 		);
 		return rows[0] === undefined ? undefined : parse(rows[0].record);
 	}
 
 	async scanConversations(query: ConversationQuery, limit: number, cursor: Cursor | undefined, _context: Context): Promise<Page<ConversationRecord, Cursor>> {
 		const start = scanStart(query.order, cursor, "ascending");
-		const where = new Where(this.tenantId, this.partitionId);
+		const where = new Where(this.ownerId, this.partitionId);
 		where.eq("owner_task_id", query.ownerTaskId);
 		where.eq("owner_conversation_id", query.ownerConversationId);
 		return this.#scan<ConversationRecord>("conversations", where, start, limit);
@@ -287,8 +298,8 @@ export class PgPiStorage implements Storage {
 	async entry(idOrConversationId: number, idOrContext?: number | Context, context?: Context): Promise<{ readonly entry: EntryRecord; readonly commitSeq: Seq } | undefined> {
 		if (context === undefined) {
 			const rows = await this.#read<{ record: string; commit_seq: string }>(
-				`SELECT record, commit_seq FROM ${S}.entries WHERE tenant_id = $1 AND partition_id = $2 AND id = $3`,
-				[this.tenantId, this.partitionId, idOrConversationId],
+				`SELECT record, commit_seq FROM ${S}.entries WHERE owner_id = $1 AND partition_id = $2 AND id = $3`,
+				[this.ownerId, this.partitionId, idOrConversationId],
 			);
 			const row = rows[0];
 			return row === undefined ? undefined : { entry: parse<EntryRecord>(row.record), commitSeq: Number(row.commit_seq) as Seq };
@@ -296,8 +307,8 @@ export class PgPiStorage implements Storage {
 		if (typeof idOrContext !== "number") throw new TypeError("Storage.entry() requires an entry ID");
 		await this.#requireConversation(idOrConversationId);
 		const rows = await this.#read<{ record: string; commit_seq: string }>(
-			`${CHAIN} SELECT e.record, e.commit_seq FROM chain JOIN ${S}.entries e ON e.tenant_id = $1 AND e.conversation_id = chain.conversation_id AND e.id <= chain.upper AND e.id >= $3 WHERE e.id = $3`,
-			[this.tenantId, idOrConversationId, idOrContext, idOrContext, this.partitionId],
+			`${CHAIN} SELECT e.record, e.commit_seq FROM chain JOIN ${S}.entries e ON e.owner_id = $1 AND e.conversation_id = chain.conversation_id AND e.id <= chain.upper AND e.id >= $3 WHERE e.id = $3`,
+			[this.ownerId, idOrConversationId, idOrContext, idOrContext, this.partitionId],
 		);
 		const row = rows[0];
 		return row === undefined ? undefined : { entry: parse<EntryRecord>(row.record), commitSeq: Number(row.commit_seq) as Seq };
@@ -310,8 +321,8 @@ export class PgPiStorage implements Storage {
 	): Promise<(EntryRecord & { readonly head: EntryId }) | undefined> {
 		await this.#requireConversation(conversationId);
 		const rows = await this.#read<{ record: string }>(
-			`${CHAIN} SELECT e.record FROM chain JOIN ${S}.entries e ON e.tenant_id = $1 AND e.conversation_id = chain.conversation_id AND e.id <= chain.upper AND e.id >= $3 AND e.head IS NOT NULL ORDER BY e.id DESC LIMIT 1`,
-			[this.tenantId, conversationId, 0, atOrBeforeEntryId ?? MAX_ID, this.partitionId],
+			`${CHAIN} SELECT e.record FROM chain JOIN ${S}.entries e ON e.owner_id = $1 AND e.conversation_id = chain.conversation_id AND e.id <= chain.upper AND e.id >= $3 AND e.head IS NOT NULL ORDER BY e.id DESC LIMIT 1`,
+			[this.ownerId, conversationId, 0, atOrBeforeEntryId ?? MAX_ID, this.partitionId],
 		);
 		return rows[0] === undefined ? undefined : parse(rows[0].record);
 	}
@@ -324,25 +335,25 @@ export class PgPiStorage implements Storage {
 		if (after !== undefined && order === "ascending") min = Math.max(min, after + 1);
 		await this.#requireConversation(query.conversationId);
 		const rows = await this.#read<{ record: string }>(
-			`${CHAIN} SELECT e.record FROM chain JOIN ${S}.entries e ON e.tenant_id = $1 AND e.conversation_id = chain.conversation_id AND e.id <= chain.upper AND e.id >= $3 ORDER BY e.id ${order === "ascending" ? "ASC" : "DESC"} LIMIT ${limit + 1}`,
-			[this.tenantId, query.conversationId, min, max, this.partitionId],
+			`${CHAIN} SELECT e.record FROM chain JOIN ${S}.entries e ON e.owner_id = $1 AND e.conversation_id = chain.conversation_id AND e.id <= chain.upper AND e.id >= $3 ORDER BY e.id ${order === "ascending" ? "ASC" : "DESC"} LIMIT ${limit + 1}`,
+			[this.ownerId, query.conversationId, min, max, this.partitionId],
 		);
 		return pageOf(rows.map((row) => parse<EntryRecord>(row.record)), limit, order);
 	}
 
 	async #requireConversation(id: number): Promise<void> {
-		const rows = await this.#read(`SELECT 1 FROM ${S}.conversations WHERE tenant_id = $1 AND partition_id = $2 AND id = $3`, [this.tenantId, this.partitionId, id]);
+		const rows = await this.#read(`SELECT 1 FROM ${S}.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = $3`, [this.ownerId, this.partitionId, id]);
 		if (rows.length === 0) throw new Error(`Unknown conversation: ${id}`);
 	}
 
 	async task(id: TaskId, _context: Context): Promise<AnyTask | undefined> {
-		const rows = await this.#read<{ record: string }>(`SELECT record FROM ${S}.tasks WHERE tenant_id = $1 AND partition_id = $2 AND id = $3`, [this.tenantId, this.partitionId, id]);
+		const rows = await this.#read<{ record: string }>(`SELECT record FROM ${S}.tasks WHERE owner_id = $1 AND partition_id = $2 AND id = $3`, [this.ownerId, this.partitionId, id]);
 		return rows[0] === undefined ? undefined : parse(rows[0].record);
 	}
 
 	async scanTasks(query: TaskQuery, limit: number, cursor: Cursor | undefined, _context: Context): Promise<Page<AnyTask, Cursor>> {
 		const start = scanStart(query.order, cursor, "ascending");
-		const where = new Where(this.tenantId, this.partitionId);
+		const where = new Where(this.ownerId, this.partitionId);
 		where.eq("conversation_id", query.conversationId);
 		where.eq("kind", query.kind === undefined ? undefined : ident(query.kind));
 		where.eq("status", query.status);
@@ -352,8 +363,8 @@ export class PgPiStorage implements Storage {
 	}
 
 	async submission(id: SubmissionId, _context: Context): Promise<SubmissionRecord | undefined> {
-		const rows = await this.#read<{ record: string }>(`SELECT record FROM ${S}.submissions WHERE tenant_id = $1 AND partition_id = $2 AND id = $3`, [
-			this.tenantId,
+		const rows = await this.#read<{ record: string }>(`SELECT record FROM ${S}.submissions WHERE owner_id = $1 AND partition_id = $2 AND id = $3`, [
+			this.ownerId,
 			this.partitionId,
 			id,
 		]);
@@ -362,7 +373,7 @@ export class PgPiStorage implements Storage {
 
 	async scanSubmissions(query: SubmissionQuery, limit: number, cursor: Cursor | undefined, _context: Context): Promise<Page<SubmissionRecord, Cursor>> {
 		const start = scanStart(query.order, cursor, "ascending");
-		const where = new Where(this.tenantId, this.partitionId);
+		const where = new Where(this.ownerId, this.partitionId);
 		where.eq("conversation_id", query.conversationId);
 		where.eq("status", query.status);
 		return this.#scan<SubmissionRecord>("submissions", where, start, limit);
@@ -370,8 +381,8 @@ export class PgPiStorage implements Storage {
 
 	async submissionByRequest(conversationId: ConversationId, requestId: string, _context: Context): Promise<SubmissionRecord | undefined> {
 		const rows = await this.#read<{ record: string }>(
-			`SELECT record FROM ${S}.submissions WHERE tenant_id = $1 AND partition_id = $2 AND conversation_id = $3 AND request_id = $4`,
-			[this.tenantId, this.partitionId, conversationId, ident(requestId)],
+			`SELECT record FROM ${S}.submissions WHERE owner_id = $1 AND partition_id = $2 AND conversation_id = $3 AND request_id = $4`,
+			[this.ownerId, this.partitionId, conversationId, ident(requestId)],
 		);
 		return rows[0] === undefined ? undefined : parse(rows[0].record);
 	}
@@ -380,21 +391,21 @@ export class PgPiStorage implements Storage {
 		const scopeId = scopeIdOf(address.scope);
 		const rows = await this.#read<DocRow>(
 			`SELECT * FROM ${S}.documents
-			 WHERE tenant_id = $1 AND partition_id = $2 AND kind = $3 AND scope_kind = $4 AND coalesce(scope_id, 0) = $5
+			 WHERE owner_id = $1 AND partition_id = $2 AND kind = $3 AND scope_kind = $4 AND coalesce(scope_id, 0) = $5
 			   AND (doc_key IS NOT NULL) = $6 AND coalesce(doc_key, '') = $7 AND ${alive("$8")}
 			 ORDER BY id LIMIT 1`,
-			[this.tenantId, this.partitionId, ident(address.kind), address.scope.kind, scopeId ?? 0, address.key !== undefined, address.key === undefined ? "" : ident(address.key), at === "current" ? null : at],
+			[this.ownerId, this.partitionId, ident(address.kind), address.scope.kind, scopeId ?? 0, address.key !== undefined, address.key === undefined ? "" : ident(address.key), at === "current" ? null : at],
 		);
 		return rows[0] === undefined ? undefined : docRecord(rows[0]);
 	}
 
 	async document(id: DocumentId, at: DocumentPoint, _context: Context): Promise<StoredDocument | undefined> {
-		return materialize((text, values) => this.#read(text, values), this.tenantId, this.partitionId, id, at);
+		return materialize((text, values) => this.#read(text, values), this.ownerId, this.partitionId, id, at);
 	}
 
 	async scanDocuments(query: DocumentQuery, limit: number, cursor: Cursor | undefined, _context: Context): Promise<Page<DocumentRecord, Cursor>> {
 		const { after } = scanStart("ascending", cursor, "ascending");
-		const where = new Where(this.tenantId, this.partitionId);
+		const where = new Where(this.ownerId, this.partitionId);
 		where.add("scope_kind =", query.scope.kind);
 		where.add("coalesce(scope_id, 0) =", scopeIdOf(query.scope) ?? 0);
 		where.eq("kind", query.kind === undefined ? undefined : ident(query.kind));
@@ -423,7 +434,7 @@ const CHAIN = `WITH RECURSIVE chain(conversation_id, upper) AS (
 	SELECT $2::bigint, $4::bigint
 	UNION ALL
 	SELECT c.parent_conversation_id, LEAST(chain.upper, c.parent_at)
-	FROM chain JOIN ${S}.conversations c ON c.tenant_id = $1 AND c.partition_id = $5 AND c.id = chain.conversation_id
+	FROM chain JOIN ${S}.conversations c ON c.owner_id = $1 AND c.partition_id = $5 AND c.id = chain.conversation_id
 	WHERE c.parent_conversation_id IS NOT NULL AND LEAST(chain.upper, c.parent_at) >= $3::bigint
 )`;
 
@@ -444,12 +455,12 @@ function pageOf<T extends { id: number }>(values: T[], limit: number, order: Sca
 	return { items, next: { after: items.at(-1)?.id ?? 0, order } };
 }
 
-/** Accumulates a parameterized WHERE over tenant and partition; undefined filters add nothing. */
+/** Accumulates a parameterized WHERE over owner and partition; undefined filters add nothing. */
 class Where {
 	readonly values: unknown[] = [];
 	readonly #clauses: string[] = [];
-	constructor(tenantId: string, partitionId: string) {
-		this.add("tenant_id =", tenantId);
+	constructor(ownerId: string, partitionId: string) {
+		this.add("owner_id =", ownerId);
 		this.add("partition_id =", partitionId);
 	}
 	param(value: unknown): string {
@@ -496,8 +507,8 @@ const isCurrentOnly = (record: { scope: { kind: string }; history?: string }): b
 type Exec = (text: string, values: unknown[]) => Promise<pg.QueryResultRow[]>;
 
 /** Materialize one document incarnation at a point: the newest base at or below it, plus the deltas after it. */
-async function materialize(exec: Exec, tenantId: string, partitionId: string, id: number, at: DocumentPoint): Promise<StoredDocument | undefined> {
-	const found = (await exec(`SELECT * FROM ${S}.documents WHERE tenant_id = $1 AND partition_id = $2 AND id = $3`, [tenantId, partitionId, id])) as DocRow[];
+async function materialize(exec: Exec, ownerId: string, partitionId: string, id: number, at: DocumentPoint): Promise<StoredDocument | undefined> {
+	const found = (await exec(`SELECT * FROM ${S}.documents WHERE owner_id = $1 AND partition_id = $2 AND id = $3`, [ownerId, partitionId, id])) as DocRow[];
 	const row = found[0];
 	if (row === undefined) return undefined;
 	const record = docRecord(row);
@@ -507,10 +518,10 @@ async function materialize(exec: Exec, tenantId: string, partitionId: string, id
 	const bound = at === "current" ? MAX_ID : at;
 	const revisions = (await exec(
 		`SELECT seq, kind, version, content FROM ${S}.document_revisions
-		 WHERE tenant_id = $1 AND document_id = $2 AND seq <= $3
-		   AND seq >= coalesce((SELECT max(seq) FROM ${S}.document_revisions WHERE tenant_id = $1 AND document_id = $2 AND kind = 'base' AND seq <= $3), 0)
+		 WHERE owner_id = $1 AND document_id = $2 AND seq <= $3
+		   AND seq >= coalesce((SELECT max(seq) FROM ${S}.document_revisions WHERE owner_id = $1 AND document_id = $2 AND kind = 'base' AND seq <= $3), 0)
 		 ORDER BY seq`,
-		[tenantId, id, bound],
+		[ownerId, id, bound],
 	)) as { seq: string; kind: "base" | "delta"; version: number; content: string }[];
 	const base = revisions[0];
 	if (base?.kind !== "base") throw new Error(`Document ${id} is missing a required base`);
@@ -568,7 +579,7 @@ function prepareBatch(writes: readonly StorageWrite[]): Batch {
 			case "conversation":
 				claim(write.value.id, "conversation");
 				batch.conversations.push(write.value);
-				batch.changes.push({ type: "conversation", id: write.value.id });
+				batch.changes.push({ type: "conversation", id: write.value.id, conversationId: write.value.id });
 				break;
 			case "entry":
 				claim(write.value.id, "entry");
@@ -589,7 +600,7 @@ function prepareBatch(writes: readonly StorageWrite[]): Batch {
 			case "document.copy":
 				claim(write.record.id, "document");
 				batch.documents.push(write);
-				batch.changes.push({ type: write.type, id: write.record.id });
+				batch.changes.push({ type: write.type, id: write.record.id, ...(write.record.scope.kind === "conversation" ? { conversationId: write.record.scope.conversationId } : {}) });
 				break;
 			case "document.change":
 			case "document.retire":
@@ -603,7 +614,7 @@ function prepareBatch(writes: readonly StorageWrite[]): Batch {
 	return batch;
 }
 
-/** Record every new id in the tenant-wide table; a duplicate of another record's id fails the batch. */
+/** Record every new id in the owner-wide table; a duplicate of another record's id fails the batch. */
 async function claimIds(client: pg.PoolClient, t: string, p: string, batch: Batch): Promise<void> {
 	const claims: { id: number; kind: string }[] = [
 		...batch.conversations.map((v) => ({ id: v.id, kind: "conversation" })),
@@ -617,7 +628,7 @@ async function claimIds(client: pg.PoolClient, t: string, p: string, batch: Batc
 		if (!Number.isSafeInteger(claim.id) || claim.id < 1) throw new StorageRejected(`ID ${claim.id} is not a valid record ID`);
 	}
 	const inserted = await client.query<{ id: string }>(
-		`INSERT INTO ${S}.record_ids (tenant_id, id, kind, partition_id) SELECT $1, x.id, x.kind, $2 FROM unnest($3::bigint[], $4::text[]) AS x(id, kind)
+		`INSERT INTO ${S}.record_ids (owner_id, id, kind, partition_id) SELECT $1, x.id, x.kind, $2 FROM unnest($3::bigint[], $4::text[]) AS x(id, kind)
 		 ON CONFLICT DO NOTHING RETURNING id`,
 		[t, p, claims.map((c) => c.id), claims.map((c) => c.kind)],
 	);
@@ -626,7 +637,7 @@ async function claimIds(client: pg.PoolClient, t: string, p: string, batch: Batc
 	if (existing.length === 0) return;
 	const owners = new Map(
 		(
-			await client.query<{ id: string; kind: string; partition_id: string }>(`SELECT id, kind, partition_id FROM ${S}.record_ids WHERE tenant_id = $1 AND id = ANY($2::bigint[])`, [
+			await client.query<{ id: string; kind: string; partition_id: string }>(`SELECT id, kind, partition_id FROM ${S}.record_ids WHERE owner_id = $1 AND id = ANY($2::bigint[])`, [
 				t,
 				existing.map((c) => c.id),
 			])
@@ -645,15 +656,21 @@ async function claimIds(client: pg.PoolClient, t: string, p: string, batch: Batc
 
 const text = (value: unknown): string => JSON.stringify(value);
 
-async function writeConversations(client: pg.PoolClient, t: string, p: string, batch: Batch): Promise<void> {
-	if (batch.conversations.length === 0) return;
+async function writeConversations(client: pg.PoolClient, t: string, p: string, batch: Batch, reservedPublicChat: string | undefined): Promise<boolean> {
+	if (batch.conversations.length === 0) return false;
 	const rows = batch.conversations;
 	await client.query(
-		`INSERT INTO ${S}.conversations (tenant_id, partition_id, id, parent_conversation_id, parent_at, owner_conversation_id, owner_task_id, record)
+		`INSERT INTO ${S}.conversations (owner_id, partition_id, id, parent_conversation_id, parent_at, owner_conversation_id, owner_task_id, record)
 		 SELECT $1, $2, x.* FROM unnest($3::bigint[], $4::bigint[], $5::bigint[], $6::bigint[], $7::bigint[], $8::text[]) AS x`,
 		[t, p, rows.map((c) => c.id), rows.map((c) => c.parent?.conversationId ?? null), rows.map((c) => c.parent?.at ?? null), rows.map((c) => c.owner?.conversationId ?? null), rows.map((c) => c.owner?.taskId ?? null), rows.map(text)],
 	);
-	await client.query(`INSERT INTO ${S}.conversation_partitions (tenant_id, conversation_id, partition_id) SELECT $1, x, $2 FROM unnest($3::bigint[]) AS x`, [t, p, rows.map((c) => c.id)]);
+	// The reserved public chat id goes to the first conversation that is not the root.
+	const reservedFor = reservedPublicChat === undefined ? undefined : rows.find((c) => c.id !== 1)?.id;
+	await client.query(
+		`INSERT INTO ${S}.conversation_partitions (owner_id, conversation_id, partition_id, public_chat_id) SELECT $1, x.id, $2, coalesce(x.pc::uuid, gen_random_uuid()) FROM unnest($3::bigint[], $4::text[]) AS x(id, pc)`,
+		[t, p, rows.map((c) => c.id), rows.map((c) => (c.id === reservedFor ? (reservedPublicChat as string) : null))],
+	);
+	return reservedFor !== undefined;
 }
 
 /** Closure: every conversation a record refers to, a fork's parent included, is in this partition. */
@@ -668,7 +685,7 @@ async function checkReferences(client: pg.PoolClient, t: string, p: string, batc
 		if (scope?.kind === "conversation") wanted.add(scope.conversationId);
 	}
 	if (wanted.size === 0) return;
-	const present = await client.query<{ id: string }>(`SELECT id FROM ${S}.conversations WHERE tenant_id = $1 AND partition_id = $2 AND id = ANY($3::bigint[])`, [t, p, [...wanted]]);
+	const present = await client.query<{ id: string }>(`SELECT id FROM ${S}.conversations WHERE owner_id = $1 AND partition_id = $2 AND id = ANY($3::bigint[])`, [t, p, [...wanted]]);
 	const found = new Set(present.rows.map((r) => Number(r.id)));
 	for (const id of wanted) if (!found.has(id)) throw new StorageRejected(`Conversation ${id} is not in partition ${p}`);
 }
@@ -677,7 +694,7 @@ async function writeEntries(client: pg.PoolClient, t: string, p: string, batch: 
 	if (batch.entries.length === 0) return;
 	const rows = batch.entries;
 	await client.query(
-		`INSERT INTO ${S}.entries (tenant_id, partition_id, id, conversation_id, head, commit_seq, record)
+		`INSERT INTO ${S}.entries (owner_id, partition_id, id, conversation_id, head, commit_seq, record)
 		 SELECT $1, $2, x.id, x.conversation_id, x.head, $3, x.record FROM unnest($4::bigint[], $5::bigint[], $6::bigint[], $7::text[]) AS x(id, conversation_id, head, record)`,
 		[t, p, seq, rows.map((e) => e.id), rows.map((e) => e.conversationId), rows.map((e) => e.head ?? null), rows.map(text)],
 	);
@@ -687,9 +704,9 @@ async function writeTasks(client: pg.PoolClient, t: string, p: string, batch: Ba
 	if (batch.tasks.length === 0) return;
 	const rows = batch.tasks;
 	await client.query(
-		`INSERT INTO ${S}.tasks (tenant_id, partition_id, id, conversation_id, kind, status, outcome_status, abort_requested, background, record)
+		`INSERT INTO ${S}.tasks (owner_id, partition_id, id, conversation_id, kind, status, outcome_status, abort_requested, background, record)
 		 SELECT $1, $2, x.* FROM unnest($3::bigint[], $4::bigint[], $5::text[], $6::text[], $7::text[], $8::boolean[], $9::boolean[], $10::text[]) AS x
-		 ON CONFLICT (tenant_id, id) DO UPDATE SET status = excluded.status, outcome_status = excluded.outcome_status,
+		 ON CONFLICT (owner_id, id) DO UPDATE SET status = excluded.status, outcome_status = excluded.outcome_status,
 		   abort_requested = excluded.abort_requested, background = excluded.background, record = excluded.record, kind = excluded.kind, conversation_id = excluded.conversation_id`,
 		[
 			t,
@@ -710,9 +727,9 @@ async function writeSubmissions(client: pg.PoolClient, t: string, p: string, bat
 	if (batch.submissions.length === 0) return;
 	const rows = batch.submissions;
 	await client.query(
-		`INSERT INTO ${S}.submissions (tenant_id, partition_id, id, conversation_id, status, request_id, record)
+		`INSERT INTO ${S}.submissions (owner_id, partition_id, id, conversation_id, status, request_id, record)
 		 SELECT $1, $2, x.* FROM unnest($3::bigint[], $4::bigint[], $5::text[], $6::text[], $7::text[]) AS x
-		 ON CONFLICT (tenant_id, id) DO UPDATE SET status = excluded.status, request_id = excluded.request_id, record = excluded.record, conversation_id = excluded.conversation_id`,
+		 ON CONFLICT (owner_id, id) DO UPDATE SET status = excluded.status, request_id = excluded.request_id, record = excluded.record, conversation_id = excluded.conversation_id`,
 		[t, p, rows.map((r) => r.id), rows.map((r) => r.conversationId), rows.map((r) => r.status), rows.map((r) => identOrNull(r.requestId)), rows.map(text)],
 	);
 }
@@ -775,8 +792,8 @@ async function writeDocuments(client: pg.PoolClient, t: string, p: string, batch
 	const existing = new Map<number, DocRow & { last_version: number | null }>();
 	if (existingIds.length > 0) {
 		const rows = (await client.query(
-			`SELECT d.*, (SELECT version FROM ${S}.document_revisions r WHERE r.tenant_id = d.tenant_id AND r.document_id = d.id ORDER BY seq DESC LIMIT 1) AS last_version
-			 FROM ${S}.documents d WHERE d.tenant_id = $1 AND d.partition_id = $2 AND d.id = ANY($3::bigint[])`,
+			`SELECT d.*, (SELECT version FROM ${S}.document_revisions r WHERE r.owner_id = d.owner_id AND r.document_id = d.id ORDER BY seq DESC LIMIT 1) AS last_version
+			 FROM ${S}.documents d WHERE d.owner_id = $1 AND d.partition_id = $2 AND d.id = ANY($3::bigint[])`,
 			[t, p, existingIds],
 		)).rows as (DocRow & { last_version: number | null })[];
 		for (const row of rows) existing.set(Number(row.id), row);
@@ -796,12 +813,12 @@ async function writeDocuments(client: pg.PoolClient, t: string, p: string, batch
 			}
 			await insertRevision(client, t, p, id, seq, action.content);
 			if (action.content.kind === "base" && currentOnly) {
-				await client.query(`DELETE FROM ${S}.document_revisions WHERE tenant_id = $1 AND document_id = $2 AND seq < $3`, [t, id, seq]);
+				await client.query(`DELETE FROM ${S}.document_revisions WHERE owner_id = $1 AND document_id = $2 AND seq < $3`, [t, id, seq]);
 			}
 		}
 		if (action.retire) {
-			await client.query(`UPDATE ${S}.documents SET retired_at = $3 WHERE tenant_id = $1 AND id = $2`, [t, id, seq]);
-			if (currentOnly) await client.query(`DELETE FROM ${S}.document_revisions WHERE tenant_id = $1 AND document_id = $2`, [t, id]);
+			await client.query(`UPDATE ${S}.documents SET retired_at = $3 WHERE owner_id = $1 AND id = $2`, [t, id, seq]);
+			if (currentOnly) await client.query(`DELETE FROM ${S}.document_revisions WHERE owner_id = $1 AND document_id = $2`, [t, id]);
 		}
 	}
 	for (const [id, action] of actions) {
@@ -810,7 +827,7 @@ async function writeDocuments(client: pg.PoolClient, t: string, p: string, batch
 		const record = create.record;
 		const scopeId = scopeIdOf(record.scope);
 		await client.query(
-			`INSERT INTO ${S}.documents (tenant_id, partition_id, id, kind, doc_key, scope_kind, scope_id, history, fork, created_at, retired_at, record)
+			`INSERT INTO ${S}.documents (owner_id, partition_id, id, kind, doc_key, scope_kind, scope_id, history, fork, created_at, retired_at, record)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 			[t, p, id, ident(record.kind), identOrNull(record.key), record.scope.kind, scopeId ?? null, (record as { history?: string }).history ?? null, (record as { fork?: string }).fork ?? null, seq, action.retire ? seq : null, JSON.stringify(record)],
 		);
@@ -821,7 +838,7 @@ async function writeDocuments(client: pg.PoolClient, t: string, p: string, batch
 }
 
 async function insertRevision(client: pg.PoolClient, t: string, p: string, id: number, seq: number, content: DocContent): Promise<void> {
-	await client.query(`INSERT INTO ${S}.document_revisions (tenant_id, partition_id, document_id, seq, kind, version, content) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
+	await client.query(`INSERT INTO ${S}.document_revisions (owner_id, partition_id, document_id, seq, kind, version, content) VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
 		t,
 		p,
 		id,
@@ -845,12 +862,12 @@ export async function reconcileAmbiguousCommit(db: Db, batch: AmbiguousBatch, op
 	const lockTimeout = Math.max(1, Math.floor(options.lockTimeoutMs ?? 2_000));
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
-			return await db.transaction(batch.tenantId, async (client) => {
+			return await db.transaction(batch.ownerId, async (client) => {
 				await client.query(`SET LOCAL lock_timeout = ${lockTimeout}`);
-				await client.query(`SELECT 1 FROM ${S}.partitions WHERE tenant_id = $1 AND partition_id = $2 FOR UPDATE`, [batch.tenantId, batch.partitionId]);
+				await client.query(`SELECT 1 FROM ${S}.partitions WHERE owner_id = $1 AND partition_id = $2 FOR UPDATE`, [batch.ownerId, batch.partitionId]);
 				const receipt = await client.query<{ commit_seq: string }>(
-					`SELECT commit_seq FROM ${S}.commit_receipts WHERE tenant_id = $1 AND partition_id = $2 AND batch_id = $3`,
-					[batch.tenantId, batch.partitionId, batch.batchId],
+					`SELECT commit_seq FROM ${S}.commit_receipts WHERE owner_id = $1 AND partition_id = $2 AND batch_id = $3`,
+					[batch.ownerId, batch.partitionId, batch.batchId],
 				);
 				const row = receipt.rows[0];
 				return row === undefined ? { committed: false as const } : { committed: true as const, seq: Number(row.commit_seq) };
@@ -863,4 +880,36 @@ export async function reconcileAmbiguousCommit(db: Db, batch: AmbiguousBatch, op
 		}
 	}
 	throw new Error("unreachable");
+}
+
+/** One outbox row per conversation the commit touched, in the commit's own transaction (RuntimeOutboxEvent). */
+async function writeOutbox(client: pg.PoolClient, o: string, p: string, batch: Batch, seq: number): Promise<void> {
+	const changes = batch.changes as { type: string; id: number; conversationId?: number }[];
+	const unplaced = changes.filter((c) => c.conversationId === undefined && (c.type === "document.change" || c.type === "document.retire"));
+	if (unplaced.length > 0) {
+		const scopes = await client.query<{ id: string; conversation_id: string | null }>(
+			`SELECT d.id, CASE d.scope_kind WHEN 'conversation' THEN d.scope_id WHEN 'task' THEN (SELECT t.conversation_id FROM ${S}.tasks t WHERE t.owner_id = d.owner_id AND t.id = d.scope_id) END AS conversation_id
+			 FROM ${S}.documents d WHERE d.owner_id = $1 AND d.id = ANY($2::bigint[])`,
+			[o, unplaced.map((c) => c.id)],
+		);
+		const byId = new Map(scopes.rows.map((r) => [Number(r.id), r.conversation_id === null ? undefined : Number(r.conversation_id)]));
+		for (const c of unplaced) c.conversationId = byId.get(c.id);
+	}
+	const groups = new Map<number, unknown[]>();
+	for (const c of changes) {
+		// Session-scope documents belong to no conversation and have no event.
+		if (c.conversationId === undefined) continue;
+		const list = groups.get(c.conversationId) ?? [];
+		list.push(c);
+		groups.set(c.conversationId, list);
+	}
+	if (groups.size === 0) return;
+	const conversations = [...groups.keys()];
+	await client.query(
+		`INSERT INTO ${S}.runtime_outbox (owner_id, partition_id, commit_seq, ordinal, projection_version, public_chat_id, conversation_id, event_kind, payload)
+		 SELECT $1, $2, $3, x.ord::int, ${PROJECTION_VERSION}, cp.public_chat_id, x.conv, 'commit', x.payload
+		 FROM unnest($4::bigint[], $5::text[]) WITH ORDINALITY AS x(conv, payload, ord)
+		 JOIN ${S}.conversation_partitions cp ON cp.owner_id = $1 AND cp.conversation_id = x.conv`,
+		[o, p, seq, conversations, conversations.map((id) => JSON.stringify({ changes: groups.get(id) }))],
+	);
 }

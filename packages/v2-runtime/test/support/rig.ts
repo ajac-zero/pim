@@ -33,7 +33,7 @@ export async function waitFor<T>(what: string, check: () => Promise<T | undefine
  * A scripted model and one tool, `gate`, for driving the Runner: `gate` is replay-safe and suspends the call until a
  * decision has been recorded for its task, which is how Pim holds a tool call for an approval.
  */
-export function createRig(db: Db, tenantId: string) {
+export function createRig(db: Db, ownerId: string) {
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
 	const models = createModels();
 	models.setProvider(faux.provider);
@@ -43,7 +43,7 @@ export function createRig(db: Db, tenantId: string) {
 		streamAborted: false,
 	};
 	const decided = async (taskId: number): Promise<boolean> => {
-		const rows = await db.read(tenantId, "SELECT 1 FROM pim_runtime.durable_signals WHERE tenant_id = $1 AND task_id = $2", [tenantId, taskId]);
+		const rows = await db.read(ownerId, "SELECT 1 FROM pim_runtime.durable_signals WHERE owner_id = $1 AND task_id = $2", [ownerId, taskId]);
 		return rows.rows.length > 0;
 	};
 	const gate = defineTool({
@@ -78,14 +78,14 @@ export function createRig(db: Db, tenantId: string) {
 			homeRoot: () => ({ agent }),
 			chatAgent: () => agent,
 			listen: false,
-			tenantFilter: tenantId,
+			ownerFilter: ownerId,
 			pollMs: 40,
 			idleUnloadMs: 0,
 			longWaitMs: 1_500,
 			onEvent: (event) => events.push(event),
 			onReport: (error) => reports.push(error),
 			...options,
-			steward: { ownerId: `runner-${randomUUID().slice(0, 6)}`, leaseTtlMs: 4_000, ...options.steward },
+			steward: { holderId: `runner-${randomUUID().slice(0, 6)}`, leaseTtlMs: 4_000, ...options.steward },
 		});
 	return { faux, models, registry, settings, harnessOptions, agent, state, events, reports, runner, gate };
 }
@@ -93,9 +93,9 @@ export function createRig(db: Db, tenantId: string) {
 export type Rig = ReturnType<typeof createRig>;
 
 /** The committed transcript of a conversation, oldest first, read without owning the partition. */
-export async function readTranscript(db: Db, tenantId: string, partitionId: string, conversationId: number): Promise<EntryRecord[]> {
+export async function readTranscript(db: Db, ownerId: string, partitionId: string, conversationId: number): Promise<EntryRecord[]> {
 	try {
-		const page = await PgPiStorage.forReading(db, tenantId, partitionId).scanEntries({ conversationId: conversationId as never, order: "ascending" }, 1_000, undefined, BACKGROUND_CONTEXT);
+		const page = await PgPiStorage.forReading(db, ownerId, partitionId).scanEntries({ conversationId: conversationId as never, order: "ascending" }, 1_000, undefined, BACKGROUND_CONTEXT);
 		return [...page.items];
 	} catch (error) {
 		// The conversation does not exist yet: nothing has been written.

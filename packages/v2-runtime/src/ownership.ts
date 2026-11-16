@@ -1,3 +1,5 @@
+import { OwnerId, PartitionId } from "@pim/v2-contracts/identity";
+import type { PartitionLease } from "@pim/v2-contracts/runtime-seam";
 import { type Db, SCHEMA } from "./db.ts";
 import type { OwnerFence } from "./storage.ts";
 
@@ -6,7 +8,7 @@ const S = SCHEMA;
 export type StewardOptions = {
 	readonly db: Db;
 	/** Names this Runner process; two Runners must not share one. */
-	readonly ownerId: string;
+	readonly holderId: string;
 	/** How long a lease lasts without renewal; default 15 s. */
 	readonly leaseTtlMs?: number;
 	/** How often a held lease is renewed; default a third of the TTL. */
@@ -21,12 +23,17 @@ export type StewardOptions = {
  * so clock skew between hosts never extends it. When renewal fails or the deadline passes, `signal` aborts and the
  * `onLost` listeners run once: the Runner closes the Harness and aborts model and tool dispatch.
  */
-export class Lease implements OwnerFence {
-	readonly tenantId: string;
-	readonly partitionId: string;
-	readonly ownerId: string;
-	readonly epoch: number;
+export class Lease implements OwnerFence, PartitionLease {
+	readonly ownerId: OwnerId;
+	readonly partitionId: PartitionId;
+	readonly holderId: string;
+	readonly epoch: bigint;
 	readonly kind: "home" | "family";
+	/** The commit-sequencing row's activation sequence when the lease was taken. */
+	readonly activationSeq: bigint;
+	/** When the partition next needs a Runner, as recorded when the lease was taken. */
+	readonly dueAt: string | null;
+	#expiresAt: number;
 	readonly #abort = new AbortController();
 	readonly #listeners = new Set<(reason: string) => void>();
 	readonly #steward: Steward;
@@ -36,13 +43,16 @@ export class Lease implements OwnerFence {
 	#lostReason: string | undefined;
 	#renewing: Promise<void> | undefined;
 
-	constructor(steward: Steward, row: { tenantId: string; partitionId: string; epoch: number; kind: "home" | "family"; remainingMs: number; sentAt: number }) {
+	constructor(steward: Steward, row: { ownerId: string; partitionId: string; epoch: bigint; kind: "home" | "family"; remainingMs: number; sentAt: number; activationSeq?: bigint; dueAt?: string | null }) {
 		this.#steward = steward;
-		this.tenantId = row.tenantId;
-		this.partitionId = row.partitionId;
-		this.ownerId = steward.ownerId;
+		this.ownerId = OwnerId.parse(row.ownerId);
+		this.partitionId = PartitionId.parse(row.partitionId);
+		this.holderId = steward.holderId;
 		this.epoch = row.epoch;
 		this.kind = row.kind;
+		this.activationSeq = row.activationSeq ?? 0n;
+		this.dueAt = row.dueAt ?? null;
+		this.#expiresAt = Date.now() + row.remainingMs;
 		this.#deadline = row.sentAt + row.remainingMs - steward.safetyMarginMs;
 		this.#armDeadline();
 	}
@@ -52,6 +62,14 @@ export class Lease implements OwnerFence {
 		if (this.#deadlineTimer !== undefined) clearTimeout(this.#deadlineTimer);
 		this.#deadlineTimer = setTimeout(() => this.lose("the lease ran past its local deadline"), Math.max(0, this.#deadline - performance.now()));
 		this.#deadlineTimer.unref?.();
+	}
+
+	get isHome(): boolean {
+		return this.kind === "home";
+	}
+	/** The database lease expiry as this process last learned it (wall clock, for display; validity uses the monotonic deadline). */
+	get leaseExpiresAt(): string {
+		return new Date(this.#expiresAt).toISOString();
 	}
 
 	get signal(): AbortSignal {
@@ -102,6 +120,7 @@ export class Lease implements OwnerFence {
 	extend(remainingMs: number, sentAt: number): void {
 		if (this.#lostReason !== undefined) return;
 		this.#deadline = Math.max(this.#deadline, sentAt + remainingMs - this.#steward.safetyMarginMs);
+		this.#expiresAt = Date.now() + remainingMs;
 		this.#armDeadline();
 	}
 
@@ -142,7 +161,7 @@ export type ReleaseResult = { released: true } | { released: false; reason: "new
 /** Takes, renews and releases partition leases for one Runner. */
 export class Steward {
 	readonly db: Db;
-	readonly ownerId: string;
+	readonly holderId: string;
 	readonly leaseTtlMs: number;
 	readonly renewEveryMs: number;
 	readonly safetyMarginMs: number;
@@ -151,7 +170,7 @@ export class Steward {
 
 	constructor(options: StewardOptions) {
 		this.db = options.db;
-		this.ownerId = options.ownerId;
+		this.holderId = options.holderId;
 		this.leaseTtlMs = options.leaseTtlMs ?? 15_000;
 		this.renewEveryMs = options.renewEveryMs ?? Math.floor(this.leaseTtlMs / 3);
 		this.safetyMarginMs = options.safetyMarginMs ?? Math.floor(this.leaseTtlMs / 5);
@@ -168,19 +187,21 @@ export class Steward {
 	 * Take the lease on one partition when it is free or expired, with the next epoch. The epoch only ever grows, so a
 	 * previous owner that is still running is fenced the moment this statement commits.
 	 */
-	async acquire(tenantId: string, partitionId: string): Promise<Lease | undefined> {
+	async acquire(ownerId: string, partitionId: string): Promise<Lease | undefined> {
 		if (this.#draining) return undefined;
 		const sentAt = performance.now();
-		const result = await this.db.read<{ epoch: string; kind: "home" | "family"; remaining_ms: number }>(
-			tenantId,
-			`UPDATE ${S}.partitions SET owner_id = $3, owner_epoch = owner_epoch + 1, lease_expires_at = clock_timestamp() + ($4::int * interval '1 millisecond')
-			 WHERE tenant_id = $1 AND partition_id = $2 AND (owner_id IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
-			 RETURNING owner_epoch AS epoch, kind, ($4::int)::float8 AS remaining_ms`,
-			[tenantId, partitionId, this.ownerId, this.leaseTtlMs],
+		const result = await this.db.read<{ epoch: string; kind: "home" | "family"; remaining_ms: number; activation_seq: string | null; due_at: Date | null }>(
+			ownerId,
+			`UPDATE ${S}.partitions SET holder_id = $3, epoch = epoch + 1, lease_expires_at = clock_timestamp() + ($4::int * interval '1 millisecond')
+			 WHERE owner_id = $1 AND partition_id = $2 AND (holder_id IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
+			 RETURNING epoch AS epoch, kind, ($4::int)::float8 AS remaining_ms,
+			   (SELECT activation_seq FROM ${S}.due_work d WHERE d.owner_id = $1 AND d.partition_id = $2) AS activation_seq,
+			   (SELECT next_due_at FROM ${S}.due_work d WHERE d.owner_id = $1 AND d.partition_id = $2) AS due_at`,
+			[ownerId, partitionId, this.holderId, this.leaseTtlMs],
 		);
 		const row = result.rows[0];
 		if (row === undefined) return undefined;
-		const lease = new Lease(this, { tenantId, partitionId, epoch: Number(row.epoch), kind: row.kind, remainingMs: row.remaining_ms, sentAt });
+		const lease = new Lease(this, { ownerId, partitionId, epoch: BigInt(row.epoch), kind: row.kind, remainingMs: row.remaining_ms, sentAt, activationSeq: BigInt(row.activation_seq ?? 0), dueAt: row.due_at?.toISOString() ?? null });
 		this.#held.add(lease);
 		lease.onLost(() => this.#held.delete(lease));
 		return lease;
@@ -190,30 +211,30 @@ export class Steward {
 	 * Claim the next partition that needs an owner: one whose due-work row says so (or whose due time has come) and whose
 	 * lease is free or expired. Candidates are locked with SKIP LOCKED so Runners claiming together take different ones.
 	 */
-	async claimNext(options: { tenantId?: string } = {}): Promise<Lease | undefined> {
+	async claimNext(options: { ownerId?: string } = {}): Promise<Lease | undefined> {
 		if (this.#draining) return undefined;
 		const sentAt = performance.now();
 		const result = await this.db.transaction(
-			options.tenantId ?? "",
+			options.ownerId ?? "",
 			async (client) => {
-				const picked = await client.query<{ tenant_id: string; partition_id: string }>(
-					`SELECT d.tenant_id, d.partition_id FROM ${S}.due_work d JOIN ${S}.partitions p USING (tenant_id, partition_id)
+				const picked = await client.query<{ owner_id: string; partition_id: string }>(
+					`SELECT d.owner_id, d.partition_id FROM ${S}.due_work d JOIN ${S}.partitions p USING (owner_id, partition_id)
 					 WHERE (d.state = 'needs_owner' OR d.next_due_at <= clock_timestamp())
-					   AND (p.owner_id IS NULL OR p.lease_expires_at <= clock_timestamp())
-					   AND ($1::text IS NULL OR d.tenant_id = $1)
+					   AND (p.holder_id IS NULL OR p.lease_expires_at <= clock_timestamp())
+					   AND ($1::text IS NULL OR d.owner_id = $1)
 					 ORDER BY coalesce(d.next_due_at, d.updated_at) LIMIT 1 FOR UPDATE OF p SKIP LOCKED`,
-					[options.tenantId ?? null],
+					[options.ownerId ?? null],
 				);
 				const row = picked.rows[0];
 				if (row === undefined) return undefined;
 				const taken = await client.query<{ epoch: string; kind: "home" | "family" }>(
-					`UPDATE ${S}.partitions SET owner_id = $3, owner_epoch = owner_epoch + 1, lease_expires_at = clock_timestamp() + ($4::int * interval '1 millisecond')
-					 WHERE tenant_id = $1 AND partition_id = $2 RETURNING owner_epoch AS epoch, kind`,
-					[row.tenant_id, row.partition_id, this.ownerId, this.leaseTtlMs],
+					`UPDATE ${S}.partitions SET holder_id = $3, epoch = epoch + 1, lease_expires_at = clock_timestamp() + ($4::int * interval '1 millisecond')
+					 WHERE owner_id = $1 AND partition_id = $2 RETURNING epoch AS epoch, kind`,
+					[row.owner_id, row.partition_id, this.holderId, this.leaseTtlMs],
 				);
 				const t = taken.rows[0];
 				if (t === undefined) return undefined;
-				return { tenantId: row.tenant_id, partitionId: row.partition_id, epoch: Number(t.epoch), kind: t.kind };
+				return { ownerId: row.owner_id, partitionId: row.partition_id, epoch: BigInt(t.epoch), kind: t.kind };
 			},
 			{ scope: "all" },
 		);
@@ -228,11 +249,11 @@ export class Steward {
 	async renew(lease: Lease): Promise<void> {
 		const sentAt = performance.now();
 		const result = await this.db.read<{ remaining_ms: number }>(
-			lease.tenantId,
+			lease.ownerId,
 			`UPDATE ${S}.partitions SET lease_expires_at = clock_timestamp() + ($5::int * interval '1 millisecond')
-			 WHERE tenant_id = $1 AND partition_id = $2 AND owner_id = $3 AND owner_epoch = $4
+			 WHERE owner_id = $1 AND partition_id = $2 AND holder_id = $3 AND epoch = $4
 			 RETURNING ($5::int)::float8 AS remaining_ms`,
-			[lease.tenantId, lease.partitionId, lease.ownerId, lease.epoch, this.leaseTtlMs],
+			[lease.ownerId, lease.partitionId, lease.holderId, lease.epoch, this.leaseTtlMs],
 		);
 		if (result.rows[0] === undefined) throw new LeaseRejected(`partition ${lease.partitionId} is owned by a higher epoch`);
 		lease.extend(this.leaseTtlMs, sentAt);
@@ -247,31 +268,31 @@ export class Steward {
 	async release(lease: Lease, options: { seenActivation: number; nextDueAt?: Date | undefined; reason?: string }): Promise<ReleaseResult> {
 		await lease.stopHeartbeat();
 		const result = await this.db.read<{ released: boolean }>(
-			lease.tenantId,
+			lease.ownerId,
 			`WITH quiet AS (
 				UPDATE ${S}.due_work SET state = 'quiescent', next_due_at = $5, reason = $6, updated_at = clock_timestamp()
-				WHERE tenant_id = $1 AND partition_id = $2 AND activation_seq = $7
-				  AND NOT EXISTS (SELECT 1 FROM ${S}.command_inbox c WHERE c.tenant_id = $1 AND c.partition_id = $2 AND c.done_at IS NULL)
-				  AND NOT EXISTS (SELECT 1 FROM ${S}.durable_signals s WHERE s.tenant_id = $1 AND s.partition_id = $2 AND s.settled_at IS NULL)
-				  AND NOT EXISTS (SELECT 1 FROM ${S}.signal_outbox o WHERE o.tenant_id = $1 AND o.source_partition_id = $2 AND o.delivered_at IS NULL)
+				WHERE owner_id = $1 AND partition_id = $2 AND activation_seq = $7
+				  AND NOT EXISTS (SELECT 1 FROM ${S}.command_inbox c WHERE c.owner_id = $1 AND c.partition_id = $2 AND c.done_at IS NULL)
+				  AND NOT EXISTS (SELECT 1 FROM ${S}.durable_signals s WHERE s.owner_id = $1 AND s.partition_id = $2 AND s.settled_at IS NULL)
+				  AND NOT EXISTS (SELECT 1 FROM ${S}.signal_outbox o WHERE o.owner_id = $1 AND o.source_partition_id = $2 AND o.delivered_at IS NULL)
 				RETURNING 1
 			), freed AS (
-				UPDATE ${S}.partitions SET owner_id = NULL, lease_expires_at = NULL
-				WHERE tenant_id = $1 AND partition_id = $2 AND owner_id = $3 AND owner_epoch = $4 AND EXISTS (SELECT 1 FROM quiet)
+				UPDATE ${S}.partitions SET holder_id = NULL, lease_expires_at = NULL
+				WHERE owner_id = $1 AND partition_id = $2 AND holder_id = $3 AND epoch = $4 AND EXISTS (SELECT 1 FROM quiet)
 				RETURNING 1
 			)
 			SELECT EXISTS (SELECT 1 FROM freed) AS released`,
-			[lease.tenantId, lease.partitionId, lease.ownerId, lease.epoch, options.nextDueAt ?? null, options.reason ?? null, options.seenActivation],
+			[lease.ownerId, lease.partitionId, lease.holderId, lease.epoch, options.nextDueAt ?? null, options.reason ?? null, options.seenActivation],
 		);
 		if (result.rows[0]?.released === true) {
 			lease.lose("released");
 			return { released: true };
 		}
-		const holder = await this.db.read<{ owner_epoch: string; owner_id: string | null }>(lease.tenantId, `SELECT owner_epoch, owner_id FROM ${S}.partitions WHERE tenant_id = $1 AND partition_id = $2`, [
-			lease.tenantId,
+		const holder = await this.db.read<{ epoch: string; holder_id: string | null }>(lease.ownerId, `SELECT epoch, holder_id FROM ${S}.partitions WHERE owner_id = $1 AND partition_id = $2`, [
+			lease.ownerId,
 			lease.partitionId,
 		]);
-		const stillMine = holder.rows[0]?.owner_id === lease.ownerId && Number(holder.rows[0]?.owner_epoch) === lease.epoch;
+		const stillMine = holder.rows[0]?.holder_id === lease.holderId && BigInt(holder.rows[0]?.epoch ?? -1) === lease.epoch;
 		if (stillMine) lease.startHeartbeat();
 		return { released: false, reason: stillMine ? "new_work" : "lost" };
 	}
@@ -282,16 +303,16 @@ export class Steward {
 	 */
 	async handOff(lease: Lease, reason: string): Promise<void> {
 		await lease.stopHeartbeat();
-		await this.db.transaction(lease.tenantId, async (client) => {
+		await this.db.transaction(lease.ownerId, async (client) => {
 			const held = await client.query(
-				`UPDATE ${S}.partitions SET owner_id = NULL, lease_expires_at = NULL WHERE tenant_id = $1 AND partition_id = $2 AND owner_id = $3 AND owner_epoch = $4 RETURNING 1`,
-				[lease.tenantId, lease.partitionId, lease.ownerId, lease.epoch],
+				`UPDATE ${S}.partitions SET holder_id = NULL, lease_expires_at = NULL WHERE owner_id = $1 AND partition_id = $2 AND holder_id = $3 AND epoch = $4 RETURNING 1`,
+				[lease.ownerId, lease.partitionId, lease.holderId, lease.epoch],
 			);
 			if (held.rowCount === 0) return;
 			await client.query(
-				`INSERT INTO ${S}.due_work (tenant_id, partition_id, state, activation_seq, reason) VALUES ($1, $2, 'needs_owner', 1, $3)
-				 ON CONFLICT (tenant_id, partition_id) DO UPDATE SET state = 'needs_owner', next_due_at = NULL, activation_seq = ${S}.due_work.activation_seq + 1, reason = $3, updated_at = clock_timestamp()`,
-				[lease.tenantId, lease.partitionId, reason],
+				`INSERT INTO ${S}.due_work (owner_id, partition_id, state, activation_seq, reason) VALUES ($1, $2, 'needs_owner', 1, $3)
+				 ON CONFLICT (owner_id, partition_id) DO UPDATE SET state = 'needs_owner', next_due_at = NULL, activation_seq = ${S}.due_work.activation_seq + 1, reason = $3, updated_at = clock_timestamp()`,
+				[lease.ownerId, lease.partitionId, reason],
 			);
 		});
 		lease.lose("handed off");

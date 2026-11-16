@@ -1,14 +1,18 @@
+import { CommandSubmission } from "@pim/v2-contracts/runtime-seam";
 import type pg from "pg";
 import { type Db, SCHEMA } from "./db.ts";
 
 const S = SCHEMA;
 
+/** A pending command as the owner reads it. `commandId` is the submitter's idempotency key; `kind` is a contract kind or `create_conversation`. */
 export type Command = {
-	readonly commandId: number;
-	readonly requestId: string;
+	readonly seq: number;
+	readonly commandId: string;
+	readonly piRequestId: string;
 	readonly kind: string;
 	readonly conversationId: number | undefined;
-	readonly payload: unknown;
+	readonly publicChatId: string | undefined;
+	readonly payload: Record<string, unknown>;
 };
 
 export type DurableSignal = {
@@ -21,14 +25,14 @@ export type DurableSignal = {
 };
 
 /** Makes a partition claimable again and tells any listening Runner; always runs in the transaction that wrote the work. */
-async function activate(client: pg.PoolClient, tenantId: string, partitionId: string, reason: string): Promise<void> {
+export async function activate(client: pg.PoolClient, ownerId: string, partitionId: string, reason: string): Promise<void> {
 	await client.query(
-		`INSERT INTO ${S}.due_work (tenant_id, partition_id, state, activation_seq, reason) VALUES ($1, $2, 'needs_owner', 1, $3)
-		 ON CONFLICT (tenant_id, partition_id) DO UPDATE SET state = 'needs_owner', next_due_at = NULL, activation_seq = ${S}.due_work.activation_seq + 1, reason = $3, updated_at = clock_timestamp()`,
-		[tenantId, partitionId, reason],
+		`INSERT INTO ${S}.due_work (owner_id, partition_id, state, activation_seq, reason) VALUES ($1, $2, 'needs_owner', 1, $3)
+		 ON CONFLICT (owner_id, partition_id) DO UPDATE SET state = 'needs_owner', next_due_at = NULL, activation_seq = ${S}.due_work.activation_seq + 1, reason = $3, updated_at = clock_timestamp()`,
+		[ownerId, partitionId, reason],
 	);
 	// A hint only: the due-work row is what a Runner claims from, so a lost notification delays but never loses work.
-	await client.query("SELECT pg_notify('pim_runtime_wake', $1)", [JSON.stringify({ tenantId, partitionId })]);
+	await client.query("SELECT pg_notify('pim_runtime_wake', $1)", [JSON.stringify({ ownerId, partitionId })]);
 }
 
 /**
@@ -42,41 +46,64 @@ export class PartitionInbox {
 		this.#db = db;
 	}
 
-	/** Admit a command; a repeated request id is not queued twice. */
-	async enqueueCommand(tenantId: string, partitionId: string, command: { requestId: string; kind: string; conversationId?: number; payload: unknown }): Promise<{ commandId: number; duplicate: boolean }> {
-		return this.#db.transaction(tenantId, async (client) => {
-			const inserted = await client.query<{ command_id: string }>(
-				`INSERT INTO ${S}.command_inbox (tenant_id, partition_id, request_id, kind, conversation_id, payload) VALUES ($1, $2, $3, $4, $5, $6::json)
-				 ON CONFLICT (tenant_id, partition_id, request_id) DO NOTHING RETURNING command_id`,
-				[tenantId, partitionId, command.requestId, command.kind, command.conversationId ?? null, JSON.stringify(command.payload)],
+	/** Admit a command from Gate, triggers or Forge; resubmitting the same `commandId` queues nothing. */
+	async enqueueCommand(submission: CommandSubmission): Promise<{ seq: number; duplicate: boolean }> {
+		const c = CommandSubmission.parse(submission);
+		return this.#enqueue(c.ownerId, c.partitionId, c.commandId, c.kind, c.piRequestId, c.conversationId, c.publicChatId, c.payload, c.submittedAt);
+	}
+
+	/** Ask the owner of a new family partition to create its first conversation (not a contract command: there is no conversation yet to address). */
+	async enqueueCreateConversation(ownerId: string, partitionId: string, command: { commandId: string; publicChatId?: string; firstInput?: unknown }): Promise<{ seq: number; duplicate: boolean }> {
+		return this.#enqueue(ownerId, partitionId, command.commandId, "create_conversation", command.commandId, undefined, command.publicChatId, { firstInput: command.firstInput ?? null }, new Date().toISOString());
+	}
+
+	async #enqueue(
+		ownerId: string,
+		partitionId: string,
+		commandId: string,
+		kind: string,
+		piRequestId: string,
+		conversationId: number | undefined,
+		publicChatId: string | undefined,
+		payload: Record<string, unknown>,
+		submittedAt: string,
+	): Promise<{ seq: number; duplicate: boolean }> {
+		return this.#db.transaction(ownerId, async (client) => {
+			const inserted = await client.query<{ seq: string }>(
+				`INSERT INTO ${S}.command_inbox (owner_id, partition_id, command_id, conversation_id, public_chat_id, pi_request_id, kind, payload, submitted_at)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json, $9)
+				 ON CONFLICT (owner_id, partition_id, command_id) DO NOTHING RETURNING seq`,
+				[ownerId, partitionId, commandId, conversationId ?? null, publicChatId ?? null, piRequestId, kind, JSON.stringify(payload), submittedAt],
 			);
 			const row = inserted.rows[0];
 			if (row !== undefined) {
-				await activate(client, tenantId, partitionId, `command:${command.kind}`);
-				return { commandId: Number(row.command_id), duplicate: false };
+				await activate(client, ownerId, partitionId, `command:${kind}`);
+				return { seq: Number(row.seq), duplicate: false };
 			}
-			const existing = await client.query<{ command_id: string }>(`SELECT command_id FROM ${S}.command_inbox WHERE tenant_id = $1 AND partition_id = $2 AND request_id = $3`, [tenantId, partitionId, command.requestId]);
-			return { commandId: Number(existing.rows[0]?.command_id), duplicate: true };
+			const existing = await client.query<{ seq: string }>(`SELECT seq FROM ${S}.command_inbox WHERE owner_id = $1 AND partition_id = $2 AND command_id = $3`, [ownerId, partitionId, commandId]);
+			return { seq: Number(existing.rows[0]?.seq), duplicate: true };
 		});
 	}
 
-	async pendingCommands(tenantId: string, partitionId: string, limit = 100): Promise<Command[]> {
-		const result = await this.#db.read<{ command_id: string; request_id: string; kind: string; conversation_id: string | null; payload: unknown }>(
-			tenantId,
-			`SELECT command_id, request_id, kind, conversation_id, payload FROM ${S}.command_inbox WHERE tenant_id = $1 AND partition_id = $2 AND done_at IS NULL ORDER BY command_id LIMIT $3`,
-			[tenantId, partitionId, limit],
+	async pendingCommands(ownerId: string, partitionId: string, limit = 100): Promise<Command[]> {
+		const result = await this.#db.read<{ seq: string; command_id: string; pi_request_id: string; kind: string; conversation_id: string | null; public_chat_id: string | null; payload: Record<string, unknown> }>(
+			ownerId,
+			`SELECT seq, command_id, pi_request_id, kind, conversation_id, public_chat_id, payload FROM ${S}.command_inbox WHERE owner_id = $1 AND partition_id = $2 AND done_at IS NULL ORDER BY seq LIMIT $3`,
+			[ownerId, partitionId, limit],
 		);
 		return result.rows.map((row) => ({
-			commandId: Number(row.command_id),
-			requestId: row.request_id,
+			seq: Number(row.seq),
+			commandId: row.command_id,
+			piRequestId: row.pi_request_id,
 			kind: row.kind,
 			conversationId: row.conversation_id === null ? undefined : Number(row.conversation_id),
+			publicChatId: row.public_chat_id ?? undefined,
 			payload: row.payload,
 		}));
 	}
 
-	async completeCommand(tenantId: string, partitionId: string, commandId: number): Promise<void> {
-		await this.#db.read(tenantId, `UPDATE ${S}.command_inbox SET done_at = clock_timestamp() WHERE tenant_id = $1 AND partition_id = $2 AND command_id = $3 AND done_at IS NULL`, [tenantId, partitionId, commandId]);
+	async completeCommand(ownerId: string, partitionId: string, seq: number): Promise<void> {
+		await this.#db.read(ownerId, `UPDATE ${S}.command_inbox SET done_at = clock_timestamp() WHERE owner_id = $1 AND partition_id = $2 AND seq = $3 AND done_at IS NULL`, [ownerId, partitionId, seq]);
 	}
 
 	/**
@@ -84,40 +111,40 @@ export class PartitionInbox {
 	 * re-applied at every activation, until a Runner has seen its task leave the waiting state.
 	 */
 	async recordSignal(
-		tenantId: string,
+		ownerId: string,
 		partitionId: string,
 		signal: { key: string; kind: DurableSignal["kind"]; taskId: number; callId?: string; payload?: unknown },
 	): Promise<{ signalId: number; duplicate: boolean }> {
-		return this.#db.transaction(tenantId, async (client) => {
+		return this.#db.transaction(ownerId, async (client) => {
 			const inserted = await client.query<{ signal_id: string }>(
-				`INSERT INTO ${S}.durable_signals (tenant_id, partition_id, signal_key, kind, task_id, call_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::json)
-				 ON CONFLICT (tenant_id, partition_id, signal_key) DO NOTHING RETURNING signal_id`,
-				[tenantId, partitionId, signal.key, signal.kind, signal.taskId, signal.callId ?? null, JSON.stringify(signal.payload ?? null)],
+				`INSERT INTO ${S}.durable_signals (owner_id, partition_id, signal_key, kind, task_id, call_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7::json)
+				 ON CONFLICT (owner_id, partition_id, signal_key) DO NOTHING RETURNING signal_id`,
+				[ownerId, partitionId, signal.key, signal.kind, signal.taskId, signal.callId ?? null, JSON.stringify(signal.payload ?? null)],
 			);
 			if (inserted.rows[0] !== undefined) {
-				await activate(client, tenantId, partitionId, `signal:${signal.kind}`);
+				await activate(client, ownerId, partitionId, `signal:${signal.kind}`);
 				return { signalId: Number(inserted.rows[0].signal_id), duplicate: false };
 			}
-			const existing = await client.query<{ signal_id: string }>(`SELECT signal_id FROM ${S}.durable_signals WHERE tenant_id = $1 AND partition_id = $2 AND signal_key = $3`, [tenantId, partitionId, signal.key]);
+			const existing = await client.query<{ signal_id: string }>(`SELECT signal_id FROM ${S}.durable_signals WHERE owner_id = $1 AND partition_id = $2 AND signal_key = $3`, [ownerId, partitionId, signal.key]);
 			return { signalId: Number(existing.rows[0]?.signal_id), duplicate: true };
 		});
 	}
 
-	async pendingSignals(tenantId: string, partitionId: string): Promise<DurableSignal[]> {
+	async pendingSignals(ownerId: string, partitionId: string): Promise<DurableSignal[]> {
 		const result = await this.#db.read<{ signal_id: string; signal_key: string; kind: DurableSignal["kind"]; task_id: string; call_id: string | null; payload: unknown }>(
-			tenantId,
-			`SELECT signal_id, signal_key, kind, task_id, call_id, payload FROM ${S}.durable_signals WHERE tenant_id = $1 AND partition_id = $2 AND settled_at IS NULL ORDER BY signal_id`,
-			[tenantId, partitionId],
+			ownerId,
+			`SELECT signal_id, signal_key, kind, task_id, call_id, payload FROM ${S}.durable_signals WHERE owner_id = $1 AND partition_id = $2 AND settled_at IS NULL ORDER BY signal_id`,
+			[ownerId, partitionId],
 		);
 		return result.rows.map((row) => ({ signalId: Number(row.signal_id), key: row.signal_key, kind: row.kind, taskId: Number(row.task_id), callId: row.call_id ?? undefined, payload: row.payload }));
 	}
 
 	/** The recorded signal for a key or call, settled or not: a tool's beforeTool hook reads a decision from here, so it gives the same answer after a restart. */
-	async signalByKey(tenantId: string, partitionId: string, key: string): Promise<(DurableSignal & { settled: boolean }) | undefined> {
+	async signalByKey(ownerId: string, partitionId: string, key: string): Promise<(DurableSignal & { settled: boolean }) | undefined> {
 		const result = await this.#db.read<{ signal_id: string; signal_key: string; kind: DurableSignal["kind"]; task_id: string; call_id: string | null; payload: unknown; settled_at: Date | null }>(
-			tenantId,
-			`SELECT signal_id, signal_key, kind, task_id, call_id, payload, settled_at FROM ${S}.durable_signals WHERE tenant_id = $1 AND partition_id = $2 AND signal_key = $3`,
-			[tenantId, partitionId, key],
+			ownerId,
+			`SELECT signal_id, signal_key, kind, task_id, call_id, payload, settled_at FROM ${S}.durable_signals WHERE owner_id = $1 AND partition_id = $2 AND signal_key = $3`,
+			[ownerId, partitionId, key],
 		);
 		const row = result.rows[0];
 		return row === undefined
@@ -125,22 +152,22 @@ export class PartitionInbox {
 			: { signalId: Number(row.signal_id), key: row.signal_key, kind: row.kind, taskId: Number(row.task_id), callId: row.call_id ?? undefined, payload: row.payload, settled: row.settled_at !== null };
 	}
 
-	async settleSignal(tenantId: string, partitionId: string, signalId: number): Promise<void> {
-		await this.#db.read(tenantId, `UPDATE ${S}.durable_signals SET settled_at = clock_timestamp() WHERE tenant_id = $1 AND partition_id = $2 AND signal_id = $3 AND settled_at IS NULL`, [tenantId, partitionId, signalId]);
+	async settleSignal(ownerId: string, partitionId: string, signalId: number): Promise<void> {
+		await this.#db.read(ownerId, `UPDATE ${S}.durable_signals SET settled_at = clock_timestamp() WHERE owner_id = $1 AND partition_id = $2 AND signal_id = $3 AND settled_at IS NULL`, [ownerId, partitionId, signalId]);
 	}
 
 	/** The activation sequence an owner reads before it decides whether to release. */
-	async activationSeq(tenantId: string, partitionId: string): Promise<number> {
-		const result = await this.#db.read<{ activation_seq: string }>(tenantId, `SELECT activation_seq FROM ${S}.due_work WHERE tenant_id = $1 AND partition_id = $2`, [tenantId, partitionId]);
+	async activationSeq(ownerId: string, partitionId: string): Promise<number> {
+		const result = await this.#db.read<{ activation_seq: string }>(ownerId, `SELECT activation_seq FROM ${S}.due_work WHERE owner_id = $1 AND partition_id = $2`, [ownerId, partitionId]);
 		return Number(result.rows[0]?.activation_seq ?? 0);
 	}
 
 	/** Ask another partition to do something, once: the outbox row and the target's command are delivered together by `deliverOutbox`. */
-	async enqueueOutbox(tenantId: string, sourcePartitionId: string, item: { operationId: string; targetConversationId: number; payload: unknown }): Promise<void> {
+	async enqueueOutbox(ownerId: string, sourcePartitionId: string, item: { operationId: string; targetConversationId: number; payload: unknown }): Promise<void> {
 		await this.#db.read(
-			tenantId,
-			`INSERT INTO ${S}.signal_outbox (tenant_id, source_partition_id, operation_id, target_conversation_id, payload) VALUES ($1, $2, $3, $4, $5::json) ON CONFLICT DO NOTHING`,
-			[tenantId, sourcePartitionId, item.operationId, item.targetConversationId, JSON.stringify(item.payload)],
+			ownerId,
+			`INSERT INTO ${S}.signal_outbox (owner_id, source_partition_id, operation_id, target_conversation_id, payload) VALUES ($1, $2, $3, $4, $5::json) ON CONFLICT DO NOTHING`,
+			[ownerId, sourcePartitionId, item.operationId, item.targetConversationId, JSON.stringify(item.payload)],
 		);
 	}
 }

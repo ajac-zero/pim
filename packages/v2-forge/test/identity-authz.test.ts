@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { codingThreadId, threadRef } from "../src/identity";
-import { CapabilityUnavailableError, ForbiddenError } from "../src/errors";
+import { CapabilityUnavailableError, ForbiddenError, httpStatus } from "../src/errors";
 import { ada, REPO, startReq, stack } from "./stack";
 
 describe("thread identity", () => {
@@ -24,13 +24,13 @@ describe("coding authorization", () => {
 	afterAll(async () => s.close());
 
 	it("a person with no grant gets 403 even though normal chat works; a deployment with no pool gets 503", async () => {
-		await expect(s.forge.start(ada, startReq("nogrant"))).rejects.toMatchObject({ status: 403, code: "forbidden" });
+		await expect(s.forge.start(ada, startReq("nogrant"))).rejects.toSatisfy((e) => httpStatus(e) === 403);
 		await s.grantAll("ada");
 		const bare = await stack();
 		await bare.grantAll("ada");
 		await bare.pool.query("update pim_forge.forge_pools set enabled = false");
 		await expect(bare.forge.start(ada, startReq("nopool"))).rejects.toBeInstanceOf(CapabilityUnavailableError);
-		await expect(bare.forge.start(ada, startReq("nopool"))).rejects.toMatchObject({ status: 503 });
+		await expect(bare.forge.start(ada, startReq("nopool"))).rejects.toSatisfy((e) => httpStatus(e) === 503);
 		await bare.close();
 	});
 

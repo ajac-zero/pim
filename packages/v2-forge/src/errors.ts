@@ -4,7 +4,6 @@ export type ForgeErrorCode =
 	| "invalid"
 	| "unsupported"
 	| "forbidden"
-	| "unavailable"
 	| "not_found"
 	| "archived"
 	| "budget_spent"
@@ -22,7 +21,6 @@ const STATUS: Record<ForgeErrorCode, number> = {
 	invalid: 400,
 	unsupported: 400,
 	forbidden: 403,
-	unavailable: 503,
 	not_found: 404,
 	archived: 409,
 	budget_spent: 409,
@@ -49,20 +47,14 @@ export class ForgeError extends Error {
 	}
 }
 
-/** The person (or the agent acting for them) lacks a coding grant or a repository's permission: 403. */
-export class ForbiddenError extends ForgeError {
-	constructor(message: string) {
-		super("forbidden", message);
-		this.name = "ForbiddenError";
-	}
-}
+/** The contracts' errors: a missing grant or repository permission is 403, a deployment with no coding pool or Amp credential is 503. */
+export { CapabilityUnavailableError, ForbiddenError, ApprovalRequiredError } from "@pim/v2-contracts/authz";
 
-/** The deployment has no coding pool or Amp credential configured: 503, while normal Pim keeps working. */
-export class CapabilityUnavailableError extends ForgeError {
-	constructor(message: string) {
-		super("unavailable", message);
-		this.name = "CapabilityUnavailableError";
-	}
+/** The HTTP status an error answers with. */
+export function httpStatus(error: unknown): number {
+	if (error instanceof ForgeError) return error.status;
+	const code = (error as { code?: string } | null)?.code;
+	return code === "forbidden" ? 403 : code === "capability_unavailable" ? 503 : code === "approval_required" ? 202 : 500;
 }
 
 /** Another worker holds the thread's lease at a newer epoch; this worker must stop stepping it. */

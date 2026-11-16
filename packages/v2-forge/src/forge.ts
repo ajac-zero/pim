@@ -3,7 +3,7 @@ import { type OrbClient } from "@pim/coding/orb/types";
 import { type Actor, Authz, assertCapability, assertPushBranch, repoName, type Permission } from "./authz";
 import { type ComputeProvider } from "./compute";
 import { type Db, type Row, tx } from "./db";
-import { ForgeError } from "./errors";
+import { ForbiddenError, ForgeError } from "./errors";
 import { HARNESSES, capabilitiesOf, type Harness } from "./harnesses";
 import { type GitHost, type Objects, type OrbClients } from "./ports";
 import { type ForgeScheduler } from "./scheduler";
@@ -31,7 +31,7 @@ export class Forge {
 	constructor(private readonly c: ForgeConfig) {}
 
 	private async own(actor: Actor, ref: string): Promise<ThreadRow> {
-		if (actor.role === "guest") throw new ForgeError("forbidden", "Guests can't use coding threads");
+		if (actor.role === "guest") throw new ForbiddenError("coding", "guests can't use coding threads");
 		return this.c.store.find(actor.ownerId, ref);
 	}
 
@@ -242,7 +242,7 @@ export class Forge {
 	async deleteArtifacts(actor: Actor, ref: string): Promise<void> {
 		const t = await this.own(actor, ref);
 		const a = (await this.c.db.query<Row>("delete from pim_forge.forge_autosaves where thread_id = $1 returning object_key", [t.threadId])).rows[0];
-		if (a) await this.c.objects.delete?.(a.object_key);
+		if (a) await this.c.objects.delete(a.object_key);
 	}
 
 	/** Deletes the branch on the git host: its own operation, needing the push grant. */
@@ -263,7 +263,7 @@ export class Forge {
 		const bytes = Buffer.from(r.stdout, "base64");
 		const head = (await this.c.compute.exec(t.workspaceRef, ["git", "rev-parse", "HEAD"], {})).stdout.trim();
 		const key = `forge/${threadId}/autosave/${head}.bundle`;
-		await this.c.objects.put(key, bytes, "application/x-git-bundle");
+		await this.c.objects.put(key, bytes, { contentType: "application/x-git-bundle" });
 		await this.c.db.query("insert into pim_forge.forge_autosaves (thread_id, head_sha, object_key, bytes) values ($1,$2,$3,$4) on conflict (thread_id) do update set head_sha = $2, object_key = $3, bytes = $4, at = now()", [threadId, head, key, bytes.length]);
 	}
 

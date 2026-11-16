@@ -5,6 +5,7 @@ import { type Db, type Queryable, type Row, tx } from "./db";
 import { ForgeError, LeaseLostError } from "./errors";
 import { codingThreadId, threadRef } from "./identity";
 import { type Harness } from "./harnesses";
+import { completionWake } from "./wakes";
 
 export type ThreadState = "provisioning" | "queued" | "idle" | "running" | "waiting_input" | "failed" | "archived";
 
@@ -41,7 +42,7 @@ export type ThreadRow = {
 	createdBy: string;
 	workspaceRef: any;
 	placement: any;
-	orb: { threadId: string; url: string; client?: string; /** The operation whose turn is running on the remote thread. */ turn?: string; /** The branch Amp pushed its work to, once known. */ branch?: string } | null;
+	orb: { threadId: string; url: string; client?: string; /** The operation whose turn is running on the remote thread. */ turn?: string; /** The total dollars the orb has reported so far, so each sync records only the difference. */ reportedUsd?: number; /** The branch Amp pushed its work to, once known. */ branch?: string } | null;
 	provisioning: any;
 	budgetUsd: number | null;
 	spentUsd: number;
@@ -194,6 +195,13 @@ export class ForgeStore {
 			await this.emit(q, "cost_ledger", `cost:${threadId}:${seq}`, threadId, { run_kind: "coding_thread", threadId, costUsd: e.costUsd, tokensIn: e.tokensIn ?? 0, tokensOut: e.tokensOut ?? 0 });
 		}
 		return seq;
+	}
+
+	/** Wakes the chat that started the thread, once per (thread, operation). Returns false when it was already sent or the thread has no chat. */
+	async emitCompletionWake(q: Queryable, t: Pick<ThreadRow, "threadId" | "chatId">, operationId: string, outcome: "completed" | "failed" | "cancelled", summary?: string | null): Promise<boolean> {
+		if (!t.chatId) return false;
+		const wake = completionWake(t.threadId, operationId, outcome, summary);
+		return this.emit(q, "wake", wake.wakeId, t.threadId, { chatId: t.chatId, ...wake });
 	}
 
 	async emit(q: Queryable, topic: OutboxTopic, dedupeKey: string, threadId: string | null, payload: object): Promise<boolean> {

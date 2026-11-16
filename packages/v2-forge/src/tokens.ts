@@ -20,7 +20,7 @@ function mint(prefix: "pimgit_" | "pimgw_", key: string, claims: Claims): string
 }
 
 function open(prefix: string, key: string, token: string, now: number): Claims {
-	const bad = () => new ForbiddenError("Invalid credential");
+	const bad = () => new ForbiddenError("credential", "invalid");
 	if (typeof token !== "string" || !token.startsWith(prefix)) throw bad();
 	const [body, mac] = token.slice(prefix.length).split(".");
 	if (!body || !mac) throw bad();
@@ -28,7 +28,7 @@ function open(prefix: string, key: string, token: string, now: number): Claims {
 	const got = Buffer.from(mac, "base64url");
 	if (got.length !== want.length || !timingSafeEqual(got, want)) throw bad();
 	const claims = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Claims;
-	if (claims.exp <= now) throw new ForbiddenError("This credential has expired");
+	if (claims.exp <= now) throw new ForbiddenError("credential", "this credential has expired");
 	return claims;
 }
 
@@ -60,16 +60,16 @@ export class Credentials {
 				[c.thread],
 			)
 		).rows[0];
-		if (!row || row.owner_id !== c.owner || row.gateway_nonce !== c.nonce) throw new ForbiddenError("This credential was revoked");
-		if (row.state === "archived" || row.archived_at || row.cancel_state === "requested" || row.cancel_state === "cancelled" || row.cancel_state === "uncertain") throw new ForbiddenError("This thread no longer holds credentials");
-		if (row.suspended_at) throw new ForbiddenError("This account is suspended");
+		if (!row || row.owner_id !== c.owner || row.gateway_nonce !== c.nonce) throw new ForbiddenError("credential", "this credential was revoked");
+		if (row.state === "archived" || row.archived_at || row.cancel_state === "requested" || row.cancel_state === "cancelled" || row.cancel_state === "uncertain") throw new ForbiddenError("credential", "this thread no longer holds credentials");
+		if (row.suspended_at) throw new ForbiddenError("credential", "this account is suspended");
 		return row;
 	}
 
 	/** Clone/fetch need a read or push token for the repository; a push also needs a branch under the prefix that is not the default. */
 	async verifyGit(token: string, access: { repo: string; op: "fetch" | "push"; branch?: string; defaultBranch?: string }): Promise<{ threadId: string; ownerId: string }> {
 		const c = open("pimgit_", this.key, token, this.clock());
-		if (c.repo !== repoName(access.repo)) throw new ForbiddenError("This credential is for another repository");
+		if (c.repo !== repoName(access.repo)) throw new ForbiddenError("credential", "this credential is for another repository");
 		await this.live(c);
 		if (access.op === "push") {
 			if (c.scope !== "push") throw new ForgeError("push_refused", "This credential can only fetch");
@@ -80,7 +80,7 @@ export class Credentials {
 
 	async verifyGateway(token: string, family: string): Promise<{ threadId: string; ownerId: string }> {
 		const c = open("pimgw_", this.key, token, this.clock());
-		if (!c.families?.includes(family)) throw new ForbiddenError("This credential doesn't cover that model family");
+		if (!c.families?.includes(family)) throw new ForbiddenError("credential", "this credential doesn't cover that model family");
 		await this.live(c);
 		return { threadId: c.thread, ownerId: c.owner };
 	}

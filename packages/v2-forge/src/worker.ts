@@ -5,7 +5,7 @@ import { OrbLostError, OrbUnreachableError, OrbError, type OrbClient, type OrbMe
 import { ampAttachments, replaceAmpAttachments } from "@pim/coding/orb/amp-attachments";
 import { createHash } from "node:crypto";
 import { type Row, type Queryable } from "./db";
-import { ForgeError, LeaseLostError } from "./errors";
+import { CapabilityUnavailableError, ForgeError, LeaseLostError } from "./errors";
 import { capabilitiesOf, LEGACY_AMP_WORKSPACE_MESSAGE, MAX_RESUMES, MAX_SESSION_RESTARTS, type Harness } from "./harnesses";
 import { type AttachmentFetcher, type Objects, type OrbClients, type TurnPort, type TurnResult } from "./ports";
 import { Provisioner, type ComputeProvider } from "./compute";
@@ -168,7 +168,7 @@ export class ForgeWorker {
 		const abort = new AbortController();
 		let result: TurnResult;
 		try {
-			if (!port) throw new ForgeError("unavailable", `No turn runner for ${prep.thread.harness}`);
+			if (!port) throw new CapabilityUnavailableError("coding:runner", `no turn runner for ${prep.thread.harness}`);
 			result = await port.run({ threadId, operationId: item.operationId, prompt: item.payload?.prompt ?? "Continue.", sessionId: prep.sessionId, resume: prep.sessionId !== null, maxBudgetUsd: prep.thread.budgetUsd === null ? null : Math.max(0, prep.thread.budgetUsd - prep.thread.spentUsd), workspace: prep.thread.workspaceRef, signal: abort.signal });
 		} catch (error) {
 			result = { outcome: "failed", detail: String(error instanceof Error ? error.message : error).slice(0, 500) };
@@ -189,9 +189,8 @@ export class ForgeWorker {
 			const { text, replies } = splitSuggestedReplies(r.text);
 			await store.appendEvent(q, t.threadId, { kind: "message", role: "assistant", data: { text, operationId, ...(replies.length ? { suggestedReplies: replies } : {}) } });
 		}
-		await q.query("delete from pim_forge.forge_stall_episodes where source = $1", [`coding:${t.threadId}`]);
-		const wake = (outcome: string) =>
-			t.chatId ? store.emit(q, "wake", `coding:${t.threadId}:${root}`, t.threadId, { chatId: t.chatId, threadId: t.threadId, operationId: root, outcome }) : Promise.resolve(false);
+		await q.query("delete from pim_forge.forge_stall_episodes where source = $1", [t.threadId]);
+		const wake = (outcome: "completed" | "failed", summary?: string | null) => store.emitCompletionWake(q, t, root, outcome, summary);
 		if (cancelled) {
 			await store.setState(q, t.threadId, "idle", "aborted");
 			await store.patch(q, t.threadId, { cancel_state: "cancelled" });
@@ -208,7 +207,7 @@ export class ForgeWorker {
 			if (interrupts > MAX_RESUMES || loop) {
 				await store.patch(q, t.threadId, { consecutive_interrupts: interrupts });
 				await store.setState(q, t.threadId, "failed", loop ? "session_limit" : "lost", loop ? `The sandbox's session reached its time limit ${MAX_SESSION_RESTARTS + 1} times in a row without the thread committing anything new` : `The sandbox was lost ${MAX_RESUMES} times in a row. Last: ${r.detail ?? "interrupted"}`.slice(0, 500));
-				await wake("failed");
+				await wake("failed", loop ? "session_limit" : "lost");
 				return;
 			}
 			await store.patch(q, t.threadId, { consecutive_interrupts: interrupts });
@@ -225,11 +224,11 @@ export class ForgeWorker {
 			await wake("completed");
 		} else if (r.outcome === "login_required") {
 			await store.setState(q, t.threadId, "waiting_input", "login_required", r.detail ?? null);
-			await wake("login_required");
+			await wake("failed", "login_required");
 		} else {
 			await store.appendEvent(q, t.threadId, { kind: "thread.turn_ended", data: { operationId: root, outcome: r.outcome } });
 			await store.setState(q, t.threadId, "failed", r.outcome === "budget" ? "budget" : "error", r.detail ?? null);
-			await wake(r.outcome);
+			await wake("failed", r.outcome === "budget" ? "budget" : (r.detail ?? "error"));
 		}
 	}
 
@@ -316,13 +315,16 @@ export class ForgeWorker {
 			if (error instanceof OrbLostError) {
 				await store.fenced(thread.threadId, epoch, async (q) => {
 					await store.setState(q, thread.threadId, "failed", "orb_lost", "The Amp thread no longer exists");
-					if (thread.chatId) await store.emit(q, "wake", `coding:${thread.threadId}:${orb.turn ?? thread.startOperation}`, thread.threadId, { chatId: thread.chatId, threadId: thread.threadId, operationId: orb.turn, outcome: "failed" });
+					await store.emitCompletionWake(q, thread, orb.turn ?? thread.startOperation, "failed", "orb_lost");
 				});
 				return "done";
 			}
 			if (error instanceof OrbUnreachableError) return "retry";
 			throw error;
 		}
+		// Cost where the orb exposes it (dollars only; Amp may report nothing, which is unmetered, not free).
+		let usd: number | null = null;
+		if (client.capabilities().usage) usd = (await client.usage(orb.threadId).catch(() => null))?.usd ?? null;
 		// One at a time, so the same attachment in two messages is fetched once.
 		const mirrored: { m: OrbMessage; text: string }[] = [];
 		for (const m of messages) mirrored.push({ m, text: await this.mirrorAttachments(thread, m.text) });
@@ -333,23 +335,25 @@ export class ForgeWorker {
 				const sentByPim = m.role === "user" && (await q.query("select 1 from pim_forge.forge_events where thread_id = $1 and role = 'user' and data ->> 'text' = $2 and source_cursor is null", [t.threadId, m.text])).rows.length > 0;
 				const external = m.role === "user" && !sentByPim && m.text !== t.task;
 				if (external) {
-					turn = `external:${m.id}`;
+					turn = `external-${m.id}`;
 					await store.appendEvent(q, t.threadId, { kind: "thread.turn_started", data: { operationId: turn, provider: client.id, orb: orb.threadId, external: true } });
 				}
 				await store.appendEvent(q, t.threadId, { kind: "message", role: m.role, sourceCursor: `orb:${m.id}`, data: { text: split.text, at: m.at, ...(split.replies.length ? { suggestedReplies: split.replies } : {}), ...(m.parts ? { parts: m.parts } : {}), ...(external ? { external: true } : {}) } });
 			}
-			await store.patch(q, t.threadId, { last_seen_at: new Date(this.clock()), orb: { ...t.orb, turn } });
+			const reported = (t.orb as { reportedUsd?: number } | null)?.reportedUsd ?? 0;
+			if (usd !== null && usd > reported) await store.appendEvent(q, t.threadId, { kind: "model_call", costUsd: usd - reported, sourceCursor: `usage:${usd}`, data: { via: "orb", harness: "amp", reportedTotalUsd: usd } });
+			await store.patch(q, t.threadId, { last_seen_at: new Date(this.clock()), orb: { ...t.orb, turn, ...(usd !== null && usd > reported ? { reportedUsd: usd } : {}) } });
 			if (status.state === "working") {
 				if (t.state !== "running") await store.setState(q, t.threadId, "running");
 			} else if (status.state === "awaiting_approval") {
 				if (t.state !== "waiting_input") await store.setState(q, t.threadId, "waiting_input", "awaiting_approval");
 			} else if (status.state === "error") {
 				await store.setState(q, t.threadId, "failed", "orb_error", "The Amp thread reported an error");
-				if (t.chatId) await store.emit(q, "wake", `coding:${t.threadId}:${turn}`, t.threadId, { chatId: t.chatId, threadId: t.threadId, operationId: turn, outcome: "failed" });
+				await store.emitCompletionWake(q, t, turn, "failed", "orb_error");
 			} else if (status.state === "idle" && t.state === "running") {
 				await store.appendEvent(q, t.threadId, { kind: "thread.turn_ended", data: { operationId: turn, outcome: "completed" } });
 				await store.setState(q, t.threadId, "idle");
-				if (t.chatId) await store.emit(q, "wake", `coding:${t.threadId}:${turn}`, t.threadId, { chatId: t.chatId, threadId: t.threadId, operationId: turn, outcome: "completed" });
+				await store.emitCompletionWake(q, t, turn, "completed");
 			}
 		});
 		return "done";
@@ -364,7 +368,7 @@ export class ForgeWorker {
 			if (!(await this.d.objects.get(key))) {
 				const got = await this.d.attachments(a.canonical);
 				if (!got) continue;
-				await this.d.objects.put(key, got.bytes, got.type);
+				await this.d.objects.put(key, got.bytes, { contentType: got.type });
 			}
 			copies.set(a.url, `/api/coding/${thread.threadId}/attachments/${key.split("/").pop()}`);
 		}

@@ -1,5 +1,7 @@
 // What Forge needs from outside, as ports. Production wires them to vendor CLIs in sandboxes, AmpHttpOrbClient, S3 Objects and the git host; tests wire deterministic fakes.
+import { createHash } from "node:crypto";
 import { type OrbClient } from "@pim/coding/orb/types";
+import { type ObjectMetadata, type ObjectStore } from "@pim/v2-contracts/platform";
 import { type ComputeHandle } from "./compute";
 
 export type TurnRequest = {
@@ -35,23 +37,28 @@ export interface TurnPort {
 /** The orb client for a thread, or null when the deployment has none (no Amp credential). */
 export type OrbClients = (thread: { threadId: string; ownerId: string }) => OrbClient | null | Promise<OrbClient | null>;
 
-/** Objects: S3. Autosave bundles and mirrored attachments live here, never in PostgreSQL. */
-export interface Objects {
-	put(key: string, bytes: Uint8Array, contentType: string): Promise<void>;
-	delete?(key: string): Promise<void>;
-	get(key: string): Promise<{ bytes: Uint8Array; contentType: string } | null>;
-}
+/** Objects: S3, through the contracts' `ObjectStore`. Autosave bundles and mirrored attachments live here, never in PostgreSQL. */
+export type Objects = ObjectStore;
 
-export class MemoryObjects implements Objects {
+export class MemoryObjects implements ObjectStore {
 	readonly map = new Map<string, { bytes: Uint8Array; contentType: string }>();
-	async put(key: string, bytes: Uint8Array, contentType: string) {
-		this.map.set(key, { bytes, contentType });
+	async put(key: string, body: Uint8Array, options: { contentType: string }): Promise<ObjectMetadata> {
+		this.map.set(key, { bytes: body, contentType: options.contentType });
+		return { key, size: body.length, contentType: options.contentType, etag: createHash("sha256").update(body).digest("hex") };
 	}
 	async get(key: string) {
-		return this.map.get(key) ?? null;
+		const o = this.map.get(key);
+		return o ? { body: o.bytes, metadata: await this.head(key).then((m) => m!) } : null;
+	}
+	async head(key: string): Promise<ObjectMetadata | null> {
+		const o = this.map.get(key);
+		return o ? { key, size: o.bytes.length, contentType: o.contentType, etag: createHash("sha256").update(o.bytes).digest("hex") } : null;
 	}
 	async delete(key: string) {
 		this.map.delete(key);
+	}
+	async presign(key: string, options: { method: "GET" | "PUT"; expiresInSeconds: number }) {
+		return `memory://${key}?method=${options.method}&expires=${options.expiresInSeconds}`;
 	}
 }
 

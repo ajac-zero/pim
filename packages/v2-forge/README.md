@@ -14,6 +14,10 @@ Forge is Pim's coding control plane on PostgreSQL (`pim_forge`, migrations `0400
 - `forge.ts`: the facade REST routes and agent tools both call. `archive`, compute teardown, artifact deletion and remote branch deletion are separate operations; cancellation is `requested`, `cancelled` or `uncertain`.
 - `stall.ts`: evidence-based two-stage stall wakes, deduplicated as `stall:<source>:<stage>:<progress>`.
 
+## Contracts
+
+Forge depends on `@pim/v2-contracts`: `codingThreadId`, the `ForgeCompletionWake` / `ForgeStallWake` envelopes (every outbox wake is parsed with them; operation ids with a colon are made safe in the wake id only), `ObjectStore` (`Objects`), the `Authorizer` (`ForgeAuthorizer`, deciding on the origin of a delegation chain, with `StandingApproval` as an auditable table), the error classes, and the shared `public.pim_schema_migrations` ledger (migrations `0400`–`0404`, band-validated). `toContractDescriptor` computes the contracts' capability shape from Forge's honest descriptor; it differs from `HARNESS_CAPABILITIES` only where `CONTRACT_DIVERGENCES` lists, and a test pins that list. Amp cost is captured as dollar deltas when the orb client's `usage` reports them; otherwise spend stays 0 and unmetered. Row-level security on `pim_current_owner_id()` is not enabled: Forge's workers step every owner's threads, so isolation is by `owner_id` in each query.
+
 ## Not here
 
 - Wiring to the real vendor CLIs (`TurnPort`), `workspace-agentd`/`sandbox-manager` (`ComputeProvider`), S3 (`Objects`), the GitHub App/Gitea (`GitHost`) and `AmpHttpOrbClient` is by port. Tests use a scripted turn runner, a local-process sandbox, local bare repositories and `FakeOrbClient`; nothing contacts a real service.

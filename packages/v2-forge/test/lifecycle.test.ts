@@ -268,7 +268,7 @@ describe("stall supervision and the outbox", () => {
 		expect(await s.stall.check(id)).toBe(1);
 		expect(await s.stall.check(id)).toBe(0);
 		expect((await stallWakes(id))).toHaveLength(1);
-		expect((await stallWakes(id))[0]).toMatch(new RegExp(`^stall:coding:${id}:1:\\d+$`));
+		expect((await stallWakes(id))[0]).toMatch(new RegExp(`^stall:${id}:1:\\d+$`));
 		s.advance(ESCALATED_STALL_MS);
 		expect(await s.stall.check(id)).toBe(2);
 		expect(await s.stall.check(id)).toBe(0);

@@ -1,11 +1,7 @@
 // A coding thread's identity, as Pim has always derived it, so pre-cutover IDs, /coding/<id> URLs and replayed coding_start calls resolve to the same thread.
-import { createHash } from "node:crypto";
 
-/** A thread's ID: from the space and the start's operation, so starting again with it reaches the same thread, and no other space's. */
-export function codingThreadId(space: string, operationId: string): string {
-	const hex = createHash("sha256").update(`pim coding thread\n${space}\n${operationId}`).digest("hex");
-	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
+/** The canonical thread id: sha256 of the owner and the start operation, as Pim has always derived it. */
+export { codingThreadId } from "@pim/v2-contracts/forge-seam";
 
 /** A thread a caller names: one of Pim's by its id, or an Amp thread by its `T-…` id. */
 export type ThreadRef = { readonly kind: "pim" | "amp"; readonly id: string };

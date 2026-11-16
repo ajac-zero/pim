@@ -118,7 +118,7 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		await w.step(id);
 		const keys = await wakes(s, id);
 		expect(keys).toHaveLength(2);
-		expect(keys[1]).toMatch(new RegExp(`^coding:${id}:external:m-`));
+		expect(keys[1]).toMatch(new RegExp(`^coding:${id}:external-m-`));
 	});
 
 	it("steers at most once per operation id", async () => {

@@ -1,6 +1,7 @@
 // Evidence-based stall supervision: what a thread has actually done decides whether its originating chat is woken, once per quiet spell, with one escalation.
 import { type Db, type Row, tx } from "./db";
 import { type ForgeStore } from "./store";
+import { stallWake } from "./wakes";
 
 export const ESCALATED_STALL_MS = 45 * 60_000;
 const ESCALATION_GAP_MS = 30 * 60_000;
@@ -58,7 +59,7 @@ export class StallSupervisor {
 	async check(threadId: string): Promise<0 | 1 | 2> {
 		const activity = await this.activity(threadId);
 		if (!activity) return 0;
-		const source = `coding:${threadId}`;
+		const source = threadId;
 		const now = this.clock();
 		return tx(this.db, async (q) => {
 			await q.query("select pg_advisory_xact_lock(hashtext($1))", [`stall:${source}`]);
@@ -76,13 +77,16 @@ export class StallSupervisor {
 				[source, progress, stage, now, hard],
 			);
 			const thread = (await q.query<Row>("select chat_id from pim_forge.forge_threads where thread_id = $1", [threadId])).rows[0];
-			if (thread?.chat_id) await this.store.emit(q, "wake", `stall:${source}:${stage}:${progress}`, threadId, { chatId: thread.chat_id, threadId, kind: "stall", stage, reasons: actionable.map((s) => s.reason) });
+			if (thread?.chat_id) {
+				const wake = stallWake(threadId, stage, progress);
+				await this.store.emit(q, "wake", wake.wakeId, threadId, { chatId: thread.chat_id, kind: "stall", reasons: actionable.map((s) => s.reason), ...wake });
+			}
 			return stage;
 		});
 	}
 
 	/** A turn ended: the next stall is a new quiet spell. */
 	async clear(threadId: string) {
-		await this.db.query("delete from pim_forge.forge_stall_episodes where source = $1", [`coding:${threadId}`]);
+		await this.db.query("delete from pim_forge.forge_stall_episodes where source = $1", [threadId]);
 	}
 }

@@ -1,0 +1,31 @@
+{
+  "name": "@pim/v2-live",
+  "version": "0.1.0",
+  "description": "Pim v2 live delivery: rebuildable PostgreSQL projections of committed runtime truth, a replayable live event log, and the stateless Live WebSocket service that bridges NATS Pulse hints to gap-free cursor replay.",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0",
+    "@pim/shared": "workspace:*",
+    "@pim/v2-contracts": "workspace:*",
+    "@nats-io/transport-node": "^3.0.0",
+    "pg": "^8.13.1",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

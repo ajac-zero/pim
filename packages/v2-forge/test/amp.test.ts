@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FakeOrbClient } from "@pim/coding/orb/fake";
 import { OrbUnreachableError, type OrbClient, type OrbStart } from "@pim/coding/orb/types";
@@ -199,7 +200,8 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		const id = await amp();
 		await s.worker().step(id);
 		await expect(s.forge.push(ada, id)).rejects.toMatchObject({ code: "unsupported" });
-		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "unsupported" });
+		// Merging is different: Amp's work is on the host, so Forge merges it from there. Not until the branch exists.
+		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "not_pushed" });
 		expect(await s.forge.diff(ada, id)).toEqual({ source: "orb", diff: "", unpushedOrb: true });
 		await s.forge.recordOrbBranch(id, "amp/feature");
 		expect(await s.forge.diff(ada, id)).toMatchObject({ unpushedOrb: true });
@@ -216,6 +218,16 @@ describe("Amp: a remote orb Forge adopts and never restarts", () => {
 		expect(d.diff).toContain("+amp");
 		// A PR can be opened for the pushed orb branch.
 		expect(await s.forge.openPullRequest(ada, id)).toMatchObject({ status: "done", number: 1 });
+		// Only pim/* branches are merged by Pim, whoever pushed them.
+		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "push_refused" });
+		await s.sh(clone, "push", s.bare, "amp/feature:refs/heads/pim/amp-work-1234");
+		await s.forge.recordOrbBranch(id, "pim/amp-work-1234");
+		expect(await s.forge.merge(ada, id)).toMatchObject({ status: "done", outcome: "merged", method: "fast-forward" });
+		expect(execFileSync("git", ["--git-dir", s.bare, "show", "main:amp.txt"], { encoding: "utf8" }).trim()).toBe("amp");
+		// Revoked: denied at once.
+		const grants = await s.pool.query("select grant_id from pim_forge.forge_grants where subject_id = 'ada' and permission = 'coding:merge'");
+		await s.authz.revoke(grants.rows[0].grant_id);
+		await expect(s.forge.merge(ada, id)).rejects.toMatchObject({ code: "forbidden" });
 	});
 
 	it("takes no slot and consumes no sandbox quota, even at a concurrency quota of zero", async () => {

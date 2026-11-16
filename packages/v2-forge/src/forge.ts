@@ -1,5 +1,7 @@
 // The Forge facade: one authorized surface for REST (`/api/coding/**`) and agent tools (`coding_*`). Both call these methods with an Actor, so a route and a tool can't disagree about who may do what.
 import { type OrbClient } from "@pim/coding/orb/types";
+import { pageTranscript, transcriptOutput } from "@pim/coding/transcript";
+import type { TranscriptMessage } from "@pim/shared/transcript";
 import { type Actor, Authz, assertCapability, assertPushBranch, repoName, type Permission } from "./authz";
 import { type ComputeProvider } from "./compute";
 import { type Db, type Row, tx } from "./db";
@@ -75,6 +77,20 @@ export class Forge {
 		return this.c.store.locked(t.threadId, async (q) => ({ queued: await this.c.store.enqueueInbox(q, t.threadId, operationId, "steer", { prompt: text }) }));
 	}
 
+	/** Sends an uncertain steer again, on the person's word: the old row is closed as superseded and a new operation carries the same text. */
+	async retrySteer(actor: Actor, ref: string, operationId: string): Promise<{ operationId: string }> {
+		const t = await this.own(actor, ref);
+		await this.allow(actor, "coding:steer", t);
+		return this.c.store.locked(t.threadId, async (q) => {
+			const row = (await q.query<Row>("select payload from pim_forge.forge_inbox where thread_id = $1 and operation_id = $2 and status = 'uncertain' for update", [t.threadId, operationId])).rows[0];
+			if (!row) throw new ForgeError("conflict", `Steer ${operationId} isn't uncertain`);
+			const next = `retry-${operationId}-1`;
+			await q.query("update pim_forge.forge_inbox set status = 'done', payload = payload || '{\"superseded\": true}' where thread_id = $1 and operation_id = $2", [t.threadId, operationId]);
+			await this.c.store.enqueueInbox(q, t.threadId, next, "steer", { prompt: row.payload.prompt });
+			return { operationId: next };
+		});
+	}
+
 	/** Stops the turn: `requested` at once, `cancelled` once the work has really stopped, `cancel_uncertain` when the remote can't say. Credentials die immediately. */
 	async abort(actor: Actor, ref: string): Promise<{ cancelState: ThreadRow["cancelState"] }> {
 		const t = await this.own(actor, ref);
@@ -113,11 +129,39 @@ export class Forge {
 		return { events: await this.c.store.events(t.threadId, { role: o.role, kind: "message", tail: o.tail }) };
 	}
 
-	/** Only the thread's last assistant message (coding_transcript_output). */
-	async transcriptOutput(actor: Actor, ref: string): Promise<{ text: string }> {
+	/** The transcript as coding_transcript pages it: `offset`/`limit`/`tail`, one `role` (user, assistant, tool or notice), or a one-line `summary` of each message. */
+	async transcriptPage(actor: Actor, ref: string, want: { offset?: number; limit?: number; role?: "user" | "assistant" | "tool" | "notice"; summary?: boolean; tail?: boolean } = {}) {
 		const t = await this.own(actor, ref);
-		const last = (await this.c.store.events(t.threadId, { role: "assistant", kind: "message", tail: 1 }))[0];
-		return { text: last?.data?.text ?? "" };
+		return pageTranscript(await this.messages(t.threadId), want);
+	}
+
+	/**
+	 * One message whole, by the id `transcriptPage` gave it, paged by lines (`offset` from 1, `limit` up to 2000) as coding_transcript_output reads it.
+	 * Without an id it is the thread's last assistant message.
+	 */
+	async transcriptOutput(actor: Actor, ref: string, want: { id?: string; offset?: number; limit?: number } = {}): Promise<{ text: string }> {
+		const t = await this.own(actor, ref);
+		const messages = await this.messages(t.threadId);
+		const id = want.id ?? messages.filter((m) => m.role === "assistant").at(-1)?.id;
+		if (id === undefined) return { text: "" };
+		const out = transcriptOutput(messages, id, want);
+		if (out === null) throw new ForgeError("not_found", `No message ${id} in coding thread ${ref}'s transcript`);
+		return { text: out };
+	}
+
+	/** The thread's messages as the shared transcript shape: its events' ids are their sequence numbers. */
+	private async messages(threadId: string): Promise<TranscriptMessage[]> {
+		const rows = await this.c.store.events(threadId, { kind: "message" });
+		return rows.map((e) => {
+			const d = e.data ?? {};
+			const parts: TranscriptMessage["parts"][number][] = [];
+			if (e.role === "tool") parts.push({ type: "tool-result", id: String(d.toolCallId ?? ""), name: String(d.name ?? "tool"), content: [{ type: "text", text: String(d.text ?? "") }], error: d.isError === true });
+			else {
+				if (d.text) parts.push({ type: "text", text: String(d.text) });
+				for (const c of d.toolCalls ?? []) parts.push({ type: "tool-call", id: String(c.id), name: String(c.name), arguments: c.arguments ?? {} });
+			}
+			return { id: String(e.seq), role: (["user", "assistant", "tool", "notice"].includes(e.role) ? e.role : "notice") as TranscriptMessage["role"], parts, timestamp: new Date(e.at).getTime() };
+		});
 	}
 
 	async diff(actor: Actor, ref: string): Promise<{ source: "workspace" | "orb"; diff: string; unpushedOrb: boolean }> {
@@ -196,13 +240,28 @@ export class Forge {
 		return { status: "done", ...pr };
 	}
 
-	/** The only way onto the default branch: fast-forward, else rebase, never force; a conflict aborts and changes nothing. */
+	/**
+	 * The only way onto the default branch: fast-forward, else rebase, never force; a conflict aborts and changes nothing.
+	 * A sandbox thread's branch is pushed first (Pim pushes for it); an Amp thread's work is already on the host, pushed by Amp, so it is merged from there, as `coding_merge` always did.
+	 */
 	async merge(actor: Actor, ref: string): Promise<Gated<{ outcome: "merged" | "conflict"; method?: string; detail?: string }>> {
 		const t = await this.own(actor, ref);
-		const ws = this.workspaceOf(t);
+		const remote = capabilitiesOf(t.harness).family === "remote-orb";
+		const branch = remote ? ((t.orb?.branch as string | undefined) ?? null) : t.branch;
+		const ws = remote ? null : this.workspaceOf(t);
 		const pending = await this.gate(actor, "coding:merge", "merge", t);
 		if (pending) return { status: "approval_required", ...pending };
-		const r = await this.c.git.merge(ws, t.repo, t.branch!);
+		const base = await this.c.git.defaultBranch(t.repo);
+		if (!branch || !(await this.c.git.hasBranch(t.repo, branch))) {
+			if (!ws) throw new ForgeError("not_pushed", "The Amp thread's branch isn't on the git host yet");
+		}
+		if (branch === base) throw new ForgeError("push_refused", `${base} is the default branch`);
+		assertPushBranch(this.c.authz.policy, branch!, base);
+		if (ws) {
+			const pushed = await this.c.git.push(ws, t.repo, branch!);
+			await this.c.store.locked(t.threadId, (q) => this.c.store.patch(q, t.threadId, { last_pushed_sha: pushed.sha }));
+		}
+		const r = await this.c.git.mergeBranch(t.repo, branch!);
 		if (r.outcome === "merged") await this.c.authz.consumeApproval(t.threadId, "merge");
 		return { status: "done", ...r };
 	}

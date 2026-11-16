@@ -1,7 +1,7 @@
 // The Forge worker: steps threads one at a time under their lease, for all three execution families.
 // Family A and B (sandbox pi and vendor CLIs) run a turn per inbox item; family C (Amp) is a remote thread Forge adopts, polls and mirrors, and never restarts.
 import { randomUUID } from "node:crypto";
-import { OrbLostError, OrbUnreachableError, OrbError, type OrbClient, type OrbMessage } from "@pim/coding/orb/types";
+import { OrbAuthError, OrbLostError, OrbUnreachableError, OrbUnsupportedError, OrbError, type OrbClient, type OrbMessage } from "@pim/coding/orb/types";
 import { ampAttachments, replaceAmpAttachments } from "@pim/coding/orb/amp-attachments";
 import { createHash } from "node:crypto";
 import { type Row, type Queryable } from "./db";
@@ -23,6 +23,8 @@ export type WorkerDeps = {
 	orbs: OrbClients;
 	objects: Objects;
 	attachments?: AttachmentFetcher;
+	/** Amp's origin, which attachment links are recognized by; https://ampcode.com when absent. */
+	ampBaseUrl?: string;
 	/** The pool a thread of a harness is placed on when it names none. */
 	defaultPool?: string;
 	holder?: string;
@@ -277,7 +279,15 @@ export class ForgeWorker {
 		try {
 			handle = await client.start({ project: thread.repo, prompt: thread.task, mode: null, title: null, idempotencyKey: key });
 		} catch (error) {
-			if (error instanceof OrbUnreachableError || (error instanceof OrbError && error.code === "orb_start_uncertain")) {
+			if (error instanceof OrbError && error.code === "orb_start_uncertain") {
+				// The cloud may have created a thread and Amp can't be asked by key: a person checks Amp, and Forge never starts a second.
+				await store.fenced(thread.threadId, epoch, async (q) => {
+					await store.patch(q, thread.threadId, { provisioning: { kind: "orb", client: client.id, key, phase: "uncertain", at: this.clock() } });
+					await store.setState(q, thread.threadId, "waiting_input", "orb_start_uncertain", "Pim can't tell whether Amp started this thread; check Amp's thread list before starting another");
+				});
+				return "done";
+			}
+			if (error instanceof OrbUnreachableError) {
 				// The start may have happened: stay provisioning and retry with the same key, which the client answers with the same thread.
 				await store.fenced(thread.threadId, epoch, (q) => store.patch(q, thread.threadId, { provisioning: { kind: "orb", client: client.id, key, phase: "uncertain", at: this.clock() } }));
 				return "retry";
@@ -298,23 +308,8 @@ export class ForgeWorker {
 	private async syncOrb(thread: ThreadRow, epoch: number, client: OrbClient): Promise<StepResult> {
 		const { store } = this.d;
 		const orb = thread.orb!;
-		// Input first, at most once: the inbox row is marked taken before the remote call.
-		const inputs = await store.fenced(thread.threadId, epoch, (q) => store.takeInbox(q, thread.threadId));
-		for (const item of inputs) {
-			if (item.kind === "abort") continue;
-			try {
-				await client.steer(orb.threadId, item.payload.prompt);
-				await store.fenced(thread.threadId, epoch, async (q) => {
-					await q.query("update pim_forge.forge_inbox set status = 'done' where thread_id = $1 and operation_id = $2", [thread.threadId, item.operationId]);
-					await store.appendEvent(q, thread.threadId, { kind: "message", role: "user", data: { text: item.payload.prompt, operationId: item.operationId, sentByPim: true } });
-					await store.patch(q, thread.threadId, { orb: { ...orb, turn: item.operationId } });
-				});
-			} catch (error) {
-				await store.fenced(thread.threadId, epoch, (q) => q.query("update pim_forge.forge_inbox set status = 'pending' where thread_id = $1 and operation_id = $2", [thread.threadId, item.operationId]));
-				if (!(error instanceof OrbUnreachableError)) throw error;
-				return "retry";
-			}
-		}
+		const delivered = await this.deliverSteers(thread, epoch, client);
+		if (delivered) return delivered;
 		let status;
 		let messages: readonly OrbMessage[] = [];
 		try {
@@ -343,7 +338,12 @@ export class ForgeWorker {
 		if (client.capabilities().usage) usd = (await client.usage(orb.threadId).catch(() => null))?.usd ?? null;
 		// One at a time, so the same attachment in two messages is fetched once.
 		const mirrored: { m: OrbMessage; text: string }[] = [];
-		for (const m of messages) mirrored.push({ m, text: await this.mirrorAttachments(thread, m.text) });
+		try {
+			for (const m of messages) mirrored.push({ m, text: await this.mirrorAttachments(thread, m.text) });
+		} catch (error) {
+			if (error instanceof OrbUnreachableError) return "retry";
+			throw error;
+		}
 		await store.fenced(thread.threadId, epoch, async (q, t) => {
 			let turn = (t.orb?.turn as string | undefined) ?? thread.startOperation;
 			for (const { m, text } of mirrored) {
@@ -375,14 +375,84 @@ export class ForgeWorker {
 		return "done";
 	}
 
+	/**
+	 * Gives the remote orb the thread's pending steers without ever sending one twice or silently dropping one.
+	 * Amp has no idempotency key for a steer, so before each send the row goes `sending` with the last remote message it saw; a send whose outcome is unknown
+	 * (a crash, an unreachable cloud after the request left) is settled by looking for the message among the remote user messages after that one:
+	 * found means sent, not found means `uncertain`, which is recorded, never resent by itself, and rechecked on every sync (Amp may take a queued steer later).
+	 * A person resends an uncertain steer explicitly (`Forge.retrySteer`).
+	 */
+	private async deliverSteers(thread: ThreadRow, epoch: number, client: OrbClient): Promise<StepResult | null> {
+		const { store } = this.d;
+		const orb = thread.orb!;
+		const rows = (await store.db.query<Row>("select operation_id, kind, payload, status from pim_forge.forge_inbox where thread_id = $1 and status in ('pending', 'sending', 'uncertain') and kind <> 'start' order by seq", [thread.threadId])).rows;
+		if (!rows.length) return null;
+		const remote = async () => {
+			try {
+				return await client.messages(orb.threadId);
+			} catch (error) {
+				if (error instanceof OrbUnreachableError) return null;
+				throw error;
+			}
+		};
+		const landed = (all: readonly OrbMessage[], baseline: string | null, prompt: string) => {
+			const from = baseline ? all.findIndex((m) => m.id === baseline) + 1 : 0;
+			return all.slice(from).some((m) => m.role === "user" && m.text.trim() === String(prompt).trim());
+		};
+		const markSent = (item: Row) =>
+			store.fenced(thread.threadId, epoch, async (q) => {
+				await q.query("update pim_forge.forge_inbox set status = 'done' where thread_id = $1 and operation_id = $2", [thread.threadId, item.operation_id]);
+				await store.appendEvent(q, thread.threadId, { kind: "message", role: "user", data: { text: item.payload.prompt, operationId: item.operation_id, sentByPim: true } });
+				await store.patch(q, thread.threadId, { orb: { ...(thread.orb as object), turn: item.operation_id } as never });
+			});
+		const markUncertain = (item: Row, why: string) =>
+			store.fenced(thread.threadId, epoch, async (q) => {
+				await q.query("update pim_forge.forge_inbox set status = 'uncertain' where thread_id = $1 and operation_id = $2", [thread.threadId, item.operation_id]);
+				await store.appendEvent(q, thread.threadId, { kind: "steer.uncertain", sourceCursor: `uncertain:${item.operation_id}`, data: { operationId: item.operation_id, text: item.payload.prompt, why } });
+			});
+		for (const item of rows) {
+			if (item.kind === "abort") continue;
+			const all = await remote();
+			if (item.status !== "pending") {
+				// Settled by the remote's own transcript.
+				if (all === null) return "retry";
+				if (landed(all, item.payload.baseline ?? null, item.payload.prompt)) await markSent(item);
+				else if (item.status === "sending") await markUncertain(item, "the worker stopped while sending");
+				continue;
+			}
+			if (all === null) return "retry";
+			const baseline = all.at(-1)?.id ?? null;
+			await store.fenced(thread.threadId, epoch, (q) => q.query("update pim_forge.forge_inbox set status = 'sending', payload = payload || $3 where thread_id = $1 and operation_id = $2", [thread.threadId, item.operation_id, JSON.stringify({ baseline })]));
+			try {
+				await client.steer(orb.threadId, item.payload.prompt);
+				await markSent(item);
+			} catch (error) {
+				const definitive = error instanceof OrbAuthError || error instanceof OrbUnsupportedError;
+				if (definitive) {
+					await store.fenced(thread.threadId, epoch, (q) => q.query("update pim_forge.forge_inbox set status = 'pending' where thread_id = $1 and operation_id = $2", [thread.threadId, item.operation_id]));
+					throw error;
+				}
+				if (error instanceof OrbLostError) throw error;
+				// Unreachable or an error after the request left: it may have landed.
+				const after = await remote().catch(() => null);
+				if (after && landed(after, baseline, item.payload.prompt)) await markSent({ ...item, payload: item.payload });
+				else await markUncertain(item, String(error instanceof Error ? error.message : error).slice(0, 200));
+				return "retry";
+			}
+		}
+		return null;
+	}
+
 	/** Copies each Amp attachment (images, MP4/WebM) into Objects once, and rewrites the message to point at the copy. */
 	private async mirrorAttachments(thread: ThreadRow, text: string): Promise<string> {
 		if (!this.d.attachments) return text;
 		const copies = new Map<string, string>();
-		for (const a of ampAttachments(text)) {
+		for (const a of ampAttachments(text, this.d.ampBaseUrl)) {
 			const key = `forge/${thread.threadId}/attachments/${createHash("sha256").update(a.canonical).digest("hex").slice(0, 32)}`;
 			if (!(await this.d.objects.get(key))) {
-				const got = await this.d.attachments(a.canonical);
+				const got = await this.d.attachments(a.canonical, thread);
+				// A fetch that may succeed later holds the whole sync back, so the message is mirrored once the copy exists.
+				if (got === "retry") throw new OrbUnreachableError("An Amp attachment isn't available yet");
 				if (!got) continue;
 				await this.d.objects.put(key, got.bytes, { contentType: got.type });
 			}

@@ -76,7 +76,8 @@ export class MemoryObjects implements ObjectStore {
 }
 
 /** Fetches an Amp attachment as the person's Amp login (the login never leaves this call); null when it can't be fetched yet. */
-export type AttachmentFetcher = (canonicalUrl: string) => Promise<{ bytes: Uint8Array; type: string } | null>;
+/** `null`: it can never be mirrored (refused, wrong type, too big); `"retry"`: ask again on the next sync. */
+export type AttachmentFetcher = (canonicalUrl: string, thread: { threadId: string; ownerId: string }) => Promise<{ bytes: Uint8Array; type: string } | null | "retry">;
 
 export type PushOutcome = { outcome: "pushed" | "unchanged"; sha: string };
 export type MergeOutcome = { outcome: "merged" | "conflict"; method?: "fast-forward" | "rebase"; sha?: string; detail?: string };
@@ -86,8 +87,8 @@ export interface GitHost {
 	defaultBranch(repo: string): Promise<string>;
 	/** Pushes the thread's checkout HEAD to `branch`; `unchanged` when the branch already is there. */
 	push(workspace: ComputeHandle, repo: string, branch: string): Promise<PushOutcome>;
-	/** Integrates `branch` onto the default branch by fast-forward, else rebase; a conflict aborts and leaves the default branch alone. */
-	merge(workspace: ComputeHandle, repo: string, branch: string): Promise<MergeOutcome>;
+	/** Integrates `branch`, already on the host, onto the default branch by fast-forward, else rebase, in a throwaway clone; a conflict aborts and leaves the default branch alone. Works for any thread, including an Amp orb's. */
+	mergeBranch(repo: string, branch: string): Promise<MergeOutcome>;
 	openPullRequest(repo: string, branch: string, base: string, title: string): Promise<{ url: string; number: number }>;
 	/** The diff of `branch` against the default branch as the host has it (for remote orbs); null when the branch is not on the host. */
 	remoteDiff(repo: string, branch: string): Promise<string | null>;

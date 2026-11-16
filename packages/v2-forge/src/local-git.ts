@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { repoName } from "./authz";
 import { type ComputeHandle } from "./compute";
 import { ForgeError } from "./errors";
+import { mergeBranch } from "./gitops";
 import { type MergeOutcome, type PushOutcome, type GitHost } from "./ports";
 import { type LocalSandboxProvider } from "./local-sandbox";
 
@@ -52,28 +53,8 @@ export class LocalGitHost implements GitHost {
 		return { outcome: "pushed", sha: head };
 	}
 
-	async merge(h: ComputeHandle, repo: string, branch: string): Promise<MergeOutcome> {
-		const base = await this.defaultBranch(repo);
-		for (let attempt = 0; attempt < 2; attempt++) {
-			await this.ws(h, "fetch", this.dir(repo), `refs/heads/${base}`);
-			const fast = (await this.ws(h, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD")).code === 0;
-			let method: "fast-forward" | "rebase" = "fast-forward";
-			if (!fast) {
-				const rebased = await this.ws(h, "rebase", "FETCH_HEAD");
-				if (rebased.code !== 0) {
-					await this.ws(h, "rebase", "--abort");
-					return { outcome: "conflict", detail: rebased.stderr.slice(0, 300) || rebased.stdout.slice(0, 300) };
-				}
-				method = "rebase";
-			}
-			const head = (await this.ws(h, "rev-parse", "HEAD")).out;
-			// Without --force: a default branch that moved meanwhile is refused, and the loop retries once from the new tip.
-			const pushed = await this.ws(h, "push", this.dir(repo), `HEAD:refs/heads/${base}`);
-			if (pushed.code === 0) {
-				return { outcome: "merged", method, sha: head };
-			}
-		}
-		return { outcome: "conflict", detail: "The default branch kept moving" };
+	async mergeBranch(repo: string, branch: string): Promise<MergeOutcome> {
+		return mergeBranch({ url: this.dir(repo) }, await this.defaultBranch(repo), branch);
 	}
 
 	async deleteBranch(repo: string, branch: string): Promise<void> {

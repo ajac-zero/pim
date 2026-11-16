@@ -7,7 +7,7 @@ import { Steward } from "../src/ownership.ts";
 import { PgPiStorage } from "../src/storage.ts";
 import { createTestDatabase, type TestDatabase } from "./support/pg.ts";
 import { uniqueTenant } from "./support/partition.ts";
-import { createRig, fauxAssistantMessage, textOf, transcript, waitFor } from "./support/rig.ts";
+import { createRig, fauxAssistantMessage, readTranscript, textOf, transcript, waitFor } from "./support/rig.ts";
 
 let database: TestDatabase;
 beforeAll(async () => {
@@ -102,15 +102,13 @@ describe("fenced ownership", () => {
 			return true;
 		}, 5_000);
 		await runnerB.start();
-		const residentB = await waitFor("runner B to host the partition", () => runnerB.resident(tenantId, partitionId));
-		await residentB.pump();
-		const root = (await residentB.harness.conversation(1 as never, BACKGROUND_CONTEXT))!;
 		const entries = await waitFor("the turn to finish", async () => {
-			const all = await transcript(residentB.harness, root);
+			const all = await readTranscript(db, tenantId, partitionId, 1);
 			return all.some((e) => e.kind === "pi.assistant" && textOf(e) === "answer from B") ? all : undefined;
 		});
 		expect(entries.filter((e) => e.kind === "pi.user")).toHaveLength(1);
-		expect(runnerB.resident(tenantId, partitionId)?.lease.epoch).toBeGreaterThan(residentA!.lease.epoch);
+		const epochs = await db.read<{ owner_epoch: string }>(tenantId, "SELECT DISTINCT owner_epoch FROM pim_runtime.commit_receipts WHERE tenant_id = $1 ORDER BY owner_epoch", [tenantId]);
+		expect(epochs.rows.length).toBeGreaterThan(1); // A's commits, then B's, in distinct epochs
 		await runnerB.stop();
 		await runnerA.stop();
 	});

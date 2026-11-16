@@ -1,0 +1,267 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createModels } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { ModelAdmission, admitModels } from "../src/admission.ts";
+import { PartitionDirectory } from "../src/directory.ts";
+import { assertDurability } from "../src/durability.ts";
+import { assessInspection } from "../src/quiescence.ts";
+import { createTestDatabase, type TestDatabase } from "./support/pg.ts";
+import { uniqueTenant } from "./support/partition.ts";
+import { createRig, latch, readTranscript, textOf, waitFor } from "./support/rig.ts";
+
+let database: TestDatabase;
+beforeAll(async () => {
+	database = await createTestDatabase();
+});
+afterAll(async () => {
+	await database.drop();
+});
+
+const hello = (runner: ReturnType<ReturnType<typeof createRig>["runner"]>, tenantId: string, partitionId: string, requestId: string) =>
+	runner.inbox.enqueueCommand(tenantId, partitionId, { requestId, kind: "submit", conversationId: 1, payload: { conversationId: 1, content: `hello ${requestId}` } });
+
+describe("memory boundedness", () => {
+	it("keeps at most maxResident Harnesses and rehydrates evicted partitions for their next command", async () => {
+		// Five tenants, one home partition each, all wanting a Runner that holds at most two.
+		const tenants = Array.from({ length: 5 }, () => uniqueTenant());
+		const rig = createRig(database.db, tenants[0]!);
+		const directory = new PartitionDirectory(database.db);
+		for (const tenantId of tenants) await directory.createPartition(tenantId, { kind: "home" });
+		rig.faux.setResponses(Array.from({ length: 5 }, (_, i) => fauxAssistantMessage(`answer ${i}`)));
+		let peak = 0;
+		const runner = rig.runner({
+			maxResident: 2,
+			idleUnloadMs: 60_000,
+			tenantFilter: undefined,
+			onEvent: (e) => {
+				rig.events.push(e);
+				peak = Math.max(peak, runner.residents.length);
+			},
+		});
+		await runner.start();
+		for (const tenantId of tenants) await hello(runner, tenantId, "home", "first");
+		await waitFor("every partition's command to complete", async () => {
+			let done = 0;
+			for (const tenantId of tenants) done += (await database.db.read(tenantId, "SELECT 1 FROM pim_runtime.command_inbox WHERE tenant_id = $1 AND done_at IS NOT NULL", [tenantId])).rowCount ?? 0;
+			if (done !== 5) return undefined;
+			let answered = 0;
+			for (const tenantId of tenants) answered += (await readTranscript(database.db, tenantId, "home", 1)).filter((e) => e.kind === "pi.assistant" && textOf(e) !== "").length;
+			return answered === 5 ? true : undefined;
+		}, 30_000);
+		expect(peak).toBeLessThanOrEqual(2);
+		expect(rig.events.filter((e) => e.type === "evicted" && e.reason === "capacity").length).toBeGreaterThanOrEqual(3);
+		// An evicted partition comes back for a later command.
+		const first = tenants[0]!;
+		await waitFor("the first tenant to be released", () => (runner.resident(first, "home") === undefined ? true : undefined));
+		rig.faux.setResponses([fauxAssistantMessage("welcome back")]);
+		await hello(runner, first, "home", "again");
+		await waitFor("the evicted home to rehydrate", async () => (await readTranscript(database.db, first, "home", 1)).some((e) => textOf(e) === "welcome back"));
+		await runner.stop();
+	});
+});
+
+describe("drain", () => {
+	it("stops claiming, releases quiet partitions, and hands a still-busy one to the next Runner with its wake intent", async () => {
+		const tenantId = uniqueTenant();
+		const rig = createRig(database.db, tenantId);
+		const directory = new PartitionDirectory(database.db);
+		const busy = await directory.createPartition(tenantId, { kind: "home" });
+		const hold = latch();
+		let signal: AbortSignal | undefined;
+		rig.faux.setResponses([
+			async (_c, options) => {
+				signal = options?.signal;
+				await Promise.race([hold.promise, new Promise<void>((r) => options?.signal?.addEventListener("abort", () => r(), { once: true }))]);
+				return fauxAssistantMessage("late");
+			},
+			fauxAssistantMessage("finished by B"),
+		]);
+		const runnerA = rig.runner({ steward: { ownerId: "runner-a", leaseTtlMs: 10_000 }, idleUnloadMs: 60_000 });
+		await runnerA.start();
+		await hello(runnerA, tenantId, busy, "busy");
+		await waitFor("the model call to start", () => signal);
+		const other = await directory.createPartition(tenantId);
+		await runnerA.drain(400);
+		expect(runnerA.steward.draining).toBe(true);
+		expect(signal?.aborted).toBe(true); // the in-flight call was cut off at the deadline
+		expect(rig.events.some((e) => e.type === "drained" && e.partitionId === busy && e.handedOff)).toBe(true);
+		const row = (await database.db.read<{ owner_id: string | null; state: string }>(tenantId, "SELECT p.owner_id, d.state FROM pim_runtime.partitions p JOIN pim_runtime.due_work d USING (tenant_id, partition_id) WHERE p.tenant_id = $1 AND p.partition_id = $2", [tenantId, busy])).rows[0]!;
+		expect(row).toEqual({ owner_id: null, state: "needs_owner" });
+		// A drained Runner claims nothing more, even the partition created after the drain began.
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect((await database.db.read(tenantId, "SELECT 1 FROM pim_runtime.partitions WHERE tenant_id = $1 AND partition_id = $2 AND owner_id IS NOT NULL", [tenantId, other])).rowCount).toBe(0);
+		// The next Runner takes over at once, without waiting for any lease to expire, and finishes the turn once.
+		const runnerB = rig.runner({ steward: { ownerId: "runner-b" } });
+		await runnerB.start();
+		await waitFor("the turn to finish on the new Runner", async () => (await readTranscript(database.db, tenantId, busy, 1)).some((e) => textOf(e) === "finished by B"));
+		expect((await readTranscript(database.db, tenantId, busy, 1)).filter((e) => e.kind === "pi.user")).toHaveLength(1);
+		await runnerB.stop();
+	});
+
+	it("releases a quiet partition atomically during a drain", async () => {
+		const tenantId = uniqueTenant();
+		const rig = createRig(database.db, tenantId);
+		const home = await new PartitionDirectory(database.db).createPartition(tenantId, { kind: "home" });
+		const runner = rig.runner({ idleUnloadMs: 60_000 });
+		await runner.activate(tenantId, home);
+		await runner.drain(2_000);
+		expect(rig.events.some((e) => e.type === "drained" && e.handedOff === false)).toBe(true);
+		const row = (await database.db.read<{ owner_id: string | null }>(tenantId, "SELECT owner_id FROM pim_runtime.partitions WHERE tenant_id = $1", [tenantId])).rows[0]!;
+		expect(row.owner_id).toBeNull();
+	});
+});
+
+describe("model admission", () => {
+	it("gives every tenant its turn and never exceeds the tenant or global cap", async () => {
+		const admission = new ModelAdmission({ globalLimit: 2, perTenantLimit: 1 });
+		const order: string[] = [];
+		const permits = new Map<string, { release(): void }>();
+		const request = async (tenant: string, tag: string): Promise<void> => {
+			const permit = (await admission.acquire(tenant, "faux"))!;
+			order.push(tag);
+			permits.set(tag, permit);
+		};
+		// Tenant A queues four calls before tenant B asks for one.
+		const a = ["a1", "a2", "a3", "a4"].map((tag) => request("A", tag));
+		await waitFor("a1", () => permits.get("a1"));
+		const b = request("B", "b1");
+		await waitFor("b1 admitted next to a1 despite A's queue", () => permits.get("b1"));
+		expect(order).toEqual(["a1", "b1"]);
+		expect(admission.inFlight).toBe(2);
+		expect(admission.inFlightFor("A")).toBe(1); // the per-tenant cap held A to one
+		permits.get("a1")!.release();
+		await waitFor("a2", () => permits.get("a2"));
+		permits.get("b1")!.release();
+		permits.get("a2")!.release();
+		await waitFor("a3", () => permits.get("a3"));
+		permits.get("a3")!.release();
+		await waitFor("a4", () => permits.get("a4"));
+		permits.get("a4")!.release();
+		await Promise.all([...a, b]);
+		expect(admission.inFlight).toBe(0);
+		expect(admission.waiting).toBe(0);
+	});
+
+	it("serves a second tenant while a rate-limited first tenant's stream is stuck, and cuts waiting calls when their signal aborts", async () => {
+		const faux = fauxProvider({ provider: "faux", models: [{ id: "m" }] });
+		const models = createModels();
+		models.setProvider(faux.provider);
+		const admission = new ModelAdmission({ globalLimit: 2, perTenantLimit: 1 });
+		const stuck = latch();
+		faux.setResponses([async () => { await stuck.promise; return fauxAssistantMessage("slow"); }, fauxAssistantMessage("fast"), fauxAssistantMessage("never")]);
+		const lease = new AbortController();
+		const slow = admitModels(models, { admission, tenantId: "A", signal: lease.signal });
+		const other = admitModels(models, { admission, tenantId: "B", signal: new AbortController().signal });
+		const model = faux.getModel();
+		const first = slow.complete(model, { messages: [{ role: "user", content: "x", timestamp: 1 }] });
+		await waitFor("A's stream to hold its slot", () => (admission.inFlightFor("A") === 1 ? true : undefined));
+		const queued = slow.complete(model, { messages: [{ role: "user", content: "y", timestamp: 1 }] }); // A's second call waits behind its own cap
+		const fast = await other.complete(model, { messages: [{ role: "user", content: "z", timestamp: 1 }] });
+		expect(fast.content).toMatchObject([{ text: "fast" }]);
+		expect(admission.waiting).toBe(1);
+		lease.abort(); // the lease behind A's calls is lost: the queued call leaves the queue
+		const aborted = await queued;
+		expect(aborted.errorMessage).toMatch(/abort/i); // pi-ai's own answer to a call whose signal is already aborted
+		expect(faux.state.callCount).toBe(2); // the queued call never reached the provider
+		stuck.release();
+		await first;
+		expect(admission.inFlight).toBe(0);
+	});
+
+	it("runs a Runner's turns through admission", async () => {
+		const tenantId = uniqueTenant();
+		const rig = createRig(database.db, tenantId);
+		const home = await new PartitionDirectory(database.db).createPartition(tenantId, { kind: "home" });
+		rig.faux.setResponses([fauxAssistantMessage("admitted answer")]);
+		const runner = rig.runner({ admission: { globalLimit: 1, perTenantLimit: 1 } });
+		await runner.start();
+		await hello(runner, tenantId, home, "r");
+		await waitFor("the answer", async () => (await readTranscript(database.db, tenantId, home, 1)).some((e) => textOf(e) === "admitted answer"));
+		expect(runner.admission?.inFlight).toBe(0);
+		await runner.stop();
+	});
+});
+
+describe("durability profile", () => {
+	it("refuses a server whose synchronous_commit is off", async () => {
+		expect(await assertDurability(database.db, "strict")).toBe("on");
+		const off = await createTestDatabase();
+		try {
+			await off.db.pool.query(`ALTER DATABASE ${off.name} SET synchronous_commit = off`);
+			await off.db.close();
+			const { Db } = await import("../src/db.ts");
+			const fresh = Db.connect({ connectionString: off.url });
+			await expect(assertDurability(fresh, "relaxed")).rejects.toThrow(/synchronous_commit is off/);
+			await fresh.close();
+		} finally {
+			await off.drop().catch(() => {});
+		}
+	});
+});
+
+describe("assessInspection", () => {
+	const task = (id: number, conversationId: number, kind: string, state: unknown, checkpoint?: unknown): never =>
+		({ record: { id, conversationId, kind, state: { status: "running", checkpoint } }, state }) as never;
+	const now = 1_000_000;
+	it("parks a run waiting on a suspended tool, and needs an owner for one waiting on a ready tool", () => {
+		const parked = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "waiting", on: [2] }), task(2, 1, "pi.tool", { kind: "suspended" })] }, now, { longWaitMs: 60_000 });
+		expect(parked).toMatchObject({ needsOwner: false, nextDueAt: undefined });
+		const busy = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "waiting", on: [2] }), task(2, 1, "pi.tool", { kind: "ready", migrates: false })] }, now, { longWaitMs: 60_000 });
+		expect(busy.needsOwner).toBe(true);
+	});
+	it("turns a far sleep into a due time and keeps a near one", () => {
+		const far = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "running" }, { phase: "retry", until: now + 120_000 })] }, now, { longWaitMs: 60_000 });
+		expect(far).toMatchObject({ needsOwner: false, nextDueAt: now + 120_000 });
+		const near = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "running" }, { phase: "retry", until: now + 5_000 })] }, now, { longWaitMs: 60_000 });
+		expect(near.needsOwner).toBe(true);
+		const poll = assessInspection({ scheduling: "running", submissions: [], tasks: [task(1, 1, "pi.generation", { kind: "ready", migrates: false }, { phase: "poll", pollAt: now + 90_000 })] }, now, { longWaitMs: 60_000, liveDue: [now + 70_000] });
+		expect(poll).toMatchObject({ needsOwner: false, nextDueAt: now + 70_000 });
+	});
+	it("needs an owner for a queued input unless a parked run holds it", () => {
+		const queued = { id: 9, conversationId: 1, type: "input", status: "queued" } as never;
+		expect(assessInspection({ scheduling: "running", submissions: [queued], tasks: [] }, now, { longWaitMs: 1 }).needsOwner).toBe(true);
+		const behindParked = assessInspection({ scheduling: "running", submissions: [queued], tasks: [task(2, 1, "pi.tool", { kind: "suspended" })] }, now, { longWaitMs: 1 });
+		expect(behindParked.needsOwner).toBe(false);
+		expect(assessInspection({ scheduling: "running", submissions: [queued], tasks: [task(2, 2, "pi.tool", { kind: "suspended" })] }, now, { longWaitMs: 1 }).needsOwner).toBe(true);
+	});
+});
+
+describe("one person's active chats", () => {
+	it("run on separate partitions at the same time, across Runners, instead of one after another", async () => {
+		const tenantId = uniqueTenant();
+		const rig = createRig(database.db, tenantId);
+		const directory = new PartitionDirectory(database.db);
+		const home = await directory.createPartition(tenantId, { kind: "home" });
+		const chats = [home];
+		for (let i = 0; i < 9; i++) chats.push(await directory.createPartition(tenantId));
+		// Every model call waits until ten are in flight together. Serialized on one mutation line this could never happen.
+		let inFlight = 0;
+		let peak = 0;
+		const together = latch();
+		rig.faux.setResponses(
+			Array.from({ length: 10 }, (_, i) => async () => {
+				inFlight++;
+				peak = Math.max(peak, inFlight);
+				if (inFlight === 10) together.release();
+				await Promise.race([together.promise, new Promise((resolve) => setTimeout(resolve, 8_000))]);
+				inFlight--;
+				return fauxAssistantMessage(`reply ${i}`);
+			}),
+		);
+		const runnerA = rig.runner({ steward: { ownerId: "runner-a" }, idleUnloadMs: 60_000 });
+		const runnerB = rig.runner({ steward: { ownerId: "runner-b" }, idleUnloadMs: 60_000 });
+		await Promise.all([runnerA.start(), runnerB.start()]);
+		await hello(runnerA, tenantId, home, "home-chat");
+		for (const partitionId of chats.slice(1)) {
+			await runnerA.inbox.enqueueCommand(tenantId, partitionId, { requestId: "new-chat", kind: "create_conversation", payload: { firstInput: "hello from a chat" } });
+		}
+		await waitFor("all ten chats to answer", async () => {
+			const answers = await database.db.read(tenantId, "SELECT 1 FROM pim_runtime.entries WHERE tenant_id = $1 AND record LIKE '%\"kind\":\"pi.assistant\"%' AND record LIKE '%reply %'", [tenantId]);
+			return answers.rowCount === 10 ? true : undefined;
+		}, 30_000);
+		expect(peak).toBe(10);
+		const partitionsWithChats = await database.db.read(tenantId, "SELECT DISTINCT partition_id FROM pim_runtime.conversations WHERE tenant_id = $1", [tenantId]);
+		expect(partitionsWithChats.rowCount).toBe(10); // the home's root and nine families, each a conversation in its own partition
+		await Promise.all([runnerA.stop(), runnerB.stop()]);
+	});
+});

@@ -12,6 +12,8 @@ import {
 import pg from "pg";
 import { ModelAdmission, admitModels, type AdmissionOptions } from "./admission.ts";
 import { type Db } from "./db.ts";
+import { PartitionDirectory } from "./directory.ts";
+import { assertDurability, type DurabilityProfile } from "./durability.ts";
 import { type AmbiguousCommit, OwnershipLost } from "./errors.ts";
 import { type Lease, Steward, type StewardOptions } from "./ownership.ts";
 import { assessInspection, liveDueTimes } from "./quiescence.ts";
@@ -47,7 +49,9 @@ export type RunnerOptions = {
 	readonly harnessOptions: (partition: PartitionContext) => HarnessOptions;
 	/** The agent and init for the home partition's root conversation; called only for the home partition. */
 	readonly homeRoot?: (tenantId: string) => Parameters<Harness["root"]>[1];
-	/** Handlers for command kinds besides the built-in `submit`. */
+	/** The agent a conversation made by the built-in `create_conversation` command starts with. */
+	readonly chatAgent?: (tenantId: string) => NonNullable<Parameters<Harness["createConversation"]>[0]["agent"]>;
+	/** Handlers for command kinds besides the built-in `submit` and `create_conversation`. */
 	readonly commands?: Readonly<Record<string, CommandHandler>>;
 	readonly admission?: AdmissionOptions;
 	/** The most Harnesses resident in this process; default 64. Quiet ones are evicted least-recently-used first. */
@@ -56,6 +60,8 @@ export type RunnerOptions = {
 	readonly idleUnloadMs?: number;
 	/** A sleep, retry or poll at least this far away does not hold a partition; default 60 s. */
 	readonly longWaitMs?: number;
+	/** The commit durability the deployment promises; checked against the server when the Runner starts. Default `strict`. */
+	readonly durability?: DurabilityProfile;
 	/** Claim only this tenant's partitions; unset claims any (a shared Runner pool). */
 	readonly tenantFilter?: string;
 	/** The claim and pump interval; default 500 ms. */
@@ -89,6 +95,7 @@ export class ResidentPartition {
 	#quietSince: number | undefined;
 	#touched: number;
 	#disposed = false;
+	#ready = false;
 	#faulted: AmbiguousCommit | undefined;
 	/** A signal whose task was not yet suspended when `resumeTask` ran: settled once the task has been seen to wait and wake, or to end. */
 	readonly #awaiting = new Map<number, { signal: DurableSignal; seenWaiting: boolean }>();
@@ -116,6 +123,10 @@ export class ResidentPartition {
 	}
 	get disposed(): boolean {
 		return this.#disposed;
+	}
+	/** True once the Harness is open and its durable work has been applied. */
+	get ready(): boolean {
+		return this.#ready && !this.#disposed;
 	}
 	get touchedAt(): number {
 		return this.#touched;
@@ -149,6 +160,7 @@ export class ResidentPartition {
 		);
 		await this.applySignals();
 		this.#harness.resume();
+		this.#ready = true;
 	}
 
 	/** Serialised: apply durable signals, deliver commands, then see whether the partition can be released. */
@@ -189,7 +201,7 @@ export class ResidentPartition {
 	}
 
 	async #runCommand(command: Command): Promise<void> {
-		const handler = command.kind === "submit" ? submitCommand : this.runner.commands[command.kind];
+		const handler = command.kind === "submit" ? submitCommand : command.kind === "create_conversation" ? createConversationCommand : this.runner.commands[command.kind];
 		try {
 			if (handler === undefined) throw new CommandRejected(`No handler for command kind ${command.kind}`);
 			await handler(this, command, this.context);
@@ -297,7 +309,7 @@ export class ResidentPartition {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		for (const stop of this.#unsubscribe.splice(0)) stop();
-		if (reason !== "released" && reason !== "recovered" && reason !== "stopped") {
+		if (reason !== "released" && reason !== "recovered" && reason !== "stopped" && reason !== "drain deadline") {
 			this.runner.emit({ type: "fenced", tenantId: this.tenantId, partitionId: this.partitionId, epoch: this.lease.epoch, reason });
 		}
 		this.runner.forget(this);
@@ -329,6 +341,27 @@ const submitCommand: CommandHandler = async (resident, command, context) => {
 	await conversation.submit({ type: "input", content: payload.content, requestId: command.requestId, ...(payload.whenBusy === undefined ? {} : { whenBusy: payload.whenBusy }) }, context);
 };
 
+/** The create_conversation command's payload: a new chat in this partition, optionally named by a public UUID and started with a first input. */
+export type CreateConversationPayload = { publicChatId?: string; firstInput?: SubmitPayload["content"] };
+
+/**
+ * Creates the first conversation of a new family partition. The commit that creates it also writes its directory row, so
+ * routing and the conversation appear together; a redelivered command finds the conversation already there.
+ */
+const createConversationCommand: CommandHandler = async (resident, command, context) => {
+	const payload = command.payload as CreateConversationPayload;
+	const existing = await resident.storage.scanConversations({}, 1, undefined, context);
+	const conversation =
+		existing.items[0] !== undefined
+			? await resident.harness.conversation(existing.items[0].id, context)
+			: await resident.harness.createConversation({ ownership: { kind: "ownerless" }, ...(resident.runner.chatAgent === undefined ? {} : { agent: resident.runner.chatAgent(resident.tenantId) }) }, context);
+	if (conversation === undefined) throw new CommandRejected("The new conversation cannot be found");
+	if (payload.publicChatId !== undefined) await resident.runner.directory.registerPublicChat(resident.tenantId, payload.publicChatId, conversation.id).catch(() => {});
+	if (payload.firstInput !== undefined) {
+		await conversation.submit({ type: "input", content: payload.firstInput, requestId: `${command.requestId}:first` }, context);
+	}
+};
+
 /** The Harness for a non-home partition, with `root()` removed: calling it would create a second conversation 1. */
 function forbidRoot(harness: Harness, partitionId: string): Harness {
 	return new Proxy(harness, {
@@ -353,6 +386,7 @@ export class Runner {
 	readonly db: Db;
 	readonly steward: Steward;
 	readonly inbox: PartitionInbox;
+	readonly directory: PartitionDirectory;
 	readonly admission: ModelAdmission | undefined;
 	readonly commands: Readonly<Record<string, CommandHandler>>;
 	readonly longWaitMs: number;
@@ -361,6 +395,7 @@ export class Runner {
 	readonly maxResident: number;
 	readonly harnessOptions: RunnerOptions["harnessOptions"];
 	readonly homeRoot: RunnerOptions["homeRoot"];
+	readonly chatAgent: RunnerOptions["chatAgent"];
 	readonly #resident = new Map<string, ResidentPartition>();
 	readonly #options: RunnerOptions;
 	#timer: ReturnType<typeof setTimeout> | undefined;
@@ -373,6 +408,8 @@ export class Runner {
 		this.db = options.db;
 		this.steward = new Steward({ ownerId: options.steward?.ownerId ?? `runner-${process.pid}-${Math.random().toString(36).slice(2, 8)}`, ...options.steward, db: options.db });
 		this.inbox = new PartitionInbox(options.db);
+		this.directory = new PartitionDirectory(options.db);
+		this.chatAgent = options.chatAgent;
 		this.admission = options.admission === undefined ? undefined : new ModelAdmission(options.admission);
 		this.commands = options.commands ?? {};
 		this.longWaitMs = options.longWaitMs ?? 60_000;
@@ -396,11 +433,14 @@ export class Runner {
 	get residents(): readonly ResidentPartition[] {
 		return [...this.#resident.values()];
 	}
+	/** The loaded partition, once it is open; one still opening is not returned. */
 	resident(tenantId: string, partitionId: string): ResidentPartition | undefined {
-		return this.#resident.get(keyOf(tenantId, partitionId));
+		const resident = this.#resident.get(keyOf(tenantId, partitionId));
+		return resident?.ready === true ? resident : undefined;
 	}
+	/** At the bound, a resident that needs no owner is released at once instead of waiting out `idleUnloadMs`, so waiting partitions get its place. */
 	overCapacity(): boolean {
-		return this.#resident.size > this.maxResident;
+		return this.#resident.size >= this.maxResident;
 	}
 	forget(resident: ResidentPartition): void {
 		if (this.#resident.get(keyOf(resident.tenantId, resident.partitionId)) === resident) this.#resident.delete(keyOf(resident.tenantId, resident.partitionId));
@@ -452,6 +492,7 @@ export class Runner {
 	/** Start claiming work. */
 	async start(): Promise<void> {
 		if (this.#running) return;
+		await assertDurability(this.db, this.#options.durability ?? "strict");
 		this.#running = true;
 		if (this.#options.listen !== false) await this.#listen();
 		this.#schedule();

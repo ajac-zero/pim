@@ -76,6 +76,7 @@ export function createRig(db: Db, tenantId: string) {
 			db,
 			harnessOptions,
 			homeRoot: () => ({ agent }),
+			chatAgent: () => agent,
 			listen: false,
 			tenantFilter: tenantId,
 			pollMs: 40,
@@ -93,8 +94,14 @@ export type Rig = ReturnType<typeof createRig>;
 
 /** The committed transcript of a conversation, oldest first, read without owning the partition. */
 export async function readTranscript(db: Db, tenantId: string, partitionId: string, conversationId: number): Promise<EntryRecord[]> {
-	const page = await PgPiStorage.forReading(db, tenantId, partitionId).scanEntries({ conversationId: conversationId as never, order: "ascending" }, 1_000, undefined, BACKGROUND_CONTEXT);
-	return [...page.items];
+	try {
+		const page = await PgPiStorage.forReading(db, tenantId, partitionId).scanEntries({ conversationId: conversationId as never, order: "ascending" }, 1_000, undefined, BACKGROUND_CONTEXT);
+		return [...page.items];
+	} catch (error) {
+		// The conversation does not exist yet: nothing has been written.
+		if (error instanceof Error && error.message.startsWith("Unknown conversation")) return [];
+		throw error;
+	}
 }
 
 /** The transcript through a live conversation handle. */

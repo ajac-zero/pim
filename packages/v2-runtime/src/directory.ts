@@ -28,7 +28,7 @@ export class PartitionDirectory {
 		const kind = options.kind ?? "family";
 		const partitionId = options.partitionId ?? (kind === "home" ? HOME_PARTITION_ID : `p_${randomUUID().replaceAll("-", "")}`);
 		await this.#db.transaction(tenantId, async (client) => {
-			const inserted = await client.query(`INSERT INTO ${S}.partitions (tenant_id, partition_id, kind) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING 1`, [tenantId, partitionId, kind]);
+			const inserted = await client.query(`INSERT INTO ${S}.partitions (tenant_id, partition_id, kind) VALUES ($1, $2, $3) ON CONFLICT (tenant_id, partition_id) DO NOTHING RETURNING 1`, [tenantId, partitionId, kind]);
 			if (inserted.rowCount === 0) {
 				const existing = await client.query<{ kind: string }>(`SELECT kind FROM ${S}.partitions WHERE tenant_id = $1 AND partition_id = $2`, [tenantId, partitionId]);
 				if (existing.rows[0]?.kind !== kind) throw new Error(`Partition ${partitionId} already exists with another kind`);

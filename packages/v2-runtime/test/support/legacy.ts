@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { type Conversation, createRegistry, defineExtension, defineTask, EntryRecord, type EntryId, Harness, type TaskId } from "@earendil-works/pi-durable";
+import { type Conversation, createRegistry, defineExtension, defineTask, type EntryRecord, type EntryId, Harness, type TaskId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 const ctx = BACKGROUND_CONTEXT;

@@ -1,0 +1,27 @@
+{
+  "name": "@pim/v2-runtime",
+  "version": "0.1.0",
+  "description": "Pim's portable persistent runtime: a PostgreSQL storage adapter for pi-durable, conversation-family partitioning, fenced ownership and the Runner host. Depends on @pim/shared and never on the Worker.",
+  "private": true,
+  "type": "module",
+  "license": "FSL-1.1-ALv2",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.1.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-durable": "1.1.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "@types/pg": "^8.15.5",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

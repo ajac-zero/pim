@@ -285,8 +285,8 @@ function chatRoutes(space: SpaceRouteHost): Route[] {
 						responseAt: info?.responseAt ?? null,
 						unread,
 						// A chat still working, or with a reply not yet read, stays in the list however old it is.
-						// A chat that has been carried on is archived: the chat that carries it on has taken its place.
-						archived: info?.archivedAt != null || space.store.isContinued(session.id) || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
+						// A chat that has been carried on is archived when it is, until the person resumes it.
+						archived: info?.archivedAt != null || (!session.busy && !unread && info !== undefined && info.updatedAt < archiveBefore),
 						visit: visit ? { username: visit.username, available: !visit.revoked } : null,
 						agent: space.agentRef(session.id),
 						room: space.roomInfo(session.id, busy, heldErrors),

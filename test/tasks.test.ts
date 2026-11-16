@@ -588,8 +588,9 @@ describe("the majordomo", () => {
 		});
 		await say("And winter?", asker);
 		await settled();
-		await vi.waitFor(async () => expect((await updatesIn((await alfredNext())!))[0]).toContain("February."));
-		expect(await updatesIn(asker)).toEqual([]);
+		// The person went on in the old chat, so it is the chat that hears the answer: nothing is forwarded from it any more.
+		await vi.waitFor(async () => expect((await updatesIn(asker))[0]).toContain("February."));
+		expect(await updatesIn((await alfredNext())!)).toEqual([]);
 
 		// Another agent's chats don't offer it the person's other agents.
 		const own = (await post("/sessions", { agent: scout.id })).body.id;

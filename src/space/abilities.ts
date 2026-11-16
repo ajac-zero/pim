@@ -2,7 +2,7 @@
  * What a chat offers beside the model: the abilities extensions give, the widgets a chat shows, and the suggestions it starts from.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { CompactionTask, defineExtension, type Extension, hook, type TaskId } from "@earendil-works/pi-durable";
+import { CompactionEntry, CompactionTask, type ConversationId, defineExtension, type Extension, hook, InboxDoc, type TaskId } from "@earendil-works/pi-durable";
 import { type PiModel, PiHarness } from "agents/harness/pi";
 import { digestHex } from "../auth/store";
 import { ASSISTANT_STARTERS } from "../extensions/assistant";
@@ -28,6 +28,7 @@ import { codingBackendIds } from "../compute";
 import { workspaceBackends } from "../coding/workspace/registry";
 import { VisitStore } from "../visits";
 import { SUGGESTIONS_KEY } from "./shared";
+import { SUMMARIZATION_SYSTEM_PROMPT, summaryRequest, wrapSummary } from "./continuation";
 
 /** The hook that carries a chat on in a new one when compaction would shorten it (`#continuationExtension`). */
 export const CONTINUATION_EXTENSION = "pim.continuation";
@@ -67,6 +68,8 @@ export interface AbilitiesHost {
 	readonly hiddenSessions: () => Set<string>;
 	readonly rooms: RoomStore;
 	readonly sessionModel: (session: string, agent?: Agent) => PiModel;
+	readonly modelCatalog: () => import("@earendil-works/pi-ai/models").Models;
+	readonly keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T>;
 	readonly broadcastMessage: (message: ServerMessage) => void;
 }
 
@@ -263,11 +266,15 @@ export class Abilities {
 		return from === null ? null : this.host.store.publicId(from);
 	}
 
+	/** Chats being carried on, so a chat is carried on by one pass at a time. */
+	readonly #continuing = new Set<string>();
+
 	/**
 	 * Compaction would hide a long chat's early history in the chat itself. Instead the chat
-	 * stays as it is, and a fork of it, compacted, is the chat the conversation goes on in: it
-	 * opens with the summary, and the sidebar lists it in the place of the chat it carries on, which is archived. A chat is
-	 * continued once; a run that already overflowed is still compacted in place, to go on.
+	 * stays as it is, and a new chat that opens with its summary is the one the conversation goes on in:
+	 * the sidebar lists it in the place of the chat it carries on, which is archived. That happens once
+	 * the chat is at rest, so nothing it was still saying is left behind; until then it runs on.
+	 * A run that already overflowed is still compacted in place, to go on.
 	 */
 	continuationExtension() {
 		return defineExtension({
@@ -278,23 +285,110 @@ export class Abilities {
 						const session = String(api.conversationId);
 						// Chats the person talks in alone; tasks', rooms' and visits' stay as they were.
 						if (reason === "manual" || this.host.hiddenSessions().has(session) || this.host.visits.bySession(session) || this.host.rooms.seats(session).length > 0) return undefined;
-						if (!this.host.store.isContinued(session)) {
-							const fork = await this.host.harness.sessions.fork(session);
-							this.host.agents.setSession(fork.id, this.host.agents.ofSession(session).id);
-							const abilities = this.host.agents.abilities(session);
-							if (abilities !== null) this.host.agents.setAbilities(fork.id, abilities);
-							this.host.store.touchSession(fork.id, this.host.store.sessionInfo(session)?.title ?? undefined);
-							this.host.store.continueSession(fork.id, session);
-							// The chat goes on with the model chosen for it.
-							this.host.store.setSessionModel(fork.id, this.host.store.sessionInfo(session)?.model ?? null);
-							await this.host.harness.session(fork.id).setModel(this.host.sessionModel(fork.id));
-							await (await this.host.harness.conversation(fork.id)).compact(undefined, BACKGROUND_CONTEXT);
-							this.host.broadcastMessage({ type: "sessions" });
-						}
+						if (!this.host.store.isContinued(session)) this.#carryOn(session);
 						return reason === "overflow" ? undefined : { decline: true as const };
 					},
 				}),
 			],
 		});
+	}
+
+	#carryOn(session: string): void {
+		if (this.#continuing.has(session)) return;
+		this.#continuing.add(session);
+		void this.host
+			.keepAliveWhile(() => this.#continueChat(session))
+			.catch((error) => console.warn("carrying a chat on failed", error))
+			.finally(() => this.#continuing.delete(session));
+	}
+
+	/** Whether there is nothing left to carry on: the chat is deleted, or already has its continuation. */
+	#done(session: string): boolean {
+		return this.host.store.deletedSessions().has(session) || this.host.store.isContinued(session);
+	}
+
+	/** Whether a chat is at rest: nothing at work for it, nothing queued for it, and no call waiting in it for answers. */
+	async #resting(session: string): Promise<boolean> {
+		if (this.host.tasks.isWaiting(session) || (await this.host.harness.session(session).busy())) return false;
+		const pi = await this.host.harness.pi();
+		return ((await pi.snapshot(InboxDoc, Number(session) as ConversationId, BACKGROUND_CONTEXT))?.items.length ?? 0) === 0;
+	}
+
+	async #continueChat(session: string): Promise<void> {
+		const { harness } = this.host;
+		// What lands in the chat while its summary is written makes the summary stale: it is written again.
+		for (let attempt = 0; attempt < 5; attempt++) {
+			for (;;) {
+				if (this.#done(session)) return;
+				const conversation = await harness.conversation(session);
+				await conversation.waitForIdle(BACKGROUND_CONTEXT);
+				if (await this.#resting(session)) break;
+				await new Promise((resolve) => setTimeout(resolve, 1_000));
+			}
+			const view = await (await harness.conversation(session)).context(BACKGROUND_CONTEXT);
+			const tail = view.entries.at(-1)?.id;
+			if (tail === undefined || view.messages.length === 0) return;
+			const chosen = this.host.sessionModel(session);
+			const catalog = this.host.modelCatalog();
+			const model = catalog.getModel(chosen.provider, chosen.id);
+			if (model === undefined) {
+				console.warn(`summarizing chat ${session} to carry it on failed: model ${chosen.provider}/${chosen.id} is not available`);
+				return;
+			}
+			const answer = await catalog.completeSimple(
+				model,
+				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: [{ role: "user", content: summaryRequest(view.messages, Math.floor(model.contextWindow * 3)), timestamp: Date.now() }] },
+				{ maxTokens: Math.min(8_192, model.maxTokens > 0 ? model.maxTokens : 8_192), signal: AbortSignal.timeout(300_000) },
+			);
+			const summary =
+				answer.stopReason === "stop"
+					? answer.content
+							.flatMap((part) => (part.type === "text" ? [part.text] : []))
+							.join("\n")
+							.trim()
+					: "";
+			if (summary === "") {
+				console.warn(`summarizing chat ${session} to carry it on failed: ${answer.errorMessage ?? answer.stopReason}`);
+				return;
+			}
+			if (this.#done(session) || !(await this.#resting(session))) continue;
+			if ((await (await harness.conversation(session)).context(BACKGROUND_CONTEXT)).entries.at(-1)?.id !== tail) continue;
+			await this.#startContinuation(session, summary);
+			return;
+		}
+		console.warn(`chat ${session} kept changing while it was summarized; it is carried on at its next compaction`);
+	}
+
+	async #startContinuation(session: string, summary: string): Promise<void> {
+		const { harness, store, agents } = this.host;
+		const info = store.sessionInfo(session);
+		const next = String(
+			(
+				await (await harness.pi()).createConversation(
+					{
+						ownership: { kind: "ownerless" },
+						agent: harness.agentDefaults(),
+						init: async (tx, id) => {
+							await tx.appendEntry(CompactionEntry, id, {
+								head: "self",
+								data: { reason: "threshold" },
+								model: [{ role: "user", content: [{ type: "text", text: wrapSummary(summary) }], timestamp: Date.now() }],
+							});
+						},
+					},
+					BACKGROUND_CONTEXT,
+				)
+			).id,
+		);
+		agents.setSession(next, agents.ofSession(session).id);
+		const abilities = agents.abilities(session);
+		if (abilities !== null) agents.setAbilities(next, abilities);
+		store.touchSession(next, info?.title ?? undefined);
+		store.continueSession(next, session);
+		store.archiveSession(session);
+		// The chat goes on with the model chosen for it.
+		store.setSessionModel(next, info?.model ?? null);
+		await harness.session(next).setModel(this.host.sessionModel(next));
+		this.host.broadcastMessage({ type: "sessions" });
 	}
 }

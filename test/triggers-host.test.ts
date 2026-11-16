@@ -334,6 +334,23 @@ describe("time triggers in Pim", () => {
 		expect(await inSpace((pim) => engineOf(pim).store.get("carried"))).toMatchObject({ lifecycle: "enabled", health: "configuration_error", healthDetail: "the trigger's chat was deleted" });
 	});
 
+	it("hands a firing to a chat carried on once the person unarchives it, and no longer to the chat that carried it on", async () => {
+		const planner = (await post("/agents", { name: "Resumer", instructions: "Plan." })).body;
+		const shown: string[] = [];
+		for (let i = 0; i < 2; i++) shown.push((await post("/sessions", { agent: planner.id })).body.id as string);
+		const [first, second] = await inSpace((pim) => shown.map((id) => pim.store.sessionOf(id)!));
+		await inSpace((pim) => pim.store.continueSession(second!, first!));
+		const anchor = clock() + MINUTE;
+		await create("old-chat-again", { ...base(planner.id), destination: { type: "existing_chat", chatId: first! }, source: interval(anchor) });
+		expect((await post(`/sessions/${shown[0]}/unarchive`, {})).status).toBe(200);
+		moveTo(anchor + SECOND);
+		faux.setResponses([toolUse("send_to_user", { message: "Back in the old chat." })]);
+		await tick();
+		const fired = (await runs("old-chat-again")).at(-1)!;
+		expect(await inSpace((pim) => engineOf(pim).host.operation(fired.operationId))).toMatchObject({ submissionChat: first });
+		expect(await submissionsIn(second!, fired.operationId)).toEqual([]);
+	});
+
 	it("hands nothing on while the space is suspended, and goes on once it is restored", async () => {
 		const agent = await majordomo();
 		const anchor = clock() + MINUTE;

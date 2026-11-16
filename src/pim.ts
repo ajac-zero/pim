@@ -2862,6 +2862,8 @@ export class Pim extends DurableAgent<Env> {
 			hiddenSessions: (...args) => self.#views.hiddenSessions(...args),
 			get rooms() { return self.#rooms; },
 			sessionModel: (...args) => self.sessionModel(...args),
+			modelCatalog: (...args) => self.modelCatalog(...args),
+			keepAliveWhile: (...args) => self.keepAliveWhile(...args),
 			broadcastMessage: (...args) => self.broadcastMessage(...args),
 		};
 	}

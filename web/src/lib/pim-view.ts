@@ -10,6 +10,7 @@ import type {
 } from "@earendil-works/pi-durable";
 import { redactSecrets } from "@pim/shared/redact";
 import {
+  compactionText,
   fromPerson,
   INTRODUCTION,
   isDeliveryReminder,
@@ -45,7 +46,8 @@ export type PimNotice = {
     | "task"
     | "room"
     | "coding"
-    | "reset";
+    | "reset"
+    | "compaction";
   /** One line, without the machine prefix. */
   title: string;
   /** The full text Pim received. */
@@ -532,6 +534,22 @@ export function projectEntry(entry: EntryRecord): ThreadEntry[] {
       },
     ];
   }
+  if (entry.kind === "pi.compaction") {
+    return [
+      {
+        key,
+        kind: "notice",
+        notice: {
+          kind: "compaction",
+          title: "Compacted earlier conversation",
+          text: compactionText(entry.model?.[0]),
+        },
+        ...(entry.model?.[0]?.timestamp === undefined
+          ? {}
+          : { at: entry.model[0].timestamp }),
+      },
+    ];
+  }
   if (entry.kind === "pi.system") return [];
   const message = entry.model?.[0];
   return message ? projectMessage(message, key) : [];
@@ -542,6 +560,22 @@ function appendEntry(view: SessionView, entry: EntryRecord): SessionView {
   if (projected.length === 0) return view;
   // A reset starts a new context; the view shows only the active one.
   if (entry.kind === "pi.reset") return { ...view, entries: projected };
+  // A compaction puts its summary in place of what it summarized: the entries before its head.
+  if (entry.kind === "pi.compaction" && entry.head !== undefined) {
+    const head = Number(entry.head);
+    // A key is its entry's id, followed by the message's place in the entry for an assistant's.
+    const kept = view.entries.filter((existing) => {
+      const id = /^(\d+)(:|$)/.exec(existing.key)?.[1];
+      return id === undefined || Number(id) >= head;
+    });
+    return {
+      ...view,
+      entries: [
+        ...projected,
+        ...kept.filter((e) => e.key !== projected[0]?.key),
+      ],
+    };
+  }
   const known = new Set(view.entries.map((existing) => existing.key));
   const fresh = projected.filter((candidate) => !known.has(candidate.key));
   return fresh.length === 0
